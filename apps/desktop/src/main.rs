@@ -161,6 +161,7 @@ fn main() -> anyhow::Result<()> {
       auth::commands::public_asset,
       auth::commands::server_state,
       auth::commands::server_check,
+      auth::commands::server_suggest,
       auth::commands::server_confirm,
       auth::commands::server_forget,
       core::commands::core_start,

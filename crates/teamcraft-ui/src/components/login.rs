@@ -677,12 +677,13 @@ fn ServerEntryScreen(
   control: SessionControl,
 ) -> impl IntoView {
   let i18n = use_i18n();
-  let address = RwSignal::new(maybe_address.unwrap_or_default());
+  let checked_address = maybe_address.unwrap_or_default();
+  let address = RwSignal::new(checked_address.clone());
   let is_checking = move || control.is_checking_server.get();
   let has_problem = maybe_problem.is_some();
-  let maybe_suggestion = maybe_problem
+  let is_unknown_host = maybe_problem
     .as_ref()
-    .and_then(|problem| problem.maybe_suggestion.clone());
+    .is_some_and(|problem| problem.key == tauri::UNKNOWN_HOST_KEY);
   let submit = move |ev: web_sys::SubmitEvent| {
     ev.prevent_default();
     if !control.is_checking_server.get_untracked() {
@@ -718,7 +719,7 @@ fn ServerEntryScreen(
         {maybe_problem.map(|problem| {
           view! { <ProblemCard maybe_title_key=None body_key=problem.key maybe_detail=Some(problem.detail) /> }
         })}
-        {maybe_suggestion.map(|suggestion| view! { <SuggestionLine suggestion=suggestion address=address /> })}
+        {is_unknown_host.then(|| view! { <AlternativesLine checked_address=checked_address address=address /> })}
         <button type="submit" class="btn btn-primary auth-submit" prop:disabled=is_checking aria-busy=move || is_checking().to_string()>
           <Show when=is_checking fallback=|| ()>
             <span class="spinner" aria-hidden="true"></span>
@@ -727,6 +728,59 @@ fn ServerEntryScreen(
         </button>
       </form>
     </AuthFrame>
+  }
+}
+
+/// Where the search for a similar address stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Alternatives {
+  Idle,
+  Looking,
+  Found(String),
+  NoneFound,
+}
+
+/// Under a host name that does not exist: "Check similar addresses". Nothing is looked up until
+/// the user presses it; then the shell tries the same name under other common top-level domains
+/// and the first one that exists is offered.
+#[component]
+fn AlternativesLine(checked_address: String, address: RwSignal<String>) -> impl IntoView {
+  let i18n = use_i18n();
+  let state = RwSignal::new(Alternatives::Idle);
+  let checked_address = StoredValue::new(checked_address);
+  let look = move |_| {
+    state.set(Alternatives::Looking);
+    let typed = checked_address.get_value();
+    spawn_local(async move {
+      let next = match tauri::server_suggest(&typed).await {
+        Ok(Some(host)) => Alternatives::Found(host),
+        Ok(None) => Alternatives::NoneFound,
+        Err(problem) => {
+          tracing::debug!(key = %problem.key, "could not look for similar addresses");
+          Alternatives::NoneFound
+        },
+      };
+      state.set(next);
+    });
+  };
+  move || match state.get() {
+    Alternatives::Idle | Alternatives::Looking => {
+      let is_looking = state.with(|state| *state == Alternatives::Looking);
+      view! {
+        <p class="auth-suggest">
+          <button type="button" class="link-btn" prop:disabled=is_looking aria-busy=is_looking.to_string() on:click=look>
+            {is_looking.then(|| view! { <span class="spinner" aria-hidden="true"></span> })}
+            <span>{move || i18n.t("server-entry-check-alternatives")}</span>
+          </button>
+        </p>
+      }
+      .into_any()
+    },
+    Alternatives::Found(host) => view! { <SuggestionLine suggestion=host address=address /> }.into_any(),
+    Alternatives::NoneFound => {
+      view! { <p class="auth-suggest" role="status">{move || i18n.t("server-entry-no-alternative")}</p> }
+        .into_any()
+    },
   }
 }
 

@@ -25,18 +25,11 @@ pub type Service = AuthService<KeyringStore>;
 pub struct CommandError {
   kind: &'static str,
   message: String,
-  /// The server entry's "did you mean …?" address (host and port), when there is one.
-  #[serde(rename = "suggestion", skip_serializing_if = "Option::is_none")]
-  maybe_suggestion: Option<String>,
 }
 
 impl CommandError {
   fn new(kind: &'static str, message: String) -> Self {
-    Self {
-      kind,
-      message,
-      maybe_suggestion: None,
-    }
+    Self { kind, message }
   }
 }
 
@@ -119,10 +112,7 @@ pub async fn server_check(
   let checked = service
     .probe_server(&origin)
     .await
-    .map_err(|error| CommandError {
-      maybe_suggestion: error.suggestion().map(|origin| origin.host().to_owned()),
-      ..CommandError::new(error.i18n_key(), error.to_string())
-    })?;
+    .map_err(|error| CommandError::new(error.i18n_key(), error.to_string()))?;
   let (maybe_logo, maybe_logo_dark) = brand_logos(&service, &checked.profile.origin, &checked.brand).await;
   let server = view(&checked.profile);
   *servers
@@ -137,6 +127,29 @@ pub async fn server_check(
     maybe_logo,
     maybe_logo_dark,
   })
+}
+
+/// "Did you mean …?" for an address that does not resolve: looks up the same name under other
+/// common top-level domains, only when the user asked for it (a button on the server entry).
+/// Answers the host (and port) of the first one that resolves; it is only suggested, never used.
+#[tauri::command]
+pub async fn server_suggest(
+  address: String,
+  servers: State<'_, Arc<ServerState>>,
+  service: State<'_, Arc<Service>>,
+) -> Result<Option<String>, CommandError> {
+  let origin = ServerOrigin::parse(&address, HTTP_POLICY)
+    .map_err(|error| CommandError::new(error.i18n_key(), error.to_string()))?;
+  // A managed computer allows one server only; nothing else to suggest.
+  if servers.managed.is_locked {
+    return Ok(None);
+  }
+  Ok(
+    service
+      .suggest_server(&origin)
+      .await
+      .map(|suggestion| suggestion.host().to_owned()),
+  )
 }
 
 /// The checked server's brand image for its confirmation, light and (when different) dark, as

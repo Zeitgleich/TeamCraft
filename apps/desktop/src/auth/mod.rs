@@ -155,12 +155,10 @@ pub enum AuthError {
 pub enum ServerProbeError {
   #[error("the server could not be reached: {0}")]
   Unreachable(String),
-  /// The host name does not resolve; a sibling top-level domain that does is offered as a hint.
-  #[error("the host name is unknown: {detail}")]
-  UnknownHost {
-    detail: String,
-    maybe_suggestion: Option<ServerOrigin>,
-  },
+  /// The host name does not resolve. The UI may offer to look for a similar address
+  /// ([`AuthService::suggest_server`]), only when the user asks for it.
+  #[error("the host name is unknown: {0}")]
+  UnknownHost(String),
   #[error("the secure connection failed: {0}")]
   Tls(String),
   #[error(transparent)]
@@ -172,17 +170,9 @@ impl ServerProbeError {
   pub fn i18n_key(&self) -> &'static str {
     match self {
       Self::Unreachable(_) => "server-entry-unreachable",
-      Self::UnknownHost { .. } => "server-entry-unknown-host",
+      Self::UnknownHost(_) => "server-entry-unknown-host",
       Self::Tls(_) => "server-entry-tls",
       Self::Check(check) => check.i18n_key(),
-    }
-  }
-
-  /// "Did you mean …?": an address the user may have meant. Never used without asking.
-  pub fn suggestion(&self) -> Option<&ServerOrigin> {
-    match self {
-      Self::UnknownHost { maybe_suggestion, .. } => maybe_suggestion.as_ref(),
-      _ => None,
     }
   }
 }
@@ -309,13 +299,7 @@ impl<S: TokenStore> AuthService<S> {
       .await
     {
       Ok(response) => response,
-      Err(error) => {
-        let mut probe_error = probe_transport_error(&error);
-        if let ServerProbeError::UnknownHost { maybe_suggestion, .. } = &mut probe_error {
-          *maybe_suggestion = suggest_sibling(origin, resolves).await;
-        }
-        return Err(probe_error);
-      },
+      Err(error) => return Err(probe_transport_error(origin, &error, resolves).await),
     };
     let status = response.status().as_u16();
     let maybe_content_type = response
@@ -336,6 +320,12 @@ impl<S: TokenStore> AuthService<S> {
       Some(REDIRECT_URI_PATTERN),
       HTTP_POLICY,
     )?)
+  }
+
+  /// "Did you mean …?" for an address that does not resolve: the first sibling under another
+  /// common top-level domain that does. Only on the user's request (it looks up several names).
+  pub async fn suggest_server(&self, origin: &ServerOrigin) -> Option<ServerOrigin> {
+    suggest_sibling(origin, resolves).await
   }
 
   /// Signs in with a stored local session or refresh token, if there is one. `Ok(false)` means
@@ -1044,7 +1034,15 @@ fn map_token_error(error: TokenError) -> AuthError {
 
 /// Tells a host name that does not exist and a connection the TLS layer refused from a server
 /// that is not there. The detail is the whole error chain, for the collapsed "details".
-fn probe_transport_error(error: &reqwest::Error) -> ServerProbeError {
+async fn probe_transport_error<F, Fut>(
+  origin: &ServerOrigin,
+  error: &reqwest::Error,
+  resolves: F,
+) -> ServerProbeError
+where
+  F: Fn(String) -> Fut,
+  Fut: std::future::Future<Output = bool>,
+{
   let mut source: Option<&dyn std::error::Error> = Some(error);
   let mut parts = Vec::new();
   while let Some(current) = source {
@@ -1052,11 +1050,9 @@ fn probe_transport_error(error: &reqwest::Error) -> ServerProbeError {
     source = current.source();
   }
   let detail = parts.join(": ");
-  match classify_transport(&detail) {
-    TransportFailure::UnknownHost => ServerProbeError::UnknownHost {
-      detail,
-      maybe_suggestion: None,
-    },
+  let failure = classify_transport(error.is_connect(), &detail, origin, resolves).await;
+  match failure {
+    TransportFailure::UnknownHost => ServerProbeError::UnknownHost(detail),
     TransportFailure::Tls => ServerProbeError::Tls(detail),
     TransportFailure::Other => ServerProbeError::Unreachable(detail),
   }
@@ -1069,23 +1065,43 @@ enum TransportFailure {
   Other,
 }
 
-/// Sorts a transport error chain by the wording of the resolvers and TLS stacks of the three
-/// platforms (getaddrinfo, Windows, macOS, rustls).
-fn classify_transport(chain: &str) -> TransportFailure {
+/// Sorts a failed request. A connection that failed for a host the resolver does not know is an
+/// unknown host; this asks the resolver itself (the same name the user asked for) instead of
+/// reading the resolver's message, which Windows translates. TLS failures are recognised by the
+/// TLS stack's own (untranslated) wording.
+async fn classify_transport<F, Fut>(
+  is_connect: bool,
+  chain: &str,
+  origin: &ServerOrigin,
+  resolves: F,
+) -> TransportFailure
+where
+  F: Fn(String) -> Fut,
+  Fut: std::future::Future<Output = bool>,
+{
   let chain = chain.to_ascii_lowercase();
-  let has_any = |words: &[&str]| words.iter().any(|word| chain.contains(word));
-  if has_any(&[
-    "dns error",
-    "failed to lookup address",
-    "name or service not known",
-    "no such host",
-    "nodename nor servname",
-  ]) {
-    TransportFailure::UnknownHost
-  } else if has_any(&["certificate", "tls", "ssl", "handshake"]) {
+  let is_tls = ["certificate", "tls", "ssl", "handshake"]
+    .iter()
+    .any(|word| chain.contains(word));
+  if is_tls {
     TransportFailure::Tls
+  } else if is_connect && !resolves(lookup_authority(origin.host())).await {
+    TransportFailure::UnknownHost
   } else {
     TransportFailure::Other
+  }
+}
+
+/// `host:port` for the resolver; `https` origins without a port use 443.
+fn lookup_authority(host: &str) -> String {
+  let has_port = host
+    .rsplit_once(':')
+    .is_some_and(|(_, port)| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
+    && !host.ends_with(']');
+  if has_port {
+    host.to_owned()
+  } else {
+    format!("{host}:443")
   }
 }
 
@@ -1103,13 +1119,7 @@ where
   let candidates = origin.sibling_suffixes();
   let mut checks = tokio::task::JoinSet::new();
   for (index, candidate) in candidates.iter().enumerate() {
-    let host = candidate.host();
-    let authority = if host.contains(':') {
-      host.to_owned()
-    } else {
-      format!("{host}:443")
-    };
-    let check = resolves(authority);
+    let check = resolves(lookup_authority(candidate.host()));
     checks.spawn(async move { (index, check.await) });
   }
   let mut found = vec![false; candidates.len()];
@@ -1126,11 +1136,12 @@ where
     .find_map(|(candidate, is_known)| is_known.then_some(candidate))
 }
 
-/// Whether `authority` (`host:port`) resolves with the system resolver.
+/// Whether `authority` (`host:port`) resolves with the system resolver within
+/// [`SUGGESTION_TIMEOUT`]; a resolver that does not answer counts as "no".
 async fn resolves(authority: String) -> bool {
-  tokio::net::lookup_host(authority)
+  tokio::time::timeout(SUGGESTION_TIMEOUT, tokio::net::lookup_host(authority))
     .await
-    .is_ok_and(|mut addresses| addresses.next().is_some())
+    .is_ok_and(|lookup| lookup.is_ok_and(|mut addresses| addresses.next().is_some()))
 }
 
 /// The body, up to `limit` bytes; more is refused (a hostile or broken answer).
@@ -1187,23 +1198,44 @@ mod tests {
   mod server_typos {
     use super::*;
 
+    #[tokio::test]
+    async fn an_unknown_host_is_what_the_resolver_says_not_its_wording() {
+      let origin = ServerOrigin::parse("chat.example.com", HttpPolicy::LoopbackOnly).unwrap();
+      // A localized Windows message, unknown to any word list: the resolver decides.
+      let localized = "Fehler beim Verbinden: Der angegebene Host ist unbekannt. (os error 11001)";
+      let unknown = classify_transport(true, localized, &origin, |authority| async move {
+        assert_eq!(authority, "chat.example.com:443");
+        false
+      })
+      .await;
+      assert_eq!(unknown, TransportFailure::UnknownHost);
+      let refused = classify_transport(true, "connection refused", &origin, |_| async { true }).await;
+      assert_eq!(refused, TransportFailure::Other);
+      // Not a connect error (a timeout while reading): never looked up.
+      let timeout = classify_transport(
+        false,
+        "operation timed out",
+        &origin,
+        |_: String| -> std::future::Ready<bool> { unreachable!("no lookup for a read error") },
+      )
+      .await;
+      assert_eq!(timeout, TransportFailure::Other);
+      let tls = classify_transport(
+        true,
+        "invalid peer certificate: UnknownIssuer",
+        &origin,
+        |_: String| -> std::future::Ready<bool> { unreachable!("no lookup for a TLS error") },
+      )
+      .await;
+      assert_eq!(tls, TransportFailure::Tls);
+    }
+
     #[test]
-    fn resolver_failures_are_unknown_hosts_and_tls_stays_tls() {
-      let dns = "error sending request: client error (Connect): dns error: failed to lookup address \
-                 information: Name or service not known";
-      assert_eq!(classify_transport(dns), TransportFailure::UnknownHost);
-      assert_eq!(
-        classify_transport("error trying to connect: No such host is known. (os error 11001)"),
-        TransportFailure::UnknownHost
-      );
-      assert_eq!(
-        classify_transport("invalid peer certificate: UnknownIssuer"),
-        TransportFailure::Tls
-      );
-      assert_eq!(
-        classify_transport("tcp connect error: Connection refused (os error 111)"),
-        TransportFailure::Other
-      );
+    fn lookups_name_the_port() {
+      assert_eq!(lookup_authority("chat.example.com"), "chat.example.com:443");
+      assert_eq!(lookup_authority("chat.example.com:8443"), "chat.example.com:8443");
+      assert_eq!(lookup_authority("[2001:db8::1]"), "[2001:db8::1]:443");
+      assert_eq!(lookup_authority("[2001:db8::1]:8080"), "[2001:db8::1]:8080");
     }
 
     #[tokio::test]
@@ -1229,15 +1261,11 @@ mod tests {
     }
 
     #[test]
-    fn only_unknown_hosts_carry_a_suggestion() {
-      let origin = ServerOrigin::parse("chat.example.de", HttpPolicy::LoopbackOnly).unwrap();
-      let error = ServerProbeError::UnknownHost {
-        detail: "dns error".into(),
-        maybe_suggestion: Some(origin.clone()),
-      };
-      assert_eq!(error.i18n_key(), "server-entry-unknown-host");
-      assert_eq!(error.suggestion(), Some(&origin));
-      assert_eq!(ServerProbeError::Tls("x".into()).suggestion(), None);
+    fn an_unknown_host_has_its_own_message() {
+      assert_eq!(
+        ServerProbeError::UnknownHost("dns".into()).i18n_key(),
+        "server-entry-unknown-host"
+      );
     }
   }
 

@@ -4237,11 +4237,19 @@ select.input {
 .auth-suggest .link-btn {
   margin: 0;
   padding: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
   color: var(--accent-strong);
   font-size: inherit;
   font-weight: 600;
   text-decoration: underline;
   text-underline-offset: 2px;
+}
+
+.auth-suggest .spinner {
+  width: 14px;
+  height: 14px;
 }
 
 /* The server confirmation: the server's own brand, its host, and where the password goes. */

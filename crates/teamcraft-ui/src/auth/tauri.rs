@@ -166,13 +166,11 @@ struct ApiPayload {
   body: String,
 }
 
-/// Error object of the desktop commands: `{ kind, message, suggestion? }`.
+/// Error object of the desktop commands: `{ kind, message }`.
 #[derive(Deserialize)]
 struct CommandError {
   kind: String,
   message: String,
-  #[serde(rename = "suggestion", default)]
-  maybe_suggestion: Option<String>,
 }
 
 pub(crate) async fn invoke(command: &str, args: JsValue) -> Result<JsValue, AuthError> {
@@ -257,15 +255,17 @@ pub struct ServerCheck {
   pub maybe_logo_dark: Option<String>,
 }
 
-/// A failed server step: the i18n key of the message (`server-entry-*`), details for the
-/// collapsed "technical details", and an address the user may have meant.
+/// A failed server step: the i18n key of the message (`server-entry-*`) and details for the
+/// collapsed "technical details".
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerProblem {
   pub key: String,
   pub detail: String,
-  /// "Did you mean …?" (host and port); only ever offered, never used on its own.
-  pub maybe_suggestion: Option<String>,
 }
+
+/// The i18n key of a server address that does not resolve; the entry then offers to look for a
+/// similar one ([`server_suggest`]).
+pub const UNKNOWN_HOST_KEY: &str = "server-entry-unknown-host";
 
 /// The server entry's state in the shell.
 pub async fn server_state() -> Result<ServerState, ServerProblem> {
@@ -276,6 +276,12 @@ pub async fn server_state() -> Result<ServerState, ServerProblem> {
 /// [`server_confirm`].
 pub async fn server_check(address: &str) -> Result<ServerCheck, ServerProblem> {
   server_call("server_check", &serde_json::json!({ "address": address })).await
+}
+
+/// "Did you mean …?" for an address that does not resolve: the shell looks up the same name under
+/// other common top-level domains. Only on the user's request; the answer is only suggested.
+pub async fn server_suggest(address: &str) -> Result<Option<String>, ServerProblem> {
+  server_call("server_suggest", &serde_json::json!({ "address": address })).await
 }
 
 /// Makes the checked server the account's server.
@@ -296,7 +302,6 @@ async fn server_call<T: for<'de> Deserialize<'de>>(
   let failed = |detail: String| ServerProblem {
     key: SERVER_FAILED_KEY.to_owned(),
     detail,
-    maybe_suggestion: None,
   };
   let function = invoke_function().ok_or_else(|| failed("not running in the desktop app".to_owned()))?;
   let js_args = js_sys::JSON::parse(&args.to_string())
@@ -313,7 +318,6 @@ async fn server_call<T: for<'de> Deserialize<'de>>(
         Ok(error) if error.kind.starts_with(SERVER_KEY_PREFIX) => ServerProblem {
           key: error.kind,
           detail: error.message,
-          maybe_suggestion: error.maybe_suggestion,
         },
         Ok(error) => failed(error.message),
         Err(_) => failed(value.as_string().unwrap_or_default()),
