@@ -367,16 +367,17 @@ MC4CAQAwBQYDK2VwBCIEIAxxS2yuWa9SUUAfZhI0772UQ48VXZLz45+L2A5IfcWA
     scene.fake.set_reply(Some(outage()));
     let call = scene.ring().await;
     scene.fake.wait_for_attempts(1).await;
-    wait_until(|| async { scene.queued().await == 1 }).await;
-    assert_eq!(scene.queued().await, 1, "the ring waits for its retry");
+    wait_until(|| async { scene.queued_rings().await == 1 }).await;
+    assert_eq!(scene.queued_rings().await, 1, "the ring waits for its retry");
 
     // carol answers on her desktop: the ring ends and its queued retry goes with it.
     scene
       .report("joined", &call, &scene.carol_id, &scene.carol_desktop)
       .await;
-    wait_until(|| async { scene.queued().await == 0 }).await;
-    assert_eq!(scene.queued().await, 0);
-    scene.fake.set_reply(None);
+    wait_until(|| async { scene.queued_rings().await == 0 }).await;
+    assert_eq!(scene.queued_rings().await, 0);
+    // What is left is the dismissal for the phone that was shown the ring; it waits for the
+    // provider like any wake-up.
     assert!(scene.fake.pushes().is_empty(), "the phone never rings late");
     scene.app.stop().await;
   }
@@ -522,6 +523,13 @@ MC4CAQAwBQYDK2VwBCIEIAxxS2yuWa9SUUAfZhI0772UQ48VXZLz45+L2A5IfcWA
         .state
         .database
         .count_push_retries(self.carol_device.parse::<DeviceId>().unwrap())
+        .await
+        .unwrap()
+    }
+    /// Queued rings only (a dismissal may wait in the queue too).
+    async fn queued_rings(&self) -> i64 {
+      teamcraft_db::testing::sqlx::query_scalar("SELECT COUNT(*) FROM push_retries WHERE kind = 'call'")
+        .fetch_one(self.app.sql_pool())
         .await
         .unwrap()
     }

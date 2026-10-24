@@ -169,6 +169,12 @@ async fn attempt_next(state: &AppState, is_user_endpoint: bool) -> Result<bool, 
       reason,
       maybe_retry_after,
     }) => {
+      // The ring may have ended while this attempt was in flight; its row was locked then, so the
+      // end of the ring could not delete it.
+      if !is_still_ringing(state, &row.wake_up) {
+        claim.complete().await?;
+        return Ok(true);
+      }
       let policy = state.settings.get().push.retry;
       match next_delay(&policy, attempts, maybe_retry_after, row.remaining_ttl, jitter()) {
         Some(delay) => {
