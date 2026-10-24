@@ -37,6 +37,9 @@ pub struct StoreChanges {
   pub conversations: BTreeSet<ConversationId>,
   /// People whose entry may differ (their presence state).
   pub users: BTreeSet<UserId>,
+  /// People whose record in the presence log was written or dropped (also counts as live), so a
+  /// reader's index of the log follows without reading all of it (issue #259).
+  pub announced: BTreeSet<UserId>,
   /// Unread counts, threads, the presence log, receipts or the connection marks.
   pub is_live: bool,
   /// Pinned identity keys or the verified workspace.
@@ -51,6 +54,8 @@ pub struct StoreChanges {
 enum Change {
   Conversation(ConversationId),
   User(UserId),
+  /// A person's record in the presence log.
+  Announced(UserId),
   Live,
   Security,
   Everything,
@@ -85,6 +90,10 @@ impl<S: LocalStore> TrackedStore<S> {
       },
       Change::User(user) => {
         changes.users.insert(user);
+      },
+      Change::Announced(user) => {
+        changes.announced.insert(user);
+        changes.is_live = true;
       },
       Change::Live => changes.is_live = true,
       Change::Security => changes.is_security = true,
@@ -176,7 +185,8 @@ fn classify(table: Table, key: &str) -> Change {
     // The presence log's head, a person's state, or their last seen (read by queries only).
     Table::Presence if key == crate::read_state::ANNOUNCED_PRESENCE_KEY => Change::Live,
     Table::Presence => key.parse().map_or(Change::Nothing, Change::User),
-    Table::AnnouncedPresence | Table::Unread | Table::Threads | Table::ReadReceipts => Change::Live,
+    Table::AnnouncedPresence => key.parse().map_or(Change::Live, Change::Announced),
+    Table::Unread | Table::Threads | Table::ReadReceipts => Change::Live,
     Table::PinnedIdentities => Change::Security,
     // The "catching up" marks; the rest are sync cursors.
     Table::SyncState => key
@@ -227,12 +237,14 @@ mod tests {
     store.put(Table::SyncState, "catching_up/9", b"true").unwrap();
     store.put(Table::Presence, "3", b"\"online\"").unwrap();
     store.put(Table::Presence, "announced", b"{}").unwrap();
+    store.put(Table::AnnouncedPresence, "4", b"{}").unwrap();
     store.put(Table::MlsStorage, "x", b"1").unwrap();
     assert_eq!(
       store.take_changes(),
       StoreChanges {
         conversations: [id(7), id(8), id(9)].into(),
         users: [id(3)].into(),
+        announced: [id(4)].into(),
         is_live: true,
         ..StoreChanges::default()
       }

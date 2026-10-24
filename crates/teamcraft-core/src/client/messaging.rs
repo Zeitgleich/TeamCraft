@@ -276,23 +276,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         return Ok(total);
       }
     }
-    let maybe_newest = self
+    // Without a stored server message (an empty conversation, or only own messages not sent yet)
+    // there is no cursor: the newest page is read, and what came since arrives as events.
+    let mut maybe_cursor = self
       .store
       .messages(conversation, MessageFilter::All)?
       .into_iter()
       .filter_map(|message| message.maybe_server_id)
       .max();
-    let Some(newest) = maybe_newest else {
-      return Ok(total);
-    };
-    let mut cursor = newest;
     loop {
+      let is_newest_page = maybe_cursor.is_none();
       let page = match maybe_first.take() {
         Some(first) => first?,
         None => {
           let query = ListMessagesQuery {
             maybe_before: None,
-            maybe_after: Some(cursor),
+            maybe_after: maybe_cursor,
             maybe_limit: Some(self.settings.history_page_size),
           };
           self.api.list_messages(conversation, &query).await?
@@ -300,10 +299,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       };
       total += page.messages.len();
       for message in page.messages {
-        cursor = cursor.max(message.id);
+        maybe_cursor = maybe_cursor.max(Some(message.id));
         self.receive_message(message)?;
       }
-      if !page.has_more {
+      // The newest page's `has_more` speaks of older messages, not newer ones.
+      if is_newest_page || !page.has_more {
         return Ok(total);
       }
     }

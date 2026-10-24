@@ -12,13 +12,16 @@ use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::live::LiveSnapshot;
 use teamcraft_client_api::model::{ConversationId, Space, SpaceId, User, UserId};
 use teamcraft_client_api::remote::{ChatSnapshot, SecuritySnapshot};
-use teamcraft_client_api::snapshot_changes::{ConversationChange, SnapshotChanges, SnapshotCursor};
+use teamcraft_client_api::snapshot_changes::{
+  ConversationChange, ConversationIndex, SnapshotChanges, SnapshotCursor,
+};
 use teamcraft_proto::{
   ConversationKind as ConversationKindProto, ConversationResponse, MessageId, UserSummary,
 };
 
 use crate::account_data::AccountData;
 use crate::notify_rules::MentionPreferences;
+use crate::read_state::PresenceIndex;
 use crate::records;
 use crate::store::{LocalStore, StoreChanges, Table};
 use crate::ui_backend::{CoreChatBackend, is_deleted};
@@ -29,6 +32,9 @@ pub struct SnapshotCache {
   epoch: u64,
   revision: u64,
   maybe_parts: Option<Parts>,
+  /// The presence log by revision, so a reader gets what is newer than its cursor without a pass
+  /// over the whole log on every presence change.
+  presence: PresenceIndex,
 }
 
 struct Parts {
@@ -67,6 +73,7 @@ impl SnapshotCache {
       epoch,
       revision: 0,
       maybe_parts: None,
+      presence: PresenceIndex::default(),
     }
   }
 
@@ -115,7 +122,7 @@ impl SnapshotCache {
     let mut answer = parts.changed_since(since.revision);
     let mut presence = since.presence;
     if parts.live_at > since.revision {
-      let live = live_since(backend, since.presence);
+      let live = live_since(backend, &self.presence, since.presence);
       presence = live.presence.revision;
       answer.maybe_live = Some(live);
     }
@@ -137,6 +144,11 @@ impl SnapshotCache {
     security: impl FnOnce() -> Option<SecuritySnapshot>,
   ) {
     let next = self.revision + 1;
+    backend.read(
+      self
+        .presence
+        .update(backend.store_ref(), changes.announced.iter().copied()),
+    );
     let maybe_security = if self.maybe_parts.is_none() || changes.is_security {
       security()
     } else {
@@ -330,6 +342,7 @@ impl Parts {
         .collect(),
       security: self.security.value.clone(),
       maybe_live,
+      index: ConversationIndex::default(),
     }
   }
 
@@ -453,12 +466,16 @@ fn order_of(spaces: &[Space], responses: &[ConversationResponse]) -> Vec<Convers
 }
 
 /// The live state with only the presence announcements newer than `presence`.
-fn live_since<S: LocalStore>(backend: &CoreChatBackend<S>, presence: u64) -> LiveSnapshot {
+fn live_since<S: LocalStore>(
+  backend: &CoreChatBackend<S>,
+  index: &PresenceIndex,
+  presence: u64,
+) -> LiveSnapshot {
   let store = backend.store_ref();
   LiveSnapshot {
     maybe_unread: backend.read(crate::read_state::unread(store)),
     threads: backend.read(crate::read_state::threads(store)),
-    presence: backend.read(crate::read_state::announced_presence_since(store, presence)),
+    presence: backend.read(index.since(store, presence)),
     receipts: backend.read(crate::read_state::all_read_receipts(store)),
     marks: backend.read(crate::read_state::marks(store)),
   }

@@ -202,7 +202,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
-  pub(super) fn unmark_resync(&self, conversation: ConversationId, part: ResyncPart) -> Result<(), CoreError> {
+  pub(super) fn unmark_resync(
+    &self,
+    conversation: ConversationId,
+    part: ResyncPart,
+  ) -> Result<(), CoreError> {
     let mut marked = self.marked_for_resync(part)?;
     if marked.remove(&conversation) {
       records::put_json(&self.store, Table::SyncState, part.key(), &marked)?;

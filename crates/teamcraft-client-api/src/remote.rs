@@ -166,6 +166,9 @@ pub struct ChatSnapshot {
   /// Server-reported counters the core keeps from gateway events; absent from older shells.
   #[serde(rename = "live", default, skip_serializing_if = "Option::is_none")]
   pub maybe_live: Option<LiveSnapshot>,
+  /// Where each conversation sits in the lists above (derived, never sent).
+  #[serde(skip)]
+  pub index: crate::snapshot_changes::ConversationIndex,
 }
 
 /// Fingerprints (hex) of the identity keys on this device.
@@ -219,6 +222,7 @@ impl ChatSnapshot {
       last_activity,
       security,
       maybe_live: backend.live_snapshot(),
+      index: crate::snapshot_changes::ConversationIndex::default(),
     }
   }
 }

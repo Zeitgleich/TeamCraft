@@ -409,11 +409,12 @@ impl RemoteChat {
       mirror.cursor = changes.cursor;
       let applied = mirror.snapshot.apply(changes);
       plan.is_snapshot_changed = applied.is_changed;
-      for (conversation, total) in &mirror.snapshot.message_counts {
-        if let Some(feed) = mirror.feeds.get_mut(conversation)
-          && applied.touches(*conversation)
+      // The feeds the UI opened, not every conversation's count (issue #246).
+      for (conversation, feed) in &mut mirror.feeds {
+        if applied.touches(*conversation)
+          && let Some(total) = mirror.snapshot.message_count(*conversation)
         {
-          feed.total = *total;
+          feed.total = total;
         }
       }
       let touched_threads: Vec<(ConversationId, ThreadId)> = mirror
@@ -562,12 +563,7 @@ impl RemoteChat {
 
   fn update_conversation(&self, conversation: ConversationId, change: impl FnOnce(&mut Conversation)) {
     let mut mirror = self.mirror.borrow_mut();
-    if let Some(found) = mirror
-      .snapshot
-      .conversations
-      .iter_mut()
-      .find(|candidate| candidate.id == conversation)
-    {
+    if let Some(found) = mirror.snapshot.conversation_mut(conversation) {
       change(found);
     }
   }
@@ -1123,36 +1119,20 @@ impl ChatBackend for RemoteChat {
   }
 
   fn conversation(&self, id: ConversationId) -> Option<Conversation> {
-    self
-      .mirror
-      .borrow()
-      .snapshot
-      .conversations
-      .iter()
-      .find(|conversation| conversation.id == id)
-      .cloned()
+    self.mirror.borrow().snapshot.conversation(id).cloned()
   }
 
   fn message_count(&self, conversation: ConversationId) -> usize {
     let mirror = self.mirror.borrow();
     mirror
       .snapshot
-      .message_counts
-      .iter()
-      .find(|(id, _)| *id == conversation)
-      .map_or(0, |(_, total)| *total)
+      .message_count(conversation)
+      .unwrap_or(0)
       .max(mirror.feeds.get(&conversation).map_or(0, |feed| feed.total))
   }
 
   fn last_activity(&self, conversation: ConversationId) -> Option<teamcraft_client_api::model::TimestampMs> {
-    self
-      .mirror
-      .borrow()
-      .snapshot
-      .last_activity
-      .iter()
-      .find(|(id, _)| *id == conversation)
-      .map(|(_, at)| *at)
+    self.mirror.borrow().snapshot.last_activity_of(conversation)
   }
 
   fn messages(&self, conversation: ConversationId, start: usize, len: usize) -> Vec<Message> {

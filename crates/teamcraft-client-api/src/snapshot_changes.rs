@@ -64,6 +64,19 @@ pub struct ConversationChange {
   pub maybe_last_activity: Option<TimestampMs>,
 }
 
+/// Where each conversation sits in a [`ChatSnapshot`]'s list of conversations, so applying a
+/// change and looking a conversation up cost a hash lookup, not a pass over the workspace (issue
+/// #246). `message_counts` and `last_activity` are in the order of the conversations, so their
+/// entries are found by binary search over these positions.
+///
+/// Derived data: [`ChatSnapshot::apply`] keeps it current and rebuilds it once it no longer
+/// matches (a snapshot built or changed some other way); a lookup it can't answer falls back to a
+/// scan. It takes no part in comparing snapshots.
+#[derive(Clone, Debug, Default)]
+pub struct ConversationIndex {
+  positions: HashMap<ConversationId, usize>,
+}
+
 /// What applying changes did to a snapshot.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AppliedChanges {
@@ -97,7 +110,77 @@ impl AppliedChanges {
   }
 }
 
+impl ConversationIndex {
+  /// The conversation's position in `conversations`, if it is there.
+  fn position(&self, conversations: &[Conversation], id: ConversationId) -> Option<usize> {
+    match self.positions.get(&id) {
+      Some(&index) if conversations.get(index).is_some_and(|known| known.id == id) => Some(index),
+      None if self.positions.len() == conversations.len() => None,
+      // Out of date: answered by a scan until the next `apply` rebuilds it.
+      _ => conversations.iter().position(|known| known.id == id),
+    }
+  }
+
+  /// Makes sure every position is current; rebuilds the index if one is not.
+  fn sync(&mut self, conversations: &[Conversation]) {
+    let is_current = self.positions.len() == conversations.len()
+      && conversations
+        .last()
+        .is_none_or(|last| self.positions.get(&last.id) == Some(&(conversations.len() - 1)));
+    if !is_current {
+      self.rebuild(conversations);
+    }
+  }
+
+  fn rebuild(&mut self, conversations: &[Conversation]) {
+    self.positions = conversations
+      .iter()
+      .enumerate()
+      .map(|(index, conversation)| (conversation.id, index))
+      .collect();
+  }
+}
+
+impl PartialEq for ConversationIndex {
+  /// Derived data: two snapshots with the same content are the same, however they were built.
+  fn eq(&self, _: &Self) -> bool {
+    true
+  }
+}
+
 impl ChatSnapshot {
+  /// The conversation with this ID.
+  pub fn conversation(&self, id: ConversationId) -> Option<&Conversation> {
+    self
+      .index
+      .position(&self.conversations, id)
+      .map(|index| &self.conversations[index])
+  }
+
+  /// The conversation with this ID, to change it in place (not its ID).
+  pub fn conversation_mut(&mut self, id: ConversationId) -> Option<&mut Conversation> {
+    self
+      .index
+      .position(&self.conversations, id)
+      .map(|index| &mut self.conversations[index])
+  }
+
+  /// The conversation's top-level message count, if the snapshot has one.
+  pub fn message_count(&self, id: ConversationId) -> Option<usize> {
+    self
+      .ordered_index(&self.message_counts, id)
+      .ok()
+      .map(|index| self.message_counts[index].1)
+  }
+
+  /// When the conversation's newest top-level message was sent, if it has one.
+  pub fn last_activity_of(&self, id: ConversationId) -> Option<TimestampMs> {
+    self
+      .ordered_index(&self.last_activity, id)
+      .ok()
+      .map(|index| self.last_activity[index].1)
+  }
+
   /// Takes what changed since this snapshot was read.
   pub fn apply(&mut self, changes: SnapshotChanges) -> AppliedChanges {
     if let Some(full) = changes.maybe_full {
@@ -157,44 +240,50 @@ impl ChatSnapshot {
 
   fn apply_conversation(&mut self, change: ConversationChange) {
     let id = change.conversation.id;
-    match self
-      .conversations
-      .iter_mut()
-      .find(|conversation| conversation.id == id)
-    {
-      Some(known) => *known = change.conversation,
-      None => self.conversations.push(change.conversation),
+    self.index.sync(&self.conversations);
+    match self.index.position(&self.conversations, id) {
+      Some(index) => self.conversations[index] = change.conversation,
+      None => {
+        // New conversations go last, like a full read lists those it didn't know.
+        self.index.positions.insert(id, self.conversations.len());
+        self.conversations.push(change.conversation);
+      },
     }
-    match self.message_counts.iter_mut().find(|(known, _)| *known == id) {
-      Some((_, count)) => *count = change.message_count,
-      None => self.message_counts.push((id, change.message_count)),
+    match self.ordered_index(&self.message_counts, id) {
+      Ok(index) => self.message_counts[index].1 = change.message_count,
+      Err(index) => self.message_counts.insert(index, (id, change.message_count)),
     }
-    let maybe_known = self.last_activity.iter().position(|(known, _)| *known == id);
-    match (maybe_known, change.maybe_last_activity) {
-      (Some(index), Some(at)) => self.last_activity[index].1 = at,
-      (Some(index), None) => {
+    match (
+      self.ordered_index(&self.last_activity, id),
+      change.maybe_last_activity,
+    ) {
+      (Ok(index), Some(at)) => self.last_activity[index].1 = at,
+      (Ok(index), None) => {
         self.last_activity.remove(index);
       },
-      (None, Some(at)) => self.insert_last_activity(id, at),
-      (None, None) => {},
+      (Err(index), Some(at)) => self.last_activity.insert(index, (id, at)),
+      (Err(_), None) => {},
     }
   }
 
-  /// Keeps the newest-message times in the order of the conversations, like a full read.
-  fn insert_last_activity(&mut self, id: ConversationId, at: TimestampMs) {
-    let positions: HashMap<ConversationId, usize> = self
-      .conversations
-      .iter()
-      .enumerate()
-      .map(|(index, conversation)| (conversation.id, index))
-      .collect();
-    let own = positions.get(&id);
-    let index = self
-      .last_activity
-      .iter()
-      .position(|(other, _)| positions.get(other) > own)
-      .unwrap_or(self.last_activity.len());
-    self.last_activity.insert(index, (id, at));
+  /// Where the conversation's entry is in a list kept in the order of the conversations, or where
+  /// it belongs.
+  fn ordered_index<T>(&self, entries: &[(ConversationId, T)], id: ConversationId) -> Result<usize, usize> {
+    let position_of = |conversation: ConversationId| {
+      self
+        .index
+        .position(&self.conversations, conversation)
+        .unwrap_or(usize::MAX)
+    };
+    let own = position_of(id);
+    if own == usize::MAX {
+      // Not a listed conversation: found only by looking.
+      return entries
+        .iter()
+        .position(|(known, _)| *known == id)
+        .ok_or(entries.len());
+    }
+    entries.binary_search_by_key(&own, |(other, _)| position_of(*other))
   }
 
   /// Puts the conversations in `order`; those not in it are gone.
@@ -211,6 +300,7 @@ impl ChatSnapshot {
     self.message_counts.sort_by_key(|(id, _)| position[id]);
     self.last_activity.retain(|(id, _)| position.contains_key(id));
     self.last_activity.sort_by_key(|(id, _)| position[id]);
+    self.index.rebuild(&self.conversations);
   }
 
   /// The live state is replaced, except presence: the changes carry only newer announcements.
@@ -230,7 +320,7 @@ mod tests {
   use teamcraft_proto::{PresenceState, UserPresence};
 
   use super::*;
-  use crate::model::{ConversationKind, DeviceSetup, PresenceStatus, SidebarCategory, id_from_raw};
+  use crate::model::{ConversationKind, DeviceSetup, PresenceStatus, SidebarCategory, id_from_raw, raw_id};
 
   #[test]
   fn a_full_answer_replaces_everything() {
@@ -270,6 +360,63 @@ mod tests {
     assert_eq!(held.conversations[1].name, "renamed");
     assert_eq!(held.message_counts[1], (id_from_raw(2), 9));
     assert!(held.last_activity.contains(&(id_from_raw(2), 500)));
+  }
+
+  #[test]
+  fn newest_message_times_stay_in_the_order_of_the_conversations() {
+    let mut held = snapshot(&[1, 2, 3, 4]);
+    for (id, at) in [(3, 30), (1, 10), (4, 40), (2, 20)] {
+      held.apply(SnapshotChanges {
+        conversations: vec![ConversationChange {
+          conversation: conversation(id),
+          message_count: 1,
+          maybe_last_activity: Some(at),
+        }],
+        ..SnapshotChanges::default()
+      });
+    }
+    let order: Vec<(u64, TimestampMs)> = held
+      .last_activity
+      .iter()
+      .map(|(id, at)| (raw_id(*id), *at))
+      .collect();
+    assert_eq!(order, vec![(1, 10), (2, 20), (3, 30), (4, 40)]);
+    assert_eq!(held.last_activity_of(id_from_raw(3)), Some(30));
+    assert_eq!(held.message_count(id_from_raw(4)), Some(1));
+    assert_eq!(
+      held.conversation(id_from_raw(2)).map(|found| found.id),
+      Some(id_from_raw(2))
+    );
+  }
+
+  #[test]
+  fn lookups_survive_a_snapshot_changed_by_hand() {
+    let mut held = snapshot(&[1, 2]);
+    held.apply(SnapshotChanges {
+      conversations: vec![ConversationChange {
+        conversation: conversation(3),
+        message_count: 5,
+        maybe_last_activity: None,
+      }],
+      ..SnapshotChanges::default()
+    });
+    held.conversations.swap(0, 2);
+    held.message_counts.swap(0, 2);
+    assert_eq!(
+      held.conversation(id_from_raw(1)).map(|found| found.id),
+      Some(id_from_raw(1))
+    );
+    // The next change rebuilds the index and lands on the right entry.
+    held.apply(SnapshotChanges {
+      conversations: vec![ConversationChange {
+        conversation: conversation(1),
+        message_count: 7,
+        maybe_last_activity: None,
+      }],
+      ..SnapshotChanges::default()
+    });
+    assert_eq!(held.message_count(id_from_raw(1)), Some(7));
+    assert_eq!(held.conversations.len(), 3);
   }
 
   #[test]
@@ -318,10 +465,7 @@ mod tests {
     held.apply(live_with(log.clone()));
     let seen = log.revision;
     log.note(presence(2, PresenceState::Away), 10);
-    let newer = AnnouncedPresence {
-      entries: log.since(seen).cloned().collect(),
-      ..log.clone()
-    };
+    let newer = AnnouncedPresence::new(log.since(seen).cloned().collect(), log.revision, 0);
     held.apply(live_with(newer));
     assert_eq!(held.maybe_live.unwrap().presence, log);
   }
@@ -371,6 +515,7 @@ mod tests {
       last_activity: Vec::new(),
       security: SecuritySnapshot::default(),
       maybe_live: None,
+      index: ConversationIndex::default(),
     }
   }
 

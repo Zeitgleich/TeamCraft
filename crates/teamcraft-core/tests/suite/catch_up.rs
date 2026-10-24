@@ -42,6 +42,34 @@ async fn a_catch_up_cut_short_leaves_no_marks() {
   }
 }
 
+#[tokio::test]
+async fn messages_missed_in_a_conversation_that_was_empty_arrive() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut carol = Peer::enroll(&server, "Carol").await;
+  let space = alice.space().await;
+  let channel = alice.client.create_channel(space, "quiet").await.unwrap();
+  alice
+    .client
+    .add_member(channel, carol.client.user_id())
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut carol]).await;
+  // Carol's history of the channel is loaded, and none of it is stored (all of it expired, say).
+  carol.client.full_sync().await.unwrap();
+  carol.store.delete_messages(channel).unwrap();
+
+  // Written while Carol is away; her catch-up reads the newest page ahead of the queue.
+  alice
+    .client
+    .send_text(channel, None, "while you were away")
+    .await
+    .unwrap();
+  carol.client.full_sync().await.unwrap();
+
+  assert_eq!(carol.texts(channel), vec!["while you were away".to_string()]);
+}
+
 /// Alice's five channels with Carol in them and a message in each.
 async fn busy_workspace() -> (FakeServer, Peer, Vec<ConversationId>) {
   let server = FakeServer::new();

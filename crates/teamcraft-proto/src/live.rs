@@ -3,7 +3,10 @@
 //! desktop shell's IPC and the in-page core's message channel as JSON, so they live with the other
 //! wire types, shared by `teamcraft-core` and `teamcraft-client-api`.
 
-use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
+
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::{ConversationId, MessageId, UserId, UserPresence};
 
@@ -26,16 +29,19 @@ pub struct LiveReceipt {
 /// Presence and custom status as `presence_update` events announced them, newest last, one entry
 /// per user and at most a configured number of entries. Each announcement gets the next revision,
 /// so a reader applies only what is newer than what it saw instead of comparing everything.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Kept ordered by revision with an index by user, so taking `k` announcements costs
+/// `O(k log n)`, not a pass over the log per announcement. On the wire it is the entries as a list,
+/// oldest first.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(from = "AnnouncedPresenceWire")]
 pub struct AnnouncedPresence {
-  #[serde(default)]
-  pub entries: Vec<RevisedPresence>,
+  entries: BTreeMap<u64, RevisedPresence>,
+  revision_of: HashMap<UserId, u64>,
   /// The highest revision handed out so far.
-  #[serde(default)]
   pub revision: u64,
   /// The highest revision dropped to stay within the bound. A reader that saw less missed an
   /// announcement and reads presence from the server again.
-  #[serde(default)]
   pub evicted_up_to: u64,
 }
 
@@ -45,21 +51,45 @@ pub struct RevisedPresence {
   pub presence: UserPresence,
 }
 
+/// The wire form of [`AnnouncedPresence`].
+#[derive(Deserialize)]
+struct AnnouncedPresenceWire {
+  #[serde(default)]
+  entries: Vec<RevisedPresence>,
+  #[serde(default)]
+  revision: u64,
+  #[serde(default)]
+  evicted_up_to: u64,
+}
+
 impl AnnouncedPresence {
+  /// A log of `entries` (any order; of a user's entries the newest counts).
+  pub fn new(entries: Vec<RevisedPresence>, revision: u64, evicted_up_to: u64) -> Self {
+    let mut log = Self {
+      revision,
+      evicted_up_to,
+      ..Self::default()
+    };
+    for entry in entries {
+      log.put(entry);
+    }
+    log
+  }
+
   /// Records an announcement: the user's previous entry is replaced, the oldest entries beyond
   /// `max_entries` are dropped.
   pub fn note(&mut self, presence: UserPresence, max_entries: usize) {
-    self
-      .entries
-      .retain(|entry| entry.presence.user_id != presence.user_id);
     self.revision += 1;
-    self.entries.push(RevisedPresence {
+    self.put(RevisedPresence {
       revision: self.revision,
       presence,
     });
-    let excess = self.entries.len().saturating_sub(max_entries);
-    if let Some(newest_dropped) = self.entries.drain(..excess).next_back() {
-      self.evicted_up_to = newest_dropped.revision;
+    while self.entries.len() > max_entries {
+      let Some((revision, dropped)) = self.entries.pop_first() else {
+        break;
+      };
+      self.revision_of.remove(&dropped.presence.user_id);
+      self.evicted_up_to = revision;
     }
   }
 
@@ -67,27 +97,77 @@ impl AnnouncedPresence {
   /// changes, issue #259): one entry per user, in revision order. Not bounded: a reader keeps one
   /// entry per person it heard of.
   pub fn merge(&mut self, newer: Self) {
-    for entry in newer.entries {
-      self
-        .entries
-        .retain(|known| known.presence.user_id != entry.presence.user_id);
-      self.entries.push(entry);
+    for entry in newer.entries.into_values() {
+      self.put(entry);
     }
-    self.entries.sort_by_key(|entry| entry.revision);
     self.revision = self.revision.max(newer.revision);
     self.evicted_up_to = self.evicted_up_to.max(newer.evicted_up_to);
   }
 
+  /// Every entry, oldest first.
+  pub fn entries(&self) -> impl Iterator<Item = &RevisedPresence> {
+    self.entries.values()
+  }
+
+  /// How many people the log holds.
+  pub fn len(&self) -> usize {
+    self.entries.len()
+  }
+
+  pub fn is_empty(&self) -> bool {
+    self.entries.is_empty()
+  }
+
   /// Announcements newer than `revision`, oldest first.
   pub fn since(&self, revision: u64) -> impl Iterator<Item = &RevisedPresence> {
-    // Entries are in revision order: the seen prefix is skipped without looking at each entry.
-    let start = self.entries.partition_point(|entry| entry.revision <= revision);
-    self.entries[start..].iter()
+    self
+      .entries
+      .range(revision.saturating_add(1)..)
+      .map(|(_, entry)| entry)
   }
 
   /// Whether a reader that saw up to `revision` missed announcements that were dropped since.
   pub fn has_gap_since(&self, revision: u64) -> bool {
     self.evicted_up_to > revision
+  }
+
+  /// Keeps `entry` as its user's, unless the log holds a newer one of them.
+  fn put(&mut self, entry: RevisedPresence) {
+    let user = entry.presence.user_id;
+    match self.revision_of.get(&user) {
+      Some(known) if *known >= entry.revision => return,
+      Some(known) => {
+        self.entries.remove(known);
+      },
+      None => {},
+    }
+    self.revision_of.insert(user, entry.revision);
+    self.entries.insert(entry.revision, entry);
+  }
+}
+
+impl Serialize for AnnouncedPresence {
+  fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    /// The entries as a list, without copying them.
+    struct Entries<'a>(&'a BTreeMap<u64, RevisedPresence>);
+
+    impl Serialize for Entries<'_> {
+      fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.values())
+      }
+    }
+
+    let mut wire = serializer.serialize_struct("AnnouncedPresence", 3)?;
+    wire.serialize_field("entries", &Entries(&self.entries))?;
+    wire.serialize_field("revision", &self.revision)?;
+    wire.serialize_field("evicted_up_to", &self.evicted_up_to)?;
+    wire.end()
+  }
+}
+
+impl From<AnnouncedPresenceWire> for AnnouncedPresence {
+  fn from(wire: AnnouncedPresenceWire) -> Self {
+    Self::new(wire.entries, wire.revision, wire.evicted_up_to)
   }
 }
 
@@ -103,8 +183,7 @@ mod tests {
     announced.note(presence(2, PresenceState::Away), 10);
     announced.note(presence(1, PresenceState::Offline), 10);
     let entries: Vec<_> = announced
-      .entries
-      .iter()
+      .entries()
       .map(|entry| (entry.revision, entry.presence.state.clone()))
       .collect();
     assert_eq!(
@@ -131,7 +210,7 @@ mod tests {
     for user in 1..=5 {
       announced.note(presence(user, PresenceState::Online), 3);
     }
-    assert_eq!(announced.entries.len(), 3);
+    assert_eq!(announced.len(), 3);
     assert_eq!(announced.evicted_up_to, 2);
     assert!(announced.has_gap_since(1));
     assert!(!announced.has_gap_since(2));
@@ -144,12 +223,48 @@ mod tests {
     held.note(presence(2, PresenceState::Online), 10);
     let mut log = held.clone();
     log.note(presence(1, PresenceState::Away), 10);
-    let newer = AnnouncedPresence {
-      entries: log.since(held.revision).cloned().collect(),
-      ..log.clone()
-    };
+    let newer = AnnouncedPresence::new(
+      log.since(held.revision).cloned().collect(),
+      log.revision,
+      log.evicted_up_to,
+    );
     held.merge(newer);
     assert_eq!(held, log);
+  }
+
+  #[test]
+  fn a_merge_keeps_one_entry_per_user_and_ignores_older_ones() {
+    let mut held = AnnouncedPresence::default();
+    for user in 1..=3 {
+      held.note(presence(user, PresenceState::Online), 10);
+    }
+    let newer = AnnouncedPresence::new(
+      vec![
+        revised(5, presence(2, PresenceState::Away)),
+        revised(4, presence(1, PresenceState::Offline)),
+        revised(1, presence(3, PresenceState::Away)),
+      ],
+      5,
+      0,
+    );
+    held.merge(newer);
+    let entries: Vec<(u64, i64)> = held
+      .entries()
+      .map(|entry| (entry.revision, entry.presence.user_id.snowflake().get()))
+      .collect();
+    // User 3's entry at revision 3 is newer than the one at revision 1.
+    assert_eq!(entries, vec![(3, 3), (4, 1), (5, 2)]);
+    assert_eq!(held.revision, 5);
+  }
+
+  #[test]
+  fn a_read_log_rebuilds_its_index() {
+    let mut log = AnnouncedPresence::default();
+    log.note(presence(1, PresenceState::Online), 10);
+    let mut read: AnnouncedPresence = serde_json::from_value(serde_json::to_value(&log).unwrap()).unwrap();
+    assert_eq!(read, log);
+    read.note(presence(1, PresenceState::Away), 10);
+    assert_eq!(read.len(), 1);
   }
 
   #[test]
@@ -168,6 +283,10 @@ mod tests {
       serde_json::from_value::<AnnouncedPresence>(serde_json::json!({})).unwrap(),
       AnnouncedPresence::default()
     );
+  }
+
+  fn revised(revision: u64, presence: UserPresence) -> RevisedPresence {
+    RevisedPresence { revision, presence }
   }
 
   fn presence(user: i64, state: PresenceState) -> UserPresence {
