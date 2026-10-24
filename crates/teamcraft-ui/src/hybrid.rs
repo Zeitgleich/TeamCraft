@@ -919,6 +919,25 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     self.chat.owner_roster()
   }
 
+  fn admin_role_holders(&self) -> (Vec<UserId>, Vec<UserId>) {
+    match &self.maybe_admin {
+      Some(admin) => admin.roster_candidates(),
+      None => (Vec::new(), Vec::new()),
+    }
+  }
+
+  fn admin_publish_roster(&self, members: Vec<teamcraft_client_api::admin::RosterEntry>) {
+    // The form is read-only otherwise; the core refuses a non-owner as well.
+    if self.policy_edit_blocker().is_some() {
+      return;
+    }
+    let Some(admin) = &self.maybe_admin else {
+      return;
+    };
+    self.chat.publish_roster(members);
+    admin.queue_refresh_after_publish();
+  }
+
   fn admin_brands(&self) -> Option<AdminBrandsResponse> {
     self.maybe_admin.as_ref().and_then(|admin| admin.brands())
   }

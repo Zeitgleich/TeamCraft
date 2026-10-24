@@ -103,6 +103,79 @@ mod last_owner {
   }
 
   #[tokio::test]
+  async fn owners_promote_demote_and_remove_and_admins_cannot_sign() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    let mut carol = Peer::enroll(&server, "Carol").await;
+    let (alice_id, bob_id, carol_id) = (
+      alice.client.user_id(),
+      bob.client.user_id(),
+      carol.client.user_id(),
+    );
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+
+    // Add an owner and an admin after the genesis.
+    alice
+      .client
+      .publish_roster(&[
+        (alice_id, RosterRole::Owner),
+        (bob_id, RosterRole::Owner),
+        (carol_id, RosterRole::Admin),
+      ])
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    let workspace = carol.client.workspace().unwrap();
+    assert_eq!(workspace.maybe_rejection, None);
+    assert_eq!(workspace.owner_status(i64::MAX / 2).unwrap().owners.len(), 2);
+    assert!(workspace.is_admin(carol_id));
+
+    // The admin can't sign a roster, not even one that makes them an owner.
+    let refused = carol
+      .client
+      .publish_roster(&[
+        (alice_id, RosterRole::Owner),
+        (bob_id, RosterRole::Owner),
+        (carol_id, RosterRole::Owner),
+      ])
+      .await;
+    assert!(matches!(refused, Err(teamcraft_core::CoreError::NotAnOwner)));
+
+    // Bob demotes Alice to admin and removes Carol.
+    bob
+      .client
+      .publish_roster(&[(bob_id, RosterRole::Owner), (alice_id, RosterRole::Admin)])
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    let workspace = carol.client.workspace().unwrap();
+    assert_eq!(workspace.roster.version, 3);
+    assert_eq!(workspace.maybe_rejection, None);
+    let status = workspace.owner_status(i64::MAX / 2).unwrap();
+    assert_eq!(
+      status.owners.iter().map(|owner| owner.0).collect::<Vec<_>>(),
+      vec![bob_id]
+    );
+    assert_eq!(status.admins, vec![alice_id]);
+    assert!(!workspace.is_admin(carol_id));
+
+    // Alice is no owner any more; Bob, the last one, can't remove himself.
+    let refused = alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner)])
+      .await;
+    assert!(matches!(refused, Err(teamcraft_core::CoreError::NotAnOwner)));
+    let refused = bob.client.publish_roster(&[(alice_id, RosterRole::Admin)]).await;
+    assert!(matches!(refused, Err(teamcraft_core::CoreError::LastOwner)));
+    assert_eq!(bob.client.workspace().unwrap().roster.version, 3);
+  }
+
+  #[tokio::test]
   async fn a_zero_owner_roster_from_a_hostile_server_is_refused() {
     let server = FakeServer::new();
     let mut alice = Peer::enroll(&server, "Alice").await;
@@ -201,21 +274,13 @@ async fn admins_cannot_sign_policy() {
     .unwrap();
   settle(&mut [&mut alice, &mut bob]).await;
 
-  // The fake server accepts it (the real one checks the role, but must not be trusted to).
-  bob
-    .client
-    .publish_policy(policy(AdminSelfJoin::Visible))
-    .await
-    .unwrap();
+  // Bob's own client refuses before signing.
+  let refused = bob.client.publish_policy(policy(AdminSelfJoin::Visible)).await;
+  assert!(matches!(refused, Err(teamcraft_core::CoreError::NotAnOwner)));
+
+  // Nothing was signed; a non-owner's signature would be refused on verify anyway (unit tests).
   settle(&mut [&mut alice, &mut bob]).await;
-  let workspace = alice.client.workspace().unwrap();
-  assert_eq!(workspace.policy_version, 0);
-  assert!(
-    workspace
-      .maybe_rejection
-      .unwrap()
-      .contains("not validly signed by an owner")
-  );
+  assert_eq!(alice.client.workspace().unwrap().policy_version, 0);
 }
 
 #[tokio::test]

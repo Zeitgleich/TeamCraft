@@ -794,6 +794,10 @@ impl ChatBackend for RemoteChat {
     });
   }
 
+  fn publish_roster(&self, members: Vec<teamcraft_client_api::admin::RosterEntry>) {
+    self.act(ChatAction::PublishRoster { members });
+  }
+
   fn admin_add_self(&self, conversation: ConversationId) {
     self.act(ChatAction::AdminJoinChannel { conversation });
   }

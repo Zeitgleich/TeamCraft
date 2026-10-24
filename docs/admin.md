@@ -95,8 +95,19 @@ signature (freshness above).
   default 2; 1 switches the warning off).
 - **When an owner leaves, add the successor first, then remove the old owner.** Removing the last
   owner is refused, so a handover always passes through a roster with both. The first roster takes
-  every owner and admin the server lists when the first policy is signed, so a second owner is best
-  given the role in the identity provider before that; the console has no roster editor yet.
+  every owner and admin the server lists when the first policy is signed.
+- **Editing the roster.** Administration → Security → Owners lists the signed roster. An owner on a
+  device with signing keys (desktop or web) can add a person as owner or admin, make an owner an
+  admin or the other way round, or remove someone. The console shows the changes, refuses a roster
+  without an owner, and signs the new version on the owner's device (`publish_roster`, then the
+  current policy again under it). People need an identity key (they set up TeamCraft once) before
+  they can be added.
+- **Identity provider roles.** The `owner` and `admin` roles in the identity provider don't change
+  the signed roster by themselves: the server can't sign. When they differ from it, the console
+  lists the difference and an owner signs the identity provider's role holders in one step.
+- **Admins can't sign.** For admins the form is read-only; the core refuses to sign a roster or
+  policy for anyone who isn't an owner of the verified roster (`not_an_owner`), and every client
+  would refuse such an entry anyway.
 - **Keep an owner's app in use.** An owner's client signs the roster again by itself when half of
   the 30 days have passed. The console warns a week before the window runs out (a client setting,
   `workspace_expiry_warning`) and once it has: then an owner only needs to open TeamCraft.

@@ -118,6 +118,8 @@ pub struct WorkspaceState {
 pub struct OwnerStatus {
   /// Each owner and the newest signing time of theirs this device verified.
   pub owners: Vec<(UserId, Option<i64>)>,
+  /// Admins of the roster (not owners).
+  pub admins: Vec<UserId>,
   /// When clients stop accepting the admins unless an owner signs the roster again; `None` for a
   /// roster from before signing times.
   pub maybe_expires_at_ms: Option<i64>,
@@ -430,8 +432,16 @@ impl WorkspaceState {
       None if self.heads.is_roster_chained => Some(0),
       None => None,
     };
+    let admins = self
+      .roster
+      .members
+      .iter()
+      .filter(|member| member.role == RosterRole::Admin)
+      .map(|member| member.user_id)
+      .collect();
     Some(OwnerStatus {
       owners,
+      admins,
       maybe_expires_at_ms,
       recommended_minimum: self.policy.owners.recommended_minimum.max(1),
     })
@@ -635,10 +645,28 @@ pub fn owner_roster_status(
         maybe_last_signed_at,
       })
       .collect(),
+    admins: status.admins,
     maybe_expires_at: status.maybe_expires_at_ms,
     recommended_minimum: status.recommended_minimum,
     warning_lead_ms: millis(warning_lead),
   })
+}
+
+/// The core's roster roles for a roster the console proposes.
+#[cfg(feature = "ui")]
+pub fn roster_roles(members: &[teamcraft_client_api::admin::RosterEntry]) -> Vec<(UserId, RosterRole)> {
+  use teamcraft_client_api::admin::RosterRoleChoice;
+
+  members
+    .iter()
+    .map(|entry| {
+      let role = match entry.role {
+        RosterRoleChoice::Owner => RosterRole::Owner,
+        RosterRoleChoice::Admin => RosterRole::Admin,
+      };
+      (entry.user, role)
+    })
+    .collect()
 }
 
 /// The update rules of the verified workspace policy (docs/updates.md §4.4); `None` while this

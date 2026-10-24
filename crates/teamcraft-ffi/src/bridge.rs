@@ -95,9 +95,11 @@ impl Engine {
           .await
       },
       ChatAction::SetActivity { .. } | ChatAction::SetAttention { .. } => Ok(()),
-      ChatAction::PublishPolicy { .. } | ChatAction::AdminJoinChannel { .. } => Err(
-        TeamCraftError::InvalidInput("workspace administration is on desktop and web".into()),
-      ),
+      ChatAction::PublishPolicy { .. }
+      | ChatAction::PublishRoster { .. }
+      | ChatAction::AdminJoinChannel { .. } => Err(TeamCraftError::InvalidInput(
+        "workspace administration is on desktop and web".into(),
+      )),
       other => {
         if let Some(unhandled) = other.apply_to(self.backend()?) {
           return Err(TeamCraftError::InvalidInput(format!(

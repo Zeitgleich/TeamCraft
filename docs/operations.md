@@ -164,8 +164,9 @@ make someone an owner.
   recommended and shows when each owner last signed.
 - **Handing over:** the successor goes into the signed roster as owner first, the old owner is
   removed afterwards. A roster without an owner is refused by the apps and the server
-  (`last_owner`). The console has no roster editor yet; later roster changes are made through the
-  client core (`publish_roster`).
+  (`last_owner`). Both steps are made in the console (Administration → Security → Owners) by an
+  owner, who signs each change on their device. Role changes in the identity provider show up there
+  as a difference until an owner signs them.
 - An owner's app re-signs the roster every 15 days while it is in use. If no owner opens TeamCraft
   for 30 days, member clients stop accepting the admins until an owner does; the console warns a
   week ahead.

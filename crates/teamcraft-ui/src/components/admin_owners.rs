@@ -4,10 +4,14 @@
 
 use leptos::prelude::*;
 
-use crate::admin::{OwnerRosterStatus, OwnerWarning};
+use crate::admin::{
+  OwnerRosterStatus, OwnerWarning, RosterChange, RosterEntry, RosterRoleChoice, normalized_roster,
+  roster_changes, roster_from_roles, roster_problem, signed_roster,
+};
 use crate::clock::{format_date_time, now_ms};
 use crate::components::admin_policy::{PolicyDraft, SelectRow};
 use crate::i18n::{I18n, use_i18n};
+use crate::model::UserId;
 use crate::state::use_app_state;
 
 /// Choices for the recommended number of owners; the policy allows up to 10.
@@ -37,7 +41,11 @@ pub fn OwnersPanel(policy: PolicyDraft) -> impl IntoView {
       <legend>{move || i18n.t("policy-owners")}</legend>
       <p class="muted-text small">{move || i18n.t("policy-owners-hint")}</p>
       {move || match roster.get() {
-        Some(status) => view! { <OwnerList status=status /> }.into_any(),
+        Some(status) => view! {
+          <OwnerList status=status.clone() />
+          <RosterEditor status=status />
+        }
+        .into_any(),
         None => view! { <p class="muted-text small">{i18n.t("policy-owners-unknown")}</p> }.into_any(),
       }}
       <SelectRow
@@ -104,6 +112,187 @@ fn OwnerList(status: OwnerRosterStatus) -> impl IntoView {
     <ul class="owner-list">{owners}</ul>
     {valid_until}
   }
+}
+
+/// Proposes a new roster and signs it on this device (admin.md §2.3.1): change roles, remove and add
+/// people, or take over the identity provider's role holders. Read-only for anyone but an owner
+/// with signing keys (the surrounding fieldset); the core refuses a roster without an owner.
+#[component]
+fn RosterEditor(status: OwnerRosterStatus) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let signed = StoredValue::new(signed_roster(&status));
+  let draft = RwSignal::new(signed.get_value());
+  let picked = RwSignal::new(String::new());
+  let (idp_owners, idp_admins) = state.read(|backend| backend.admin_role_holders());
+  let from_roles = roster_from_roles(&idp_owners, &idp_admins);
+  let idp_changes = if from_roles.is_empty() {
+    Vec::new()
+  } else {
+    roster_changes(&signed.get_value(), &from_roles)
+  };
+  let name_of = move |user: UserId| {
+    state
+      .read(|backend| backend.user(user))
+      .map(|user| user.display_name)
+      .unwrap_or_else(|| user.to_string())
+  };
+  let changes = Memo::new(move |_| roster_changes(&signed.get_value(), &draft.get()));
+  let problem = Memo::new(move |_| roster_problem(&draft.get()));
+  let addable = Memo::new(move |_| {
+    let current = draft.get();
+    let mut users: Vec<(String, String)> = state
+      .read(|backend| backend.users())
+      .into_iter()
+      .filter(|user| !current.iter().any(|entry| entry.user == user.id))
+      .map(|user| (user.id.to_string(), user.display_name))
+      .collect();
+    users.sort_by(|a, b| a.1.cmp(&b.1));
+    users
+  });
+  let set_role = move |user: UserId, maybe_role: Option<RosterRoleChoice>| {
+    draft.update(|entries| {
+      entries.retain(|entry| entry.user != user);
+      if let Some(role) = maybe_role {
+        entries.push(RosterEntry { user, role });
+      }
+      *entries = normalized_roster(entries);
+    });
+  };
+  let add = move |role: RosterRoleChoice| {
+    if let Ok(user) = picked.get_untracked().parse::<UserId>() {
+      set_role(user, Some(role));
+      picked.set(String::new());
+    }
+  };
+  let sign = move |members: Vec<RosterEntry>| {
+    if roster_problem(&members).is_none() {
+      state.write(|backend| backend.admin_publish_roster(members));
+    }
+  };
+
+  let idp_block = (!idp_changes.is_empty()).then(|| {
+    let lines = idp_changes
+      .iter()
+      .map(|change| view! { <li>{change_text(i18n, *change, &name_of)}</li> })
+      .collect_view();
+    let target = from_roles.clone();
+    let has_problem = roster_problem(&from_roles).is_some();
+    view! {
+      <div class="roster-idp">
+        <p class="auth-alert" role="status">{i18n.t("roster-idp-title")}</p>
+        <ul>{lines}</ul>
+        <button type="button" class="btn" disabled=has_problem on:click=move |_| sign(target.clone())>
+          {i18n.t("roster-idp-sign")}
+        </button>
+      </div>
+    }
+  });
+
+  view! {
+    <div class="roster-editor">
+      <h4 class="detail-heading">{move || i18n.t("roster-title")}</h4>
+      <ul class="owner-list">
+        <For each=move || draft.get() key=|entry| (entry.user, entry.role) let:entry>
+          {
+            let user = entry.user;
+            let (role_key, toggle_key, toggled) = match entry.role {
+              RosterRoleChoice::Owner => ("roster-role-owner", "roster-make-admin", RosterRoleChoice::Admin),
+              RosterRoleChoice::Admin => ("roster-role-admin", "roster-make-owner", RosterRoleChoice::Owner),
+            };
+            view! {
+              <li>
+                <strong translate="no">{name_of(user)}</strong>
+                " "
+                <span class="muted-text small">{i18n.t(role_key)}</span>
+                " "
+                <button type="button" class="btn btn-small" on:click=move |_| set_role(user, Some(toggled))>
+                  {i18n.t(toggle_key)}
+                </button>
+                <button type="button" class="btn btn-small" on:click=move |_| set_role(user, None)>
+                  {i18n.t("roster-remove")}
+                </button>
+              </li>
+            }
+          }
+        </For>
+      </ul>
+      <div class="field inline">
+        <label for="roster-add">{move || i18n.t("roster-add-label")}</label>
+        <select
+          id="roster-add"
+          class="input"
+          prop:value=move || picked.get()
+          on:change=move |ev| picked.set(event_target_value(&ev))
+        >
+          <option value="">{move || i18n.t("roster-add-choose")}</option>
+          {move || {
+            addable
+              .get()
+              .into_iter()
+              .map(|(value, name)| view! { <option value=value>{name}</option> })
+              .collect_view()
+          }}
+        </select>
+        <button type="button" class="btn btn-small" disabled=move || picked.get().is_empty() on:click=move |_| add(RosterRoleChoice::Owner)>
+          {move || i18n.t("roster-add-owner")}
+        </button>
+        <button type="button" class="btn btn-small" disabled=move || picked.get().is_empty() on:click=move |_| add(RosterRoleChoice::Admin)>
+          {move || i18n.t("roster-add-admin")}
+        </button>
+      </div>
+      {move || {
+        let pending = changes.get();
+        (!pending.is_empty()).then(|| {
+          let lines = pending
+            .into_iter()
+            .map(|change| view! { <li>{change_text(i18n, change, &name_of)}</li> })
+            .collect_view();
+          view! {
+            <h4 class="detail-heading">{i18n.t("roster-pending")}</h4>
+            <ul>{lines}</ul>
+          }
+        })
+      }}
+      {move || problem.get().map(|_| view! { <p class="auth-alert" role="alert">{i18n.t("roster-no-owner")}</p> })}
+      <p class="muted-text small">{move || i18n.t("roster-sign-hint")}</p>
+      <button type="button" class="btn" disabled=move || changes.get().is_empty() on:click=move |_| draft.set(signed.get_value())>
+        {move || i18n.t("roster-reset")}
+      </button>
+      <button
+        type="button"
+        class="btn btn-primary"
+        disabled=move || changes.get().is_empty() || problem.get().is_some()
+        on:click=move |_| sign(draft.get_untracked())
+      >
+        {move || i18n.t("roster-sign")}
+      </button>
+      {idp_block}
+    </div>
+  }
+}
+
+fn change_text(i18n: I18n, change: RosterChange, name_of: &impl Fn(UserId) -> String) -> String {
+  let (key, user) = match change {
+    RosterChange::Add {
+      user,
+      role: RosterRoleChoice::Owner,
+    } => ("roster-change-add-owner", user),
+    RosterChange::Add {
+      user,
+      role: RosterRoleChoice::Admin,
+    } => ("roster-change-add-admin", user),
+    RosterChange::ChangeRole {
+      user,
+      role: RosterRoleChoice::Owner,
+    } => ("roster-change-make-owner", user),
+    RosterChange::ChangeRole {
+      user,
+      role: RosterRoleChoice::Admin,
+    } => ("roster-change-make-admin", user),
+    RosterChange::Remove { user } => ("roster-change-remove", user),
+  };
+  i18n.t_with(key, &[("name", &name_of(user))])
 }
 
 fn warning_text(i18n: I18n, warning: OwnerWarning) -> String {

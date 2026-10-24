@@ -279,6 +279,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn publish_policy(&mut self, policy: WorkspacePolicy) -> Result<(), CoreError> {
     self.sync_workspace().await?;
     let state = self.workspace()?;
+    if state.roster.version > 0 && !self.is_verified_owner(&state) {
+      return Err(CoreError::NotAnOwner);
+    }
     let document = ChainedPolicyDocument {
       version: state.policy_version + 1,
       policy,
@@ -290,6 +293,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self
       .append_log(WorkspaceLogKind::Policy, WorkspaceLog::Policy, version, &document)
       .await
+  }
+
+  /// Whether this user is an owner in the roster this device verified.
+  fn is_verified_owner(&self, state: &WorkspaceState) -> bool {
+    state
+      .roster
+      .members
+      .iter()
+      .any(|member| member.user_id == self.account.user_id && member.role == RosterRole::Owner)
   }
 
   /// Owners: signs the roster again when it is half as old as clients accept (security review A6).
@@ -318,6 +330,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Err(CoreError::LastOwner);
     }
     let state = self.workspace()?;
+    // After the genesis only an owner of the verified roster can sign the next one; anything
+    // else would be refused by every client anyway.
+    if state.roster.version > 0 && !self.is_verified_owner(&state) {
+      return Err(CoreError::NotAnOwner);
+    }
     document.version = state.roster.version + 1;
     document.maybe_prev_hash = Some(head_or_genesis(state.heads.maybe_roster_hash));
     document.maybe_signed_at_ms = Some(self.now_ms());

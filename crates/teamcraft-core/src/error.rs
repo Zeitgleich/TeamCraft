@@ -82,6 +82,10 @@ pub enum CoreError {
     "last_owner: the roster must keep at least one owner; add the new owner before removing the last one"
   )]
   LastOwner,
+  /// Only an owner of the verified roster signs the next roster or policy; nothing is signed. The
+  /// message starts with a stable code the UI localizes.
+  #[error("not_an_owner: only owners of the signed roster can sign it; this user is not one")]
+  NotAnOwner,
   #[error("user {0} isn't an admin in the signed roster")]
   NotAnAdmin(UserId),
   #[error("user {0} has no identity key yet (never enrolled)")]
@@ -134,6 +138,11 @@ mod tests {
   use teamcraft_proto::ErrorCode;
 
   use super::*;
+
+  #[test]
+  fn the_non_owner_refusal_carries_its_stable_code() {
+    assert!(CoreError::NotAnOwner.to_string().starts_with("not_an_owner:"));
+  }
 
   #[test]
   fn the_last_owner_refusal_carries_the_stable_code() {

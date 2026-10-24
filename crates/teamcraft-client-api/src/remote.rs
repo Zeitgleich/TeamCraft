@@ -411,6 +411,11 @@ pub enum ChatAction {
     #[serde(default)]
     admins: Vec<UserId>,
   },
+  /// Signs and publishes the admin roster as the next version (owners only, admin.md §2.3). The
+  /// core refuses a roster without an owner and a signer who isn't an owner.
+  PublishRoster {
+    members: Vec<crate::admin::RosterEntry>,
+  },
   /// Wraps the key backup with a new recovery passphrase (the old one stops working for recovery).
   ChangePassphrase {
     passphrase: String,

@@ -124,6 +124,9 @@ pub trait ChatBackend {
     _admins: Vec<UserId>,
   ) {
   }
+  /// Signs and publishes this roster as the next version (owners only, admin.md §2.3). Needs
+  /// [`Self::can_sign_workspace`].
+  fn publish_roster(&self, _members: Vec<crate::admin::RosterEntry>) {}
   /// Adds the signed-in admin to a conversation through the encryption group (admin.md §2.2).
   fn admin_add_self(&self, _conversation: ConversationId) {}
   /// What desktop and browser notifications may show (the verified workspace policy). A backend
@@ -466,6 +469,12 @@ pub trait AdminBackend {
   fn admin_owner_roster(&self) -> Option<crate::admin::OwnerRosterStatus> {
     None
   }
+  /// The identity provider's role holders as the server reports them: (owners, admins).
+  fn admin_role_holders(&self) -> (Vec<UserId>, Vec<UserId>) {
+    (Vec::new(), Vec::new())
+  }
+  /// Signs `members` as the next roster on this device (owners only).
+  fn admin_publish_roster(&self, _members: Vec<crate::admin::RosterEntry>) {}
 
   // ---- Runtime settings (admin.md §6): brands, mail, calendar, instance settings ----
 

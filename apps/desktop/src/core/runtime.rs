@@ -887,6 +887,10 @@ impl Core {
       } => {
         return publish_policy(client, base, policy.clone(), owners, admins).await;
       },
+      ChatAction::PublishRoster { members } => {
+        let roles = teamcraft_core::workspace::roster_roles(members);
+        return client.publish_roster(&roles).await.map_err(describe);
+      },
       ChatAction::AdminJoinChannel { conversation } => {
         let me = client.user_id();
         return client.admin_add_member(*conversation, me).await.map_err(describe);
@@ -904,6 +908,7 @@ impl Core {
       | ChatAction::SetAttention { .. }
       | ChatAction::AcceptKeyChange { .. }
       | ChatAction::PublishPolicy { .. }
+      | ChatAction::PublishRoster { .. }
       | ChatAction::AdminJoinChannel { .. } => {},
       // Everything else goes to the backend, which queues what needs the engine as commands.
       other => {
