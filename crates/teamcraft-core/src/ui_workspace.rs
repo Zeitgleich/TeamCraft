@@ -36,7 +36,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       request: Box::new(UpdateSpaceRequest {
         maybe_name: changes.maybe_name,
         maybe_icon: None,
-        maybe_color: None,
+        maybe_color: changes.maybe_color,
         maybe_description: changes.maybe_description,
         maybe_join_policy: changes.maybe_is_open.map(join_policy),
         maybe_is_archived: changes.maybe_is_archived,

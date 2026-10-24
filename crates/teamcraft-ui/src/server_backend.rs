@@ -19,7 +19,7 @@ use crate::backend::ChatBackend;
 use crate::model::{
   Conversation, ConversationId, ConversationKind, CustomStatus, Message, MessageId, MessageKind,
   PresenceStatus, SidebarCategory, Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId,
-  id_from_raw, raw_id,
+  hue_from_hex, id_from_raw, raw_id,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -202,6 +202,8 @@ pub fn build_snapshot(
         .as_deref()
         .and_then(hue_from_hex)
         .unwrap_or_else(|| hue_from_seed(&space.name)),
+      maybe_color: space.maybe_color.clone(),
+      maybe_image_version: space.maybe_image.as_ref().map(|image| image.version.clone()),
       unread_count: 0,
       mention_count: 0,
     })
@@ -284,29 +286,6 @@ pub(crate) fn hue_from_seed(seed: &str) -> u16 {
     acc.wrapping_mul(33).wrapping_add(u32::from(byte))
   });
   (hash % 360) as u16
-}
-
-/// Hue of a `#rrggbb` colour, or `None` for anything else (and for greys, which have no hue).
-fn hue_from_hex(color: &str) -> Option<u16> {
-  let hex = color.strip_prefix('#')?;
-  if hex.len() != 6 {
-    return None;
-  }
-  let channel = |range: std::ops::Range<usize>| u8::from_str_radix(&hex[range], 16).ok().map(f32::from);
-  let (r, g, b) = (channel(0..2)?, channel(2..4)?, channel(4..6)?);
-  let (max, min) = (r.max(g).max(b), r.min(g).min(b));
-  if (max - min).abs() < f32::EPSILON {
-    return None;
-  }
-  let delta = max - min;
-  let hue = if (max - r).abs() < f32::EPSILON {
-    ((g - b) / delta).rem_euclid(6.0)
-  } else if (max - g).abs() < f32::EPSILON {
-    (b - r) / delta + 2.0
-  } else {
-    (r - g) / delta + 4.0
-  };
-  Some((hue * 60.0).round() as u16 % 360)
 }
 
 impl ChatBackend for RestChat {
@@ -552,10 +531,5 @@ mod tests {
   fn hues_are_stable_and_in_range() {
     assert_eq!(hue_from_seed("Project A"), hue_from_seed("Project A"));
     assert!(hue_from_seed("anything") < 360);
-    assert_eq!(hue_from_hex("#ff0000"), Some(0));
-    assert_eq!(hue_from_hex("#00ff00"), Some(120));
-    assert_eq!(hue_from_hex("#0000ff"), Some(240));
-    assert_eq!(hue_from_hex("#808080"), None);
-    assert_eq!(hue_from_hex("red"), None);
   }
 }

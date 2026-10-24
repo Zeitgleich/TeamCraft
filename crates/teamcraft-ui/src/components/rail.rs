@@ -1,8 +1,9 @@
 use leptos::prelude::*;
 
 use crate::components::icons::{Icon, IconName};
+use crate::components::space_tile::SpaceTileContent;
 use crate::i18n::use_i18n;
-use crate::model::{Space, initials};
+use crate::model::Space;
 use crate::sections::{RailBadge, badge_count};
 use crate::state::{Overlay, RailEntry, use_app_state};
 
@@ -30,7 +31,12 @@ pub fn SpaceRail() -> impl IntoView {
             view! { <AllSpacesButton /> }.into_any()
           } else {
             view! {
-              <For each=move || spaces.get() key=|space| space.id let:space>
+              // A new name, color or picture renders the button again.
+              <For
+                each=move || spaces.get()
+                key=|space| (space.id, space.name.clone(), space.hue, space.maybe_image_version.clone())
+                let:space
+              >
                 <SpaceButton space=space />
               </For>
             }
@@ -174,7 +180,7 @@ fn SpaceButton(space: Space) -> impl IntoView {
         aria-current=move || is_current().then_some("true")
         on:click=move |_| state.open_space(id)
       >
-        <span aria-hidden="true">{initials(&space.name)}</span>
+        <SpaceTileContent space=space.clone() />
         <RailBadgeView badge=badge />
       </button>
     </li>

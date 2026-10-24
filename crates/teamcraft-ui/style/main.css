@@ -5238,6 +5238,30 @@ select.input {
 
 /* Profiles and directory */
 .avatar-img { width: 100%; height: 100%; border-radius: inherit; object-fit: cover; display: block; }
+
+/* Space pictures: the rail button, the sidebar head and the quick switcher; letters until loaded. */
+.space-image { width: 100%; height: 100%; border-radius: inherit; object-fit: cover; display: block; }
+.space-tile {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: hsl(var(--hue) 40% 32%);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  vertical-align: middle;
+}
+.sidebar-head .space-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.switcher-space { display: inline-flex; align-items: center; gap: 4px; }
+.switcher-space .space-tile { width: 16px; height: 16px; border-radius: 4px; font-size: 7px; }
+.space-image-row { display: flex; align-items: center; gap: .75rem; margin-bottom: .5rem; }
+.space-image-preview .space-tile { width: 64px; height: 64px; border-radius: 16px; font-size: 22px; }
+.space-image-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.color-input { width: 48px; height: 32px; padding: 2px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: none; }
 .profile-avatar-row { display: flex; align-items: center; gap: .75rem; margin-bottom: .75rem; }
 .profile-facts { display: grid; grid-template-columns: max-content 1fr; gap: .25rem .75rem; margin: .75rem 0; }
 .profile-facts dt { color: var(--text-muted, #666); }

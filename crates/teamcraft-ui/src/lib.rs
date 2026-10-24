@@ -60,6 +60,7 @@ pub mod session;
 pub mod settings;
 pub mod sign_in_page;
 pub mod slash;
+pub mod space_images;
 pub mod state;
 pub mod sync_reads;
 #[cfg(target_arch = "wasm32")]

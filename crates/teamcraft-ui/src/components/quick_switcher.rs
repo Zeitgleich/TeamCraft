@@ -9,6 +9,7 @@ use leptos::prelude::*;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
+use crate::components::space_tile::SpaceTile;
 use crate::i18n::use_i18n;
 use crate::keys::{ENTER, ESCAPE, SEARCH_MESSAGES, ShortcutKeys};
 use crate::model::{
@@ -304,7 +305,7 @@ fn SwitcherRow(item: SwitcherItem, index: usize, selected: RwSignal<usize>) -> i
       )
     },
     SwitcherItem::Space(space) => (
-      view! { <Icon name=IconName::Layers /> }.into_any(),
+      view! { <SpaceTile space=space.clone() /> }.into_any(),
       space.name.clone(),
       i18n.t("switcher-context-space"),
       space.unread_count > 0,
