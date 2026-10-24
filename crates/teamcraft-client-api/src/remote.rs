@@ -18,6 +18,7 @@ use crate::calls::{
   CallStatusSounds, IncomingCall, MediaDevices, OrgBackgroundRule, OrgBackgrounds, PushToTalk,
   RemoteVideoTrack, RunningCall,
 };
+use crate::live::LiveSnapshot;
 use crate::model::{
   Conversation, ConversationId, CustomStatus, DeviceId, Message, MessageId, PresenceStatus, Space, SpaceId,
   ThreadId, ThreadSummary, TimestampMs, User, UserId,
@@ -155,6 +156,9 @@ pub struct ChatSnapshot {
   /// Identity keys this device knows, for key verification and key-change warnings.
   #[serde(default)]
   pub security: SecuritySnapshot,
+  /// Server-reported counters the core keeps from gateway events; absent from older shells.
+  #[serde(rename = "live", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_live: Option<LiveSnapshot>,
 }
 
 /// Fingerprints (hex) of the identity keys on this device.
@@ -200,6 +204,7 @@ impl ChatSnapshot {
       message_counts,
       last_activity,
       security,
+      maybe_live: backend.live_snapshot(),
     }
   }
 }

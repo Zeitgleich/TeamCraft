@@ -7,7 +7,7 @@ use futures_util::FutureExt;
 use futures_util::future::{Either, select};
 use teamcraft_proto::{
   DeviceActivity, ErrorBody, ErrorCode, GatewayClientMessage, GatewayEvent, GatewayServerMessage,
-  MlsMessageKind,
+  MlsMessageKind, UserPresence,
 };
 
 use super::Client;
@@ -73,6 +73,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .await?;
       match receive(&mut connection, handshake_timeout).await? {
         GatewayServerMessage::Resumed { .. } => {
+          self.resync_live_state().await?;
           return Ok(GatewayStart {
             connection,
             outcome: GatewayOutcome::Resumed,
@@ -118,11 +119,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       last_seq: 0,
     });
     self.persist_sync()?;
+    // The full sync already read the counters; the UI still reads what only it keeps.
+    read_state::update_marks(&self.store, |marks| marks.connections += 1)?;
     Ok(GatewayStart {
       connection,
       outcome: GatewayOutcome::Fresh,
       heartbeat_interval,
     })
+  }
+
+  /// After a resumed connection: the missed events follow, but counters are read once anyway, so a
+  /// count that drifted (an event lost before this device stored it) is repaired on every connect
+  /// instead of by a timer (issue #183). One request each for threads and counts. A failed read
+  /// doesn't fail the connection: the events keep the counts current, the next connect retries.
+  async fn resync_live_state(&mut self) -> Result<(), CoreError> {
+    if let Err(error) = self.refresh_read_state().await {
+      tracing::warn!(%error, "could not read the unread counts after resuming");
+    }
+    read_state::update_marks(&self.store, |marks| marks.connections += 1)
   }
 
   /// The token the handshake sends (`identify`/`resume`).
@@ -214,6 +228,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     match event {
       GatewayEvent::MessageCreate { message } => {
         self.clear_typing(message.conversation_id, message.sender_user_id);
+        read_state::note_new_message(&self.store, &message, self.account.user_id)?;
         self.receive_message(message)
       },
       GatewayEvent::MlsMessage { message } => {
@@ -251,8 +266,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           self.refresh_conversation(conversation_id).await
         }
       },
-      GatewayEvent::PresenceUpdate { user_id, state, .. } => {
+      GatewayEvent::PresenceUpdate {
+        user_id,
+        state,
+        maybe_status,
+      } => {
         records::put_json(&self.store, Table::Presence, &user_id.to_string(), &state)?;
+        read_state::note_announced_presence(
+          &self.store,
+          &UserPresence {
+            user_id,
+            state: state.clone(),
+            maybe_status,
+            maybe_last_seen: None,
+          },
+        )?;
         if state == teamcraft_proto::PresenceState::Offline {
           // The server records "last seen" when the person stops being active; the event doesn't
           // carry it. Read in one batch on the next tick, so a burst of people going offline (or
@@ -295,6 +323,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       GatewayEvent::DeviceAdd { user_id, device_id } => self.queue_device_addition(user_id, device_id),
       GatewayEvent::ThreadUpdate { .. } => self.refresh_read_state().await,
       GatewayEvent::NotificationSettingsUpdate => self.refresh_notification_settings().await,
+      GatewayEvent::UnreadUpdate {
+        conversation_id,
+        unread_count,
+        mention_count,
+      } => read_state::note_unread(&self.store, conversation_id, unread_count, mention_count),
+      // The UI reads the announcement itself; the mark tells it to do so now.
+      GatewayEvent::AnnouncementUpdate => {
+        read_state::update_marks(&self.store, |marks| marks.announcements += 1)
+      },
       GatewayEvent::ReadReceipt {
         conversation_id,
         user_id,
@@ -316,7 +353,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       | GatewayEvent::LobbyJoin { .. }
       | GatewayEvent::GuestExpired { .. }
       | GatewayEvent::ProfileUpdate { .. }
-      | GatewayEvent::AnnouncementUpdate
       | GatewayEvent::OrgRecoveryUpdate { .. }
       | GatewayEvent::SystemEvent { .. }
       | GatewayEvent::UserGroupUpdate { .. }

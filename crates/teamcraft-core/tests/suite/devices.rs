@@ -122,6 +122,66 @@ mod read_state_events {
   }
 
   #[tokio::test]
+  async fn counts_follow_new_messages_and_unread_updates_and_resync_on_reconnect() {
+    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let server = FakeServer::new();
+    let mut alice = enroll(&server, "Alice", &clock).await;
+    let mut bob = enroll(&server, "Bob", &clock).await;
+    let channel = channel_of(&mut [&mut alice, &mut bob]).await;
+    let bob_id = bob.client.user_id();
+    // Whatever setting up the channel left unread (the fake keeps no read positions).
+    let (before, _) = counts(&bob, channel).expect("loaded by the full sync");
+
+    alice.client.send_text(channel, None, "one").await.unwrap();
+    alice.client.send_text(channel, None, "two").await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    assert_eq!(
+      counts(&bob, channel),
+      Some((before + 2, 0)),
+      "counted from message_create"
+    );
+    assert_eq!(
+      counts(&alice, channel),
+      Some((0, 0)),
+      "own messages are not unread"
+    );
+
+    server.publish_event(
+      &[bob_id],
+      &GatewayEvent::UnreadUpdate {
+        conversation_id: channel,
+        unread_count: 5,
+        mention_count: 1,
+      },
+    );
+    settle(&mut [&mut bob]).await;
+    assert_eq!(counts(&bob, channel), Some((5, 1)), "the server's word wins");
+
+    // A dropped connection resumes; the counts are read once anyway (the fake reports nothing
+    // unread), and the mark tells the UI to read its part again.
+    let connections = read_state::marks(bob.store.as_ref()).unwrap().connections;
+    server.drop_gateways(bob_id);
+    let (gateway, outcome) = bob.client.connect_gateway().await.unwrap();
+    assert_eq!(outcome, teamcraft_core::client::GatewayOutcome::Resumed);
+    bob.gateway = gateway;
+    assert_eq!(counts(&bob, channel), Some((0, 0)));
+    assert_eq!(
+      read_state::marks(bob.store.as_ref()).unwrap().connections,
+      connections + 1
+    );
+  }
+
+  #[tokio::test]
+  async fn announcement_updates_move_the_mark() {
+    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let server = FakeServer::new();
+    let mut alice = enroll(&server, "Alice", &clock).await;
+    server.publish_event(&[alice.client.user_id()], &GatewayEvent::AnnouncementUpdate);
+    settle(&mut [&mut alice]).await;
+    assert_eq!(read_state::marks(alice.store.as_ref()).unwrap().announcements, 1);
+  }
+
+  #[tokio::test]
   async fn receipts_and_acknowledgements_are_stored() {
     let clock = Arc::new(ManualClock::new(1_800_000_000_000));
     let server = FakeServer::new();
@@ -342,4 +402,15 @@ async fn a_linked_device_inherits_pins_and_the_workspace_root() {
     laptop.workspace_root_fingerprint().unwrap(),
     phone.client.workspace_root_fingerprint().unwrap()
   );
+}
+
+/// Unread and mention counts of the conversation as the core stores them; `None` before any sync.
+fn counts(peer: &Peer, conversation: ConversationId) -> Option<(u32, u32)> {
+  read_state::unread(peer.store.as_ref()).unwrap().map(|unread| {
+    unread
+      .conversations
+      .iter()
+      .find(|entry| entry.conversation_id == conversation)
+      .map_or((0, 0), |entry| (entry.unread_count, entry.mention_count))
+  })
 }

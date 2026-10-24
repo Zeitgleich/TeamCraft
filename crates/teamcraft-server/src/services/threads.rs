@@ -167,6 +167,28 @@ pub async fn get_unread(state: &AppState, caller: &AuthenticatedUser) -> Result<
   })
 }
 
+/// Sends the user's devices their new counts of the conversation (issue #183: clients keep their
+/// badges from events instead of polling `GET /unread`).
+pub async fn publish_unread(
+  state: &AppState,
+  user: UserId,
+  conversation: ConversationId,
+) -> Result<(), ApiError> {
+  let row = state
+    .database
+    .conversation_unread_count(conversation, user, state.settings.get().limits.max_unread_counted)
+    .await?;
+  state.hub.publish(
+    [user],
+    &GatewayEvent::UnreadUpdate {
+      conversation_id: conversation,
+      unread_count: row.unread_count,
+      mention_count: row.mention_count,
+    },
+  );
+  Ok(())
+}
+
 /// The caller must be a member and `thread` must be the root message of a thread in the conversation.
 async fn require_thread(
   state: &AppState,

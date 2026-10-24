@@ -97,6 +97,11 @@ pub trait ChatBackend {
   fn seen_by(&self, _conversation: ConversationId, _message: MessageId) -> Vec<UserId> {
     Vec::new()
   }
+  /// Unread counts, threads, presence and receipts the backend keeps current from gateway events.
+  /// `None` when it has no gateway (the UI then asks the server itself).
+  fn live_snapshot(&self) -> Option<crate::live::LiveSnapshot> {
+    None
+  }
   /// Other people typing in a conversation right now (the indicator lasts a few seconds).
   fn typing_users(&self, _conversation: ConversationId) -> Vec<UserId> {
     Vec::new()

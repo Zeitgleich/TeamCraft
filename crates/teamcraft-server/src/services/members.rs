@@ -12,6 +12,7 @@ use super::conversations::{can_list_members, ensure_open_channel};
 use super::convert::user_summary;
 use super::notifications;
 use super::system_events;
+use super::threads;
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -322,6 +323,7 @@ pub async fn set_read_position(
     [caller.user.id],
     &GatewayEvent::ConversationUpdate { conversation_id: id },
   );
+  threads::publish_unread(state, caller.user.id, id).await?;
   // Phones that show a notification for what was just read remove it.
   tokio::spawn(crate::push::routing::dismiss_read(
     state.clone(),

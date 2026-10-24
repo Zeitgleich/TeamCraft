@@ -28,7 +28,9 @@ resumes.
 Events go to the *users* that are members at publish time, so a removed member stops receiving a
 conversation's events immediately. Event types: `message_create`, `conversation_update`, `membership_add`,
 `membership_remove`, `mls_message`, `space_update`, `space_member_add`, `space_member_remove`, `typing_start`,
-`presence_update`. `conversation_update` and `space_update` carry only IDs: refetch the object over REST (it
+`presence_update`, `unread_update` (the user's counts of a conversation after their read position moved;
+see notifications.md, "Unread and mention counts"), and more listed in `teamcraft-proto`'s
+`GatewayEvent`. `conversation_update` and `space_update` carry only IDs: refetch the object over REST (it
 differs per viewer).
 
 ## Client frames

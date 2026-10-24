@@ -4,13 +4,37 @@
 
 use std::collections::BTreeMap;
 
-use teamcraft_proto::{ConversationId, MessageId, ThreadId, ThreadSummary, UnreadResponse, UserId};
+use serde::{Deserialize, Serialize};
+
+use teamcraft_proto::{
+  ConversationId, ConversationUnread, MessageId, MessageResponse, ThreadId, ThreadSummary, UnreadResponse,
+  UserId, UserPresence,
+};
 
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, Table};
 
 const UNREAD_KEY: &str = "state";
+const MARKS_KEY: &str = "marks";
+/// Prefix of the presence records `presence_update` events leave in [`Table::Presence`].
+const ANNOUNCED_PRESENCE_PREFIX: &str = "announced:";
+
+/// Counters that move when a UI should read something from the server once: after each gateway
+/// connection (events in between may be lost) and when the announcement changed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveMarks {
+  pub connections: u64,
+  pub announcements: u64,
+}
+
+/// How far another member of a DM has read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StoredReceipt {
+  pub conversation: ConversationId,
+  pub user: UserId,
+  pub message: MessageId,
+}
 
 /// Followed threads, most recently active first. Last replies are decrypted into the message store
 /// separately; `maybe_last_reply` here keeps only the ciphertext the server sent.
@@ -23,6 +47,36 @@ pub fn threads(store: &impl LocalStore) -> Result<Vec<ThreadSummary>, CoreError>
 /// Unread and mention counts as last reported by the server.
 pub fn unread(store: &impl LocalStore) -> Result<Option<UnreadResponse>, CoreError> {
   records::get_json(store, Table::Unread, UNREAD_KEY)
+}
+
+/// How far other members of DMs have read, across all conversations.
+pub fn all_read_receipts(store: &impl LocalStore) -> Result<Vec<StoredReceipt>, CoreError> {
+  let mut receipts = Vec::new();
+  for (key, value) in store.list(Table::ReadReceipts)? {
+    let corrupt = || CoreError::Corrupt(format!("read receipt key {key}"));
+    let (conversation, user) = key.split_once('/').ok_or_else(corrupt)?;
+    receipts.push(StoredReceipt {
+      conversation: conversation.parse().map_err(|_| corrupt())?,
+      user: user.parse().map_err(|_| corrupt())?,
+      message: serde_json::from_slice(&value).map_err(|error| CoreError::Corrupt(error.to_string()))?,
+    });
+  }
+  Ok(receipts)
+}
+
+/// Presence and custom status as `presence_update` events announced them.
+pub fn announced_presence(store: &impl LocalStore) -> Result<Vec<UserPresence>, CoreError> {
+  let mut presence = Vec::new();
+  for (key, value) in store.list(Table::Presence)? {
+    if key.starts_with(ANNOUNCED_PRESENCE_PREFIX) {
+      presence.push(serde_json::from_slice(&value).map_err(|error| CoreError::Corrupt(error.to_string()))?);
+    }
+  }
+  Ok(presence)
+}
+
+pub fn marks(store: &impl LocalStore) -> Result<LiveMarks, CoreError> {
+  Ok(records::get_json(store, Table::Unread, MARKS_KEY)?.unwrap_or_default())
 }
 
 /// How far each other member of a DM has read.
@@ -73,6 +127,83 @@ pub(crate) fn save_threads(store: &impl LocalStore, threads: &[ThreadSummary]) -
 
 pub(crate) fn save_unread(store: &impl LocalStore, unread: &UnreadResponse) -> Result<(), CoreError> {
   records::put_json(store, Table::Unread, UNREAD_KEY, unread)
+}
+
+/// Takes the server's counts of one conversation (`unread_update`). Before the first full answer
+/// there is nothing to amend; the next sync brings everything.
+pub(crate) fn note_unread(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  unread_count: u32,
+  mention_count: u32,
+) -> Result<(), CoreError> {
+  let Some(mut unread) = unread(store)? else {
+    return Ok(());
+  };
+  unread
+    .conversations
+    .retain(|entry| entry.conversation_id != conversation);
+  if unread_count > 0 || mention_count > 0 {
+    unread.conversations.push(ConversationUnread {
+      conversation_id: conversation,
+      unread_count,
+      mention_count,
+    });
+  }
+  save_unread(store, &unread)
+}
+
+/// Counts a new top-level message of someone else, as the server does (threads.rs counts replies).
+/// Only for messages that arrive live: history that sync loads was counted by the server already.
+pub(crate) fn note_new_message(
+  store: &impl LocalStore,
+  message: &MessageResponse,
+  me: UserId,
+) -> Result<(), CoreError> {
+  if message.sender_user_id == me || message.maybe_thread_id.is_some() {
+    return Ok(());
+  }
+  let Some(mut unread) = unread(store)? else {
+    return Ok(());
+  };
+  let is_mention = message.mentioned_user_ids.contains(&me);
+  match unread
+    .conversations
+    .iter_mut()
+    .find(|entry| entry.conversation_id == message.conversation_id)
+  {
+    Some(entry) => {
+      entry.unread_count = entry.unread_count.saturating_add(1);
+      entry.mention_count = entry.mention_count.saturating_add(u32::from(is_mention));
+    },
+    None => unread.conversations.push(ConversationUnread {
+      conversation_id: message.conversation_id,
+      unread_count: 1,
+      mention_count: u32::from(is_mention),
+    }),
+  }
+  save_unread(store, &unread)
+}
+
+pub(crate) fn note_announced_presence(
+  store: &impl LocalStore,
+  presence: &UserPresence,
+) -> Result<(), CoreError> {
+  records::put_json(
+    store,
+    Table::Presence,
+    &format!("{ANNOUNCED_PRESENCE_PREFIX}{}", presence.user_id),
+    presence,
+  )
+}
+
+pub(crate) fn update_marks(
+  store: &impl LocalStore,
+  change: impl FnOnce(&mut LiveMarks),
+) -> Result<(), CoreError> {
+  let mut current = marks(store)?;
+  change(&mut current);
+  records::put_json(store, Table::Unread, MARKS_KEY, &current)
 }
 
 /// Records a receipt; receipts only move forward (events may arrive out of order).

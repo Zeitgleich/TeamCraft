@@ -15,6 +15,7 @@ pub mod calls;
 pub mod emoji;
 pub mod emoji_catalog;
 pub mod links;
+pub mod live;
 pub mod log;
 pub mod model;
 pub mod notify;
