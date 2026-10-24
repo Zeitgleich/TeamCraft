@@ -3,11 +3,12 @@
 //! over the top bar. The UI asks for the layout, drives the window through `window_action` and is
 //! told when the maximized or fullscreen state changes, so its restore button stays right.
 
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewWindow, WebviewWindowBuilder, Window};
 use teamcraft_client_api::window_chrome::{
-  ControlLayout, TitleBar, WindowAction, WindowChrome, WindowPlatform,
+  ControlLayout, LinuxDesktop, TitleBar, WindowAction, WindowChrome, WindowPlatform,
 };
 
 use crate::shell_prefs::ShellPrefsState;
@@ -129,14 +130,19 @@ pub fn window_chrome(
     chrome.title_bar
   };
   let platform = platform();
+  let linux_desktop = match platform {
+    WindowPlatform::Linux => linux_desktop(),
+    WindowPlatform::Windows | WindowPlatform::Macos => LinuxDesktop::Other,
+  };
   let controls = match (title_bar, platform) {
     (TitleBar::Custom, WindowPlatform::Windows) => ControlLayout::windows(),
-    (TitleBar::Custom, WindowPlatform::Linux) => linux_layout(&window),
+    (TitleBar::Custom, WindowPlatform::Linux) => linux_layout(&window, linux_desktop),
     _ => ControlLayout::default(),
   };
   WindowChrome {
     title_bar,
     platform,
+    linux_desktop,
     controls,
     is_maximized: window.is_maximized().unwrap_or(false),
     is_fullscreen: window.is_fullscreen().unwrap_or(false),
@@ -191,10 +197,37 @@ fn platform() -> WindowPlatform {
   }
 }
 
-/// The desktop's button layout as GTK sees it: GNOME's setting, KDE's (written for GTK apps), and
+/// The running desktop environment (also set inside the Flatpak), for the look of the controls.
+fn linux_desktop() -> LinuxDesktop {
+  let maybe_current = std::env::var("XDG_CURRENT_DESKTOP").ok();
+  let maybe_session = std::env::var("XDG_SESSION_DESKTOP").ok();
+  LinuxDesktop::from_xdg(maybe_current.as_deref(), maybe_session.as_deref())
+}
+
+/// The desktop's button layout: on KDE KWin's own setting when `kwinrc` is readable (not inside
+/// the Flatpak), otherwise as GTK sees it: GNOME's setting, KDE's (written for GTK apps), and
 /// inside the Flatpak the settings portal.
+fn linux_layout(window: &WebviewWindow, desktop: LinuxDesktop) -> ControlLayout {
+  let maybe_kwin = (desktop == LinuxDesktop::Kde)
+    .then(kwinrc_path)
+    .flatten()
+    .and_then(|path| std::fs::read_to_string(path).ok())
+    .and_then(|text| ControlLayout::from_kwinrc(&text));
+  maybe_kwin.unwrap_or_else(|| gtk_layout(window))
+}
+
+/// `$XDG_CONFIG_HOME/kwinrc`, or `$HOME/.config/kwinrc`.
+fn kwinrc_path() -> Option<PathBuf> {
+  let maybe_config = std::env::var_os("XDG_CONFIG_HOME")
+    .map(PathBuf::from)
+    .filter(|path| path.is_absolute());
+  let config =
+    maybe_config.or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+  Some(config.join("kwinrc"))
+}
+
 #[cfg(target_os = "linux")]
-fn linux_layout(window: &WebviewWindow) -> ControlLayout {
+fn gtk_layout(window: &WebviewWindow) -> ControlLayout {
   use gtk::prelude::{GtkSettingsExt, WidgetExt};
 
   let maybe_layout = window
@@ -209,6 +242,6 @@ fn linux_layout(window: &WebviewWindow) -> ControlLayout {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn linux_layout(_window: &WebviewWindow) -> ControlLayout {
+fn gtk_layout(_window: &WebviewWindow) -> ControlLayout {
   ControlLayout::windows()
 }

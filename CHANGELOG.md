@@ -8,6 +8,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ## [Unreleased]
 
+### Fixed
+
+- **Window controls look like the desktop's own**: on Linux the custom title bar follows the running
+  desktop (`XDG_CURRENT_DESKTOP`): GNOME's round, lightly filled buttons, or on KDE Plasma Breeze's
+  flat chevrons with a round highlight and a red close circle; other desktops get the GNOME look.
+  Hover no longer shows a square behind the round buttons. On KDE the button order comes from
+  KWin's own setting when it is readable. Windows gets 46×32 caption buttons in the corner with
+  Fluent-style glyphs and the red close hover. Smooth hover transitions (off with reduced motion) and
+  focus rings for the keyboard on every platform; macOS keeps its native traffic lights.
+
 ## [1.0.1] - 2026-10-24
 
 ### Added

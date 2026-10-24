@@ -811,14 +811,25 @@ select.input {
    one. `--window-controls-left/right` hold the number of buttons on each side. */
 
 :root {
-  /* Windows' caption buttons; no target is smaller than 32px. */
+  /* Width of one window button (Windows' caption buttons; no target is smaller than 30px). */
   --window-btn-w: 46px;
+  /* Margin between the controls and the window edge; it moves the window like the bar. */
+  --window-controls-inset: 0px;
   /* Room for the macOS traffic lights (positioned by the shell). */
   --traffic-lights-w: 84px;
 }
 
+/* GNOME (libadwaita), also for Linux desktops without a style of their own: a 24px circle and
+   an 8px gap per button, inside a target the full height of the bar. */
 :root[data-platform="linux"] {
-  --window-btn-w: 38px;
+  --window-btn-w: 32px;
+  --window-controls-inset: 4px;
+}
+
+/* KDE (Breeze): 24px circles 6px apart. */
+:root[data-platform="linux"][data-linux-desktop="kde"] {
+  --window-btn-w: 30px;
+  --window-controls-inset: 5px;
 }
 
 /* The title bar is the window's top edge: banners go below it. */
@@ -839,8 +850,12 @@ select.input {
 }
 
 :root[data-titlebar="custom"] .top-bar {
-  padding-left: calc(var(--window-controls-left, 0) * var(--window-btn-w));
-  padding-right: calc(12px + var(--window-controls-right, 0) * var(--window-btn-w));
+  padding-left: calc(
+    var(--window-controls-left, 0) * var(--window-btn-w) + var(--window-controls-inset)
+  );
+  padding-right: calc(
+    12px + var(--window-controls-right, 0) * var(--window-btn-w) + var(--window-controls-inset)
+  );
   -webkit-user-select: none;
   user-select: none;
 }
@@ -859,20 +874,26 @@ select.input {
   visibility: hidden;
 }
 
+/* The controls draw in their text colour (`currentColor`), so fills and glyphs follow the bar
+   in light and dark and the plain background of the screens without a top bar. */
 .window-controls {
+  --window-btn-ring: var(--chrome-strong);
   position: fixed;
   top: 0;
   z-index: 200;
   display: flex;
+  box-sizing: border-box;
   height: var(--topbar-h);
 }
 
 .window-controls.left {
   left: 0;
+  padding-left: var(--window-controls-inset);
 }
 
 .window-controls.right {
   right: 0;
+  padding-right: var(--window-controls-inset);
 }
 
 .window-btn {
@@ -885,55 +906,130 @@ select.input {
   border-radius: 0;
   background: transparent;
   color: var(--chrome-text);
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
 }
 
-.window-btn .icon {
-  width: 16px;
-  height: 16px;
-  stroke-width: 1.4;
+.window-glyph {
+  display: block;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease,
+    box-shadow 120ms ease;
 }
 
-.window-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
+.window-btn:hover,
+.window-btn:active {
   color: var(--chrome-strong);
 }
 
-.window-btn:active {
-  background: rgba(255, 255, 255, 0.16);
-}
-
 .window-btn:focus-visible {
-  outline: 2px solid var(--chrome-strong);
-  outline-offset: -4px;
+  outline: 2px solid var(--window-btn-ring);
+  outline-offset: -2px;
 }
 
-:root[data-platform="windows"] .window-btn.close:hover,
-:root[data-platform="windows"] .window-btn.close:active {
-  background: #c42b1c;
+/* Screens without the top bar (sign-in, guest join): the controls sit on the page background. */
+:root:not(:has(.top-bar)) .window-controls {
+  --window-btn-ring: var(--focus);
+}
+
+:root:not(:has(.top-bar)) .window-btn {
+  color: var(--text-muted);
+}
+
+:root:not(:has(.top-bar)) .window-btn:hover,
+:root:not(:has(.top-bar)) .window-btn:active {
+  color: var(--text);
+}
+
+/* Windows 11: 46×32 caption buttons flush with the top right corner, a light grey on hover,
+   red behind close. */
+:root[data-platform="windows"] .window-controls {
+  height: 32px;
+}
+
+:root[data-platform="windows"] .window-btn:hover {
+  background-color: color-mix(in srgb, currentColor 9%, transparent);
+}
+
+:root[data-platform="windows"] .window-btn:active {
+  background-color: color-mix(in srgb, currentColor 6%, transparent);
+}
+
+:root[data-platform="windows"] .window-btn.close:hover {
+  background-color: #c42b1c;
   color: #fff;
 }
 
-/* Linux: round buttons as GNOME and KDE draw them, inside a full-height target. */
-:root[data-platform="linux"] .window-btn .icon {
-  box-sizing: border-box;
-  width: 26px;
-  height: 26px;
-  padding: 6px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.08);
+:root[data-platform="windows"] .window-btn.close:active {
+  background-color: #c84031;
+  color: #fff;
 }
 
+/* Linux: the button is a full-height target; the circle is the glyph's own box. A square never
+   shows, so the focus ring is drawn round the circle too. */
+:root[data-platform="linux"] .window-btn,
 :root[data-platform="linux"] .window-btn:hover,
 :root[data-platform="linux"] .window-btn:active {
   background: transparent;
 }
 
-:root[data-platform="linux"] .window-btn:hover .icon {
-  background: rgba(255, 255, 255, 0.18);
+:root[data-platform="linux"] .window-btn:focus-visible {
+  outline: none;
 }
 
-:root[data-platform="linux"] .window-btn:active .icon {
-  background: rgba(255, 255, 255, 0.26);
+:root[data-platform="linux"] .window-glyph {
+  box-sizing: content-box;
+  padding: 4px;
+  border-radius: 50%;
+}
+
+:root[data-platform="linux"] .window-btn:focus-visible .window-glyph {
+  box-shadow: 0 0 0 2px var(--window-btn-ring);
+}
+
+/* GNOME: a light fill at rest, stronger on hover and press; close is not red. */
+:root[data-platform="linux"] .window-glyph {
+  background-color: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+:root[data-platform="linux"] .window-btn:hover .window-glyph {
+  background-color: color-mix(in srgb, currentColor 16%, transparent);
+}
+
+:root[data-platform="linux"] .window-btn:active .window-glyph {
+  background-color: color-mix(in srgb, currentColor 24%, transparent);
+}
+
+/* KDE: flat glyphs, a subtle circle on hover, a red circle with a white cross behind close. */
+:root[data-platform="linux"][data-linux-desktop="kde"] .window-glyph {
+  background-color: transparent;
+}
+
+:root[data-platform="linux"][data-linux-desktop="kde"] .window-btn:hover .window-glyph {
+  background-color: color-mix(in srgb, currentColor 15%, transparent);
+}
+
+:root[data-platform="linux"][data-linux-desktop="kde"] .window-btn:active .window-glyph {
+  background-color: color-mix(in srgb, currentColor 25%, transparent);
+}
+
+:root[data-platform="linux"][data-linux-desktop="kde"] .window-btn.close:hover .window-glyph {
+  background-color: #da4453;
+  color: #fff;
+}
+
+:root[data-platform="linux"][data-linux-desktop="kde"] .window-btn.close:active .window-glyph {
+  background-color: #b83a47;
+  color: #fff;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .window-btn,
+  .window-glyph {
+    transition: none;
+  }
 }
 
 /* Screens without the top bar (sign-in, guest join) get a strip to move the window by. */
@@ -946,15 +1042,6 @@ select.input {
 
 :root:has(.top-bar) .window-drag-strip {
   display: none;
-}
-
-:root:not(:has(.top-bar)) .window-btn {
-  color: var(--text-muted);
-}
-
-:root:not(:has(.top-bar)) .window-btn:hover {
-  background: var(--surface-3);
-  color: var(--text);
 }
 
 /* Without a window manager frame the window needs its own edge (Windows draws one itself). */

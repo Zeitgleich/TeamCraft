@@ -6,12 +6,11 @@
 use leptos::ev::MouseEvent;
 use leptos::prelude::*;
 use teamcraft_client_api::window_chrome::{
-  TitleBar, WindowAction, WindowButton, WindowChrome, WindowPlatform,
+  LinuxDesktop, TitleBar, WindowAction, WindowButton, WindowChrome, WindowPlatform,
 };
 use wasm_bindgen::JsCast;
 
 use crate::auth::tauri;
-use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 
 /// The shell's event when the maximized or fullscreen state or the title bar changed.
@@ -59,10 +58,11 @@ pub fn WindowControls() -> impl IntoView {
   };
   view! {
     {move || custom().map(|chrome| {
+      let style = ControlStyle::new(chrome.platform, chrome.linux_desktop);
       let left = (!chrome.controls.left.is_empty())
-        .then(|| view! { <ControlGroup buttons=chrome.controls.left.clone() side="left" /> });
+        .then(|| view! { <ControlGroup buttons=chrome.controls.left.clone() side="left" style=style /> });
       let right = (!chrome.controls.right.is_empty())
-        .then(|| view! { <ControlGroup buttons=chrome.controls.right.clone() side="right" /> });
+        .then(|| view! { <ControlGroup buttons=chrome.controls.right.clone() side="right" style=style /> });
       view! {
         <div class="window-drag-strip" data-window-drag="" on:mousedown=on_drag></div>
         {left}
@@ -184,18 +184,29 @@ fn start_window_drag(event: &MouseEvent) {
   leptos::task::spawn_local(tauri::window_action(action));
 }
 
+/// The group's own padding (the margin to the window edge on Linux) still moves the window.
 #[component]
-fn ControlGroup(buttons: Vec<WindowButton>, side: &'static str) -> impl IntoView {
+fn ControlGroup(buttons: Vec<WindowButton>, side: &'static str, style: ControlStyle) -> impl IntoView {
   let i18n = use_i18n();
+  let on_drag = window_drag_handler();
   view! {
-    <div class=format!("window-controls {side}") role="group" aria-label=move || i18n.t("window-controls")>
-      {buttons.into_iter().map(|button| view! { <ControlButton button=button /> }).collect_view()}
+    <div
+      class=format!("window-controls {side}")
+      role="group"
+      aria-label=move || i18n.t("window-controls")
+      data-window-drag=""
+      on:mousedown=on_drag
+    >
+      {buttons
+        .into_iter()
+        .map(|button| view! { <ControlButton button=button style=style /> })
+        .collect_view()}
     </div>
   }
 }
 
 #[component]
-fn ControlButton(button: WindowButton) -> impl IntoView {
+fn ControlButton(button: WindowButton, style: ControlStyle) -> impl IntoView {
   let i18n = use_i18n();
   let maybe_state = use_context::<WindowChromeState>();
   let is_maximized = move || {
@@ -212,12 +223,6 @@ fn ControlButton(button: WindowButton) -> impl IntoView {
     };
     i18n.t(key)
   };
-  let icon = Signal::derive(move || match button {
-    WindowButton::Minimize => IconName::WindowMinimize,
-    WindowButton::Maximize if is_maximized() => IconName::WindowRestore,
-    WindowButton::Maximize => IconName::WindowMaximize,
-    WindowButton::Close => IconName::Close,
-  });
   let action = match button {
     WindowButton::Minimize => WindowAction::Minimize,
     WindowButton::Maximize => WindowAction::ToggleMaximize,
@@ -227,6 +232,8 @@ fn ControlButton(button: WindowButton) -> impl IntoView {
     WindowButton::Close => "window-btn close",
     WindowButton::Minimize | WindowButton::Maximize => "window-btn",
   };
+  let glyph = style.glyph();
+  let path = move || glyph.path(button, is_maximized());
   view! {
     <button
       type="button"
@@ -235,8 +242,117 @@ fn ControlButton(button: WindowButton) -> impl IntoView {
       title=label
       on:click=move |_| leptos::task::spawn_local(tauri::window_action(action))
     >
-      <Icon name=icon />
+      <svg
+        class="window-glyph"
+        viewBox=glyph.view_box
+        width=glyph.size_px
+        height=glyph.size_px
+        fill="none"
+        stroke="currentColor"
+        stroke-width=glyph.stroke_width
+        stroke-linecap=glyph.line_cap
+        stroke-linejoin="round"
+        shape-rendering=glyph.shape_rendering
+        aria-hidden="true"
+        focusable="false"
+      >
+        <path d=path />
+      </svg>
     </button>
+  }
+}
+
+/// Whose window buttons the controls look like.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ControlStyle {
+  /// Windows 11 caption buttons.
+  Windows,
+  /// libadwaita (GNOME, and the default on other Linux desktops).
+  Adwaita,
+  /// KDE Plasma's Breeze decoration.
+  Breeze,
+}
+
+/// How a style draws its glyphs (inline SVG, no icon font).
+#[derive(Clone, Copy)]
+struct GlyphSet {
+  view_box: &'static str,
+  size_px: &'static str,
+  stroke_width: &'static str,
+  line_cap: &'static str,
+  shape_rendering: &'static str,
+  minimize: &'static str,
+  maximize: &'static str,
+  restore: &'static str,
+  close: &'static str,
+}
+
+/// Segoe Fluent Icons' caption glyphs: 10 px hairlines on the pixel grid, square ends.
+const WINDOWS_GLYPHS: GlyphSet = GlyphSet {
+  view_box: "0 0 10 10",
+  size_px: "10",
+  stroke_width: "1",
+  line_cap: "butt",
+  shape_rendering: "crispEdges",
+  minimize: "M0 5.5h10",
+  maximize: "M0.5 0.5h9v9h-9z",
+  restore: "M2.5 2.5V0.5h7v7h-2 M0.5 2.5h7v7h-7z",
+  close: "M0 0l10 10M10 0 0 10",
+};
+
+/// Adwaita's symbolic window icons on a 16 px grid.
+const ADWAITA_GLYPHS: GlyphSet = GlyphSet {
+  view_box: "0 0 16 16",
+  size_px: "16",
+  stroke_width: "1.5",
+  line_cap: "round",
+  shape_rendering: "geometricPrecision",
+  minimize: "M4.5 10.75h7",
+  maximize: "M4.75 4.75h6.5v6.5h-6.5z",
+  restore: "M6.25 6.25h5v5h-5z M4.25 9.25v-5h5",
+  close: "M4.75 4.75l6.5 6.5M11.25 4.75l-6.5 6.5",
+};
+
+/// Breeze: chevrons for minimize and maximize, a diamond for restore.
+const BREEZE_GLYPHS: GlyphSet = GlyphSet {
+  view_box: "0 0 16 16",
+  size_px: "16",
+  stroke_width: "1.5",
+  line_cap: "round",
+  shape_rendering: "geometricPrecision",
+  minimize: "M3.5 6l4.5 4.5 4.5-4.5",
+  maximize: "M3.5 10.5 8 6l4.5 4.5",
+  restore: "M8 3.25 12.75 8 8 12.75 3.25 8z",
+  close: "M4.5 4.5l7 7M11.5 4.5l-7 7",
+};
+
+impl ControlStyle {
+  fn new(platform: WindowPlatform, linux_desktop: LinuxDesktop) -> Self {
+    match (platform, linux_desktop) {
+      (WindowPlatform::Windows, _) => Self::Windows,
+      (WindowPlatform::Linux, LinuxDesktop::Kde) => Self::Breeze,
+      // macOS has no drawn controls (its traffic lights are native).
+      (WindowPlatform::Linux | WindowPlatform::Macos, _) => Self::Adwaita,
+    }
+  }
+
+  fn glyph(self) -> GlyphSet {
+    match self {
+      Self::Windows => WINDOWS_GLYPHS,
+      Self::Adwaita => ADWAITA_GLYPHS,
+      Self::Breeze => BREEZE_GLYPHS,
+    }
+  }
+}
+
+impl GlyphSet {
+  fn path(&self, button: WindowButton, is_maximized: bool) -> &'static str {
+    match button {
+      WindowButton::Minimize => self.minimize,
+      WindowButton::Maximize if is_maximized => self.restore,
+      WindowButton::Maximize => self.maximize,
+      WindowButton::Close => self.close,
+    }
   }
 }
 
@@ -251,7 +367,12 @@ fn apply_root_attributes(maybe_chrome: Option<&WindowChrome>) {
   // Other properties on the root (brand colours, banner height) belong to others: only ours change.
   let style = root.style();
   let Some(chrome) = maybe_chrome.filter(|chrome| chrome.title_bar == TitleBar::Custom) else {
-    for name in ["data-titlebar", "data-platform", "data-window"] {
+    for name in [
+      "data-titlebar",
+      "data-platform",
+      "data-linux-desktop",
+      "data-window",
+    ] {
       drop(root.remove_attribute(name));
     }
     for property in [CONTROLS_LEFT_PROPERTY, CONTROLS_RIGHT_PROPERTY] {
@@ -264,6 +385,11 @@ fn apply_root_attributes(maybe_chrome: Option<&WindowChrome>) {
     WindowPlatform::Macos => "macos",
     WindowPlatform::Linux => "linux",
   };
+  let linux_desktop = match chrome.linux_desktop {
+    LinuxDesktop::Gnome => "gnome",
+    LinuxDesktop::Kde => "kde",
+    LinuxDesktop::Other => "other",
+  };
   let window_state = if chrome.is_fullscreen {
     "fullscreen"
   } else if chrome.is_maximized {
@@ -274,6 +400,7 @@ fn apply_root_attributes(maybe_chrome: Option<&WindowChrome>) {
   // Errors only for invalid names, which these aren't.
   drop(root.set_attribute("data-titlebar", "custom"));
   drop(root.set_attribute("data-platform", platform));
+  drop(root.set_attribute("data-linux-desktop", linux_desktop));
   drop(root.set_attribute("data-window", window_state));
   // The top bar keeps its content clear of the controls (button counts; the stylesheet sizes them).
   drop(style.set_property(CONTROLS_LEFT_PROPERTY, &chrome.controls.left.len().to_string()));
@@ -283,6 +410,41 @@ fn apply_root_attributes(maybe_chrome: Option<&WindowChrome>) {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn kde_gets_breeze_and_every_other_linux_desktop_adwaita() {
+    assert_eq!(
+      ControlStyle::new(WindowPlatform::Linux, LinuxDesktop::Kde),
+      ControlStyle::Breeze
+    );
+    assert_eq!(
+      ControlStyle::new(WindowPlatform::Linux, LinuxDesktop::Gnome),
+      ControlStyle::Adwaita
+    );
+    assert_eq!(
+      ControlStyle::new(WindowPlatform::Linux, LinuxDesktop::Other),
+      ControlStyle::Adwaita
+    );
+    assert_eq!(
+      ControlStyle::new(WindowPlatform::Windows, LinuxDesktop::Other),
+      ControlStyle::Windows
+    );
+  }
+
+  #[test]
+  fn maximize_turns_into_restore_when_maximized() {
+    for style in [ControlStyle::Windows, ControlStyle::Adwaita, ControlStyle::Breeze] {
+      let glyph = style.glyph();
+      assert_ne!(
+        glyph.path(WindowButton::Maximize, false),
+        glyph.path(WindowButton::Maximize, true)
+      );
+      assert_eq!(
+        glyph.path(WindowButton::Close, false),
+        glyph.path(WindowButton::Close, true)
+      );
+    }
+  }
 
   #[test]
   fn a_press_without_movement_is_a_click() {
