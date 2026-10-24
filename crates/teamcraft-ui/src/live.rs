@@ -87,6 +87,18 @@ pub struct LiveFollowUp {
   pub needs_announcement: bool,
 }
 
+/// One refresh's answers from the server; `None` parts were not asked for or failed.
+#[derive(Debug, Default)]
+struct Fetched {
+  /// Counts and threads came over REST (no core).
+  is_rest: bool,
+  maybe_unread: Option<HashMap<ConversationId, (u32, u32)>>,
+  maybe_threads: Option<Vec<ThreadWire>>,
+  presence: Vec<UserPresence>,
+  receipts: HashMap<ConversationId, Vec<(UserId, MessageId)>>,
+  maybe_announcement: Option<GetAnnouncementResponse>,
+}
+
 impl LiveServer {
   pub fn new(auth: Rc<dyn Authenticator>, scope: ScopeFn) -> Self {
     Self {
@@ -169,32 +181,29 @@ impl LiveServer {
         );
       }
     }
-    {
-      let mut state = self.state.borrow_mut();
-      if !is_core_fed {
-        state.is_loaded = true;
-      }
-      if let Some(unread) = unread {
-        state.unread = unread_map(&unread);
-      }
-      if let Some(threads) = threads {
-        state.threads = threads.threads;
-      }
-      state
-        .presence
-        .extend(presence.into_iter().map(|entry| (entry.user_id, entry)));
-      state.receipts.extend(receipts);
-      if let Some(announcement) = announcement {
-        state.announcement = announcement.maybe_announcement;
-      }
+    let fetched = Fetched {
+      is_rest: !is_core_fed,
+      maybe_unread: unread.map(|unread| unread_map(&unread)),
+      maybe_threads: threads.map(|threads| threads.threads),
+      presence,
+      receipts,
+      maybe_announcement: announcement,
+    };
+    // Issue #246: an unchanged answer must not make the whole UI read the workspace again.
+    if self.state.borrow_mut().merge(fetched) {
+      self.changed();
     }
-    self.changed();
   }
 
   async fn refresh_announcement(&self) {
     if let Some(announcement) = self.get::<GetAnnouncementResponse>("/api/v1/announcement").await {
-      self.state.borrow_mut().announcement = announcement.maybe_announcement;
-      self.changed();
+      let is_changed = replace_if_changed(
+        &mut self.state.borrow_mut().announcement,
+        announcement.maybe_announcement,
+      );
+      if is_changed {
+        self.changed();
+      }
     }
   }
 
@@ -381,6 +390,38 @@ impl LiveState {
   /// receipts only where they changed since the last snapshot (a REST answer read after an older
   /// event must not be undone by it). Proportional to what changed, not to everything the core
   /// keeps: presence by revision, receipts skipped when unchanged.
+  /// Takes a refresh's answers; failed parts keep their previous values. Returns whether anything
+  /// the UI shows changed.
+  fn merge(&mut self, fetched: Fetched) -> bool {
+    let mut is_changed = false;
+    if fetched.is_rest && !self.is_loaded {
+      self.is_loaded = true;
+      is_changed = true;
+    }
+    if let Some(unread) = fetched.maybe_unread {
+      is_changed |= replace_if_changed(&mut self.unread, unread);
+    }
+    if let Some(threads) = fetched.maybe_threads {
+      is_changed |= replace_if_changed(&mut self.threads, threads);
+    }
+    for entry in fetched.presence {
+      if self.presence.get(&entry.user_id) != Some(&entry) {
+        self.presence.insert(entry.user_id, entry);
+        is_changed = true;
+      }
+    }
+    for (conversation, receipts) in fetched.receipts {
+      if self.receipts.get(&conversation) != Some(&receipts) {
+        self.receipts.insert(conversation, receipts);
+        is_changed = true;
+      }
+    }
+    if let Some(announcement) = fetched.maybe_announcement {
+      is_changed |= replace_if_changed(&mut self.announcement, announcement.maybe_announcement);
+    }
+    is_changed
+  }
+
   pub fn apply_snapshot(&mut self, live: LiveSnapshot) -> LiveFollowUp {
     let maybe_last_marks = self.maybe_last_marks.replace(live.marks);
     self.is_core_fed = true;
@@ -415,6 +456,14 @@ impl LiveState {
       }
     }
   }
+}
+
+fn replace_if_changed<T: PartialEq>(current: &mut T, new: T) -> bool {
+  if *current == new {
+    return false;
+  }
+  *current = new;
+  true
 }
 
 /// The first snapshot needs no resync of its own: the start reads everything anyway.
@@ -521,6 +570,59 @@ mod tests {
   use teamcraft_client_api::live::LiveReceipt;
 
   const NOW: TimestampMs = 1_792_540_800_000;
+
+  mod refresh_merge {
+    use super::*;
+
+    #[test]
+    fn the_same_answers_again_change_nothing() {
+      let mut state = LiveState::default();
+      assert!(state.merge(fetched(Some(&[(7, 3, 1)]))));
+      assert!(!state.merge(fetched(Some(&[(7, 3, 1)]))));
+    }
+
+    #[test]
+    fn a_new_count_is_a_change() {
+      let mut state = LiveState::default();
+      state.merge(fetched(Some(&[(7, 3, 1)])));
+      assert!(state.merge(fetched(Some(&[(7, 4, 1)]))));
+      assert_eq!(state.unread.get(&id_from_raw(7)), Some(&(4, 1)));
+    }
+
+    #[test]
+    fn a_failed_part_keeps_the_previous_answer_and_is_no_change() {
+      let mut state = LiveState::default();
+      state.merge(fetched(Some(&[(7, 3, 1)])));
+      assert!(!state.merge(fetched(None)));
+      assert_eq!(state.unread.get(&id_from_raw(7)), Some(&(3, 1)));
+    }
+
+    #[test]
+    fn a_new_receipt_is_a_change_and_an_old_one_is_not() {
+      let mut state = LiveState::default();
+      let conversation: ConversationId = id_from_raw(7);
+      let receipt = (id_from_raw::<UserId>(2), id_from_raw::<MessageId>(9));
+      let with_receipt = || Fetched {
+        receipts: HashMap::from([(conversation, vec![receipt])]),
+        ..Fetched::default()
+      };
+      assert!(state.merge(with_receipt()));
+      assert!(!state.merge(with_receipt()));
+    }
+
+    fn fetched(maybe_unread: Option<&[(u64, u32, u32)]>) -> Fetched {
+      Fetched {
+        is_rest: true,
+        maybe_unread: maybe_unread.map(|rows| {
+          rows
+            .iter()
+            .map(|(id, unread, mentions)| (id_from_raw(*id), (*unread, *mentions)))
+            .collect()
+        }),
+        ..Fetched::default()
+      }
+    }
+  }
 
   #[test]
   fn counts_come_from_the_server_once_loaded() {

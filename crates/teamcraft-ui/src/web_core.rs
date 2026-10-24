@@ -13,14 +13,15 @@
 //! to it.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::future::Future;
-use std::pin::Pin;
+use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::time::Duration;
 
 use futures_channel::{mpsc, oneshot};
 use futures_util::StreamExt;
-use futures_util::future::{Either, select};
+use futures_util::future::{Either, pending, select};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use teamcraft_client_api::backend::ChatBackend;
@@ -59,6 +60,8 @@ use crate::web_tabs::{self, Follower, OwnerChannel, OwnerLock, Ownership};
 const MAX_APPROVAL_MISSES: u8 = 3;
 /// How often the loop wakes up on its own: outbox retries, heartbeats, staggered commits.
 const TICK: Duration = Duration::from_secs(3);
+/// How often the UI is told to read again while a long sync fills the store (issue #247).
+const SYNC_PROGRESS: Duration = Duration::from_secs(1);
 /// How often account data (saved items, drafts) is pulled from the user's other devices.
 const ACCOUNT_SYNC: Duration = Duration::from_secs(60);
 /// How often the core's copy of the access token is renewed from the page's session.
@@ -537,6 +540,12 @@ struct Core {
   /// When to compare the browser's push subscription with the registration next; `None` when
   /// nothing is due (e2ee.md §7).
   maybe_push_check_at_ms: Option<i64>,
+  /// The security part of the last snapshot, for snapshots taken while a sync holds the client.
+  maybe_last_security: Option<SecuritySnapshot>,
+  /// Requests that arrived during a connect and need the client; handled once it is done.
+  deferred: VecDeque<Request>,
+  /// The UI side hung up during a connect: the loop ends after it.
+  is_closed: bool,
 }
 
 /// A link in progress on this (new) device.
@@ -576,13 +585,22 @@ impl Core {
       maybe_attention: None,
       store_health: StoreHealth::Saved,
       maybe_push_check_at_ms: None,
+      maybe_last_security: None,
+      deferred: VecDeque::new(),
+      is_closed: false,
     }
   }
 
   async fn run(mut self, mut requests: mpsc::UnboundedReceiver<Request>) {
     self.open().await;
     loop {
-      self.connect().await;
+      self.connect(&mut requests).await;
+      while let Some(request) = self.deferred.pop_front() {
+        self.handle(request).await;
+      }
+      if self.is_closed {
+        return;
+      }
       match self.next_wake(&mut requests).await {
         Wake::Request(None) => return,
         Wake::Request(Some(request)) => self.handle(request).await,
@@ -966,28 +984,11 @@ impl Core {
     client.complete_link_approval(approval).await.map_err(describe)
   }
 
-  fn snapshot(&self) -> Result<ChatSnapshot, String> {
+  fn snapshot(&mut self) -> Result<ChatSnapshot, String> {
+    let security = self.security_snapshot()?;
+    self.maybe_last_security = Some(security.clone());
     let backend = self.backend.as_ref().ok_or_else(not_set_up)?;
-    let mut conversations = Vec::new();
-    for space in backend.spaces() {
-      conversations.extend(backend.space_conversations(space.id));
-    }
-    conversations.extend(backend.direct_conversations());
-    let message_counts = conversations
-      .iter()
-      .map(|conversation| (conversation.id, backend.message_count(conversation.id)))
-      .collect();
-    let last_activity = last_activity_of(backend, &conversations);
-    Ok(ChatSnapshot {
-      me: backend.me(),
-      users: backend.users(),
-      spaces: backend.spaces(),
-      conversations,
-      message_counts,
-      last_activity,
-      security: self.security_snapshot()?,
-      maybe_live: backend.live_snapshot(),
-    })
+    Ok(chat_snapshot(backend, security))
   }
 
   /// Fingerprints of the keys this device pinned, and of keys the server showed since.
@@ -1014,12 +1015,7 @@ impl Core {
 
   fn window(&self, conversation: ConversationId, start: usize, len: usize) -> Result<MessageWindow, String> {
     let backend = self.backend.as_ref().ok_or_else(not_set_up)?;
-    Ok(MessageWindow {
-      conversation,
-      start,
-      total: backend.message_count(conversation),
-      messages: backend.messages(conversation, start, len),
-    })
+    Ok(message_window(backend, conversation, start, len))
   }
 
   async fn action(&mut self, action: ChatAction) -> Result<(), String> {
@@ -1162,11 +1158,57 @@ impl Core {
     }
   }
 
-  async fn connect(&mut self) {
-    let Some(client) = self.client.as_mut() else {
+  /// Connects when due. A fresh session's full sync can take minutes on a workspace that grew
+  /// meanwhile (issue #247): until it is done, the UI's reads are answered from the local store,
+  /// which the sync fills as it goes, and the UI is told every [`SYNC_PROGRESS`] to read again.
+  /// Requests that need the client wait for the end of the connect.
+  async fn connect(&mut self, requests: &mut mpsc::UnboundedReceiver<Request>) {
+    if self.maybe_last_security.is_none() && self.client.is_some() {
+      self.maybe_last_security = self.security_snapshot().ok();
+    }
+    let Self {
+      client: Some(client),
+      connection,
+      backend,
+      status,
+      store_health,
+      maybe_last_security,
+      deferred,
+      is_closed,
+      ..
+    } = self
+    else {
       return;
     };
-    if self.connection.connect_if_due(client).await.is_some() {
+    let reads = ReadOnly {
+      maybe_backend: backend.as_ref(),
+      status,
+      store_health,
+      maybe_security: maybe_last_security.as_ref(),
+    };
+    let outcome = {
+      // Polled first in every round: when no attempt is due it is ready at once.
+      let mut connecting = pin!(connection.connect_if_due(client));
+      loop {
+        let progress = pin!(platform::sleep(SYNC_PROGRESS));
+        let request = if *is_closed {
+          Either::Left(pending())
+        } else {
+          Either::Right(requests.next())
+        };
+        match select(connecting.as_mut(), select(request, progress)).await {
+          Either::Left((outcome, _)) => break outcome,
+          Either::Right((Either::Left((Some(request), _)), _)) => {
+            if let Some(request) = reads.answer(request) {
+              deferred.push_back(request);
+            }
+          },
+          Either::Right((Either::Left((None, _)), _)) => *is_closed = true,
+          Either::Right((Either::Right(((), _)), _)) => notify_changed(),
+        }
+      }
+    };
+    if outcome.is_some() {
       self.repeat_attention().await;
       notify_changed();
     }
@@ -1237,6 +1279,83 @@ fn now_ms() -> i64 {
 
 fn millis(duration: Duration) -> i64 {
   i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+}
+
+/// What the core can answer while a connect holds the client: reads of the local store.
+struct ReadOnly<'a> {
+  maybe_backend: Option<&'a CoreChatBackend<Store>>,
+  status: &'a CoreStatus,
+  store_health: &'a StoreHealth,
+  maybe_security: Option<&'a SecuritySnapshot>,
+}
+
+impl ReadOnly<'_> {
+  /// Answers a read; hands back a request that needs the client.
+  fn answer(&self, request: Request) -> Option<Request> {
+    let Some(backend) = self.maybe_backend else {
+      return Some(request);
+    };
+    match request {
+      Request::Status(reply) => drop(reply.send(self.status.clone())),
+      Request::StoreHealth(reply) => drop(reply.send(self.store_health.clone())),
+      Request::Snapshot(reply) => match self.maybe_security {
+        Some(security) => drop(reply.send(Ok(chat_snapshot(backend, security.clone())))),
+        None => return Some(Request::Snapshot(reply)),
+      },
+      Request::Messages {
+        conversation,
+        start,
+        len,
+        reply,
+      } => drop(reply.send(Ok(message_window(backend, conversation, start, len)))),
+      Request::Thread {
+        conversation,
+        thread,
+        reply,
+      } => drop(reply.send(Ok(backend.thread(conversation, thread)))),
+      // Commands a query queues run with the next query after the connect.
+      Request::Query(query, reply) => drop(reply.send(Ok(query.answer(backend)))),
+      other => return Some(other),
+    }
+    None
+  }
+}
+
+fn chat_snapshot(backend: &CoreChatBackend<Store>, security: SecuritySnapshot) -> ChatSnapshot {
+  let mut conversations = Vec::new();
+  for space in backend.spaces() {
+    conversations.extend(backend.space_conversations(space.id));
+  }
+  conversations.extend(backend.direct_conversations());
+  let message_counts = conversations
+    .iter()
+    .map(|conversation| (conversation.id, backend.message_count(conversation.id)))
+    .collect();
+  let last_activity = last_activity_of(backend, &conversations);
+  ChatSnapshot {
+    me: backend.me(),
+    users: backend.users(),
+    spaces: backend.spaces(),
+    conversations,
+    message_counts,
+    last_activity,
+    security,
+    maybe_live: backend.live_snapshot(),
+  }
+}
+
+fn message_window(
+  backend: &CoreChatBackend<Store>,
+  conversation: ConversationId,
+  start: usize,
+  len: usize,
+) -> MessageWindow {
+  MessageWindow {
+    conversation,
+    start,
+    total: backend.message_count(conversation),
+    messages: backend.messages(conversation, start, len),
+  }
 }
 
 fn not_set_up() -> String {

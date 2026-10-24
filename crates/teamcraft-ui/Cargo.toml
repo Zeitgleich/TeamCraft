@@ -44,6 +44,8 @@ thiserror.workspace = true
 base64.workspace = true
 secrecy.workspace = true
 wasm-bindgen-futures = "0.4"
+# Joins and selects of futures (the desktop mirror refreshes its reads concurrently, web_core).
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # OIDC authorization code + PKCE for the browser flow. Only the protocol parts are used; HTTP goes
 # through the browser's fetch (no reqwest on wasm). PKCE is delegated to this audited crate.
 oauth2 = { version = "5", default-features = false }
@@ -59,4 +61,3 @@ tracing-web = "0.1"
 teamcraft-core = { path = "../teamcraft-core", default-features = false, features = ["ui"] }
 teamcraft-crypto = { path = "../teamcraft-crypto" }
 futures-channel = "0.3"
-futures-util = { version = "0.3", default-features = false, features = ["std"] }

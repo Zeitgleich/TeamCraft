@@ -7,12 +7,13 @@
 //! whenever its store changes and the mirror then refreshes what it holds.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 use teamcraft_client_api::calls::OrgBackgroundRule;
 use teamcraft_proto::OrgBackgroundId;
 
+use futures_util::future::{join_all, join3};
 use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
 use serde_json::json;
@@ -130,13 +131,28 @@ pub async fn stop_core() -> Result<(), String> {
 struct Feed {
   total: usize,
   rows: BTreeMap<usize, Message>,
+  /// Read by the UI since it was last told about a change: a refresh reloads its pages.
+  is_used: bool,
+  /// The core changed while nobody read this feed: its pages are reloaded on the next read.
+  is_stale: bool,
 }
 
 struct Mirror {
   snapshot: ChatSnapshot,
   feeds: HashMap<ConversationId, Feed>,
   threads: HashMap<(ConversationId, ThreadId), Vec<Message>>,
+  /// Threads read since the UI was last told about a change; a refresh reloads only these.
+  used_threads: HashSet<(ConversationId, ThreadId)>,
   loading: HashSet<LoadKey>,
+}
+
+/// What a refresh reads again: only what the UI showed since its last change (issue #246).
+#[derive(Default)]
+struct RefreshPlan {
+  is_snapshot_changed: bool,
+  pages: Vec<(ConversationId, usize)>,
+  threads: Vec<(ConversationId, ThreadId)>,
+  queries: Vec<(String, ChatQuery)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -154,6 +170,8 @@ struct Slot {
   maybe_answer: Option<ChatAnswer>,
   is_loading: bool,
   is_stale: bool,
+  /// Read by the UI since it was last told about a change: a refresh asks again right away.
+  is_used: bool,
 }
 
 #[derive(Clone)]
@@ -165,6 +183,42 @@ pub struct RemoteChat {
   answers: Rc<RefCell<HashMap<String, Slot>>>,
 }
 
+impl Feed {
+  /// Takes a page read from the core; returns whether any row or the total changed.
+  fn apply(&mut self, window: MessageWindow) -> bool {
+    let mut is_changed = self.total != window.total;
+    self.total = window.total;
+    for (offset, message) in window.messages.into_iter().enumerate() {
+      let index = window.start + offset;
+      if self.rows.get(&index) != Some(&message) {
+        self.rows.insert(index, message);
+        is_changed = true;
+      }
+    }
+    is_changed
+  }
+
+  /// The pages held, plus the last one (where new messages arrive).
+  fn held_pages(&self) -> Vec<usize> {
+    let last = self.total.saturating_sub(1) / PAGE;
+    let pages: BTreeSet<usize> = self.rows.keys().map(|index| index / PAGE).chain([last]).collect();
+    pages.into_iter().collect()
+  }
+}
+
+impl Slot {
+  /// Takes a fresh answer; returns whether it differs from the one held.
+  fn settle(&mut self, answer: ChatAnswer) -> bool {
+    self.is_loading = false;
+    self.is_stale = false;
+    if self.maybe_answer.as_ref() == Some(&answer) {
+      return false;
+    }
+    self.maybe_answer = Some(answer);
+    true
+  }
+}
+
 impl RemoteChat {
   /// Reads the first snapshot and starts following the shell's change events.
   pub async fn connect() -> Result<Self, String> {
@@ -174,6 +228,7 @@ impl RemoteChat {
         snapshot,
         feeds: HashMap::new(),
         threads: HashMap::new(),
+        used_threads: HashSet::new(),
         loading: HashSet::new(),
       })),
       notify: Rc::new(RefCell::new(None)),
@@ -193,6 +248,7 @@ impl RemoteChat {
     let (existing, must_load) = {
       let mut answers = self.answers.borrow_mut();
       let slot = answers.entry(key.clone()).or_default();
+      slot.is_used = true;
       let must_load = !slot.is_loading && (slot.maybe_answer.is_none() || slot.is_stale);
       if must_load {
         slot.is_loading = true;
@@ -202,19 +258,9 @@ impl RemoteChat {
     if must_load {
       let backend = self.clone();
       spawn_local(async move {
-        let outcome = call::<ChatAnswer>("core_query", &json!({ "query": query })).await;
-        {
-          let mut answers = backend.answers.borrow_mut();
-          let slot = answers.entry(key).or_default();
-          slot.is_loading = false;
-          // After a failure the old answer stays and nothing is asked again until something changes.
-          slot.is_stale = false;
-          match outcome {
-            Ok(answer) => slot.maybe_answer = Some(answer),
-            Err(error) => tracing::warn!(%error, "a query failed"),
-          }
+        if backend.fetch_answer(key, query).await {
+          backend.changed();
         }
-        backend.changed();
       });
     }
     existing
@@ -227,7 +273,36 @@ impl RemoteChat {
     }
   }
 
+  /// Asks the core for one answer again; returns whether it differs from the one held.
+  async fn fetch_answer(&self, key: String, query: ChatQuery) -> bool {
+    let outcome = call::<ChatAnswer>("core_query", &json!({ "query": query })).await;
+    let mut answers = self.answers.borrow_mut();
+    let slot = answers.entry(key).or_default();
+    match outcome {
+      Ok(answer) => slot.settle(answer),
+      Err(error) => {
+        tracing::warn!(%error, "a query failed");
+        // The old answer stays and nothing is asked again until something changes.
+        slot.is_loading = false;
+        slot.is_stale = false;
+        false
+      },
+    }
+  }
+
+  /// Tells the UI to read again. What it reads is marked used anew, so a later refresh reloads
+  /// only what is still shown.
   fn changed(&self) {
+    for slot in self.answers.borrow_mut().values_mut() {
+      slot.is_used = false;
+    }
+    {
+      let mut mirror = self.mirror.borrow_mut();
+      mirror.used_threads.clear();
+      for feed in mirror.feeds.values_mut() {
+        feed.is_used = false;
+      }
+    }
     let notify = self.notify.borrow().clone();
     if let Some(notify) = notify {
       notify();
@@ -248,104 +323,147 @@ impl RemoteChat {
     );
   }
 
-  /// Re-reads the snapshot and every page held in the mirror, then tells the UI.
+  /// Re-reads the snapshot and what the UI showed since its last change, and tells the UI only
+  /// when something differs: a change elsewhere in the core costs no re-render (issue #246).
   async fn refresh(&self) {
-    match call::<ChatSnapshot>("core_snapshot", &json!({})).await {
-      Ok(snapshot) => {
-        self.mark_answers_stale();
-        let pages: Vec<(ConversationId, usize)> = {
-          let mut mirror = self.mirror.borrow_mut();
-          for (conversation, total) in &snapshot.message_counts {
-            if let Some(feed) = mirror.feeds.get_mut(conversation) {
-              feed.total = *total;
-            }
-          }
-          mirror.snapshot = snapshot;
-          // Threads are re-read on demand; cached pages are overwritten in place so rows do not flicker.
-          mirror.threads.clear();
-          mirror
-            .feeds
-            .iter()
-            .flat_map(|(conversation, feed)| {
-              let last = feed.total.saturating_sub(1) / PAGE;
-              feed
-                .rows
-                .keys()
-                .map(|index| index / PAGE)
-                .chain([last])
-                .collect::<HashSet<_>>()
-                .into_iter()
-                .map(|page| (*conversation, page))
-                .collect::<Vec<_>>()
-            })
-            .collect()
-        };
-        for (conversation, page) in pages {
-          self.load_page(conversation, page);
-        }
-        self.changed();
+    let snapshot = match call::<ChatSnapshot>("core_snapshot", &json!({})).await {
+      Ok(snapshot) => snapshot,
+      Err(error) => {
+        tracing::warn!(%error, "could not refresh the chat snapshot");
+        return;
       },
-      Err(error) => tracing::warn!(%error, "could not refresh the chat snapshot"),
+    };
+    let plan = self.plan_refresh(snapshot);
+    let pages = join_all(
+      plan
+        .pages
+        .into_iter()
+        .map(|(conversation, page)| self.fetch_page(conversation, page)),
+    );
+    let threads = join_all(
+      plan
+        .threads
+        .into_iter()
+        .map(|(conversation, thread)| self.fetch_thread(conversation, thread)),
+    );
+    let answers = join_all(
+      plan
+        .queries
+        .into_iter()
+        .map(|(key, query)| self.fetch_answer(key, query)),
+    );
+    let (pages, threads, answers) = join3(pages, threads, answers).await;
+    let is_changed = plan.is_snapshot_changed
+      || pages.into_iter().any(|is_changed| is_changed)
+      || threads.into_iter().any(|is_changed| is_changed)
+      || answers.into_iter().any(|is_changed| is_changed);
+    if is_changed {
+      self.changed();
     }
+  }
+
+  /// Takes the new snapshot and picks what to reload. What the UI did not read since its last
+  /// change is only marked stale and reloaded when it is read again.
+  fn plan_refresh(&self, snapshot: ChatSnapshot) -> RefreshPlan {
+    let mut plan = RefreshPlan::default();
+    {
+      let mut mirror = self.mirror.borrow_mut();
+      for (conversation, total) in &snapshot.message_counts {
+        if let Some(feed) = mirror.feeds.get_mut(conversation) {
+          feed.total = *total;
+        }
+      }
+      plan.is_snapshot_changed = mirror.snapshot != snapshot;
+      mirror.snapshot = snapshot;
+      let used_threads = std::mem::take(&mut mirror.used_threads);
+      mirror.threads.retain(|key, _| used_threads.contains(key));
+      plan.threads = used_threads.into_iter().collect();
+      for (conversation, feed) in &mut mirror.feeds {
+        if feed.is_used {
+          plan
+            .pages
+            .extend(feed.held_pages().into_iter().map(|page| (*conversation, page)));
+        } else {
+          feed.is_stale = true;
+        }
+      }
+    }
+    for (key, slot) in self.answers.borrow_mut().iter_mut() {
+      if slot.is_loading {
+        continue;
+      }
+      match (slot.is_used, serde_json::from_str::<ChatQuery>(key)) {
+        (true, Ok(query)) => {
+          slot.is_loading = true;
+          plan.queries.push((key.clone(), query));
+        },
+        _ => slot.is_stale = true,
+      }
+    }
+    plan
   }
 
   fn load_page(&self, conversation: ConversationId, page: usize) {
-    let key = LoadKey::Page(conversation, page);
-    if !self.mirror.borrow_mut().loading.insert(key) {
-      return;
-    }
     let backend = self.clone();
     spawn_local(async move {
-      let args = json!({ "conversation": conversation, "start": page * PAGE, "len": PAGE });
-      let outcome = call::<MessageWindow>("core_messages", &args).await;
-      {
-        let mut mirror = backend.mirror.borrow_mut();
-        mirror.loading.remove(&key);
-        match outcome {
-          Ok(window) => {
-            let feed = mirror.feeds.entry(conversation).or_default();
-            feed.total = window.total;
-            for (offset, message) in window.messages.into_iter().enumerate() {
-              feed.rows.insert(window.start + offset, message);
-            }
-          },
-          Err(error) => {
-            tracing::warn!(%error, %conversation, "could not load messages");
-            return;
-          },
-        }
+      if backend.fetch_page(conversation, page).await {
+        backend.changed();
       }
-      backend.changed();
     });
   }
 
-  fn load_thread(&self, conversation: ConversationId, thread: ThreadId) {
-    let key = LoadKey::Thread(conversation, thread);
+  /// Reads one page of a feed; returns whether it differs from the rows held.
+  async fn fetch_page(&self, conversation: ConversationId, page: usize) -> bool {
+    let key = LoadKey::Page(conversation, page);
     if !self.mirror.borrow_mut().loading.insert(key) {
-      return;
+      return false;
     }
+    let args = json!({ "conversation": conversation, "start": page * PAGE, "len": PAGE });
+    let outcome = call::<MessageWindow>("core_messages", &args).await;
+    let mut mirror = self.mirror.borrow_mut();
+    mirror.loading.remove(&key);
+    match outcome {
+      Ok(window) => mirror.feeds.entry(conversation).or_default().apply(window),
+      Err(error) => {
+        tracing::warn!(%error, %conversation, "could not load messages");
+        false
+      },
+    }
+  }
+
+  fn load_thread(&self, conversation: ConversationId, thread: ThreadId) {
     let backend = self.clone();
     spawn_local(async move {
-      let outcome = call::<Vec<Message>>(
-        "core_thread",
-        &json!({ "conversation": conversation, "thread": thread }),
-      )
-      .await;
-      {
-        let mut mirror = backend.mirror.borrow_mut();
-        mirror.loading.remove(&key);
-        match outcome {
-          Ok(messages) => {
-            mirror.threads.insert((conversation, thread), messages);
-          },
-          Err(error) => {
-            tracing::warn!(%error, "could not load a thread");
-            return;
-          },
-        }
+      if backend.fetch_thread(conversation, thread).await {
+        backend.changed();
       }
-      backend.changed();
     });
+  }
+
+  /// Reads one thread; returns whether it differs from the one held.
+  async fn fetch_thread(&self, conversation: ConversationId, thread: ThreadId) -> bool {
+    let key = LoadKey::Thread(conversation, thread);
+    if !self.mirror.borrow_mut().loading.insert(key) {
+      return false;
+    }
+    let outcome = call::<Vec<Message>>(
+      "core_thread",
+      &json!({ "conversation": conversation, "thread": thread }),
+    )
+    .await;
+    let mut mirror = self.mirror.borrow_mut();
+    mirror.loading.remove(&key);
+    match outcome {
+      Ok(messages) => {
+        let is_changed = mirror.threads.get(&(conversation, thread)) != Some(&messages);
+        mirror.threads.insert((conversation, thread), messages);
+        is_changed
+      },
+      Err(error) => {
+        tracing::warn!(%error, "could not load a thread");
+        false
+      },
+    }
   }
 
   fn act(&self, action: ChatAction) {
@@ -928,9 +1046,16 @@ impl ChatBackend for RemoteChat {
     }
     let mut missing_pages = HashSet::new();
     let mut found = Vec::with_capacity(end - start);
+    let mut stale_pages = Vec::new();
     {
-      let mirror = self.mirror.borrow();
-      let feed = mirror.feeds.get(&conversation);
+      let mut mirror = self.mirror.borrow_mut();
+      let feed = mirror.feeds.get_mut(&conversation).map(|feed| {
+        feed.is_used = true;
+        if std::mem::take(&mut feed.is_stale) {
+          stale_pages = feed.held_pages();
+        }
+        &*feed
+      });
       for index in start..end {
         match feed.and_then(|feed| feed.rows.get(&index)) {
           Some(message) => found.push(message.clone()),
@@ -940,7 +1065,7 @@ impl ChatBackend for RemoteChat {
         }
       }
     }
-    for page in &missing_pages {
+    for page in missing_pages.iter().chain(&stale_pages) {
       self.load_page(conversation, *page);
     }
     // All or nothing: a window with holes would pair messages with the wrong neighbours.
@@ -952,7 +1077,11 @@ impl ChatBackend for RemoteChat {
   }
 
   fn thread(&self, conversation: ConversationId, thread: ThreadId) -> Vec<Message> {
-    let cached = self.mirror.borrow().threads.get(&(conversation, thread)).cloned();
+    let cached = {
+      let mut mirror = self.mirror.borrow_mut();
+      mirror.used_threads.insert((conversation, thread));
+      mirror.threads.get(&(conversation, thread)).cloned()
+    };
     match cached {
       Some(messages) => messages,
       None => {
@@ -1081,5 +1210,80 @@ impl SearchBackend for RemoteChat {
 
   fn delete_saved_search(&self, id: u64) {
     self.act(ChatAction::DeleteSavedSearch { id });
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::model::{MessageKind, id_from_raw};
+
+  mod feed {
+    use super::*;
+
+    #[test]
+    fn the_same_page_again_is_no_change() {
+      let mut feed = Feed::default();
+      assert!(feed.apply(window(3, &["a", "b", "c"])));
+      assert!(!feed.apply(window(3, &["a", "b", "c"])));
+    }
+
+    #[test]
+    fn an_edited_row_or_a_new_total_is_a_change() {
+      let mut feed = Feed::default();
+      feed.apply(window(3, &["a", "b", "c"]));
+      assert!(feed.apply(window(3, &["a", "B", "c"])));
+      assert!(feed.apply(window(4, &["a", "B", "c"])));
+    }
+
+    #[test]
+    fn held_pages_include_the_last_page() {
+      let mut feed = Feed::default();
+      feed.apply(window(PAGE * 3, &["a"]));
+      assert_eq!(feed.held_pages(), vec![0, 2]);
+    }
+  }
+
+  mod slot {
+    use super::*;
+
+    #[test]
+    fn an_equal_answer_is_no_change() {
+      let mut slot = Slot::default();
+      assert!(slot.settle(draft("x")));
+      assert!(!slot.settle(draft("x")));
+      assert!(slot.settle(draft("y")));
+      assert!(!slot.is_loading && !slot.is_stale);
+    }
+  }
+
+  fn draft(body: &str) -> ChatAnswer {
+    ChatAnswer::Draft {
+      maybe_body: Some(body.to_owned()),
+    }
+  }
+
+  fn window(total: usize, bodies: &[&str]) -> MessageWindow {
+    MessageWindow {
+      conversation: id_from_raw(7),
+      start: 0,
+      total,
+      messages: bodies
+        .iter()
+        .zip(1_u64..)
+        .map(|(body, id)| Message {
+          id: id_from_raw(id),
+          conversation: id_from_raw(7),
+          author: id_from_raw(2),
+          kind: MessageKind::User,
+          sent_at: 0,
+          body: (*body).to_owned(),
+          is_edited: false,
+          reactions: Vec::new(),
+          reply_count: 0,
+          maybe_thread: None,
+        })
+        .collect(),
+    }
   }
 }

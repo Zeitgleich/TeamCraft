@@ -33,6 +33,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     {
       self.store.delete(Table::Conversations, &stale.to_string())?;
     }
+    // The whole list first, members after: a UI reading the store meanwhile shows every
+    // conversation at once instead of one per member request (issue #247).
     for conversation in &conversations {
       records::put_json(
         &self.store,
@@ -40,6 +42,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         &conversation.id.to_string(),
         conversation,
       )?;
+    }
+    for conversation in &conversations {
       self.refresh_members(conversation.id).await?;
     }
     self.sync_welcomes().await?;
