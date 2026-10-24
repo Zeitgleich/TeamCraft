@@ -430,10 +430,10 @@ fn allow_web_connections(config: &mut Config) {
   if let Some(calls) = &config.calls {
     urls.push(&calls.sfu_url);
   }
+  let mut urls: Vec<String> = urls.into_iter().map(str::to_owned).collect();
   if let Some(storage) = &config.storage {
-    urls.push(&storage.endpoint);
+    urls.push(storage.client_url());
   }
-  let urls: Vec<String> = urls.into_iter().map(str::to_owned).collect();
   config
     .web
     .allow_connections_to(&urls.iter().map(String::as_str).collect::<Vec<_>>());
