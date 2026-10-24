@@ -48,6 +48,10 @@ const REFRESH_MARGIN: Duration = Duration::from_secs(60);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 /// The webview may only ask for API paths below this prefix.
 const API_PREFIX: &str = "/api/v1/";
+/// Brand images the webview may ask for without credentials.
+const BRAND_ASSET_PREFIX: &str = "/api/v1/brand/assets/";
+/// The largest brand image passed to the webview.
+const MAX_BRAND_ASSET_BYTES: usize = 2 * 1024 * 1024;
 /// The largest `server-info` answer read; a real one is a few KiB.
 const MAX_SERVER_INFO_BYTES: usize = 1024 * 1024;
 /// The redirect URI the identity provider sees, up to the port picked per sign-in (RFC 8252).
@@ -453,6 +457,57 @@ impl<S: TokenStore> AuthService<S> {
       .await
       .map_err(|error| AuthError::Network(error.to_string()))?;
     Ok(ApiResponse { status, body })
+  }
+
+  /// A brand image of the active server (`/api/v1/brand/assets/{slot}`), without credentials:
+  /// the webview's content security policy only loads images from itself or `data:` URLs, so
+  /// the page shows it as one. Images only, at most [`MAX_BRAND_ASSET_BYTES`].
+  pub async fn public_asset(&self, path: &str) -> Result<ApiBytesResponse, AuthError> {
+    if !is_brand_asset_path(path) {
+      return Err(AuthError::Unsupported(format!(
+        "path {path:?} is not a brand image"
+      )));
+    }
+    let url = format!("{}{path}", self.server()?.server_url.trim_end_matches('/'));
+    let response = self
+      .http
+      .get(url)
+      .send()
+      .await
+      .map_err(|error| AuthError::Network(error.to_string()))?;
+    let status = response.status().as_u16();
+    let content_type = response
+      .headers()
+      .get(reqwest::header::CONTENT_TYPE)
+      .and_then(|value| value.to_str().ok())
+      .map(str::to_owned)
+      .filter(|value| value.starts_with("image/"));
+    let Some(content_type) = content_type else {
+      return Ok(ApiBytesResponse {
+        status,
+        content_type: None,
+        body_base64: String::new(),
+      });
+    };
+    let mut body = Vec::new();
+    let mut response = response;
+    while let Some(chunk) = response
+      .chunk()
+      .await
+      .map_err(|error| AuthError::Network(error.to_string()))?
+    {
+      if body.len() + chunk.len() > MAX_BRAND_ASSET_BYTES {
+        return Err(AuthError::InvalidResponse(
+          "the brand image is too large".to_owned(),
+        ));
+      }
+      body.extend_from_slice(&chunk);
+    }
+    Ok(ApiBytesResponse {
+      status,
+      content_type: Some(content_type),
+      body_base64: base64::engine::general_purpose::STANDARD.encode(&body),
+    })
   }
 
   /// `{method} {server}{path}` with a fresh access token; a body is sent as JSON.
@@ -903,6 +958,13 @@ async fn read_limited(mut response: reqwest::Response, limit: usize) -> Result<V
   Ok(body)
 }
 
+/// `/api/v1/brand/assets/<slot>` with a plain slot name, nothing else.
+fn is_brand_asset_path(path: &str) -> bool {
+  path.strip_prefix(BRAND_ASSET_PREFIX).is_some_and(|slot| {
+    !slot.is_empty() && slot.bytes().all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+  })
+}
+
 /// The webview may only reach the API of the configured server, never an arbitrary URL.
 fn validate_api_path(path: &str) -> Result<(), AuthError> {
   let is_plain = path.chars().all(|ch| {
@@ -972,6 +1034,20 @@ mod tests {
     };
     assert_ne!(config.token_key(), other_issuer.token_key());
     assert_ne!(config.token_key(), other_client.token_key());
+  }
+
+  #[test]
+  fn only_brand_images_are_fetched_without_credentials() {
+    assert!(is_brand_asset_path("/api/v1/brand/assets/logo_dark"));
+    for bad in [
+      "/api/v1/brand/assets/",
+      "/api/v1/brand/assets/../me",
+      "/api/v1/brand/assets/logo?x=1",
+      "/api/v1/me",
+      "https://evil.example/api/v1/brand/assets/logo",
+    ] {
+      assert!(!is_brand_asset_path(bad), "{bad}");
+    }
   }
 
   #[test]

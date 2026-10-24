@@ -249,6 +249,15 @@ pub async fn public_get(path: String, service: State<'_, Arc<Service>>) -> Resul
   Ok(service.public_get(&path).await?)
 }
 
+/// A brand image of the active server as bytes (the webview shows it as a `data:` URL).
+#[tauri::command]
+pub async fn public_asset(
+  path: String,
+  service: State<'_, Arc<Service>>,
+) -> Result<ApiBytesResponse, CommandError> {
+  Ok(service.public_asset(&path).await?)
+}
+
 #[tauri::command]
 pub async fn api_request(
   method: ApiMethod,

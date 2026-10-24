@@ -8,6 +8,7 @@
 //! server's `theme.css`, so the first paint already has them.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use leptos::prelude::*;
 use serde::Deserialize;
@@ -32,6 +33,53 @@ impl Brand {
   }
 }
 
+/// Brand images the desktop shell fetched, by asset path, as `data:` URLs (`None`: loading or
+/// unusable). The desktop webview's content security policy loads no images from the server.
+#[derive(Clone, Copy)]
+struct ShellImages(RwSignal<HashMap<String, Option<String>>>);
+
+/// What an `<img>` loads for a brand asset URL of [`BrandView`]: the URL itself in the browser
+/// (same origin), a `data:` URL from the desktop shell (fetched on first use). `None` while there
+/// is nothing to show yet. Reactive.
+pub fn image_src(url: &str) -> Option<String> {
+  if !tauri::is_available() {
+    return Some(url.to_owned());
+  }
+  let images = use_context::<ShellImages>()?;
+  if let Some(found) = images.0.with(|map| map.get(url).cloned()) {
+    return found;
+  }
+  images.0.update(|map| {
+    map.insert(url.to_owned(), None);
+  });
+  let path = url.to_owned();
+  leptos::task::spawn_local(async move {
+    let loaded = load_shell_image(&path).await;
+    if loaded.is_none() {
+      tracing::debug!(path = %path, "could not load a brand image");
+    }
+    images.0.update(|map| {
+      map.insert(path, loaded);
+    });
+  });
+  None
+}
+
+/// A brand image through the desktop shell (`public_asset`), as a `data:` URL.
+async fn load_shell_image(path: &str) -> Option<String> {
+  #[derive(Deserialize)]
+  struct Payload {
+    status: u16,
+    content_type: Option<String>,
+    body_base64: String,
+  }
+  let payload = tauri::call::<Payload>("public_asset", &serde_json::json!({ "path": path }))
+    .await
+    .ok()?;
+  let content_type = payload.content_type.filter(|_| payload.status == 200)?;
+  Some(format!("data:{content_type};base64,{}", payload.body_base64))
+}
+
 /// Loads the cached brand of the configured server, shows it, and refreshes it from the server.
 pub fn provide_brand(settings: Settings) {
   let config = AppConfig::load();
@@ -41,6 +89,7 @@ pub fn provide_brand(settings: Settings) {
     .and_then(|response| BrandView::from_response(response, &config.server_url));
   let brand = Brand(RwSignal::new(cached.unwrap_or_else(BrandView::fallback)));
   provide_context(brand);
+  provide_context(ShellImages(RwSignal::new(HashMap::new())));
 
   let system_dark = RwSignal::new(system_prefers_dark());
   watch_system_scheme(system_dark);
@@ -139,10 +188,7 @@ fn apply_to_document(view: &BrandView, is_dark: bool) {
     });
   }
   document.set_title(&view.display_name);
-  if let Some(icon) = view
-    .asset("favicon", is_dark)
-    .or_else(|| view.asset("icon", is_dark))
-  {
+  if let Some(icon) = view.favicon(is_dark) {
     set_favicon(&document, icon);
   }
 }

@@ -15,6 +15,7 @@ use crate::backend::Backend;
 use crate::brand::Brand;
 use crate::clock::now_ms;
 use crate::components::app::Shell;
+use crate::components::brand_logo::BrandLogo;
 use crate::components::bundle_banner::BundleBanner;
 use crate::components::icons::{Icon, IconName};
 use crate::components::security_ui::QrImage;
@@ -83,17 +84,10 @@ pub(crate) fn AuthFrame(children: Children) -> impl IntoView {
       <BundleBanner />
       <section class="auth-card">
         <div class="auth-brand" translate="no">
-          {move || match brand.with(|view| view.asset("logo", false).map(str::to_owned)) {
-            Some(light) => {
-              let dark = brand.with(|view| view.asset("logo", true).map(str::to_owned)).filter(|dark| *dark != light);
-              view! {
-                <img class="auth-logo-img brand-light" src=light alt=name() />
-                {dark.map(|dark| view! { <img class="auth-logo-img brand-dark" src=dark alt=name() /> })}
-              }
-                .into_any()
-            },
-            None => view! { <span class="auth-logo" aria-hidden="true">{move || name().chars().next().map(String::from).unwrap_or_default()}</span> }.into_any(),
-          }}
+          <BrandLogo
+            class="auth-logo-img"
+            fallback=move || view! { <span class="auth-logo" aria-hidden="true">{move || name().chars().next().map(String::from).unwrap_or_default()}</span> }
+          />
           <span>{name}</span>
         </div>
         {move || {
