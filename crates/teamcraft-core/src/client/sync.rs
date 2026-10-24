@@ -65,6 +65,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.refresh_notification_settings().await?;
     // A `device_add` missed while offline beyond the resume window would leave them waiting.
     self.recheck_waiting_additions().await?;
+    // A revocation the revoking device couldn't finish while this one was away (#232).
+    self.finish_listed_revocations().await?;
     self.apply_pending_changes().await?;
     self.flush_outbox().await?;
     self.top_up_key_packages().await?;

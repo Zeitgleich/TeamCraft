@@ -324,12 +324,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       | GatewayEvent::SpaceMemberAdd { .. }
       | GatewayEvent::SpaceMemberRemove { .. } => self.refresh_spaces().await,
       GatewayEvent::WorkspaceUpdate { .. } => self.sync_workspace().await,
-      // The user's own device that revoked it signs the removal (`Client::revoke_device`).
+      // The user's own device that revoked it signs the removal (`Client::revoke_device`); the
+      // user's other devices finish it if the signed device list says so (#232).
       GatewayEvent::DeviceRemove { user_id, device_id } => {
         if device_id == self.account.device_id {
           tracing::warn!("this device was revoked; it will no longer receive messages");
         }
         tracing::debug!(user_id = %user_id, "device revoked on the server");
+        if user_id == self.account.user_id {
+          self.queue_revocation_check(device_id)?;
+        }
         Ok(())
       },
       GatewayEvent::TypingStart {

@@ -417,6 +417,170 @@ mod revoking {
   }
 }
 
+/// The revoking device is lost before it finished (#232): the user's other devices finish it, but
+/// only on the signed device list's word, never the server's.
+mod finished_by_another_device {
+  use super::*;
+
+  #[tokio::test]
+  async fn a_revocation_the_signed_list_names_is_finished_by_another_device() {
+    let server = FakeServer::new();
+    let mut world = Devices::new(&server).await;
+    let commits_before = commits(&world.tablet, world.channel).await;
+
+    // The phone revoked the laptop on the server and in the signed list; its group commit never
+    // arrived, and the phone is lost (never runs again).
+    server.drop_next_commit(world.phone.client.user_id());
+    world
+      .phone
+      .client
+      .revoke_device(world.laptop_device)
+      .await
+      .unwrap_err();
+    settle(&mut [&mut world.tablet, &mut world.bob, &mut world.laptop]).await;
+
+    assert_eq!(commits(&world.tablet, world.channel).await, commits_before + 1);
+    assert!(
+      !world
+        .tablet
+        .client
+        .group_device_ids(world.channel)
+        .unwrap()
+        .contains(&world.laptop_device)
+    );
+    world
+      .bob
+      .client
+      .send_text(world.channel, None, "after")
+      .await
+      .unwrap();
+    settle(&mut [&mut world.tablet, &mut world.bob, &mut world.laptop]).await;
+    assert_eq!(world.tablet.texts(world.channel), ["after"]);
+    assert!(world.laptop.texts(world.channel).is_empty());
+  }
+
+  #[tokio::test]
+  async fn a_device_that_was_away_finishes_it_on_its_full_sync() {
+    let server = FakeServer::new();
+    let mut world = Devices::new(&server).await;
+    let commits_before = commits(&world.tablet, world.channel).await;
+    server.drop_next_commit(world.phone.client.user_id());
+    world
+      .phone
+      .client
+      .revoke_device(world.laptop_device)
+      .await
+      .unwrap_err();
+
+    // The tablet missed the gateway event (offline beyond the resume window): its full sync
+    // reads the signed list.
+    world.tablet.client.full_sync().await.unwrap();
+    assert_eq!(commits(&world.tablet, world.channel).await, commits_before + 1);
+    assert!(
+      !world
+        .tablet
+        .client
+        .group_device_ids(world.channel)
+        .unwrap()
+        .contains(&world.laptop_device)
+    );
+  }
+
+  #[tokio::test]
+  async fn the_servers_word_alone_removes_nobody() {
+    let server = FakeServer::new();
+    let mut world = Devices::new(&server).await;
+    let commits_before = commits(&world.tablet, world.channel).await;
+
+    // A hostile server claims the laptop was revoked; no signed device list says so.
+    server.revoke_device(world.phone.client.user_id(), world.laptop_device);
+    world.settle_all().await;
+    world.tablet.client.apply_pending_changes().await.unwrap();
+
+    assert_eq!(commits(&world.tablet, world.channel).await, commits_before);
+    assert!(
+      world
+        .tablet
+        .client
+        .group_device_ids(world.channel)
+        .unwrap()
+        .contains(&world.laptop_device)
+    );
+  }
+
+  #[tokio::test]
+  async fn a_tampered_device_list_removes_nobody() {
+    let server = FakeServer::new();
+    let mut world = Devices::new(&server).await;
+    let commits_before = commits(&world.tablet, world.channel).await;
+    let alice = world.phone.client.user_id();
+
+    // The claimed revocation comes with a list whose signature doesn't verify.
+    let mut forged = server.device_list_of(alice).unwrap();
+    let mut bytes = forged.signed_list.as_slice().to_vec();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0x01;
+    forged.signed_list = teamcraft_proto::Base64Bytes::new(bytes);
+    forged.sequence += 1;
+    server.serve_device_list(alice, forged);
+    server.revoke_device(alice, world.laptop_device);
+    world.settle_all().await;
+
+    assert_eq!(commits(&world.tablet, world.channel).await, commits_before);
+    assert!(
+      world
+        .tablet
+        .client
+        .group_device_ids(world.channel)
+        .unwrap()
+        .contains(&world.laptop_device)
+    );
+  }
+
+  /// Alice's phone, tablet (which checks a reported revocation at once) and laptop, and Bob, in
+  /// one channel.
+  struct Devices {
+    phone: Peer,
+    tablet: Peer,
+    laptop: Peer,
+    bob: Peer,
+    laptop_device: teamcraft_proto::DeviceId,
+    channel: ConversationId,
+  }
+
+  impl Devices {
+    async fn new(server: &FakeServer) -> Self {
+      let mut phone = Peer::enroll(server, "Alice").await;
+      let mut bob = Peer::enroll(server, "Bob").await;
+      let channel = channel_with(&mut phone, &mut [&mut bob]).await;
+      phone.client.upload_key_bag().await.unwrap();
+      let at_once = teamcraft_core::ClientSettings {
+        revocation_check_delay: std::time::Duration::ZERO,
+        ..settings()
+      };
+      let mut tablet = Peer::enroll_with(phone.api.clone(), "Alice tablet", at_once).await;
+      let mut laptop = Peer::enroll_as(phone.api.clone(), "Alice laptop").await;
+      phone.client.add_missing_devices(channel).await.unwrap();
+      settle(&mut [&mut phone, &mut bob, &mut tablet, &mut laptop]).await;
+      assert!(tablet.client.has_group(channel).unwrap());
+      assert!(laptop.client.has_group(channel).unwrap());
+      let laptop_device = laptop.client.device_id();
+      Self {
+        phone,
+        tablet,
+        laptop,
+        bob,
+        laptop_device,
+        channel,
+      }
+    }
+
+    async fn settle_all(&mut self) {
+      settle(&mut [&mut self.phone, &mut self.tablet, &mut self.bob, &mut self.laptop]).await;
+    }
+  }
+}
+
 async fn three(server: &FakeServer) -> (Peer, Peer, Peer) {
   (
     Peer::enroll(server, "Alice").await,

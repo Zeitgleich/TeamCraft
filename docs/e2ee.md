@@ -72,6 +72,16 @@ key only keeps the passwords out of database dumps and backups ([admin.md](admin
   is only a hint; clients don't sign a removal on the server's word. The device that revokes signs
   (above); an admin removes people with a signed change any member commits, also in conversations the
   admin isn't in (admin.md §2.2).
+- **Other devices finish a revocation.** If the revoking device is lost after it published the list
+  but before it removed the device from every group, the user's other devices finish it. A
+  `device_remove` the server reports for a device of the same user only makes them look: after
+  `revocation_check_delay` (default 5 minutes, so the revoking device normally finishes first) they
+  fetch the user's device list, verify it with the pinned identity key (never older than the one
+  they stored), and only if it names the device revoked do they sign its removal from the groups
+  they share with it. Without such a list nothing is signed; the check is repeated with the
+  removal backoff, `removal_attempts` times, then dropped. A full resync (gateway events missed)
+  does the same check once against the groups it holds. The revoked device's leaves carry the
+  user's ID, so the removal is the user's own change, as from the revoking device.
 - MLS ciphersuite: `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519` (matches the device keys).
   The device key signs both MLS messages and TeamCraft structures; every TeamCraft signature and AEAD
   input is prefixed with a length-prefixed `TeamCraft-v1 …` label, so it can't collide with MLS's
