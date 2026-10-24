@@ -428,7 +428,10 @@ private fun MainNavigation(selected: ChatTab, conversations: List<ConversationIt
           BadgedBox(
             badge = {
               when {
-                count > 0 -> Badge(containerColor = LocalTeamCraftColors.current.badge) { Text(count.toString()) }
+                count > 0 -> Badge(
+                  containerColor = LocalTeamCraftColors.current.badge,
+                  contentColor = LocalTeamCraftColors.current.chromeText,
+                ) { Text(count.toString()) }
                 badge.unread > 0 -> Badge(containerColor = MaterialTheme.colorScheme.primary)
               }
             },
@@ -445,7 +448,10 @@ private fun NavigationIcon(tab: ChatTab) {
     ChatTab.Home -> Icon(Icons.Filled.Home, contentDescription = null)
     ChatTab.Activity -> Icon(Icons.Filled.Notifications, contentDescription = null)
     // The channel marker of the lists, so the tab reads as "channels".
-    ChatTab.Spaces -> Text("#", style = MaterialTheme.typography.titleLarge, modifier = Modifier.clearAndSetSemantics {})
+    // In an icon-sized box, so the label lines up with the other tabs at any font scale.
+    ChatTab.Spaces -> Box(Modifier.size(24.dp).clearAndSetSemantics {}, contentAlignment = Alignment.Center) {
+      Text("#", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold), maxLines = 1)
+    }
   }
 }
 
@@ -903,9 +909,11 @@ private fun avatarColor(name: String): Color = Color.hsl(((name.hashCode() % 360
 
 @Composable
 private fun CountPill(text: String, color: Color, description: String) {
+  // On the accent (unread) the accent's own text color: white on the dark theme's light teal fails contrast.
+  val textColor = if (color == MaterialTheme.colorScheme.primary) MaterialTheme.colorScheme.onPrimary else LocalTeamCraftColors.current.chromeText
   Text(
     text,
-    color = LocalTeamCraftColors.current.chromeText,
+    color = textColor,
     style = MaterialTheme.typography.labelSmall,
     modifier = Modifier
       .padding(start = 8.dp)
