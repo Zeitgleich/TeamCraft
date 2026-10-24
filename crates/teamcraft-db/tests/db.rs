@@ -13,7 +13,7 @@ use teamcraft_db::{
 };
 use teamcraft_proto::{
   ClientMessageId, ConversationId, ConversationKind, ConversationVisibility, DeviceId, HistoryPolicy, Id,
-  JoinPolicy, MessageId, SpaceId, UserId, UserKind,
+  IdempotencyKey, JoinPolicy, MessageId, SpaceId, UserId, UserKind,
 };
 
 const ISSUER: &str = "https://auth.example.com/realms/dev";
@@ -293,6 +293,7 @@ async fn sending_the_same_client_message_id_twice_stores_one_message() {
     maybe_description: None,
     join_policy: JoinPolicy::Open,
     creator: alice.id,
+    maybe_idempotency_key: None,
   })
   .await
   .unwrap();
@@ -312,6 +313,7 @@ async fn sending_the_same_client_message_id_twice_stores_one_message() {
       is_integration: false,
     },
     alice.id,
+    None,
   )
   .await
   .unwrap();
@@ -357,4 +359,91 @@ fn identity<'a>(subject: &'a str, display_name: &'a str) -> OidcIdentity<'a> {
     maybe_organization: None,
     should_sync_organization: false,
   }
+}
+
+#[tokio::test]
+async fn creating_a_space_or_channel_twice_with_one_key_creates_one() {
+  let Some(test_db) = TestDatabase::create().await else {
+    return;
+  };
+  let db = &test_db.db;
+  let ids = SnowflakeGenerator::new(1).unwrap();
+  let alice = db
+    .upsert_oidc_user(&identity("a", "Alice"), ids.next_id().unwrap())
+    .await
+    .unwrap();
+  let bob = db
+    .upsert_oidc_user(&identity("b", "Bob"), ids.next_id().unwrap())
+    .await
+    .unwrap();
+  let key = IdempotencyKey::from_bytes([9; 16]);
+  let new_space = |id: SpaceId, creator: UserId, maybe_key: Option<IdempotencyKey>| NewSpace {
+    id,
+    name: "S",
+    maybe_icon: None,
+    maybe_color: None,
+    maybe_description: None,
+    join_policy: JoinPolicy::Open,
+    creator,
+    maybe_idempotency_key: maybe_key,
+  };
+
+  let first = db
+    .create_space(&new_space(ids.next_id().unwrap(), alice.id, Some(key)))
+    .await
+    .unwrap();
+  let second = db
+    .create_space(&new_space(ids.next_id().unwrap(), alice.id, Some(key)))
+    .await
+    .unwrap();
+  // Keys are per user: another user's identical key is a different request.
+  let other_user = db
+    .create_space(&new_space(ids.next_id().unwrap(), bob.id, Some(key)))
+    .await
+    .unwrap();
+  // Without a key every call creates.
+  let keyless = db
+    .create_space(&new_space(ids.next_id().unwrap(), alice.id, None))
+    .await
+    .unwrap();
+
+  assert!(first.is_new && !second.is_new);
+  assert_eq!(first.id, second.id);
+  assert!(other_user.is_new && other_user.id != first.id);
+  assert!(keyless.is_new);
+  let spaces: i64 = sqlx::query_scalar("SELECT count(*) FROM spaces")
+    .fetch_one(&test_db.pool)
+    .await
+    .unwrap();
+  assert_eq!(spaces, 3);
+
+  // The same key for another kind of resource does not collide.
+  let channel = NewConversation {
+    id: ids.next_id().unwrap(),
+    maybe_space: Some(first.id),
+    kind: ConversationKind::Channel,
+    maybe_name: Some("general"),
+    maybe_topic: None,
+    maybe_description: None,
+    visibility: ConversationVisibility::Public,
+    history_policy: HistoryPolicy::FromJoin,
+    maybe_category: None,
+    maybe_participants_key: None,
+    is_integration: false,
+  };
+  let created = db.create_channel(&channel, alice.id, Some(&key)).await.unwrap();
+  let again = db
+    .create_channel(
+      &NewConversation {
+        id: ids.next_id().unwrap(),
+        ..channel
+      },
+      alice.id,
+      Some(&key),
+    )
+    .await
+    .unwrap();
+  assert!(created.is_new && !again.is_new);
+  assert_eq!(created.id, again.id);
+  test_db.drop_database().await;
 }

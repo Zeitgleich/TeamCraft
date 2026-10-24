@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::wire_enum::wire_enum;
-use crate::{ConversationId, MeetingId, UnixMillis, UserId, UserSummary};
+use crate::{ConversationId, IdempotencyKey, MeetingId, UnixMillis, UserId, UserSummary};
 
 wire_enum! {
   pub enum MeetingStatus {
@@ -89,6 +89,10 @@ pub struct CreateMeetingRequest {
   /// Guests wait for the host to admit them (default: yes).
   #[serde(default = "default_true")]
   pub has_lobby: bool,
+  /// Client-generated key that makes a retry of this request return the original result instead
+  /// of creating a second one. Optional so older clients keep working.
+  #[serde(rename = "idempotency_key", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_idempotency_key: Option<IdempotencyKey>,
 }
 
 /// `PATCH /api/v1/meetings/{id}`: changes what is set; invitees are replaced as a whole.
@@ -114,6 +118,10 @@ pub struct UpdateMeetingRequest {
 pub struct CreateInstantMeetingRequest {
   #[serde(rename = "title", default, skip_serializing_if = "Option::is_none")]
   pub maybe_title: Option<String>,
+  /// Client-generated key that makes a retry of this request return the original result instead
+  /// of creating a second one. Optional so older clients keep working.
+  #[serde(rename = "idempotency_key", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_idempotency_key: Option<IdempotencyKey>,
 }
 
 /// `PUT /api/v1/meetings/{id}/rsvp`: the caller's answer to an invitation.
@@ -300,6 +308,57 @@ mod tests {
     let request: CreateMeetingRequest =
       serde_json::from_str(r#"{"title":"Sync","starts_at":1000,"ends_at":2000}"#).unwrap();
     assert!(request.has_lobby && request.invitees.is_empty());
+  }
+
+  const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
+
+  #[test]
+  fn create_requests_carry_an_optional_idempotency_key() {
+    // Older clients send no key.
+    let old: CreateMeetingRequest =
+      serde_json::from_str(r#"{"title":"Sync","starts_at":1000,"ends_at":2000}"#).unwrap();
+    assert_eq!(old.maybe_idempotency_key, None);
+    assert!(
+      serde_json::to_value(&old)
+        .unwrap()
+        .get("idempotency_key")
+        .is_none()
+    );
+
+    let key = IdempotencyKey::from_hex(KEY_HEX).unwrap();
+    let request: CreateMeetingRequest = serde_json::from_str(&format!(
+      r#"{{"title":"Sync","starts_at":1000,"ends_at":2000,"idempotency_key":"{KEY_HEX}"}}"#
+    ))
+    .unwrap();
+    assert_eq!(request.maybe_idempotency_key, Some(key));
+    assert_eq!(
+      serde_json::to_value(&request).unwrap()["idempotency_key"],
+      KEY_HEX
+    );
+
+    let instant = CreateInstantMeetingRequest {
+      maybe_title: None,
+      maybe_idempotency_key: Some(key),
+    };
+    assert_eq!(
+      serde_json::to_string(&instant).unwrap(),
+      format!(r#"{{"idempotency_key":"{KEY_HEX}"}}"#)
+    );
+    assert!(serde_json::from_str::<CreateInstantMeetingRequest>(r#"{"idempotency_key":"zz"}"#).is_err());
+
+    let space: crate::CreateSpaceRequest = serde_json::from_str(&format!(
+      r#"{{"name":"S","join_policy":"open","idempotency_key":"{KEY_HEX}"}}"#
+    ))
+    .unwrap();
+    assert_eq!(space.maybe_idempotency_key, Some(key));
+    let channel: crate::CreateChannelRequest = serde_json::from_str(&format!(
+      r#"{{"name":"c","visibility":"private","idempotency_key":"{KEY_HEX}"}}"#
+    ))
+    .unwrap();
+    assert_eq!(channel.maybe_idempotency_key, Some(key));
+    let legacy: crate::CreateChannelRequest =
+      serde_json::from_str(r#"{"name":"c","visibility":"private"}"#).unwrap();
+    assert_eq!(legacy.maybe_idempotency_key, None);
   }
 
   #[test]

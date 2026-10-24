@@ -5,8 +5,8 @@ use teamcraft_crypto::membership::{HistoryShare, MembershipAction};
 use teamcraft_proto::{
   CategoryId, ConversationId, ConversationKind, ConversationResponse, ConversationVisibility,
   CreateCategoryRequest, CreateChannelRequest, CreateInviteRequest, CreateSpaceRequest, HistoryPolicy,
-  ListCategoriesResponse, ListConversationsResponse, MoveChannelRequest, SpaceId, SpaceResponse, SpaceRole,
-  UnixMillis, UpdateCategoryRequest, UpdateConversationRequest, UpdateSpaceRequest,
+  IdempotencyKey, ListCategoriesResponse, ListConversationsResponse, MoveChannelRequest, SpaceId,
+  SpaceResponse, SpaceRole, UnixMillis, UpdateCategoryRequest, UpdateConversationRequest, UpdateSpaceRequest,
 };
 
 use super::Client;
@@ -24,6 +24,8 @@ pub struct ChannelOptions {
   pub maybe_topic: Option<String>,
   pub maybe_category: Option<CategoryId>,
   pub maybe_history: Option<HistoryPolicy>,
+  /// Makes a retry of the creation return the same channel.
+  pub maybe_idempotency_key: Option<IdempotencyKey>,
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
@@ -61,6 +63,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_topic: options.maybe_topic,
       maybe_description: None,
       is_integration: false,
+      maybe_idempotency_key: options.maybe_idempotency_key,
     };
     self.create_channel_from(space, &request).await
   }

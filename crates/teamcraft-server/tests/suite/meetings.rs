@@ -11,6 +11,7 @@ use std::time::Duration;
 use common::*;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
+use teamcraft_db::testing::sqlx;
 use teamcraft_server::config::{MailTexts, MeetingsConfig};
 use teamcraft_server::testing::{FakeCalendar, FakeMailer, Reply, TestApp, TestUser};
 
@@ -950,6 +951,48 @@ mod instant {
       .post(&alice, "/meetings/instant", json!({"title": "Quick sync"}))
       .await;
     assert_eq!(named.body["title"], "Quick sync");
+    app.stop().await;
+  }
+}
+
+mod retried_creation {
+  use super::*;
+
+  const KEY: &str = "ffeeddccbbaa99887766554433221100";
+
+  #[tokio::test]
+  async fn a_repeated_meeting_request_creates_one_meeting_and_one_invitation() {
+    let (app, calendar) = app!();
+    let alice = owner();
+    let body = json!({
+      "title": "Retried", "starts_at": 4_102_444_800_000_i64, "ends_at": 4_102_448_400_000_i64,
+      "idempotency_key": KEY,
+    });
+
+    let first = app.post(&alice, "/meetings", body.clone()).await;
+    let second = app.post(&alice, "/meetings", body).await;
+
+    assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+    assert_eq!(first.body["id"], second.body["id"]);
+    assert_eq!(calendar.names().len(), 1);
+    let meetings: i64 = sqlx::query_scalar("SELECT count(*) FROM meetings")
+      .fetch_one(app.sql_pool())
+      .await
+      .unwrap();
+    assert_eq!(meetings, 1);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_repeated_meet_now_request_returns_the_same_meeting() {
+    let (app, _calendar) = app!();
+    let alice = owner();
+    let body = json!({"idempotency_key": KEY});
+
+    let first = app.post(&alice, "/meetings/instant", body.clone()).await;
+    let second = app.post(&alice, "/meetings/instant", body).await;
+
+    assert_eq!(first.body["id"], second.body["id"]);
     app.stop().await;
   }
 }

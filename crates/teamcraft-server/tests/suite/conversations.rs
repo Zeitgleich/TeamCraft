@@ -7,6 +7,7 @@ use crate::common;
 use common::*;
 use reqwest::StatusCode;
 use serde_json::json;
+use teamcraft_db::testing::sqlx;
 use teamcraft_server::testing::TestApp;
 
 macro_rules! app {
@@ -445,6 +446,68 @@ mod channels {
     assert_eq!(view.body["my_membership"]["notification_level"], "all");
     assert_eq!(view.body["my_membership"]["is_favorite"], true);
     assert_eq!(view.body["my_membership"]["last_read_message_id"], message);
+    app.stop().await;
+  }
+}
+
+mod retried_creation {
+  use super::*;
+
+  const KEY: &str = "00112233445566778899aabbccddeeff";
+
+  #[tokio::test]
+  async fn a_repeated_space_or_channel_request_returns_the_original() {
+    let app = app!();
+    let (alice, bob) = (owner(), admin());
+    let body = json!({"name": "Retried", "join_policy": "open", "idempotency_key": KEY});
+
+    let first = app.post(&alice, "/spaces", body.clone()).await;
+    let second = app.post(&alice, "/spaces", body.clone()).await;
+    assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+    assert_eq!(first.id(), second.id());
+    // The key belongs to the user who made the request.
+    let other = app.post(&bob, "/spaces", body).await;
+    assert_ne!(other.id(), first.id());
+    // Older clients send no key and get a new space every time.
+    let keyless = json!({"name": "Retried", "join_policy": "open"});
+    let (one, two) = (
+      app.post(&alice, "/spaces", keyless.clone()).await,
+      app.post(&alice, "/spaces", keyless).await,
+    );
+    assert_ne!(one.id(), two.id());
+    let spaces: i64 = sqlx::query_scalar("SELECT count(*) FROM spaces WHERE name = 'Retried'")
+      .fetch_one(app.sql_pool())
+      .await
+      .unwrap();
+    assert_eq!(spaces, 4);
+
+    let space = first.id();
+    let channel = json!({"name": "retried", "visibility": "public", "idempotency_key": KEY});
+    let path = format!("/spaces/{space}/channels");
+    let created = app.post(&alice, &path, channel.clone()).await;
+    let repeated = app.post(&alice, &path, channel).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    assert_eq!(created.id(), repeated.id());
+    let channels: i64 = sqlx::query_scalar("SELECT count(*) FROM conversations WHERE name = 'retried'")
+      .fetch_one(app.sql_pool())
+      .await
+      .unwrap();
+    assert_eq!(channels, 1);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_malformed_key_is_rejected() {
+    let app = app!();
+    let alice = owner();
+    let reply = app
+      .post(
+        &alice,
+        "/spaces",
+        json!({"name": "Bad", "join_policy": "open", "idempotency_key": "short"}),
+      )
+      .await;
+    assert!(reply.status.is_client_error(), "{}", reply.body);
     app.stop().await;
   }
 }

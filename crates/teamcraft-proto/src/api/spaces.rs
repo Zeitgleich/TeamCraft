@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::wire_enum::wire_enum;
-use crate::{CategoryId, InviteId, SpaceId, SpaceRole, UnixMillis, UserId, UserSummary};
+use crate::{CategoryId, IdempotencyKey, InviteId, SpaceId, SpaceRole, UnixMillis, UserId, UserSummary};
 
 wire_enum! {
   /// How people join a space.
@@ -52,6 +52,10 @@ pub struct CreateSpaceRequest {
   #[serde(rename = "description", default, skip_serializing_if = "Option::is_none")]
   pub maybe_description: Option<String>,
   pub join_policy: JoinPolicy,
+  /// Client-generated key that makes a retry of this request return the original result instead
+  /// of creating a second one. Optional so older clients keep working.
+  #[serde(rename = "idempotency_key", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_idempotency_key: Option<IdempotencyKey>,
 }
 
 /// `PATCH /api/v1/spaces/{id}`: only the fields that are present change; an empty string clears

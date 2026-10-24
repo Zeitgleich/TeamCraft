@@ -7,7 +7,7 @@
 //! come from [`crate::backend::ChatBackend::message_extras`] for the rows on screen.
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{CategoryId, HistoryPolicy};
+use teamcraft_proto::{CategoryId, HistoryPolicy, IdempotencyKey};
 
 use crate::model::{ConversationId, Message, MessageId, SpaceId, ThreadId, TimestampMs, UserId};
 
@@ -294,6 +294,10 @@ pub struct NewSpace {
   pub maybe_description: Option<String>,
   /// Anyone in the workspace may join (otherwise by invitation).
   pub is_open: bool,
+  /// Generated once per user action; a retry of the queued action reuses it so the server creates
+  /// the space only once.
+  #[serde(default)]
+  pub maybe_idempotency_key: Option<IdempotencyKey>,
 }
 
 /// Changes to a space; absent fields stay.
@@ -325,6 +329,10 @@ pub struct NewChannel {
   /// What people added later see (default: the workspace policy's).
   #[serde(default)]
   pub maybe_history: Option<HistoryPolicy>,
+  /// Generated once per user action; a retry of the queued action reuses it so the server creates
+  /// the channel only once.
+  #[serde(default)]
+  pub maybe_idempotency_key: Option<IdempotencyKey>,
 }
 
 /// Changes to a channel; absent fields stay.

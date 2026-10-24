@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO create_idempotency_keys (user_id, kind, idempotency_key, resource_id)\n       VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING RETURNING resource_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "resource_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "create_idempotency_keys",
+            "name": "resource_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Bytea",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "43e3b3d5b7e22d41dc85706201f764fda6012d377d1c8fce829c6d2ac9df0073"
+}

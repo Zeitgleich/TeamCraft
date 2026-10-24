@@ -89,8 +89,15 @@ pub async fn create_meeting(
     kind: MeetingKind::Scheduled.as_str(),
     has_lobby: request.has_lobby,
     attendees: &attendees,
+    maybe_idempotency_key: request.maybe_idempotency_key,
   };
-  state.database.create_meeting(&new).await?;
+  let created = state.database.create_meeting(&new).await?;
+  if !created.is_new {
+    // A retry of an earlier request: return that meeting; calendar entry and invitations were
+    // handled by the first request.
+    let meeting = load_meeting(state, created.id).await?;
+    return respond(state, service, &meeting, Vec::new()).await;
+  }
 
   let meeting = load_meeting(state, id).await?;
   if let Err(error) = sync_calendar(state, service, &meeting).await {
@@ -120,7 +127,7 @@ pub async fn create_instant_meeting(
   let now = OffsetDateTime::now_utc();
   let id: MeetingId = state.next_id()?;
   let uid = service.uid(id);
-  state
+  let created = state
     .database
     .create_meeting(&NewMeeting {
       id,
@@ -147,9 +154,10 @@ pub async fn create_instant_meeting(
       kind: MeetingKind::Instant.as_str(),
       has_lobby: true,
       attendees: &[],
+      maybe_idempotency_key: request.maybe_idempotency_key,
     })
     .await?;
-  let meeting = load_meeting(state, id).await?;
+  let meeting = load_meeting(state, created.id).await?;
   respond(state, service, &meeting, Vec::new()).await
 }
 

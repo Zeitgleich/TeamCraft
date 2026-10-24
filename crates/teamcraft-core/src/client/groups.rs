@@ -13,8 +13,9 @@ use teamcraft_crypto::mls::{
 };
 use teamcraft_proto::{
   AddConversationMemberRequest, Base64Bytes, ClaimKeyPackagesRequest, ConversationId, CreateChannelRequest,
-  CreateDmRequest, CreateGroupDmRequest, DeviceId, HistoryPolicy, Id, ListMlsMessagesQuery, MlsMessageKind,
-  MlsMessageResponse, MlsWelcome, PostMlsCommitRequest, PostMlsMessageRequest, SpaceId, UserId,
+  CreateDmRequest, CreateGroupDmRequest, DeviceId, HistoryPolicy, Id, IdempotencyKey, ListMlsMessagesQuery,
+  MlsMessageKind, MlsMessageResponse, MlsWelcome, PostMlsCommitRequest, PostMlsMessageRequest, SpaceId,
+  UserId,
 };
 
 use super::workspace::{PendingChange, SharedKeys};
@@ -92,6 +93,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_topic: None,
       maybe_description: None,
       is_integration: false,
+      maybe_idempotency_key: Some(IdempotencyKey::random()),
     };
     self.create_channel_from(space, &request).await
   }
@@ -108,7 +110,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       &conversation.id.to_string(),
       &conversation,
     )?;
-    self.found_group(conversation.id)?;
+    // A repeated create (idempotency key) returns the channel we already founded.
+    if !self.has_group(conversation.id)? {
+      self.found_group(conversation.id)?;
+    }
     Ok(conversation.id)
   }
 

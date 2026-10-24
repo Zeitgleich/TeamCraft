@@ -2,13 +2,14 @@ use std::collections::{HashMap, HashSet};
 
 use teamcraft_proto::{
   CategoryId, ChannelModeration, ChannelRole, ConversationId, ConversationKind, ConversationVisibility,
-  HistoryPolicy, MessageId, NotificationLevel, Permission, SpaceId, UserId,
+  HistoryPolicy, IdempotencyKey, MessageId, NotificationLevel, Permission, SpaceId, UserId,
 };
 
 use time::OffsetDateTime;
 
 use crate::database::Database;
 use crate::error::DbError;
+use crate::idempotency::{Created, IdempotentKind, claim_key};
 use crate::ids::{from_db, from_db_opt, to_db, to_db_all};
 use crate::user::User;
 
@@ -117,12 +118,25 @@ impl Database {
     &self,
     new: &NewConversation<'_>,
     creator: UserId,
-  ) -> Result<ConversationId, DbError> {
+    maybe_key: Option<&IdempotencyKey>,
+  ) -> Result<Created<ConversationId>, DbError> {
     let mut tx = self.pool().begin().await?;
+    if let Some(key) = maybe_key {
+      let maybe_existing = claim_key(&mut tx, creator, IdempotentKind::Channel, key, to_db(new.id)).await?;
+      if let Some(existing) = maybe_existing {
+        return Ok(Created {
+          id: from_db(existing)?,
+          is_new: false,
+        });
+      }
+    }
     insert_conversation(&mut tx, new).await?;
     insert_membership(&mut tx, new.id, creator, ChannelRole::Admin).await?;
     tx.commit().await?;
-    Ok(new.id)
+    Ok(Created {
+      id: new.id,
+      is_new: true,
+    })
   }
 
   /// Returns the existing DM / group DM of exactly these participants or creates it.

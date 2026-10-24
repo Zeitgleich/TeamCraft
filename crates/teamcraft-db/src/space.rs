@@ -1,8 +1,11 @@
-use teamcraft_proto::{CategoryId, JoinPolicy, NotificationLevel, SpaceId, SpaceRole, UserId};
+use teamcraft_proto::{
+  CategoryId, IdempotencyKey, JoinPolicy, NotificationLevel, SpaceId, SpaceRole, UserId,
+};
 use time::OffsetDateTime;
 
 use crate::database::Database;
 use crate::error::DbError;
+use crate::idempotency::{Created, IdempotentKind, claim_key};
 use crate::ids::{from_db, from_db_opt, to_db};
 use crate::notification::StoredSpaceNotifications;
 use crate::user::User;
@@ -49,6 +52,7 @@ pub struct NewSpace<'a> {
   pub maybe_description: Option<&'a str>,
   pub join_policy: JoinPolicy,
   pub creator: UserId,
+  pub maybe_idempotency_key: Option<IdempotencyKey>,
 }
 
 /// Fields to change; `None` keeps the stored value. An empty string clears icon, color, description.
@@ -107,14 +111,28 @@ pub struct Category {
 }
 
 impl Database {
-  /// Creates the space; the creator becomes its first space admin.
-  pub async fn create_space(&self, space: &NewSpace<'_>) -> Result<Space, DbError> {
+  /// Creates the space; the creator becomes its first space admin. A repeated idempotency key
+  /// creates nothing and returns the first space.
+  pub async fn create_space(&self, space: &NewSpace<'_>) -> Result<Created<SpaceId>, DbError> {
     let mut tx = self.pool().begin().await?;
-    let row = sqlx::query!(
-      r#"INSERT INTO spaces (id, name, icon_ref, color, description, join_policy)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id, name, icon_ref, color, description, join_policy, brand_id,
-                   archived_at IS NOT NULL AS "is_archived!""#,
+    if let Some(key) = &space.maybe_idempotency_key {
+      let maybe_existing = claim_key(
+        &mut tx,
+        space.creator,
+        IdempotentKind::Space,
+        key,
+        to_db(space.id),
+      )
+      .await?;
+      if let Some(existing) = maybe_existing {
+        return Ok(Created {
+          id: from_db(existing)?,
+          is_new: false,
+        });
+      }
+    }
+    sqlx::query!(
+      "INSERT INTO spaces (id, name, icon_ref, color, description, join_policy) VALUES ($1, $2, $3, $4, $5, $6)",
       to_db(space.id),
       space.name,
       space.maybe_icon,
@@ -122,7 +140,7 @@ impl Database {
       space.maybe_description,
       space.join_policy.as_str(),
     )
-    .fetch_one(&mut *tx)
+    .execute(&mut *tx)
     .await?;
     sqlx::query!(
       "INSERT INTO space_members (space_id, user_id, role) VALUES ($1, $2, $3)",
@@ -133,15 +151,9 @@ impl Database {
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(Space {
-      id: from_db(row.id)?,
-      name: row.name,
-      maybe_icon: row.icon_ref,
-      maybe_color: row.color,
-      maybe_description: row.description,
-      join_policy: JoinPolicy::from(row.join_policy),
-      is_archived: row.is_archived,
-      maybe_brand_id: row.brand_id,
+    Ok(Created {
+      id: space.id,
+      is_new: true,
     })
   }
 

@@ -90,11 +90,22 @@ impl utoipa::ToSchema for Base64Bytes {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClientMessageId([u8; 16]);
 
+/// Client-generated key of a create request (space, channel, meeting). The server remembers it per
+/// user and returns the original result for a repeated request. Same format as [`ClientMessageId`].
+pub type IdempotencyKey = ClientMessageId;
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("client message ID must be 32 hex characters")]
 pub struct ClientMessageIdError;
 
 impl ClientMessageId {
+  /// A fresh random ID from the operating system's random source.
+  pub fn random() -> Self {
+    let mut bytes = [0u8; 16];
+    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut bytes);
+    Self(bytes)
+  }
+
   pub fn from_bytes(bytes: [u8; 16]) -> Self {
     Self(bytes)
   }

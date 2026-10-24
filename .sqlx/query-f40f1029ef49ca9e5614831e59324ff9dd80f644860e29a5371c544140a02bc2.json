@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM create_idempotency_keys WHERE kind = 'meeting' AND resource_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f40f1029ef49ca9e5614831e59324ff9dd80f644860e29a5371c544140a02bc2"
+}

@@ -2,12 +2,15 @@
 
 use std::collections::HashMap;
 
-use teamcraft_proto::{ChannelRole, ConversationId, MeetingAttendeeId, MeetingId, MeetingInviteId, UserId};
+use teamcraft_proto::{
+  ChannelRole, ConversationId, IdempotencyKey, MeetingAttendeeId, MeetingId, MeetingInviteId, UserId,
+};
 use time::OffsetDateTime;
 
 use crate::conversation::{NewConversation, insert_conversation, insert_membership};
 use crate::database::Database;
 use crate::error::DbError;
+use crate::idempotency::{Created, IdempotentKind, claim_key};
 use crate::ids::{from_db, from_db_opt, to_db};
 
 /// A stored meeting. `kind`, `status` are the wire names (`scheduled`, `instant`; `scheduled`,
@@ -54,6 +57,7 @@ pub struct NewMeeting<'a> {
   pub kind: &'a str,
   pub has_lobby: bool,
   pub attendees: &'a [NewAttendee],
+  pub maybe_idempotency_key: Option<IdempotencyKey>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,8 +116,24 @@ pub enum AttendeeKey<'a> {
 impl Database {
   /// Creates the meeting, its chat conversation (the organizer is admin there) and the invitees;
   /// invited users become members of the chat.
-  pub async fn create_meeting(&self, new: &NewMeeting<'_>) -> Result<(), DbError> {
+  pub async fn create_meeting(&self, new: &NewMeeting<'_>) -> Result<Created<MeetingId>, DbError> {
     let mut tx = self.pool().begin().await?;
+    if let Some(key) = &new.maybe_idempotency_key {
+      let maybe_existing = claim_key(
+        &mut tx,
+        new.organizer,
+        IdempotentKind::Meeting,
+        key,
+        to_db(new.id),
+      )
+      .await?;
+      if let Some(existing) = maybe_existing {
+        return Ok(Created {
+          id: from_db(existing)?,
+          is_new: false,
+        });
+      }
+    }
     insert_conversation(&mut tx, &new.conversation).await?;
     insert_membership(&mut tx, new.conversation.id, new.organizer, ChannelRole::Admin).await?;
     sqlx::query!(
@@ -141,7 +161,10 @@ impl Database {
       }
     }
     tx.commit().await?;
-    Ok(())
+    Ok(Created {
+      id: new.id,
+      is_new: true,
+    })
   }
 
   pub async fn get_meeting(&self, id: MeetingId) -> Result<Option<StoredMeeting>, DbError> {
@@ -429,6 +452,13 @@ impl Database {
 
   /// Removes a meeting with its chat and invitees (rollback of a failed creation).
   pub async fn delete_meeting(&self, meeting: &StoredMeeting) -> Result<(), DbError> {
+    // The key goes with the meeting, so a retry after an undone creation creates it again.
+    sqlx::query!(
+      "DELETE FROM create_idempotency_keys WHERE kind = 'meeting' AND resource_id = $1",
+      to_db(meeting.id)
+    )
+    .execute(self.pool())
+    .await?;
     sqlx::query!(
       "DELETE FROM conversations WHERE id = $1",
       to_db(meeting.conversation)

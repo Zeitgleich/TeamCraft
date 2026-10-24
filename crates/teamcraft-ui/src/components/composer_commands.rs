@@ -2,7 +2,7 @@
 
 use leptos::prelude::*;
 use teamcraft_client_api::actions::ChannelChanges;
-use teamcraft_proto::HistoryPolicy;
+use teamcraft_proto::{HistoryPolicy, IdempotencyKey};
 
 use crate::clock::{end_of_local_day, now_ms};
 use crate::i18n::I18n;
@@ -249,7 +249,11 @@ fn start_meeting(state: AppState, i18n: I18n) -> Outcome {
   };
   let client = hub.client();
   leptos::task::spawn_local(async move {
-    if client.start_instant(None).await.is_ok() {
+    if client
+      .start_instant(None, Some(IdempotencyKey::random()))
+      .await
+      .is_ok()
+    {
       state.open_meetings();
     }
   });

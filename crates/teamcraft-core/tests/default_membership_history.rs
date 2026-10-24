@@ -21,6 +21,7 @@ async fn a_default_member_joins_the_group_and_reads_only_from_the_join_on() {
     .create_channel_with(
       alice.space().await,
       ChannelOptions {
+        maybe_idempotency_key: None,
         name: "general".into(),
         is_private: false,
         maybe_topic: None,

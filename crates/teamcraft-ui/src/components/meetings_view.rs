@@ -3,7 +3,7 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use teamcraft_proto::{LobbyEntry, MeetingId, MeetingResponse, MeetingStatus, RsvpStatus};
+use teamcraft_proto::{IdempotencyKey, LobbyEntry, MeetingId, MeetingResponse, MeetingStatus, RsvpStatus};
 
 use crate::calls::{CallKind, CallRequest};
 use crate::clock::{format_date, format_local_datetime_input, format_time, local_day, now_ms};
@@ -36,12 +36,19 @@ pub fn MeetingsView() -> impl IntoView {
   reload();
   use_interval_while_visible(REFRESH_MS, reload);
 
+  let is_starting = RwSignal::new(false);
   let start_now = move |_| {
+    if is_starting.get_untracked() {
+      return;
+    }
+    is_starting.set(true);
     spawn_local(async move {
       let client = hub.client();
-      if let Some(meeting) = hub.run(me, now_ms(), client.start_instant(None)).await {
+      let key = Some(IdempotencyKey::random());
+      if let Some(meeting) = hub.run(me, now_ms(), client.start_instant(None, key)).await {
         join_meeting(state, i18n, meeting.conversation_id);
       }
+      is_starting.set(false);
     });
   };
 
@@ -51,7 +58,7 @@ pub fn MeetingsView() -> impl IntoView {
         <div class="panel-title">
           <h1>{move || i18n.t("meetings-title")}</h1>
         </div>
-        <button class="btn" on:click=start_now>
+        <button class="btn" prop:disabled=move || is_starting.get() on:click=start_now>
           <Icon name=IconName::Video />
           <span>{move || i18n.t("meetings-start-now")}</span>
         </button>
@@ -381,6 +388,9 @@ pub fn ScheduleMeetingDialog() -> impl IntoView {
   };
   let submit = move |ev: leptos::ev::SubmitEvent| {
     ev.prevent_default();
+    if is_saving.get_untracked() {
+      return;
+    }
     let now = now_ms();
     match form.get_untracked().to_request(now) {
       Err(error) => maybe_error.set(Some(error)),

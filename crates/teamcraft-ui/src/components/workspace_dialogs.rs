@@ -9,7 +9,7 @@ use teamcraft_client_api::actions::{
   BrowsableChannel, CategoryChoice, CategoryInfo, ChannelChanges, NewChannel, NewSpace, SpaceChanges,
   SpaceInvite,
 };
-use teamcraft_proto::{CategoryId, HistoryPolicy};
+use teamcraft_proto::{CategoryId, HistoryPolicy, IdempotencyKey};
 
 use crate::channel_policy::{ChannelPolicyHub, parse_retention};
 use crate::components::composer_commands::left_text;
@@ -89,6 +89,7 @@ pub fn NewSpaceDialog() -> impl IntoView {
       name,
       maybe_description: non_empty(&description.get_untracked()),
       is_open: is_open.get_untracked(),
+      maybe_idempotency_key: Some(IdempotencyKey::random()),
     });
   };
   view! {
@@ -194,6 +195,7 @@ pub fn NewChannelDialog(space: SpaceId) -> impl IntoView {
       maybe_topic: non_empty(&topic.get_untracked()),
       maybe_category,
       maybe_history: history.get_untracked().policy(),
+      maybe_idempotency_key: Some(IdempotencyKey::random()),
     });
   };
   view! {
