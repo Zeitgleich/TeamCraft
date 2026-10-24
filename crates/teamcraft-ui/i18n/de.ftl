@@ -95,6 +95,9 @@ sidebar-integrations = Integrationen
 sidebar-direct-messages = Direktnachrichten
 sidebar-item-mentions = { $name }, { $count } Erwähnungen
 sidebar-item-unread = { $name }, ungelesene Nachrichten
+sidebar-item-catching-up = { $name }, wird nachgeladen
+catching-up = Wird nachgeladen…
+catching-up-detail = Nachrichten aus der Zeit, in der du weg warst, werden noch geladen.
 
 ## Kanal
 channel-region-label = Kanal { $name }

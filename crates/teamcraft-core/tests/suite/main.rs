@@ -9,6 +9,7 @@ mod account_data;
 mod activity;
 mod backgrounds;
 mod calls;
+mod catch_up;
 mod chat_actions;
 #[path = "../common/mod.rs"]
 mod common;

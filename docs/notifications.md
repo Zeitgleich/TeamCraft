@@ -46,9 +46,15 @@ Clients keep the counts current from gateway events instead of polling `GET /unr
   drifted is repaired on reconnect, not by a timer. After a resume it reads them only once the replay
   (`resumed.replayed` events) has been applied: `GET /unread` already counts the replayed messages,
   which would otherwise be counted twice.
-- Presence announced by `presence_update` reaches the UI as a bounded list (the newest 500 people by
-  default) with a revision per entry, so the UI applies only what it hasn't seen. A UI that fell
-  behind further than the bound reads presence over REST again.
+- Presence announced by `presence_update` reaches the UI through a bounded log (the newest 5,000
+  people by default, one record per person) with a revision per entry; the UI is sent only the
+  entries newer than the revision it has (issue #259). After every connection the core reads the
+  presence of everyone it knows in batches of 200 (`GET /presence`) and announces what changed, so
+  the UI never reads presence itself.
+- Read receipts arrive as `read_receipt` events. The UI reads `GET /conversations/{id}/read-receipts`
+  only for the DM it shows, once per connection (issue #252), never one request per DM.
+- Account data (saved items, drafts, backgrounds) is read once per connection and on `key_bag_update`;
+  nothing is read on a timer (issue #252).
 
 The client core keeps all of this in its store and hands it to the UI with its snapshot. Only a UI
 without a core (no gateway) still polls, every 5 minutes while the page is visible.

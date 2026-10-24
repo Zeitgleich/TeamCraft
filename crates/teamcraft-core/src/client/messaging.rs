@@ -8,13 +8,13 @@ use teamcraft_crypto::message::{
   EncryptedMessage, MessageContext, MessageError, decrypt_message, decrypt_unsigned_message, encrypt_message,
 };
 use teamcraft_proto::{
-  Base64Bytes, ClientMessageId, ConversationId, Id, ListMessagesQuery, MessageId, MessageResponse,
-  SendMessageRequest, Snowflake, ThreadId, UserId,
+  Base64Bytes, ClientMessageId, ConversationId, Id, ListMessagesQuery, ListMessagesResponse, MessageId,
+  MessageResponse, SendMessageRequest, Snowflake, ThreadId, UserId,
 };
 use zeroize::Zeroizing;
 
 use super::Client;
-use crate::api::ServerApi;
+use crate::api::{ApiError, ServerApi};
 use crate::convert;
 use crate::error::CoreError;
 use crate::records::{self, OutboxEntry};
@@ -248,13 +248,33 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Fetches messages newer than the newest one this device has (after being offline), and the
   /// first time the newest page of history.
   pub async fn catch_up_messages(&mut self, conversation: ConversationId) -> Result<usize, CoreError> {
-    // The first time, the newest page of history, whatever this device stored already (its own
-    // first message would otherwise hide everything before it).
-    let history_key = format!("history_loaded/{conversation}");
+    self.catch_up_messages_from(conversation, None).await
+  }
+
+  /// [`Self::catch_up_messages`] with its first request already answered (a catch-up reads
+  /// several conversations' first pages at once, issue #247): `maybe_first` answers
+  /// [`Self::first_messages_query`].
+  pub(crate) async fn catch_up_messages_from(
+    &mut self,
+    conversation: ConversationId,
+    mut maybe_first: Option<Result<ListMessagesResponse, ApiError>>,
+  ) -> Result<usize, CoreError> {
     let mut total = 0;
-    if records::get_json::<bool>(&self.store, Table::SyncState, &history_key)?.is_none() {
-      total += self.load_older_messages(conversation).await?;
-      records::put_json(&self.store, Table::SyncState, &history_key, &true)?;
+    if !self.is_history_loaded(conversation)? {
+      let query = self.first_messages_query(conversation)?;
+      let page = match maybe_first.take() {
+        Some(first) => first?,
+        None => self.api.list_messages(conversation, &query).await?,
+      };
+      total += page.messages.len();
+      for message in page.messages {
+        self.receive_message(message)?;
+      }
+      records::put_json(&self.store, Table::SyncState, &history_key(conversation), &true)?;
+      if query.maybe_before.is_none() {
+        // That was the newest page: what came since arrives as gateway events.
+        return Ok(total);
+      }
     }
     let maybe_newest = self
       .store
@@ -267,12 +287,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     let mut cursor = newest;
     loop {
-      let query = ListMessagesQuery {
-        maybe_before: None,
-        maybe_after: Some(cursor),
-        maybe_limit: Some(self.settings.history_page_size),
+      let page = match maybe_first.take() {
+        Some(first) => first?,
+        None => {
+          let query = ListMessagesQuery {
+            maybe_before: None,
+            maybe_after: Some(cursor),
+            maybe_limit: Some(self.settings.history_page_size),
+          };
+          self.api.list_messages(conversation, &query).await?
+        },
       };
-      let page = self.api.list_messages(conversation, &query).await?;
       total += page.messages.len();
       for message in page.messages {
         cursor = cursor.max(message.id);
@@ -282,6 +307,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         return Ok(total);
       }
     }
+  }
+
+  /// Whether the first page of history was loaded (the first catch-up of a conversation).
+  pub(crate) fn is_history_loaded(&self, conversation: ConversationId) -> Result<bool, CoreError> {
+    Ok(records::get_json::<bool>(&self.store, Table::SyncState, &history_key(conversation))?.is_some())
   }
 
   /// Decrypts and stores a message from the server. Messages whose content key hasn't arrived yet
@@ -619,6 +649,11 @@ fn early_controls_key(conversation: ConversationId, target: ClientMessageId) -> 
 }
 
 /// Where a conversation's bookmarks bar is kept: the newest `Bookmarks` message that was applied.
+/// Marks in [`Table::SyncState`] that a conversation's first page of history was loaded.
+fn history_key(conversation: ConversationId) -> String {
+  format!("history_loaded/{conversation}")
+}
+
 pub(crate) fn bookmarks_key(conversation: ConversationId) -> String {
   format!("bookmarks/{conversation}")
 }

@@ -178,10 +178,13 @@ fn classify(table: Table, key: &str) -> Change {
     Table::Presence => key.parse().map_or(Change::Nothing, Change::User),
     Table::AnnouncedPresence | Table::Unread | Table::Threads | Table::ReadReceipts => Change::Live,
     Table::PinnedIdentities => Change::Security,
+    // The "catching up" marks; the rest are sync cursors.
+    Table::SyncState => key
+      .strip_prefix(crate::client::CATCHING_UP_PREFIX)
+      .map_or(Change::Nothing, conversation_of),
     Table::ContentKeys
     | Table::MlsStorage
     | Table::AppliedChanges
-    | Table::SyncState
     | Table::Undecrypted
     | Table::PendingChanges
     | Table::SearchSegments
@@ -221,13 +224,14 @@ mod tests {
     let store = TrackedStore::new(MemoryStore::new());
     store.put(Table::Members, "7", b"[]").unwrap();
     store.put(Table::Account, "bookmarks/8", b"[]").unwrap();
+    store.put(Table::SyncState, "catching_up/9", b"true").unwrap();
     store.put(Table::Presence, "3", b"\"online\"").unwrap();
     store.put(Table::Presence, "announced", b"{}").unwrap();
     store.put(Table::MlsStorage, "x", b"1").unwrap();
     assert_eq!(
       store.take_changes(),
       StoreChanges {
-        conversations: [id(7), id(8)].into(),
+        conversations: [id(7), id(8), id(9)].into(),
         users: [id(3)].into(),
         is_live: true,
         ..StoreChanges::default()

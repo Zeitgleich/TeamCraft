@@ -178,6 +178,7 @@ impl PendingEnrollment {
       maybe_replay_left: None,
       member_join_attempts: HashMap::new(),
       maybe_waiting_checked_at_ms: None,
+      catch_up_focus: super::CatchUpFocus::default(),
     };
     client.persist_sync()?;
     client.store_wrapped_keys_blob(&wrapped_keys)?;

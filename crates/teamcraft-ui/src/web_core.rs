@@ -12,7 +12,7 @@
 //! Only one tab per account runs the core (`web_tabs`, e2ee.md §9.4); the others pass their calls
 //! to it.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::{Pin, pin};
@@ -34,7 +34,7 @@ use teamcraft_client_api::remote::{
 };
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
-use teamcraft_core::client::{LinkApproval, LinkedSecrets, NewDeviceLink};
+use teamcraft_core::client::{CatchUpFocus, LinkApproval, LinkedSecrets, NewDeviceLink};
 use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor};
 use teamcraft_core::push_preview::{PushSession, save_push_session};
@@ -611,6 +611,9 @@ struct Core {
   maybe_last_security: Option<SecuritySnapshot>,
   /// The UI's snapshot, rebuilt per conversation from what the store's writes touched (#246).
   snapshots: RefCell<SnapshotCache>,
+  /// The conversation the UI reads, which a catch-up takes first (issue #247); set also while a
+  /// sync holds the client.
+  catch_up_focus: CatchUpFocus,
   /// Requests that arrived during a connect and need the client; handled once it is done.
   deferred: VecDeque<Request>,
   /// The UI side hung up during a connect: the loop ends after it.
@@ -656,6 +659,7 @@ impl Core {
       maybe_push_check_at_ms: None,
       maybe_last_security: None,
       snapshots: RefCell::new(SnapshotCache::new(now_ms().unsigned_abs())),
+      catch_up_focus: CatchUpFocus::default(),
       deferred: VecDeque::new(),
       is_closed: false,
     }
@@ -827,6 +831,7 @@ impl Core {
       client.user_id(),
       Box::new(SystemClock),
     ));
+    self.catch_up_focus = client.catch_up_focus();
     self.client = Some(client);
     self.maybe_push_check_at_ms = Some(i64::MIN);
     store_string(&self.store_ready_key(), "1");
@@ -885,7 +890,10 @@ impl Core {
         start,
         len,
         reply,
-      } => drop(reply.send(self.window(conversation, start, len))),
+      } => {
+        self.catch_up_focus.set(conversation);
+        drop(reply.send(self.window(conversation, start, len)));
+      },
       Request::Attachment {
         conversation,
         message,
@@ -1322,6 +1330,7 @@ impl Core {
       store_health,
       maybe_last_security,
       snapshots,
+      catch_up_focus,
       deferred,
       is_closed,
       ..
@@ -1338,11 +1347,12 @@ impl Core {
           let reads = SyncReads {
             backend,
             store,
-            stored: StoredWorkspace::of(backend),
+            stored: Cell::new(StoredWorkspace::of(backend)),
             status,
             store_health,
             maybe_security: maybe_last_security.as_ref(),
             snapshots,
+            focus: catch_up_focus,
           };
           reads
             .serve(connecting.as_mut(), requests, deferred, is_closed)
@@ -1427,11 +1437,13 @@ fn millis(duration: Duration) -> i64 {
 struct SyncReads<'a> {
   backend: &'a CoreChatBackend<Store>,
   store: &'a Store,
-  stored: StoredWorkspace,
+  /// Becomes [`StoredWorkspace::Known`] as soon as the sync has stored the conversation list.
+  stored: Cell<StoredWorkspace>,
   status: &'a CoreStatus,
   store_health: &'a StoreHealth,
   maybe_security: Option<&'a SecuritySnapshot>,
   snapshots: &'a RefCell<SnapshotCache>,
+  focus: &'a CatchUpFocus,
 }
 
 impl SyncReads<'_> {
@@ -1463,6 +1475,9 @@ impl SyncReads<'_> {
         Either::Right((Either::Left((None, _)), _)) => *is_closed = true,
         Either::Right((Either::Right(((), _)), _)) => {
           let revision = self.store.inner().write_revision();
+          if revision != seen_revision && self.has_become_known(deferred) {
+            notify_local();
+          }
           if revision != seen_revision && is_page_visible() {
             seen_revision = revision;
             notify_local();
@@ -1472,6 +1487,24 @@ impl SyncReads<'_> {
     }
   }
 
+  /// A first sync stores the conversation list before it catches each one up (issue #247): from
+  /// then on the workspace is shown, each conversation marked while it is caught up, and the
+  /// requests that waited for it are answered. Returns whether that happened now.
+  fn has_become_known(&self, deferred: &mut VecDeque<Request>) -> bool {
+    if self.stored.get() == StoredWorkspace::Known
+      || StoredWorkspace::of(self.backend) == StoredWorkspace::Empty
+    {
+      return false;
+    }
+    self.stored.set(StoredWorkspace::Known);
+    for request in std::mem::take(deferred) {
+      if let Some(request) = self.answer(request) {
+        deferred.push_back(request);
+      }
+    }
+    true
+  }
+
   /// Answers a read; hands back a request that has to wait.
   fn answer(&self, request: Request) -> Option<Request> {
     let request = match request {
@@ -1479,7 +1512,7 @@ impl SyncReads<'_> {
       other => other,
     };
     let read = match &request {
-      Request::Status(_) if self.stored == StoredWorkspace::Empty => {
+      Request::Status(_) if self.stored.get() == StoredWorkspace::Empty => {
         // Ready with an empty store would show an empty workspace: the first sync is awaited.
         return Some(request);
       },
@@ -1489,11 +1522,15 @@ impl SyncReads<'_> {
         start,
         len,
         ..
-      } => Some(SyncRead::Messages {
-        conversation: *conversation,
-        start: *start,
-        len: *len,
-      }),
+      } => {
+        // The conversation the user opened is caught up next.
+        self.focus.set(*conversation);
+        Some(SyncRead::Messages {
+          conversation: *conversation,
+          start: *start,
+          len: *len,
+        })
+      },
       Request::Thread {
         conversation, thread, ..
       } => Some(SyncRead::Thread {
@@ -1505,7 +1542,7 @@ impl SyncReads<'_> {
       _ => return Some(request),
     };
     let maybe_answer = match read {
-      Some(read) => match answer_during_sync(read, self.backend, self.stored, self.maybe_security) {
+      Some(read) => match answer_during_sync(read, self.backend, self.stored.get(), self.maybe_security) {
         Some(answer) => Some(answer),
         None => return Some(request),
       },
@@ -1534,7 +1571,7 @@ impl SyncReads<'_> {
   /// The snapshot from the cache, as far as the sync has filled the store. Waits while the
   /// workspace was empty or no security part was taken yet (it needs the client).
   fn answer_snapshot(&self, request: Request) -> Option<Request> {
-    let (StoredWorkspace::Known, Some(security)) = (self.stored, self.maybe_security) else {
+    let (StoredWorkspace::Known, Some(security)) = (self.stored.get(), self.maybe_security) else {
       return Some(request);
     };
     let changes = self.store.take_changes();

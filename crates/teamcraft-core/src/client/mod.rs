@@ -10,6 +10,7 @@ mod attachments;
 mod attested;
 mod backgrounds;
 mod calls;
+mod catch_up;
 pub mod devices;
 mod enroll;
 pub mod files;
@@ -46,6 +47,8 @@ pub use actions::{OutgoingText, REPLY_EXCERPT_CHARS, forward_content, reply_ref}
 pub use attachments::{MAX_VIEWER_BYTES, OutgoingFile};
 pub use attested::{AttestationSettings, JwksSource};
 pub use calls::{CallEventSink, CallKeySigner};
+pub(crate) use catch_up::CATCHING_UP_PREFIX;
+pub use catch_up::{CatchUpFocus, is_catching_up};
 pub use enroll::{EnrollmentOptions, EnrollmentSecret, OrgRecoveryUnlock, PendingEnrollment};
 pub use gateway::{DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart};
 pub use group_health::{
@@ -165,6 +168,9 @@ pub struct ClientSettings {
   pub pending_actions: PendingActionSettings,
   /// Backoff and cap of file uploads that failed on the network (issue #316).
   pub upload_retry: files::UploadRetrySettings,
+  /// How many conversations a catch-up reads from the server at once (issue #247): member lists
+  /// and the first page of each queue and history. The MLS work itself stays one at a time.
+  pub catch_up_concurrency: usize,
 }
 
 pub struct Client<A, S> {
@@ -197,6 +203,8 @@ pub struct Client<A, S> {
   /// Events of a resume replay still to come: the counters are read once it has drained, because
   /// `GET /unread` already counts the missed messages the replay delivers (issue #183).
   maybe_replay_left: Option<u64>,
+  /// The conversation the user looks at; a catch-up takes it first (issue #247).
+  catch_up_focus: CatchUpFocus,
 }
 
 impl Default for ClientSettings {
@@ -233,6 +241,7 @@ impl Default for ClientSettings {
       max_announced_presence: 5_000,
       pending_actions: PendingActionSettings::default(),
       upload_retry: files::UploadRetrySettings::default(),
+      catch_up_concurrency: 6,
     }
   }
 }
@@ -273,7 +282,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_replay_left: None,
       member_join_attempts: HashMap::new(),
       maybe_waiting_checked_at_ms: None,
+      catch_up_focus: CatchUpFocus::default(),
     };
+    // A catch-up the app was closed during left its marks; the next one sets them again.
+    catch_up::clear_marks(&client.store)?;
     // Startup: removal records of the user's devices count from the start, and this device's own
     // (also from older versions) are shared.
     client.apply_shared_removals()?;

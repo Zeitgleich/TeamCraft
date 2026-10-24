@@ -1021,6 +1021,7 @@ fn demo_conversations() -> Vec<Conversation> {
     is_muted: false,
     can_post: true,
     bookmarks: Vec::new(),
+    is_catching_up: false,
   };
   use ConversationKind::{Integration, Private, Public};
   use SidebarCategory::{Channels, Integrations};
@@ -1195,6 +1196,7 @@ fn demo_conversations() -> Vec<Conversation> {
       is_muted: false,
       can_post: true,
       bookmarks: Vec::new(),
+      is_catching_up: false,
     });
   }
   list

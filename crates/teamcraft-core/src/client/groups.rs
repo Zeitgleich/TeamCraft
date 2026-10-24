@@ -15,8 +15,8 @@ use teamcraft_crypto::mls::{
 use teamcraft_proto::{
   AddConversationMemberRequest, Base64Bytes, ClaimKeyPackagesRequest, ConversationId, CreateChannelRequest,
   CreateDmRequest, CreateGroupDmRequest, DeviceId, HistoryPolicy, Id, IdempotencyKey, ListMlsMessagesQuery,
-  MlsMessageKind, MlsMessageResponse, MlsWelcome, PostMlsCommitRequest, PostMlsMessageRequest, SpaceId,
-  UserId,
+  ListMlsMessagesResponse, MlsMessageKind, MlsMessageResponse, MlsWelcome, PostMlsCommitRequest,
+  PostMlsMessageRequest, SpaceId, UserId,
 };
 
 use super::workspace::{PendingChange, SharedKeys};
@@ -543,7 +543,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Whether this device holds a DM group it founded and nobody else is in: still at epoch 0, no
   /// commit of its own in flight, and the DM's setup not finished.
-  fn is_unfinished_dm_founding(&mut self, id: ConversationId) -> Result<bool, CoreError> {
+  pub(crate) fn is_unfinished_dm_founding(&mut self, id: ConversationId) -> Result<bool, CoreError> {
     Ok(
       self.store.get(Table::SyncState, &dm_setup_key(id))?.is_some()
         && self.mls_epoch(id)? == Some(0)
@@ -691,13 +691,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// server never got it. A device that can't follow the group any more asks to be added back
   /// (e2ee.md §4.6).
   pub async fn sync_mls(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    self.sync_mls_from(conversation, None).await
+  }
+
+  /// [`Self::sync_mls`] with the queue's first page already read (a catch-up reads several
+  /// conversations' pages at once, issue #247).
+  pub(crate) async fn sync_mls_from(
+    &mut self,
+    conversation: ConversationId,
+    maybe_first: Option<Result<ListMlsMessagesResponse, ApiError>>,
+  ) -> Result<(), CoreError> {
     if self.is_unfinished_dm_founding(conversation)? {
       // Nobody else is in this group, so the queue can only hold another founding's group
       // (whose welcome replaces this one) or nothing: following it would only refuse its entries
       // and ask to be added back to a group this device was never in.
       return Ok(());
     }
-    let mut catch_up = match self.catch_up_mls(conversation).await {
+    let mut catch_up = match self.catch_up_mls(conversation, maybe_first).await {
       Ok(catch_up) => catch_up,
       // The server no longer lets this user read the queue: removed, with the removal commit
       // still to come or refused, or a server that wants this device to stop following the
@@ -714,7 +724,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // Neither this commit nor another one for the epoch is in the queue: the server never got
       // it. Another commit may win meanwhile; the next pass finds out.
       self.post_pending_again(conversation).await?;
-      catch_up = self.catch_up_mls(conversation).await?;
+      catch_up = self.catch_up_mls(conversation, None).await?;
     }
     if catch_up.is_behind {
       return self.request_rejoin(conversation, catch_up.current_epoch).await;
@@ -735,14 +745,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.sync_mls(conversation).await
   }
 
-  /// One pass over the queue after the cursor.
-  async fn catch_up_mls(&mut self, conversation: ConversationId) -> Result<CatchUp, CoreError> {
+  /// One pass over the queue after the cursor, starting with `maybe_first` when it was read ahead.
+  async fn catch_up_mls(
+    &mut self,
+    conversation: ConversationId,
+    mut maybe_first: Option<Result<ListMlsMessagesResponse, ApiError>>,
+  ) -> Result<CatchUp, CoreError> {
     loop {
-      let query = ListMlsMessagesQuery {
-        maybe_after: self.sync.mls_cursors.get(&conversation).copied(),
-        maybe_limit: None,
+      let page = match maybe_first.take() {
+        Some(first) => first?,
+        None => {
+          let query = ListMlsMessagesQuery {
+            maybe_after: self.sync.mls_cursors.get(&conversation).copied(),
+            maybe_limit: None,
+          };
+          self.api.list_mls_messages(conversation, &query).await?
+        },
       };
-      let page = self.api.list_mls_messages(conversation, &query).await?;
       for message in &page.messages {
         if self.process_mls(message).await? == MlsProgress::NeedsBacklog {
           // Every earlier entry was handled and the group is still an epoch behind: this device

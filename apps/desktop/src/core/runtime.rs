@@ -853,7 +853,13 @@ impl Core {
         start,
         len,
         reply,
-      } => drop(reply.send(self.window(conversation, start, len))),
+      } => {
+        // The next catch-up starts with the conversation the user looked at last (issue #247).
+        if let Some(client) = &self.client {
+          client.catch_up_focus().set(conversation);
+        }
+        drop(reply.send(self.window(conversation, start, len)));
+      },
       Request::Thread {
         conversation,
         thread,

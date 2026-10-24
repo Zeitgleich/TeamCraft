@@ -33,8 +33,8 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{BackgroundId, OrgBackgroundId};
 use teamcraft_proto::{
-  CategoryId, ConversationNotificationSettings, CreateSpaceRequest, HistoryPolicy, MoveChannelRequest,
-  UpdateConversationRequest, UpdateSpaceRequest, effective_notifications,
+  CategoryId, ConversationNotificationSettings, CreateSpaceRequest, EffectiveNotifications, HistoryPolicy,
+  MoveChannelRequest, UpdateConversationRequest, UpdateSpaceRequest, effective_notifications,
 };
 
 use teamcraft_client_api::notify::{MentionRules, is_mentioned};
@@ -455,6 +455,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       is_muted: self.is_muted(response),
       can_post: true,
       bookmarks: self.bookmarks_of(response.id),
+      is_catching_up: self.read(crate::client::is_catching_up(&self.store, response.id)),
     }
   }
 
@@ -462,9 +463,24 @@ impl<S: LocalStore> CoreChatBackend<S> {
   /// not passed yet, with the space's setting standing in for a conversation the member never
   /// configured.
   fn is_muted(&self, response: &ConversationResponse) -> bool {
-    let Some(membership) = &response.maybe_my_membership else {
+    let Some(effective) = self.effective_notifications(response) else {
       return false;
     };
+    effective.level == NotificationLevel::None
+      || effective
+        .maybe_muted_until
+        .is_some_and(|until| until.0 > self.now_ms())
+  }
+
+  /// When a mute that is on now ends by itself (Unix milliseconds): the conversation's entry
+  /// changes then without any write (issue #246, the snapshot cache reads it again).
+  pub(crate) fn mute_end(&self, response: &ConversationResponse) -> Option<i64> {
+    let until = self.effective_notifications(response)?.maybe_muted_until?.0;
+    (until > self.now_ms()).then_some(until)
+  }
+
+  fn effective_notifications(&self, response: &ConversationResponse) -> Option<EffectiveNotifications> {
+    let membership = response.maybe_my_membership.as_ref()?;
     let own = ConversationNotificationSettings {
       level: membership.notification_level.clone(),
       maybe_muted_until: membership.maybe_muted_until,
@@ -473,16 +489,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let maybe_space: Option<SpaceResponse> = response
       .maybe_space_id
       .and_then(|space| self.read(records::get_json(&self.store, Table::Spaces, &space.to_string())));
-    let effective = effective_notifications(
+    Some(effective_notifications(
       &own,
       maybe_space
         .as_ref()
         .and_then(|space| space.maybe_my_notifications.as_ref()),
-    );
-    effective.level == NotificationLevel::None
-      || effective
-        .maybe_muted_until
-        .is_some_and(|until| until.0 > self.now_ms())
+    ))
   }
 
   /// The bookmarks bar of a conversation, as the newest applied `Bookmarks` message set it.

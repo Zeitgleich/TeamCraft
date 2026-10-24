@@ -6,7 +6,7 @@
 //! differ from what it read last ([`SnapshotChanges`]). A new message costs one conversation's
 //! re-read and an answer with one entry; a presence event one person's entry and the live state.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::live::LiveSnapshot;
@@ -42,6 +42,9 @@ struct Parts {
   security: Revised<SecuritySnapshot>,
   /// When the live state (counts, threads, presence log, receipts) was last written.
   live_at: u64,
+  /// When muted conversations' mutes end by themselves: their entries change then without a
+  /// write, so they are read again once the time has come.
+  mute_ends: BTreeMap<ConversationId, i64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -165,10 +168,14 @@ impl Parts {
     let order = order_of(&spaces, &responses);
     let by_id: BTreeMap<ConversationId, &ConversationResponse> =
       responses.iter().map(|response| (response.id, response)).collect();
+    let mut mute_ends = BTreeMap::new();
     let conversations = order
       .iter()
       .filter_map(|id| by_id.get(id))
       .map(|response| {
+        if let Some(end) = backend.mute_end(response) {
+          mute_ends.insert(response.id, end);
+        }
         (
           response.id,
           Revised::new(part_of(backend, response, &shared), revision),
@@ -189,6 +196,7 @@ impl Parts {
       order: Revised::new(order, revision),
       security: Revised::new(SecuritySnapshot::default(), revision),
       live_at: revision,
+      mute_ends,
     }
   }
 
@@ -223,6 +231,7 @@ impl Parts {
     }
     self.conversations = conversations;
     is_changed |= self.order.set(fresh.order.value, revision);
+    self.mute_ends = fresh.mute_ends;
     if is_live {
       self.live_at = revision;
       is_changed = true;
@@ -259,11 +268,18 @@ impl Parts {
         },
       }
     }
-    let known: Vec<ConversationId> = changes
+    let now = backend.now_ms();
+    let unmuted = self
+      .mute_ends
+      .iter()
+      .filter(|(_, end)| **end <= now)
+      .map(|(conversation, _)| *conversation);
+    let known: BTreeSet<ConversationId> = changes
       .conversations
       .iter()
-      .filter(|conversation| self.conversations.contains_key(conversation))
       .copied()
+      .chain(unmuted)
+      .filter(|conversation| self.conversations.contains_key(conversation))
       .collect();
     if !known.is_empty() {
       let shared = Shared::read(backend, BTreeMap::new());
@@ -278,6 +294,10 @@ impl Parts {
         };
         let shared = shared.with_people_of(backend, &response);
         is_changed |= part.set(part_of(backend, &response, &shared), revision);
+        match backend.mute_end(&response) {
+          Some(end) => self.mute_ends.insert(conversation, end),
+          None => self.mute_ends.remove(&conversation),
+        };
       }
     }
     if changes.is_live {
