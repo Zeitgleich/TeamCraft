@@ -606,7 +606,11 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
               on:input=move |ev| edit_draft.set(event_target_value(&ev))
               on:keydown=move |ev| match ev.key().as_str() {
                 "Enter" if !ev.shift_key() => { ev.prevent_default(); save_edit(); },
-                "Escape" => is_editing.set(false),
+                "Escape" => {
+                  // Only the edit is cancelled; the feed doesn't take it as "mark read".
+                  ev.prevent_default();
+                  is_editing.set(false);
+                },
                 _ => {},
               }
             ></textarea>

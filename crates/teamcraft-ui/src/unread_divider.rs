@@ -5,7 +5,9 @@
 //! for a while; new messages that arrive while the user looks elsewhere move it to the first of
 //! them. Pure: the wiring lives in the message list, the composer and `AppState`.
 
-use crate::model::ConversationId;
+use std::time::Duration;
+
+use crate::model::{ConversationId, TimestampMs};
 use crate::state::UnreadMarker;
 
 /// What happened in a conversation, as far as its divider cares.
@@ -63,6 +65,31 @@ pub fn next_divider(
   }
 }
 
+/// How long the user has sat at the bottom of the focused conversation with a divider shown,
+/// against an injected clock (the message list feeds it `now` and arms one timer).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DwellClock {
+  maybe_since: Option<TimestampMs>,
+}
+
+impl DwellClock {
+  /// Whether the user is reading at the bottom right now; leaving the bottom starts over.
+  pub fn update(&mut self, is_reading: bool, now: TimestampMs) {
+    self.maybe_since = match (is_reading, self.maybe_since) {
+      (false, _) => None,
+      (true, Some(since)) => Some(since),
+      (true, None) => Some(now),
+    };
+  }
+
+  /// What is left of `dwell`; `None` while the user isn't reading at the bottom, zero once due.
+  pub fn remaining(&self, now: TimestampMs, dwell: Duration) -> Option<Duration> {
+    let since = self.maybe_since?;
+    let elapsed = Duration::from_millis(u64::try_from(now.saturating_sub(since)).unwrap_or(0));
+    Some(dwell.saturating_sub(elapsed))
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -117,6 +144,40 @@ mod tests {
       has_seen_divider: true,
     };
     assert_eq!(next_divider(None, here(), own), None);
+  }
+
+  mod dwell {
+    use super::*;
+
+    const DWELL: Duration = Duration::from_secs(10);
+
+    #[test]
+    fn counts_from_reaching_the_bottom_and_is_due_after_the_dwell() {
+      let mut clock = DwellClock::default();
+      assert_eq!(clock.remaining(0, DWELL), None);
+      clock.update(true, 1_000);
+      clock.update(true, 5_000);
+      assert_eq!(clock.remaining(5_000, DWELL), Some(Duration::from_secs(6)));
+      assert_eq!(clock.remaining(11_000, DWELL), Some(Duration::ZERO));
+      assert_eq!(clock.remaining(60_000, DWELL), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn leaving_the_bottom_or_the_window_starts_over() {
+      let mut clock = DwellClock::default();
+      clock.update(true, 1_000);
+      clock.update(false, 8_000);
+      assert_eq!(clock.remaining(9_000, DWELL), None);
+      clock.update(true, 9_000);
+      assert_eq!(clock.remaining(10_000, DWELL), Some(Duration::from_secs(9)));
+    }
+
+    #[test]
+    fn a_clock_running_backwards_does_not_fire_early() {
+      let mut clock = DwellClock::default();
+      clock.update(true, 10_000);
+      assert_eq!(clock.remaining(4_000, DWELL), Some(DWELL));
+    }
   }
 
   fn here() -> ConversationId {

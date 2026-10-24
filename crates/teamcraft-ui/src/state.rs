@@ -734,6 +734,10 @@ impl AppState {
       self.panel.set(SidePanel::Closed);
     }
     if self.view.get_untracked() != MainView::Conversation(id) {
+      // Leaving a conversation removes its divider; the new one is placed from its read marker.
+      if let MainView::Conversation(previous) = self.view.get_untracked() {
+        self.divider_event(previous, DividerEvent::Left);
+      }
       self.unread_marker.set(self.unread_marker_for(&conversation));
       self.settings.remember_conversation(id);
       self.linked_message.set(None);
@@ -2000,6 +2004,56 @@ mod tests {
         .read(|backend| backend.conversation(unread))
         .expect("still there");
       assert_eq!(after.unread_count, 0);
+    }
+
+    #[test]
+    fn only_a_real_conversation_change_counts_as_leaving() {
+      let state = test_state();
+      let unread = unread_conversation(&state);
+      state.open_conversation(unread);
+      place_divider(&state, unread);
+      // Opening the same conversation again (a remount, a route written another way) keeps it.
+      state.open_conversation(unread);
+      assert_eq!(
+        state
+          .unread_marker
+          .get_untracked()
+          .map(|marker| marker.conversation),
+        Some(unread)
+      );
+      state.open_conversation(first_dm(&state));
+      assert!(
+        state
+          .unread_marker
+          .get_untracked()
+          .is_none_or(|marker| marker.conversation != unread)
+      );
+    }
+
+    #[test]
+    fn the_divider_never_moves_the_read_marker_back() {
+      let state = test_state();
+      let unread = unread_conversation(&state);
+      state.mark_conversation_read(unread);
+      // News while away places a divider; that is view state only, nothing becomes unread again.
+      state.divider_event(
+        unread,
+        DividerEvent::ArrivedWhileAway {
+          first_new: 2,
+          is_own: false,
+          has_seen_divider: true,
+        },
+      );
+      assert_eq!(
+        state.unread_marker.get_untracked().map(|marker| marker.index),
+        Some(2)
+      );
+      let after = state
+        .read(|backend| backend.conversation(unread))
+        .expect("still there");
+      assert_eq!(after.unread_count, 0);
+      state.divider_event(unread, DividerEvent::DwelledAtBottom);
+      assert_eq!(state.unread_marker.get_untracked(), None);
     }
 
     fn place_divider(state: &AppState, conversation: ConversationId) {
