@@ -1,7 +1,8 @@
 //! Serves the web client: static files from a configured directory (the `trunk build` output of
 //! `teamcraft-ui`) as the router's fallback, so every API route wins.
 //!
-//! - Unknown paths get `index.html` (client-side routing); unknown `/api/...` paths stay 404.
+//! - Unknown paths get `index.html` (client-side routing); unknown `/api/...` and `/.well-known/...`
+//!   paths stay 404.
 //! - Files whose name carries a content hash (`app-3f2a9c1b7d4e5f60.wasm`, as trunk writes them) are
 //!   cached for a year; `index.html` and everything else must be revalidated.
 //! - Precompressed variants next to a file (`<file>.br`, `<file>.gz`, written by
@@ -37,6 +38,7 @@ const REVALIDATE: &str = "no-cache";
 const SHORT_LIVED: &str = "public, max-age=3600";
 const NEVER_STORE: &str = "no-store";
 const INDEX: &str = "index.html";
+const WELL_KNOWN_DIR: &str = ".well-known";
 const DOWNLOAD_PAGE: &str = "download.html";
 const SRI_OPEN: &str = "{{sri:";
 const MIN_HASH_DIGITS: usize = 12;
@@ -69,12 +71,16 @@ pub fn router(config: &WebConfig) -> Router {
     .precompressed_br()
     .precompressed_gzip()
     .fallback(ServeFile::new(dir.join(INDEX)));
+  // Files that other services look up by name (security.txt, app links) are served if they exist
+  // and are a plain 404 otherwise: an app shell with 200 there would read as a broken file.
+  let well_known = ServeDir::new(dir.join(WELL_KNOWN_DIR));
   let policy = Some(policy_header(&config.resolved_content_security_policy()));
   let router = match maybe_share {
     Some(bundle) => share_routes(Router::new(), bundle),
     None => Router::new().route("/f/{id}", get(share_page_handler).with_state(dir)),
   };
   router
+    .nest_service("/.well-known", well_known)
     .route(
       "/api/{*rest}",
       get(api_not_found)
@@ -317,7 +323,8 @@ mod tests {
   }
 
   /// The web client's routes (teamcraft-ui `route.rs`) are client-side: a reload or a deep link on
-  /// any of them gets the app shell, never cached, while files and the API keep their own answers.
+  /// any of them gets the app shell, never cached, while files, the API and `/.well-known/` keep
+  /// their own answers.
   #[tokio::test]
   async fn client_routes_get_the_app_shell() {
     let dir = std::env::temp_dir().join(format!("teamcraft-web-routes-{}", std::process::id()));
@@ -325,6 +332,8 @@ mod tests {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(INDEX), "<!doctype html><title>shell</title>").unwrap();
     std::fs::write(dir.join("favicon.ico"), b"ico").unwrap();
+    std::fs::create_dir_all(dir.join(WELL_KNOWN_DIR)).unwrap();
+    std::fs::write(dir.join(WELL_KNOWN_DIR).join("security.txt"), b"Contact: x").unwrap();
     let base = serve(router(&WebConfig {
       maybe_static_dir: Some(dir.clone()),
       ..WebConfig::default()
@@ -378,6 +387,20 @@ mod tests {
     assert_eq!(icon.bytes().await.unwrap().as_ref(), b"ico");
     let api = client.get(format!("{base}/api/v1/nothing")).send().await.unwrap();
     assert_eq!(api.status(), StatusCode::NOT_FOUND);
+    let security = client
+      .get(format!("{base}/.well-known/security.txt"))
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(security.bytes().await.unwrap().as_ref(), b"Contact: x");
+    for path in [
+      "/.well-known/assetlinks.json",
+      "/.well-known/apple-app-site-association",
+      "/.well-known/acme-challenge/token",
+    ] {
+      let missing = client.get(format!("{base}{path}")).send().await.unwrap();
+      assert_eq!(missing.status(), StatusCode::NOT_FOUND, "{path}");
+    }
     drop(std::fs::remove_dir_all(&dir));
   }
 

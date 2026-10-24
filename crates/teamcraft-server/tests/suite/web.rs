@@ -109,6 +109,32 @@ async fn the_shell_is_served_at_the_root_and_for_client_side_routes_without_cach
 }
 
 #[tokio::test]
+async fn health_probes_and_well_known_paths_never_get_the_shell() {
+  let site = Site::create();
+  let Some(app) = start(&site).await else { return };
+
+  for path in ["/healthz", "/readyz"] {
+    let (status, headers, body) = get(&app, path).await;
+    assert_eq!(status, StatusCode::OK, "{path}");
+    assert!(
+      header(&headers, "content-type").starts_with("application/json"),
+      "{path}"
+    );
+    assert_ne!(String::from_utf8(body).unwrap(), INDEX, "{path}");
+  }
+  for path in [
+    "/.well-known/assetlinks.json",
+    "/.well-known/apple-app-site-association",
+    "/.well-known/security.txt",
+  ] {
+    let (status, _, body) = get(&app, path).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+    assert_ne!(String::from_utf8(body).unwrap(), INDEX, "{path}");
+  }
+  app.stop().await;
+}
+
+#[tokio::test]
 async fn hashed_assets_are_cached_for_a_year_and_other_files_briefly() {
   let site = Site::create();
   let Some(app) = start(&site).await else { return };
