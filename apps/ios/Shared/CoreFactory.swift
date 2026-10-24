@@ -27,36 +27,43 @@ final class ClosureEventListener: EventListener, @unchecked Sendable {
 }
 
 enum CoreFactoryError: Error, Equatable {
-  /// Not signed in (no account, or no database key yet).
+  /// Not signed in (no server, no account, or no database key yet).
   case noAccount
 }
 
-/// Opens the Rust core for the signed-in account from the shared container and keychain. The app
-/// and the notification extension both use it, so they open the same sealed database.
+/// Opens the Rust core for the signed-in account of the active server from the shared container
+/// and keychain. The app and the notification extension both use it, so they open the same sealed
+/// database.
 struct CoreFactory {
   let environment: AppEnvironment
   let container: SharedContainer
   let keys: DatabaseKeyStore
   let vault: SessionVault
+  let servers: ServerStore
 
   init(
     environment: AppEnvironment = .current,
     container: SharedContainer? = nil,
     keys: DatabaseKeyStore = DatabaseKeyStore(),
-    vault: SessionVault = SessionVault()
+    vault: SessionVault = SessionVault(),
+    servers: ServerStore = ServerStore()
   ) {
     self.environment = environment
     self.container = container ?? SharedContainer(environment: environment)
     self.keys = keys
     self.vault = vault
+    self.servers = servers
   }
 
-  /// The app creates the database key on first sign-in (`createKey`); the extension never does.
+  /// Opens the core for `account` (the OIDC subject) on the active server. The app creates the
+  /// database key on first sign-in (`createKey`); the extension never does.
   func open(account: String, createKey: Bool, listener: EventListener) throws -> TeamCraft {
+    guard let server = servers.activeServer else { throw CoreFactoryError.noAccount }
+    let keyName = Self.databaseKeyName(storageKey: server.address.storageKey, account: account)
     let key: Data
     if createKey {
-      key = try keys.key(for: account)
-    } else if let existing = try keys.existingKey(for: account) {
+      key = try keys.key(for: keyName)
+    } else if let existing = try keys.existingKey(for: keyName) {
       key = existing
     } else {
       throw CoreFactoryError.noAccount
@@ -64,12 +71,24 @@ struct CoreFactory {
     // Created with its protection class before the core writes into it.
     _ = container.downloadsDirectory
     let config = AppConfig(
-      serverUrl: environment.serverURL.absoluteString,
+      serverUrl: server.address.origin,
       dataDir: container.dataDirectory.path,
       account: account,
       databaseKey: key,
       pushGatewayUrl: environment.pushGatewayURL?.absoluteString)
     return try TeamCraft(config: config, tokens: VaultTokenProvider(vault: vault), listener: listener)
+  }
+
+  /// Deletes the database key of `account` on the active server (sign-out).
+  func deleteDatabaseKey(account: String) {
+    guard let active = servers.active else { return }
+    try? keys.delete(for: Self.databaseKeyName(storageKey: active.storageKey, account: account))
+  }
+
+  /// One key per server and account, so the same subject on two servers never shares a key.
+  /// Storage keys never contain `|`, so the name splits back unambiguously.
+  static func databaseKeyName(storageKey: String, account: String) -> String {
+    "\(storageKey)|\(account)"
   }
 }
 

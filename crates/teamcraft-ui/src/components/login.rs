@@ -7,7 +7,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_proto::GetMeResponse;
 
-use crate::auth::tauri;
+use crate::auth::tauri::{self, ServerCheck, ServerProblem};
 use crate::auth::{self, AppConfig};
 use crate::backend::Backend;
 use crate::brand::Brand;
@@ -39,6 +39,10 @@ pub fn SessionGate(settings: Settings) -> impl IntoView {
   view! {
     {move || match control.state.get() {
       SessionState::Checking => view! { <CheckingScreen /> }.into_any(),
+      SessionState::NeedsServer { maybe_address, maybe_problem } => {
+        view! { <ServerEntryScreen maybe_address=maybe_address maybe_problem=maybe_problem control=control /> }.into_any()
+      },
+      SessionState::ConfirmServer(check) => view! { <ServerConfirmScreen check=*check control=control /> }.into_any(),
       SessionState::SignedOut(problem) => view! { <LoginScreen problem=problem control=control /> }.into_any(),
       SessionState::SigningIn => view! { <SigningInScreen control=control /> }.into_any(),
       SessionState::NeedsEnrollment { me, has_existing_identity, was_data_lost } => {
@@ -207,7 +211,140 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
       <Show when=|| !tauri::is_available() fallback=|| ()>
         <LocalSignIn control=control />
       </Show>
+      <ServerLine control=control />
       {demo_switch()}
+    </AuthFrame>
+  }
+}
+
+/// Desktop: which server the sign-in is for, and the way to another one.
+#[component]
+fn ServerLine(control: SessionControl) -> impl IntoView {
+  let i18n = use_i18n();
+  move || {
+    control.server.get().map(|server| {
+      view! {
+        <p class="auth-server muted-text small">
+          <span translate="no">{i18n.t_with("server-entry-current", &[("host", &server.host)])}</span>
+          <Show when=move || !control.is_server_locked.get() fallback=|| ()>
+            " "
+            <button class="link-btn" on:click=move |_| control.change_server()>
+              {move || i18n.t("server-entry-change")}
+            </button>
+          </Show>
+        </p>
+      }
+    })
+  }
+}
+
+/// Desktop, first start: the address of the server to sign in to.
+#[component]
+fn ServerEntryScreen(
+  maybe_address: Option<String>,
+  maybe_problem: Option<ServerProblem>,
+  control: SessionControl,
+) -> impl IntoView {
+  let i18n = use_i18n();
+  let address = RwSignal::new(maybe_address.unwrap_or_default());
+  let submit = move |ev: web_sys::SubmitEvent| {
+    ev.prevent_default();
+    control.check_server(address.get_untracked());
+  };
+  view! {
+    <AuthFrame>
+      <h1>{move || i18n.t("server-entry-title")}</h1>
+      <p class="muted-text">{move || i18n.t("server-entry-subtitle")}</p>
+      <form class="auth-server-entry" on:submit=submit>
+        <label for="server-address">{move || i18n.t("server-entry-label")}</label>
+        <input
+          id="server-address"
+          class="input"
+          type="text"
+          inputmode="url"
+          autocomplete="url"
+          autocapitalize="off"
+          spellcheck="false"
+          placeholder="team.example.com"
+          required
+          data-autofocus
+          prop:readonly=move || control.is_server_locked.get()
+          prop:value=move || address.get()
+          on:input=move |ev| address.set(event_target_value(&ev))
+        />
+        <p class="muted-text small">{move || i18n.t("server-entry-hint")}</p>
+        {maybe_problem.map(|problem| {
+          view! {
+            <div class="auth-alert" role="alert">
+              <Icon name=IconName::Alert />
+              <div>
+                <p>{move || i18n.t(&problem.key)}</p>
+                <p class="small mono" translate="no">{problem.detail.clone()}</p>
+              </div>
+            </div>
+          }
+        })}
+        <div class="auth-actions">
+          <button type="submit" class="btn btn-primary" prop:disabled=move || control.is_checking_server.get()>
+            <Show when=move || control.is_checking_server.get() fallback=|| ()>
+              <span class="spinner" aria-hidden="true"></span>
+            </Show>
+            <span>{move || i18n.t("server-entry-continue")}</span>
+          </button>
+        </div>
+      </form>
+    </AuthFrame>
+  }
+}
+
+/// Desktop: the server answered; its name and host are confirmed before the browser opens.
+#[component]
+fn ServerConfirmScreen(check: ServerCheck, control: SessionControl) -> impl IntoView {
+  let i18n = use_i18n();
+  let name = check.server.display_name.clone();
+  let host = check.server.host.clone();
+  let initial = name.chars().next().map(String::from).unwrap_or_default();
+  let provider = check.identity_provider_host.clone();
+  let warning_host = provider.clone();
+  let is_elsewhere = check.is_identity_provider_elsewhere;
+  view! {
+    <AuthFrame>
+      <h1>{move || i18n.t("server-entry-confirm-title")}</h1>
+      <div class="auth-server-card">
+        <span class="auth-logo" aria-hidden="true">{initial}</span>
+        <div>
+          <strong translate="no">{name}</strong>
+          <p class="muted-text small mono" translate="no">{host}</p>
+        </div>
+      </div>
+      <p class="auth-provider small">
+        <span translate="no">{i18n.t_with("server-entry-provider", &[("host", &provider)])}</span>
+      </p>
+      {is_elsewhere
+        .then(|| {
+          view! {
+            <div class="auth-alert" role="alert">
+              <Icon name=IconName::Alert />
+              <p>{i18n.t_with("server-entry-provider-elsewhere", &[("host", &warning_host)])}</p>
+            </div>
+          }
+        })}
+      <p class="muted-text">{move || i18n.t("server-entry-confirm-body")}</p>
+      <div class="auth-actions">
+        <button
+          class="btn btn-primary"
+          data-autofocus
+          prop:disabled=move || control.is_checking_server.get()
+          on:click=move |_| control.confirm_server(check.clone())
+        >
+          {move || i18n.t("server-entry-confirm")}
+        </button>
+        <Show when=move || !control.is_server_locked.get() fallback=|| ()>
+          <button class="btn" on:click=move |_| control.change_server()>
+            {move || i18n.t("server-entry-other")}
+          </button>
+        </Show>
+      </div>
     </AuthFrame>
   }
 }

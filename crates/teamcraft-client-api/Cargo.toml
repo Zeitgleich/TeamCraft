@@ -17,6 +17,10 @@ serde.workspace = true
 thiserror.workspace = true
 # Release versions for desktop updates (1.2.3-rc.1 < 1.2.3); already in the tree through Tauri.
 semver = "1"
-
-[dev-dependencies]
+# The server entry: what users type becomes a server origin; the server's answer is JSON.
+url.workspace = true
 serde_json.workspace = true
+# The server entry's warning about an identity provider outside the server's registrable domain
+# needs the Public Suffix List; this crate embeds it (no I/O, builds for wasm).
+psl = "2"
+

@@ -53,6 +53,10 @@ struct RecoveryProgress: Equatable {
 /// What the app shows at the top level.
 enum AppPhase {
   case starting
+  /// Asks for the server address; `address` prefills the field (a preconfigured or the last input).
+  case needsServer(address: String, failure: ServerFailure?)
+  /// A server passed the checks; the user confirms it before signing in.
+  case confirmServer(CheckedServer)
   case signedOut(AppFailure?)
   case needsEnrollment(hasExistingIdentity: Bool, failure: AppFailure?)
   case linking(LinkProgress)
@@ -83,13 +87,19 @@ final class AppModel {
   private(set) var connection: ConnectionState?
 
   let calls = CallManager()
-  /// The server's brand for the sign-in screen.
-  let brand = BrandStore(serverURL: AppEnvironment.current.serverURL)
+  /// The server's brand for the confirmation and sign-in screens.
+  let brand = BrandStore()
+  /// The server the device's management or the build names (read at start).
+  private(set) var managedServer = ManagedServer(maybeAddress: nil, isLocked: false)
+  /// The account's server; `nil` until one is chosen.
+  private(set) var maybeServer: StoredServer?
 
-  @ObservationIgnored private let vault = SessionVault()
+  @ObservationIgnored private let servers = ServerStore()
+  @ObservationIgnored private lazy var vault = SessionVault(servers: servers)
   @ObservationIgnored private let container = SharedContainer()
-  @ObservationIgnored private lazy var factory = CoreFactory(container: container, vault: vault)
+  @ObservationIgnored private lazy var factory = CoreFactory(container: container, vault: vault, servers: servers)
   @ObservationIgnored private let login = WebLogin()
+  @ObservationIgnored private let serverInfo = ServerInfoClient()
   @ObservationIgnored private lazy var processLock = ProcessLock(fileURL: container.lockFileURL)
   @ObservationIgnored private let storeChanges = StoreChangeNotifier()
   @ObservationIgnored private var maybeCore: TeamCraft?
@@ -105,27 +115,84 @@ final class AppModel {
 
   // MARK: Start and sign-in
 
-  /// Opens the stored session, if any. Safe to call more than once.
+  /// Opens the stored server and session, if any. Safe to call more than once.
   func bootstrap() async {
     guard case .starting = phase else { return }
     storeChanges.observe { [weak self] in self?.storeDidChange() }
     // Starts following the network, so changes reach the core from now on.
     _ = NetworkMonitor.shared
+    removeLegacyAccount()
     // Copies of picked files older than a week were uploaded long ago.
     container.pruneUploads(olderThan: 7 * 24 * 3600)
-    await refreshAccountState()
+    await startWithServer()
   }
 
   /// After a failed start: tries to open the account again.
   func retry() async {
     phase = .starting
-    await refreshAccountState()
+    await startWithServer()
+  }
+
+  // MARK: Server
+
+  /// Whether the user may only use the server the device's management set.
+  var isServerLocked: Bool { managedServer.isLocked }
+
+  /// Checks what the user typed or pasted (address, URL, invite or message link): normalises it,
+  /// asks the server and shows it for confirmation; stays at the entry with the reason otherwise.
+  func checkServer(_ input: String) async {
+    await busy {
+      do {
+        let address = try normalizeServerAddress(input: input, allowInsecureHttp: AppEnvironment.allowsInsecureHttp)
+        guard managedServer.allows(origin: address.origin, normalize: Self.normalizedOrigin) else {
+          phase = .needsServer(address: input, failure: .locked)
+          return
+        }
+        guard let url = URL(string: address.serverInfoUrl) else { throw URLError(.badURL) }
+        let answer = try await serverInfo.fetch(url)
+        let environment = AppEnvironment.current
+        let checked = try checkServerInfo(
+          origin: address.origin, status: answer.status, contentType: answer.contentType, body: answer.body,
+          clientVersion: environment.clientVersion, redirectUri: environment.oidcRedirectURI.absoluteString,
+          allowInsecureHttp: AppEnvironment.allowsInsecureHttp, language: Locale.preferredLanguages.first ?? "en")
+        brand.select(checked.server.address, initial: checked.maybeBrand)
+        phase = .confirmServer(checked)
+      } catch let error as URLError {
+        phase = .needsServer(address: input, failure: ServerFailure(transport: error))
+      } catch {
+        phase = .needsServer(address: input, failure: ServerFailure(entryError: error))
+      }
+    }
+  }
+
+  /// The user confirmed the checked server: it becomes the account's server, sign-in follows.
+  func confirmServer() {
+    guard case .confirmServer(let checked) = phase else { return }
+    servers.activate(checked.server)
+    maybeServer = checked.server
+    phase = .signedOut(nil)
+  }
+
+  /// Back to the server entry, from the confirmation or the sign-in screen (signed out, so no
+  /// account data is at stake). Not while the server is locked.
+  func changeServer() {
+    guard !managedServer.isLocked else { return }
+    if case .signedOut = phase {
+      servers.forgetActive()
+    }
+    maybeServer = nil
+    brand.select(nil)
+    phase = .needsServer(address: "", failure: nil)
   }
 
   func signIn() async {
+    guard let server = maybeServer else {
+      phase = .needsServer(address: "", failure: nil)
+      return
+    }
     await busy {
       do {
-        let session = try await login.login()
+        let session = try await login.login(server: server)
         try vault.save(session)
         container.activeAccount = session.subject
         container.displayName = session.displayName
@@ -138,27 +205,11 @@ final class AppModel {
     }
   }
 
+  /// Ends the session; the server stays, so signing in again is one tap ("Change server" leads to
+  /// another one).
   func signOut() async {
     await busy {
-      await stopSyncing()
-      // Before the keys go: deletes the push key here, ends the sealed device token at the gateway
-      // and the registration on the server, so the server can't push to this phone any more.
-      // Best effort and at most a few seconds; offline, the push key is still gone.
-      if let core = try? core() {
-        await Self.awaitAtMost(seconds: 5) { try? await core.unregisterPush() }
-      }
-      if let account = container.activeAccount {
-        try? factory.keys.delete(for: account)
-      }
-      maybeCore = nil
-      connection = nil
-      vault.clear()
-      NotificationAuthenticator().removeKey()
-      container.wipeDownloads()
-      container.pruneUploads(olderThan: 0)
-      container.activeAccount = nil
-      container.displayName = nil
-      UserDefaults.standard.removeObject(forKey: Self.pushTokenKey)
+      await endSession()
       phase = .signedOut(nil)
     }
   }
@@ -676,8 +727,76 @@ final class AppModel {
     return Wire.decode(ChatAnswer.self, from: json)
   }
 
+  /// Picks the server at start: the stored one, a preconfigured one to confirm, or the entry.
+  private func startWithServer() async {
+    managedServer = ManagedServer.current()
+    let stored = servers.activeServer
+    // A stored entry the core no longer accepts is dropped; its server is entered again.
+    if stored == nil { servers.forgetActive() }
+    let decision = ServerStartDecision.decide(
+      maybeStoredOrigin: stored?.address.origin, managed: managedServer, normalize: Self.normalizedOrigin)
+    switch decision {
+    case .useStored:
+      maybeServer = stored
+      brand.select(stored?.address)
+      await refreshAccountState()
+    case .forgetStoredAndCheck(let address):
+      // The management locks another server: this account may not stay on the device.
+      await endSession()
+      servers.forgetActive()
+      maybeServer = nil
+      await checkServer(address)
+    case .check(let address):
+      await checkServer(address)
+    case .enterServer:
+      phase = .needsServer(address: "", failure: nil)
+    }
+  }
+
+  /// The origin `address` normalises to, `nil` when unusable.
+  nonisolated private static func normalizedOrigin(_ address: String) -> String? {
+    try? normalizeServerAddress(input: address, allowInsecureHttp: AppEnvironment.allowsInsecureHttp).origin
+  }
+
+  /// Signs the active account out on this device: push registration, keys, session and local
+  /// plaintext go; the server entry stays.
+  private func endSession() async {
+    await stopSyncing()
+    // Before the keys go: deletes the push key here, ends the sealed device token at the gateway
+    // and the registration on the server, so the server can't push to this phone any more.
+    // Best effort and at most a few seconds; offline, the push key is still gone.
+    if let core = try? core() {
+      await Self.awaitAtMost(seconds: 5) { try? await core.unregisterPush() }
+    }
+    if let account = container.activeAccount {
+      factory.deleteDatabaseKey(account: account)
+    }
+    maybeCore = nil
+    connection = nil
+    vault.clear()
+    NotificationAuthenticator().removeKey()
+    container.wipeDownloads()
+    container.pruneUploads(olderThan: 0)
+    container.activeAccount = nil
+    container.displayName = nil
+    UserDefaults.standard.removeObject(forKey: Self.pushTokenKey)
+  }
+
+  /// Builds before server entry kept one session under a fixed name: it is deleted with its
+  /// database key and data, and the user enters the server and signs in again.
+  private func removeLegacyAccount() {
+    guard vault.removeLegacySession() else { return }
+    if let account = container.activeAccount {
+      try? factory.keys.delete(for: account)
+    }
+    container.removeLegacyData()
+    container.activeAccount = nil
+    container.displayName = nil
+    UserDefaults.standard.removeObject(forKey: Self.pushTokenKey)
+  }
+
   private func refreshAccountState() async {
-    guard vault.load() != nil, container.activeAccount != nil else {
+    guard maybeServer != nil, vault.load() != nil, container.activeAccount != nil else {
       phase = .signedOut(nil)
       return
     }

@@ -35,6 +35,8 @@ import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.ui.screens.BrowseScreen
 import de.zeitgleich.teamcraft.ui.screens.ChatListScreen
+import de.zeitgleich.teamcraft.ui.screens.ConfirmServerScreen
+import de.zeitgleich.teamcraft.ui.screens.ServerEntryScreen
 import de.zeitgleich.teamcraft.ui.screens.FilesScreen
 import de.zeitgleich.teamcraft.ui.screens.MeetingsScreen
 import de.zeitgleich.teamcraft.ui.screens.SavedScreen
@@ -66,17 +68,39 @@ fun AppRoot(
   val state by viewModel.appState.collectAsState()
   val isBusy by viewModel.isBusy.collectAsState()
   val brand by viewModel.loginBrand.collectAsState()
+  val maybeServer by viewModel.server.collectAsState()
+  val isServerLocked by viewModel.isServerLocked.collectAsState()
   val isDark = isSystemInDarkTheme()
   val scope = rememberCoroutineScope()
   when (val current = state) {
     AppState.Starting -> LoadingScreen()
+    is AppState.NeedsServer -> ServerEntryScreen(
+      prefill = current.prefill,
+      maybeError = current.maybeError,
+      isLocked = current.isLocked,
+      isBusy = isBusy,
+      onSubmit = viewModel::submitServer,
+    )
+    is AppState.ConfirmServer -> ConfirmServerScreen(
+      checked = current.checked,
+      maybeBrand = brand,
+      maybeLogo = remember(brand, isDark) { viewModel.brandLogo(isDark) },
+      isBusy = isBusy,
+      onContinue = {
+        scope.launch {
+          if (viewModel.confirmServer()) viewModel.loginIntent()?.let(onLogin)
+        }
+      },
+      maybeOnOtherServer = if (isServerLocked) null else viewModel::useAnotherServer,
+    )
     is AppState.SignedOut -> LoginScreen(
       maybeBrand = brand,
       maybeLogo = remember(brand, isDark) { viewModel.brandLogo(isDark) },
-      serverHost = viewModel.serverHost,
+      serverHost = maybeServer?.address?.host.orEmpty(),
       maybeError = current.maybeError,
       isBusy = isBusy,
-      onLogin = { scope.launch { runCatching { onLogin(viewModel.loginIntent()) } } },
+      onLogin = { scope.launch { viewModel.loginIntent()?.let(onLogin) } },
+      maybeOnChangeServer = if (isServerLocked) null else ({ viewModel.changeServer() }),
     )
     is AppState.NeedsEnrollment -> EnrollScreen(
       hasExistingIdentity = current.hasExistingIdentity,

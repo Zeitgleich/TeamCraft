@@ -6,31 +6,25 @@ use super::AuthError;
 const SERVICE: &str = "de.zeitgleich.teamcraft";
 const ACCOUNT: &str = "oidc-refresh-token";
 
-/// Where the refresh token lives between runs.
+/// Where the refresh tokens live between runs, one per server (`server` is its origin).
 pub trait TokenStore: Send + Sync + 'static {
-  fn load(&self) -> impl Future<Output = Result<Option<SecretString>, AuthError>> + Send;
-  fn save(&self, refresh_token: &str) -> impl Future<Output = Result<(), AuthError>> + Send;
-  fn clear(&self) -> impl Future<Output = Result<(), AuthError>> + Send;
+  fn load(&self, server: &str) -> impl Future<Output = Result<Option<SecretString>, AuthError>> + Send;
+  fn save(&self, server: &str, refresh_token: &str) -> impl Future<Output = Result<(), AuthError>> + Send;
+  fn clear(&self, server: &str) -> impl Future<Output = Result<(), AuthError>> + Send;
 }
 
-/// The OS keyring: Secret Service on Linux, Keychain on macOS.
-pub struct KeyringStore {
-  /// Distinguishes servers, so signing in to another instance does not overwrite this one.
-  account: String,
-}
+/// The OS keyring: Secret Service on Linux, Keychain on macOS. One entry per server origin, so
+/// signing in to another instance never overwrites or reuses this one's token.
+#[derive(Default)]
+pub struct KeyringStore;
 
 impl KeyringStore {
-  pub fn new(issuer: &str) -> Self {
-    Self {
-      account: format!("{ACCOUNT}@{issuer}"),
-    }
-  }
-
   async fn run<T: Send + 'static>(
     &self,
+    server: &str,
     action: impl FnOnce(keyring::Entry) -> keyring::Result<T> + Send + 'static,
   ) -> Result<T, AuthError> {
-    let account = self.account.clone();
+    let account = format!("{ACCOUNT}@{server}");
     // Keyring calls block (D-Bus on Linux); keep them off the async executor.
     tauri::async_runtime::spawn_blocking(move || {
       let entry = keyring::Entry::new(SERVICE, &account)?;
@@ -43,9 +37,9 @@ impl KeyringStore {
 }
 
 impl TokenStore for KeyringStore {
-  async fn load(&self) -> Result<Option<SecretString>, AuthError> {
+  async fn load(&self, server: &str) -> Result<Option<SecretString>, AuthError> {
     let found = self
-      .run(|entry| match entry.get_password() {
+      .run(server, |entry| match entry.get_password() {
         Ok(token) => Ok(Some(token)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(error) => Err(error),
@@ -54,14 +48,14 @@ impl TokenStore for KeyringStore {
     Ok(found.map(SecretString::from))
   }
 
-  async fn save(&self, refresh_token: &str) -> Result<(), AuthError> {
+  async fn save(&self, server: &str, refresh_token: &str) -> Result<(), AuthError> {
     let token = refresh_token.to_owned();
-    self.run(move |entry| entry.set_password(&token)).await
+    self.run(server, move |entry| entry.set_password(&token)).await
   }
 
-  async fn clear(&self) -> Result<(), AuthError> {
+  async fn clear(&self, server: &str) -> Result<(), AuthError> {
     self
-      .run(|entry| match entry.delete_credential() {
+      .run(server, |entry| match entry.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(error) => Err(error),
       })
@@ -73,32 +67,32 @@ impl TokenStore for KeyringStore {
 #[cfg(test)]
 #[derive(Default)]
 pub struct MemoryStore {
-  token: std::sync::Mutex<Option<String>>,
+  tokens: std::sync::Mutex<std::collections::HashMap<String, String>>,
 }
 
 #[cfg(test)]
 impl TokenStore for MemoryStore {
-  async fn load(&self) -> Result<Option<SecretString>, AuthError> {
+  async fn load(&self, server: &str) -> Result<Option<SecretString>, AuthError> {
     Ok(
       self
-        .token
+        .tokens
         .lock()
-        .map(|token| token.clone())
-        .unwrap_or_default()
+        .ok()
+        .and_then(|tokens| tokens.get(server).cloned())
         .map(SecretString::from),
     )
   }
 
-  async fn save(&self, refresh_token: &str) -> Result<(), AuthError> {
-    if let Ok(mut token) = self.token.lock() {
-      *token = Some(refresh_token.to_owned());
+  async fn save(&self, server: &str, refresh_token: &str) -> Result<(), AuthError> {
+    if let Ok(mut tokens) = self.tokens.lock() {
+      tokens.insert(server.to_owned(), refresh_token.to_owned());
     }
     Ok(())
   }
 
-  async fn clear(&self) -> Result<(), AuthError> {
-    if let Ok(mut token) = self.token.lock() {
-      *token = None;
+  async fn clear(&self, server: &str) -> Result<(), AuthError> {
+    if let Ok(mut tokens) = self.tokens.lock() {
+      tokens.remove(server);
     }
     Ok(())
   }
@@ -110,18 +104,23 @@ mod tests {
 
   use super::*;
 
+  const SERVER_A: &str = "https://a.example.com";
+  const SERVER_B: &str = "https://b.example.com";
+
   #[tokio::test]
-  async fn memory_store_round_trips() {
+  async fn memory_store_round_trips_per_server() {
     let store = MemoryStore::default();
-    assert!(store.load().await.expect("load").is_none());
-    store.save("refresh-1").await.expect("save");
+    assert!(store.load(SERVER_A).await.expect("load").is_none());
+    store.save(SERVER_A, "refresh-a").await.expect("save");
+    store.save(SERVER_B, "refresh-b").await.expect("save");
     let loaded = store
-      .load()
+      .load(SERVER_A)
       .await
       .expect("load")
       .map(|token| token.expose_secret().to_owned());
-    assert_eq!(loaded.as_deref(), Some("refresh-1"));
-    store.clear().await.expect("clear");
-    assert!(store.load().await.expect("load").is_none());
+    assert_eq!(loaded.as_deref(), Some("refresh-a"));
+    store.clear(SERVER_A).await.expect("clear");
+    assert!(store.load(SERVER_A).await.expect("load").is_none());
+    assert!(store.load(SERVER_B).await.expect("load").is_some());
   }
 }

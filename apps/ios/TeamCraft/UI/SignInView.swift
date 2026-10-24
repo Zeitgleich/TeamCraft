@@ -4,14 +4,13 @@ import SwiftUI
 /// app signs in to, so a user with several organizations knows where they are.
 struct SignInView: View {
   @Environment(AppModel.self) private var model
-  @Environment(\.colorScheme) private var colorScheme
   let failure: AppFailure?
 
   var body: some View {
     let brand = model.brand
     ScrollView {
       VStack(spacing: 24) {
-        logo(brand)
+        BrandLogo(brand: brand)
         Group {
           if let title = brand.brand?.maybeTitle ?? brand.brand?.displayName {
             Text(verbatim: title)
@@ -40,6 +39,11 @@ struct SignInView: View {
         Text("sign_in_server \(brand.serverHost)")
           .font(.footnote)
           .foregroundStyle(Theme.textMuted)
+        if !model.isServerLocked {
+          Button("change_server") { model.changeServer() }
+            .font(.footnote)
+            .disabled(model.isBusy)
+        }
         if let links = brand.brand?.links { BrandLinkRow(links: links) }
       }
       .padding(24)
@@ -48,22 +52,6 @@ struct SignInView: View {
     }
     .scrollBounceBehavior(.basedOnSize)
     .task { await brand.refresh() }
-  }
-
-  @ViewBuilder
-  private func logo(_ brand: BrandStore) -> some View {
-    if let image = (colorScheme == .dark ? brand.darkLogo : nil) ?? brand.logo {
-      Image(uiImage: image)
-        .resizable()
-        .scaledToFit()
-        .frame(maxWidth: 220, maxHeight: 96)
-        .accessibilityLabel(Text(verbatim: brand.brand?.displayName ?? ""))
-    } else {
-      Image(systemName: "bubble.left.and.bubble.right.fill")
-        .font(.system(size: 56))
-        .foregroundStyle(Theme.accent)
-        .accessibilityHidden(true)
-    }
   }
 }
 

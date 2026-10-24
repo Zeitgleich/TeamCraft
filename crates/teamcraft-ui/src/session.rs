@@ -9,6 +9,7 @@ use teamcraft_proto::{ErrorBody, ErrorCode, GetMeResponse};
 
 use teamcraft_client_api::remote::{CoreStatus, EnrollRequest};
 
+use crate::auth::tauri::{ServerCheck, ServerProblem, ServerView};
 use crate::auth::{ApiResponse, AuthError, Authenticator, tauri};
 use crate::model::UserId;
 use crate::remote_backend;
@@ -20,6 +21,14 @@ const KEY_DEVICE_READY_PREFIX: &str = "teamcraft.device_ready.";
 pub enum SessionState {
   /// Looking for a stored session or finishing a redirect.
   Checking,
+  /// Desktop: no server is chosen yet (first start, or after "Change server"). The address is put
+  /// back into the field after a failed check.
+  NeedsServer {
+    maybe_address: Option<String>,
+    maybe_problem: Option<ServerProblem>,
+  },
+  /// Desktop: the server answered; the user confirms its name and host before signing in.
+  ConfirmServer(Box<ServerCheck>),
   SignedOut(Option<LoginProblem>),
   /// The identity provider is open in the browser.
   SigningIn,
@@ -60,6 +69,12 @@ pub struct SessionControl {
   /// Why the last local sign-in failed, for its form.
   pub local_error: RwSignal<Option<LocalSignInProblem>>,
   pub is_local_signing_in: RwSignal<bool>,
+  /// Desktop: the account's server, shown on the sign-in screen.
+  pub server: RwSignal<Option<ServerView>>,
+  /// Desktop: the device's managed configuration does not allow another server.
+  pub is_server_locked: RwSignal<bool>,
+  /// Desktop: a server address is being checked.
+  pub is_checking_server: RwSignal<bool>,
 }
 
 /// What went wrong in the local-account sign-in form.
@@ -82,6 +97,9 @@ impl SessionControl {
       is_enrolling: RwSignal::new(false),
       local_error: RwSignal::new(None),
       is_local_signing_in: RwSignal::new(false),
+      server: RwSignal::new(None),
+      is_server_locked: RwSignal::new(false),
+      is_checking_server: RwSignal::new(false),
     }
   }
 
@@ -89,10 +107,13 @@ impl SessionControl {
     self.auth.get_value()
   }
 
-  /// Looks for an existing session at startup.
+  /// Looks for an existing session at startup. The desktop app first needs a server.
   pub fn start(&self) {
     let control = *self;
     spawn_local(async move {
+      if tauri::is_available() && !control.has_server().await {
+        return;
+      }
       let auth = control.authenticator();
       match auth.restore().await {
         Ok(true) => control.load_account().await,
@@ -102,6 +123,92 @@ impl SessionControl {
           .set(SessionState::SignedOut(Some(problem_from_auth(&error)))),
       }
     });
+  }
+
+  /// Checks the server the user typed (desktop); its answer is shown for confirmation.
+  pub fn check_server(&self, address: String) {
+    let control = *self;
+    control.is_checking_server.set(true);
+    spawn_local(async move {
+      let outcome = tauri::server_check(&address).await;
+      control.is_checking_server.set(false);
+      control.state.set(match outcome {
+        Ok(check) => SessionState::ConfirmServer(Box::new(check)),
+        Err(problem) => SessionState::NeedsServer {
+          maybe_address: Some(address),
+          maybe_problem: Some(problem),
+        },
+      });
+    });
+  }
+
+  /// The user confirmed the checked server: it becomes the account's server and sign-in starts.
+  pub fn confirm_server(&self, check: ServerCheck) {
+    let control = *self;
+    control.is_checking_server.set(true);
+    spawn_local(async move {
+      let outcome = tauri::server_confirm(&check.server.origin).await;
+      control.is_checking_server.set(false);
+      match outcome {
+        Ok(server) => {
+          crate::brand::show_server_brand(check.brand);
+          control.server.set(Some(server));
+          control.sign_in();
+        },
+        Err(problem) => control.state.set(SessionState::NeedsServer {
+          maybe_address: Some(check.server.host),
+          maybe_problem: Some(problem),
+        }),
+      }
+    });
+  }
+
+  /// Back to the server entry (desktop), from the confirmation or the sign-in screen.
+  pub fn change_server(&self) {
+    let control = *self;
+    spawn_local(async move {
+      let had_server = control.server.get_untracked().is_some();
+      if had_server && let Err(problem) = tauri::server_forget().await {
+        control.state.set(SessionState::NeedsServer {
+          maybe_address: None,
+          maybe_problem: Some(problem),
+        });
+        return;
+      }
+      control.server.set(None);
+      control.state.set(SessionState::NeedsServer {
+        maybe_address: None,
+        maybe_problem: None,
+      });
+    });
+  }
+
+  /// Desktop: whether the shell has an account server. Without one this offers the managed
+  /// server (checked right away) or the empty server entry, and answers `false`.
+  async fn has_server(&self) -> bool {
+    let server_state = match tauri::server_state().await {
+      Ok(server_state) => server_state,
+      Err(problem) => {
+        self.state.set(SessionState::NeedsServer {
+          maybe_address: None,
+          maybe_problem: Some(problem),
+        });
+        return false;
+      },
+    };
+    self.is_server_locked.set(server_state.is_locked);
+    if let Some(server) = server_state.maybe_active {
+      self.server.set(Some(server));
+      return true;
+    }
+    match server_state.maybe_managed_address {
+      Some(address) => self.check_server(address),
+      None => self.state.set(SessionState::NeedsServer {
+        maybe_address: None,
+        maybe_problem: None,
+      }),
+    }
+    false
   }
 
   pub fn sign_in(&self) {

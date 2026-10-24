@@ -5960,6 +5960,374 @@
           }
         }
       }
+    },
+    "server_entry_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter your server address"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gib die Adresse deines Servers ein"
+          }
+        }
+      }
+    },
+    "server_entry_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your organization's TeamCraft address, for example team.example.com. You can also paste an invite or message link."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die TeamCraft-Adresse deiner Organisation, zum Beispiel team.example.com. Du kannst auch einen Einladungs- oder Nachrichtenlink einfügen."
+          }
+        }
+      }
+    },
+    "server_managed_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your organization set up this server for this device."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Organisation hat diesen Server für dieses Gerät eingerichtet."
+          }
+        }
+      }
+    },
+    "server_entry_placeholder": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "team.example.com"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "team.example.com"
+          }
+        }
+      }
+    },
+    "server_entry_continue": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Continue"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Weiter"
+          }
+        }
+      }
+    },
+    "server_confirm_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Check that this is your organization's server before you sign in."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Prüfe vor der Anmeldung, ob das der Server deiner Organisation ist."
+          }
+        }
+      }
+    },
+    "server_confirm_continue": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Continue to sign in"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Weiter zur Anmeldung"
+          }
+        }
+      }
+    },
+    "server_use_another": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use another server"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anderen Server verwenden"
+          }
+        }
+      }
+    },
+    "change_server": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Change server"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Server wechseln"
+          }
+        }
+      }
+    },
+    "server_error_invalid_address": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That is not a valid server address."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das ist keine gültige Serveradresse."
+          }
+        }
+      }
+    },
+    "server_error_https_only": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only secure (https) server addresses are supported."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Es werden nur sichere Serveradressen (https) unterstützt."
+          }
+        }
+      }
+    },
+    "server_error_not_teamcraft": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No TeamCraft server was found at this address."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unter dieser Adresse wurde kein TeamCraft-Server gefunden."
+          }
+        }
+      }
+    },
+    "server_error_unreachable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Can't reach the server. Check the address and your connection, then try again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Server ist nicht erreichbar. Prüfe die Adresse und deine Verbindung und versuche es erneut."
+          }
+        }
+      }
+    },
+    "server_error_tls": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A secure connection to the server could not be established. Its certificate may be invalid."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Es konnte keine sichere Verbindung zum Server aufgebaut werden. Möglicherweise ist sein Zertifikat ungültig."
+          }
+        }
+      }
+    },
+    "server_error_captive_portal": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This network asks you to sign in first. Open a web page in Safari, sign in to the network, then try again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Netzwerk verlangt zuerst eine Anmeldung. Öffne eine Webseite in Safari, melde dich im Netzwerk an und versuche es dann erneut."
+          }
+        }
+      }
+    },
+    "server_error_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The server is not available right now. Try again later."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Server ist gerade nicht verfügbar. Versuche es später erneut."
+          }
+        }
+      }
+    },
+    "server_error_app_too_old": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This app is too old for the server. Please update TeamCraft."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese App ist zu alt für den Server. Bitte aktualisiere TeamCraft."
+          }
+        }
+      }
+    },
+    "server_error_server_too_old": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The server is too old for this app. Ask your administrator to update it."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Server ist zu alt für diese App. Bitte deine Administration, ihn zu aktualisieren."
+          }
+        }
+      }
+    },
+    "server_error_invalid_sign_in": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The server's sign-in settings are invalid. Ask your administrator."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Anmeldeeinstellungen des Servers sind ungültig. Wende dich an deine Administration."
+          }
+        }
+      }
+    },
+    "server_error_not_set_up": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This server is not set up for this app. Ask your administrator."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Server ist nicht für diese App eingerichtet. Wende dich an deine Administration."
+          }
+        }
+      }
+    },
+    "server_error_locked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your organization only allows its own server on this device."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Organisation erlaubt auf diesem Gerät nur ihren eigenen Server."
+          }
+        }
+      }
+    },
+    "server_confirm_provider %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You will sign in at %@."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Du meldest dich bei %@ an."
+          }
+        }
+      }
+    },
+    "server_confirm_provider_elsewhere %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This server signs you in through %@, which is not part of its own domain. Continue only if your organization uses this sign-in service; otherwise someone could be impersonating your server."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Server meldet dich über %@ an, das nicht zu seiner eigenen Domain gehört. Fahre nur fort, wenn deine Organisation diesen Anmeldedienst nutzt; sonst könnte sich jemand als dein Server ausgeben."
+          }
+        }
+      }
     }
   },
   "version": "1.0"

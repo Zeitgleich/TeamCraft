@@ -15,20 +15,19 @@ use teamcraft_media::effects::normalize_background_file;
 use teamcraft_proto::{ConversationId, UserId};
 
 use super::runtime::{CoreConfig, CoreRuntime, KeyChoice, TokenCache};
-use crate::auth::DesktopConfig;
+use crate::auth::commands::Service;
 use crate::calls::CallHost;
 
 /// Holds the running core, if a user is signed in.
 pub struct CoreHost {
-  config: DesktopConfig,
   tokens: TokenCache,
-  running: Mutex<Option<(UserId, Arc<CoreRuntime>)>>,
+  /// The server (origin), the user and their core.
+  running: Mutex<Option<(String, UserId, Arc<CoreRuntime>)>>,
 }
 
 impl CoreHost {
-  pub fn new(config: DesktopConfig, tokens: TokenCache) -> Self {
+  pub fn new(tokens: TokenCache) -> Self {
     Self {
-      config,
       tokens,
       running: Mutex::new(None),
     }
@@ -47,7 +46,7 @@ impl CoreHost {
       .lock()
       .map_err(|_| "core state is poisoned".to_owned())?
       .as_ref()
-      .map(|(_, runtime)| runtime.clone())
+      .map(|(_, _, runtime)| runtime.clone())
       .ok_or_else(|| "the core has not been started".to_owned())
   }
 }
@@ -61,14 +60,18 @@ impl From<String> for CommandError {
   }
 }
 
-/// Starts (or reuses) the core for `user` and reports where it stands.
+/// Starts (or reuses) the core for `user` of the active server and reports where it stands.
 #[tauri::command]
 pub async fn core_start(
   app: AppHandle,
   host: State<'_, CoreHost>,
   calls: State<'_, Arc<CallHost>>,
+  service: State<'_, Arc<Service>>,
   user: UserId,
 ) -> Result<CoreStatus, CommandError> {
+  let server = service
+    .active_server()
+    .ok_or_else(|| "no server is chosen".to_owned())?;
   let existing = {
     let running = host
       .running
@@ -76,17 +79,18 @@ pub async fn core_start(
       .map_err(|_| "core state is poisoned".to_owned())?;
     running
       .as_ref()
-      .filter(|(current, _)| *current == user)
-      .map(|(_, runtime)| runtime.clone())
+      .filter(|(current_server, current, _)| *current_server == server.server_url && *current == user)
+      .map(|(_, _, runtime)| runtime.clone())
   };
   let runtime = match existing {
     Some(runtime) => runtime,
     None => {
-      let data_dir = data_dir(&app)?;
+      // Everything local is per server: the store (with the workspace root it pinned) and its key.
+      let data_dir = base_dir(&app)?.join("core").join(server.storage_key()?);
       let config = CoreConfig {
-        server_url: host.config.server_url.clone(),
+        server_url: server.server_url.clone(),
         data_dir,
-        keystore_scope: host.config.issuer.clone(),
+        keystore_scope: server.server_url.clone(),
         argon2: Argon2Settings::default(),
       };
       let key = KeyChoice::Keyring {
@@ -111,7 +115,8 @@ pub async fn core_start(
       *host
         .running
         .lock()
-        .map_err(|_| "core state is poisoned".to_owned())? = Some((user, runtime.clone()));
+        .map_err(|_| "core state is poisoned".to_owned())? =
+        Some((server.server_url.clone(), user, runtime.clone()));
       runtime
     },
   };
@@ -252,11 +257,10 @@ pub fn core_stop(host: State<'_, CoreHost>) -> Result<(), CommandError> {
   Ok(())
 }
 
-/// `TEAMCRAFT_DATA_DIR` overrides the platform's app data directory.
-fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
-  let base = match std::env::var("TEAMCRAFT_DATA_DIR") {
-    Ok(dir) if !dir.is_empty() => PathBuf::from(dir),
-    _ => app.path().app_data_dir().map_err(|error| error.to_string())?,
-  };
-  Ok(base.join("core"))
+/// The app's data directory; `TEAMCRAFT_DATA_DIR` overrides the platform's.
+pub fn base_dir(app: &AppHandle) -> Result<PathBuf, String> {
+  match std::env::var("TEAMCRAFT_DATA_DIR") {
+    Ok(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
+    _ => app.path().app_data_dir().map_err(|error| error.to_string()),
+  }
 }

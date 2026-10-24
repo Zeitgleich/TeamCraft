@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The top level: sign-in, enrollment or the chats, by the account's state.
+/// The top level: server entry, sign-in, enrollment or the chats, by the account's state.
 struct RootView: View {
   @Environment(AppModel.self) private var model
 
@@ -10,6 +10,10 @@ struct RootView: View {
       switch model.phase {
       case .starting:
         ProgressView("loading")
+      case .needsServer(let address, let failure):
+        ServerEntryView(address: address, failure: failure)
+      case .confirmServer(let checked):
+        ServerConfirmView(checked: checked)
       case .signedOut(let failure):
         SignInView(failure: failure)
       case .needsEnrollment(let hasExistingIdentity, let failure):

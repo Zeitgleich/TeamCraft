@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds only: plain HTTP to any host, so a development server on the LAN or the emulator's
+     host (http://10.0.2.2:8081) can be entered. The app itself allows it only in debug builds
+     (BuildConfig.DEBUG); release builds use main/res/xml/network_security_config.xml. -->
+<network-security-config xmlns:tools="http://schemas.android.com/tools">
+  <base-config cleartextTrafficPermitted="true" tools:ignore="InsecureBaseConfiguration" />
+</network-security-config>

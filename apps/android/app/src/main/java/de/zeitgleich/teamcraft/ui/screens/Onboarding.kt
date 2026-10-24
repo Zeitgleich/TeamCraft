@@ -65,8 +65,8 @@ private const val MIN_PASSPHRASE_LENGTH = 12
 
 /** Share of the screen width the link QR code takes. */
 private const val QR_CODE_WIDTH_FRACTION = 0.7f
-private const val LOGO_WIDTH_FRACTION = 0.6f
-private val LOGO_MAX_HEIGHT = 96.dp
+internal const val LOGO_WIDTH_FRACTION = 0.6f
+internal val LOGO_MAX_HEIGHT = 96.dp
 
 @Composable
 fun LoadingScreen() {
@@ -83,7 +83,8 @@ fun MessageScreen(@StringRes message: Int, onRetry: () -> Unit) {
 
 /**
  * Sign-in: the server's brand (logo, heading, text, links) when it sent one, and which server
- * the app signs in to, so a user with several organizations knows where they are.
+ * the app signs in to, so a user with several organizations knows where they are. "Change server"
+ * leads back to the server entry; [maybeOnChangeServer] is null when the organization locked it.
  */
 @Composable
 fun LoginScreen(
@@ -93,6 +94,7 @@ fun LoginScreen(
   @StringRes maybeError: Int?,
   isBusy: Boolean,
   onLogin: () -> Unit,
+  maybeOnChangeServer: (() -> Unit)?,
 ) {
   val name = maybeBrand?.displayName ?: stringResource(R.string.app_name)
   Centered {
@@ -127,6 +129,9 @@ fun LoginScreen(
       style = MaterialTheme.typography.bodySmall,
       color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
+    maybeOnChangeServer?.let { onChange ->
+      TextButton(onClick = onChange, enabled = !isBusy) { Text(stringResource(R.string.server_change)) }
+    }
     maybeBrand?.links?.let { BrandLinkRow(it) }
   }
 }
@@ -290,13 +295,13 @@ private fun WorkingButton(
 }
 
 @Composable
-private fun Title(@StringRes text: Int) {
+internal fun Title(@StringRes text: Int) {
   Text(stringResource(text), style = MaterialTheme.typography.headlineSmall, modifier = Modifier.semantics { heading() })
 }
 
 /** An error, read out by TalkBack as soon as it appears. */
 @Composable
-private fun ErrorLine(@StringRes text: Int) {
+internal fun ErrorLine(@StringRes text: Int) {
   Text(
     stringResource(text),
     color = MaterialTheme.colorScheme.error,
@@ -366,7 +371,7 @@ fun OrgRecoveryScreen(
 }
 
 @Composable
-private fun Centered(content: @Composable () -> Unit) {
+internal fun Centered(content: @Composable () -> Unit) {
   Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
     Column(
       modifier = Modifier

@@ -4,14 +4,21 @@
 //! The webview talks to this module only through the commands in [`commands`]; access and refresh
 //! tokens never reach it. API calls go through [`AuthService::api_get`], which attaches the bearer
 //! token and refreshes it when needed.
+//!
+//! Which server and identity provider to use is not built in: the user enters the server (or the
+//! device's managed configuration names it), the server's `GET /api/v1/server-info` says how to
+//! sign in, and [`servers`] keeps that per account (docs/operations.md "Server address in the
+//! apps"). Tokens are stored per server origin.
 
 pub mod commands;
 mod loopback;
+pub mod servers;
 mod store;
 
 #[cfg(all(test, feature = "integration"))]
 pub(crate) mod integration_tests;
 
+use std::sync::{PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -25,10 +32,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify};
 
 use teamcraft_client_api::remote::ApiMethod;
+use teamcraft_client_api::server_entry::{
+  self, CheckedServer, HttpPolicy, ServerAnswer, ServerCheckError, ServerOrigin, ServerProfile,
+  check_discovery, is_provider_endpoint,
+};
 
 pub use store::{KeyringStore, TokenStore};
 
-const SCOPE: &str = "openid";
 /// How long the browser may take to come back.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 /// Refresh this long before the access token expires.
@@ -36,16 +46,52 @@ const REFRESH_MARGIN: Duration = Duration::from_secs(60);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 /// The webview may only ask for API paths below this prefix.
 const API_PREFIX: &str = "/api/v1/";
+/// The largest `server-info` answer read; a real one is a few KiB.
+const MAX_SERVER_INFO_BYTES: usize = 1024 * 1024;
+/// The redirect URI the identity provider sees, up to the port picked per sign-in (RFC 8252).
+pub const REDIRECT_URI_PATTERN: &str = "http://127.0.0.1/callback";
+/// Release builds take `https` servers only (plain `http` on this computer); debug builds anything.
+pub const HTTP_POLICY: HttpPolicy = if cfg!(debug_assertions) {
+  HttpPolicy::Allowed
+} else {
+  HttpPolicy::LoopbackOnly
+};
 
-/// Where the server and the identity provider live (environment variables override the dev defaults).
+/// The active server and how to sign in to it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DesktopConfig {
+  /// The server's origin: what tokens and local data are keyed by.
   pub server_url: String,
   pub issuer: String,
   pub client_id: String,
+  pub scopes: Vec<String>,
 }
 
 impl DesktopConfig {
+  pub fn from_profile(profile: &ServerProfile) -> Self {
+    Self {
+      server_url: profile.origin.as_str().to_owned(),
+      issuer: profile.issuer.clone(),
+      client_id: profile.client_id.clone(),
+      scopes: profile.scopes.clone(),
+    }
+  }
+
+  /// The keyring entry of this server's refresh token: per origin, issuer and client, so a server
+  /// that announces another identity provider never gets the previous provider's token.
+  pub fn token_key(&self) -> String {
+    format!("{}|{}|{}", self.server_url, self.issuer, self.client_id)
+  }
+
+  /// The directory name of this server's local data.
+  pub fn storage_key(&self) -> Result<String, String> {
+    ServerOrigin::parse(&self.server_url, HttpPolicy::Allowed)
+      .map(|origin| origin.storage_key())
+      .map_err(|error| error.to_string())
+  }
+
+  /// The dev stack of the README, overridden by environment variables (tests against it only).
+  #[cfg(all(test, feature = "integration"))]
   pub fn from_env() -> Self {
     let var = |name: &str, default: &str| {
       std::env::var(name)
@@ -60,6 +106,7 @@ impl DesktopConfig {
         "http://127.0.0.1:8080/realms/teamcraft-dev",
       ),
       client_id: var("TEAMCRAFT_OIDC_CLIENT_ID", "teamcraft"),
+      scopes: vec!["openid".to_owned()],
     }
   }
 }
@@ -81,6 +128,31 @@ pub enum AuthError {
   NotSignedIn,
   #[error("not supported here: {0}")]
   Unsupported(String),
+  /// No server is chosen yet: the user has to enter one first.
+  #[error("no server chosen")]
+  NoServer,
+}
+
+/// Why a server's `GET /api/v1/server-info` could not be used.
+#[derive(Debug, thiserror::Error)]
+pub enum ServerProbeError {
+  #[error("the server could not be reached: {0}")]
+  Unreachable(String),
+  #[error("the secure connection failed: {0}")]
+  Tls(String),
+  #[error(transparent)]
+  Check(#[from] ServerCheckError),
+}
+
+impl ServerProbeError {
+  /// The i18n message of the UI.
+  pub fn i18n_key(&self) -> &'static str {
+    match self {
+      Self::Unreachable(_) => "server-entry-unreachable",
+      Self::Tls(_) => "server-entry-tls",
+      Self::Check(check) => check.i18n_key(),
+    }
+  }
 }
 
 impl AuthError {
@@ -93,6 +165,7 @@ impl AuthError {
       Self::StateMismatch => "state_mismatch",
       Self::NotSignedIn => "not_signed_in",
       Self::Unsupported(_) => "unsupported",
+      Self::NoServer => "no_server",
     }
   }
 }
@@ -114,6 +187,7 @@ pub struct ApiBytesResponse {
 
 #[derive(Debug, Clone, Deserialize)]
 struct Discovery {
+  issuer: String,
   authorization_endpoint: String,
   token_endpoint: String,
   #[serde(default)]
@@ -133,7 +207,8 @@ struct Session {
 }
 
 pub struct AuthService<S: TokenStore> {
-  config: DesktopConfig,
+  /// `None` until the user has chosen a server.
+  server: RwLock<Option<DesktopConfig>>,
   http: reqwest::Client,
   store: S,
   session: Mutex<Session>,
@@ -141,7 +216,7 @@ pub struct AuthService<S: TokenStore> {
 }
 
 impl<S: TokenStore> AuthService<S> {
-  pub fn new(config: DesktopConfig, store: S) -> Result<Self, AuthError> {
+  pub fn new(maybe_server: Option<DesktopConfig>, store: S) -> Result<Self, AuthError> {
     let http = reqwest::Client::builder()
       .timeout(HTTP_TIMEOUT)
       // A redirect would carry the bearer token to wherever a hostile answer points.
@@ -149,7 +224,7 @@ impl<S: TokenStore> AuthService<S> {
       .build()
       .map_err(|error| AuthError::Unsupported(error.to_string()))?;
     Ok(Self {
-      config,
+      server: RwLock::new(maybe_server),
       http,
       store,
       session: Mutex::new(Session::default()),
@@ -157,17 +232,66 @@ impl<S: TokenStore> AuthService<S> {
     })
   }
 
-  /// Signs in with a stored refresh token, if there is one. `Ok(false)` means "sign in again".
+  /// The active server, if one is chosen.
+  pub fn active_server(&self) -> Option<DesktopConfig> {
+    self.server.read().unwrap_or_else(PoisonError::into_inner).clone()
+  }
+
+  /// Makes `maybe_server` the active server. The session of the previous one ends here (its
+  /// stored token stays with its own server).
+  pub async fn set_server(&self, maybe_server: Option<DesktopConfig>) {
+    let mut session = self.session.lock().await;
+    *session = Session::default();
+    *self.server.write().unwrap_or_else(PoisonError::into_inner) = maybe_server;
+    self.cancel.notify_waiters();
+  }
+
+  /// Asks `origin` how to sign in to it (`GET /api/v1/server-info`) and checks the answer. Nothing
+  /// changes until the user confirms; redirects are reported, never followed.
+  pub async fn probe_server(&self, origin: &ServerOrigin) -> Result<CheckedServer, ServerProbeError> {
+    let response = self
+      .http
+      .get(origin.server_info_url())
+      .header(reqwest::header::ACCEPT, "application/json")
+      .send()
+      .await
+      .map_err(probe_transport_error)?;
+    let status = response.status().as_u16();
+    let maybe_content_type = response
+      .headers()
+      .get(reqwest::header::CONTENT_TYPE)
+      .and_then(|value| value.to_str().ok())
+      .map(str::to_owned);
+    let body = read_limited(response, MAX_SERVER_INFO_BYTES).await?;
+    let answer = ServerAnswer {
+      status,
+      maybe_content_type: maybe_content_type.as_deref(),
+      body: &body,
+    };
+    Ok(server_entry::check_server_info(
+      origin,
+      answer,
+      env!("CARGO_PKG_VERSION"),
+      Some(REDIRECT_URI_PATTERN),
+      HTTP_POLICY,
+    )?)
+  }
+
+  /// Signs in with a stored refresh token, if there is one. `Ok(false)` means "sign in again"
+  /// (also when no server is chosen yet).
   pub async fn restore(&self) -> Result<bool, AuthError> {
-    let Some(refresh) = self.store.load().await? else {
+    let Some(server) = self.active_server() else {
+      return Ok(false);
+    };
+    let Some(refresh) = self.store.load(&server.token_key()).await? else {
       return Ok(false);
     };
     let mut session = self.session.lock().await;
-    match self.refresh_with(&mut session, refresh).await {
+    match self.refresh_with(&mut session, &server, refresh).await {
       Ok(()) => Ok(true),
       // The provider rejected the token (expired, revoked, user disabled): forget it.
       Err(AuthError::Denied(_) | AuthError::NotSignedIn) => {
-        self.store.clear().await?;
+        self.store.clear(&server.token_key()).await?;
         Ok(false)
       },
       Err(other) => Err(other),
@@ -176,15 +300,22 @@ impl<S: TokenStore> AuthService<S> {
 
   /// Runs the browser login. `open_browser` receives the authorization URL.
   pub async fn login(&self, open_browser: impl FnOnce(&str) -> Result<(), String>) -> Result<(), AuthError> {
-    let discovery = self.discovery().await?;
+    let server = self.server()?;
+    let discovery = self.discovery(&server).await?;
     let (listener, redirect_uri) = loopback::bind().await?;
-    let client = self.client(&discovery, &redirect_uri)?;
+    let client = self.client(&discovery, &redirect_uri, &server)?;
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
     let (url, state) = client
       .authorize_url(CsrfToken::new_random)
-      .add_scope(Scope::new(SCOPE.to_owned()))
+      .add_scopes(server.scopes.iter().cloned().map(Scope::new))
       .set_pkce_challenge(challenge)
       .url();
+    // The discovery was checked; check the final URL again right before the OS opens it.
+    if !is_provider_endpoint(url.as_str(), HTTP_POLICY) {
+      return Err(AuthError::InvalidResponse(
+        "the sign-in address is not https".to_owned(),
+      ));
+    }
     open_browser(url.as_str())
       .map_err(|error| AuthError::Unsupported(format!("could not open the browser: {error}")))?;
 
@@ -203,7 +334,7 @@ impl<S: TokenStore> AuthService<S> {
       .await
       .map_err(map_token_error)?;
     let mut session = self.session.lock().await;
-    self.adopt(&mut session, &response).await
+    self.adopt(&mut session, &server, &response).await
   }
 
   /// Aborts a login that waits for the browser.
@@ -213,6 +344,9 @@ impl<S: TokenStore> AuthService<S> {
 
   /// Ends the session at the provider (best effort) and forgets everything stored locally.
   pub async fn logout(&self) -> Result<(), AuthError> {
+    let Some(server) = self.active_server() else {
+      return Ok(());
+    };
     let (in_memory, discovery) = {
       let mut session = self.session.lock().await;
       (
@@ -222,13 +356,13 @@ impl<S: TokenStore> AuthService<S> {
     };
     let refresh = match in_memory {
       Some(token) => Some(token),
-      None => self.store.load().await?,
+      None => self.store.load(&server.token_key()).await?,
     };
-    self.store.clear().await?;
+    self.store.clear(&server.token_key()).await?;
     if let (Some(refresh), Some(endpoint)) = (refresh, discovery.and_then(|found| found.end_session_endpoint))
     {
       let form = [
-        ("client_id", self.config.client_id.as_str()),
+        ("client_id", server.client_id.as_str()),
         ("refresh_token", refresh.expose_secret()),
       ];
       if let Err(error) = self.http.post(endpoint).form(&form).send().await {
@@ -248,7 +382,7 @@ impl<S: TokenStore> AuthService<S> {
   /// (the brand of the server). Only `/api/...` paths; the answer is data for the page.
   pub async fn public_get(&self, path: &str) -> Result<ApiResponse, AuthError> {
     validate_api_path(path)?;
-    let url = format!("{}{path}", self.config.server_url.trim_end_matches('/'));
+    let url = format!("{}{path}", self.server()?.server_url.trim_end_matches('/'));
     let response = self
       .http
       .get(url)
@@ -272,8 +406,10 @@ impl<S: TokenStore> AuthService<S> {
     maybe_body: Option<String>,
   ) -> Result<ApiResponse, AuthError> {
     validate_api_path(path)?;
-    let token = self.access_token().await?;
-    let url = format!("{}{path}", self.config.server_url.trim_end_matches('/'));
+    // One read of the server: the token and the URL always belong to the same one.
+    let server = self.server()?;
+    let token = self.access_token(&server).await?;
+    let url = format!("{}{path}", server.server_url.trim_end_matches('/'));
     let mut request = self
       .http
       .request(reqwest_method(method), url)
@@ -305,8 +441,9 @@ impl<S: TokenStore> AuthService<S> {
     maybe_body: Option<(String, Vec<u8>)>,
   ) -> Result<ApiBytesResponse, AuthError> {
     validate_api_path(path)?;
-    let token = self.access_token().await?;
-    let url = format!("{}{path}", self.config.server_url.trim_end_matches('/'));
+    let server = self.server()?;
+    let token = self.access_token(&server).await?;
+    let url = format!("{}{path}", server.server_url.trim_end_matches('/'));
     let mut request = self
       .http
       .request(reqwest_method(method), url)
@@ -337,14 +474,43 @@ impl<S: TokenStore> AuthService<S> {
     })
   }
 
-  /// The current access token as text, refreshed when needed. For the in-process client core only:
-  /// the webview never gets it.
+  /// The current access token as text, refreshed when needed (tests against the dev stack; the
+  /// app uses [`Self::server_bearer_token`]).
+  #[cfg(all(test, feature = "integration"))]
   pub async fn bearer_token(&self) -> Result<String, AuthError> {
-    Ok(self.access_token().await?.expose_secret().to_owned())
+    Ok(self.server_bearer_token().await?.1)
   }
 
-  async fn access_token(&self) -> Result<SecretString, AuthError> {
+  /// `(server origin, access token)`: the token with the server it is for.
+  pub async fn server_bearer_token(&self) -> Result<(String, String), AuthError> {
+    let server = self.server()?;
+    let token = self.access_token(&server).await?;
+    Ok((server.server_url, token.expose_secret().to_owned()))
+  }
+
+  /// Whether a session (tokens in memory) exists.
+  pub async fn is_signed_in(&self) -> bool {
+    self.session.lock().await.maybe_tokens.is_some()
+  }
+
+  /// Deletes a refresh token stored under the server origin alone (the key before tokens were
+  /// kept per origin, issuer and client), so it can never be used for another provider.
+  pub async fn forget_origin_only_token(&self, server: &DesktopConfig) -> Result<(), AuthError> {
+    self.store.clear(&server.server_url).await
+  }
+
+  /// Deletes the stored refresh token of `server` (leaving it, or its sign-in settings changed).
+  pub async fn forget_tokens(&self, server: &DesktopConfig) -> Result<(), AuthError> {
+    self.store.clear(&server.token_key()).await
+  }
+
+  /// The access token of `server`, refreshed when needed; refused when the active server is
+  /// another one by now.
+  async fn access_token(&self, server: &DesktopConfig) -> Result<SecretString, AuthError> {
     let mut session = self.session.lock().await;
+    if self.active_server().as_ref() != Some(server) {
+      return Err(AuthError::NotSignedIn);
+    }
     let needs_refresh = match &session.maybe_tokens {
       None => return Err(AuthError::NotSignedIn),
       Some(tokens) => tokens.expires_at.saturating_duration_since(Instant::now()) <= REFRESH_MARGIN,
@@ -360,7 +526,7 @@ impl<S: TokenStore> AuthService<S> {
             .map(|token| SecretString::from(token.expose_secret().to_owned()))
         })
         .ok_or(AuthError::NotSignedIn)?;
-      if let Err(error) = self.refresh_with(&mut session, refresh).await {
+      if let Err(error) = self.refresh_with(&mut session, server, refresh).await {
         if matches!(error, AuthError::Denied(_) | AuthError::NotSignedIn) {
           session.maybe_tokens = None;
         }
@@ -374,21 +540,35 @@ impl<S: TokenStore> AuthService<S> {
       .ok_or(AuthError::NotSignedIn)
   }
 
-  async fn refresh_with(&self, session: &mut Session, refresh: SecretString) -> Result<(), AuthError> {
-    let discovery = self.discovery_in(session).await?;
+  async fn refresh_with(
+    &self,
+    session: &mut Session,
+    server: &DesktopConfig,
+    refresh: SecretString,
+  ) -> Result<(), AuthError> {
+    let discovery = self.discovery_in(session, server).await?;
     // The redirect URI is not used for refreshing, but the client needs a valid one.
-    let client = self.client(&discovery, "http://127.0.0.1/callback")?;
+    let client = self.client(&discovery, REDIRECT_URI_PATTERN, server)?;
     let http = self.oauth_http();
     let response = client
       .exchange_refresh_token(&RefreshToken::new(refresh.expose_secret().to_owned()))
       .request_async(&http)
       .await
       .map_err(map_token_error)?;
-    self.adopt(session, &response).await
+    self.adopt(session, server, &response).await
   }
 
-  /// Takes over a token response: keeps the access token in memory and persists the refresh token.
-  async fn adopt(&self, session: &mut Session, response: &BasicTokenResponse) -> Result<(), AuthError> {
+  /// Takes over a token response of `server`: keeps the access token in memory and persists the
+  /// refresh token. A response that arrives after the user switched servers is dropped.
+  async fn adopt(
+    &self,
+    session: &mut Session,
+    server: &DesktopConfig,
+    response: &BasicTokenResponse,
+  ) -> Result<(), AuthError> {
+    if self.active_server().as_ref() != Some(server) {
+      return Err(AuthError::Cancelled);
+    }
     let previous = session.maybe_tokens.as_ref().and_then(|tokens| {
       tokens
         .refresh
@@ -400,7 +580,7 @@ impl<S: TokenStore> AuthService<S> {
       .map(|token| token.secret().clone())
       .or(previous);
     if let Some(refresh) = &refresh {
-      self.store.save(refresh).await?;
+      self.store.save(&server.token_key(), refresh).await?;
     }
     let lifetime = response.expires_in().unwrap_or(Duration::from_secs(60));
     session.maybe_tokens = Some(Tokens {
@@ -411,18 +591,26 @@ impl<S: TokenStore> AuthService<S> {
     Ok(())
   }
 
-  async fn discovery(&self) -> Result<Discovery, AuthError> {
-    let mut session = self.session.lock().await;
-    self.discovery_in(&mut session).await
+  fn server(&self) -> Result<DesktopConfig, AuthError> {
+    self.active_server().ok_or(AuthError::NoServer)
   }
 
-  async fn discovery_in(&self, session: &mut Session) -> Result<Discovery, AuthError> {
+  async fn discovery(&self, server: &DesktopConfig) -> Result<Discovery, AuthError> {
+    let mut session = self.session.lock().await;
+    self.discovery_in(&mut session, server).await
+  }
+
+  async fn discovery_in(
+    &self,
+    session: &mut Session,
+    server: &DesktopConfig,
+  ) -> Result<Discovery, AuthError> {
     if let Some(found) = &session.maybe_discovery {
       return Ok(found.clone());
     }
     let url = format!(
       "{}/.well-known/openid-configuration",
-      self.config.issuer.trim_end_matches('/')
+      server.issuer.trim_end_matches('/')
     );
     let response = self
       .http
@@ -440,6 +628,15 @@ impl<S: TokenStore> AuthService<S> {
       .json()
       .await
       .map_err(|error| AuthError::InvalidResponse(error.to_string()))?;
+    // The endpoints reach the system browser and the token requests: https only, and the
+    // document must be the configured issuer's (RFC 8414 §3.3).
+    let mut endpoints = vec![
+      found.authorization_endpoint.as_str(),
+      found.token_endpoint.as_str(),
+    ];
+    endpoints.extend(found.end_session_endpoint.as_deref());
+    check_discovery(&server.issuer, &found.issuer, &endpoints, HTTP_POLICY)
+      .map_err(|error| AuthError::InvalidResponse(error.to_string()))?;
     session.maybe_discovery = Some(found.clone());
     Ok(found)
   }
@@ -448,6 +645,7 @@ impl<S: TokenStore> AuthService<S> {
     &self,
     discovery: &Discovery,
     redirect_uri: &str,
+    server: &DesktopConfig,
   ) -> Result<
     BasicClient<
       oauth2::EndpointSet,
@@ -460,7 +658,7 @@ impl<S: TokenStore> AuthService<S> {
   > {
     let invalid = |error: url::ParseError| AuthError::InvalidResponse(error.to_string());
     Ok(
-      BasicClient::new(ClientId::new(self.config.client_id.clone()))
+      BasicClient::new(ClientId::new(server.client_id.clone()))
         .set_auth_uri(AuthUrl::new(discovery.authorization_endpoint.clone()).map_err(invalid)?)
         .set_token_uri(TokenUrl::new(discovery.token_endpoint.clone()).map_err(invalid)?)
         .set_redirect_uri(RedirectUrl::new(redirect_uri.to_owned()).map_err(invalid)?),
@@ -528,6 +726,41 @@ fn map_token_error(error: TokenError) -> AuthError {
   }
 }
 
+/// Tells a server that is not there from a connection the TLS layer refused.
+fn probe_transport_error(error: reqwest::Error) -> ServerProbeError {
+  let mut source: Option<&dyn std::error::Error> = Some(&error);
+  let mut chain = String::new();
+  while let Some(current) = source {
+    chain.push_str(&current.to_string().to_ascii_lowercase());
+    chain.push(' ');
+    source = current.source();
+  }
+  let is_tls = ["certificate", "tls", "ssl", "handshake"]
+    .iter()
+    .any(|word| chain.contains(word));
+  if is_tls {
+    ServerProbeError::Tls(error.to_string())
+  } else {
+    ServerProbeError::Unreachable(error.to_string())
+  }
+}
+
+/// The body, up to `limit` bytes; more is refused (a hostile or broken answer).
+async fn read_limited(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>, ServerProbeError> {
+  let mut body = Vec::new();
+  while let Some(chunk) = response
+    .chunk()
+    .await
+    .map_err(|error| ServerProbeError::Unreachable(error.to_string()))?
+  {
+    if body.len() + chunk.len() > limit {
+      return Err(ServerProbeError::Check(ServerCheckError::NotTeamCraft));
+    }
+    body.extend_from_slice(&chunk);
+  }
+  Ok(body)
+}
+
 /// The webview may only reach the API of the configured server, never an arbitrary URL.
 fn validate_api_path(path: &str) -> Result<(), AuthError> {
   let is_plain = path.chars().all(|ch| {
@@ -577,6 +810,26 @@ mod tests {
     for bad in bad_paths {
       assert!(validate_api_path(bad).is_err(), "{bad}");
     }
+  }
+
+  #[test]
+  fn refresh_tokens_are_kept_per_server_issuer_and_client() {
+    let config = DesktopConfig {
+      server_url: "https://team.example.com".into(),
+      issuer: "https://auth.example.com/realms/a".into(),
+      client_id: "teamcraft".into(),
+      scopes: vec!["openid".into()],
+    };
+    let other_issuer = DesktopConfig {
+      issuer: "https://evil.example".into(),
+      ..config.clone()
+    };
+    let other_client = DesktopConfig {
+      client_id: "other".into(),
+      ..config.clone()
+    };
+    assert_ne!(config.token_key(), other_issuer.token_key());
+    assert_ne!(config.token_key(), other_client.token_key());
   }
 
   #[test]

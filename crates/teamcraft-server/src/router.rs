@@ -43,19 +43,19 @@ use crate::handlers::{
   get_my_lobby_state_handler, get_my_org_recovery_shares_handler, get_my_privacy_handler,
   get_my_profile_handler, get_notification_settings_handler, get_policy_handler, get_push_gateway_handler,
   get_read_receipts_handler, get_recovery_material_handler, get_recovery_request_handler,
-  get_recovery_result_handler, get_security_log_handler, get_share_info_handler, get_space_handler,
-  get_space_notification_settings_handler, get_space_retention_handler, get_unread_handler,
-  get_user_avatar_handler, get_user_device_list_handler, get_user_group_handler, get_user_handler,
-  get_user_profile_handler, get_web_push_key_handler, healthz_handler, join_conversation_handler,
-  join_meeting_handler, join_space_handler, key_package_status_handler, list_acknowledgements_handler,
-  list_brands_handler, list_call_history_handler, list_categories_handler, list_conversation_members_handler,
-  list_conversations_handler, list_devices_handler, list_invites_handler, list_lobby_handler,
-  list_meetings_handler, list_messages_handler, list_mls_messages_handler, list_organizations_handler,
-  list_policy_log_handler, list_presence_handler, list_recovery_requests_handler, list_roster_handler,
-  list_share_links_handler, list_space_members_handler, list_spaces_handler, list_system_events_handler,
-  list_threads_handler, list_user_devices_handler, list_user_groups_handler, list_welcomes_handler,
-  local_activate_handler, local_login_handler, local_logout_handler, move_channel_handler,
-  pin_message_handler, post_mls_commit_handler, post_mls_message_handler,
+  get_recovery_result_handler, get_security_log_handler, get_server_info_handler, get_share_info_handler,
+  get_space_handler, get_space_notification_settings_handler, get_space_retention_handler,
+  get_unread_handler, get_user_avatar_handler, get_user_device_list_handler, get_user_group_handler,
+  get_user_handler, get_user_profile_handler, get_web_push_key_handler, healthz_handler,
+  join_conversation_handler, join_meeting_handler, join_space_handler, key_package_status_handler,
+  list_acknowledgements_handler, list_brands_handler, list_call_history_handler, list_categories_handler,
+  list_conversation_members_handler, list_conversations_handler, list_devices_handler, list_invites_handler,
+  list_lobby_handler, list_meetings_handler, list_messages_handler, list_mls_messages_handler,
+  list_organizations_handler, list_policy_log_handler, list_presence_handler, list_recovery_requests_handler,
+  list_roster_handler, list_share_links_handler, list_space_members_handler, list_spaces_handler,
+  list_system_events_handler, list_threads_handler, list_user_devices_handler, list_user_groups_handler,
+  list_welcomes_handler, local_activate_handler, local_login_handler, local_logout_handler,
+  move_channel_handler, pin_message_handler, post_mls_commit_handler, post_mls_message_handler,
   put_conversation_notification_settings_handler, put_email_digest_handler, put_identity_key_handler,
   put_key_bag_handler, put_mls_group_info_handler, put_my_device_list_handler, put_my_privacy_handler,
   put_my_profile_handler, put_notification_settings_handler, put_org_recovery_shares_handler,
@@ -84,6 +84,7 @@ pub fn router(state: AppState) -> Router {
   let api_v1 = Router::new()
     .route("/brand", get(get_brand_handler))
     .route("/client-compatibility", get(get_client_compatibility_handler))
+    .route("/server-info", get(get_server_info_handler))
     .route("/brands", get(list_brands_handler))
     .route("/brand/theme.css", get(get_brand_theme_handler))
     .route("/brand/assets/{slot}", get(get_brand_asset_handler))

@@ -14,6 +14,11 @@ use teamcraft_client_api::os_notify::{NotificationTag, OsNotification, TagTarget
 
 use crate::model::ConversationId;
 
+/// Prefix of the i18n keys the server commands answer with.
+const SERVER_KEY_PREFIX: &str = "server-entry-";
+/// The message of a server step that failed for another reason.
+const SERVER_FAILED_KEY: &str = "server-entry-failed";
+
 /// Whether the page runs inside the desktop shell.
 pub fn is_available() -> bool {
   invoke_function().is_some()
@@ -182,6 +187,99 @@ fn serde_wasm_json<T: for<'de> Deserialize<'de>>(value: &JsValue) -> Result<T, A
     .and_then(|text| text.as_string())
     .ok_or_else(|| AuthError::InvalidResponse("not JSON".to_owned()))?;
   serde_json::from_str(&text).map_err(|error| AuthError::InvalidResponse(error.to_string()))
+}
+
+/// The account's server as the desktop shell reports it.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct ServerView {
+  pub origin: String,
+  pub host: String,
+  pub display_name: String,
+  #[serde(default)]
+  pub has_local_accounts: bool,
+}
+
+/// Where the server entry stands at startup.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct ServerState {
+  #[serde(rename = "active", default)]
+  pub maybe_active: Option<ServerView>,
+  #[serde(rename = "managed_address", default)]
+  pub maybe_managed_address: Option<String>,
+  #[serde(default)]
+  pub is_locked: bool,
+}
+
+/// A server the shell checked, waiting for the user's confirmation.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct ServerCheck {
+  pub server: ServerView,
+  pub brand: teamcraft_proto::BrandResponse,
+  /// Where the password will be entered.
+  #[serde(default)]
+  pub identity_provider_host: String,
+  /// The identity provider lies outside the server's domain.
+  #[serde(default)]
+  pub is_identity_provider_elsewhere: bool,
+}
+
+/// A failed server step: the i18n key of the message (`server-entry-*`) and details for logs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServerProblem {
+  pub key: String,
+  pub detail: String,
+}
+
+/// The server entry's state in the shell.
+pub async fn server_state() -> Result<ServerState, ServerProblem> {
+  server_call("server_state", &serde_json::json!({})).await
+}
+
+/// Asks the server at `address` (as typed) how to sign in; the shell keeps the answer for
+/// [`server_confirm`].
+pub async fn server_check(address: &str) -> Result<ServerCheck, ServerProblem> {
+  server_call("server_check", &serde_json::json!({ "address": address })).await
+}
+
+/// Makes the checked server the account's server.
+pub async fn server_confirm(origin: &str) -> Result<ServerView, ServerProblem> {
+  server_call("server_confirm", &serde_json::json!({ "origin": origin })).await
+}
+
+/// Leaves the account's server (after sign-out): the server entry comes next.
+pub async fn server_forget() -> Result<(), ServerProblem> {
+  server_call("server_forget", &serde_json::json!({})).await
+}
+
+/// Like [`call`], keeping the error's kind, which the server commands set to an i18n key.
+async fn server_call<T: for<'de> Deserialize<'de>>(
+  command: &str,
+  args: &serde_json::Value,
+) -> Result<T, ServerProblem> {
+  let failed = |detail: String| ServerProblem {
+    key: SERVER_FAILED_KEY.to_owned(),
+    detail,
+  };
+  let function = invoke_function().ok_or_else(|| failed("not running in the desktop app".to_owned()))?;
+  let js_args = js_sys::JSON::parse(&args.to_string())
+    .map_err(|_| failed("could not encode the arguments".to_owned()))?;
+  let promise = function
+    .call2(&JsValue::NULL, &command.into(), &js_args)
+    .map_err(|_| failed("the desktop bridge rejected the call".to_owned()))?
+    .dyn_into::<js_sys::Promise>()
+    .map_err(|_| failed("no promise".to_owned()))?;
+  let answer =
+    JsFuture::from(promise)
+      .await
+      .map_err(|value| match serde_wasm_json::<CommandError>(&value) {
+        Ok(error) if error.kind.starts_with(SERVER_KEY_PREFIX) => ServerProblem {
+          key: error.kind,
+          detail: error.message,
+        },
+        Ok(error) => failed(error.message),
+        Err(_) => failed(value.as_string().unwrap_or_default()),
+      })?;
+  serde_wasm_json(&answer).map_err(|error| failed(error.to_string()))
 }
 
 /// Shows a system notification: through the desktop shell, or from the page (the service worker's

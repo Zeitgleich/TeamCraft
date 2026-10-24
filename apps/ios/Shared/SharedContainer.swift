@@ -7,6 +7,8 @@ struct SharedContainer {
   private static let activeAccountKey = "activeAccount"
   private static let displayNameKey = "displayName"
   private static let appLockKey = "appLockEnabled"
+  /// Not a storage key: host names that start with `_` are not used for web servers.
+  private static let noServerFolder = "_none"
 
   let environment: AppEnvironment
   private let fileManager: FileManager
@@ -16,11 +18,14 @@ struct SharedContainer {
     self.fileManager = fileManager
   }
 
-  /// The folder the Rust core keeps its sealed database and downloads in. Not in backups (the
-  /// database key never leaves the device, so a restored copy is useless); the database is
-  /// readable after the first unlock, because the extension opens it while the phone is locked.
+  /// The folder the Rust core keeps its sealed database and downloads in, one per server (the
+  /// active entry's storage key; without a server nothing opens a core, so its folder stays empty).
+  /// Not in backups (the database key never leaves the device, so a restored copy is useless); the
+  /// database is readable after the first unlock, because the extension opens it while the phone is
+  /// locked.
   var dataDirectory: URL {
-    var url = containerRoot.appendingPathComponent("teamcraft", isDirectory: true)
+    let folder = ServerStore(defaults: defaults).active?.storageKey ?? Self.noServerFolder
+    var url = serversDirectory.appendingPathComponent(folder, isDirectory: true)
     prepare(&url, protection: .completeUntilFirstUserAuthentication)
     return url
   }
@@ -60,14 +65,17 @@ struct SharedContainer {
     try? fileManager.removeItem(at: dataDirectory.appendingPathComponent("downloads", isDirectory: true))
   }
 
-  /// The cross-process lock file (see `ProcessLock`).
+  /// The cross-process lock file (see `ProcessLock`); one for all servers, so the app and the
+  /// extension exclude each other even right after a server change.
   var lockFileURL: URL {
-    dataDirectory.appendingPathComponent("process.lock")
+    // Creates the container root first (the fallback folder may not exist yet).
+    _ = serversDirectory
+    return containerRoot.appendingPathComponent("process.lock")
   }
 
-  /// Settings both processes read (which account is signed in).
+  /// Settings both processes read (which server and account are signed in).
   var defaults: UserDefaults {
-    UserDefaults(suiteName: environment.appGroupId) ?? .standard
+    ServerStore.sharedDefaults(environment: environment)
   }
 
   /// Whether app lock is on. The notification extension reads it: with app lock on, notifications
@@ -87,6 +95,19 @@ struct SharedContainer {
   var displayName: String? {
     get { defaults.string(forKey: Self.displayNameKey) }
     nonmutating set { defaults.set(newValue, forKey: Self.displayNameKey) }
+  }
+
+  /// Removes the data folder of builds that had one server baked in (before server entry); its
+  /// account signs in again.
+  func removeLegacyData() {
+    try? fileManager.removeItem(at: containerRoot.appendingPathComponent("teamcraft", isDirectory: true))
+  }
+
+  /// Holds a data folder per server.
+  private var serversDirectory: URL {
+    var url = containerRoot.appendingPathComponent("servers", isDirectory: true)
+    prepare(&url, protection: .completeUntilFirstUserAuthentication)
+    return url
   }
 
   /// Creates `url` with a data protection class (new files inside inherit it) and keeps it out of backups.

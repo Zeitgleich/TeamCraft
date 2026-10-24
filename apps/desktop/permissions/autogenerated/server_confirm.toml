@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-server-confirm"
+description = "Enables the server_confirm command without any pre-configured scope."
+commands.allow = ["server_confirm"]
+
+[[permission]]
+identifier = "deny-server-confirm"
+description = "Denies the server_confirm command without any pre-configured scope."
+commands.deny = ["server_confirm"]

@@ -38,7 +38,7 @@ use crate::services::calls::CallService;
 use crate::services::local_accounts::LocalAuth;
 use crate::services::permission_scheme::SchemeStore;
 use crate::services::session::PolicyHolder;
-use crate::state::{AppState, MeetingMailConfig, Settings};
+use crate::state::{AppState, MeetingMailConfig, Settings, SignInSettings};
 use crate::storage::BlobStore;
 
 pub const TEST_ISSUER: &str = "https://auth.example.com/realms/test";
@@ -444,6 +444,7 @@ impl TestApp {
       max_attachment_bytes: maybe_storage
         .as_ref()
         .map_or(100 * 1024 * 1024, |storage| storage.max_attachment_bytes),
+      sign_in: SignInSettings::new(TEST_ISSUER.into(), TEST_CLIENT.into(), &[], None),
       ..Settings::default()
     };
     settings.gateway.presence_offline_grace_secs = 0;

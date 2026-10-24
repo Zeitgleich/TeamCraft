@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="server_entry_title">Gib deine Serveradresse ein</string>
+  <string name="server_entry_hint">Die Adresse bekommst du von deiner Organisation. Du kannst auch einen Einladungs- oder Nachrichtenlink einfügen.</string>
+  <string name="server_entry_locked">Deine Organisation hat den Server für diese App eingerichtet.</string>
+  <string name="server_entry_label">Serveradresse</string>
+  <string name="server_entry_continue">Weiter</string>
+  <string name="server_confirm_hint">Prüfe, dass das der Server deiner Organisation ist, bevor du dich anmeldest.</string>
+  <string name="server_confirm_continue">Weiter zur Anmeldung</string>
+  <string name="server_confirm_other">Anderen Server verwenden</string>
+  <string name="server_change">Server wechseln</string>
+  <string name="server_error_empty">Gib deine Serveradresse ein.</string>
+  <string name="server_error_invalid">Das ist keine gültige Serveradresse. Prüfe sie und versuche es erneut.</string>
+  <string name="server_error_credentials">Lass Benutzername und Passwort weg: Gib nur die Serveradresse ein.</string>
+  <string name="server_error_https_only">Es werden nur sichere Serveradressen (https) unterstützt.</string>
+  <string name="server_error_not_teamcraft">Unter dieser Adresse gibt es keinen TeamCraft-Server. Prüfe die Adresse mit deiner Administration.</string>
+  <string name="server_error_unreachable">Der Server ist nicht erreichbar. Prüfe die Adresse und deine Verbindung und versuche es erneut.</string>
+  <string name="server_error_offline">Du bist offline. Die App versucht es erneut, sobald du verbunden bist.</string>
+  <string name="server_error_tls">Es lässt sich keine sichere Verbindung zum Server aufbauen. Sein Zertifikat ist vielleicht ungültig, oder das Netzwerk greift ein.</string>
+  <string name="server_error_captive_portal">Dieses Netzwerk verlangt zuerst eine Anmeldung, zum Beispiel im Hotel- oder Zug-WLAN. Melde dich im Browser beim Netzwerk an und versuche es dann erneut.</string>
+  <string name="server_error_unavailable">Der Server ist gerade nicht verfügbar. Versuche es später erneut.</string>
+  <string name="server_error_app_too_old">Diese App ist zu alt für den Server. Aktualisiere die App und versuche es dann erneut.</string>
+  <string name="server_error_server_too_old">Der Server ist zu alt für diese App. Bitte deine Administration, ihn zu aktualisieren.</string>
+  <string name="server_error_invalid_sign_in">Die Anmeldeeinstellungen des Servers sind ungültig. Bitte deine Administration, sie zu prüfen.</string>
+  <string name="server_error_redirect_not_allowed">Der Server ist noch nicht für diese App eingerichtet. Bitte deine Administration, die Anmeldung der App zu erlauben.</string>
+  <string name="server_error_locked">Deine Organisation erlaubt in dieser App nur ihren eigenen Server.</string>
+  <string name="restriction_server_url_title">Serveradresse</string>
+  <string name="restriction_server_url_description">Der TeamCraft-Server, bei dem sich die Nutzer anmelden, zum Beispiel https://team.example.com. Die App prüft ihn und lässt ihn vor der Anmeldung bestätigen.</string>
+  <string name="restriction_lock_server_title">Server sperren</string>
+  <string name="restriction_lock_server_description">Nutzer können nicht zu einem anderen Server wechseln. Ein Konto auf einem anderen Server wird abgemeldet.</string>
+  <string name="server_confirm_provider">Du meldest dich bei %1$s an.</string>
+  <string name="server_confirm_provider_elsewhere">Dieser Server meldet dich über %1$s an, das nicht zu seiner eigenen Domain gehört. Fahre nur fort, wenn deine Organisation diesen Anmeldedienst nutzt; sonst könnte sich jemand als dein Server ausgeben.</string>
+</resources>

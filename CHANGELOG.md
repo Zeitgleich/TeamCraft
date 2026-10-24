@@ -10,6 +10,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ### Added
 
+- **Server entry in the apps**: the desktop, Android and iOS apps no longer have a server built in.
+  On first start they ask for the server address (a host name, URL or any link into the server),
+  show the server's name and host for confirmation and sign in with the settings the server
+  announces in the new public `GET /api/v1/server-info` (issuer, public client, scopes, optional
+  redirect URIs, brand, versions). Clear messages for captive portals, foreign servers, TLS problems
+  and version skew; "Change server" on the sign-in screen. Companies can preconfigure and lock the
+  server (desktop `desktop.json`, Android managed configuration, iOS managed app configuration).
+  Tokens and local data are kept per server origin; installs from release candidates sign in again.
+  New settings `[oidc] app_scopes` and `app_redirect_uris`
+  ([docs/operations.md](docs/operations.md) "Server address in the apps"). The web client now signs
+  in with the server's announced settings too.
 - **Durable push retries**: wake-ups that fail because a push service or the push gateway is down or
   rate limited wait in the database and are tried again with backoff and jitter, honouring
   `Retry-After`, until their TTL ends; a restart or a killed server loses none and sends none twice.

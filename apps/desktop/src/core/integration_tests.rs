@@ -136,7 +136,8 @@ async fn alice_and_carol_chat_in_a_channel_and_a_dm_through_the_core() {
 }
 
 pub(super) async fn person(name: &'static str, config: &DesktopConfig) -> Person {
-  let service = Arc::new(AuthService::new(config.clone(), SharedStore::default()).expect("auth service"));
+  let service =
+    Arc::new(AuthService::new(Some(config.clone()), SharedStore::default()).expect("auth service"));
   service
     .login(|url| spawn_fake_browser(url, name))
     .await
@@ -146,14 +147,14 @@ pub(super) async fn person(name: &'static str, config: &DesktopConfig) -> Person
     serde_json::from_str(&me.body).unwrap_or_else(|error| panic!("me body: {error}: {}", me.body));
   let token = service.bearer_token().await.expect("token");
   let tokens = TokenCache::default();
-  tokens.set(Some(token.clone()));
+  tokens.set(Some((config.server_url.clone(), token.clone())));
   // Access tokens live minutes; long-running users (the dev bridge) keep the cache fresh.
   tokio::spawn({
     let (service, tokens) = (service.clone(), tokens.clone());
     async move {
       loop {
         tokio::time::sleep(Duration::from_secs(20)).await;
-        tokens.set(service.bearer_token().await.ok());
+        tokens.set(service.server_bearer_token().await.ok());
       }
     }
   });

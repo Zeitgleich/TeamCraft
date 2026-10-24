@@ -4,15 +4,15 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Log
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
-import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import de.zeitgleich.teamcraft.server.StoragePaths
+import de.zeitgleich.teamcraft.server.readAtMost
 import uniffi.teamcraft_ffi.LoginBrand
 import uniffi.teamcraft_ffi.loginBrand
 
@@ -24,13 +24,14 @@ private const val TIMEOUT_MILLIS = 10_000
 
 /**
  * The server's brand for the sign-in screen (docs/branding.md §5): asked without credentials from
- * the configured server, checked by the core, cached per server URL so the next start shows it at
- * once. Brand data only changes what the screen shows, never which server the app talks to.
+ * the server the user picked, checked by the core, cached per server origin so the next start
+ * shows it at once. Brand data only changes what the screen shows, never which server the app
+ * talks to.
  */
-class BrandStore(context: Context, private val serverUrl: String) {
+class BrandStore(context: Context, val origin: String, storageKey: String) {
   private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-  private val directory = File(context.filesDir, "brand")
-  private val key = "teamcraft.brand:" + serverUrl.trimEnd('/')
+  private val directory = File(context.filesDir, StoragePaths.brandDir(storageKey))
+  private val key = "teamcraft.brand:" + origin.trimEnd('/')
 
   /** The brand of the last start, if this server sent one. */
   fun cached(): LoginBrand? = prefs.getString(key, null)?.let { check(it) }
@@ -38,7 +39,7 @@ class BrandStore(context: Context, private val serverUrl: String) {
   /** Asks the server again; the cached brand stays when it can't be reached. */
   suspend fun refresh(): LoginBrand? = withContext(Dispatchers.IO) {
     val json = try {
-      download(serverUrl.trimEnd('/') + "/api/v1/brand", MAX_BRAND_JSON_BYTES).decodeToString()
+      download(origin.trimEnd('/') + "/api/v1/brand", MAX_BRAND_JSON_BYTES).decodeToString()
     } catch (failure: IOException) {
       Log.i(TAG, "brand not reachable: ${failure.javaClass.simpleName}")
       return@withContext cached()
@@ -56,7 +57,7 @@ class BrandStore(context: Context, private val serverUrl: String) {
     return BitmapFactory.decodeFile(file.path)
   }
 
-  private fun check(json: String): LoginBrand? = loginBrand(json, serverUrl, Locale.getDefault().toLanguageTag())
+  private fun check(json: String): LoginBrand? = loginBrand(json, origin, Locale.getDefault().toLanguageTag())
 
   private fun saveLogo(maybeUrl: String?, isDark: Boolean) {
     val file = logoFile(isDark)
@@ -87,16 +88,5 @@ private fun download(url: String, maxBytes: Int): ByteArray {
     return connection.inputStream.use { readAtMost(it, maxBytes) }
   } finally {
     connection.disconnect()
-  }
-}
-
-private fun readAtMost(input: InputStream, maxBytes: Int): ByteArray {
-  val output = ByteArrayOutputStream()
-  val buffer = ByteArray(8 * 1024)
-  while (true) {
-    val count = input.read(buffer)
-    if (count < 0) return output.toByteArray()
-    if (output.size() + count > maxBytes) throw IOException("too large")
-    output.write(buffer, 0, count)
   }
 }

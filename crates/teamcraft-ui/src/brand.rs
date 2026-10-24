@@ -70,6 +70,19 @@ pub fn provide_brand(settings: Settings) {
   });
 }
 
+/// Desktop: the user confirmed a server; show its brand (from its `server-info` answer) at once
+/// and keep it for the next start.
+pub fn show_server_brand(response: BrandResponse) {
+  let config = AppConfig::load();
+  let Some(view) = BrandView::from_response(response.clone(), &config.server_url) else {
+    return;
+  };
+  if let Ok(text) = serde_json::to_string(&response) {
+    store_string(&cache_key(&config.server_url), &text);
+  }
+  Brand::use_current().0.set(view);
+}
+
 /// `GET /api/v1/brand` without credentials: through the desktop shell, or the page's own fetch.
 async fn fetch_brand(config: &AppConfig) -> Result<String, String> {
   #[derive(Deserialize)]

@@ -28,12 +28,11 @@ android {
     ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-    buildConfigField("String", "SERVER_URL", "\"${setting("serverUrl")}\"")
+    // README.md "Server address": no server is baked in; a self-built app may pre-select one.
+    buildConfigField("String", "DEFAULT_SERVER", "\"${setting("defaultServer")}\"")
     // The push gateway of the publisher this build is made for (docs/push-gateway.md); empty: the
     // gateway the server names.
     buildConfigField("String", "PUSH_GATEWAY_URL", "\"${setting("pushGatewayUrl")}\"")
-    buildConfigField("String", "OIDC_ISSUER", "\"${setting("oidcIssuer")}\"")
-    buildConfigField("String", "OIDC_CLIENT_ID", "\"${setting("oidcClientId")}\"")
     // AppAuth's redirect activity listens on this scheme; the OIDC client must allow the URI.
     manifestPlaceholders["appAuthRedirectScheme"] = setting("oidcRedirectScheme")
     buildConfigField("String", "OIDC_REDIRECT_URI", "\"${setting("oidcRedirectScheme")}:/oauth/callback\"")

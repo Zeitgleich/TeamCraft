@@ -10,6 +10,7 @@ notifications.
 | Path                                           | What                                                                           |
 |------------------------------------------------|--------------------------------------------------------------------------------|
 | `app/src/main/java/.../auth`                   | OIDC login with AppAuth (code + PKCE), session sealed with a Keystore key      |
+| `app/src/main/java/.../server`                 | Server entry: stored servers, managed configuration, `server-info` fetch       |
 | `app/src/main/java/.../security`               | `KeystoreBox` (AES-256-GCM key in the Keystore), `SealedFile`                  |
 | `app/src/main/java/.../core`                   | Opens the Rust core per account (Keystore-sealed key); chat bridge and models  |
 | `app/src/main/java/.../push`                   | `PushBackend`s, UnifiedPush receiver, payload format                           |
@@ -105,22 +106,65 @@ links changes.
 
 ### Configuration
 
-Gradle properties (`gradle.properties` has the development defaults; override with `-P` or in
+Gradle properties (`gradle.properties` has the defaults; override with `-P` or in
 `~/.gradle/gradle.properties`):
 
-| Property                       | Meaning                                                              |
-|--------------------------------|----------------------------------------------------------------------|
-| `teamcraft.serverUrl`          | TeamCraft server                                                     |
+| Property                       | Meaning                                                                          |
+|--------------------------------|----------------------------------------------------------------------------------|
+| `teamcraft.defaultServer`      | Server pre-selected on first start (self-built apps); empty: the user enters it  |
 | `teamcraft.pushGatewayUrl`     | Push gateway the FCM token is sealed for (publisher builds); empty: the server's |
-| `teamcraft.oidcIssuer`         | OIDC issuer (Keycloak realm URL)                                     |
-| `teamcraft.oidcClientId`       | Public OIDC client with PKCE                                         |
-| `teamcraft.oidcRedirectScheme` | Redirect URI is `<scheme>:/oauth/callback`; the client must allow it |
-| `teamcraft.fcm*`               | Firebase project of the deployment (flavor `full`); empty: no FCM    |
-| `teamcraft.upload*`            | Upload signing key (see "Signing")                                   |
+| `teamcraft.oidcRedirectScheme` | Redirect URI is `<scheme>:/oauth/callback`; the server's client must allow it    |
+| `teamcraft.fcm*`               | Firebase project of the deployment (flavor `full`); empty: no FCM                |
+| `teamcraft.upload*`            | Upload signing key (see "Signing")                                               |
+
+### Server address
+
+No server is built in. On first start the app asks for the server address (docs/operations.md
+"Server address in the apps"): the user types `team.example.com`, a full URL, or pastes an invite or
+message link. The core normalises it (`normalizeServerAddress`), the app fetches
+`GET {origin}/api/v1/server-info` (no redirects, 10 s connect / 15 s read timeout, at most 1 MiB)
+and the core checks the answer (`checkServerInfo`). The app then shows the server's brand and host
+for confirmation and signs in with the identity provider, client and scopes the server announced.
+The redirect URI must be in the server's `redirect_uris`.
+
+| Failure                                            | What the user reads                                             |
+|----------------------------------------------------|-----------------------------------------------------------------|
+| Not a web address, user name in it, plain `http`   | Invalid address / https only                                    |
+| Another web server, or a 404                       | Not a TeamCraft server                                          |
+| HTML page or redirect (hotel Wi-Fi)                | Sign in to the network first                                    |
+| DNS, refused, timeout                              | Offline (retried when the device is back online) or unreachable |
+| Certificate or TLS failure                         | No secure connection                                            |
+| 5xx                                                | Server not available                                            |
+| Version checks                                     | App too old / server too old                                    |
+| Sign-in settings invalid, redirect URI not allowed | Ask the admin                                                   |
+
+The checked server profile is stored per account (`server/ServerStore.kt`, app-private preferences,
+excluded from backups) and checked again on every start (`storedServer`); a profile that doesn't
+pass leads back to the entry. Everything of an account is keyed by the server's storage key:
+`auth/<key>/session.bin`, `store/<key>/<subject>/`, `keys/<key>/<subject>.key`, `brand/<key>/`.
+"Change server" on the sign-in screen forgets the server's profile (local data stays); signing out
+keeps the server. The app only ever contacts servers the user entered or the managed configuration
+names, never one a server points to. Builds from before the server entry kept one unkeyed session
+and store: the first start removes them and the user signs in (and links the device) again.
+
+A self-built app can set `teamcraft.defaultServer`: it is checked on first start and shown for
+confirmation like a managed server, but the user can still change it.
+
+#### Managed configuration (MDM)
+
+Organizations set the server through Android Enterprise managed configuration
+(`res/xml/app_restrictions.xml`); it takes precedence over `teamcraft.defaultServer` and is read on
+every start.
+
+| Key           | Type   | Meaning                                                                                                                       |
+|---------------|--------|-------------------------------------------------------------------------------------------------------------------------------|
+| `server_url`  | string | Server address; with no account yet the app checks it and goes straight to the confirmation                                   |
+| `lock_server` | bool   | Only `server_url` is allowed: no "Change server", other addresses are refused, and an account on another server is signed out |
 
 ### Tests
 
-- Unit tests (JVM, both flavors) run with every build: notification texts, push payload decoding,
+- Unit tests (JVM, both flavors) run with every build: the server entry (start decision, managed
+  configuration precedence, the lock, error texts, storage paths, stored accounts), notification texts, push payload decoding,
   the UnifiedPush subscription JSON, sidebar sections, what each wake-up kind shows, notification
   line order and dismissal matching, ring matching, the DND schedule JSON and quick-DND times
   across DST.
@@ -146,11 +190,13 @@ adb reverse tcp:8081 tcp:8081
 adb install app/build/outputs/apk/full/debug/app-full-debug.apk
 ```
 
-The app uses `127.0.0.1` rather than the emulator's `10.0.2.2` on purpose: Keycloak writes the host
-the device used into the token's issuer, and the server accepts only its configured issuer. The dev
-realm's public client `teamcraft` already allows the redirect URI `de.zeitgleich.teamcraft:/oauth/callback`.
-Plain HTTP is only allowed to `127.0.0.1`, `localhost` and `10.0.2.2`
-(`res/xml/network_security_config.xml`).
+Enter `http://127.0.0.1:8081` as the server address. Debug builds accept plain HTTP to any host
+(`src/debug/res/xml/network_security_config.xml`), e.g. `http://10.0.2.2:8081` or a machine on the
+LAN, but the issuer the server announces must be reachable from the device under the same name:
+Keycloak writes the host the device used into the token's issuer, and the server accepts only its
+configured issuer, which is why `adb reverse` and `127.0.0.1` are the easy way. The dev realm's
+public client `teamcraft` already allows the redirect URI `de.zeitgleich.teamcraft:/oauth/callback`.
+Release builds allow plain HTTP only to the device itself (`127.0.0.1`, `localhost`, `::1`).
 
 ## Security
 
@@ -161,7 +207,7 @@ Plain HTTP is only allowed to `127.0.0.1`, `localhost` and `10.0.2.2`
 - **Backups:** off, and every domain excluded from cloud backup and device transfer. A new phone is
   set up by linking it from another device or with the recovery passphrase.
 - **TLS:** the core trusts the Mozilla root set (`webpki-roots`) on Android; HTTPS is required except
-  for the development hosts above.
+  for the device itself (and any host in debug builds, see above).
 
 ## Push and notifications
 
@@ -256,8 +302,8 @@ key (a lost upload key can be reset; a lost app signing key can't).
 
 1. Create the app in the Play Console with the deployment's application ID (`de.zeitgleich.teamcraft`
    by default; change `applicationId` for your organization).
-2. Build `bundleFullRelease` (an AAB) with the upload key and the production server/issuer
-   properties, and upload it to the **Closed testing** track.
+2. Build `bundleFullRelease` (an AAB) with the upload key, and upload it to the **Closed testing**
+   track. Testers enter the server address, or the organization sets it through managed configuration.
 3. Add the testers (an email list or a Google Group of employees) and share the opt-in link.
 4. Fill in the data safety form: messages are end-to-end encrypted, the server sees metadata
    (e2ee.md §4.4); no ads, no analytics.

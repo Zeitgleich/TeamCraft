@@ -120,6 +120,14 @@ pub struct OidcConfig {
   /// client roles are read from `resource_access.<client_id>.roles`.
   #[serde(default = "default_client_id")]
   pub client_id: String,
+  /// Scopes the apps ask for at sign-in, announced in `GET /api/v1/server-info`; `openid` is always
+  /// added.
+  #[serde(default = "default_app_scopes")]
+  pub app_scopes: Vec<String>,
+  /// Redirect URIs the provider allows for `client_id`, announced so an app whose redirect URI is
+  /// missing says so instead of failing at the provider. Unset: the apps do not check.
+  #[serde(rename = "app_redirect_uris", default)]
+  pub maybe_app_redirect_uris: Option<Vec<String>>,
   /// Confidential client with a service account, reserved for the admin API and back-channel logout.
   #[serde(default = "default_server_client")]
   pub server_client: String,
@@ -1472,6 +1480,10 @@ fn default_client_id() -> String {
 
 fn default_server_client() -> String {
   "teamcraft-server".into()
+}
+
+fn default_app_scopes() -> Vec<String> {
+  vec!["openid".into(), "profile".into(), "email".into()]
 }
 
 fn default_algorithms() -> Vec<String> {

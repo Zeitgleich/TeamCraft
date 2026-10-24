@@ -199,10 +199,13 @@ jobs check the bundle they embed.
 Upload key secrets: `ANDROID_UPLOAD_KEYSTORE_BASE64` (the keystore file, base64),
 `ANDROID_UPLOAD_KEYSTORE_PASSWORD`, `ANDROID_UPLOAD_KEY_ALIAS`, `ANDROID_UPLOAD_KEY_PASSWORD`.
 
-The Android apps read their server and identity provider defaults at build time. The release job takes
-them from the repository variables `TEAMCRAFT_ANDROID_SERVER_URL`, `TEAMCRAFT_ANDROID_OIDC_ISSUER`,
-`TEAMCRAFT_ANDROID_OIDC_CLIENT_ID` and `TEAMCRAFT_ANDROID_OIDC_REDIRECT_SCHEME`; without them the APKs
-point at the development defaults in `apps/android/gradle.properties`.
+No release build has a server built in: the desktop, Android and iOS apps ask the user for the server
+address on first start (or take it from the device's managed configuration) and learn how to sign in
+from the server's `GET /api/v1/server-info` (docs/operations.md "Server address in the apps"). The
+release job therefore sets no server or identity provider; the redirect scheme stays the app ID
+(`de.zeitgleich.teamcraft:/oauth/callback`), the one operators register. Self-builds may compile in a
+default server (`TEAMCRAFT_DEFAULT_SERVER_URL` for desktop and iOS, `teamcraft.defaultServer` for
+Android); release builds must not.
 
 The `full` flavor gets its Firebase project from the secrets `TEAMCRAFT_FCM_PROJECT_ID`,
 `TEAMCRAFT_FCM_APPLICATION_ID`, `TEAMCRAFT_FCM_API_KEY` and `TEAMCRAFT_FCM_SENDER_ID` (the values of the

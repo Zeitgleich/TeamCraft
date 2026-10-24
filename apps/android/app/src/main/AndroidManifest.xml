@@ -28,6 +28,11 @@
     android:supportsRtl="true"
     android:theme="@style/Theme.TeamCraft">
 
+    <!-- Managed configuration: server address and lock, set by the organization's MDM. -->
+    <meta-data
+      android:name="android.content.APP_RESTRICTIONS"
+      android:resource="@xml/app_restrictions" />
+
     <activity
       android:name=".ui.MainActivity"
       android:exported="true"
