@@ -1201,6 +1201,7 @@ crop-preview-settings = Settings
 crop-preview-rail = Space bar
 crop-preview-sidebar = Sidebar
 crop-apply = Apply
+crop-retry = Try again
 crop-uploading = Saving…
 space-open = Anyone in the workspace can join
 space-settings-title = Space settings

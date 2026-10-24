@@ -51,9 +51,12 @@ enum CropPhase {
   /// Reading and decoding the file.
   Preparing,
   Ready,
-  /// Cutting the chosen square (a moment, on the page's thread).
+  /// Cutting the chosen square (a moment, on the page's thread); the picture stays as it is.
   Cropping,
-  Failed(ImagePickError),
+  /// Cutting failed; the picture stays and "Apply" can be tried again.
+  CropFailed(ImagePickError),
+  /// The file could not be read: there is no picture to crop, only another file to pick.
+  LoadFailed(ImagePickError),
 }
 
 /// One live preview: the size it is shown at, its corner radius and its caption.
@@ -142,7 +145,15 @@ pub fn ImageCropDialog(
   let upload = PendingAction::new();
   let busy = move || upload.is_pending();
   let is_pending = move || busy() || phase.get() == CropPhase::Cropping;
-  let is_ready = move || phase.get() == CropPhase::Ready;
+  // Interactive: the picture is there and nothing runs.
+  let is_ready = move || matches!(phase.get(), CropPhase::Ready | CropPhase::CropFailed(_));
+  // The picture is shown (also while cropping and uploading, so nothing flickers).
+  let has_picture = Memo::new(move |_| {
+    matches!(
+      phase.get(),
+      CropPhase::Ready | CropPhase::Cropping | CropPhase::CropFailed(_)
+    )
+  });
 
   remember_focus();
   load_picture(file, phase, picture, view);
@@ -163,9 +174,10 @@ pub fn ImageCropDialog(
   });
   let resize = window_event_listener(leptos::ev::resize, move |_| measure());
   on_cleanup(move || resize.remove());
-  // The dialog takes focus when it opens; the stage once the picture is there.
+  // The dialog takes focus when it opens, the stage once the picture is there; cropping and
+  // uploading leave focus where it is.
   Effect::new(move |_| {
-    let target = if is_ready() {
+    let target = if has_picture.get() {
       stage
         .get()
         .map(|element| element.unchecked_into::<web_sys::HtmlElement>())
@@ -219,7 +231,7 @@ pub fn ImageCropDialog(
           }
         },
         Err(error) => {
-          phase.set_if_alive(CropPhase::Failed(error));
+          phase.set_if_alive(CropPhase::CropFailed(error));
         },
       }
     });
@@ -394,7 +406,7 @@ pub fn ImageCropDialog(
               style:height=format!("{}px", preview.size_px)
               style:border-radius=preview.radius
             >
-              {move || is_ready().then(image)}
+              {move || has_picture.get().then(image)}
             </span>
             <figcaption>{move || i18n.t(preview.caption_key)}</figcaption>
           </figure>
@@ -404,7 +416,7 @@ pub fn ImageCropDialog(
   };
   let zoom_percent = move || format!("{:.0}", view.get().zoom() * 100.0);
   let message = move || match phase.get() {
-    CropPhase::Failed(error) => Some(i18n.t(error.i18n_key())),
+    CropPhase::CropFailed(error) | CropPhase::LoadFailed(error) => Some(i18n.t(error.i18n_key())),
     _ => upload
       .maybe_failure()
       .map(|failure| failure_message(i18n, &failure)),
@@ -435,7 +447,7 @@ pub fn ImageCropDialog(
               class:is-round=target.is_round()
               class:is-dragging=is_dragging
               class:is-animated=is_animated
-              tabindex=move || if is_ready() { "0" } else { "-1" }
+              tabindex=move || if has_picture.get() { "0" } else { "-1" }
               role="group"
               aria-label=move || i18n.t("crop-stage")
               aria-describedby="crop-help"
@@ -447,7 +459,7 @@ pub fn ImageCropDialog(
               on:wheel=on_wheel
               on:keydown=on_stage_keydown
             >
-              {move || is_ready().then(image)}
+              {move || has_picture.get().then(image)}
               <div class="crop-mask" style:inset=format!("{STAGE_INSET_PX}px") aria-hidden="true"></div>
               <Show when=move || phase.get() == CropPhase::Preparing fallback=|| ()>
                 <div class="crop-loading" role="status">
@@ -527,7 +539,16 @@ pub fn ImageCropDialog(
               <Show when=is_pending fallback=|| ()>
                 <span class="spinner" aria-hidden="true"></span>
               </Show>
-              {move || if busy() { i18n.t("crop-uploading") } else { i18n.t("crop-apply") }}
+              {move || {
+                let has_failed = matches!(phase.get(), CropPhase::CropFailed(_)) || upload.maybe_failure().is_some();
+                if busy() {
+                  i18n.t("crop-uploading")
+                } else if has_failed {
+                  i18n.t("crop-retry")
+                } else {
+                  i18n.t("crop-apply")
+                }
+              }}
             </button>
           </footer>
         </div>
@@ -586,7 +607,7 @@ fn load_picture(
 ) {
   spawn_local(async move {
     let Ok(buffer) = JsFuture::from(file.array_buffer()).await else {
-      phase.set_if_alive(CropPhase::Failed(ImagePickError::Unreadable));
+      phase.set_if_alive(CropPhase::LoadFailed(ImagePickError::Unreadable));
       return;
     };
     // The spinner paints before decoding takes the page's thread for a moment.
@@ -610,7 +631,7 @@ fn load_picture(
         }
       },
       Err(error) => {
-        phase.set_if_alive(CropPhase::Failed(error));
+        phase.set_if_alive(CropPhase::LoadFailed(error));
       },
     }
   });

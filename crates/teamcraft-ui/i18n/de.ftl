@@ -1201,6 +1201,7 @@ crop-preview-settings = Einstellungen
 crop-preview-rail = Space-Leiste
 crop-preview-sidebar = Seitenleiste
 crop-apply = Übernehmen
+crop-retry = Erneut versuchen
 crop-uploading = Wird gespeichert …
 space-open = Alle im Workspace können beitreten
 space-settings-title = Space-Einstellungen

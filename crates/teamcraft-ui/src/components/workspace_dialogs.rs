@@ -59,6 +59,8 @@ enum ImageStatus {
   Busy,
   /// The i18n key of the message.
   Failed(&'static str),
+  /// A neutral note (the i18n key), e.g. that the demo keeps no pictures.
+  Note(&'static str),
 }
 
 /// How the history choice of a new channel is picked.
@@ -881,7 +883,7 @@ fn SpaceImageSection(space: SpaceId) -> impl IntoView {
     Box::pin(async move {
       let Some(hub) = maybe_hub else {
         picked.set_if_alive(None);
-        status.set_if_alive(ImageStatus::Failed("space-image-demo"));
+        status.set_if_alive(ImageStatus::Note("space-image-demo"));
         return Ok(());
       };
       let updated = hub
@@ -939,6 +941,7 @@ fn SpaceImageSection(space: SpaceId) -> impl IntoView {
       ImageStatus::Idle => ().into_any(),
       ImageStatus::Busy => view! { <p class="hint" role="status">{move || i18n.t("space-image-uploading")}</p> }.into_any(),
       ImageStatus::Failed(key) => view! { <p class="field-error" role="alert">{move || i18n.t(key)}</p> }.into_any(),
+      ImageStatus::Note(key) => view! { <p class="hint" role="status">{move || i18n.t(key)}</p> }.into_any(),
     }}
     {move || picked.get().map(|file| view! {
       <ImageCropDialog
