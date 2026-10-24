@@ -32,7 +32,7 @@ class AppGraph(context: Context) {
   val servers = ServerStore(context)
   val managedConfig = ManagedConfig(context)
   val auth = AuthRepository(context, servers)
-  val legacySignOut = LegacySignOut(context, servers)
+  val legacySignOut = LegacySignOut(servers)
   val core = CoreRepository(context, auth)
   val notifier = MessageNotifier(context)
   val mentionPrefs = MentionPrefs(context)

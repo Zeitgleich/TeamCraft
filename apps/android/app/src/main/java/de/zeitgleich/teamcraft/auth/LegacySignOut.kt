@@ -1,6 +1,5 @@
 package de.zeitgleich.teamcraft.auth
 
-import android.content.Context
 import android.util.Log
 import java.io.File
 import java.io.IOException
@@ -53,7 +52,7 @@ private val READ_TIMEOUT_MILLIS = TimeUnit.SECONDS.toMillis(15).toInt()
  * (`teamcraft-client-api` `legacy_session`). Best effort: a failed request never keeps the old
  * session beyond the wait. Tokens are never logged.
  */
-class LegacySignOut(private val context: Context, private val servers: ServerStore) {
+class LegacySignOut(private val servers: ServerStore) {
   private val lock = Mutex()
 
   /** Runs on app start and after the user confirmed a server; cheap when nothing is left. */
@@ -123,17 +122,22 @@ class LegacySignOut(private val context: Context, private val servers: ServerSto
     val key = SealedFile(File(legacy, "$LEGACY_KEYS/$account.key"), KeystoreBox(DATABASE_KEY_ALIAS)).read() ?: return null
     val tokenEndpoint = state.authorizationServiceConfiguration?.tokenEndpoint?.toString() ?: return null
     val tokens = refresh(tokenEndpoint, refreshToken, clientId) ?: return null
-    val core = TeamCraft(
-      AppConfig(
-        serverUrl = server.address.origin,
-        dataDir = File(legacy, LEGACY_STORE).absolutePath,
-        account = account,
-        databaseKey = key,
-        pushGatewayUrl = BuildConfig.PUSH_GATEWAY_URL.ifEmpty { null },
-      ),
-      StaticTokens(tokens.first),
-      NoChanges(),
-    )
+    val core = try {
+      TeamCraft(
+        AppConfig(
+          serverUrl = server.address.origin,
+          dataDir = File(legacy, LEGACY_STORE).absolutePath,
+          account = account,
+          databaseKey = key,
+          pushGatewayUrl = BuildConfig.PUSH_GATEWAY_URL.ifEmpty { null },
+        ),
+        StaticTokens(tokens.first),
+        NoChanges(),
+      )
+    } catch (failure: Exception) {
+      Log.i(TAG, "could not open the old store: ${failure.javaClass.simpleName}")
+      return tokens.second
+    }
     try {
       core.unregisterPush()
       Log.i(TAG, "unregistered the old device's push")

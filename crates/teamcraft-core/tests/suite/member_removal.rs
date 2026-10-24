@@ -525,6 +525,8 @@ mod finished_by_another_device {
     server.serve_device_list(alice, forged);
     server.revoke_device(alice, world.laptop_device);
     world.settle_all().await;
+    // A full sync reads the list too; refusing it doesn't stop the sync.
+    world.tablet.client.full_sync().await.unwrap();
 
     assert_eq!(commits(&world.tablet, world.channel).await, commits_before);
     assert!(
