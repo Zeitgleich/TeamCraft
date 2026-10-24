@@ -2,19 +2,23 @@
 //! hours) and the card of another person with their local time.
 
 use leptos::prelude::*;
-use teamcraft_proto::{UpdateProfileRequest, UserId, WorkingHours};
+use teamcraft_proto::{AvatarContentType, ErrorCode, UpdateProfileRequest, UserId, WorkingHours};
 use wasm_bindgen::JsCast;
-use wasm_bindgen_futures::JsFuture;
 
 use crate::clock::{
   format_date_time, format_relative, local_time_zone, now_ms, time_in_zone, time_zone_names,
 };
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
+use crate::components::image_crop_dialog::{
+  CropTarget, CropUpload, ImageCropDialog, allow_image_drop, dropped_file,
+};
 use crate::components::modal::Modal;
+use crate::feedback::{ActionFailure, FailureKind};
 use crate::i18n::use_i18n;
+use crate::image_crop::check_pick;
 use crate::model::{PresenceStatus, User};
-use crate::profiles::{MAX_AVATAR_BYTES, avatar_type, use_profiles};
+use crate::profiles::{MAX_AVATAR_BYTES, use_profiles};
 use crate::reactive::SetIfAlive;
 use crate::state::use_app_state;
 
@@ -144,6 +148,15 @@ pub fn EditProfileDialog() -> impl IntoView {
     });
   };
 
+  let picked = RwSignal::new_local(None::<web_sys::File>);
+  let open_crop = move |file: web_sys::File| {
+    if let Err(pick_error) = check_pick(&file.type_(), file.size()) {
+      error.set(Some(i18n.t(pick_error.i18n_key())));
+      return;
+    }
+    error.set(None);
+    picked.set(Some(file));
+  };
   let pick_avatar = move |ev: leptos::ev::Event| {
     let Some(input) = ev
       .target()
@@ -151,30 +164,30 @@ pub fn EditProfileDialog() -> impl IntoView {
     else {
       return;
     };
-    let Some(file) = input.files().and_then(|files| files.item(0)) else {
-      return;
-    };
+    let maybe_file = input.files().and_then(|files| files.item(0));
     input.set_value("");
-    let Some(content_type) = avatar_type(&file.type_()) else {
-      error.set(Some(i18n.t("profile-avatar-type")));
-      return;
-    };
-    if file.size() as u64 > MAX_AVATAR_BYTES {
-      error.set(Some(i18n.t("profile-avatar-size")));
-      return;
+    if let Some(file) = maybe_file {
+      open_crop(file);
     }
-    error.set(None);
-    leptos::task::spawn_local(async move {
-      let Ok(buffer) = JsFuture::from(file.array_buffer()).await else {
-        error.set_if_alive(Some(i18n.t("profile-avatar-unreadable")));
-        return;
-      };
-      let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
-      if let Err(failure) = hub.upload_avatar(me.id, content_type, bytes).await {
-        error.set_if_alive(Some(failure.to_string()));
-      }
-    });
   };
+  let me_id = me.id;
+  let apply_avatar = Callback::new(move |png: Vec<u8>| -> CropUpload {
+    Box::pin(async move {
+      if png.len() as u64 > MAX_AVATAR_BYTES {
+        return Err(ActionFailure::new(
+          FailureKind::Server(ErrorCode::PayloadTooLarge),
+          "cropped avatar above the upload limit",
+        ));
+      }
+      hub
+        .upload_avatar(me_id, AvatarContentType::Png, png)
+        .await
+        .map_err(|failure| failure.to_failure())?;
+      picked.set_if_alive(None);
+      Ok(())
+    })
+  });
+  let cancel_crop = Callback::new(move |()| picked.set(None));
   let remove_avatar = move |_| {
     leptos::task::spawn_local(async move {
       if let Err(failure) = hub.remove_avatar(me.id).await {
@@ -193,7 +206,11 @@ pub fn EditProfileDialog() -> impl IntoView {
           </button>
         </header>
         <div class="modal-body">
-          <div class="profile-avatar-row">
+          <div class="profile-avatar-row" on:dragover=allow_image_drop on:drop=move |ev| {
+            if let Some(file) = dropped_file(&ev) {
+              open_crop(file);
+            }
+          }>
             <Avatar user=me.clone() size=AvatarSize::Large />
             <label class="btn btn-small">
               {move || i18n.t("profile-avatar-change")}
@@ -263,6 +280,14 @@ pub fn EditProfileDialog() -> impl IntoView {
           <button type="submit" class="btn btn-primary" prop:disabled=move || is_saving.get()>{move || i18n.t("save")}</button>
         </footer>
       </form>
+      {move || picked.get().map(|file| view! {
+        <ImageCropDialog
+          file=file
+          target=CropTarget::Avatar
+          on_apply=apply_avatar
+          on_cancel=cancel_crop
+        />
+      })}
     </Modal>
   }
   .into_any()

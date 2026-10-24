@@ -48,6 +48,13 @@ pub enum IconName {
   Shield,
   Clock,
   List,
+  ListNumbered,
+  Quote,
+  Code,
+  CodeBlock,
+  AtSign,
+  Slash,
+  Camera,
   Key,
   Layers,
   Alert,
@@ -163,6 +170,17 @@ impl IconName {
       Self::Shield => "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z",
       Self::Clock => "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z M12 7v5l3 3",
       Self::List => "M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01",
+      Self::ListNumbered => {
+        "M10 6h11 M10 12h11 M10 18h11 M4 4h1v5 M4 9h2 M6 19H4c0-1.5 2-2.2 2-3.4a1 1 0 0 0-2-.3"
+      },
+      Self::Quote => "M5 18h3l2-4V7H4v7h3z M14 18h3l2-4V7h-6v7h3z",
+      Self::Code => "M16 18l6-6-6-6 M8 6l-6 6 6 6",
+      Self::CodeBlock => "M3 4h18v16H3z M10 9l-3 3 3 3 M14 9l3 3-3 3",
+      Self::AtSign => "M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8z M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-3.9 7.9",
+      Self::Slash => "M4 4h16v16H4z M15 7l-6 10",
+      Self::Camera => {
+        "M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z M12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"
+      },
       Self::Key => "M21 2l-2 2m-7.6 7.6a5.5 5.5 0 1 1-7.8 7.8 5.5 5.5 0 0 1 7.8-7.8z M15.5 7.5l3 3L22 7l-3-3",
       Self::Layers => "M12 2l10 5-10 5L2 7z M2 17l10 5 10-5 M2 12l10 5 10-5",
       Self::Alert => {

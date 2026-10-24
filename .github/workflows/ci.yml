@@ -247,9 +247,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Versions agree (Cargo, desktop, Android, iOS, CHANGELOG.md)
+      - name: Versions agree (Cargo, desktop, Android, iOS)
         run: scripts/check-versions.sh
-      - name: Release script tests (updater manifest, no demo data in release builds)
+      - name: Release script tests (updater manifest, release notes, no demo data in release builds)
         run: python3 -m unittest discover -s scripts/tests -v
       - name: UI tasks touch signals only with try_ after an await (issue #322)
         run: scripts/check-async-signals.py
