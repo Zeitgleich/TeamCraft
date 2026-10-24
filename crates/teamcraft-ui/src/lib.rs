@@ -25,6 +25,7 @@ pub mod clock;
 pub mod components;
 pub mod delivery;
 pub mod diff;
+pub mod editor_doc;
 pub mod feed_motion;
 pub mod feedback;
 // Shared with the mobile apps (through the FFI), so they live in the client API.
@@ -34,6 +35,7 @@ pub mod highlight;
 pub mod history;
 pub mod hybrid;
 pub mod i18n;
+pub mod image_crop;
 pub mod keys;
 pub mod lightbox;
 pub mod live;

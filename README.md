@@ -11,7 +11,7 @@ written in Rust. License: AGPL-3.0-or-later.
 - Download the apps: the [package site](https://zeitgleich.github.io/TeamCraft/) or the
   [releases](https://github.com/Zeitgleich/TeamCraft/releases) (Windows x64 and arm64; macOS 14 or newer
   for Apple silicon or Intel; Linux x86_64 and aarch64; Android)
-- Releases and changes: [CHANGELOG.md](CHANGELOG.md), [docs/release.md](docs/release.md)
+- Releases and changes: [GitHub Releases](https://github.com/Zeitgleich/TeamCraft/releases), [docs/release.md](docs/release.md)
 - Rules for contributors and coding agents: [AGENTS.md](AGENTS.md)
 
 ## Development setup

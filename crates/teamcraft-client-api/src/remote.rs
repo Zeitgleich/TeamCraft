@@ -166,6 +166,9 @@ pub struct ChatSnapshot {
   /// Server-reported counters the core keeps from gateway events; absent from older shells.
   #[serde(rename = "live", default, skip_serializing_if = "Option::is_none")]
   pub maybe_live: Option<LiveSnapshot>,
+  /// Where each conversation sits in the lists above (derived, never sent).
+  #[serde(skip)]
+  pub index: crate::snapshot_changes::ConversationIndex,
 }
 
 /// Fingerprints (hex) of the identity keys on this device.
@@ -219,6 +222,7 @@ impl ChatSnapshot {
       last_activity,
       security,
       maybe_live: backend.live_snapshot(),
+      index: crate::snapshot_changes::ConversationIndex::default(),
     }
   }
 }
@@ -304,9 +308,11 @@ pub enum CoreStatus {
     /// Fingerprint of the account's identity key.
     identity_fingerprint: String,
   },
-  Failed {
-    message: String,
-  },
+  /// The encrypted data could not be opened (keystore, database); `message` is for details.
+  Failed { message: String },
+  /// The client core ended unexpectedly (an internal error such as a panic), not because of the
+  /// keystore or the database: the user is asked to restart the app and report it.
+  Stopped,
 }
 
 /// Where the core's gateway connection stands, for the connection banner (the core's
@@ -1266,6 +1272,10 @@ mod tests {
         has_existing_identity: true,
         was_data_lost: true
       }
+    );
+    assert_eq!(
+      serde_json::to_string(&CoreStatus::Stopped).expect("serialize"),
+      r#"{"state":"stopped"}"#
     );
   }
 

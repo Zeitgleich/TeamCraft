@@ -46,7 +46,7 @@ async fn the_web_client_offers_the_v1_chat_features() {
       sign_in_as_alice(&page).await;
       wait_for_text(&page, "browser-channel").await;
       click_text(&page, "browser-channel").await;
-      let composer = wait_for_element(&page, "textarea").await;
+      let composer = wait_for_element(&page, "[data-composer]").await;
 
       // The mention picker completes people (Carol is in the channel).
       composer
@@ -59,7 +59,7 @@ async fn the_web_client_offers_the_v1_chat_features() {
       wait_for_text(&page, "@carol").await;
       shot(&page, "v1-mention-picker").await;
       composer.press_key("Enter").await.unwrap();
-      assert_eq!(textarea_value(&page).await, "hello @carol ");
+      assert_eq!(composer_text(&page).await, "hello @carol ");
 
       // Emoticons become emoji on send.
       composer
@@ -191,7 +191,7 @@ async fn a_message_written_in_the_web_client_reaches_a_second_client() {
       sign_in_as_alice(&page).await;
       wait_for_text(&page, "browser-channel").await;
       click_text(&page, "browser-channel").await;
-      let composer = wait_for_element(&page, "textarea").await;
+      let composer = wait_for_element(&page, "[data-composer]").await;
       composer
         .click()
         .await
@@ -494,7 +494,7 @@ async fn send_in_channel(page: &Page, text: &str) {
   // Input goes to the tab in front; a background tab never gets it.
   page.bring_to_front().await.unwrap();
   click_text(page, "browser-channel").await;
-  let composer = wait_for_element(page, "textarea").await;
+  let composer = wait_for_element(page, "[data-composer]").await;
   composer
     .click()
     .await
@@ -532,9 +532,9 @@ pub(crate) async fn shot(page: &Page, name: &str) {
     .await;
 }
 
-async fn textarea_value(page: &Page) -> String {
+async fn composer_text(page: &Page) -> String {
   page
-    .evaluate("document.querySelector('textarea').value")
+    .evaluate("document.querySelector('[data-composer]').textContent")
     .await
     .ok()
     .and_then(|result| result.into_value::<String>().ok())

@@ -1,10 +1,10 @@
 <!-- Template of every GitHub release's notes, rendered by scripts/render-release-notes.py
      (docs/release.md). Placeholders: {{version}} {{tag}} {{repo}} {{prerelease_notice}}
-     {{changelog}} {{breaking}} {{images}} {{generated_notes}} -->
+     {{highlights}} {{breaking}} {{images}} {{generated_notes}} -->
 {{prerelease_notice}}
 ## Highlights
 
-{{changelog}}
+{{highlights}}
 
 ## Install
 

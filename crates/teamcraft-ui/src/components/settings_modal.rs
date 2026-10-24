@@ -3,6 +3,7 @@ use teamcraft_client_api::window_chrome::TitleBar;
 
 use crate::auth::tauri;
 use crate::components::bundle_banner::AboutSection;
+use crate::components::composer_toolbar::{FORMAT_SHORTCUTS, action_label};
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::components::settings_tabs::{
@@ -256,6 +257,22 @@ pub fn ShortcutsModal() -> impl IntoView {
                 <tr>
                   <th scope="row">{move || i18n.t(key)}</th>
                   <td><ShortcutList shortcuts=keys /></td>
+                </tr>
+              }
+            })
+            .collect_view()}
+        </tbody>
+      </table>
+      <h3 class="shortcut-section">{move || i18n.t("shortcuts-formatting")}</h3>
+      <table class="shortcut-table">
+        <tbody>
+          {FORMAT_SHORTCUTS
+            .into_iter()
+            .map(|(action, shortcut)| {
+              view! {
+                <tr>
+                  <th scope="row">{move || i18n.t(action_label(action))}</th>
+                  <td><ShortcutList shortcuts=vec![shortcut] /></td>
                 </tr>
               }
             })

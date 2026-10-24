@@ -86,4 +86,9 @@ pub struct UnreadResponse {
   /// client that counts new messages itself stops there too. Absent from servers before 1.0.1.
   #[serde(rename = "max_counted", default, skip_serializing_if = "Option::is_none")]
   pub maybe_max_counted: Option<u32>,
+  /// An ID taken after the counts were read: messages with a higher ID are not in them. A client
+  /// that counts live `message_create` events itself counts only those, so events that queued
+  /// while this answer was on its way are not counted twice. Absent from servers before 1.0.2.
+  #[serde(rename = "counted_through", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_counted_through: Option<MessageId>,
 }

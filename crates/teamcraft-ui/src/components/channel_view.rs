@@ -128,6 +128,7 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
         <ChannelHeader conversation=conversation info=info tab=tab />
         <KeyChangeBanner conversation=conversation />
         <DeviceAccessBanner conversation=conversation />
+        <CatchingUpNote info=info />
         <MembershipIssueBanners conversation=conversation info=info />
         <HuddleBar conversation=conversation />
         <BookmarksBar conversation=conversation info=info />
@@ -158,6 +159,27 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
             .into_any(),
         }}
       </section>
+    })
+  }
+}
+
+/// The client is still catching up this conversation after being away (issue #247): older
+/// messages may still arrive above what is shown.
+#[component]
+fn CatchingUpNote(info: Memo<Option<Conversation>>) -> impl IntoView {
+  let i18n = use_i18n();
+  let is_catching_up = Memo::new(move |_| info.get().is_some_and(|conv| conv.is_catching_up));
+  move || {
+    is_catching_up.get().then(|| {
+      view! {
+        <div class="key-banner catching-up-note" role="status">
+          <Icon name=IconName::Clock />
+          <div class="key-banner-text">
+            <strong>{move || i18n.t("catching-up")}</strong>
+            <span>{move || i18n.t("catching-up-detail")}</span>
+          </div>
+        </div>
+      }
     })
   }
 }

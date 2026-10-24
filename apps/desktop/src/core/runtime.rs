@@ -1,5 +1,7 @@
+use std::any::Any;
 use std::cell::RefCell;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -13,6 +15,7 @@ use teamcraft_client_api::remote::{
   ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreStatus, EnrollRequest, LinkStatus,
   MessageWindow, SecuritySnapshot,
 };
+use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
 use teamcraft_core::client::{LinkApproval, LinkedSecrets, NewDeviceLink};
 use teamcraft_core::clock::{Clock, SystemClock};
@@ -21,9 +24,10 @@ use teamcraft_core::connection::{
 };
 use teamcraft_core::records;
 use teamcraft_core::store::{
-  DatabaseKeySource, KeySourceError, KeyringKeySource, SqlCipherStore, StoreError, StoreLock,
+  DatabaseKeySource, KeySourceError, KeyringKeySource, SqlCipherStore, StoreError, StoreLock, TrackedStore,
 };
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
+use teamcraft_core::ui_snapshot::SnapshotCache;
 use teamcraft_core::upkeep::{self, Upkeep};
 use teamcraft_core::{
   CallKeySigner, Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer,
@@ -46,8 +50,10 @@ const MAX_APPROVAL_MISSES: u8 = 3;
 /// Retries (outbox, uploads, previews), staggered commits and the other periodic upkeep; also the
 /// connection's regular check.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
-/// How often account data (saved items, drafts) is pulled from the user's other devices.
-const ACCOUNT_SYNC: Duration = Duration::from_secs(60);
+/// How long a failed account data sync waits before it is retried; also how often the roster's age
+/// is checked locally. Account data itself is read after each connection and on `key_bag_update`
+/// (issue #252), not on a timer.
+const UPKEEP_INTERVAL: Duration = Duration::from_secs(60);
 /// A core of this process that is just stopping may hold the store lock for a moment longer.
 const STORE_LOCK_ATTEMPTS: u32 = 15;
 const STORE_LOCK_RETRY: Duration = Duration::from_millis(200);
@@ -217,7 +223,8 @@ pub struct CallPreparation {
 
 type Api = HttpServerApi<ServerTokens>;
 type Gateway = <Api as ServerApi>::Gateway;
-type Store = Arc<SqlCipherStore>;
+/// Notes what each write changes, so the UI's snapshot is rebuilt per conversation (issue #246).
+type Store = TrackedStore<Arc<SqlCipherStore>>;
 
 // Short-lived messages on a channel: boxing the one large variant would only add an allocation.
 #[allow(clippy::large_enum_variant)]
@@ -225,6 +232,10 @@ enum Request {
   Status(oneshot::Sender<CoreStatus>),
   Enroll(EnrollRequest, oneshot::Sender<Result<(), String>>),
   Snapshot(oneshot::Sender<Result<ChatSnapshot, String>>),
+  SnapshotChanges(
+    Option<SnapshotCursor>,
+    oneshot::Sender<Result<SnapshotChanges, String>>,
+  ),
   UpdatePolicy(oneshot::Sender<Option<ClientUpdatePolicy>>),
   Messages {
     conversation: ConversationId,
@@ -315,7 +326,12 @@ impl CoreRuntime {
           on_call_event,
         };
         let core = Core::new(config, user, key, tokens, hooks, status);
-        runtime.block_on(core.run(receiver));
+        // A panic ends the core for good: logged here, and `status` then answers `Stopped`, so the
+        // UI shows an internal error instead of a keystore problem.
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| runtime.block_on(core.run(receiver))));
+        if let Err(payload) = outcome {
+          tracing::error!(panic = %panic_text(payload.as_ref()), "the client core panicked and stopped");
+        }
       })
       .ok();
     Self {
@@ -345,10 +361,9 @@ impl CoreRuntime {
     drop(self.requests.send(Request::NetworkChanged));
   }
 
+  /// Where the core stands; `Stopped` when its thread is gone (it panicked or was shut down).
   pub async fn status(&self) -> CoreStatus {
-    self.ask(Request::Status).await.unwrap_or(CoreStatus::Failed {
-      message: "the core is not running".into(),
-    })
+    self.ask(Request::Status).await.unwrap_or(CoreStatus::Stopped)
   }
 
   pub async fn enroll(&self, request: EnrollRequest) -> Result<(), String> {
@@ -361,6 +376,16 @@ impl CoreRuntime {
   pub async fn snapshot(&self) -> Result<ChatSnapshot, String> {
     self
       .ask(Request::Snapshot)
+      .await
+      .unwrap_or_else(|| Err(stopped()))
+  }
+
+  pub async fn snapshot_changes(
+    &self,
+    maybe_since: Option<SnapshotCursor>,
+  ) -> Result<SnapshotChanges, String> {
+    self
+      .ask(|reply| Request::SnapshotChanges(maybe_since, reply))
       .await
       .unwrap_or_else(|| Err(stopped()))
   }
@@ -523,8 +548,38 @@ impl Drop for CoreRuntime {
   }
 }
 
+/// Fingerprints of the keys this device pinned, and of keys the server showed since.
+fn security_of(client: &Client<Api, Store>) -> Result<SecuritySnapshot, String> {
+  let fingerprint = |key: [u8; 32]| IdentityPublicKey::from_bytes(key).fingerprint().to_string();
+  let contacts = records::pinned_identities(client.store())
+    .map_err(describe)?
+    .into_iter()
+    .map(|(user, pinned)| ContactKeys {
+      user,
+      fingerprint: fingerprint(pinned.public_key),
+      maybe_new_fingerprint: pinned.maybe_changed_to.map(fingerprint),
+      is_attested: pinned.is_attested,
+    })
+    .collect();
+  Ok(SecuritySnapshot {
+    my_fingerprint: client.identity_fingerprint(),
+    contacts,
+    maybe_push_content: Some(teamcraft_core::push_preview::push_content_mode(client.store())),
+    maybe_owners: client.owner_roster_status(),
+  })
+}
+
 fn stopped() -> String {
   "the core is not running".to_owned()
+}
+
+/// The message of a panic payload (`panic!` with a literal or a formatted message).
+fn panic_text(payload: &(dyn Any + Send)) -> &str {
+  payload
+    .downcast_ref::<&str>()
+    .copied()
+    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+    .unwrap_or("non-text panic payload")
 }
 
 struct Core {
@@ -553,6 +608,8 @@ struct Core {
   maybe_attention: Option<bool>,
   /// Set while opening waits for an access token.
   maybe_open_retry: Option<OpenRetry>,
+  /// The UI's snapshot, rebuilt per conversation from what the store's writes touched (#246).
+  snapshots: SnapshotCache,
 }
 
 /// Why the client could not be opened.
@@ -619,13 +676,14 @@ impl Core {
       backend: None,
       connection,
       status: CoreStatus::NotStarted,
-      upkeep: Upkeep::new(ACCOUNT_SYNC),
+      upkeep: Upkeep::new(UPKEEP_INTERVAL),
       link: None,
       link_failure: LinkStatus::Idle,
       approval: None,
       approval_misses: 0,
       maybe_attention: None,
       maybe_open_retry: None,
+      snapshots: SnapshotCache::new(SystemClock.now_ms().unsigned_abs()),
     }
   }
 
@@ -688,9 +746,9 @@ impl Core {
     let store = match &self.store {
       Some(store) => store.clone(),
       None => {
-        let store = Arc::new(
+        let store = TrackedStore::new(Arc::new(
           SqlCipherStore::open(&path, &self.key).map_err(|error| OpenError::Failed(error.to_string()))?,
-        );
+        ));
         self.store = Some(store.clone());
         store
       },
@@ -796,6 +854,7 @@ impl Core {
       // Handled by the loop in `run`.
       Request::Shutdown => {},
       Request::Snapshot(reply) => drop(reply.send(self.snapshot())),
+      Request::SnapshotChanges(maybe_since, reply) => drop(reply.send(self.snapshot_changes(maybe_since))),
       Request::UpdatePolicy(reply) => drop(
         reply.send(
           self
@@ -809,7 +868,13 @@ impl Core {
         start,
         len,
         reply,
-      } => drop(reply.send(self.window(conversation, start, len))),
+      } => {
+        // The next catch-up starts with the conversation the user looked at last (issue #247).
+        if let Some(client) = &self.client {
+          client.catch_up_focus().set(conversation);
+        }
+        drop(reply.send(self.window(conversation, start, len)));
+      },
       Request::Thread {
         conversation,
         thread,
@@ -1023,31 +1088,36 @@ impl Core {
     client.complete_link_approval(approval).await.map_err(describe)
   }
 
-  fn snapshot(&self) -> Result<ChatSnapshot, String> {
-    let backend = self.backend.as_ref().ok_or("this device is not set up yet")?;
-    Ok(ChatSnapshot::read(backend, self.security_snapshot()?))
+  fn snapshot(&mut self) -> Result<ChatSnapshot, String> {
+    let security = self.security_snapshot()?;
+    let (Some(backend), Some(store)) = (self.backend.as_ref(), self.store.as_ref()) else {
+      return Err("this device is not set up yet".to_owned());
+    };
+    Ok(
+      self
+        .snapshots
+        .snapshot(backend, store.take_changes(), || Some(security)),
+    )
+  }
+
+  fn snapshot_changes(&mut self, maybe_since: Option<SnapshotCursor>) -> Result<SnapshotChanges, String> {
+    let Self {
+      backend: Some(backend),
+      store: Some(store),
+      client: Some(client),
+      snapshots,
+      ..
+    } = self
+    else {
+      return Err("this device is not set up yet".to_owned());
+    };
+    let security = || security_of(client).ok();
+    Ok(snapshots.changes_since(backend, store.take_changes(), security, maybe_since))
   }
 
   /// Fingerprints of the keys this device pinned, and of keys the server showed since.
   fn security_snapshot(&self) -> Result<SecuritySnapshot, String> {
-    let client = self.client.as_ref().ok_or("this device is not set up yet")?;
-    let fingerprint = |key: [u8; 32]| IdentityPublicKey::from_bytes(key).fingerprint().to_string();
-    let contacts = records::pinned_identities(client.store())
-      .map_err(describe)?
-      .into_iter()
-      .map(|(user, pinned)| ContactKeys {
-        user,
-        fingerprint: fingerprint(pinned.public_key),
-        maybe_new_fingerprint: pinned.maybe_changed_to.map(fingerprint),
-        is_attested: pinned.is_attested,
-      })
-      .collect();
-    Ok(SecuritySnapshot {
-      my_fingerprint: client.identity_fingerprint(),
-      contacts,
-      maybe_push_content: Some(teamcraft_core::push_preview::push_content_mode(client.store())),
-      maybe_owners: client.owner_roster_status(),
-    })
+    security_of(self.client.as_ref().ok_or("this device is not set up yet")?)
   }
 
   fn window(&self, conversation: ConversationId, start: usize, len: usize) -> Result<MessageWindow, String> {

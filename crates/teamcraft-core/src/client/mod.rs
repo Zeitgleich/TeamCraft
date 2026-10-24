@@ -10,6 +10,7 @@ mod attachments;
 mod attested;
 mod backgrounds;
 mod calls;
+mod catch_up;
 pub mod devices;
 mod enroll;
 pub mod files;
@@ -34,6 +35,7 @@ mod sync;
 mod ui_commands;
 mod workspace;
 pub mod workspace_admin;
+pub(crate) use account::ACCOUNT_DATA_KEY;
 pub(crate) use workspace::WORKSPACE_KEY;
 
 use std::collections::{BTreeMap, HashMap};
@@ -45,6 +47,8 @@ pub use actions::{OutgoingText, REPLY_EXCERPT_CHARS, forward_content, reply_ref}
 pub use attachments::{MAX_VIEWER_BYTES, OutgoingFile};
 pub use attested::{AttestationSettings, JwksSource};
 pub use calls::{CallEventSink, CallKeySigner};
+pub(crate) use catch_up::CATCHING_UP_PREFIX;
+pub use catch_up::{CatchUpFocus, is_catching_up};
 pub use enroll::{EnrollmentOptions, EnrollmentSecret, OrgRecoveryUnlock, PendingEnrollment};
 pub use gateway::{DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart};
 pub use group_health::{
@@ -155,13 +159,18 @@ pub struct ClientSettings {
   /// Show messages from before senders signed them (their sender is only "some member"). Off by
   /// default: a removed member could otherwise keep writing in anyone's name (security review A10).
   pub accept_unsigned_messages: bool,
-  /// How many people's announced presence the core keeps for the UI (the newest announcements);
-  /// a UI that fell further behind reads presence from the server again.
+  /// How many people's announced presence the core keeps for the UI (the newest announcements, one
+  /// record each). The core announces everyone it knows after each connection, so the bound only
+  /// bites in larger workspaces; there a UI keeps the older presence of people dropped before it
+  /// read them until their next announcement.
   pub max_announced_presence: usize,
   /// Limits of the queue of read positions, acknowledgements, pins and presence (issue #159).
   pub pending_actions: PendingActionSettings,
   /// Backoff and cap of file uploads that failed on the network (issue #316).
   pub upload_retry: files::UploadRetrySettings,
+  /// How many conversations a catch-up reads from the server at once (issue #247): member lists
+  /// and the first page of each queue and history. The MLS work itself stays one at a time.
+  pub catch_up_concurrency: usize,
 }
 
 pub struct Client<A, S> {
@@ -174,9 +183,6 @@ pub struct Client<A, S> {
   groups: HashMap<ConversationId, ConversationGroup>,
   sync: SyncState,
   typing: notifications::TypingState,
-  /// People who went offline whose last seen is still to be read (batched, see
-  /// [`Client::refresh_stale_last_seen`]).
-  stale_last_seen: std::collections::BTreeSet<UserId>,
   maybe_call_sink: Option<CallEventSink>,
   maybe_preview_fetcher: Option<Box<dyn crate::link_preview::PreviewFetcher>>,
   maybe_jwks_source: Option<Box<dyn JwksSource>>,
@@ -194,6 +200,8 @@ pub struct Client<A, S> {
   /// Events of a resume replay still to come: the counters are read once it has drained, because
   /// `GET /unread` already counts the missed messages the replay delivers (issue #183).
   maybe_replay_left: Option<u64>,
+  /// The conversation the user looks at; a catch-up takes it first (issue #247).
+  catch_up_focus: CatchUpFocus,
 }
 
 impl Default for ClientSettings {
@@ -227,9 +235,10 @@ impl Default for ClientSettings {
       workspace_expiry_warning: std::time::Duration::from_secs(7 * 24 * 60 * 60),
       maybe_attestation: None,
       accept_unsigned_messages: false,
-      max_announced_presence: 500,
+      max_announced_presence: 5_000,
       pending_actions: PendingActionSettings::default(),
       upload_retry: files::UploadRetrySettings::default(),
+      catch_up_concurrency: 6,
     }
   }
 }
@@ -261,7 +270,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       groups: HashMap::new(),
       sync,
       typing: Default::default(),
-      stale_last_seen: Default::default(),
       maybe_call_sink: None,
       maybe_preview_fetcher,
       maybe_jwks_source,
@@ -270,7 +278,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_replay_left: None,
       member_join_attempts: HashMap::new(),
       maybe_waiting_checked_at_ms: None,
+      catch_up_focus: CatchUpFocus::default(),
     };
+    // A catch-up the app was closed during left its marks; the next one sets them again.
+    catch_up::clear_marks(&client.store)?;
     // Startup: removal records of the user's devices count from the start, and this device's own
     // (also from older versions) are shared.
     client.apply_shared_removals()?;

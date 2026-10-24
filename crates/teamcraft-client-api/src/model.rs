@@ -292,6 +292,10 @@ pub struct Conversation {
   /// Whether the signed-in user may post (announcement and integration channels may forbid it).
   pub can_post: bool,
   pub bookmarks: Vec<Bookmark>,
+  /// The client is still catching up this conversation's history after being away (issue #247):
+  /// what it shows may be incomplete.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_catching_up: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

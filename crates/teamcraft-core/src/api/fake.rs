@@ -107,6 +107,8 @@ struct State {
   failing_read_positions: HashSet<ConversationId>,
   /// `PUT read-position` requests that arrived, to check that queued ones are sent once.
   read_position_writes: u64,
+  /// REST calls per user, also those that failed (tests about idle traffic).
+  rest_calls: HashMap<UserId, u64>,
   users: BTreeMap<UserId, UserSummary>,
   devices: BTreeMap<DeviceId, Device>,
   identity_keys: HashMap<UserId, IdentityKeyResponse>,
@@ -365,6 +367,11 @@ impl FakeServer {
   /// How many gateway handshakes were refused for a bad token so far.
   pub fn gateway_refusal_count(&self) -> u64 {
     self.lock().gateway_refusals
+  }
+
+  /// How many REST calls `user` made so far, including failed ones.
+  pub fn rest_call_count(&self, user: UserId) -> u64 {
+    self.lock().rest_calls.get(&user).copied().unwrap_or(0)
   }
 
   /// How many directory searches (`GET /users?query=`) arrived so far.
@@ -907,6 +914,7 @@ impl FakeServerApi {
   /// Runs `action` on the state if the user is online.
   fn with<R>(&self, action: impl FnOnce(&mut State, UserId) -> Result<R, ApiError>) -> Result<R, ApiError> {
     let mut state = self.server.lock();
+    *state.rest_calls.entry(self.user).or_default() += 1;
     if state.offline_users.contains(&self.user) || state.rest_failing_users.contains(&self.user) {
       return Err(ApiError::Network("fake server: client is offline".into()));
     }
@@ -2302,6 +2310,7 @@ impl ServerApi for FakeServerApi {
         unread_thread_count: 0,
         thread_mention_count: 0,
         maybe_max_counted: None,
+        maybe_counted_through: None,
       }))
     })
   }

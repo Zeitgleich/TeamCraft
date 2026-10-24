@@ -10186,6 +10186,7 @@ dependencies = [
  "wasm-bindgen-test",
  "web-sys",
  "webpki-roots",
+ "zbus",
  "zeroize",
 ]
 

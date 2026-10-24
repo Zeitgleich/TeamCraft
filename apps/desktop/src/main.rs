@@ -174,6 +174,7 @@ fn main() -> anyhow::Result<()> {
       core::commands::core_network_changed,
       core::commands::core_enroll,
       core::commands::core_snapshot,
+      core::commands::core_snapshot_changes,
       core::commands::core_link_start,
       core::commands::core_link_status,
       core::commands::core_link_cancel,
