@@ -85,7 +85,7 @@ dm-new-hint = Eine Person für eine Direktnachricht, mehrere für eine Gruppe.
 dm-new-start = Unterhaltung öffnen
 dm-new-start-group = Gruppe starten
 
-## Kompaktes Layout (Telefone): untere Navigation, zurück, Menüs
+## Kompaktes Layout (Telefone): untere Navigation, zurück, Menüs; Anrufe im Browser
 back = Zurück
 bottom-nav-label = Hauptnavigation
 bottom-nav-spaces = Spaces
@@ -93,6 +93,9 @@ bottom-nav-you = Ich
 conversation-more = Mehr
 composer-camera = Foto oder Video aufnehmen
 composer-photos = Fotos und Videos
+calls-browser-title = Anrufe im Browser kommen bald
+calls-browser-body = Nutze bis dahin die Desktop- oder Mobil-App von TeamCraft. Deine Unterhaltungen sind dort auch.
+calls-browser-download = App herunterladen
 
 ## Seitenleiste
 sidebar-label = Kanäle und Direktnachrichten

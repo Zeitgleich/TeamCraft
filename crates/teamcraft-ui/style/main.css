@@ -7557,3 +7557,21 @@ select.input {
 :root[data-layout="compact"] .search-main {
   padding: var(--space-2) var(--space-3);
 }
+
+/* A short notice stays a card, also on phones. */
+.modal-notice {
+  width: min(440px, 100%);
+}
+
+:root[data-layout="compact"] .modal-backdrop:has(.modal-notice) {
+  align-items: center;
+  padding: var(--space-4);
+}
+
+:root[data-layout="compact"] .modal.modal-notice {
+  height: auto;
+  margin-top: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}

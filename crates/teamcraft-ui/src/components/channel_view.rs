@@ -710,11 +710,25 @@ fn CallButtons(conversation: ConversationId, info: Memo<Option<Conversation>>) -
     Some(ConversationKind::Direct) => CallKind::Direct,
     _ => CallKind::Group,
   };
-  // Without call support (the browser for now) there are no call buttons.
+  // Without call support (the browser until #330) the buttons still show and say where calls are.
   let has_calls = state.read(|backend| backend.has_calls());
-  let is_callable = move || has_calls && kind().is_some_and(|kind| kind != ConversationKind::Integration);
-  let is_channel = move || matches!(kind(), Some(ConversationKind::Public | ConversationKind::Private));
+  let is_callable = move || kind().is_some_and(|kind| kind != ConversationKind::Integration);
+  let is_channel =
+    move || has_calls && matches!(kind(), Some(ConversationKind::Public | ConversationKind::Private));
   let is_busy = move || call.phase.get() != CallPhase::Idle;
+  let start = move |with_video: bool| {
+    if has_calls {
+      call.prepare(
+        CallRequest {
+          conversation,
+          kind: call_kind(),
+        },
+        with_video,
+      );
+    } else {
+      state.overlay.set(Overlay::CallsUnavailable);
+    }
+  };
 
   view! {
     <Show when=is_callable fallback=|| ()>
@@ -723,7 +737,7 @@ fn CallButtons(conversation: ConversationId, info: Memo<Option<Conversation>>) -
         disabled=is_busy
         aria-label=move || i18n.t("call-start-audio")
         title=move || i18n.t("call-start-audio")
-        on:click=move |_| call.prepare(CallRequest { conversation, kind: call_kind() }, false)
+        on:click=move |_| start(false)
       >
         <Icon name=IconName::Phone />
       </button>
@@ -732,7 +746,7 @@ fn CallButtons(conversation: ConversationId, info: Memo<Option<Conversation>>) -
         disabled=is_busy
         aria-label=move || i18n.t("call-start-video")
         title=move || i18n.t("call-start-video")
-        on:click=move |_| call.prepare(CallRequest { conversation, kind: call_kind() }, true)
+        on:click=move |_| start(true)
       >
         <Icon name=IconName::Video />
       </button>

@@ -189,6 +189,8 @@ pub enum Overlay {
   EditProfile,
   /// Another person's profile card.
   UserProfile(UserId),
+  /// Calls aren't available in this client (the browser, for now): where the apps are.
+  CallsUnavailable,
 }
 
 /// The tabs of the settings dialog (PLAN.md §4 and §5).
