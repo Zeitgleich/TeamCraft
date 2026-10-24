@@ -79,6 +79,8 @@ pub fn NewSpaceDialog() -> impl IntoView {
   let name = RwSignal::new(String::new());
   let description = RwSignal::new(String::new());
   let is_open = RwSignal::new(true);
+  // One key per opened dialog: every submit of it is the same user action.
+  let key = IdempotencyKey::random();
   let submit = move |ev: leptos::ev::SubmitEvent| {
     ev.prevent_default();
     let Some(name) = non_empty(&name.get_untracked()) else {
@@ -89,7 +91,7 @@ pub fn NewSpaceDialog() -> impl IntoView {
       name,
       maybe_description: non_empty(&description.get_untracked()),
       is_open: is_open.get_untracked(),
-      maybe_idempotency_key: Some(IdempotencyKey::random()),
+      maybe_idempotency_key: Some(key),
     });
   };
   view! {
@@ -177,6 +179,8 @@ pub fn NewChannelDialog(space: SpaceId) -> impl IntoView {
   let category = RwSignal::new(String::new());
   let history = RwSignal::new(HistoryChoice::WorkspaceDefault);
   let categories = Memo::new(move |_| state.read(|backend| backend.categories(space)));
+  // One key per opened dialog: every submit of it is the same user action.
+  let key = IdempotencyKey::random();
   let submit = move |ev: leptos::ev::SubmitEvent| {
     ev.prevent_default();
     let Some(name) = non_empty(&name.get_untracked()) else {
@@ -195,7 +199,7 @@ pub fn NewChannelDialog(space: SpaceId) -> impl IntoView {
       maybe_topic: non_empty(&topic.get_untracked()),
       maybe_category,
       maybe_history: history.get_untracked().policy(),
-      maybe_idempotency_key: Some(IdempotencyKey::random()),
+      maybe_idempotency_key: Some(key),
     });
   };
   view! {

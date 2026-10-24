@@ -10,7 +10,8 @@ use teamcraft_proto::{
 };
 
 use super::Client;
-use crate::api::ServerApi;
+use crate::api::{ApiError, ServerApi};
+use crate::client::groups::CREATE_ATTEMPTS;
 use crate::convert;
 use crate::error::CoreError;
 use crate::records;
@@ -30,7 +31,16 @@ pub struct ChannelOptions {
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn create_space(&mut self, request: &CreateSpaceRequest) -> Result<SpaceResponse, CoreError> {
-    let space = self.api.create_space(request).await?;
+    let mut attempt = 1;
+    // Same retry as for channels: the request keeps its idempotency key.
+    let space = loop {
+      match self.api.create_space(request).await {
+        Err(ApiError::Network(_)) if request.maybe_idempotency_key.is_some() && attempt < CREATE_ATTEMPTS => {
+          attempt += 1;
+        },
+        other => break other?,
+      }
+    };
     self.refresh_spaces().await?;
     Ok(space)
   }

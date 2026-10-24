@@ -497,6 +497,28 @@ mod retried_creation {
   }
 
   #[tokio::test]
+  async fn concurrent_requests_with_one_key_create_one_space() {
+    let app = app!();
+    let alice = owner();
+    let body = json!({"name": "Racing", "join_policy": "open", "idempotency_key": KEY});
+
+    let (a, b, c) = tokio::join!(
+      app.post(&alice, "/spaces", body.clone()),
+      app.post(&alice, "/spaces", body.clone()),
+      app.post(&alice, "/spaces", body.clone()),
+    );
+
+    assert_eq!(a.status, StatusCode::CREATED, "{}", a.body);
+    assert_eq!((a.id(), a.id()), (b.id(), c.id()));
+    let spaces: i64 = sqlx::query_scalar("SELECT count(*) FROM spaces WHERE name = 'Racing'")
+      .fetch_one(app.sql_pool())
+      .await
+      .unwrap();
+    assert_eq!(spaces, 1);
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn a_malformed_key_is_rejected() {
     let app = app!();
     let alice = owner();

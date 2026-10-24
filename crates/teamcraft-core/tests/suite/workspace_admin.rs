@@ -106,6 +106,21 @@ async fn channel_changes_are_announced() {
   }));
 }
 
+/// The server made the channel but the answer was lost: the core retries with the same key and
+/// ends up with the one channel.
+#[tokio::test]
+async fn a_lost_create_answer_is_retried_without_a_duplicate() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let space = alice.space().await;
+
+  server.lose_create_answers(1);
+  let channel = alice.client.create_channel(space, "lossy").await.unwrap();
+
+  assert_eq!(server.channel_count("lossy"), 1);
+  assert!(alice.client.has_group(channel).unwrap());
+}
+
 /// A queued create action that is retried (a lost answer, a second click) carries the key it was
 /// made with, so the server creates the space or channel once.
 #[tokio::test]

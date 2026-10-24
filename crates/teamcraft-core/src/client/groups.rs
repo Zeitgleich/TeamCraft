@@ -20,7 +20,7 @@ use teamcraft_proto::{
 
 use super::workspace::{PendingChange, SharedKeys};
 use super::{Client, pending_post_key};
-use crate::api::ServerApi;
+use crate::api::{ApiError, ServerApi};
 use crate::convert;
 use crate::error::CoreError;
 use crate::records;
@@ -44,6 +44,8 @@ pub(crate) const REJOIN_REQUEST_MAGIC: &[u8] = b"TCRJ";
 /// Rounds of "catch up, send the lost commit again" before [`Client::sync_mls`] leaves a commit
 /// pending for the next sync.
 const PENDING_COMMIT_ROUNDS: u32 = 3;
+/// Tries of a create request whose answer was lost; all carry the same idempotency key.
+pub(crate) const CREATE_ATTEMPTS: u32 = 3;
 
 /// This device's commit, merged: what it did and when the server stored it.
 struct OwnCommit {
@@ -103,7 +105,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     space: SpaceId,
     request: &CreateChannelRequest,
   ) -> Result<ConversationId, CoreError> {
-    let conversation = self.api.create_channel(space, request).await?;
+    let mut attempt = 1;
+    // A lost answer is retried with the same request, hence the same idempotency key: the server
+    // returns the channel it already made instead of a second one.
+    let conversation = loop {
+      match self.api.create_channel(space, request).await {
+        Err(ApiError::Network(_)) if request.maybe_idempotency_key.is_some() && attempt < CREATE_ATTEMPTS => {
+          attempt += 1;
+        },
+        other => break other?,
+      }
+    };
     records::put_json(
       &self.store,
       Table::Conversations,

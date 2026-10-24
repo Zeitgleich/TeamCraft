@@ -3,11 +3,14 @@
 use sqlx::{Postgres, Transaction};
 use teamcraft_proto::{IdempotencyKey, UserId};
 
+use crate::database::Database;
 use crate::error::DbError;
 use crate::ids::to_db;
 
 /// Keys older than this can no longer be retried by any client and are purged.
 const KEY_RETENTION_DAYS: i32 = 7;
+/// Rows purged per run, so the purge never holds locks for long.
+const PURGE_BATCH: i64 = 1000;
 
 /// What a create call made: the resource and whether this call created it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,7 +40,8 @@ impl IdempotentKind {
 
 /// Reserves the key for `resource` inside the creating transaction. Returns the resource ID stored
 /// by an earlier request if the key was already used; the caller then returns it without creating
-/// anything. A concurrent request with the same key waits for the first one's commit.
+/// anything. A concurrent request with the same key waits for the first one's commit. One statement
+/// does both steps, so a key removed in between can't leave the caller without an answer.
 pub(crate) async fn claim_key(
   tx: &mut Transaction<'_, Postgres>,
   user: UserId,
@@ -45,32 +49,35 @@ pub(crate) async fn claim_key(
   key: &IdempotencyKey,
   resource: i64,
 ) -> Result<Option<i64>, DbError> {
-  sqlx::query!(
-    "DELETE FROM create_idempotency_keys WHERE created_at < now() - make_interval(days => $1)",
-    KEY_RETENTION_DAYS,
-  )
-  .execute(&mut **tx)
-  .await?;
-  let inserted = sqlx::query_scalar!(
+  let row = sqlx::query!(
     r#"INSERT INTO create_idempotency_keys (user_id, kind, idempotency_key, resource_id)
-       VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING RETURNING resource_id"#,
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (user_id, kind, idempotency_key)
+       DO UPDATE SET resource_id = create_idempotency_keys.resource_id
+       RETURNING resource_id, (xmax = 0) AS "is_inserted!""#,
     to_db(user),
     kind.as_str(),
     key.as_bytes().as_slice(),
     resource,
   )
-  .fetch_optional(&mut **tx)
-  .await?;
-  if inserted.is_some() {
-    return Ok(None);
-  }
-  let existing = sqlx::query_scalar!(
-    "SELECT resource_id FROM create_idempotency_keys WHERE user_id = $1 AND kind = $2 AND idempotency_key = $3",
-    to_db(user),
-    kind.as_str(),
-    key.as_bytes().as_slice(),
-  )
   .fetch_one(&mut **tx)
   .await?;
-  Ok(Some(existing))
+  Ok((!row.is_inserted).then_some(row.resource_id))
+}
+
+impl Database {
+  /// Purges one batch of keys past the retry window (run periodically, never in a request).
+  /// Returns how many were removed; a full batch means there may be more.
+  pub async fn delete_expired_create_keys(&self) -> Result<u64, DbError> {
+    let result = sqlx::query!(
+      r#"DELETE FROM create_idempotency_keys WHERE ctid IN (
+           SELECT ctid FROM create_idempotency_keys
+           WHERE created_at < now() - make_interval(days => $1) LIMIT $2 FOR UPDATE SKIP LOCKED)"#,
+      KEY_RETENTION_DAYS,
+      PURGE_BATCH,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected())
+  }
 }

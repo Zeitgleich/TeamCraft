@@ -91,8 +91,48 @@ impl utoipa::ToSchema for Base64Bytes {}
 pub struct ClientMessageId([u8; 16]);
 
 /// Client-generated key of a create request (space, channel, meeting). The server remembers it per
-/// user and returns the original result for a repeated request. Same format as [`ClientMessageId`].
-pub type IdempotencyKey = ClientMessageId;
+/// user and returns the original result for a repeated request. Wire format: 32 lowercase hex
+/// characters. A separate type so a message ID can't be passed where a create key belongs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct IdempotencyKey(ClientMessageId);
+
+impl IdempotencyKey {
+  /// A fresh random key from the operating system's random source.
+  pub fn random() -> Self {
+    Self(ClientMessageId::random())
+  }
+
+  pub fn from_bytes(bytes: [u8; 16]) -> Self {
+    Self(ClientMessageId::from_bytes(bytes))
+  }
+
+  pub fn as_bytes(&self) -> &[u8; 16] {
+    self.0.as_bytes()
+  }
+
+  pub fn to_hex(&self) -> String {
+    self.0.to_hex()
+  }
+
+  pub fn from_hex(text: &str) -> Result<Self, ClientMessageIdError> {
+    ClientMessageId::from_hex(text).map(Self)
+  }
+}
+
+impl fmt::Display for IdempotencyKey {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    self.0.fmt(f)
+  }
+}
+
+impl utoipa::PartialSchema for IdempotencyKey {
+  fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+    <ClientMessageId as utoipa::PartialSchema>::schema()
+  }
+}
+
+impl utoipa::ToSchema for IdempotencyKey {}
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("client message ID must be 32 hex characters")]

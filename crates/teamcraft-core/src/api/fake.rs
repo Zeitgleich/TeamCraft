@@ -146,6 +146,8 @@ struct State {
   /// Like the server: a repeated idempotency key returns the first space / channel.
   created_spaces: HashMap<(UserId, IdempotencyKey), SpaceId>,
   created_channels: HashMap<(UserId, IdempotencyKey), ConversationId>,
+  /// Create answers still to be lost after the resource was made (a timeout).
+  create_answers_to_lose: u32,
   roster_log: Vec<WorkspaceLogEntryResponse>,
   policy_log: Vec<WorkspaceLogEntryResponse>,
   /// Larger attachments are refused like the server's `max_attachment_bytes`; `None`: no limit.
@@ -458,6 +460,21 @@ impl FakeServer {
     let by_ms = i64::try_from(by.as_millis()).unwrap_or(i64::MAX);
     let mut state = self.lock();
     state.clock_offset_ms = state.clock_offset_ms.saturating_add(by_ms);
+  }
+
+  /// The next `count` space / channel creations are made, but the answer never reaches the client.
+  pub fn lose_create_answers(&self, count: u32) {
+    self.lock().create_answers_to_lose = count;
+  }
+
+  /// How many channels have this name.
+  pub fn channel_count(&self, name: &str) -> usize {
+    let state = self.lock();
+    state
+      .conversations
+      .values()
+      .filter(|c| c.response.maybe_name.as_deref() == Some(name))
+      .count()
   }
 
   /// The user's next commit is stored and fanned out, but the answer to the client is lost (a
@@ -1132,6 +1149,10 @@ impl ServerApi for FakeServerApi {
         state.created_channels.insert((me, key), id);
       }
       state.publish([me], &GatewayEvent::ConversationUpdate { conversation_id: id });
+      if state.create_answers_to_lose > 0 {
+        state.create_answers_to_lose -= 1;
+        return Err(ApiError::Network("fake answer lost".into()));
+      }
       Ok(state.conversation(id)?.view(me))
     })
   }
