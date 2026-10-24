@@ -85,6 +85,8 @@ version as the final 1.0.0 and as each other: reinstall once with `sudo dnf rein
    then delete the draft (the candidate's images stay in GHCR under their own tag) – or publish it as
    a prerelease, which hands it to the `prerelease` update channel and repositories
    ([updates.md](updates.md) §3.2).
+   Note: tag a commit whose message has no `[skip ci]`; GitHub skips every workflow for a tag on
+   such a commit, the release included.
 6. **Release**: tag the same commit and push it:
 
    ```sh
