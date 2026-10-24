@@ -49,6 +49,30 @@ const REPORT: DemoFile = DemoFile {
   bytes: b"%PDF-1.4 demo",
   maybe_thumbnail: None,
 };
+/// The script in it must never run: SVG is only shown drawn into a PNG.
+const DIAGRAM: DemoFile = DemoFile {
+  id: "9000007",
+  name: "diagram.svg",
+  media_type: "image/svg+xml",
+  bytes: include_bytes!("../demo-media/diagram.svg"),
+  maybe_thumbnail: Some(include_bytes!("../demo-media/diagram-thumb.png")),
+};
+/// Thumbnail made by the sender's browser (JPEG), as for every format the core can't decode.
+const LANDSCAPE: DemoFile = DemoFile {
+  id: "9000008",
+  name: "landscape.avif",
+  media_type: "image/avif",
+  bytes: include_bytes!("../demo-media/landscape.avif"),
+  maybe_thumbnail: Some(include_bytes!("../demo-media/landscape-thumb.jpg")),
+};
+/// A format this browser can't decode, without a thumbnail: shown as a file card.
+const PHOTO: DemoFile = DemoFile {
+  id: "9000009",
+  name: "IMG_0042.heic",
+  media_type: "image/heic",
+  bytes: b"not decodable in this demo",
+  maybe_thumbnail: None,
+};
 const CLIP: DemoFile = DemoFile {
   id: "9000005",
   name: "clip.webm",
@@ -58,9 +82,12 @@ const CLIP: DemoFile = DemoFile {
 };
 
 /// Which files go with which message, counted from the newest message of the channel.
-const ATTACHED: [(usize, &[DemoFile]); 5] = [
+const ATTACHED: [(usize, &[DemoFile]); 8] = [
   (0, &[REPORT]),
   (1, &[LAKE, DUNES, PEAKS]),
+  (2, &[DIAGRAM]),
+  (4, &[LANDSCAPE]),
+  (6, &[PHOTO]),
   (3, &[BOUNCE]),
   (5, &[CLIP]),
   (8, &[DUNES]),
@@ -97,8 +124,10 @@ pub(super) fn demo_files(conversation: ConversationId, messages: &[Message]) -> 
 
 /// The full bytes of a demo file, as the lightbox fetches them.
 pub fn demo_bytes(file_id: &str) -> Option<&'static [u8]> {
-  [LAKE, DUNES, PEAKS, BOUNCE, CLIP, REPORT]
-    .into_iter()
-    .find(|file| file_id.starts_with(file.id))
-    .map(|file| file.bytes)
+  [
+    LAKE, DUNES, PEAKS, BOUNCE, CLIP, REPORT, DIAGRAM, LANDSCAPE, PHOTO,
+  ]
+  .into_iter()
+  .find(|file| file_id.starts_with(file.id))
+  .map(|file| file.bytes)
 }

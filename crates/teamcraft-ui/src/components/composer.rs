@@ -10,15 +10,19 @@ use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::channel_view::DroppedFiles;
 use crate::components::composer_commands::{self, Notice, Outcome};
 use crate::components::emoji_picker::EmojiPicker;
+use crate::components::file_views::blob_url;
 use crate::components::icons::{Icon, IconName};
 use crate::components::rich_text::RichText;
 use crate::groups::use_groups;
 use crate::i18n::use_i18n;
 use crate::keys::t_with_shortcuts;
+use crate::media_formats::{is_svg, media_type_for, needs_app_thumbnail};
+use crate::media_layout::{APP_THUMBNAIL_SIDE, thumbnail_type};
 use crate::mention::{self, TriggerKind};
 use crate::model::{ConversationId, ThreadId};
 use crate::model::{ConversationKind, MessageKind, User};
 use crate::notifier::needs_channel_confirmation;
+use crate::raster;
 use crate::reactive::SetIfAlive;
 use crate::settings::SendMode;
 use crate::slash::{self, Parsed};
@@ -42,6 +46,8 @@ struct PendingFile {
   bytes: Vec<u8>,
   /// Object URL of an image for the thumbnail in the chip; revoked when the file leaves the list.
   maybe_preview_url: Option<String>,
+  /// A thumbnail the browser drew for a format the core can't decode (`OutgoingFile`).
+  maybe_thumbnail: Option<Vec<u8>>,
 }
 
 /// One line in the picker under the input.
@@ -322,6 +328,7 @@ pub fn Composer(
         file_name: file.name,
         media_type: file.media_type,
         source: FileSource::Bytes { bytes: file.bytes },
+        maybe_thumbnail: file.maybe_thumbnail,
       })
       .collect();
     let body = text;
@@ -573,20 +580,19 @@ pub fn Composer(
         match JsFuture::from(file.array_buffer()).await {
           Ok(buffer) => {
             let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
-            let media_type = if file.type_().is_empty() {
-              "application/octet-stream".to_owned()
-            } else {
-              file.type_()
+            let media_type = media_type_for(&file.name(), &file.type_());
+            // SVG, AVIF, HEIC: the browser draws the thumbnail the core in the page can't make.
+            let maybe_thumbnail = match needs_app_thumbnail(&media_type) {
+              true => raster::app_thumbnail(&bytes, &media_type, APP_THUMBNAIL_SIDE).await,
+              false => None,
             };
-            let maybe_preview_url = media_type
-              .starts_with("image/")
-              .then(|| web_sys::Url::create_object_url_with_blob(&file).ok())
-              .flatten();
+            let maybe_preview_url = chip_preview_url(&file, &media_type, maybe_thumbnail.as_deref());
             let read = PendingFile {
               name: file.name(),
               media_type,
               bytes,
               maybe_preview_url,
+              maybe_thumbnail,
             };
             if let Some(PendingFile {
               maybe_preview_url: Some(url),
@@ -940,6 +946,22 @@ pub fn Composer(
   }
 }
 
+/// The chip's preview of a picked picture. An SVG shows its drawn thumbnail, never itself: a `blob:`
+/// URL of an SVG would run its scripts if opened in a tab (see `crate::raster`).
+fn chip_preview_url(
+  file: &web_sys::File,
+  media_type: &str,
+  maybe_thumbnail: Option<&[u8]>,
+) -> Option<String> {
+  if let Some(thumbnail) = maybe_thumbnail {
+    return blob_url(thumbnail, thumbnail_type(thumbnail));
+  }
+  let is_shown_as_is = media_type.starts_with("image/") && !is_svg(media_type);
+  is_shown_as_is
+    .then(|| web_sys::Url::create_object_url_with_blob(file).ok())
+    .flatten()
+}
+
 /// Adds a file that was read in the background. The composer may be gone by then (another
 /// conversation was opened while a big file was read): its signals are disposed, and writing them
 /// would panic and abort the whole wasm app (issue #316). Returns the file when nobody took it.
@@ -974,6 +996,7 @@ mod tests {
       media_type: "text/plain".into(),
       bytes: b"x".to_vec(),
       maybe_preview_url: None,
+      maybe_thumbnail: None,
     }
   }
 }

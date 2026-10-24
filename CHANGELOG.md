@@ -26,6 +26,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
   focus or long-press instead of permanent buttons; other files are compact cards with a download
   button and "…". The lightbox opens at once with the thumbnail and a small spinner, and decrypted
   pictures stay cached for the session (bounded), so reopening is instant.
+- **More image formats** (#337): SVG, AVIF, HEIC/HEIF, JPEG XL, BMP, ICO, animated WebP and APNG
+  show as pictures where the platform decodes them. The sender's app draws thumbnails the core can't
+  make (the browser on web and desktop, `resvg` for SVG on native platforms). Animated WebP and
+  APNG pause like GIFs. A picture this device can't decode shows as a file card; on Android the
+  viewer offers "Open with another app". Files without a type get one from their extension.
 - **DM encryption setup status**: a DM whose device waits for the other side's encryption group says
   "Setting up encryption…", and after two minutes without it that the setup failed; "Retry" asks the
   other side's devices again (#278).
@@ -77,6 +82,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ### Security
 
+- **SVG is never shown as itself** (#337): web and desktop draw it into a PNG through an `<img>`
+  that is never attached to the page, so "Open image in new tab" can't run its scripts with the
+  app's origin. SVG thumbnails are drawn without loading anything (no files, URLs or nested
+  images), without a DTD (no entity expansion), and within limits on file size, element count and
+  `<use>` expansion; tests cover hostile SVGs.
 - **The first admin roster is confirmed before it is signed**: the first policy save no longer signs
   the identity provider's owners and admins as the server reports them; the owner checks each with
   user ID and key fingerprint (attested, trusted on first use, own key), or signs only themselves

@@ -36,6 +36,7 @@
   <string name="react_quick">React with %1$s</string>
   <string name="file_open">Open</string>
   <string name="image_unreadable">This image can\'t be shown.</string>
+  <string name="image_open_with">Open with another app</string>
   <string name="close">Close</string>
   <string name="share">Share</string>
   <string name="delete_confirm_title">Delete this message?</string>

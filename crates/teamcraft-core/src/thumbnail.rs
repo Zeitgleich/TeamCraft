@@ -34,6 +34,9 @@ pub fn thumbnail(bytes: &[u8], media_type: &str) -> Option<Vec<u8>> {
   if !media_type.starts_with("image/") {
     return None;
   }
+  if is_svg(media_type) {
+    return svg_thumbnail(bytes);
+  }
   let image = decode_upright(bytes)?;
   if has_transparency(&image) {
     PNG_STEPS
@@ -47,6 +50,25 @@ pub fn thumbnail(bytes: &[u8], media_type: &str) -> Option<Vec<u8>> {
       .filter_map(|&(side, quality)| encode_jpeg(&fitted(&image, side), quality))
       .find(|jpeg| jpeg.len() <= MAX_THUMBNAIL_BYTES)
   }
+}
+
+/// SVG is drawn, not decoded: `resvg` on native platforms; the browser makes its own (`teamcraft-ui`).
+fn is_svg(media_type: &str) -> bool {
+  media_type.trim().eq_ignore_ascii_case("image/svg+xml")
+}
+
+/// A PNG (an SVG may be transparent) at the largest of [`PNG_STEPS`] that fits.
+#[cfg(not(target_arch = "wasm32"))]
+fn svg_thumbnail(bytes: &[u8]) -> Option<Vec<u8>> {
+  PNG_STEPS
+    .iter()
+    .filter_map(|&side| crate::svg_thumbnail::svg_thumbnail_png(bytes, side))
+    .find(|png| png.len() <= MAX_THUMBNAIL_BYTES)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn svg_thumbnail(_bytes: &[u8]) -> Option<Vec<u8>> {
+  None
 }
 
 /// Decodes within the limits and turns the picture as its EXIF orientation says: phone cameras
@@ -171,6 +193,14 @@ mod tests {
     assert_eq!(dimensions(&made), (THUMBNAIL_SIZE, THUMBNAIL_SIZE / 2));
 
     assert_eq!(thumbnail(b"%PDF-1.7", "application/pdf"), None);
+    let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="1"/>"#;
+    let made = thumbnail(svg, "image/svg+xml").unwrap();
+    assert_eq!(image::guess_format(&made).unwrap(), ImageFormat::Png);
+    assert_eq!(
+      dimensions(&made),
+      (THUMBNAIL_SIZE, THUMBNAIL_SIZE / 2),
+      "SVG is drawn at the thumbnail size"
+    );
     assert_eq!(thumbnail(b"not really a png", "image/png"), None);
     assert_eq!(thumbnail(b"", "image/png"), None);
   }

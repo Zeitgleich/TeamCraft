@@ -3,12 +3,13 @@
 //! Full attachments are end-to-end encrypted like everything else: the client core (the desktop shell
 //! or the core in the page) downloads and decrypts them, and the page only ever sees the plaintext as
 //! a `Blob` in memory. Nothing is written to disk and no plaintext URL exists outside this page.
+//! An SVG is only ever shown drawn into a PNG ([`crate::raster`]), never as itself.
 
 use wasm_bindgen::JsCast;
 
-use crate::media_formats::is_animated;
+use crate::media_formats::{is_animated, is_svg};
 use crate::model::{ConversationId, MessageId};
-use crate::raster::{Encoding, rasterize};
+use crate::raster::{Encoding, SVG_DISPLAY_SIDE, rasterize};
 
 /// Media type of a blob whose file doesn't claim to be an image: the browser shows nothing for it.
 const OPAQUE_TYPE: &str = "application/octet-stream";
@@ -114,6 +115,13 @@ async fn shown(
   media_type: &str,
   maybe_max_side: Option<u32>,
 ) -> Result<ObjectUrl, String> {
+  if is_svg(media_type) {
+    let side = maybe_max_side.unwrap_or(SVG_DISPLAY_SIDE);
+    let blob = rasterize(bytes, media_type, side, Encoding::Png)
+      .await
+      .ok_or_else(|| "the browser could not draw the SVG".to_owned())?;
+    return ObjectUrl::from_blob(&blob).ok_or_else(refused);
+  }
   let is_picture = media_type.starts_with("image/");
   let header = bytes
     .subarray(0, bytes.length().min(ANIMATION_SNIFF_BYTES))
@@ -179,10 +187,11 @@ fn refused() -> String {
 }
 
 /// Only images and videos get their own type; anything else stays opaque bytes, so a file that lies
-/// about its type is never rendered as a document. The page only ever puts these URLs into `<img>`
-/// and `<video>`, where an SVG can't run scripts.
+/// about its type is never rendered as a document. SVG is a document too (its scripts would run if
+/// the URL were opened in a tab): it stays opaque and is shown drawn into a PNG instead.
 fn blob_type(media_type: &str) -> &str {
-  match media_type.starts_with("image/") || media_type.starts_with("video/") {
+  let is_media = media_type.starts_with("image/") || media_type.starts_with("video/");
+  match is_media && !is_svg(media_type) {
     true => media_type,
     false => OPAQUE_TYPE,
   }
@@ -197,6 +206,12 @@ mod tests {
     assert_eq!(blob_type("image/jpeg"), "image/jpeg");
     assert_eq!(blob_type("video/mp4"), "video/mp4");
     assert_eq!(blob_type("text/html"), OPAQUE_TYPE);
+    assert_eq!(
+      blob_type("image/svg+xml"),
+      OPAQUE_TYPE,
+      "SVG is never a blob of its own type"
+    );
+    assert_eq!(blob_type("IMAGE/SVG+XML"), OPAQUE_TYPE);
     assert_eq!(blob_type(""), OPAQUE_TYPE);
   }
 }

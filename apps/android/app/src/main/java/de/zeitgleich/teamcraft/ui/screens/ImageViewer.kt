@@ -260,7 +260,17 @@ private fun ImagePage(
       )
     }
     when {
-      state is FullImage.Unreadable -> Text(stringResource(R.string.image_unreadable), color = Color.White)
+      // A format this device can't decode (SVG, AVIF before Android 12, HEIC before 9): another
+      // app may open it (issue #337).
+      state is FullImage.Unreadable -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(stringResource(R.string.image_unreadable), color = Color.White)
+        maybePath?.let { path ->
+          val context = LocalContext.current
+          TextButton(onClick = { openFile(context, File(path), file.mediaType) }) {
+            Text(stringResource(R.string.image_open_with), color = Color.White)
+          }
+        }
+      }
       file.transfer.state == "failed" -> Text(stringResource(R.string.image_load_failed), color = Color.White)
       state is FullImage.Waiting -> LoadingBadge(file, Modifier.align(Alignment.BottomCenter))
       else -> {}

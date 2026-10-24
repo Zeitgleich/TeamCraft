@@ -54,6 +54,10 @@ pub struct OutgoingFile {
   pub file_name: String,
   pub media_type: String,
   pub source: FileSource,
+  /// A thumbnail the app made itself (PNG or JPEG), for formats the client core can't decode but
+  /// the platform can: the browser draws SVG, AVIF and HEIC. The core's own thumbnail wins.
+  #[serde(rename = "thumbnail", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_thumbnail: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

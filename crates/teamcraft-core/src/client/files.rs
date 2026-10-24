@@ -54,7 +54,14 @@ pub struct PendingFile {
   /// Failed attempts and when the next one is due.
   #[serde(default, skip_serializing_if = "UploadRetry::is_fresh")]
   pub retry: UploadRetry,
+  /// The app's own thumbnail, used when the core can't make one (see `OutgoingFile`).
+  #[serde(rename = "thumbnail", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_thumbnail: Option<Base64Bytes>,
 }
+
+/// Largest thumbnail an app may hand in: as large as the core's own (the message carries it); a
+/// bigger one is dropped and the file goes without.
+pub const MAX_APP_THUMBNAIL_BYTES: usize = crate::thumbnail::MAX_THUMBNAIL_BYTES;
 
 /// An announced attachment that the file's ciphertext goes into.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -236,6 +243,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           maybe_failure: None,
           maybe_slot: None,
           retry: UploadRetry::default(),
+          maybe_thumbnail: None,
         })
         .collect(),
     };
@@ -398,7 +406,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Err(UploadError::Failed(TransferFailure::TooLarge));
     }
     let content = read_source(&file.source).map_err(|()| UploadError::Failed(TransferFailure::LocalFile))?;
-    let maybe_thumbnail = crate::thumbnail::thumbnail(&content, &file.media_type);
+    let maybe_thumbnail = crate::thumbnail::thumbnail(&content, &file.media_type).or_else(|| {
+      file
+        .maybe_thumbnail
+        .as_ref()
+        .filter(|thumbnail| thumbnail.as_slice().len() <= MAX_APP_THUMBNAIL_BYTES)
+        .map(|thumbnail| thumbnail.as_slice().to_vec())
+    });
     // Receivers reserve the picture's space before anything loads (issue #316).
     let maybe_dimensions = crate::thumbnail::image_dimensions(&content, &file.media_type)
       .map(|(width, height)| ImageDimensions { width, height });
@@ -1002,6 +1016,7 @@ mod tests {
         maybe_failure: None,
         maybe_slot: None,
         retry: UploadRetry::default(),
+        maybe_thumbnail: None,
       }],
     };
     save_pending_upload(&store, &upload).unwrap();
@@ -1059,6 +1074,7 @@ mod tests {
         maybe_failure: None,
         maybe_slot: None,
         retry: UploadRetry::default(),
+        maybe_thumbnail: None,
       };
       let json = serde_json::to_value(&file).unwrap();
       assert!(json.get("retry").is_none() && json.get("slot").is_none());
