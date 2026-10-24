@@ -49,6 +49,7 @@ pub use gateway::{DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart};
 pub use group_health::{
   RemovalStatus, group_leftovers, is_queue_refused, pending_removals, unconfirmed_removals,
 };
+pub use groups::{DmSetupStatus, dm_setup_status};
 pub use linking::{LinkApproval, LinkOffer, LinkedSecrets, NewDeviceLink};
 pub use member_device::{GroupAccess, is_waiting_for_device};
 pub use messaging::FlushReport;
@@ -113,6 +114,9 @@ pub struct ClientSettings {
   /// A device without a group (a welcome it couldn't join) waits twice as long after each rejoin
   /// request, up to this.
   pub rejoin_retry_max: std::time::Duration,
+  /// A DM device that waits for the welcome of a group someone else founded shows "setting up
+  /// encryption" this long, then that it failed, with a retry (#278).
+  pub dm_welcome_timeout: std::time::Duration,
   /// A removal whose server side the server refused after the MLS side was done (the remover lost
   /// the right meanwhile) is tried again after this long (e2ee.md §4.6, removal order).
   pub removal_retry: std::time::Duration,
@@ -121,6 +125,14 @@ pub struct ClientSettings {
   /// Refusals before a removal shows as failed and waits for the user's "retry"; also how often
   /// an admin outside the group signs its removal again at most.
   pub removal_attempts: u32,
+  /// After the server reports another device of this user revoked, this device waits this long
+  /// before it reads the signed device list and, if that names the device revoked, finishes its
+  /// removal from the groups (the revoking device normally did by then). Later checks back off
+  /// like refused removals, `removal_attempts` in all (#232).
+  pub revocation_check_delay: std::time::Duration,
+  /// Revocation checks waiting at most; a server reporting more devices revoked can't make this
+  /// device fetch its device list without bound (#232).
+  pub max_pending_revocation_checks: usize,
   /// How long an admin outside the group keeps checking that its posted removal doesn't get too
   /// old to be committed (it can't see the members' commit).
   pub removal_watch: std::time::Duration,
@@ -190,9 +202,12 @@ impl Default for ClientSettings {
       device_add_attempts: 6,
       rejoin_retry: std::time::Duration::from_secs(10 * 60),
       rejoin_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
+      dm_welcome_timeout: std::time::Duration::from_secs(2 * 60),
       removal_retry: std::time::Duration::from_secs(60 * 60),
       removal_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
       removal_attempts: 6,
+      revocation_check_delay: std::time::Duration::from_secs(5 * 60),
+      max_pending_revocation_checks: 16,
       removal_watch: std::time::Duration::from_secs(30 * 24 * 60 * 60),
       max_group_info_bytes: 256 * 1024,
       max_upload_bytes: 100 * 1024 * 1024,

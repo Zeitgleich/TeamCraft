@@ -653,6 +653,22 @@ pub fn owner_roster_status(
   })
 }
 
+/// The first roster's roles: the signer as owner (the root of trust, e2ee.md §11), then the owners
+/// and admins the user confirmed, each once; an owner listed as admin too stays owner.
+pub fn genesis_roles(me: UserId, owners: &[UserId], admins: &[UserId]) -> Vec<(UserId, RosterRole)> {
+  let mut roles: Vec<(UserId, RosterRole)> = vec![(me, RosterRole::Owner)];
+  for (user, role) in owners
+    .iter()
+    .map(|user| (*user, RosterRole::Owner))
+    .chain(admins.iter().map(|user| (*user, RosterRole::Admin)))
+  {
+    if !roles.iter().any(|(listed, _)| *listed == user) {
+      roles.push((user, role));
+    }
+  }
+  roles
+}
+
 /// The core's roster roles for a roster the console proposes.
 #[cfg(feature = "ui")]
 pub fn roster_roles(members: &[teamcraft_client_api::admin::RosterEntry]) -> Vec<(UserId, RosterRole)> {
@@ -687,6 +703,20 @@ mod tests {
   use teamcraft_proto::{Id, Snowflake, UnixMillis};
 
   use super::*;
+
+  #[test]
+  fn the_genesis_roles_keep_the_signer_as_owner() {
+    let user = |raw: i64| UserId::from_snowflake(Snowflake::new(raw).unwrap());
+    let roles = genesis_roles(user(1), &[user(2), user(1)], &[user(1), user(2), user(3)]);
+    assert_eq!(
+      roles,
+      vec![
+        (user(1), RosterRole::Owner),
+        (user(2), RosterRole::Owner),
+        (user(3), RosterRole::Admin),
+      ]
+    );
+  }
 
   #[test]
   fn a_removed_owner_cannot_backdate_a_policy() {

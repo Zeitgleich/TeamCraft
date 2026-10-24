@@ -14,7 +14,8 @@ use teamcraft_proto::{Base64Bytes, ConversationId, DeviceId, MlsMessageKind, Pos
 use super::Client;
 use super::groups::{ADMIN_CHANGE_MAGIC, ChangeSource};
 use super::workspace::{
-  PendingAnnouncement, PendingChange, RemovalState, RemovalStep, RevocationStep, current_epoch_of,
+  PendingAnnouncement, PendingChange, PendingOutcome, REVOCATION_CHECK_KEY_PREFIX, RemovalState, RemovalStep,
+  RevocationStep, current_epoch_of,
 };
 use crate::api::ServerApi;
 use crate::convert;
@@ -565,7 +566,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         not_before_ms: 0,
       })?;
     }
-    self.publish_device_list(&[device]).await?;
+    // A list that names the device revoked already (published before a crash, or by the device
+    // whose revocation this one finishes) needn't be signed again.
+    if !self.is_revoked_in_stored_list(device)? {
+      self.publish_device_list(&[device]).await?;
+    }
     let conversations: Vec<_> = self.cached_conversations()?.into_keys().collect();
     let mut maybe_first_error = None;
     for conversation in conversations {
@@ -582,6 +587,182 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }
     }
     maybe_first_error.map_or(Ok(()), Err)
+  }
+
+  /// The server reported `device`, another device of this user, revoked. Its word alone changes
+  /// nothing: after `revocation_check_delay` this device reads the user's signed device list and,
+  /// only if that names the device revoked, finishes what the revoking device may not have, its
+  /// removal from every group they share (#232, e2ee.md §3). Nothing to check when this device is
+  /// the one revoking it, for a device it doesn't know (in no shared group and not in the last
+  /// verified list: the server may make IDs up), for one checked already, or beyond
+  /// `max_pending_revocation_checks`.
+  pub(crate) fn queue_revocation_check(&mut self, device: DeviceId) -> Result<(), CoreError> {
+    let check_key = PendingChange::revocation_check_key(device);
+    let is_own_revocation = self
+      .stored_pending(&PendingChange::revocation_key(device))?
+      .is_some();
+    if device == self.account.device_id || is_own_revocation || self.stored_pending(&check_key)?.is_some() {
+      return Ok(());
+    }
+    let is_in_shared_group = self.shares_group_with(device)?;
+    let me = self.account.user_id;
+    let maybe_list = self.stored_device_list(me, &self.account.identity_public_key())?;
+    let crypto_device = convert::device(device);
+    let is_revoked_in_list = maybe_list
+      .as_ref()
+      .is_some_and(|list| list.is_revoked(crypto_device));
+    // Finished already (by this device, or the list it stored names it and no group has it).
+    if is_revoked_in_list && !is_in_shared_group {
+      return Ok(());
+    }
+    let is_listed = maybe_list.as_ref().is_some_and(|list| {
+      list
+        .devices()
+        .iter()
+        .any(|entry| entry.device_id == crypto_device)
+    });
+    if !is_in_shared_group && !is_listed {
+      tracing::debug!(device_id = %device, "the server reported an unknown device revoked; ignored");
+      return Ok(());
+    }
+    if self.pending_revocation_checks()? >= self.settings.max_pending_revocation_checks {
+      tracing::warn!(device_id = %device, "too many revocation checks waiting; this one is not queued");
+      return Ok(());
+    }
+    let delay_ms = millis(self.settings.revocation_check_delay);
+    self.queue_pending(PendingChange::RevocationCheck {
+      device_id: device,
+      not_before_ms: self.now_ms().saturating_add(delay_ms),
+      attempts: 0,
+    })
+  }
+
+  /// How many [`PendingChange::RevocationCheck`]s wait in the queue.
+  fn pending_revocation_checks(&self) -> Result<usize, CoreError> {
+    let pending = self.store.list(Table::PendingChanges)?;
+    Ok(
+      pending
+        .iter()
+        .filter(|(key, _)| key.starts_with(REVOCATION_CHECK_KEY_PREFIX))
+        .count(),
+    )
+  }
+
+  /// Runs a [`PendingChange::RevocationCheck`] that is due: finishes the revocation if the signed
+  /// list names the device revoked, else checks again later, up to `removal_attempts` times.
+  pub(crate) async fn apply_revocation_check(
+    &mut self,
+    change: &PendingChange,
+  ) -> Result<PendingOutcome, CoreError> {
+    let PendingChange::RevocationCheck {
+      device_id,
+      not_before_ms,
+      attempts,
+    } = change
+    else {
+      return Ok(PendingOutcome::Done);
+    };
+    if self.now_ms() < *not_before_ms {
+      return Ok(PendingOutcome::Later(change.clone()));
+    }
+    if self.is_revoked_in_own_list(*device_id).await? {
+      self.finish_listed_revocation(*device_id).await?;
+      return Ok(PendingOutcome::Done);
+    }
+    let attempts = attempts.saturating_add(1);
+    if attempts >= self.settings.removal_attempts {
+      tracing::info!(device_id = %device_id, "no signed revocation of the device the server reported; nothing removed");
+      return Ok(PendingOutcome::Done);
+    }
+    Ok(PendingOutcome::Later(PendingChange::RevocationCheck {
+      device_id: *device_id,
+      not_before_ms: self.now_ms().saturating_add(self.backoff_ms(attempts)),
+      attempts,
+    }))
+  }
+
+  /// After a full resync (the gateway events may be gone): finishes every revocation the signed
+  /// device list names whose device is still in one of this device's groups.
+  pub(crate) async fn finish_listed_revocations(&mut self) -> Result<(), CoreError> {
+    let me = self.account.user_id;
+    let Some(list) = self
+      .fetch_device_list(me, &self.account.identity_public_key())
+      .await?
+    else {
+      return Ok(());
+    };
+    let mut revoked = std::collections::BTreeSet::new();
+    for conversation in self.cached_conversations()?.into_keys() {
+      if !self.has_group(conversation)? {
+        continue;
+      }
+      for member in self.group_or_error(conversation)?.members()? {
+        let device = convert::device_from_crypto(member.device_id)?;
+        if member.user_id == convert::user(me)
+          && device != self.account.device_id
+          && list.is_revoked(member.device_id)
+        {
+          revoked.insert(device);
+        }
+      }
+    }
+    for device in revoked {
+      self.finish_listed_revocation(device).await?;
+    }
+    Ok(())
+  }
+
+  /// Removes `device`, which the verified list names revoked, from the groups this device shares
+  /// with it; a group that refuses is retried through the pending queue like an own revocation.
+  async fn finish_listed_revocation(&mut self, device: DeviceId) -> Result<(), CoreError> {
+    let key = PendingChange::revocation_key(device);
+    if self.stored_pending(&key)?.is_some() {
+      // Already under way (this device's own, or an earlier check's).
+      return Ok(());
+    }
+    tracing::info!(device_id = %device, "finishing a revocation the signed device list names");
+    self.queue_pending(PendingChange::Revocation {
+      device_id: device,
+      step: RevocationStep::Groups,
+      not_before_ms: 0,
+    })?;
+    let result = self.run_revocation(device, RevocationStep::Groups).await;
+    match self.settle_pending(&key, result) {
+      Err(error) if error.is_transient() => Err(error),
+      // Kept in the queue for the next round (`settle_pending`).
+      Err(error) => {
+        tracing::warn!(device_id = %device, %error, "a revoked device is still in a group");
+        Ok(())
+      },
+      Ok(()) => Ok(()),
+    }
+  }
+
+  /// Whether one of this device's groups has `device`.
+  fn shares_group_with(&mut self, device: DeviceId) -> Result<bool, CoreError> {
+    for conversation in self.cached_conversations()?.into_keys() {
+      if self.has_group(conversation)? && self.group_device_ids(conversation)?.contains(&device) {
+        return Ok(true);
+      }
+    }
+    Ok(false)
+  }
+
+  /// Whether this user's signed device list, fetched and verified with the identity key (never
+  /// older than the stored one), names `device` revoked.
+  async fn is_revoked_in_own_list(&mut self, device: DeviceId) -> Result<bool, CoreError> {
+    let me = self.account.user_id;
+    let maybe_list = self
+      .fetch_device_list(me, &self.account.identity_public_key())
+      .await?;
+    Ok(maybe_list.is_some_and(|list| list.is_revoked(convert::device(device))))
+  }
+
+  /// [`Self::is_revoked_in_own_list`] with the list this device stored last, without a request.
+  fn is_revoked_in_stored_list(&self, device: DeviceId) -> Result<bool, CoreError> {
+    let me = self.account.user_id;
+    let maybe_list = self.stored_device_list(me, &self.account.identity_public_key())?;
+    Ok(maybe_list.is_some_and(|list| list.is_revoked(convert::device(device))))
   }
 
   /// Drops a pending revocation once it is done; keeps it when it may work later, or, after the

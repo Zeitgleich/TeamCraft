@@ -235,6 +235,16 @@ pub enum MembershipIssue {
   /// None of `user`'s devices passed the checks (signed device list, credential), so they can't
   /// be added; a new device of theirs is tried again.
   DevicesUnverified { user: UserId },
+  /// A DM this device opened waits for the welcome into the group the other side founded:
+  /// "setting up encryption", with a retry ([`crate::backend::ChatBackend::retry_dm_setup`]).
+  /// `remaining_ms` after it was read it becomes [`Self::EncryptionSetupFailed`]; the view reads
+  /// the issues again then.
+  EncryptionSetup {
+    #[serde(default)]
+    remaining_ms: u64,
+  },
+  /// That welcome didn't come in time; "retry" asks the members again.
+  EncryptionSetupFailed,
   #[serde(other)]
   Unknown,
 }

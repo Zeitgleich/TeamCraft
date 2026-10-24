@@ -42,7 +42,8 @@ impl Peer {
     Self::enroll_with(server.add_user(name), name, settings).await
   }
 
-  async fn enroll_with(api: FakeServerApi, name: &str, client_settings: ClientSettings) -> Self {
+  /// Enrolls a device of the user behind `api` with other client settings.
+  pub async fn enroll_with(api: FakeServerApi, name: &str, client_settings: ClientSettings) -> Self {
     let store = Arc::new(MemoryStore::new());
     let mut client = PendingEnrollment::new()
       .complete(

@@ -25,6 +25,8 @@ use crate::workspace::{
 };
 
 pub(crate) const WORKSPACE_KEY: &str = "state";
+/// Where [`PendingChange::RevocationCheck`]s wait in the pending queue, before the device ID.
+pub(crate) const REVOCATION_CHECK_KEY_PREFIX: &str = "revocation_check/";
 
 /// A membership change waiting to be committed by this device.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +105,16 @@ pub(crate) enum PendingChange {
     /// Not tried again before this after a group refused the removal; 0 for right away.
     #[serde(default)]
     not_before_ms: i64,
+  },
+  /// The server reported another device of this user revoked (`device_remove`). Only the signed
+  /// device list decides: once it names the device revoked, this device removes it from the groups
+  /// they share, in case the revoking device couldn't (#232, e2ee.md §3). Dropped after
+  /// `removal_attempts` checks that found nothing signed.
+  RevocationCheck {
+    device_id: DeviceId,
+    not_before_ms: i64,
+    #[serde(default)]
+    attempts: u32,
   },
   /// A user this device added who had no device to add yet (none set up, or none with a key
   /// package left); see [`super::pending_add`]. The server lists them already.
@@ -220,6 +232,11 @@ impl PendingChange {
   /// Where a revocation this device started waits ([`PendingChange::Revocation`]).
   pub(crate) fn revocation_key(device: DeviceId) -> String {
     format!("revocation/{device}")
+  }
+
+  /// Where the check of a revocation the server reported waits ([`PendingChange::RevocationCheck`]).
+  pub(crate) fn revocation_check_key(device: DeviceId) -> String {
+    format!("{REVOCATION_CHECK_KEY_PREFIX}{device}")
   }
 }
 
@@ -360,6 +377,25 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Err(CoreError::PolicyBaseMismatch);
     }
     self.publish_policy(policy).await
+  }
+
+  /// [`Self::publish_policy_based_on`], first signing the genesis roster if this device verified
+  /// none yet: the signer as owner and root of trust, plus the `owners` and `admins` the user
+  /// confirmed with their IDs and keys (admin.md §2.3, #265). The server's role holders never go
+  /// in unconfirmed; once a roster is verified, `owners` and `admins` are ignored.
+  pub async fn publish_policy_with_genesis(
+    &mut self,
+    base: &WorkspacePolicy,
+    policy: WorkspacePolicy,
+    owners: &[UserId],
+    admins: &[UserId],
+  ) -> Result<(), CoreError> {
+    self.sync_workspace().await?;
+    if self.workspace()?.roster.version == 0 {
+      let roles = crate::workspace::genesis_roles(self.account.user_id, owners, admins);
+      self.publish_roster(&roles).await?;
+    }
+    self.publish_policy_based_on(base, policy).await
   }
 
   /// Signs and publishes a new workspace policy (owners only).
@@ -525,6 +561,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         ..
       } => PendingChange::removal_key(*conversation_id, *user_id),
       PendingChange::Revocation { device_id, .. } => PendingChange::revocation_key(*device_id),
+      PendingChange::RevocationCheck { device_id, .. } => PendingChange::revocation_check_key(*device_id),
       PendingChange::AddUser {
         conversation_id,
         user_id,
@@ -673,6 +710,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         let key = PendingChange::revocation_key(*device_id);
         return self.removal_outcome(&key, change, result.map(|()| RemovalProgress::Done));
       },
+      PendingChange::RevocationCheck { .. } => return self.apply_revocation_check(change).await,
       PendingChange::Rejoin { .. } => return self.apply_rejoin(change).await,
       PendingChange::AddUser { .. } => return self.apply_user_addition(change).await,
       PendingChange::ShareHistory {

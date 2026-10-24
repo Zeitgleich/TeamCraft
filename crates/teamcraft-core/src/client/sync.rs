@@ -65,6 +65,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.refresh_notification_settings().await?;
     // A `device_add` missed while offline beyond the resume window would leave them waiting.
     self.recheck_waiting_additions().await?;
+    // A revocation the revoking device couldn't finish while this one was away (#232). A list
+    // that doesn't verify is the server's problem, not a reason to stop syncing.
+    if let Err(error) = self.finish_listed_revocations().await {
+      if error.is_transient() {
+        return Err(error);
+      }
+      tracing::warn!(%error, "could not check the signed device list for unfinished revocations");
+    }
     self.apply_pending_changes().await?;
     self.flush_outbox().await?;
     self.top_up_key_packages().await?;

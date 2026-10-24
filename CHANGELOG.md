@@ -20,6 +20,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 - **Videos and animated images in the lightbox**: videos play in the viewer with the browser's
   controls; GIFs and APNGs animate and can be paused (`K`), and start paused when the system asks
   for reduced motion.
+- **DM encryption setup status**: a DM whose device waits for the other side's encryption group says
+  "Setting up encryption…", and after two minutes without it that the setup failed; "Retry" asks the
+  other side's devices again (#278).
 
 ### Changed
 
@@ -34,6 +37,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
   against servers without the endpoint.
 - **Share links of messages with several files**: "Create share link" shares the file it belongs to,
   and every file shows its own link, instead of all of them pointing to the message's first file.
+- **Interrupted device revocations are finished by the user's other devices**: if the device that
+  revoked one was lost before it removed it from every conversation, the user's other devices do it,
+  once the signed device list names the device revoked; a revocation the server claims alone changes
+  nothing (#232).
+
+### Security
+
+- **The first admin roster is confirmed before it is signed**: the first policy save no longer signs
+  the identity provider's owners and admins as the server reports them; the owner checks each with
+  user ID and key fingerprint (attested, trusted on first use, own key), or signs only themselves
+  (#265).
+- **Sessions from before the server entry are signed out**: the desktop revokes the old refresh token
+  at its identity provider and deletes it, the old database keys and the old store; Android and iOS
+  unregister the old device's push and revoke the old token once the user entered its server, then
+  delete the old session, key and store (after 14 days without that server: deleted without it)
+  (#223, #224).
 
 ## [1.0.1] - 2026-10-24
 

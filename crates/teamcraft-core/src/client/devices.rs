@@ -140,7 +140,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// The user's list from the server if it is at least as new as the stored one (then stored),
   /// else the stored one. `None` if the user never published one.
-  async fn fetch_device_list(
+  pub(crate) async fn fetch_device_list(
     &self,
     user: UserId,
     identity: &IdentityPublicKey,
@@ -155,7 +155,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(Some(verified))
   }
 
-  fn stored_device_list(
+  pub(crate) fn stored_device_list(
     &self,
     user: UserId,
     identity: &IdentityPublicKey,

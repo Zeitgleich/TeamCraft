@@ -216,6 +216,71 @@ mod hostile_server {
   }
 }
 
+/// The user sees that a DM waits for its welcome, and that it failed after a bound, with a retry
+/// (#278).
+mod status {
+  use super::*;
+  use teamcraft_core::client::{DmSetupStatus, dm_setup_status, is_waiting_for_device};
+
+  #[tokio::test]
+  async fn a_welcome_that_never_comes_shows_as_waiting_then_failed_and_retry_asks_again() {
+    let (server, clock, alice, bob) = two().await;
+    let (alice, dm) = open_cut_short(&server, &clock, alice, &bob, CUT_AFTER_FOUNDING).await;
+    let mut alice = alice;
+    assert_eq!(status(&alice, &clock, dm), None, "nothing waited for yet");
+
+    // The server says another founding won; no welcome ever comes.
+    server.bump_epoch(dm, 3);
+    clock.advance(retry_ms() * 2);
+    alice.client.full_sync().await.unwrap();
+    assert_eq!(
+      status(&alice, &clock, dm),
+      Some(DmSetupStatus::WaitingForWelcome {
+        remaining: std::time::Duration::from_millis(timeout_ms().unsigned_abs()),
+      }),
+      "the UI's timer fires when it fails"
+    );
+
+    clock.advance(timeout_ms());
+    assert_eq!(status(&alice, &clock, dm), Some(DmSetupStatus::Failed));
+
+    // Retry: the wait starts anew and the members are asked for a welcome; the group of one stays.
+    alice.client.retry_dm_setup(dm).await.unwrap();
+    assert!(matches!(
+      status(&alice, &clock, dm),
+      Some(DmSetupStatus::WaitingForWelcome { .. })
+    ));
+    assert!(is_waiting_for_device(&*alice.store, dm).unwrap());
+    assert_eq!(alice.client.mls_epoch(dm).unwrap(), Some(0));
+  }
+
+  #[tokio::test]
+  async fn the_welcome_ends_the_wait() {
+    let (server, clock, alice, mut bob) = two().await;
+    let (alice, dm) = open_cut_short(&server, &clock, alice, &bob, CUT_AFTER_FOUNDING).await;
+    let mut alice = alice;
+    assert_eq!(bob.client.open_dm(alice.client.user_id()).await.unwrap(), dm);
+    alice.client.full_sync().await.unwrap();
+    assert_eq!(status(&alice, &clock, dm), None);
+    clock.advance(timeout_ms() * 2);
+    assert_eq!(
+      status(&alice, &clock, dm),
+      None,
+      "never shown as failed afterwards"
+    );
+    assert_talks(&mut alice, &mut bob, dm).await;
+  }
+
+  fn status(peer: &Peer, clock: &Arc<ManualClock>, dm: ConversationId) -> Option<DmSetupStatus> {
+    use teamcraft_core::clock::Clock;
+    dm_setup_status(&*peer.store, dm, clock.now_ms()).unwrap()
+  }
+
+  fn timeout_ms() -> i64 {
+    i64::try_from(settings().dm_welcome_timeout.as_millis()).unwrap()
+  }
+}
+
 mod multi_device {
   use super::*;
 

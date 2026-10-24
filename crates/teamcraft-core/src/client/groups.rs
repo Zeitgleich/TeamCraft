@@ -92,6 +92,40 @@ struct DmSetupRecord {
   /// founding race with that person's first device is still settled as above.
   #[serde(default)]
   is_waiting_for_device: bool,
+  /// Waiting for a welcome (another founding won, or someone else founded): until when that is
+  /// shown as "setting up encryption", and as failed afterwards, with a retry (#278).
+  #[serde(default)]
+  maybe_welcome_deadline_ms: Option<i64>,
+}
+
+/// Where the setup of a DM this device created stands, for the UI (#278).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DmSetupStatus {
+  /// Waiting for the welcome into the group the other side founded; shown as failed after
+  /// `remaining` (the UI plans one timer for it).
+  WaitingForWelcome { remaining: std::time::Duration },
+  /// No welcome within `dm_welcome_timeout`: the user can retry ([`Client::retry_dm_setup`]).
+  Failed,
+}
+
+/// The setup status of `conversation` at `now_ms`; `None` when nothing is waited for. Read by the
+/// UI from the store.
+pub fn dm_setup_status(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  now_ms: i64,
+) -> Result<Option<DmSetupStatus>, CoreError> {
+  let maybe_setup: Option<DmSetupRecord> =
+    records::get_json(store, Table::SyncState, &dm_setup_key(conversation))?;
+  Ok(maybe_setup.and_then(|setup| {
+    let deadline = setup.maybe_welcome_deadline_ms?;
+    Some(match u64::try_from(deadline.saturating_sub(now_ms)) {
+      Ok(remaining_ms) if remaining_ms > 0 => DmSetupStatus::WaitingForWelcome {
+        remaining: std::time::Duration::from_millis(remaining_ms),
+      },
+      _ => DmSetupStatus::Failed,
+    })
+  }))
 }
 
 /// What became of opening a welcome.
@@ -211,6 +245,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .saturating_add(1),
       maybe_founding_key_id: maybe_setup.and_then(|record| record.maybe_founding_key_id),
       is_waiting_for_device: false,
+      maybe_welcome_deadline_ms: None,
     };
     records::put_json(&self.store, Table::SyncState, &dm_setup_key(id), &setup)?;
     self.finish_dm_setup(id, others).await?;
@@ -299,6 +334,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         // Another founding won, says the server: this device waits for the winner's welcome.
         // Adding now would only lose the epoch again and spend the others' key packages.
         tracing::info!(conversation_id = %id, "waiting for the welcome of the DM group that was founded first");
+        self.note_waiting_for_welcome(id)?;
         if self.has_requested_rejoin(id)? {
           // That welcome was opened but not joined (its key package is spent): ask the members
           // again, at the rejoin backoff; their new welcome replaces this group once it checks out.
@@ -313,6 +349,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         // in the group and adds this one.
         if let Err(error) = self.join_as_member_device(id).await {
           tracing::debug!(conversation_id = %id, %error, "not joined as a further device");
+        }
+        if !self.has_group(id)? {
+          self.note_waiting_for_welcome(id)?;
         }
         return self.complete_dm_setup(id, others);
       },
@@ -343,6 +382,68 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }
     }
     self.complete_dm_setup(id, others)
+  }
+
+  /// "Retry" on a DM whose setup waits for a welcome (#278): tries the setup again now, and if
+  /// the welcome is still missing, asks the members once more, with a signed rejoin request, to
+  /// add this device (the welcome may be lost, or its key package spent). The wait starts anew.
+  pub async fn retry_dm_setup(&mut self, id: ConversationId) -> Result<(), CoreError> {
+    let Some(setup) = self.dm_setup(id)? else {
+      return Ok(());
+    };
+    let setup = DmSetupRecord {
+      tried_at_ms: self.now_ms(),
+      maybe_welcome_deadline_ms: None,
+      ..setup
+    };
+    records::put_json(&self.store, Table::SyncState, &dm_setup_key(id), &setup)?;
+    if self.finish_dm_setup(id, &setup.others).await? {
+      return Ok(());
+    }
+    let is_waiting = self
+      .dm_setup(id)?
+      .is_some_and(|setup| setup.maybe_welcome_deadline_ms.is_some());
+    if !is_waiting {
+      return Ok(());
+    }
+    let query = ListMlsMessagesQuery {
+      maybe_after: None,
+      maybe_limit: Some(1),
+    };
+    let server_epoch = self.api.list_mls_messages(id, &query).await?.current_epoch;
+    // The user asked: not held back by the backoff of an earlier request.
+    self.store.delete(Table::AppliedChanges, &rejoin_key(id))?;
+    self.request_rejoin(id, server_epoch).await
+  }
+
+  /// Starts the wait for a welcome, unless it runs already.
+  fn note_waiting_for_welcome(&mut self, id: ConversationId) -> Result<(), CoreError> {
+    let Some(setup) = self.dm_setup(id)? else {
+      return Ok(());
+    };
+    if setup.maybe_welcome_deadline_ms.is_some() {
+      return Ok(());
+    }
+    let timeout_ms = i64::try_from(self.settings.dm_welcome_timeout.as_millis()).unwrap_or(i64::MAX);
+    let setup = DmSetupRecord {
+      maybe_welcome_deadline_ms: Some(self.now_ms().saturating_add(timeout_ms)),
+      ..setup
+    };
+    records::put_json(&self.store, Table::SyncState, &dm_setup_key(id), &setup)
+  }
+
+  /// The welcome a DM's setup waited for was joined: the setup is done if everybody is in, and
+  /// waits for no welcome any more either way.
+  fn note_dm_welcome_joined(&mut self, id: ConversationId) -> Result<(), CoreError> {
+    let Some(setup) = self.dm_setup(id)? else {
+      return Ok(());
+    };
+    let setup = DmSetupRecord {
+      maybe_welcome_deadline_ms: None,
+      ..setup
+    };
+    records::put_json(&self.store, Table::SyncState, &dm_setup_key(id), &setup)?;
+    self.complete_dm_setup(id, &setup.others).map(|_| ())
   }
 
   /// Founds a DM's group. A content key this device makes for it is noted in the setup record
@@ -1444,6 +1545,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.remember_member_keys(conversation, &directory, welcome.id.snowflake().unix_millis())?;
         // Everything up to the welcome belongs to epochs before we joined.
         self.advance_cursor(conversation, welcome)?;
+        self.note_dm_welcome_joined(conversation)?;
         if let Ok(response) = self.api.conversation(conversation).await {
           records::put_json(
             &self.store,

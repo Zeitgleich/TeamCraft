@@ -75,6 +75,16 @@ key only keeps the passwords out of database dumps and backups ([admin.md](admin
   is only a hint; clients don't sign a removal on the server's word. The device that revokes signs
   (above); an admin removes people with a signed change any member commits, also in conversations the
   admin isn't in (admin.md §2.2).
+- **Other devices finish a revocation.** If the revoking device is lost after it published the list
+  but before it removed the device from every group, the user's other devices finish it. A
+  `device_remove` the server reports for a device of the same user only makes them look: after
+  `revocation_check_delay` (default 5 minutes, so the revoking device normally finishes first) they
+  fetch the user's device list, verify it with the pinned identity key (never older than the one
+  they stored), and only if it names the device revoked do they sign its removal from the groups
+  they share with it. Without such a list nothing is signed; the check is repeated with the
+  removal backoff, `removal_attempts` times, then dropped. A full resync (gateway events missed)
+  does the same check once against the groups it holds. The revoked device's leaves carry the
+  user's ID, so the removal is the user's own change, as from the revoking device.
 - MLS ciphersuite: `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519` (matches the device keys).
   The device key signs both MLS messages and TeamCraft structures; every TeamCraft signature and AEAD
   input is prefixed with a length-prefixed `TeamCraft-v1 …` label, so it can't collide with MLS's
@@ -157,7 +167,10 @@ passphrase again instead.
 **The first owner.** The first roster entry makes its signer the workspace root of trust (admin.md
 §2.3); an owner who can't recover their identity could never sign the roster or policy again. The
 server therefore accepts the genesis roster only from a user who has both an identity key and a key
-bag, in addition to the ordering above.
+bag, in addition to the ordering above. The other owners and admins of the genesis come from the
+identity provider's roles, which the server reports; the signer's client signs only the people the
+signer confirmed one by one with user ID and pinned-key fingerprint (admin.md §2.3, "The first
+roster"), so a hostile server can't slip a look-alike owner into the root roster.
 
 **Never without an owner.** Every roster entry, the genesis included, must name at least one owner
 with a valid 32-byte identity key. Clients check this before the chain and the signature and refuse
@@ -566,7 +579,12 @@ a revoked device can't hand out the group). The founded group goes only after th
 server's word alone (an epoch conflict, a later epoch in the queue) never makes it drop the group,
 so a server can't make devices drop and found again in a loop; it can only delay the DM. On giving
 up, the founding content key stops being current but stays in the ring (and the account's key bag,
-which merges by union), and the winner's key becomes current when it arrives.
+which merges by union), and the winner's key becomes current when it arrives. While such a device
+waits for the winner's welcome (or for anybody's, when someone else founded), the DM shows "setting
+up encryption", and after `dm_welcome_timeout` (default 2 minutes) that the setup failed; "retry"
+runs the setup again and, if the welcome is still missing, posts a signed rejoin request so a member
+adds this device (§4.6, rejoin), and the wait starts anew. Retrying never founds or gives up a group
+by itself; the rules above still decide.
 
 **Server time for merge decisions.** Whether every member merges a commit must not depend on its own
 clock, or a skewed clock would split the group. The roster freshness (admin.md §2.3) is judged at the

@@ -94,8 +94,14 @@ signature (freshness above).
   than the recommended number. That number is part of the signed policy (`owners.recommended_minimum`,
   default 2; 1 switches the warning off).
 - **When an owner leaves, add the successor first, then remove the old owner.** Removing the last
-  owner is refused, so a handover always passes through a roster with both. The first roster takes
-  every owner and admin the server lists when the first policy is signed.
+  owner is refused, so a handover always passes through a roster with both.
+- **The first roster.** The first policy save in a workspace without a signed roster signs the
+  genesis roster too: the signer as first owner (the root of trust), proposed together with the
+  owners and admins the identity provider lists. That list comes from the server, so it goes
+  through the same confirmation as later edits (user ID, fingerprint, attested, trusted on first use
+  or own key) before anything is signed; the owner can also sign themselves alone and add the
+  others later. The core signs only the confirmed list (`publish_policy_with_genesis`) and ignores
+  it once a roster is verified.
 - **Editing the roster.** Administration → Security → Owners lists the signed roster. An owner on a
   device with signing keys (desktop or web) can add a person as owner or admin, make an owner an
   admin or the other way round, or remove someone. The console shows the changes, refuses a roster
