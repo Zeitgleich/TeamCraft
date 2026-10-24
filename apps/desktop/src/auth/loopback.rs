@@ -1,23 +1,27 @@
 //! The loopback redirect receiver of RFC 8252 §7.3: a one-shot HTTP listener on `127.0.0.1` with a
-//! random port that the browser is redirected to after login.
+//! random port that the browser is redirected to after login. The browser's request stays open
+//! until the sign-in is finished, so the page it then shows tells the truth ([`callback_page`]).
 
 use std::time::Duration;
 
+use teamcraft_client_api::sign_in_look::SignInLook;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use super::AuthError;
+use super::callback_page::{self, CallbackOutcome};
 
 const CALLBACK_PATH: &str = "/callback";
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Page shown in the browser tab after the redirect (English and German, shown together because the
-/// shell does not know the user's language here).
-const DONE_PAGE: &str = "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>TeamCraft</title>\
-<body style=\"font:16px system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem\">\
-<h1>TeamCraft</h1><p>You are signed in. You can close this tab and return to the app.</p>\
-<p lang=\"de\">Du bist angemeldet. Du kannst diesen Tab schlie&szlig;en und zur App zur&uuml;ckkehren.</p></body></html>";
+/// The browser's redirect with the connection it came on; [`Redirect::answer`] shows the page.
+pub struct Redirect {
+  pub params: CallbackParams,
+  stream: TcpStream,
+  maybe_accept_language: Option<String>,
+}
 
 /// Parameters the identity provider put on the redirect.
 #[derive(Debug, PartialEq, Eq)]
@@ -26,14 +30,24 @@ pub struct CallbackParams {
   maybe_error: Option<String>,
 }
 
+impl Redirect {
+  /// Shows the page for `outcome` in the browser and closes the connection.
+  pub async fn answer(mut self, outcome: CallbackOutcome, look: &SignInLook) {
+    let page = callback_page::render(outcome, look, self.maybe_accept_language.as_deref());
+    let (status, reason) = outcome.status();
+    respond(&mut self.stream, status, reason, &page).await;
+  }
+}
+
 impl CallbackParams {
   /// The authorization code, or the provider's refusal as an error.
-  pub fn into_code(self) -> Result<String, AuthError> {
-    if let Some(error) = self.maybe_error {
-      return Err(AuthError::Denied(error));
+  pub fn code(&self) -> Result<String, AuthError> {
+    if let Some(error) = &self.maybe_error {
+      return Err(AuthError::Denied(error.clone()));
     }
     self
       .maybe_code
+      .clone()
       .ok_or_else(|| AuthError::InvalidResponse("the redirect carried no code".to_owned()))
   }
 }
@@ -51,12 +65,14 @@ pub async fn bind() -> Result<(TcpListener, String), AuthError> {
 }
 
 /// Accepts connections until one carries a valid redirect with the expected `state`. Anything else
-/// (favicon requests, port scanners) is answered with an error and ignored.
+/// (favicon requests, port scanners) is answered with an error and ignored; a redirect with the
+/// wrong `state` gets the error page and ends the wait.
 pub async fn wait_for_redirect(
   listener: TcpListener,
   expected_state: &str,
   redirect_uri: &str,
-) -> Result<CallbackParams, AuthError> {
+  look: &SignInLook,
+) -> Result<Redirect, AuthError> {
   let host = redirect_uri
     .trim_start_matches("http://")
     .split('/')
@@ -71,13 +87,25 @@ pub async fn wait_for_redirect(
     let Some(request) = read_request(&mut stream).await else {
       continue;
     };
+    let maybe_accept_language = header(&request, "accept-language");
     match parse_request(&request, &host, expected_state) {
       Parsed::Callback(params) => {
-        respond(&mut stream, 200, "OK", DONE_PAGE).await;
-        return Ok(params);
+        return Ok(Redirect {
+          params,
+          stream,
+          maybe_accept_language,
+        });
       },
       Parsed::WrongState => {
-        respond(&mut stream, 400, "Bad Request", "state mismatch").await;
+        let redirect = Redirect {
+          params: CallbackParams {
+            maybe_code: None,
+            maybe_error: None,
+          },
+          stream,
+          maybe_accept_language,
+        };
+        redirect.answer(CallbackOutcome::StateMismatch, look).await;
         return Err(AuthError::StateMismatch);
       },
       Parsed::Ignore => respond(&mut stream, 404, "Not Found", "not found").await,
@@ -110,6 +138,17 @@ async fn read_request(stream: &mut TcpStream) -> Option<String> {
     }
   }
   String::from_utf8(buffer).ok()
+}
+
+/// The value of a request header, by case-insensitive name.
+fn header(request: &str, name: &str) -> Option<String> {
+  request
+    .lines()
+    .skip(1)
+    .take_while(|line| !line.is_empty())
+    .filter_map(|line| line.split_once(':'))
+    .find(|(key, _)| key.trim().eq_ignore_ascii_case(name))
+    .map(|(_, value)| value.trim().to_owned())
 }
 
 fn parse_request(request: &str, expected_host: &str, expected_state: &str) -> Parsed {
@@ -155,14 +194,24 @@ fn parse_request(request: &str, expected_host: &str, expected_state: &str) -> Pa
 }
 
 async fn respond(stream: &mut TcpStream, status: u16, reason: &str, body: &str) {
-  let response = format!(
+  let response = response(status, reason, body);
+  // The browser may already be gone, or stall; there is nobody to tell.
+  let _ = tokio::time::timeout(WRITE_TIMEOUT, async {
+    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = stream.shutdown().await;
+  })
+  .await;
+}
+
+/// The HTTP response with the page's security headers.
+fn response(status: u16, reason: &str, body: &str) -> String {
+  format!(
     "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\
+     Content-Security-Policy: {}\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\n\
      Cache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n{body}",
-    body.len()
-  );
-  // The browser may already be gone; there is nobody to tell.
-  let _ = stream.write_all(response.as_bytes()).await;
-  let _ = stream.shutdown().await;
+    body.len(),
+    callback_page::CONTENT_SECURITY_POLICY,
+  )
 }
 
 #[cfg(test)]
@@ -237,11 +286,78 @@ mod tests {
     let Parsed::Callback(params) = parsed else {
       unreachable!("state matches")
     };
-    assert!(matches!(params.into_code(), Err(AuthError::Denied(text)) if text == "No thanks"));
+    assert!(matches!(params.code(), Err(AuthError::Denied(text)) if text == "No thanks"));
+  }
+
+  #[test]
+  fn headers_are_read_case_insensitively_from_the_head_only() {
+    let request =
+      "GET /callback HTTP/1.1\r\nHost: x\r\naccept-LANGUAGE: de-DE,de;q=0.9\r\n\r\nAccept-Language: en";
+    assert_eq!(
+      header(request, "Accept-Language").as_deref(),
+      Some("de-DE,de;q=0.9")
+    );
+    assert_eq!(header(&get("/", HOST), "accept-language"), None);
+  }
+
+  #[test]
+  fn every_answer_carries_the_content_security_policy() {
+    let answer = response(200, "OK", "<p>x</p>");
+    assert!(answer.contains(
+      "\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src data:;"
+    ));
+    assert!(answer.contains("\r\nX-Content-Type-Options: nosniff\r\n"));
+    assert!(answer.contains("\r\nCache-Control: no-store\r\n"));
   }
 
   #[tokio::test]
-  async fn listener_answers_the_redirect_over_tcp() {
+  async fn the_page_comes_after_the_sign_in_and_never_echoes_the_redirect() {
+    let (listener, addr, redirect) = listen().await;
+    let waiter = tokio::spawn(async move {
+      let look = SignInLook::default();
+      let answered = wait_for_redirect(listener, "st-secret", &redirect, &look)
+        .await
+        .expect("redirect");
+      let code = answered.params.code().expect("code");
+      answered.answer(CallbackOutcome::SignedIn, &look).await;
+      code
+    });
+    let answer = send(
+      &addr,
+      &format!(
+        "GET /callback?code=the-code&state=st-secret HTTP/1.1\r\nHost: {addr}\r\n\
+         Accept-Language: de-DE,de;q=0.9\r\n\r\n"
+      ),
+    )
+    .await;
+    assert!(answer.starts_with("HTTP/1.1 200"));
+    assert!(answer.contains("Content-Security-Policy: default-src 'none'"));
+    assert!(answer.contains("<html lang=\"de\"") && answer.contains("Angemeldet"));
+    assert!(!answer.contains("the-code") && !answer.contains("st-secret"));
+    assert_eq!(waiter.await.expect("task"), "the-code");
+  }
+
+  #[tokio::test]
+  async fn a_wrong_state_shows_the_error_page() {
+    let (listener, addr, redirect) = listen().await;
+    let waiter = tokio::spawn(async move {
+      let look = SignInLook {
+        maybe_locale: Some("en".to_owned()),
+        ..SignInLook::default()
+      };
+      wait_for_redirect(listener, "st", &redirect, &look).await.err()
+    });
+    let answer = send(&addr, &get("/callback?code=c&state=forged", &addr)).await;
+    assert!(answer.starts_with("HTTP/1.1 400"));
+    assert!(answer.contains("This sign-in was not started here"));
+    assert!(!answer.contains("forged"));
+    assert!(matches!(
+      waiter.await.expect("task"),
+      Some(AuthError::StateMismatch)
+    ));
+  }
+
+  async fn listen() -> (TcpListener, String, String) {
     let (listener, redirect) = bind().await.expect("bind");
     assert!(redirect.starts_with("http://127.0.0.1:") && redirect.ends_with("/callback"));
     let addr = redirect
@@ -250,19 +366,14 @@ mod tests {
       .next()
       .expect("host")
       .to_owned();
-    let waiter = tokio::spawn({
-      let redirect = redirect.clone();
-      async move { wait_for_redirect(listener, "st", &redirect).await }
-    });
-    let mut stream = TcpStream::connect(&addr).await.expect("connect");
-    stream
-      .write_all(get("/callback?code=the-code&state=st", &addr).as_bytes())
-      .await
-      .expect("write");
+    (listener, addr, redirect)
+  }
+
+  async fn send(addr: &str, request: &str) -> String {
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    stream.write_all(request.as_bytes()).await.expect("write");
     let mut answer = String::new();
     stream.read_to_string(&mut answer).await.expect("read");
-    assert!(answer.starts_with("HTTP/1.1 200"));
-    let params = waiter.await.expect("task").expect("params");
-    assert_eq!(params.into_code().expect("code"), "the-code");
+    answer
   }
 }

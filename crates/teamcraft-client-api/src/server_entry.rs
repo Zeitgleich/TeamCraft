@@ -30,6 +30,9 @@ const MAX_SCOPE_CHARS: usize = 100;
 const MAX_DISPLAY_NAME_CHARS: usize = 64;
 /// Host names that are this device; plain `http` to them stays on the device.
 const LOOPBACK_NAMES: [&str; 2] = ["localhost", "localhost."];
+/// Top-level domains a mistyped server address is compared with, most likely first; the first
+/// one that resolves is offered as "did you mean …?".
+const SIBLING_SUFFIXES: [&str; 8] = ["de", "com", "eu", "net", "org", "at", "ch", "io"];
 
 /// The origin of a TeamCraft server: `https://host[:port]`, lower case, nothing after it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -198,6 +201,42 @@ impl ServerOrigin {
   /// `{origin}/api/v1/server-info`.
   pub fn server_info_url(&self) -> String {
     format!("{}{SERVER_INFO_PATH}", self.0)
+  }
+
+  /// The same address under other common top-level domains (`team.example.com` →
+  /// `team.example.de`, …), for a "did you mean …?" hint when this host name does not resolve.
+  /// Only a hint: the app never connects to one of them on its own. Empty for IP addresses and
+  /// names without a public suffix (`localhost`, an intranet name).
+  pub fn sibling_suffixes(&self) -> Vec<Self> {
+    let Some((scheme, authority)) = self.0.split_once("://") else {
+      return Vec::new();
+    };
+    // IPv6 literals (`[::1]`) have no top-level domain.
+    if authority.starts_with('[') {
+      return Vec::new();
+    }
+    let (host, port) = match authority.rsplit_once(':') {
+      Some((host, port)) => (host, format!(":{port}")),
+      None => (authority, String::new()),
+    };
+    if host.parse::<std::net::IpAddr>().is_ok() || !host.contains('.') {
+      return Vec::new();
+    }
+    let Some(suffix) = psl::suffix_str(host) else {
+      return Vec::new();
+    };
+    let Some(stem) = host
+      .strip_suffix(suffix)
+      .and_then(|stem| stem.strip_suffix('.'))
+      .filter(|stem| !stem.is_empty())
+    else {
+      return Vec::new();
+    };
+    SIBLING_SUFFIXES
+      .iter()
+      .filter(|candidate| **candidate != suffix)
+      .map(|candidate| Self(format!("{scheme}://{stem}.{candidate}{port}")))
+      .collect()
   }
 
   fn from_url(url: &Url, policy: HttpPolicy) -> Result<Self, ServerAddressError> {
@@ -972,6 +1011,41 @@ mod tests {
         ServerAddressError::InsecureHttp.i18n_key(),
         "server-entry-https-only"
       );
+    }
+  }
+
+  mod sibling_suffixes {
+    use super::*;
+
+    #[test]
+    fn a_com_address_offers_de_first_and_never_itself() {
+      let siblings = origin("team.example.com").sibling_suffixes();
+      let hosts: Vec<&str> = siblings.iter().map(ServerOrigin::host).collect();
+      assert_eq!(hosts.first(), Some(&"team.example.de"));
+      assert!(!hosts.contains(&"team.example.com"));
+      assert_eq!(hosts.len(), SIBLING_SUFFIXES.len() - 1);
+    }
+
+    #[test]
+    fn multi_label_suffixes_and_ports_are_kept_apart() {
+      let siblings = origin("https://chat.example.co.uk:8443").sibling_suffixes();
+      assert_eq!(
+        siblings.first().map(ServerOrigin::as_str),
+        Some("https://chat.example.de:8443")
+      );
+    }
+
+    #[test]
+    fn addresses_without_a_public_suffix_have_none() {
+      for input in [
+        "localhost:8080",
+        "https://192.0.2.10",
+        "https://[2001:db8::1]",
+        "intranet",
+      ] {
+        let parsed = ServerOrigin::parse(input, HttpPolicy::Allowed).unwrap();
+        assert!(parsed.sibling_suffixes().is_empty(), "{input}");
+      }
     }
   }
 

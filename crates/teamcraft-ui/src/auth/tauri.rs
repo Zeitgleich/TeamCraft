@@ -9,7 +9,9 @@ use teamcraft_client_api::window_chrome::{TitleBar, WindowAction, WindowChrome};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
-use super::{ApiBytes, ApiMethod, ApiResponse, AuthError, Authenticator, BinaryBody, LocalFuture};
+use super::{
+  ApiBytes, ApiMethod, ApiResponse, AuthError, Authenticator, BinaryBody, LocalFuture, SignInLook,
+};
 use teamcraft_client_api::os_notify::{NotificationTag, OsNotification, TagTarget};
 
 use crate::model::ConversationId;
@@ -48,8 +50,12 @@ impl Authenticator for TauriAuth {
     })
   }
 
-  fn login(&self) -> LocalFuture<'_, Result<(), AuthError>> {
-    Box::pin(async { invoke("auth_login", JsValue::UNDEFINED).await.map(|_| ()) })
+  fn login(&self, look: SignInLook) -> LocalFuture<'_, Result<(), AuthError>> {
+    Box::pin(async move {
+      let args = js_sys::JSON::parse(&serde_json::json!({ "look": look }).to_string())
+        .map_err(|_| AuthError::InvalidResponse("could not build the request".to_owned()))?;
+      invoke("auth_login", args).await.map(|_| ())
+    })
   }
 
   fn login_local(
@@ -241,14 +247,25 @@ pub struct ServerCheck {
   /// The identity provider lies outside the server's domain.
   #[serde(default)]
   pub is_identity_provider_elsewhere: bool,
+  /// The brand image as a `data:` URL (an older shell sends none).
+  #[serde(rename = "logo", default)]
+  pub maybe_logo: Option<String>,
+  /// The brand's separate image for the dark theme.
+  #[serde(rename = "logo_dark", default)]
+  pub maybe_logo_dark: Option<String>,
 }
 
-/// A failed server step: the i18n key of the message (`server-entry-*`) and details for logs.
+/// A failed server step: the i18n key of the message (`server-entry-*`) and details for the
+/// collapsed "technical details".
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerProblem {
   pub key: String,
   pub detail: String,
 }
+
+/// The i18n key of a server address that does not resolve; the entry then offers to look for a
+/// similar one ([`server_suggest`]).
+pub const UNKNOWN_HOST_KEY: &str = "server-entry-unknown-host";
 
 /// The server entry's state in the shell.
 pub async fn server_state() -> Result<ServerState, ServerProblem> {
@@ -259,6 +276,12 @@ pub async fn server_state() -> Result<ServerState, ServerProblem> {
 /// [`server_confirm`].
 pub async fn server_check(address: &str) -> Result<ServerCheck, ServerProblem> {
   server_call("server_check", &serde_json::json!({ "address": address })).await
+}
+
+/// "Did you mean …?" for an address that does not resolve: the shell looks up the same name under
+/// other common top-level domains. Only on the user's request; the answer is only suggested.
+pub async fn server_suggest(address: &str) -> Result<Option<String>, ServerProblem> {
+  server_call("server_suggest", &serde_json::json!({ "address": address })).await
 }
 
 /// Makes the checked server the account's server.

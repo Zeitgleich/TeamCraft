@@ -10,6 +10,7 @@
 //! sign in, and [`servers`] keeps that per account (docs/operations.md "Server address in the
 //! apps"). Tokens are stored per server origin.
 
+mod callback_page;
 pub mod commands;
 mod local;
 mod loopback;
@@ -37,7 +38,9 @@ use teamcraft_client_api::server_entry::{
   self, CheckedServer, HttpPolicy, ServerAnswer, ServerCheckError, ServerOrigin, ServerProfile,
   check_discovery, is_provider_endpoint,
 };
+use teamcraft_client_api::sign_in_look::SignInLook;
 
+use callback_page::CallbackOutcome;
 use local::{LOCAL_LOGIN_PATH, LOCAL_LOGOUT_PATH, LocalRefusal, LocalSession};
 #[cfg(test)]
 pub(crate) use store::MemoryStore;
@@ -152,6 +155,10 @@ pub enum AuthError {
 pub enum ServerProbeError {
   #[error("the server could not be reached: {0}")]
   Unreachable(String),
+  /// The host name does not resolve. The UI may offer to look for a similar address
+  /// ([`AuthService::suggest_server`]), only when the user asks for it.
+  #[error("the host name is unknown: {0}")]
+  UnknownHost(String),
   #[error("the secure connection failed: {0}")]
   Tls(String),
   #[error(transparent)]
@@ -163,6 +170,7 @@ impl ServerProbeError {
   pub fn i18n_key(&self) -> &'static str {
     match self {
       Self::Unreachable(_) => "server-entry-unreachable",
+      Self::UnknownHost(_) => "server-entry-unknown-host",
       Self::Tls(_) => "server-entry-tls",
       Self::Check(check) => check.i18n_key(),
     }
@@ -283,13 +291,16 @@ impl<S: TokenStore> AuthService<S> {
   /// Asks `origin` how to sign in to it (`GET /api/v1/server-info`) and checks the answer. Nothing
   /// changes until the user confirms; redirects are reported, never followed.
   pub async fn probe_server(&self, origin: &ServerOrigin) -> Result<CheckedServer, ServerProbeError> {
-    let response = self
+    let response = match self
       .http
       .get(origin.server_info_url())
       .header(reqwest::header::ACCEPT, "application/json")
       .send()
       .await
-      .map_err(probe_transport_error)?;
+    {
+      Ok(response) => response,
+      Err(error) => return Err(probe_transport_error(origin, &error, resolves).await),
+    };
     let status = response.status().as_u16();
     let maybe_content_type = response
       .headers()
@@ -309,6 +320,12 @@ impl<S: TokenStore> AuthService<S> {
       Some(REDIRECT_URI_PATTERN),
       HTTP_POLICY,
     )?)
+  }
+
+  /// "Did you mean …?" for an address that does not resolve: the first sibling under another
+  /// common top-level domain that does. Only on the user's request (it looks up several names).
+  pub async fn suggest_server(&self, origin: &ServerOrigin) -> Option<ServerOrigin> {
+    suggest_sibling(origin, resolves).await
   }
 
   /// Signs in with a stored local session or refresh token, if there is one. `Ok(false)` means
@@ -335,8 +352,13 @@ impl<S: TokenStore> AuthService<S> {
     }
   }
 
-  /// Runs the browser login. `open_browser` receives the authorization URL.
-  pub async fn login(&self, open_browser: impl FnOnce(&str) -> Result<(), String>) -> Result<(), AuthError> {
+  /// Runs the browser login. `open_browser` receives the authorization URL; `look` styles the
+  /// page the browser shows when it comes back.
+  pub async fn login(
+    &self,
+    look: &SignInLook,
+    open_browser: impl FnOnce(&str) -> Result<(), String>,
+  ) -> Result<(), AuthError> {
     let server = self.server()?;
     let discovery = self.discovery(&server).await?;
     let (listener, redirect_uri) = loopback::bind().await?;
@@ -356,29 +378,42 @@ impl<S: TokenStore> AuthService<S> {
     open_browser(url.as_str())
       .map_err(|error| AuthError::Unsupported(format!("could not open the browser: {error}")))?;
 
-    let wait = loopback::wait_for_redirect(listener, state.secret(), &redirect_uri);
-    let params = tokio::select! {
+    let wait = loopback::wait_for_redirect(listener, state.secret(), &redirect_uri, look);
+    let redirect = tokio::select! {
       result = tokio::time::timeout(LOGIN_TIMEOUT, wait) => result.map_err(|_| AuthError::Cancelled)??,
       () = self.cancel.notified() => return Err(AuthError::Cancelled),
     };
-    let code = params.into_code()?;
-
-    let http = self.oauth_http();
-    let response = client
-      .exchange_code(AuthorizationCode::new(code))
-      .set_pkce_verifier(PkceCodeVerifier::new(verifier.secret().clone()))
-      .request_async(&http)
-      .await
-      .map_err(map_token_error)?;
-    let mut session = self.session.lock().await;
-    session.maybe_local = None;
-    self.adopt(&mut session, &server, &response).await?;
-    drop(session);
+    // The browser waits for its page until the tokens are in: it then says what really happened.
+    let outcome = self
+      .finish_login(&client, &server, redirect.params.code(), verifier)
+      .await;
+    redirect.answer(callback_outcome(&outcome), look).await;
+    outcome?;
     // A local session of an earlier sign-in must not come back at the next start.
     if let Err(error) = self.store.clear_local_session(&server.server_url).await {
       tracing::warn!(%error, "could not forget the earlier local session");
     }
     Ok(())
+  }
+
+  /// Exchanges the redirect's code for tokens and keeps them.
+  async fn finish_login(
+    &self,
+    client: &OidcClient,
+    server: &DesktopConfig,
+    code: Result<String, AuthError>,
+    verifier: PkceCodeVerifier,
+  ) -> Result<(), AuthError> {
+    let http = self.oauth_http();
+    let response = client
+      .exchange_code(AuthorizationCode::new(code?))
+      .set_pkce_verifier(verifier)
+      .request_async(&http)
+      .await
+      .map_err(map_token_error)?;
+    let mut session = self.session.lock().await;
+    session.maybe_local = None;
+    self.adopt(&mut session, server, &response).await
   }
 
   /// Signs in a local account with e-mail, password and, when given, the one-time code. The token
@@ -485,12 +520,19 @@ impl<S: TokenStore> AuthService<S> {
   /// the webview's content security policy only loads images from itself or `data:` URLs, so
   /// the page shows it as one. Images only, at most [`MAX_BRAND_ASSET_BYTES`].
   pub async fn public_asset(&self, path: &str) -> Result<ApiBytesResponse, AuthError> {
+    let server_url = self.server()?.server_url;
+    self.brand_asset(&server_url, path).await
+  }
+
+  /// A brand image of the server at `server_url`, also one that is not confirmed yet (its
+  /// confirmation shows the logo).
+  pub async fn brand_asset(&self, server_url: &str, path: &str) -> Result<ApiBytesResponse, AuthError> {
     if !is_brand_asset_path(path) {
       return Err(AuthError::Unsupported(format!(
         "path {path:?} is not a brand image"
       )));
     }
-    let url = format!("{}{path}", self.server()?.server_url.trim_end_matches('/'));
+    let url = format!("{}{path}", server_url.trim_end_matches('/'));
     let response = self
       .http
       .get(url)
@@ -900,16 +942,7 @@ impl<S: TokenStore> AuthService<S> {
     discovery: &Discovery,
     redirect_uri: &str,
     server: &DesktopConfig,
-  ) -> Result<
-    BasicClient<
-      oauth2::EndpointSet,
-      oauth2::EndpointNotSet,
-      oauth2::EndpointNotSet,
-      oauth2::EndpointNotSet,
-      oauth2::EndpointSet,
-    >,
-    AuthError,
-  > {
+  ) -> Result<OidcClient, AuthError> {
     let invalid = |error: url::ParseError| AuthError::InvalidResponse(error.to_string());
     Ok(
       BasicClient::new(ClientId::new(server.client_id.clone()))
@@ -922,6 +955,25 @@ impl<S: TokenStore> AuthService<S> {
   /// HTTP client of the `oauth2` crate on top of our `reqwest` client.
   fn oauth_http(&self) -> OAuthHttp {
     OAuthHttp(self.http.clone())
+  }
+}
+
+/// The `oauth2` client of a sign-in: authorization and token endpoints set.
+type OidcClient = BasicClient<
+  oauth2::EndpointSet,
+  oauth2::EndpointNotSet,
+  oauth2::EndpointNotSet,
+  oauth2::EndpointNotSet,
+  oauth2::EndpointSet,
+>;
+
+/// What the browser tab says about a finished sign-in.
+fn callback_outcome(outcome: &Result<(), AuthError>) -> CallbackOutcome {
+  match outcome {
+    Ok(()) => CallbackOutcome::SignedIn,
+    Err(AuthError::Denied(_) | AuthError::Cancelled) => CallbackOutcome::Refused,
+    Err(AuthError::StateMismatch) => CallbackOutcome::StateMismatch,
+    Err(_) => CallbackOutcome::Failed,
   }
 }
 
@@ -980,23 +1032,116 @@ fn map_token_error(error: TokenError) -> AuthError {
   }
 }
 
-/// Tells a server that is not there from a connection the TLS layer refused.
-fn probe_transport_error(error: reqwest::Error) -> ServerProbeError {
-  let mut source: Option<&dyn std::error::Error> = Some(&error);
-  let mut chain = String::new();
+/// Tells a host name that does not exist and a connection the TLS layer refused from a server
+/// that is not there. The detail is the whole error chain, for the collapsed "details".
+async fn probe_transport_error<F, Fut>(
+  origin: &ServerOrigin,
+  error: &reqwest::Error,
+  resolves: F,
+) -> ServerProbeError
+where
+  F: Fn(String) -> Fut,
+  Fut: std::future::Future<Output = bool>,
+{
+  let mut source: Option<&dyn std::error::Error> = Some(error);
+  let mut parts = Vec::new();
   while let Some(current) = source {
-    chain.push_str(&current.to_string().to_ascii_lowercase());
-    chain.push(' ');
+    parts.push(current.to_string());
     source = current.source();
   }
+  let detail = parts.join(": ");
+  let failure = classify_transport(error.is_connect(), &detail, origin, resolves).await;
+  match failure {
+    TransportFailure::UnknownHost => ServerProbeError::UnknownHost(detail),
+    TransportFailure::Tls => ServerProbeError::Tls(detail),
+    TransportFailure::Other => ServerProbeError::Unreachable(detail),
+  }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TransportFailure {
+  UnknownHost,
+  Tls,
+  Other,
+}
+
+/// Sorts a failed request. A connection that failed for a host the resolver does not know is an
+/// unknown host; this asks the resolver itself (the same name the user asked for) instead of
+/// reading the resolver's message, which Windows translates. TLS failures are recognised by the
+/// TLS stack's own (untranslated) wording.
+async fn classify_transport<F, Fut>(
+  is_connect: bool,
+  chain: &str,
+  origin: &ServerOrigin,
+  resolves: F,
+) -> TransportFailure
+where
+  F: Fn(String) -> Fut,
+  Fut: std::future::Future<Output = bool>,
+{
+  let chain = chain.to_ascii_lowercase();
   let is_tls = ["certificate", "tls", "ssl", "handshake"]
     .iter()
     .any(|word| chain.contains(word));
   if is_tls {
-    ServerProbeError::Tls(error.to_string())
+    TransportFailure::Tls
+  } else if is_connect && !resolves(lookup_authority(origin.host())).await {
+    TransportFailure::UnknownHost
   } else {
-    ServerProbeError::Unreachable(error.to_string())
+    TransportFailure::Other
   }
+}
+
+/// `host:port` for the resolver; `https` origins without a port use 443.
+fn lookup_authority(host: &str) -> String {
+  let has_port = host
+    .rsplit_once(':')
+    .is_some_and(|(_, port)| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
+    && !host.ends_with(']');
+  if has_port {
+    host.to_owned()
+  } else {
+    format!("{host}:443")
+  }
+}
+
+/// How long the "did you mean …?" lookups may take together.
+const SUGGESTION_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The first sibling of `origin` (`.de` for `.com`, …) whose host name resolves, in the order of
+/// [`ServerOrigin::sibling_suffixes`]. All are looked up at once; any not answered in
+/// [`SUGGESTION_TIMEOUT`] count as unknown.
+async fn suggest_sibling<F, Fut>(origin: &ServerOrigin, resolves: F) -> Option<ServerOrigin>
+where
+  F: Fn(String) -> Fut,
+  Fut: std::future::Future<Output = bool> + Send + 'static,
+{
+  let candidates = origin.sibling_suffixes();
+  let mut checks = tokio::task::JoinSet::new();
+  for (index, candidate) in candidates.iter().enumerate() {
+    let check = resolves(lookup_authority(candidate.host()));
+    checks.spawn(async move { (index, check.await) });
+  }
+  let mut found = vec![false; candidates.len()];
+  // A slow resolver leaves the rest unknown; dropping the set stops the lookups.
+  let _ = tokio::time::timeout(SUGGESTION_TIMEOUT, async {
+    while let Some(Ok((index, is_known))) = checks.join_next().await {
+      found[index] = is_known;
+    }
+  })
+  .await;
+  candidates
+    .into_iter()
+    .zip(found)
+    .find_map(|(candidate, is_known)| is_known.then_some(candidate))
+}
+
+/// Whether `authority` (`host:port`) resolves with the system resolver within
+/// [`SUGGESTION_TIMEOUT`]; a resolver that does not answer counts as "no".
+async fn resolves(authority: String) -> bool {
+  tokio::time::timeout(SUGGESTION_TIMEOUT, tokio::net::lookup_host(authority))
+    .await
+    .is_ok_and(|lookup| lookup.is_ok_and(|mut addresses| addresses.next().is_some()))
 }
 
 /// The body, up to `limit` bytes; more is refused (a hostile or broken answer).
@@ -1049,6 +1194,97 @@ fn reqwest_method(method: ApiMethod) -> reqwest::Method {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  mod server_typos {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_unknown_host_is_what_the_resolver_says_not_its_wording() {
+      let origin = ServerOrigin::parse("chat.example.com", HttpPolicy::LoopbackOnly).unwrap();
+      // A localized Windows message, unknown to any word list: the resolver decides.
+      let localized = "Fehler beim Verbinden: Der angegebene Host ist unbekannt. (os error 11001)";
+      let unknown = classify_transport(true, localized, &origin, |authority| async move {
+        assert_eq!(authority, "chat.example.com:443");
+        false
+      })
+      .await;
+      assert_eq!(unknown, TransportFailure::UnknownHost);
+      let refused = classify_transport(true, "connection refused", &origin, |_| async { true }).await;
+      assert_eq!(refused, TransportFailure::Other);
+      // Not a connect error (a timeout while reading): never looked up.
+      let timeout = classify_transport(
+        false,
+        "operation timed out",
+        &origin,
+        |_: String| -> std::future::Ready<bool> { unreachable!("no lookup for a read error") },
+      )
+      .await;
+      assert_eq!(timeout, TransportFailure::Other);
+      let tls = classify_transport(
+        true,
+        "invalid peer certificate: UnknownIssuer",
+        &origin,
+        |_: String| -> std::future::Ready<bool> { unreachable!("no lookup for a TLS error") },
+      )
+      .await;
+      assert_eq!(tls, TransportFailure::Tls);
+    }
+
+    #[test]
+    fn lookups_name_the_port() {
+      assert_eq!(lookup_authority("chat.example.com"), "chat.example.com:443");
+      assert_eq!(lookup_authority("chat.example.com:8443"), "chat.example.com:8443");
+      assert_eq!(lookup_authority("[2001:db8::1]"), "[2001:db8::1]:443");
+      assert_eq!(lookup_authority("[2001:db8::1]:8080"), "[2001:db8::1]:8080");
+    }
+
+    #[tokio::test]
+    async fn the_first_resolving_sibling_is_suggested() {
+      let origin = ServerOrigin::parse("chat.example.com", HttpPolicy::LoopbackOnly).unwrap();
+      let suggestion = suggest_sibling(&origin, |authority| async move {
+        // `.de` does not exist here, `.net` and `.org` do.
+        authority == "chat.example.net:443" || authority == "chat.example.org:443"
+      })
+      .await;
+      assert_eq!(
+        suggestion.as_ref().map(ServerOrigin::as_str),
+        Some("https://chat.example.net")
+      );
+    }
+
+    #[tokio::test]
+    async fn nothing_resolving_means_no_suggestion() {
+      let origin = ServerOrigin::parse("chat.example.com", HttpPolicy::LoopbackOnly).unwrap();
+      assert_eq!(suggest_sibling(&origin, |_| async { false }).await, None);
+      let local = ServerOrigin::parse("localhost:8080", HttpPolicy::Allowed).unwrap();
+      assert_eq!(suggest_sibling(&local, |_| async { true }).await, None);
+    }
+
+    #[test]
+    fn an_unknown_host_has_its_own_message() {
+      assert_eq!(
+        ServerProbeError::UnknownHost("dns".into()).i18n_key(),
+        "server-entry-unknown-host"
+      );
+    }
+  }
+
+  #[test]
+  fn sign_in_outcomes_map_to_the_browser_page() {
+    assert_eq!(callback_outcome(&Ok(())), CallbackOutcome::SignedIn);
+    assert_eq!(
+      callback_outcome(&Err(AuthError::Denied("access_denied".into()))),
+      CallbackOutcome::Refused
+    );
+    assert_eq!(
+      callback_outcome(&Err(AuthError::StateMismatch)),
+      CallbackOutcome::StateMismatch
+    );
+    assert_eq!(
+      callback_outcome(&Err(AuthError::Network("down".into()))),
+      CallbackOutcome::Failed
+    );
+  }
 
   #[test]
   fn only_plain_api_paths_are_allowed() {

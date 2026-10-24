@@ -9,10 +9,11 @@ use teamcraft_client_api::sign_in_page::SignInPage;
 use teamcraft_proto::{GetMeResponse, SignInMethod};
 use wasm_bindgen::JsCast;
 
+use crate::auth::SignInLook;
 use crate::auth::tauri::{self, ServerCheck, ServerProblem};
 use crate::auth::{self, AppConfig};
 use crate::backend::Backend;
-use crate::brand::Brand;
+use crate::brand::{Brand, image_src};
 use crate::clock::now_ms;
 use crate::components::app::Shell;
 use crate::components::brand_logo::BrandLogo;
@@ -31,6 +32,7 @@ use crate::session::{LocalSignInProblem, LoginProblem, SessionControl, SessionSt
 use crate::settings::Settings;
 use crate::sign_in_page::{SignInBlock, SignInPageState, blocks};
 use teamcraft_client_api::remote::{CoreStatus, LinkStatus};
+use teamcraft_client_api::sign_in_look::LookTheme;
 
 /// Shows the right screen for the sign-in state and the chat shell once the user is in.
 #[component]
@@ -59,8 +61,16 @@ pub fn SessionGate(settings: Settings) -> impl IntoView {
   }
 }
 
+/// The card every sign-in screen sits on: the brand of the server on top (unless the screen shows
+/// a brand itself, like the server confirmation), the screen, the encryption note and the brand's
+/// links at the bottom.
 #[component]
-pub(crate) fn AuthFrame(children: Children) -> impl IntoView {
+pub(crate) fn AuthFrame(
+  /// The screen shows a brand of its own; the current one would be the wrong one.
+  #[prop(optional)]
+  hide_brand: bool,
+  children: Children,
+) -> impl IntoView {
   let i18n = use_i18n();
   let brand = Brand::use_current().0;
   let language = move || i18n.locale().tag();
@@ -84,24 +94,26 @@ pub(crate) fn AuthFrame(children: Children) -> impl IntoView {
     <main class="auth-page">
       <BundleBanner />
       <section class="auth-card">
-        <div class="auth-brand" translate="no">
-          <BrandLogo
-            class="auth-logo-img"
-            fallback=move || view! { <span class="auth-logo" aria-hidden="true">{move || name().chars().next().map(String::from).unwrap_or_default()}</span> }
-          />
-          <span>{name}</span>
-        </div>
-        {move || {
-          brand
-            .with(|view| view.login_title(language()).map(str::to_owned))
-            .map(|title| view! { <h2 class="auth-brand-title">{title}</h2> })
-        }}
-        {move || {
-          brand
-            .with(|view| view.login_text(language()).map(str::to_owned))
-            .map(|text| view! { <p class="auth-brand-text muted-text">{text}</p> })
-        }}
-        {children()}
+        {(!hide_brand).then(|| view! {
+          <div class="auth-brand" translate="no">
+            <BrandLogo
+              class="auth-logo-img"
+              fallback=move || view! { <span class="auth-logo" aria-hidden="true">{move || name().chars().next().map(String::from).unwrap_or_default()}</span> }
+            />
+            <span class="auth-brand-name">{name}</span>
+          </div>
+          {move || {
+            brand
+              .with(|view| view.login_title(language()).map(str::to_owned))
+              .map(|title| view! { <h2 class="auth-brand-title">{title}</h2> })
+          }}
+          {move || {
+            brand
+              .with(|view| view.login_text(language()).map(str::to_owned))
+              .map(|text| view! { <p class="auth-brand-text muted-text">{text}</p> })
+          }}
+        })}
+        <div class="auth-content">{children()}</div>
         <p class="auth-foot muted-text small">
           <Icon name=IconName::Lock />
           <span>{move || i18n.t("login-footer")}</span>
@@ -132,7 +144,7 @@ fn CheckingScreen() -> impl IntoView {
   let i18n = use_i18n();
   view! {
     <AuthFrame>
-      <p class="auth-status" role="status">
+      <p class="auth-status auth-status-quiet" role="status">
         <span class="spinner" aria-hidden="true"></span>
         <span>{move || i18n.t("login-checking")}</span>
       </p>
@@ -150,9 +162,11 @@ fn SigningInScreen(control: SessionControl) -> impl IntoView {
         <span class="spinner" aria-hidden="true"></span>
         <span>{move || i18n.t("login-signing-in")}</span>
       </p>
-      <button class="btn" on:click=move |_| control.cancel_sign_in()>
-        {move || i18n.t("cancel")}
-      </button>
+      <div class="auth-actions">
+        <button class="btn auth-wide" data-autofocus on:click=move |_| control.cancel_sign_in()>
+          {move || i18n.t("cancel")}
+        </button>
+      </div>
     </AuthFrame>
   }
 }
@@ -168,10 +182,49 @@ fn OpeningCoreScreen(control: SessionControl) -> impl IntoView {
         <span class="spinner" aria-hidden="true"></span>
         <span>{move || i18n.t("login-opening-core")}</span>
       </p>
-      <button class="btn" on:click=move |_| control.sign_out()>
-        {move || i18n.t("login-core-sign-out")}
-      </button>
+      <div class="auth-actions">
+        <button class="btn auth-wide" on:click=move |_| control.sign_out()>
+          {move || i18n.t("login-core-sign-out")}
+        </button>
+      </div>
     </AuthFrame>
+  }
+}
+
+/// How a problem card looks: an error, or a notice when nothing went wrong (a cancelled sign-in).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProblemTone {
+  Error,
+  Notice,
+}
+
+/// A problem in plain language, with the technical detail (when there is one) folded away under
+/// "Technical details", for the admins.
+#[component]
+fn ProblemCard(
+  maybe_title_key: Option<String>,
+  body_key: String,
+  maybe_detail: Option<String>,
+  #[prop(default = ProblemTone::Error)] tone: ProblemTone,
+) -> impl IntoView {
+  let i18n = use_i18n();
+  let maybe_detail = maybe_detail.filter(|detail| !detail.trim().is_empty());
+  view! {
+    <div class="auth-problem" class:auth-problem-notice=tone == ProblemTone::Notice role="alert">
+      <Icon name=IconName::Alert />
+      <div class="auth-problem-text">
+        {maybe_title_key.map(|key| view! { <strong class="auth-problem-title">{move || i18n.t(&key)}</strong> })}
+        <p>{move || i18n.t(&body_key)}</p>
+        {maybe_detail.map(|detail| {
+          view! {
+            <details class="auth-details">
+              <summary>{move || i18n.t("login-details")}</summary>
+              <p class="mono" translate="no">{detail}</p>
+            </details>
+          }
+        })}
+      </div>
+    </div>
   }
 }
 
@@ -208,6 +261,11 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
     ),
     None => (None, None),
   };
+  let tone = if problem == Some(LoginProblem::Cancelled) {
+    ProblemTone::Notice
+  } else {
+    ProblemTone::Error
+  };
   let subtitle = move || i18n.t(sign_in.page.with(subtitle_key));
 
   view! {
@@ -218,20 +276,18 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
         .zip(body_key)
         .map(|(title, body)| {
           view! {
-            <div class="auth-alert" role="alert">
-              <Icon name=IconName::Alert />
-              <div>
-                <strong>{move || i18n.t(title)}</strong>
-                <p>{move || i18n.t(body)}</p>
-                {detail.map(|text| view! { <p class="small mono" translate="no">{text}</p> })}
-              </div>
-            </div>
+            <ProblemCard
+              maybe_title_key=Some(title.to_owned())
+              body_key=body.to_owned()
+              maybe_detail=detail
+              tone=tone
+            />
           }
         })}
       {if is_role_problem {
         view! {
           <div class="auth-actions">
-            <button class="btn btn-primary" data-autofocus on:click=move |_| control.sign_out()>
+            <button class="btn btn-primary auth-wide" data-autofocus on:click=move |_| control.sign_out()>
               {move || i18n.t("login-use-other-account")}
             </button>
           </div>
@@ -240,7 +296,7 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
       } else if is_core_problem {
         // Still signed in: retry the core, or sign out (which also unlocks changing the server).
         view! {
-          <div class="auth-actions">
+          <div class="auth-actions auth-actions-split">
             <button class="btn btn-primary" data-autofocus on:click=move |_| control.retry_core()>
               {move || i18n.t("login-core-retry")}
             </button>
@@ -322,12 +378,28 @@ fn SsoButton(
 ) -> impl IntoView {
   let i18n = use_i18n();
   let text = move || i18n.t_with("login-sso", &[("provider", &label)]);
+  let brand = Brand::use_current().0;
+  // The brand's images as the card shows them (desktop: `data:` URLs from the shell).
+  let logos = Memo::new(move |_| {
+    brand.with(|view| {
+      let maybe_light = view.header_image(false).and_then(image_src);
+      let maybe_dark = view
+        .header_image(true)
+        .filter(|dark| Some(*dark) != view.header_image(false))
+        .and_then(image_src);
+      (view.display_name.clone(), maybe_light, maybe_dark)
+    })
+  });
+  let start = move |_| {
+    let (name, maybe_logo, maybe_logo_dark) = logos.get_untracked();
+    control.sign_in(sign_in_look(i18n, Some(name), maybe_logo, maybe_logo_dark));
+  };
   view! {
     <button
       type="button"
       class="btn btn-primary auth-sso"
       data-autofocus=is_first
-      on:click=move |_| control.sign_in()
+      on:click=start
     >
       {maybe_icon_url.map(|url| {
         view! {
@@ -605,98 +677,212 @@ fn ServerEntryScreen(
   control: SessionControl,
 ) -> impl IntoView {
   let i18n = use_i18n();
-  let address = RwSignal::new(maybe_address.unwrap_or_default());
+  let checked_address = maybe_address.unwrap_or_default();
+  let address = RwSignal::new(checked_address.clone());
+  let is_checking = move || control.is_checking_server.get();
+  let has_problem = maybe_problem.is_some();
+  let is_unknown_host = maybe_problem
+    .as_ref()
+    .is_some_and(|problem| problem.key == tauri::UNKNOWN_HOST_KEY);
   let submit = move |ev: web_sys::SubmitEvent| {
     ev.prevent_default();
-    control.check_server(address.get_untracked());
+    if !control.is_checking_server.get_untracked() {
+      control.check_server(address.get_untracked());
+    }
   };
   view! {
     <AuthFrame>
       <h1>{move || i18n.t("server-entry-title")}</h1>
-      <p class="muted-text">{move || i18n.t("server-entry-subtitle")}</p>
-      <form class="auth-server-entry" on:submit=submit>
-        <label for="server-address">{move || i18n.t("server-entry-label")}</label>
-        <input
-          id="server-address"
-          class="input"
-          type="text"
-          inputmode="url"
-          autocomplete="url"
-          autocapitalize="off"
-          spellcheck="false"
-          placeholder="team.example.com"
-          required
-          data-autofocus
-          prop:readonly=move || control.is_server_locked.get()
-          prop:value=move || address.get()
-          on:input=move |ev| address.set(event_target_value(&ev))
-        />
-        <p class="muted-text small">{move || i18n.t("server-entry-hint")}</p>
-        {maybe_problem.map(|problem| {
-          view! {
-            <div class="auth-alert" role="alert">
-              <Icon name=IconName::Alert />
-              <div>
-                <p>{move || i18n.t(&problem.key)}</p>
-                <p class="small mono" translate="no">{problem.detail.clone()}</p>
-              </div>
-            </div>
-          }
-        })}
-        <div class="auth-actions">
-          <button type="submit" class="btn btn-primary" prop:disabled=move || control.is_checking_server.get()>
-            <Show when=move || control.is_checking_server.get() fallback=|| ()>
-              <span class="spinner" aria-hidden="true"></span>
-            </Show>
-            <span>{move || i18n.t("server-entry-continue")}</span>
-          </button>
+      <p class="auth-subtitle muted-text">{move || i18n.t("server-entry-subtitle")}</p>
+      <form class="auth-form" on:submit=submit>
+        <div class="field">
+          <label for="server-address">{move || i18n.t("server-entry-label")}</label>
+          <input
+            id="server-address"
+            class="input"
+            type="text"
+            inputmode="url"
+            autocomplete="url"
+            autocapitalize="off"
+            spellcheck="false"
+            placeholder="team.example.com"
+            required
+            data-autofocus
+            aria-describedby="server-address-hint"
+            aria-invalid=has_problem.to_string()
+            prop:readonly=move || control.is_server_locked.get()
+            prop:value=move || address.get()
+            on:input=move |ev| address.set(event_target_value(&ev))
+          />
+          <p id="server-address-hint" class="field-hint">{move || i18n.t("server-entry-hint")}</p>
         </div>
+        {maybe_problem.map(|problem| {
+          view! { <ProblemCard maybe_title_key=None body_key=problem.key maybe_detail=Some(problem.detail) /> }
+        })}
+        {is_unknown_host.then(|| view! { <AlternativesLine checked_address=checked_address address=address /> })}
+        <button type="submit" class="btn btn-primary auth-submit" prop:disabled=is_checking aria-busy=move || is_checking().to_string()>
+          <Show when=is_checking fallback=|| ()>
+            <span class="spinner" aria-hidden="true"></span>
+          </Show>
+          <span>{move || i18n.t("server-entry-continue")}</span>
+        </button>
       </form>
     </AuthFrame>
   }
 }
 
-/// Desktop: the server answered; its name and host are confirmed before the browser opens.
+/// Where the search for a similar address stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Alternatives {
+  Idle,
+  Looking,
+  Found(String),
+  NoneFound,
+}
+
+/// Under a host name that does not exist: "Check similar addresses". Nothing is looked up until
+/// the user presses it; then the shell tries the same name under other common top-level domains
+/// and the first one that exists is offered.
+#[component]
+fn AlternativesLine(checked_address: String, address: RwSignal<String>) -> impl IntoView {
+  let i18n = use_i18n();
+  let state = RwSignal::new(Alternatives::Idle);
+  let checked_address = StoredValue::new(checked_address);
+  let look = move |_| {
+    state.set(Alternatives::Looking);
+    let typed = checked_address.get_value();
+    spawn_local(async move {
+      let next = match tauri::server_suggest(&typed).await {
+        Ok(Some(host)) => Alternatives::Found(host),
+        Ok(None) => Alternatives::NoneFound,
+        Err(problem) => {
+          tracing::debug!(key = %problem.key, "could not look for similar addresses");
+          Alternatives::NoneFound
+        },
+      };
+      state.set(next);
+    });
+  };
+  move || match state.get() {
+    Alternatives::Idle | Alternatives::Looking => {
+      let is_looking = state.with(|state| *state == Alternatives::Looking);
+      view! {
+        <p class="auth-suggest">
+          <button type="button" class="link-btn" prop:disabled=is_looking aria-busy=is_looking.to_string() on:click=look>
+            {is_looking.then(|| view! { <span class="spinner" aria-hidden="true"></span> })}
+            <span>{move || i18n.t("server-entry-check-alternatives")}</span>
+          </button>
+        </p>
+      }
+      .into_any()
+    },
+    Alternatives::Found(host) => view! { <SuggestionLine suggestion=host address=address /> }.into_any(),
+    Alternatives::NoneFound => {
+      view! { <p class="auth-suggest" role="status">{move || i18n.t("server-entry-no-alternative")}</p> }
+        .into_any()
+    },
+  }
+}
+
+/// "Did you mean team.example.de?" under a host name that does not exist. Taking the hint only
+/// fills in the field; the user still continues on their own.
+#[component]
+fn SuggestionLine(suggestion: String, address: RwSignal<String>) -> impl IntoView {
+  let i18n = use_i18n();
+  let host = StoredValue::new(suggestion);
+  let is_taken = move || host.with_value(|host| address.with(|typed| typed.trim() == host));
+  let take = move |_| {
+    address.set(host.get_value());
+    focus_element("server-address");
+  };
+  move || {
+    (!is_taken()).then(|| {
+      let text = host.with_value(|host| i18n.t_with("server-entry-did-you-mean", &[("host", host)]));
+      let (before, after) = host
+        .with_value(|host| split_around(&text, host).map(|(before, after)| (before.to_owned(), after.to_owned())))
+        .unwrap_or_else(|| (text.clone(), String::new()));
+      view! {
+        <p class="auth-suggest" role="status">
+          <Icon name=IconName::Help />
+          <span>
+            {before}
+            <button type="button" class="link-btn mono" translate="no" on:click=take>{host.get_value()}</button>
+            {after}
+          </span>
+        </p>
+      }
+    })
+  }
+}
+
+/// Desktop: the server answered; its brand, host and identity provider are confirmed before the
+/// browser opens.
 #[component]
 fn ServerConfirmScreen(check: ServerCheck, control: SessionControl) -> impl IntoView {
   let i18n = use_i18n();
   let name = check.server.display_name.clone();
   let host = check.server.host.clone();
-  let initial = name.chars().next().map(String::from).unwrap_or_default();
   let provider = check.identity_provider_host.clone();
-  let warning_host = provider.clone();
   let is_elsewhere = check.is_identity_provider_elsewhere;
+  let maybe_logo = check.maybe_logo.clone().filter(|url| is_data_image(url));
+  let maybe_logo_dark = check
+    .maybe_logo_dark
+    .clone()
+    .filter(|url| is_data_image(url) && Some(url) != maybe_logo.as_ref());
+  let logo_failed = RwSignal::new(false);
+  let hide_on_error = move |_| logo_failed.set(true);
+  let look_logos = (maybe_logo.clone(), maybe_logo_dark.clone());
+  let look_name = name.clone();
+  let check = StoredValue::new(check);
+  let confirm = move |_| {
+    let look = sign_in_look(
+      i18n,
+      Some(look_name.clone()),
+      look_logos.0.clone(),
+      look_logos.1.clone(),
+    );
+    control.confirm_server(check.get_value(), look);
+  };
   view! {
-    <AuthFrame>
-      <h1>{move || i18n.t("server-entry-confirm-title")}</h1>
-      <div class="auth-server-card">
-        <span class="auth-logo" aria-hidden="true">{initial}</span>
-        <div>
-          <strong translate="no">{name}</strong>
-          <p class="muted-text small mono" translate="no">{host}</p>
-        </div>
+    <AuthFrame hide_brand=true>
+      <div class="auth-identity" translate="no">
+        <Show when=move || !logo_failed.get() fallback=|| ()>
+          {maybe_logo.clone().map(|light| {
+            view! {
+              <img class="auth-identity-logo brand-light" src=light alt="" on:error=hide_on_error />
+              {maybe_logo_dark.clone().map(|dark| view! {
+                <img class="auth-identity-logo brand-dark" src=dark alt="" aria-hidden="true" on:error=hide_on_error />
+              })}
+            }
+          })}
+        </Show>
+        <p class="auth-identity-name">{name}</p>
+        <p class="auth-identity-host mono">{host}</p>
       </div>
-      <p class="auth-provider small">
-        <span translate="no">{i18n.t_with("server-entry-provider", &[("host", &provider)])}</span>
-      </p>
+      <h1 class="auth-center">{move || i18n.t("server-entry-confirm-title")}</h1>
+      <p class="auth-subtitle muted-text auth-center">{move || i18n.t("server-entry-confirm-body")}</p>
+      <ProviderRow provider=provider.clone() />
       {is_elsewhere
         .then(|| {
           view! {
             <div class="auth-alert" role="alert">
               <Icon name=IconName::Alert />
-              <p>{i18n.t_with("server-entry-provider-elsewhere", &[("host", &warning_host)])}</p>
+              <p>{move || i18n.t_with("server-entry-provider-elsewhere", &[("host", &provider)])}</p>
             </div>
           }
         })}
-      <p class="muted-text">{move || i18n.t("server-entry-confirm-body")}</p>
-      <div class="auth-actions">
+      <div class="auth-actions auth-actions-split">
         <button
           class="btn btn-primary"
           data-autofocus
           prop:disabled=move || control.is_checking_server.get()
-          on:click=move |_| control.confirm_server(check.clone())
+          aria-busy=move || control.is_checking_server.get().to_string()
+          on:click=confirm
         >
-          {move || i18n.t("server-entry-confirm")}
+          <Show when=move || control.is_checking_server.get() fallback=|| ()>
+            <span class="spinner" aria-hidden="true"></span>
+          </Show>
+          <span>{move || i18n.t("server-entry-confirm")}</span>
         </button>
         <Show when=move || !control.is_server_locked.get() fallback=|| ()>
           <button class="btn" on:click=move |_| control.change_server()>
@@ -706,6 +892,89 @@ fn ServerConfirmScreen(check: ServerCheck, control: SessionControl) -> impl Into
       </div>
     </AuthFrame>
   }
+}
+
+/// "You will sign in at sso.example.com." – where the password goes (#222 H1), so it reads as body
+/// text in its own row, the host set off in mono.
+#[component]
+fn ProviderRow(provider: String) -> impl IntoView {
+  let i18n = use_i18n();
+  let provider = StoredValue::new(provider);
+  view! {
+    <div class="auth-provider">
+      <Icon name=IconName::Key />
+      <p translate="no">
+        {move || {
+          let text = provider.with_value(|host| i18n.t_with("server-entry-provider", &[("host", host)]));
+          let host = provider.get_value();
+          match split_around(&text, &host) {
+            Some((before, after)) => {
+              let (before, after) = (before.to_owned(), after.to_owned());
+              view! { {before}<strong class="mono">{host}</strong>{after} }.into_any()
+            },
+            None => text.into_view().into_any(),
+          }
+        }}
+      </p>
+    </div>
+  }
+}
+
+/// The parts of `text` before and after the first `needle`, to set a placeable off in markup.
+fn split_around<'a>(text: &'a str, needle: &str) -> Option<(&'a str, &'a str)> {
+  if needle.is_empty() {
+    return None;
+  }
+  let start = text.find(needle)?;
+  Some((&text[..start], &text[start + needle.len()..]))
+}
+
+/// A `data:` image URL as the shell hands brand images over; anything else is not shown.
+fn is_data_image(url: &str) -> bool {
+  url.starts_with("data:image/")
+}
+
+/// What the browser's page after the sign-in looks like: the app's language and theme, the
+/// server's name and logo.
+fn sign_in_look(
+  i18n: crate::i18n::I18n,
+  maybe_brand_name: Option<String>,
+  maybe_logo: Option<String>,
+  maybe_logo_dark: Option<String>,
+) -> SignInLook {
+  SignInLook {
+    maybe_locale: Some(i18n.locale().tag().to_owned()),
+    theme: document_theme(),
+    maybe_brand_name,
+    maybe_logo: maybe_logo.filter(|url| is_data_image(url)),
+    maybe_logo_dark: maybe_logo_dark.filter(|url| is_data_image(url)),
+  }
+}
+
+/// The theme the app applied to `<html data-theme>` (none: follow the system).
+fn document_theme() -> LookTheme {
+  let maybe_theme = web_sys::window()
+    .and_then(|window| window.document())
+    .and_then(|document| document.document_element())
+    .and_then(|root| root.get_attribute("data-theme"));
+  match maybe_theme.as_deref() {
+    Some("light") => LookTheme::Light,
+    Some("dark") => LookTheme::Dark,
+    _ => LookTheme::System,
+  }
+}
+
+/// Moves the focus to the element with this id (after the view updated).
+fn focus_element(id: &'static str) {
+  request_animation_frame(move || {
+    if let Some(element) = web_sys::window()
+      .and_then(|window| window.document())
+      .and_then(|document| document.get_element_by_id(id))
+      .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+      drop(element.focus());
+    }
+  });
 }
 
 /// Development builds offer the demo data on the login screen.
@@ -832,15 +1101,12 @@ fn DataGate(me: GetMeResponse, settings: Settings, control: SessionControl) -> i
         let detail = error.to_string();
         view! {
           <AuthFrame>
-            <div class="auth-alert" role="alert">
-              <Icon name=IconName::Alert />
-              <div>
-                <strong>{move || i18n.t("data-failed-title")}</strong>
-                <p>{move || i18n.t("data-failed-body")}</p>
-                <p class="small mono" translate="no">{detail}</p>
-              </div>
-            </div>
-            <div class="auth-actions">
+            <ProblemCard
+              maybe_title_key=Some("data-failed-title".to_owned())
+              body_key="data-failed-body".to_owned()
+              maybe_detail=Some(detail)
+            />
+            <div class="auth-actions auth-actions-split">
               <button class="btn btn-primary" data-autofocus on:click=move |_| attempt.update(|n| *n += 1)>
                 {move || i18n.t("data-retry")}
               </button>
@@ -1155,6 +1421,28 @@ mod tests {
       local_problem_message(&LocalSignInProblem::Failed("internal".into())),
       ("login-local-failed", Some("internal".to_owned()))
     );
+  }
+
+  #[test]
+  fn a_placeable_is_split_out_of_its_sentence() {
+    assert_eq!(
+      split_around("You will sign in at sso.example.com.", "sso.example.com"),
+      Some(("You will sign in at ", "."))
+    );
+    assert_eq!(
+      split_around("Meintest du chat.example.de?", "chat.example.de"),
+      Some(("Meintest du ", "?"))
+    );
+    assert_eq!(split_around("no host here", "sso.example.com"), None);
+    assert_eq!(split_around("text", ""), None);
+  }
+
+  #[test]
+  fn only_data_images_are_shown_or_passed_on() {
+    assert!(is_data_image("data:image/png;base64,AA=="));
+    assert!(!is_data_image("https://example.com/logo.png"));
+    assert!(!is_data_image("data:text/html;base64,AA=="));
+    assert!(!is_data_image("javascript:alert(1)"));
   }
 
   #[test]

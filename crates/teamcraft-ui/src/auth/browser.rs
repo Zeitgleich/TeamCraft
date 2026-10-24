@@ -18,7 +18,9 @@ use teamcraft_client_api::server_entry::{HttpPolicy, SERVER_INFO_PATH, check_dis
 use teamcraft_proto::{SERVER_INFO_PRODUCT, ServerInfoResponse};
 
 use super::fetch::fetch;
-use super::{ApiBytes, ApiMethod, ApiResponse, AppConfig, AuthError, Authenticator, BinaryBody, LocalFuture};
+use super::{
+  ApiBytes, ApiMethod, ApiResponse, AppConfig, AuthError, Authenticator, BinaryBody, LocalFuture, SignInLook,
+};
 use crate::clock::now_ms;
 use crate::route::Route;
 
@@ -419,7 +421,7 @@ impl Authenticator for BrowserAuth {
     Box::pin(BrowserAuth::access_token(self))
   }
 
-  fn login(&self) -> LocalFuture<'_, Result<(), AuthError>> {
+  fn login(&self, _look: SignInLook) -> LocalFuture<'_, Result<(), AuthError>> {
     Box::pin(async move {
       self.begin_login().await?;
       std::future::pending::<()>().await;

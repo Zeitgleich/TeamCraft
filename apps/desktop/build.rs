@@ -16,6 +16,7 @@ const COMMANDS: &[&str] = &[
   "public_asset",
   "server_state",
   "server_check",
+  "server_suggest",
   "server_confirm",
   "server_forget",
   "core_start",

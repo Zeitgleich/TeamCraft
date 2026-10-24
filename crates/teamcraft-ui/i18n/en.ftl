@@ -690,6 +690,12 @@ server-entry-locked = Your organization has set up this app for one server only.
 server-entry-not-checked = The server has to be checked again. Continue once more.
 server-entry-not-saved = The server could not be saved on this device.
 server-entry-failed = Something went wrong. Try again.
+server-entry-unknown-host = There is no server at this address. Check the spelling.
+server-entry-did-you-mean = Did you mean { $host }?
+server-entry-check-alternatives = Check similar addresses
+server-entry-no-alternative = No similar address found. Check the address with your admins.
+server-entry-provider-label = Sign-in service
+login-details = Technical details
 welcome-title = Welcome, { $name }
 welcome-subtitle = This is the first device of your account. Two short steps protect your messages.
 welcome-step-keys = Keys are created on this device
@@ -2020,3 +2026,15 @@ lightbox-loading = Loading the full image…
 lightbox-failed = The image could not be loaded.
 lightbox-gone = This image is no longer available.
 album-open = Open image { $index } of { $count }: { $name }
+
+## Sign-in callback page: the browser tab the desktop app shows after the identity provider
+## (plain text only, no placeables; the desktop shell reads these lines itself)
+callback-page-title = Sign-in
+callback-signed-in-title = Signed in
+callback-signed-in-body = You can close this window and return to the app.
+callback-refused-title = Sign-in not completed
+callback-refused-body = The sign-in was cancelled or refused. Go back to the app to try again.
+callback-mismatch-title = This sign-in was not started here
+callback-mismatch-body = The answer did not match the sign-in started in the app, so it was ignored for your safety. Start the sign-in again in the app.
+callback-failed-title = Sign-in failed
+callback-failed-body = The sign-in could not be finished. Go back to the app for details and try again.

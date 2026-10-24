@@ -20,6 +20,7 @@
     "allow-public-asset",
     "allow-server-state",
     "allow-server-check",
+    "allow-server-suggest",
     "allow-server-confirm",
     "allow-server-forget",
     "allow-core-start",
