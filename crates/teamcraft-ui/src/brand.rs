@@ -8,6 +8,7 @@
 //! server's `theme.css`, so the first paint already has them.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use leptos::prelude::*;
 use serde::Deserialize;
@@ -17,6 +18,8 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
 use crate::auth::{AppConfig, fetch, tauri};
+use crate::clock::now_ms;
+use crate::model::TimestampMs;
 use crate::settings::{Settings, Theme, load_string, store_string};
 
 const BRAND_PATH: &str = "/api/v1/brand";
@@ -32,6 +35,94 @@ impl Brand {
   }
 }
 
+/// Brand images of the current server the desktop shell fetched, by asset path. The desktop
+/// webview's content security policy loads no images from the server; the paths are the same on
+/// every server, so the cache is emptied when the user switches servers.
+#[derive(Clone, Copy)]
+struct ShellImages(RwSignal<HashMap<String, ShellImage>>);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ShellImage {
+  Loading,
+  /// A `data:` URL.
+  Ready(String),
+  /// Failed at this time (milliseconds); tried again after [`IMAGE_RETRY_MS`].
+  Failed(TimestampMs),
+}
+
+/// How long a failed brand image (offline, server error) waits before it is fetched again.
+const IMAGE_RETRY_MS: TimestampMs = 30_000;
+
+/// What an `<img>` loads for a brand asset URL of [`BrandView`]: the URL itself in the browser
+/// (same origin), the `data:` URL from the desktop shell once [`request_image`] fetched it.
+/// `None` while there is nothing to show. Reactive, without side effects. (Development builds
+/// with a `teamcraft.server_url` override get absolute URLs of that server; the browser loads
+/// them as they are.)
+pub fn image_src(url: &str) -> Option<String> {
+  if !tauri::is_available() {
+    return Some(url.to_owned());
+  }
+  let images = use_context::<ShellImages>()?;
+  images.0.with(|map| match map.get(url) {
+    Some(ShellImage::Ready(data_url)) => Some(data_url.clone()),
+    _ => None,
+  })
+}
+
+/// Desktop: starts fetching a brand image through the shell unless it is loaded, loading, or
+/// failed less than [`IMAGE_RETRY_MS`] ago. Call from an effect, not while rendering.
+pub fn request_image(url: &str) {
+  if !tauri::is_available() {
+    return;
+  }
+  let Some(images) = use_context::<ShellImages>() else {
+    return;
+  };
+  let now = now_ms();
+  let is_wanted = images.0.with_untracked(|map| match map.get(url) {
+    None => true,
+    Some(ShellImage::Failed(at)) => now - *at >= IMAGE_RETRY_MS,
+    Some(ShellImage::Loading | ShellImage::Ready(_)) => false,
+  });
+  if !is_wanted {
+    return;
+  }
+  images.0.update(|map| {
+    map.insert(url.to_owned(), ShellImage::Loading);
+  });
+  let path = url.to_owned();
+  leptos::task::spawn_local(async move {
+    let entry = match load_shell_image(&path).await {
+      Some(data_url) => ShellImage::Ready(data_url),
+      None => {
+        tracing::debug!(path = %path, "could not load a brand image");
+        ShellImage::Failed(now_ms())
+      },
+    };
+    images.0.update(|map| {
+      // Emptied meanwhile (another server): this answer belongs to the old one.
+      if map.get(&path) == Some(&ShellImage::Loading) {
+        map.insert(path, entry);
+      }
+    });
+  });
+}
+
+/// A brand image through the desktop shell (`public_asset`), as a `data:` URL.
+async fn load_shell_image(path: &str) -> Option<String> {
+  #[derive(Deserialize)]
+  struct Payload {
+    status: u16,
+    content_type: Option<String>,
+    body_base64: String,
+  }
+  let payload = tauri::call::<Payload>("public_asset", &serde_json::json!({ "path": path }))
+    .await
+    .ok()?;
+  let content_type = payload.content_type.filter(|_| payload.status == 200)?;
+  Some(format!("data:{content_type};base64,{}", payload.body_base64))
+}
+
 /// Loads the cached brand of the configured server, shows it, and refreshes it from the server.
 pub fn provide_brand(settings: Settings) {
   let config = AppConfig::load();
@@ -41,6 +132,7 @@ pub fn provide_brand(settings: Settings) {
     .and_then(|response| BrandView::from_response(response, &config.server_url));
   let brand = Brand(RwSignal::new(cached.unwrap_or_else(BrandView::fallback)));
   provide_context(brand);
+  provide_context(ShellImages(RwSignal::new(HashMap::new())));
 
   let system_dark = RwSignal::new(system_prefers_dark());
   watch_system_scheme(system_dark);
@@ -79,6 +171,10 @@ pub fn show_server_brand(response: BrandResponse) {
   };
   if let Ok(text) = serde_json::to_string(&response) {
     store_string(&cache_key(&config.server_url), &text);
+  }
+  // Another server: its images have the same paths as the previous server's.
+  if let Some(images) = use_context::<ShellImages>() {
+    images.0.set(HashMap::new());
   }
   Brand::use_current().0.set(view);
 }
@@ -139,9 +235,9 @@ fn apply_to_document(view: &BrandView, is_dark: bool) {
     });
   }
   document.set_title(&view.display_name);
-  if let Some(icon) = view
-    .asset("favicon", is_dark)
-    .or_else(|| view.asset("icon", is_dark))
+  // The desktop has no tab, and its webview could not load the server's images anyway.
+  if !tauri::is_available()
+    && let Some(icon) = view.favicon(is_dark)
   {
     set_favicon(&document, icon);
   }

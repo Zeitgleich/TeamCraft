@@ -241,7 +241,7 @@ kbd {
 
 .top-bar {
   display: grid;
-  grid-template-columns: var(--rail-w) minmax(0, 1fr) auto;
+  grid-template-columns: minmax(var(--rail-w), auto) minmax(0, 1fr) auto;
   align-items: center;
   background: var(--chrome);
   color: var(--chrome-text);
@@ -249,15 +249,32 @@ kbd {
 }
 
 .top-bar .brand {
-  font-weight: 700;
-  font-size: 11px;
-  color: var(--chrome-strong);
-  text-align: center;
-  white-space: nowrap;
+  /* As wide as it needs, up to the sidebar's width; long names end in an ellipsis. */
+  display: flex;
+  align-items: center;
+  gap: 8px;
   grid-column: 1;
-  padding: 0 4px;
+  min-width: 0;
+  max-width: calc(var(--rail-w) + var(--sidebar-w));
+  padding: 0 12px;
+  color: var(--chrome-strong);
+}
+
+/* No `display` here: `.brand-light`/`.brand-dark` switch the theme's variant. */
+.top-bar .brand-logo {
+  height: 24px;
+  max-width: 120px;
+  object-fit: contain;
+  flex: none;
+}
+
+.top-bar .brand-name {
+  font-weight: 600;
+  font-size: 14px;
+  white-space: nowrap;
   overflow: hidden;
-  text-overflow: clip;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .search-btn {

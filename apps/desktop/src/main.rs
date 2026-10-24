@@ -157,6 +157,7 @@ fn main() -> anyhow::Result<()> {
       auth::commands::api_request,
       auth::commands::api_request_bytes,
       auth::commands::public_get,
+      auth::commands::public_asset,
       auth::commands::server_state,
       auth::commands::server_check,
       auth::commands::server_confirm,

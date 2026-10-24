@@ -85,18 +85,6 @@ pub fn Sidebar() -> impl IntoView {
   let sections = Memo::new(move |_| build_sections(&listed.get(), &state.settings.sidebar_options()));
   let grouped =
     Memo::new(move |_| build_grouped(&spaces.get(), &listed.get(), &state.settings.sidebar_options()));
-  let thread_unread = Memo::new(move |_| {
-    state.read(|backend| {
-      backend
-        .followed_threads()
-        .iter()
-        .filter(|thread| thread.unread_replies > 0)
-        .count() as u32
-    })
-  });
-
-  let activity_unread = Memo::new(move |_| state.read(|backend| backend.activity().unread_count));
-
   view! {
     <nav class="sidebar" aria-label=move || i18n.t("sidebar-label")>
       <div class="sidebar-head">
@@ -120,6 +108,46 @@ pub fn Sidebar() -> impl IntoView {
         <span class="jump-label">{move || i18n.t("sidebar-jump")}</span>
         <ShortcutKeys shortcut=QUICK_SWITCHER />
       </button>
+      <GlobalEntries />
+      <div class="sidebar-scroll">
+        {move || {
+          if is_grouped.get() {
+            view! { <GroupedSections grouped=grouped collapsed=collapsed collapsed_spaces=collapsed_spaces /> }
+              .into_any()
+          } else {
+            view! {
+              <For each=move || sections.get() key=section_key let:section>
+                <SidebarSection kind=section.kind conversations=section.conversations collapsed=collapsed />
+              </For>
+            }
+              .into_any()
+          }
+        }}
+      </div>
+      <CallPill />
+    </nav>
+  }
+}
+
+/// The entries that are not about one space: threads, activity, calls, meetings, people, saved
+/// items and search. Home and the space sidebar both start with them.
+#[component]
+pub fn GlobalEntries() -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let thread_unread = Memo::new(move |_| {
+    state.read(|backend| {
+      backend
+        .followed_threads()
+        .iter()
+        .filter(|thread| thread.unread_replies > 0)
+        .count() as u32
+    })
+  });
+
+  let activity_unread = Memo::new(move |_| state.read(|backend| backend.activity().unread_count));
+
+  view! {
       <button
         class="sb-item sb-threads"
         class:current=move || state.view.get() == MainView::Threads
@@ -197,23 +225,6 @@ pub fn Sidebar() -> impl IntoView {
         <Icon name=IconName::Search />
         <span class="sb-name">{move || i18n.t("sidebar-search")}</span>
       </button>
-      <div class="sidebar-scroll">
-        {move || {
-          if is_grouped.get() {
-            view! { <GroupedSections grouped=grouped collapsed=collapsed collapsed_spaces=collapsed_spaces /> }
-              .into_any()
-          } else {
-            view! {
-              <For each=move || sections.get() key=section_key let:section>
-                <SidebarSection kind=section.kind conversations=section.conversations collapsed=collapsed />
-              </For>
-            }
-              .into_any()
-          }
-        }}
-      </div>
-      <CallPill />
-    </nav>
   }
 }
 

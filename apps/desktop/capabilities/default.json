@@ -17,6 +17,7 @@
     "allow-api-request",
     "allow-api-request-bytes",
     "allow-public-get",
+    "allow-public-asset",
     "allow-server-state",
     "allow-server-check",
     "allow-server-confirm",

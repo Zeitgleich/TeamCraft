@@ -13,6 +13,7 @@ const COMMANDS: &[&str] = &[
   "api_request",
   "api_request_bytes",
   "public_get",
+  "public_asset",
   "server_state",
   "server_check",
   "server_confirm",

@@ -109,6 +109,21 @@ impl BrandView {
     self.assets.get(slot).map(String::as_str)
   }
 
+  /// The image beside the brand's name (top bar, sign-in card): the logo, else the icon, each in
+  /// the theme's variant when there is one. `None`: show the name alone (or its initial).
+  pub fn header_image(&self, is_dark: bool) -> Option<&str> {
+    self
+      .asset("logo", is_dark)
+      .or_else(|| self.asset("icon", is_dark))
+  }
+
+  /// The browser tab's icon: the favicon, else the icon, each in the theme's variant.
+  pub fn favicon(&self, is_dark: bool) -> Option<&str> {
+    self
+      .asset("favicon", is_dark)
+      .or_else(|| self.asset("icon", is_dark))
+  }
+
   pub fn login_title(&self, language: &str) -> Option<&str> {
     pick(&self.login_title, language)
   }
@@ -182,6 +197,43 @@ mod tests {
   use teamcraft_proto::BrandColors;
 
   use super::*;
+
+  #[test]
+  fn header_images_fall_back_from_logo_to_icon_per_theme() {
+    let mut with_icon = response();
+    with_icon.assets = BTreeMap::from([
+      ("icon".to_owned(), "/api/v1/brand/assets/icon".to_owned()),
+      (
+        "icon_dark".to_owned(),
+        "/api/v1/brand/assets/icon_dark".to_owned(),
+      ),
+      ("favicon".to_owned(), "/api/v1/brand/assets/favicon".to_owned()),
+    ]);
+    let view = BrandView::from_response(with_icon, "https://chat.a.example.com").unwrap();
+    assert_eq!(
+      view.header_image(false),
+      Some("https://chat.a.example.com/api/v1/brand/assets/icon")
+    );
+    assert_eq!(
+      view.header_image(true),
+      Some("https://chat.a.example.com/api/v1/brand/assets/icon_dark")
+    );
+    assert_eq!(
+      view.favicon(true),
+      Some("https://chat.a.example.com/api/v1/brand/assets/favicon")
+    );
+
+    let view = BrandView::from_response(response(), "").unwrap();
+    assert_eq!(view.header_image(false), Some("/api/v1/brand/assets/logo"));
+    assert_eq!(view.header_image(true), Some("/api/v1/brand/assets/logo_dark"));
+    // No favicon or icon: the page keeps its own.
+    assert_eq!(view.favicon(false), None);
+
+    let mut bare = response();
+    bare.assets.clear();
+    let view = BrandView::from_response(bare, "").unwrap();
+    assert_eq!(view.header_image(false), None);
+  }
 
   fn response() -> BrandResponse {
     BrandResponse {

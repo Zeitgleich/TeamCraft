@@ -24,6 +24,7 @@ pub mod app;
 pub mod avatar;
 pub mod background_picker;
 pub mod bookmarks;
+pub mod brand_logo;
 pub mod bundle_banner;
 pub mod call_prejoin;
 pub mod call_screen;

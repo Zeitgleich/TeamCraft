@@ -1,6 +1,8 @@
 use leptos::prelude::*;
 
+use crate::brand::Brand;
 use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::brand_logo::BrandLogo;
 use crate::components::icons::{Icon, IconName};
 use crate::components::status_menu::StatusMenu;
 use crate::components::window_controls::window_drag_handler;
@@ -17,11 +19,13 @@ pub fn TopBar() -> impl IntoView {
   let me = Memo::new(move |_| state.me());
   let menu_open = move || matches!(state.overlay.get(), Overlay::StatusMenu);
   let on_drag = window_drag_handler();
+  let brand = Brand::use_current().0;
 
   view! {
     <header class="top-bar" data-window-drag="" on:mousedown=on_drag>
       <div class="brand" translate="no" data-window-drag="">
-        "TeamCraft"
+        <BrandLogo class="brand-logo" fallback=|| () />
+        <span class="brand-name" data-window-drag="">{move || brand.with(|view| view.display_name.clone())}</span>
       </div>
       <button class="search-btn" on:click=move |_| state.overlay.set(Overlay::QuickSwitcher)>
         <Icon name=IconName::Search />

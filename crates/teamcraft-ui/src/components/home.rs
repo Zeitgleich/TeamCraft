@@ -8,6 +8,7 @@ use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::huddle_bar::CallPill;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
+use crate::components::sidebar::GlobalEntries;
 
 use crate::i18n::use_i18n;
 use crate::keys::{QUICK_SWITCHER, ShortcutKeys};
@@ -69,6 +70,7 @@ pub fn HomeSidebar() -> impl IntoView {
         <span class="jump-label">{move || i18n.t("sidebar-jump")}</span>
         <ShortcutKeys shortcut=QUICK_SWITCHER />
       </button>
+      <GlobalEntries />
       <div class="home-chips" role="group" aria-label=move || i18n.t("home-filters")>
         {HomeFilter::CHIPS
           .into_iter()
