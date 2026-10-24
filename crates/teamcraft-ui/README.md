@@ -54,6 +54,9 @@ contains demo fixtures.
 | Activity tabs, light / dark     | ![Activity light](docs/screenshots/polish-activity-light.png) ![Activity dark](docs/screenshots/polish-activity-dark.png) |
 | Preview of an unjoined channel  | ![Preview light](docs/screenshots/polish-preview-details-light.png) ![Preview dark](docs/screenshots/polish-preview-details-dark.png) |
 | Files tab, browse with preview  | ![Files tab](docs/screenshots/polish-files-tab-light.png) ![Browse channels](docs/screenshots/polish-browse-dark.png) |
+| Phone (390×844), light: Home, space, channel, thread, Activity, settings | ![Phone light](docs/screenshots/mobile-light.png) |
+| Phone (390×844), dark           | ![Phone dark](docs/screenshots/mobile-dark.png)                |
+| Phone in landscape, light / dark | ![Landscape light](docs/screenshots/mobile-landscape-light.png) ![Landscape dark](docs/screenshots/mobile-landscape-dark.png) |
 
 Screenshots are produced with Playwright against `trunk build --features demo` (English, 1360×840); the
 tour also walks every screen in German and fails on missing translation keys.

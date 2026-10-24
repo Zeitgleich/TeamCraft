@@ -10,6 +10,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ### Added
 
+- **The web app on phones**: below 768 px (and on phones in landscape) one pane at a time – Home's or
+  a space's list, the conversation, the thread – with a back button that follows the browser
+  history and a bottom navigation (Home, Activity, Spaces, You). Dialogs, settings and the search
+  are full-screen sheets; touch targets are at least 44 px, message actions open on tap or long
+  press, Enter inserts a newline, the composer has camera and photo pickers and stays above the
+  keyboard, and the safe-area insets are respected. Tablets get the sidebar (#307).
+- **Installable web app**: a web app manifest per brand (`/api/v1/brand/manifest.webmanifest`)
+  with its name, top bar color and icon, so the web client can be added to the home screen and
+  runs standalone; the browser's theme color follows the app's theme (#307).
 - **Lightbox controls on desktop and web**: the sender, relative time, conversation and file name at
   the top; rotate (`R`) and zoom (−, slider, +, fit) at the bottom left; download, the thread panel
   beside the picture (`T`), open in a new window and a "…" menu (view thread, jump to message `J`,
