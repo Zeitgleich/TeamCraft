@@ -25,8 +25,10 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
 
 use crate::auth::tauri;
+use crate::clock::now_ms;
 use crate::components::app::on_window;
 use crate::i18n::I18n;
+use crate::model::TimestampMs;
 use crate::route::{HistoryStep, Route};
 use crate::state::{AppState, RouteOutcome};
 
@@ -35,6 +37,9 @@ const ROUTE_WAIT: Duration = Duration::from_secs(20);
 /// `MouseEvent.button` of the mouse's back and forward buttons.
 const MOUSE_BACK: i16 = 3;
 const MOUSE_FORWARD: i16 = 4;
+/// How long after the release of a mouse back/forward click the webview's own step is waited for
+/// before the app takes it.
+const WEBVIEW_TRAVEL_GRACE: Duration = Duration::from_millis(100);
 
 /// A step through the history.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -176,28 +181,48 @@ fn write_address_bar(step: HistoryStep, path: &str) {
 
 /// Desktop: the mouse's back and forward buttons move through the history, exactly one step per
 /// click. Webviews differ in what they do on their own: WebView2 (Chromium) goes back on the
-/// release unless the page cancels it, WebKitGTK builds may go back on the press or not at all. So
-/// the default action is cancelled on press, release and `auxclick`, the app moves on the release,
-/// and if the webview moved on the press anyway (a `popstate` in between) the app doesn't move again.
+/// release unless the page cancels it, WebKitGTK builds may go back on the press or not at all, and
+/// whether `preventDefault` stops them varies. So the default action is cancelled on press, release
+/// and `auxclick`, and the app takes its own step [`WEBVIEW_TRAVEL_GRACE`] after the release, only
+/// if no `popstate` came since the press (the webview moved on its own).
 fn handle_mouse_buttons() {
   let Some(window) = web_sys::window() else { return };
-  let press = Rc::new(Cell::new(MouseButtonPress::Idle));
-  let on_press = press.clone();
+  let clicks = Rc::new(Cell::new(MouseClicks::default()));
+  let on_press = clicks.clone();
   listen_mouse(&window, "mousedown", move |travel_to, event| {
     event.prevent_default();
-    on_press.set(MouseButtonPress::Pressed(travel_to));
+    update(&on_press, |clicks| clicks.press(travel_to));
   });
-  let on_release = press.clone();
+  let on_release = clicks.clone();
   listen_mouse(&window, "mouseup", move |travel_to, event| {
     event.prevent_default();
-    let (next, maybe_travel) = on_release.get().release(travel_to);
-    on_release.set(next);
-    if let Some(travel_to) = maybe_travel {
-      travel(travel_to);
+    let now = now_ms();
+    if let Some(earlier) = update(&on_release, |clicks| clicks.release(travel_to, now)) {
+      travel(earlier);
     }
+    let deadline = now + grace_ms();
+    let on_grace_end = on_release.clone();
+    set_timeout(
+      move || {
+        if let Some(travel_to) = update(&on_grace_end, |clicks| clicks.settle(deadline)) {
+          travel(travel_to);
+        }
+      },
+      WEBVIEW_TRAVEL_GRACE,
+    );
   });
   listen_mouse(&window, "auxclick", |_, event| event.prevent_default());
-  on_window("popstate", move || press.set(press.get().history_moved()));
+  on_window("popstate", move || {
+    let now = now_ms();
+    update(&clicks, |clicks| clicks.history_moved(now));
+  });
+}
+
+fn update<T>(clicks: &Cell<MouseClicks>, change: impl FnOnce(&mut MouseClicks) -> T) -> T {
+  let mut next = clicks.get();
+  let result = change(&mut next);
+  clicks.set(next);
+  result
 }
 
 /// Calls `handler` for the mouse's back and forward buttons only.
@@ -228,31 +253,97 @@ fn mouse_travel(button: i16) -> Option<Travel> {
   }
 }
 
-/// Where a click of the back or forward button stands, between its press and its release.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MouseButtonPress {
+fn grace_ms() -> TimestampMs {
+  TimestampMs::try_from(WEBVIEW_TRAVEL_GRACE.as_millis()).unwrap_or(TimestampMs::MAX)
+}
+
+/// The clicks of the back and forward buttons and the app's own steps for them. Every method that
+/// returns a [`Travel`] means the app takes that step now.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct MouseClicks {
+  click: MouseClick,
+  /// When the app last took a step itself; its `popstate` is not the webview's.
+  maybe_own_step_at: Option<TimestampMs>,
+}
+
+/// Where a click stands, from its press until the app's own step.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum MouseClick {
+  #[default]
   Idle,
   Pressed(Travel),
   /// The history moved while the button was down: the webview went there on its own.
   MovedByWebview,
+  /// Released; the app steps at `deadline` unless the webview moves first.
+  Released {
+    travel: Travel,
+    deadline: TimestampMs,
+  },
 }
 
-impl MouseButtonPress {
-  /// A `popstate` arrived.
-  fn history_moved(self) -> Self {
-    match self {
-      Self::Pressed(_) => Self::MovedByWebview,
-      other => other,
+impl MouseClicks {
+  /// The button went down. A step still waiting from a click just before is kept for its release.
+  fn press(&mut self, travel_to: Travel) {
+    if !matches!(self.click, MouseClick::Released { .. }) {
+      self.click = MouseClick::Pressed(travel_to);
     }
   }
 
-  /// The button was released: the next state and the step the app takes, if any. A release
-  /// without a press seen (a webview that doesn't report it) still moves once.
-  fn release(self, travel_to: Travel) -> (Self, Option<Travel>) {
-    match self {
-      Self::MovedByWebview => (Self::Idle, None),
-      Self::Idle | Self::Pressed(_) => (Self::Idle, Some(travel_to)),
+  /// The button came up at `now`. Returns the step of a click before this one that is still
+  /// waiting: it is taken now, so quick clicks each move once.
+  fn release(&mut self, travel_to: Travel, now: TimestampMs) -> Option<Travel> {
+    let waiting = MouseClick::Released {
+      travel: travel_to,
+      deadline: now + grace_ms(),
+    };
+    match self.click {
+      MouseClick::MovedByWebview => {
+        self.click = MouseClick::Idle;
+        None
+      },
+      MouseClick::Released { travel, .. } => {
+        self.click = waiting;
+        self.maybe_own_step_at = Some(now);
+        Some(travel)
+      },
+      // A release without a press seen (a webview that doesn't report it) still moves once.
+      MouseClick::Idle | MouseClick::Pressed(_) => {
+        self.click = waiting;
+        None
+      },
     }
+  }
+
+  /// The grace of the release with `deadline` ended: the app's own step, unless the webview moved
+  /// meanwhile or a newer click took over.
+  fn settle(&mut self, deadline: TimestampMs) -> Option<Travel> {
+    match self.click {
+      MouseClick::Released {
+        travel,
+        deadline: waiting_for,
+      } if waiting_for == deadline => {
+        self.click = MouseClick::Idle;
+        self.maybe_own_step_at = Some(deadline);
+        Some(travel)
+      },
+      _ => None,
+    }
+  }
+
+  /// A `popstate` arrived at `now`. The answer to the app's own recent step is skipped; any other
+  /// while a click is under way is the webview's own step, so the app doesn't take one. One after
+  /// the grace (a throttled timer) is not the webview's.
+  fn history_moved(&mut self, now: TimestampMs) {
+    if let Some(own_step_at) = self.maybe_own_step_at.take()
+      && now <= own_step_at + grace_ms()
+    {
+      return;
+    }
+    self.click = match self.click {
+      MouseClick::Pressed(_) => MouseClick::MovedByWebview,
+      MouseClick::Released { deadline, .. } if now <= deadline => MouseClick::Idle,
+      other => other,
+    };
   }
 }
 
@@ -260,37 +351,95 @@ impl MouseButtonPress {
 mod tests {
   use super::*;
 
-  #[test]
-  fn a_click_moves_once() {
-    let (next, maybe_travel) = MouseButtonPress::Pressed(Travel::Back).release(Travel::Back);
-    assert_eq!((next, maybe_travel), (MouseButtonPress::Idle, Some(Travel::Back)));
-  }
+  const T0: TimestampMs = 1_000_000;
 
-  #[test]
-  fn a_webview_that_moved_on_the_press_gets_no_second_step() {
-    let press = MouseButtonPress::Pressed(Travel::Forward).history_moved();
-    assert_eq!(press.release(Travel::Forward), (MouseButtonPress::Idle, None));
-  }
+  mod mouse_buttons {
+    use super::*;
 
-  #[test]
-  fn history_moves_without_a_press_change_nothing() {
-    assert_eq!(MouseButtonPress::Idle.history_moved(), MouseButtonPress::Idle);
-  }
-
-  #[test]
-  fn a_release_without_a_press_still_moves() {
-    assert_eq!(
-      MouseButtonPress::Idle.release(Travel::Back),
-      (MouseButtonPress::Idle, Some(Travel::Back))
-    );
-  }
-
-  #[test]
-  fn only_the_back_and_forward_buttons_travel() {
-    assert_eq!(mouse_travel(MOUSE_BACK), Some(Travel::Back));
-    assert_eq!(mouse_travel(MOUSE_FORWARD), Some(Travel::Forward));
-    for button in [0, 1, 2, 5] {
-      assert_eq!(mouse_travel(button), None);
+    #[test]
+    fn a_click_moves_once_after_the_grace() {
+      let mut clicks = clicked(Travel::Back);
+      assert_eq!(clicks.settle(T0 + grace_ms()), Some(Travel::Back));
+      clicks.history_moved(T0 + grace_ms() + 3);
+      assert_eq!(clicks, MouseClicks::default(), "its own popstate changes nothing");
     }
+
+    #[test]
+    fn a_webview_that_moved_on_the_press_gets_no_second_step() {
+      let mut clicks = MouseClicks::default();
+      clicks.press(Travel::Forward);
+      clicks.history_moved(T0 - 5);
+      assert_eq!(clicks.release(Travel::Forward, T0), None);
+      assert_eq!(clicks.settle(T0 + grace_ms()), None);
+    }
+
+    #[test]
+    fn a_webview_that_moved_on_the_release_gets_no_second_step() {
+      let mut clicks = clicked(Travel::Back);
+      clicks.history_moved(T0 + grace_ms() / 2);
+      assert_eq!(clicks.settle(T0 + grace_ms()), None);
+      assert_eq!(clicks, MouseClicks::default());
+    }
+
+    #[test]
+    fn a_history_move_after_the_grace_is_not_the_webviews() {
+      let mut clicks = clicked(Travel::Back);
+      clicks.history_moved(T0 + grace_ms() + 1);
+      assert_eq!(clicks.settle(T0 + grace_ms()), Some(Travel::Back));
+    }
+
+    #[test]
+    fn quick_clicks_each_move_once() {
+      let mut clicks = clicked(Travel::Back);
+      clicks.press(Travel::Back);
+      let second_release = T0 + 30;
+      assert_eq!(
+        clicks.release(Travel::Back, second_release),
+        Some(Travel::Back),
+        "the first click's step is taken now"
+      );
+      clicks.history_moved(second_release + 2);
+      assert_eq!(clicks.settle(T0 + grace_ms()), None, "the first timer is stale");
+      assert_eq!(
+        clicks.settle(second_release + grace_ms()),
+        Some(Travel::Back),
+        "the first step's popstate was not taken for the webview's"
+      );
+    }
+
+    #[test]
+    fn history_moves_without_a_click_change_nothing() {
+      let mut clicks = MouseClicks::default();
+      clicks.history_moved(T0);
+      assert_eq!(clicks, MouseClicks::default());
+    }
+
+    #[test]
+    fn a_release_without_a_press_still_moves() {
+      let mut clicks = MouseClicks::default();
+      assert_eq!(clicks.release(Travel::Forward, T0), None);
+      assert_eq!(clicks.settle(T0 + grace_ms()), Some(Travel::Forward));
+    }
+
+    #[test]
+    fn only_the_back_and_forward_buttons_travel() {
+      assert_eq!(mouse_travel(MOUSE_BACK), Some(Travel::Back));
+      assert_eq!(mouse_travel(MOUSE_FORWARD), Some(Travel::Forward));
+      for button in [0, 1, 2, 5] {
+        assert_eq!(mouse_travel(button), None);
+      }
+    }
+  }
+
+  /// Pressed and released at `T0`, waiting for the grace to end.
+  fn clicked(travel_to: Travel) -> MouseClicks {
+    let mut clicks = MouseClicks::default();
+    clicks.press(travel_to);
+    assert_eq!(
+      clicks.release(travel_to, T0),
+      None,
+      "nothing happens on the release itself"
+    );
+    clicks
   }
 }
