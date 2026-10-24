@@ -20,6 +20,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 - **The last owner can't be removed**: a roster without an owner is refused by the owner's app
   before signing, by the server, and by every client verifying the roster, so the workspace can't
   end up without anyone who can administer it (#188).
+- **Removals that don't go through at once** (e2ee.md §4.6): a removal or leave on its way shows as
+  pending in the conversation; one the server keeps refusing backs off up to a day and then shows
+  as failed with "retry". Admins see people who are still in a channel's encrypted group although
+  the server no longer lists them, and remove them with one click; an admin outside the group signs
+  its removal again before members would refuse it as too old. The goodbye and the removal
+  announcement are never sent twice after a crash, and a removal finished later still announces
+  it. A server that refuses a member the encrypted group is shown instead of going unnoticed, and
+  a device whose join from a welcome was cut off asks to be added back instead of staying out.
 
 ## [1.0.0] - 2026-10-24
 
