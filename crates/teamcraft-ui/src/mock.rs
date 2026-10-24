@@ -238,6 +238,20 @@ impl MockBackend {
       }),
     }
   }
+
+  /// A workspace without spaces, channels or DMs, as a new instance's first owner sees it.
+  #[cfg(test)]
+  pub fn empty_workspace(now: TimestampMs) -> Self {
+    let backend = Self::new(now);
+    {
+      let mut state = backend.state.borrow_mut();
+      state.spaces.clear();
+      state.conversations.clear();
+      state.messages.clear();
+      state.replies.clear();
+    }
+    backend
+  }
 }
 
 impl ChatBackend for MockBackend {

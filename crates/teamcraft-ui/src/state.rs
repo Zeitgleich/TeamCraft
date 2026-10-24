@@ -248,8 +248,9 @@ pub struct AppState {
   pub pending_route: RwSignal<Option<Route>>,
   /// Bumped when a route named something that doesn't exist or the user can't open.
   pub unavailable_routes: RwSignal<u64>,
-  /// Set while the app follows a URL it was given, so the address bar replaces its entry instead
-  /// of adding one (`history.rs` takes it).
+  /// Set while the app follows a URL it was given or redirects on its own (the first conversation
+  /// once startup data arrived), so the address bar replaces its entry instead of adding one
+  /// (`history.rs` takes it).
   follows_url: StoredValue<bool>,
   pub settings: Settings,
 }
@@ -390,6 +391,9 @@ impl AppState {
     });
     if let Some(conversation) = first {
       self.open_conversation(conversation.id);
+      // It stands in for the start page the URL already shows, so Back doesn't return to a `/`
+      // that would just open it again.
+      self.follows_url.set_value(true);
     }
   }
 
@@ -1186,7 +1190,8 @@ impl AppState {
     RouteOutcome::Shown
   }
 
-  /// Where the app starts: the first channel, else the getting-started page.
+  /// Where the app starts: the first channel, else Home with the welcome page (as
+  /// [`start_position`] does on startup).
   fn open_start(&self) {
     let first = self.read(|backend| {
       let space = backend.spaces().into_iter().next()?;
@@ -1196,7 +1201,9 @@ impl AppState {
     match first {
       Some(conversation) => self.open_conversation(conversation),
       None => {
-        self.view.set(MainView::GettingStarted);
+        let (_, rail, view) = start_position(None);
+        self.rail.set(rail);
+        self.view.set(view);
         self.panel.set(SidePanel::Closed);
       },
     }
@@ -1266,6 +1273,7 @@ mod tests {
   use super::*;
   use crate::mock::MockBackend;
   use crate::model::thread_id_of;
+  use crate::route::HistoryStep;
 
   const NOW: TimestampMs = 1_792_584_000_000;
 
@@ -1488,6 +1496,47 @@ mod tests {
       state.open_threads();
       assert_eq!(state.follow_route(Route::Start), RouteOutcome::Shown);
       assert_eq!(state.route(), Route::Channel { space, channel });
+    }
+
+    #[test]
+    fn the_start_route_without_a_channel_opens_home_with_the_welcome_page() {
+      let backend: Rc<dyn Backend> = Rc::new(MockBackend::empty_workspace(NOW));
+      let state = AppState::new(backend, Settings::for_tests(), None);
+      state.open_threads();
+      state.rail.set(RailEntry::Space);
+      assert_eq!(state.follow_route(Route::Start), RouteOutcome::Shown);
+      assert_eq!(state.rail.get(), RailEntry::Home);
+      assert_eq!(state.view.get(), MainView::GettingStarted);
+      assert_eq!(state.route(), Route::Start);
+    }
+
+    #[test]
+    fn the_first_conversation_after_startup_data_replaces_the_start_entry() {
+      let backend: Rc<dyn Backend> = Rc::new(MockBackend::new(NOW));
+      // Started before any data had arrived: the getting-started page under `/`.
+      let state = AppState::new(backend, Settings::for_tests(), None);
+      assert_eq!(state.route(), Route::Start);
+      assert!(!state.take_follows_url());
+      state.backend_changed();
+      let (space, channel) = first_channel(&state);
+      let next = state.route();
+      assert_eq!(next, Route::Channel { space, channel });
+      let is_redirect = state.take_follows_url();
+      assert!(is_redirect, "the URL is replaced, not pushed");
+      assert_eq!(
+        HistoryStep::between(&Route::Start, &next, is_redirect),
+        HistoryStep::Replace
+      );
+    }
+
+    #[test]
+    fn data_arriving_later_leaves_the_history_alone() {
+      let state = test_state();
+      state.open_threads();
+      assert!(!state.take_follows_url());
+      state.backend_changed();
+      assert_eq!(state.route(), Route::Threads);
+      assert!(!state.take_follows_url(), "nothing was redirected");
     }
   }
 

@@ -7,12 +7,15 @@
 //! - Closing the settings dialog goes back to the entry it was opened over, so it leaves no
 //!   extra entry behind.
 //! - The desktop app uses the same paths inside its webview. Its webviews don't all map the mouse's
-//!   back/forward buttons and Alt+←/→ to the history, so the app does that itself there.
+//!   back/forward buttons and Alt+←/→ to the history, so the app does that itself there, and
+//!   makes sure a click never moves twice (`handle_mouse_buttons`).
 //!
 //! Own module instead of `leptos_router`: navigation state lives in `AppState` signals that many
 //! components set directly, and overlays (settings) have routes too. The router would have to
 //! become the source of truth for all of that; this keeps the state as it is and mirrors it.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::Duration;
 
 use leptos::prelude::*;
@@ -171,24 +174,123 @@ fn write_address_bar(step: HistoryStep, path: &str) {
   }
 }
 
-/// Desktop: the mouse's back and forward buttons move through the history. The webview's own
-/// handling (where there is one) is cancelled, so a click never moves twice.
+/// Desktop: the mouse's back and forward buttons move through the history, exactly one step per
+/// click. Webviews differ in what they do on their own: WebView2 (Chromium) goes back on the
+/// release unless the page cancels it, WebKitGTK builds may go back on the press or not at all. So
+/// the default action is cancelled on press, release and `auxclick`, the app moves on the release,
+/// and if the webview moved on the press anyway (a `popstate` in between) the app doesn't move again.
 fn handle_mouse_buttons() {
   let Some(window) = web_sys::window() else { return };
-  let listener = Closure::<dyn Fn(web_sys::MouseEvent)>::new(|event: web_sys::MouseEvent| {
-    let travel_to = match event.button() {
-      MOUSE_BACK => Travel::Back,
-      MOUSE_FORWARD => Travel::Forward,
-      _ => return,
-    };
+  let press = Rc::new(Cell::new(MouseButtonPress::Idle));
+  let on_press = press.clone();
+  listen_mouse(&window, "mousedown", move |travel_to, event| {
     event.prevent_default();
-    travel(travel_to);
+    on_press.set(MouseButtonPress::Pressed(travel_to));
+  });
+  let on_release = press.clone();
+  listen_mouse(&window, "mouseup", move |travel_to, event| {
+    event.prevent_default();
+    let (next, maybe_travel) = on_release.get().release(travel_to);
+    on_release.set(next);
+    if let Some(travel_to) = maybe_travel {
+      travel(travel_to);
+    }
+  });
+  listen_mouse(&window, "auxclick", |_, event| event.prevent_default());
+  on_window("popstate", move || press.set(press.get().history_moved()));
+}
+
+/// Calls `handler` for the mouse's back and forward buttons only.
+fn listen_mouse(
+  window: &web_sys::Window,
+  event: &str,
+  handler: impl Fn(Travel, &web_sys::MouseEvent) + 'static,
+) {
+  let listener = Closure::<dyn Fn(web_sys::MouseEvent)>::new(move |event: web_sys::MouseEvent| {
+    if let Some(travel_to) = mouse_travel(event.button()) {
+      handler(travel_to, &event);
+    }
   });
   if window
-    .add_event_listener_with_callback("mouseup", listener.as_ref().unchecked_ref())
+    .add_event_listener_with_callback(event, listener.as_ref().unchecked_ref())
     .is_ok()
   {
     // Lives as long as the page.
     listener.forget();
+  }
+}
+
+fn mouse_travel(button: i16) -> Option<Travel> {
+  match button {
+    MOUSE_BACK => Some(Travel::Back),
+    MOUSE_FORWARD => Some(Travel::Forward),
+    _ => None,
+  }
+}
+
+/// Where a click of the back or forward button stands, between its press and its release.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MouseButtonPress {
+  Idle,
+  Pressed(Travel),
+  /// The history moved while the button was down: the webview went there on its own.
+  MovedByWebview,
+}
+
+impl MouseButtonPress {
+  /// A `popstate` arrived.
+  fn history_moved(self) -> Self {
+    match self {
+      Self::Pressed(_) => Self::MovedByWebview,
+      other => other,
+    }
+  }
+
+  /// The button was released: the next state and the step the app takes, if any. A release
+  /// without a press seen (a webview that doesn't report it) still moves once.
+  fn release(self, travel_to: Travel) -> (Self, Option<Travel>) {
+    match self {
+      Self::MovedByWebview => (Self::Idle, None),
+      Self::Idle | Self::Pressed(_) => (Self::Idle, Some(travel_to)),
+    }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn a_click_moves_once() {
+    let (next, maybe_travel) = MouseButtonPress::Pressed(Travel::Back).release(Travel::Back);
+    assert_eq!((next, maybe_travel), (MouseButtonPress::Idle, Some(Travel::Back)));
+  }
+
+  #[test]
+  fn a_webview_that_moved_on_the_press_gets_no_second_step() {
+    let press = MouseButtonPress::Pressed(Travel::Forward).history_moved();
+    assert_eq!(press.release(Travel::Forward), (MouseButtonPress::Idle, None));
+  }
+
+  #[test]
+  fn history_moves_without_a_press_change_nothing() {
+    assert_eq!(MouseButtonPress::Idle.history_moved(), MouseButtonPress::Idle);
+  }
+
+  #[test]
+  fn a_release_without_a_press_still_moves() {
+    assert_eq!(
+      MouseButtonPress::Idle.release(Travel::Back),
+      (MouseButtonPress::Idle, Some(Travel::Back))
+    );
+  }
+
+  #[test]
+  fn only_the_back_and_forward_buttons_travel() {
+    assert_eq!(mouse_travel(MOUSE_BACK), Some(Travel::Back));
+    assert_eq!(mouse_travel(MOUSE_FORWARD), Some(Travel::Forward));
+    for button in [0, 1, 2, 5] {
+      assert_eq!(mouse_travel(button), None);
+    }
   }
 }
