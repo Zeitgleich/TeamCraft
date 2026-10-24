@@ -21,6 +21,9 @@ pub struct OutgoingFile {
   pub content: Vec<u8>,
 }
 
+/// Room above the plaintext cap for nonce, tag and framing of an encrypted attachment.
+const CIPHERTEXT_OVERHEAD_BYTES: u64 = 1024;
+
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Encrypts and uploads a file, then posts the message that carries its key.
   pub async fn send_file(
@@ -85,8 +88,29 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     &self,
     attachment: &AttachmentRef,
   ) -> Result<SecretBytes, CoreError> {
+    self.download_decrypted_capped(attachment, None).await
+  }
+
+  /// Like [`Self::download_decrypted`], but stops reading once the ciphertext exceeds
+  /// `maybe_max_plaintext_bytes` (plus encryption overhead): the sender-declared size can't be trusted.
+  pub(crate) async fn download_decrypted_capped(
+    &self,
+    attachment: &AttachmentRef,
+    maybe_max_plaintext_bytes: Option<u64>,
+  ) -> Result<SecretBytes, CoreError> {
     let download = self.api.download_attachment(attachment.attachment_id).await?;
-    let ciphertext = self.api.get_blob(&download.download_url).await?;
+    let ciphertext = match maybe_max_plaintext_bytes {
+      Some(max) => {
+        self
+          .api
+          .get_blob_capped(
+            &download.download_url,
+            max.saturating_add(CIPHERTEXT_OVERHEAD_BYTES),
+          )
+          .await?
+      },
+      None => self.api.get_blob(&download.download_url).await?,
+    };
     if !ciphertext_matches(&ciphertext, attachment.ciphertext_sha256.as_slice()) {
       return Err(CoreError::Corrupt(
         "attachment blob doesn't match its hash".into(),
