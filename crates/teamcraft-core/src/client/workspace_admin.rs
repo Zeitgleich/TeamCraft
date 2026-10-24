@@ -165,6 +165,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn join_missing_groups(&mut self) -> Result<usize, CoreError> {
     let mut requested = 0;
     for response in self.cached_conversations()?.into_values() {
+      if response.maybe_my_membership.is_some()
+        && !self.has_group(response.id)?
+        && self.has_requested_rejoin(response.id)?
+      {
+        // A welcome this device opened but couldn't join: it asked to be added back, and asks
+        // again after `rejoin_retry` (also when the first request never went out).
+        self.request_rejoin(response.id, 0).await?;
+        continue;
+      }
       let is_channel = response.maybe_space_id.is_some() && response.kind == ConversationKind::Channel;
       let key = format!("self-add/{}", response.id);
       if !is_channel

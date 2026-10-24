@@ -275,18 +275,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         user_id,
       } => {
         if user_id == self.account.user_id {
-          // Removed: the group is gone for this device; local history stays readable.
-          self.drop_group(conversation_id)?;
-          self
-            .store
-            .delete(Table::Conversations, &conversation_id.to_string())?;
-          self.store.delete(Table::Members, &conversation_id.to_string())?;
-          Ok(())
+          self.forget_conversation(conversation_id)
         } else {
           // Only a hint: the server's word doesn't make this device sign a removal (security
           // review A8). The remover's client, or an admin's signed change, removes them from the
-          // group.
-          self.refresh_conversation(conversation_id).await
+          // group; if neither comes, admins see who is left in the group.
+          self.refresh_conversation(conversation_id).await?;
+          self.note_group_leftovers(conversation_id)
         }
       },
       GatewayEvent::PresenceUpdate {

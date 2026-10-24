@@ -29,8 +29,8 @@ use crate::calls::{
 };
 use crate::calls::{OrgBackgroundRule, OrgBackgrounds};
 use crate::model::{
-  Conversation, ConversationId, CustomStatus, DeviceId, Message, MessageId, PresenceStatus, Space, SpaceId,
-  ThreadId, ThreadSummary, TimestampMs, User, UserId,
+  Conversation, ConversationId, CustomStatus, DeviceId, MembershipIssue, Message, MessageId, PresenceStatus,
+  Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId,
 };
 use crate::privacy::{LastSeenVisibility, PrivacySettings};
 use crate::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
@@ -222,6 +222,13 @@ pub trait ChatBackend {
   fn is_waiting_for_device(&self, _conversation: ConversationId) -> bool {
     false
   }
+  /// Removals and leaves on their way or failed, people left in the encryption group (for admins)
+  /// and a server refusing the group, for the conversation's banners.
+  fn membership_issues(&self, _conversation: ConversationId) -> Vec<MembershipIssue> {
+    Vec::new()
+  }
+  /// Tries a failed removal or leave again, or signs the removal of somebody left in the group.
+  fn retry_removal(&self, _conversation: ConversationId, _user: UserId) {}
 
   fn first_unread(&self, _conversation: ConversationId) -> Option<MessageId> {
     None

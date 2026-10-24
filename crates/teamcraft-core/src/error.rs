@@ -96,6 +96,10 @@ pub enum CoreError {
   /// commit until it is resolved (e2ee.md §4.6).
   #[error("the outcome of this device's last commit in conversation {0} is not known yet")]
   CommitPending(ConversationId),
+  /// A leave waits until its goodbye reached the server: once the removal is committed, the
+  /// leaver can't write in the conversation any more (e2ee.md §4.6).
+  #[error("the goodbye in conversation {0} hasn't reached the server yet")]
+  GoodbyePending(ConversationId),
   #[error("gateway: {0}")]
   Gateway(String),
   /// A browser API failed or is missing (no service worker, permission denied, ...).
@@ -113,7 +117,7 @@ impl CoreError {
   pub fn is_transient(&self) -> bool {
     match self {
       Self::Api(error) => error.is_transient(),
-      Self::CommitPending(_) => true,
+      Self::CommitPending(_) | Self::GoodbyePending(_) => true,
       _ => false,
     }
   }

@@ -9,7 +9,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::log_view::ChannelFeed;
 use crate::components::security_ui::KeyChangeBanner;
 use crate::i18n::use_i18n;
-use crate::model::{Conversation, ConversationId, ConversationKind};
+use crate::model::{Conversation, ConversationId, ConversationKind, MembershipIssue};
 use crate::state::{Overlay, SidePanel, use_app_state};
 
 /// How far back the seen line looks for the user's own latest message.
@@ -90,6 +90,7 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
         <ChannelHeader conversation=conversation info=info />
         <KeyChangeBanner conversation=conversation />
         <DeviceAccessBanner conversation=conversation />
+        <MembershipIssueBanners conversation=conversation info=info />
         <HuddleBar conversation=conversation />
         <BookmarksBar conversation=conversation info=info />
         <ChannelFeed conversation=conversation />
@@ -119,6 +120,78 @@ fn DeviceAccessBanner(conversation: ConversationId) -> impl IntoView {
         </div>
       }
     })
+  }
+}
+
+/// Removals and leaves still on their way or failed (with "retry"), people still in the
+/// encryption group whom the server no longer lists (admins can sign their removal), and a server
+/// refusing this device the group (e2ee.md §4.6, removal order).
+#[component]
+fn MembershipIssueBanners(conversation: ConversationId, info: Memo<Option<Conversation>>) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let issues = Memo::new(move |_| state.read(|backend| backend.membership_issues(conversation)));
+  move || {
+    let me = state.me().id;
+    let channel = info.get().map(|conv| conv.name).unwrap_or_default();
+    issues
+      .get()
+      .into_iter()
+      .filter_map(|issue| {
+        let name_of = |user| {
+          state
+            .read(|backend| backend.user(user))
+            .map(|user| user.display_name)
+            .unwrap_or_default()
+        };
+        let (role, title, maybe_retry) = match issue {
+          MembershipIssue::RemovalPending { user } if user == me => ("status", i18n.t("leave-pending"), None),
+          MembershipIssue::RemovalPending { user } => (
+            "status",
+            i18n.t_with("removal-pending", &[("name", &name_of(user))]),
+            None,
+          ),
+          MembershipIssue::RemovalFailed { user } if user == me => ("alert", i18n.t("leave-failed"), Some(user)),
+          MembershipIssue::RemovalFailed { user } => (
+            "alert",
+            i18n.t_with("removal-failed", &[("name", &name_of(user))]),
+            Some(user),
+          ),
+          MembershipIssue::LeftInGroup { user } => (
+            "alert",
+            i18n.t_with(
+              "left-in-group",
+              &[("name", &name_of(user)), ("channel", &channel)],
+            ),
+            Some(user),
+          ),
+          MembershipIssue::GroupRefused => ("alert", i18n.t("group-refused"), None),
+          MembershipIssue::Unknown => return None,
+        };
+        let is_leftover = matches!(issue, MembershipIssue::LeftInGroup { .. });
+        let retry = maybe_retry.map(|user| {
+          let label = if is_leftover {
+            i18n.t("left-in-group-remove")
+          } else {
+            i18n.t("removal-retry")
+          };
+          view! {
+            <button class="btn btn-small" on:click=move |_| state.write(|backend| backend.retry_removal(conversation, user))>
+              {label}
+            </button>
+          }
+        });
+        Some(view! {
+          <div class="key-banner" role=role>
+            <Icon name=IconName::Lock />
+            <div class="key-banner-text">
+              <strong translate="no">{title}</strong>
+            </div>
+            {retry}
+          </div>
+        })
+      })
+      .collect_view()
   }
 }
 

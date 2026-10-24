@@ -182,6 +182,17 @@ struct State {
   garbled_entries: HashMap<UserId, HashSet<teamcraft_proto::MlsMessageId>>,
   /// Group information served whatever the group's epoch ([`FakeServer::serve_group_info`]).
   forced_group_infos: HashMap<ConversationId, teamcraft_proto::MlsGroupInfoResponse>,
+  /// Users whose member removals (`DELETE …/members/{user}`) are refused, the check before them
+  /// still allowed ([`FakeServer::refuse_removal_steps_by`]).
+  refusing_removal_steps_by: HashSet<UserId>,
+  /// Member removals requested so far, refused or not.
+  removal_requests: u64,
+  /// The next proposal of these users fails this way ([`FakeServer::cut_next_proposal`]).
+  proposal_cuts: HashMap<UserId, NetworkCut>,
+  /// Members refused their groups' queues ([`FakeServer::refuse_queue_to`]).
+  queue_refused_to: HashSet<UserId>,
+  /// The next identity key lookup of these users fails with a network error.
+  failing_identity_lookups: HashSet<UserId>,
 }
 
 /// How an armed network cut ([`FakeServer::cut_network_after`]) hits the call it catches.
@@ -496,6 +507,46 @@ impl FakeServer {
     self.lock().removal_cuts.insert(user, cut);
   }
 
+  /// While `is_refusing`, the server refuses `user`'s member removals with `403` but still allows
+  /// the check before them: the remover lost the right between the two.
+  pub fn refuse_removal_steps_by(&self, user: UserId, is_refusing: bool) {
+    let mut state = self.lock();
+    if is_refusing {
+      state.refusing_removal_steps_by.insert(user);
+    } else {
+      state.refusing_removal_steps_by.remove(&user);
+    }
+  }
+
+  /// Member removals (`DELETE …/members/{user}`) requested so far, refused or not.
+  pub fn removal_requests(&self) -> u64 {
+    self.lock().removal_requests
+  }
+
+  /// The user's next MLS proposal (a signed change, a rejoin request) fails as `cut` says.
+  pub fn cut_next_proposal(&self, user: UserId, cut: NetworkCut) {
+    self.lock().proposal_cuts.insert(user, cut);
+  }
+
+  /// From now on the server refuses `user` the queues of their groups (`403`) while still listing
+  /// them as a member: a server that wants a member to stop following a group.
+  pub fn refuse_queue_to(&self, user: UserId) {
+    self.lock().queue_refused_to.insert(user);
+  }
+
+  /// The next lookup of `user`'s identity key (by anyone) fails with a network error.
+  pub fn fail_next_identity_lookup(&self, user: UserId) {
+    self.lock().failing_identity_lookups.insert(user);
+  }
+
+  /// Moves the group's epoch forward as if members had committed `by` times (that this fake
+  /// doesn't see): for a device outside the group, which only learns the epoch.
+  pub fn bump_epoch(&self, conversation: ConversationId, by: u64) {
+    if let Some(entry) = self.lock().conversations.get_mut(&conversation) {
+      entry.epoch = entry.epoch.saturating_add(by);
+    }
+  }
+
   /// The user's next commit is lost on the way: never stored, the client sees a network error.
   pub fn drop_next_commit(&self, user: UserId) {
     self.lock().dropping_commits.insert(user);
@@ -768,6 +819,52 @@ impl FakeServerApi {
     Err(ApiError::Network("fake server: network cut".into()))
   }
 
+  fn post_mls_message_now(
+    &self,
+    conversation: ConversationId,
+    request: &PostMlsMessageRequest,
+  ) -> Result<MlsMessageResponse, ApiError> {
+    self.with(|state, me| {
+      state.ensure_own_device(me, request.device_id)?;
+      // Non-members may only post proposals, and only with admin rights (admin.md §2.2).
+      let is_member = state.member_conversation(conversation, me).is_ok();
+      if !is_member && !(request.kind == MlsMessageKind::Proposal && state.admins.contains(&me)) {
+        return Err(ApiError::status(
+          403,
+          ErrorCode::Forbidden,
+          "only members can post",
+        ));
+      }
+      let current_epoch = state.conversation(conversation)?.epoch;
+      if request.epoch != current_epoch {
+        return Err(ApiError::status(
+          409,
+          ErrorCode::EpochConflict,
+          format!("the group is in epoch {current_epoch}"),
+        ));
+      }
+      let message = MlsMessageResponse {
+        id: state.next_id(),
+        conversation_id: conversation,
+        epoch: request.epoch,
+        kind: request.kind.clone(),
+        sender_device_id: request.device_id,
+        maybe_recipient_device_id: None,
+        payload: request.payload.clone(),
+      };
+      let entry = state.actor_conversation_mut(conversation, me)?;
+      entry.mls.push(message.clone());
+      let members: Vec<UserId> = entry.members.keys().copied().collect();
+      state.publish(
+        members,
+        &GatewayEvent::MlsMessage {
+          message: message.clone(),
+        },
+      );
+      Ok(message)
+    })
+  }
+
   /// [`Self::with`], failing as [`FakeServer::cut_next_removal`] asked.
   fn with_removal_cut<R>(
     &self,
@@ -896,6 +993,9 @@ impl ServerApi for FakeServerApi {
 
   async fn identity_key(&self, user: UserId) -> Result<IdentityKeyResponse, ApiError> {
     self.with(|state, _| {
+      if state.failing_identity_lookups.remove(&user) {
+        return Err(ApiError::Network("fake server: identity lookup cut".into()));
+      }
       state
         .identity_keys
         .get(&user)
@@ -1246,6 +1346,14 @@ impl ServerApi for FakeServerApi {
 
   async fn remove_member(&self, conversation: ConversationId, user: UserId) -> Result<(), ApiError> {
     self.with_removal_cut(|state, me| {
+      state.removal_requests += 1;
+      if state.refusing_removal_steps_by.contains(&me) {
+        return Err(ApiError::status(
+          403,
+          ErrorCode::Forbidden,
+          "may not remove members",
+        ));
+      }
       let entry = state.removal_target(conversation, me)?;
       let mut recipients: Vec<UserId> = entry.members.keys().copied().collect();
       if entry.members.remove(&user).is_none() {
@@ -1576,45 +1684,20 @@ impl ServerApi for FakeServerApi {
     conversation: ConversationId,
     request: &PostMlsMessageRequest,
   ) -> Result<MlsMessageResponse, ApiError> {
-    self.with(|state, me| {
-      state.ensure_own_device(me, request.device_id)?;
-      // Non-members may only post proposals, and only with admin rights (admin.md §2.2).
-      let is_member = state.member_conversation(conversation, me).is_ok();
-      if !is_member && !(request.kind == MlsMessageKind::Proposal && state.admins.contains(&me)) {
-        return Err(ApiError::status(
-          403,
-          ErrorCode::Forbidden,
-          "only members can post",
-        ));
-      }
-      let current_epoch = state.conversation(conversation)?.epoch;
-      if request.epoch != current_epoch {
-        return Err(ApiError::status(
-          409,
-          ErrorCode::EpochConflict,
-          format!("the group is in epoch {current_epoch}"),
-        ));
-      }
-      let message = MlsMessageResponse {
-        id: state.next_id(),
-        conversation_id: conversation,
-        epoch: request.epoch,
-        kind: request.kind.clone(),
-        sender_device_id: request.device_id,
-        maybe_recipient_device_id: None,
-        payload: request.payload.clone(),
-      };
-      let entry = state.actor_conversation_mut(conversation, me)?;
-      entry.mls.push(message.clone());
-      let members: Vec<UserId> = entry.members.keys().copied().collect();
-      state.publish(
-        members,
-        &GatewayEvent::MlsMessage {
-          message: message.clone(),
-        },
-      );
-      Ok(message)
-    })
+    let maybe_cut = if request.kind == MlsMessageKind::Proposal {
+      self.server.lock().proposal_cuts.remove(&self.user)
+    } else {
+      None
+    };
+    match maybe_cut {
+      None => self.post_mls_message_now(conversation, request),
+      Some(NetworkCut::BeforeRequest) => Err(ApiError::Network("fake server: never sent".into())),
+      Some(NetworkCut::ResponseLost) => {
+        // Deliberately ignored: the client never learns the outcome.
+        let _ = self.post_mls_message_now(conversation, request);
+        Err(ApiError::Network("fake server: answer lost".into()))
+      },
+    }
   }
 
   async fn list_mls_messages(
@@ -1623,6 +1706,13 @@ impl ServerApi for FakeServerApi {
     query: &ListMlsMessagesQuery,
   ) -> Result<ListMlsMessagesResponse, ApiError> {
     self.with(|state, me| {
+      if state.queue_refused_to.contains(&me) {
+        return Err(ApiError::status(
+          403,
+          ErrorCode::Forbidden,
+          "only members can read the group's messages",
+        ));
+      }
       let entry = state.member_conversation(conversation, me)?;
       let floor = entry.members.get(&me).map_or(0, |(_, floor)| *floor);
       let maybe_garbled = state.garbled_entries.get(&me);

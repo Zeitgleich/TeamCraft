@@ -22,8 +22,8 @@ use teamcraft_client_api::calls::{
 use teamcraft_client_api::live::LiveSnapshot;
 use teamcraft_client_api::model::{
   Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, JoinableSpace,
-  Message, MessageKind, PENDING_ID_BIT, PresenceStatus, Reaction, SidebarCategory, Space, SpaceId,
-  SystemEvent, ThreadId, ThreadSummary, TimestampMs, User, UserId,
+  MembershipIssue, Message, MessageKind, PENDING_ID_BIT, PresenceStatus, Reaction, SidebarCategory, Space,
+  SpaceId, SystemEvent, ThreadId, ThreadSummary, TimestampMs, User, UserId,
 };
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
@@ -216,6 +216,11 @@ pub enum CoreCommand {
     history: HistoryPolicy,
   },
   RemoveMember {
+    conversation: ConversationId,
+    user: UserId,
+  },
+  /// "Retry" on a failed removal or leave, or "remove" on somebody left in the group.
+  RetryRemoval {
     conversation: ConversationId,
     user: UserId,
   },
@@ -1026,6 +1031,38 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn is_waiting_for_device(&self, conversation: ConversationId) -> bool {
     crate::client::is_waiting_for_device(&self.store, conversation).unwrap_or(false)
+  }
+
+  fn membership_issues(&self, conversation: ConversationId) -> Vec<MembershipIssue> {
+    let mut issues: Vec<MembershipIssue> = self
+      .read(crate::client::pending_removals(&self.store, conversation))
+      .into_iter()
+      .map(|(user, status)| match status {
+        crate::client::RemovalStatus::Pending => MembershipIssue::RemovalPending { user },
+        crate::client::RemovalStatus::Failed => MembershipIssue::RemovalFailed { user },
+      })
+      .collect();
+    // Only admins are asked to sign somebody's removal again (e2ee.md §4.6).
+    let workspace: crate::workspace::WorkspaceState = self.read(
+      records::get_json(&self.store, Table::Workspace, crate::client::WORKSPACE_KEY)
+        .map(Option::unwrap_or_default),
+    );
+    if workspace.is_admin(self.me) {
+      issues.extend(
+        self
+          .read(crate::client::group_leftovers(&self.store, conversation))
+          .into_iter()
+          .map(|user| MembershipIssue::LeftInGroup { user }),
+      );
+    }
+    if self.read(crate::client::is_queue_refused(&self.store, conversation)) {
+      issues.push(MembershipIssue::GroupRefused);
+    }
+    issues
+  }
+
+  fn retry_removal(&self, conversation: ConversationId, user: UserId) {
+    self.command(CoreCommand::RetryRemoval { conversation, user });
   }
 
   fn typing_users(&self, conversation: ConversationId) -> Vec<UserId> {
