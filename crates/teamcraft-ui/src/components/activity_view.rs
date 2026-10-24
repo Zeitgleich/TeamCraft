@@ -8,8 +8,12 @@ use crate::clock::{format_date_time, format_relative, now_ms};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
+use crate::components::tab_list::{on_tab_keys, roving_tabindex};
 use crate::i18n::use_i18n;
 use crate::state::use_app_state;
+
+/// The feed's element ID: one panel, which every tab filters.
+const ACTIVITY_PANEL_ID: &str = "activity-panel";
 
 /// The tabs of the feed: everything, or one kind of activity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +36,11 @@ impl ActivityTab {
       Self::Mentions => "activity-mentions",
       Self::Threads => "activity-threads",
     }
+  }
+
+  /// The element ID of the tab's button; the feed is labelled by the selected one.
+  fn tab_id(self) -> String {
+    format!("{}-tab", self.label_key())
   }
 
   fn includes(self, item: &ActivityItem, is_direct: impl Fn() -> bool) -> bool {
@@ -69,6 +78,9 @@ pub fn ActivityView() -> impl IntoView {
       .collect::<Vec<_>>()
   });
 
+  let on_keydown =
+    move |ev: web_sys::KeyboardEvent| on_tab_keys(&ev, &ActivityTab::ALL, tab, ActivityTab::tab_id);
+
   view! {
     <section class="activity-view" aria-label=move || i18n.t("activity-title")>
       <header class="panel-header">
@@ -90,14 +102,17 @@ pub fn ActivityView() -> impl IntoView {
           {move || i18n.t("activity-mark-read")}
         </button>
       </header>
-      <div class="view-tabs" role="tablist" aria-label=move || i18n.t("activity-filter")>
+      <div class="view-tabs" role="tablist" aria-label=move || i18n.t("activity-filter") on:keydown=on_keydown>
         {ActivityTab::ALL
           .into_iter()
           .map(|value| {
             view! {
               <button
+                id=value.tab_id()
                 role="tab"
                 aria-selected=move || (tab.get() == value).to_string()
+                aria-controls=ACTIVITY_PANEL_ID
+                tabindex=move || roving_tabindex(tab.get() == value)
                 on:click=move |_| tab.set(value)
               >
                 {move || i18n.t(value.label_key())}
@@ -106,7 +121,12 @@ pub fn ActivityView() -> impl IntoView {
           })
           .collect_view()}
       </div>
-      <ul class="activity-list panel-scroll" role="tabpanel">
+      <ul
+        class="activity-list panel-scroll"
+        role="tabpanel"
+        id=ACTIVITY_PANEL_ID
+        aria-labelledby=move || tab.get().tab_id()
+      >
         <For each=move || items.get() key=|item| (item.id.clone(), item.is_unread) let:item>
           <ActivityRow item=item />
         </For>

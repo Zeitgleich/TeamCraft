@@ -1136,7 +1136,6 @@ pins-empty-title = Keine angehefteten Nachrichten
 sidebar-saved = Gespeichert
 
 # Files and link previews
-files-title = Dateien
 files-empty = Dateien und Bilder, die hier geteilt werden, erscheinen in diesem Tab.
 files-empty-title = Noch keine Dateien
 file-download = Herunterladen

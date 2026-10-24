@@ -234,12 +234,17 @@ pub fn LinkPreviewCard(preview: LinkPreview) -> impl IntoView {
 
 /// Everything shared in the conversation: the "Files" tab of the channel header.
 #[component]
-pub fn ChannelFiles(conversation: ConversationId) -> impl IntoView {
+pub fn ChannelFiles(
+  conversation: ConversationId,
+  /// The panel's element ID, which its tab controls.
+  panel_id: String,
+  /// The element ID of the tab that labels the panel.
+  labelled_by: String,
+) -> impl IntoView {
   let state = use_app_state();
-  let i18n = use_i18n();
   let files = Memo::new(move |_| state.read(|backend| backend.conversation_files(conversation)));
   view! {
-    <div class="channel-files panel-scroll" role="tabpanel" id="channel-tab-files" aria-label=move || i18n.t("files-title")>
+    <div class="channel-files panel-scroll" role="tabpanel" id=panel_id aria-labelledby=labelled_by>
       <div class="files-list">
         <For each=move || files.get() key=|file| (file.message, file.file_id.clone()) let:file>
           <FileCard file=file />

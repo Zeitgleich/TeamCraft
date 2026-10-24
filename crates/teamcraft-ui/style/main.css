@@ -664,6 +664,14 @@ select.input {
   height: 34px;
 }
 
+/* A conversation's messages tab: feed, seen line and composer, laid out as before the tabs. */
+.channel-messages {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 /* A conversation's files tab. */
 .channel-files {
   flex: 1;

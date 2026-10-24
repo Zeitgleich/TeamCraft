@@ -1136,7 +1136,6 @@ pins-empty-title = No pinned messages
 sidebar-saved = Saved
 
 # Files and link previews
-files-title = Files
 files-empty = Files and images shared here show up in this tab.
 files-empty-title = No files yet
 file-download = Download

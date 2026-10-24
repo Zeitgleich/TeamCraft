@@ -72,6 +72,7 @@ pub mod skeleton;
 pub mod space_tile;
 pub mod status_menu;
 pub mod storage_banner;
+pub mod tab_list;
 pub mod thread_panel;
 pub mod threads_inbox;
 pub mod top_bar;

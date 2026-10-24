@@ -8,6 +8,7 @@ use crate::components::modal::Modal;
 use crate::components::settings_tabs::{
   CallsTab, DevicesTab, DisplayTab, LanguageTab, NotificationsTab, PrivacyTab, SidebarTab,
 };
+use crate::components::tab_list::{on_tab_keys, roving_tabindex};
 use crate::components::update_notice::UpdatesSection;
 use crate::i18n::use_i18n;
 use crate::keys::{ENTER, ESCAPE, Key, Modifier, QUICK_SWITCHER, Shortcut, ShortcutList};
@@ -21,27 +22,10 @@ pub fn SettingsModal() -> impl IntoView {
   // The tab is part of the URL (`/settings/{tab}`), so it lives in the app state.
   let tab = state.settings_tab;
 
-  let on_tab_keys = move |ev: web_sys::KeyboardEvent| {
-    let position = Tab::ALL
-      .iter()
-      .position(|candidate| *candidate == tab.get_untracked())
-      .unwrap_or(0);
-    let next = match ev.key().as_str() {
-      "ArrowDown" | "ArrowRight" => (position + 1) % Tab::ALL.len(),
-      "ArrowUp" | "ArrowLeft" => (position + Tab::ALL.len() - 1) % Tab::ALL.len(),
-      _ => return,
-    };
-    ev.prevent_default();
-    tab.set(Tab::ALL[next]);
-    if let Some(button) = web_sys::window()
-      .and_then(|window| window.document())
-      .and_then(|document| document.get_element_by_id(&format!("settings-tab-{}", Tab::ALL[next].slug())))
-    {
-      use wasm_bindgen::JsCast;
-      if let Ok(button) = button.dyn_into::<web_sys::HtmlElement>() {
-        drop(button.focus());
-      }
-    }
+  let on_tablist_keydown = move |ev: web_sys::KeyboardEvent| {
+    on_tab_keys(&ev, &Tab::ALL, tab, |candidate| {
+      format!("settings-tab-{}", candidate.slug())
+    });
   };
 
   view! {
@@ -53,7 +37,7 @@ pub fn SettingsModal() -> impl IntoView {
         </button>
       </header>
       <div class="settings-layout">
-        <div class="settings-tabs" role="tablist" aria-orientation="vertical" on:keydown=on_tab_keys>
+        <div class="settings-tabs" role="tablist" aria-orientation="vertical" on:keydown=on_tablist_keydown>
           {Tab::ALL
             .into_iter()
             .map(|candidate| {
@@ -63,7 +47,7 @@ pub fn SettingsModal() -> impl IntoView {
                   role="tab"
                   aria-selected=move || (tab.get() == candidate).to_string()
                   aria-controls=format!("settings-panel-{}", candidate.slug())
-                  tabindex=move || if tab.get() == candidate { "0" } else { "-1" }
+                  tabindex=move || roving_tabindex(tab.get() == candidate)
                   data-autofocus=(candidate == tab.get_untracked()).then_some("")
                   on:click=move |_| tab.set(candidate)
                 >
