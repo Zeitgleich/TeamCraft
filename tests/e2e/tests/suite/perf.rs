@@ -162,6 +162,9 @@ struct Report {
   seconds_sign_in_and_unlock: f64,
   seconds_return_to_channel_list: f64,
   seconds_return_until_all_channels_read: f64,
+  /// Until the first channel opened shows its newest message (issue #247: the open channel is
+  /// caught up first).
+  seconds_return_first_channel_read: f64,
   /// 1 when the identity provider's session had expired while Carol was away (she signed in again,
   /// which is part of `seconds_return_to_channel_list`).
   signed_in_again: f64,
@@ -192,6 +195,9 @@ struct Report {
   idle_task_ms_per_minute: f64,
   /// HTTP requests of the page while idle (the budget: none besides the gateway heartbeat).
   idle_http_requests_per_minute: f64,
+  /// Of those, requests to TeamCraft's API (the rest: token renewal at the identity provider).
+  /// Issue #252: none at all.
+  idle_api_requests_per_minute: f64,
   /// Gateway frames in both directions while idle (heartbeats and their answers).
   idle_gateway_frames_per_minute: f64,
   wasm_kib: f64,
@@ -459,8 +465,11 @@ async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> R
   let had_to_sign_in = come_back(page, &seeded.first_space_channels[1].0).await;
   report.signed_in_again = if had_to_sign_in { 1.0 } else { 0.0 };
   report.seconds_return_to_channel_list = started.elapsed().as_secs_f64();
-  for (name, last) in &seeded.first_space_channels {
+  for (index, (name, last)) in seeded.first_space_channels.iter().enumerate() {
     switch_within(page, name, last, Duration::from_secs(280)).await;
+    if index == 0 {
+      report.seconds_return_first_channel_read = started.elapsed().as_secs_f64();
+    }
   }
   report.seconds_return_until_all_channels_read = started.elapsed().as_secs_f64();
   let long_tasks = evaluate_value(page, "window.__longTasks || [0, 0, 0]".into()).await;
@@ -513,7 +522,7 @@ async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> R
   // Idle in the foreground: nothing happens, so the client should not use the CPU.
   let usage_before = ProcessUsage::of_matching(profile);
   let tasks_before = metric(page, "TaskDuration").await;
-  let (http_requests, gateway_frames) = count_traffic(page, scale.idle).await;
+  let traffic = count_traffic(page, scale.idle).await;
   let usage_after = ProcessUsage::of_matching(profile);
   let tasks_after = metric(page, "TaskDuration").await;
   let idle_seconds = scale.idle.as_secs_f64();
@@ -525,8 +534,9 @@ async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> R
     .saturating_sub(usage_before.context_switches)) as f64
     / idle_seconds;
   report.idle_task_ms_per_minute = (tasks_after - tasks_before) * 1000.0 * 60.0 / idle_seconds;
-  report.idle_http_requests_per_minute = http_requests * 60.0 / idle_seconds;
-  report.idle_gateway_frames_per_minute = gateway_frames * 60.0 / idle_seconds;
+  report.idle_http_requests_per_minute = traffic.http_requests * 60.0 / idle_seconds;
+  report.idle_api_requests_per_minute = traffic.api_requests * 60.0 / idle_seconds;
+  report.idle_gateway_frames_per_minute = traffic.gateway_frames * 60.0 / idle_seconds;
   report.wasm_kib = wasm_bytes() as f64 / 1024.0;
   report
 }
@@ -545,7 +555,7 @@ fn percentile(sorted: &[f64], percent: usize) -> f64 {
 
 /// Waits `period` while counting the page's HTTP requests and gateway frames (DevTools network
 /// events; the service worker's own requests are not the page's and are not counted).
-async fn count_traffic(page: &Page, period: Duration) -> (f64, f64) {
+async fn count_traffic(page: &Page, period: Duration) -> Traffic {
   page.execute(NetworkEnableParams::default()).await.unwrap();
   let mut requests = page.event_listener::<EventRequestWillBeSent>().await.unwrap();
   let mut sent = page.event_listener::<EventWebSocketFrameSent>().await.unwrap();
@@ -553,18 +563,32 @@ async fn count_traffic(page: &Page, period: Duration) -> (f64, f64) {
     .event_listener::<EventWebSocketFrameReceived>()
     .await
     .unwrap();
-  let (mut http_requests, mut frames) = (0.0, 0.0);
+  let mut traffic = Traffic::default();
   let deadline = tokio::time::sleep(period);
   tokio::pin!(deadline);
   loop {
     tokio::select! {
       () = &mut deadline => break,
-      Some(_) = requests.next() => http_requests += 1.0,
-      Some(_) = sent.next() => frames += 1.0,
-      Some(_) = received.next() => frames += 1.0,
+      Some(request) = requests.next() => {
+        traffic.http_requests += 1.0;
+        if request.request.url.starts_with(&format!("{WEB_ORIGIN}/api/")) {
+          eprintln!("request while idle: {}", request.request.url);
+          traffic.api_requests += 1.0;
+        }
+      },
+      Some(_) = sent.next() => traffic.gateway_frames += 1.0,
+      Some(_) = received.next() => traffic.gateway_frames += 1.0,
     }
   }
-  (http_requests, frames)
+  traffic
+}
+
+/// What the page sent and received over a period.
+#[derive(Debug, Default)]
+struct Traffic {
+  http_requests: f64,
+  api_requests: f64,
+  gateway_frames: f64,
 }
 
 /// CPU (percent of one core) and wakeups per second of the browser's processes over `period`.
@@ -762,6 +786,10 @@ impl Report {
         self.seconds_return_to_channel_list,
       ),
       (
+        "seconds_return_first_channel_read",
+        self.seconds_return_first_channel_read,
+      ),
+      (
         "seconds_return_until_all_channels_read",
         self.seconds_return_until_all_channels_read,
       ),
@@ -813,6 +841,7 @@ impl Report {
         "idle_http_requests_per_minute",
         self.idle_http_requests_per_minute,
       ),
+      ("idle_api_requests_per_minute", self.idle_api_requests_per_minute),
       (
         "idle_gateway_frames_per_minute",
         self.idle_gateway_frames_per_minute,
@@ -853,5 +882,10 @@ impl Report {
       "heap grows with channel switches: {self:#?}"
     );
     assert!(self.idle_cpu_percent < 5.0, "busy while idle: {self:#?}");
+    // Issue #252: nothing is read on a timer while connected.
+    assert_eq!(
+      self.idle_api_requests_per_minute, 0.0,
+      "requests while idle: {self:#?}"
+    );
   }
 }

@@ -335,11 +335,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         )?;
         if state == teamcraft_proto::PresenceState::Offline {
           // The server records "last seen" when the person stops being active; the event doesn't
-          // carry it. Read in one batch on the next tick, so a burst of people going offline (or
-          // someone toggling "appear offline") costs one request, not one per event.
-          self.stale_last_seen.insert(user_id);
+          // carry it. Forgotten here and read when the UI shows the person (`ui_last_seen`), so
+          // people going offline cost no request while nobody looks (issue #252).
+          self
+            .store
+            .delete(Table::Presence, &super::people::last_seen_key(user_id))?;
         } else {
-          self.stale_last_seen.remove(&user_id);
           let record = super::people::LastSeenRecord {
             maybe_at_ms: None,
             fetched_at_ms: self.now_ms(),

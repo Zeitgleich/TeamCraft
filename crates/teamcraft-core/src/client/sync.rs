@@ -84,8 +84,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.flush_outbox().await?;
     // Read positions, acknowledgements and pins taken offline (issue #159).
     self.flush_pending_actions().await?;
-    // Presence changed unseen while the device was away: refreshed a batch per upkeep tick.
-    self.mark_known_presence_stale()?;
     self.top_up_key_packages().await?;
     // Also picks up saved items and drafts other devices changed while this one was away.
     self.sync_account_data().await

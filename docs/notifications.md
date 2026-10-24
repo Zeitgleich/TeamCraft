@@ -56,8 +56,10 @@ Clients keep the counts current from gateway events instead of polling `GET /unr
 - Account data (saved items, drafts, backgrounds) is read once per connection and on `key_bag_update`;
   nothing is read on a timer (issue #252).
 
-The client core keeps all of this in its store and hands it to the UI with its snapshot. Only a UI
-without a core (no gateway) still polls, every 5 minutes while the page is visible.
+The client core keeps all of this in its store and hands it to the UI with its snapshot; the UI asks
+only for what changed since its last read (`core_snapshot_changes`, issue #246), so a counter or
+presence change sends the live state and nothing of the workspace. Only a UI without a core (no
+gateway) still polls, every 5 minutes while the page is visible.
 
 ### Where the counts show
 

@@ -169,7 +169,6 @@ impl PendingEnrollment {
       groups: HashMap::new(),
       sync,
       typing: Default::default(),
-      stale_last_seen: Default::default(),
       maybe_call_sink: None,
       maybe_preview_fetcher,
       maybe_jwks_source,

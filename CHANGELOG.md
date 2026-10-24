@@ -53,6 +53,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
   one action), placeholders instead of "nothing here" while user groups load, fixed sizes for
   thumbnails and link-preview images so the feed doesn't jump when they decode; one radius and type
   scale in the stylesheet.
+- **No network traffic while idle** besides the gateway heartbeat: account data (saved items,
+  drafts, backgrounds) is read once per connection and when another device changes it instead of
+  every minute; the core reads everyone's presence once per connection in batches of 200 and the
+  UI no longer reads presence itself; read receipts are read only for the DM that is open, never
+  one request per DM (#252).
+- **Cheaper updates on big workspaces**: the desktop and web apps get only what changed per
+  conversation from the client core instead of the whole workspace on every change, and re-read
+  only the conversations that changed (#246). Presence changes travel as deltas (#259).
+- **Coming back to a grown workspace**: the channel list shows as soon as the conversation list
+  arrived, each conversation marked "catching up" until its history is in; the conversation that
+  is open is caught up first, several conversations are fetched at once (#247).
 
 ### Fixed
 
@@ -74,6 +85,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
   revoked one was lost before it removed it from every conversation, the user's other devices do it,
   once the signed device list names the device revoked; a revocation the server claims alone changes
   nothing (#232).
+- Unread counts no longer count messages twice that arrived while the counts were read after a
+  reconnect (`GET /unread` names the newest message it covers, `counted_through`), and a huge
+  mention count from the server can't overflow (#259).
 
 ### Security
 

@@ -61,11 +61,6 @@ impl Upkeep {
         Err(error) => tracing::debug!(%error, "skipped conversations not synced yet"),
       }
     }
-    // Last seen of people who went offline since the last tick, in one request.
-    match client.refresh_stale_last_seen().await {
-      Ok(has_changed) => is_changed |= has_changed,
-      Err(error) => tracing::debug!(%error, "reading last seen failed"),
-    }
     // Key packages expire; a device that runs for weeks renews them in time (e2ee.md §4.3).
     if let Err(error) = client.renew_key_packages_if_due().await {
       tracing::debug!(%error, "key packages not renewed yet");

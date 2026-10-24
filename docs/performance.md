@@ -195,15 +195,15 @@ What the numbers say:
 - The app adds about 210 MiB to the browser; most of it is the compiled wasm and its linear memory
   (the JS heap is under 5 MiB). Channel switches don't grow it.
 - The message list is virtualised: the DOM holds about 25 rows whatever the channel's length.
-- While idle the page still runs about 0.4 s of tasks per minute: the sync loop's 3 s tick and a
-  30 s REST poll of unread counts, threads, presence and read receipts (#183). A one-second banner
-  timer that ran even while connected is fixed.
+- While idle the page ran about 0.4 s of tasks per minute at the time of this table: the sync
+  loop's 3 s tick and a 30 s REST poll of unread counts, threads, presence and read receipts. The
+  poll is gone since (#183, #252; see "Idle traffic and updates per conversation" below). A
+  one-second banner timer that ran even while connected is fixed.
 - Sending used to read the whole conversation for every message (fixed); it showed when filling a
   20,000-message channel.
-- Against the budgets in robustness.md: switching, scrolling, start and memory are well within them;
-  idle network is not (the 30 s poll, #183, and the once-a-minute account data sync).
-- Since #183 the counters come over the gateway (notifications.md, "Unread and mention counts"); the
-  30 s poll is gone. The numbers above were measured before that change and are not re-run yet.
+- Against the budgets in robustness.md: switching, scrolling, start and memory are well within them.
+  Idle network was not at the time (the 30 s poll and the once-a-minute account data sync); both are
+  gone since (#183, #252), re-measured below.
 
 #### Large workspace
 
@@ -243,10 +243,11 @@ What the numbers say:
   browser on the large workspace (181 MiB on the small one), and neither the JS heap nor the PSS
   grows with channel switches beyond the noise. The message list stays virtualised at 20,000
   messages.
-- **Idle is not** (#246, #183): every change notification re-reads work that grows with the
+- **Idle was not** (#246, #183): every change notification re-read work that grows with the
   workspace (about 0.6 s of main-thread time per round on the large workspace, 70 ms on the small
-  one), and refresh rounds trigger further rounds. Before this change each heartbeat answer (every
-  25 s) counted as a change and started a round too; the 30 s poll and the loop remain.
+  one), and refresh rounds triggered further rounds. Each heartbeat answer (every 25 s) counted as a
+  change too (fixed with this measurement), the 30 s poll and the loop went with #183 and #253, the
+  rest with #246 and #252: see "Idle traffic and updates per conversation" below.
 - **Coming back** to a workspace that grew by 300 channels and 100k messages takes three minutes
   before the channel list shows (#247); the main thread is mostly free meanwhile (14 tasks over
   50 ms, 1 s in total), the time goes to the sequential catch-up (#155).
