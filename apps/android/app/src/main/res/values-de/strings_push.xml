@@ -120,4 +120,27 @@
   <string name="mute_forever">Bis ich die Stummschaltung aufhebe</string>
   <string name="mute_forever_state">Stummgeschaltet, bis du es aufhebst.</string>
   <string name="mute_until">Stummgeschaltet bis %1$s.</string>
+
+  <string name="notification_new_message_from">Neue Nachricht von %1$s</string>
+  <plurals name="notification_new_messages_from">
+    <item quantity="one">%1$d neue Nachricht von %2$s</item>
+    <item quantity="other">%1$d neue Nachrichten von %2$s</item>
+  </plurals>
+  <string name="notification_photo">📷 Bild</string>
+  <string name="notification_video">🎬 Video</string>
+  <string name="notification_audio">🎤 Audio</string>
+  <string name="notification_content_title">Inhalt der Benachrichtigungen</string>
+  <string name="notification_content_full">Absender und Nachricht</string>
+  <string name="notification_content_sender">Nur Absender</string>
+  <string name="notification_content_nothing">Nichts (\"Neue Nachricht\")</string>
+  <string name="notification_content_limited">Dein Workspace zeigt höchstens: %1$s.</string>
+  <string name="notification_content_app_lock">Solange die App-Sperre an ist, zeigen Benachrichtigungen nur den Absender.</string>
+  <string name="diagnostics_preview_full">Die letzte Nachrichten-Benachrichtigung hat die Nachricht gezeigt.</string>
+  <string name="diagnostics_preview_no_session">Die letzte Nachrichten-Benachrichtigung konnte die Nachricht nicht zeigen: auf diesem Gerät nicht angemeldet.</string>
+  <string name="diagnostics_preview_not_decrypted">Die letzte Nachrichten-Benachrichtigung konnte die Nachricht nicht zeigen: Sie ließ sich nicht rechtzeitig abrufen oder entschlüsseln (offline, oder Schlüssel noch nicht angekommen).</string>
+  <string name="diagnostics_preview_timed_out">Die letzte Nachrichten-Benachrichtigung konnte die Nachricht nicht zeigen: Das Abrufen hat zu lange gedauert.</string>
+  <string name="diagnostics_preview_not_showable">Die letzte Nachrichten-Benachrichtigung hatte nichts zu zeigen (kein Text und keine Datei).</string>
+  <string name="diagnostics_preview_policy">Die Richtlinie deines Workspace blendet Nachrichtentext in Benachrichtigungen aus.</string>
+  <string name="diagnostics_preview_setting">Deine Einstellung blendet Nachrichtentext in Benachrichtigungen aus.</string>
+  <string name="diagnostics_unreadable">Benachrichtigungen, die dieses Gerät nicht öffnen konnte: %1$d</string>
 </resources>

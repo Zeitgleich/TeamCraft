@@ -127,4 +127,27 @@
   <string name="mute_forever">Until I unmute</string>
   <string name="mute_forever_state">Muted until you unmute.</string>
   <string name="mute_until">Muted until %1$s.</string>
+
+  <string name="notification_new_message_from">New message from %1$s</string>
+  <plurals name="notification_new_messages_from">
+    <item quantity="one">%1$d new message from %2$s</item>
+    <item quantity="other">%1$d new messages from %2$s</item>
+  </plurals>
+  <string name="notification_photo">📷 Photo</string>
+  <string name="notification_video">🎬 Video</string>
+  <string name="notification_audio">🎤 Audio</string>
+  <string name="notification_content_title">Notification content</string>
+  <string name="notification_content_full">Sender and message</string>
+  <string name="notification_content_sender">Sender only</string>
+  <string name="notification_content_nothing">Nothing (\"New message\")</string>
+  <string name="notification_content_limited">Your workspace shows at most: %1$s.</string>
+  <string name="notification_content_app_lock">While the app lock is on, notifications show the sender only.</string>
+  <string name="diagnostics_preview_full">The last message notification showed the message.</string>
+  <string name="diagnostics_preview_no_session">The last message notification could not show the message: not signed in on this device.</string>
+  <string name="diagnostics_preview_not_decrypted">The last message notification could not show the message: it could not be fetched or decrypted in time (offline, or keys not yet arrived).</string>
+  <string name="diagnostics_preview_timed_out">The last message notification could not show the message: fetching it took too long.</string>
+  <string name="diagnostics_preview_not_showable">The last message notification had nothing to show (not a text or a file).</string>
+  <string name="diagnostics_preview_policy">Your workspace\'s policy hides message text in notifications.</string>
+  <string name="diagnostics_preview_setting">Your setting hides message text in notifications.</string>
+  <string name="diagnostics_unreadable">Notifications this device could not open: %1$d</string>
 </resources>

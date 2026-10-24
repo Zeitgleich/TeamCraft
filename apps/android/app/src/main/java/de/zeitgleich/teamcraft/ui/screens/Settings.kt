@@ -144,6 +144,8 @@ private fun SettingsHub(viewModel: MainViewModel, account: AppState.Ready, onOpe
 @Composable
 private fun NotificationsPage(viewModel: MainViewModel, onDnd: () -> Unit, onDiagnostics: () -> Unit) {
   NotificationSettingsSection(viewModel)
+  Heading(R.string.notification_content_title)
+  NotificationContentSection(viewModel)
   Heading(R.string.mention_title)
   MentionSettingsSection(viewModel)
   Text(

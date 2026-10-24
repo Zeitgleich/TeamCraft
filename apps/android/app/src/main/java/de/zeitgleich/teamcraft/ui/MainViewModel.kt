@@ -53,6 +53,7 @@ import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.ConversationKind
 import uniffi.teamcraft_ffi.LoginBrand
 import uniffi.teamcraft_ffi.MessageItem
+import uniffi.teamcraft_ffi.NotificationContent
 import uniffi.teamcraft_ffi.Presence
 import uniffi.teamcraft_ffi.PushDiagnosticsInfo
 import uniffi.teamcraft_ffi.PushService
@@ -463,6 +464,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   fun confirmChannelOver(): Int = graph.mentionPrefs.confirmChannelOver
 
   val mentionPrefs get() = graph.mentionPrefs
+
+  val notificationContent get() = graph.notificationContent
+
+  /** Sets how much notifications show; those already in the shade follow at once. */
+  fun setNotificationContent(content: NotificationContent) {
+    graph.notificationContent.update(content)
+    graph.notifier.repostAll()
+    viewModelScope.launch { read { setNotificationContent(content) } }
+  }
+
+  /** The workspace policy's limit for notifications; `null` when the core can't answer. */
+  suspend fun notificationContentLimit(): NotificationContent? = read { notificationContent().workspace }
 
   val segmentPrefetch get() = graph.segmentPrefetch
 

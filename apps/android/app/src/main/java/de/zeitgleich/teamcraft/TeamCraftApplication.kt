@@ -16,6 +16,7 @@ import de.zeitgleich.teamcraft.calls.CallController
 import de.zeitgleich.teamcraft.core.CoreRepository
 import de.zeitgleich.teamcraft.notifications.MentionPrefs
 import de.zeitgleich.teamcraft.notifications.MessageNotifier
+import de.zeitgleich.teamcraft.notifications.NotificationContentPrefs
 import de.zeitgleich.teamcraft.notifications.PushHandler
 import de.zeitgleich.teamcraft.notifications.PushStats
 import de.zeitgleich.teamcraft.notifications.ReadWatcher
@@ -34,12 +35,13 @@ class AppGraph(context: Context) {
   val auth = AuthRepository(context, servers)
   val legacySignOut = LegacySignOut(servers)
   val core = CoreRepository(context, auth)
-  val notifier = MessageNotifier(context)
+  val notificationContent = NotificationContentPrefs(context)
+  val notifier = MessageNotifier(context, notificationContent)
   val mentionPrefs = MentionPrefs(context)
   val calls = CallController(context, core, scope)
   val pushStats = PushStats(context)
   val pushHandler = PushHandler(context, notifier, calls, pushStats)
-  val push = PushManager(context, core, pushHandler, mentionPrefs, scope)
+  val push = PushManager(context, core, pushHandler, mentionPrefs, notificationContent, scope)
   val segmentPrefetch = SegmentPrefetch(context)
   val readWatcher = ReadWatcher(core, notifier, scope)
   val network = NetworkWatcher(context) { core.networkChanged() }
