@@ -1,18 +1,23 @@
 package de.zeitgleich.teamcraft.calls
 
 import android.Manifest
+import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager
 import android.view.WindowManager.LayoutParams.FLAG_SECURE
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,6 +40,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -47,10 +53,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
@@ -180,6 +190,12 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
     hasCamera = isGranted
     calls.setCameraWanted(isGranted)
   }
+  var maybeFullScreen by rememberSaveable { mutableStateOf<Long?>(null) }
+  val maybeFullScreenTrack = tracks.firstOrNull { it.streamId.toLong() == maybeFullScreen }
+  if (maybeFullScreenTrack != null) {
+    FullScreenVideo(maybeFullScreenTrack, frames[maybeFullScreenTrack.streamId]) { maybeFullScreen = null }
+    return
+  }
   Surface(modifier = Modifier.fillMaxSize()) {
     Box(Modifier.fillMaxSize().safeDrawingPadding()) {
       Column(
@@ -191,7 +207,7 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
         if (tracks.isEmpty()) {
           Box(Modifier.weight(1f))
         } else {
-          VideoGrid(tracks, frames, Modifier.weight(1f))
+          VideoGrid(tracks, frames, Modifier.weight(1f)) { track -> maybeFullScreen = track.streamId.toLong() }
         }
         CallControls(
           maybeState = maybeState,
@@ -237,7 +253,12 @@ private fun CallStatus(maybeState: CallStateInfo?) {
 }
 
 @Composable
-private fun VideoGrid(tracks: List<VideoTrackInfo>, frames: Map<UInt, Bitmap>, modifier: Modifier) {
+private fun VideoGrid(
+  tracks: List<VideoTrackInfo>,
+  frames: Map<UInt, Bitmap>,
+  modifier: Modifier,
+  onFullScreen: (VideoTrackInfo) -> Unit,
+) {
   val columns = if (tracks.size > 1) 2 else 1
   LazyVerticalGrid(
     columns = GridCells.Fixed(columns),
@@ -248,7 +269,11 @@ private fun VideoGrid(tracks: List<VideoTrackInfo>, frames: Map<UInt, Bitmap>, m
     items(tracks, key = { it.streamId.toLong() }) { track ->
       val maybeFrame = frames[track.streamId]
       Box(
-        Modifier.fillMaxWidth().aspectRatio(VIDEO_ASPECT).background(Color.Black),
+        Modifier
+          .fillMaxWidth()
+          .aspectRatio(VIDEO_ASPECT)
+          .background(Color.Black)
+          .clickable(onClickLabel = stringResource(R.string.call_video_fullscreen)) { onFullScreen(track) },
         contentAlignment = Alignment.Center,
       ) {
         if (maybeFrame == null) {
@@ -263,6 +288,58 @@ private fun VideoGrid(tracks: List<VideoTrackInfo>, frames: Map<UInt, Bitmap>, m
             modifier = Modifier.fillMaxSize(),
           )
         }
+      }
+    }
+  }
+}
+
+/**
+ * One video over the whole screen, cutout included, with the system bars hidden (a swipe from the
+ * edge shows them for a moment) until a tap or Back returns to the call (#309).
+ */
+@Composable
+private fun FullScreenVideo(track: VideoTrackInfo, maybeFrame: Bitmap?, onExit: () -> Unit) {
+  ImmersiveWindow()
+  BackHandler(onBack = onExit)
+  Box(
+    Modifier
+      .fillMaxSize()
+      .background(Color.Black)
+      .clickable(onClickLabel = stringResource(R.string.call_video_exit_fullscreen), onClick = onExit),
+    contentAlignment = Alignment.Center,
+  ) {
+    if (maybeFrame == null) {
+      Text(stringResource(R.string.call_video_waiting), color = Color.White)
+    } else {
+      Image(
+        bitmap = maybeFrame.asImageBitmap(),
+        contentDescription = stringResource(if (track.isScreen) R.string.call_video_screen else R.string.call_video_camera),
+        contentScale = ContentScale.Fit,
+        modifier = Modifier.fillMaxSize(),
+      )
+    }
+  }
+}
+
+/** Hides the system bars while this is shown, and lets the content use the cutout's edge too. */
+@Composable
+private fun ImmersiveWindow() {
+  val view = LocalView.current
+  DisposableEffect(view) {
+    val window = (view.context as? Activity)?.window ?: return@DisposableEffect onDispose {}
+    val maybeCutoutMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) window.attributes.layoutInDisplayCutoutMode else null
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+      window.attributes = window.attributes.apply {
+        layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+      }
+    }
+    val controller = WindowCompat.getInsetsController(window, view)
+    controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+    controller.hide(WindowInsetsCompat.Type.systemBars())
+    onDispose {
+      controller.show(WindowInsetsCompat.Type.systemBars())
+      if (maybeCutoutMode != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        window.attributes = window.attributes.apply { layoutInDisplayCutoutMode = maybeCutoutMode }
       }
     }
   }

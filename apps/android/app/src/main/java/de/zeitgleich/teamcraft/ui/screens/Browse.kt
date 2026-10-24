@@ -80,6 +80,7 @@ fun BrowseScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
     }
   }
   Scaffold(
+    contentWindowInsets = ScreenInsets,
     topBar = { ChromeTopBar(title = stringResource(R.string.browse_title), maybeOnBack = onBack) },
     bottomBar = {
       if (showPeople && picked.isNotEmpty()) {

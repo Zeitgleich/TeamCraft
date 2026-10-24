@@ -38,7 +38,7 @@ fun PushBatteryScreen(viewModel: MainViewModel, onBack: () -> Unit) {
   var refresh by remember { mutableIntStateOf(0) }
   LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { refresh++ }
   val health = remember(refresh) { NotificationHealth.read(context) }
-  Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.battery_title), maybeOnBack = onBack) }) { padding ->
+  Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.battery_title), maybeOnBack = onBack) }, contentWindowInsets = ScreenInsets) { padding ->
     Column(
       Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(16.dp),
       verticalArrangement = Arrangement.spacedBy(12.dp),

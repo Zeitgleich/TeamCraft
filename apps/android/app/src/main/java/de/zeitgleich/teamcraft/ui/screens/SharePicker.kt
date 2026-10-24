@@ -40,6 +40,7 @@ fun SharePickerScreen(viewModel: MainViewModel, content: SharedContent, onPick: 
     conversations = viewModel.readChat { snapshot() }?.conversations?.filter { it.canPost }?.sortedBy { it.name.lowercase() }
   }
   Scaffold(
+    contentWindowInsets = ScreenInsets,
     topBar = {
       ChromeTopBar(
         title = stringResource(R.string.share_title),

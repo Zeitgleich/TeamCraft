@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- Image viewer and previews (#315) -->
+  <string name="image_loading">Loading the full image</string>
+  <string name="image_load_failed">The image couldn\'t be loaded. Tap to try again.</string>
+  <string name="image_position">%1$d of %2$d</string>
+  <string name="message_pinned">Pinned</string>
+  <!-- Composer -->
+  <string name="composer_remove_file">Remove %1$s</string>
+  <!-- Calls -->
+  <string name="call_video_fullscreen">Show full screen</string>
+  <string name="call_video_exit_fullscreen">Exit full screen</string>
+</resources>

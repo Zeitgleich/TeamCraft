@@ -3,7 +3,6 @@ package de.zeitgleich.teamcraft.ui.screens
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
-import android.graphics.BitmapFactory
 import android.net.Uri
 import android.text.format.DateUtils
 import android.text.format.Formatter
@@ -20,6 +19,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -65,8 +65,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -74,6 +72,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
@@ -107,7 +106,11 @@ import de.zeitgleich.teamcraft.core.Message
 import de.zeitgleich.teamcraft.core.MessageExtras
 import de.zeitgleich.teamcraft.ui.FeedItem
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.Pictures
+import de.zeitgleich.teamcraft.ui.THUMBNAIL_DECODE_PX
 import de.zeitgleich.teamcraft.ui.feedItems
+import de.zeitgleich.teamcraft.ui.rememberThumbnail
+import de.zeitgleich.teamcraft.ui.thumbnailKey
 import de.zeitgleich.teamcraft.ui.TextSpan
 import de.zeitgleich.teamcraft.ui.textSpans
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
@@ -118,6 +121,16 @@ private const val QUICK_REACTION = "👍"
 
 /** How long a message opened from a link stays highlighted. */
 private const val HIGHLIGHT_MS = 2500L
+
+/** The box an image preview fits into, keeping its shape (#315). */
+private val PREVIEW_MAX_WIDTH = 280.dp
+private val PREVIEW_MAX_HEIGHT = 320.dp
+
+/** Panoramas and tall screenshots are cut to these shapes (width over height) rather than shrunk to a line. */
+private const val MIN_PREVIEW_RATIO = 0.5f
+private const val MAX_PREVIEW_RATIO = 2.5f
+/** The shape of a preview whose thumbnail can't be read. */
+private const val DEFAULT_PREVIEW_RATIO = 4f / 3f
 
 /** How far a message is dragged to the right before letting go replies to it. */
 private val SWIPE_REPLY_THRESHOLD = 72.dp
@@ -147,8 +160,7 @@ fun MessageFeed(
   val scope = rememberCoroutineScope()
   var hasScrolledInitially by remember { mutableStateOf(false) }
   var maybeLastMessageId by remember { mutableStateOf<String?>(null) }
-  var maybeViewed by remember { mutableStateOf<ViewedImage?>(null) }
-  var maybeWaitingFor by remember { mutableStateOf<String?>(null) }
+  var maybeViewedId by remember { mutableStateOf<String?>(null) }
   var maybeHighlighted by remember(maybeFocusMessage) { mutableStateOf(maybeFocusMessage) }
   LaunchedEffect(maybeHighlighted) {
     if (maybeHighlighted != null) {
@@ -176,27 +188,19 @@ fun MessageFeed(
     }
     maybeLastMessageId = newest.id
   }
-  // A tapped image that was still being downloaded opens once it is here.
-  LaunchedEffect(extras, maybeWaitingFor) {
-    val waiting = maybeWaitingFor ?: return@LaunchedEffect
-    val file = extras.values.flatMap { it.files }.firstOrNull { it.fileId == waiting } ?: return@LaunchedEffect
-    val path = file.transfer.path
-    if (file.transfer.state == "local" && path != null) {
-      maybeViewed = ViewedImage(path, file.fileName, file.mediaType)
-      maybeWaitingFor = null
-    } else if (file.transfer.state == "failed") {
-      maybeWaitingFor = null
-    }
-  }
   val context = LocalContext.current
-  val onOpenFile: (FileInfo) -> Unit = { file ->
-    openOrDownload(viewModel, file, context) { maybeImage ->
-      if (maybeImage != null) maybeViewed = maybeImage else maybeWaitingFor = file.fileId.takeIf { file.isImage }
+  val onOpenFile: (FileInfo) -> Unit = remember(viewModel, context) {
+    { file ->
+      // Images open in the viewer at once (it shows the thumbnail and fetches the full picture).
+      if (file.isImage && file.maybeThumbnail != null) maybeViewedId = file.fileId else openOrDownload(viewModel, file, context)
     }
   }
+  // Once per snapshot, not per row: mentions are matched against every user's name.
+  val usernames = remember(snapshot) { snapshot?.users.orEmpty().map { it.username.lowercase() }.toSet() }
   Box(modifier.fillMaxSize()) {
     LazyColumn(Modifier.fillMaxSize(), state = listState, reverseLayout = true) {
-      items(items, key = { it.key }) { item ->
+      // Rows of one kind reuse each other's layout when they scroll in.
+      items(items, key = { it.key }, contentType = { it.contentType }) { item ->
         when (item) {
           is FeedItem.Day -> DayChip(item.date)
           FeedItem.Unread -> UnreadDivider()
@@ -206,6 +210,7 @@ fun MessageFeed(
               message = item.message,
               maybeExtras = extras[item.message.id],
               snapshot = snapshot,
+              usernames = usernames,
               isContinuation = item.isContinuation,
               onOpenThread = onOpenThread,
               onOpenFile = onOpenFile,
@@ -227,7 +232,15 @@ fun MessageFeed(
       JumpDownButton(belowCount) { scope.launch { listState.animateScrollToItem(0) } }
     }
   }
-  maybeViewed?.let { image -> ImageViewer(image) { maybeViewed = null } }
+  maybeViewedId?.let { fileId ->
+    ImageViewer(
+      // Oldest first, so swiping to the right goes back in time as in the feed above.
+      images = messages.flatMap { message -> extras[message.id]?.files.orEmpty() }.filter { it.isImage && it.maybeThumbnail != null },
+      startFileId = fileId,
+      onDownload = { file -> viewModel.act(ChatActions.download(file.conversation, file.message)) },
+      onDismiss = { maybeViewedId = null },
+    )
+  }
 }
 
 /** Messages newer than the item at `index` of the newest-first list (the "below" count). */
@@ -242,17 +255,13 @@ private suspend fun showAtTop(listState: LazyListState, index: Int) {
   listState.scrollBy(-(info.viewportEndOffset - info.viewportStartOffset - itemSize).toFloat())
 }
 
-/** Images open in the viewer, other local files in another app; anything else is downloaded first. */
-private fun openOrDownload(viewModel: MainViewModel, file: FileInfo, context: Context, onImage: (ViewedImage?) -> Unit) {
+/** A local file opens in another app; anything else is downloaded first (a second tap opens it). */
+private fun openOrDownload(viewModel: MainViewModel, file: FileInfo, context: Context) {
   val path = file.transfer.path
   when {
-    file.transfer.state == "local" && path != null && file.isImage -> onImage(ViewedImage(path, file.fileName, file.mediaType))
     file.transfer.state == "local" && path != null -> openFile(context, File(path), file.mediaType)
-    file.transfer.state == "downloading" -> onImage(null)
-    else -> {
-      viewModel.act(ChatActions.download(file.conversation, file.message))
-      onImage(null)
-    }
+    file.transfer.state == "downloading" -> {}
+    else -> viewModel.act(ChatActions.download(file.conversation, file.message))
   }
 }
 
@@ -344,10 +353,10 @@ private fun SwipeToReply(message: Message, maybeOnReply: ((Message) -> Unit)?, c
       }
     },
   ) {
-    Text(
-      "↩",
-      style = MaterialTheme.typography.titleLarge,
-      color = MaterialTheme.colorScheme.primary,
+    Icon(
+      painterResource(R.drawable.ic_reply),
+      contentDescription = null,
+      tint = MaterialTheme.colorScheme.primary,
       modifier = Modifier
         .align(Alignment.CenterStart)
         .padding(start = 16.dp)
@@ -364,6 +373,7 @@ private fun MessageRow(
   message: Message,
   maybeExtras: MessageExtras?,
   snapshot: ChatSnapshot?,
+  usernames: Set<String>,
   isContinuation: Boolean,
   onOpenThread: ((String) -> Unit)?,
   onOpenFile: (FileInfo) -> Unit,
@@ -454,12 +464,12 @@ private fun MessageRow(
     when {
       maybeExtras?.isDeleted == true -> Text(stringResource(R.string.message_deleted), fontStyle = FontStyle.Italic)
       message.body.isNotEmpty() && !isOnlyFileLabel(message.body, maybeExtras) ->
-        MessageText(message, snapshot, onOpenPermalink)
+        MessageText(message, snapshot, usernames, onOpenPermalink)
     }
     if (maybeExtras?.isSendFailed == true) NotSentLine(viewModel, message)
     val files = maybeExtras?.files.orEmpty()
     // Several pictures in one message: a grid instead of a long column of large previews.
-    val gridImages = files.filter { it.isImage && it.maybeThumbnailPng != null }.takeIf { it.size >= 2 }.orEmpty()
+    val gridImages = files.filter { it.isImage && it.maybeThumbnail != null }.takeIf { it.size >= 2 }.orEmpty()
     if (gridImages.isNotEmpty()) ImageGrid(gridImages, onOpenFile)
     files.filterNot { it in gridImages }.forEach { file -> FileAttachment(file, onOpenFile) }
     maybeExtras?.maybeLinkPreview?.let { LinkPreviewCard(it) }
@@ -502,8 +512,14 @@ private fun isOnlyFileLabel(body: String, maybeExtras: MessageExtras?): Boolean 
 @Composable
 private fun NotSentLine(viewModel: MainViewModel, message: Message) {
   Row(verticalAlignment = Alignment.CenterVertically) {
+    Icon(
+      painterResource(R.drawable.ic_warning),
+      contentDescription = null,
+      tint = MaterialTheme.colorScheme.error,
+      modifier = Modifier.padding(end = 4.dp).size(16.dp),
+    )
     Text(
-      "⚠ " + stringResource(R.string.not_sent),
+      stringResource(R.string.not_sent),
       color = MaterialTheme.colorScheme.error,
       style = MaterialTheme.typography.labelMedium,
       modifier = Modifier.weight(1f, fill = false),
@@ -519,7 +535,14 @@ private fun NotSentLine(viewModel: MainViewModel, message: Message) {
 
 @Composable
 private fun Markers(maybeExtras: MessageExtras?) {
-  if (maybeExtras?.isPinned == true) Text(" 📌", style = MaterialTheme.typography.bodySmall)
+  if (maybeExtras?.isPinned == true) {
+    Icon(
+      painterResource(R.drawable.ic_push_pin),
+      contentDescription = stringResource(R.string.message_pinned),
+      tint = MaterialTheme.colorScheme.onSurfaceVariant,
+      modifier = Modifier.padding(start = 4.dp).size(14.dp),
+    )
+  }
   if (maybeExtras?.priority == "urgent") {
     Text(" " + stringResource(R.string.priority_urgent), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
   } else if (maybeExtras?.priority == "important") {
@@ -549,7 +572,7 @@ private fun ReplyQuote(author: String, excerpt: String) {
  * open in the app, and highlighted mentions (stronger for the user's own name).
  */
 @Composable
-private fun MessageText(message: Message, snapshot: ChatSnapshot?, onOpenPermalink: (String) -> Unit) {
+private fun MessageText(message: Message, snapshot: ChatSnapshot?, usernames: Set<String>, onOpenPermalink: (String) -> Unit) {
   val context = LocalContext.current
   val style = SpanColors(
     link = MaterialTheme.colorScheme.primary,
@@ -559,7 +582,6 @@ private fun MessageText(message: Message, snapshot: ChatSnapshot?, onOpenPermali
   )
   val mutedColor = MaterialTheme.colorScheme.onSurfaceVariant
   val edited = if (message.isEdited) " " + stringResource(R.string.edited) else ""
-  val usernames = remember(snapshot) { snapshot?.users.orEmpty().map { it.username.lowercase() }.toSet() }
   val myUsername = snapshot?.me?.username.orEmpty()
   val text = remember(message.body, edited, style, mutedColor, usernames, myUsername) {
     val spans = textSpans(message.body, usernames, myUsername)
@@ -637,42 +659,76 @@ private fun systemText(message: Message, maybeExtras: MessageExtras?, snapshot: 
   }
 }
 
-/** Images as a large preview (tap for full screen), other files as a row with name and size. */
+/** Images as a large preview (tap for full screen), other files as a compact card. */
 @Composable
 private fun FileAttachment(file: FileInfo, onOpen: (FileInfo) -> Unit) {
+  val maybeThumbnail = file.maybeThumbnail
+  if (file.isImage && maybeThumbnail != null) {
+    ImagePreview(file, maybeThumbnail.bytes, onOpen)
+  } else {
+    FileCard(file, onOpen)
+  }
+}
+
+/**
+ * A picture at its own shape, fit into [PREVIEW_MAX_WIDTH] × [PREVIEW_MAX_HEIGHT]: portrait photos
+ * stay whole instead of being cut to a strip (#315). Its size is known from the thumbnail's header
+ * before the pixels are decoded, so the feed doesn't jump when they arrive.
+ */
+@Composable
+private fun ImagePreview(file: FileInfo, thumbnail: ByteArray, onOpen: (FileInfo) -> Unit) {
+  val ratio = remember(thumbnail) { Pictures.aspectRatio(thumbnail) ?: DEFAULT_PREVIEW_RATIO }
+    .coerceIn(MIN_PREVIEW_RATIO, MAX_PREVIEW_RATIO)
+  val width = minOf(PREVIEW_MAX_WIDTH, PREVIEW_MAX_HEIGHT * ratio)
+  Box(
+    Modifier
+      .padding(top = 4.dp)
+      .widthIn(max = width)
+      .fillMaxWidth()
+      .aspectRatio(ratio)
+      .clip(RoundedCornerShape(12.dp))
+      .background(MaterialTheme.colorScheme.surfaceVariant)
+      .clickable(onClickLabel = stringResource(R.string.file_open)) { onOpen(file) },
+  ) {
+    TransferOverlay(file) { Thumbnail(file, ContentScale.Crop) }
+  }
+}
+
+/** A file that isn't a picture: its symbol, name and size; tap to download or open. */
+@Composable
+private fun FileCard(file: FileInfo, onOpen: (FileInfo) -> Unit) {
   val context = LocalContext.current
-  val maybeThumbnail = rememberThumbnail(file.maybeThumbnailPng)
   Column(
     Modifier
       .padding(top = 4.dp)
-      .widthIn(max = 280.dp)
-      .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
+      .widthIn(max = PREVIEW_MAX_WIDTH)
+      .clip(RoundedCornerShape(12.dp))
+      .background(MaterialTheme.colorScheme.surfaceVariant)
       .clickable(onClickLabel = stringResource(R.string.file_open)) { onOpen(file) }
-      .padding(if (maybeThumbnail != null) 4.dp else 8.dp),
+      .padding(8.dp),
   ) {
-    if (maybeThumbnail != null) {
-      Image(
-        maybeThumbnail,
-        contentDescription = file.fileName,
-        contentScale = ContentScale.Crop,
-        modifier = Modifier.fillMaxWidth().heightIn(max = 220.dp),
-      )
-    }
-    if (maybeThumbnail == null || !file.isImage) {
-      Row(verticalAlignment = Alignment.CenterVertically) {
-        Text("📎", modifier = Modifier.padding(end = 6.dp))
-        Column {
-          Text(file.fileName, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
-          Text(
-            Formatter.formatShortFileSize(context, file.sizeBytes),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-          )
-        }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      Box(
+        Modifier.size(40.dp).background(MaterialTheme.colorScheme.secondaryContainer, RoundedCornerShape(8.dp)),
+        contentAlignment = Alignment.Center,
+      ) {
+        Icon(
+          painterResource(if (file.isImage) R.drawable.ic_image else R.drawable.ic_description),
+          contentDescription = null,
+          tint = MaterialTheme.colorScheme.onSecondaryContainer,
+        )
+      }
+      Column(Modifier.padding(start = 10.dp)) {
+        Text(file.fileName, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
+        Text(
+          Formatter.formatShortFileSize(context, file.sizeBytes),
+          style = MaterialTheme.typography.labelSmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
       }
     }
     file.transfer.maybeProgress?.let { progress ->
-      LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
+      LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
     }
     if (file.transfer.state == "failed") {
       Text(stringResource(R.string.file_failed), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
@@ -683,11 +739,10 @@ private fun FileAttachment(file: FileInfo, onOpen: (FileInfo) -> Unit) {
 /** Square tiles, two per row; a tap opens the picture like a single one. */
 @Composable
 private fun ImageGrid(images: List<FileInfo>, onOpen: (FileInfo) -> Unit) {
-  Column(Modifier.padding(top = 4.dp).widthIn(max = 280.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+  Column(Modifier.padding(top = 4.dp).widthIn(max = PREVIEW_MAX_WIDTH), verticalArrangement = Arrangement.spacedBy(4.dp)) {
     for (row in images.chunked(2)) {
       Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         for (image in row) {
-          val maybeThumbnail = rememberThumbnail(image.maybeThumbnailPng)
           Box(
             Modifier
               .weight(1f)
@@ -696,12 +751,7 @@ private fun ImageGrid(images: List<FileInfo>, onOpen: (FileInfo) -> Unit) {
               .background(MaterialTheme.colorScheme.surfaceVariant)
               .clickable(onClickLabel = stringResource(R.string.file_open)) { onOpen(image) },
           ) {
-            maybeThumbnail?.let {
-              Image(it, contentDescription = image.fileName, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-            }
-            image.transfer.maybeProgress?.let { progress ->
-              LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter))
-            }
+            TransferOverlay(image) { Thumbnail(image, ContentScale.Crop) }
           }
         }
         // An odd last picture keeps its tile size.
@@ -711,19 +761,28 @@ private fun ImageGrid(images: List<FileInfo>, onOpen: (FileInfo) -> Unit) {
   }
 }
 
-/** Decodes a PNG thumbnail once per content, not on every recomposition. */
+/** A preview's picture, decoded in the background; the tile's own color stands in until then. */
 @Composable
-fun rememberThumbnail(maybePng: List<Int>?): ImageBitmap? = remember(maybePng) {
-  maybePng?.let { bytes ->
-    val array = ByteArray(bytes.size) { bytes[it].toByte() }
-    BitmapFactory.decodeByteArray(array, 0, array.size)?.asImageBitmap()
+private fun Thumbnail(file: FileInfo, contentScale: ContentScale) {
+  val maybeBitmap by rememberThumbnail(thumbnailKey(file), file.maybeThumbnail?.bytes, THUMBNAIL_DECODE_PX)
+  maybeBitmap?.let { bitmap ->
+    Image(bitmap, contentDescription = file.fileName, contentScale = contentScale, modifier = Modifier.fillMaxSize())
+  }
+}
+
+/** The picture with an upload's or download's progress along its bottom edge. */
+@Composable
+private fun BoxScope.TransferOverlay(file: FileInfo, picture: @Composable () -> Unit) {
+  picture()
+  file.transfer.maybeProgress?.let { progress ->
+    LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter))
   }
 }
 
 @Composable
 private fun LinkPreviewCard(preview: LinkPreview) {
   val context = LocalContext.current
-  val maybeImage = rememberThumbnail(preview.maybeImage)
+  val maybeImage by rememberThumbnail("link:${preview.url}", preview.maybeImage?.bytes, THUMBNAIL_DECODE_PX)
   Row(
     Modifier
       .padding(top = 4.dp)
@@ -733,7 +792,14 @@ private fun LinkPreviewCard(preview: LinkPreview) {
   ) {
     Box(Modifier.width(3.dp).heightIn(min = 48.dp).background(MaterialTheme.colorScheme.primary))
     Column(Modifier.padding(8.dp)) {
-      maybeImage?.let { Image(it, contentDescription = null, modifier = Modifier.heightIn(max = 120.dp).size(width = 280.dp, height = 120.dp), contentScale = ContentScale.Crop) }
+      maybeImage?.let {
+        Image(
+          it,
+          contentDescription = null,
+          modifier = Modifier.size(width = PREVIEW_MAX_WIDTH, height = 120.dp).clip(RoundedCornerShape(8.dp)),
+          contentScale = ContentScale.Crop,
+        )
+      }
       preview.maybeSiteName?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
       preview.maybeTitle?.let { Text(it, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis) }
       preview.maybeDescription?.let { Text(it, style = MaterialTheme.typography.bodySmall, maxLines = 3, overflow = TextOverflow.Ellipsis) }

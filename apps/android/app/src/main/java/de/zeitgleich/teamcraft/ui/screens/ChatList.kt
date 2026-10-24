@@ -19,9 +19,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -61,6 +65,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.contentDescription
@@ -235,6 +240,7 @@ internal fun MainScaffold(
 ) {
   val hasDirect = maybeConversations.orEmpty().any { it.isDirect }
   Scaffold(
+    contentWindowInsets = ScreenInsets,
     topBar = { maybeSelectionBar?.invoke() ?: BrandTopBar(brand, accountName, onSearch = onSearch, onAccount = onAccount) },
     bottomBar = {
       if (maybeSelectionBar == null) MainNavigation(tab, maybeConversations.orEmpty(), onSelect = onTab)
@@ -390,6 +396,7 @@ private fun BrandTopBar(brand: MainBrand, accountName: String, onSearch: () -> U
         InitialAvatar(accountName, size = 32.dp)
       }
     },
+    windowInsets = TopBarInsets,
     colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
   )
 }
@@ -398,7 +405,11 @@ private fun BrandTopBar(brand: MainBrand, accountName: String, onSearch: () -> U
 @Composable
 private fun MainNavigation(selected: ChatTab, conversations: List<ConversationItem>, onSelect: (ChatTab) -> Unit) {
   val (direct, channels) = conversations.partition { it.isDirect }
-  NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
+  // In landscape the bar's items stay clear of a side cutout too (#309).
+  NavigationBar(
+    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+    windowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal),
+  ) {
     for (tab in ChatTab.entries) {
       val label = stringResource(
         when (tab) {
@@ -783,10 +794,11 @@ private fun TitleLine(conversation: ConversationItem, maybeEntry: ChatListEntry?
     )
     if (conversation.isMuted) {
       val mutedLabel = stringResource(R.string.chat_muted)
-      Text(
-        "🔕",
-        style = MaterialTheme.typography.labelSmall,
-        modifier = Modifier.padding(start = 4.dp).semantics { contentDescription = mutedLabel },
+      Icon(
+        painterResource(R.drawable.ic_notifications_off),
+        contentDescription = mutedLabel,
+        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 4.dp).size(14.dp),
       )
     }
     maybeEntry?.let { entry ->
@@ -953,6 +965,7 @@ private fun SelectionTopBar(
   val actions = selectionActions(selected)
   TopAppBar(
     title = { Text(pluralStringResource(R.plurals.chats_selected, selected.size, selected.size)) },
+    windowInsets = TopBarInsets,
     navigationIcon = {
       IconButton(onClick = onDone) { Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.cancel)) }
     },
