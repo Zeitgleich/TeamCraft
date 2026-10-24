@@ -396,9 +396,24 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_job_that_takes_too_long_is_busy_and_keeps_its_permit_until_it_ends() {
       let permits = Arc::new(Semaphore::new(1));
+      // The job blocks until the sender is used or dropped (also when an assertion fails), so it
+      // can't finish before the timeout and never outlives the test.
       let (release, wait) = std::sync::mpsc::channel::<()>();
-      // Blocks until released: it can't finish before the timeout.
-      let result = run_limited(&permits, Duration::from_secs(5), move || wait.recv().is_ok()).await;
+      let call = tokio::spawn({
+        let permits = Arc::clone(&permits);
+        async move { run_limited(&permits, Duration::from_secs(5), move || wait.recv().is_ok()).await }
+      });
+      // Paused time doesn't advance on its own while a blocking task runs: move the clock by hand,
+      // in steps, until the call gave up (bounded: 20 steps of a second cover the 5 s timeout).
+      for _ in 0..20 {
+        if call.is_finished() {
+          break;
+        }
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+      }
+      assert!(call.is_finished(), "the timeout did not fire");
+      let result = call.await.unwrap();
       assert!(matches!(result, Err(ApiError::Busy { .. })), "{result:?}");
       assert_eq!(permits.available_permits(), 0);
       release.send(()).unwrap();

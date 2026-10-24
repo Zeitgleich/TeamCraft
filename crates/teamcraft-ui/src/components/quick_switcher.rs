@@ -820,6 +820,8 @@ mod tests {
       id: id_from_raw(id),
       name: name.into(),
       hue: 0,
+      maybe_color: None,
+      maybe_image_version: None,
       unread_count: 0,
       mention_count: 0,
     }

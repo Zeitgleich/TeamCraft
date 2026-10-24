@@ -23,7 +23,8 @@ use teamcraft_client_api::live::LiveSnapshot;
 use teamcraft_client_api::model::{
   Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, DeviceSetup,
   JoinableSpace, MembershipIssue, Message, MessageKind, PENDING_ID_BIT, PresenceStatus, Reaction,
-  SidebarCategory, Space, SpaceId, SystemEvent, ThreadId, ThreadSummary, TimestampMs, User, UserId, hue_from_hex,
+  SidebarCategory, Space, SpaceId, SystemEvent, ThreadId, ThreadSummary, TimestampMs, User, UserId,
+  hue_from_hex,
 };
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
