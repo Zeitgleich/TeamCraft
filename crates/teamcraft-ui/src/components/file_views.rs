@@ -1,6 +1,7 @@
-//! Files and link previews: the cards under a message, the files panel and the image gallery.
-//! Bytes never pass through the page except small thumbnails: downloads run in the client core,
-//! which reports progress and the local path (`FileInfo::transfer`).
+//! Files and link previews: the cards and image albums under a message and the files panel.
+//! Downloads run in the client core, which reports progress and the local path
+//! (`FileInfo::transfer`); the page holds small thumbnails, and full images only while the lightbox
+//! (`components::lightbox`) shows them.
 
 use leptos::prelude::*;
 use teamcraft_client_api::actions::{FileFailure, FileInfo, FileTransfer, LinkPreview, ShareLinkOptions};
@@ -8,17 +9,67 @@ use teamcraft_client_api::admin::format_bytes;
 
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_actions::copy_to_clipboard;
-use crate::components::modal::Modal;
 use crate::i18n::use_i18n;
-use crate::model::{ConversationId, MessageId};
+use crate::lightbox::ImageKey;
+use crate::model::ConversationId;
+use crate::object_url::ObjectUrl;
 use crate::state::{Overlay, SidePanel, use_app_state};
 
-/// The files attached to one message.
+/// Most tiles an album shows; the last one counts the images it doesn't show ("+3").
+const MAX_ALBUM_TILES: usize = 4;
+
+/// The files attached to one message: several images form an album, everything else gets a card.
 #[component]
 pub fn MessageFiles(files: Vec<FileInfo>) -> impl IntoView {
+  let is_album_image = |file: &FileInfo| ImageKey::of(file).is_some() && file.maybe_thumbnail_png.is_some();
+  let (album, cards): (Vec<FileInfo>, Vec<FileInfo>) =
+    match files.iter().filter(|file| is_album_image(file)).count() {
+      0 | 1 => (Vec::new(), files),
+      _ => files.into_iter().partition(is_album_image),
+    };
   view! {
     <div class="msg-files">
-      {files.into_iter().map(|file| view! { <FileCard file=file /> }).collect_view()}
+      {(!album.is_empty()).then(|| view! { <AlbumGrid images=album /> })}
+      {cards.into_iter().map(|file| view! { <FileCard file=file /> }).collect_view()}
+    </div>
+  }
+}
+
+/// The images of a message as a grid of thumbnails; a tile opens the lightbox on its image.
+#[component]
+fn AlbumGrid(images: Vec<FileInfo>) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let count = images.len();
+  let hidden = count.saturating_sub(MAX_ALBUM_TILES);
+  let tiles = images
+    .into_iter()
+    .take(MAX_ALBUM_TILES)
+    .enumerate()
+    .filter_map(|(index, file)| {
+      let key = ImageKey::of(&file)?;
+      let url = ObjectUrl::from_bytes(file.maybe_thumbnail_png.as_deref()?, "image/png")?;
+      let src = url.as_str().to_owned();
+      // Revoked when the row leaves the screen.
+      StoredValue::new_local(url);
+      let conversation = file.conversation;
+      let (position, total, name) = ((index + 1).to_string(), count.to_string(), file.file_name);
+      let maybe_more = (index + 1 == MAX_ALBUM_TILES && hidden > 0).then(|| format!("+{hidden}"));
+      Some(view! {
+        <button
+          class="album-tile"
+          aria-label=move || i18n.t_with("album-open", &[("index", &position), ("count", &total), ("name", &name)])
+          on:click=move |_| state.overlay.set(Overlay::Lightbox(conversation, key))
+        >
+          <img src=src alt="" loading="lazy" />
+          {maybe_more.map(|more| view! { <span class="album-more" aria-hidden="true">{more}</span> })}
+        </button>
+      })
+    })
+    .collect_view();
+  view! {
+    <div class="msg-album" data-tiles=count.min(MAX_ALBUM_TILES).to_string()>
+      {tiles}
     </div>
   }
 }
@@ -30,10 +81,14 @@ pub fn FileCard(file: FileInfo) -> impl IntoView {
   let i18n = use_i18n();
   let (conversation, message) = (file.conversation, file.message);
   let is_image = file.media_type.starts_with("image/");
+  let maybe_key = ImageKey::of(&file);
   let thumbnail = file
     .maybe_thumbnail_png
     .as_deref()
-    .and_then(|bytes| blob_url(bytes, "image/png"));
+    .and_then(|bytes| ObjectUrl::from_bytes(bytes, "image/png"));
+  let maybe_src = thumbnail.as_ref().map(|url| url.as_str().to_owned());
+  // Revoked when the card leaves the screen.
+  StoredValue::new_local(thumbnail);
   let file_id = file.file_id.clone();
   let name = file.file_name.clone();
   let share_link = Memo::new(move |_| {
@@ -72,21 +127,22 @@ pub fn FileCard(file: FileInfo) -> impl IntoView {
       .into_any()
     },
   };
-  let open_gallery = move |_| state.overlay.set(Overlay::Gallery(conversation, message));
   view! {
     <div class="file-card">
-      {thumbnail
-        .map(|url| {
-          view! {
-            <button class="file-thumb" aria-label=move || i18n.t("file-preview") on:click=open_gallery>
-              <img src=url alt=name.clone() loading="lazy" />
-            </button>
-          }
-          .into_any()
-        })
-        .unwrap_or_else(|| {
-          view! { <span class="file-icon"><Icon name=if is_image { IconName::Image } else { IconName::File } /></span> }.into_any()
-        })}
+      {match (maybe_src, maybe_key) {
+        (Some(src), Some(key)) => view! {
+          <button
+            class="file-thumb"
+            aria-label=move || i18n.t("file-preview")
+            on:click=move |_| state.overlay.set(Overlay::Lightbox(conversation, key))
+          >
+            <img src=src alt=name.clone() loading="lazy" />
+          </button>
+        }
+        .into_any(),
+        (Some(src), None) => view! { <span class="file-thumb is-static"><img src=src alt=name.clone() loading="lazy" /></span> }.into_any(),
+        (None, _) => view! { <span class="file-icon"><Icon name=if is_image { IconName::Image } else { IconName::File } /></span> }.into_any(),
+      }}
       <div class="file-meta">
         <span class="file-name" translate="no">{file.file_name.clone()}</span>
         <span class="file-size">{format_bytes(file.size_bytes)}</span>
@@ -175,71 +231,6 @@ pub fn FilesPanel(conversation: ConversationId) -> impl IntoView {
         </Show>
       </div>
     </aside>
-  }
-}
-
-/// A larger look at the images of a conversation, with previous/next.
-#[component]
-pub fn Gallery(conversation: ConversationId, start: MessageId) -> impl IntoView {
-  let state = use_app_state();
-  let i18n = use_i18n();
-  let images = Memo::new(move |_| {
-    state
-      .read(|backend| backend.conversation_files(conversation))
-      .into_iter()
-      .filter(|file| file.media_type.starts_with("image/"))
-      .collect::<Vec<_>>()
-  });
-  let index = RwSignal::new(None::<usize>);
-  let current = move || {
-    let list = images.get();
-    let at = index
-      .get()
-      .unwrap_or_else(|| list.iter().position(|file| file.message == start).unwrap_or(0));
-    list.get(at).cloned().map(|file| (at, list.len(), file))
-  };
-  let step = move |delta: isize| {
-    let len = images.with(Vec::len) as isize;
-    if len == 0 {
-      return;
-    }
-    let at = current().map_or(0, |(at, _, _)| at) as isize;
-    index.set(Some((at + delta).rem_euclid(len) as usize));
-  };
-  view! {
-    <Modal labelled_by="gallery-title" class="modal-gallery">
-      <div on:keydown=move |ev| match ev.key().as_str() {
-        "ArrowLeft" => step(-1),
-        "ArrowRight" => step(1),
-        _ => {},
-      }>
-        <header class="modal-head">
-          <h2 id="gallery-title" translate="no">
-            {move || current().map(|(_, _, file)| file.file_name).unwrap_or_default()}
-          </h2>
-          <button class="icon-btn" data-autofocus aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
-            <Icon name=IconName::Close />
-          </button>
-        </header>
-        <div class="gallery-body">
-          <button class="icon-btn" aria-label=move || i18n.t("gallery-previous") on:click=move |_| step(-1)>
-            <Icon name=IconName::ChevronRight />
-          </button>
-          {move || {
-            current().map(|(_, _, file)| {
-              match file.maybe_thumbnail_png.as_deref().and_then(|bytes| blob_url(bytes, "image/png")) {
-                Some(url) => view! { <img class="gallery-image" src=url alt=file.file_name.clone() /> }.into_any(),
-                None => view! { <Icon name=IconName::Image /> }.into_any(),
-              }
-            })
-          }}
-          <button class="icon-btn" aria-label=move || i18n.t("gallery-next") on:click=move |_| step(1)>
-            <Icon name=IconName::ChevronRight />
-          </button>
-        </div>
-        <p class="gallery-count">{move || current().map(|(at, len, _)| format!("{} / {len}", at + 1)).unwrap_or_default()}</p>
-      </div>
-    </Modal>
   }
 }
 
