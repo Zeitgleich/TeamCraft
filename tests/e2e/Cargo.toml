@@ -26,9 +26,11 @@ e2e = [
   "dep:serde_json",
   "dep:sqlx",
   "dep:tokio",
+  "dep:tokio-tungstenite",
+  "dep:futures-util",
 ]
 # Drives the web client in headless Chromium (needs a trunk build of teamcraft-ui, see README.md).
-browser = ["e2e", "dep:chromiumoxide", "dep:futures-util"]
+browser = ["e2e", "dep:chromiumoxide"]
 
 [dependencies]
 teamcraft-client-api = { path = "../../crates/teamcraft-client-api", optional = true }
@@ -45,4 +47,7 @@ sqlx = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "process", "io-util", "fs", "net", "time", "macros", "sync"] }
 # Headless Chromium over the DevTools protocol: no driver binary, no Node, Rust like the rest of the tests.
 chromiumoxide = { version = "0.9", optional = true, default-features = false }
-futures-util = { version = "0.3", optional = true, default-features = false, features = ["std"] }
+futures-util = { version = "0.3", optional = true, default-features = false, features = ["std", "sink"] }
+# Raw gateway connections (resume with a chosen sequence number, a consumer that stops reading); the
+# same version the core and the server use.
+tokio-tungstenite = { version = "0.30", optional = true }

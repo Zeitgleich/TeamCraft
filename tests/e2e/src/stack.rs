@@ -8,13 +8,15 @@ use std::time::Duration;
 use anyhow::Context;
 use sqlx::Connection;
 
-use crate::process::{Service, binary, free_tcp_port, free_udp_port};
+use crate::process::{Service, any_address, binary, free_tcp_port, free_udp_port};
+use crate::relay::TcpRelay;
 use crate::tokens::UserTokens;
 
 pub const KEYCLOAK_URL: &str = "http://127.0.0.1:8080";
 pub const ISSUER: &str = "http://127.0.0.1:8080/realms/teamcraft-dev";
 pub const MAILPIT_URL: &str = "http://127.0.0.1:8025";
 const POSTGRES_ADMIN_URL: &str = "postgres://teamcraft:teamcraft-dev-only@127.0.0.1:5432/postgres";
+const POSTGRES_ADDR: &str = "127.0.0.1:5432";
 const GARAGE_URL: &str = "http://127.0.0.1:3900";
 const SFU_REGISTRATION_TOKEN: &str = "e2e-sfu-registration-token-0123456789";
 const GUEST_TOKEN_SECRET: &str = "e2e-guest-token-secret-0123456789abcdef";
@@ -45,6 +47,10 @@ pub struct Stack {
 struct OwnedServer {
   database_name: String,
   server: Service,
+  /// What the server was started with, to start it again ([`Stack::respawn_server`]).
+  envs: Vec<(String, String)>,
+  /// Between the server and Postgres when the test asked for it ([`StackBuilder::with_database_relay`]).
+  maybe_database_relay: Option<TcpRelay>,
 }
 
 /// The SFU process and what clients need to talk to it.
@@ -65,6 +71,7 @@ pub struct StackBuilder {
   web_dir: Option<PathBuf>,
   maybe_port: Option<u16>,
   extra_env: Vec<(String, String)>,
+  has_database_relay: bool,
 }
 
 impl StackBuilder {
@@ -110,6 +117,13 @@ impl StackBuilder {
   /// `http://127.0.0.1:8082/*`, so browser tests must use 8082.
   pub fn with_port(mut self, port: u16) -> Self {
     self.maybe_port = Some(port);
+    self
+  }
+
+  /// Connects the server to Postgres through a [`TcpRelay`] the test can cut
+  /// ([`Stack::database_relay`]).
+  pub fn with_database_relay(mut self) -> Self {
+    self.has_database_relay = true;
     self
   }
 
@@ -184,6 +198,74 @@ impl Stack {
       .unwrap_or_default()
   }
 
+  /// The server process; panics for a deployed instance.
+  pub fn server(&mut self) -> &mut Service {
+    &mut self.owned().server
+  }
+
+  /// The relay between server and Postgres; panics unless the stack was built
+  /// [`StackBuilder::with_database_relay`].
+  pub fn database_relay(&mut self) -> &TcpRelay {
+    self
+      .owned()
+      .maybe_database_relay
+      .as_ref()
+      .expect("the stack was built without with_database_relay()")
+  }
+
+  /// Stops the server with SIGTERM (a deploy or `docker stop`), starts it again on the same port
+  /// and database and waits until it answers. Returns how long the shutdown took.
+  pub async fn restart_server(&mut self) -> Duration {
+    let shutdown = self
+      .server()
+      .terminate(START_TIMEOUT)
+      .await
+      .unwrap_or_else(|error| panic!("stopping the server: {error:#}"));
+    self
+      .respawn_server()
+      .await
+      .unwrap_or_else(|error| panic!("starting the server again: {error:#}"));
+    shutdown
+  }
+
+  /// Starts the server process again (after it exited or was terminated) and waits for `/healthz`.
+  pub async fn respawn_server(&mut self) -> anyhow::Result<()> {
+    self.spawn_server()?;
+    self.wait_for_server(START_TIMEOUT).await
+  }
+
+  /// Starts the server process again without waiting for it.
+  pub fn spawn_server(&mut self) -> anyhow::Result<()> {
+    let dir = self.dir.clone();
+    // The log of the earlier run is kept next to the new one.
+    let runs = std::fs::read_dir(&dir)?
+      .filter_map(Result::ok)
+      .filter(|entry| entry.file_name().to_string_lossy().starts_with("server"))
+      .count();
+    let owned = self.owned();
+    owned.server = Service::spawn(
+      &format!("server-{runs}"),
+      &binary("teamcraft-server"),
+      &[],
+      &owned.envs,
+      &dir,
+    )?;
+    Ok(())
+  }
+
+  /// Waits until the server answers `/healthz`; fails early if it exits.
+  pub async fn wait_for_server(&mut self, timeout: Duration) -> anyhow::Result<()> {
+    let url = format!("{}/healthz", self.base_url);
+    self.server().wait_for_http(&url, timeout).await
+  }
+
+  fn owned(&mut self) -> &mut OwnedServer {
+    self
+      .maybe_owned
+      .as_mut()
+      .expect("a deployed instance has no server process")
+  }
+
   /// Stops the processes and drops the database.
   pub async fn stop(self) {
     let Self {
@@ -197,11 +279,14 @@ impl Stack {
     let Some(OwnedServer {
       database_name,
       server,
+      maybe_database_relay,
+      ..
     }) = maybe_owned
     else {
       return;
     };
     drop(server);
+    drop(maybe_database_relay);
     // Best effort: the runner script also removes leftover e2e databases.
     if let Ok(mut connection) = sqlx::PgConnection::connect(POSTGRES_ADMIN_URL).await {
       let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -229,11 +314,20 @@ impl Stack {
     let port = settings.maybe_port.unwrap_or_else(free_tcp_port);
     let base_url = format!("http://127.0.0.1:{port}");
     let sfu_port = free_udp_port();
+    let maybe_database_relay = if settings.has_database_relay {
+      Some(TcpRelay::start(POSTGRES_ADDR).await?)
+    } else {
+      None
+    };
+    let database_port = maybe_database_relay.as_ref().map_or(5432, |relay| relay.port);
     let mut envs = vec![
-      ("TEAMCRAFT_SERVER__LISTEN_ADDR".into(), format!("[::]:{port}")),
+      (
+        "TEAMCRAFT_SERVER__LISTEN_ADDR".into(),
+        format!("{}:{port}", any_address()),
+      ),
       (
         "TEAMCRAFT_DATABASE__URL".into(),
-        format!("postgres://teamcraft:teamcraft-dev-only@127.0.0.1:5432/{database_name}"),
+        format!("postgres://teamcraft:teamcraft-dev-only@127.0.0.1:{database_port}/{database_name}"),
       ),
       // Parallel tests each run a server: small pools keep their sum below the dev Postgres limit
       // (the intermittent enrollment 500 was "too many clients" under parallel runs).
@@ -346,6 +440,8 @@ impl Stack {
       maybe_owned: Some(OwnedServer {
         database_name,
         server,
+        envs,
+        maybe_database_relay,
       }),
     })
   }
