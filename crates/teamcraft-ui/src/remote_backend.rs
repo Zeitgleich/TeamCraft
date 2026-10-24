@@ -18,8 +18,9 @@ use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
 use serde_json::json;
 use teamcraft_client_api::actions::{
-  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
-  OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
+  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, LinkedMessage, MessageExtras, NewChannel,
+  NewSpace, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges,
+  SpaceInvite,
 };
 use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
 use teamcraft_client_api::calls::BackgroundImageInfo;
@@ -38,6 +39,7 @@ use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, WebPushKeyRespons
 use crate::auth::Authenticator;
 use crate::auth::tauri::{call, listen, listen_text};
 use crate::feedback::{ActionFailure, ActionTicket, report_background_failure, report_failure};
+use crate::route::Route;
 
 /// Messages fetched per request. Feeds are read in 2-row windows by the list, so pages keep the
 /// number of requests small while scrolling.
@@ -403,7 +405,7 @@ impl RemoteChat {
   /// changed (they read more than the snapshot).
   fn plan_refresh(&self, changes: SnapshotChanges) -> RefreshPlan {
     let mut plan = RefreshPlan::default();
-    {
+    let applied = {
       let mut mirror = self.mirror.borrow_mut();
       let mirror = &mut *mirror;
       mirror.cursor = changes.cursor;
@@ -443,13 +445,26 @@ impl RemoteChat {
           feed.is_stale = true;
         }
       }
-    }
+      applied
+    };
     for (key, slot) in self.answers.borrow_mut().iter_mut() {
+      let query = serde_json::from_str::<ChatQuery>(key);
+      // A message link's preview only changes with its own conversation: other changes keep
+      // the answer it has (#319, no rescans on every message elsewhere).
+      if let Ok(ChatQuery::LinkedMessage { link }) = &query
+        && slot.maybe_answer.is_some()
+        && !slot.is_loading
+        && Route::from_permalink(link)
+          .and_then(|route| route.conversation())
+          .is_some_and(|conversation| !applied.touches(conversation))
+      {
+        continue;
+      }
       if slot.is_loading {
         slot.is_outdated = true;
         continue;
       }
-      match (slot.is_used, serde_json::from_str::<ChatQuery>(key)) {
+      match (slot.is_used, query) {
         (true, Ok(query)) => {
           slot.is_loading = true;
           plan.queries.push((key.clone(), query));
@@ -702,6 +717,15 @@ impl ChatBackend for RemoteChat {
       link: link.to_owned(),
     }) {
       Some(ChatAnswer::PermalinkTarget { maybe_target }) => maybe_target,
+      _ => None,
+    }
+  }
+
+  fn linked_message(&self, link: &str) -> Option<LinkedMessage> {
+    match self.ask(ChatQuery::LinkedMessage {
+      link: link.to_owned(),
+    }) {
+      Some(ChatAnswer::LinkedMessage { maybe_linked }) => maybe_linked,
       _ => None,
     }
   }

@@ -21,8 +21,9 @@ use teamcraft_proto::{
 };
 
 use teamcraft_client_api::actions::{
-  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
-  OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
+  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, LinkedMessage, MessageExtras, NewChannel,
+  NewSpace, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges,
+  SpaceInvite,
 };
 use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy};
 
@@ -373,6 +374,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
 
   fn resolve_permalink(&self, link: &str) -> Option<PermalinkTarget> {
     self.chat.resolve_permalink(link)
+  }
+
+  fn linked_message(&self, link: &str) -> Option<LinkedMessage> {
+    self.chat.linked_message(link)
   }
 
   fn mark_unread(&self, conversation: ConversationId, from: MessageId) {

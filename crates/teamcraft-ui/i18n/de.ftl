@@ -241,6 +241,10 @@ shortcut-back-forward = Zurück oder vorwärts
 shortcut-close = Dialog oder Seitenbereich schließen
 shortcut-messages = Zwischen Nachrichten wechseln
 shortcut-open-thread = Thread der markierten Nachricht öffnen
+shortcut-quote-message = Markierte Nachricht in einer Antwort zitieren
+shortcut-react-message = Auf die markierte Nachricht reagieren
+shortcut-message-menu = Weitere Aktionen für die markierte Nachricht
+shortcut-edit-last = Deine letzte Nachricht bearbeiten (im leeren Eingabefeld)
 
 ## Anrufe und Huddles
 call-start-audio = Audioanruf starten
@@ -1174,6 +1178,7 @@ composer-file-too-large = { $name } überschreitet das Upload-Limit von { $limit
 composer-file-unreadable = { $name } konnte nicht gelesen werden.
 permalink-label = Nachricht in { $name }
 permalink-unavailable = Link zu einer Unterhaltung, in der du nicht Mitglied bist
+permalink-hidden = Nachrichtenlink
 route-unavailable = Diese Seite ist nicht verfügbar. Vielleicht wurde sie entfernt, oder du hast keinen Zugriff darauf.
 
 # Workspace management
@@ -2257,3 +2262,19 @@ callback-mismatch-title = Diese Anmeldung wurde nicht hier gestartet
 callback-mismatch-body = Die Antwort passte nicht zur Anmeldung, die in der App gestartet wurde, und wurde zu deiner Sicherheit ignoriert. Starte die Anmeldung in der App erneut.
 callback-failed-title = Anmeldung fehlgeschlagen
 callback-failed-body = Die Anmeldung konnte nicht abgeschlossen werden. Details findest du in der App; versuche es dort erneut.
+
+## Message toolbar and action sheet (#320)
+action-with-shortcut = { $action } ({ $shortcut })
+action-copy-text = Text kopieren
+action-copied = Kopiert
+action-copy-failed = Konnte nicht in die Zwischenablage kopieren
+action-copy-link-unready = Der Link ist noch nicht bereit. Versuch es gleich noch einmal.
+message-action-sheet = Aktionen für diese Nachricht
+
+## Previews of linked messages (#319)
+linked-message-from = In { $conversation }
+linked-message-from-thread = Aus einem Thread in { $conversation }
+linked-message-open = Zur Nachricht
+linked-message-deleted = Diese Nachricht wurde gelöscht
+linked-message-not-loaded = Nachricht nicht geladen
+linked-message-unavailable = Nachricht aus einem Gespräch, das du nicht sehen kannst

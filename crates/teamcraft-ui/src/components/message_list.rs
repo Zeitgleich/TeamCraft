@@ -13,6 +13,7 @@ use crate::clock::format_date;
 use crate::components::empty_state::{EmptyAction, EmptyState};
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_row::MessageRow;
+use crate::components::message_toolbar::{MessageToolbar, ToolbarHost};
 use crate::components::skeleton::MessageSkeleton;
 use crate::feed_motion::{FeedMotion, Shown, newest_confirmed};
 use crate::i18n::use_i18n;
@@ -116,6 +117,7 @@ pub fn MessageList(
   });
   let container = NodeRef::<html::Div>::new();
   let rows = NodeRef::<html::Div>::new();
+  let toolbar = ToolbarHost::provide(container);
 
   let is_log = state
     .read(|backend| backend.conversation(conversation))
@@ -252,6 +254,7 @@ pub fn MessageList(
     if !changed {
       return;
     }
+    toolbar.reposition();
     if stick_to_bottom.get_untracked() {
       layout_rev.update(|rev| *rev += 1);
       defer_while_alive(list_id, scroll_to_bottom);
@@ -478,6 +481,7 @@ pub fn MessageList(
           </For>
         </div>
         <div class="spacer" style:height=move || format!("{}px", window.get().pad_bottom)></div>
+        <MessageToolbar host=toolbar />
       </div>
       <Show when=move || !stick_to_bottom.get() fallback=|| ()>
         <button
@@ -590,7 +594,11 @@ fn newest_confirmed_of(
 }
 
 /// Arrow keys move between rendered rows; Home/End jump to the oldest/newest loaded row.
-fn handle_list_keys(ev: &web_sys::KeyboardEvent, container: NodeRef<html::Div>, rows: NodeRef<html::Div>) {
+pub(crate) fn handle_list_keys(
+  ev: &web_sys::KeyboardEvent,
+  container: NodeRef<html::Div>,
+  rows: NodeRef<html::Div>,
+) {
   let key = ev.key();
   if !matches!(key.as_str(), "ArrowUp" | "ArrowDown") {
     return;

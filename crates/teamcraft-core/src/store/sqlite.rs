@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
-use teamcraft_proto::{ClientMessageId, ConversationId, Id};
+use teamcraft_proto::{ClientMessageId, ConversationId, Id, MessageId};
 use zeroize::Zeroizing;
 
 use super::{DatabaseKeySource, LocalStore, MessageFilter, StoreError, StoredMessage, Table};
@@ -168,6 +168,24 @@ impl LocalStore for SqlCipherStore {
           conversation.snowflake().get(),
           client_message_id.as_bytes().as_slice()
         ],
+        |row| row.get(0),
+      )
+      .optional()
+      .map_err(database_error)?;
+    maybe_record.map(|record| decode_message(&record)).transpose()
+  }
+
+  /// Server messages sort by their ID (`sort_group` 0), so the order index finds one directly.
+  fn message_by_server_id(
+    &self,
+    conversation: ConversationId,
+    server_id: MessageId,
+  ) -> Result<Option<StoredMessage>, StoreError> {
+    let maybe_record: Option<Vec<u8>> = self
+      .lock()
+      .query_row(
+        "SELECT record FROM messages WHERE conversation_id = ?1 AND sort_group = 0 AND sort_value = ?2",
+        params![conversation.snowflake().get(), server_id.snowflake().get()],
         |row| row.get(0),
       )
       .optional()

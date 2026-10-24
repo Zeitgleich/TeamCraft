@@ -16,8 +16,9 @@ use teamcraft_proto::{
 };
 
 use crate::actions::{
-  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
-  OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
+  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, LinkedMessage, MessageExtras, NewChannel,
+  NewSpace, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges,
+  SpaceInvite,
 };
 use crate::activity::ActivityFeed;
 use crate::admin::{
@@ -229,6 +230,12 @@ pub trait ChatBackend {
   }
   /// Where a permalink points, if the user is a member there.
   fn resolve_permalink(&self, _link: &str) -> Option<PermalinkTarget> {
+    None
+  }
+  /// The message a permalink points to, for its embedded preview, read from this device's store
+  /// and only if the user is a member of its conversation. `None` while a backend that loads in the
+  /// background is still looking, and from backends that can't read messages.
+  fn linked_message(&self, _link: &str) -> Option<LinkedMessage> {
     None
   }
   /// Marks the conversation unread from this message on.

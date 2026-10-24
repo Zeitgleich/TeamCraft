@@ -8,7 +8,9 @@ use std::collections::{HashMap, HashSet};
 
 use teamcraft_proto::{BackgroundId, ErrorCode, HistoryPolicy};
 
-use teamcraft_client_api::actions::{FileInfo, MessageExtras, ShareLink, ShareLinkOptions};
+use teamcraft_client_api::actions::{
+  FileInfo, LinkedMessage, MessageExtras, PermalinkTarget, ShareLink, ShareLinkOptions,
+};
 use teamcraft_client_api::activity::{ActivityFeed, ActivityItem, ActivityKind};
 use teamcraft_client_api::calls::{CallDirection, CallHistoryItem};
 use teamcraft_client_api::privacy::{LastSeenVisibility, PrivacySettings};
@@ -741,6 +743,26 @@ impl ChatBackend for MockBackend {
     Some(format!("teamcraft:/c/{conversation}/m/{message}"))
   }
 
+  fn resolve_permalink(&self, link: &str) -> Option<PermalinkTarget> {
+    self.state.borrow().find_linked(link).map(|(target, _)| target)
+  }
+
+  fn linked_message(&self, link: &str) -> Option<LinkedMessage> {
+    let Some((target, message)) = self.state.borrow().find_linked(link) else {
+      return Some(LinkedMessage::Unavailable);
+    };
+    let files = self
+      .conversation_files(target.conversation)
+      .into_iter()
+      .filter(|file| file.message == target.message)
+      .collect();
+    Some(LinkedMessage::Visible {
+      target,
+      message,
+      files,
+    })
+  }
+
   fn conversation_files(&self, conversation: ConversationId) -> Vec<FileInfo> {
     if conversation != ch_design() {
       return Vec::new();
@@ -809,6 +831,79 @@ impl State {
     for dm in DM_FIRST + 1..DM_FIRST + 6 {
       self.generate_conversation(id_from_raw::<ConversationId>(dm), 12, now);
     }
+    self.seed_message_links();
+  }
+
+  /// A few recent messages in #general link to other messages: one in another channel, a thread
+  /// reply, and one in a conversation the user isn't in (its preview says so).
+  fn seed_message_links(&mut self) {
+    let Some(linked) = self
+      .messages
+      .get(&ch_design())
+      .and_then(|all| {
+        all
+          .iter()
+          .rev()
+          .find(|message| matches!(message.kind, MessageKind::User))
+      })
+      .map(|message| format!("teamcraft:/c/{}/m/{}", message.conversation, message.id))
+    else {
+      return;
+    };
+    let maybe_reply = self
+      .replies
+      .get(&ch_engineering())
+      .and_then(|replies| replies.last())
+      .and_then(|reply| {
+        reply
+          .maybe_thread
+          .map(|thread| format!("teamcraft:/c/{}/m/{}/t/{thread}", reply.conversation, reply.id))
+      });
+    let hidden = "teamcraft:/c/999/m/99900001".to_owned();
+    let bodies = [
+      Some(format!("Here is the mockup we talked about: {linked}")),
+      maybe_reply.map(|link| format!("Answered in the thread: {link}")),
+      Some(format!("Context from the other team: {hidden}")),
+    ];
+    let Some(general) = self.messages.get_mut(&ch_general()) else {
+      return;
+    };
+    let mut users = general
+      .iter_mut()
+      .rev()
+      .skip(1)
+      .filter(|message| matches!(message.kind, MessageKind::User));
+    for body in bodies.into_iter().flatten() {
+      if let Some(message) = users.nth(1) {
+        message.body = body;
+      }
+    }
+  }
+
+  /// The message a demo permalink points to, if the demo user can see it.
+  fn find_linked(&self, link: &str) -> Option<(PermalinkTarget, Message)> {
+    let Some(crate::route::Route::Message {
+      conversation,
+      message,
+      maybe_thread,
+    }) = crate::route::Route::from_permalink(link)
+    else {
+      return None;
+    };
+    let found = self
+      .messages
+      .get(&conversation)
+      .into_iter()
+      .chain(self.replies.get(&conversation))
+      .flatten()
+      .find(|candidate| candidate.id == message)?
+      .clone();
+    let target = PermalinkTarget {
+      conversation,
+      message,
+      maybe_thread: maybe_thread.or(found.maybe_thread),
+    };
+    Some((target, found))
   }
 
   fn generate_conversation(&mut self, conversation: ConversationId, count: usize, now: TimestampMs) {

@@ -389,6 +389,20 @@ pub trait LocalStore {
     conversation: ConversationId,
     filter: MessageFilter,
   ) -> Result<Vec<StoredMessage>, StoreError>;
+  /// The message the server knows by `server_id`, without reading the whole conversation (the
+  /// preview of a message link). The default scans; stores with an index answer directly.
+  fn message_by_server_id(
+    &self,
+    conversation: ConversationId,
+    server_id: MessageId,
+  ) -> Result<Option<StoredMessage>, StoreError> {
+    Ok(
+      self
+        .messages(conversation, MessageFilter::All)?
+        .into_iter()
+        .find(|message| message.maybe_server_id == Some(server_id)),
+    )
+  }
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError>;
 }
 
@@ -422,6 +436,14 @@ macro_rules! forward_local_store {
         client_message_id: ClientMessageId,
       ) -> Result<Option<StoredMessage>, StoreError> {
         (**self).message(conversation, client_message_id)
+      }
+
+      fn message_by_server_id(
+        &self,
+        conversation: ConversationId,
+        server_id: MessageId,
+      ) -> Result<Option<StoredMessage>, StoreError> {
+        (**self).message_by_server_id(conversation, server_id)
       }
 
       fn messages(
@@ -710,8 +732,19 @@ pub(crate) mod tests {
     store.upsert_message(&sent).unwrap();
     assert_eq!(
       store.message(conversation, pending.client_message_id).unwrap(),
+      Some(sent.clone())
+    );
+    // Found by the server's ID too, only in its own conversation.
+    assert_eq!(
+      store.message_by_server_id(conversation, id(500)).unwrap(),
       Some(sent)
     );
+    assert_eq!(
+      store.message_by_server_id(conversation, id(100)).unwrap(),
+      Some(first.clone())
+    );
+    assert_eq!(store.message_by_server_id(other, id(100)).unwrap(), None);
+    assert_eq!(store.message_by_server_id(conversation, id(999)).unwrap(), None);
     assert_eq!(store.messages(conversation, MessageFilter::All).unwrap().len(), 5);
 
     store.delete_messages(conversation).unwrap();
