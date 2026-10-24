@@ -66,7 +66,7 @@ ashpd = { version = "0.13.13", features = ["global_shortcuts"] }
 futures-util = "0.3"
 # Idle time, screen lock and replaceable, withdrawable notifications over D-Bus (MIT; already in the
 # tree through ashpd, same version and runtime).
-zbus = { version = "5.13", default-features = false, features = ["tokio"] }
+zbus = { version = "6.0", default-features = false, features = ["tokio"] }
 # The desktop's window button layout (gtk-decoration-layout) for the custom title bar (MIT; the
 # same version Tauri uses on Linux, so already in the tree).
 gtk = "0.18"
