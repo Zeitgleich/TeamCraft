@@ -35,6 +35,8 @@ pub mod channel_preview;
 pub mod channel_view;
 pub mod composer;
 pub mod composer_commands;
+pub mod composer_editor;
+pub mod composer_toolbar;
 pub mod count_badge;
 pub mod directory_view;
 pub mod emoji_picker;

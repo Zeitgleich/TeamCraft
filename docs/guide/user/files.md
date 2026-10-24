@@ -5,9 +5,9 @@ hold ciphertext. The file name and size travel inside the encrypted message.
 
 ## Send and receive
 
-- **Attach** with the paperclip or drop files into the composer. The upload is chunked and
-  **resumes** after a lost connection; a progress bar shows it, and *Try again* appears if it fails.
-  Files over the instance limit (100 MiB by default) are refused before upload.
+- **Attach** with **+** in the composer, drop files into it or paste an image. The upload is
+  chunked and **resumes** after a lost connection; a progress bar shows it, and *Try again* appears
+  if it fails. Files over the instance limit (100 MiB by default) are refused before upload.
 - Images get a **thumbnail** made on your device and open in a **gallery** (previous / next).
   Other files show a **preview** where possible and a **Download** button; downloaded files are
   saved on this device.

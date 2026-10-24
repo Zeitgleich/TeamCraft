@@ -3,17 +3,39 @@
 ## Write a message
 
 Type in the composer and press **Enter** (or **Ctrl/Cmd+Enter**, a setting under Settings >
-Display). Messages support a safe Markdown subset: `**bold**`, `_italic_`, `~~strike~~`,
-`` `code` ``, fenced code blocks (with syntax highlighting), lists, quotes and links. No HTML is
-rendered. A **formatting toolbar** and a **preview** wrap your selection in Markdown (Settings >
-Writing turns them on or off); `:)` and `:tada:` become emoji when you send (also a setting).
+Display); **Shift+Enter** starts a new line. The composer shows formatting as it will look in the
+message. **Aa** shows the **formatting toolbar** (Settings > Writing keeps it on): bold, italic,
+underline, strikethrough, text style (normal text, headings 1–3), link, numbered and bulleted list,
+quote, inline code and code block. Hover a button to see its shortcut; **Ctrl/Cmd+/** lists them
+all:
+
+| Format                | Shortcut (⌘ instead of Ctrl on macOS) | Or type                  |
+|-----------------------|---------------------------------------|--------------------------|
+| Bold, italic          | Ctrl+B, Ctrl+I                        | `**bold**`, `_italic_`   |
+| Underline             | Ctrl+U                                | `__underline__`          |
+| Strikethrough         | Ctrl+Shift+X                          | `~~strike~~`             |
+| Link                  | Ctrl+Shift+U                          | paste a URL over text    |
+| Numbered, bulleted    | Ctrl+Shift+7, Ctrl+Shift+8            | `1. ` or `- ` at a start |
+| Quote                 | Ctrl+Shift+9                          | `> ` at a line start     |
+| Inline code           | Ctrl+E                                | `` `code` ``             |
+| Code block            | Ctrl+Alt+C                            | ```` ``` ```` at a start |
+| Normal text, headings | Ctrl+Alt+0 to Ctrl+Alt+3              | `# ` to `### `           |
+
+Messages are stored as a safe Markdown subset, so they read well on every device. Pasted text from
+web pages or documents keeps only that formatting; no HTML is ever rendered. `:)` and `:tada:`
+become emoji when you send (a setting).
+
+The row under the text: **+** attaches files or photos (and takes a photo on phones), **Aa**,
+**emoji**, **@** to mention someone, **/** for commands, and **Send** with an arrow for the
+**send options**: priority (*Important*, *Urgent*), **send without notification** and **ask for
+read confirmation**. They apply to the next message and show next to the send button.
 
 - **@name** opens the **mention picker**: people, `@channel` / `@here` and **user groups**.
   `@channel` in a large conversation asks you to confirm first.
-- **Attach files** with the paperclip or by dropping them in; see [Files](files.md).
+- **Attach files** with **+**, by dropping them in, or by pasting an image; see [Files](files.md).
 - **Emoji** from the emoji button. Reactions: hover a message and choose the reaction button, or
   choose an existing reaction chip to add or remove yours.
-- **Priority:** mark a message *Important* or *Urgent*. Recipients of urgent messages can
+- **Priority** (send options): mark a message *Important* or *Urgent*. Recipients of urgent messages can
   **Confirm read**; in DMs the server repeats the push every two minutes (default, up to five times)
   until they do. Urgent messages never break through do-not-disturb or a mute.
 - **Drafts** are kept per conversation and sync across your devices (encrypted).
