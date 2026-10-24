@@ -112,8 +112,12 @@ fn details(info: &PanicHookInfo<'_>) -> String {
 }
 
 /// The current page without its fragment: following a link to the same URL with a fragment would
-/// only scroll, not reload.
+/// only scroll, not reload. The desktop webview starts over at its root, the one page its asset
+/// protocol is sure to serve.
 fn reload_href() -> String {
+  if crate::auth::tauri::is_available() {
+    return "/".to_owned();
+  }
   web_sys::window()
     .map(|window| window.location())
     .and_then(|location| {
