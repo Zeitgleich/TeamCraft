@@ -8,6 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-24
+
+First release. TeamCraft is a self-hosted business team chat with calls and meetings in which the
+server only ever sees ciphertext. From here on the wire format, the API and the database stay
+compatible within 1.x; database migrations run by themselves and are forward-only.
+
 ### Added
 
 - **Server entry in the apps**: the desktop, Android and iOS apps no longer have a server built in.
@@ -61,24 +67,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
   allowed/disabled, channel, pinned and minimum version, mirror), and the server announces the oldest
   client it supports (`GET /api/v1/client-compatibility`); older apps ask for an update
   ([docs/updates.md](docs/updates.md)).
-
-### Changed
-
 - **macOS**: a dmg and an update per architecture, Apple silicon (`TeamCraft_<version>_aarch64.dmg`) and
-  Intel (`TeamCraft_<version>_x64.dmg`), instead of one universal dmg with both: smaller downloads and
-  updates. Installed universal apps update to the build of their own Mac. The download page offers
+  Intel (`TeamCraft_<version>_x64.dmg`): smaller downloads and
+  updates than one universal dmg; universal installs from release candidates update to the build of
+  their own Mac. The download page offers
   both, Apple silicon first.
 - All of the server's mail, meeting invitations included, goes through one mail server;
   `[meetings.smtp]` only counts when `[mail.smtp]` is missing.
-
-## [1.0.0] - 2026-10-23
-
-First release. TeamCraft is a self-hosted business team chat with calls and meetings in which the
-server only ever sees ciphertext. From here on the wire format, the API and the database stay
-compatible within 1.x; database migrations run by themselves and are forward-only.
-
-### Added
-
 - **Chat**: spaces, public and private channels with categories, DMs and group DMs, threads,
   reactions, mentions, user groups, pins and saved items, read receipts, urgent DMs, typing indicators,
   unread counts with an unread divider, jump to date, search with jumps to the message, an emoji
@@ -148,6 +143,14 @@ compatible within 1.x; database migrations run by themselves and are forward-onl
 
 ### Security
 
+- Removing or leaving a member is crash- and retry-safe: the member's devices are committed out of
+  the MLS group before the server drops the membership, a leave from a device outside the group
+  still removes the user's other devices, and an interrupted removal or device revocation is
+  finished on the next attempt ([docs/e2ee.md](docs/e2ee.md) §4.6). Before, a lost response between
+  the two steps could leave a removed member able to read new messages.
+- The apps check the server's identity-provider discovery strictly (exact issuer, HTTPS endpoints),
+  show the provider's host on the confirm screen and warn when it is outside the server's
+  registrable domain (Public Suffix List).
 - The server is untrusted by design ([ARCHITECTURE.md](ARCHITECTURE.md) §2): it stores ciphertext,
   signed policy and signed membership only. The findings of the security reviews are fixed
   ([docs/security-review.md](docs/security-review.md)).

@@ -2,10 +2,10 @@
 
 The workspace policy is **signed by an owner** and stored by the server verbatim; clients verify the
 signature and refuse entries not signed by an owner. A compromised server therefore cannot change
-policy. Edit it under Administration > **Security** (read-only for admins and in the browser).
+policy. Edit it under Administration > **Security** (read-only for admins).
 
-**Saving a policy needs an owner on the desktop app**: the client core signs the new version with the
-owner's device key. The first save also founds the signed roster of owners and admins from the
+**Saving a policy needs an owner** (desktop app or browser): the client core signs the new version
+with the owner's device key. The first save also founds the signed roster of owners and admins from the
 identity provider's roles. Policy versions are append-only; each save is a new version.
 
 ## Settings
