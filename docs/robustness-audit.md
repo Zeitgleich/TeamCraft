@@ -340,7 +340,8 @@ close frames, gateway memory bounded by count).
   progress, cancel, backoff, a server-published size limit. Desktop sends a file path instead of bytes
   over IPC; the web slices `Blob`s. The image lightbox's in-memory download (`Client::open_attachment`,
   desktop `core_attachment`) uses the same path today: it runs on the sync loop, buffers the whole
-  file and shows no byte progress; it gets the same treatment (and a size cap for what it shows).
+  file and shows no byte progress; it gets the same treatment. Its size is capped on every platform
+  (`MAX_VIEWER_BYTES`, 128 MiB; larger files offer "Download" instead).
 - **Files:** `crates/teamcraft-core/src/client/{attachments,files}.rs`, `ui_files.rs`, `runner.rs`,
   `api/{http,mod}.rs`, proto attachment types, server `services/attachments.rs`, `storage.rs`,
   handlers, `crates/teamcraft-db/src/attachment.rs` plus a migration, teamcraft-ui composer, desktop

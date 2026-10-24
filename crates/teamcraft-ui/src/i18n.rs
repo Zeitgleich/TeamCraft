@@ -296,12 +296,20 @@ mod tests {
   fn lightbox_and_file_keys_exist() {
     let keys: Vec<String> = [
       include_str!("components/lightbox.rs"),
+      include_str!("components/lightbox_controls.rs"),
       include_str!("components/file_views.rs"),
     ]
     .into_iter()
     .flat_map(keys_in_source)
     .collect();
-    for expected in ["lightbox-save", "lightbox-saving", "album-open", "file-too-large"] {
+    for expected in [
+      "lightbox-save",
+      "lightbox-saving",
+      "lightbox-shortcut",
+      "lightbox-details-dimensions-value",
+      "album-open",
+      "file-too-large",
+    ] {
       assert!(
         keys.iter().any(|key| key == expected),
         "the scan missed {expected}"
@@ -358,9 +366,17 @@ mod tests {
   /// The literal keys of `.t("…")`, `.t_with("…", …)` and of match arms that pick a key (`=> "…"`).
   fn keys_in_source(source: &str) -> Vec<String> {
     let mut keys = Vec::new();
-    for marker in [".t(\"", ".t_with(\"", "=> \""] {
+    // rustfmt may break a long call after its parenthesis: the key starts after the whitespace.
+    for marker in [".t(", ".t_with(", "=> \""] {
       for (at, _) in source.match_indices(marker) {
         let rest = &source[at + marker.len()..];
+        let rest = match marker.ends_with('"') {
+          true => rest,
+          false => match rest.trim_start().strip_prefix('"') {
+            Some(quoted) => quoted,
+            None => continue,
+          },
+        };
         if let Some(end) = rest.find('"') {
           keys.push(rest[..end].to_owned());
         }

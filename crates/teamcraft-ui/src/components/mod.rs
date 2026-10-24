@@ -44,6 +44,7 @@ pub mod huddle_bar;
 pub mod icons;
 pub mod incoming_call;
 pub mod lightbox;
+pub mod lightbox_controls;
 pub mod log_view;
 pub mod login;
 pub mod meeting_controls;

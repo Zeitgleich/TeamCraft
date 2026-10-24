@@ -8,6 +8,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). How a rel
 
 ## [Unreleased]
 
+### Added
+
+- **Lightbox controls on desktop and web**: the sender, relative time, conversation and file name at
+  the top; rotate (`R`) and zoom (−, slider, +, fit) at the bottom left; download, the thread panel
+  beside the picture (`T`), open in a new window and a "…" menu (view thread, jump to message `J`,
+  add to Saved, copy link to message, share link, copy image `Ctrl/⌘+C`, forward, file details) at
+  the bottom right; round previous/next buttons on hover, a thumbnail strip, and a backdrop blurred
+  and tinted from the picture. Every control has a tooltip with its key and is reachable by
+  keyboard.
+- **Videos and animated images in the lightbox**: videos play in the viewer with the browser's
+  controls; GIFs and APNGs animate and can be paused (`K`), and start paused when the system asks
+  for reduced motion.
+
+### Changed
+
+- The in-memory viewer opens files up to 128 MiB on every platform (the desktop app had no limit);
+  bigger files offer "Download" instead.
+
+### Fixed
+
+- **Share links of messages with several files**: "Create share link" shares the file it belongs to,
+  and every file shows its own link, instead of all of them pointing to the message's first file.
+
 ## [1.0.1] - 2026-10-24
 
 ### Changed

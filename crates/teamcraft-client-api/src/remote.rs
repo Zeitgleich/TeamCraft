@@ -533,6 +533,7 @@ pub enum ChatAction {
   CreateShareLink {
     conversation: ConversationId,
     message: MessageId,
+    file_id: String,
     options: ShareLinkOptions,
   },
   CreateSpace {
@@ -711,8 +712,9 @@ impl ChatAction {
       Self::CreateShareLink {
         conversation,
         message,
+        file_id,
         options,
-      } => backend.create_share_link(conversation, message, options),
+      } => backend.create_share_link(conversation, message, &file_id, options),
       Self::CreateSpace { space } => backend.create_space(space),
       Self::UpdateSpace { space, changes } => backend.update_space(space, changes),
       Self::CreateChannelWith { channel } => backend.create_channel_with(channel),
@@ -798,6 +800,7 @@ pub enum ChatQuery {
   ShareLinks {
     conversation: ConversationId,
     message: MessageId,
+    file_id: String,
   },
   MaxUploadBytes,
   BrowseChannels {
@@ -1003,8 +1006,9 @@ impl ChatQuery {
       Self::ShareLinks {
         conversation,
         message,
+        file_id,
       } => ChatAnswer::ShareLinks {
-        links: backend.share_links(conversation, message),
+        links: backend.share_links(conversation, message, &file_id),
       },
       Self::MaxUploadBytes => ChatAnswer::Bytes {
         maybe_bytes: backend.max_upload_bytes(),

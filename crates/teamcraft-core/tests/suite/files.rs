@@ -15,6 +15,7 @@ use teamcraft_client_api::actions::{
 };
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::Message;
+use teamcraft_core::MAX_VIEWER_BYTES;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::upkeep::Upkeep;
 use teamcraft_crypto::attachment::decrypt_attachment;
@@ -94,6 +95,12 @@ async fn one_file_of_an_album_opens_in_memory_and_downloads_alone() {
     .expect("the file of the message");
   let opened = bob.client.open_attachment(&reference).await.unwrap();
   assert_eq!(opened.expose_secret(), b"waves");
+  let mut too_big = reference.clone();
+  too_big.size_bytes = MAX_VIEWER_BYTES + 1;
+  assert!(
+    bob.client.open_attachment(&too_big).await.is_err(),
+    "the viewer refuses files above its cap on every platform"
+  );
   assert!(bob_ui.attachment_ref(channel, received.id, "pending-0").is_none());
 
   let directory = std::env::temp_dir().join(format!("teamcraft-one-download-{}", std::process::id()));
@@ -194,9 +201,13 @@ async fn share_links_carry_the_key_only_in_the_fragment() {
   run_commands(&mut alice, &alice_ui).await;
   settle(&mut [&mut alice, &mut bob]).await;
   let message = last(&alice_ui, channel);
+  let file_id = alice_ui.message_extras(channel, &[message.id])[0].files[0]
+    .file_id
+    .clone();
   alice_ui.create_share_link(
     channel,
     message.id,
+    &file_id,
     ShareLinkOptions {
       maybe_password: Some("open sesame".into()),
       maybe_max_downloads: Some(3),
@@ -205,7 +216,7 @@ async fn share_links_carry_the_key_only_in_the_fragment() {
   );
   run_commands(&mut alice, &alice_ui).await;
 
-  let link = alice_ui.share_links(channel, message.id).remove(0);
+  let link = alice_ui.share_links(channel, message.id, &file_id).remove(0);
   assert!(link.has_password);
   let (page, fragment) = link.url.split_once('#').unwrap();
   let share_id = page.rsplit('/').next().unwrap();
@@ -220,6 +231,55 @@ async fn share_links_carry_the_key_only_in_the_fragment() {
     b"%PDF signed"
   );
   assert!(!format!("{link:?}").contains(fragment), "Debug hides the key");
+}
+
+#[tokio::test]
+async fn each_file_of_a_message_has_its_own_share_link() {
+  let (server, mut alice, mut bob, channel) = channel_with_two().await;
+  let alice_ui = backend_of(&alice);
+  alice_ui.send_message(with_files(
+    channel,
+    "",
+    vec![
+      file("first.txt", "text/plain", b"first".to_vec()),
+      file("second.txt", "text/plain", b"second".to_vec()),
+    ],
+  ));
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  let message = last(&alice_ui, channel);
+  let files = alice_ui.message_extras(channel, &[message.id])[0].files.clone();
+  let (first, second) = (&files[0], &files[1]);
+  assert_eq!(second.file_name, "second.txt");
+
+  alice_ui.create_share_link(channel, message.id, &second.file_id, ShareLinkOptions::default());
+  run_commands(&mut alice, &alice_ui).await;
+
+  assert!(
+    alice_ui
+      .share_links(channel, message.id, &first.file_id)
+      .is_empty(),
+    "the first file was not shared"
+  );
+  let link = alice_ui
+    .share_links(channel, message.id, &second.file_id)
+    .remove(0);
+  assert_eq!(link.file_id, second.file_id);
+  let (page, fragment) = link.url.split_once('#').unwrap();
+  let ciphertext = server.shared_blob(page.rsplit('/').next().unwrap()).unwrap();
+  let opened = open_fragment(fragment, None).unwrap();
+  assert_eq!(opened.file_name, "second.txt");
+  assert_eq!(
+    decrypt_attachment(&opened.key, &ciphertext)
+      .unwrap()
+      .expose_secret(),
+    b"second"
+  );
+  assert!(
+    alice_ui
+      .share_links(channel, message.id, "no-such-file")
+      .is_empty()
+  );
 }
 
 async fn channel_with_two() -> (FakeServer, Peer, Peer, ConversationId) {

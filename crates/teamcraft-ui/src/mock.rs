@@ -4,10 +4,11 @@
 //! tens of thousands of entries costs no memory and proves the message list only renders what is visible.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use teamcraft_proto::BackgroundId;
 
+use teamcraft_client_api::actions::{FileInfo, MessageExtras, ShareLink, ShareLinkOptions};
 use teamcraft_client_api::activity::{ActivityFeed, ActivityItem, ActivityKind};
 use teamcraft_client_api::calls::{CallDirection, CallHistoryItem};
 use teamcraft_client_api::privacy::{LastSeenVisibility, PrivacySettings};
@@ -161,6 +162,8 @@ impl Rng {
   }
 }
 
+#[path = "mock_files.rs"]
+pub mod files;
 #[path = "mock_ops.rs"]
 mod ops;
 #[path = "mock_search.rs"]
@@ -194,6 +197,10 @@ struct State {
   /// The user's own call backgrounds (only name and size; the mock keeps no pictures).
   backgrounds: Vec<BackgroundImageInfo>,
   next_background_id: u64,
+  /// Messages the user saved for later.
+  saved: HashSet<MessageId>,
+  /// Share links the user created, by file.
+  share_links: HashMap<String, ShareLink>,
 }
 
 impl MockBackend {
@@ -227,6 +234,8 @@ impl MockBackend {
       next_message_id: 1_000_000,
       backgrounds: Vec::new(),
       next_background_id: 1,
+      saved: HashSet::new(),
+      share_links: HashMap::new(),
     };
     state.seed_messages(now);
     state.refresh_space_badges();
@@ -599,6 +608,76 @@ impl ChatBackend for MockBackend {
     {
       conv.is_favorite = is_favorite;
     }
+  }
+
+  fn message_extras(&self, conversation: ConversationId, messages: &[MessageId]) -> Vec<MessageExtras> {
+    let files = self.conversation_files(conversation);
+    let state = self.state.borrow();
+    messages
+      .iter()
+      .map(|&message| MessageExtras {
+        is_saved: state.saved.contains(&message),
+        files: files
+          .iter()
+          .filter(|file| file.message == message)
+          .cloned()
+          .collect(),
+        ..MessageExtras::new(message)
+      })
+      .collect()
+  }
+
+  fn set_saved(&self, _conversation: ConversationId, message: MessageId, is_saved: bool) {
+    let mut state = self.state.borrow_mut();
+    match is_saved {
+      true => state.saved.insert(message),
+      false => state.saved.remove(&message),
+    };
+  }
+
+  fn permalink(&self, conversation: ConversationId, message: MessageId) -> Option<String> {
+    Some(format!("teamcraft:/c/{conversation}/m/{message}"))
+  }
+
+  fn conversation_files(&self, conversation: ConversationId) -> Vec<FileInfo> {
+    if conversation != ch_design() {
+      return Vec::new();
+    }
+    let state = self.state.borrow();
+    let messages = state.messages.get(&conversation).map_or(&[][..], Vec::as_slice);
+    files::demo_files(conversation, messages)
+  }
+
+  fn create_share_link(
+    &self,
+    _conversation: ConversationId,
+    _message: MessageId,
+    file_id: &str,
+    options: ShareLinkOptions,
+  ) {
+    let link = ShareLink {
+      file_id: file_id.to_owned(),
+      url: format!("https://chat.example.com/s/demo{file_id}#demo-key"),
+      maybe_expires_at: options.maybe_expires_at,
+      maybe_max_downloads: options.maybe_max_downloads,
+      has_password: options.maybe_password.is_some(),
+    };
+    self
+      .state
+      .borrow_mut()
+      .share_links
+      .insert(file_id.to_owned(), link);
+  }
+
+  fn share_links(&self, _conversation: ConversationId, _message: MessageId, file_id: &str) -> Vec<ShareLink> {
+    self
+      .state
+      .borrow()
+      .share_links
+      .get(file_id)
+      .cloned()
+      .into_iter()
+      .collect()
   }
 
   fn set_presence(&self, presence: PresenceStatus) {

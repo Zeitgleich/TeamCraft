@@ -43,6 +43,13 @@ contains demo fixtures.
 | Compare keys                    | ![Compare keys](docs/screenshots/key-verify.png)               |
 | New login approval              | ![Device approval](docs/screenshots/device-approval.png)       |
 | QR device linking               | ![QR linking](docs/screenshots/device-link-qr.png)             |
+| Lightbox with the thread        | ![Lightbox](docs/screenshots/lightbox.png)                     |
+| Lightbox: tooltip with the key  | ![Tooltip](docs/screenshots/lightbox-tooltip.png)              |
+| Lightbox: rotated and zoomed    | ![Rotated](docs/screenshots/lightbox-rotated.png)              |
+| Lightbox: "…" menu (en, de)     | ![Menu](docs/screenshots/lightbox-menu.png) ![Menu de](docs/screenshots/lightbox-menu-de.png) |
+| Lightbox: file details          | ![Details](docs/screenshots/lightbox-details.png)              |
+| Lightbox: video                 | ![Video](docs/screenshots/lightbox-video.png)                  |
+| Lightbox: GIF, reduced motion   | ![Paused GIF](docs/screenshots/lightbox-gif-paused.png)        |
 
 Screenshots are produced with Playwright against `trunk build --features demo` (English, 1360×840); the
 tour also walks every screen in German and fails on missing translation keys.

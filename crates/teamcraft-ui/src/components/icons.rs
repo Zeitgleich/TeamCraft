@@ -68,6 +68,16 @@ pub enum IconName {
   ZoomOut,
   /// An arrow leaving to the right: forward a message.
   Forward,
+  /// A circular arrow: turn an image a quarter clockwise.
+  Rotate,
+  /// A box with an arrow leaving it: open in a new window.
+  External,
+  /// Two overlapping sheets: copy to the clipboard.
+  Copy,
+  /// An "i" in a circle: details.
+  Info,
+  Play,
+  Pause,
 }
 
 impl IconName {
@@ -97,6 +107,12 @@ impl IconName {
       Self::ZoomIn => "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z M21 21l-4.3-4.3 M11 8v6 M8 11h6",
       Self::ZoomOut => "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z M21 21l-4.3-4.3 M8 11h6",
       Self::Forward => "M15 14l5-5-5-5 M20 9H10a6 6 0 0 0-6 6v3",
+      Self::Rotate => "M21 12a9 9 0 1 1-2.6-6.4 M21 3v6h-6",
+      Self::External => "M14 4h6v6 M20 4l-9 9 M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5",
+      Self::Copy => "M9 9h11v11H9z M5 15H4V4h11v1",
+      Self::Info => "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z M12 11v6 M12 7.5h.01",
+      Self::Play => "M7 4l13 8-13 8z",
+      Self::Pause => "M7 4h3v16H7z M14 4h3v16h-3z",
       Self::Close => "M18 6 6 18M6 6l12 12",
       Self::Plus => "M12 5v14M5 12h14",
       Self::Bookmark => "M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z",

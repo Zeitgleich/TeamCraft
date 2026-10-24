@@ -22,6 +22,11 @@ impl ObjectUrl {
     Self::from_parts(&array, media_type)
   }
 
+  /// A URL for a blob the page made itself (a canvas snapshot).
+  pub fn from_blob(blob: &web_sys::Blob) -> Option<Self> {
+    web_sys::Url::create_object_url_with_blob(blob).ok().map(Self)
+  }
+
   pub fn as_str(&self) -> &str {
     &self.0
   }
@@ -49,6 +54,11 @@ pub async fn fetch_attachment(
   file_id: String,
   media_type: &str,
 ) -> Result<ObjectUrl, String> {
+  #[cfg(feature = "demo")]
+  if crate::settings::BackendMode::load() == crate::settings::BackendMode::Mock {
+    let bytes = crate::mock::files::demo_bytes(&file_id).ok_or_else(|| "no such demo file".to_owned())?;
+    return ObjectUrl::from_bytes(bytes, media_type).ok_or_else(refused);
+  }
   if crate::auth::tauri::is_available() {
     return fetch_from_shell(conversation, message, file_id, media_type).await;
   }
@@ -99,10 +109,11 @@ fn refused() -> String {
   "the browser refused the file".to_owned()
 }
 
-/// Only images get their own type; anything else stays opaque bytes, so a file that lies about being
-/// an image is never rendered as a document.
+/// Only images and videos get their own type; anything else stays opaque bytes, so a file that lies
+/// about its type is never rendered as a document. The page only ever puts these URLs into `<img>`
+/// and `<video>`, where an SVG can't run scripts.
 fn blob_type(media_type: &str) -> &str {
-  match media_type.starts_with("image/") {
+  match media_type.starts_with("image/") || media_type.starts_with("video/") {
     true => media_type,
     false => OPAQUE_TYPE,
   }
@@ -113,8 +124,9 @@ mod tests {
   use super::*;
 
   #[test]
-  fn only_images_keep_their_media_type() {
+  fn only_images_and_videos_keep_their_media_type() {
     assert_eq!(blob_type("image/jpeg"), "image/jpeg");
+    assert_eq!(blob_type("video/mp4"), "video/mp4");
     assert_eq!(blob_type("text/html"), OPAQUE_TYPE);
     assert_eq!(blob_type(""), OPAQUE_TYPE);
   }

@@ -161,6 +161,11 @@ pub struct MessageEdit {
   pub replaced_at: TimestampMs,
 }
 
+/// Largest file the image and video viewer opens in memory, on every platform; bigger files are
+/// only saved. The client core enforces the same limit on the bytes it receives
+/// (`teamcraft_core::MAX_VIEWER_BYTES`).
+pub const MAX_VIEWER_BYTES: u64 = 128 * 1024 * 1024;
+
 /// An attached file and where its bytes are.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileInfo {

@@ -214,9 +214,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
     &self,
     conversation: ConversationId,
     message: MessageId,
+    file_id: &str,
     options: ShareLinkOptions,
   ) {
-    let Some(attachment) = self.first_attachment(conversation, message) else {
+    let Some(attachment) = self.attachment_id(conversation, message, file_id) else {
+      tracing::warn!(conversation_id = %conversation, "sharing a file that isn't loaded");
       return;
     };
     self.command(CoreCommand::CreateShareLink {
@@ -228,8 +230,13 @@ impl<S: LocalStore> CoreChatBackend<S> {
     });
   }
 
-  pub(crate) fn ui_share_links(&self, conversation: ConversationId, message: MessageId) -> Vec<ShareLink> {
-    let Some(attachment) = self.first_attachment(conversation, message) else {
+  pub(crate) fn ui_share_links(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+  ) -> Vec<ShareLink> {
+    let Some(attachment) = self.attachment_id(conversation, message, file_id) else {
       return Vec::new();
     };
     self
@@ -253,11 +260,18 @@ impl<S: LocalStore> CoreChatBackend<S> {
     ))
   }
 
-  fn first_attachment(&self, conversation: ConversationId, message: MessageId) -> Option<AttachmentId> {
+  /// The attachment ID of one file of a message; `None` if the message has no such file.
+  fn attachment_id(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+  ) -> Option<AttachmentId> {
     let stored = self.find_stored(conversation, message)?;
     attachments_of(&stored.content)
-      .first()
+      .into_iter()
       .map(|attachment| attachment.attachment_id)
+      .find(|attachment| attachment.to_string() == file_id)
   }
 }
 

@@ -1,10 +1,13 @@
-//! State of the image lightbox, kept apart from the view so it can be tested without a browser:
-//! which images it pages through (one message's album or the whole conversation), where the current
-//! one is, and how far it is zoomed and panned.
+//! State of the media lightbox (images, animated images and videos), kept apart from the view so it
+//! can be tested without a browser: which files it pages through (one message's album or the whole
+//! conversation), where the current one is, how far it is zoomed, panned and rotated, which
+//! thumbnails the strip shows, and which key does what.
 //!
 //! Positions are in CSS pixels relative to the centre of the stage (the area the image is shown in).
-//! The image is first fitted into the stage ("fit", scale 1) and then scaled around its centre and
-//! moved by an offset, which is what the view writes into the image's `transform`.
+//! The image is first fitted into the stage ("fit", scale 1) and then rotated, scaled around its
+//! centre and moved by an offset, which is what the view writes into the image's `transform`.
+
+use std::ops::Range;
 
 use teamcraft_client_api::actions::FileInfo;
 use teamcraft_proto::AttachmentId;
@@ -24,14 +27,61 @@ pub const DOUBLE_TAP_MAX_MS: f64 = 300.0;
 pub const DOUBLE_TAP_MAX_PX: f64 = 30.0;
 /// A pointer that moved less than this between press and release tapped (no drag).
 pub const TAP_MAX_PX: f64 = 8.0;
+/// Most thumbnails the strip under the image renders at once, around the current one.
+pub const MAX_STRIP_THUMBNAILS: usize = 15;
 /// Fitted scale.
 const MIN_SCALE: f64 = 1.0;
 
-/// Identifies one image across list refreshes: new messages shift indexes, not keys.
+/// Identifies one image or video across list refreshes: new messages shift indexes, not keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ImageKey {
+pub struct MediaKey {
   pub message: MessageId,
   pub attachment: AttachmentId,
+}
+
+/// What the lightbox shows a file as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaKind {
+  /// A still image: zoom, pan and rotate.
+  Image,
+  /// A GIF or APNG: like an image, but it moves, so it can be paused (and starts paused when the
+  /// user asked the system for reduced motion).
+  Animated,
+  /// Played by the browser's own `<video>` with its controls.
+  Video,
+}
+
+/// A quarter-turn rotation of the view (the file is not changed).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Rotation {
+  #[default]
+  Upright,
+  Clockwise,
+  UpsideDown,
+  CounterClockwise,
+}
+
+/// Everything the lightbox does from the keyboard; the tooltips name the same keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Command {
+  Previous,
+  Next,
+  ZoomIn,
+  ZoomOut,
+  ZoomReset,
+  Rotate,
+  ToggleThread,
+  TogglePlay,
+  JumpToMessage,
+  Download,
+  CopyImage,
+}
+
+/// Whether shortcuts are shown with ⌘ (Apple platforms) or Ctrl.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModifierStyle {
+  Ctrl,
+  Command,
 }
 
 /// Which images previous/next page through.
@@ -71,12 +121,13 @@ pub struct Size {
   pub height: f64,
 }
 
-/// Zoom and pan of the current image.
+/// Zoom, pan and rotation of the current image.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Viewport {
   scale: f64,
   offset: Point,
   max_scale: f64,
+  rotation: Rotation,
 }
 
 /// Follows the pointers on the stage and turns them into pans, pinches, swipes and taps.
@@ -112,13 +163,11 @@ pub enum Release {
   Swipe(Direction),
 }
 
-impl ImageKey {
-  /// The key of a file that the lightbox can show: a received image with an attachment id (files
-  /// still uploading have none yet).
+impl MediaKey {
+  /// The key of a file that the lightbox can show: a received image or video with an attachment id
+  /// (files still uploading have none yet).
   pub fn of(file: &FileInfo) -> Option<Self> {
-    if !is_image(file) {
-      return None;
-    }
+    MediaKind::of(&file.media_type)?;
     let attachment = file.file_id.parse().ok()?;
     Some(Self {
       message: file.message,
@@ -128,6 +177,149 @@ impl ImageKey {
 
   pub fn matches(&self, file: &FileInfo) -> bool {
     file.message == self.message && file.file_id == self.attachment.to_string()
+  }
+}
+
+impl MediaKind {
+  /// `None` for files the lightbox doesn't show (documents, audio, archives).
+  pub fn of(media_type: &str) -> Option<Self> {
+    let media_type = media_type.trim().to_ascii_lowercase();
+    match media_type.as_str() {
+      "image/gif" | "image/apng" => Some(Self::Animated),
+      // SVG is shown as an image only: inside `<img>` it can't run scripts.
+      other if other.starts_with("image/") => Some(Self::Image),
+      other if other.starts_with("video/") => Some(Self::Video),
+      _ => None,
+    }
+  }
+
+  /// Zoom, pan and rotation apply to pictures; a video keeps its controls.
+  pub fn can_transform(self) -> bool {
+    matches!(self, Self::Image | Self::Animated)
+  }
+
+  /// An animated image starts paused when the user prefers reduced motion; a video never plays by
+  /// itself.
+  pub fn starts_paused(self, prefers_reduced_motion: bool) -> bool {
+    match self {
+      Self::Animated => prefers_reduced_motion,
+      Self::Image | Self::Video => false,
+    }
+  }
+}
+
+impl Rotation {
+  pub fn clockwise(self) -> Self {
+    match self {
+      Self::Upright => Self::Clockwise,
+      Self::Clockwise => Self::UpsideDown,
+      Self::UpsideDown => Self::CounterClockwise,
+      Self::CounterClockwise => Self::Upright,
+    }
+  }
+
+  pub fn degrees(self) -> u16 {
+    match self {
+      Self::Upright => 0,
+      Self::Clockwise => 90,
+      Self::UpsideDown => 180,
+      Self::CounterClockwise => 270,
+    }
+  }
+
+  /// A quarter turn swaps the image's width and height on screen.
+  pub fn is_sideways(self) -> bool {
+    matches!(self, Self::Clockwise | Self::CounterClockwise)
+  }
+
+  fn orient(self, size: Size) -> Size {
+    match self.is_sideways() {
+      true => Size::new(size.height, size.width),
+      false => size,
+    }
+  }
+}
+
+impl Command {
+  /// The command of a key press, `None` for keys the lightbox leaves alone. `has_shortcut_modifier`
+  /// is Ctrl, or ⌘ on Apple platforms.
+  pub fn for_key(key: &str, has_shortcut_modifier: bool, has_alt: bool) -> Option<Self> {
+    if has_alt {
+      return None;
+    }
+    if has_shortcut_modifier {
+      return match key {
+        "s" | "S" => Some(Self::Download),
+        "c" | "C" => Some(Self::CopyImage),
+        _ => None,
+      };
+    }
+    match key {
+      "ArrowLeft" => Some(Self::Previous),
+      "ArrowRight" => Some(Self::Next),
+      "+" | "=" => Some(Self::ZoomIn),
+      "-" | "_" => Some(Self::ZoomOut),
+      "0" => Some(Self::ZoomReset),
+      "r" | "R" => Some(Self::Rotate),
+      "t" | "T" => Some(Self::ToggleThread),
+      "k" | "K" => Some(Self::TogglePlay),
+      "j" | "J" => Some(Self::JumpToMessage),
+      _ => None,
+    }
+  }
+
+  /// The key as the tooltips and `aria-keyshortcuts` name it.
+  pub fn shortcut_label(self, style: ModifierStyle) -> &'static str {
+    let is_apple = style == ModifierStyle::Command;
+    match self {
+      Self::Previous => "←",
+      Self::Next => "→",
+      Self::ZoomIn => "+",
+      Self::ZoomOut => "−",
+      Self::ZoomReset => "0",
+      Self::Rotate => "R",
+      Self::ToggleThread => "T",
+      Self::TogglePlay => "K",
+      Self::JumpToMessage => "J",
+      Self::Download if is_apple => "⌘S",
+      Self::Download => "Ctrl+S",
+      Self::CopyImage if is_apple => "⌘C",
+      Self::CopyImage => "Ctrl+C",
+    }
+  }
+
+  /// The `aria-keyshortcuts` value (WAI-ARIA key names).
+  pub fn aria_shortcut(self, style: ModifierStyle) -> &'static str {
+    let is_apple = style == ModifierStyle::Command;
+    match self {
+      Self::Previous => "ArrowLeft",
+      Self::Next => "ArrowRight",
+      Self::ZoomIn => "+",
+      Self::ZoomOut => "-",
+      Self::ZoomReset => "0",
+      Self::Rotate => "R",
+      Self::ToggleThread => "T",
+      Self::TogglePlay => "K",
+      Self::JumpToMessage => "J",
+      Self::Download if is_apple => "Meta+S",
+      Self::Download => "Control+S",
+      Self::CopyImage if is_apple => "Meta+C",
+      Self::CopyImage => "Control+C",
+    }
+  }
+}
+
+impl ModifierStyle {
+  /// ⌘ on macOS and iOS, Ctrl elsewhere, from the browser's platform string.
+  pub fn for_platform(platform: &str) -> Self {
+    let platform = platform.to_ascii_lowercase();
+    let is_apple = ["mac", "iphone", "ipad", "ipod"]
+      .iter()
+      .any(|name| platform.contains(name));
+    match is_apple {
+      true => Self::Command,
+      false => Self::Ctrl,
+    }
   }
 }
 
@@ -190,11 +382,47 @@ impl Viewport {
       scale: MIN_SCALE,
       offset: Point::ORIGIN,
       max_scale: max_scale.max(MIN_SCALE),
+      rotation: Rotation::Upright,
     }
   }
 
+  /// Zoom relative to the fitted image (1 = fit).
   pub fn scale(&self) -> f64 {
     self.scale
+  }
+
+  pub fn rotation(&self) -> Rotation {
+    self.rotation
+  }
+
+  /// The CSS scale of the laid-out image: the zoom times what a quarter turn needs to fit again.
+  /// `image` is the laid-out (unrotated) size, which the stylesheet already fits into the stage.
+  pub fn display_scale(&self, image: Size, stage: Size) -> f64 {
+    self.scale * self.fit_factor(image, stage)
+  }
+
+  /// The zoom slider's position for the current zoom, from 0 (fit) to 1 (the maximum). The slider
+  /// is logarithmic, so every step zooms by the same factor.
+  pub fn slider_position(&self) -> f64 {
+    match self.max_scale > MIN_SCALE {
+      true => (self.scale.ln() / self.max_scale.ln()).clamp(0.0, 1.0),
+      false => 0.0,
+    }
+  }
+
+  /// Zooms to the slider's `position` (0 to 1) around the stage centre.
+  pub fn zoom_to_slider(&mut self, position: f64, image: Size, stage: Size) {
+    if !position.is_finite() {
+      return;
+    }
+    let target = self.max_scale.powf(position.clamp(0.0, 1.0));
+    self.zoom_by(target / self.scale, Point::ORIGIN, image, stage);
+  }
+
+  /// Turns the view a quarter clockwise and fits the image again.
+  pub fn rotate_clockwise(&mut self) {
+    self.rotation = self.rotation.clockwise();
+    self.reset();
   }
 
   pub fn offset(&self) -> Point {
@@ -249,12 +477,25 @@ impl Viewport {
   /// The image's edges never come inside the stage's edges; a side smaller than the stage stays
   /// centred.
   fn clamp_offset(&mut self, image: Size, stage: Size) {
-    let limit = |image_side: f64, stage_side: f64| ((image_side * self.scale - stage_side) / 2.0).max(0.0);
-    let (limit_x, limit_y) = (limit(image.width, stage.width), limit(image.height, stage.height));
+    let shown = self.rotation.orient(image);
+    let scale = self.display_scale(image, stage);
+    let limit = |image_side: f64, stage_side: f64| ((image_side * scale - stage_side) / 2.0).max(0.0);
+    let (limit_x, limit_y) = (limit(shown.width, stage.width), limit(shown.height, stage.height));
     self.offset = Point::new(
       self.offset.x.clamp(-limit_x, limit_x),
       self.offset.y.clamp(-limit_y, limit_y),
     );
+  }
+
+  /// A sideways image may be too tall or wide for the stage once turned: shrink it until it fits.
+  fn fit_factor(&self, image: Size, stage: Size) -> f64 {
+    let shown = self.rotation.orient(image);
+    if shown.width <= 0.0 || shown.height <= 0.0 {
+      return 1.0;
+    }
+    (stage.width / shown.width)
+      .min(stage.height / shown.height)
+      .clamp(f64::MIN_POSITIVE, 1.0)
   }
 }
 
@@ -341,10 +582,10 @@ impl Pointers {
 
 /// The images the lightbox pages through, oldest first (left to right). `files` comes newest first,
 /// as [`crate::backend::ChatBackend::conversation_files`] returns it.
-pub fn images_in_scope(files: &[FileInfo], scope: LightboxScope, start: ImageKey) -> Vec<FileInfo> {
+pub fn images_in_scope(files: &[FileInfo], scope: LightboxScope, start: MediaKey) -> Vec<FileInfo> {
   let mut images: Vec<FileInfo> = files
     .iter()
-    .filter(|file| ImageKey::of(file).is_some())
+    .filter(|file| MediaKey::of(file).is_some())
     .filter(|file| scope == LightboxScope::Conversation || file.message == start.message)
     .cloned()
     .collect();
@@ -353,15 +594,15 @@ pub fn images_in_scope(files: &[FileInfo], scope: LightboxScope, start: ImageKey
 }
 
 /// How many images the message of `start` has, to choose the scope it opens with.
-pub fn album_len(files: &[FileInfo], start: ImageKey) -> usize {
+pub fn album_len(files: &[FileInfo], start: MediaKey) -> usize {
   files
     .iter()
-    .filter(|file| file.message == start.message && ImageKey::of(file).is_some())
+    .filter(|file| file.message == start.message && MediaKey::of(file).is_some())
     .count()
 }
 
 /// Where `current` is in `images`.
-pub fn position(images: &[FileInfo], current: ImageKey) -> Option<Position> {
+pub fn position(images: &[FileInfo], current: MediaKey) -> Option<Position> {
   images
     .iter()
     .position(|file| current.matches(file))
@@ -372,23 +613,29 @@ pub fn position(images: &[FileInfo], current: ImageKey) -> Option<Position> {
 }
 
 /// The image before or after `current`; `None` at either end (the list doesn't wrap around).
-pub fn neighbor(images: &[FileInfo], current: ImageKey, direction: Direction) -> Option<ImageKey> {
+pub fn neighbor(images: &[FileInfo], current: MediaKey, direction: Direction) -> Option<MediaKey> {
   let at = position(images, current)?;
   let index = match direction {
     Direction::Previous => at.index.checked_sub(1)?,
     Direction::Next => at.index + 1,
   };
-  images.get(index).and_then(ImageKey::of)
+  images.get(index).and_then(MediaKey::of)
+}
+
+/// The thumbnails the strip renders: at most `max` around `index`, so a conversation with thousands
+/// of images renders a handful of tiles.
+pub fn strip_range(len: usize, index: usize, max: usize) -> Range<usize> {
+  if len <= max {
+    return 0..len;
+  }
+  let start = index.saturating_sub(max / 2).min(len - max);
+  start..start + max
 }
 
 /// A pinch or ctrl+wheel reports small deltas, a mouse wheel large ones; both map to a smooth zoom.
 pub fn wheel_zoom_factor(delta_y_px: f64, is_pinch: bool) -> f64 {
   let sensitivity = if is_pinch { 0.01 } else { 0.002 };
   (-delta_y_px * sensitivity).exp()
-}
-
-fn is_image(file: &FileInfo) -> bool {
-  file.media_type.starts_with("image/")
 }
 
 /// Turns the newest-first list into oldest-first while keeping the files of one message in the order
@@ -498,9 +745,9 @@ mod tests {
     fn uploads_and_other_files_have_no_key() {
       let mut uploading = image(4, 40, "d.png");
       uploading.file_id = "pending-0".to_owned();
-      assert_eq!(ImageKey::of(&uploading), None);
-      assert_eq!(ImageKey::of(&file(4, 41, "notes.txt", "text/plain")), None);
-      assert_eq!(ImageKey::of(&image(4, 42, "e.png")), Some(key(4, 42)));
+      assert_eq!(MediaKey::of(&uploading), None);
+      assert_eq!(MediaKey::of(&file(4, 41, "notes.txt", "text/plain")), None);
+      assert_eq!(MediaKey::of(&image(4, 42, "e.png")), Some(key(4, 42)));
     }
   }
 
@@ -580,6 +827,246 @@ mod tests {
       assert!(wheel_zoom_factor(100.0, false) < 1.0);
       assert!(wheel_zoom_factor(-100.0, false) > 1.0);
       assert!(wheel_zoom_factor(-10.0, true) > wheel_zoom_factor(-10.0, false));
+    }
+  }
+
+  mod media {
+    use super::*;
+
+    #[test]
+    fn images_gifs_and_videos_open_and_other_files_do_not() {
+      assert_eq!(MediaKind::of("image/png"), Some(MediaKind::Image));
+      assert_eq!(MediaKind::of("image/svg+xml"), Some(MediaKind::Image));
+      assert_eq!(MediaKind::of("image/gif"), Some(MediaKind::Animated));
+      assert_eq!(MediaKind::of(" Image/APNG "), Some(MediaKind::Animated));
+      assert_eq!(MediaKind::of("video/mp4"), Some(MediaKind::Video));
+      assert_eq!(MediaKind::of("video/webm"), Some(MediaKind::Video));
+      for other in ["", "audio/ogg", "text/html", "application/pdf", "imagex/png"] {
+        assert_eq!(MediaKind::of(other), None, "{other:?}");
+      }
+      assert_eq!(
+        MediaKey::of(&file(5, 50, "clip.mp4", "video/mp4")),
+        Some(key(5, 50))
+      );
+    }
+
+    #[test]
+    fn only_animated_images_pause_for_reduced_motion() {
+      assert!(MediaKind::Animated.starts_paused(true));
+      assert!(!MediaKind::Animated.starts_paused(false));
+      assert!(!MediaKind::Image.starts_paused(true));
+      assert!(
+        !MediaKind::Video.starts_paused(true),
+        "videos never play by themselves anyway"
+      );
+    }
+
+    #[test]
+    fn videos_keep_their_controls_instead_of_zoom_and_rotation() {
+      assert!(MediaKind::Image.can_transform());
+      assert!(MediaKind::Animated.can_transform());
+      assert!(!MediaKind::Video.can_transform());
+    }
+
+    #[test]
+    fn a_video_in_an_album_pages_like_an_image() {
+      let mut files = conversation();
+      files.insert(2, file(2, 25, "clip.webm", "video/webm"));
+      let album = images_in_scope(&files, LightboxScope::Album, key(2, 21));
+      let names: Vec<&str> = album.iter().map(|file| file.file_name.as_str()).collect();
+      assert_eq!(names, ["b1.png", "clip.webm", "b2.png", "b3.png"]);
+    }
+  }
+
+  mod rotation {
+    use super::*;
+
+    #[test]
+    fn four_quarter_turns_come_back_upright() {
+      let mut rotation = Rotation::default();
+      let mut seen = Vec::new();
+      for _ in 0..4 {
+        rotation = rotation.clockwise();
+        seen.push(rotation.degrees());
+      }
+      assert_eq!(seen, [90, 180, 270, 0]);
+      assert_eq!(rotation, Rotation::Upright);
+      assert!(Rotation::Clockwise.is_sideways() && !Rotation::UpsideDown.is_sideways());
+    }
+
+    #[test]
+    fn rotating_fits_the_image_again() {
+      let mut viewport = Viewport::default();
+      viewport.zoom_by(3.0, Point::new(100.0, 50.0), IMAGE, STAGE);
+      viewport.rotate_clockwise();
+      assert_eq!(viewport.rotation(), Rotation::Clockwise);
+      assert_eq!((viewport.scale(), viewport.offset()), (1.0, Point::ORIGIN));
+      viewport.reset();
+      assert_eq!(
+        viewport.rotation(),
+        Rotation::Clockwise,
+        "fit to window keeps the turn"
+      );
+    }
+
+    #[test]
+    fn a_sideways_image_shrinks_to_fit_the_stage() {
+      // 1000×500 fits a 1000×800 stage upright; turned it is 500 wide and 1000 tall, so it shrinks
+      // to 800 / 1000.
+      let wide = Size::new(1000.0, 500.0);
+      let mut viewport = Viewport::default();
+      assert_eq!(viewport.display_scale(wide, STAGE), 1.0);
+      viewport.rotate_clockwise();
+      assert_eq!(viewport.display_scale(wide, STAGE), 0.8);
+      viewport.rotate_clockwise();
+      assert_eq!(
+        viewport.display_scale(wide, STAGE),
+        1.0,
+        "upside down fits as it is"
+      );
+      assert_eq!(
+        Viewport::default().display_scale(Size::default(), STAGE),
+        1.0,
+        "not laid out yet"
+      );
+    }
+
+    #[test]
+    fn panning_a_sideways_image_uses_its_turned_size() {
+      let mut viewport = Viewport::default();
+      viewport.rotate_clockwise();
+      viewport.zoom_by(2.0, Point::ORIGIN, IMAGE, STAGE);
+      viewport.pan_by(Point::new(5000.0, 5000.0), IMAGE, STAGE);
+      // 800×600 turned is 600×800, fits as it is; at 2× it is 1200×1600 in 1000×800.
+      assert_eq!(viewport.offset(), Point::new(100.0, 400.0));
+    }
+  }
+
+  mod slider {
+    use super::*;
+
+    #[test]
+    fn the_slider_runs_from_fit_to_the_maximum() {
+      let mut viewport = Viewport::new(4.0);
+      assert_eq!(viewport.slider_position(), 0.0);
+      viewport.zoom_to_slider(1.0, IMAGE, STAGE);
+      assert_eq!(viewport.scale(), 4.0);
+      assert_eq!(viewport.slider_position(), 1.0);
+      viewport.zoom_to_slider(0.5, IMAGE, STAGE);
+      assert!(
+        (viewport.scale() - 2.0).abs() < 1e-9,
+        "logarithmic: halfway is 2× of 4×"
+      );
+      viewport.zoom_to_slider(0.0, IMAGE, STAGE);
+      assert!(!viewport.is_zoomed());
+    }
+
+    #[test]
+    fn out_of_range_slider_values_are_clamped_or_ignored() {
+      let mut viewport = Viewport::new(4.0);
+      viewport.zoom_to_slider(7.0, IMAGE, STAGE);
+      assert_eq!(viewport.scale(), 4.0);
+      viewport.zoom_to_slider(f64::NAN, IMAGE, STAGE);
+      assert_eq!(viewport.scale(), 4.0);
+      viewport.zoom_to_slider(-1.0, IMAGE, STAGE);
+      assert_eq!(viewport.scale(), 1.0);
+      assert_eq!(Viewport::new(1.0).slider_position(), 0.0, "no zoom range");
+    }
+  }
+
+  mod keys {
+    use super::*;
+
+    #[test]
+    fn plain_keys_page_zoom_rotate_and_toggle() {
+      let cases = [
+        ("ArrowLeft", Command::Previous),
+        ("ArrowRight", Command::Next),
+        ("+", Command::ZoomIn),
+        ("=", Command::ZoomIn),
+        ("-", Command::ZoomOut),
+        ("0", Command::ZoomReset),
+        ("r", Command::Rotate),
+        ("R", Command::Rotate),
+        ("t", Command::ToggleThread),
+        ("k", Command::TogglePlay),
+        ("j", Command::JumpToMessage),
+      ];
+      for (key, command) in cases {
+        assert_eq!(Command::for_key(key, false, false), Some(command), "{key}");
+      }
+      assert_eq!(Command::for_key("x", false, false), None);
+      assert_eq!(
+        Command::for_key("Escape", false, false),
+        None,
+        "the dialog closes itself"
+      );
+    }
+
+    #[test]
+    fn modifiers_save_and_copy_and_alt_is_left_alone() {
+      assert_eq!(Command::for_key("s", true, false), Some(Command::Download));
+      assert_eq!(Command::for_key("c", true, false), Some(Command::CopyImage));
+      assert_eq!(
+        Command::for_key("r", true, false),
+        None,
+        "Ctrl+R reloads, as always"
+      );
+      assert_eq!(Command::for_key("ArrowLeft", true, false), None);
+      assert_eq!(Command::for_key("r", false, true), None);
+    }
+
+    #[test]
+    fn tooltips_name_the_platform_modifier() {
+      let mac = ModifierStyle::for_platform("MacIntel");
+      let other = ModifierStyle::for_platform("Linux x86_64");
+      assert_eq!(mac, ModifierStyle::Command);
+      assert_eq!(ModifierStyle::for_platform("iPhone"), ModifierStyle::Command);
+      assert_eq!(other, ModifierStyle::Ctrl);
+      assert_eq!(Command::Download.shortcut_label(mac), "⌘S");
+      assert_eq!(Command::Download.shortcut_label(other), "Ctrl+S");
+      assert_eq!(Command::CopyImage.aria_shortcut(other), "Control+C");
+      assert_eq!(Command::Rotate.shortcut_label(other), "R");
+    }
+
+    #[test]
+    fn every_shortcut_label_is_a_key_that_triggers_it() {
+      let all = [
+        Command::Previous,
+        Command::Next,
+        Command::ZoomIn,
+        Command::ZoomReset,
+        Command::Rotate,
+        Command::ToggleThread,
+        Command::TogglePlay,
+        Command::JumpToMessage,
+      ];
+      for command in all {
+        let key = match command.aria_shortcut(ModifierStyle::Ctrl) {
+          "R" | "T" | "K" | "J" => command.aria_shortcut(ModifierStyle::Ctrl).to_lowercase(),
+          other => other.to_owned(),
+        };
+        assert_eq!(Command::for_key(&key, false, false), Some(command), "{command:?}");
+      }
+      assert_eq!(Command::for_key("-", false, false), Some(Command::ZoomOut));
+    }
+  }
+
+  mod strip {
+    use super::*;
+
+    #[test]
+    fn a_short_list_shows_every_thumbnail() {
+      assert_eq!(strip_range(5, 3, 15), 0..5);
+      assert_eq!(strip_range(0, 0, 15), 0..0);
+    }
+
+    #[test]
+    fn a_long_list_shows_a_window_around_the_current_image() {
+      assert_eq!(strip_range(1000, 500, 15), 493..508);
+      assert_eq!(strip_range(1000, 2, 15), 0..15, "at the start");
+      assert_eq!(strip_range(1000, 999, 15), 985..1000, "at the end");
+      assert_eq!(strip_range(1000, 5000, 15), 985..1000, "an index past the end");
     }
   }
 
@@ -684,8 +1171,8 @@ mod tests {
     ]
   }
 
-  fn key(message: i64, attachment: i64) -> ImageKey {
-    ImageKey {
+  fn key(message: i64, attachment: i64) -> MediaKey {
+    MediaKey {
       message: id(message),
       attachment: attachment.to_string().parse().expect("valid id"),
     }

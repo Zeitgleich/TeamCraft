@@ -325,11 +325,14 @@ back, if it was (five minutes of slack for clocks). Messages from before signatu
 Client encrypts each file with a fresh random key (XChaCha20-Poly1305, chunked for streaming), uploads
 the blob to S3 via a presigned URL, puts key + hash + file name + thumbnail into the encrypted message.
 
-The message list shows only the encrypted thumbnail. Opening an image in the lightbox makes the client
-core download the blob, check its hash and decrypt it in memory (desktop: `core_attachment`, raw bytes
-to the webview; web: the core in the page). The page holds the plaintext only as a `blob:` URL for the
-image on screen and revokes it when the viewer moves on or closes; nothing is written to disk unless
-the user saves the file.
+The message list shows only the encrypted thumbnail. Opening an image or video in the lightbox makes
+the client core download the blob, check its hash and decrypt it in memory (desktop: `core_attachment`,
+raw bytes to the webview; web: the core in the page), up to `MAX_VIEWER_BYTES` (128 MiB) on every
+platform; bigger files are only saved. The page holds the plaintext only as a `blob:` URL for the file
+on screen and revokes it when the viewer moves on or closes; nothing is written to disk unless the user
+saves the file. "Copy image" draws that image into a canvas in the page; "open in a new window" opens a
+blank window of the page itself (`about:blank`, the only window the desktop app allows) that shows the
+same `blob:` URL. Neither creates a URL the server or anyone else could load.
 
 #### 4.5.1 Share links for external download
 
