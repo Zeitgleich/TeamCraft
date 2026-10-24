@@ -10,7 +10,7 @@
 #   `-unsigned` otherwise) and `-debug-signed` builds for testers.
 # - SBOMs (SPDX and CycloneDX) of the source tree and both images, image digests, SHA256SUMS, and a
 #   build provenance attestation for every file.
-# - Notes rendered from .github/release-notes.md: the CHANGELOG.md section, generated notes
+# - Notes rendered from .github/release-notes.md: the highlights from the annotated tag's message, generated notes
 #   (.github/release.yml categories), install and verification instructions.
 #
 # A tag equal to the tree's version (v1.2.3) is a release; v1.2.3-rc.1 on the same tree is a candidate
@@ -44,7 +44,7 @@ jobs:
       image_owner: ${{ steps.version.outputs.image_owner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The tag must fit the versions in the tree (Cargo, desktop, Android, iOS) and CHANGELOG.md.
+      # The tag must fit the versions in the tree (Cargo, desktop, Android, iOS).
       - name: Tag fits the versions in the tree
         id: version
         env:
@@ -427,12 +427,20 @@ jobs:
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-checksums: dist/SHA256SUMS
-      - name: Release notes (.github/release-notes.md, CHANGELOG.md, generated notes)
+      - name: Release notes (.github/release-notes.md, tag message, generated notes)
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
+          # actions/checkout leaves the tag lightweight; the highlights are in the annotated tag object.
+          # A candidate with an empty message falls back to its base version's tag, if it exists.
+          git fetch --no-tags --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          base="v${VERSION%%-*}"
+          if [ "$base" != "$TAG" ]; then
+            git fetch --no-tags --force origin "refs/tags/${base}:refs/tags/${base}" 2>/dev/null \
+              || echo "no tag ${base} yet"
+          fi
           gh api "repos/${REPO}/releases/generate-notes" -f tag_name="$TAG" -q .body > generated.md
           scripts/render-release-notes.py --version "$VERSION" --tag "$TAG" --repo "$REPO" \
             --images dist/images.txt --generated generated.md > notes.md

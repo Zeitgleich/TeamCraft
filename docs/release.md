@@ -15,7 +15,6 @@ release workflow against the tag):
 | `apps/desktop/tauri.conf.json`                | `version`                                                                       |
 | `apps/android/app/build.gradle.kts`           | `versionName`, `versionCode` (formula below)                                    |
 | `apps/ios/project.yml`                        | `MARKETING_VERSION` (numeric part), `CURRENT_PROJECT_VERSION` (= `versionCode`) |
-| `CHANGELOG.md`                                | a `## [X.Y.Z]` section                                                          |
 | `apps/desktop/packaging/linux/*.metainfo.xml` | `<release>` (not checked; update it)                                            |
 
 Versions follow [Semantic Versioning](https://semver.org); prereleases in the tree are `-beta.N` and
@@ -76,11 +75,13 @@ version as the final 1.0.0 and as each other: reinstall once with `sudo dnf rein
 1. **Main is green.** Never tag a commit whose CI failed.
 2. **Branch** `release/vX.Y.Z` and set the version in the places above (`cargo update --workspace
    --offline` updates `Cargo.lock`); `scripts/check-versions.sh` must pass.
-3. **Changelog.** Move the entries under `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` and update the
-   compare links. Put changes that need operators to act under `### Breaking`: the release notes show
-   them under "Breaking changes". The section is the notes' "Highlights".
+3. **Highlights.** There is no changelog file: the release notes live in GitHub Releases. Write the
+   version's highlights as Markdown in a file you don't commit; they become the annotated tag's
+   message in steps 5 and 6. Put changes that need operators to act under `### Breaking`: the release
+   notes show them under "Breaking changes" (else "None.").
 4. **Merge** (squash) into main and wait for CI.
-5. **Candidate**: tag the merge commit `vX.Y.Z-rc.1` and push the tag. Check the draft prerelease (files,
+5. **Candidate**: tag the merge commit `vX.Y.Z-rc.1` (annotated as in step 6; a candidate with an
+   empty message takes the highlights of `vX.Y.Z` if that tag exists) and push the tag. Check the draft prerelease (files,
    notes, `images.txt`, `latest.json`), install the images on a staging host and one desktop package,
    then delete the draft (the candidate's images stay in GHCR under their own tag) – or publish it as
    a prerelease, which hands it to the `prerelease` update channel and repositories
@@ -90,9 +91,24 @@ version as the final 1.0.0 and as each other: reinstall once with `sudo dnf rein
 6. **Release**: tag the same commit and push it:
 
    ```sh
-   git tag -s vX.Y.Z -m "TeamCraft X.Y.Z"
+   git tag -s --cleanup=whitespace -F highlights.md vX.Y.Z
    git push origin vX.Y.Z
    ```
+
+   For example, `highlights.md`:
+
+   ```markdown
+   - Threads in the sidebar
+   - Faster channel switch
+
+   ### Breaking
+
+   - `[push] gateway_url` is now required
+   ```
+
+   `--cleanup=whitespace` matters: git's default cleanup drops every line starting with `#`, the
+   Markdown headings included. A lightweight tag (no message) is no error: the notes then have only
+   the generated part. Check the message with `git tag -l --format='%(contents)' vX.Y.Z`.
 
 7. **Review the draft release**, then **publish** it in the GitHub UI. Publishing runs `packages.yml`:
    the Pages site with the update manifests and the APT/RPM repositories is rebuilt, and installed
@@ -122,15 +138,15 @@ Rendered by `scripts/render-release-notes.py` from the template `.github/release
 | Part                        | Comes from                                                                                                             |
 |-----------------------------|------------------------------------------------------------------------------------------------------------------------|
 | Pre-release notice          | tags with a `-` suffix                                                                                                 |
-| Highlights                  | the version's `CHANGELOG.md` section (for a candidate: the base version's)                                             |
+| Highlights                  | the annotated tag's message (a candidate with an empty one: the base version's tag's)                                  |
 | Install                     | the template, with the image references of `images.txt`                                                                |
-| Upgrading, breaking changes | the template; `### Breaking` of the changelog section, else "None."                                                    |
+| Upgrading, breaking changes | the template; `### Breaking` of the tag message, else "None."                                                          |
 | Known limitations           | the template: unsigned builds, iOS not distributed, push for self-built apps, what is tested in CI only, AppImage size |
 | Verify the downloads        | the template: checksums, attestations, cosign                                                                          |
 | What's changed              | GitHub's generated notes, grouped by `.github/release.yml`                                                             |
 
 Label pull requests so the generated notes group them: `security`, `breaking`, `feature` /
-`enhancement`, `bug` / `fix`, `documentation`, `dependencies`; `skip-changelog` leaves one out.
+`enhancement`, `bug` / `fix`, `documentation`, `dependencies`; `skip-release-notes` leaves one out.
 Dependabot's pull requests are left out. Edit the template when a known limitation is gone.
 
 ## What a release contains
