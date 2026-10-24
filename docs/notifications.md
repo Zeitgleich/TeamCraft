@@ -26,7 +26,10 @@ content stays encrypted; keyword notifications and the activity feed are built o
 and how many mention the user, plus the number of followed threads with unread replies and the unread
 thread mentions. Messages of the user themselves, thread replies (they count in the threads) and
 messages from before the user joined are not counted. The read position is
-`PUT /conversations/{id}/read-position`.
+`PUT /conversations/{id}/read-position`; the server keeps the larger of the stored and the new
+position, so a late or repeated write never moves it back. Clients queue read positions,
+acknowledgements, pin flags and the manual presence in their store while offline and send them once
+back (issue #159), also after an app restart.
 
 Clients keep the counts current from gateway events instead of polling `GET /unread` (issue #183):
 
