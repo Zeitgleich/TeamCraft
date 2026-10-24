@@ -5,6 +5,8 @@
 // Hides the console window on Windows release builds; harmless on macOS and Linux.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(target_os = "linux")]
+mod appindicator;
 mod attention;
 mod auth;
 mod autostart;
@@ -133,6 +135,7 @@ fn main() -> anyhow::Result<()> {
         window_chrome::on_resized(window);
       }
       // Closing keeps the app running in the tray (notifications keep coming) when the user wants it.
+      // Without a tray icon it closes as usual, which quits the app.
       if let WindowEvent::CloseRequested { api, .. } = event
         && window.label() == tray::MAIN_WINDOW
         && window.state::<ShellPrefsState>().get().is_close_to_tray
@@ -219,7 +222,9 @@ fn main() -> anyhow::Result<()> {
 /// feature (the UI reads it from `localStorage`); release builds never offer demo data.
 fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
   let prefs = app.state::<ShellPrefsState>().get();
-  let is_hidden = prefs.is_start_minimized && tray::has_tray(app.handle());
+  // Without a tray icon a hidden window couldn't come back: start minimized to the taskbar instead.
+  let has_tray = tray::has_tray(app.handle());
+  let is_hidden = prefs.is_start_minimized && has_tray;
   // The title stays set without a title bar: the taskbar, Alt+Tab and the dock show it.
   let window = WebviewWindowBuilder::new(app, tray::MAIN_WINDOW, WebviewUrl::default())
     .title("TeamCraft")
@@ -235,7 +240,13 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     )),
     _ => window,
   };
-  window.build()?;
+  let window = window.build()?;
+  if prefs.is_start_minimized
+    && !has_tray
+    && let Err(error) = window.minimize()
+  {
+    tracing::debug!(%error, "could not minimize the window");
+  }
   Ok(())
 }
 
