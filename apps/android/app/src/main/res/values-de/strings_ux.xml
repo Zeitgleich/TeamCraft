@@ -102,4 +102,18 @@
     <item quantity="one">%d ausgewählt</item>
     <item quantity="other">%d ausgewählt</item>
   </plurals>
+  <!-- Main screen (#262): bottom navigation, global entries of Home, empty states. -->
+  <string name="nav_home">Start</string>
+  <string name="nav_activity">Aktivität</string>
+  <string name="nav_spaces">Spaces</string>
+  <string name="home_entry_threads">Threads</string>
+  <string name="home_entry_saved">Gemerkt</string>
+  <string name="home_entry_meetings">Meetings</string>
+  <string name="home_entry_people">Personen</string>
+  <string name="account_menu">%1$s: Konto, Status und Einstellungen</string>
+  <string name="dm_empty_title">Noch keine Direktnachrichten</string>
+  <string name="activity_empty_title">Alles gelesen</string>
+  <string name="activity_empty">Erwähnungen und ungelesene Nachrichten aus all deinen Unterhaltungen erscheinen hier.</string>
+  <string name="spaces_empty_title">Noch keine Kanäle</string>
+  <string name="spaces_empty">Durchsuche die Kanäle deiner Spaces, um einem beizutreten.</string>
 </resources>

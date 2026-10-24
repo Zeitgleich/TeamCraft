@@ -25,6 +25,22 @@ class ConversationSectionsTest {
   }
 
   @Test
+  fun activityHoldsMentionsFirstThenUnreadNewestFirstWithoutMutedOrRead() {
+    val result = activityConversations(
+      listOf(
+        item("1", "read", ConversationKind.PUBLIC, space = "Project A"),
+        item("2", "Amy", ConversationKind.DIRECT, unread = 2u),
+        item("3", "muted", ConversationKind.PUBLIC, unread = 5u, isMuted = true),
+        item("4", "release", ConversationKind.PUBLIC, unread = 1u, mentions = 1u),
+        item("5", "Bob", ConversationKind.DIRECT, unread = 1u),
+        item("6", "quiet", ConversationKind.PRIVATE, unread = 3u, mentions = 2u, isMuted = true),
+      ),
+      lastActivity = mapOf("2" to 10L, "5" to 20L),
+    )
+    assertEquals(listOf("quiet", "release", "Bob", "Amy"), result.map { it.name })
+  }
+
+  @Test
   fun directMessagesNewestFirstWithFavoritesOnTop() {
     val result = directSections(
       listOf(

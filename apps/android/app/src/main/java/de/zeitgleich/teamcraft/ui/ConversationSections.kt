@@ -9,12 +9,31 @@ sealed interface SectionTitle {
   data class Space(val name: String) : SectionTitle
   data object Channels : SectionTitle
   data object DirectMessages : SectionTitle
+
+  /** The Activity tab's one list (shown without a header). */
+  data object Activity : SectionTitle
 }
 
 data class Section(val title: SectionTitle, val conversations: List<ConversationItem>)
 
-/** The two lists of the chats screen: Home (the DMs, outside spaces) and the channels by space. */
-enum class ChatTab { Home, Spaces }
+/**
+ * The bottom navigation of the main screen (the desktop's One Home, #237): Home (global entries
+ * and the DMs, outside spaces), Activity (what waits for the user) and the channels by space.
+ */
+enum class ChatTab { Home, Activity, Spaces }
+
+/**
+ * The Activity tab: every conversation with a mention, or unread and not muted (the Unread filter
+ * across DMs and channels), the most recent first.
+ */
+fun activityConversations(conversations: List<ConversationItem>, lastActivity: Map<String, Long> = emptyMap()): List<ConversationItem> =
+  conversations
+    .filter { HomeFilter.Unread.matches(it) }
+    .sortedWith(
+      compareByDescending<ConversationItem> { it.mentionCount }
+        .thenByDescending { lastActivity[it.id] ?: Long.MIN_VALUE }
+        .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name },
+    )
 
 /** The filter chips of Home (as in Element): one at a time, `All` is none selected. */
 enum class HomeFilter {
