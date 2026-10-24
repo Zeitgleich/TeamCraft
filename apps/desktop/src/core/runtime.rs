@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use secrecy::ExposeSecret;
 use teamcraft_client_api::backend::ChatBackend;
@@ -70,12 +70,20 @@ pub struct CoreConfig {
 
 /// The access token the core sends, with the server (origin) it belongs to. With a live source
 /// (the login session) every request reads the current token, so a core started right after
-/// sign-in never sees an empty cache; the last token seen is the fallback while a refresh holds
-/// the session.
+/// sign-in never sees an empty cache; while a refresh holds the session, the token seen last is
+/// used only as long as it is still valid. Without a source (tests) it holds what [`Self::set`]
+/// put there.
 #[derive(Clone, Default)]
 pub struct TokenCache {
-  last: Arc<Mutex<Option<(String, String)>>>,
+  last: Arc<Mutex<Option<CachedToken>>>,
   maybe_source: Option<Arc<dyn Fn() -> TokenPeek + Send + Sync>>,
+}
+
+struct CachedToken {
+  server_url: String,
+  token: String,
+  /// `None` for a token set by hand, which has no known expiry.
+  maybe_valid_until: Option<Instant>,
 }
 
 impl TokenCache {
@@ -88,10 +96,13 @@ impl TokenCache {
   }
 
   /// `(server origin, access token)`, or nothing while signed out.
+  #[cfg(test)]
   pub fn set(&self, maybe_token: Option<(String, String)>) {
-    if let Ok(mut slot) = self.last.lock() {
-      *slot = maybe_token;
-    }
+    self.remember(maybe_token.map(|(server_url, token)| CachedToken {
+      server_url,
+      token,
+      maybe_valid_until: None,
+    }));
   }
 
   /// The tokens of one server: a core never sends another server's token, even right after the
@@ -105,16 +116,39 @@ impl TokenCache {
 
   fn current(&self) -> Option<(String, String)> {
     match self.maybe_source.as_ref().map(|source| source()) {
-      Some(TokenPeek::Ready { server_url, token }) => {
-        let current = (server_url, token.expose_secret().to_owned());
-        self.set(Some(current.clone()));
-        Some(current)
+      Some(TokenPeek::Ready {
+        server_url,
+        token,
+        valid_for,
+      }) => {
+        let token = token.expose_secret().to_owned();
+        self.remember(Some(CachedToken {
+          server_url: server_url.clone(),
+          token: token.clone(),
+          maybe_valid_until: Some(Instant::now() + valid_for),
+        }));
+        Some((server_url, token))
       },
-      Some(TokenPeek::SignedOut) => {
-        self.set(None);
+      Some(TokenPeek::Unavailable) => {
+        self.remember(None);
         None
       },
-      Some(TokenPeek::Busy) | None => self.last.lock().ok().and_then(|slot| slot.clone()),
+      Some(TokenPeek::Busy) | None => self.last.lock().ok().and_then(|slot| {
+        slot
+          .as_ref()
+          .filter(|cached| {
+            cached
+              .maybe_valid_until
+              .is_none_or(|until| until > Instant::now())
+          })
+          .map(|cached| (cached.server_url.clone(), cached.token.clone()))
+      }),
+    }
+  }
+
+  fn remember(&self, maybe_token: Option<CachedToken>) {
+    if let Ok(mut slot) = self.last.lock() {
+      *slot = maybe_token;
     }
   }
 }
@@ -221,6 +255,8 @@ enum Request {
   ApprovalCancel,
   /// The network changed or the computer woke up: check the connection now.
   NetworkChanged,
+  /// Ends the core loop, closing the database and releasing the store lock.
+  Shutdown,
 }
 
 /// Handle to the core thread. Dropping it stops the thread.
@@ -228,7 +264,8 @@ pub struct CoreRuntime {
   requests: mpsc::UnboundedSender<Request>,
   /// Read without asking the core thread, which may be busy connecting.
   connection: ConnectionStatus,
-  thread: Option<std::thread::JoinHandle<()>>,
+  /// Taken by [`CoreRuntime::shutdown`] or on drop.
+  thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl CoreRuntime {
@@ -262,7 +299,17 @@ impl CoreRuntime {
     Self {
       requests,
       connection,
-      thread,
+      thread: Mutex::new(thread),
+    }
+  }
+
+  /// Stops the core thread and waits until it closed the database and released the store lock,
+  /// even while other handles to this runtime are still around (they then get "not running").
+  pub fn shutdown(&self) {
+    drop(self.requests.send(Request::Shutdown));
+    let maybe_thread = self.thread.lock().ok().and_then(|mut slot| slot.take());
+    if let Some(thread) = maybe_thread {
+      drop(thread.join());
     }
   }
 
@@ -426,7 +473,11 @@ impl Drop for CoreRuntime {
     // Closing the channel ends the loop; wait so the database is closed before a new core opens it.
     let (closed, _) = mpsc::unbounded_channel();
     drop(std::mem::replace(&mut self.requests, closed));
-    if let Some(thread) = self.thread.take() {
+    let maybe_thread = match self.thread.get_mut() {
+      Ok(slot) => slot.take(),
+      Err(poisoned) => poisoned.into_inner().take(),
+    };
+    if let Some(thread) = maybe_thread {
       drop(thread.join());
     }
   }
@@ -540,8 +591,8 @@ impl Core {
       let maybe_deadline = self.connection_deadline();
       tokio::select! {
         request = requests.recv() => match request {
+          Some(Request::Shutdown) | None => break,
           Some(request) => self.handle(request).await,
-          None => break,
         },
         frame = self.connection.receive() => self.on_frame(frame).await,
         _ = flush.tick(), if self.client.is_some() => {
@@ -701,6 +752,8 @@ impl Core {
       },
       Request::ApprovalCancel => self.approval = None,
       Request::NetworkChanged => self.connection.network_changed(SystemClock.now_ms()).await,
+      // Handled by the loop in `run`.
+      Request::Shutdown => {},
       Request::Snapshot(reply) => drop(reply.send(self.snapshot())),
       Request::UpdatePolicy(reply) => drop(
         reply.send(
@@ -1220,5 +1273,55 @@ mod tests {
     assert!(tokens.access_token().is_err());
     cache.set(Some(("https://a.example.com".into(), "token-a".into())));
     assert_eq!(tokens.access_token().ok().as_deref(), Some("token-a"));
+  }
+
+  mod live_source {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use secrecy::SecretString;
+
+    use super::*;
+
+    const SERVER: &str = "https://a.example.com";
+
+    #[test]
+    fn a_busy_session_falls_back_to_a_token_that_is_still_valid() {
+      let cache = cache_with(Duration::from_secs(60));
+      let tokens = cache.for_server(SERVER);
+
+      assert_eq!(tokens.access_token().ok().as_deref(), Some("token-a"));
+      assert_eq!(tokens.access_token().ok().as_deref(), Some("token-a"), "busy");
+    }
+
+    #[test]
+    fn a_busy_session_never_falls_back_to_an_expired_token() {
+      let cache = cache_with(Duration::ZERO);
+      let tokens = cache.for_server(SERVER);
+
+      assert!(tokens.access_token().is_ok());
+      assert!(
+        tokens.access_token().is_err(),
+        "busy, and the token seen last has run out"
+      );
+    }
+
+    /// Ready with a token valid for `valid_for` once, busy afterwards.
+    fn cache_with(valid_for: Duration) -> TokenCache {
+      let was_read = Arc::new(AtomicBool::new(false));
+      TokenCache {
+        last: Arc::default(),
+        maybe_source: Some(Arc::new(move || {
+          if was_read.swap(true, Ordering::SeqCst) {
+            TokenPeek::Busy
+          } else {
+            TokenPeek::Ready {
+              server_url: SERVER.into(),
+              token: SecretString::from("token-a"),
+              valid_for,
+            }
+          }
+        })),
+      }
+    }
   }
 }

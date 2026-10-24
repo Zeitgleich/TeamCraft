@@ -2,6 +2,7 @@
 //! about the account. Pure state; the screens live in `components::login`.
 
 use std::rc::Rc;
+use std::time::Duration;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -11,11 +12,18 @@ use teamcraft_client_api::remote::{CoreStatus, EnrollRequest};
 
 use crate::auth::tauri::{ServerCheck, ServerProblem, ServerView};
 use crate::auth::{ApiResponse, AuthError, Authenticator, tauri};
+use crate::clock;
 use crate::model::UserId;
 use crate::remote_backend;
 use crate::settings::{load_string, store_string};
 
 const KEY_DEVICE_READY_PREFIX: &str = "teamcraft.device_ready.";
+/// How long the client core may wait for its access token before the user is told; it keeps
+/// trying, and the problem card goes away once it opened.
+const CORE_START_PATIENCE_MS: i64 = 10_000;
+/// How often the UI asks a waiting core again: often at first, calmly once the card is shown.
+const CORE_POLL_EARLY: Duration = Duration::from_millis(500);
+const CORE_POLL_LATE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SessionState {
@@ -33,6 +41,9 @@ pub enum SessionState {
   SignedOut(Option<LoginProblem>),
   /// The identity provider is open in the browser.
   SigningIn,
+  /// Desktop: signed in; the client core is still waiting for the access token to open the
+  /// encrypted data.
+  OpeningCore,
   /// Signed in, but this device has no keys yet (first device of the account); the web build only
   /// shows a placeholder here.
   NeedsDeviceSetup(GetMeResponse),
@@ -54,7 +65,8 @@ pub enum LoginProblem {
   ServerUnreachable,
   /// The encrypted local data could not be opened (keystore, database); the text is for details.
   CoreFailed(String),
-  /// The client core got no access token from the sign-in (yet); trying again or signing out helps.
+  /// The client core has been waiting for an access token for a while; it keeps trying, and the user
+  /// can try again or sign out.
   CoreNotSignedIn,
   Cancelled,
   /// Anything else; the text is meant for logs and a "details" line, not as the main message.
@@ -78,6 +90,8 @@ pub struct SessionControl {
   pub is_server_locked: RwSignal<bool>,
   /// Desktop: a server address is being checked.
   pub is_checking_server: RwSignal<bool>,
+  /// Desktop: counts core starts, so waiting for an older one stops (sign-out, retry).
+  core_round: RwSignal<u64>,
 }
 
 /// What went wrong in the local-account sign-in form.
@@ -107,6 +121,7 @@ impl SessionControl {
       server: RwSignal::new(None),
       is_server_locked: RwSignal::new(false),
       is_checking_server: RwSignal::new(false),
+      core_round: RwSignal::new(0),
     }
   }
 
@@ -256,6 +271,7 @@ impl SessionControl {
 
   pub fn sign_out(&self) {
     let control = *self;
+    control.core_round.update(|round| *round = round.wrapping_add(1));
     spawn_local(async move {
       if tauri::has_core()
         && let Err(error) = remote_backend::stop_core().await
@@ -279,7 +295,21 @@ impl SessionControl {
 
   /// Desktop: opens the encrypted local client and decides whether keys must be set up first.
   async fn start_core(&self, me: GetMeResponse) {
-    match remote_backend::core_status(me.id).await {
+    let round = self.core_round.get_untracked().wrapping_add(1);
+    self.core_round.set(round);
+    self.check_core(me, clock::now_ms(), round).await;
+  }
+
+  async fn check_core(&self, me: GetMeResponse, started_ms: i64, round: u64) {
+    if self.core_round.get_untracked() != round {
+      return;
+    }
+    let outcome = remote_backend::core_status(me.id).await;
+    // Signed out or started again meanwhile: this answer is stale.
+    if self.core_round.get_untracked() != round {
+      return;
+    }
+    match outcome {
       Ok(CoreStatus::Ready { .. }) => self.state.set(SessionState::Ready(me)),
       Ok(CoreStatus::NeedsEnrollment {
         has_existing_identity,
@@ -293,15 +323,32 @@ impl SessionControl {
       },
       Ok(CoreStatus::Failed { message }) => self
         .state
-        .set(SessionState::SignedOut(Some(core_problem(message)))),
-      // The core is still waiting for an access token (it retries on its own).
-      Ok(CoreStatus::NotStarted) => self
-        .state
-        .set(SessionState::SignedOut(Some(LoginProblem::CoreNotSignedIn))),
+        .set(SessionState::SignedOut(Some(LoginProblem::CoreFailed(message)))),
+      // The core is still waiting for an access token and retries on its own.
+      Ok(CoreStatus::NotStarted) => self.wait_for_core(me, started_ms, round),
       Err(error) => self
         .state
         .set(SessionState::SignedOut(Some(LoginProblem::Failed(error)))),
     }
+  }
+
+  /// Shows "connecting" (after a while the problem card) and asks the core again shortly.
+  fn wait_for_core(&self, me: GetMeResponse, started_ms: i64, round: u64) {
+    let waited_ms = clock::now_ms().saturating_sub(started_ms);
+    let next = core_wait_state(waited_ms);
+    if self.state.get_untracked() != next {
+      self.state.set(next);
+    }
+    let poll = if waited_ms < CORE_START_PATIENCE_MS {
+      CORE_POLL_EARLY
+    } else {
+      CORE_POLL_LATE
+    };
+    let control = *self;
+    set_timeout(
+      move || spawn_local(async move { control.check_core(me, started_ms, round).await }),
+      poll,
+    );
   }
 
   /// The core could not be opened: asks the server and the core again, keeping the sign-in.
@@ -375,12 +422,13 @@ pub fn use_session() -> Option<SessionControl> {
   use_context::<SessionControl>()
 }
 
-/// A core that had no access token is a sign-in problem, not a keystore or database one.
-fn core_problem(message: String) -> LoginProblem {
-  if message.contains("no access token") {
-    LoginProblem::CoreNotSignedIn
+/// While the core waits for its access token: "connecting" at first, the problem card once the
+/// wait is longer than [`CORE_START_PATIENCE_MS`].
+fn core_wait_state(waited_ms: i64) -> SessionState {
+  if waited_ms < CORE_START_PATIENCE_MS {
+    SessionState::OpeningCore
   } else {
-    LoginProblem::CoreFailed(message)
+    SessionState::SignedOut(Some(LoginProblem::CoreNotSignedIn))
   }
 }
 
@@ -505,14 +553,15 @@ mod tests {
   }
 
   #[test]
-  fn a_core_without_a_token_is_a_sign_in_problem_not_a_keystore_one() {
+  fn a_core_waiting_for_its_token_shows_connecting_before_the_problem_card() {
+    assert_eq!(core_wait_state(0), SessionState::OpeningCore);
     assert_eq!(
-      core_problem("no access token: not signed in".into()),
-      LoginProblem::CoreNotSignedIn
+      core_wait_state(CORE_START_PATIENCE_MS - 1),
+      SessionState::OpeningCore
     );
     assert_eq!(
-      core_problem("keyring unavailable".into()),
-      LoginProblem::CoreFailed("keyring unavailable".into())
+      core_wait_state(CORE_START_PATIENCE_MS),
+      SessionState::SignedOut(Some(LoginProblem::CoreNotSignedIn))
     );
   }
 }

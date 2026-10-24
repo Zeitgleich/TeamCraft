@@ -42,7 +42,7 @@ use crate::shell_prefs::ShellPrefsState;
 use crate::updates::UpdateHost;
 use crate::window_chrome::WindowChromeState;
 
-/// How often the core's token cache is refreshed from the login session.
+/// How often the login session's access token is checked and refreshed before it runs out.
 const TOKEN_REFRESH: Duration = Duration::from_secs(2);
 
 fn main() -> anyhow::Result<()> {
@@ -52,10 +52,9 @@ fn main() -> anyhow::Result<()> {
 
   // No server yet: the account's server is set in `setup`, once the data directory is known.
   let service = Arc::new(AuthService::new(None, KeyringStore).context("could not set up sign-in")?);
-  // The core reads the session's current token on every request; the loop below refreshes it and
-  // keeps the last one as the fallback while a refresh holds the session.
+  // The core reads the session's current token on every request; the loop below refreshes it.
   let tokens = TokenCache::live(service.clone());
-  keep_tokens_fresh(service.clone(), tokens.clone());
+  keep_tokens_fresh(service.clone());
 
   // Registered first: the single-instance plugin must see a second launch before anything else.
   let builder = tauri::Builder::default().plugin(single_instance::plugin());
@@ -274,10 +273,12 @@ fn watch_wake(app: &tauri::AppHandle) {
   });
 }
 
-fn keep_tokens_fresh(service: Arc<AuthService<KeyringStore>>, tokens: TokenCache) {
+fn keep_tokens_fresh(service: Arc<AuthService<KeyringStore>>) {
   tauri::async_runtime::spawn(async move {
     loop {
-      tokens.set(service.server_bearer_token().await.ok());
+      // Refreshes the token when it is close to expiry; the core reads the result from the session.
+      // Signed out is the normal case here, not an error.
+      drop(service.server_bearer_token().await);
       tokio::time::sleep(TOKEN_REFRESH).await;
     }
   });

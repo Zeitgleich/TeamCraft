@@ -47,6 +47,9 @@ pub use store::{KeyringStore, TokenStore};
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 /// Refresh this long before the access token expires.
 const REFRESH_MARGIN: Duration = Duration::from_secs(60);
+/// An identity provider token this close to its expiry is not handed to the core any more: a
+/// request with a token that runs out on the way fails anyway (local sessions use the same margin).
+const TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(30);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 /// The webview may only ask for API paths below this prefix.
 const API_PREFIX: &str = "/api/v1/";
@@ -209,12 +212,17 @@ struct Discovery {
 /// The access token as it stands right now, read without waiting or refreshing
 /// ([`AuthService::peek_server_bearer_token`]).
 pub enum TokenPeek {
-  /// The token of the active server, valid for now.
-  Ready { server_url: String, token: SecretString },
-  /// No server, or nobody signed in to it.
-  SignedOut,
-  /// A sign-in or refresh holds the session, or the token is about to run out: the caller uses the
-  /// token it saw last, which the refresh loop replaces.
+  /// The token of the active server and how long it may still be sent (expiry minus a margin).
+  Ready {
+    server_url: String,
+    token: SecretString,
+    valid_for: Duration,
+  },
+  /// No server, nobody signed in to it, or the token has (nearly) run out: no token is sent until
+  /// the refresh loop replaced it.
+  Unavailable,
+  /// A sign-in or refresh holds the session: the caller may use the token it saw last, while that
+  /// is still valid.
   Busy,
 }
 
@@ -619,23 +627,33 @@ impl<S: TokenStore> AuthService<S> {
   /// at once instead of after the next refresh tick.
   pub fn peek_server_bearer_token(&self) -> TokenPeek {
     let Some(server) = self.active_server() else {
-      return TokenPeek::SignedOut;
+      return TokenPeek::Unavailable;
     };
     let Ok(session) = self.session.try_lock() else {
       return TokenPeek::Busy;
     };
     let maybe_token = match (&session.maybe_local, &session.maybe_tokens) {
-      (Some(local), _) => local.is_live(local::now_ms()).then(|| local.token()),
-      (None, Some(tokens)) => (tokens.expires_at > Instant::now())
-        .then(|| SecretString::from(tokens.access.expose_secret().to_owned())),
-      (None, None) => return TokenPeek::SignedOut,
+      (Some(local), _) => local
+        .remaining(local::now_ms())
+        .map(|valid_for| (local.token(), valid_for)),
+      (None, Some(tokens)) => {
+        let valid_for = tokens.expires_at.saturating_duration_since(Instant::now());
+        (valid_for > TOKEN_EXPIRY_MARGIN).then(|| {
+          (
+            SecretString::from(tokens.access.expose_secret().to_owned()),
+            valid_for - TOKEN_EXPIRY_MARGIN,
+          )
+        })
+      },
+      (None, None) => None,
     };
     match maybe_token {
-      Some(token) => TokenPeek::Ready {
+      Some((token, valid_for)) => TokenPeek::Ready {
         server_url: server.server_url,
         token,
+        valid_for,
       },
-      None => TokenPeek::Busy,
+      None => TokenPeek::Unavailable,
     }
   }
 

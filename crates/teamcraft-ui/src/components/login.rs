@@ -49,6 +49,7 @@ pub fn SessionGate(settings: Settings) -> impl IntoView {
       SessionState::ConfirmServer(check) => view! { <ServerConfirmScreen check=*check control=control /> }.into_any(),
       SessionState::SignedOut(problem) => view! { <LoginScreen problem=problem control=control /> }.into_any(),
       SessionState::SigningIn => view! { <SigningInScreen control=control /> }.into_any(),
+      SessionState::OpeningCore => view! { <OpeningCoreScreen control=control /> }.into_any(),
       SessionState::NeedsEnrollment { me, has_existing_identity, was_data_lost } => {
         view! { <EnrollScreen name=me.display_name has_existing_identity=has_existing_identity was_data_lost=was_data_lost control=control /> }.into_any()
       },
@@ -151,6 +152,24 @@ fn SigningInScreen(control: SessionControl) -> impl IntoView {
       </p>
       <button class="btn" on:click=move |_| control.cancel_sign_in()>
         {move || i18n.t("cancel")}
+      </button>
+    </AuthFrame>
+  }
+}
+
+/// Signed in; the encrypted data opens as soon as the core has the access token.
+#[component]
+fn OpeningCoreScreen(control: SessionControl) -> impl IntoView {
+  let i18n = use_i18n();
+  view! {
+    <AuthFrame>
+      <h1>{move || i18n.t("login-opening-core-title")}</h1>
+      <p class="auth-status" role="status">
+        <span class="spinner" aria-hidden="true"></span>
+        <span>{move || i18n.t("login-opening-core")}</span>
+      </p>
+      <button class="btn" on:click=move |_| control.sign_out()>
+        {move || i18n.t("login-core-sign-out")}
       </button>
     </AuthFrame>
   }

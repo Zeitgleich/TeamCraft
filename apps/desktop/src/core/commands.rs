@@ -50,9 +50,10 @@ impl CoreHost {
     user: UserId,
     spawn: impl FnOnce(TokenCache) -> CoreRuntime,
   ) -> Result<CoreStatus, String> {
-    // Refreshes a token that is about to run out before the core asks for it.
-    if let Ok(token) = service.server_bearer_token().await {
-      self.tokens.set(Some(token));
+    // Refreshes a token that is about to run out before the core asks for it; without one the
+    // core waits for it on its own.
+    if let Err(error) = service.server_bearer_token().await {
+      tracing::debug!(%error, "no fresh access token before starting the core");
     }
     if let Some(runtime) = self.running_for(server_url, user)? {
       let status = runtime.status().await;
@@ -60,6 +61,8 @@ impl CoreHost {
         return Ok(status);
       }
       tracing::info!("the core failed to open before; starting it again");
+      // Stopped here, not when the last handle goes: the new core needs the store lock now.
+      runtime.shutdown();
       drop(runtime);
       self.stop()?;
     }
@@ -348,25 +351,29 @@ mod tests {
     let host = CoreHost::new(TokenCache::live(service.clone()));
     let directory = scratch_dir("replace");
     std::fs::create_dir_all(&directory).expect("dir");
-    // A file where the data directory should be: opening fails.
-    let blocked = directory.join("blocked");
-    std::fs::write(&blocked, b"").expect("file");
+    // A damaged database: opening fails after the store lock was taken.
+    let database = directory.join(format!("{}.db", user(1)));
+    std::fs::write(&database, b"not a database").expect("file");
 
     let first = host
       .start(&service, &server_url, user(1), |tokens| {
-        runtime(&server_url, blocked.clone(), tokens)
+        runtime(&server_url, directory.clone(), tokens)
       })
       .await
       .expect("first start");
+    // Another handle to the failed core (a command still running) must not keep the lock.
+    let still_held = host.current().expect("failed core");
     let second = host
       .start(&service, &server_url, user(1), |tokens| {
-        runtime(&server_url, directory.join("data"), tokens)
+        std::fs::remove_file(&database).expect("remove the damaged database");
+        runtime(&server_url, directory.clone(), tokens)
       })
       .await
       .expect("second start");
 
     assert!(matches!(first, CoreStatus::Failed { .. }), "{first:?}");
     assert!(matches!(second, CoreStatus::NeedsEnrollment { .. }), "{second:?}");
+    drop(still_held);
     host.stop().expect("stop");
     drop(std::fs::remove_dir_all(&directory));
   }
