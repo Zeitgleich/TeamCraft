@@ -161,6 +161,36 @@ mod hostile_server {
   }
 
   #[tokio::test]
+  async fn a_welcome_from_a_revoked_device_of_the_user_leaves_the_founded_group() {
+    let (server, clock, mut alice, bob) = two().await;
+    let mut laptop = link(&mut alice, &clock).await;
+    let laptop_id = laptop.client.device_id();
+    let (alice, dm) = open_cut_short(&server, &clock, alice, &bob, CUT_AFTER_FOUNDING).await;
+    let mut alice = alice;
+
+    // The laptop founds the DM's group with Bob and the phone in it; then the phone revokes the
+    // laptop, and the server keeps serving what the laptop made.
+    assert_eq!(laptop.client.open_dm(bob.client.user_id()).await.unwrap(), dm);
+    laptop.client.add_missing_devices(dm).await.unwrap();
+    assert!(
+      server
+        .welcomes_for(alice.client.device_id())
+        .iter()
+        .any(|welcome| welcome.conversation_id == dm && welcome.sender_device_id == laptop_id),
+      "the laptop's welcome for the phone"
+    );
+    server.ignore_revocations();
+    alice.client.revoke_device(laptop_id).await.unwrap();
+
+    alice.client.full_sync().await.unwrap();
+    assert_eq!(
+      alice.client.mls_epoch(dm).unwrap(),
+      Some(0),
+      "kept the founded group"
+    );
+  }
+
+  #[tokio::test]
   async fn a_server_claiming_a_later_epoch_doesnt_make_the_device_give_up_or_found_again() {
     let (server, clock, alice, bob) = two().await;
     let (alice, dm) = open_cut_short(&server, &clock, alice, &bob, CUT_AFTER_FOUNDING).await;

@@ -524,8 +524,10 @@ for (from the user's own request, never the server's member list), and finishes 
 (crash, lost network) on the next open, or on a sync at `rejoin_retry` doubled per attempt, up to
 `rejoin_retry_max`. It founds only when the server shows no group (epoch 0) and it has none. A group
 of one that this device founded and nobody joined is given up only for a welcome that checks out:
-every leaf verified against the pinned identities, the tree holding exactly this user and the DM's
-other participants, and made by one of those participants or by another device of this user. The
+every leaf verified against the pinned identities and active by its user's newest signed device
+list, the tree holding exactly this user and the DM's other participants, and made by one of those
+participants or by another device of this user, which a signed device list must name (fails closed:
+a revoked device can't hand out the group). The founded group goes only after the join succeeded. The
 server's word alone (an epoch conflict, a later epoch in the queue) never makes it drop the group,
 so a server can't make devices drop and found again in a loop; it can only delay the DM. On giving
 up, the founding content key stops being current but stays in the ring (and the account's key bag,

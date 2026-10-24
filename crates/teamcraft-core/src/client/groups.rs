@@ -363,7 +363,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// The founding content key stops being current, or this device would keep encrypting with a
   /// key nobody else has; it stays in the ring (and the key bag) for what was encrypted with it.
   fn give_up_founded_group(&mut self, id: ConversationId) -> Result<(), CoreError> {
-    self.drop_group(id)?;
+    // The joined group took over the MLS state stored under this group ID: only the records
+    // about the founded one go, deleting its MLS state would delete the joined group's.
+    self.forget_group_records(id)?;
     let Some(setup) = self.dm_setup(id)? else {
       return Ok(());
     };
@@ -1435,6 +1437,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self
       .pin_identities(members.members.iter().map(|member| member.user.id))
       .await?;
+    if let Some(others) = maybe_founded_for {
+      // The newest device lists of everybody the DM's group may hold, before the welcome is
+      // opened: a revoked device must not be the one that replaces this device's group.
+      let me = self.user_id();
+      self.trusted_directory(others.iter().copied().chain([me])).await?;
+    }
     let stage = match maybe_founded_for {
       Some(_) => ConversationGroup::stage_join_replacing,
       None => ConversationGroup::stage_join,
@@ -1471,13 +1479,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       if let Err(error) = checked {
         return Ok(WelcomeJoin::Rejected(error));
       }
-      tracing::info!(conversation_id = %conversation, "joining the DM group that was founded first");
+    }
+    let group = match staged.complete(&self.provider, &directory) {
+      Ok(group) => group,
+      Err(error) => return Ok(WelcomeJoin::Rejected(error)),
+    };
+    if maybe_founded_for.is_some() {
+      // Only now that the join went through: a failed one leaves the founded group as it was.
+      tracing::info!(conversation_id = %conversation, "joined the DM group that was founded first");
       self.give_up_founded_group(conversation)?;
     }
-    Ok(match staged.complete(&self.provider, &directory) {
-      Ok(group) => WelcomeJoin::Joined(Box::new((group, directory))),
-      Err(error) => WelcomeJoin::Rejected(error),
-    })
+    Ok(WelcomeJoin::Joined(Box::new((group, directory))))
   }
 
   /// Whether this device's group is already at or past the welcome's epoch.
