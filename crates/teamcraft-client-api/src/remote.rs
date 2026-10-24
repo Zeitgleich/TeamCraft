@@ -242,6 +242,7 @@ impl MessageWindow {
       start,
       total: backend.message_count(conversation),
       messages: backend.messages(conversation, start, len),
+      undecrypted: backend.undecrypted_count(conversation),
     }
   }
 }
@@ -274,6 +275,10 @@ pub struct MessageWindow {
   /// Length of the whole feed at the time of reading.
   pub total: usize,
   pub messages: Vec<Message>,
+  /// Messages of the conversation this device received but can't read yet (keys not arrived):
+  /// not in the feed, so a conversation of only such messages would look empty without it.
+  #[serde(default)]
+  pub undecrypted: usize,
 }
 
 /// Where the local client stands.

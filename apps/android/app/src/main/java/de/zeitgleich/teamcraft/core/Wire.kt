@@ -133,7 +133,14 @@ data class ChatSnapshot(
 }
 
 @Serializable
-data class MessageWindow(val conversation: String, val start: Int, val total: Int, val messages: List<Message>)
+data class MessageWindow(
+  val conversation: String,
+  val start: Int,
+  val total: Int,
+  val messages: List<Message>,
+  /** Received but not readable on this device yet (keys not arrived); not in [messages]. */
+  val undecrypted: Int = 0,
+)
 
 @Serializable
 data class ReplyPreview(

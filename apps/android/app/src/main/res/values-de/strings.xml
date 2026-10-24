@@ -184,4 +184,8 @@
     <item quantity="one">Von %d Person bestätigt</item>
     <item quantity="other">Von %d Personen bestätigt</item>
   </plurals>
+  <plurals name="messages_undecrypted">
+    <item quantity="one">%1$d Nachricht kann auf diesem Gerät noch nicht gelesen werden. Sie erscheint, sobald ihre Schlüssel vom Gerät eines anderen Mitglieds ankommen.</item>
+    <item quantity="other">%1$d Nachrichten können auf diesem Gerät noch nicht gelesen werden. Sie erscheinen, sobald ihre Schlüssel vom Gerät eines anderen Mitglieds ankommen.</item>
+  </plurals>
 </resources>

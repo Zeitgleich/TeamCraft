@@ -779,6 +779,16 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       .map(|conversation| self.to_conversation(conversation, &users, &preferences))
   }
 
+  fn undecrypted_count(&self, conversation: ConversationId) -> usize {
+    // Parked under "<conversation>/<client message ID>" (`client::messaging`); the keys suffice.
+    let prefix = format!("{conversation}/");
+    self
+      .read(self.store.list(Table::Undecrypted).map_err(CoreError::from))
+      .iter()
+      .filter(|(key, _)| key.starts_with(&prefix))
+      .count()
+  }
+
   fn message_count(&self, conversation: ConversationId) -> usize {
     self
       .read(
@@ -1485,6 +1495,26 @@ mod tests {
       backend.drain_commands(),
       vec![CoreCommand::MarkRead { conversation }]
     );
+  }
+
+  #[test]
+  fn messages_waiting_for_keys_are_counted_per_conversation() {
+    let store = MemoryStore::new();
+    let conversation: ConversationId = id(7);
+    for key in [
+      format!("{conversation}/aa"),
+      format!("{conversation}/bb"),
+      "70/cc".to_string(),
+    ] {
+      store.put(Table::Undecrypted, &key, b"{}").unwrap();
+    }
+    let backend = CoreChatBackend::new(store, id(1), Box::new(ManualClock::new(0)));
+    assert_eq!(backend.undecrypted_count(conversation), 2);
+    assert_eq!(backend.undecrypted_count(id(70)), 1);
+    assert_eq!(backend.undecrypted_count(id(8)), 0);
+    // Not part of the feed, but the window says they exist (an otherwise empty conversation).
+    let window = teamcraft_client_api::remote::MessageWindow::read(&backend, conversation, 0, 50);
+    assert_eq!((window.total, window.undecrypted), (0, 2));
   }
 
   #[test]
