@@ -7,6 +7,13 @@ all-features = true
 [advisories]
 # Every ignored advisory needs a reason and a link.
 ignore = [
+  # crypto-bigint 0.5 (via elliptic-curve 0.13 / p256 0.13 / ecdsa 0.16, pulled in by davey and the
+  # openmls_rust_crypto stack) has secret-dependent branches in a few arithmetic operations. Only
+  # 0.7.6 is patched and those crates don't support it yet; the direct crypto-bigint 0.7 is updated
+  # to 0.7.6. Exploiting it needs a local timing or microarchitectural side channel on the device.
+  # Remove with the crypto major upgrades (#124, #163).
+  # https://rustsec.org/advisories/RUSTSEC-2026-0387
+  { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 only via p256/elliptic-curve 0.13; no patched 0.5 release, upgrade tracked in #163" },
   # zip 4 (via tauri-plugin-updater 2.14, whose latest stable release still requires zip ^4) keeps
   # SUID/SGID bits when extracting. The updater only extracts update archives after checking their
   # minisign signature against the key in tauri.conf.json, so a crafted archive never reaches it; Windows
