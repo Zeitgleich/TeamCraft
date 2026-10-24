@@ -1,6 +1,9 @@
 //! All integration tests of the crate in one test binary: one link step instead of one per file.
 //! Each module keeps its own `cfg` gates (features, target), so a module that does not apply
 //! here is empty.
+// Every module runs on tokio against the fake server; the wasm tests are web.rs and
+// web_service_worker.rs.
+#![cfg(not(target_arch = "wasm32"))]
 
 mod account_data;
 mod activity;
