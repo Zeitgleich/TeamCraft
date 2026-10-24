@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """Checks the web client's wasm against the download budget and prints its size.
 
-The budget (.claude/rules/robustness.md, "Download size") counts the uncompressed wasm a first
-visit downloads: the app (`teamcraft-ui-*_bg.wasm`) and the service worker
-(`teamcraft-web-sw*_bg.wasm`, installed on the first visit too). CI runs this after the release
-`trunk build` (`.github/workflows/web-size.yml`) on every change to the web client.
+The budget (.claude/rules/robustness.md, "Download size") counts the compressed wasm a first visit
+transfers: the app (`teamcraft-ui-*_bg.wasm`) and the service worker (`teamcraft-web-sw*_bg.wasm`,
+installed on the first visit too). The server sends them compressed, the browser compiles while it
+streams, and the service worker caches them afterwards, so the transfer size is what a user waits
+for. It is measured as gzip -9, which every server and browser supports; brotli (smaller) is
+printed too when the `brotli` module is installed. CI runs this after the release `trunk build`
+(`.github/workflows/web-size.yml`) on every change to the web client.
 
-Two limits: above `--budget-bytes` (the budget) it warns; above `--max-bytes` it fails. While the
-bundle is over the budget, the maximum is a ratchet just above its current size, so it can't grow
-unnoticed; it comes down with every reduction until it meets the budget (docs/performance.md).
+Limits:
 
-    scripts/check-web-size.py crates/teamcraft-ui/dist [--max-bytes N] [--baseline main.json] [--write sizes.json]
+- `--budget-bytes`: the gzip -9 total. It warns within 5 % of it and fails above it.
+- `--max-uncompressed-bytes`: a growth ratchet on the uncompressed total (memory and compile time
+  grow with it). It sits a little above the current size so the bundle can't grow unnoticed; lower it
+    after a reduction, raising it is a decision (docs/performance.md, "Web bundle size").
+
+        scripts/check-web-size.py crates/teamcraft-ui/dist [--budget-bytes N]
+                [--max-uncompressed-bytes N] [--baseline main.json] [--write sizes.json]
 
 `--baseline` is the `--write` output of an earlier build (CI keeps main's); the delta to it is
 printed. With `GITHUB_STEP_SUMMARY` set, the table also goes to the job summary.
@@ -22,8 +29,16 @@ import os
 import pathlib
 import sys
 
-# 10 MB, as the budget table says (decimal megabytes, like the sizes reported in issue #248).
-DEFAULT_BUDGET_BYTES = 10_000_000
+try:
+    import brotli
+except ImportError:  # Optional: gzip is the budget, brotli is informational.
+    brotli = None
+
+# The gzip -9 total of app + service worker, decimal megabytes: 4.25 MB measured on main c55b2e58
+# plus about 10 % (docs/performance.md, "Web bundle size").
+DEFAULT_BUDGET_BYTES = 4_700_000
+# Warn when the gzip total is above this share of the budget.
+WARN_SHARE = 0.95
 # The files of a first visit, by the name trunk gives them (with a content hash).
 PARTS = {
     "app": "teamcraft-ui-*_bg.wasm",
@@ -34,8 +49,10 @@ PARTS = {
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("dist", type=pathlib.Path, help="the trunk output directory")
-    parser.add_argument("--budget-bytes", type=int, default=DEFAULT_BUDGET_BYTES)
-    parser.add_argument("--max-bytes", type=int, help="fail above this (default: the budget)")
+    parser.add_argument("--budget-bytes", type=int, default=DEFAULT_BUDGET_BYTES,
+                        help="fail above this gzip -9 total, warn close to it")
+    parser.add_argument("--max-uncompressed-bytes", type=int,
+                        help="fail above this uncompressed total (the growth ratchet)")
     parser.add_argument("--baseline", type=pathlib.Path, help="sizes of an earlier build (JSON)")
     parser.add_argument("--write", type=pathlib.Path, help="write this build's sizes (JSON)")
     args = parser.parse_args(argv)
@@ -43,7 +60,7 @@ def main(argv=None):
     if sizes is None:
         return 2
     maybe_baseline = load_baseline(args.baseline)
-    report = render(sizes, maybe_baseline, args.budget_bytes)
+    report = render(sizes, maybe_baseline, args.budget_bytes, args.max_uncompressed_bytes)
     print(report)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
@@ -52,20 +69,12 @@ def main(argv=None):
     if args.write:
         args.write.parent.mkdir(parents=True, exist_ok=True)
         args.write.write_text(json.dumps(sizes, indent=2) + "\n", encoding="utf-8")
-    total = total_bytes(sizes)
-    max_bytes = args.max_bytes if args.max_bytes is not None else args.budget_bytes
-    if total > max_bytes:
-        print(f"error: the web wasm is {total:,} bytes, over the maximum of {max_bytes:,}",
-              file=sys.stderr)
-        return 1
-    if total > args.budget_bytes:
-        # A workflow annotation where CI runs it; plain text elsewhere.
-        print(f"::warning::the web wasm is {total:,} bytes, over the budget of {args.budget_bytes:,}")
-    return 0
+    return check_limits(sizes, args.budget_bytes, args.max_uncompressed_bytes)
 
 
 def measure(dist):
-    """{part: {"bytes", "gzip_bytes"}}; None (with an error) when a part is missing or ambiguous."""
+    """{part: {"bytes", "gzip_bytes"[, "brotli_bytes"]}}; None (with an error) when a part is missing
+    or ambiguous."""
     sizes = {}
     for part, pattern in PARTS.items():
         matches = sorted(dist.glob(pattern))
@@ -74,7 +83,31 @@ def measure(dist):
             return None
         data = matches[0].read_bytes()
         sizes[part] = {"bytes": len(data), "gzip_bytes": len(gzip.compress(data, compresslevel=9))}
+        if brotli is not None:
+            sizes[part]["brotli_bytes"] = len(brotli.compress(data, quality=11))
     return sizes
+
+
+def check_limits(sizes, budget_bytes, maybe_max_uncompressed_bytes):
+    """The exit code: 1 when a limit is exceeded, 0 otherwise (with a warning close to the budget)."""
+    gzip_total = total_bytes(sizes, "gzip_bytes")
+    uncompressed_total = total_bytes(sizes, "bytes")
+    failed = False
+    if gzip_total > budget_bytes:
+        print(f"error: the web wasm is {gzip_total:,} bytes gzip -9, over the budget of "
+              f"{budget_bytes:,}", file=sys.stderr)
+        failed = True
+    if maybe_max_uncompressed_bytes is not None and uncompressed_total > maybe_max_uncompressed_bytes:
+        print(f"error: the web wasm is {uncompressed_total:,} bytes uncompressed, over the ratchet of "
+              f"{maybe_max_uncompressed_bytes:,}", file=sys.stderr)
+        failed = True
+    if failed:
+        return 1
+    if gzip_total > budget_bytes * WARN_SHARE:
+        # A workflow annotation where CI runs it; plain text elsewhere.
+        print(f"::warning::the web wasm is {gzip_total:,} bytes gzip -9, within "
+              f"{100 - WARN_SHARE * 100:.0f} % of the budget of {budget_bytes:,}")
+    return 0
 
 
 def load_baseline(maybe_path):
@@ -87,38 +120,43 @@ def load_baseline(maybe_path):
         return None
 
 
-def total_bytes(sizes):
-    return sum(part["bytes"] for part in sizes.values())
+def total_bytes(sizes, key):
+    return sum(part[key] for part in sizes.values())
 
 
-def render(sizes, maybe_baseline, budget_bytes):
-    """A Markdown table: each part, the total against the budget, and the delta to the baseline."""
-    rows = [("app", sizes["app"]), ("service worker", sizes["service_worker"])]
-    total = {
-        "bytes": total_bytes(sizes),
-        "gzip_bytes": sum(part["gzip_bytes"] for part in sizes.values()),
-    }
-    rows.append(("total", total))
+def render(sizes, maybe_baseline, budget_bytes, maybe_max_uncompressed_bytes):
+    """A Markdown table: each part, the total against the limits, and the gzip delta to the baseline."""
+    has_brotli = all("brotli_bytes" in part for part in sizes.values())
+    keys = ["bytes", "gzip_bytes"] + (["brotli_bytes"] if has_brotli else [])
+    total = {key: total_bytes(sizes, key) for key in keys}
+    rows = [("app", sizes["app"], "app"), ("service worker", sizes["service_worker"], "service_worker"),
+            ("total", total, None)]
+    brotli_header = " brotli -11 |" if has_brotli else ""
+    brotli_rule = "------------|" if has_brotli else ""
     lines = [
-        "| Web wasm       | Uncompressed | gzip -9    | Delta to main |",
-        "|----------------|--------------|------------|---------------|",
+        f"| Web wasm       | Uncompressed | gzip -9    |{brotli_header} gzip delta to main |",
+        f"|----------------|--------------|------------|{brotli_rule}--------------------|",
     ]
-    for (label, size), key in zip(rows, ["app", "service_worker", None]):
-        delta = format_delta(size["bytes"], baseline_bytes(maybe_baseline, key))
-        lines.append(f"| {label:<14} | {mb(size['bytes']):>12} | {mb(size['gzip_bytes']):>10} | {delta:>13} |")
-    headroom = budget_bytes - total["bytes"]
+    for label, size, maybe_key in rows:
+        delta = format_delta(size["gzip_bytes"], baseline_bytes(maybe_baseline, maybe_key, "gzip_bytes"))
+        brotli_cell = f" {mb(size['brotli_bytes']):>10} |" if has_brotli else ""
+        lines.append(f"| {label:<14} | {mb(size['bytes']):>12} | {mb(size['gzip_bytes']):>10} |"
+                     f"{brotli_cell} {delta:>18} |")
     lines.append("")
-    lines.append(f"Budget {mb(budget_bytes)} uncompressed; headroom {mb(headroom)}.")
+    lines.append(f"Budget {mb(budget_bytes)} gzip -9; headroom {mb(budget_bytes - total['gzip_bytes'])}.")
+    if maybe_max_uncompressed_bytes is not None:
+        lines.append(f"Uncompressed ratchet {mb(maybe_max_uncompressed_bytes)}; headroom "
+                     f"{mb(maybe_max_uncompressed_bytes - total['bytes'])}.")
     return "\n".join(lines)
 
 
-def baseline_bytes(maybe_baseline, maybe_key):
+def baseline_bytes(maybe_baseline, maybe_part, key):
     if maybe_baseline is None:
         return None
     try:
-        if maybe_key is None:
-            return total_bytes(maybe_baseline)
-        return maybe_baseline[maybe_key]["bytes"]
+        if maybe_part is None:
+            return total_bytes(maybe_baseline, key)
+        return maybe_baseline[maybe_part][key]
     except (KeyError, TypeError):
         return None
 

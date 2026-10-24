@@ -101,11 +101,12 @@ in [docs/performance.md](../../docs/performance.md) ("Clients"). A change that t
 | Idle, connected, in the foreground: CPU                 | ≤ 0.5 %   | ≤ 1 %                       | ≤ 1 %                                        |
 | Network while idle besides the gateway heartbeat        | none      | none                        | none                                         |
 | In the background                                       | –         | –                           | no wakelocks, no polling; push wakes the app |
-| Download size                                           | –         | ≤ 10 MB wasm uncompressed   | –                                            |
+| Download size (first visit, compressed)                 | –         | ≤ 4.7 MB wasm, gzip -9      | –                                            |
 
-- The download size counts the uncompressed wasm a first visit loads: the app and the service
-  worker. CI checks it on every change to the web client (`.github/workflows/web-size.yml`); see
-  docs/performance.md, "Web bundle size", for where it stands.
+- The download size counts the compressed wasm a first visit transfers: the app and the service
+  worker, measured as gzip -9 (brotli, where the server offers it, is about 30 % smaller). CI checks
+  it on every change to the web client (`.github/workflows/web-size.yml`), together with a growth
+  ratchet on the uncompressed size; see docs/performance.md, "Web bundle size", for where it stands.
 - Lists that can grow (messages, members, channels, search hits) are virtualised or paged; nothing
   renders or loads "all of them".
 - No work proportional to a conversation's or workspace's size on a hot path (send, switch, scroll,
