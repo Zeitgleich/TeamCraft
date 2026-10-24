@@ -29,6 +29,9 @@ pub enum ApiError {
   /// Compare-and-swap on a versioned object failed.
   #[error("the stored version is {current_version}, not the expected one")]
   VersionConflict { current_version: u64 },
+  /// A roster without an owner: nobody could ever sign a roster or policy again (admin.md §2.3).
+  #[error("the roster must keep at least one owner")]
+  LastOwner,
   #[error("the user has no key package left")]
   KeyPackageExhausted,
   /// An uploaded key package doesn't parse, isn't validly signed, or is (nearly) expired.
@@ -209,7 +212,7 @@ impl ApiError {
       | Self::MfaRequired => StatusCode::FORBIDDEN,
       Self::Auth(AuthError::KeysUnavailable(_)) => StatusCode::SERVICE_UNAVAILABLE,
       Self::NotFound { .. } => StatusCode::NOT_FOUND,
-      Self::InvalidRequest(_) | Self::InvalidKeyPackage(_) => StatusCode::BAD_REQUEST,
+      Self::InvalidRequest(_) | Self::InvalidKeyPackage(_) | Self::LastOwner => StatusCode::BAD_REQUEST,
       Self::Conflict(_)
       | Self::KeyPackageExhausted
       | Self::EpochConflict { .. }
@@ -239,6 +242,7 @@ impl ApiError {
       Self::LocalAccountsDisabled => ErrorCode::LocalAccountsDisabled,
       Self::UnknownHost => ErrorCode::UnknownHost,
       Self::Conflict(_) => ErrorCode::Conflict,
+      Self::LastOwner => ErrorCode::LastOwner,
       Self::KeyPackageExhausted => ErrorCode::KeyPackageExhausted,
       Self::InvalidKeyPackage(_) => ErrorCode::InvalidKeyPackage,
       Self::EpochConflict { .. } => ErrorCode::EpochConflict,
@@ -394,6 +398,7 @@ mod tests {
         StatusCode::CONFLICT,
         ErrorCode::Conflict,
       ),
+      (ApiError::LastOwner, StatusCode::BAD_REQUEST, ErrorCode::LastOwner),
       (
         ApiError::PayloadTooLarge("x".into()),
         StatusCode::PAYLOAD_TOO_LARGE,

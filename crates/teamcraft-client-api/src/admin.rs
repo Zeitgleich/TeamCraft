@@ -203,6 +203,68 @@ pub enum PolicyBlocker {
   NoSigningKeys,
 }
 
+/// The owners of the roster this device verified, for the console's owner warnings (admin.md §2.3).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OwnerRosterStatus {
+  pub owners: Vec<OwnerSigning>,
+  /// When member clients stop accepting the admins unless an owner signs the roster again; `None`
+  /// for a roster from before signing times.
+  #[serde(rename = "expires_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_expires_at: Option<TimestampMs>,
+  /// From the signed policy: fewer owners than this shows a warning (1 switches it off).
+  pub recommended_minimum: u8,
+  /// How long before [`Self::maybe_expires_at`] the console starts warning.
+  pub warning_lead_ms: i64,
+}
+
+/// An owner and the newest roster or policy signature of theirs this device verified.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OwnerSigning {
+  pub user: UserId,
+  #[serde(rename = "last_signed_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_last_signed_at: Option<TimestampMs>,
+}
+
+/// Something about the owners the console should point out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnerWarning {
+  /// Admin authority already ended on member clients.
+  Expired,
+  /// Admin authority ends at `at` unless an owner opens TeamCraft and signs again.
+  ExpiresSoon { at: TimestampMs },
+  /// Fewer owners than recommended: losing one could leave the workspace without any.
+  TooFewOwners { count: usize, minimum: u8 },
+}
+
+/// The i18n message for an admin error the console words itself: refusals whose text starts with
+/// a stable error code (the core puts it first). Other errors are shown as they are.
+pub fn admin_error_i18n_key(detail: &str) -> Option<&'static str> {
+  let last_owner = format!("{}:", teamcraft_proto::ErrorCode::LastOwner.as_str());
+  detail.contains(&last_owner).then_some("admin-error-last-owner")
+}
+
+impl OwnerRosterStatus {
+  /// The warnings at `now`, most urgent first.
+  pub fn warnings(&self, now: TimestampMs) -> Vec<OwnerWarning> {
+    let mut warnings = Vec::new();
+    if let Some(at) = self.maybe_expires_at {
+      if at <= now {
+        warnings.push(OwnerWarning::Expired);
+      } else if at.saturating_sub(now) <= self.warning_lead_ms {
+        warnings.push(OwnerWarning::ExpiresSoon { at });
+      }
+    }
+    let minimum = self.recommended_minimum.max(1);
+    if self.owners.len() < usize::from(minimum) {
+      warnings.push(OwnerWarning::TooFewOwners {
+        count: self.owners.len(),
+        minimum,
+      });
+    }
+    warnings
+  }
+}
+
 /// One audit log line: metadata only, never message content (admin.md §4).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuditEntry {
@@ -339,5 +401,83 @@ mod tests {
     slugs.sort_unstable();
     slugs.dedup();
     assert_eq!(slugs.len(), AuditAction::ALL.len());
+  }
+
+  #[test]
+  fn the_last_owner_refusal_is_localized() {
+    assert_eq!(
+      admin_error_i18n_key("last_owner: the roster must keep at least one owner"),
+      Some("admin-error-last-owner")
+    );
+    assert_eq!(admin_error_i18n_key("server answered 500: oops"), None);
+  }
+
+  mod owner_warnings {
+    use super::*;
+    use crate::model::Id;
+
+    const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+    const NOW: TimestampMs = 100 * DAY_MS;
+
+    #[test]
+    fn two_owners_with_a_fresh_roster_need_no_warning() {
+      assert!(status(2, Some(NOW + 20 * DAY_MS), 2).warnings(NOW).is_empty());
+    }
+
+    #[test]
+    fn fewer_owners_than_recommended_are_pointed_out() {
+      assert_eq!(
+        status(1, Some(NOW + 20 * DAY_MS), 2).warnings(NOW),
+        vec![OwnerWarning::TooFewOwners { count: 1, minimum: 2 }]
+      );
+      assert!(
+        status(1, Some(NOW + 20 * DAY_MS), 1).warnings(NOW).is_empty(),
+        "a minimum of 1 switches the warning off"
+      );
+      assert_eq!(
+        status(1, None, 0).warnings(NOW),
+        Vec::new(),
+        "a minimum of 0 counts as 1"
+      );
+    }
+
+    #[test]
+    fn an_expiring_roster_is_announced_ahead_of_time() {
+      let at = NOW + 7 * DAY_MS;
+      assert_eq!(
+        status(2, Some(at), 2).warnings(NOW),
+        vec![OwnerWarning::ExpiresSoon { at }]
+      );
+      assert!(status(2, Some(NOW + 7 * DAY_MS + 1), 2).warnings(NOW).is_empty());
+    }
+
+    #[test]
+    fn an_expired_roster_comes_first() {
+      assert_eq!(
+        status(1, Some(NOW), 2).warnings(NOW),
+        vec![
+          OwnerWarning::Expired,
+          OwnerWarning::TooFewOwners { count: 1, minimum: 2 }
+        ]
+      );
+      assert!(
+        status(2, None, 2).warnings(NOW).is_empty(),
+        "rosters from before signing times don't expire"
+      );
+    }
+
+    fn status(owners: i64, maybe_expires_at: Option<TimestampMs>, minimum: u8) -> OwnerRosterStatus {
+      OwnerRosterStatus {
+        owners: (1..=owners)
+          .map(|raw| OwnerSigning {
+            user: UserId::from_snowflake(crate::model::Snowflake::new(raw).unwrap()),
+            maybe_last_signed_at: None,
+          })
+          .collect(),
+        maybe_expires_at,
+        recommended_minimum: minimum,
+        warning_lead_ms: 7 * DAY_MS,
+      }
+    }
   }
 }

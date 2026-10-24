@@ -37,6 +37,8 @@ wire_enum! {
     Conflict => "conflict",
     EpochConflict => "epoch_conflict",
     VersionConflict => "version_conflict",
+    /// A roster change would leave the workspace without an owner (admin.md §2.3).
+    LastOwner => "last_owner",
     KeyPackageExhausted => "key_package_exhausted",
     PayloadTooLarge => "payload_too_large",
     RateLimited => "rate_limited",
@@ -162,6 +164,7 @@ mod tests {
       ErrorCode::Conflict,
       ErrorCode::EpochConflict,
       ErrorCode::VersionConflict,
+      ErrorCode::LastOwner,
       ErrorCode::KeyPackageExhausted,
       ErrorCode::PayloadTooLarge,
       ErrorCode::RateLimited,

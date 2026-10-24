@@ -156,6 +156,12 @@ passphrase again instead.
 server therefore accepts the genesis roster only from a user who has both an identity key and a key
 bag, in addition to the ordering above.
 
+**Never without an owner.** Every roster entry, the genesis included, must name at least one owner
+with a valid 32-byte identity key. Clients check this before the chain and the signature and refuse
+the entry otherwise (`NoOwner`), so a validly signed but ownerless roster can't lock the workspace;
+owners' clients don't sign one (`LastOwner`), and the server refuses to store one (`last_owner`) as
+a sanity check, not as a trust decision.
+
 ## 4. Messages
 
 ### 4.1 Why not "MLS only"

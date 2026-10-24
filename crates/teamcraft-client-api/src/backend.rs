@@ -126,6 +126,11 @@ pub trait ChatBackend {
   fn push_content_mode(&self) -> teamcraft_proto::PushContentMode {
     teamcraft_proto::PushContentMode::Generic
   }
+  /// The owners of the roster this device verified (admin.md §2.3); `None` when the backend has
+  /// verified none.
+  fn owner_roster(&self) -> Option<crate::admin::OwnerRosterStatus> {
+    None
+  }
   /// Identity keys this device knows (empty when the backend has no encryption keys).
   fn security_keys(&self) -> crate::remote::SecuritySnapshot {
     crate::remote::SecuritySnapshot::default()
@@ -450,6 +455,10 @@ pub trait AdminBackend {
   fn set_audit_filter(&self, _filter: AuditFilter) {}
   /// Why the signed policy cannot be changed here (not an owner, no encryption keys on this device).
   fn policy_edit_blocker(&self) -> Option<crate::admin::PolicyBlocker> {
+    None
+  }
+  /// The owners of the verified roster and when each last signed, for the owner warnings.
+  fn admin_owner_roster(&self) -> Option<crate::admin::OwnerRosterStatus> {
     None
   }
 

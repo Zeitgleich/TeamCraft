@@ -33,6 +33,7 @@ const MAX_PRESET_TEXT_CHARS: usize = 100;
 pub const MAX_ORG_BACKGROUNDS: usize = 50;
 const MAX_ORG_BACKGROUND_NAME_CHARS: usize = 100;
 const SHA256_BYTES: usize = 32;
+const MAX_RECOMMENDED_OWNERS: u8 = 10;
 
 pub async fn append(
   state: &AppState,
@@ -54,8 +55,11 @@ pub async fn append(
   {
     return Err(ApiError::device_not_found());
   }
-  if kind == WorkspaceLogKind::Roster && request.expected_version == 0 {
-    require_recoverable_root(state, caller).await?;
+  if kind == WorkspaceLogKind::Roster {
+    check_roster_payload(request.payload.as_slice())?;
+    if request.expected_version == 0 {
+      require_recoverable_root(state, caller).await?;
+    }
   }
   let maybe_document = if kind == WorkspaceLogKind::Policy {
     let document = check_policy_payload(request.payload.as_slice(), request.expected_version + 1)?;
@@ -212,6 +216,42 @@ pub async fn get_policy(
   })
 }
 
+/// The parts of a roster document the server looks at. Clients verify the rest (and the
+/// signatures); the server only refuses what no honest client sends.
+#[derive(serde::Deserialize)]
+struct RosterOutline {
+  members: Vec<RosterMemberOutline>,
+}
+
+#[derive(serde::Deserialize)]
+struct RosterMemberOutline {
+  role: RosterRoleOutline,
+}
+
+#[derive(serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RosterRoleOutline {
+  Owner,
+  #[serde(other)]
+  Other,
+}
+
+/// A sanity check, not a trust decision (clients refuse a roster without an owner themselves):
+/// a roster nobody owns could never be changed again (admin.md §2.3).
+fn check_roster_payload(payload: &[u8]) -> Result<(), ApiError> {
+  let roster: RosterOutline = serde_json::from_slice(payload)
+    .map_err(|e| ApiError::InvalidRequest(format!("the payload is not a roster document: {e}")))?;
+  if roster
+    .members
+    .iter()
+    .any(|member| member.role == RosterRoleOutline::Owner)
+  {
+    Ok(())
+  } else {
+    Err(ApiError::LastOwner)
+  }
+}
+
 /// Parses and validates a policy document before it is appended.
 fn check_policy_payload(payload: &[u8], expected_new_version: u64) -> Result<PolicyDocument, ApiError> {
   let document: PolicyDocument = serde_json::from_slice(payload)
@@ -275,6 +315,11 @@ fn check_policy_payload(payload: &[u8], expected_new_version: u64) -> Result<Pol
     ));
   }
   check_guest_and_password_policy(policy)?;
+  if !(1..=MAX_RECOMMENDED_OWNERS).contains(&policy.owners.recommended_minimum) {
+    return Err(ApiError::InvalidRequest(format!(
+      "owners.recommended_minimum must be between 1 and {MAX_RECOMMENDED_OWNERS}"
+    )));
+  }
   if matches!(
     policy.notifications.push_content,
     teamcraft_proto::PushContentMode::Unknown(_)
@@ -570,6 +615,44 @@ mod tests {
       "unlimited exceeds a limit"
     );
     assert!(check_policy_payload(&with(days(0), RetentionSetting::default()), 1).is_err());
+  }
+
+  #[test]
+  fn a_roster_without_an_owner_is_refused() {
+    let roster =
+      |members: serde_json::Value| serde_json::to_vec(&json!({"version": 2, "members": members})).unwrap();
+    let member = |role: &str| json!({"user_id": "1", "role": role, "identity_key": "AAAA"});
+    assert!(check_roster_payload(&roster(json!([member("owner"), member("admin")]))).is_ok());
+    for members in [json!([]), json!([member("admin")]), json!([member("auditor")])] {
+      assert!(matches!(
+        check_roster_payload(&roster(members)),
+        Err(ApiError::LastOwner)
+      ));
+    }
+    assert!(matches!(
+      check_roster_payload(b"not json"),
+      Err(ApiError::InvalidRequest(_))
+    ));
+    assert!(matches!(
+      check_roster_payload(b"{}"),
+      Err(ApiError::InvalidRequest(_))
+    ));
+  }
+
+  #[test]
+  fn the_recommended_number_of_owners_is_bounded() {
+    assert!(check_policy_payload(&payload(1, |p| p.owners.recommended_minimum = 1), 1).is_ok());
+    assert!(check_policy_payload(&payload(1, |p| p.owners.recommended_minimum = 0), 1).is_err());
+    assert!(check_policy_payload(&payload(1, |p| p.owners.recommended_minimum = 11), 1).is_err());
+    let without: serde_json::Value =
+      json!({"version": 1, "policy": serde_json::to_value(WorkspacePolicy::default()).unwrap()});
+    let mut older = without.clone();
+    older["policy"].as_object_mut().unwrap().remove("owners");
+    let parsed = check_policy_payload(&serde_json::to_vec(&older).unwrap(), 1).unwrap();
+    assert_eq!(
+      parsed.policy.owners.recommended_minimum, 2,
+      "older documents get the default"
+    );
   }
 
   #[test]

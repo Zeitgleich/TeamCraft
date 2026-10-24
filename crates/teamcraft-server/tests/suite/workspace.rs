@@ -41,6 +41,20 @@ async fn append(
     .await
 }
 
+/// A roster document with one owner; `tag` tells entries apart (the server stores the bytes as they are).
+fn roster(tag: &str) -> Vec<u8> {
+  roster_with(tag, &["owner", "admin"])
+}
+
+fn roster_with(tag: &str, roles: &[&str]) -> Vec<u8> {
+  let members: Vec<Value> = roles
+    .iter()
+    .enumerate()
+    .map(|(index, role)| json!({"user_id": (index + 1).to_string(), "role": role, "identity_key": "AAAA"}))
+    .collect();
+  serde_json::to_vec(&json!({"version": 0, "members": members, "tag": tag})).unwrap()
+}
+
 fn policy_payload(version: u64, edit: impl FnOnce(&mut Value)) -> Vec<u8> {
   let mut value = serde_json::to_value(PolicyDocument {
     version,
@@ -67,11 +81,27 @@ async fn only_owners_append_and_everybody_can_read_the_roster() {
     StatusCode::FORBIDDEN,
     "admins don't sign the roster"
   );
-  let first = append(&app, &alice, &alice_device, "/workspace/roster", 0, b"entry-1").await;
+  let first = append(
+    &app,
+    &alice,
+    &alice_device,
+    "/workspace/roster",
+    0,
+    &roster("entry-1"),
+  )
+  .await;
   assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
   assert_eq!(first.body["version"], 1);
   assert_eq!(first.body["signer_device_id"], alice_device);
-  append(&app, &alice, &alice_device, "/workspace/roster", 1, b"entry-2").await;
+  append(
+    &app,
+    &alice,
+    &alice_device,
+    "/workspace/roster",
+    1,
+    &roster("entry-2"),
+  )
+  .await;
 
   let listed = app.get(&carol, "/workspace/roster").await;
   let versions: Vec<_> = listed.body["entries"]
@@ -81,7 +111,7 @@ async fn only_owners_append_and_everybody_can_read_the_roster() {
     .map(|e| e["version"].clone())
     .collect();
   assert_eq!(versions, vec![json!(1), json!(2)]);
-  assert_eq!(listed.body["entries"][0]["payload"], b64(b"entry-1"));
+  assert_eq!(listed.body["entries"][0]["payload"], b64(&roster("entry-1")));
   let tail = app.get(&carol, "/workspace/roster?after=1").await;
   assert_eq!(tail.body["entries"].as_array().unwrap().len(), 1);
   app.stop().await;
@@ -94,11 +124,49 @@ async fn the_root_of_trust_needs_a_recoverable_identity() {
   let device = register_device(&app, &alice).await;
   // No identity key yet, or one from an older client without a key bag: the genesis roster would
   // pin a root of trust nobody can recover (e2ee.md §3.2).
-  let refused = append(&app, &alice, &device, "/workspace/roster", 0, b"genesis").await;
+  let refused = append(&app, &alice, &device, "/workspace/roster", 0, &roster("genesis")).await;
   assert_eq!(refused.error_code(), "conflict", "{}", refused.body);
   enroll_identity(&app, &alice).await;
-  let first = append(&app, &alice, &device, "/workspace/roster", 0, b"genesis").await;
+  let first = append(&app, &alice, &device, "/workspace/roster", 0, &roster("genesis")).await;
   assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+  app.stop().await;
+}
+
+#[tokio::test]
+async fn a_roster_without_an_owner_is_refused() {
+  let app = app!();
+  let alice = owner();
+  let device = register_device(&app, &alice).await;
+  enroll_identity(&app, &alice).await;
+  let first = append(&app, &alice, &device, "/workspace/roster", 0, &roster("genesis")).await;
+  assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+
+  // admin.md §2.3: nobody could sign the next roster. Clients refuse such an entry too.
+  for roles in [&["admin"][..], &[][..]] {
+    let orphaned = append(
+      &app,
+      &alice,
+      &device,
+      "/workspace/roster",
+      1,
+      &roster_with("orphaned", roles),
+    )
+    .await;
+    assert_eq!(
+      (orphaned.status, orphaned.error_code()),
+      (StatusCode::BAD_REQUEST, "last_owner"),
+      "{}",
+      orphaned.body
+    );
+  }
+  let garbage = append(&app, &alice, &device, "/workspace/roster", 1, b"not a roster").await;
+  assert_eq!(garbage.error_code(), "invalid_request");
+  let listed = app.get(&alice, "/workspace/roster").await;
+  assert_eq!(
+    listed.body["entries"].as_array().unwrap().len(),
+    1,
+    "nothing was stored"
+  );
   app.stop().await;
 }
 
@@ -121,14 +189,14 @@ async fn stale_versions_conflict_and_concurrent_appends_have_one_winner() {
   let alice = owner();
   let device = register_device(&app, &alice).await;
   enroll_identity(&app, &alice).await;
-  append(&app, &alice, &device, "/workspace/roster", 0, b"one").await;
+  append(&app, &alice, &device, "/workspace/roster", 0, &roster("one")).await;
 
-  let stale = append(&app, &alice, &device, "/workspace/roster", 0, b"again").await;
+  let stale = append(&app, &alice, &device, "/workspace/roster", 0, &roster("again")).await;
   assert_eq!(
     (stale.status, stale.error_code()),
     (StatusCode::CONFLICT, "version_conflict")
   );
-  let gap = append(&app, &alice, &device, "/workspace/roster", 5, b"gap").await;
+  let gap = append(&app, &alice, &device, "/workspace/roster", 5, &roster("gap")).await;
   assert_eq!(gap.error_code(), "version_conflict");
 
   let attempts = (0..8).map(|n| {
@@ -140,7 +208,7 @@ async fn stale_versions_conflict_and_concurrent_appends_have_one_winner() {
         &device,
         "/workspace/roster",
         1,
-        format!("race-{n}").as_bytes(),
+        &roster(&format!("race-{n}")),
       )
       .await
     }
@@ -269,7 +337,7 @@ async fn connected_clients_are_told_about_new_entries() {
     .unwrap();
   socket.next().await;
 
-  append(&app, &alice, &device, "/workspace/roster", 0, b"entry").await;
+  append(&app, &alice, &device, "/workspace/roster", 0, &roster("entry")).await;
   let found = tokio::time::timeout(std::time::Duration::from_secs(5), async {
     loop {
       let Some(Ok(Message::Text(text))) = socket.next().await else {

@@ -368,6 +368,25 @@ impl Default for ClientUpdatePolicy {
   }
 }
 
+/// Default for [`OwnerPolicy::recommended_minimum`].
+pub const DEFAULT_RECOMMENDED_OWNERS: u8 = 2;
+
+/// How many owners the admin console asks for (admin.md §2.3). Only a warning: a roster with at
+/// least one owner is always valid, a roster without one never is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct OwnerPolicy {
+  /// Fewer owners than this shows a warning in the admin console; 1 switches it off.
+  pub recommended_minimum: u8,
+}
+
+impl Default for OwnerPolicy {
+  fn default() -> Self {
+    Self {
+      recommended_minimum: DEFAULT_RECOMMENDED_OWNERS,
+    }
+  }
+}
+
 /// The security and retention policy of the workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct WorkspacePolicy {
@@ -396,6 +415,8 @@ pub struct WorkspacePolicy {
   pub call_backgrounds: CallBackgroundPolicy,
   #[serde(default)]
   pub client_updates: ClientUpdatePolicy,
+  #[serde(default)]
+  pub owners: OwnerPolicy,
 }
 
 /// The JSON document a policy entry's `payload` must contain (and the owner signs).
@@ -437,6 +458,7 @@ impl Default for WorkspacePolicy {
       notifications: NotificationDefaults::default(),
       call_backgrounds: CallBackgroundPolicy::default(),
       client_updates: ClientUpdatePolicy::default(),
+      owners: OwnerPolicy::default(),
     }
   }
 }

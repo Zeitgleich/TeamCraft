@@ -427,6 +427,21 @@ policy-recovery-hint = Erlaubt Admins, den Zugang wiederherzustellen, wenn jeman
 policy-recovery-members = Für Mitglieder erlauben
 policy-recovery-guests = Für Gäste erlauben
 policy-recovery-approvals = Admins, die zustimmen müssen
+policy-owners = Eigentümer
+policy-owners-hint = Eigentümer signieren die Admin-Liste und diese Richtlinie. Behalte mindestens zwei: Verlässt der einzige Eigentümer die Organisation oder verliert alle Geräte und die Wiederherstellungs-Passphrase, kann niemand den Workspace mehr verwalten. Um einen Eigentümer zu ersetzen, füge zuerst den Nachfolger hinzu und entferne erst dann den bisherigen.
+policy-owners-unknown = Dieses Gerät hat noch keine Admin-Liste geprüft.
+policy-owners-last-signed = zuletzt signiert { $time }
+policy-owners-never-signed = auf diesem Gerät noch keine Signatur gesehen
+policy-owners-valid-until = Die Admin-Rechte gelten auf den Geräten der Mitglieder bis { $time }. Die App eines Eigentümers signiert lange vorher von selbst neu, sobald sie geöffnet ist.
+policy-owners-too-few = { $count } von { $minimum } empfohlenen Eigentümern. Füge einen weiteren Eigentümer hinzu, damit der Workspace verwaltbar bleibt, wenn jemand geht oder seine Geräte verliert.
+policy-owners-expires-soon = Seit einer Weile hat kein Eigentümer signiert: Die Geräte der Mitglieder erkennen die Admins ab { $time } nicht mehr an. Ein Eigentümer muss TeamCraft vorher öffnen.
+policy-owners-expired = Kein Eigentümer hat rechtzeitig signiert: Die Geräte der Mitglieder erkennen die Admins nicht mehr an. Ein Eigentümer muss TeamCraft öffnen, um neu zu signieren.
+policy-owners-minimum = Empfohlene Anzahl an Eigentümern
+policy-owners-minimum-hint = Bei weniger Eigentümern erscheint hier eine Warnung. 1 schaltet die Warnung ab.
+policy-owners-count = { $count ->
+    [one] { $count } Eigentümer
+   *[other] { $count } Eigentümer
+  }
 policy-admins = { $count } Admins
 policy-signin = Anmeldung
 policy-mfa = Mehrfaktor-Authentifizierung verlangen
@@ -939,6 +954,7 @@ guest-network = Der Server ist nicht erreichbar. Prüfe deine Verbindung und lad
 policy-blocked-not-owner = Nur Owner können die signierte Richtlinie ändern. Hier kannst du sie lesen.
 policy-blocked-no-keys = Die Richtlinie wird mit deinen Verschlüsselungsschlüsseln signiert. Öffne die Desktop-App, um sie zu ändern.
 policy-not-stored = Noch nicht Teil der signierten Richtlinie. Diese Regeln kommen von deinem Identity-Provider.
+admin-error-last-owner = Diese Änderung ließe den Workspace ohne Eigentümer zurück, und niemand könnte ihn mehr verwalten. Füge zuerst den neuen Eigentümer hinzu und entferne dann den bisherigen.
 admin-error = Die letzte Anfrage ist fehlgeschlagen: { $detail }
 audit-member-added = Mitglied hinzugefügt
 audit-member-removed = Mitglied entfernt

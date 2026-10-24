@@ -107,6 +107,22 @@ pub struct WorkspaceState {
   /// A member's head newer than ours, to check after the next sync.
   #[serde(rename = "ahead", default, skip_serializing_if = "Option::is_none")]
   pub maybe_ahead: Option<WorkspaceHead>,
+  /// When each owner of the current roster last signed a verified roster or policy entry (the
+  /// signing time the document names), for the admin console (issue #188).
+  #[serde(default)]
+  pub owner_signed_at_ms: BTreeMap<UserId, i64>,
+}
+
+/// The owners of the verified roster, as [`WorkspaceState::owner_status`] reports them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnerStatus {
+  /// Each owner and the newest signing time of theirs this device verified.
+  pub owners: Vec<(UserId, Option<i64>)>,
+  /// When clients stop accepting the admins unless an owner signs the roster again; `None` for a
+  /// roster from before signing times.
+  pub maybe_expires_at_ms: Option<i64>,
+  /// From the signed policy; at least 1.
+  pub recommended_minimum: u8,
 }
 
 /// What a member's client has verified of both logs; sent along inside encrypted messages so
@@ -173,6 +189,17 @@ pub enum WorkspaceError {
   BrokenChain { log: &'static str, version: u64 },
   #[error("policy entry {version} names roster version {roster_version}, which this client can't check")]
   StaleRosterVersion { version: u64, roster_version: u64 },
+  /// Nobody could sign the next roster or policy: the workspace could never be administered again
+  /// (admin.md §2.3).
+  #[error("roster entry {version} has no owner")]
+  NoOwner { version: u64 },
+}
+
+impl RosterDocument {
+  /// Owners with a usable identity key: only they can sign the next entry.
+  pub fn owner_count(&self) -> usize {
+    identities(self, |role| *role == RosterRole::Owner).len()
+  }
 }
 
 impl WorkspaceState {
@@ -285,6 +312,13 @@ impl WorkspaceState {
         "document version differs from the entry",
       ));
     }
+    // Refused whoever signed it: an owner's client never signs one, and a server that stores one
+    // anyway must not be able to lock the workspace.
+    if document.owner_count() == 0 {
+      return Err(WorkspaceError::NoOwner {
+        version: entry.version,
+      });
+    }
     check_chain(
       log,
       entry.version,
@@ -319,6 +353,11 @@ impl WorkspaceState {
     self
       .owners_by_version
       .insert(document.version, owner_keys(&document));
+    self.note_signature(signer.0, document.maybe_signed_at_ms);
+    let owners = owner_keys(&document);
+    self
+      .owner_signed_at_ms
+      .retain(|user, _| owners.contains_key(user));
     self.roster = document;
     Ok(())
   }
@@ -345,7 +384,15 @@ impl WorkspaceState {
       self.heads.is_policy_chained,
     )?;
     let owners = self.policy_signers(&document)?;
-    verify(log, WorkspaceLog::Policy, entry, &owners)?;
+    let signer = verify(log, WorkspaceLog::Policy, entry, &owners)?;
+    if self
+      .roster
+      .members
+      .iter()
+      .any(|member| member.user_id == signer.0 && member.role == RosterRole::Owner)
+    {
+      self.note_signature(signer.0, document.maybe_signed_at_ms);
+    }
     self.heads.maybe_policy_hash = Some(entry_hash(log, WorkspaceLog::Policy, entry)?);
     self.heads.is_policy_chained |= document.maybe_prev_hash.is_some();
     if document.roster_version > 0 {
@@ -356,6 +403,38 @@ impl WorkspaceState {
     self.policy_version = entry.version;
     self.policy = document.policy;
     Ok(())
+  }
+
+  /// Remembers the newest signing time of an owner; documents without one tell nothing.
+  fn note_signature(&mut self, user: UserId, maybe_signed_at_ms: Option<i64>) {
+    let Some(signed_at) = maybe_signed_at_ms else {
+      return;
+    };
+    let latest = self.owner_signed_at_ms.entry(user).or_insert(signed_at);
+    *latest = (*latest).max(signed_at);
+  }
+
+  /// Owners of the verified roster and when admin authority expires, for the admin console.
+  /// `None` before this device verified a roster.
+  pub fn owner_status(&self, max_age_ms: i64) -> Option<OwnerStatus> {
+    if self.roster.version == 0 {
+      return None;
+    }
+    let owners = owner_keys(&self.roster)
+      .into_keys()
+      .map(|user| (user, self.owner_signed_at_ms.get(&user).copied()))
+      .collect();
+    let maybe_expires_at_ms = match self.heads.maybe_roster_signed_at_ms {
+      Some(signed_at) => Some(signed_at.saturating_add(max_age_ms)),
+      // A chained roster without a signing time is never fresh (see `is_roster_fresh`).
+      None if self.heads.is_roster_chained => Some(0),
+      None => None,
+    };
+    Some(OwnerStatus {
+      owners,
+      maybe_expires_at_ms,
+      recommended_minimum: self.policy.owners.recommended_minimum.max(1),
+    })
   }
 
   /// Owners who may sign this policy: those of the roster version it names, which must not be
@@ -532,6 +611,36 @@ fn payload_error(log: &'static str, entry: &WorkspaceLogEntryResponse, reason: &
   }
 }
 
+/// The owners of the verified roster for the admin console (`None` before one was verified, or
+/// when the state can't be read).
+#[cfg(feature = "ui")]
+pub fn owner_roster_status(
+  store: &impl LocalStore,
+  max_age: std::time::Duration,
+  warning_lead: std::time::Duration,
+) -> Option<teamcraft_client_api::admin::OwnerRosterStatus> {
+  use teamcraft_client_api::admin::{OwnerRosterStatus, OwnerSigning};
+
+  let millis = |duration: std::time::Duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX);
+  let state = records::get_json::<WorkspaceState>(store, Table::Workspace, crate::client::WORKSPACE_KEY)
+    .ok()
+    .flatten()?;
+  let status = state.owner_status(millis(max_age))?;
+  Some(OwnerRosterStatus {
+    owners: status
+      .owners
+      .into_iter()
+      .map(|(user, maybe_last_signed_at)| OwnerSigning {
+        user,
+        maybe_last_signed_at,
+      })
+      .collect(),
+    maybe_expires_at: status.maybe_expires_at_ms,
+    recommended_minimum: status.recommended_minimum,
+    warning_lead_ms: millis(warning_lead),
+  })
+}
+
 /// The update rules of the verified workspace policy (docs/updates.md §4.4); `None` while this
 /// device has verified nothing yet (the desktop shell then keeps the last rules it saw).
 pub fn verified_client_update_policy(store: &impl LocalStore) -> Option<ClientUpdatePolicy> {
@@ -637,6 +746,125 @@ mod tests {
       fresh.maybe_alarm.is_some(),
       "a colleague sees entries this device isn't shown"
     );
+  }
+
+  mod last_owner {
+    use super::*;
+
+    #[test]
+    fn a_validly_signed_roster_without_an_owner_is_refused() {
+      // admin.md §2.3: an owner's (older or compromised) client signed it and the server stored it.
+      let (alice, bob) = (Owner::new(1), Owner::new(2));
+      let mut state = WorkspaceState::default();
+      let first = roster(1, &[&alice], Some(1_000), &state);
+      state
+        .apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 1, &first)])
+        .unwrap();
+
+      let mut orphaned = roster(2, &[&alice, &bob], Some(2_000), &state);
+      for member in &mut orphaned.members {
+        member.role = RosterRole::Admin;
+      }
+      let refused = state.apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 2, &orphaned)]);
+      assert!(matches!(refused, Err(WorkspaceError::NoOwner { version: 2 })));
+      assert_eq!(state.roster.version, 1, "the last verified roster stays in force");
+      assert!(state.is_admin(alice.user_id));
+      assert!(state.maybe_rejection.is_some());
+
+      let mut empty = roster(2, &[], Some(2_000), &state);
+      empty.members.clear();
+      assert!(matches!(
+        state.apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 2, &empty)]),
+        Err(WorkspaceError::NoOwner { version: 2 })
+      ));
+    }
+
+    #[test]
+    fn a_genesis_roster_without_an_owner_is_refused() {
+      let alice = Owner::new(1);
+      let mut state = WorkspaceState::default();
+      let mut genesis = roster(1, &[&alice], None, &state);
+      genesis.members[0].role = RosterRole::Admin;
+      assert!(matches!(
+        state.apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 1, &genesis)]),
+        Err(WorkspaceError::NoOwner { version: 1 })
+      ));
+      assert_eq!(state.maybe_root, None, "no root of trust is pinned");
+    }
+
+    #[test]
+    fn an_owner_without_a_usable_key_does_not_count() {
+      let alice = Owner::new(1);
+      let mut state = WorkspaceState::default();
+      let first = roster(1, &[&alice], None, &state);
+      state
+        .apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 1, &first)])
+        .unwrap();
+      let mut broken = roster(2, &[&alice], None, &state);
+      broken.members[0].identity_key = Base64Bytes::new(vec![1; 5]);
+      assert_eq!(broken.owner_count(), 0);
+      assert!(matches!(
+        state.apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 2, &broken)]),
+        Err(WorkspaceError::NoOwner { .. })
+      ));
+    }
+  }
+
+  mod owner_status {
+    use super::*;
+
+    #[test]
+    fn signing_times_are_kept_per_owner_and_dropped_with_the_owner() {
+      let (alice, bob) = (Owner::new(1), Owner::new(2));
+      let mut state = WorkspaceState::default();
+      assert_eq!(state.owner_status(100), None, "nothing verified yet");
+      let first = roster(1, &[&alice, &bob], Some(1_000), &state);
+      state
+        .apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 1, &first)])
+        .unwrap();
+      let mut signed_policy = policy(1, 1, &state);
+      signed_policy.maybe_signed_at_ms = Some(1_500);
+      state
+        .apply_entries(vec![bob.sign(WorkspaceLogKind::Policy, 1, &signed_policy)])
+        .unwrap();
+
+      let status = state.owner_status(10_000).unwrap();
+      let mut owners = status.owners.clone();
+      owners.sort();
+      assert_eq!(
+        owners,
+        vec![(alice.user_id, Some(1_000)), (bob.user_id, Some(1_500))]
+      );
+      assert_eq!(
+        status.maybe_expires_at_ms,
+        Some(11_000),
+        "the newest roster plus the window"
+      );
+      assert_eq!(status.recommended_minimum, 2);
+
+      // Bob removes Alice: her time goes with her.
+      let second = roster(2, &[&bob], Some(3_000), &state);
+      state
+        .apply_entries(vec![bob.sign(WorkspaceLogKind::Roster, 2, &second)])
+        .unwrap();
+      let status = state.owner_status(10_000).unwrap();
+      assert_eq!(status.owners, vec![(bob.user_id, Some(3_000))]);
+      assert_eq!(status.maybe_expires_at_ms, Some(13_000));
+    }
+
+    #[test]
+    fn a_chained_roster_without_a_signing_time_counts_as_expired() {
+      let alice = Owner::new(1);
+      let mut state = WorkspaceState::default();
+      let first = roster(1, &[&alice], None, &state);
+      state
+        .apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 1, &first)])
+        .unwrap();
+      let status = state.owner_status(10_000).unwrap();
+      assert_eq!(status.owners, vec![(alice.user_id, None)]);
+      assert_eq!(status.maybe_expires_at_ms, Some(0));
+      assert!(!state.is_roster_fresh(1, 10_000), "the same as freshness says");
+    }
   }
 
   struct Owner {

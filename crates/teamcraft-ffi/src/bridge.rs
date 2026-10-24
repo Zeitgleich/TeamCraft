@@ -215,6 +215,14 @@ impl Engine {
       maybe_push_content: Some(teamcraft_core::push_preview::push_content_mode(
         self.store.as_ref(),
       )),
+      maybe_owners: {
+        let settings = teamcraft_core::ClientSettings::default();
+        teamcraft_core::workspace::owner_roster_status(
+          self.store.as_ref(),
+          settings.workspace_max_age,
+          settings.workspace_expiry_warning,
+        )
+      },
     })
   }
 }

@@ -166,6 +166,10 @@ pub struct SecuritySnapshot {
   /// an older shell) is treated as the strictest mode.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub maybe_push_content: Option<teamcraft_proto::PushContentMode>,
+  /// The owners of the verified roster, for the admin console's warnings; `None` before a roster
+  /// was verified (or from an older shell).
+  #[serde(rename = "owners", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_owners: Option<crate::admin::OwnerRosterStatus>,
 }
 
 /// What this device pinned for one contact, and a different key the server has shown since.

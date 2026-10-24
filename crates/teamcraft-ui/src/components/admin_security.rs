@@ -2,6 +2,7 @@ use leptos::prelude::*;
 use teamcraft_proto::{AdminSelfJoin, HistoryPolicy};
 
 use crate::components::admin_console::SectionHeader;
+use crate::components::admin_owners::OwnersPanel;
 use crate::components::admin_policy::{
   CheckRow, PolicyBlockerNote, PolicyFooter, SelectRow, use_policy_draft,
 };
@@ -109,6 +110,8 @@ pub fn SecuritySection() -> impl IntoView {
         policy.save();
       }
     >
+      <OwnersPanel policy=policy />
+
       <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
         <legend>{move || i18n.t("policy-self-join")}</legend>
         <p class="muted-text small">{move || i18n.t("policy-self-join-hint")}</p>
