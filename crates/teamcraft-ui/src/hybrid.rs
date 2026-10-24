@@ -74,11 +74,6 @@ impl<C: ChatBackend + 'static> Hybrid<C> {
     let scope_chat = chat.clone();
     let scope = Rc::new(move || LiveScope {
       users: scope_chat.users().into_iter().map(|user| user.id).collect(),
-      direct: scope_chat
-        .direct_conversations()
-        .into_iter()
-        .map(|conversation| conversation.id)
-        .collect(),
     });
     let maybe_admin = (role >= Role::Admin).then(|| AdminLive::new(auth.clone()));
     Self {

@@ -4,7 +4,8 @@
 
 use std::collections::BTreeMap;
 
-use teamcraft_proto::live::{AnnouncedPresence, LiveMarks, LiveReceipt};
+use serde::{Deserialize, Serialize};
+use teamcraft_proto::live::{AnnouncedPresence, LiveMarks, LiveReceipt, RevisedPresence};
 use teamcraft_proto::{
   ConversationId, ConversationUnread, MessageId, MessageResponse, ThreadId, ThreadSummary, UnreadResponse,
   UserId, UserPresence,
@@ -16,9 +17,10 @@ use crate::store::{LocalStore, Table};
 
 const UNREAD_KEY: &str = "state";
 const MARKS_KEY: &str = "marks";
-/// The one record in [`Table::Presence`] (whose other keys are user IDs) that keeps what
-/// `presence_update` events announced, for the UI.
-const ANNOUNCED_PRESENCE_KEY: &str = "announced";
+/// The record in [`Table::Presence`] (whose other keys are user IDs) that heads the presence log
+/// in [`Table::AnnouncedPresence`]. Before 1.0.2 it held the whole log; that form reads as a head
+/// with an empty log.
+pub(crate) const ANNOUNCED_PRESENCE_KEY: &str = "announced";
 /// What servers before 1.0.1 cap counts at (`limits.max_unread_counted` default); newer servers
 /// say it in `GET /unread`.
 const DEFAULT_MAX_UNREAD_COUNTED: u32 = 1000;
@@ -53,7 +55,26 @@ pub fn all_read_receipts(store: &impl LocalStore) -> Result<Vec<LiveReceipt>, Co
 
 /// Presence and custom status as `presence_update` events announced them, bounded.
 pub fn announced_presence(store: &impl LocalStore) -> Result<AnnouncedPresence, CoreError> {
-  Ok(records::get_json(store, Table::Presence, ANNOUNCED_PRESENCE_KEY)?.unwrap_or_default())
+  announced_presence_since(store, 0)
+}
+
+/// The announcements newer than `revision`, oldest first (issue #259: the UI gets what changed,
+/// not the whole log). Costs one record read when nothing is newer.
+pub fn announced_presence_since(
+  store: &impl LocalStore,
+  revision: u64,
+) -> Result<AnnouncedPresence, CoreError> {
+  let head = presence_log(store)?;
+  let mut entries = Vec::new();
+  if head.revision > revision {
+    entries = presence_log_entries(store)?;
+    entries.retain(|entry| entry.revision > revision);
+  }
+  Ok(AnnouncedPresence {
+    entries,
+    revision: head.revision,
+    evicted_up_to: head.evicted_up_to,
+  })
 }
 
 pub fn marks(store: &impl LocalStore) -> Result<LiveMarks, CoreError> {
@@ -136,7 +157,8 @@ pub(crate) fn note_unread(
 
 /// Counts a new top-level message of someone else, as the server does (threads.rs counts replies),
 /// up to the server's cap. Only for messages that arrive live: history that sync loads was counted
-/// by the server already, and so was a message this device stored before (a duplicate delivery).
+/// by the server already, and so was a message this device stored before (a duplicate delivery) or
+/// one the last `GET /unread` covered (`counted_through`).
 pub(crate) fn note_new_message(
   store: &impl LocalStore,
   message: &MessageResponse,
@@ -148,6 +170,13 @@ pub(crate) fn note_new_message(
   let Some(mut unread) = unread(store)? else {
     return Ok(());
   };
+  // Issue #259: events that queued while `GET /unread` was answered are in its counts already.
+  if unread
+    .maybe_counted_through
+    .is_some_and(|counted_through| message.id <= counted_through)
+  {
+    return Ok(());
+  }
   let is_known = store
     .message(message.conversation_id, message.client_message_id)?
     .is_some_and(|stored| stored.maybe_server_id.is_some());
@@ -167,7 +196,11 @@ pub(crate) fn note_new_message(
         return Ok(());
       }
       entry.unread_count += 1;
-      entry.mention_count = (entry.mention_count + mention).min(entry.unread_count);
+      // The server's counts can be anything: an overflow would panic in debug builds.
+      entry.mention_count = entry
+        .mention_count
+        .saturating_add(mention)
+        .min(entry.unread_count);
     },
     None if max_counted == 0 => return Ok(()),
     None => unread.conversations.push(ConversationUnread {
@@ -179,15 +212,79 @@ pub(crate) fn note_new_message(
   save_unread(store, &unread)
 }
 
-/// Keeps a `presence_update` for the UI; at most `max_entries` people, the oldest are dropped.
+/// Keeps a person's presence for the UI under the next revision: one record per person, so an
+/// announcement writes that person's record and the log's head, not the whole log (issue #259).
+/// The same presence again is no announcement. Beyond `max_entries` people the oldest tenth is
+/// dropped at once, so the bound costs one pass over the log now and then, not one per event.
+/// Returns whether it was announced.
 pub(crate) fn note_announced_presence(
   store: &impl LocalStore,
   presence: UserPresence,
   max_entries: usize,
+) -> Result<bool, CoreError> {
+  let key = presence.user_id.to_string();
+  let maybe_known: Option<RevisedPresence> = records::get_json(store, Table::AnnouncedPresence, &key)?;
+  if maybe_known
+    .as_ref()
+    .is_some_and(|known| known.presence == presence)
+  {
+    return Ok(false);
+  }
+  let mut head = presence_log(store)?;
+  if maybe_known.is_none() {
+    head.len += 1;
+  }
+  head.revision += 1;
+  let entry = RevisedPresence {
+    revision: head.revision,
+    presence,
+  };
+  records::put_json(store, Table::AnnouncedPresence, &key, &entry)?;
+  if head.len > max_entries {
+    evict_oldest(store, &mut head, max_entries)?;
+  }
+  records::put_json(store, Table::Presence, ANNOUNCED_PRESENCE_KEY, &head)?;
+  Ok(true)
+}
+
+/// Drops the oldest announcements down to nine tenths of the bound.
+fn evict_oldest(
+  store: &impl LocalStore,
+  head: &mut PresenceLog,
+  max_entries: usize,
 ) -> Result<(), CoreError> {
-  let mut announced = announced_presence(store)?;
-  announced.note(presence, max_entries);
-  records::put_json(store, Table::Presence, ANNOUNCED_PRESENCE_KEY, &announced)
+  let entries = presence_log_entries(store)?;
+  let keep = max_entries.saturating_sub(max_entries / 10);
+  let excess = entries.len().saturating_sub(keep);
+  for dropped in &entries[..excess] {
+    store.delete(Table::AnnouncedPresence, &dropped.presence.user_id.to_string())?;
+    head.evicted_up_to = head.evicted_up_to.max(dropped.revision);
+  }
+  head.len = entries.len() - excess;
+  Ok(())
+}
+
+/// The head of the presence log: what [`AnnouncedPresence`] says besides its entries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct PresenceLog {
+  #[serde(default)]
+  revision: u64,
+  #[serde(default)]
+  evicted_up_to: u64,
+  /// How many people the log holds.
+  #[serde(default)]
+  len: usize,
+}
+
+fn presence_log(store: &impl LocalStore) -> Result<PresenceLog, CoreError> {
+  Ok(records::get_json(store, Table::Presence, ANNOUNCED_PRESENCE_KEY)?.unwrap_or_default())
+}
+
+/// Every entry of the log, oldest first.
+fn presence_log_entries(store: &impl LocalStore) -> Result<Vec<RevisedPresence>, CoreError> {
+  let mut entries: Vec<RevisedPresence> = records::list_json(store, Table::AnnouncedPresence)?;
+  entries.sort_by_key(|entry| entry.revision);
+  Ok(entries)
 }
 
 pub(crate) fn update_marks(
@@ -270,6 +367,77 @@ mod tests {
     assert!(acknowledgements(&store, id(1), id(51)).unwrap().is_empty());
   }
 
+  mod presence_log {
+    use teamcraft_proto::PresenceState;
+
+    use super::*;
+
+    #[test]
+    fn readers_get_only_newer_announcements() {
+      let store = MemoryStore::new();
+      for user in 1..=3 {
+        note_announced_presence(&store, presence(user, PresenceState::Online), 10).unwrap();
+      }
+      note_announced_presence(&store, presence(1, PresenceState::Away), 10).unwrap();
+      let newer = announced_presence_since(&store, 2).unwrap();
+      let seen: Vec<(u64, PresenceState)> = newer
+        .entries
+        .iter()
+        .map(|entry| (entry.revision, entry.presence.state.clone()))
+        .collect();
+      assert_eq!(seen, vec![(3, PresenceState::Online), (4, PresenceState::Away)]);
+      assert_eq!(newer.revision, 4);
+      assert!(announced_presence_since(&store, 4).unwrap().entries.is_empty());
+      assert_eq!(announced_presence(&store).unwrap().entries.len(), 3);
+    }
+
+    #[test]
+    fn the_same_presence_again_is_no_announcement() {
+      let store = MemoryStore::new();
+      assert!(note_announced_presence(&store, presence(1, PresenceState::Online), 10).unwrap());
+      assert!(!note_announced_presence(&store, presence(1, PresenceState::Online), 10).unwrap());
+      assert_eq!(announced_presence(&store).unwrap().revision, 1);
+    }
+
+    #[test]
+    fn the_bound_drops_the_oldest_tenth_and_reports_the_gap() {
+      let store = MemoryStore::new();
+      for user in 1..=11 {
+        note_announced_presence(&store, presence(user, PresenceState::Online), 10).unwrap();
+      }
+      let log = announced_presence(&store).unwrap();
+      // Eleven people, bound ten: down to nine, the two oldest are gone.
+      assert_eq!(log.entries.len(), 9);
+      assert_eq!(log.evicted_up_to, 2);
+      assert!(log.has_gap_since(1));
+      // The next one fits again without dropping anybody.
+      note_announced_presence(&store, presence(12, PresenceState::Online), 10).unwrap();
+      assert_eq!(announced_presence(&store).unwrap().entries.len(), 10);
+    }
+
+    #[test]
+    fn the_log_of_older_versions_reads_as_an_empty_log() {
+      let store = MemoryStore::new();
+      let mut old = AnnouncedPresence::default();
+      old.note(presence(1, PresenceState::Online), 10);
+      records::put_json(&store, Table::Presence, ANNOUNCED_PRESENCE_KEY, &old).unwrap();
+      let log = announced_presence(&store).unwrap();
+      assert!(log.entries.is_empty());
+      assert_eq!(log.revision, 1);
+      note_announced_presence(&store, presence(2, PresenceState::Away), 10).unwrap();
+      assert_eq!(announced_presence_since(&store, 1).unwrap().entries.len(), 1);
+    }
+
+    fn presence(user: i64, state: PresenceState) -> UserPresence {
+      UserPresence {
+        user_id: id(user),
+        state,
+        maybe_status: None,
+        maybe_last_seen: None,
+      }
+    }
+  }
+
   mod new_messages {
     use super::*;
 
@@ -321,6 +489,27 @@ mod tests {
       assert_eq!(counts(&store, 1), (1, 0), "a duplicate delivery counts once");
     }
 
+    #[test]
+    fn messages_the_last_answer_counted_are_not_counted_again() {
+      let store = MemoryStore::new();
+      let mut unread = unread_of(&[(1, 2, 0)], Some(1000));
+      // Messages 100 and 101 were in the answer; their events were queued while it was on its way.
+      unread.maybe_counted_through = Some(id(101));
+      save_unread(&store, &unread).unwrap();
+      for seq in 0..3 {
+        note_new_message(&store, &message(1, 9, seq, false), id(5)).unwrap();
+      }
+      assert_eq!(counts(&store, 1), (3, 0), "only message 102 is new");
+    }
+
+    #[test]
+    fn a_huge_mention_count_from_the_server_does_not_overflow() {
+      let store = MemoryStore::new();
+      save_unread(&store, &unread_of(&[(1, 5, u32::MAX)], Some(1000))).unwrap();
+      note_new_message(&store, &message(1, 9, 0, true), id(5)).unwrap();
+      assert_eq!(counts(&store, 1), (6, 6));
+    }
+
     fn message(conversation: i64, sender: i64, seq: u8, is_mention: bool) -> MessageResponse {
       MessageResponse {
         id: id(100 + i64::from(seq)),
@@ -349,6 +538,7 @@ mod tests {
         unread_thread_count: 0,
         thread_mention_count: 0,
         maybe_max_counted,
+        maybe_counted_through: None,
       }
     }
 

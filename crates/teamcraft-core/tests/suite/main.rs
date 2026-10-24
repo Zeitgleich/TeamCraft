@@ -35,6 +35,8 @@ mod queries;
 mod removal_followups;
 mod runner;
 mod search;
+mod snapshot_cache;
 mod sync_engine;
+mod upkeep;
 mod workspace;
 mod workspace_admin;

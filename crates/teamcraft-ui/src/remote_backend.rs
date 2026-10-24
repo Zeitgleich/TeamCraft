@@ -32,6 +32,7 @@ use teamcraft_client_api::remote::{
   CoreStatus, EnrollRequest, LinkStatus, MessageWindow, StoreHealth,
 };
 use teamcraft_client_api::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
+use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, WebPushKeyResponse};
 
 use crate::auth::Authenticator;
@@ -140,6 +141,8 @@ struct Feed {
 
 struct Mirror {
   snapshot: ChatSnapshot,
+  /// How far the snapshot was read; the core answers the next refresh with what changed since.
+  cursor: SnapshotCursor,
   feeds: HashMap<ConversationId, Feed>,
   threads: HashMap<(ConversationId, ThreadId), Vec<Message>>,
   /// Threads read since the UI was last told about a change; a refresh reloads only these.
@@ -229,10 +232,18 @@ impl Slot {
 impl RemoteChat {
   /// Reads the first snapshot and starts following the shell's change events.
   pub async fn connect() -> Result<Self, String> {
-    let snapshot: ChatSnapshot = call("core_snapshot", &json!({})).await?;
+    let first: SnapshotChanges = call("core_snapshot_changes", &json!({ "since": null })).await?;
+    let cursor = first.cursor;
+    let snapshot = match first.maybe_full {
+      Some(full) => *full,
+      // Invariant: a reader without a cursor gets the whole snapshot; should a shell not send it,
+      // the plain read does.
+      None => call("core_snapshot", &json!({})).await?,
+    };
     let backend = Self {
       mirror: Rc::new(RefCell::new(Mirror {
         snapshot,
+        cursor,
         feeds: HashMap::new(),
         threads: HashMap::new(),
         used_threads: HashSet::new(),
@@ -345,17 +356,19 @@ impl RemoteChat {
     );
   }
 
-  /// Re-reads the snapshot and what the UI showed since its last change, and tells the UI only
-  /// when something differs: a change elsewhere in the core costs no re-render (issue #246).
+  /// Takes what changed in the snapshot, re-reads what the UI showed of the conversations that
+  /// changed, and tells the UI only when something differs: a change elsewhere in the core costs
+  /// no re-render, and a change in one conversation no re-read of the others (issue #246).
   async fn refresh(&self) {
-    let snapshot = match call::<ChatSnapshot>("core_snapshot", &json!({})).await {
-      Ok(snapshot) => snapshot,
+    let since = self.mirror.borrow().cursor;
+    let changes = match call::<SnapshotChanges>("core_snapshot_changes", &json!({ "since": since })).await {
+      Ok(changes) => changes,
       Err(error) => {
         tracing::warn!(%error, "could not refresh the chat snapshot");
         return;
       },
     };
-    let plan = self.plan_refresh(snapshot);
+    let plan = self.plan_refresh(changes);
     let pages = join_all(
       plan
         .pages
@@ -384,23 +397,43 @@ impl RemoteChat {
     }
   }
 
-  /// Takes the new snapshot and picks what to reload. What the UI did not read since its last
-  /// change is only marked stale and reloaded when it is read again.
-  fn plan_refresh(&self, snapshot: ChatSnapshot) -> RefreshPlan {
+  /// Takes what changed and picks what to reload: feeds and threads of the conversations that
+  /// changed, if the UI read them since its last change; the others of those conversations are
+  /// only marked stale and reloaded when read again. Queries are asked again whenever the core
+  /// changed (they read more than the snapshot).
+  fn plan_refresh(&self, changes: SnapshotChanges) -> RefreshPlan {
     let mut plan = RefreshPlan::default();
     {
       let mut mirror = self.mirror.borrow_mut();
-      for (conversation, total) in &snapshot.message_counts {
-        if let Some(feed) = mirror.feeds.get_mut(conversation) {
+      let mirror = &mut *mirror;
+      mirror.cursor = changes.cursor;
+      let applied = mirror.snapshot.apply(changes);
+      plan.is_snapshot_changed = applied.is_changed;
+      for (conversation, total) in &mirror.snapshot.message_counts {
+        if let Some(feed) = mirror.feeds.get_mut(conversation)
+          && applied.touches(*conversation)
+        {
           feed.total = *total;
         }
       }
-      plan.is_snapshot_changed = mirror.snapshot != snapshot;
-      mirror.snapshot = snapshot;
-      let used_threads = std::mem::take(&mut mirror.used_threads);
-      mirror.threads.retain(|key, _| used_threads.contains(key));
-      plan.threads = used_threads.into_iter().collect();
+      let touched_threads: Vec<(ConversationId, ThreadId)> = mirror
+        .used_threads
+        .iter()
+        .filter(|(conversation, _)| applied.touches(*conversation))
+        .copied()
+        .collect();
+      let used_threads = &mirror.used_threads;
+      mirror
+        .threads
+        .retain(|key, _| !applied.touches(key.0) || used_threads.contains(key));
+      for key in &touched_threads {
+        mirror.used_threads.remove(key);
+      }
+      plan.threads = touched_threads;
       for (conversation, feed) in &mut mirror.feeds {
+        if !applied.touches(*conversation) {
+          continue;
+        }
         if feed.is_used {
           plan
             .pages

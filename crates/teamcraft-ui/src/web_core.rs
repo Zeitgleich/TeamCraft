@@ -32,14 +32,16 @@ use teamcraft_client_api::remote::{
   ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreConnection, CoreStatus, EnrollRequest,
   LinkStatus, MessageWindow, SecuritySnapshot, StoreHealth,
 };
+use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
 use teamcraft_core::client::{LinkApproval, LinkedSecrets, NewDeviceLink};
 use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor};
 use teamcraft_core::push_preview::{PushSession, save_push_session};
 use teamcraft_core::records;
-use teamcraft_core::store::{IndexedDbStore, StoreError, browser_database_key};
+use teamcraft_core::store::{IndexedDbStore, StoreError, TrackedStore, browser_database_key};
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
+use teamcraft_core::ui_snapshot::SnapshotCache;
 use teamcraft_core::upkeep::{self, Upkeep};
 use teamcraft_core::{
   Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer, PendingEnrollment,
@@ -64,8 +66,10 @@ const MAX_APPROVAL_MISSES: u8 = 3;
 const TICK: Duration = Duration::from_secs(3);
 /// How often the UI is told to read again while a long sync fills the store (issue #247).
 const SYNC_PROGRESS: Duration = Duration::from_secs(1);
-/// How often account data (saved items, drafts) is pulled from the user's other devices.
-const ACCOUNT_SYNC: Duration = Duration::from_secs(60);
+/// How long a failed account data sync waits before it is retried; also how often the roster's age
+/// is checked locally. Account data itself is read after each connection and on `key_bag_update`
+/// (issue #252), not on a timer.
+const UPKEEP_INTERVAL: Duration = Duration::from_secs(60);
 /// How often the core's copy of the access token is renewed from the page's session.
 const TOKEN_REFRESH: Duration = Duration::from_secs(20);
 /// How long the access token stored for the service worker is used. Tokens are renewed every
@@ -80,7 +84,8 @@ const PUSH_CHECK_RETRY: Duration = Duration::from_secs(60);
 const SUBSCRIPTION_CHANGED: &str = "push_subscription_changed";
 
 type Api = HttpServerApi<WebTokens>;
-type Store = Rc<IndexedDbStore>;
+/// Notes what each write changes, so the UI's snapshot is rebuilt per conversation (issue #246).
+type Store = TrackedStore<Rc<IndexedDbStore>>;
 type Listener = Rc<RefCell<dyn FnMut()>>;
 
 thread_local! {
@@ -207,6 +212,10 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
         .map(|()| Value::Null)
     },
     "core_snapshot" => to_value(ask(Request::Snapshot).await??),
+    "core_snapshot_changes" => {
+      let maybe_since: Option<SnapshotCursor> = field(&args, "since")?;
+      to_value(ask(|reply| Request::SnapshotChanges(maybe_since, reply)).await??)
+    },
     "core_messages" => {
       let (conversation, start, len) = (
         field(&args, "conversation")?,
@@ -513,6 +522,11 @@ enum Request {
   CheckPush,
   Enroll(EnrollRequest, oneshot::Sender<Result<(), String>>),
   Snapshot(oneshot::Sender<Result<ChatSnapshot, String>>),
+  /// What changed in the snapshot since the reader's cursor (issue #246).
+  SnapshotChanges(
+    Option<SnapshotCursor>,
+    oneshot::Sender<Result<SnapshotChanges, String>>,
+  ),
   Messages {
     conversation: ConversationId,
     start: usize,
@@ -595,6 +609,8 @@ struct Core {
   maybe_push_check_at_ms: Option<i64>,
   /// The security part of the last snapshot, for snapshots taken while a sync holds the client.
   maybe_last_security: Option<SecuritySnapshot>,
+  /// The UI's snapshot, rebuilt per conversation from what the store's writes touched (#246).
+  snapshots: RefCell<SnapshotCache>,
   /// Requests that arrived during a connect and need the client; handled once it is done.
   deferred: VecDeque<Request>,
   /// The UI side hung up during a connect: the loop ends after it.
@@ -629,7 +645,7 @@ impl Core {
       connection,
       status: CoreStatus::NotStarted,
       next_tick_ms: i64::MIN,
-      upkeep: Upkeep::new(ACCOUNT_SYNC),
+      upkeep: Upkeep::new(UPKEEP_INTERVAL),
       link: None,
       last_session_token: None,
       link_failure: LinkStatus::Idle,
@@ -639,6 +655,7 @@ impl Core {
       store_health: StoreHealth::Saved,
       maybe_push_check_at_ms: None,
       maybe_last_security: None,
+      snapshots: RefCell::new(SnapshotCache::new(now_ms().unsigned_abs())),
       deferred: VecDeque::new(),
       is_closed: false,
     }
@@ -696,7 +713,7 @@ impl Core {
     let Some(store) = self.store.as_ref() else {
       return;
     };
-    let health = match store.flush().await {
+    let health = match store.inner().flush().await {
       Ok(()) => StoreHealth::Saved,
       Err(StoreError::QuotaExceeded) => StoreHealth::QuotaExceeded,
       Err(StoreError::Closed) => StoreHealth::Closed,
@@ -757,11 +774,11 @@ impl Core {
     let key = browser_database_key(&name)
       .await
       .map_err(|error| error.to_string())?;
-    let store = Rc::new(
+    let store = TrackedStore::new(Rc::new(
       IndexedDbStore::open(&name, &key)
         .await
         .map_err(|error| error.to_string())?,
-    );
+    ));
     self.store = Some(store.clone());
     match Client::open(
       self.api(),
@@ -862,6 +879,7 @@ impl Core {
       Request::ApprovalCancel => self.approval = None,
       Request::NetworkChanged => self.connection.network_changed(now_ms()).await,
       Request::Snapshot(reply) => drop(reply.send(self.snapshot())),
+      Request::SnapshotChanges(maybe_since, reply) => drop(reply.send(self.snapshot_changes(maybe_since))),
       Request::Messages {
         conversation,
         start,
@@ -1052,8 +1070,36 @@ impl Core {
   fn snapshot(&mut self) -> Result<ChatSnapshot, String> {
     let security = self.security_snapshot()?;
     self.maybe_last_security = Some(security.clone());
-    let backend = self.backend.as_ref().ok_or_else(not_set_up)?;
-    Ok(ChatSnapshot::read(backend, security))
+    let (Some(backend), Some(store)) = (self.backend.as_ref(), self.store.as_ref()) else {
+      return Err(not_set_up());
+    };
+    Ok(
+      self
+        .snapshots
+        .borrow_mut()
+        .snapshot(backend, store.take_changes(), || Some(security)),
+    )
+  }
+
+  fn snapshot_changes(&mut self, maybe_since: Option<SnapshotCursor>) -> Result<SnapshotChanges, String> {
+    let (Some(backend), Some(store)) = (self.backend.as_ref(), self.store.as_ref()) else {
+      return Err(not_set_up());
+    };
+    let changes = store.take_changes();
+    let mut maybe_security = None;
+    let answer = self.snapshots.borrow_mut().changes_since(
+      backend,
+      changes,
+      || {
+        maybe_security = self.security_snapshot().ok();
+        maybe_security.clone()
+      },
+      maybe_since,
+    );
+    if maybe_security.is_some() {
+      self.maybe_last_security = maybe_security;
+    }
+    Ok(answer)
   }
 
   /// Fingerprints of the keys this device pinned, and of keys the server showed since.
@@ -1275,6 +1321,7 @@ impl Core {
       status,
       store_health,
       maybe_last_security,
+      snapshots,
       deferred,
       is_closed,
       ..
@@ -1295,6 +1342,7 @@ impl Core {
             status,
             store_health,
             maybe_security: maybe_last_security.as_ref(),
+            snapshots,
           };
           reads
             .serve(connecting.as_mut(), requests, deferred, is_closed)
@@ -1383,6 +1431,7 @@ struct SyncReads<'a> {
   status: &'a CoreStatus,
   store_health: &'a StoreHealth,
   maybe_security: Option<&'a SecuritySnapshot>,
+  snapshots: &'a RefCell<SnapshotCache>,
 }
 
 impl SyncReads<'_> {
@@ -1396,7 +1445,7 @@ impl SyncReads<'_> {
     deferred: &mut VecDeque<Request>,
     is_closed: &mut bool,
   ) -> F::Output {
-    let mut seen_revision = self.store.write_revision();
+    let mut seen_revision = self.store.inner().write_revision();
     loop {
       let progress = pin!(platform::sleep(SYNC_PROGRESS));
       let request = if *is_closed {
@@ -1413,7 +1462,7 @@ impl SyncReads<'_> {
         },
         Either::Right((Either::Left((None, _)), _)) => *is_closed = true,
         Either::Right((Either::Right(((), _)), _)) => {
-          let revision = self.store.write_revision();
+          let revision = self.store.inner().write_revision();
           if revision != seen_revision && is_page_visible() {
             seen_revision = revision;
             notify_local();
@@ -1425,13 +1474,16 @@ impl SyncReads<'_> {
 
   /// Answers a read; hands back a request that has to wait.
   fn answer(&self, request: Request) -> Option<Request> {
+    let request = match request {
+      Request::Snapshot(_) | Request::SnapshotChanges(..) => return self.answer_snapshot(request),
+      other => other,
+    };
     let read = match &request {
       Request::Status(_) if self.stored == StoredWorkspace::Empty => {
         // Ready with an empty store would show an empty workspace: the first sync is awaited.
         return Some(request);
       },
       Request::Status(_) | Request::StoreHealth(_) => None,
-      Request::Snapshot(_) => Some(SyncRead::Snapshot),
       Request::Messages {
         conversation,
         start,
@@ -1463,7 +1515,6 @@ impl SyncReads<'_> {
     match (request, maybe_answer) {
       (Request::Status(reply), None) => drop(reply.send(self.status.clone())),
       (Request::StoreHealth(reply), None) => drop(reply.send(self.store_health.clone())),
-      (Request::Snapshot(reply), Some(SyncReadAnswer::Snapshot(snapshot))) => drop(reply.send(Ok(*snapshot))),
       (Request::Messages { reply, .. }, Some(SyncReadAnswer::Messages(window))) => {
         drop(reply.send(Ok(window)))
       },
@@ -1474,6 +1525,28 @@ impl SyncReads<'_> {
       // Invariant: `answer_during_sync` answers with the variant of the read. Should it not, the
       // request waits for the sync like any other.
       (request, _) => return Some(request),
+    }
+    None
+  }
+}
+
+impl SyncReads<'_> {
+  /// The snapshot from the cache, as far as the sync has filled the store. Waits while the
+  /// workspace was empty or no security part was taken yet (it needs the client).
+  fn answer_snapshot(&self, request: Request) -> Option<Request> {
+    let (StoredWorkspace::Known, Some(security)) = (self.stored, self.maybe_security) else {
+      return Some(request);
+    };
+    let changes = self.store.take_changes();
+    let mut snapshots = self.snapshots.borrow_mut();
+    let security = || Some(security.clone());
+    match request {
+      Request::Snapshot(reply) => drop(reply.send(Ok(snapshots.snapshot(self.backend, changes, security)))),
+      Request::SnapshotChanges(maybe_since, reply) => {
+        let answer = snapshots.changes_since(self.backend, changes, security, maybe_since);
+        drop(reply.send(Ok(answer)));
+      },
+      other => return Some(other),
     }
     None
   }

@@ -3,14 +3,15 @@
 //!
 //! None of this is message content, so the server owns it. With a client core (desktop, and the
 //! browser with its in-page core) the core keeps it current from gateway events and hands it over
-//! in its snapshot ([`LiveSnapshot`]); the UI reads over REST only what the core doesn't keep
-//! (presence of shown people, the announcement, DM receipts), once at start and once after each
-//! gateway connection, never on a timer (issue #183). Without a core there is no gateway: then
-//! everything is read over REST, with a slow poll while the page is visible.
+//! in its snapshot ([`LiveSnapshot`]), presence included (it reads everyone's after each
+//! connection). The UI reads over REST only what the core doesn't keep: the announcement, and the
+//! receipts of the DM that is open, once at start and once after each gateway connection, never
+//! on a timer and never one request per DM (issues #183, #252). Without a core there is no
+//! gateway: then everything is read over REST, with a slow poll while the page is visible.
 //! [`crate::hybrid::Hybrid`] lays this state over the chat backend.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -42,9 +43,8 @@ const THREAD_PAGE: u32 = 100;
 /// What the chat currently shows, so a refresh asks only for relevant data.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LiveScope {
+  /// Whose presence a UI without a core reads.
   pub users: Vec<UserId>,
-  /// DMs and group DMs: the only conversations with read receipts.
-  pub direct: Vec<ConversationId>,
 }
 
 type ScopeFn = Rc<dyn Fn() -> LiveScope>;
@@ -77,6 +77,11 @@ pub struct LiveState {
   presence_seen: u64,
   /// The receipts of the last snapshot: unchanged ones are not applied again.
   last_receipts: Vec<LiveReceipt>,
+  /// The conversation whose receipts the UI showed last (the open DM): the only one whose
+  /// receipts are read over REST, once per connection.
+  maybe_receipts_shown: Option<ConversationId>,
+  /// Conversations whose receipts were read since the last connection, or are being read.
+  receipts_read: HashSet<ConversationId>,
 }
 
 /// What the UI still has to read from the server after a core snapshot.
@@ -151,35 +156,34 @@ impl LiveServer {
     );
   }
 
-  /// Fetches what the core doesn't keep (everything without a core). Failed parts keep their
+  /// Fetches what the core doesn't keep (everything without a core): at most the announcement and
+  /// the open DM's receipts with a core, whatever the workspace's size. Failed parts keep their
   /// previous values.
   pub async fn refresh(&self) {
-    let scope = (self.scope)();
-    let is_core_fed = self.state.borrow().is_core_fed;
-    let (unread, threads) = if is_core_fed {
-      (None, None)
+    let (is_core_fed, maybe_shown) = {
+      let mut state = self.state.borrow_mut();
+      // Receipts may have been missed since they were read: read again when shown.
+      state.receipts_read.clear();
+      (state.is_core_fed, state.maybe_receipts_shown)
+    };
+    let (unread, threads, presence) = if is_core_fed {
+      (None, None, Vec::new())
     } else {
+      let scope = (self.scope)();
       (
         self.get::<UnreadResponse>("/api/v1/unread").await,
         self
           .get::<ListThreadsResponse>(&format!("/api/v1/threads?limit={THREAD_PAGE}"))
           .await,
+        self.presence(&scope.users).await,
       )
     };
-    let presence = self.presence(&scope.users).await;
     let announcement = self.get::<GetAnnouncementResponse>("/api/v1/announcement").await;
     let mut receipts = HashMap::new();
-    for conversation in &scope.direct {
-      let path = format!("/api/v1/conversations/{conversation}/read-receipts");
-      if let Some(response) = self.get::<ReadReceiptsResponse>(&path).await {
-        receipts.insert(
-          *conversation,
-          response
-            .receipts
-            .into_iter()
-            .map(|receipt| (receipt.user_id, receipt.message_id))
-            .collect(),
-        );
+    if let Some(conversation) = maybe_shown {
+      self.state.borrow_mut().receipts_read.insert(conversation);
+      if let Some(read) = self.receipts(conversation).await {
+        receipts.insert(conversation, read);
       }
     }
     let fetched = Fetched {
@@ -194,6 +198,31 @@ impl LiveServer {
     if self.state.borrow_mut().merge(fetched) {
       self.changed();
     }
+  }
+
+  async fn refresh_receipts(&self, conversation: ConversationId) {
+    let Some(receipts) = self.receipts(conversation).await else {
+      return;
+    };
+    let fetched = Fetched {
+      receipts: HashMap::from([(conversation, receipts)]),
+      ..Fetched::default()
+    };
+    if self.state.borrow_mut().merge(fetched) {
+      self.changed();
+    }
+  }
+
+  async fn receipts(&self, conversation: ConversationId) -> Option<Vec<(UserId, MessageId)>> {
+    let path = format!("/api/v1/conversations/{conversation}/read-receipts");
+    let response = self.get::<ReadReceiptsResponse>(&path).await?;
+    Some(
+      response
+        .receipts
+        .into_iter()
+        .map(|receipt| (receipt.user_id, receipt.message_id))
+        .collect(),
+    )
   }
 
   async fn refresh_announcement(&self) {
@@ -249,8 +278,19 @@ impl LiveServer {
     })
   }
 
-  /// Users who have read up to (or past) the message, in a DM or group DM.
+  /// Users who have read up to (or past) the message, in a DM or group DM. The first time a
+  /// conversation is shown after a connection its receipts are read from the server once (events
+  /// may have been missed); the UI reads again when they arrived.
   pub fn seen_by(&self, conversation: ConversationId, message: MessageId) -> Vec<UserId> {
+    let is_unread = {
+      let mut state = self.state.borrow_mut();
+      state.maybe_receipts_shown = Some(conversation);
+      state.receipts_read.insert(conversation)
+    };
+    if is_unread {
+      let live = self.clone();
+      spawn_local(async move { live.refresh_receipts(conversation).await });
+    }
     let state = self.state.borrow();
     state
       .receipts
@@ -431,7 +471,9 @@ impl LiveState {
       self.unread = unread_map(unread);
     }
     self.threads = live.threads;
-    let has_presence_gap = live.presence.has_gap_since(self.presence_seen);
+    // The core announces everyone it knows after each connection; a reader that fell behind the
+    // log's bound keeps the older presence of the people dropped meanwhile until their next
+    // announcement (there is nothing better to read: the UI no longer asks the server).
     for entry in live.presence.since(self.presence_seen) {
       self
         .presence
@@ -442,10 +484,7 @@ impl LiveState {
       self.apply_receipts(&live.receipts);
       self.last_receipts = live.receipts;
     }
-    let mut follow_up = follow_up(maybe_last_marks, live.marks);
-    // Announcements dropped before this UI saw them: read presence from the server instead.
-    follow_up.needs_resync |= maybe_last_marks.is_some() && has_presence_gap;
-    follow_up
+    follow_up(maybe_last_marks, live.marks)
   }
 
   fn apply_receipts(&mut self, live: &[LiveReceipt]) {
@@ -730,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn announcements_dropped_before_the_ui_saw_them_ask_for_a_resync() {
+    fn announcements_dropped_before_the_ui_saw_them_ask_the_server_nothing() {
       let mut state = LiveState::default();
       let mut snapshot = live(Some(&[]), LiveMarks::default());
       state.apply_snapshot(snapshot.clone());
@@ -739,13 +778,9 @@ mod tests {
           .presence
           .note(presence(id_from_raw(user), PresenceState::Online), 2);
       }
-      assert!(state.apply_snapshot(snapshot.clone()).needs_resync);
+      // Issue #252: the core owns presence; the UI takes what the log still holds.
+      assert_eq!(state.apply_snapshot(snapshot.clone()), LiveFollowUp::default());
       assert_eq!(state.presence.len(), 2, "the entries still kept are applied");
-      assert_eq!(
-        state.apply_snapshot(snapshot),
-        LiveFollowUp::default(),
-        "caught up"
-      );
     }
 
     #[test]
@@ -779,6 +814,7 @@ mod tests {
           unread_thread_count: 0,
           thread_mention_count: 0,
           maybe_max_counted: None,
+          maybe_counted_through: None,
         }),
         marks,
         ..LiveSnapshot::default()

@@ -34,6 +34,7 @@ mod sync;
 mod ui_commands;
 mod workspace;
 pub mod workspace_admin;
+pub(crate) use account::ACCOUNT_DATA_KEY;
 pub(crate) use workspace::WORKSPACE_KEY;
 
 use std::collections::{BTreeMap, HashMap};
@@ -155,8 +156,10 @@ pub struct ClientSettings {
   /// Show messages from before senders signed them (their sender is only "some member"). Off by
   /// default: a removed member could otherwise keep writing in anyone's name (security review A10).
   pub accept_unsigned_messages: bool,
-  /// How many people's announced presence the core keeps for the UI (the newest announcements);
-  /// a UI that fell further behind reads presence from the server again.
+  /// How many people's announced presence the core keeps for the UI (the newest announcements, one
+  /// record each). The core announces everyone it knows after each connection, so the bound only
+  /// bites in larger workspaces; there a UI keeps the older presence of people dropped before it
+  /// read them until their next announcement.
   pub max_announced_presence: usize,
   /// Limits of the queue of read positions, acknowledgements, pins and presence (issue #159).
   pub pending_actions: PendingActionSettings,
@@ -227,7 +230,7 @@ impl Default for ClientSettings {
       workspace_expiry_warning: std::time::Duration::from_secs(7 * 24 * 60 * 60),
       maybe_attestation: None,
       accept_unsigned_messages: false,
-      max_announced_presence: 500,
+      max_announced_presence: 5_000,
       pending_actions: PendingActionSettings::default(),
       upload_retry: files::UploadRetrySettings::default(),
     }

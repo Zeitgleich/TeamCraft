@@ -63,6 +63,21 @@ impl AnnouncedPresence {
     }
   }
 
+  /// Takes a later read of the log that holds only what is newer than this one (the core sends
+  /// changes, issue #259): one entry per user, in revision order. Not bounded: a reader keeps one
+  /// entry per person it heard of.
+  pub fn merge(&mut self, newer: Self) {
+    for entry in newer.entries {
+      self
+        .entries
+        .retain(|known| known.presence.user_id != entry.presence.user_id);
+      self.entries.push(entry);
+    }
+    self.entries.sort_by_key(|entry| entry.revision);
+    self.revision = self.revision.max(newer.revision);
+    self.evicted_up_to = self.evicted_up_to.max(newer.evicted_up_to);
+  }
+
   /// Announcements newer than `revision`, oldest first.
   pub fn since(&self, revision: u64) -> impl Iterator<Item = &RevisedPresence> {
     // Entries are in revision order: the seen prefix is skipped without looking at each entry.
@@ -120,6 +135,21 @@ mod tests {
     assert_eq!(announced.evicted_up_to, 2);
     assert!(announced.has_gap_since(1));
     assert!(!announced.has_gap_since(2));
+  }
+
+  #[test]
+  fn a_later_read_merges_per_user() {
+    let mut held = AnnouncedPresence::default();
+    held.note(presence(1, PresenceState::Online), 10);
+    held.note(presence(2, PresenceState::Online), 10);
+    let mut log = held.clone();
+    log.note(presence(1, PresenceState::Away), 10);
+    let newer = AnnouncedPresence {
+      entries: log.since(held.revision).cloned().collect(),
+      ..log.clone()
+    };
+    held.merge(newer);
+    assert_eq!(held, log);
   }
 
   #[test]

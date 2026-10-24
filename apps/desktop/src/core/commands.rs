@@ -10,6 +10,7 @@ use teamcraft_client_api::remote::{
   CORE_CHANGED_EVENT, CORE_FAILED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection,
   CoreStatus, EnrollRequest, LinkStatus, MessageWindow,
 };
+use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_media::effects::normalize_background_file;
 use teamcraft_proto::{ConversationId, MessageId, UserId};
@@ -236,6 +237,15 @@ pub fn core_approval_cancel(host: State<'_, CoreHost>) -> Result<(), CommandErro
 #[tauri::command]
 pub async fn core_snapshot(host: State<'_, CoreHost>) -> Result<ChatSnapshot, CommandError> {
   Ok(host.current()?.snapshot().await?)
+}
+
+/// What changed in the snapshot since the webview's cursor (issue #246).
+#[tauri::command]
+pub async fn core_snapshot_changes(
+  host: State<'_, CoreHost>,
+  since: Option<SnapshotCursor>,
+) -> Result<SnapshotChanges, CommandError> {
+  Ok(host.current()?.snapshot_changes(since).await?)
 }
 
 #[tauri::command]

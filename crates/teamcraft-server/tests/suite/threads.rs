@@ -360,6 +360,28 @@ mod caps {
     );
     app.stop().await;
   }
+
+  #[tokio::test]
+  async fn the_counts_say_which_messages_they_cover() {
+    let Some(app) = TestApp::start().await else {
+      return;
+    };
+    let s = scene(&app).await;
+    let counted = send_in(&app, &s.bob, &s.channel, &s.bob_device, 1, None, &[]).await;
+
+    let counts = unread(&app, &s.alice).await;
+    let later = send_in(&app, &s.bob, &s.channel, &s.bob_device, 2, None, &[]).await;
+
+    // Issue #259: a client counting live events counts only messages above the boundary.
+    let through: i64 = counts.body["counted_through"]
+      .as_str()
+      .expect("counted_through")
+      .parse()
+      .unwrap();
+    assert!(counted.parse::<i64>().unwrap() <= through);
+    assert!(later.parse::<i64>().unwrap() > through);
+    app.stop().await;
+  }
 }
 
 mod gateway {

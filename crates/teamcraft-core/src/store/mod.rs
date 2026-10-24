@@ -15,6 +15,7 @@ pub mod sealed;
 mod sealed_sqlite;
 #[cfg(all(feature = "sqlcipher", not(target_arch = "wasm32")))]
 mod sqlite;
+mod tracked;
 
 #[cfg(target_arch = "wasm32")]
 pub use browser::{IndexedDbRecords, IndexedDbStore, browser_database_key};
@@ -28,6 +29,7 @@ pub use memory::MemoryStore;
 pub use sealed_sqlite::{SealedSqliteStore, SqliteRecords};
 #[cfg(all(feature = "sqlcipher", not(target_arch = "wasm32")))]
 pub use sqlite::SqlCipherStore;
+pub use tracked::{StoreChanges, TrackedStore};
 
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{ClientMessageId, ConversationId, MessageId, ThreadId, UserId};
@@ -95,6 +97,9 @@ pub enum Table {
   /// Small actions waiting for the server (read positions, acknowledgements, pins, presence), one
   /// record per target.
   PendingActions,
+  /// Presence as `presence_update` events (and the reads after a connection) announced it to the
+  /// UI, one record per user with its revision (issue #259).
+  AnnouncedPresence,
 }
 
 /// A decrypted (or own, not yet sent) message.
@@ -507,7 +512,7 @@ impl StoredMessage {
 
 impl Table {
   /// Every table; a new variant goes here too (stores that load by name skip unknown tables).
-  pub const ALL: [Self; 31] = [
+  pub const ALL: [Self; 32] = [
     Self::Account,
     Self::Spaces,
     Self::Conversations,
@@ -539,6 +544,7 @@ impl Table {
     Self::DeviceKeys,
     Self::RemovedSenders,
     Self::PendingActions,
+    Self::AnnouncedPresence,
   ];
 
   /// The table with this [`Self::name`], if this version knows it.
@@ -580,6 +586,7 @@ impl Table {
       Self::DeviceKeys => "device_keys",
       Self::RemovedSenders => "removed_senders",
       Self::PendingActions => "pending_actions",
+      Self::AnnouncedPresence => "announced_presence",
     }
   }
 }

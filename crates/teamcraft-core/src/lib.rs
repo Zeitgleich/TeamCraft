@@ -35,6 +35,8 @@ mod ui_people;
 #[cfg(feature = "ui")]
 mod ui_search;
 #[cfg(feature = "ui")]
+pub mod ui_snapshot;
+#[cfg(feature = "ui")]
 mod ui_workspace;
 pub mod upkeep;
 #[cfg(target_arch = "wasm32")]

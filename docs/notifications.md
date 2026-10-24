@@ -36,7 +36,9 @@ Clients keep the counts current from gateway events instead of polling `GET /unr
 - A new top-level `message_create` from someone else raises the conversation's unread count by one, and
   its mention count when `mentioned_user_ids` contains the user (counted like the server counts). The
   client stops at the cap `GET /unread` reports (`max_counted`, `limits.max_unread_counted`), and a
-  message it already stored (a duplicate delivery) is not counted again.
+  message it already stored (a duplicate delivery) is not counted again. `GET /unread` also names an
+  ID taken after the counts were read (`counted_through`): events of messages up to it queued while
+  the answer was on its way and are already in the counts, so only higher IDs are counted.
 - Moving the read position, on any device, sends `unread_update` with the conversation's new counts to
   the user's devices.
 - `thread_update` makes the client read `GET /threads` and `GET /unread` again.
