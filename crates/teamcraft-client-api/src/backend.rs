@@ -229,6 +229,13 @@ pub trait ChatBackend {
   }
   /// Tries a failed removal or leave again, or signs the removal of somebody left in the group.
   fn retry_removal(&self, _conversation: ConversationId, _user: UserId) {}
+  /// "Keep": drops an unconfirmed (or failed) removal without doing anything more.
+  fn discard_removal(&self, _conversation: ConversationId, _user: UserId) {}
+  /// Unconfirmed removals in every conversation, for the admin console: an admin outside the
+  /// group doesn't see the conversation.
+  fn unconfirmed_removals(&self) -> Vec<(ConversationId, UserId)> {
+    Vec::new()
+  }
 
   fn first_unread(&self, _conversation: ConversationId) -> Option<MessageId> {
     None

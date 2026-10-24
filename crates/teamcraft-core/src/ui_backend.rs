@@ -224,6 +224,11 @@ pub enum CoreCommand {
     conversation: ConversationId,
     user: UserId,
   },
+  /// "Keep" on an unconfirmed or failed removal.
+  DiscardRemoval {
+    conversation: ConversationId,
+    user: UserId,
+  },
   InviteToSpace {
     space: SpaceId,
     email: String,
@@ -1040,6 +1045,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       .map(|(user, status)| match status {
         crate::client::RemovalStatus::Pending => MembershipIssue::RemovalPending { user },
         crate::client::RemovalStatus::Failed => MembershipIssue::RemovalFailed { user },
+        crate::client::RemovalStatus::Unconfirmed => MembershipIssue::RemovalUnconfirmed { user },
       })
       .collect();
     // Only admins are asked to sign somebody's removal again (e2ee.md §4.6).
@@ -1063,6 +1069,14 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn retry_removal(&self, conversation: ConversationId, user: UserId) {
     self.command(CoreCommand::RetryRemoval { conversation, user });
+  }
+
+  fn discard_removal(&self, conversation: ConversationId, user: UserId) {
+    self.command(CoreCommand::DiscardRemoval { conversation, user });
+  }
+
+  fn unconfirmed_removals(&self) -> Vec<(ConversationId, UserId)> {
+    self.read(crate::client::unconfirmed_removals(&self.store))
   }
 
   fn typing_users(&self, conversation: ConversationId) -> Vec<UserId> {

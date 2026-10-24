@@ -8,13 +8,12 @@ use teamcraft_crypto::workspace::{WorkspaceLog, sign_log_entry};
 use teamcraft_proto::{
   AddConversationMemberRequest, AppendWorkspaceLogRequest, Base64Bytes, ClientMessageId, ConversationId,
   DeviceId, ErrorCode, Id, ListWorkspaceLogQuery, MlsMessageKind, PostMlsMessageRequest, PresenceState,
-  UserId,
-  WorkspaceLogEntryResponse, WorkspaceLogKind, WorkspacePolicy,
+  UserId, WorkspaceLogEntryResponse, WorkspaceLogKind, WorkspacePolicy,
 };
 
 use super::Client;
 use super::groups::{ADMIN_CHANGE_MAGIC, ChangeSource};
-use super::removal::{RemovalProgress, is_worth_retrying};
+use super::removal::{RemovalProgress, RemovalRun, is_worth_retrying};
 use crate::api::{ApiError, ServerApi};
 use crate::convert;
 use crate::error::CoreError;
@@ -140,6 +139,10 @@ pub(crate) enum RemovalState {
   Retrying,
   /// Refused `removal_attempts` times: shown as failed until the user tries again.
   Failed,
+  /// Can't be confirmed from here (an admin outside the group: the server lists the user again,
+  /// or the server step resumed later, when somebody may have added them back): waits for the
+  /// admin's "remove" or "keep", never settled on the server's word.
+  Unconfirmed,
 }
 
 /// A message that belongs to a removal: the leaver's goodbye or the remover's announcement.
@@ -585,7 +588,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         ..
       } => {
         // A failed one waits for the user's "retry" ([`Client::retry_removal`]).
-        if *state == RemovalState::Failed || self.now_ms() < *not_before_ms {
+        if matches!(state, RemovalState::Failed | RemovalState::Unconfirmed) || self.now_ms() < *not_before_ms
+        {
           return Ok(PendingOutcome::Later(change.clone()));
         }
         let key = PendingChange::removal_key(*conversation_id, *user_id);
@@ -593,7 +597,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         if self.stored_pending(&key)?.is_none() {
           return Ok(PendingOutcome::Done);
         }
-        let result = self.run_removal(*conversation_id, *user_id, *step).await;
+        let result = self
+          .run_removal(*conversation_id, *user_id, *step, RemovalRun::Resumed)
+          .await;
         return self.removal_outcome(&key, change, result);
       },
       PendingChange::Revocation {

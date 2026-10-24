@@ -464,9 +464,13 @@ leaving device that isn't in the group. An admin outside the group keeps watchin
 epoch-conflict answer to a post for an epoch the group has left (nothing is stored), and signs the
 removal again once the group is half as many epochs past it as members accept
 (`MAX_CHANGE_AGE_EPOCHS`, see Freshness), at most `removal_attempts` times. Signing again is
-harmless when the first change was committed: members find nobody to remove. It doesn't sign
-again once the server lists the user again (an instance admin may see the member list; trusting
-that can only mean not signing). A leaver's other devices drop the group when the server's removal
+harmless when the first change was committed: members find nobody to remove. Once the server lists
+the user again (an instance admin may see the member list) it neither signs again nor forgets the
+removal: a hostile server could list the user while holding the change back. The removal shows as
+unconfirmed in the admin console and the conversation until the admin chooses "remove again" (signed
+and sent afresh) or "keep". The same holds for its server step resumed later (after a refusal or a
+restart): the admin can't see whether somebody added the user back since, so the step isn't sent on
+its own. A leaver's other devices drop the group when the server's removal
 reaches them.
 
 A later addition wins over a pending removal: the remover's own addition of the user, or a signed

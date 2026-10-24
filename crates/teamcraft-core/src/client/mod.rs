@@ -45,7 +45,9 @@ pub use attested::{AttestationSettings, JwksSource};
 pub use calls::{CallEventSink, CallKeySigner};
 pub use enroll::{EnrollmentOptions, EnrollmentSecret, OrgRecoveryUnlock, PendingEnrollment};
 pub use gateway::{DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart};
-pub use group_health::{RemovalStatus, group_leftovers, is_queue_refused, pending_removals};
+pub use group_health::{
+  RemovalStatus, group_leftovers, is_queue_refused, pending_removals, unconfirmed_removals,
+};
 pub use linking::{LinkApproval, LinkOffer, LinkedSecrets, NewDeviceLink};
 pub use member_device::{GroupAccess, is_waiting_for_device};
 pub use messaging::FlushReport;

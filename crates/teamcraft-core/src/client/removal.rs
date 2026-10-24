@@ -122,6 +122,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   ) -> Result<(), CoreError> {
     let key = PendingChange::removal_key(conversation, user);
     let (step, maybe_announcement) = match self.stored_pending(&key)? {
+      // "Remove" on an unconfirmed one: the admin decides now, so it is signed and sent afresh.
+      Some(PendingChange::Removal {
+        state: RemovalState::Unconfirmed,
+        maybe_announcement,
+        ..
+      }) => (RemovalStep::Group, maybe_announcement),
       Some(PendingChange::Removal {
         step,
         maybe_announcement,
@@ -144,7 +150,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       state: RemovalState::Retrying,
       maybe_announcement,
     })?;
-    match self.run_removal(conversation, user, step).await {
+    match self
+      .run_removal(conversation, user, step, RemovalRun::Decided)
+      .await
+    {
       Ok(RemovalProgress::Done) => self.store.delete(Table::PendingChanges, &key).map_err(Into::into),
       Ok(RemovalProgress::Waiting) => Ok(()),
       Err(error) => {
@@ -160,15 +169,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
-  /// Runs a removal from `step` on; also continues one from the pending queue. Each finished step
-  /// is stored before the next starts.
+  /// Runs a removal from `step` on; also continues one from the pending queue (`run`). Each
+  /// finished step is stored before the next starts.
   pub(crate) async fn run_removal(
     &mut self,
     conversation: ConversationId,
     user: UserId,
     mut step: RemovalStep,
+    mut run: RemovalRun,
   ) -> Result<RemovalProgress, CoreError> {
     if step == RemovalStep::Group {
+      // Signed just now: what follows rests on this decision.
+      run = RemovalRun::Decided;
       self.send_announcement(conversation, user, true).await?;
       step = self.remove_from_group(conversation, user).await?;
       self.set_removal_step(conversation, user, step, 0)?;
@@ -188,8 +200,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     } = step
     {
       return self
-        .watch_removal(conversation, user, signed_epoch, since_ms, probes)
+        .watch_removal(conversation, user, signed_epoch, since_ms, probes, run)
         .await;
+    }
+    if run == RemovalRun::Resumed && matches!(step, RemovalStep::ServerThenWatch { .. }) {
+      // An admin outside the group can't see whether somebody added the user back since it
+      // signed; the server's list can't tell either. The admin decides ("remove" or "keep").
+      tracing::warn!(conversation_id = %conversation, "an admin's removal resumed later is unconfirmed; waiting for the admin");
+      self.mark_unconfirmed(conversation, user)?;
+      return Ok(RemovalProgress::Waiting);
     }
     if self.is_back_in_group(conversation, user)? {
       // Added again since the removal (its commit removed them, or it was refused as stale): the
@@ -325,6 +344,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     signed_epoch: u64,
     since_ms: i64,
     probes: u32,
+    run: RemovalRun,
   ) -> Result<RemovalProgress, CoreError> {
     let now = self.now_ms();
     if self.has_group(conversation)? {
@@ -364,9 +384,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       tracing::warn!(conversation_id = %conversation, "stopped signing a removal again; members' devices show whether it went through");
       return Ok(RemovalProgress::Done);
     }
-    if self.is_listed_again(conversation, user).await? {
-      tracing::info!(conversation_id = %conversation, "the user was added again; not signing the removal again");
-      return Ok(RemovalProgress::Done);
+    if run == RemovalRun::Resumed && self.is_listed_again(conversation, user).await? {
+      // Added back, or a server that wants the removal forgotten while it holds the change back:
+      // not signed again, not dropped either; the admin decides.
+      tracing::warn!(conversation_id = %conversation, "the server lists a removed user again; waiting for the admin");
+      self.mark_unconfirmed(conversation, user)?;
+      return Ok(RemovalProgress::Waiting);
     }
     tracing::info!(conversation_id = %conversation, signed_epoch, current_epoch = current, "signing an admin removal again before members would refuse it as too old");
     let action = MembershipAction::RemoveUser {
@@ -455,6 +478,42 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if user != self.account.user_id && self.stored_pending(&key)?.is_some() {
       tracing::info!(conversation_id = %conversation, "the user was added again; dropped the pending removal");
       self.store.delete(Table::PendingChanges, &key)?;
+    }
+    Ok(())
+  }
+
+  /// Drops a pending removal on the user's "keep" (an unconfirmed or failed one).
+  pub async fn discard_removal(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<(), CoreError> {
+    self.store.delete(
+      Table::PendingChanges,
+      &PendingChange::removal_key(conversation, user),
+    )?;
+    Ok(())
+  }
+
+  /// Keeps a removal, with its step, until the user says "remove" or "keep".
+  fn mark_unconfirmed(&self, conversation: ConversationId, user: UserId) -> Result<(), CoreError> {
+    if let Some(PendingChange::Removal {
+      step,
+      not_before_ms,
+      attempts,
+      maybe_announcement,
+      ..
+    }) = self.stored_pending(&PendingChange::removal_key(conversation, user))?
+    {
+      self.queue_pending(PendingChange::Removal {
+        conversation_id: conversation,
+        user_id: user,
+        step,
+        not_before_ms,
+        attempts,
+        state: RemovalState::Unconfirmed,
+        maybe_announcement,
+      })?;
     }
     Ok(())
   }
@@ -629,6 +688,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub(crate) fn stored_pending(&self, key: &str) -> Result<Option<PendingChange>, CoreError> {
     records::get_json(&self.store, Table::PendingChanges, key)
   }
+}
+
+/// Whether a removal runs because the user decided it now, or resumed from the pending queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RemovalRun {
+  Decided,
+  Resumed,
 }
 
 /// How far a removal got in one round.

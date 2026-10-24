@@ -564,6 +564,10 @@ pub enum ChatAction {
     conversation: ConversationId,
     user: UserId,
   },
+  DiscardRemoval {
+    conversation: ConversationId,
+    user: UserId,
+  },
   SetBookmarks {
     conversation: ConversationId,
     bookmarks: Vec<crate::model::Bookmark>,
@@ -713,6 +717,7 @@ impl ChatAction {
       } => backend.add_member_with_history(conversation, user, history),
       Self::RemoveMember { conversation, user } => backend.remove_member(conversation, user),
       Self::RetryRemoval { conversation, user } => backend.retry_removal(conversation, user),
+      Self::DiscardRemoval { conversation, user } => backend.discard_removal(conversation, user),
       Self::SetBookmarks {
         conversation,
         bookmarks,
@@ -756,6 +761,7 @@ pub enum ChatQuery {
   MembershipIssues {
     conversation: ConversationId,
   },
+  UnconfirmedRemovals,
   Draft {
     conversation: ConversationId,
     #[serde(default)]
@@ -897,6 +903,9 @@ pub enum ChatAnswer {
   MembershipIssues {
     issues: Vec<MembershipIssue>,
   },
+  UnconfirmedRemovals {
+    removals: Vec<(ConversationId, UserId)>,
+  },
   Unsupported,
 }
 
@@ -936,6 +945,9 @@ impl ChatQuery {
       },
       Self::MembershipIssues { conversation } => ChatAnswer::MembershipIssues {
         issues: backend.membership_issues(conversation),
+      },
+      Self::UnconfirmedRemovals => ChatAnswer::UnconfirmedRemovals {
+        removals: backend.unconfirmed_removals(),
       },
       Self::FirstUnread { conversation } => ChatAnswer::Message {
         maybe_message: backend.first_unread(conversation),

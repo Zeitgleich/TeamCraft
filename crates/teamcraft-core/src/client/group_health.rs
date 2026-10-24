@@ -23,6 +23,9 @@ pub enum RemovalStatus {
   Pending,
   /// Refused too often; waits for the user's "retry".
   Failed,
+  /// An admin's removal from outside the group that can't be confirmed (the server lists the
+  /// user again, or somebody may have added them back): waits for "remove" or "keep".
+  Unconfirmed,
 }
 
 /// That the server refused this device the group's queue while listing the user as a member.
@@ -170,8 +173,8 @@ pub fn is_queue_refused(store: &impl LocalStore, conversation: ConversationId) -
   )
 }
 
-/// Removals and leaves this device started in the conversation that still show: on their way or
-/// failed. An admin's removal from outside the group that is only watched no longer shows.
+/// Removals and leaves this device started in the conversation that still show: on their way,
+/// failed or unconfirmed. An admin's removal from outside the group that is only watched doesn't.
 pub fn pending_removals(
   store: &impl LocalStore,
   conversation: ConversationId,
@@ -186,16 +189,36 @@ pub fn pending_removals(
       ..
     } = change
       && conversation_id == conversation
-      && !matches!(step, RemovalStep::Watch { .. })
+      && (state == RemovalState::Unconfirmed || !matches!(step, RemovalStep::Watch { .. }))
     {
       let status = match state {
         RemovalState::Retrying => RemovalStatus::Pending,
         RemovalState::Failed => RemovalStatus::Failed,
+        RemovalState::Unconfirmed => RemovalStatus::Unconfirmed,
       };
       removals.push((user_id, status));
     }
   }
   Ok(removals)
+}
+
+/// Unconfirmed removals in every conversation, for the admin console (an admin outside the group
+/// doesn't see the conversation).
+pub fn unconfirmed_removals(store: &impl LocalStore) -> Result<Vec<(ConversationId, UserId)>, CoreError> {
+  Ok(
+    records::list_json::<PendingChange>(store, Table::PendingChanges)?
+      .into_iter()
+      .filter_map(|change| match change {
+        PendingChange::Removal {
+          conversation_id,
+          user_id,
+          state: RemovalState::Unconfirmed,
+          ..
+        } => Some((conversation_id, user_id)),
+        _ => None,
+      })
+      .collect(),
+  )
 }
 
 pub(crate) fn leftovers_key(conversation: ConversationId) -> String {

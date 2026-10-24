@@ -168,11 +168,23 @@ fn MembershipIssueBanners(conversation: ConversationId, info: Memo<Option<Conver
             ),
             Some(user),
           ),
+          MembershipIssue::RemovalUnconfirmed { user } => (
+            "alert",
+            i18n.t_with(
+              "removal-unconfirmed",
+              &[("name", &name_of(user)), ("channel", &channel)],
+            ),
+            Some(user),
+          ),
           MembershipIssue::GroupRefused => ("alert", i18n.t("group-refused"), None),
           MembershipIssue::Unknown => return None,
         };
         let is_leftover = matches!(issue, MembershipIssue::LeftInGroup { .. });
+        let is_unconfirmed = matches!(issue, MembershipIssue::RemovalUnconfirmed { .. });
         let actions = maybe_retry.map(|user| {
+          if is_unconfirmed {
+            return view! { <UnconfirmedRemovalActions conversation=conversation user=user /> }.into_any();
+          }
           if !is_leftover {
             return view! {
               <button class="btn btn-small" on:click=move |_| state.write(|backend| backend.retry_removal(conversation, user))>
@@ -218,6 +230,21 @@ fn MembershipIssueBanners(conversation: ConversationId, info: Memo<Option<Conver
         })
       })
       .collect_view()
+  }
+}
+
+/// "Remove" signs the removal afresh, "keep" drops it: the admin decides, not the server's list.
+#[component]
+pub fn UnconfirmedRemovalActions(conversation: ConversationId, user: UserId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  view! {
+    <button class="btn btn-small" on:click=move |_| state.write(|backend| backend.retry_removal(conversation, user))>
+      {move || i18n.t("removal-unconfirmed-remove")}
+    </button>
+    <button class="btn btn-small" on:click=move |_| state.write(|backend| backend.discard_removal(conversation, user))>
+      {move || i18n.t("removal-unconfirmed-keep")}
+    </button>
   }
 }
 

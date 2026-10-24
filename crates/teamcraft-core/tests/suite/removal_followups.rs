@@ -13,7 +13,9 @@ use crate::common;
 use common::{PASSPHRASE, Peer, options, settings, settle};
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::{FakeServer, NetworkCut};
-use teamcraft_core::client::{RemovalStatus, group_leftovers, is_queue_refused, pending_removals};
+use teamcraft_core::client::{
+  RemovalStatus, group_leftovers, is_queue_refused, pending_removals, unconfirmed_removals,
+};
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::store::{
   ConversationEvent, LocalStore, MemoryStore, MessageContent, MessageFilter, Table,
@@ -183,7 +185,8 @@ mod admin_outside_the_group {
   }
 
   /// Somebody added Carol back after the admin's removal: the admin, who sees the server list
-  /// her again, doesn't sign her removal again.
+  /// her again, doesn't sign her removal again, and doesn't forget it either: it waits as
+  /// unconfirmed until the admin keeps her.
   #[tokio::test]
   async fn the_admin_does_not_sign_again_after_the_user_was_added_back() {
     let server = FakeServer::new();
@@ -212,6 +215,107 @@ mod admin_outside_the_group {
     admin.client.apply_pending_changes().await.unwrap();
     assert_eq!(proposals_by(&alice, &admin, channel).await, before);
     assert!(is_listed(&alice, channel, carol_id).await);
+    assert_eq!(
+      unconfirmed_removals(admin.store.as_ref()).unwrap(),
+      [(channel, carol_id)]
+    );
+
+    // It waits for the admin, however long.
+    clock.advance(millis(2 * DAY));
+    admin.client.apply_pending_changes().await.unwrap();
+    assert_eq!(proposals_by(&alice, &admin, channel).await, before);
+    admin.client.discard_removal(channel, carol_id).await.unwrap();
+    assert!(unconfirmed_removals(admin.store.as_ref()).unwrap().is_empty());
+    assert!(is_listed(&alice, channel, carol_id).await);
+  }
+
+  /// A hostile server lists Carol again without anybody adding her (and holds the admin's change
+  /// back): the admin isn't fooled into forgetting the removal; "remove again" signs and sends it
+  /// afresh.
+  #[tokio::test]
+  async fn a_server_listing_the_user_again_leaves_the_removal_to_the_admin() {
+    let server = FakeServer::new();
+    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let (mut alice, mut bob, mut carol) = three(&server).await;
+    let mut admin = enroll_with_clock(&server, "Admin", &clock, settings()).await;
+    let (alice_id, admin_id) = (alice.client.user_id(), admin.client.user_id());
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner), (admin_id, RosterRole::Admin)])
+      .await
+      .unwrap();
+    server.set_admin(admin_id);
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
+    let carol_id = carol.client.user_id();
+
+    admin.client.admin_remove_member(channel, carol_id).await.unwrap();
+    // On the server only: no signed addition.
+    admin
+      .api
+      .add_member(
+        channel,
+        &teamcraft_proto::AddConversationMemberRequest {
+          user_id: carol_id,
+          maybe_role: None,
+        },
+      )
+      .await
+      .unwrap();
+    server.bump_epoch(channel, MAX_CHANGE_AGE_EPOCHS / 2);
+    clock.advance(millis(HOUR));
+    admin.client.apply_pending_changes().await.unwrap();
+    assert_eq!(
+      unconfirmed_removals(admin.store.as_ref()).unwrap(),
+      [(channel, carol_id)]
+    );
+    let before = proposals_by(&alice, &admin, channel).await;
+
+    admin.client.retry_removal(channel, carol_id).await.unwrap();
+    assert_eq!(proposals_by(&alice, &admin, channel).await, before + 1);
+    assert!(!is_listed(&alice, channel, carol_id).await);
+    assert!(unconfirmed_removals(admin.store.as_ref()).unwrap().is_empty());
+  }
+
+  /// The server step of an admin outside the group is resumed later (it was refused): somebody
+  /// may have added the user back meanwhile, which the admin can't see. It isn't sent on its own
+  /// but waits for the admin.
+  #[tokio::test]
+  async fn a_resumed_server_step_of_an_admin_outside_the_group_waits_for_the_admin() {
+    let server = FakeServer::new();
+    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let (mut alice, mut bob, mut carol) = three(&server).await;
+    let mut admin = enroll_with_clock(&server, "Admin", &clock, settings()).await;
+    let (alice_id, admin_id) = (alice.client.user_id(), admin.client.user_id());
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner), (admin_id, RosterRole::Admin)])
+      .await
+      .unwrap();
+    server.set_admin(admin_id);
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
+    let carol_id = carol.client.user_id();
+
+    server.refuse_removal_steps_by(admin_id, true);
+    admin
+      .client
+      .admin_remove_member(channel, carol_id)
+      .await
+      .unwrap_err();
+    server.refuse_removal_steps_by(admin_id, false);
+    let requests = server.removal_requests();
+
+    clock.advance(millis(2 * DAY));
+    admin.client.apply_pending_changes().await.unwrap();
+    assert_eq!(server.removal_requests(), requests, "not sent on its own");
+    assert!(is_listed(&alice, channel, carol_id).await);
+    assert_eq!(
+      unconfirmed_removals(admin.store.as_ref()).unwrap(),
+      [(channel, carol_id)]
+    );
+
+    admin.client.retry_removal(channel, carol_id).await.unwrap();
+    assert_eq!(server.removal_requests(), requests + 1);
+    assert!(!is_listed(&alice, channel, carol_id).await);
   }
 }
 

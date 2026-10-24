@@ -168,6 +168,11 @@ pub enum MembershipIssue {
   RemovalPending { user: UserId },
   /// That removal or leave was refused too often; "retry" ([`crate::backend::ChatBackend::retry_removal`]).
   RemovalFailed { user: UserId },
+  /// An admin's removal from outside the group that can't be confirmed: the server lists `user`
+  /// again, or somebody may have added them back since. "Remove" signs it afresh
+  /// ([`crate::backend::ChatBackend::retry_removal`]), "keep" drops it
+  /// ([`crate::backend::ChatBackend::discard_removal`]).
+  RemovalUnconfirmed { user: UserId },
   /// `user` is still in the encryption group though the server no longer lists them; shown to
   /// admins, who can sign the removal again.
   LeftInGroup { user: UserId },

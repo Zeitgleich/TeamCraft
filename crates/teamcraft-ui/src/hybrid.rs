@@ -394,6 +394,14 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.retry_removal(conversation, user);
   }
 
+  fn discard_removal(&self, conversation: ConversationId, user: UserId) {
+    self.chat.discard_removal(conversation, user);
+  }
+
+  fn unconfirmed_removals(&self) -> Vec<(ConversationId, UserId)> {
+    self.chat.unconfirmed_removals()
+  }
+
   fn draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) -> Option<String> {
     self.chat.draft(conversation, maybe_thread)
   }
