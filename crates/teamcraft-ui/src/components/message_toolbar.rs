@@ -129,7 +129,12 @@ impl ToolbarHost {
       let id = active.message.id;
       self.active.set(Some(active));
       let host = *self;
-      request_animation_frame(move || host.reposition_to(id));
+      request_animation_frame(move || {
+        // The list may be gone by the next frame.
+        if host.active.try_with_untracked(|_| ()).is_some() {
+          host.reposition_to(id);
+        }
+      });
     }
   }
 

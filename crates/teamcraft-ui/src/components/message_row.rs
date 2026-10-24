@@ -724,9 +724,9 @@ impl LongPress {
     set_timeout(
       move || {
         if press.generation.try_get_value() == Some(generation) {
-          press.has_fired.set_value(true);
-          press.maybe_origin.set_value(None);
-          press.on_fire.with_value(|fire| fire());
+          press.has_fired.try_set_value(true);
+          press.maybe_origin.try_set_value(None);
+          press.on_fire.try_with_value(|fire| fire());
         }
       },
       LONG_PRESS,
