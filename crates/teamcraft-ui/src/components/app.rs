@@ -431,7 +431,12 @@ fn is_text_input_focused() -> bool {
   web_sys::window()
     .and_then(|window| window.document())
     .and_then(|document| document.active_element())
-    .is_some_and(|element| matches!(element.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT"))
+    .is_some_and(|element| {
+      matches!(element.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT")
+        || element
+          .dyn_ref::<web_sys::HtmlElement>()
+          .is_some_and(web_sys::HtmlElement::is_content_editable)
+    })
 }
 
 /// Mirrors the theme setting into `data-theme` on `<html>`; "system" removes it so CSS media queries apply.
