@@ -10,7 +10,7 @@ use crate::auth::AppConfig;
 use crate::components::login::AuthFrame;
 use crate::i18n::use_i18n;
 use crate::meetings::{GuestClient, MeetingError};
-use crate::reactive::use_interval;
+use crate::reactive::{SetIfAlive, use_interval};
 
 /// How often the lobby is asked whether the guest was admitted.
 const POLL_MS: u64 = 2000;
@@ -57,7 +57,7 @@ pub fn GuestJoinPage(meeting: MeetingId, invite_token: String) -> impl IntoView 
         let outcome = client
           .join(&invite_token.get_value(), &name.get_untracked())
           .await;
-        phase.set(match outcome {
+        phase.set_if_alive(match outcome {
           Ok(joined) => match joined.lobby_state {
             LobbyState::Admitted => GuestPhase::Admitted,
             LobbyState::Denied => GuestPhase::Denied,
@@ -78,11 +78,13 @@ pub fn GuestJoinPage(meeting: MeetingId, invite_token: String) -> impl IntoView 
     let client = client.clone();
     spawn_local(async move {
       match client.lobby_state(meeting, &guest_token).await {
-        Ok(LobbyState::Admitted) => phase.set(GuestPhase::Admitted),
-        Ok(LobbyState::Denied) => phase.set(GuestPhase::Denied),
+        Ok(LobbyState::Admitted) => phase.set_if_alive(GuestPhase::Admitted),
+        Ok(LobbyState::Denied) => phase.set_if_alive(GuestPhase::Denied),
         Ok(LobbyState::Waiting | LobbyState::Unknown(_)) => {},
         // A hiccup keeps waiting; a refused session ends it.
-        Err(MeetingError::Refused { .. }) => phase.set(GuestPhase::Failed(FailureKind::LinkUnusable)),
+        Err(MeetingError::Refused { .. }) => {
+          phase.set_if_alive(GuestPhase::Failed(FailureKind::LinkUnusable))
+        },
         Err(_) => {},
       }
     });

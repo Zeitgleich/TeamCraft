@@ -12,6 +12,7 @@ use crate::components::tab_list::{on_tab_keys, roving_tabindex};
 use crate::components::update_notice::UpdatesSection;
 use crate::i18n::use_i18n;
 use crate::keys::{ENTER, ESCAPE, Key, Modifier, QUICK_SWITCHER, Shortcut, ShortcutList};
+use crate::reactive::SetIfAlive;
 use crate::state::{SettingsTab as Tab, use_app_state};
 
 /// User settings, one tab per area (PLAN.md §4 and §5); the tabs live in `settings_tabs`.
@@ -273,8 +274,8 @@ fn DesktopSection() -> impl IntoView {
   let autostart = RwSignal::new(None::<bool>);
   let error = RwSignal::new(None::<String>);
   leptos::task::spawn_local(async move {
-    prefs.set(tauri::shell_prefs().await);
-    autostart.set(tauri::autostart().await);
+    prefs.set_if_alive(tauri::shell_prefs().await);
+    autostart.set_if_alive(tauri::autostart().await);
   });
   let save = move |change: fn(&mut tauri::ShellPrefs, bool), value: bool| {
     let Some(mut next) = prefs.get_untracked() else {
@@ -283,7 +284,7 @@ fn DesktopSection() -> impl IntoView {
     change(&mut next, value);
     prefs.set(Some(next));
     leptos::task::spawn_local(async move {
-      error.set(tauri::set_shell_prefs(next).await.err());
+      error.set_if_alive(tauri::set_shell_prefs(next).await.err());
     });
   };
   view! {
@@ -297,7 +298,7 @@ fn DesktopSection() -> impl IntoView {
             on:change=move |ev| {
               let on = event_target_checked(&ev);
               autostart.set(Some(on));
-              leptos::task::spawn_local(async move { error.set(tauri::set_autostart(on).await.err()) });
+              leptos::task::spawn_local(async move { error.set_if_alive(tauri::set_autostart(on).await.err()) });
             }
           />
           <span>{move || i18n.t("settings-autostart")}</span>

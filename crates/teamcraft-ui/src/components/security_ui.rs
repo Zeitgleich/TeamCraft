@@ -8,6 +8,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, UserId};
+use crate::reactive::SetIfAlive;
 use crate::remote_backend;
 use crate::security::group_fingerprint;
 use crate::state::{Overlay, use_app_state};
@@ -183,7 +184,7 @@ fn ApproveLinkDialog() -> impl IntoView {
     }
     phase.set(ApprovePhase::Connecting);
     spawn_local(async move {
-      phase.set(match remote_backend::approval_start(&entered).await {
+      phase.set_if_alive(match remote_backend::approval_start(&entered).await {
         Ok(()) => ApprovePhase::ConfirmCode { error: None },
         Err(message) => ApprovePhase::Failed(message),
       });
@@ -195,12 +196,12 @@ fn ApproveLinkDialog() -> impl IntoView {
     let short_code = typed.get_untracked();
     phase.set(ApprovePhase::Sending);
     spawn_local(async move {
-      phase.set(match remote_backend::approval_confirm(&short_code).await {
+      phase.set_if_alive(match remote_backend::approval_confirm(&short_code).await {
         Ok(()) => ApprovePhase::Done,
         // A wrong code keeps the attempt open for a retry; after a few misses the core drops it and
         // the next call fails with "no device waiting", which ends here as well.
         Err(message) if message.contains("did not match the one") => {
-          typed.set(String::new());
+          typed.set_if_alive(String::new());
           ApprovePhase::ConfirmCode { error: Some(message) }
         },
         Err(message) => ApprovePhase::Failed(message),

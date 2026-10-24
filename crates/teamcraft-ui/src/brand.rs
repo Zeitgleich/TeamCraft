@@ -21,6 +21,7 @@ use wasm_bindgen::closure::Closure;
 use crate::auth::{AppConfig, fetch, tauri};
 use crate::clock::now_ms;
 use crate::model::TimestampMs;
+use crate::reactive::{SetIfAlive, UpdateIfAlive};
 use crate::settings::{Settings, Theme, load_string, store_string};
 
 const BRAND_PATH: &str = "/api/v1/brand";
@@ -100,7 +101,7 @@ pub fn request_image(url: &str) {
         ShellImage::Failed(now_ms())
       },
     };
-    images.0.update(|map| {
+    images.0.update_if_alive(|map| {
       // Emptied meanwhile (another server): this answer belongs to the old one.
       if map.get(&path) == Some(&ShellImage::Loading) {
         map.insert(path, entry);
@@ -154,7 +155,7 @@ pub fn provide_brand(settings: Settings) {
       {
         Some(view) => {
           store_string(&key, &text);
-          brand.0.set(view);
+          brand.0.set_if_alive(view);
         },
         None => tracing::debug!("the server's brand is unusable; keeping the current one"),
       },

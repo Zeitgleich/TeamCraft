@@ -12,7 +12,7 @@ use crate::components::skeleton::ListSkeleton;
 use crate::i18n::use_i18n;
 use crate::model::{DeviceSetup, User, UserId};
 use crate::profiles::use_profiles;
-use crate::reactive::use_debounced;
+use crate::reactive::{SetIfAlive, UpdateIfAlive, use_debounced};
 use crate::rest::RestClient;
 use crate::session::use_session;
 use crate::state::{Overlay, use_app_state};
@@ -194,8 +194,8 @@ fn UserGroups() -> impl IntoView {
         .get::<ListUserGroupsResponse>("/api/v1/user-groups")
         .await
       {
-        Ok(list) => groups.set(list.groups),
-        Err(failure) => error.set(Some(failure.to_string())),
+        Ok(list) => groups.set_if_alive(list.groups),
+        Err(failure) => error.set_if_alive(Some(failure.to_string())),
       }
       is_loaded.set(true);
     });
@@ -221,12 +221,12 @@ fn UserGroups() -> impl IntoView {
         .await
       {
         Ok(_) => {
-          handle.set(String::new());
-          name.set(String::new());
-          error.set(None);
-          reload.update(|value| *value += 1);
+          handle.set_if_alive(String::new());
+          name.set_if_alive(String::new());
+          error.set_if_alive(None);
+          reload.update_if_alive(|value| *value += 1);
         },
-        Err(failure) => error.set(Some(failure.to_string())),
+        Err(failure) => error.set_if_alive(Some(failure.to_string())),
       }
     });
   };
@@ -291,7 +291,7 @@ fn GroupMembers(
     leptos::task::spawn_local(async move {
       let path = format!("/api/v1/user-groups/{group}");
       if let Ok(detail) = client.get_value().get::<UserGroupDetailResponse>(&path).await {
-        members.set(detail.members);
+        members.set_if_alive(detail.members);
       }
     });
   });
@@ -299,8 +299,8 @@ fn GroupMembers(
     leptos::task::spawn_local(async move {
       let path = format!("/api/v1/user-groups/{group}/members/{user}");
       if client.get_value().send(method, &path, None).await.is_ok() {
-        refresh.update(|value| *value += 1);
-        reload.update(|value| *value += 1);
+        refresh.update_if_alive(|value| *value += 1);
+        reload.update_if_alive(|value| *value += 1);
       }
     });
   };

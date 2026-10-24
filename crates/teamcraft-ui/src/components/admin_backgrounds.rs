@@ -8,6 +8,7 @@ use crate::admin::PolicyBlocker;
 use crate::components::admin_console::SectionHeader;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
+use crate::reactive::SetIfAlive;
 use crate::state::use_app_state;
 
 const MODES: [CallBackgroundMode; 3] = [
@@ -215,13 +216,14 @@ fn UploadForm(is_locked: Signal<bool>) -> impl IntoView {
       match JsFuture::from(file.array_buffer()).await {
         Ok(buffer) => {
           let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
-          state.write(|backend| backend.add_org_background(&chosen_name, bytes));
-          name.set(String::new());
-          if let Some(element) = file_input.get_untracked() {
+          state.try_write(|backend| backend.add_org_background(&chosen_name, bytes));
+          name.set_if_alive(String::new());
+          if let Some(element) = file_input.try_get_untracked().flatten() {
+            // async-ok: a DOM input element, not a signal.
             element.set_value("");
           }
         },
-        Err(_) => maybe_error.set(Some(i18n.t("admin-backgrounds-unreadable"))),
+        Err(_) => maybe_error.set_if_alive(Some(i18n.t("admin-backgrounds-unreadable"))),
       }
     });
   };

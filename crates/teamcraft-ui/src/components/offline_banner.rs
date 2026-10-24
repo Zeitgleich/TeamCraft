@@ -17,7 +17,7 @@ use crate::clock::now_ms;
 use crate::components::app::{on_document, on_window};
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
-use crate::reactive::use_interval_while;
+use crate::reactive::{SetIfAlive, use_interval_while};
 use crate::remote_backend;
 use crate::session::use_session;
 
@@ -56,14 +56,17 @@ pub fn OfflineBanner() -> impl IntoView {
         return;
       };
       if state == CoreConnection::Connecting {
-        if connecting_since.get_untracked().is_none() {
-          connecting_since.set(Some(now_ms()));
+        if connecting_since.try_get_untracked() == Some(None) {
+          connecting_since.set_if_alive(Some(now_ms()));
         }
       } else {
-        connecting_since.set(None);
+        connecting_since.set_if_alive(None);
       }
-      if connection.get_untracked() != Some(state) {
-        connection.set(Some(state));
+      if connection
+        .try_get_untracked()
+        .is_some_and(|shown| shown != Some(state))
+      {
+        connection.set_if_alive(Some(state));
       }
     });
   };

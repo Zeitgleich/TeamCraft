@@ -11,6 +11,7 @@ use crate::admin::format_bytes;
 use crate::calls::{BackgroundEffect, BackgroundImageInfo, EffectGroup};
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
+use crate::reactive::SetIfAlive;
 use crate::state::use_app_state;
 
 /// Largest picture the picker offers to upload; matches the server default `max_background_bytes`
@@ -70,9 +71,9 @@ pub fn BackgroundPicker(effect: RwSignal<BackgroundEffect>) -> impl IntoView {
       match JsFuture::from(file.array_buffer()).await {
         Ok(buffer) => {
           let picture = js_sys::Uint8Array::new(&buffer).to_vec();
-          state.write(|backend| backend.add_background_image(&file.name(), picture));
+          state.try_write(|backend| backend.add_background_image(&file.name(), picture));
         },
-        Err(_) => error.set(Some(i18n.t("effect-upload-unreadable"))),
+        Err(_) => error.set_if_alive(Some(i18n.t("effect-upload-unreadable"))),
       }
     });
   };

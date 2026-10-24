@@ -23,6 +23,7 @@ use crate::components::space_tile::SpaceTile;
 use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, SpaceId, UserId, hue_from_hex};
+use crate::reactive::SetIfAlive;
 use crate::space_images::{ImagePickError, check_pick, prepare_upload, use_space_images};
 use crate::state::{Overlay, use_app_state};
 
@@ -544,21 +545,21 @@ fn ChannelRetention(conversation: ConversationId) -> impl IntoView {
   let is_saved = RwSignal::new(false);
   spawn_local(async move {
     if let Ok(loaded) = hub.retention(conversation).await {
-      days.set(
+      days.set_if_alive(
         loaded
           .own
           .maybe_max_age_days
           .map(|value| value.to_string())
           .unwrap_or_default(),
       );
-      messages.set(
+      messages.set_if_alive(
         loaded
           .own
           .maybe_max_messages
           .map(|value| value.to_string())
           .unwrap_or_default(),
       );
-      status.set(Some(loaded));
+      status.set_if_alive(Some(loaded));
     }
   });
   let save = move |ev: leptos::ev::SubmitEvent| {
@@ -575,12 +576,12 @@ fn ChannelRetention(conversation: ConversationId) -> impl IntoView {
     spawn_local(async move {
       match hub.set_retention(conversation, setting).await {
         Ok(saved) => {
-          status.set(Some(saved));
-          is_saved.set(true);
+          status.set_if_alive(Some(saved));
+          is_saved.set_if_alive(true);
         },
         Err(error) => {
           tracing::warn!(%error, "could not save the channel retention");
-          maybe_error.set(Some("retention-error-refused"));
+          maybe_error.set_if_alive(Some("retention-error-refused"));
         },
       }
     });
@@ -870,22 +871,22 @@ fn SpaceImageSection(space: SpaceId) -> impl IntoView {
     status.set(ImageStatus::Busy);
     spawn_local(async move {
       let Ok(buffer) = JsFuture::from(file.array_buffer()).await else {
-        status.set(ImageStatus::Failed(ImagePickError::Unreadable.i18n_key()));
+        status.set_if_alive(ImageStatus::Failed(ImagePickError::Unreadable.i18n_key()));
         return;
       };
       let png = match prepare_upload(&js_sys::Uint8Array::new(&buffer).to_vec()) {
         Ok(png) => png,
         Err(error) => {
-          status.set(ImageStatus::Failed(error.i18n_key()));
+          status.set_if_alive(ImageStatus::Failed(error.i18n_key()));
           return;
         },
       };
       match hub.upload(space, png).await {
         Ok(updated) => {
-          shown.set(ShownImage::after(&updated));
-          status.set(ImageStatus::Idle);
+          shown.set_if_alive(ShownImage::after(&updated));
+          status.set_if_alive(ImageStatus::Idle);
         },
-        Err(failure) => status.set(ImageStatus::Failed(failure.i18n_key())),
+        Err(failure) => status.set_if_alive(ImageStatus::Failed(failure.i18n_key())),
       }
     });
   };
@@ -894,10 +895,10 @@ fn SpaceImageSection(space: SpaceId) -> impl IntoView {
     spawn_local(async move {
       match hub.remove(space).await {
         Ok(updated) => {
-          shown.set(ShownImage::after(&updated));
-          status.set(ImageStatus::Idle);
+          shown.set_if_alive(ShownImage::after(&updated));
+          status.set_if_alive(ImageStatus::Idle);
         },
-        Err(failure) => status.set(ImageStatus::Failed(failure.i18n_key())),
+        Err(failure) => status.set_if_alive(ImageStatus::Failed(failure.i18n_key())),
       }
     });
   };

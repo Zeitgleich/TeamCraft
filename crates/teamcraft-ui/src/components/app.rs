@@ -747,6 +747,7 @@ fn watch_activity(state: AppState) {
     let watch = watch.clone();
     leptos::task::spawn_local(async move {
       if let Some(os) = tauri::os_attention().await {
+        // async-ok: a Cell the task shares, not a signal.
         watch.maybe_os.set(Some(os));
         watch.check();
       }

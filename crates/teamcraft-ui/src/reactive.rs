@@ -3,6 +3,28 @@
 use leptos::prelude::*;
 use leptos::reactive::graph::Observer;
 
+/// Writes from async tasks and timers (after an `.await`, in a callback of the core), which can run
+/// after the component that owns the signal is gone. Plain `set`/`update` panic then ("reactive
+/// value already disposed"), which kills the wasm app (issue #322); these do nothing instead.
+/// `scripts/check-async-signals.py` makes sure spawned tasks use them.
+pub trait SetIfAlive: Set {
+  fn set_if_alive(&self, value: Self::Value) {
+    // A disposed signal hands the value back; nobody is left to show it.
+    let _ = self.try_set(value);
+  }
+}
+
+impl<S: Set> SetIfAlive for S {}
+
+/// See [`SetIfAlive`].
+pub trait UpdateIfAlive: Update {
+  fn update_if_alive(&self, change: impl FnOnce(&mut Self::Value)) {
+    let _ = self.try_update(change);
+  }
+}
+
+impl<S: Update> UpdateIfAlive for S {}
+
 /// Reads a signal, subscribing the caller only when there is one. Component bodies and event handlers
 /// have no observer; reading there is intentional and must not trigger the debug-build warning.
 pub fn get_if_observed<T: Clone + Send + Sync + 'static>(signal: RwSignal<T>) -> T {

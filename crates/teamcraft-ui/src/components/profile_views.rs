@@ -15,6 +15,7 @@ use crate::components::modal::Modal;
 use crate::i18n::use_i18n;
 use crate::model::{PresenceStatus, User};
 use crate::profiles::{MAX_AVATAR_BYTES, avatar_type, use_profiles};
+use crate::reactive::SetIfAlive;
 use crate::state::use_app_state;
 
 pub use teamcraft_proto::Weekday;
@@ -135,9 +136,9 @@ pub fn EditProfileDialog() -> impl IntoView {
     leptos::task::spawn_local(async move {
       match hub.save(request).await {
         Ok(()) => state.close_overlay(),
-        Err(failure) => error.set(Some(failure.to_string())),
+        Err(failure) => error.set_if_alive(Some(failure.to_string())),
       }
-      is_saving.set(false);
+      is_saving.set_if_alive(false);
     });
   };
 
@@ -163,19 +164,19 @@ pub fn EditProfileDialog() -> impl IntoView {
     error.set(None);
     leptos::task::spawn_local(async move {
       let Ok(buffer) = JsFuture::from(file.array_buffer()).await else {
-        error.set(Some(i18n.t("profile-avatar-unreadable")));
+        error.set_if_alive(Some(i18n.t("profile-avatar-unreadable")));
         return;
       };
       let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
       if let Err(failure) = hub.upload_avatar(me.id, content_type, bytes).await {
-        error.set(Some(failure.to_string()));
+        error.set_if_alive(Some(failure.to_string()));
       }
     });
   };
   let remove_avatar = move |_| {
     leptos::task::spawn_local(async move {
       if let Err(failure) = hub.remove_avatar(me.id).await {
-        error.set(Some(failure.to_string()));
+        error.set_if_alive(Some(failure.to_string()));
       }
     });
   };

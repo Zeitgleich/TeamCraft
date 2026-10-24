@@ -9,6 +9,7 @@
 use std::cell::Cell;
 use std::time::Duration;
 
+use crate::reactive::SetIfAlive;
 use leptos::prelude::*;
 use teamcraft_client_api::updates::ClientVersion;
 use teamcraft_proto::ClientCompatibilityResponse;
@@ -172,7 +173,7 @@ pub fn watch_releases(state: RwSignal<ReleaseUpdate>) {
     };
     let registration: web_sys::ServiceWorkerRegistration = registration.unchecked_into();
     if registration.waiting().is_some() && has_controller() {
-      state.set(ReleaseUpdate::Ready);
+      state.set_if_alive(ReleaseUpdate::Ready);
     }
     follow_installs(&registration, state);
     check_for_update(&registration, state);
@@ -290,9 +291,11 @@ fn check_for_update(registration: &web_sys::ServiceWorkerRegistration, state: Rw
     match fetch_compatibility().await {
       Ok(compatibility) => {
         if let Some(update) = compatibility_update(env!("CARGO_PKG_VERSION"), &compatibility)
-          && state.get_untracked() != ReleaseUpdate::Ready
+          && state
+            .try_get_untracked()
+            .is_some_and(|current| current != ReleaseUpdate::Ready)
         {
-          state.set(update);
+          state.set_if_alive(update);
         }
       },
       Err(error) => tracing::debug!(%error, "could not ask the server for supported versions"),

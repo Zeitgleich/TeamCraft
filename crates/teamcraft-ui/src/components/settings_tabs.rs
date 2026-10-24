@@ -21,6 +21,7 @@ use crate::prefs::{
   CallPrefs, Density, DndSchedule, EVERY_DAY, MuteFor, NotificationPrefs, NotifyLevel, PushWhen, SidebarSort,
   ThreadReplies, Zoom, default_dnd_window,
 };
+use crate::reactive::SetIfAlive;
 use crate::settings::{SendMode, Theme, load_string, store_string};
 use crate::state::{Overlay, use_app_state};
 use teamcraft_proto::DndWindow;
@@ -194,10 +195,11 @@ pub fn NotificationsTab() -> impl IntoView {
   let allow_notifications = move |_| {
     let push_key = push_key.get_value();
     leptos::task::spawn_local(async move {
-      if page_permission.get_untracked().as_deref() != Some("granted") {
-        page_permission.set(crate::auth::tauri::request_notification_permission().await);
+      if page_permission.try_get_untracked().flatten().as_deref() != Some("granted") {
+        let answer = crate::auth::tauri::request_notification_permission().await;
+        page_permission.set_if_alive(answer);
       }
-      if page_permission.get_untracked().as_deref() != Some("granted") {
+      if page_permission.try_get_untracked().flatten().as_deref() != Some("granted") {
         return;
       }
       let Some(session) = crate::session::use_session() else {
@@ -206,10 +208,10 @@ pub fn NotificationsTab() -> impl IntoView {
       match crate::remote_backend::enable_web_push(session.authenticator().as_ref()).await {
         Ok(()) => {
           store_string(&push_key, "1");
-          is_push_on.set(true);
-          push_error.set(None);
+          is_push_on.set_if_alive(true);
+          push_error.set_if_alive(None);
         },
-        Err(error) => push_error.set(Some(error)),
+        Err(error) => push_error.set_if_alive(Some(error)),
       }
     });
   };
@@ -1292,11 +1294,11 @@ fn RecoveryPassphrase() -> impl IntoView {
     leptos::task::spawn_local(async move {
       let result = crate::remote_backend::change_passphrase(&new_passphrase).await;
       if result.is_ok() {
-        passphrase.set(String::new());
-        confirm.set(String::new());
+        passphrase.set_if_alive(String::new());
+        confirm.set_if_alive(String::new());
       }
-      outcome.set(Some(result));
-      is_working.set(false);
+      outcome.set_if_alive(Some(result));
+      is_working.set_if_alive(false);
     });
   };
   view! {

@@ -15,7 +15,7 @@ use crate::model::{
 };
 use crate::navigation::{Step, divider_index, next_unread};
 use crate::prefs::SidebarSort;
-use crate::reactive::get_if_observed;
+use crate::reactive::{SetIfAlive, get_if_observed};
 use crate::route::Route;
 use crate::sections::{HomeFilter, apply_favorite_order, build_direct, build_sections};
 use crate::security::DeviceApproval;
@@ -600,6 +600,13 @@ impl AppState {
     result
   }
 
+  /// [`Self::write`] for async tasks: nothing happens once the shell is gone (issue #322).
+  pub fn try_write<R>(&self, write: impl FnOnce(&dyn Backend) -> R) -> Option<R> {
+    let result = self.backend.try_with_value(|backend| write(backend.as_ref()))?;
+    let _ = self.revision.try_update(|revision| *revision += 1);
+    Some(result)
+  }
+
   pub fn me(&self) -> User {
     self.read(|backend| backend.me())
   }
@@ -757,7 +764,8 @@ impl AppState {
   }
 
   pub fn dismiss_toast(&self, id: u64) {
-    self.toasts.update(|list| list.retain(|toast| toast.id != id));
+    // Also called by timers, which may fire after the shell is gone.
+    let _ = self.toasts.try_update(|list| list.retain(|toast| toast.id != id));
   }
 
   /// Hides an own message at once and deletes it after the undo window, unless Undo was pressed.
@@ -770,12 +778,12 @@ impl AppState {
     set_timeout(
       move || {
         state.dismiss_toast(toast);
-        let mut is_still_deleted = false;
-        state
+        let is_still_deleted = state
           .hidden_messages
-          .update(|hidden| is_still_deleted = hidden.remove(&message));
+          .try_update(|hidden| hidden.remove(&message))
+          .unwrap_or(false);
         if is_still_deleted {
-          state.write(|backend| backend.delete_message(conversation, message));
+          state.try_write(|backend| backend.delete_message(conversation, message));
         }
       },
       UNDO_WINDOW,
@@ -818,12 +826,12 @@ impl AppState {
     set_timeout(
       move || {
         state.dismiss_toast(toast);
-        let mut is_still_leaving = false;
-        state
+        let is_still_leaving = state
           .hidden_conversations
-          .update(|hidden| is_still_leaving = hidden.remove(&conversation));
+          .try_update(|hidden| hidden.remove(&conversation))
+          .unwrap_or(false);
         if is_still_leaving {
-          state.write(|backend| backend.leave_channel(conversation));
+          state.try_write(|backend| backend.leave_channel(conversation));
         }
       },
       UNDO_WINDOW,
@@ -984,8 +992,8 @@ impl AppState {
     self.highlighted.set(Some(message));
     set_timeout(
       move || {
-        if state.highlighted.get_untracked() == Some(message) {
-          state.highlighted.set(None);
+        if state.highlighted.try_get_untracked() == Some(Some(message)) {
+          state.highlighted.set_if_alive(None);
         }
       },
       HIGHLIGHT_DURATION,

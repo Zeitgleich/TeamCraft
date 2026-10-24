@@ -25,7 +25,7 @@ use crate::hybrid::Hybrid;
 use crate::i18n::use_i18n;
 use crate::meetings::{MeetingsClient, MeetingsHub};
 use crate::notify_sync::NotificationSync;
-use crate::reactive::use_interval;
+use crate::reactive::{SetIfAlive, use_interval};
 use crate::remote_backend::{self, RemoteChat};
 use crate::remote_calls::RemoteCalls;
 use crate::server_backend::{LoadError, RestChat};
@@ -798,7 +798,7 @@ fn AlternativesLine(checked_address: String, address: RwSignal<String>) -> impl 
           Alternatives::NoneFound
         },
       };
-      state.set(next);
+      state.set_if_alive(next);
     });
   };
   move || match state.get() {
@@ -1131,7 +1131,7 @@ fn DataGate(me: GetMeResponse, settings: Settings, control: SessionControl) -> i
     let auth = control.authenticator();
     let me = me.get_value();
     leptos::task::spawn_local(async move {
-      backend.set(Some(load_backend(auth, &me).await));
+      backend.set_if_alive(Some(load_backend(auth, &me).await));
     });
   });
 
@@ -1346,7 +1346,7 @@ fn LinkScreen(device_name: String, control: SessionControl, on_back: Callback<()
 
   spawn_local(async move {
     if let Err(message) = remote_backend::link_start(&device_name.get_value()).await {
-      status.set(LinkStatus::Failed { message });
+      status.set_if_alive(LinkStatus::Failed { message });
     }
   });
   use_interval(LINK_POLL_MS, move || {
@@ -1361,7 +1361,7 @@ fn LinkScreen(device_name: String, control: SessionControl, on_back: Callback<()
         return;
       }
       if let Ok(latest) = remote_backend::link_status().await {
-        status.set(latest);
+        status.set_if_alive(latest);
       }
     });
   });

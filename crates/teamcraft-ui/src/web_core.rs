@@ -411,6 +411,7 @@ fn start_follower(user: UserId) -> Result<(), String> {
     let Some(lock) = web_tabs::wait_to_own(user).await else {
       return;
     };
+    // async-ok: a thread-local, not a signal.
     let is_still_following = RUNNING.with(|running| {
       matches!(&*running.borrow(), Some(Running::Follower { user: following, .. }) if *following == user)
     });

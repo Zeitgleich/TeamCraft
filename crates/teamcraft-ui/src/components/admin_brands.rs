@@ -15,6 +15,7 @@ use crate::components::admin_fields::{
   is_email_address, is_email_domain, is_web_url, list_text, parse_list,
 };
 use crate::i18n::use_i18n;
+use crate::reactive::SetIfAlive;
 use crate::state::use_app_state;
 
 /// Below this contrast ratio (WCAG AA for normal text) a color pair is flagged.
@@ -776,10 +777,11 @@ fn BrandAssets(id: String, response: Memo<Option<AdminBrandsResponse>>, is_read_
                       match JsFuture::from(file.array_buffer()).await {
                         Ok(buffer) => {
                           let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
-                          state.write(|backend| backend.upload_brand_asset(id, slot, bytes, content_type));
+                          state.try_write(|backend| backend.upload_brand_asset(id, slot, bytes, content_type));
                         },
-                        Err(_) => maybe_error.set(Some("admin-error-image-unreadable")),
+                        Err(_) => maybe_error.set_if_alive(Some("admin-error-image-unreadable")),
                       }
+                      // async-ok: a DOM input element, not a signal.
                       input.set_value("");
                     });
                   }
