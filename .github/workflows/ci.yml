@@ -11,6 +11,8 @@ on:
     paths-ignore:
       - "docs/**"
       - "**/*.md"
+  # By hand, e.g. to get a verdict on main after a docs-only merge before tagging a release.
+  workflow_dispatch:
 
 # A new push to the same branch or PR cancels the run still going for the previous one.
 concurrency:
