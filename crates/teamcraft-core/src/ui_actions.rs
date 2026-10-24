@@ -45,10 +45,16 @@ impl<S: LocalStore> CoreChatBackend<S> {
   pub(crate) fn ui_saved_items(&self) -> Vec<SavedItem> {
     let data = self.read(stored_account_data(self.store_ref()));
     let users = self.summaries();
+    let preferences = self.mention_preferences();
     let names: std::collections::BTreeMap<ConversationId, String> = self
       .conversations_raw()
       .iter()
-      .map(|conversation| (conversation.id, self.to_conversation(conversation, &users).name))
+      .map(|conversation| {
+        (
+          conversation.id,
+          self.to_conversation(conversation, &users, &preferences).name,
+        )
+      })
       .collect();
     data
       .saved_items()
