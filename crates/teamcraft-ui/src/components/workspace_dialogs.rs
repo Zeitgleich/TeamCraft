@@ -24,7 +24,9 @@ use crate::components::space_tile::SpaceTile;
 use crate::feedback::{PendingAction, failure_message};
 use crate::i18n::use_i18n;
 use crate::image_crop::check_pick;
-use crate::model::{ConversationId, JoinPolicy, Space, SpaceId, SpaceMember, SpaceRole, User, hue_from_hex};
+use crate::model::{
+  ConversationId, JoinPolicy, Space, SpaceId, SpaceMember, SpaceRole, SpaceRoster, User, hue_from_hex,
+};
 use crate::reactive::SetIfAlive;
 use crate::space_images::use_space_images;
 use crate::state::{Overlay, use_app_state};
@@ -504,8 +506,19 @@ fn ChannelMemberRow(conversation: ConversationId, user: User) -> impl IntoView {
           <button type="button" class="btn btn-small" on:click=move |_| is_confirming.set(false)>{move || i18n.t("cancel")}</button>
         </Show>
       })}
+      <FailureNote pending=pending />
     </li>
   }
+}
+
+/// The `<option>` value of a role in the role select.
+fn role_value(role: &SpaceRole) -> String {
+  match role {
+    SpaceRole::SpaceAdmin => "space_admin",
+    SpaceRole::Guest => "guest",
+    SpaceRole::Member | SpaceRole::Unknown(_) => "member",
+  }
+  .to_owned()
 }
 
 /// Public or private (with a confirmation), and how long messages are kept.
@@ -891,8 +904,6 @@ pub fn SpaceSettingsDialog(space: SpaceId) -> impl IntoView {
     SPACE_ADVANCED,
   ];
   let selected = RwSignal::new(SPACE_OVERVIEW);
-  // Members and invitations load afresh whenever the settings open.
-  state.write(|backend| backend.refresh_space_roster(space));
   let name = current.name.clone();
   view! {
     <Dialog title_key="space-settings-title" class="modal-settings">
@@ -1016,28 +1027,49 @@ fn SpaceMembersSection(space: Space) -> impl IntoView {
   let i18n = use_i18n();
   let id = space.id;
   let can_manage = space.can_add_members;
+  // The link of an open space is something everyone in it can pass on.
+  let can_invite = space.can_add_members || space.can_invite_guests || space.join_policy == JoinPolicy::Open;
+  // Guests never see the member list; for everybody else it loads afresh when the section opens.
+  let is_guest = state.read(|backend| backend.my_role()) == teamcraft_proto::Role::Guest;
+  let loading = PendingAction::new();
+  let load = move || loading.run(|| state.write(|backend| backend.refresh_space_roster(id)));
+  if !is_guest {
+    load();
+  }
   let filter = RwSignal::new(String::new());
-  let members = Memo::new(move |_| {
+  let roster = Memo::new(move |_| {
     let needle = filter.get().trim().to_lowercase();
-    state.read(|backend| backend.space_members(id)).map(|mut list| {
-      list.retain(|member| needle.is_empty() || member.display_name.to_lowercase().contains(&needle));
-      list
-    })
+    match state.read(|backend| backend.space_members(id)) {
+      SpaceRoster::Loaded(mut list) => {
+        list.retain(|member| needle.is_empty() || member.display_name.to_lowercase().contains(&needle));
+        SpaceRoster::Loaded(list)
+      },
+      other => other,
+    }
   });
   let invites = Memo::new(move |_| state.read(|backend| backend.space_invites(id)));
   view! {
     <div class="settings-row">
       <label class="visually-hidden" for="ss-member-filter">{move || i18n.t("space-members-filter")}</label>
       <input id="ss-member-filter" class="input grow" autocomplete="off" placeholder=move || i18n.t("space-members-filter") prop:value=move || filter.get() on:input=move |ev| filter.set(event_target_value(&ev)) />
-      <button type="button" class="btn btn-primary" on:click=move |_| state.overlay.set(Overlay::InvitePeople(id))>
-        <Icon name=IconName::UserPlus />
-        {move || i18n.t("invite-title")}
-      </button>
+      {can_invite.then(|| view! {
+        <button type="button" class="btn btn-primary" on:click=move |_| state.overlay.set(Overlay::InvitePeople(id))>
+          <Icon name=IconName::UserPlus />
+          {move || i18n.t("invite-title")}
+        </button>
+      })}
     </div>
-    {(!can_manage).then(|| view! { <p class="hint">{move || i18n.t("space-members-read-only")}</p> })}
-    {move || match members.get() {
-      None => view! { <p class="muted-text" role="status">{move || i18n.t("space-members-loading")}</p> }.into_any(),
-      Some(list) => view! {
+    {(!can_manage && !is_guest).then(|| view! { <p class="hint">{move || i18n.t("space-members-read-only")}</p> })}
+    {move || match roster.get() {
+      _ if is_guest => view! { <p class="hint">{move || i18n.t("space-members-hidden")}</p> }.into_any(),
+      SpaceRoster::Hidden => view! { <p class="hint">{move || i18n.t("space-members-hidden")}</p> }.into_any(),
+      // Offline or refused: say so and offer to try again instead of loading forever.
+      SpaceRoster::Loading if loading.maybe_failure().is_some() => view! {
+        <FailureNote pending=loading />
+        <button type="button" class="btn btn-small" on:click=move |_| load()>{move || i18n.t("data-retry")}</button>
+      }.into_any(),
+      SpaceRoster::Loading => view! { <p class="muted-text" role="status">{move || i18n.t("space-members-loading")}</p> }.into_any(),
+      SpaceRoster::Loaded(list) => view! {
         <p class="muted-text">{i18n.t_count("members-count", list.len())}</p>
         <ul class="settings-member-list">
           {list.into_iter().map(|member| view! { <SpaceMemberRow space=id member=member can_manage=can_manage /> }).collect_view()}
@@ -1093,6 +1125,7 @@ fn SpaceMemberRow(space: SpaceId, member: SpaceMember, can_manage: bool) -> impl
   let role = member.role.clone();
   // Guest accounts stay guests; members and space admins can be switched.
   let can_change_role = can_manage && !is_me && !member.is_guest;
+  let shown_role = RwSignal::new(role_value(&role));
   view! {
     <li class="settings-member">
       {maybe_avatar.map(|user| view! { <Avatar user=user size=AvatarSize::Small show_presence=true /> })}
@@ -1100,20 +1133,29 @@ fn SpaceMemberRow(space: SpaceId, member: SpaceMember, can_manage: bool) -> impl
       {is_me.then(|| view! { <span class="muted-text">{move || i18n.t("settings-member-you")}</span> })}
       <span class="grow"></span>
       {if can_change_role {
-        let is_admin = role == SpaceRole::SpaceAdmin;
         view! {
           <label class="visually-hidden" for=format!("ss-role-{user}")>{move || i18n.t("space-role")}</label>
           <select
             id=format!("ss-role-{user}")
             class="input input-small"
+            prop:value=move || shown_role.get()
             prop:disabled=move || pending.is_pending()
             on:change=move |ev| {
-              let role = if event_target_value(&ev) == "space_admin" { SpaceRole::SpaceAdmin } else { SpaceRole::Member };
-              pending.run(|| state.write(|backend| backend.set_space_role(space, user, role)));
+              let previous = shown_role.get_untracked();
+              let value = event_target_value(&ev);
+              let role = if value == "space_admin" { SpaceRole::SpaceAdmin } else { SpaceRole::Member };
+              shown_role.set(value);
+              // A refusal (the last space admin) puts the old role back.
+              pending.run_or_else(
+                || state.write(|backend| backend.set_space_role(space, user, role)),
+                move |_| {
+                  let _ = shown_role.try_set(previous);
+                },
+              );
             }
           >
-            <option value="member" selected=!is_admin>{move || i18n.t("space-role-member")}</option>
-            <option value="space_admin" selected=is_admin>{move || i18n.t("space-role-admin")}</option>
+            <option value="member">{move || i18n.t("space-role-member")}</option>
+            <option value="space_admin">{move || i18n.t("space-role-admin")}</option>
           </select>
         }.into_any()
       } else {
@@ -1195,39 +1237,74 @@ fn SpaceChannelsSection(space: Space) -> impl IntoView {
     <h3>{move || i18n.t("space-channels")}</h3>
     <ul class="settings-member-list">
       <For each=move || channels.get() key=|channel| (channel.conversation, channel.maybe_category) let:browsed>
-        {
-          let channel = browsed.conversation;
-          let current = browsed.maybe_category.map(|category| category.to_string()).unwrap_or_default();
-          view! {
-            <li class="settings-member">
-              <Icon name=IconName::Hash />
-              <span class="member-name" translate="no">{browsed.name.clone()}</span>
-              <span class="grow"></span>
-              <label class="visually-hidden" for=format!("ss-cat-{channel}")>{move || i18n.t("channel-move-category")}</label>
-              <select
-                id=format!("ss-cat-{channel}")
-                class="input input-small"
-                on:change=move |ev| {
-                  let value = event_target_value(&ev);
-                  let choice = match value.parse::<CategoryId>() {
-                    Ok(category) if !value.is_empty() => CategoryChoice::Category { category },
-                    _ => CategoryChoice::Uncategorized,
-                  };
-                  state.write(|backend| backend.update_channel(channel, ChannelChanges { maybe_category: Some(choice), ..ChannelChanges::default() }));
-                }
-              >
-                <option value="" selected=current.is_empty()>{move || i18n.t("channel-uncategorized")}</option>
-                {move || categories.get().into_iter().map(|category| {
-                  let value = category.id.to_string();
-                  let is_current = value == current;
-                  view! { <option value=value selected=is_current translate="no">{category.name.clone()}</option> }
-                }).collect_view()}
-              </select>
-            </li>
-          }
-        }
+        <ChannelCategoryRow channel=browsed categories=categories can_edit=can_edit />
       </For>
     </ul>
+  }
+}
+
+/// A channel of the space with its category; the select puts the old category back on a refusal.
+#[component]
+fn ChannelCategoryRow(
+  channel: BrowsableChannel,
+  categories: Memo<Vec<CategoryInfo>>,
+  can_edit: bool,
+) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let id = channel.conversation;
+  let shown = RwSignal::new(
+    channel
+      .maybe_category
+      .map(|category| category.to_string())
+      .unwrap_or_default(),
+  );
+  let pending = PendingAction::new();
+  let change = move |ev: leptos::ev::Event| {
+    let previous = shown.get_untracked();
+    let value = event_target_value(&ev);
+    let choice = match value.parse::<CategoryId>() {
+      Ok(category) if !value.is_empty() => CategoryChoice::Category { category },
+      _ => CategoryChoice::Uncategorized,
+    };
+    shown.set(value);
+    pending.run_or_else(
+      || {
+        state.write(|backend| {
+          backend.update_channel(
+            id,
+            ChannelChanges {
+              maybe_category: Some(choice),
+              ..ChannelChanges::default()
+            },
+          )
+        })
+      },
+      move |_| {
+        let _ = shown.try_set(previous);
+      },
+    );
+  };
+  view! {
+    <li class="settings-member">
+      <Icon name=IconName::Hash />
+      <span class="member-name" translate="no">{channel.name.clone()}</span>
+      <span class="grow"></span>
+      <label class="visually-hidden" for=format!("ss-cat-{id}")>{move || i18n.t("channel-move-category")}</label>
+      <select
+        id=format!("ss-cat-{id}")
+        class="input input-small"
+        prop:value=move || shown.get()
+        prop:disabled=move || !can_edit || pending.is_pending()
+        on:change=change
+      >
+        <option value="">{move || i18n.t("channel-uncategorized")}</option>
+        {move || categories.get().into_iter().map(|category| {
+          view! { <option value=category.id.to_string() translate="no">{category.name.clone()}</option> }
+        }).collect_view()}
+      </select>
+      <FailureNote pending=pending />
+    </li>
   }
 }
 

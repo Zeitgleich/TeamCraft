@@ -21,8 +21,8 @@ use crate::feedback::{ActionFailure, FailureKind, report_failure};
 use crate::model::{
   Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, InviteId, JoinPolicy,
   JoinableSpace, LogLevel, Message, MessageId, MessageKind, PendingInvite, PresenceStatus, Reaction,
-  SidebarCategory, Space, SpaceId, SpaceMember, SpaceRole, SystemEvent, ThreadId, ThreadSummary, TimestampMs,
-  User, UserId, id_from_raw, raw_id, root_message_of, thread_id_of,
+  SidebarCategory, Space, SpaceId, SpaceMember, SpaceRole, SpaceRoster, SystemEvent, ThreadId, ThreadSummary,
+  TimestampMs, User, UserId, id_from_raw, raw_id, root_message_of, thread_id_of,
 };
 
 /// Number of lines in the large log channel.
@@ -488,7 +488,7 @@ impl ChatBackend for MockBackend {
     self.state.borrow().spaces.clone()
   }
 
-  fn space_members(&self, space: SpaceId) -> Option<Vec<SpaceMember>> {
+  fn space_members(&self, space: SpaceId) -> SpaceRoster {
     let state = self.state.borrow();
     let mut members: Vec<SpaceMember> = state
       .users
@@ -510,7 +510,7 @@ impl ChatBackend for MockBackend {
       })
       .collect();
     members.sort_by_key(|member| member.display_name.to_lowercase());
-    Some(members)
+    SpaceRoster::Loaded(members)
   }
 
   fn space_invites(&self, space: SpaceId) -> Vec<PendingInvite> {

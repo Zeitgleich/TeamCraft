@@ -24,14 +24,13 @@ use teamcraft_client_api::live::LiveSnapshot;
 use teamcraft_client_api::model::{
   Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, DeviceSetup,
   JoinableSpace, MembershipIssue, Message, MessageKind, PENDING_ID_BIT, PendingInvite, PresenceStatus,
-  Reaction, SidebarCategory, Space, SpaceId, SpaceMember, SystemEvent, ThreadId, ThreadSummary, TimestampMs,
-  User, UserId, hue_from_hex,
+  Reaction, SidebarCategory, Space, SpaceId, SpaceMember, SpaceRoster, SystemEvent, ThreadId, ThreadSummary,
+  TimestampMs, User, UserId, hue_from_hex,
 };
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
   ConversationVisibility, Id, InviteId, JoinPolicy, ListConversationMembersResponse, ListInvitesResponse,
-  ListSpaceMembersResponse, MessageId, NotificationLevel, PresenceState, Snowflake, SpaceResponse, SpaceRole,
-  UserKind, UserSummary,
+  MessageId, NotificationLevel, PresenceState, Snowflake, SpaceResponse, SpaceRole, UserKind, UserSummary,
 };
 use teamcraft_proto::{BackgroundId, OrgBackgroundId};
 use teamcraft_proto::{
@@ -42,7 +41,7 @@ use teamcraft_proto::{
 use teamcraft_client_api::notify::{MentionRules, is_mentioned};
 
 use crate::client::bookmarks_key;
-use crate::client::workspace_admin::ChannelOptions;
+use crate::client::workspace_admin::{ChannelOptions, StoredRoster};
 use crate::clock::Clock;
 use crate::error::CoreError;
 use crate::notify_rules::{MentionPreferences, load_mention_preferences};
@@ -1424,26 +1423,29 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     });
   }
 
-  fn space_members(&self, space: SpaceId) -> Option<Vec<SpaceMember>> {
-    let roster: Option<ListSpaceMembersResponse> = self.read(records::get_json(
+  fn space_members(&self, space: SpaceId) -> SpaceRoster {
+    let stored: Option<StoredRoster> = self.read(records::get_json(
       &self.store,
       Table::SpaceRosters,
       &space.to_string(),
     ));
-    roster.map(|roster| {
-      let mut members: Vec<SpaceMember> = roster
-        .members
-        .into_iter()
-        .map(|member| SpaceMember {
-          user: member.user.id,
-          is_guest: member.user.kind == UserKind::Guest,
-          display_name: member.user.display_name,
-          role: member.role,
-        })
-        .collect();
-      members.sort_by_key(|member| member.display_name.to_lowercase());
-      members
-    })
+    let roster = match stored {
+      None => return SpaceRoster::Loading,
+      Some(StoredRoster::Hidden) => return SpaceRoster::Hidden,
+      Some(StoredRoster::Visible(roster)) => roster,
+    };
+    let mut members: Vec<SpaceMember> = roster
+      .members
+      .into_iter()
+      .map(|member| SpaceMember {
+        user: member.user.id,
+        is_guest: member.user.kind == UserKind::Guest,
+        display_name: member.user.display_name,
+        role: member.role,
+      })
+      .collect();
+    members.sort_by_key(|member| member.display_name.to_lowercase());
+    SpaceRoster::Loaded(members)
   }
 
   fn space_invites(&self, space: SpaceId) -> Vec<PendingInvite> {

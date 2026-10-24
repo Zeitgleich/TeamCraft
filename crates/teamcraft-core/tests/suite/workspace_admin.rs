@@ -10,7 +10,7 @@ use crate::common;
 use common::{Peer, backend_of, run_commands, settle};
 use teamcraft_client_api::actions::{ChannelChanges, NewChannel, NewSpace, SpaceInvite, WorkspaceEvent};
 use teamcraft_client_api::backend::ChatBackend;
-use teamcraft_client_api::model::{Message, MessageKind, SystemEvent};
+use teamcraft_client_api::model::{Message, MessageKind, SpaceRoster, SystemEvent};
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_proto::{ConversationId, HistoryPolicy, IdempotencyKey, SpaceId, SpaceRole};
 
@@ -378,12 +378,12 @@ async fn space_settings_list_change_and_remove_members_and_withdraw_invitations(
 
   assert_eq!(
     alice_ui.space_members(space),
-    None,
+    SpaceRoster::Loading,
     "nothing until the settings ask"
   );
   alice_ui.refresh_space_roster(space);
   run_commands(&mut alice, &alice_ui).await;
-  let members = alice_ui.space_members(space).unwrap();
+  let members = loaded(alice_ui.space_members(space));
   assert!(
     members
       .iter()
@@ -396,8 +396,7 @@ async fn space_settings_list_change_and_remove_members_and_withdraw_invitations(
   alice_ui.set_space_role(space, bob.user_id(), SpaceRole::SpaceAdmin);
   run_commands(&mut alice, &alice_ui).await;
   let bob_now = |ui: &dyn ChatBackend| {
-    ui.space_members(space)
-      .unwrap()
+    loaded(ui.space_members(space))
       .into_iter()
       .find(|member| member.user == bob.user_id())
   };
@@ -430,6 +429,13 @@ async fn the_people_of_my_spaces_are_known_without_a_shared_conversation() {
   let bob_ui = backend_of(&bob);
   let names: Vec<String> = bob_ui.users().into_iter().map(|user| user.display_name).collect();
   assert!(names.contains(&"Alice".to_string()), "{names:?}");
+}
+
+fn loaded(roster: SpaceRoster) -> Vec<teamcraft_client_api::model::SpaceMember> {
+  match roster {
+    SpaceRoster::Loaded(members) => members,
+    other => panic!("the roster is {other:?}"),
+  }
 }
 
 async fn create_public_channel(peer: &mut Peer, space: SpaceId, name: &str) -> ConversationId {

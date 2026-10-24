@@ -6,9 +6,9 @@ use teamcraft_proto::{
   AddSpaceMemberRequest, CategoryId, ConversationId, ConversationKind, ConversationResponse,
   ConversationVisibility, CreateCategoryRequest, CreateChannelRequest, CreateInviteRequest,
   CreateSpaceRequest, HistoryPolicy, IdempotencyKey, InviteId, ListCategoriesResponse,
-  ListConversationsResponse, ListInvitesResponse, MoveChannelRequest, SpaceId, SpaceResponse, SpaceRole,
-  UnixMillis, UpdateCategoryRequest, UpdateConversationRequest, UpdateSpaceMemberRequest, UpdateSpaceRequest,
-  UserId,
+  ListConversationsResponse, ListInvitesResponse, ListSpaceMembersResponse, MoveChannelRequest, SpaceId,
+  SpaceResponse, SpaceRole, UnixMillis, UpdateCategoryRequest, UpdateConversationRequest,
+  UpdateSpaceMemberRequest, UpdateSpaceRequest, UserId,
 };
 
 use super::Client;
@@ -18,6 +18,15 @@ use crate::convert;
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{ConversationEvent, LocalStore, MessageContent, Table};
+
+/// A space's member list as the store keeps it (`Table::SpaceRosters`).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", content = "roster", rename_all = "snake_case")]
+pub(crate) enum StoredRoster {
+  Visible(ListSpaceMembersResponse),
+  /// The server doesn't show this user the members.
+  Hidden,
+}
 
 /// A new channel.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -299,10 +308,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.refresh_space_invites(space).await
   }
 
-  /// The space's members with their roles, kept for the space settings.
+  /// The space's members with their roles, kept for the space settings. Guests and people outside
+  /// the space may not list them: that is kept as hidden, not an error.
   pub async fn refresh_space_roster(&mut self, space: SpaceId) -> Result<(), CoreError> {
-    let roster = self.api.list_space_members(space).await?;
-    records::put_json(&self.store, Table::SpaceRosters, &space.to_string(), &roster)?;
+    let stored = match self.api.list_space_members(space).await {
+      Ok(roster) => StoredRoster::Visible(roster),
+      Err(ApiError::Status {
+        status: 403 | 404, ..
+      }) => StoredRoster::Hidden,
+      Err(error) => return Err(error.into()),
+    };
+    records::put_json(&self.store, Table::SpaceRosters, &space.to_string(), &stored)?;
     Ok(())
   }
 

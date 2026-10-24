@@ -15,7 +15,7 @@ use crate::components::message_actions::copy_to_clipboard;
 use crate::components::people_picker::PeoplePicker;
 use crate::components::space_tile::SpaceTile;
 use crate::components::workspace_dialogs::{Dialog, FailureNote};
-use crate::feedback::PendingAction;
+use crate::feedback::{ActionFailure, PendingAction, failure_message};
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, JoinPolicy, JoinableSpace, Space, SpaceId, User, UserId};
 use crate::state::{Overlay, use_app_state};
@@ -106,6 +106,19 @@ fn is_plausible_email(address: &str) -> bool {
       && !domain.ends_with('.')
       && !domain.contains('@')
   })
+}
+
+/// The address list without `address` (any spelling `EmailList::parse` accepts), the rest joined
+/// with commas.
+fn without_address(text: &str, address: &str) -> String {
+  let list = EmailList::parse(text);
+  list
+    .valid
+    .into_iter()
+    .chain(list.invalid)
+    .filter(|candidate| candidate != address)
+    .collect::<Vec<_>>()
+    .join(", ")
 }
 
 /// The address of an open space for colleagues to open and join: the web app's path of the space
@@ -313,8 +326,11 @@ pub fn InvitePeopleDialog(space: SpaceId) -> impl IntoView {
   let emails = RwSignal::new(String::new());
   let message = RwSignal::new(String::new());
   let status = RwSignal::new(InviteStatus::Editing);
-  // Pending until the core answered; a refusal shows as an error toast (issue #322).
-  let pending = PendingAction::new();
+  // How many of the sent invitations the core hasn't answered yet, and the last refusal (also
+  // shown as a toast, issue #322).
+  let in_flight = RwSignal::new(0_usize);
+  let last_failure = RwSignal::new(None::<ActionFailure>);
+  let is_busy = move || in_flight.get() != 0;
   let parsed = Memo::new(move |_| EmailList::parse(&emails.get()));
   // A switch to "member" drops picked guest accounts: they can only be guests.
   Effect::new(move |_| {
@@ -339,20 +355,39 @@ pub fn InvitePeopleDialog(space: SpaceId) -> impl IntoView {
     let addresses = parsed.get_untracked().valid;
     let maybe_message = Some(message.get_untracked().trim().to_owned()).filter(|text| !text.is_empty());
     let count = users.len() + addresses.len();
-    // The form is cleared only once everything went through; on a failure the choices stay for
-    // another try. The dialog may be gone by then, so the signals are set with `try_set`.
-    let on_success = move || {
-      let _ = chosen.try_set(Vec::new());
-      let _ = emails.try_set(String::new());
-      let _ = status.try_set(InviteStatus::Sent { count });
-    };
     status.set(InviteStatus::Editing);
-    pending.run_and_then(
-      || {
-        if !users.is_empty() {
-          state.write(|backend| backend.add_space_members(space, users, is_guest));
-        }
-        for email in addresses {
+    last_failure.set(None);
+    // Each part reports on its own: what went through leaves the form, so "send" again only sends
+    // what failed (a second invitation mail must not go out). The dialog may be gone by then,
+    // hence `try_set`.
+    let finish_one = move |maybe_failure: Option<&ActionFailure>| {
+      if let Some(failure) = maybe_failure {
+        let _ = last_failure.try_set(Some(failure.clone()));
+      }
+      let _ = in_flight.try_update(|count| *count = count.saturating_sub(1));
+      let is_done = in_flight.try_get_untracked() == Some(0);
+      if is_done && last_failure.try_with_untracked(Option::is_none) == Some(true) {
+        let _ = status.try_set(InviteStatus::Sent { count });
+      }
+    };
+    if !users.is_empty() {
+      in_flight.update(|count| *count += 1);
+      // Adding is idempotent on the server, so a retry of the people is harmless.
+      PendingAction::new().run_with(
+        || state.write(|backend| backend.add_space_members(space, users, is_guest)),
+        move |maybe_failure| {
+          if maybe_failure.is_none() {
+            let _ = chosen.try_set(Vec::new());
+          }
+          finish_one(maybe_failure);
+        },
+      );
+    }
+    for email in addresses {
+      in_flight.update(|count| *count += 1);
+      let sent = email.clone();
+      PendingAction::new().run_with(
+        || {
           state.write(|backend| {
             backend.invite_to_space(SpaceInvite {
               space,
@@ -362,11 +397,16 @@ pub fn InvitePeopleDialog(space: SpaceId) -> impl IntoView {
               maybe_expires_at: None,
               maybe_message: maybe_message.clone(),
             })
-          });
-        }
-      },
-      on_success,
-    );
+          })
+        },
+        move |maybe_failure| {
+          if maybe_failure.is_none() {
+            let _ = emails.try_update(|text| *text = without_address(text, &sent));
+          }
+          finish_one(maybe_failure);
+        },
+      );
+    }
   };
 
   view! {
@@ -431,17 +471,19 @@ pub fn InvitePeopleDialog(space: SpaceId) -> impl IntoView {
               // Reported once the core answered without a failure.
               {move || match status.get() {
                 InviteStatus::Sent { count } => view! { <span role="status">{i18n.t_count("invite-done", count)}</span> }.into_any(),
-                InviteStatus::Editing => view! { <FailureNote pending=pending /> }.into_any(),
+                InviteStatus::Editing => view! {
+                  {move || last_failure.get().map(|failure| view! { <span class="field-error" role="alert">{failure_message(i18n, &failure)}</span> })}
+                }.into_any(),
               }}
               <span class="grow"></span>
               <button type="button" class="btn" on:click=move |_| state.close_overlay()>{move || i18n.t("close")}</button>
               <button
                 type="submit"
                 class="btn btn-primary"
-                prop:disabled=move || pending.is_pending() || !is_sendable()
-                aria-busy=move || pending.is_pending().then_some("true")
+                prop:disabled=move || is_busy() || !is_sendable()
+                aria-busy=move || is_busy().then_some("true")
               >
-                <Show when=move || pending.is_pending() fallback=|| ()>
+                <Show when=is_busy fallback=|| ()>
                   <span class="spinner" role="status" aria-label=move || i18n.t("action-running")></span>
                 </Show>
                 {move || i18n.t("invite-send")}
@@ -620,6 +662,18 @@ mod tests {
         list.invalid,
         ["no-at-sign", "@example.com", "a@b", "a@.com", "a@b.com."]
       );
+    }
+
+    #[test]
+    fn a_sent_address_leaves_the_field() {
+      assert_eq!(
+        without_address(
+          "Ann@Example.com, bob@example.org\ncarol@example.net",
+          "ann@example.com"
+        ),
+        "bob@example.org, carol@example.net"
+      );
+      assert_eq!(without_address("ann@example.com", "ann@example.com"), "");
     }
 
     #[test]

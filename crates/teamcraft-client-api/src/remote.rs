@@ -972,7 +972,7 @@ pub enum ChatAnswer {
   },
   SpaceMembers {
     #[serde(default)]
-    maybe_members: Option<Vec<crate::model::SpaceMember>>,
+    roster: crate::model::SpaceRoster,
   },
   SpaceInvites {
     invites: Vec<crate::model::PendingInvite>,
@@ -1104,7 +1104,7 @@ impl ChatQuery {
         spaces: backend.joinable_spaces(),
       },
       Self::SpaceMembers { space } => ChatAnswer::SpaceMembers {
-        maybe_members: backend.space_members(space),
+        roster: backend.space_members(space),
       },
       Self::SpaceInvites { space } => ChatAnswer::SpaceInvites {
         invites: backend.space_invites(space),

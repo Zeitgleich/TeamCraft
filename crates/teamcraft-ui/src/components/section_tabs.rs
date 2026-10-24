@@ -61,7 +61,8 @@ where
               id=section.tab_id(id_prefix)
               role="tab"
               aria-selected=move || (selected.get() == section).to_string()
-              aria-controls=section.panel_id(id_prefix)
+              // Only the selected section's panel exists, so only its tab points at it.
+              aria-controls=move || (selected.get() == section).then(|| section.panel_id(id_prefix))
               tabindex=move || roving_tabindex(selected.get() == section)
               on:click=move |_| selected.set(section)
             >

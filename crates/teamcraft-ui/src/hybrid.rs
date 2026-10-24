@@ -524,7 +524,7 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.invite_to_space(invite);
   }
 
-  fn space_members(&self, space: SpaceId) -> Option<Vec<teamcraft_client_api::model::SpaceMember>> {
+  fn space_members(&self, space: SpaceId) -> teamcraft_client_api::model::SpaceRoster {
     self.chat.space_members(space)
   }
 

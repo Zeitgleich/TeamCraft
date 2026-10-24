@@ -1244,6 +1244,7 @@ space-join-invite-only-hint = Only people who are added or invited see the space
 space-members-filter = Find a member
 space-members-read-only = Space admins add, remove and change members.
 space-members-loading = Loading members…
+space-members-hidden = Only members of the space see who is in it.
 space-invites-pending = Pending invitations
 space-invite-revoke = Withdraw
 space-role = Role

@@ -202,6 +202,18 @@ pub struct SpaceMember {
   pub role: SpaceRole,
 }
 
+/// The member list of a space as far as the user may see it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", content = "members", rename_all = "snake_case")]
+pub enum SpaceRoster {
+  /// Not loaded yet ([`crate::backend::ChatBackend::refresh_space_roster`]).
+  #[default]
+  Loading,
+  /// The user may not see who is in the space (guests, people outside it).
+  Hidden,
+  Loaded(Vec<SpaceMember>),
+}
+
 /// An invitation by e-mail that nobody has signed in with yet.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingInvite {

@@ -163,16 +163,23 @@ impl PendingAction {
   /// the form), even after the component is gone: what it touches must tolerate that
   /// (`try_set`, app-level state).
   pub fn run_and_then(&self, start: impl FnOnce(), on_success: impl FnOnce() + 'static) {
+    self.run_with(start, move |maybe_failure| {
+      if maybe_failure.is_none() {
+        on_success();
+      }
+    });
+  }
+
+  /// [`Self::run`], calling `on_done` with the failure, if any, once the backend answered; like
+  /// [`Self::run_and_then`] it may run after the component is gone.
+  pub fn run_with(&self, start: impl FnOnce(), on_done: impl FnOnce(Option<&ActionFailure>) + 'static) {
     if !self.begin() {
       return;
     }
     let this = *self;
     let ticket = Rc::new(ActionTicket::new(move |maybe_failure| {
-      let is_success = maybe_failure.is_none();
+      on_done(maybe_failure.as_ref());
       this.finish(maybe_failure);
-      if is_success {
-        on_success();
-      }
     }));
     let maybe_outer = CURRENT_TICKET.with(|current| current.replace(Some(ticket)));
     start();

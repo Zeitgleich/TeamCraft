@@ -374,10 +374,9 @@ pub trait ChatBackend {
     _joins_space: bool,
   ) {
   }
-  /// The members of a space with their roles; `None` until they are loaded
-  /// ([`Self::refresh_space_roster`]).
-  fn space_members(&self, _space: SpaceId) -> Option<Vec<crate::model::SpaceMember>> {
-    None
+  /// The members of a space with their roles, as far as the user may see them.
+  fn space_members(&self, _space: SpaceId) -> crate::model::SpaceRoster {
+    crate::model::SpaceRoster::Loading
   }
   /// The space's pending e-mail invitations (empty for people who may not manage members).
   fn space_invites(&self, _space: SpaceId) -> Vec<crate::model::PendingInvite> {

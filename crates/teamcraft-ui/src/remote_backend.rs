@@ -26,7 +26,7 @@ use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
 use teamcraft_client_api::calls::BackgroundImageInfo;
 use teamcraft_client_api::model::{
   Conversation, ConversationId, CustomStatus, InviteId, JoinableSpace, Message, MessageId, PendingInvite,
-  PresenceStatus, Space, SpaceId, SpaceMember, SpaceRole, ThreadId, ThreadSummary, User, UserId,
+  PresenceStatus, Space, SpaceId, SpaceRole, SpaceRoster, ThreadId, ThreadSummary, User, UserId,
 };
 use teamcraft_client_api::remote::{
   CORE_CHANGED_EVENT, CORE_FAILED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection,
@@ -962,10 +962,10 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::InviteToSpace { invite });
   }
 
-  fn space_members(&self, space: SpaceId) -> Option<Vec<SpaceMember>> {
+  fn space_members(&self, space: SpaceId) -> SpaceRoster {
     match self.ask(ChatQuery::SpaceMembers { space }) {
-      Some(ChatAnswer::SpaceMembers { maybe_members }) => maybe_members,
-      _ => None,
+      Some(ChatAnswer::SpaceMembers { roster }) => roster,
+      _ => SpaceRoster::Loading,
     }
   }
 
