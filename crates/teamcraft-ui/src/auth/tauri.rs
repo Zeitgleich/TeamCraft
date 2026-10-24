@@ -382,13 +382,13 @@ pub async fn os_attention() -> Option<OsAttention> {
     .ok()
 }
 
-/// Desktop only: unread count and menu texts for the tray icon and the dock/taskbar badge.
-pub async fn tray_update(unread: u32, tooltip: &str, show_label: &str, quit_label: &str) {
+/// Desktop only: unread count (`None` keeps the badge) and menu texts for the tray icon and the dock/taskbar badge.
+pub async fn tray_update(maybe_unread: Option<u32>, tooltip: &str, show_label: &str, quit_label: &str) {
   if !is_available() {
     return;
   }
   let args = serde_json::json!({
-    "update": { "unread": unread, "tooltip": tooltip, "show_label": show_label, "quit_label": quit_label }
+    "update": { "maybe_unread": maybe_unread, "tooltip": tooltip, "show_label": show_label, "quit_label": quit_label }
   });
   if let Err(error) = call::<()>("tray_update", &args).await {
     tracing::debug!(%error, "could not update the tray");

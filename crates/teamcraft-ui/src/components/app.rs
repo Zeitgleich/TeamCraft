@@ -82,6 +82,9 @@ pub fn App() -> impl IntoView {
   apply_language_attribute();
   crate::brand::provide_brand(settings);
   provide_window_chrome();
+  if tauri::is_available() {
+    sync_tray_labels(i18n);
+  }
   // Above every screen: sign-in has no top bar, but the window still needs its controls.
   view! {
     <WindowControls />
@@ -482,6 +485,17 @@ fn initial_location(backend: &dyn Backend) -> Option<(SpaceId, ConversationId)> 
 
 /// Keeps the tray icon's badge, tooltip and menu texts in step with the unread messages and the
 /// language (desktop app).
+/// The tray texts in the UI language from the start, also on the sign-in screen where `sync_tray`
+/// is not running yet. The badge is left alone.
+fn sync_tray_labels(i18n: crate::i18n::I18n) {
+  let brand = crate::brand::Brand::use_current();
+  Effect::new(move |_| {
+    let name = brand.0.with(|brand| brand.display_name.clone());
+    let (show, quit) = (i18n.t("tray-show"), i18n.t("tray-quit"));
+    leptos::task::spawn_local(async move { tauri::tray_update(None, &name, &show, &quit).await });
+  });
+}
+
 fn sync_tray(state: AppState, i18n: crate::i18n::I18n) {
   let brand = crate::brand::Brand::use_current();
   Effect::new(move |previous: Option<(u32, String, String)>| {
@@ -509,7 +523,9 @@ fn sync_tray(state: AppState, i18n: crate::i18n::I18n) {
         ),
       };
       let (show, quit) = (i18n.t("tray-show"), i18n.t("tray-quit"));
-      leptos::task::spawn_local(async move { tauri::tray_update(unread, &tooltip, &show, &quit).await });
+      leptos::task::spawn_local(
+        async move { tauri::tray_update(Some(unread), &tooltip, &show, &quit).await },
+      );
     }
     current
   });
