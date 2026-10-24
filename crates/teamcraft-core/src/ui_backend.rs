@@ -24,6 +24,7 @@ use teamcraft_client_api::model::{
   Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, DeviceSetup,
   JoinableSpace, MembershipIssue, Message, MessageKind, PENDING_ID_BIT, PresenceStatus, Reaction,
   SidebarCategory, Space, SpaceId, SystemEvent, ThreadId, ThreadSummary, TimestampMs, User, UserId,
+  hue_from_hex,
 };
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
@@ -724,7 +725,13 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       .map(|space| Space {
         id: space.id,
         name: space.name,
-        hue: hue(space.id),
+        hue: space
+          .maybe_color
+          .as_deref()
+          .and_then(hue_from_hex)
+          .unwrap_or_else(|| hue(space.id)),
+        maybe_color: space.maybe_color,
+        maybe_image_version: space.maybe_image.map(|image| image.version),
         unread_count: 0,
         mention_count: 0,
       })

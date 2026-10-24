@@ -61,6 +61,7 @@ mod security;
 mod session_policy;
 mod shares;
 mod space_features;
+mod space_images;
 mod status;
 mod threads;
 mod unread_events;

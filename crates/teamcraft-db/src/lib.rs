@@ -96,7 +96,7 @@ pub use share_link::{NewShareLink, ShareLink, ShareTarget};
 pub use snowflake::{Clock, SnowflakeError, SnowflakeGenerator, SystemClock};
 pub use space::{
   Category, ExpiredGuest, ExpiryChange, NewSpace, NewSpaceMember, Space, SpaceChanges, SpaceListing,
-  SpaceMember, SpaceView,
+  SpaceMember, SpaceView, StoredSpaceImage,
 };
 pub use status::StoredStatus;
 pub use system_event::{NewSystemEvent, StoredSystemEvent};

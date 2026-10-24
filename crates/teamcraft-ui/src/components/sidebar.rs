@@ -6,6 +6,7 @@ use wasm_bindgen::JsCast;
 use crate::components::avatar::PresenceDot;
 use crate::components::huddle_bar::CallPill;
 use crate::components::icons::{Icon, IconName};
+use crate::components::space_tile::SpaceTile;
 use crate::i18n::use_i18n;
 use crate::meetings::MeetingsHub;
 use crate::model::{Conversation, ConversationId, ConversationKind, PresenceStatus, SpaceId};
@@ -36,14 +37,13 @@ pub fn Sidebar() -> impl IntoView {
     store_json(KEY_COLLAPSED_SECTIONS, &slugs);
   });
 
-  let space_name = Memo::new(move |_| {
+  let current_space = Memo::new(move |_| {
     let space = state.space.get();
     state.read(|backend| {
       backend
         .spaces()
         .into_iter()
         .find(|candidate| candidate.id == space)
-        .map(|s| s.name)
     })
   });
   let is_grouped = Memo::new(move |_| {
@@ -88,7 +88,19 @@ pub fn Sidebar() -> impl IntoView {
     <nav class="sidebar" aria-label=move || i18n.t("sidebar-label")>
       <div class="sidebar-head">
         <h2 class="space-name" translate="no">
-          {move || if is_grouped.get() { i18n.t("sidebar-all-spaces") } else { space_name.get().unwrap_or_default() }}
+          {move || {
+            if is_grouped.get() {
+              i18n.t("sidebar-all-spaces").into_any()
+            } else {
+              current_space
+                .get()
+                .map(|space| {
+                  let name = space.name.clone();
+                  view! { <SpaceTile space=space /> <span>{name}</span> }
+                })
+                .into_any()
+            }
+          }}
         </h2>
         <button class="icon-btn" aria-label=move || i18n.t("browse-title") title=move || i18n.t("browse-title") on:click=move |_| state.overlay.set(Overlay::BrowseChannels(state.space.get_untracked()))>
           <Icon name=IconName::List />

@@ -313,6 +313,9 @@ pub struct SpaceChanges {
   pub maybe_name: Option<String>,
   #[serde(default)]
   pub maybe_description: Option<String>,
+  /// `#rrggbb`; an empty string clears the color.
+  #[serde(default)]
+  pub maybe_color: Option<String>,
   #[serde(default)]
   pub maybe_is_open: Option<bool>,
   #[serde(default)]

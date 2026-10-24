@@ -13,6 +13,9 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::wire_enum::wire_enum;
 use crate::{BrandAssetSlot, BrandColors, BrandLinks, ConversationId, SignInMethod, SpaceId, UnixMillis};
 
+/// Default of [`LimitSettings::max_space_image_bytes`]: a 256×256 PNG stays well below it.
+pub const DEFAULT_MAX_SPACE_IMAGE_BYTES: u64 = 1024 * 1024;
+
 wire_enum! {
   /// Where the value in force comes from.
   pub enum SettingSource {
@@ -395,6 +398,10 @@ pub struct LimitSettings {
   pub max_attachment_bytes: u64,
   pub max_attachment_bytes_per_user: u64,
   pub max_avatar_bytes: u64,
+  /// Largest space picture after the server re-encoded it. Absent from older clients' requests:
+  /// the default applies.
+  #[serde(default = "default_max_space_image_bytes")]
+  pub max_space_image_bytes: u64,
   pub max_background_bytes: u64,
   pub max_backgrounds_per_user: u32,
   pub max_group_dm_participants: u32,
@@ -439,6 +446,10 @@ pub struct SignInPageSettings {
 
 fn enabled() -> bool {
   true
+}
+
+fn default_max_space_image_bytes() -> u64 {
+  DEFAULT_MAX_SPACE_IMAGE_BYTES
 }
 
 /// Texts of the server's own mail. Placeholders: invitation `{inviter}` `{space}` `{role}` `{url}`,

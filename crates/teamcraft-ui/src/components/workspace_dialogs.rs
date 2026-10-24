@@ -1,6 +1,7 @@
 //! Managing the workspace: new spaces and channels, the channel browser, channel and space
-//! settings (rename, categories, privacy conversion, archive), adding people with the "share
-//! history" choice, and inviting guests. The core and server decide what the user may do; these
+//! settings (rename, picture and color, categories, privacy conversion, archive), adding people with
+//! the "share history" choice, and inviting members or guests. The core and server decide what the
+//! user may do; these
 //! dialogs only collect the choices.
 
 use leptos::prelude::*;
@@ -9,15 +10,50 @@ use teamcraft_client_api::actions::{
   BrowsableChannel, CategoryChoice, CategoryInfo, ChannelChanges, NewChannel, NewSpace, SpaceChanges,
   SpaceInvite,
 };
-use teamcraft_proto::{CategoryId, HistoryPolicy, IdempotencyKey};
+use teamcraft_proto::{CategoryId, HistoryPolicy, IdempotencyKey, SpaceResponse};
+use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::JsFuture;
 
 use crate::channel_policy::{ChannelPolicyHub, parse_retention};
 use crate::components::composer_commands::left_text;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
+use crate::components::space_tile::SpaceTile;
 use crate::i18n::use_i18n;
-use crate::model::{ConversationId, SpaceId, UserId};
+use crate::model::{ConversationId, SpaceId, UserId, hue_from_hex};
+use crate::space_images::{ImagePickError, check_pick, prepare_upload, use_space_images};
 use crate::state::{Overlay, use_app_state};
+
+/// What the color picker shows for a space without a color of its own.
+const DEFAULT_SPACE_COLOR: &str = "#3b5fa0";
+/// Invitations are for members unless the inviter says otherwise: a guest invitation limits what the
+/// person sees, so it has to be a deliberate choice.
+const INVITES_AS_GUEST_BY_DEFAULT: bool = false;
+
+/// The color picker's state: untouched, a picked color, or back to the derived default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ColorChoice {
+  Unchanged,
+  Set(String),
+  Default,
+}
+
+/// Which picture the settings preview shows: the store's, or the result of an upload or removal
+/// that the store hasn't caught up with yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ShownImage {
+  FromStore,
+  Uploaded(String),
+  Removed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImageStatus {
+  Idle,
+  Busy,
+  /// The i18n key of the message.
+  Failed(&'static str),
+}
 
 /// How the history choice of a new channel is picked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,6 +77,34 @@ impl HistoryChoice {
       "from_join" => Self::FromJoin,
       "full" => Self::Full,
       _ => Self::WorkspaceDefault,
+    }
+  }
+}
+
+impl ColorChoice {
+  /// The `maybe_color` of the update: nothing, the color, or an empty string that clears it.
+  fn change(self) -> Option<String> {
+    match self {
+      Self::Unchanged => None,
+      Self::Set(hex) => hue_from_hex(&hex).map(|_| hex),
+      Self::Default => Some(String::new()),
+    }
+  }
+}
+
+impl ShownImage {
+  fn after(updated: &SpaceResponse) -> Self {
+    match &updated.maybe_image {
+      Some(image) => Self::Uploaded(image.version.clone()),
+      None => Self::Removed,
+    }
+  }
+
+  fn version(&self, maybe_stored: Option<&str>) -> Option<String> {
+    match self {
+      Self::FromStore => maybe_stored.map(str::to_owned),
+      Self::Uploaded(version) => Some(version.clone()),
+      Self::Removed => None,
     }
   }
 }
@@ -647,18 +711,27 @@ fn AddPeople(conversation: ConversationId) -> impl IntoView {
   }
 }
 
-/// Settings of a space: name, openness, archive, categories and invitations.
+/// Settings of a space: name, picture, color, archive, categories and invitations.
 #[component]
 pub fn SpaceSettingsDialog(space: SpaceId) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let current_name = state
+  let maybe_current = state
     .read(|backend| backend.spaces())
     .into_iter()
-    .find(|candidate| candidate.id == space)
-    .map(|space| space.name)
-    .unwrap_or_default();
-  let name = RwSignal::new(current_name);
+    .find(|candidate| candidate.id == space);
+  let name = RwSignal::new(
+    maybe_current
+      .as_ref()
+      .map(|space| space.name.clone())
+      .unwrap_or_default(),
+  );
+  let color = RwSignal::new(ColorChoice::Unchanged);
+  let picker_value = maybe_current
+    .as_ref()
+    .and_then(|space| space.maybe_color.clone())
+    .filter(|color| hue_from_hex(color).is_some())
+    .unwrap_or_else(|| DEFAULT_SPACE_COLOR.to_owned());
   let description = RwSignal::new(String::new());
   let new_category = RwSignal::new(String::new());
   let categories = Memo::new(move |_| state.read(|backend| backend.categories(space)));
@@ -670,6 +743,7 @@ pub fn SpaceSettingsDialog(space: SpaceId) -> impl IntoView {
         SpaceChanges {
           maybe_name: non_empty(&name.get_untracked()),
           maybe_description: non_empty(&description.get_untracked()),
+          maybe_color: color.get_untracked().change(),
           ..SpaceChanges::default()
         },
       )
@@ -690,11 +764,28 @@ pub fn SpaceSettingsDialog(space: SpaceId) -> impl IntoView {
         <input id="ss-name" class="input" data-autofocus required maxlength="80" prop:value=move || name.get() on:input=move |ev| name.set(event_target_value(&ev)) />
         <label for="ss-description">{move || i18n.t("space-description")}</label>
         <textarea id="ss-description" class="input" rows="2" prop:value=move || description.get() on:input=move |ev| description.set(event_target_value(&ev))></textarea>
+        <label for="ss-color">{move || i18n.t("space-color")}</label>
+        <div class="inline-form">
+          <input
+            id="ss-color"
+            type="color"
+            class="color-input"
+            prop:value=move || match color.get() {
+              ColorChoice::Set(hex) => hex,
+              ColorChoice::Unchanged | ColorChoice::Default => picker_value.clone(),
+            }
+            on:input=move |ev| color.set(ColorChoice::Set(event_target_value(&ev)))
+          />
+          <button type="button" class="btn btn-small" on:click=move |_| color.set(ColorChoice::Default)>
+            {move || i18n.t("space-color-reset")}
+          </button>
+        </div>
         <div class="modal-foot">
           <span class="grow"></span>
           <button type="submit" class="btn btn-primary">{move || i18n.t("save")}</button>
         </div>
       </form>
+      <SpaceImageSection space=space />
       <h3>{move || i18n.t("space-categories")}</h3>
       <ul class="category-list">
         <For each=move || categories.get() key=|category| (category.id, category.name.clone()) let:category>
@@ -720,6 +811,117 @@ pub fn SpaceSettingsDialog(space: SpaceId) -> impl IntoView {
       </button>
     </Dialog>
   }
+}
+
+/// The space's picture: preview, upload (scaled to a 256×256 square first) and remove.
+#[component]
+fn SpaceImageSection(space: SpaceId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let Some(hub) = use_space_images() else {
+    // The demo backend has no server to keep pictures.
+    return ().into_any();
+  };
+  let shown = RwSignal::new(ShownImage::FromStore);
+  let status = RwSignal::new(ImageStatus::Idle);
+  let preview = Memo::new(move |_| {
+    state
+      .read(|backend| backend.spaces())
+      .into_iter()
+      .find(|candidate| candidate.id == space)
+      .map(|mut current| {
+        current.maybe_image_version = shown.get().version(current.maybe_image_version.as_deref());
+        current
+      })
+  });
+  let has_image = move || {
+    preview.with(|maybe| {
+      maybe
+        .as_ref()
+        .is_some_and(|space| space.maybe_image_version.is_some())
+    })
+  };
+
+  let pick = move |ev: leptos::ev::Event| {
+    let Some(input) = ev
+      .target()
+      .and_then(|target| target.dyn_into::<web_sys::HtmlInputElement>().ok())
+    else {
+      return;
+    };
+    let Some(file) = input.files().and_then(|files| files.item(0)) else {
+      return;
+    };
+    input.set_value("");
+    if let Err(error) = check_pick(&file.type_(), file.size()) {
+      status.set(ImageStatus::Failed(error.i18n_key()));
+      return;
+    }
+    status.set(ImageStatus::Busy);
+    spawn_local(async move {
+      let Ok(buffer) = JsFuture::from(file.array_buffer()).await else {
+        status.set(ImageStatus::Failed(ImagePickError::Unreadable.i18n_key()));
+        return;
+      };
+      let png = match prepare_upload(&js_sys::Uint8Array::new(&buffer).to_vec()) {
+        Ok(png) => png,
+        Err(error) => {
+          status.set(ImageStatus::Failed(error.i18n_key()));
+          return;
+        },
+      };
+      match hub.upload(space, png).await {
+        Ok(updated) => {
+          shown.set(ShownImage::after(&updated));
+          status.set(ImageStatus::Idle);
+        },
+        Err(failure) => status.set(ImageStatus::Failed(failure.i18n_key())),
+      }
+    });
+  };
+  let remove = move |_| {
+    status.set(ImageStatus::Busy);
+    spawn_local(async move {
+      match hub.remove(space).await {
+        Ok(updated) => {
+          shown.set(ShownImage::after(&updated));
+          status.set(ImageStatus::Idle);
+        },
+        Err(failure) => status.set(ImageStatus::Failed(failure.i18n_key())),
+      }
+    });
+  };
+
+  view! {
+    <h3>{move || i18n.t("space-image")}</h3>
+    <div class="space-image-row">
+      {move || preview.get().map(|space| view! { <span class="space-image-preview"><SpaceTile space=space /></span> })}
+      <div class="space-image-actions">
+        <label class="btn btn-small" class:disabled=move || status.get() == ImageStatus::Busy>
+          {move || if has_image() { i18n.t("space-image-change") } else { i18n.t("space-image-upload") }}
+          <input
+            type="file"
+            class="visually-hidden"
+            accept="image/png,image/jpeg,image/webp"
+            prop:disabled=move || status.get() == ImageStatus::Busy
+            on:change=pick
+          />
+        </label>
+        <Show when=has_image fallback=|| ()>
+          <button type="button" class="btn btn-small" prop:disabled=move || status.get() == ImageStatus::Busy on:click=remove>
+            {move || i18n.t("space-image-remove")}
+          </button>
+        </Show>
+      </div>
+    </div>
+    <p class="hint">{move || i18n.t("space-image-hint")}</p>
+    {move || match status.get() {
+      ImageStatus::Idle => ().into_any(),
+      ImageStatus::Busy => view! { <p class="hint" role="status">{move || i18n.t("space-image-uploading")}</p> }.into_any(),
+      ImageStatus::Failed(key) => view! { <p class="field-error" role="alert">{move || i18n.t(key)}</p> }.into_any(),
+    }}
+  }
+  .into_any()
 }
 
 #[component]
@@ -750,7 +952,7 @@ fn InvitePeople(space: SpaceId) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let email = RwSignal::new(String::new());
-  let is_guest = RwSignal::new(true);
+  let is_guest = RwSignal::new(INVITES_AS_GUEST_BY_DEFAULT);
   let is_sent = RwSignal::new(false);
   let submit = move |ev: leptos::ev::SubmitEvent| {
     ev.prevent_default();
@@ -807,5 +1009,57 @@ mod tests {
   fn blank_text_is_none() {
     assert_eq!(non_empty("  \n"), None);
     assert_eq!(non_empty(" a "), Some("a".to_owned()));
+  }
+
+  #[test]
+  fn invitations_are_for_members_by_default() {
+    const { assert!(!INVITES_AS_GUEST_BY_DEFAULT) };
+  }
+
+  #[test]
+  fn the_color_picker_sends_only_a_deliberate_change() {
+    assert_eq!(ColorChoice::Unchanged.change(), None);
+    assert_eq!(
+      ColorChoice::Set("#2f6fed".into()).change(),
+      Some("#2f6fed".into())
+    );
+    assert_eq!(ColorChoice::Set("javascript:".into()).change(), None);
+    assert_eq!(ColorChoice::Default.change(), Some(String::new()));
+  }
+
+  #[test]
+  fn the_preview_follows_an_upload_until_the_store_catches_up() {
+    let mut response = space_response();
+    assert_eq!(ShownImage::FromStore.version(Some("old")), Some("old".into()));
+    assert_eq!(ShownImage::FromStore.version(None), None);
+
+    response.maybe_image = Some(teamcraft_proto::SpaceImage {
+      version: "new".into(),
+      size_bytes: 10,
+    });
+    let uploaded = ShownImage::after(&response);
+    assert_eq!(uploaded, ShownImage::Uploaded("new".into()));
+    assert_eq!(uploaded.version(Some("old")), Some("new".into()));
+
+    response.maybe_image = None;
+    let removed = ShownImage::after(&response);
+    assert_eq!(removed, ShownImage::Removed);
+    assert_eq!(removed.version(Some("old")), None);
+  }
+
+  fn space_response() -> SpaceResponse {
+    SpaceResponse {
+      id: crate::model::id_from_raw(7),
+      name: "Project A".into(),
+      maybe_icon: None,
+      maybe_color: None,
+      maybe_description: None,
+      maybe_image: None,
+      join_policy: teamcraft_proto::JoinPolicy::InviteOnly,
+      is_archived: false,
+      maybe_brand_id: None,
+      maybe_my_role: None,
+      maybe_my_notifications: None,
+    }
   }
 }

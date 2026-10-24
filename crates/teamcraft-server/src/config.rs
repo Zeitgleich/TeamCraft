@@ -236,6 +236,13 @@ pub struct LimitsConfig {
   pub max_directory_results: u32,
   /// Largest avatar image.
   pub max_avatar_bytes: u64,
+  /// Largest space picture, after the server re-encoded the upload as PNG.
+  pub max_space_image_bytes: u64,
+  /// Space pictures decoded at the same time; more uploads are answered 503 with `Retry-After`.
+  /// Read at start.
+  pub max_concurrent_image_decodes: usize,
+  /// How long decoding and re-encoding one picture may take before the upload is answered 503.
+  pub image_decode_timeout_secs: u64,
   /// Largest call background picture a user uploads (encrypted; apps send Full HD JPEGs).
   pub max_background_bytes: u64,
   /// How many call background pictures one user may keep.
@@ -1281,6 +1288,9 @@ impl Default for LimitsConfig {
       max_page_size: 200,
       max_directory_results: 50,
       max_avatar_bytes: 1024 * 1024,
+      max_space_image_bytes: teamcraft_proto::DEFAULT_MAX_SPACE_IMAGE_BYTES,
+      max_concurrent_image_decodes: 2,
+      image_decode_timeout_secs: 5,
       max_background_bytes: 8 * 1024 * 1024,
       max_backgrounds_per_user: 24,
       org_recovery_request_ttl_secs: 86_400,

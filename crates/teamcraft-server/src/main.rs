@@ -226,6 +226,9 @@ async fn run() -> anyhow::Result<()> {
     })),
     rate_limits: Arc::new(RateLimits::new(&config.security.rate_limits)),
     brands: Arc::new(brands),
+    image_decodes: Arc::new(tokio::sync::Semaphore::new(
+      config.limits.max_concurrent_image_decodes.max(1),
+    )),
   };
   load_runtime_settings(&state).await?;
   spawn_session_sweeper(state.clone());

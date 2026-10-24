@@ -161,9 +161,40 @@ pub fn initials(name: &str) -> String {
 pub struct Space {
   pub id: SpaceId,
   pub name: String,
+  /// Hue of the letter tile: from [`Self::maybe_color`] when it has one, else derived.
   pub hue: u16,
+  /// The `#rrggbb` color the space's admins picked.
+  #[serde(default)]
+  pub maybe_color: Option<String>,
+  /// Version of the space's picture (`GET /api/v1/spaces/{id}/image`); without one the space
+  /// shows its letter tile.
+  #[serde(default)]
+  pub maybe_image_version: Option<String>,
   pub unread_count: u32,
   pub mention_count: u32,
+}
+
+/// Hue of a `#rrggbb` color, or `None` for anything else (and for greys, which have no hue).
+pub fn hue_from_hex(color: &str) -> Option<u16> {
+  let hex = color.strip_prefix('#')?;
+  if hex.len() != 6 || !hex.is_ascii() {
+    return None;
+  }
+  let channel = |range: std::ops::Range<usize>| u8::from_str_radix(&hex[range], 16).ok().map(f32::from);
+  let (r, g, b) = (channel(0..2)?, channel(2..4)?, channel(4..6)?);
+  let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+  if (max - min).abs() < f32::EPSILON {
+    return None;
+  }
+  let delta = max - min;
+  let hue = if (max - r).abs() < f32::EPSILON {
+    ((g - b) / delta).rem_euclid(6.0)
+  } else if (max - g).abs() < f32::EPSILON {
+    (b - r) / delta + 2.0
+  } else {
+    (r - g) / delta + 4.0
+  };
+  Some((hue * 60.0).round() as u16 % 360)
 }
 
 /// An open space the user is not in yet and may join.
@@ -409,6 +440,27 @@ pub struct ThreadSummary {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn hex_colors_have_a_hue_and_everything_else_none() {
+    assert_eq!(hue_from_hex("#ff0000"), Some(0));
+    assert_eq!(hue_from_hex("#00ff00"), Some(120));
+    assert_eq!(hue_from_hex("#0000ff"), Some(240));
+    assert_eq!(hue_from_hex("#808080"), None);
+    assert_eq!(hue_from_hex("red"), None);
+    assert_eq!(hue_from_hex("#ff00"), None);
+    assert_eq!(hue_from_hex("#ffé0"), None);
+  }
+
+  #[test]
+  fn spaces_from_older_snapshots_have_no_color_or_image() {
+    let space: Space = serde_json::from_value(serde_json::json!({
+      "id": "7", "name": "Project A", "hue": 10, "unread_count": 0, "mention_count": 0,
+    }))
+    .unwrap();
+    assert_eq!(space.maybe_color, None);
+    assert_eq!(space.maybe_image_version, None);
+  }
 
   #[test]
   fn membership_issues_keep_their_wire_form_and_tolerate_new_kinds() {

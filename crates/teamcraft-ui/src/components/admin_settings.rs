@@ -151,6 +151,7 @@ const LIMITS: &[FieldDef] = &[
   amount("max_attachment_bytes", MIB, U64_MAX, MEGABYTES),
   amount("max_attachment_bytes_per_user", MIB, U64_MAX, MEGABYTES),
   amount("max_avatar_bytes", MIB, U64_MAX, MEGABYTES),
+  amount("max_space_image_bytes", MIB, U64_MAX, MEGABYTES),
   amount("max_background_bytes", MIB, U64_MAX, MEGABYTES),
   count("max_backgrounds_per_user"),
   count("max_group_dm_participants"),

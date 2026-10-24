@@ -23,6 +23,10 @@ pub struct SpaceResponse {
   pub maybe_color: Option<String>,
   #[serde(rename = "description", default, skip_serializing_if = "Option::is_none")]
   pub maybe_description: Option<String>,
+  /// The space's picture, if it has one (`GET /api/v1/spaces/{id}/image`). Like the name it is
+  /// directory data the server sees, not end-to-end encrypted content (e2ee.md §4.4).
+  #[serde(rename = "image", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_image: Option<SpaceImage>,
   pub join_policy: JoinPolicy,
   pub is_archived: bool,
   /// Brand tag: the space may be themed with this brand's accent color. A hint; it restricts
@@ -35,6 +39,16 @@ pub struct SpaceResponse {
   /// The caller's notification setting for the whole space; absent for non-members.
   #[serde(rename = "my_notifications", default, skip_serializing_if = "Option::is_none")]
   pub maybe_my_notifications: Option<crate::SpaceNotificationSettings>,
+}
+
+/// The picture of a space: a square PNG the server re-encoded from the upload
+/// (`PUT /api/v1/spaces/{id}/image`, space admins).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SpaceImage {
+  /// Changes with every new picture (a content hash); the image's `ETag` is this value in quotes.
+  /// Clients key their cache by it.
+  pub version: String,
+  pub size_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -173,4 +187,55 @@ pub struct InviteResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ListInvitesResponse {
   pub invites: Vec<InviteResponse>,
+}
+
+#[cfg(test)]
+mod tests {
+  use serde_json::json;
+
+  use super::*;
+  use crate::{Id, Snowflake};
+
+  #[test]
+  fn a_space_without_an_image_has_no_image_field() {
+    let space = space(None);
+    let value = serde_json::to_value(&space).unwrap();
+    assert!(value.get("image").is_none(), "{value}");
+    // Older servers send no `image`: it reads as none.
+    let parsed: SpaceResponse = serde_json::from_value(json!({
+      "id": "7",
+      "name": "Project A",
+      "join_policy": "open",
+      "is_archived": false,
+    }))
+    .unwrap();
+    assert_eq!(parsed, space);
+  }
+
+  #[test]
+  fn a_space_image_has_a_stable_shape() {
+    let space = space(Some(SpaceImage {
+      version: "3f2a".into(),
+      size_bytes: 1234,
+    }));
+    let value = serde_json::to_value(&space).unwrap();
+    assert_eq!(value["image"], json!({"version": "3f2a", "size_bytes": 1234}));
+    assert_eq!(serde_json::from_value::<SpaceResponse>(value).unwrap(), space);
+  }
+
+  fn space(maybe_image: Option<SpaceImage>) -> SpaceResponse {
+    SpaceResponse {
+      id: SpaceId::from_snowflake(Snowflake::new(7).unwrap()),
+      name: "Project A".into(),
+      maybe_icon: None,
+      maybe_color: None,
+      maybe_description: None,
+      maybe_image,
+      join_policy: JoinPolicy::Open,
+      is_archived: false,
+      maybe_brand_id: None,
+      maybe_my_role: None,
+      maybe_my_notifications: None,
+    }
+  }
 }
