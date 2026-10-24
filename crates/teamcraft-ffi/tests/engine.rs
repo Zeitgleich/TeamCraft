@@ -8,12 +8,13 @@ use std::sync::Arc;
 use teamcraft_ffi::{AppConfig, EventListener, TeamCraft, TeamCraftError, TokenProvider, login_brand};
 
 /// A brand answer as the server sends it, with one asset path and one link that must be dropped.
-const BRAND_JSON: &str = r#"{
+const BRAND_JSON: &str = r##"{
   "id": "brand-a", "display_name": "Brand A", "origin": "https://chat.a.example.com",
   "assets": {"logo": "/api/v1/brand/assets/logo", "icon": "https://elsewhere.example.com/icon.png"},
+  "colors": {"light": {"accent": "#0b7f78", "on_accent": "url(x)"}, "dark": {"accent": "#35c6ba"}},
   "login_title": {"en": "Welcome", "de": "Willkommen"},
   "links": {"privacy": "https://a.example.com/privacy", "terms": "javascript:alert(1)"}
-}"#;
+}"##;
 
 /// Nothing listens on the discard port, so every request fails fast as a network error.
 const UNREACHABLE_SERVER: &str = "http://127.0.0.1:9";
@@ -120,6 +121,16 @@ mod brand {
       Some("https://a.example.com/privacy")
     );
     assert_eq!(brand.links.maybe_terms, None);
+  }
+
+  #[test]
+  fn the_login_brand_carries_only_checked_accent_colors() {
+    let brand = login_brand(BRAND_JSON.into(), "https://chat.example.com".into(), "en".into()).unwrap();
+    assert_eq!(brand.light.maybe_accent.as_deref(), Some("#0b7f78"));
+    // Not a hex color: dropped, the app keeps its own.
+    assert_eq!(brand.light.maybe_on_accent, None);
+    assert_eq!(brand.dark.maybe_accent.as_deref(), Some("#35c6ba"));
+    assert_eq!(brand.dark.maybe_accent_soft, None);
   }
 
   #[test]
