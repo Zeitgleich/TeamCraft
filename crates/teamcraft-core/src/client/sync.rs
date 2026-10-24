@@ -226,7 +226,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   async fn refresh_members(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    let members = self.api.list_members(conversation).await?;
+    let members = match self.api.list_members(conversation).await {
+      Ok(members) => members,
+      // No longer a member (an event from before the removal arrived late): nothing to refresh.
+      Err(error) if error.is_not_found() || error.is_forbidden() => return Ok(()),
+      Err(error) => return Err(error.into()),
+    };
     for member in &members.members {
       self.remember_user(&member.user)?;
     }

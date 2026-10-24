@@ -163,6 +163,10 @@ struct State {
   is_ignoring_revocations: bool,
   /// The next commit of these users is stored and fanned out, but the answer is lost.
   losing_commit_answers: HashSet<UserId>,
+  /// Users whose removals the server refuses (a moderator removing an admin, the last admin).
+  refusing_removals_by: HashSet<UserId>,
+  /// The next member removal or device revocation of these users fails this way.
+  removal_cuts: HashMap<UserId, NetworkCut>,
   /// The next commit of these users is lost on the way (never stored).
   dropping_commits: HashSet<UserId>,
   /// These users get the next commit (of anyone) garbled, so their client refuses it.
@@ -452,6 +456,19 @@ impl FakeServer {
     self.lock().losing_commit_answers.insert(user);
   }
 
+  /// From now on the server refuses `user`'s removals (and the check before them) with `403`, as
+  /// for a member without the right to remove somebody.
+  pub fn refuse_removals_by(&self, user: UserId) {
+    self.lock().refusing_removals_by.insert(user);
+  }
+
+  /// The user's next member removal (`DELETE …/members/{user}`) or device revocation fails as
+  /// `cut` says, without taking the user offline: the app was killed before sending it, or right
+  /// after the server handled it.
+  pub fn cut_next_removal(&self, user: UserId, cut: NetworkCut) {
+    self.lock().removal_cuts.insert(user, cut);
+  }
+
   /// The user's next commit is lost on the way: never stored, the client sees a network error.
   pub fn drop_next_commit(&self, user: UserId) {
     self.lock().dropping_commits.insert(user);
@@ -723,6 +740,23 @@ impl FakeServerApi {
     }
     Err(ApiError::Network("fake server: network cut".into()))
   }
+
+  /// [`Self::with`], failing as [`FakeServer::cut_next_removal`] asked.
+  fn with_removal_cut<R>(
+    &self,
+    action: impl FnOnce(&mut State, UserId) -> Result<R, ApiError>,
+  ) -> Result<R, ApiError> {
+    let maybe_cut = self.server.lock().removal_cuts.remove(&self.user);
+    match maybe_cut {
+      None => self.with(action),
+      Some(NetworkCut::BeforeRequest) => Err(ApiError::Network("fake server: never sent".into())),
+      Some(NetworkCut::ResponseLost) => {
+        // Deliberately ignored: the client never learns the outcome.
+        let _ = self.with(action);
+        Err(ApiError::Network("fake server: answer lost".into()))
+      },
+    }
+  }
 }
 
 impl ServerApi for FakeServerApi {
@@ -873,7 +907,7 @@ impl ServerApi for FakeServerApi {
   }
 
   async fn revoke_device(&self, device: DeviceId) -> Result<(), ApiError> {
-    self.with(|state, me| {
+    self.with_removal_cut(|state, me| {
       if state.devices.get(&device).is_none_or(|entry| entry.user != me) {
         return Err(ApiError::status(404, ErrorCode::DeviceNotFound, "no such device"));
       }
@@ -1167,17 +1201,17 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  async fn check_member_removal(&self, conversation: ConversationId, _user: UserId) -> Result<(), ApiError> {
+    self.with(|state, me| state.removal_target(conversation, me).map(|_| ()))
+  }
+
   async fn remove_member(&self, conversation: ConversationId, user: UserId) -> Result<(), ApiError> {
-    self.with(|state, me| {
-      // Server admins may remove people from conversations they aren't in.
-      let entry = if state.admins.contains(&me) {
-        state.conversation_mut(conversation)?
-      } else {
-        state.member_conversation_mut(conversation, me)?
-      };
+    self.with_removal_cut(|state, me| {
+      let entry = state.removal_target(conversation, me)?;
       let mut recipients: Vec<UserId> = entry.members.keys().copied().collect();
       if entry.members.remove(&user).is_none() {
-        return Err(ApiError::status(404, ErrorCode::UserNotFound, "not a member"));
+        // Idempotent like the server: already gone.
+        return Ok(());
       }
       recipients.retain(|member| *member != user);
       // The removed user learns about it once, then stops receiving the conversation's events.
@@ -2900,6 +2934,27 @@ impl State {
       Ok(found)
     } else {
       Err(ApiError::status(404, ErrorCode::ChannelNotFound, "not a member"))
+    }
+  }
+
+  /// The conversation `me` may remove somebody from: as a member, or as a server admin (also in
+  /// conversations they aren't in).
+  fn removal_target(
+    &mut self,
+    conversation: ConversationId,
+    me: UserId,
+  ) -> Result<&mut Conversation, ApiError> {
+    if self.refusing_removals_by.contains(&me) {
+      return Err(ApiError::status(
+        403,
+        ErrorCode::Forbidden,
+        "may not remove members",
+      ));
+    }
+    if self.admins.contains(&me) {
+      self.conversation_mut(conversation)
+    } else {
+      self.member_conversation_mut(conversation, me)
     }
   }
 

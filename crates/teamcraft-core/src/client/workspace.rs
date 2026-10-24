@@ -13,6 +13,7 @@ use teamcraft_proto::{
 
 use super::Client;
 use super::groups::{ADMIN_CHANGE_MAGIC, ChangeSource};
+use super::removal::{RemovalProgress, is_worth_retrying};
 use crate::api::{ApiError, ServerApi};
 use crate::convert;
 use crate::error::CoreError;
@@ -71,6 +72,49 @@ pub(crate) enum PendingChange {
     conversation_id: ConversationId,
     share: SharedKeys,
   },
+  /// A removal (or leave) this device started: the MLS side first, then the server's membership
+  /// (e2ee.md §4.6, removal order). Kept until both are done.
+  Removal {
+    conversation_id: ConversationId,
+    user_id: UserId,
+    step: RemovalStep,
+    /// Not tried again before this (server time of this device's clock) after the server refused
+    /// the server side; 0 for right away.
+    #[serde(default)]
+    not_before_ms: i64,
+  },
+  /// A revocation of another device of this user: the server first, then the signed device list
+  /// and the groups. Kept until all are done.
+  Revocation {
+    device_id: DeviceId,
+    step: RevocationStep,
+    /// Not tried again before this after a group refused the removal; 0 for right away.
+    #[serde(default)]
+    not_before_ms: i64,
+  },
+}
+
+/// The next step of a [`PendingChange::Removal`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RemovalStep {
+  /// Remove the user from the MLS group (commit, or a signed change the members commit).
+  Group,
+  /// Leaving: the signed removal of this user, signed for `signed_epoch`, is in the group's queue;
+  /// wait until a member's commit removed this device before dropping the server's membership.
+  AwaitCommit { signed_epoch: u64 },
+  /// The group side is done; drop the server's membership.
+  Server,
+}
+
+/// The next step of a [`PendingChange::Revocation`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RevocationStep {
+  /// Revoke the device on the server (ends its sessions).
+  Server,
+  /// Publish the device list without it and remove it from every shared group.
+  Groups,
 }
 
 /// Which content keys a new member gets after the commit that added them.
@@ -94,6 +138,16 @@ impl PendingChange {
   /// Where a device's rejoin request waits ([`PendingChange::Rejoin`]).
   pub(crate) fn rejoin_key(conversation: ConversationId, device: DeviceId) -> String {
     format!("rejoin/{conversation}/{device}")
+  }
+
+  /// Where a removal this device started waits ([`PendingChange::Removal`]).
+  pub(crate) fn removal_key(conversation: ConversationId, user: UserId) -> String {
+    format!("removal/{conversation}/{user}")
+  }
+
+  /// Where a revocation this device started waits ([`PendingChange::Revocation`]).
+  pub(crate) fn revocation_key(device: DeviceId) -> String {
+    format!("revocation/{device}")
   }
 }
 
@@ -292,26 +346,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         },
       )
       .await
-  }
-
-  /// An admin removes `user` from a conversation, also one the admin isn't a member of: the server
-  /// membership changes now, the signed change waits in the group's queue until a member's client
-  /// commits it (admin.md §2.2). Deactivating someone calls this per conversation; the server's
-  /// own removal is only a hint to the clients (security review A8).
-  pub async fn admin_remove_member(
-    &mut self,
-    conversation: ConversationId,
-    user: UserId,
-  ) -> Result<(), CoreError> {
-    self.api.remove_member(conversation, user).await?;
-    self
-      .post_admin_change(
-        conversation,
-        MembershipAction::RemoveUser {
-          user_id: convert::user(user),
-        },
-      )
-      .await
+      .map(|_| ())
   }
 
   /// Commits what's waiting in the pending queue. Changes that turned out moot or invalid are
@@ -365,6 +400,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         conversation_id,
         share,
       } => format!("share_history/{conversation_id}/{share:?}"),
+      PendingChange::Removal {
+        conversation_id,
+        user_id,
+        ..
+      } => PendingChange::removal_key(*conversation_id, *user_id),
+      PendingChange::Revocation { device_id, .. } => PendingChange::revocation_key(*device_id),
     };
     records::put_json(&self.store, Table::PendingChanges, &key, &change)
   }
@@ -470,6 +511,31 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         return Ok(PendingOutcome::Done);
       },
       PendingChange::AddDevice { .. } => return self.apply_device_addition(change).await,
+      PendingChange::Removal {
+        conversation_id,
+        user_id,
+        step,
+        not_before_ms,
+      } => {
+        if self.now_ms() < *not_before_ms {
+          return Ok(PendingOutcome::Later(change.clone()));
+        }
+        let result = self.run_removal(*conversation_id, *user_id, *step).await;
+        let key = PendingChange::removal_key(*conversation_id, *user_id);
+        return self.removal_outcome(&key, change, result);
+      },
+      PendingChange::Revocation {
+        device_id,
+        step,
+        not_before_ms,
+      } => {
+        if self.now_ms() < *not_before_ms {
+          return Ok(PendingOutcome::Later(change.clone()));
+        }
+        let result = self.run_revocation(*device_id, *step).await;
+        let key = PendingChange::revocation_key(*device_id);
+        return self.removal_outcome(&key, change, result.map(|()| RemovalProgress::Done));
+      },
       PendingChange::Rejoin { .. } => return self.apply_rejoin(change).await,
       PendingChange::ShareHistory {
         conversation_id,
@@ -483,6 +549,33 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     self.commit_change(source.0, source.1).await?;
     Ok(PendingOutcome::Done)
+  }
+
+  /// What a removal or revocation round leads to: done, or kept with the step it reached when it
+  /// waits for a commit, may work later, or failed after its group side was done (dropping it
+  /// then would leave the server listing somebody the group removed; it is tried again later).
+  fn removal_outcome(
+    &mut self,
+    key: &str,
+    change: &PendingChange,
+    result: Result<RemovalProgress, CoreError>,
+  ) -> Result<PendingOutcome, CoreError> {
+    let reached = self.stored_pending(key)?.unwrap_or_else(|| change.clone());
+    match result {
+      Ok(RemovalProgress::Done) => Ok(PendingOutcome::Done),
+      Ok(RemovalProgress::Waiting) => Ok(PendingOutcome::Later(reached)),
+      Err(error) if is_worth_retrying(&error) => {
+        tracing::debug!(%error, "a removal waits for the next round");
+        Ok(PendingOutcome::Later(reached))
+      },
+      Err(error) => match self.retry_later(reached) {
+        Some(later) => {
+          tracing::warn!(%error, "the server refused a removal whose group side is done; trying again later");
+          Ok(PendingOutcome::Later(later))
+        },
+        None => Err(error),
+      },
+    }
   }
 
   /// Adds a member's new device once due. Done when the device is in the group (added here or by
@@ -576,14 +669,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }))
   }
 
+  /// Posts a signed membership change for the group's members to commit; returns the epoch it
+  /// was signed for.
   pub(crate) async fn post_admin_change(
     &mut self,
     conversation: ConversationId,
     action: MembershipAction,
-  ) -> Result<(), CoreError> {
+  ) -> Result<u64, CoreError> {
     // A non-member can't read the group's queue, so it learns the epoch from the conflict answer;
-    // the change is signed for that epoch (security review A3).
-    let mut epoch = 0;
+    // the change is signed for that epoch (security review A3). A member (leaving) starts from its
+    // own.
+    let mut epoch = match self.group(conversation)? {
+      Some(group) => group.epoch(),
+      None => 0,
+    };
     for _ in 0..2 {
       let signed = MembershipChange::new(convert::conversation(conversation), epoch, action, &mut OsRng)
         .sign(&self.account.device, self.account.certificate.clone())?;
@@ -596,7 +695,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         payload: Base64Bytes::new(payload),
       };
       match self.api.post_mls_message(conversation, &request).await {
-        Ok(_) => return Ok(()),
+        Ok(_) => return Ok(epoch),
         Err(error) if error.is_epoch_conflict() => match current_epoch_of(&error) {
           Some(current) => epoch = current,
           None => return Err(error.into()),

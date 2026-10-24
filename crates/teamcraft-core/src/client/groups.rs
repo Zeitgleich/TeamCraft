@@ -227,24 +227,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .await
   }
 
-  /// Removes `user` on the server and from the MLS group, then rotates the content key so the
-  /// removed person can't read anything new (e2ee.md §4.1, §4.2).
-  pub async fn remove_member(&mut self, conversation: ConversationId, user: UserId) -> Result<(), CoreError> {
-    self.api.remove_member(conversation, user).await?;
-    self
-      .commit_change(
-        conversation,
-        ChangeSource::Own(MembershipAction::RemoveUser {
-          user_id: convert::user(user),
-        }),
-      )
-      .await?;
-    // After the key rotation, so the removed person doesn't read it.
-    self
-      .announce(conversation, ConversationEvent::MemberRemoved { user })
-      .await
-  }
-
   /// Adds devices of current members that aren't in the group yet (a colleague's new laptop).
   /// These need no signed change: each device is cross-signed by its user (e2ee.md §4.6).
   pub async fn add_missing_devices(&mut self, conversation: ConversationId) -> Result<usize, CoreError> {
@@ -254,9 +236,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .trusted_directory(members.members.iter().map(|member| member.user.id))
       .await?;
     let group_devices = self.group_device_ids(conversation)?;
+    let group_users: BTreeSet<UserId> = self.group_users(conversation)?.into_iter().collect();
     let mut key_packages = Vec::new();
     let mut recipients = Vec::new();
     for member in &members.members {
+      // Only further devices of users in the group go in without a signed change. A user the
+      // server still lists but who has no device here is being removed (the server's membership
+      // goes after the MLS removal) or not added yet: claiming their key packages would waste them.
+      if !group_users.contains(&member.user.id) {
+        continue;
+      }
       let devices = self.api.list_user_devices(member.user.id).await?;
       if devices
         .devices
@@ -315,7 +304,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// server never got it. A device that can't follow the group any more asks to be added back
   /// (e2ee.md §4.6).
   pub async fn sync_mls(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    let mut catch_up = self.catch_up_mls(conversation).await?;
+    let mut catch_up = match self.catch_up_mls(conversation).await {
+      Ok(catch_up) => catch_up,
+      // The server no longer lets this user read the queue: removed, with the removal commit
+      // still to come or refused. Nothing to catch up or ask for; the server's removal event ends
+      // the group here.
+      Err(CoreError::Api(error)) if error.is_not_found() || error.is_forbidden() => {
+        tracing::debug!(conversation_id = %conversation, "no longer allowed to read the group's queue");
+        return Ok(());
+      },
+      Err(error) => return Err(error),
+    };
     for _ in 0..PENDING_COMMIT_ROUNDS {
       if catch_up.is_behind || !self.has_pending_commit(conversation)? {
         break;
@@ -427,8 +426,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(MlsProgress::NeedsBacklog);
     }
 
-    let members = self.api.list_members(conversation).await?;
-    let users = members.members.iter().map(|member| member.user.id);
+    let users: Vec<UserId> = match self.api.list_members(conversation).await {
+      Ok(members) => members.members.into_iter().map(|member| member.user.id).collect(),
+      // The server dropped this user's membership already: the removal commit goes first and the
+      // server's membership after it (e2ee.md §4.6), so this is likely that commit. Who is in the
+      // group is all it needs to verify.
+      Err(error) if error.is_not_found() || error.is_forbidden() => self.group_users(conversation)?,
+      Err(error) => return Err(error.into()),
+    };
     // A commit may add devices: check them against the newest device lists.
     let directory = if message.kind == MlsMessageKind::Commit {
       self.trusted_directory(users).await?
@@ -552,6 +557,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       ChangeSource::Own(action) => *action,
       ChangeSource::Delegated(signed) => *signed.unverified().action(),
     };
+    if let (ChangeSource::Delegated(_), MembershipAction::RemoveUser { user_id }) = (&source, action)
+      && user_id == convert::user(self.account.user_id)
+    {
+      // MLS doesn't let a member commit its own removal: the other members commit it, and the
+      // server's membership removal ends the group here.
+      return Ok(());
+    }
     if let MembershipAction::AddUser { user_id, history } = action
       && history
         != self
@@ -1055,17 +1067,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // This device asked to be added back: the welcome replaces the group it can't follow.
       self.drop_group(conversation)?;
     }
-    let members = self.api.list_members(conversation).await?;
-    let directory: PinnedDirectory = self
-      .pin_identities(members.members.iter().map(|member| member.user.id))
-      .await?;
-    match ConversationGroup::join(
-      &self.provider,
-      welcome.payload.as_slice(),
-      convert::conversation(conversation),
-      &directory,
-    ) {
-      Ok(group) => {
+    match self.join_welcome_group(conversation, welcome).await? {
+      Ok((group, directory)) => {
         // The joining epoch's key: the members switched to it if they shared history from the
         // join on; the committer's bundle says which key is current.
         let key = group.epoch_content_key(&self.provider)?;
@@ -1106,6 +1109,43 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.welcome_handled(welcome)
       },
     }
+  }
+
+  /// Verifies and joins the group a welcome brings, with the directory it was verified against.
+  /// Identities are pinned for everybody the welcome's tree holds, not only whom the server lists:
+  /// somebody removed after the welcome was made is still in its tree, their removal commit next in
+  /// the queue, while the server dropped them already (its membership goes after the MLS removal,
+  /// e2ee.md §4.6). Every leaf is verified against its user's pinned identity either way.
+  async fn join_welcome_group(
+    &mut self,
+    conversation: ConversationId,
+    welcome: &MlsMessageResponse,
+  ) -> Result<Result<(ConversationGroup, PinnedDirectory), MlsError>, CoreError> {
+    // Pinned before the welcome is opened, which takes this device's key package: a network error
+    // here leaves the welcome for the next try.
+    let members = self.api.list_members(conversation).await?;
+    self
+      .pin_identities(members.members.iter().map(|member| member.user.id))
+      .await?;
+    let staged = match ConversationGroup::stage_join(
+      &self.provider,
+      welcome.payload.as_slice(),
+      convert::conversation(conversation),
+    ) {
+      Ok(staged) => staged,
+      Err(error) => return Ok(Err(error)),
+    };
+    let mut users = Vec::new();
+    for user in staged.claimed_users()? {
+      users.push(convert::user_from_crypto(user)?);
+    }
+    // Pinned above already, except somebody removed meanwhile.
+    let directory = self.pin_identities(users).await?;
+    Ok(
+      staged
+        .complete(&self.provider, &directory)
+        .map(|group| (group, directory)),
+    )
   }
 
   /// Whether this device's group is already at or past the welcome's epoch.
@@ -1220,6 +1260,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Who may make signed changes in the group, with the signed roster's freshness judged at
   /// `at_ms` (the server's time of the commit being checked).
+  /// The users with a device in the conversation's group.
+  pub(crate) fn group_users(&mut self, conversation: ConversationId) -> Result<Vec<UserId>, CoreError> {
+    let mut users = Vec::new();
+    for member in self.group_or_error(conversation)?.members()? {
+      let user = convert::user_from_crypto(member.user_id)?;
+      if !users.contains(&user) {
+        users.push(user);
+      }
+    }
+    Ok(users)
+  }
+
   fn group_authority(
     &mut self,
     conversation: ConversationId,

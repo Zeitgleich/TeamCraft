@@ -209,13 +209,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
-  /// Says goodbye, then leaves; the remaining members remove this user's devices.
-  pub async fn leave_channel(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    self.announce(conversation, ConversationEvent::Left).await?;
-    self.api.remove_member(conversation, self.account.user_id).await?;
-    Ok(())
-  }
-
   pub async fn refresh_categories(&mut self, space: SpaceId) -> Result<ListCategoriesResponse, CoreError> {
     let categories = self.api.list_categories(space).await?;
     records::put_json(&self.store, Table::Categories, &space.to_string(), &categories)?;

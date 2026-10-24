@@ -178,6 +178,71 @@ mod channels {
   }
 
   #[tokio::test]
+  async fn a_removal_is_checked_first_and_removing_twice_succeeds() {
+    let app = app!();
+    let (alice, carol, dave) = (owner(), member("carol"), member("dave"));
+    let (alice_id, carol_id, dave_id) = (
+      user_id(&app, &alice).await,
+      user_id(&app, &carol).await,
+      user_id(&app, &dave).await,
+    );
+    let space = create_space(&app, &alice, "Team", "invite_only").await;
+    let channel = create_channel(&app, &alice, &space, "general", "private").await;
+    for id in [&carol_id, &dave_id] {
+      add_space_member(&app, &alice, &space, id, "member").await;
+      add_channel_member(&app, &alice, &channel, id).await;
+    }
+    let check = |user: &str| format!("/conversations/{channel}/members/{user}/removal");
+    let member = |user: &str| format!("/conversations/{channel}/members/{user}");
+
+    // The check answers like the removal would, and changes nothing.
+    assert_eq!(
+      app.get(&carol, &check(&dave_id)).await.status,
+      StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+      app.get(&alice, &check(&alice_id)).await.status,
+      StatusCode::CONFLICT
+    );
+    assert_eq!(
+      app.get(&carol, &check(&carol_id)).await.status,
+      StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+      app.get(&alice, &check(&dave_id)).await.status,
+      StatusCode::NO_CONTENT
+    );
+    let members = app
+      .get(&alice, &format!("/conversations/{channel}/members"))
+      .await;
+    assert_eq!(members.body["members"].as_array().unwrap().len(), 3);
+
+    // Two admins (or a retry after a lost answer) removing the same person: both succeed.
+    let dave_path = member(&dave_id);
+    let (first, second) = tokio::join!(app.delete(&alice, &dave_path), app.delete(&alice, &dave_path));
+    assert_eq!(first.status, StatusCode::NO_CONTENT, "{}", first.body);
+    assert_eq!(second.status, StatusCode::NO_CONTENT, "{}", second.body);
+    assert_eq!(
+      app.delete(&alice, &member(&dave_id)).await.status,
+      StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+      app.get(&alice, &check(&dave_id)).await.status,
+      StatusCode::NO_CONTENT
+    );
+    // Still only for those who may remove members.
+    assert_eq!(
+      app.delete(&carol, &member(&dave_id)).await.status,
+      StatusCode::FORBIDDEN
+    );
+    let members = app
+      .get(&alice, &format!("/conversations/{channel}/members"))
+      .await;
+    assert_eq!(members.body["members"].as_array().unwrap().len(), 2);
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn the_last_channel_admin_cannot_leave_or_step_down() {
     let app = app!();
     let (alice, carol) = (owner(), member("carol"));
