@@ -144,6 +144,9 @@ struct Mirror {
   /// Threads read since the UI was last told about a change; a refresh reloads only these.
   used_threads: HashSet<(ConversationId, ThreadId)>,
   loading: HashSet<LoadKey>,
+  /// Loads asked for again while in flight: their answer may predate a change, so they are read
+  /// once more when it arrives.
+  outdated: HashSet<LoadKey>,
 }
 
 /// What a refresh reads again: only what the UI showed since its last change (issue #246).
@@ -172,6 +175,8 @@ struct Slot {
   is_stale: bool,
   /// Read by the UI since it was last told about a change: a refresh asks again right away.
   is_used: bool,
+  /// The core changed while an answer was in flight: it is asked again when that one arrives.
+  is_outdated: bool,
 }
 
 #[derive(Clone)]
@@ -230,6 +235,7 @@ impl RemoteChat {
         threads: HashMap::new(),
         used_threads: HashSet::new(),
         loading: HashSet::new(),
+        outdated: HashSet::new(),
       })),
       notify: Rc::new(RefCell::new(None)),
       refresh_queued: Rc::new(Cell::new(false)),
@@ -270,23 +276,32 @@ impl RemoteChat {
   fn mark_answers_stale(&self) {
     for slot in self.answers.borrow_mut().values_mut() {
       slot.is_stale = true;
+      // An answer in flight may predate the change: asked again when it arrives.
+      slot.is_outdated |= slot.is_loading;
     }
   }
 
-  /// Asks the core for one answer again; returns whether it differs from the one held.
+  /// Asks the core for one answer again; returns whether it differs from the one held. Asks once
+  /// more when the core changed while the answer was in flight.
   async fn fetch_answer(&self, key: String, query: ChatQuery) -> bool {
-    let outcome = call::<ChatAnswer>("core_query", &json!({ "query": query })).await;
-    let mut answers = self.answers.borrow_mut();
-    let slot = answers.entry(key).or_default();
-    match outcome {
-      Ok(answer) => slot.settle(answer),
-      Err(error) => {
-        tracing::warn!(%error, "a query failed");
-        // The old answer stays and nothing is asked again until something changes.
-        slot.is_loading = false;
-        slot.is_stale = false;
-        false
-      },
+    let mut is_changed = false;
+    loop {
+      let outcome = call::<ChatAnswer>("core_query", &json!({ "query": query })).await;
+      let mut answers = self.answers.borrow_mut();
+      let slot = answers.entry(key.clone()).or_default();
+      match outcome {
+        Ok(answer) => is_changed |= slot.settle(answer),
+        Err(error) => {
+          tracing::warn!(%error, "a query failed");
+          // The old answer stays and nothing is asked again until something changes.
+          slot.is_loading = false;
+          slot.is_stale = false;
+        },
+      }
+      if !std::mem::take(&mut slot.is_outdated) {
+        return is_changed;
+      }
+      slot.is_loading = true;
     }
   }
 
@@ -390,6 +405,7 @@ impl RemoteChat {
     }
     for (key, slot) in self.answers.borrow_mut().iter_mut() {
       if slot.is_loading {
+        slot.is_outdated = true;
         continue;
       }
       match (slot.is_used, serde_json::from_str::<ChatQuery>(key)) {
@@ -415,20 +431,34 @@ impl RemoteChat {
   /// Reads one page of a feed; returns whether it differs from the rows held.
   async fn fetch_page(&self, conversation: ConversationId, page: usize) -> bool {
     let key = LoadKey::Page(conversation, page);
-    if !self.mirror.borrow_mut().loading.insert(key) {
+    if !self.begin_load(key) {
       return false;
     }
-    let args = json!({ "conversation": conversation, "start": page * PAGE, "len": PAGE });
-    let outcome = call::<MessageWindow>("core_messages", &args).await;
-    let mut mirror = self.mirror.borrow_mut();
-    mirror.loading.remove(&key);
-    match outcome {
-      Ok(window) => mirror.feeds.entry(conversation).or_default().apply(window),
-      Err(error) => {
-        tracing::warn!(%error, %conversation, "could not load messages");
-        false
-      },
+    let mut is_changed = false;
+    loop {
+      let args = json!({ "conversation": conversation, "start": page * PAGE, "len": PAGE });
+      let outcome = call::<MessageWindow>("core_messages", &args).await;
+      let mut mirror = self.mirror.borrow_mut();
+      match outcome {
+        Ok(window) => is_changed |= mirror.feeds.entry(conversation).or_default().apply(window),
+        Err(error) => tracing::warn!(%error, %conversation, "could not load messages"),
+      }
+      if !mirror.outdated.remove(&key) {
+        mirror.loading.remove(&key);
+        return is_changed;
+      }
     }
+  }
+
+  /// Marks a load as in flight; `false` when it already is (it is then read once more, since the
+  /// caller may know of a change the load in flight predates).
+  fn begin_load(&self, key: LoadKey) -> bool {
+    let mut mirror = self.mirror.borrow_mut();
+    if mirror.loading.insert(key) {
+      return true;
+    }
+    mirror.outdated.insert(key);
+    false
   }
 
   fn load_thread(&self, conversation: ConversationId, thread: ThreadId) {
@@ -443,26 +473,28 @@ impl RemoteChat {
   /// Reads one thread; returns whether it differs from the one held.
   async fn fetch_thread(&self, conversation: ConversationId, thread: ThreadId) -> bool {
     let key = LoadKey::Thread(conversation, thread);
-    if !self.mirror.borrow_mut().loading.insert(key) {
+    if !self.begin_load(key) {
       return false;
     }
-    let outcome = call::<Vec<Message>>(
-      "core_thread",
-      &json!({ "conversation": conversation, "thread": thread }),
-    )
-    .await;
-    let mut mirror = self.mirror.borrow_mut();
-    mirror.loading.remove(&key);
-    match outcome {
-      Ok(messages) => {
-        let is_changed = mirror.threads.get(&(conversation, thread)) != Some(&messages);
-        mirror.threads.insert((conversation, thread), messages);
-        is_changed
-      },
-      Err(error) => {
-        tracing::warn!(%error, "could not load a thread");
-        false
-      },
+    let mut is_changed = false;
+    loop {
+      let outcome = call::<Vec<Message>>(
+        "core_thread",
+        &json!({ "conversation": conversation, "thread": thread }),
+      )
+      .await;
+      let mut mirror = self.mirror.borrow_mut();
+      match outcome {
+        Ok(messages) => {
+          is_changed |= mirror.threads.get(&(conversation, thread)) != Some(&messages);
+          mirror.threads.insert((conversation, thread), messages);
+        },
+        Err(error) => tracing::warn!(%error, "could not load a thread"),
+      }
+      if !mirror.outdated.remove(&key) {
+        mirror.loading.remove(&key);
+        return is_changed;
+      }
     }
   }
 
