@@ -61,6 +61,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -160,7 +161,8 @@ fun MessageFeed(
   val scope = rememberCoroutineScope()
   var hasScrolledInitially by remember { mutableStateOf(false) }
   var maybeLastMessageId by remember { mutableStateOf<String?>(null) }
-  var maybeViewedId by remember { mutableStateOf<String?>(null) }
+  // Saveable: a rotation keeps the viewer open.
+  var maybeViewedId by rememberSaveable { mutableStateOf<String?>(null) }
   var maybeHighlighted by remember(maybeFocusMessage) { mutableStateOf(maybeFocusMessage) }
   LaunchedEffect(maybeHighlighted) {
     if (maybeHighlighted != null) {

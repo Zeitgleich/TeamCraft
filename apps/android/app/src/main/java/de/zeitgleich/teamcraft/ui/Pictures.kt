@@ -25,8 +25,15 @@ import de.zeitgleich.teamcraft.core.FileInfo
  */
 const val THUMBNAIL_DECODE_PX = 1024
 
-/** Share of the app's heap that decoded pictures may take (the usual eighth). */
+/** Share of the app's heap that decoded thumbnails may take (the usual eighth). */
 private const val MEMORY_SHARE = 8L
+
+/**
+ * Full images kept, by count: the one being looked at and its neighbours, so swiping back and
+ * forth doesn't decode again. Counted, not sized: one full image may be larger than the
+ * thumbnails' whole budget, which would evict it at once.
+ */
+private const val FULL_IMAGES_KEPT = 4
 
 /**
  * Decoded pictures – the senders' thumbnails and full images from the decrypted downloads – kept in
@@ -42,8 +49,16 @@ object Pictures {
     override fun sizeOf(key: String, value: ImageBitmap): Int = value.width * value.height * BYTES_PER_PIXEL
   }
 
+  private val fullImages = LruCache<String, ImageBitmap>(FULL_IMAGES_KEPT)
+
   /** A picture decoded before, without waiting. */
-  fun cached(key: String): ImageBitmap? = memory.get(key)
+  fun cached(key: String): ImageBitmap? = memory.get(key) ?: fullImages.get(key)
+
+  /** Forgets every decoded picture: the account they were decrypted for is gone from this device's session. */
+  fun clear() {
+    memory.evictAll()
+    fullImages.evictAll()
+  }
 
   /** A thumbnail's bytes, decoded once per file. */
   suspend fun thumbnail(key: String, bytes: ByteArray, maxSidePx: Int): ImageBitmap? =
@@ -57,7 +72,7 @@ object Pictures {
     return cached(key) ?: withContext(Dispatchers.IO) {
       // The core keeps the most recently used downloads when it trims its folder.
       File(path).setLastModified(System.currentTimeMillis())
-      decodeFile(path, maxSidePx)?.asImageBitmap()?.also { memory.put(key, it) }
+      decodeFile(path, maxSidePx)?.asImageBitmap()?.also { fullImages.put(key, it) }
     }
   }
 

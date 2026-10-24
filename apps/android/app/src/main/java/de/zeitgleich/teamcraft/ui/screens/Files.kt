@@ -26,6 +26,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,7 +54,8 @@ fun FilesScreen(viewModel: MainViewModel, conversationId: String, onBack: () -> 
   val changes by viewModel.changeCount.collectAsState()
   val context = LocalContext.current
   var files by remember { mutableStateOf<List<FileInfo>?>(null) }
-  var maybeViewedId by remember { mutableStateOf<String?>(null) }
+  // Saveable: a rotation keeps the viewer open.
+  var maybeViewedId by rememberSaveable { mutableStateOf<String?>(null) }
   LaunchedEffect(changes, conversationId) {
     files = viewModel.readChat { query(ChatQueries.files(conversationId)).files }
   }

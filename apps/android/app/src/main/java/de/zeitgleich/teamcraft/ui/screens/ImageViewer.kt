@@ -44,6 +44,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -107,7 +108,10 @@ private const val SHARP_THUMBNAIL_PX = 480
  */
 @Composable
 fun ImageViewer(images: List<FileInfo>, startFileId: String, onDownload: (FileInfo) -> Unit, onDismiss: () -> Unit) {
+  // After a rotation the screen re-reads its messages: open once the pictures are back.
+  if (images.isEmpty()) return
   val startPage = remember { images.indexOfFirst { it.fileId == startFileId }.coerceAtLeast(0) }
+  // Saved with the screen: a rotation keeps the picture that was being looked at.
   val pager = rememberPagerState(initialPage = startPage) { images.size }
   var isBarShown by remember { mutableStateOf(true) }
   var isZoomed by remember { mutableStateOf(false) }
@@ -190,6 +194,7 @@ private fun ImagePage(
   val full by produceState<FullImage>(
     maybePath?.let { path -> Pictures.cached(Pictures.fileKey(path, maxSidePx))?.let { FullImage.Ready(it) } } ?: FullImage.Waiting,
     maybePath,
+    maxSidePx,
   ) {
     val path = maybePath ?: return@produceState
     if (value is FullImage.Ready) return@produceState
@@ -199,6 +204,9 @@ private fun ImagePage(
     // Only the picture being looked at is fetched; a failed one waits for a tap.
     if (isCurrent && file.transfer.state == "remote") onDownload(file)
   }
+  val currentFile by rememberUpdatedState(file)
+  val currentOnDownload by rememberUpdatedState(onDownload)
+  val currentOnTap by rememberUpdatedState(onTap)
   var scale by remember { mutableFloatStateOf(1f) }
   var offset by remember { mutableStateOf(Offset.Zero) }
   var size by remember { mutableStateOf(IntSize.Zero) }
@@ -225,8 +233,10 @@ private fun ImagePage(
       .onSizeChanged { size = it }
       .pointerInput(file.fileId) {
         detectTapGestures(
+          // The gesture outlives recompositions: read the file's latest transfer state, not the first.
           onTap = {
-            if (file.transfer.state == "failed") onDownload(file) else onTap()
+            val latest = currentFile
+            if (latest.transfer.state == "failed") currentOnDownload(latest) else currentOnTap()
           },
           onDoubleTap = { zoomTo(if (scale > 1f) 1f else DOUBLE_TAP_ZOOM) },
         )
