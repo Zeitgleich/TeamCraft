@@ -705,7 +705,7 @@ fn AddPeople(conversation: ConversationId) -> impl IntoView {
   view! {
     <h3>{move || i18n.t("channel-add-people")}</h3>
     <label class="visually-hidden" for="cs-add">{move || i18n.t("channel-add-people")}</label>
-    <select id="cs-add" class="input" on:change=move |ev| chosen.set(event_target_value(&ev))>
+    <select id="cs-add" class="input" prop:value=move || chosen.get() on:change=move |ev| chosen.set(event_target_value(&ev))>
       <option value="">{move || i18n.t("channel-pick-person")}</option>
       <For each=move || candidates.get() key=|user| user.id let:user>
         <option value=user.id.to_string() translate="no">{user.display_name.clone()}</option>

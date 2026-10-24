@@ -5697,7 +5697,7 @@ select.input {
 .format-toolbar { display: flex; gap: .25rem; margin-bottom: .25rem; }
 .composer-preview { margin-top: .35rem; padding: .4rem .6rem; border: 1px dashed var(--border, rgba(128,128,128,.4)); border-radius: var(--radius-sm); }
 
-.toasts { position: fixed; inset-inline-end: var(--space-4); bottom: var(--space-4); display: flex; flex-direction: column; gap: var(--space-2); z-index: 50; }
+.toasts { position: fixed; inset-inline-end: var(--space-4); bottom: var(--space-4); display: flex; flex-direction: column; gap: var(--space-2); z-index: 1100; /* above dialogs: an error must show over the dialog that caused it */ }
 .toast { display: flex; align-items: center; gap: var(--space-2); padding: 10px var(--space-3); border-radius: var(--radius-md); background: var(--surface); color: var(--text); border: 1px solid var(--border); box-shadow: var(--shadow); }
 .toast-body { display: flex; flex-direction: column; gap: .25rem; min-width: 0; max-width: min(28rem, calc(100vw - 6rem)); }
 /* A failed action (issue #322): stays until closed, with the details behind a toggle. */
