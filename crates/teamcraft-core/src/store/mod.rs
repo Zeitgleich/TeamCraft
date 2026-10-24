@@ -92,6 +92,9 @@ pub enum Table {
   DeviceKeys,
   /// When a device left a conversation, `{conversation}/{user}/{device}` (A10).
   RemovedSenders,
+  /// Small actions waiting for the server (read positions, acknowledgements, pins, presence), one
+  /// record per target.
+  PendingActions,
 }
 
 /// A decrypted (or own, not yet sent) message.
@@ -493,7 +496,7 @@ impl StoredMessage {
 
 impl Table {
   /// Every table; a new variant goes here too (stores that load by name skip unknown tables).
-  pub const ALL: [Self; 30] = [
+  pub const ALL: [Self; 31] = [
     Self::Account,
     Self::Spaces,
     Self::Conversations,
@@ -524,6 +527,7 @@ impl Table {
     Self::DeviceLists,
     Self::DeviceKeys,
     Self::RemovedSenders,
+    Self::PendingActions,
   ];
 
   /// The table with this [`Self::name`], if this version knows it.
@@ -564,6 +568,7 @@ impl Table {
       Self::DeviceLists => "device_lists",
       Self::DeviceKeys => "device_keys",
       Self::RemovedSenders => "removed_senders",
+      Self::PendingActions => "pending_actions",
     }
   }
 }

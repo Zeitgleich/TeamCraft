@@ -8,8 +8,21 @@
 //! "set to" on the server (`GREATEST` for read positions, `ON CONFLICT DO NOTHING` for
 //! acknowledgements, a flag for pins, a value for presence), so a retry after a lost response
 //! changes nothing. A read position in the queue only ever moves forward.
+//!
+//! Every entry is its own record in [`Table::PendingActions`]: an entry this version can't read
+//! (a newer version queued it, or it is damaged) costs only that entry, and two writers (web tabs
+//! of the same account) never overwrite each other's entries. An entry is only replaced or removed
+//! if it is still the one that was read (a compare-and-swap per entry), so a newer action queued
+//! while an older one was on its way is not lost. Two tabs of different versions that write the
+//! same target at once keep the last write; for read positions the server's `GREATEST` keeps that
+//! harmless.
+//!
+//! Entries go out in the order they were queued. Each one backs off on its own when the server has
+//! trouble with it, and gives up after [`PendingActionSettings::max_attempts`] or
+//! [`PendingActionSettings::max_age`] (dropped with a log entry), so one stuck entry never holds
+//! back the others.
 
-use std::collections::BTreeMap;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{
@@ -21,11 +34,6 @@ use crate::api::{ApiError, ServerApi};
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, Table};
-
-/// Where the queue is stored (one record in [`Table::SyncState`]).
-const QUEUE_KEY: &str = "pending_actions";
-/// Entries kept at most; beyond it the oldest goes. Coalescing keeps real queues far below.
-const MAX_PENDING_ACTIONS: usize = 1000;
 
 /// An action waiting for the server.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,19 +58,44 @@ pub enum PendingAction {
   },
   /// The user's manual presence (do not disturb, invisible, automatic).
   Presence { request: SetPresenceRequest },
+  /// An action a newer version queued (another tab, or before a downgrade). This version leaves
+  /// the entry alone for the version that knows it.
+  #[serde(other)]
+  Unknown,
 }
 
-/// The stored queue: actions by their key.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-struct PendingActions {
-  entries: BTreeMap<String, QueuedAction>,
+/// Limits of the queue. Configurable; the defaults keep a busy device's queue small and retry a
+/// server in trouble for about a day.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingActionSettings {
+  /// Entries kept at most; beyond it the oldest goes. Coalescing keeps real queues far below.
+  pub max_entries: usize,
+  /// Wait before an entry the server had trouble with (5xx, 429) is tried again; doubles with each
+  /// attempt.
+  pub retry_after: Duration,
+  /// The wait between attempts grows up to this.
+  pub retry_max: Duration,
+  /// Attempts the server had trouble with before the entry is dropped.
+  pub max_attempts: u32,
+  /// An entry not sent within this long after it was queued is dropped.
+  pub max_age: Duration,
 }
 
+/// One stored entry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct QueuedAction {
   action: PendingAction,
-  /// When the user took it (this device's clock; only used to drop the oldest when full).
+  /// When the user last took it (this device's clock): the send order and the age cap.
   queued_at_ms: i64,
+  /// Breaks ties between entries queued in the same millisecond.
+  #[serde(default)]
+  sequence: u64,
+  /// Attempts the server had trouble with so far.
+  #[serde(default)]
+  attempts: u32,
+  /// Not tried again before this (after server trouble).
+  #[serde(default)]
+  maybe_retry_at_ms: Option<i64>,
 }
 
 /// What became of one attempt.
@@ -72,63 +105,99 @@ enum Attempt {
   Waiting,
   /// The server refused it for good (the conversation is gone, the message unknown): dropped.
   Refused(ApiError),
-  /// Offline, server trouble, a token to renew or an unreadable store: stays queued, the rest
-  /// waits too.
-  RetryLater(CoreError),
+  /// The server had trouble with this request (5xx, 429): the entry backs off, the others go on.
+  ServerTrouble(ApiError),
+  /// Offline, a token to renew or an unreadable store: every other entry would fail the same way,
+  /// so the flush stops and nothing counts as an attempt.
+  Unreachable(CoreError),
+}
+
+impl Default for PendingActionSettings {
+  fn default() -> Self {
+    Self {
+      max_entries: 1000,
+      retry_after: Duration::from_secs(30),
+      retry_max: Duration::from_secs(60 * 60),
+      max_attempts: 30,
+      max_age: Duration::from_secs(7 * 24 * 60 * 60),
+    }
+  }
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Queues the action and tries to send what is queued. Never fails for being offline: the action
   /// is stored and goes out later.
   pub async fn queue_action(&mut self, action: PendingAction) -> Result<(), CoreError> {
+    if action == PendingAction::Unknown {
+      tracing::warn!("an unknown action can't be queued");
+      return Ok(());
+    }
     self.store_action(action)?;
     self.flush_pending_actions().await?;
     Ok(())
   }
 
-  /// Sends the queued actions in order. Stops at the first one that has to wait for the network;
-  /// drops those the server refuses for good. Returns how many were sent.
+  /// Sends the queued actions in the order they were queued. Skips those that wait for their
+  /// retry time, drops those the server refuses for good or that ran out of attempts or age, and
+  /// stops when the server can't be reached. Returns how many were sent.
   pub async fn flush_pending_actions(&mut self) -> Result<usize, CoreError> {
-    let mut queue = load_queue(&self.store)?;
-    if queue.entries.is_empty() {
-      return Ok(0);
-    }
+    let entries = load_entries(&self.store)?;
+    let now_ms = self.now_ms();
     let mut sent = 0;
-    let keys: Vec<String> = queue.entries.keys().cloned().collect();
-    for key in keys {
-      let Some(queued) = queue.entries.get(&key).cloned() else {
+    for (key, queued) in entries {
+      if queued.action == PendingAction::Unknown {
         continue;
-      };
+      }
+      if self.is_too_old(&queued, now_ms) {
+        tracing::warn!(
+          kind = queued.action.kind(),
+          "a queued action got too old; dropped"
+        );
+        replace_if_unchanged(&self.store, &key, &queued, None)?;
+        continue;
+      }
+      if queued
+        .maybe_retry_at_ms
+        .is_some_and(|retry_at_ms| retry_at_ms > now_ms)
+      {
+        continue;
+      }
       match self.attempt(&queued.action).await {
         Attempt::Sent => {
-          queue.entries.remove(&key);
+          // A newer action for the same target queued meanwhile stays and goes out next time.
+          replace_if_unchanged(&self.store, &key, &queued, None)?;
           sent += 1;
           self.after_sent(&queued.action).await;
         },
         Attempt::Waiting => {},
         Attempt::Refused(error) => {
           tracing::warn!(%error, kind = queued.action.kind(), "the server refused a queued action; dropped");
-          queue.entries.remove(&key);
+          replace_if_unchanged(&self.store, &key, &queued, None)?;
         },
-        Attempt::RetryLater(error) => {
+        Attempt::ServerTrouble(error) => self.back_off(&key, &queued, &error, now_ms)?,
+        Attempt::Unreachable(error) => {
           tracing::debug!(%error, "queued actions wait for the server");
           break;
         },
       }
     }
-    save_queue(&self.store, &queue)?;
     Ok(sent)
   }
 
-  /// How many actions wait for the server.
+  /// How many actions wait for the server (those of a newer version not counted).
   pub fn pending_action_count(&self) -> Result<usize, CoreError> {
-    Ok(load_queue(&self.store)?.entries.len())
+    Ok(
+      load_entries(&self.store)?
+        .iter()
+        .filter(|(_, queued)| queued.action != PendingAction::Unknown)
+        .count(),
+    )
   }
 
   fn store_action(&self, action: PendingAction) -> Result<(), CoreError> {
-    let mut queue = load_queue(&self.store)?;
     let key = action.key();
-    let action = match (queue.entries.get(&key).map(|queued| &queued.action), action) {
+    let maybe_queued = load_entry(&self.store, &key)?;
+    let action = match (maybe_queued.as_ref().map(|queued| &queued.action), action) {
       // A read position never moves back, also not when an older one is queued after a newer one.
       (
         Some(PendingAction::ReadPosition { message: queued, .. }),
@@ -142,26 +211,67 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       (_, action) => action,
     };
-    queue.entries.insert(
-      key,
-      QueuedAction {
-        action,
-        queued_at_ms: self.now_ms(),
-      },
-    );
-    while queue.entries.len() > MAX_PENDING_ACTIONS {
-      let Some(oldest) = queue
-        .entries
-        .iter()
-        .min_by_key(|(_, queued)| queued.queued_at_ms)
-        .map(|(key, _)| key.clone())
-      else {
-        break;
-      };
+    let entries = load_entries(&self.store)?;
+    let sequence = entries
+      .iter()
+      .map(|(_, queued)| queued.sequence)
+      .max()
+      .map_or(0, |sequence| sequence.saturating_add(1));
+    let queued = QueuedAction {
+      action,
+      queued_at_ms: self.now_ms(),
+      sequence,
+      attempts: 0,
+      maybe_retry_at_ms: None,
+    };
+    records::put_json(&self.store, Table::PendingActions, &key, &queued)?;
+    let others: Vec<(String, QueuedAction)> =
+      entries.into_iter().filter(|(other, _)| *other != key).collect();
+    self.trim_queue(others.len() + 1, &others)
+  }
+
+  /// Drops the oldest entries beyond [`PendingActionSettings::max_entries`]; `entries` are the
+  /// others, oldest first.
+  fn trim_queue(&self, count: usize, entries: &[(String, QueuedAction)]) -> Result<(), CoreError> {
+    let excess = count.saturating_sub(self.settings.pending_actions.max_entries);
+    for (key, _) in entries.iter().take(excess) {
       tracing::warn!("too many queued actions; the oldest is dropped");
-      queue.entries.remove(&oldest);
+      self.store.delete(Table::PendingActions, key)?;
     }
-    save_queue(&self.store, &queue)
+    Ok(())
+  }
+
+  fn is_too_old(&self, queued: &QueuedAction, now_ms: i64) -> bool {
+    let max_age_ms = duration_ms(self.settings.pending_actions.max_age);
+    now_ms.saturating_sub(queued.queued_at_ms) > max_age_ms
+  }
+
+  /// After server trouble: the entry waits twice as long as last time, or goes once it ran out of
+  /// attempts.
+  fn back_off(
+    &self,
+    key: &str,
+    queued: &QueuedAction,
+    error: &ApiError,
+    now_ms: i64,
+  ) -> Result<(), CoreError> {
+    let limits = &self.settings.pending_actions;
+    let attempts = queued.attempts.saturating_add(1);
+    if attempts >= limits.max_attempts {
+      tracing::warn!(%error, kind = queued.action.kind(), attempts, "a queued action ran out of attempts; dropped");
+      return replace_if_unchanged(&self.store, key, queued, None).map(|_| ());
+    }
+    tracing::debug!(%error, kind = queued.action.kind(), attempts, "a queued action waits for the server");
+    let doubled = limits
+      .retry_after
+      .saturating_mul(2_u32.saturating_pow(attempts.saturating_sub(1)));
+    let wait_ms = duration_ms(doubled.min(limits.retry_max));
+    let retried = QueuedAction {
+      attempts,
+      maybe_retry_at_ms: Some(now_ms.saturating_add(wait_ms)),
+      ..queued.clone()
+    };
+    replace_if_unchanged(&self.store, key, queued, Some(&retried)).map(|_| ())
   }
 
   async fn attempt(&mut self, action: &PendingAction) -> Attempt {
@@ -194,13 +304,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         },
         // The message is gone from this device (deleted, conversation left): nothing to flag.
         Ok(None) => return Attempt::Sent,
-        Err(error) => return Attempt::RetryLater(error.into()),
+        Err(error) => return Attempt::Unreachable(error.into()),
       },
       PendingAction::Presence { request } => self.api.set_presence(request).await,
+      // Never attempted (the flush skips them); nothing this version could send.
+      PendingAction::Unknown => return Attempt::Waiting,
     };
     match result {
       Ok(()) => Attempt::Sent,
-      Err(error) if error.is_retry_later() => Attempt::RetryLater(CoreError::Api(error)),
+      Err(error @ ApiError::Status { .. }) if error.is_transient() => Attempt::ServerTrouble(error),
+      Err(error) if error.is_retry_later() => Attempt::Unreachable(CoreError::Api(error)),
       Err(error) => Attempt::Refused(error),
     }
   }
@@ -229,6 +342,7 @@ impl PendingAction {
         conversation, target, ..
       } => format!("pin/{conversation}/{target}"),
       Self::Presence { .. } => "presence".to_owned(),
+      Self::Unknown => "unknown".to_owned(),
     }
   }
 
@@ -239,14 +353,138 @@ impl PendingAction {
       Self::Acknowledge { .. } => "acknowledge",
       Self::ServerPin { .. } => "server_pin",
       Self::Presence { .. } => "presence",
+      Self::Unknown => "unknown",
     }
   }
 }
 
-fn load_queue(store: &impl LocalStore) -> Result<PendingActions, CoreError> {
-  Ok(records::get_json(store, Table::SyncState, QUEUE_KEY)?.unwrap_or_default())
+impl QueuedAction {
+  fn order(&self) -> (i64, u64) {
+    (self.queued_at_ms, self.sequence)
+  }
 }
 
-fn save_queue(store: &impl LocalStore, queue: &PendingActions) -> Result<(), CoreError> {
-  records::put_json(store, Table::SyncState, QUEUE_KEY, queue)
+/// Every readable entry, oldest first. A damaged entry is dropped with a log entry; it would never
+/// become readable.
+fn load_entries(store: &impl LocalStore) -> Result<Vec<(String, QueuedAction)>, CoreError> {
+  let mut entries = Vec::new();
+  for (key, bytes) in store.list(Table::PendingActions)? {
+    match serde_json::from_slice::<QueuedAction>(&bytes) {
+      Ok(queued) => entries.push((key, queued)),
+      Err(error) => {
+        tracing::warn!(%error, "a damaged queued action is dropped");
+        store.delete(Table::PendingActions, &key)?;
+      },
+    }
+  }
+  entries.sort_by(|(left_key, left), (right_key, right)| {
+    left
+      .order()
+      .cmp(&right.order())
+      .then_with(|| left_key.cmp(right_key))
+  });
+  Ok(entries)
+}
+
+/// The entry for `key`; a damaged one counts as absent (it is overwritten).
+fn load_entry(store: &impl LocalStore, key: &str) -> Result<Option<QueuedAction>, CoreError> {
+  match records::get_json(store, Table::PendingActions, key) {
+    Ok(maybe_queued) => Ok(maybe_queued),
+    Err(CoreError::Corrupt(_)) => Ok(None),
+    Err(error) => Err(error),
+  }
+}
+
+/// Replaces (or with `None` removes) the entry if it is still `expected`: an entry another writer
+/// changed meanwhile is the newer one and stays. Returns whether it was replaced.
+fn replace_if_unchanged(
+  store: &impl LocalStore,
+  key: &str,
+  expected: &QueuedAction,
+  maybe_new: Option<&QueuedAction>,
+) -> Result<bool, CoreError> {
+  if load_entry(store, key)?.as_ref() != Some(expected) {
+    return Ok(false);
+  }
+  match maybe_new {
+    Some(new) => records::put_json(store, Table::PendingActions, key, new)?,
+    None => store.delete(Table::PendingActions, key)?,
+  }
+  Ok(true)
+}
+
+fn duration_ms(duration: Duration) -> i64 {
+  i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+  use teamcraft_proto::{Id, Snowflake};
+
+  use super::*;
+  use crate::store::MemoryStore;
+
+  #[test]
+  fn an_entry_of_an_unknown_kind_is_read_as_unknown_and_left_alone() {
+    let store = MemoryStore::new();
+    let newer = br#"{"action":{"kind":"set_status","text":"away"},"queued_at_ms":5}"#;
+    store.put(Table::PendingActions, "status", newer).unwrap();
+    let entries = load_entries(&store).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].1.action, PendingAction::Unknown);
+    assert!(store.get(Table::PendingActions, "status").unwrap().is_some());
+  }
+
+  #[test]
+  fn a_damaged_entry_is_dropped_and_the_others_still_load() {
+    let store = MemoryStore::new();
+    store.put(Table::PendingActions, "broken", b"{not json").unwrap();
+    let queued = queued(read(1, 10), 1);
+    records::put_json(&store, Table::PendingActions, "read/1", &queued).unwrap();
+    let entries = load_entries(&store).unwrap();
+    assert_eq!(entries, vec![("read/1".to_owned(), queued)]);
+    assert!(store.get(Table::PendingActions, "broken").unwrap().is_none());
+  }
+
+  #[test]
+  fn entries_load_in_the_order_they_were_queued() {
+    let store = MemoryStore::new();
+    records::put_json(&store, Table::PendingActions, "b", &queued(read(1, 10), 1)).unwrap();
+    records::put_json(&store, Table::PendingActions, "a", &queued(read(2, 10), 2)).unwrap();
+    let keys: Vec<String> = load_entries(&store)
+      .unwrap()
+      .into_iter()
+      .map(|(key, _)| key)
+      .collect();
+    assert_eq!(keys, vec!["b", "a"]);
+  }
+
+  #[test]
+  fn an_entry_changed_by_another_writer_is_not_replaced() {
+    let store = MemoryStore::new();
+    let seen = queued(read(1, 10), 1);
+    let newer = queued(read(1, 20), 2);
+    records::put_json(&store, Table::PendingActions, "read/1", &newer).unwrap();
+    assert!(!replace_if_unchanged(&store, "read/1", &seen, None).unwrap());
+    assert_eq!(load_entry(&store, "read/1").unwrap(), Some(newer.clone()));
+    assert!(replace_if_unchanged(&store, "read/1", &newer, None).unwrap());
+    assert_eq!(load_entry(&store, "read/1").unwrap(), None);
+  }
+
+  fn queued(action: PendingAction, queued_at_ms: i64) -> QueuedAction {
+    QueuedAction {
+      action,
+      queued_at_ms,
+      sequence: 0,
+      attempts: 0,
+      maybe_retry_at_ms: None,
+    }
+  }
+
+  fn read(conversation: i64, message: i64) -> PendingAction {
+    PendingAction::ReadPosition {
+      conversation: ConversationId::from_snowflake(Snowflake::new(conversation).unwrap()),
+      message: MessageId::from_snowflake(Snowflake::new(message).unwrap()),
+    }
+  }
 }

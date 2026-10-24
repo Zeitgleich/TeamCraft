@@ -15,8 +15,19 @@ use crate::error::CoreError;
 use crate::store::{LocalStore, Table};
 use crate::{read_state, records};
 
-/// Conversations an earlier sync skipped, retried by the upkeep and the next full sync.
+/// Conversations whose content an earlier sync skipped, retried by the upkeep and the next full
+/// sync.
 const NEEDS_RESYNC_KEY: &str = "needs_resync";
+/// Conversations whose member list an earlier sync couldn't refresh; tracked apart from the
+/// content, so a content sync that works doesn't clear a member refresh that failed.
+const NEEDS_MEMBER_RESYNC_KEY: &str = "needs_member_resync";
+
+/// The part of a conversation's sync that failed and waits for another try.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResyncPart {
+  Members,
+  Content,
+}
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Brings the store up to date after a fresh gateway session (or at start): the last steps of an
@@ -38,7 +49,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .filter(|id| !conversations.iter().any(|conversation| conversation.id == **id))
     {
       self.store.delete(Table::Conversations, &stale.to_string())?;
-      self.unmark_resync(*stale)?;
+      self.unmark_resync(*stale, ResyncPart::Members)?;
+      self.unmark_resync(*stale, ResyncPart::Content)?;
     }
     // The whole list first, members after: a UI reading the store meanwhile shows every
     // conversation at once instead of one per member request (issue #247).
@@ -54,15 +66,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // follow right after the list.
     for conversation in members_order(&conversations) {
       let result = self.refresh_members(conversation).await;
-      self.isolate(conversation, result)?;
+      if self.isolate(conversation, ResyncPart::Members, result)? {
+        self.unmark_resync(conversation, ResyncPart::Members)?;
+      }
     }
     self.sync_welcomes().await?;
     // After the welcomes: a member's add (with a Welcome) wins over claiming the place ourselves.
     self.join_missing_groups().await?;
     for conversation in &conversations {
       let result = self.sync_conversation_content(conversation.id).await;
-      if self.isolate(conversation.id, result)? {
-        self.unmark_resync(conversation.id)?;
+      if self.isolate(conversation.id, ResyncPart::Content, result)? {
+        self.unmark_resync(conversation.id, ResyncPart::Content)?;
       }
     }
     self.refresh_read_state().await?;
@@ -83,25 +97,42 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Retries the conversations an earlier sync had to skip (see [`Self::isolate`]); the upkeep
   /// calls this with the account sync. Returns how many caught up.
   pub async fn resync_marked_conversations(&mut self) -> Result<usize, CoreError> {
-    let marked = self.conversations_to_resync()?;
+    let members = self.marked_for_resync(ResyncPart::Members)?;
+    let content = self.marked_for_resync(ResyncPart::Content)?;
     let mut caught_up = 0;
-    for conversation in marked {
-      let result = async {
-        self.refresh_members(conversation).await?;
-        self.sync_conversation_content(conversation).await
+    for conversation in members.union(&content).copied() {
+      let mut is_caught_up = true;
+      if members.contains(&conversation) {
+        let result = self.refresh_members(conversation).await;
+        let is_done = self.isolate(conversation, ResyncPart::Members, result)?;
+        if is_done {
+          self.unmark_resync(conversation, ResyncPart::Members)?;
+        }
+        is_caught_up &= is_done;
       }
-      .await;
-      if self.isolate(conversation, result)? {
-        self.unmark_resync(conversation)?;
-        caught_up += 1;
+      if content.contains(&conversation) {
+        let result = self.sync_conversation_content(conversation).await;
+        let is_done = self.isolate(conversation, ResyncPart::Content, result)?;
+        if is_done {
+          self.unmark_resync(conversation, ResyncPart::Content)?;
+        }
+        is_caught_up &= is_done;
       }
+      caught_up += usize::from(is_caught_up);
     }
     Ok(caught_up)
   }
 
-  /// The conversations an earlier sync skipped.
+  /// The conversations an earlier sync skipped in part (members, content or both).
   pub fn conversations_to_resync(&self) -> Result<BTreeSet<ConversationId>, CoreError> {
-    Ok(records::get_json(&self.store, Table::SyncState, NEEDS_RESYNC_KEY)?.unwrap_or_default())
+    let mut marked = self.marked_for_resync(ResyncPart::Members)?;
+    marked.extend(self.marked_for_resync(ResyncPart::Content)?);
+    Ok(marked)
+  }
+
+  /// The conversations whose member list an earlier sync couldn't refresh.
+  pub fn conversations_to_resync_members(&self) -> Result<BTreeSet<ConversationId>, CoreError> {
+    self.marked_for_resync(ResyncPart::Members)
   }
 
   /// One conversation's part of the sync: its MLS backlog, new messages, messages waiting for keys
@@ -121,27 +152,36 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// sync goes on with the others. Being offline, server trouble, an expired token or a broken
   /// store would fail every other conversation too: that stops the sync. Returns whether the
   /// conversation went through.
-  fn isolate(&self, conversation: ConversationId, result: Result<(), CoreError>) -> Result<bool, CoreError> {
+  fn isolate(
+    &self,
+    conversation: ConversationId,
+    part: ResyncPart,
+    result: Result<(), CoreError>,
+  ) -> Result<bool, CoreError> {
     match result {
       Ok(()) => Ok(true),
       Err(error) if error.is_retry_later() || matches!(error, CoreError::Store(_)) => Err(error),
       Err(error) => {
-        tracing::warn!(%error, conversation_id = %conversation, "conversation skipped by the sync; retried later");
-        let mut marked = self.conversations_to_resync()?;
+        tracing::warn!(%error, conversation_id = %conversation, ?part, "conversation skipped by the sync; retried later");
+        let mut marked = self.marked_for_resync(part)?;
         if marked.insert(conversation) {
-          records::put_json(&self.store, Table::SyncState, NEEDS_RESYNC_KEY, &marked)?;
+          records::put_json(&self.store, Table::SyncState, part.key(), &marked)?;
         }
         Ok(false)
       },
     }
   }
 
-  fn unmark_resync(&self, conversation: ConversationId) -> Result<(), CoreError> {
-    let mut marked = self.conversations_to_resync()?;
+  fn unmark_resync(&self, conversation: ConversationId, part: ResyncPart) -> Result<(), CoreError> {
+    let mut marked = self.marked_for_resync(part)?;
     if marked.remove(&conversation) {
-      records::put_json(&self.store, Table::SyncState, NEEDS_RESYNC_KEY, &marked)?;
+      records::put_json(&self.store, Table::SyncState, part.key(), &marked)?;
     }
     Ok(())
+  }
+
+  fn marked_for_resync(&self, part: ResyncPart) -> Result<BTreeSet<ConversationId>, CoreError> {
+    Ok(records::get_json(&self.store, Table::SyncState, part.key())?.unwrap_or_default())
   }
 
   /// Followed threads and unread counts (after `thread_update` and on fresh sessions). The threads'
@@ -321,6 +361,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   fn remember_user(&self, user: &UserSummary) -> Result<(), CoreError> {
     records::put_json(&self.store, Table::Users, &user.id.to_string(), user)
+  }
+}
+
+impl ResyncPart {
+  /// Where the conversations marked for this part are stored.
+  fn key(self) -> &'static str {
+    match self {
+      Self::Members => NEEDS_MEMBER_RESYNC_KEY,
+      Self::Content => NEEDS_RESYNC_KEY,
+    }
   }
 }
 

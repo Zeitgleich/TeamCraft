@@ -101,6 +101,10 @@ struct State {
   directory_searches: u64,
   /// Conversations whose history answers 403 (a removal the list doesn't show yet, a policy).
   forbidden_histories: HashSet<ConversationId>,
+  /// Conversations whose member list answers with an unreadable response.
+  broken_member_lists: HashSet<ConversationId>,
+  /// Conversations whose read position writes answer 503.
+  failing_read_positions: HashSet<ConversationId>,
   /// `PUT read-position` requests that arrived, to check that queued ones are sent once.
   read_position_writes: u64,
   users: BTreeMap<UserId, UserSummary>,
@@ -373,6 +377,26 @@ impl FakeServer {
       state.forbidden_histories.insert(conversation);
     } else {
       state.forbidden_histories.remove(&conversation);
+    }
+  }
+
+  /// Makes the conversation's member list answer with an unreadable response (or work again).
+  pub fn break_member_list(&self, conversation: ConversationId, is_broken: bool) {
+    let mut state = self.lock();
+    if is_broken {
+      state.broken_member_lists.insert(conversation);
+    } else {
+      state.broken_member_lists.remove(&conversation);
+    }
+  }
+
+  /// Makes writes of the conversation's read position answer 503 (or work again).
+  pub fn fail_read_positions(&self, conversation: ConversationId, is_failing: bool) {
+    let mut state = self.lock();
+    if is_failing {
+      state.failing_read_positions.insert(conversation);
+    } else {
+      state.failing_read_positions.remove(&conversation);
     }
   }
 
@@ -1288,6 +1312,9 @@ impl ServerApi for FakeServerApi {
     conversation: ConversationId,
   ) -> Result<ListConversationMembersResponse, ApiError> {
     self.with(|state, me| {
+      if state.broken_member_lists.contains(&conversation) {
+        return Err(ApiError::Decode("fake server: unreadable member list".into()));
+      }
       // Instance admins may list any conversation's members, like the server.
       let entry = if state.admins.contains(&me) {
         state.conversation(conversation)?
@@ -1496,6 +1523,9 @@ impl ServerApi for FakeServerApi {
   ) -> Result<(), ApiError> {
     self.with(|state, me| {
       state.read_position_writes += 1;
+      if state.failing_read_positions.contains(&conversation) {
+        return Err(ApiError::status(503, ErrorCode::Unavailable, "try again later"));
+      }
       // Like the server's `GREATEST`: a late or repeated write never moves the position back.
       let position = state
         .member_conversation_mut(conversation, me)?
