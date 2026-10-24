@@ -117,6 +117,17 @@ impl BrandView {
       .or_else(|| self.asset("icon", is_dark))
   }
 
+  /// Whether the header image is a logo (a wordmark that already carries the name), not just an
+  /// icon. With a logo the name is not repeated beside it; with an icon it is.
+  pub fn has_wordmark(&self) -> bool {
+    self.assets.contains_key("logo") || self.assets.contains_key("logo_dark")
+  }
+
+  /// Whether this is the product's own look ([`BrandView::fallback`]): no server brand is known.
+  pub fn is_fallback(&self) -> bool {
+    *self == Self::fallback()
+  }
+
   /// The browser tab's icon: the favicon, else the icon, each in the theme's variant.
   pub fn favicon(&self, is_dark: bool) -> Option<&str> {
     self
@@ -233,6 +244,16 @@ mod tests {
     bare.assets.clear();
     let view = BrandView::from_response(bare, "").unwrap();
     assert_eq!(view.header_image(false), None);
+  }
+
+  #[test]
+  fn only_a_logo_is_a_wordmark_and_only_the_fallback_is_the_product() {
+    let with_logo = BrandView::from_response(response(), "").unwrap();
+    assert!(with_logo.has_wordmark() && !with_logo.is_fallback());
+    let mut with_icon = response();
+    with_icon.assets = BTreeMap::from([("icon".to_owned(), "/api/v1/brand/assets/icon".to_owned())]);
+    assert!(!BrandView::from_response(with_icon, "").unwrap().has_wordmark());
+    assert!(BrandView::fallback().is_fallback() && !BrandView::fallback().has_wordmark());
   }
 
   fn response() -> BrandResponse {

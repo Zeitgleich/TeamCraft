@@ -10,6 +10,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+use base64::Engine;
 use leptos::prelude::*;
 use serde::Deserialize;
 use teamcraft_client_api::brand::{BrandView, cache_key};
@@ -177,6 +178,32 @@ pub fn show_server_brand(response: BrandResponse) {
     images.0.set(HashMap::new());
   }
   Brand::use_current().0.set(view);
+}
+
+/// Desktop, no server chosen (the server entry): the product's own look. The brand of a server the
+/// user left is forgotten too, so it does not come back on the next start before a server is
+/// chosen. Only the confirmation and what follows show a server's brand.
+pub fn show_product_brand() {
+  let config = AppConfig::load();
+  // An empty value reads as missing (`load_string`).
+  store_string(&cache_key(&config.server_url), "");
+  if let Some(images) = use_context::<ShellImages>() {
+    images.0.set(HashMap::new());
+  }
+  let brand = Brand::use_current().0;
+  if !brand.with_untracked(BrandView::is_fallback) {
+    brand.set(BrandView::fallback());
+  }
+}
+
+/// The product mark (the app icon of the desktop build) as a `data:` URL: shown while no server
+/// brand is known, without a request.
+pub fn product_icon() -> String {
+  const ICON: &[u8] = include_bytes!("../../../apps/desktop/icons/128x128@2x.png");
+  format!(
+    "data:image/png;base64,{}",
+    base64::engine::general_purpose::STANDARD.encode(ICON)
+  )
 }
 
 /// `GET /api/v1/brand` without credentials: through the desktop shell, or the page's own fetch.
