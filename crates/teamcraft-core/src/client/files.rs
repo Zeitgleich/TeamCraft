@@ -64,6 +64,13 @@ const MAX_DOWNLOAD_BYTES: Option<u64> = Some(256 * 1024 * 1024);
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_DOWNLOAD_BYTES: Option<u64> = None;
 
+/// Longest saved file name in bytes; common file systems allow 255 and the copy suffix needs room.
+const MAX_FILE_NAME_BYTES: usize = 200;
+
+/// How long the browser gets to start reading a download before its object URL is revoked.
+#[cfg(target_arch = "wasm32")]
+const REVOKE_DELAY_MS: i32 = 1000;
+
 /// Progress of a file on this device, keyed by attachment ID.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -358,7 +365,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// temporary `<a download>` link, which saves it into the browser's download folder.
   #[cfg(target_arch = "wasm32")]
   async fn download_to_disk(&self, reference: &AttachmentRef) -> Result<String, CoreError> {
-    let plaintext = self.download_decrypted(reference).await?;
+    // The cap is enforced on the bytes actually received, not on the sender-declared size.
+    let plaintext = self
+      .download_decrypted_capped(reference, MAX_DOWNLOAD_BYTES)
+      .await?;
     let file_name = sanitize_file_name(&reference.file_name);
     save_in_browser(plaintext.expose_secret(), &file_name)?;
     Ok(file_name)
@@ -527,6 +537,7 @@ fn read_source(source: &UploadSource) -> Result<Vec<u8>, ()> {
 
 fn failure_of(error: &CoreError) -> TransferFailure {
   match error {
+    CoreError::Api(ApiError::BlobTooLarge { .. }) => TransferFailure::TooLarge,
     CoreError::Api(_) => TransferFailure::Network,
     CoreError::Attachment(_) => TransferFailure::Corrupted,
     CoreError::Corrupt(message) if message.contains("hash") => TransferFailure::Corrupted,
@@ -551,10 +562,38 @@ fn sanitize_file_name(file_name: &str) -> String {
       }
     })
     .collect();
-  match safe.trim_start_matches('.').trim() {
-    "" => "file".to_string(),
-    trimmed => trimmed.to_string(),
+  let trimmed = safe.trim_start_matches('.').trim();
+  let limited = truncate_utf8(trimmed, MAX_FILE_NAME_BYTES);
+  if limited.is_empty() {
+    return "file".to_string();
   }
+  if is_reserved_windows_name(limited) {
+    return format!("_{limited}");
+  }
+  limited.to_string()
+}
+
+/// Longest part of `text` that fits `max_bytes` without splitting a character.
+fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
+  let mut end = max_bytes.min(text.len());
+  while !text.is_char_boundary(end) {
+    end -= 1;
+  }
+  &text[..end]
+}
+
+/// `CON`, `NUL`, `COM1`, ... (with or without an extension) can't be created on Windows.
+fn is_reserved_windows_name(file_name: &str) -> bool {
+  let stem = file_name
+    .split('.')
+    .next()
+    .unwrap_or_default()
+    .trim_end()
+    .to_ascii_uppercase();
+  matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+    || (stem.len() == 4
+      && (stem.starts_with("COM") || stem.starts_with("LPT"))
+      && stem.ends_with(|digit: char| ('1'..='9').contains(&digit)))
 }
 
 /// Whether a file of `size_bytes` is over the platform's download cap (`None`: no cap).
@@ -600,11 +639,31 @@ fn save_in_browser(bytes: &[u8], file_name: &str) -> Result<(), CoreError> {
     },
     None => Err(browser("could not create a download link")),
   };
-  // The browser has started reading the blob by the time click() returns.
-  if let Err(error) = web_sys::Url::revoke_object_url(&url) {
-    tracing::debug!(?error, "the download URL could not be revoked");
-  }
+  // Revoking right after click() makes Firefox and Safari drop the download, so give them time.
+  // Memory peaks at about three copies of the file (ciphertext, plaintext, Blob) until then.
+  revoke_later(url);
   result
+}
+
+/// Revokes an object URL after [`REVOKE_DELAY_MS`].
+#[cfg(target_arch = "wasm32")]
+fn revoke_later(url: String) {
+  use wasm_bindgen::JsCast;
+  use wasm_bindgen::closure::Closure;
+
+  let revoke = Closure::once_into_js(move || {
+    if let Err(error) = web_sys::Url::revoke_object_url(&url) {
+      tracing::debug!(?error, "the download URL could not be revoked");
+    }
+  });
+  let scheduled = web_sys::window().and_then(|window| {
+    window
+      .set_timeout_with_callback_and_timeout_and_arguments_0(revoke.unchecked_ref(), REVOKE_DELAY_MS)
+      .ok()
+  });
+  if scheduled.is_none() {
+    tracing::debug!("the download URL could not be scheduled for revoking");
+  }
 }
 
 /// `name`, or `name (2)`, `name (3)`, ... if taken. The name is sanitized first.
@@ -637,7 +696,22 @@ mod tests {
     assert_eq!(sanitize_file_name("...hidden"), "hidden");
     assert_eq!(sanitize_file_name(".."), "file");
     assert_eq!(sanitize_file_name(""), "file");
+    assert_eq!(sanitize_file_name("CON"), "_CON");
+    assert_eq!(sanitize_file_name("nul.txt"), "_nul.txt");
+    assert_eq!(sanitize_file_name("com1.tar.gz"), "_com1.tar.gz");
+    assert_eq!(sanitize_file_name("LPT9"), "_LPT9");
+    assert_eq!(sanitize_file_name("console.txt"), "console.txt");
+    assert_eq!(sanitize_file_name("COM0"), "COM0");
+    assert_eq!(sanitize_file_name(&"a".repeat(500)).len(), MAX_FILE_NAME_BYTES);
+    // 200 is not a boundary of the 3-byte characters: the cut stays valid UTF-8.
+    assert_eq!(sanitize_file_name(&"€".repeat(100)).len(), 198);
     assert_eq!(sanitize_file_name("report (final).pdf"), "report (final).pdf");
+  }
+
+  #[test]
+  fn oversized_blobs_are_a_too_large_failure_not_a_network_one() {
+    let error = CoreError::Api(ApiError::BlobTooLarge { max_bytes: 10 });
+    assert_eq!(failure_of(&error), TransferFailure::TooLarge);
   }
 
   #[test]
