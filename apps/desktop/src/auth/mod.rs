@@ -531,9 +531,9 @@ impl<S: TokenStore> AuthService<S> {
     })
   }
 
-  /// The current access token as text, refreshed when needed (tests against the dev stack; the
-  /// app uses [`Self::server_bearer_token`]).
-  #[cfg(all(test, feature = "integration"))]
+  /// The current access token as text, refreshed when needed (tests; the app uses
+  /// [`Self::server_bearer_token`]).
+  #[cfg(test)]
   pub async fn bearer_token(&self) -> Result<String, AuthError> {
     Ok(self.server_bearer_token().await?.1)
   }
