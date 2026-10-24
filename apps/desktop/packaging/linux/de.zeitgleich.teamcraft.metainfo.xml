@@ -35,6 +35,11 @@
     <display_length compare="ge">720</display_length>
   </requires>
   <releases>
+    <release version="1.0.2" date="2026-10-25" type="stable">
+      <description>
+        <p>Fixes the Linux desktop app not starting, mobile web layout, richer composer, spaces and invitations, image crop and formats, never-silent errors, faster web app.</p>
+      </description>
+    </release>
     <release version="1.0.1" date="2026-10-24" type="stable">
       <description>
         <p>Fixes desktop sign-in on a new device, faster web app on large workspaces, image lightbox.</p>
