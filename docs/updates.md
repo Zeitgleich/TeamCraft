@@ -182,6 +182,7 @@ apt/pool/<tag>/*.deb
 rpm/{stable,prerelease}/          rpms signed with rpmsign, repodata with a signed repomd.xml
 teamcraft-archive-keyring.gpg     the repository key (binary, for Signed-By)
 teamcraft-archive-keyring.asc     the same key, armored (for rpm/dnf)
+site-build.txt                    the workflow run that built the site (checked after deploying)
 ```
 
 Debian and Ubuntu (deb822 sources):

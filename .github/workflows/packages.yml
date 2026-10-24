@@ -62,6 +62,9 @@ jobs:
           PLAY_STORE_URL: ${{ vars.PLAY_STORE_URL }}
           APP_STORE_URL: ${{ vars.APP_STORE_URL }}
         run: scripts/package-site.sh build "$RUNNER_TEMP/work" "$RUNNER_TEMP/site"
+      # Identifies this build on the live site; the deploy job waits until the site serves it.
+      - name: Build id
+        run: echo "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" > "$RUNNER_TEMP/site/site-build.txt"
       # Installed clients and the setup snippets use these paths: no page may link a missing file.
       - name: Check the site's links
         env:
@@ -100,3 +103,24 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+      # deploy-pages can report success without the site changing: Pages ignored the deployment of a
+      # final release whose commit the release candidate had already deployed (issue #279). Wait for
+      # this run's build id on the live site (cache-busted) and fail loudly if it never shows up.
+      - name: Check the live site
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+          EXPECTED: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          url="${PAGE_URL%/}/site-build.txt"
+          live=""
+          for attempt in $(seq 1 40); do
+            live="$(curl -fsS -H 'Cache-Control: no-cache' "$url?nocache=$EXPECTED-$attempt" || true)"
+            if [ "$live" = "$EXPECTED" ]; then
+              echo "The live site serves build $EXPECTED."
+              exit 0
+            fi
+            echo "Attempt $attempt: the live site serves build '${live:-none}', waiting for $EXPECTED."
+            sleep 15
+          done
+          echo "::error::The live site still serves build '${live:-none}' instead of $EXPECTED after 10 minutes. Re-run from the default branch: gh workflow run packages.yml --ref main"
+          exit 1
