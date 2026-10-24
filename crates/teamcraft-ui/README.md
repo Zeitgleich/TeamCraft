@@ -50,6 +50,10 @@ contains demo fixtures.
 | Lightbox: file details          | ![Details](docs/screenshots/lightbox-details.png)              |
 | Lightbox: video                 | ![Video](docs/screenshots/lightbox-video.png)                  |
 | Lightbox: GIF, reduced motion   | ![Paused GIF](docs/screenshots/lightbox-gif-paused.png)        |
+| Labelled rail, light / dark     | ![Channel light](docs/screenshots/polish-channel-light.png) ![Channel dark](docs/screenshots/polish-channel-dark.png) |
+| Activity tabs, light / dark     | ![Activity light](docs/screenshots/polish-activity-light.png) ![Activity dark](docs/screenshots/polish-activity-dark.png) |
+| Preview of an unjoined channel  | ![Preview light](docs/screenshots/polish-preview-details-light.png) ![Preview dark](docs/screenshots/polish-preview-details-dark.png) |
+| Files tab, browse with preview  | ![Files tab](docs/screenshots/polish-files-tab-light.png) ![Browse channels](docs/screenshots/polish-browse-dark.png) |
 
 Screenshots are produced with Playwright against `trunk build --features demo` (English, 1360×840); the
 tour also walks every screen in German and fails on missing translation keys.
