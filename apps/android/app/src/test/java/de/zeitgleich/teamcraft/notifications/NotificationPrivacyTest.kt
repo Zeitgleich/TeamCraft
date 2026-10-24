@@ -39,6 +39,13 @@ class NotificationPrivacyTest {
   }
 
   @Test
+  fun theStoredSettingDefaultsToContentAndFailsClosed() {
+    assertEquals(NotificationContent.CONTENT, NotificationContentPrefs.parse(null))
+    assertEquals(NotificationContent.SENDER_ONLY, NotificationContentPrefs.parse("SENDER_ONLY"))
+    assertEquals(NotificationContent.NOTHING, NotificationContentPrefs.parse("SOMETHING_NEWER"))
+  }
+
+  @Test
   fun theSummaryListsNamesOnlyWhenNamesShow() {
     val conversations = listOf(
       ConversationNotification(conversationId = "1", maybeTitle = "Project A", lines = listOf(line("Alice"))),

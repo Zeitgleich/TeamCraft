@@ -22,11 +22,16 @@ class NotificationContentPrefs(context: Context) {
     state.value = content
   }
 
-  private fun read(): NotificationContent =
-    NotificationContent.entries.firstOrNull { it.name == prefs.getString(KEY_CONTENT, null) } ?: NotificationContent.CONTENT
+  private fun read(): NotificationContent = parse(prefs.getString(KEY_CONTENT, null))
 
-  private companion object {
-    const val FILE = "notification_content"
-    const val KEY_CONTENT = "content"
+  companion object {
+    private const val FILE = "notification_content"
+    private const val KEY_CONTENT = "content"
+
+    /** Nothing stored: the default (content). A value this version doesn't know: the strictest. */
+    fun parse(maybeStored: String?): NotificationContent {
+      maybeStored ?: return NotificationContent.CONTENT
+      return NotificationContent.entries.firstOrNull { it.name == maybeStored } ?: NotificationContent.NOTHING
+    }
   }
 }

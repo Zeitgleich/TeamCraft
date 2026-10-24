@@ -103,14 +103,42 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Catches one conversation up for a push that arrived while the sync loop wasn't running
-  /// (notifications.md, "Mobile push delivery"): its record and members (for the names), welcomes
-  /// (a conversation this device was just added to), then its MLS backlog and new messages. Only
-  /// for an app that owns this client; a notification extension next to the app must not advance
-  /// its state and uses [`crate::push_preview`] alone.
+  /// (notifications.md, "Mobile push delivery"): the three steps below in order. Only for an app
+  /// that owns this client; a notification extension next to the app must not advance its state
+  /// and uses [`crate::push_preview`] alone. An app with a time budget runs the steps itself and
+  /// may cut only the cancel-safe ones short.
   pub async fn catch_up_for_push(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    self.refresh_conversation(conversation).await?;
+    self.push_refresh_conversation(conversation).await?;
+    self.push_follow_groups(conversation).await?;
+    self.push_catch_up_messages(conversation).await
+  }
+
+  /// Step 1, the conversation's record and members (for the names). Cancel-safe: every write
+  /// follows the request it stores, so a future dropped at any await leaves nothing half done.
+  pub async fn push_refresh_conversation(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    self.refresh_conversation(conversation).await
+  }
+
+  /// Step 2, welcomes (a conversation this device was just added to) and the conversation's MLS
+  /// backlog. **Not cancel-safe:** opening a welcome spends this device's key package before the
+  /// group is persisted, with requests in between (`join_welcome_group`); dropped there, the
+  /// welcome could never be opened again and the device would silently miss the group. Run it to
+  /// completion (its requests time out on their own) or not at all.
+  pub async fn push_follow_groups(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
     self.sync_welcomes().await?;
-    self.sync_conversation_content(conversation).await
+    if self.has_group(conversation)? {
+      self.sync_mls(conversation).await?;
+    }
+    Ok(())
+  }
+
+  /// Step 3, new messages, parked ones decrypted again, unknown senders' keys. Cancel-safe: the
+  /// message cursor is derived from the store, each message is stored by itself (a repeat is
+  /// skipped), and keys are stored only after the lists that vouch for them were fetched.
+  pub async fn push_catch_up_messages(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    self.catch_up_messages(conversation).await?;
+    self.retry_undecrypted(conversation)?;
+    self.learn_sender_keys(conversation).await
   }
 
   /// Retries the conversations an earlier sync had to skip (see [`Self::isolate`]); the upkeep

@@ -267,8 +267,10 @@ audio, file name). How the core gets there, within `PUSH_PREVIEW_BUDGET` (7 s; F
 3. If that fails or names no sender (a first DM from somebody new, keys that changed while the app was
    closed) and the sync loop isn't running, the app's own client catches that one conversation up
    (`Client::catch_up_for_push`: record and members, welcomes, MLS backlog, new messages) and reads the
-   message from the store. The iOS notification extension runs next to the app and must not advance
-   its state, so it stops after step 2.
+   message from the store. Only the cancel-safe parts are cut at the deadline: following the groups
+   (welcomes, MLS) starts only with 2 s left and then runs to completion, since a welcome spends the
+   key package before the join is stored. The iOS notification extension runs next to the app and
+   must not advance its state, so it stops after step 2.
 
 Whatever is known by then is shown: "New message" under the sender's name when the text could not be
 read, never nothing. `PushNotification.maybe_gap` says why less was shown (no session, not decrypted,

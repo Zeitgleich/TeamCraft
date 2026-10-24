@@ -52,6 +52,11 @@ class PushHandler(
     handled.update { it + 1 }
   }
 
+  /** A wake-up that could not be opened and must not show anything (it may have been a withdrawal). */
+  fun recordUnreadable() {
+    stats.recordUnreadable()
+  }
+
   private fun ring(conversationId: String, maybeCallId: String?, notification: PushNotification): IncomingRing {
     val displayName = notification.maybeConversationName?.takeIf { it.isNotBlank() }
       ?: notification.maybeSenderName?.takeIf { it.isNotBlank() }

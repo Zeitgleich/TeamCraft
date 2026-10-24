@@ -169,12 +169,14 @@ pub async fn push_preview<A: ServerApi>(
 }
 
 /// What this device's user lets notifications show (the app's privacy setting); [`push_preview`]
-/// applies the stricter of this and the workspace policy. Defaults to everything the policy allows.
+/// applies the stricter of this and the workspace policy. Never set: everything the policy allows.
+/// Fails closed: a record that can't be read shows nothing but "New message".
 pub fn device_push_content(store: &impl LocalStore) -> PushContentMode {
-  records::get_json::<PushContentMode>(store, Table::Account, DEVICE_PUSH_CONTENT_RECORD)
-    .ok()
-    .flatten()
-    .unwrap_or(PushContentMode::Full)
+  match records::get_json::<PushContentMode>(store, Table::Account, DEVICE_PUSH_CONTENT_RECORD) {
+    Ok(Some(mode)) => mode,
+    Ok(None) => PushContentMode::Full,
+    Err(_) => PushContentMode::Generic,
+  }
 }
 
 /// Stores this device's own notification privacy setting (see [`device_push_content`]).
@@ -469,6 +471,18 @@ mod tests {
       assert_eq!(generic.content, PreviewContent::Unavailable);
       assert!(generic.is_conversation_verified);
     }
+  }
+
+  #[test]
+  fn the_device_setting_defaults_to_full_and_fails_closed() {
+    let store = crate::store::MemoryStore::new();
+    assert_eq!(device_push_content(&store), PushContentMode::Full);
+    save_device_push_content(&store, &PushContentMode::Sender).unwrap();
+    assert_eq!(device_push_content(&store), PushContentMode::Sender);
+    store
+      .put(Table::Account, DEVICE_PUSH_CONTENT_RECORD, b"not json")
+      .unwrap();
+    assert_eq!(device_push_content(&store), PushContentMode::Generic);
   }
 
   #[test]

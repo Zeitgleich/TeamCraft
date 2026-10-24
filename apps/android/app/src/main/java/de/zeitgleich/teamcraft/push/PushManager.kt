@@ -118,6 +118,7 @@ class PushManager(
     if (isSigningOut) return
     val core = runCatching { core.core() }.getOrElse {
       Log.w(TAG, "wake-up while no account is open: ${it.javaClass.simpleName}")
+      if (isVisible && !isSigningOut) handler.handleUnreadable() else handler.recordUnreadable()
       return
     }
     runCatching {
@@ -130,7 +131,7 @@ class PushManager(
       .onSuccess { if (!isSigningOut) handler.handle(it) }
       .onFailure {
         Log.w(TAG, "wake-up could not be opened: ${it.javaClass.simpleName}")
-        if (isVisible && !isSigningOut) handler.handleUnreadable()
+        if (isVisible && !isSigningOut) handler.handleUnreadable() else handler.recordUnreadable()
       }
   }
 

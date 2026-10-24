@@ -57,6 +57,9 @@ const PUSH_PREVIEW_BUDGET: Duration = Duration::from_secs(7);
 /// The part of [`PUSH_PREVIEW_BUDGET`] for fetching and decrypting the message alone; the rest is
 /// for catching the conversation up if that fails.
 const PUSH_FETCH_BUDGET: Duration = Duration::from_secs(4);
+/// What must be left of [`PUSH_PREVIEW_BUDGET`] to start following the groups, which can't be cut
+/// short once begun.
+const PUSH_FOLLOW_MIN_LEFT: Duration = Duration::from_secs(2);
 /// Plaintext copies of files waiting to be uploaded, one folder per account below it.
 const UPLOAD_STAGING_DIR: &str = "outgoing";
 
@@ -119,6 +122,29 @@ struct PendingApproval {
 /// The app's [`TokenProvider`] as the core's token source.
 #[derive(Clone)]
 pub(crate) struct ForeignTokens(Arc<dyn TokenProvider>);
+
+/// [`CoreClient::catch_up_for_push`] within `deadline`, cutting only the cancel-safe steps short.
+/// Following the groups (welcomes, MLS) is never dropped halfway: it starts only with
+/// [`PUSH_FOLLOW_MIN_LEFT`] to spare and then runs to completion, bounded by its requests' own
+/// timeouts; a wake-up that outlasts the receiver's budget continues as expedited work.
+async fn catch_up_for_push(
+  client: &mut CoreClient,
+  conversation: ConversationId,
+  deadline: tokio::time::Instant,
+) -> Result<(), TeamCraftError> {
+  let timed_out = || TeamCraftError::Core("push catch-up timed out".into());
+  tokio::time::timeout_at(deadline, client.push_refresh_conversation(conversation))
+    .await
+    .map_err(|_| timed_out())??;
+  if deadline.saturating_duration_since(tokio::time::Instant::now()) < PUSH_FOLLOW_MIN_LEFT {
+    return Err(timed_out());
+  }
+  client.push_follow_groups(conversation).await?;
+  tokio::time::timeout_at(deadline, client.push_catch_up_messages(conversation))
+    .await
+    .map_err(|_| timed_out())??;
+  Ok(())
+}
 
 /// Starts the engine thread and waits until the store is open.
 pub(crate) fn spawn(
@@ -609,6 +635,7 @@ impl Engine {
     let api = self.api();
     // Without a token the preview still names conversation and sender.
     let maybe_api = self.tokens.0.access_token().map(|_| &api);
+    // Cancel-safe: the preview only reads the store.
     let fetched = tokio::time::timeout(
       PUSH_FETCH_BUDGET,
       push_preview(self.store.as_ref(), maybe_api, payload),
@@ -618,7 +645,13 @@ impl Engine {
       Ok(result) => result?,
       Err(_elapsed) => {
         let mut preview = push_preview::<Api>(self.store.as_ref(), None, payload).await?;
-        preview.maybe_gap = preview.maybe_gap.map(|_| PreviewGap::TimedOut);
+        // Only a missing message is the timeout's fault; a policy or setting cut stays as it is.
+        if matches!(
+          preview.maybe_gap,
+          Some(PreviewGap::NoSession | PreviewGap::NotDecrypted)
+        ) {
+          preview.maybe_gap = Some(PreviewGap::TimedOut);
+        }
         preview
       },
     };
@@ -629,10 +662,8 @@ impl Engine {
       && let ClientSlot::Idle(client) = &mut self.client
     {
       let conversation = preview.wake_up.conversation_id;
-      match tokio::time::timeout_at(deadline, client.catch_up_for_push(conversation)).await {
-        Ok(Ok(())) => {},
-        Ok(Err(error)) => tracing::debug!(%error, conversation_id = %conversation, "push catch-up failed"),
-        Err(_elapsed) => tracing::debug!(conversation_id = %conversation, "push catch-up timed out"),
+      if let Err(error) = catch_up_for_push(client, conversation, deadline).await {
+        tracing::debug!(%error, conversation_id = %conversation, "push catch-up stopped");
       }
       let caught_up = push_preview::<Api>(self.store.as_ref(), None, payload).await?;
       // The store-only preview names `NoSession` while the message is still missing: then the first
