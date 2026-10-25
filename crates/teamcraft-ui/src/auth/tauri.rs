@@ -15,6 +15,7 @@ use super::{
 };
 use teamcraft_client_api::os_notify::{NotificationTag, OsNotification, TagTarget};
 
+use crate::feedback::{ActionFailure, FailureKind, NotificationFailure};
 use crate::model::ConversationId;
 use crate::reactive::OwnerLiveness;
 
@@ -394,19 +395,21 @@ async fn server_call<T: for<'de> Deserialize<'de>>(
 /// registration where there is one, so buttons work and a click reaches the worker). A newer one with
 /// the same tag replaces it. Failures are logged, never shown.
 pub async fn show_notification(notification: &OsNotification) {
-  if let Err(error) = try_show_notification(notification).await {
-    tracing::debug!(%error, "could not show a notification");
+  if let Err(failure) = try_show_notification(notification).await {
+    tracing::debug!(detail = %failure.detail, "could not show a notification");
   }
 }
 
 /// [`show_notification`] for a caller that tells the user what happened (the test notification in
 /// the settings): why it could not be shown. The system may still hide a shown one (focus modes).
-pub async fn try_show_notification(notification: &OsNotification) -> Result<(), String> {
+pub async fn try_show_notification(notification: &OsNotification) -> Result<(), ActionFailure> {
   if !is_available() {
     return show_page_notification(notification).await;
   }
   let args = serde_json::json!({ "notification": notification });
-  call::<()>("notify_user", &args).await
+  call::<()>("notify_user", &args)
+    .await
+    .map_err(|error| ActionFailure::from_wire(&error))
 }
 
 /// Removes the notifications of conversations that were read (here or on another device).
@@ -817,20 +820,30 @@ thread_local! {
 /// service worker); without permission nothing is shown. Through the worker's registration when
 /// there is one: only those notifications have buttons, and their clicks reach the worker, which
 /// hands them back to an open page (`teamcraft_core::web_push`). Otherwise the page's own.
-async fn show_page_notification(notification: &OsNotification) -> Result<(), String> {
+async fn show_page_notification(notification: &OsNotification) -> Result<(), ActionFailure> {
   if notification_permission().as_deref() != Some("granted") {
-    return Err("notifications are not allowed in this browser".to_owned());
+    return Err(ActionFailure::new(
+      FailureKind::Notification(NotificationFailure::NotAllowed),
+      "notifications are not allowed in this browser",
+    ));
   }
   let options = page_notification_options(notification);
   if show_through_worker(&notification.title, &options).await {
     return Ok(());
   }
   let Some(constructor) = notification_constructor() else {
-    return Err("this browser has no notifications".to_owned());
+    return Err(ActionFailure::new(
+      FailureKind::Notification(NotificationFailure::Unsupported),
+      "this browser has no notifications",
+    ));
   };
   let args = js_sys::Array::of2(&JsValue::from_str(&notification.title), &options);
-  let shown = js_sys::Reflect::construct(&constructor, &args)
-    .map_err(|_| "the browser refused the notification".to_owned())?;
+  let shown = js_sys::Reflect::construct(&constructor, &args).map_err(|_| {
+    ActionFailure::new(
+      FailureKind::Notification(NotificationFailure::Refused),
+      "the browser refused the notification",
+    )
+  })?;
   let tag = notification.tag.as_str().to_owned();
   // async-ok: a thread-local, not a signal.
   PAGE_NOTIFICATIONS.with(|page| page.borrow_mut().insert(tag, shown));

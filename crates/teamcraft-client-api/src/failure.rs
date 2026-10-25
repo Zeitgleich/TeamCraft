@@ -14,6 +14,8 @@ const CALL_PREFIX: &str = "call_";
 /// Prefixes of a failure where something on the network answered instead of the server.
 const CAPTIVE_PORTAL_PREFIX: &str = "captive_portal";
 const UNTRUSTED_CERTIFICATE_PREFIX: &str = "untrusted_certificate";
+/// Prefix of a system notification that could not be shown on this device: `notification_<failure>`.
+const NOTIFICATION_PREFIX: &str = "notification_";
 
 /// What went wrong and the technical detail behind it, for the "Details" of an error message.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,8 +40,38 @@ pub enum FailureKind {
   /// The connection was refused over the certificate: usually a proxy that inspects encrypted
   /// traffic with a CA this device doesn't trust.
   UntrustedCertificate,
+  /// A system notification could not be shown on this device ([`NotificationFailure`]).
+  Notification(NotificationFailure),
   /// Anything else (local store, encryption, a stopped core).
   Other,
+}
+
+/// Why a system notification could not be shown, so the UI can say what to do about it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotificationFailure {
+  /// The browser or system doesn't allow notifications for this site or app.
+  NotAllowed,
+  /// This browser has no notifications at all.
+  Unsupported,
+  /// The browser or system refused to show it.
+  Refused,
+}
+
+impl NotificationFailure {
+  const ALL: [Self; 3] = [Self::NotAllowed, Self::Unsupported, Self::Refused];
+
+  /// Stable name on the wire, after [`NOTIFICATION_PREFIX`].
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::NotAllowed => "not_allowed",
+      Self::Unsupported => "unsupported",
+      Self::Refused => "refused",
+    }
+  }
+
+  fn from_wire(name: &str) -> Option<Self> {
+    Self::ALL.into_iter().find(|failure| failure.as_str() == name)
+  }
 }
 
 /// Why a call action failed on this device, so the UI can say what to do about it.
@@ -162,6 +194,12 @@ impl ActionFailure {
     if let Some(failure) = prefix.strip_prefix(CALL_PREFIX).and_then(CallFailure::from_wire) {
       return Self::new(FailureKind::Call(failure), detail);
     }
+    if let Some(failure) = prefix
+      .strip_prefix(NOTIFICATION_PREFIX)
+      .and_then(NotificationFailure::from_wire)
+    {
+      return Self::new(FailureKind::Notification(failure), detail);
+    }
     match ErrorCode::from(prefix.to_owned()) {
       ErrorCode::Unknown(_) => Self::other(text),
       code => Self::new(FailureKind::Server(code), detail),
@@ -174,6 +212,9 @@ impl ActionFailure {
       FailureKind::Server(code) => format!("{}: {}", code.as_str(), self.detail),
       FailureKind::Network => format!("{NETWORK_PREFIX}: {}", self.detail),
       FailureKind::Call(failure) => format!("{CALL_PREFIX}{}: {}", failure.as_str(), self.detail),
+      FailureKind::Notification(failure) => {
+        format!("{NOTIFICATION_PREFIX}{}: {}", failure.as_str(), self.detail)
+      },
       FailureKind::CaptivePortal => format!("{CAPTIVE_PORTAL_PREFIX}: {}", self.detail),
       FailureKind::UntrustedCertificate => format!("{UNTRUSTED_CERTIFICATE_PREFIX}: {}", self.detail),
       FailureKind::Other => self.detail.clone(),
@@ -214,6 +255,14 @@ mod tests {
       ActionFailure::new(FailureKind::Call(CallFailure::CameraDenied), "x").to_wire(),
       "call_camera_denied: x"
     );
+  }
+
+  #[test]
+  fn notification_failures_round_trip() {
+    for failure in NotificationFailure::ALL {
+      let failure = ActionFailure::new(FailureKind::Notification(failure), "browser: denied");
+      assert_eq!(ActionFailure::from_wire(&failure.to_wire()), failure);
+    }
   }
 
   #[test]
