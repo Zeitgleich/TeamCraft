@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "What the main window may call: the shell's own commands (listed in build.rs) and event subscriptions. No plugin commands: the webview never opens URLs, shows notifications or runs the updater itself.",
+  "description": "What the main window may call: the shell's own commands (listed in build.rs) and event subscriptions. No plugin commands: the webview opens links only through `open_external` (web and mail addresses), shows notifications or runs the updater itself.",
   "windows": [
     "main"
   ],
@@ -55,6 +55,7 @@
     "allow-call-unwatch-video",
     "allow-call-watch-camera",
     "allow-call-unwatch-camera",
+    "allow-open-external",
     "allow-notify-user",
     "allow-withdraw-notifications",
     "allow-request-attention",
