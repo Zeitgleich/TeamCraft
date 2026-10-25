@@ -439,6 +439,22 @@ impl ConversationGroup {
       .collect()
   }
 
+  /// One member device with its certificate verified against the pinned identity; `None` if it
+  /// isn't in the group. Other members' leaves aren't looked at, so one bad leaf doesn't keep
+  /// keys from reaching the device.
+  pub fn verified_member(
+    &self,
+    member: GroupMember,
+    directory: &impl IdentityDirectory,
+  ) -> Result<Option<VerifiedDevice>, MlsError> {
+    for leaf in self.group.members() {
+      if credential::member_of(&leaf.credential)? == member {
+        return credential::verify(&leaf.credential, &leaf.signature_key, directory).map(Some);
+      }
+    }
+    Ok(None)
+  }
+
   /// All member devices with their certificates verified against the pinned identities, e.g. to
   /// check the call key bindings of a conversation's call (e2ee.md §8). Unlike the certificates the
   /// server stores (provisional, from registration), these carry the final device ids.
@@ -1171,6 +1187,20 @@ impl StagedJoin {
       }
     }
     Ok(users)
+  }
+
+  /// The member whose commit made the welcome, as its leaf claims; [`Self::complete`] verifies
+  /// every leaf, this one included.
+  pub fn sender(&self) -> Result<GroupMember, MlsError> {
+    let sender_index = self.staged.welcome_sender_index();
+    for member in self.staged.members() {
+      if member.index == sender_index {
+        return credential::member_of(&member.credential);
+      }
+    }
+    Err(MlsError::UnexpectedMessage(
+      "the welcome's sender isn't in its group",
+    ))
   }
 
   /// Verifies every leaf against its user's pinned identity without joining yet: who is in the

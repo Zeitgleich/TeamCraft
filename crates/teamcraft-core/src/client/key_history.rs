@@ -30,6 +30,10 @@ struct KeyHistory {
   /// "user/device" → the epoch its current leaf was added in, for devices added while this
   /// device was in the group. A device added back keeps its entry: it was a member all along.
   member_since: BTreeMap<String, u64>,
+  /// User ID → the last epoch in which the user's last device left the group, while this device
+  /// was in it: a history share pending from before must not reach the user's devices (#403).
+  #[serde(default)]
+  user_left: BTreeMap<String, u64>,
   /// "user/device" → the epoch it was last added back in, while this device was in the group:
   /// its own record of keys starts there afresh (#389). Decides whether it may lack older keys,
   /// not what it may be sent.
@@ -54,6 +58,12 @@ impl HandOverKey {
 }
 
 impl KeyHistory {
+  /// Whether `user` stayed a member from `epoch` on, as far as a device that joined in `joined`
+  /// could see.
+  fn has_stayed(&self, user: &str, epoch: u64, joined: u64) -> bool {
+    epoch >= joined && self.user_left.get(user).is_none_or(|left| *left <= epoch)
+  }
+
   /// Whether `member`'s own record of keys starts after `joined` (this device's join): its leaf
   /// was added later, or it was added back later and started afresh (#389). It may then lack
   /// keys this device has.
@@ -140,11 +150,28 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       let key = member_key(*member)?;
       history.member_since.remove(&key);
       history.member_restarted.remove(&key);
+      if !after.iter().any(|other| other.user_id == member.user_id) {
+        let user = convert::user_from_crypto(member.user_id)?;
+        history.user_left.insert(user.to_string(), epoch);
+      }
     }
     if let Some(rejoined) = maybe_rejoined {
       history.member_restarted.insert(member_key(rejoined)?, epoch);
     }
     self.put_key_history(conversation, &history)
+  }
+
+  /// Whether this device saw `user` stay in the group since `epoch`: it was in the group itself
+  /// then, and the user's last device didn't leave since.
+  pub(crate) fn stayed_member_since(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+    epoch: u64,
+  ) -> Result<bool, CoreError> {
+    let joined = self.group_or_error(conversation)?.joined_epoch();
+    let history = self.key_history(conversation)?;
+    Ok(history.has_stayed(&user.to_string(), epoch, joined))
   }
 
   /// Starts the record afresh for a group this device just joined.
@@ -172,7 +199,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .map(|ring| ring.keys())
       .unwrap_or_default();
     let keys = history.entitled_keys(ring_keys, joined, &device_key, self.settings.max_missed_keys);
-    Ok(ContentKeyBundle::missed_keys(
+    Ok(ContentKeyBundle::without_current(
       convert::conversation(conversation),
       keys,
     ))
@@ -428,6 +455,23 @@ mod tests {
       ids(&[keys[4].duplicate(), keys[3].duplicate()])
     );
     assert!(history.entitled_keys(&keys, 0, DEVICE, 0).is_empty());
+  }
+
+  #[test]
+  fn a_history_share_is_valid_only_while_its_user_stayed() {
+    let mut history = KeyHistory::default();
+    assert!(history.has_stayed("9", 5, 0));
+    assert!(
+      !history.has_stayed("9", 5, 6),
+      "added before this device joined: can't tell"
+    );
+    history.user_left.insert("9".into(), 7);
+    assert!(
+      !history.has_stayed("9", 5, 0),
+      "left in epoch 7 after the addition in 5"
+    );
+    assert!(history.has_stayed("9", 8, 0), "a later addition");
+    assert!(history.has_stayed("3", 5, 0), "another user");
   }
 
   #[test]

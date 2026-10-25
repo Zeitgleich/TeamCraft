@@ -919,7 +919,7 @@ mod sealed_keys {
   }
 
   fn missed_keys_of(ring: &ContentKeyRing) -> ContentKeyBundle {
-    ContentKeyBundle::missed_keys(
+    ContentKeyBundle::without_current(
       CONVERSATION,
       ring.keys().iter().map(ContentKey::duplicate).collect(),
     )
@@ -935,6 +935,44 @@ mod sealed_keys {
   fn key_ids(keys: &[ContentKey]) -> Vec<crate::content_key::ContentKeyId> {
     keys.iter().map(ContentKey::id).collect()
   }
+}
+
+#[test]
+fn one_member_is_verified_alone_and_a_welcome_names_its_maker() {
+  let mut world = World::new();
+  let carol = world
+    .alice_group
+    .verified_member(member(&world.carol.user), &world.directory)
+    .unwrap()
+    .unwrap();
+  assert_eq!(GroupMember::from(&carol), member(&world.carol.user));
+  assert!(
+    world
+      .alice_group
+      .verified_member(member(&world.dave.user), &world.directory)
+      .unwrap()
+      .is_none(),
+    "not in the group"
+  );
+  // Carol's identity isn't pinned: only her leaf fails, Alice's still verifies.
+  let without_carol = TestDirectory::with(&[&world.alice.user]);
+  assert!(
+    world
+      .alice_group
+      .verified_member(member(&world.carol.user), &without_carol)
+      .is_err()
+  );
+  assert!(
+    world
+      .alice_group
+      .verified_member(member(&world.alice.user), &without_carol)
+      .unwrap()
+      .is_some()
+  );
+
+  let welcome = world.welcome_for_bob();
+  let staged = ConversationGroup::stage_join(&world.bob.provider, &welcome, CONVERSATION).unwrap();
+  assert_eq!(staged.sender().unwrap(), member(&world.alice.user));
 }
 
 /// Alice (admin) and Carol share a group; Bob and Dave are pinned but not members.
