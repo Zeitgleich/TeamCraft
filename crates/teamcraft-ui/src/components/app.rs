@@ -918,6 +918,7 @@ fn connect_calls(state: AppState) {
       CallEvent::Decline(conversation) => backend.decline_call(conversation),
       CallEvent::Muted(is_muted) => backend.set_call_muted(is_muted),
       CallEvent::Deafened(is_deafened) => backend.set_call_deafened(is_deafened),
+      CallEvent::MoveHere => backend.move_call_here(),
       CallEvent::Microphone(device) => backend.select_microphone(Some(device)),
       CallEvent::Speakers(device) => backend.select_speakers(Some(device)),
       CallEvent::TestSpeakers(device) => backend.test_speakers(Some(device)),

@@ -284,6 +284,7 @@ enum Input {
 enum Command {
   Mute(bool),
   Deafen(bool),
+  MoveHere,
   SwitchAudio {
     source: AudioSource,
     sink: AudioSink,
@@ -437,6 +438,11 @@ impl WebCall {
     let _ = self
       .inputs
       .unbounded_send(Input::Command(Command::Deafen(is_deafened)));
+  }
+
+  /// Takes the call over from the account's other devices.
+  pub fn move_here(&self) {
+    let _ = self.inputs.unbounded_send(Input::Command(Command::MoveHere));
   }
 
   /// Switches microphone and speakers (or test signals) mid-call. On error the previous ones keep
@@ -1144,6 +1150,7 @@ impl CallState<'_> {
         self.is_muted = is_muted;
         self.encoder.pending.clear();
       },
+      Command::MoveHere => engine.move_here(),
       Command::Deafen(is_deafened) => {
         engine.set_deafened(is_deafened);
         self.is_deafened = is_deafened;

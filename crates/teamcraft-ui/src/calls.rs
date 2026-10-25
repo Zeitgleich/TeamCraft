@@ -32,6 +32,8 @@ pub enum CallEvent {
   Decline(ConversationId),
   Muted(bool),
   Deafened(bool),
+  /// Takes the call over from the account's other devices, which leave it.
+  MoveHere,
   Microphone(String),
   Speakers(String),
   /// Plays the test sound on these speakers (an empty id: the default).
@@ -181,6 +183,20 @@ impl CallState {
   pub fn join(&self, request: CallRequest) {
     self.maybe_request.set(Some(request));
     self.enter();
+  }
+
+  /// The account is in this call on another device: joins next to it with the microphone muted,
+  /// so the two don't echo each other.
+  pub fn join_alongside(&self, request: CallRequest) {
+    self.is_mic_on.set(false);
+    self.join(request);
+  }
+
+  /// The account is in this call on another device: joins and takes the call over, so the other
+  /// device leaves.
+  pub fn join_and_take_over(&self, request: CallRequest) {
+    self.join(request);
+    self.emit(CallEvent::MoveHere);
   }
 
   /// Leaves the pre-join screen and enters the call.

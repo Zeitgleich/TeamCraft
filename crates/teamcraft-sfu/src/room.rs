@@ -446,6 +446,10 @@ impl Room {
         participant_id,
         self.subscribe(participant_id, stream_id, maybe_max_layer, now),
       ),
+      CallClientMessage::MoveHere => {
+        self.close_other_devices_of(participant_id);
+        Ok(())
+      },
       CallClientMessage::Unknown => {
         debug!(participant_id = %participant_id, "ignoring unknown message");
         Ok(())
@@ -703,6 +707,39 @@ impl Room {
       .map(|(device_id, _)| *device_id)
       .collect();
     self.close(&mut state, &devices, event);
+  }
+
+  /// The account's other devices leave for `device_id` (the call moves there). Reconnecting
+  /// ones lose their slot at once; the DAVE group removes them like any leaver.
+  fn close_other_devices_of(&self, device_id: DeviceId) {
+    let mut state = lock(&self.state);
+    let Some(user_id) = state
+      .participants
+      .get(&device_id)
+      .map(|participant| participant.user_id)
+    else {
+      return;
+    };
+    let devices: Vec<DeviceId> = state
+      .participants
+      .iter()
+      .filter(|(other, participant)| **other != device_id && participant.user_id == user_id)
+      .map(|(other, _)| *other)
+      .collect();
+    let mut handles = Vec::new();
+    for other in &devices {
+      match state.handle_of(*other) {
+        Some(handle) => handles.push(handle.clone()),
+        None => state.remove(self.call_id, *other, Instant::now()),
+      }
+    }
+    info!(call_id = %self.call_id, device_id = %device_id, moved = devices.len(), "call moved to a device");
+    close_after_event(
+      handles,
+      CallEvent::ConnectionReplaced,
+      REPLACED_BY_NEW_CONNECTION,
+      b"call moved to another device",
+    );
   }
 
   fn connected_handles(&self) -> Vec<ParticipantHandle> {

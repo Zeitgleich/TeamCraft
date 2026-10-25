@@ -411,6 +411,16 @@ call ("connection lost"). Refused joins, removal or end by the host and `connect
 final: they are never answered with a rejoin. A locked meeting still lets a device of its roster
 back in.
 
+**Several devices of one account.** A call's participants are devices, not users: the SFU's slots,
+the server's roster and the DAVE group (one leaf per device, e2ee.md §8) are keyed by device, so a
+phone can join while the laptop is in the call and leaving on one keeps the other in. Each device
+has its own key package and call key binding, so no media key is shared between devices. A device
+doesn't play the microphone of another device of its own account (the user is in the room with
+it; playing it would echo), and a second device joins muted by default ("Join here too"). "Move
+call here" joins and then sends `move_here`: the SFU closes the account's *other* devices in that
+call with `connection_replaced`, which they treat as a final leave; it never touches another
+user's device. The server's ringing already stops for everybody once any device of a callee joins.
+
 Rejoin attempts back off exponentially (250 ms doubling to 2 s) with jitter (each pause between
 half and all of its interval), so clients that lost the SFU together don't come back in lockstep.
 

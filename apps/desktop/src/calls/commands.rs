@@ -199,6 +199,7 @@ pub async fn call_action(
     CallAction::Decline { conversation } => calls.decline(conversation),
     CallAction::SetMuted { is_muted } => calls.set_muted(is_muted).await,
     CallAction::SetDeafened { is_deafened } => calls.set_deafened(is_deafened).await,
+    CallAction::MoveHere => calls.move_here().await,
     CallAction::SelectMicrophone { maybe_device } => calls.select_microphone(maybe_device).await?,
     CallAction::SelectSpeakers { maybe_device } => calls.select_speakers(maybe_device).await?,
     CallAction::SetCamera { is_on } => {

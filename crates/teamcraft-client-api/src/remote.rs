@@ -79,6 +79,8 @@ pub enum CallAction {
   SetDeafened {
     is_deafened: bool,
   },
+  /// Takes the call over from the account's other devices, which leave it (#505).
+  MoveHere,
   /// `None` follows the system default.
   SelectMicrophone {
     #[serde(default)]
