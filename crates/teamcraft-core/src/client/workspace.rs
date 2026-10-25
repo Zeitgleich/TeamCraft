@@ -698,7 +698,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// From the last presence the gateway reported; this device's own user counts as online.
-  fn is_probably_online(&self, user: UserId) -> Result<bool, CoreError> {
+  pub(crate) fn is_probably_online(&self, user: UserId) -> Result<bool, CoreError> {
     if user == self.account.user_id {
       return Ok(true);
     }
@@ -1034,7 +1034,7 @@ fn change_id_hex(bytes: &[u8]) -> String {
 /// This device's position among the group's devices for committing `new_device`: devices of online
 /// users first, then by ID XOR the new device's ID, so the same member isn't always first. Every
 /// member computes the same order from the same group and presence.
-fn commit_rank(candidates: &[(DeviceId, bool)], own: DeviceId, new_device: DeviceId) -> u32 {
+pub(crate) fn commit_rank(candidates: &[(DeviceId, bool)], own: DeviceId, new_device: DeviceId) -> u32 {
   let order = |device: DeviceId, is_online: bool| {
     (
       !is_online,
