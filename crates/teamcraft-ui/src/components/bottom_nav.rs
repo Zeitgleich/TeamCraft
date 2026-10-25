@@ -8,6 +8,7 @@ use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::count_badge::{BadgeTone, CountBadge};
 use crate::components::icons::{Icon, IconName};
 use crate::components::rail::activity_tone;
+use crate::components::sliding_indicator::SlidingIndicator;
 use crate::i18n::use_i18n;
 use crate::sections::badge_count;
 use crate::state::{AppState, MainView, Overlay, RailEntry, use_app_state};
@@ -49,6 +50,7 @@ pub fn BottomNav() -> impl IntoView {
 
   view! {
     <nav class="bottom-nav" aria-label=move || i18n.t("bottom-nav-label")>
+      <SlidingIndicator maybe_target=".bottom-nav-icon" />
       <NavTab
         label_key="rail-home"
         is_current=is_home

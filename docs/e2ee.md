@@ -565,7 +565,8 @@ its own. See [admin.md](admin.md) §2.
   both its own join and the device's addition, newest first, at most `max_missed_keys` (client, 512).
   Keys from the user's key bag or sealed to it have no epoch and are never sent on. A member that
   joined after the device fell out lacks the keys before its join; so when a member added back a
-  device and the committer joined after this member (it saw the committer's leaf added), this member
+  device and the committer joined after this member (it saw the committer's leaf added, or the
+  committer added back, which starts its own record afresh), this member
   sends its own keys too, ranked like an addition, unless a member that joined no later than itself
   sent them first. Clients before this version ignore the sealed bundles.
 - Commits with other proposal types (PSK, re-init, external init, group context changes), from

@@ -667,8 +667,11 @@ select.input {
   margin-top: var(--space-2);
 }
 
-/* Underlined tabs of a view (Activity, a conversation's Messages and Files). */
+/* Underlined tabs of a view (Activity, a conversation's Messages and Files). The underline is the
+   list's sliding `.tab-indicator` (see "Motion"). */
 .view-tabs {
+  position: relative;
+  isolation: isolate;
   display: flex;
   gap: var(--space-1);
   padding: 0 var(--space-4);
@@ -696,17 +699,6 @@ select.input {
 
 .view-tabs [role="tab"][aria-selected="true"] {
   color: var(--accent-strong);
-}
-
-.view-tabs [role="tab"][aria-selected="true"]::after {
-  content: "";
-  position: absolute;
-  left: var(--space-2);
-  right: var(--space-2);
-  bottom: -1px;
-  height: 2px;
-  border-radius: 2px 2px 0 0;
-  background: var(--accent);
 }
 
 .panel-header:has(+ .view-tabs) {
@@ -2733,6 +2725,8 @@ ol.md-list {
 }
 
 .segmented {
+  position: relative;
+  isolation: isolate;
   display: inline-flex;
   padding: 2px;
   border-radius: var(--radius-sm);
@@ -2751,9 +2745,7 @@ ol.md-list {
 }
 
 .segmented button[aria-pressed="true"] {
-  background: var(--surface);
   color: var(--text);
-  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.15);
 }
 
 .thread-card {
@@ -7903,9 +7895,33 @@ ol.md-list {
   }
 }
 
-/* Toasts rise in and sink back out the same way; banners settle in from above. */
+/* Toasts rise in and sink back out the same way; banners settle in from above. The others glide
+   to their new places when one comes or goes (`translate`, played from src/toast_motion.rs), and
+   on touch a toast follows the finger and is swiped away. */
 .toast {
   animation: motion-toast-in var(--dur-base) var(--ease-emphasized);
+  transition:
+    translate var(--dur-base) var(--ease-standard),
+    transform var(--dur-base) var(--ease-standard),
+    opacity var(--dur-base) var(--ease-standard);
+}
+
+.toast.is-flipping,
+.toast.is-dragging {
+  transition: none;
+}
+
+.toast.is-swiped {
+  transition:
+    transform var(--dur-exit) var(--ease-exit),
+    opacity var(--dur-exit) var(--ease-exit);
+  pointer-events: none;
+}
+
+@media (pointer: coarse) {
+  .toast {
+    touch-action: pan-y;
+  }
 }
 
 .motion-ghost.is-leaving.toast {
@@ -7939,7 +7955,8 @@ ol.md-list {
 }
 
 /* Sidebar sections: the chevron turns, the rows of a section the user opens slide down into place
-   (`.is-opening` only follows a click, not a re-render). */
+   and slide back up when they close it (`.is-opening`/`.is-closing` only follow a click, not a
+   re-render; the list is hidden once the exit played). */
 .sb-section-head .chevron,
 .sb-space-head .chevron {
   transition: transform var(--dur-base) var(--ease-emphasized);
@@ -7952,6 +7969,19 @@ ol.md-list {
 
 @keyframes motion-section-open {
   from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+
+.sb-section ul.is-closing {
+  animation: motion-section-close var(--dur-exit) var(--ease-exit) forwards;
+  transform-origin: top;
+  pointer-events: none;
+}
+
+@keyframes motion-section-close {
+  to {
     opacity: 0;
     transform: translateY(-6px);
   }
@@ -8021,10 +8051,51 @@ ol.md-list {
   }
 }
 
-/* Tabs and segmented controls: the selected one's surface fades in. */
-.segmented button[aria-pressed="true"],
-.view-tabs [role="tab"][aria-selected="true"]::after {
-  animation: motion-fade-in var(--dur-fast) var(--ease-standard);
+/* Selection indicators: one per tab list, segmented control and the bottom navigation, sliding
+   from the old item to the new one (src/components/sliding_indicator.rs sets the variables).
+   It is laid out once at the selected item's width and only translates and scales after that. */
+.tab-indicator {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: -1;
+  width: var(--indicator-base-w, 0px);
+  height: var(--indicator-h, 0px);
+  transform: translate(var(--indicator-x, 0px), var(--indicator-y, 0px)) scaleX(var(--indicator-sx, 1));
+  transform-origin: 0 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.tab-indicator.has-selection {
+  opacity: 1;
+}
+
+.tab-indicator.is-live {
+  transition:
+    transform var(--dur-base) var(--ease-standard),
+    opacity var(--dur-fast) var(--ease-standard);
+}
+
+.view-tabs > .tab-indicator {
+  top: auto;
+  bottom: -1px;
+  z-index: 1;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--accent);
+  transform: translateX(var(--indicator-x, 0px)) scaleX(var(--indicator-sx, 1));
+}
+
+.segmented > .tab-indicator {
+  border-radius: var(--radius-xs);
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.15);
+}
+
+.bottom-nav > .tab-indicator {
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.14);
 }
 
 /* Reduced motion (#360): every entrance and exit becomes a plain fade on the shortened tokens;
@@ -8044,6 +8115,20 @@ ol.md-list {
   .sb-section ul.is-opening,
   .action-sheet {
     animation-name: motion-fade-in;
+  }
+
+  .sb-section ul.is-closing {
+    animation-name: motion-fade-out;
+  }
+
+  /* Indicators jump; toasts fade but don't glide or fly (a swipe still follows the finger). */
+  .tab-indicator.is-live {
+    transition: none;
+  }
+
+  .toast,
+  .toast.is-swiped {
+    transition: opacity var(--dur-exit) var(--ease-exit);
   }
 
   .motion-ghost.is-leaving,
@@ -8224,6 +8309,8 @@ ol.md-list {
 
 /* The bottom navigation: four tabs, each a full-height touch target. */
 :root[data-layout="compact"] .bottom-nav {
+  position: relative;
+  isolation: isolate;
   display: flex;
   padding-bottom: env(safe-area-inset-bottom);
   border-top: 1px solid rgba(255, 255, 255, 0.08);
@@ -8255,15 +8342,10 @@ ol.md-list {
   width: 56px;
   height: 30px;
   border-radius: var(--radius-pill);
-  transition: background-color var(--dur-fast) var(--ease-standard);
 }
 
 .bottom-nav-tab.current {
   color: var(--chrome-strong);
-}
-
-.bottom-nav-tab.current .bottom-nav-icon {
-  background: rgba(255, 255, 255, 0.14);
 }
 
 .bottom-nav-label {

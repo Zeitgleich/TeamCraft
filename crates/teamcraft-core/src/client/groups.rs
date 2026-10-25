@@ -969,7 +969,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           // Somebody answered that device's request already.
           self.note_device_readded(conversation, device, at_ms)?;
         }
-        self.note_member_changes(conversation, &before)?;
+        self.note_member_changes(conversation, &before, update.maybe_rejoined)?;
         if let (Some(rejoined), Some(committer)) = (update.maybe_rejoined, update.maybe_committer) {
           self.follow_up_rejoin(conversation, rejoined, committer)?;
         }
@@ -1314,7 +1314,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let before = group.members()?;
     let update = group.confirm_commit(&self.provider)?;
     let after = group.members()?;
-    self.note_member_changes(conversation, &before)?;
+    self.note_member_changes(conversation, &before, update.maybe_rejoined)?;
     if update.maybe_change.is_none() && update.maybe_rejoined.is_none() {
       // This device's own addition of further devices of members: they wait for a current key
       // like any (#178); this device takes its turn with the others.
