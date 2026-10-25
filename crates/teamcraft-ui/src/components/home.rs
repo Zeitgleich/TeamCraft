@@ -1,7 +1,6 @@
-//! Home. DMs and group DMs live outside spaces (PLAN.md, ARCHITECTURE.md:
+//! Chats (the rail's first entry). DMs and group DMs live outside spaces (PLAN.md, ARCHITECTURE.md:
 //! `conversations.space_id` is null for them), so they get their own entry on the space rail and
-//! their own sidebar, as in Element or Discord: newest first, with filter chips and "new message".
-//! Finding a DM by name is the top bar's search.
+//! their own sidebar, as in Element or Discord: newest first, with a text filter, filter chips and "new message".
 
 use leptos::prelude::*;
 
@@ -29,20 +28,21 @@ pub fn HomeSidebar() -> impl IntoView {
   let show_all = RwSignal::new(false);
   let show_options = RwSignal::new(false);
   let chip = RwSignal::new(HomeFilter::All);
+  let query = RwSignal::new(String::new());
   let list = Memo::new(move |_| {
     let (sort, limit) = state
       .settings
       .prefs
       .with(|prefs| (prefs.sidebar.dm_sort, prefs.sidebar.dm_limit as usize));
     let limit = if show_all.get() { 0 } else { limit };
-    build_direct(state.direct_entries(), sort, limit, "", chip.get())
+    build_direct(state.direct_entries(), sort, limit, &query.get(), chip.get())
   });
   let has_any = Memo::new(move |_| state.read(|backend| !backend.direct_conversations().is_empty()));
 
   view! {
-    <nav class="sidebar dm-sidebar" aria-label=move || i18n.t("home-title")>
+    <nav class="sidebar dm-sidebar" aria-label=move || i18n.t("chats-title")>
       <div class="sidebar-head">
-        <h2 class="space-name">{move || i18n.t("home-title")}</h2>
+        <h2 class="space-name">{move || i18n.t("chats-title")}</h2>
         <button
           class="icon-btn"
           aria-label=move || i18n.t("dm-options")
@@ -66,6 +66,25 @@ pub fn HomeSidebar() -> impl IntoView {
         <DirectOptions />
       </Show>
       <GlobalEntries />
+      <div class="chats-filter">
+        <label class="visually-hidden" for="chats-filter">{move || i18n.t("chats-filter")}</label>
+        <input
+          id="chats-filter"
+          class="input"
+          type="search"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder=move || i18n.t("chats-filter")
+          prop:value=move || query.get()
+          on:input=move |ev| query.set(event_target_value(&ev))
+          on:keydown=move |ev| {
+            if ev.key() == "Escape" && !query.with_untracked(String::is_empty) {
+              ev.stop_propagation();
+              query.set(String::new());
+            }
+          }
+        />
+      </div>
       <div class="home-chips" role="group" aria-label=move || i18n.t("home-filters")>
         {HomeFilter::CHIPS
           .into_iter()
@@ -316,8 +335,8 @@ pub fn HomeStart() -> impl IntoView {
   let i18n = use_i18n();
   view! {
     <section class="dm-home" aria-labelledby="dm-home-title">
-      <Icon name=IconName::Home class="dm-home-icon" />
-      <h1 id="dm-home-title">{move || i18n.t("home-title")}</h1>
+      <Icon name=IconName::Chat class="dm-home-icon" />
+      <h1 id="dm-home-title">{move || i18n.t("chats-title")}</h1>
       <p>{move || i18n.t("dm-home-hint")}</p>
       <button class="btn btn-primary" on:click=move |_| state.overlay.set(Overlay::NewMessage)>
         {move || i18n.t("dm-new")}

@@ -26,7 +26,7 @@ pub fn SpaceRail() -> impl IntoView {
   view! {
     <nav class="space-rail" aria-label=move || i18n.t("rail-label")>
       <div class="rail-destinations">
-        <HomeButton />
+        <ChatsButton />
         <ActivityButton />
         <ThreadsButton />
       </div>
@@ -58,9 +58,9 @@ pub fn SpaceRail() -> impl IntoView {
   }
 }
 
-/// Home (the DMs), with the number of unread DMs and mentions in them.
+/// Chats (the DMs and group DMs), with the number of unread DMs and mentions in them.
 #[component]
-fn HomeButton() -> impl IntoView {
+fn ChatsButton() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let count = Memo::new(move |_| {
@@ -68,19 +68,19 @@ fn HomeButton() -> impl IntoView {
     badge_count(&list)
   });
   let is_current =
-    Signal::derive(move || state.rail.get() == RailEntry::Home && !is_destination_view(state.view.get()));
+    Signal::derive(move || state.rail.get() == RailEntry::Chats && !is_destination_view(state.view.get()));
   let label = Signal::derive(move || match count.get() {
-    0 => i18n.t("home-title"),
-    unread => i18n.t_with("rail-home-unread", &[("count", &unread.to_string())]),
+    0 => i18n.t("chats-title"),
+    unread => i18n.t_with("rail-chats-unread", &[("count", &unread.to_string())]),
   });
   view! {
     <RailDestination
-      icon=IconName::Home
-      label_key="rail-home"
+      icon=IconName::Chat
+      label_key="rail-chats"
       accessible_label=label
       is_current=is_current
       count=Signal::derive(move || count.get())
-      on_open=Callback::new(move |()| state.open_home())
+      on_open=Callback::new(move |()| state.open_chats())
     />
   }
 }
