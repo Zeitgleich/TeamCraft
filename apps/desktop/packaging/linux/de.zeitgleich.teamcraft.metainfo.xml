@@ -35,6 +35,11 @@
     <display_length compare="ge">720</display_length>
   </requires>
   <releases>
+    <release version="1.0.3" date="2026-10-25" type="stable">
+      <description>
+        <p>Fixes a memory leak, adds calls in the browser and real video in desktop calls, reworked settings, smoother motion and phone layout, text size, new logo, a faster web app that loads in parts, more robust networking, calls and local storage.</p>
+      </description>
+    </release>
     <release version="1.0.2" date="2026-10-25" type="stable">
       <description>
         <p>Fixes the Linux desktop app not starting, mobile web layout, richer composer, spaces and invitations, image crop and formats, never-silent errors, faster web app.</p>
