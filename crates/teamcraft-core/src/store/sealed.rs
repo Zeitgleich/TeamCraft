@@ -29,6 +29,11 @@ pub struct SealedStore<B> {
 pub trait RecordBackend {
   fn put_record(&self, id: &LookupId, sealed: &[u8]) -> Result<(), StoreError>;
   fn delete_record(&self, id: &LookupId) -> Result<(), StoreError>;
+
+  /// See [`LocalStore::purge_freed`]; backends without such files do nothing.
+  fn purge_freed(&self) -> Result<(), StoreError> {
+    Ok(())
+  }
 }
 
 /// What a sealed record holds: the plaintext name next to the value, so loading can rebuild the
@@ -189,6 +194,10 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
         .delete_record(&self.message_id(conversation, message.client_message_id))?;
     }
     self.cache.delete_messages(conversation)
+  }
+
+  fn purge_freed(&self) -> Result<(), StoreError> {
+    self.backend.purge_freed()
   }
 }
 

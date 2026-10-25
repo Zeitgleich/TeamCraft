@@ -36,6 +36,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// messages (the conversation the user looks at first, several at once, issue #247), then the
   /// outbox, key packages and the key bag.
   pub async fn full_sync(&mut self) -> Result<(), CoreError> {
+    // Welcomes may have come in while this device was away: no spent key package goes before they
+    // are read again (issue #395).
+    self.are_welcomes_synced = false;
     // Removal records of the user's devices count before anything is decrypted, and this device's
     // own (also from older versions) reach the others.
     self.apply_shared_removals()?;
@@ -68,8 +71,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self
       .catch_up_conversations(&ids, &members_order(&conversations))
       .await?;
-    // With the queues read, the newest server time is known (issue #186).
+    // With the queues read, the newest server time is known (issues #186, #391).
     self.prune_removed_senders()?;
+    self.prune_readded_records()?;
     self.refresh_read_state().await?;
     self.refresh_notification_settings().await?;
     // A `device_add` missed while offline beyond the resume window would leave them waiting.
@@ -243,13 +247,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// has passed since the last check (the runner calls this on its ticks), so packages are renewed
   /// on a long-running device too, not only after a full sync. Returns whether it checked.
   ///
+  /// The welcomes are read first: the tick may come right after the device woke from a long sleep,
+  /// before the gateway noticed, and a welcome that came meanwhile may wait for a package the
+  /// cleanup would delete (issue #395). One request per check. A welcome sync that fails doesn't
+  /// stop the renewal (the device must stay addable, and the check must not repeat on every tick);
+  /// it only leaves the cleanup for later. Re-add records past their cooldown go too, for a device
+  /// that only ever resumes its gateway session (issue #391).
+  ///
   /// [`ClientSettings::key_package_check_interval`]: super::ClientSettings::key_package_check_interval
   pub async fn renew_key_packages_if_due(&mut self) -> Result<bool, CoreError> {
     let interval_ms = i64::try_from(self.settings.key_package_check_interval.as_millis()).unwrap_or(i64::MAX);
     if self.now_ms().saturating_sub(self.last_key_package_check_ms) < interval_ms {
       return Ok(false);
     }
+    if let Err(error) = self.sync_welcomes().await {
+      tracing::warn!(%error, "could not read the welcomes before the key package check");
+    }
     self.top_up_key_packages().await?;
+    self.prune_readded_records()?;
     Ok(true)
   }
 

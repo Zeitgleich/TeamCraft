@@ -210,8 +210,10 @@ pub struct Client<A, S> {
   /// When this device last handled a further device's request to be added, per conversation and
   /// device: repeats within `rejoin_retry` cost no requests (issue #187).
   device_add_requests_handled: HashMap<(ConversationId, teamcraft_proto::DeviceId), i64>,
-  /// Whether this session read all welcomes once: only then may spent key packages go, so a
-  /// welcome that waited for one is opened first (e2ee.md §4.3.1).
+  /// Whether all welcomes were read since the last reset: only then may spent key packages go, so a
+  /// welcome that waited for one is opened first (e2ee.md §4.3.1). Reset when a gateway connection
+  /// starts (fresh or resumed), when a full sync starts and when a welcome sync starts; set when a
+  /// welcome sync read the last page.
   are_welcomes_synced: bool,
   /// When people waiting for a first device were last checked after a full sync
   /// ([`Client::recheck_waiting_additions`]).
