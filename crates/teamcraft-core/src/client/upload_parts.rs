@@ -356,11 +356,10 @@ async fn next_part(
   } else {
     Vec::new()
   };
-  ciphertext.extend(
-    encryptor
-      .encrypt_segment(first_chunk, &plaintext, is_last)
-      .map_err(|_| local_failure())?,
-  );
+  encryptor
+    .encrypt_segment_into(first_chunk, &plaintext, is_last, &mut ciphertext)
+    .map_err(|_| local_failure())?;
+  drop(plaintext);
   let mut hasher = CiphertextHasher::from_state(parts.hash_state.as_slice()).map_err(|_| local_failure())?;
   hasher.update(&ciphertext);
   Ok(PartStep::Part {

@@ -298,6 +298,20 @@ impl AttachmentSegmentEncryptor {
     plaintext: &[u8],
     is_final: bool,
   ) -> Result<Vec<u8>, AttachmentError> {
+    let mut ciphertext = Vec::new();
+    self.encrypt_segment_into(first_chunk, plaintext, is_final, &mut ciphertext)?;
+    Ok(ciphertext)
+  }
+
+  /// [`Self::encrypt_segment`], appending to `ciphertext` (after the header, say) instead of
+  /// allocating another buffer of the segment's size.
+  pub fn encrypt_segment_into(
+    &self,
+    first_chunk: u32,
+    plaintext: &[u8],
+    is_final: bool,
+    ciphertext: &mut Vec<u8>,
+  ) -> Result<(), AttachmentError> {
     let chunk_len = self.chunk_size;
     let (body, maybe_last) = if is_final {
       let full_chunks = plaintext.len().saturating_sub(1) / chunk_len;
@@ -313,7 +327,7 @@ impl AttachmentSegmentEncryptor {
       (plaintext, None)
     };
     let tags = body.len() / chunk_len + usize::from(maybe_last.is_some());
-    let mut ciphertext = Vec::with_capacity(plaintext.len() + tags * TAG_LEN);
+    ciphertext.reserve(plaintext.len() + tags * TAG_LEN);
     let mut position = first_chunk;
     for chunk in body.chunks(chunk_len) {
       ciphertext.extend_from_slice(&self.encrypt_at(position, false, chunk)?);
@@ -322,7 +336,7 @@ impl AttachmentSegmentEncryptor {
     if let Some(last) = maybe_last {
       ciphertext.extend_from_slice(&self.encrypt_at(position, true, last)?);
     }
-    Ok(ciphertext)
+    Ok(())
   }
 
   fn encrypt_at(&self, position: u32, is_last: bool, chunk: &[u8]) -> Result<Vec<u8>, AttachmentError> {

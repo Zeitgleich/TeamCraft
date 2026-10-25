@@ -168,6 +168,9 @@ tokio-rustls = { version = "0.26.6", default-features = false }
 # tree through teamcraft-crypto).
 p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "std"] }
 base64 = "0.23.1"
+# Peak heap use in the large-upload memory test (tests/upload_memory.rs): a counting global
+# allocator needs `unsafe`, which the workspace forbids in our own code.
+peak_alloc = "0.3.0"
 
 # The desktop build's zbus features, so the keystore tests see the same Secret Service backend: with
 # `tokio`, zbus' blocking API nests a tokio runtime (store/key_source.rs). Already in the tree
