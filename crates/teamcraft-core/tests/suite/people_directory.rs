@@ -9,6 +9,35 @@ use std::time::Duration;
 use common::{Peer, settle};
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::client::{UserAddWait, pending_user_additions};
+use teamcraft_core::records;
+use teamcraft_core::store::Table;
+use teamcraft_proto::{UserKind, UserSummary};
+
+#[tokio::test]
+async fn addresses_kept_from_earlier_answers_go_when_the_policy_does_not_show_them() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let bob_id = server.add_user("Bob").user_id();
+  // Bob's address from a time the directory policy showed it.
+  let bob = UserSummary {
+    id: bob_id,
+    maybe_username: Some("bob".into()),
+    display_name: "Bob".into(),
+    kind: UserKind::Member,
+    maybe_email: Some("bob@example.com".into()),
+    maybe_organization: None,
+    maybe_has_devices: None,
+  };
+  records::put_json(&alice.store, Table::Users, &bob_id.to_string(), &bob).unwrap();
+
+  // The verified policy (the default here) doesn't show addresses.
+  alice.client.sync_workspace().await.unwrap();
+  let kept: UserSummary = records::get_json(&alice.store, Table::Users, &bob_id.to_string())
+    .unwrap()
+    .unwrap();
+  assert_eq!(kept.maybe_email, None);
+  assert_eq!(kept.display_name, "Bob", "the rest stays");
+}
 
 #[tokio::test]
 async fn a_dm_with_somebody_without_a_device_adds_them_when_their_first_device_appears() {

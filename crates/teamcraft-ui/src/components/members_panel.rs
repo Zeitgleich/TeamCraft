@@ -54,7 +54,7 @@ pub fn MembersPanel(conversation: ConversationId) -> impl IntoView {
         </button>
       </header>
       <ul class="member-list panel-scroll">
-        <For each=move || members.get() key=|user| (user.id, user.presence, user.maybe_custom_status.as_ref().map(|status| status.text.clone())) let:user>
+        <For each=move || members.get() key=|user| (user.id, user.presence, user.maybe_custom_status.clone()) let:user>
           <li class="member">
             <button
               type="button"

@@ -27,8 +27,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{
-  ClientMessageId, ConversationId, MessageId, SetCustomStatusRequest, SetPresenceRequest,
-  SetReadPositionRequest,
+  ClientMessageId, ConversationId, CustomStatus, MessageId, SetCustomStatusRequest, SetPresenceRequest,
+  SetReadPositionRequest, UnixMillis,
 };
 
 use super::Client;
@@ -68,11 +68,11 @@ pub enum PendingAction {
   Unknown,
 }
 
-/// A custom status to set, or none.
+/// A custom status to set (its end on this device's clock), or none.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "change", rename_all = "snake_case")]
 pub enum StatusChange {
-  Set { status: SetCustomStatusRequest },
+  Set { status: CustomStatus },
   Clear,
 }
 
@@ -159,9 +159,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Sends the queued actions in the order they were queued. Skips those that wait for their
   /// retry time, drops those the server refuses for good or that ran out of attempts or age, and
-  /// stops when the server can't be reached. Returns how many were sent.
+  /// stops when the server can't be reached. Returns how many were sent. A refused custom status
+  /// waits for the host to show it ([`Client::take_background_failures`]): nobody waits for this
+  /// flush (issue #322).
   pub async fn flush_pending_actions(&mut self) -> Result<usize, CoreError> {
-    Ok(self.flush_queue().await?.sent)
+    let outcome = self.flush_queue().await?;
+    for (action, error) in outcome.refused {
+      if let PendingAction::CustomStatus { .. } = action {
+        self.background_failures.push(CoreError::Api(error));
+      }
+    }
+    Ok(outcome.sent)
   }
 
   /// How many actions wait for the server (those of a newer version not counted).
@@ -348,12 +356,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         Err(error) => return Attempt::Unreachable(error.into()),
       },
       PendingAction::Presence { request } => self.api.set_presence(request).await,
-      PendingAction::CustomStatus { change } => match change {
-        // A status that ended while it waited (offline) is nothing to show any more.
-        StatusChange::Set { status } if status.maybe_expires_at.is_none_or(|at| at.0 > self.now_ms()) => {
-          self.api.set_custom_status(status).await
-        },
-        StatusChange::Set { .. } | StatusChange::Clear => self.api.clear_custom_status().await,
+      PendingAction::CustomStatus { change } => {
+        let maybe_request = match change {
+          StatusChange::Set { status } => {
+            SetCustomStatusRequest::for_status(status, UnixMillis(self.now_ms()))
+          },
+          StatusChange::Clear => None,
+        };
+        match maybe_request {
+          Some(request) => self.api.set_custom_status(&request).await,
+          // A clear, or a status that ended while it waited (offline): nothing left to show.
+          None => self.api.clear_custom_status().await,
+        }
       },
       // Never attempted (the flush skips them); nothing this version could send.
       PendingAction::Unknown => return Attempt::Waiting,

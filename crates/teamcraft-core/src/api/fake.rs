@@ -591,6 +591,11 @@ impl FakeServer {
     self.lock().custom_statuses.get(&user).cloned()
   }
 
+  /// The server's clock now (the system clock plus [`FakeServer::advance_clock`]).
+  pub fn server_now_ms(&self) -> i64 {
+    self.lock().now_ms()
+  }
+
   /// From now on `PUT /me/status` answers 403, as with custom statuses switched off.
   pub fn refuse_custom_statuses(&self, is_refused: bool) {
     self.lock().refuses_custom_statuses = is_refused;
@@ -1793,7 +1798,28 @@ impl ServerApi for FakeServerApi {
           "custom statuses are switched off; choose one of the presets",
         ));
       }
-      state.custom_statuses.insert(me, request.clone());
+      // Like the server: a duration ends on this clock and wins over the client's end.
+      let now = state.now_ms();
+      let maybe_expires_at = match (request.maybe_expires_in_seconds, request.maybe_expires_at) {
+        (Some(seconds), _) => Some(teamcraft_proto::UnixMillis(
+          now.saturating_add(i64::try_from(seconds).unwrap_or(i64::MAX).saturating_mul(1000)),
+        )),
+        (None, Some(at)) if at.0 <= now => {
+          return Err(ApiError::status(
+            400,
+            ErrorCode::InvalidRequest,
+            "expires_at must be in the future",
+          ));
+        },
+        (None, maybe_at) => maybe_at,
+      };
+      let status = teamcraft_proto::CustomStatus {
+        maybe_emoji: request.maybe_emoji.clone(),
+        maybe_text: request.maybe_text.clone(),
+        maybe_expires_at,
+        maybe_activity: None,
+      };
+      state.custom_statuses.insert(me, status);
       Ok(())
     })
   }

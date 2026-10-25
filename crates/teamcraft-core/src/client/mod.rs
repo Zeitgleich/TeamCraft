@@ -204,6 +204,9 @@ pub struct Client<A, S> {
   groups: HashMap<ConversationId, ConversationGroup>,
   sync: SyncState,
   typing: notifications::TypingState,
+  /// Refusals of earlier user actions found by a background flush, for the host to show
+  /// ([`Client::take_background_failures`]).
+  background_failures: Vec<CoreError>,
   maybe_call_sink: Option<CallEventSink>,
   maybe_preview_fetcher: Option<Box<dyn crate::link_preview::PreviewFetcher>>,
   maybe_jwks_source: Option<Box<dyn JwksSource>>,
@@ -308,6 +311,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       groups: HashMap::new(),
       sync,
       typing: Default::default(),
+      background_failures: Vec::new(),
       maybe_call_sink: None,
       maybe_preview_fetcher,
       maybe_jwks_source,

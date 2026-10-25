@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
+use teamcraft_client_api::custom_status::set_request;
 use teamcraft_client_api::live::{LiveMarks, LiveReceipt, LiveSnapshot};
 use teamcraft_proto::{
   AnnouncementId, AnnouncementResponse, CustomStatus as CustomStatusWire, GetAnnouncementResponse,
@@ -340,10 +341,10 @@ impl LiveServer {
   /// Stores (or clears) the custom status of the signed-in user over REST, for a UI without a
   /// client core (the core queues it otherwise), and shows it right away.
   pub fn set_custom_status(&self, me: UserId, maybe_status: Option<&CustomStatus>, now: TimestampMs) {
-    let maybe_wire = maybe_status.and_then(|status| status.to_request(now));
-    match &maybe_wire {
-      Some(wire) => {
-        let body = serde_json::to_string(wire).ok();
+    let maybe_wire = maybe_status.and_then(|status| status.to_wire(now));
+    match maybe_wire.as_ref().and_then(|wire| set_request(wire, now)) {
+      Some(request) => {
+        let body = serde_json::to_string(&request).ok();
         self.send(ApiMethod::Put, "/api/v1/me/status".to_owned(), body);
       },
       None => self.send(ApiMethod::Delete, "/api/v1/me/status".to_owned(), None),
@@ -574,9 +575,10 @@ pub fn presence_status(state: &PresenceState) -> PresenceStatus {
   }
 }
 
-/// The status with its end resolved in the user's time zone ("today" ends at local midnight); the
-/// core and the server then only need the point in time. An end the caller already chose (a
-/// preset's duration, the unchanged end of the current status) stays.
+/// The status with its end resolved in the user's time zone ("today" ends at local midnight), on
+/// this device's clock. It reaches the server as the time left from when it is sent
+/// (`SetCustomStatusRequest::for_status`), so a clock that is off doesn't matter. An end the
+/// caller already chose (a preset's duration, the unchanged end of the current status) stays.
 pub fn with_local_expiry(mut status: CustomStatus, now: TimestampMs) -> CustomStatus {
   if status.maybe_expires_at.is_some() {
     return status;
@@ -830,7 +832,7 @@ mod tests {
       },
       NOW,
     );
-    let wire = status.to_request(NOW).unwrap();
+    let wire = status.to_wire(NOW).unwrap();
     assert_eq!(
       wire.maybe_expires_at,
       Some(teamcraft_proto::UnixMillis(NOW + 3_600_000))
@@ -851,7 +853,7 @@ mod tests {
       },
       NOW,
     );
-    let wire = status.to_request(NOW).unwrap();
+    let wire = status.to_wire(NOW).unwrap();
     assert_eq!(wire.maybe_expires_at, None);
     assert_eq!(wire.maybe_emoji, None);
   }

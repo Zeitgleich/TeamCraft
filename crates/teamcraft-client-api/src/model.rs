@@ -66,7 +66,7 @@ impl PresenceStatus {
 
 /// Emoji, text and optional expiry shown next to a user's name (PLAN.md §4: server-visible).
 /// Conversions to and from the wire form live in [`crate::custom_status`].
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CustomStatus {
   pub emoji: String,
   pub text: String,
@@ -79,7 +79,7 @@ pub struct CustomStatus {
 }
 
 /// When a custom status clears itself.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StatusExpiry {
   Never,
   ThirtyMinutes,

@@ -317,10 +317,7 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     match &self.maybe_live {
       Some(live) if live.is_core_fed() => {
         let me = self.chat.me().id;
-        live.show_own_status(
-          me,
-          maybe_status.as_ref().and_then(|status| status.to_request(now)),
-        );
+        live.show_own_status(me, maybe_status.as_ref().and_then(|status| status.to_wire(now)));
         self.chat.set_custom_status(maybe_status);
       },
       Some(live) => live.set_custom_status(self.chat.me().id, maybe_status.as_ref(), now),

@@ -741,6 +741,18 @@ impl Core {
           self.changed();
         },
       }
+      self.report_background_failures();
+    }
+  }
+
+  /// Refusals the core found while it sent queued actions in the background (a custom status the
+  /// workspace no longer allows): shown, since no button waits for them (issue #322).
+  fn report_background_failures(&mut self) {
+    let Some(client) = self.client.as_mut() else {
+      return;
+    };
+    for error in client.take_background_failures() {
+      (self.on_failure)(describe_failure(error));
     }
   }
 

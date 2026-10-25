@@ -2,7 +2,7 @@
 //! `PUT /api/v1/me/status`, what is shown of what the server reported, and what the workspace
 //! policy allows. Server-visible by design (low sensitivity), so nothing here is encrypted.
 
-use teamcraft_proto::{CustomStatus as CustomStatusWire, PresencePolicy, UnixMillis};
+use teamcraft_proto::{CustomStatus as CustomStatusWire, PresencePolicy, SetCustomStatusRequest, UnixMillis};
 
 use crate::model::{CustomStatus, StatusExpiry, TimestampMs};
 
@@ -36,9 +36,10 @@ impl CustomStatus {
     })
   }
 
-  /// The body of `PUT /api/v1/me/status` with the end resolved at `now`. `None` if there is nothing
-  /// to set (no emoji and no text): that is a clear.
-  pub fn to_request(&self, now: TimestampMs) -> Option<CustomStatusWire> {
+  /// The status as the server reports it, with the end resolved at `now` on this device's clock
+  /// (what the user sees until the server confirms; [`set_request`] turns it into the request).
+  /// `None` if there is nothing to set (no emoji and no text): that is a clear.
+  pub fn to_wire(&self, now: TimestampMs) -> Option<CustomStatusWire> {
     let maybe_emoji = Some(self.emoji.trim().to_owned()).filter(|emoji| !emoji.is_empty());
     let maybe_text = Some(self.text.trim().to_owned()).filter(|text| !text.is_empty());
     if maybe_emoji.is_none() && maybe_text.is_none() {
@@ -80,6 +81,15 @@ impl CustomStatus {
   }
 }
 
+/// The body of `PUT /api/v1/me/status` for `status` sent at `now`, both on this device's clock.
+/// The end goes as a duration, which the server resolves on its own clock: a device whose clock
+/// runs behind would otherwise send an end that looks past to the server and be refused for good.
+/// The end itself goes along for servers that don't know durations yet. `None` if the status
+/// already ended: then there is nothing left to set.
+pub fn set_request(status: &CustomStatusWire, now: TimestampMs) -> Option<SetCustomStatusRequest> {
+  SetCustomStatusRequest::for_status(status, UnixMillis(now))
+}
+
 /// What of a person's status the viewer sees: nothing while the workspace switched statuses off or
 /// after it ended.
 pub fn shown_status(
@@ -96,10 +106,12 @@ pub fn is_allowed(policy: &PresencePolicy, status: &CustomStatus) -> bool {
   if !policy.statuses_enabled {
     return false;
   }
+  let no_empty = |emoji: &str| Some(emoji.trim().to_owned()).filter(|emoji| !emoji.is_empty());
+  let emoji = no_empty(&status.emoji);
   policy.custom_status_enabled
     || policy.presets.iter().any(|preset| {
-      preset.maybe_emoji.as_deref().map(str::trim).unwrap_or_default() == status.emoji.trim()
-        && preset.text.trim() == status.text.trim()
+      // An empty emoji is no emoji, on both sides.
+      preset.maybe_emoji.as_deref().and_then(no_empty) == emoji && preset.text.trim() == status.text.trim()
     })
 }
 
@@ -122,12 +134,55 @@ mod tests {
     #[test]
     fn a_status_becomes_a_request_with_its_end_resolved() {
       let request = status("🌴", " Vacation ", StatusExpiry::OneHour)
-        .to_request(NOW)
+        .to_wire(NOW)
         .unwrap();
       assert_eq!(request.maybe_emoji.as_deref(), Some("🌴"));
       assert_eq!(request.maybe_text.as_deref(), Some("Vacation"));
       assert_eq!(request.maybe_expires_at, Some(UnixMillis(NOW + 3_600_000)));
       assert_eq!(request.maybe_activity, None);
+    }
+
+    #[test]
+    fn the_request_says_how_long_so_a_skewed_clock_does_not_matter() {
+      // The device's clock runs an hour behind the server: its own end would look past there.
+      let wire = status("🌴", "Vacation", StatusExpiry::ThirtyMinutes)
+        .to_wire(NOW)
+        .unwrap();
+      let request = set_request(&wire, NOW).unwrap();
+      assert_eq!(request.maybe_expires_in_seconds, Some(30 * 60));
+      assert_eq!(request.maybe_expires_at, Some(UnixMillis(NOW + 30 * 60_000)));
+      // Sent later from the queue, it asks for what is left of it, rounded up.
+      let later = set_request(&wire, NOW + 10 * 60_000 + 500).unwrap();
+      assert_eq!(later.maybe_expires_in_seconds, Some(20 * 60));
+      let forever = status("🌴", "Vacation", StatusExpiry::Never)
+        .to_wire(NOW)
+        .unwrap();
+      assert_eq!(set_request(&forever, NOW).unwrap().maybe_expires_in_seconds, None);
+    }
+
+    #[test]
+    fn a_status_that_ended_before_it_was_sent_is_no_request() {
+      let wire = status("🌴", "Vacation", StatusExpiry::ThirtyMinutes)
+        .to_wire(NOW)
+        .unwrap();
+      assert_eq!(set_request(&wire, NOW + 30 * 60_000), None);
+    }
+
+    #[test]
+    fn the_request_keeps_its_wire_names() {
+      let wire = status("🌴", "Vacation", StatusExpiry::OneHour)
+        .to_wire(NOW)
+        .unwrap();
+      let json = serde_json::to_value(set_request(&wire, NOW).unwrap()).unwrap();
+      assert_eq!(
+        json,
+        serde_json::json!({
+          "emoji": "🌴",
+          "text": "Vacation",
+          "expires_at": NOW + 3_600_000,
+          "expires_in_seconds": 3600,
+        })
+      );
     }
 
     #[test]
@@ -157,7 +212,7 @@ mod tests {
 
     #[test]
     fn an_empty_status_is_a_clear() {
-      assert_eq!(status(" ", "  ", StatusExpiry::Never).to_request(NOW), None);
+      assert_eq!(status(" ", "  ", StatusExpiry::Never).to_wire(NOW), None);
     }
 
     #[test]
@@ -231,6 +286,22 @@ mod tests {
         ..PresencePolicy::default()
       };
       assert!(is_allowed(&policy, &status("🤒", " Sick", StatusExpiry::Today)));
+      let without_emoji = PresencePolicy {
+        presets: vec![StatusPreset {
+          maybe_emoji: Some(" ".into()),
+          text: "Lunch".into(),
+          maybe_duration_minutes: None,
+        }],
+        ..policy.clone()
+      };
+      assert!(is_allowed(
+        &without_emoji,
+        &status("", "Lunch", StatusExpiry::Today)
+      ));
+      assert!(!is_allowed(
+        &without_emoji,
+        &status("🍕", "Lunch", StatusExpiry::Today)
+      ));
       assert!(!is_allowed(
         &policy,
         &status("🌴", "Vacation", StatusExpiry::Today)

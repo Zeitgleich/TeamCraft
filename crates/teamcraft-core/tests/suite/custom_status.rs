@@ -6,6 +6,8 @@
 
 use crate::common;
 
+use std::time::Duration;
+
 use common::{Peer, backend_of, run_commands, settle};
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{CustomStatus, StatusExpiry};
@@ -29,9 +31,14 @@ async fn a_status_set_in_the_menu_reaches_the_server_and_others_see_it_with_its_
   let stored = server.custom_status(alice_id).expect("stored on the server");
   assert_eq!(stored.maybe_emoji.as_deref(), Some("🌴"));
   assert_eq!(stored.maybe_text.as_deref(), Some("Vacation"));
-  assert_eq!(stored.maybe_expires_at, Some(UnixMillis(NOW_MS + HOUR_MS)));
+  // An hour on the server's clock (the fake's clock is not the device's).
+  assert_ends_in(&server, stored.maybe_expires_at, HOUR_MS);
   let mine = alice_ui.me().maybe_custom_status.expect("shown to the user");
-  assert_eq!(mine.maybe_expires_at, Some(NOW_MS + HOUR_MS));
+  assert_eq!(
+    mine.maybe_expires_at,
+    Some(NOW_MS + HOUR_MS),
+    "on the device's clock until confirmed"
+  );
 
   // Bob reads it with alice's presence (as after every connection).
   bob.client.refresh_presence(&[alice_id]).await.unwrap();
@@ -40,7 +47,50 @@ async fn a_status_set_in_the_menu_reaches_the_server_and_others_see_it_with_its_
     .and_then(|user| user.maybe_custom_status)
     .expect("bob sees alice's status");
   assert_eq!((seen.emoji.as_str(), seen.text.as_str()), ("🌴", "Vacation"));
-  assert_eq!(seen.maybe_expires_at, Some(NOW_MS + HOUR_MS));
+  assert_eq!(seen.maybe_expires_at, stored.maybe_expires_at.map(|at| at.0));
+}
+
+#[tokio::test]
+async fn a_device_whose_clock_runs_behind_still_gets_its_thirty_minutes() {
+  let (server, mut alice, _bob) = two_in_a_channel().await;
+  let alice_id = alice.client.user_id();
+  let alice_ui = backend_of(&alice);
+  // The server's clock runs two hours ahead of the device's: "30 minutes from now" on the device
+  // is an end in the past for the server.
+  let ahead_ms = NOW_MS - server.server_now_ms() + 2 * HOUR_MS;
+  server.advance_clock(Duration::from_millis(u64::try_from(ahead_ms).unwrap()));
+
+  alice_ui.set_custom_status(Some(vacation(StatusExpiry::ThirtyMinutes)));
+  run_commands(&mut alice, &alice_ui).await;
+
+  let stored = server.custom_status(alice_id).expect("not refused");
+  assert_ends_in(&server, stored.maybe_expires_at, HOUR_MS / 2);
+}
+
+#[tokio::test]
+async fn a_status_refused_while_the_queue_went_out_in_the_background_is_reported_once() {
+  let (server, mut alice, _bob) = two_in_a_channel().await;
+  let alice_id = alice.client.user_id();
+  let alice_ui = backend_of(&alice);
+  server.set_offline(alice_id, true);
+  alice_ui.set_custom_status(Some(vacation(StatusExpiry::Never)));
+  run_commands(&mut alice, &alice_ui).await;
+  assert!(
+    alice.client.take_background_failures().is_empty(),
+    "offline is no failure"
+  );
+
+  // Back online, the workspace now allows only presets; the upkeep's flush finds out.
+  server.refuse_custom_statuses(true);
+  server.set_offline(alice_id, false);
+  alice.client.flush_pending_actions().await.unwrap();
+  assert_eq!(
+    alice.client.take_background_failures().len(),
+    1,
+    "for the host to show"
+  );
+  assert!(alice.client.take_background_failures().is_empty(), "taken once");
+  assert_eq!(alice_ui.me().maybe_custom_status, None, "back to the server's");
 }
 
 #[tokio::test]
@@ -131,6 +181,16 @@ async fn a_status_that_ended_while_it_waited_clears_instead() {
   server.set_offline(alice_id, false);
   alice.client.flush_pending_actions().await.unwrap();
   assert_eq!(server.custom_status(alice_id), None, "nothing left to show");
+}
+
+/// The status ends `in_ms` after now on the server's clock (within the test's run time).
+fn assert_ends_in(server: &FakeServer, maybe_end: Option<UnixMillis>, in_ms: i64) {
+  let end = maybe_end.unwrap().0;
+  let expected = server.server_now_ms() + in_ms;
+  assert!(
+    (expected - 60_000..=expected).contains(&end),
+    "ends at {end}, expected about {expected}"
+  );
 }
 
 /// alice and bob share a channel, so they see each other's presence.

@@ -244,7 +244,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       CoreCommand::SetCustomStatus { maybe_status } => {
         let now = self.now_ms();
         self
-          .set_custom_status(maybe_status.and_then(|status| status.to_request(now)))
+          .set_custom_status(maybe_status.and_then(|status| status.to_wire(now)))
           .await
       },
     }
