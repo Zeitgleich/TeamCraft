@@ -375,7 +375,7 @@ fn SidebarSection(
         >
           <Icon name=IconName::ChevronDown class="chevron" />
           <span>{move || i18n.t(kind.title_key())}</span>
-          {move || (is_collapsed() && unread_hidden > 0).then(|| view! { <span class="badge-count">{unread_hidden}</span> })}
+          {move || (is_collapsed() && unread_hidden > 0).then(|| view! { <span class="badge-count is-quiet">{unread_hidden}</span> })}
         </button>
         {(kind == SectionKind::Unreads)
           .then(|| {

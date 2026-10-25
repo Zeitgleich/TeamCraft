@@ -1,11 +1,11 @@
 use leptos::prelude::*;
 
-use crate::components::count_badge::CountBadge;
+use crate::components::count_badge::{BadgeTone, CountBadge};
 use crate::components::icons::{Icon, IconName};
 use crate::components::space_tile::SpaceTileContent;
 use crate::i18n::use_i18n;
 use crate::model::Space;
-use crate::sections::{RailBadge, badge_count};
+use crate::sections::{RailBadge, badge_count, has_urgent_activity};
 use crate::state::{MainView, Overlay, RailEntry, use_app_state};
 
 /// Space switcher on the far left (Mattermost "team sidebar"). On top the global destinations with
@@ -91,9 +91,11 @@ fn ActivityButton() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let count = Memo::new(move |_| state.read(|backend| backend.activity().unread_count));
-  let label = Signal::derive(move || match count.get() {
-    0 => i18n.t("sidebar-activity"),
-    unread => i18n.t_with("rail-activity-unread", &[("count", &unread.to_string())]),
+  let tone = activity_tone(state);
+  let label = Signal::derive(move || match (count.get(), tone.get()) {
+    (0, _) => i18n.t("sidebar-activity"),
+    (unread, BadgeTone::Mention) => i18n.t_with("rail-activity-mentions", &[("count", &unread.to_string())]),
+    (unread, BadgeTone::Unread) => i18n.t_with("rail-activity-unread", &[("count", &unread.to_string())]),
   });
   view! {
     <RailDestination
@@ -102,6 +104,7 @@ fn ActivityButton() -> impl IntoView {
       accessible_label=label
       is_current=Signal::derive(move || state.view.get() == MainView::Activity)
       count=Signal::derive(move || count.get())
+      tone=tone
       on_open=Callback::new(move |()| state.open_activity())
     />
   }
@@ -121,9 +124,18 @@ fn ThreadsButton() -> impl IntoView {
         .count() as u32
     })
   });
-  let label = Signal::derive(move || match count.get() {
-    0 => i18n.t("sidebar-threads"),
-    unread => i18n.t_with("rail-threads-unread", &[("count", &unread.to_string())]),
+  let tone = Signal::derive(move || {
+    BadgeTone::of(state.read(|backend| {
+      backend
+        .followed_threads()
+        .iter()
+        .any(|thread| thread.unread_replies > 0 && thread.has_mention)
+    }))
+  });
+  let label = Signal::derive(move || match (count.get(), tone.get()) {
+    (0, _) => i18n.t("sidebar-threads"),
+    (unread, BadgeTone::Mention) => i18n.t_with("rail-threads-mentions", &[("count", &unread.to_string())]),
+    (unread, BadgeTone::Unread) => i18n.t_with("rail-threads-unread", &[("count", &unread.to_string())]),
   });
   view! {
     <RailDestination
@@ -132,6 +144,7 @@ fn ThreadsButton() -> impl IntoView {
       accessible_label=label
       is_current=Signal::derive(move || state.view.get() == MainView::Threads)
       count=Signal::derive(move || count.get())
+      tone=tone
       on_open=Callback::new(move |()| state.open_threads())
     />
   }
@@ -146,6 +159,7 @@ fn RailDestination(
   accessible_label: Signal<String>,
   is_current: Signal<bool>,
   count: Signal<u32>,
+  #[prop(into, optional)] tone: Signal<BadgeTone>,
   on_open: Callback<()>,
 ) -> impl IntoView {
   let i18n = use_i18n();
@@ -160,11 +174,27 @@ fn RailDestination(
     >
       <span class="rail-dest-icon">
         <Icon name=icon />
-        <CountBadge count=count is_decorative=true />
+        <CountBadge count=count tone=tone is_decorative=true />
       </span>
       <span class="rail-dest-label" aria-hidden="true">{move || i18n.t(label_key)}</span>
     </button>
   }
+}
+
+/// Activity is red when an unread item is a mention or in a direct conversation, quiet otherwise.
+pub fn activity_tone(state: crate::state::AppState) -> Signal<BadgeTone> {
+  Signal::derive(move || {
+    BadgeTone::of(state.read(|backend| {
+      has_urgent_activity(&backend.activity().items, |id| {
+        backend.conversation(id).is_some_and(|conversation| {
+          matches!(
+            conversation.kind,
+            crate::model::ConversationKind::Direct | crate::model::ConversationKind::Group
+          )
+        })
+      })
+    }))
+  })
 }
 
 /// Views that have their own rail destination: while one is open, Home isn't the current one.

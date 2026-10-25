@@ -12,6 +12,29 @@ pub const THUMBNAIL_SIDE_PX: u32 = 320;
 /// Longest side of the thumbnails the browser draws for formats the core can't decode (as large as
 /// the core's own, `teamcraft_core::thumbnail::THUMBNAIL_SIZE` in newer apps).
 pub const APP_THUMBNAIL_SIDE: u32 = 640;
+/// Smallest width-to-height ratio at which a link preview's picture goes wide under the text.
+const WIDE_EMBED_RATIO: f32 = 1.3;
+/// How a link preview shows its picture (issue #372).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum EmbedImage {
+  /// Full width under the text, in the picture's own ratio (width / height).
+  Wide { aspect_ratio: f32 },
+  /// A small square thumbnail at the end of the card.
+  Thumbnail,
+}
+
+impl EmbedImage {
+  /// Wide for landscape pictures, a thumbnail for the rest and for unknown sizes.
+  pub fn of(size: Option<(u32, u32)>) -> Self {
+    match size {
+      Some((width, height)) if width as f32 / height as f32 >= WIDE_EMBED_RATIO => Self::Wide {
+        aspect_ratio: width as f32 / height as f32,
+      },
+      _ => Self::Thumbnail,
+    }
+  }
+}
+
 /// Largest file an inline preview downloads by itself; bigger ones keep their thumbnail until opened.
 pub const MAX_INLINE_LOAD_BYTES: u64 = 16 * 1024 * 1024;
 /// Smallest side of an inline picture, so a thin strip stays clickable.
@@ -143,6 +166,21 @@ mod tests {
   use super::*;
 
   const LARGE: ImageSize = ImageSize::Large;
+
+  #[test]
+  fn landscape_embed_images_go_wide_and_the_rest_are_thumbnails() {
+    assert_eq!(
+      EmbedImage::of(Some((640, 320))),
+      EmbedImage::Wide { aspect_ratio: 2.0 }
+    );
+    assert_eq!(
+      EmbedImage::of(Some((130, 100))),
+      EmbedImage::Wide { aspect_ratio: 1.3 }
+    );
+    assert_eq!(EmbedImage::of(Some((100, 100))), EmbedImage::Thumbnail);
+    assert_eq!(EmbedImage::of(Some((100, 300))), EmbedImage::Thumbnail);
+    assert_eq!(EmbedImage::of(None), EmbedImage::Thumbnail);
+  }
 
   #[test]
   fn png_headers_give_the_size_and_anything_else_none() {
