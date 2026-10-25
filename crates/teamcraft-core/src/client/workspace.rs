@@ -1030,7 +1030,7 @@ fn change_id_hex(bytes: &[u8]) -> String {
 /// This device's position among the group's devices for committing `new_device`: devices of online
 /// users first, then by ID XOR the new device's ID, so the same member isn't always first. Every
 /// member computes the same order from the same group and presence.
-pub(crate) fn commit_rank(candidates: &[(DeviceId, bool)], own: DeviceId, new_device: DeviceId) -> u32 {
+fn commit_rank(candidates: &[(DeviceId, bool)], own: DeviceId, new_device: DeviceId) -> u32 {
   let order = |device: DeviceId, is_online: bool| {
     (
       !is_online,

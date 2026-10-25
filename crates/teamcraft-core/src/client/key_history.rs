@@ -9,7 +9,7 @@ use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::content_key::{ContentKey, ContentKeyId};
 use teamcraft_crypto::mls::{ContentKeyBundle, GroupMember};
-use teamcraft_proto::{ConversationId, DeviceId, UserId};
+use teamcraft_proto::{ConversationId, DeviceId, Id, UserId};
 
 use super::Client;
 use super::workspace::{PendingChange, PendingOutcome};
@@ -305,11 +305,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     let device = convert::device_from_crypto(rejoined.device_id)?;
     // Ranked only among the members this device sees as older than the committer (who may have
-    // the keys it lacks); beyond `device_add_max_rank` the ones ahead send, not everybody at once.
+    // the keys it lacks), the oldest records first; one stagger per rank, uncapped, so they don't
+    // send at once and the first sealed keys from a member no newer cancel the rest.
     let rank = self.follow_up_rank(conversation, rejoined, committer)?;
-    if rank >= self.settings.device_add_max_rank {
-      return Ok(());
-    }
     let stagger_ms = i64::try_from(self.settings.device_add_stagger.as_millis()).unwrap_or(i64::MAX);
     let not_before_ms = self
       .now_ms()
@@ -323,7 +321,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// This device's place among the group's devices that may follow up a rejoin `committer`
-  /// answered: those whose record of keys starts before the committer's, online users first.
+  /// answered: those whose record of keys starts before the committer's, online users first,
+  /// then the oldest record (who has the most of what the device missed). Devices agree on the
+  /// order as far as they saw the same additions and rejoins; where they don't, two may send at
+  /// the same time, which only duplicates keys.
   fn follow_up_rank(
     &mut self,
     conversation: ConversationId,
@@ -340,20 +341,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         continue;
       }
       // No entry: in the group since before this device joined, so before the committer.
-      if history
-        .record_start(&member_key(member)?)
-        .is_none_or(|start| start < committer_start)
-      {
+      let start = history.record_start(&member_key(member)?).unwrap_or(0);
+      if start < committer_start {
         let user = convert::user_from_crypto(member.user_id)?;
-        candidates.push((
-          convert::device_from_crypto(member.device_id)?,
-          self.is_probably_online(user)?,
-        ));
+        candidates.push(FollowUpCandidate {
+          device: convert::device_from_crypto(member.device_id)?,
+          is_online: self.is_probably_online(user)?,
+          record_start: start,
+        });
       }
     }
-    Ok(super::workspace::commit_rank(
+    let own = FollowUpCandidate {
+      device: self.account.device_id,
+      is_online: true,
+      record_start: joined,
+    };
+    Ok(follow_up_rank_among(
       &candidates,
-      self.account.device_id,
+      own,
       convert::device_from_crypto(rejoined.device_id)?,
     ))
   }
@@ -438,6 +443,32 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       history,
     )
   }
+}
+
+/// A device that may follow up a rejoin ([`Client::follow_up_rank`]).
+#[derive(Clone, Copy, Debug)]
+struct FollowUpCandidate {
+  device: DeviceId,
+  is_online: bool,
+  record_start: u64,
+}
+
+/// How many `candidates` go before `own`: online first, then the oldest record, then an order that
+/// changes with the device added back (so the same member doesn't always go first).
+fn follow_up_rank_among(candidates: &[FollowUpCandidate], own: FollowUpCandidate, rejoined: DeviceId) -> u32 {
+  let order = |candidate: &FollowUpCandidate| {
+    (
+      !candidate.is_online,
+      candidate.record_start,
+      candidate.device.snowflake().get() ^ rejoined.snowflake().get(),
+    )
+  };
+  let own_order = order(&own);
+  let ahead = candidates
+    .iter()
+    .filter(|candidate| candidate.device != own.device && order(candidate) < own_order)
+    .count();
+  u32::try_from(ahead).unwrap_or(u32::MAX)
 }
 
 /// Where a conversation's [`KeyHistory`] is kept.
@@ -550,6 +581,62 @@ mod tests {
     assert_eq!(kept, [1, 5, 9], "epochs 9 and 5, and the current key");
     history.prune_key_epochs(10, None);
     assert_eq!(history.key_epochs.len(), 3, "nothing to prune");
+  }
+
+  mod follow_up_rank {
+    use teamcraft_proto::Snowflake;
+
+    use super::*;
+
+    #[test]
+    fn the_oldest_online_record_goes_first_and_nobody_is_left_out() {
+      // Issue #390 review: B joined in epoch 4, D, E and F later; B must not be capped out.
+      let (b, d, e, f) = (
+        candidate(2, 4),
+        candidate(4, 12),
+        candidate(5, 15),
+        candidate(6, 20),
+      );
+      let all = [b, d, e, f];
+      let rejoined = device(9);
+      let ranks: Vec<u32> = all
+        .iter()
+        .map(|own| follow_up_rank_among(&all, *own, rejoined))
+        .collect();
+      assert_eq!(ranks, [0, 1, 2, 3], "oldest record first, every rank distinct");
+    }
+
+    #[test]
+    fn online_members_go_before_older_offline_ones() {
+      let offline_oldest = FollowUpCandidate {
+        is_online: false,
+        ..candidate(2, 0)
+      };
+      let online = candidate(3, 10);
+      assert_eq!(
+        follow_up_rank_among(&[offline_oldest, online], online, device(9)),
+        0
+      );
+    }
+
+    #[test]
+    fn equal_records_are_ordered_by_the_device_added_back() {
+      let (a, b) = (candidate(1, 0), candidate(2, 0));
+      let first = follow_up_rank_among(&[a, b], a, device(8));
+      assert_eq!(first + follow_up_rank_among(&[a, b], b, device(8)), 1, "one each");
+    }
+
+    fn candidate(raw: i64, record_start: u64) -> FollowUpCandidate {
+      FollowUpCandidate {
+        device: device(raw),
+        is_online: true,
+        record_start,
+      }
+    }
+
+    fn device(raw: i64) -> DeviceId {
+      DeviceId::from_snowflake(Snowflake::new(raw).unwrap())
+    }
   }
 
   #[test]
