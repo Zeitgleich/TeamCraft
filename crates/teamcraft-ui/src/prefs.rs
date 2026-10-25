@@ -626,6 +626,9 @@ pub struct SidebarPrefs {
   /// One sidebar with the channels of every space grouped by space (Slack style), instead of the
   /// space switcher with one space's channels at a time.
   pub is_grouped_by_space: bool,
+  /// Switching to Home or to a space reopens the conversation that was open there. Off: Home
+  /// shows its overview and a space opens its first channel (#498).
+  pub reopen_last_conversation: bool,
 }
 
 impl Default for SidebarPrefs {
@@ -635,6 +638,7 @@ impl Default for SidebarPrefs {
       dm_sort: DmSort::Recent,
       dm_limit: 0,
       is_grouped_by_space: false,
+      reopen_last_conversation: true,
     }
   }
 }

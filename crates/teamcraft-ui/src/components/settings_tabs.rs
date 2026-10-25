@@ -309,6 +309,12 @@ pub fn PreferencesSection() -> impl IntoView {
         value=Signal::derive(move || prefs.get().sidebar.is_grouped_by_space)
         on_change=Callback::new(move |value: bool| prefs.update(|all| all.sidebar.is_grouped_by_space = value))
       />
+      <SwitchRow
+        label="settings-reopen-last"
+        hint="settings-reopen-last-hint"
+        value=Signal::derive(move || prefs.get().sidebar.reopen_last_conversation)
+        on_change=Callback::new(move |value: bool| prefs.update(|all| all.sidebar.reopen_last_conversation = value))
+      />
       <SelectRow
         label="settings-sidebar-sort"
         options=slug_options(&["default", "alphabetical"], "settings-sort-")

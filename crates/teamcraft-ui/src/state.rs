@@ -19,7 +19,7 @@ use crate::reactive::{SetIfAlive, get_if_observed};
 use crate::route::Route;
 use crate::sections::{HomeFilter, apply_favorite_order, build_direct, build_sections};
 use crate::security::DeviceApproval;
-use crate::settings::Settings;
+use crate::settings::{LastOpenPlace, Settings, last_open, remember_last_open};
 use crate::toast_timer::{Hold, ToastClock};
 use crate::unread_divider::{DividerEvent, next_divider};
 use crate::viewport::{CompactDepth, CompactPane, Layout, current_layout};
@@ -314,6 +314,19 @@ fn start_position(start: Option<(SpaceId, ConversationId)>) -> (SpaceId, RailEnt
 
 /// Home's page without any DM: the welcome page while the workspace is empty (create a space,
 /// find people), else Home's own start page.
+/// The remembered conversation if it is still among `candidates` (it may have been left or
+/// archived since); `None` otherwise, so the caller picks its own default.
+fn remembered_conversation(
+  candidates: impl IntoIterator<Item = ConversationId>,
+  remembered: Option<ConversationId>,
+) -> Option<ConversationId> {
+  let remembered = remembered?;
+  candidates
+    .into_iter()
+    .any(|id| id == remembered)
+    .then_some(remembered)
+}
+
 fn home_view_without_dms(has_spaces: bool) -> MainView {
   if has_spaces {
     MainView::Home
@@ -525,12 +538,19 @@ impl AppState {
   }
 
   /// Opens the first channel of a space, or shows its getting-started page when it has none.
+  /// Opens the channel the space had open last (#498), else its first channel.
   pub fn open_first_conversation_of(&self, space: SpaceId) {
-    let first = self
-      .backend
-      .with_value(|backend| backend.space_conversations(space).into_iter().next());
+    let remembered = self
+      .reopen_setting()
+      .then(|| last_open(self.me().id).spaces.get(&space).copied())
+      .flatten();
+    let first = self.backend.with_value(|backend| {
+      let channels = backend.space_conversations(space);
+      remembered_conversation(channels.iter().map(|channel| channel.id), remembered)
+        .or_else(|| channels.first().map(|channel| channel.id))
+    });
     match first {
-      Some(conversation) => self.open_conversation(conversation.id),
+      Some(id) => self.open_conversation(id),
       None => {
         self.view.set(MainView::GettingStarted);
         self.panel.set(SidePanel::Closed);
@@ -617,7 +637,7 @@ impl AppState {
     }
   }
 
-  /// Shows Home: the most recent DM, or the page's start when there is none.
+  /// Shows Home: the DM it had open last (#498), or the page's start when there is none.
   pub fn open_home(&self) {
     self.rail.set(RailEntry::Home);
     // Phones show Home's list (the welcome page while the workspace is empty); a conversation
@@ -640,15 +660,37 @@ impl AppState {
     if is_direct_open {
       return;
     }
-    let maybe_recent = self.direct_list().into_iter().next();
-    match maybe_recent {
-      Some(conversation) => self.open_conversation(conversation.id),
+    let direct = self.direct_list();
+    let remembered = self
+      .reopen_setting()
+      .then(|| last_open(self.me().id).home)
+      .flatten();
+    match remembered_conversation(direct.iter().map(|conversation| conversation.id), remembered) {
+      Some(id) => self.open_conversation(id),
       None => {
         let has_spaces = self.read(|backend| !backend.spaces().is_empty());
         self.view.set(home_view_without_dms(has_spaces));
         self.panel.set(SidePanel::Closed);
       },
     }
+  }
+
+  /// Whether switching to Home or a space reopens what was open there (the sidebar setting).
+  fn reopen_setting(&self) -> bool {
+    self
+      .settings
+      .prefs
+      .with_untracked(|prefs| prefs.sidebar.reopen_last_conversation)
+  }
+
+  /// Keeps the conversation of Home or a space for the next visit to it.
+  fn remember_place(&self, conversation: &Conversation, id: ConversationId) {
+    let place = match conversation.maybe_space {
+      Some(space) => LastOpenPlace::Space(space, id),
+      None if conversation.kind.is_direct_like() => LastOpenPlace::Home(id),
+      None => return,
+    };
+    remember_last_open(self.me().id, place);
   }
 
   /// DMs and group DMs as Home lists them (favorites first, then by recency
@@ -805,6 +847,7 @@ impl AppState {
       }
       self.unread_marker.set(self.unread_marker_for(&conversation));
       self.settings.remember_conversation(id);
+      self.remember_place(&conversation, id);
       self.linked_message.set(None);
     }
     self.view.set(MainView::Conversation(id));
@@ -1775,6 +1818,17 @@ mod tests {
   fn home_without_dms_welcomes_an_empty_workspace() {
     assert_eq!(home_view_without_dms(false), MainView::GettingStarted);
     assert_eq!(home_view_without_dms(true), MainView::Home);
+  }
+
+  #[test]
+  fn the_remembered_conversation_reopens_only_while_it_exists() {
+    let (kept, gone): (ConversationId, ConversationId) = (id_from_raw(1), id_from_raw(2));
+    assert_eq!(
+      remembered_conversation([kept, id_from_raw(3)], Some(kept)),
+      Some(kept)
+    );
+    assert_eq!(remembered_conversation([kept], Some(gone)), None);
+    assert_eq!(remembered_conversation([kept], None), None);
   }
 
   mod state_to_route {

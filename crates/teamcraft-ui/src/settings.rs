@@ -1,10 +1,13 @@
 //! Per-device user preferences, persisted in `localStorage`. They will move to the synced, encrypted
 //! user settings of the client core later; the UI only depends on the signals here.
 
+use std::collections::HashMap;
+
 use leptos::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::i18n::Locale;
-use crate::model::ConversationId;
+use crate::model::{ConversationId, SpaceId, UserId};
 use crate::navigation::push_recent;
 use crate::prefs::Preferences;
 use crate::sections::SidebarOptions;
@@ -20,8 +23,46 @@ const KEY_PREFS: &str = "teamcraft.prefs";
 const KEY_RECENT_CONVERSATIONS: &str = "teamcraft.recent_conversations";
 const KEY_RECENT_EMOJI: &str = "teamcraft.recent_emoji";
 const KEY_FAVORITE_ORDER: &str = "teamcraft.favorite_order";
+/// Per account: `teamcraft.last_open.<user id>`, a [`LastOpen`].
+const KEY_LAST_OPEN_PREFIX: &str = "teamcraft.last_open.";
 /// Conversations the quick switcher remembers as recently visited.
 const MAX_RECENT_CONVERSATIONS: usize = 20;
+/// Where the last open conversation of an account was: Home, or a space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LastOpenPlace {
+  Home(ConversationId),
+  Space(SpaceId, ConversationId),
+}
+
+/// The conversation each place of one account had open last, so switching back reopens it (#498).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LastOpen {
+  pub home: Option<ConversationId>,
+  pub spaces: HashMap<SpaceId, ConversationId>,
+}
+
+/// What an account had open last on this device.
+pub fn last_open(user: UserId) -> LastOpen {
+  load_json(&last_open_key(user)).unwrap_or_default()
+}
+
+/// Remembers the conversation of a place for an account; the next visit to the place reopens it.
+pub fn remember_last_open(user: UserId, place: LastOpenPlace) {
+  let mut last = last_open(user);
+  match place {
+    LastOpenPlace::Home(conversation) => last.home = Some(conversation),
+    LastOpenPlace::Space(space, conversation) => {
+      last.spaces.insert(space, conversation);
+    },
+  }
+  store_json(&last_open_key(user), &last);
+}
+
+fn last_open_key(user: UserId) -> String {
+  format!("{KEY_LAST_OPEN_PREFIX}{user}")
+}
+
 /// Emoji the pickers offer as recently used.
 pub const MAX_RECENT_EMOJI: usize = 16;
 
