@@ -56,11 +56,6 @@ pub fn run(state: AppState, i18n: I18n, conversation: ConversationId, command: S
       text("slash-status-cleared")
     },
     SlashCommand::Status(StatusChange::Set { emoji, text: status }) => {
-      let emoji = if emoji.is_empty() {
-        "💬".to_owned()
-      } else {
-        emoji
-      };
       let status = CustomStatus {
         emoji,
         text: status,

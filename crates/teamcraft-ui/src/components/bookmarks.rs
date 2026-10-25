@@ -10,8 +10,6 @@ use crate::i18n::use_i18n;
 use crate::model::{Bookmark, BookmarkKind, Conversation, ConversationId};
 use crate::state::{Overlay, use_app_state};
 
-const DEFAULT_EMOJI: &str = "🔖";
-
 /// Only web links open from a bookmark; anything else (`javascript:`, `data:`) is refused (the
 /// rule the mobile apps share, teamcraft-client-api `links`).
 pub fn is_openable(url: &str) -> bool {
@@ -51,7 +49,7 @@ pub fn BookmarksBar(conversation: ConversationId, info: Memo<Option<Conversation
           };
           view! {
             <button class="bookmark" title=bookmark.title.clone() on:click=open>
-              <span aria-hidden="true">{bookmark.emoji.clone()}</span>
+              {(!bookmark.emoji.is_empty()).then(|| view! { <span aria-hidden="true">{bookmark.emoji.clone()}</span> })}
               <Icon name=if bookmark.kind == BookmarkKind::Link { IconName::Link } else { IconName::File } />
               <span class="bookmark-title" translate="no">{bookmark.title.clone()}</span>
             </button>
@@ -94,7 +92,8 @@ pub fn BookmarksDialog(conversation: ConversationId) -> impl IntoView {
   let add = move |_| {
     list.update(|entries| {
       entries.push(Bookmark {
-        emoji: DEFAULT_EMOJI.to_owned(),
+        // No emoji by default: the bar shows the link or file icon, an emoji is the user's choice.
+        emoji: String::new(),
         title: String::new(),
         kind: BookmarkKind::Link,
         url: "https://".to_owned(),

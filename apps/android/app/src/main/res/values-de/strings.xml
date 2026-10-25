@@ -70,7 +70,7 @@
   <string name="notification_channel_meetings_description">Erinnerungen kurz vor Beginn eines Meetings.</string>
   <string name="notification_mute">Für 8 Stunden stummschalten</string>
   <string name="notification_new_message">Neue Nachricht</string>
-  <string name="notification_file">📎 %1$s</string>
+  <string name="notification_file">%1$s</string>
   <string name="notification_reply">Antworten</string>
   <string name="notification_mark_read">Als gelesen markieren</string>
   <string name="you">Du</string>

@@ -20,7 +20,7 @@ data class NotificationText(
     val newMessageFrom: (String) -> String,
     /** "3 new messages from Alice, Bob" (count, names). */
     val newMessagesFrom: (Int, String) -> String,
-    /** "📷 Photo", "📎 notes.pdf", … by kind and file name. */
+    /** "Photo", "notes.pdf", … by kind and file name. */
     val attachment: (NotificationAttachmentKind, String) -> String,
   )
 

@@ -307,12 +307,12 @@ fn text_of(stored: &StoredMessage) -> Option<String> {
       meta
         .attachments
         .iter()
-        .map(|attachment| format!("📎 {}", attachment.file_name))
+        .map(|attachment| attachment.file_name.clone())
         .collect::<Vec<_>>()
         .join(" "),
     ),
     MessageContent::Text { body, .. } => Some(body.clone()),
-    MessageContent::File { attachment } => Some(format!("📎 {}", attachment.file_name)),
+    MessageContent::File { attachment } => Some(attachment.file_name.clone()),
     _ => None,
   }
 }

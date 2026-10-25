@@ -510,9 +510,11 @@ private fun MessageRow(
   }
 }
 
-/** The core labels file messages "📎 name"; with the file shown below, the label is noise. */
-private fun isOnlyFileLabel(body: String, maybeExtras: MessageExtras?): Boolean =
-  maybeExtras?.files?.any { body.trim() == "📎 ${it.fileName}" } == true
+/** The core's body of a file message is the file names; with the file shown below, the body is noise. */
+private fun isOnlyFileLabel(body: String, maybeExtras: MessageExtras?): Boolean {
+  val files = maybeExtras?.files.orEmpty()
+  return files.isNotEmpty() && body.trim() == files.joinToString(" ") { it.fileName }
+}
 
 /** An own message the server rejected: say so, and offer to send it again or drop it. */
 @Composable

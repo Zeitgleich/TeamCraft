@@ -71,7 +71,7 @@
   <string name="notification_channel_meetings_description">Reminders shortly before a meeting starts.</string>
   <string name="notification_mute">Mute for 8 hours</string>
   <string name="notification_new_message">New message</string>
-  <string name="notification_file">📎 %1$s</string>
+  <string name="notification_file">%1$s</string>
   <string name="notification_reply">Reply</string>
   <string name="notification_mark_read">Mark as read</string>
   <string name="you">You</string>

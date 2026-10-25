@@ -302,7 +302,7 @@ pub fn CustomStatusDialog() -> impl IntoView {
   let emoji = RwSignal::new(
     current
       .as_ref()
-      .map_or_else(|| "💬".to_owned(), |status| status.emoji.clone()),
+      .map_or_else(String::new, |status| status.emoji.clone()),
   );
   let text = RwSignal::new(
     current
