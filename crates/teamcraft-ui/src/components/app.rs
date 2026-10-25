@@ -86,6 +86,7 @@ pub fn App() -> impl IntoView {
   apply_theme(settings.theme);
   apply_density(settings);
   apply_zoom(settings);
+  apply_text_size(settings);
   apply_language_attribute();
   crate::viewport::sync_theme_color(move || settings.theme.track());
   crate::brand::provide_brand(settings);
@@ -655,6 +656,26 @@ fn apply_zoom(settings: Settings) {
   Effect::new(move |_| {
     let percent = settings.prefs.get().display.zoom.percent();
     leptos::task::spawn_local(async move { tauri::set_zoom(percent).await });
+  });
+}
+
+/// Every platform: the text size setting sets `--text-scale` on the root (CSSOM, the CSP blocks
+/// style attributes); the stylesheet's rem type scale follows it.
+fn apply_text_size(settings: Settings) {
+  // Only a change of the text size touches the root, not every other preference change.
+  let text_size = Memo::new(move |_| settings.prefs.with(|prefs| prefs.display.text_size));
+  Effect::new(move |_| {
+    let scale = text_size.get().css_scale();
+    let Some(root) = web_sys::window()
+      .and_then(|window| window.document())
+      .and_then(|doc| doc.document_element())
+      .and_then(|root| root.dyn_into::<web_sys::HtmlElement>().ok())
+    else {
+      return;
+    };
+    if root.style().set_property("--text-scale", &scale).is_err() {
+      tracing::debug!("could not apply the text size");
+    }
   });
 }
 

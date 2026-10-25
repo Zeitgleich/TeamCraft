@@ -168,6 +168,21 @@ pub fn is_touch_primary() -> bool {
     .is_some_and(|query| query.matches())
 }
 
+/// Size of one CSS `rem` in pixels: the browser's default text size times the text size setting
+/// (issue #370). Sizes that follow the text, such as menus measured before they render, scale
+/// with it. 16 when the root can't be read.
+pub fn rem_px() -> f64 {
+  web_sys::window()
+    .and_then(|window| {
+      let root = window.document()?.document_element()?;
+      window.get_computed_style(&root).ok().flatten()
+    })
+    .and_then(|style| style.get_property_value("font-size").ok())
+    .and_then(|size| size.trim_end_matches("px").parse::<f64>().ok())
+    .filter(|px| *px > 0.0)
+    .unwrap_or(16.0)
+}
+
 /// Mirrors the visible part of the window into `--vv-height` and `--vv-top` on `<html>`, so the
 /// compact layout ends at the on-screen keyboard and the composer stays above it. Chrome resizes
 /// the layout itself (`interactive-widget=resizes-content` in index.html); Safari only reports the
