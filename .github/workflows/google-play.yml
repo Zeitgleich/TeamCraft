@@ -1,0 +1,134 @@
+# Google Play (docs/release.md, "Google Play"): when a release is published (or by hand for a tag),
+# uploads the signed App Bundle of the `full` flavor that release.yml attached to the release to a
+# Play track, with the tag's highlights as "What's new". Releases and candidates both go to the
+# track; their versionCodes increase (docs/release.md, "Build numbers").
+#
+# Setup: the secret GOOGLE_PLAY_SERVICE_ACCOUNT_JSON (a service account with "Release to testing
+# tracks" for the app); without it the run skips the upload with a notice. Repository variables:
+#   TEAMCRAFT_PLAY_TRACK           default `internal`
+#   TEAMCRAFT_PLAY_RELEASE_STATUS  default `draft` (required while the app was never published on
+#                                  Play); `completed` rolls the release out to the track's testers
+#   TEAMCRAFT_PLAY_LOCALES         default `en-US,de-DE`: languages of the "What's new" text
+name: Google Play
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to upload (vX.Y.Z or vX.Y.Z-rc.N); its release must have the bundle
+        required: true
+
+# One Play edit at a time: two concurrent edits of the same app fail.
+concurrency:
+  group: google-play
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  PACKAGE_NAME: de.zeitgleich.teamcraft
+
+jobs:
+  upload:
+    name: Upload to Google Play
+    runs-on: ubuntu-latest
+    permissions:
+      # Reads the release's files and the tag.
+      contents: read
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Settings
+        id: settings
+        env:
+          HAS_SERVICE_ACCOUNT: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON != '' }}
+          TRACK: ${{ vars.TEAMCRAFT_PLAY_TRACK || 'internal' }}
+          STATUS: ${{ vars.TEAMCRAFT_PLAY_RELEASE_STATUS || 'draft' }}
+          LOCALES: ${{ vars.TEAMCRAFT_PLAY_LOCALES || 'en-US,de-DE' }}
+        run: |
+          if [ "$HAS_SERVICE_ACCOUNT" != true ]; then
+            echo "::notice::no GOOGLE_PLAY_SERVICE_ACCOUNT_JSON secret: ${TAG} is not uploaded to Google Play"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$TAG" in
+            v[0-9]*) ;;
+            *) echo "::error::not a release tag: ${TAG}"; exit 1 ;;
+          esac
+          case "$STATUS" in
+            draft | completed) ;;
+            *) echo "::error::TEAMCRAFT_PLAY_RELEASE_STATUS must be draft or completed, not ${STATUS}"; exit 1 ;;
+          esac
+          {
+            echo "enabled=true"
+            echo "version=${TAG#v}"
+            echo "track=$TRACK"
+            echo "status=$STATUS"
+            echo "locales=$LOCALES"
+          } >> "$GITHUB_OUTPUT"
+          echo "Uploading ${TAG} to the ${TRACK} track as ${STATUS}."
+      # The scripts of the branch that runs (the release's tag, or the default branch by hand).
+      - if: steps.settings.outputs.enabled == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The bundle exactly as the release attached it, checked against the release's SHA256SUMS
+      # (which the release's build provenance attestation covers).
+      - name: Download the App Bundle
+        if: steps.settings.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ steps.settings.outputs.version }}
+        run: |
+          bundle="teamcraft-android-${VERSION}-full-release.aab"
+          mkdir -p "$RUNNER_TEMP/play"
+          cd "$RUNNER_TEMP/play"
+          if ! gh release download "$TAG" --repo "$REPO" --pattern "$bundle" --pattern SHA256SUMS; then
+            echo "::error::the release ${TAG} has no ${bundle} (an -unsigned bundle means the upload key secrets were missing when it was built)"
+            exit 1
+          fi
+          grep -F "  ${bundle}" SHA256SUMS | sha256sum -c -
+          echo "BUNDLE=$RUNNER_TEMP/play/$bundle" >> "$GITHUB_ENV"
+      - name: Release notes (the tag's highlights)
+        if: steps.settings.outputs.enabled == 'true'
+        env:
+          REPO: ${{ github.repository }}
+          VERSION: ${{ steps.settings.outputs.version }}
+          LOCALES: ${{ steps.settings.outputs.locales }}
+        run: |
+          # actions/checkout leaves the tag lightweight (or out); the highlights are in the annotated
+          # tag object. A candidate with an empty message falls back to its base version's tag.
+          git fetch --no-tags --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          base="v${VERSION%%-*}"
+          if [ "$base" != "$TAG" ]; then
+            git fetch --no-tags --force origin "refs/tags/${base}:refs/tags/${base}" 2>/dev/null \
+              || echo "no tag ${base} yet"
+          fi
+          scripts/play-release-notes.py --version "$VERSION" --tag "$TAG" --repo "$REPO" \
+            --locales "$LOCALES" --out-dir "$RUNNER_TEMP/play/whatsnew"
+      # Only as a file readable by the runner user, never on a command line; removed below.
+      - name: Service account key
+        if: steps.settings.outputs.enabled == 'true'
+        env:
+          SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          key="$RUNNER_TEMP/play-service-account.json"
+          (umask 077 && printf '%s' "$SERVICE_ACCOUNT_JSON" > "$key")
+          echo "SERVICE_ACCOUNT_FILE=$key" >> "$GITHUB_ENV"
+      # The bundle carries the R8 mapping and the native symbol table (build.gradle.kts), so Play
+      # deobfuscates and symbolicates crashes without separate uploads.
+      - name: Upload to the track
+        if: steps.settings.outputs.enabled == 'true'
+        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1.1.5
+        with:
+          serviceAccountJson: ${{ env.SERVICE_ACCOUNT_FILE }}
+          packageName: ${{ env.PACKAGE_NAME }}
+          releaseFiles: ${{ env.BUNDLE }}
+          releaseName: ${{ steps.settings.outputs.version }}
+          tracks: ${{ steps.settings.outputs.track }}
+          status: ${{ steps.settings.outputs.status }}
+          whatsNewDirectory: ${{ runner.temp }}/play/whatsnew
+      - name: Remove the service account key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/play-service-account.json"

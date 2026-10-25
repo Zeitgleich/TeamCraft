@@ -7,7 +7,8 @@
 # - Desktop packages from desktop-release.yml (called, not copied), the web client bundle, and the
 #   desktop updater manifest latest.json when the update artifacts are signed (docs/updates.md).
 # - Android APKs of both flavors: release builds (signed only when the upload key secrets exist,
-#   `-unsigned` otherwise) and `-debug-signed` builds for testers.
+#   `-unsigned` otherwise) and `-debug-signed` builds for testers; the App Bundle of the `full`
+#   flavor, which google-play.yml uploads to Google Play once the release is published.
 # - SBOMs (SPDX and CycloneDX) of the source tree and both images, image digests, SHA256SUMS, and a
 #   build provenance attestation for every file.
 # - Notes rendered from .github/release-notes.md: the highlights from the annotated tag's message, generated notes
@@ -285,7 +286,7 @@ jobs:
             echo "teamcraft.fcmSenderId=$FCM_SENDER_ID"
           } > "$TEAMCRAFT_ANDROID_CACHE/gradle/gradle.properties"
           echo "Firebase config written for the full flavor."
-      - name: Build APKs
+      - name: Build APKs and the App Bundle
         env:
           PUSH_GATEWAY_URL: ${{ vars.TEAMCRAFT_ANDROID_PUSH_GATEWAY_URL }}
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
@@ -293,7 +294,7 @@ jobs:
           KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
         run: |
           # No server or identity provider: the apps ask for the server (docs/release.md).
-          args=(assembleFullRelease assembleLibreRelease assembleFullDebug assembleLibreDebug)
+          args=(assembleFullRelease assembleLibreRelease assembleFullDebug assembleLibreDebug bundleFullRelease)
           [ -n "$PUSH_GATEWAY_URL" ] && args+=("-Pteamcraft.pushGatewayUrl=$PUSH_GATEWAY_URL")
           if [ "${HAS_UPLOAD_KEY:-}" = true ]; then
             args+=("-Pteamcraft.uploadKeystore=/src/apps/android/upload.keystore"
@@ -305,7 +306,7 @@ jobs:
       - name: Remove the Firebase config
         if: always()
         run: rm -f "$TEAMCRAFT_ANDROID_CACHE/gradle/gradle.properties"
-      - name: Collect APKs
+      - name: Collect APKs and the App Bundle
         run: |
           mkdir -p out
           for apk in apps/android/app/build/outputs/apk/*/*/*.apk; do
@@ -318,12 +319,19 @@ jobs:
             [ "$type" = debug ] && suffix="-signed"
             cp "$apk" "out/teamcraft-android-${VERSION}-${flavor}-${type}${suffix}.apk"
           done
+          # Gradle names a bundle the same whether it is signed or not.
+          suffix="-unsigned"
+          [ "${HAS_UPLOAD_KEY:-}" = true ] && suffix=""
+          cp apps/android/app/build/outputs/bundle/fullRelease/app-full-release.aab \
+            "out/teamcraft-android-${VERSION}-full-release${suffix}.aab"
           rm -f apps/android/upload.keystore
           ls -l out
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-android
-          path: out/*.apk
+          path: |
+            out/*.apk
+            out/*.aab
           if-no-files-found: error
 
   release:
@@ -392,7 +400,7 @@ jobs:
           find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
             -o -name '*.flatpak' -o -name '*.dmg' -o -name '*.msi' -o -name '*.exe' \
             -o -name '*.app.tar.gz' -o -name '*.sig' \
-            -o -name '*.apk' -o -name '*.spdx.json' -o -name '*.cdx.json' \) -exec cp {} dist/ \;
+            -o -name '*.apk' -o -name '*.aab' -o -name '*.spdx.json' -o -name '*.cdx.json' \) -exec cp {} dist/ \;
           # The web client: the same trunk build the desktop app embeds, served by the server
           # ([web] static_dir), plus precompressed .br/.gz variants the server picks by Accept-Encoding.
           # Never with demo data. Signed with the web release key when the secret exists: its service
