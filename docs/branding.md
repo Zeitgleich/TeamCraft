@@ -334,3 +334,36 @@ An optional label per user, taken from the identity provider.
   URL is fixed per build; a server-URL screen needs a public way to learn the OIDC issuer. SVG logos
   aren't drawn on mobile (the name is shown instead).
 - One OIDC client for all brands (§10).
+
+## 14. The product mark
+
+Without a server brand the apps show TeamCraft's own mark: three people around a speech bubble,
+and the wordmark "TeamCraft". A server brand replaces both (§5); the product mark is only the
+default.
+
+| File                                 | What it is                                                         |
+|--------------------------------------|--------------------------------------------------------------------|
+| `assets/brand/reference/wordmark.png`| The supplied wordmark, the input of `wordmark.py`                  |
+| `assets/brand/mark.svg`              | The mark, constructed by `scripts/brand/mark.py`                   |
+| `assets/brand/wordmark.svg`, `-dark` | The wordmark for light and dark backgrounds (`wordmark.py`)        |
+| `assets/brand/icon.svg`              | The mark on its rounded backplate (desktop, web, Linux scalable)   |
+| `assets/brand/glyph.svg`             | The small-size icon: the bubble on the brand blue (below 40 px)    |
+
+`mark.py` builds the mark from exact geometry measured from the artwork (circles, edges on a 30°
+grid, tangent fillets, the same clear space of 15 units around every head), so every curve is a
+true arc. `wordmark.py` traces the letters and fits smooth Béziers, as the typeface isn't available
+as a font. `icons.py` renders every platform icon from them: Tauri's PNGs, `.ico`, `.icns` and tray
+icons; the web app's install icons, favicon and the images of the loading and sign-in screens; the
+iOS icon (light, dark, tinted) and launch logo; Android's adaptive icon layers, themed icon and
+notification icon. The generated files are committed because the builds use them; change a master
+or a script and run:
+
+```sh
+python3 scripts/brand/mark.py
+python3 scripts/brand/wordmark.py   # numpy, scipy, Pillow, potrace
+python3 scripts/brand/icons.py --contact-sheet /path/to/sheet.png   # rsvg-convert or ImageMagick 7
+```
+
+The product's accent colour is the mark's blue: `#005dfc` in the light theme (5.3:1 with white
+text), `#5c9dff` with `#04122e` text in the dark theme (6.8:1). It is the default of `--accent`
+(`style/main.css`) and of the Android and iOS themes; a brand's own colours override it (§2).
