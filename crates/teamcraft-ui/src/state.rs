@@ -20,6 +20,7 @@ use crate::route::Route;
 use crate::sections::{HomeFilter, apply_favorite_order, build_direct, build_sections};
 use crate::security::DeviceApproval;
 use crate::settings::Settings;
+use crate::toast_timer::{Hold, ToastClock};
 use crate::unread_divider::{DividerEvent, next_divider};
 use crate::viewport::{CompactPane, Layout, current_layout};
 use teamcraft_client_api::actions::{NewChannel, NewSpace, PermalinkTarget};
@@ -249,6 +250,8 @@ pub struct AppState {
   /// Short messages shown over the app until dismissed (reminders, undo).
   pub toasts: RwSignal<Vec<Toast>>,
   next_toast: StoredValue<u64>,
+  /// Countdowns of the toasts that close by themselves; they pause on hover and focus (#367).
+  toast_clock: StoredValue<ToastClock, LocalStorage>,
   /// Messages deleted with an undo window: hidden now, deleted when the window ends.
   pub hidden_messages: RwSignal<HashSet<MessageId>>,
   /// Channels left with an undo window: gone from the sidebar now, left when the window ends.
@@ -337,6 +340,7 @@ impl AppState {
       pending_dm: RwSignal::new(None),
       toasts: RwSignal::new(Vec::new()),
       next_toast: StoredValue::new(0),
+      toast_clock: StoredValue::new_local(ToastClock::default()),
       hidden_messages: RwSignal::new(HashSet::new()),
       hidden_conversations: RwSignal::new(HashSet::new()),
       pending_open: RwSignal::new(None),
@@ -831,8 +835,8 @@ impl AppState {
   }
 
   /// Shows a failed action until the user closes it. Called from outside the reactive tree (the
-  /// core answered), so it does nothing once the shell is gone. The same error twice in a row
-  /// shows once.
+  /// core answered), so it does nothing once the shell is gone. A repeat of any error still shown
+  /// adds no second toast; background failures are rate-limited before they get here (#344).
   pub fn show_error(&self, text: String, detail: String) {
     let Some(id) = self.next_toast.try_get_value() else {
       return;
@@ -858,14 +862,35 @@ impl AppState {
 
   /// Shows a confirmation that goes away by itself ("Link copied").
   pub fn show_brief_toast(&self, text: String) {
-    let state = *self;
     let toast = self.push_toast(text, None);
-    set_timeout(move || state.dismiss_toast(toast), BRIEF_TOAST);
+    self.close_toast_after(toast, BRIEF_TOAST, || {});
   }
 
+  /// Closes a toast and runs what its end does (an Undo toast commits now). Also called by the
+  /// toast timer, which may fire after the shell is gone.
   pub fn dismiss_toast(&self, id: u64) {
-    // Also called by timers, which may fire after the shell is gone.
     let _ = self.toasts.try_update(|list| list.retain(|toast| toast.id != id));
+    // Nothing left to point at or focus: a hold from a toast that went away must not stall the next.
+    if self.toasts.try_with_untracked(Vec::is_empty) == Some(true) {
+      self.hold_toasts(Hold::Pointer, false);
+      self.hold_toasts(Hold::Focus, false);
+    }
+    let maybe_end = self.toast_clock.try_update_value(|clock| clock.end(id)).flatten();
+    if let Some(end) = maybe_end {
+      end();
+    }
+  }
+
+  /// The pointer or focus is on the toasts, or the page is hidden: countdowns stand still (#367).
+  pub fn hold_toasts(&self, hold: Hold, is_on: bool) {
+    let now = crate::clock::now_ms();
+    if self
+      .toast_clock
+      .try_update_value(|clock| clock.timers.set_hold(hold, is_on, now))
+      .is_some()
+    {
+      self.schedule_toast_wake();
+    }
   }
 
   /// Hides an own message at once and deletes it after the undo window, unless Undo was pressed.
@@ -875,19 +900,15 @@ impl AppState {
       hidden.insert(message);
     });
     let toast = self.push_toast(text, Some(Undo::RestoreMessage(message)));
-    set_timeout(
-      move || {
-        state.dismiss_toast(toast);
-        let is_still_deleted = state
-          .hidden_messages
-          .try_update(|hidden| hidden.remove(&message))
-          .unwrap_or(false);
-        if is_still_deleted {
-          state.try_write(|backend| backend.delete_message(conversation, message));
-        }
-      },
-      UNDO_WINDOW,
-    );
+    self.close_toast_after(toast, UNDO_WINDOW, move || {
+      let is_still_deleted = state
+        .hidden_messages
+        .try_update(|hidden| hidden.remove(&message))
+        .unwrap_or(false);
+      if is_still_deleted {
+        state.try_write(|backend| backend.delete_message(conversation, message));
+      }
+    });
   }
 
   /// Runs the Undo of a toast and closes it.
@@ -923,19 +944,15 @@ impl AppState {
       hidden.insert(conversation);
     });
     let toast = self.push_toast(text, Some(Undo::StayInChannel(conversation)));
-    set_timeout(
-      move || {
-        state.dismiss_toast(toast);
-        let is_still_leaving = state
-          .hidden_conversations
-          .try_update(|hidden| hidden.remove(&conversation))
-          .unwrap_or(false);
-        if is_still_leaving {
-          state.try_write(|backend| backend.leave_channel(conversation));
-        }
-      },
-      UNDO_WINDOW,
-    );
+    self.close_toast_after(toast, UNDO_WINDOW, move || {
+      let is_still_leaving = state
+        .hidden_conversations
+        .try_update(|hidden| hidden.remove(&conversation))
+        .unwrap_or(false);
+      if is_still_leaving {
+        state.try_write(|backend| backend.leave_channel(conversation));
+      }
+    });
   }
 
   /// Conversations as the sidebar shows them: without the ones being left, favorites in the user's
@@ -965,6 +982,63 @@ impl AppState {
       }
     });
     list
+  }
+
+  /// Closes `toast` after `duration` of countdown, which pauses while held; `on_end` runs when it
+  /// closes, by the countdown or earlier.
+  fn close_toast_after(&self, toast: u64, duration: Duration, on_end: impl FnOnce() + 'static) {
+    let now = crate::clock::now_ms();
+    self.toast_clock.update_value(|clock| {
+      clock.timers.start(toast, duration, now);
+      clock.on_end.insert(toast, Box::new(on_end));
+    });
+    self.schedule_toast_wake();
+  }
+
+  /// One browser timer for the nearest deadline; none while the countdowns are held. Native builds
+  /// (tests) have no browser timer and drive the countdowns themselves.
+  fn schedule_toast_wake(&self) {
+    let state = *self;
+    let now = crate::clock::now_ms();
+    let _ = self.toast_clock.try_update_value(|clock| {
+      if let Some(wake) = clock.maybe_wake.take() {
+        wake.clear();
+      }
+      let Some(deadline) = clock.timers.next_deadline() else {
+        return;
+      };
+      let wait = Duration::from_millis(u64::try_from(deadline - now).unwrap_or(0));
+      #[cfg(target_arch = "wasm32")]
+      match leptos::leptos_dom::helpers::set_timeout_with_handle(move || state.wake_toasts(), wait) {
+        Ok(handle) => clock.maybe_wake = Some(handle),
+        // Without a timer the toast stays until closed: worse, but nothing is lost.
+        Err(_) => tracing::debug!("could not start the toast timer"),
+      }
+      #[cfg(not(target_arch = "wasm32"))]
+      let _ = (state, wait);
+    });
+  }
+
+  /// The toast timer fired: closes the toasts whose time ran out and waits for the next one.
+  #[cfg(target_arch = "wasm32")]
+  fn wake_toasts(&self) {
+    self.wake_toasts_at(crate::clock::now_ms());
+  }
+
+  /// Native builds have no toast timer; tests call this with their own clock.
+  #[cfg(any(target_arch = "wasm32", test))]
+  fn wake_toasts_at(&self, now: TimestampMs) {
+    let expired = self
+      .toast_clock
+      .try_update_value(|clock| {
+        clock.maybe_wake = None;
+        clock.timers.take_expired(now)
+      })
+      .unwrap_or_default();
+    for toast in expired {
+      self.dismiss_toast(toast);
+    }
+    self.schedule_toast_wake();
   }
 
   fn push_toast(&self, text: String, maybe_undo: Option<Undo>) -> u64 {
@@ -1859,6 +1933,42 @@ mod tests {
       state.show_error("two".into(), "b".into());
       state.show_error("one".into(), "a".into());
       assert_eq!(state.toasts.get_untracked().len(), 2);
+    }
+
+    /// #367: an Undo toast closed before its countdown ran out commits at once (the message leaves
+    /// the hidden set because its deletion went out).
+    #[test]
+    fn closing_an_undo_toast_commits_at_once() {
+      let state = test_state();
+      let (_, conversation) = first_channel(&state);
+      let message = id_from_raw(1);
+      state.delete_with_undo(conversation, message, "deleted".into());
+      assert!(state.hidden_messages.get_untracked().contains(&message));
+      state.dismiss_toast(state.toasts.get_untracked()[0].id);
+      assert!(state.toasts.get_untracked().is_empty());
+      assert!(!state.hidden_messages.get_untracked().contains(&message));
+    }
+
+    #[test]
+    fn toasts_close_when_their_countdown_ran_out_but_not_while_held() {
+      let state = test_state();
+      let (_, conversation) = first_channel(&state);
+      let message = id_from_raw(1);
+      let now = crate::clock::now_ms();
+      state.show_brief_toast("Link copied".into());
+      state.delete_with_undo(conversation, message, "deleted".into());
+      state.hold_toasts(Hold::Pointer, true);
+      state.wake_toasts_at(now + 60_000);
+      assert_eq!(state.toasts.get_untracked().len(), 2, "held under the pointer");
+      state.hold_toasts(Hold::Pointer, false);
+      state.wake_toasts_at(now + BRIEF_TOAST.as_millis() as i64);
+      assert_eq!(state.toasts.get_untracked().len(), 1, "the brief toast closed");
+      state.wake_toasts_at(now + UNDO_WINDOW.as_millis() as i64);
+      assert!(state.toasts.get_untracked().is_empty());
+      assert!(
+        !state.hidden_messages.get_untracked().contains(&message),
+        "the deletion went out"
+      );
     }
 
     #[test]
