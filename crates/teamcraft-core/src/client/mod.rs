@@ -129,6 +129,9 @@ pub struct ClientSettings {
   /// times): each answer costs a commit, and a broken or malicious device could ask far more often
   /// than `rejoin_retry` (issue #149).
   pub rejoin_cooldown: std::time::Duration,
+  /// Removal records whose absence ended before the workspace's retention limit are dropped
+  /// (issue #186); this much later, to spare messages still on the way.
+  pub removed_sender_retention_leeway: std::time::Duration,
   /// A DM device that waits for the welcome of a group someone else founded shows "setting up
   /// encryption" this long, then that it failed, with a retry (#278).
   pub dm_welcome_timeout: std::time::Duration,
@@ -233,6 +236,7 @@ impl Default for ClientSettings {
       rejoin_retry: std::time::Duration::from_secs(10 * 60),
       rejoin_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
       rejoin_cooldown: std::time::Duration::from_secs(30 * 60),
+      removed_sender_retention_leeway: std::time::Duration::from_secs(24 * 60 * 60),
       dm_welcome_timeout: std::time::Duration::from_secs(2 * 60),
       removal_retry: std::time::Duration::from_secs(60 * 60),
       removal_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
