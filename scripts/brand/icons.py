@@ -14,6 +14,7 @@ python3 scripts/brand/icons.py [--contact-sheet out.png]
 
 import argparse
 import json
+import re
 import shutil
 import struct
 import subprocess
@@ -125,20 +126,34 @@ def web() -> list[Path]:
     render(tile(LIGHT_BACKPLATE, "full", safe_radius=0.39), 512, WEB / "icon-maskable-512.png"),
     render(tile(LIGHT_BACKPLATE, "full", width=0.74), 180, WEB / "apple-touch-icon.png"),
   ]
-  (WEB / "favicon.svg").write_text(glyph("rounded"))
+  # Browsers scale an SVG favicon sharply (HiDPI), so the tab shows the full mark, not the glyph.
+  mark = (BRAND / "mark.svg").read_text()
+  (WEB / "favicon.svg").write_text(mark)
+  (WEB / "favicon-unread.svg").write_text(with_unread_dot(mark))
   write_ico({size: png_bytes(glyph("rounded"), size) for size in (16, 32, 48)}, WEB / "favicon.ico")
   shutil.copy(BRAND / "mark.svg", WEB / "mark.svg")
-  # The loading screen animates the dots itself (style/loader.css).
-  (WEB / "loader-mark.svg").write_text(mark.svg(with_dots=False))
+  # The loading screen inlines the mark in index.html (its parts animate); update it there too.
   shutil.copy(BRAND / "wordmark.svg", WEB / "wordmark.svg")
   shutil.copy(BRAND / "wordmark-dark.svg", WEB / "wordmark-dark.svg")
-  names = ("favicon.svg", "favicon.ico", "mark.svg", "loader-mark.svg", "wordmark.svg",
-           "wordmark-dark.svg")
+  names = ("favicon.svg", "favicon-unread.svg", "favicon.ico", "mark.svg", "wordmark.svg", "wordmark-dark.svg")
   return out + [WEB / name for name in names]
 
 
+def with_unread_dot(svg: str) -> str:
+  """The mark with a red dot in its corner: the favicon while something is unread."""
+  x, y, w, h = (float(part) for part in re.search(r'viewBox="([^"]+)"', svg).group(1).split())
+  r = w * 0.2
+  dot = (
+    "  <!-- Unread: a red dot in the corner (brand.rs shows this variant while something is unread). -->\n"
+    f'  <circle cx="{x + w - r * 1.02:.0f}" cy="{y + h - r * 1.02:.0f}" r="{r:.0f}" fill="#e5484d"'
+    f' stroke="#ffffff" stroke-width="{w * 0.035:.0f}"/>\n'
+  )
+  end = svg.rindex("</svg>")
+  return svg[:end] + dot + svg[end:]
+
+
 def ios() -> list[Path]:
-  """The single-size app icon with its dark and tinted appearances, and the launch screen logo."""
+  """The single-size app icon with its dark and tinted appearances."""
   icons = IOS / "AppIcon.appiconset"
   out = [
     render(tile(LIGHT_BACKPLATE, "full", width=0.76), 1024, icons / "icon-1024.png", opaque=True),
@@ -159,9 +174,7 @@ def ios() -> list[Path]:
     "info": {"author": "xcode", "version": 1},
   }
   (icons / "Contents.json").write_text(json.dumps(contents, indent=2) + "\n")
-  launch = IOS / "LaunchLogo.imageset"
-  for scale in (1, 2, 3):
-    out.append(render(mark_only(), 120 * scale, launch / f"logo@{scale}x.png"))
+  # The launch screen is the background only; the app's loading screen draws the mark (#463).
   return out
 
 

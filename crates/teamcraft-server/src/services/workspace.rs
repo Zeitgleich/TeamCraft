@@ -295,7 +295,9 @@ fn check_policy_payload(payload: &[u8], expected_new_version: u64) -> Result<Pol
     ));
   }
   let presence = &policy.presence;
-  if presence.maybe_away_timeout_minutes == Some(0)
+  if presence
+    .maybe_away_timeout_minutes
+    .is_some_and(|minutes| minutes < teamcraft_proto::MIN_AWAY_TIMEOUT_MINUTES)
     || presence.presets.len() > MAX_STATUS_PRESETS
     || presence.presets.iter().any(|preset| {
       preset.text.trim().is_empty()
@@ -536,6 +538,24 @@ mod tests {
     ];
     for edit in failing {
       assert!(check_policy_payload(&payload(1, edit), 1).is_err());
+    }
+  }
+
+  #[test]
+  fn the_away_timeout_has_a_minimum() {
+    for (minutes, is_valid) in [
+      (Some(0), false),
+      (Some(4), false),
+      (Some(5), true),
+      (Some(60), true),
+      (None, true),
+    ] {
+      let document = payload(1, |p| p.presence.maybe_away_timeout_minutes = minutes);
+      assert_eq!(
+        check_policy_payload(&document, 1).is_ok(),
+        is_valid,
+        "{minutes:?}"
+      );
     }
   }
 

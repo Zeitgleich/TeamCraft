@@ -90,9 +90,9 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSRequiresIPhoneOS: true
         # The brand colour with the white T of the app icon (Assets.xcassets).
+        # Background only: the app's loading screen assembles the mark from there (issue #463).
         UILaunchScreen:
           UIColorName: LaunchBackground
-          UIImageName: LaunchLogo
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations:

@@ -149,6 +149,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   }
   if tauri::is_available() {
     sync_tray(state, i18n);
+  } else {
+    sync_favicon(state);
   }
   if let Some((_, conversation)) = start {
     state.open_conversation(conversation);
@@ -727,6 +729,25 @@ fn sync_tray_labels(i18n: crate::i18n::I18n) {
   });
 }
 
+/// The browser tab's icon gets a red dot while the tray would show a count.
+fn sync_favicon(state: AppState) {
+  Effect::new(move |previous: Option<bool>| {
+    let has_unread = state.read(|backend| {
+      let mut list: Vec<_> = backend
+        .spaces()
+        .into_iter()
+        .flat_map(|space| backend.space_conversations(space.id))
+        .collect();
+      list.extend(backend.direct_conversations());
+      badge_count(&list) > 0
+    });
+    if previous != Some(has_unread) {
+      crate::brand::show_unread_in_favicon(has_unread);
+    }
+    has_unread
+  });
+}
+
 fn sync_tray(state: AppState, i18n: crate::i18n::I18n) {
   let brand = crate::brand::Brand::use_current();
   Effect::new(move |previous: Option<(u32, String, String)>| {
@@ -951,11 +972,17 @@ const ACTIVITY_CHECK_MS: u64 = 5_000;
 /// How often `/remind` reminders are checked.
 const REMINDER_CHECK_MS: u64 = 15_000;
 const MS_PER_MINUTE: f64 = 60_000.0;
+/// While the window is in front, input repeats "active" at most this often: half the shortest
+/// away timeout the workspace policy allows (a minute), so a user who only scrolls or reads with
+/// the mouse never times out, and the next input after an automatic away ends it at once.
+const ACTIVE_REPEAT_MS: TimestampMs = 30_000;
 
 /// What the activity watcher keeps between events.
 struct ActivityWatch {
   state: AppState,
   last_input_at: Cell<TimestampMs>,
+  /// When this device last told the server it is active.
+  last_active_report_at: Cell<TimestampMs>,
   is_idle: Cell<bool>,
   maybe_os: Cell<Option<tauri::OsAttention>>,
   reporter: RefCell<AttentionReporter>,
@@ -968,6 +995,8 @@ fn watch_activity(state: AppState) {
   let watch = Rc::new(ActivityWatch {
     state,
     last_input_at: Cell::new(now_ms()),
+    // The gateway's identify says active.
+    last_active_report_at: Cell::new(now_ms()),
     is_idle: Cell::new(false),
     maybe_os: Cell::new(None),
     reporter: RefCell::new(AttentionReporter::default()),
@@ -976,13 +1005,17 @@ fn watch_activity(state: AppState) {
     let watch = watch.clone();
     on_window(event, move || watch.on_input());
   }
-  for event in ["focus", "blur", "pageshow"] {
+  for event in ["focus", "pageshow"] {
     let watch = watch.clone();
-    on_window(event, move || watch.check());
+    on_window(event, move || watch.on_shown());
   }
   {
     let watch = watch.clone();
-    on_document("visibilitychange", move || watch.check());
+    on_window("blur", move || watch.check());
+  }
+  {
+    let watch = watch.clone();
+    on_document("visibilitychange", move || watch.on_shown());
   }
   // The window goes away: the server should not wait for the lease to run out.
   {
@@ -1005,12 +1038,30 @@ fn watch_activity(state: AppState) {
 }
 
 impl ActivityWatch {
+  /// Pointer, key, wheel or touch input. Ends this device's idle at once; while the window is in
+  /// front it also repeats "active" now and then, which ends an away timeout of the server.
   fn on_input(&self) {
-    self.last_input_at.set(now_ms());
-    if self.is_idle.replace(false) {
-      self.state.read(|backend| backend.set_activity(false));
+    let now = now_ms();
+    self.last_input_at.set(now);
+    let is_repeat_due = now.saturating_sub(self.last_active_report_at.get()) >= ACTIVE_REPEAT_MS;
+    if self.is_idle.replace(false) || (is_repeat_due && is_in_front()) {
+      self.report_active(now);
     }
     self.check();
+  }
+
+  /// The window was focused or became visible: the user turned to the app, which counts as input.
+  fn on_shown(&self) {
+    if is_in_front() {
+      self.on_input();
+    } else {
+      self.check();
+    }
+  }
+
+  fn report_active(&self, now: TimestampMs) {
+    self.last_active_report_at.set(now);
+    self.state.read(|backend| backend.set_activity(false));
   }
 
   fn check_idle(&self) {
@@ -1089,6 +1140,11 @@ pub(crate) fn listen_on(target: &web_sys::EventTarget, event: &str, callback: im
     // Lives as long as the page.
     listener.forget();
   }
+}
+
+/// The window is visible and has the focus: input there is the user working in the app.
+fn is_in_front() -> bool {
+  is_document_visible() && window_has_focus()
 }
 
 fn is_document_visible() -> bool {

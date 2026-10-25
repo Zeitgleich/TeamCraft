@@ -4,8 +4,10 @@
 
 Open the status menu (your avatar):
 
-- **Online**, **Away**, **Do not disturb**, **Offline**. Your devices report when you are idle, so
-  you turn **Away** automatically after the time your admin set.
+- **Online**, **Away**, **Do not disturb**, **Offline**. Without input you turn away automatically
+  after a while (15 minutes unless you or your admin chose otherwise, at least 5) and back to online
+  as soon as you use the app again. **Away** chosen in the menu stays until you pick another status;
+  **Online** goes back to the automatic status.
 - **Custom status** with an emoji, a text and an expiry (30 minutes, 1 hour, today, this week, never),
   or one of the **presets** your admin offers. Presets: In a meeting, Commuting, Out sick, On vacation
   unless your admin chose others. `/status` does the same from the composer.
