@@ -10,11 +10,15 @@ use std::sync::Arc;
 use common::{Peer, linked_options, settings, settle};
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
-use teamcraft_core::store::{ConversationEvent, LocalStore, MemoryStore, MessageContent, MessageFilter};
+use teamcraft_core::clock::{Clock, ManualClock, SystemClock};
+use teamcraft_core::store::{
+  ConversationEvent, LocalStore, MemoryStore, MessageContent, MessageFilter, Table,
+};
+use teamcraft_core::workspace::RosterRole;
 use teamcraft_core::{GroupAccess, LinkOffer, PendingEnrollment};
 use teamcraft_proto::{
   AddConversationMemberRequest, Base64Bytes, ConversationId, Id, ListMlsMessagesQuery, MlsMessageKind,
-  PostMlsMessageRequest,
+  PostMlsMessageRequest, WorkspacePolicy,
 };
 
 #[tokio::test]
@@ -226,6 +230,119 @@ async fn a_new_device_refuses_what_a_removed_member_signs_after_the_removal() {
     .unwrap();
   settle(&mut [&mut laptop]).await;
   assert!(!laptop.texts(channel).contains(&"forged again".to_string()));
+}
+
+/// Issue #186: removal records of a conversation the user is no longer in are dropped, and a
+/// device that still holds the record can't bring it back.
+#[tokio::test]
+async fn removal_records_of_a_conversation_the_user_left_are_dropped() {
+  let server = FakeServer::new();
+  let mut phone = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let mut carol = Peer::enroll(&server, "Carol").await;
+  let space = phone.space().await;
+  let channel = phone.client.create_channel(space, "general").await.unwrap();
+  for user in [bob.client.user_id(), carol.client.user_id()] {
+    phone.client.add_member(channel, user).await.unwrap();
+  }
+  settle(&mut [&mut phone, &mut bob, &mut carol]).await;
+  phone
+    .client
+    .remove_member(channel, carol.client.user_id())
+    .await
+    .unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut carol]).await;
+  let key = format!(
+    "{channel}/{}/{}",
+    carol.client.user_id(),
+    carol.client.device_id()
+  );
+  let left_at_ms = phone.client.account_data().removed_senders[&key].left_at_ms;
+
+  server.remove_member_as_admin(channel, phone.client.user_id());
+  phone.client.full_sync().await.unwrap();
+  let data = phone.client.account_data();
+  assert!(!data.removed_senders.contains_key(&key));
+  assert!(data.is_pruned_sender(&key, left_at_ms));
+  assert!(phone.store.get(Table::RemovedSenders, &key).unwrap().is_none());
+
+  // Another device's copy of the same absence (or an older key bag) doesn't count again.
+  let mut older = data.clone();
+  older.pruned_senders.clear();
+  older.note_removed_sender(&key, left_at_ms);
+  let mut merged = data.clone();
+  merged.merge(&older, 0);
+  assert!(!merged.removed_senders.contains_key(&key));
+}
+
+/// Issue #186: an absence that ended before anything the workspace's retention limit keeps can't
+/// matter any more; a device that is still out keeps its record.
+#[tokio::test]
+async fn removal_records_that_ended_before_the_retention_limit_are_dropped() {
+  const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+  let server = FakeServer::new();
+  // Alice's clock runs three days ahead of the server: what happens now is "three days ago".
+  let clock = ManualClock::new(SystemClock.now_ms() + 3 * DAY_MS);
+  let mut phone = Peer::enroll_on_clock(server.add_user("Alice"), "Alice", settings(), Box::new(clock)).await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let mut carol = Peer::enroll(&server, "Carol").await;
+  let mut dave = Peer::enroll(&server, "Dave").await;
+  let alice_id = phone.client.user_id();
+  phone
+    .client
+    .publish_roster(&[(alice_id, RosterRole::Owner)])
+    .await
+    .unwrap();
+  let space = phone.space().await;
+  let channel = phone.client.create_channel(space, "general").await.unwrap();
+  for user in [
+    bob.client.user_id(),
+    carol.client.user_id(),
+    dave.client.user_id(),
+  ] {
+    phone.client.add_member(channel, user).await.unwrap();
+  }
+  settle(&mut [&mut phone, &mut bob, &mut carol, &mut dave]).await;
+  // Carol leaves and comes back; Dave leaves for good.
+  for user in [carol.client.user_id(), dave.client.user_id()] {
+    phone.client.remove_member(channel, user).await.unwrap();
+  }
+  settle(&mut [&mut phone, &mut bob, &mut carol, &mut dave]).await;
+  phone
+    .client
+    .add_member(channel, carol.client.user_id())
+    .await
+    .unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut carol, &mut dave]).await;
+  let key_of = |peer: &Peer| format!("{channel}/{}/{}", peer.client.user_id(), peer.client.device_id());
+  let (carol_key, dave_key) = (key_of(&carol), key_of(&dave));
+  let data = phone.client.account_data();
+  assert!(data.removed_senders[&carol_key].maybe_back_at_ms.is_some());
+  assert!(data.removed_senders.contains_key(&dave_key));
+
+  // Pinned messages survive retention: nothing can go yet.
+  let mut policy = WorkspacePolicy::default();
+  policy.retention.limit.maybe_max_age_days = Some(1);
+  policy.retention.keep_pinned = true;
+  phone.client.publish_policy(policy.clone()).await.unwrap();
+  phone.client.full_sync().await.unwrap();
+  assert!(
+    phone
+      .client
+      .account_data()
+      .removed_senders
+      .contains_key(&carol_key)
+  );
+
+  policy.retention.keep_pinned = false;
+  phone.client.publish_policy(policy).await.unwrap();
+  phone.client.full_sync().await.unwrap();
+  let data = phone.client.account_data();
+  assert!(
+    !data.removed_senders.contains_key(&carol_key),
+    "ended before the horizon"
+  );
+  assert!(data.removed_senders.contains_key(&dave_key), "still out");
 }
 
 #[tokio::test]

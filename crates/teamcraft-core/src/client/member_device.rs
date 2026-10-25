@@ -23,6 +23,9 @@ use crate::store::{LocalStore, Table};
 /// Where enrollment notes whether the key bag came over the link ([`Client::has_key_bag_from_link`]).
 pub(crate) const KEY_BAG_FROM_LINK_KEY: &str = "key_bag_from_link";
 
+/// One day, for the retention horizon of removal records.
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
 /// Marks an MLS "proposal" entry in which a new device of a member asks to be added.
 pub(crate) const DEVICE_ADD_REQUEST_MAGIC: &[u8] = b"TCDA";
 
@@ -267,6 +270,62 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let data = self.account_data();
     for (key, absence) in &data.removed_senders {
       records::merge_removed_sender(&self.store, key, absence)?;
+    }
+    self.forget_pruned_senders(&data)
+  }
+
+  /// Drops removal records that can't matter any more (issue #186), here and in the account data:
+  /// those of conversations the user is no longer in (`conversations`, the server's list), and
+  /// absences that ended before anything the workspace's retention still keeps. Records of a
+  /// device that is still out stay: they refuse what it signs from now on.
+  pub(crate) fn prune_removed_senders(&mut self, conversations: &[ConversationId]) -> Result<(), CoreError> {
+    let current: BTreeSet<String> = conversations.iter().map(ToString::to_string).collect();
+    let maybe_horizon_ms = self.retention_horizon_ms()?;
+    self.update_account_data(|data, now_ms| {
+      data.prune_removed_senders(
+        |key, absence| {
+          let conversation = key.split('/').next().unwrap_or_default();
+          let has_left_conversation = !current.contains(conversation);
+          let ended_before_retention = maybe_horizon_ms.is_some_and(|horizon_ms| {
+            absence
+              .maybe_back_at_ms
+              .is_some_and(|back| back >= absence.left_at_ms && back < horizon_ms)
+          });
+          has_left_conversation || ended_before_retention
+        },
+        now_ms,
+      )
+    })?;
+    let data = self.account_data();
+    self.forget_pruned_senders(&data)
+  }
+
+  /// Messages older than this (server time) can't be fetched any more: no conversation keeps them
+  /// longer than the workspace's retention limit allows. `None` without such a limit, or when
+  /// pinned messages survive retention (an old pinned message stays readable).
+  fn retention_horizon_ms(&self) -> Result<Option<i64>, CoreError> {
+    let retention = self.workspace_policy()?.retention;
+    if retention.keep_pinned {
+      return Ok(None);
+    }
+    Ok(retention.limit.maybe_max_age_days.map(|days| {
+      let max_age_ms = i64::from(days).saturating_mul(DAY_MS);
+      // A day more for clock skew between this device and the server.
+      self.now_ms().saturating_sub(max_age_ms).saturating_sub(DAY_MS)
+    }))
+  }
+
+  /// Deletes this device's own removal records that the user's devices dropped as spent.
+  fn forget_pruned_senders(&mut self, data: &crate::account_data::AccountData) -> Result<(), CoreError> {
+    if data.pruned_senders.is_empty() {
+      return Ok(());
+    }
+    for (key, _) in self.store.list(Table::RemovedSenders)? {
+      if let Some(absence) = records::removed_sender(&self.store, &key)?
+        && data.is_pruned_sender(&key, absence.left_at_ms)
+      {
+        self.store.delete(Table::RemovedSenders, &key)?;
+      }
     }
     Ok(())
   }

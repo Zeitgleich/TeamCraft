@@ -54,6 +54,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.unmark_resync(*stale, ResyncPart::Members)?;
       self.unmark_resync(*stale, ResyncPart::Content)?;
     }
+    // Removal records of conversations the user left can go (issue #186).
+    let ids: Vec<ConversationId> = conversations.iter().map(|conversation| conversation.id).collect();
+    self.prune_removed_senders(&ids)?;
     // The whole list first, members after: a UI reading the store meanwhile shows every
     // conversation at once instead of one per member request (issue #247).
     for conversation in &conversations {
@@ -64,7 +67,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         conversation,
       )?;
     }
-    let ids: Vec<ConversationId> = conversations.iter().map(|conversation| conversation.id).collect();
     self
       .catch_up_conversations(&ids, &members_order(&conversations))
       .await?;
