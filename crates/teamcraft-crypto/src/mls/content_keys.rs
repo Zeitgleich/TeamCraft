@@ -146,9 +146,9 @@ impl ContentKeyBundle {
     }
   }
 
-  /// Keys a device added back missed while it was out, for [`SealedContentKeys`]: no current
-  /// key, the device derives the current one itself (e2ee.md §4.6).
-  pub fn missed_keys(conversation_id: ConversationId, keys: Vec<ContentKey>) -> Self {
+  /// Keys without a current one, for [`SealedContentKeys`]: what a device added back missed, or
+  /// the history of a new member (e2ee.md §4.3, §4.6). The current key travels on its own.
+  pub fn without_current(conversation_id: ConversationId, keys: Vec<ContentKey>) -> Self {
     Self {
       conversation_id,
       maybe_current: None,

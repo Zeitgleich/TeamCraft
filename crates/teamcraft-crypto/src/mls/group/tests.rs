@@ -919,7 +919,7 @@ mod sealed_keys {
   }
 
   fn missed_keys_of(ring: &ContentKeyRing) -> ContentKeyBundle {
-    ContentKeyBundle::missed_keys(
+    ContentKeyBundle::without_current(
       CONVERSATION,
       ring.keys().iter().map(ContentKey::duplicate).collect(),
     )

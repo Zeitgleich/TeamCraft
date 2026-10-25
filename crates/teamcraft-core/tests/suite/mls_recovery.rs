@@ -380,6 +380,48 @@ mod missed_keys {
   }
 }
 
+mod history_shares {
+  use super::*;
+
+  /// Issue #403: Gus joined from the join on; Alice later adds Uma with full history. Uma reads
+  /// everything, Gus still nothing from before his join: the history went sealed to Uma alone.
+  #[tokio::test]
+  async fn a_from_join_member_learns_no_history_when_somebody_else_gets_it() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut gus) = three(&server).await;
+    let mut uma = Peer::enroll(&server, "Uma").await;
+    let channel = channel_with(&mut alice, &mut [&mut bob]).await;
+    alice.client.send_text(channel, None, "before Gus").await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    alice
+      .client
+      .add_member_with_history(channel, gus.client.user_id(), Some(HistoryPolicy::FromJoin))
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut gus]).await;
+
+    alice
+      .client
+      .add_member_with_history(channel, uma.client.user_id(), Some(HistoryPolicy::Full))
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut gus, &mut uma]).await;
+    uma.client.full_sync().await.unwrap();
+    assert!(uma.texts(channel).contains(&"before Gus".to_string()));
+
+    let before_gus = alice.content_key_of(channel, "before Gus").await;
+    assert!(uma.client.has_content_key(channel, &before_gus));
+    assert!(!gus.client.has_content_key(channel, &before_gus));
+    // Everybody still writes and reads under the shared current key.
+    gus.client.send_text(channel, None, "hi Uma").await.unwrap();
+    uma.client.send_text(channel, None, "hi Gus").await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut gus, &mut uma]).await;
+    assert!(uma.texts(channel).contains(&"hi Uma".to_string()));
+    assert!(gus.texts(channel).contains(&"hi Gus".to_string()));
+    assert!(bob.texts(channel).contains(&"hi Gus".to_string()));
+  }
+}
+
 mod skewed_clocks {
   use super::*;
 
