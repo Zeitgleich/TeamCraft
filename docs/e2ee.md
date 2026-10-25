@@ -423,6 +423,37 @@ shows only the resulting PNG. Thumbnails of SVG are drawn by the sender's browse
 `resvg` on native platforms, with no DTD, no resources loaded and limits on size, element count and
 `<use>` expansion (`teamcraft-core` `svg_thumbnail`).
 
+#### 4.5.0 Previews of Markdown, HTML and PDF files
+
+A received `.md`, `.html` or `.pdf` file (by media type, or by extension when the type is generic) can be
+opened as a formatted preview in the app, up to 10 MiB (larger files are only downloaded). The preview works
+from the file the client core already downloaded and decrypted; nothing leaves the client. The file is
+untrusted, so each kind is shown in a way that can't run its code or reach the app:
+
+| Kind     | Shown as                                                                                       |
+|----------|------------------------------------------------------------------------------------------------|
+| Markdown | the app's own renderer (the message subset: a tree of elements, no HTML string); "show source" |
+| HTML     | a sandboxed frame, see below; "show source"                                                    |
+| PDF      | the vendored PDF.js, see below                                                                 |
+
+**HTML.** An `<iframe sandbox="" srcdoc="…">` with the strictest sandbox (no `allow-scripts`, no
+`allow-same-origin`: an opaque origin that reaches nothing of the app, its storage or its tokens; no forms,
+popups, top navigation or downloads). The document starts with its own policy,
+`default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'`
+(also set as the frame's `csp` attribute): no script, no connection, no remote image or font, so opening a
+file tells no one that it was opened. The page's own policy applies to the frame too (`srcdoc` inherits it),
+which is stricter still: inline `<style>` blocks are blocked by `style-src 'self'`, so a previewed file shows
+with the browser's default styles. Links in the frame do nothing; the file's `http(s)` links are listed under
+the preview and open in the system browser (desktop) or a new tab (web), with the address as the label.
+The list is read from an inert parsed copy of the file (`DOMParser`).
+
+**PDF.** PDF.js, vendored and pinned (`crates/teamcraft-ui/vendor/pdfjs-<version>`, the npm package's
+`pdf.min.mjs`, worker and the decoders' WebAssembly, unmodified, no CDN), loaded as a separate module when the first PDF opens, so the
+first-visit bundle is untouched. It runs with `isEvalSupported: false`, no
+scripting (the scripting sandbox is not shipped) and no annotation, form or link layer: pages are canvases
+plus a text layer for selecting text and searching. Memory stays bounded: only pages near the viewport are
+drawn.
+
 #### 4.5.1 Share links for external download
 
 A file shared in a chat can get a link that anyone can open in a browser, without an account:

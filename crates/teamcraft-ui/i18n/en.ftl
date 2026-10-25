@@ -1265,6 +1265,20 @@ file-upload-retrying = Retrying…
 file-upload-failed = Upload failed
 file-upload-unreadable = The file could not be read any more. Attach it again.
 file-preview = Show preview
+preview-unavailable = The file could not be loaded. Check your connection and try again.
+preview-show-source = Show source
+preview-show-formatted = Show formatted
+preview-html-note = Shown without scripts and without loading anything from the web.
+preview-links = { $count ->
+    [one] { $count } link in this file
+   *[other] { $count } links in this file
+  }
+preview-pdf-unreadable = This PDF could not be opened. Download it to view it elsewhere.
+preview-zoom-in = Zoom in
+preview-zoom-out = Zoom out
+preview-page = Page
+preview-find = Find in document
+preview-find-none = No match
 file-share = Create share link
 file-copy-share = Copy share link
 link-open-new = Open link in a new tab
