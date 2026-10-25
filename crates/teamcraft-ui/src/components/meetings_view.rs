@@ -49,7 +49,7 @@ pub fn MeetingsView() -> impl IntoView {
       let key = Some(IdempotencyKey::random());
       if let Some(meeting) = hub.run(me, now_ms(), client.start_instant(None, key)).await {
         // The server makes the chat without encryption; an instant meeting invites nobody.
-        // Gone only with the app: the organizer's next call then founds the group with themselves.
+        // Gone only with the app; then the chat stays without encryption (nobody else founds it).
         state.try_write(|backend| backend.set_up_meeting_chat(meeting.conversation_id, Vec::new()));
         join_meeting(state, i18n, meeting.conversation_id);
       }
@@ -423,7 +423,7 @@ pub fn ScheduleMeetingDialog() -> impl IntoView {
             // The server makes the chat without encryption: the users invited here go into its
             // group (from this request, never from the server's member list).
             let invitees = crate::meetings::invited_users(&request);
-            // Gone only with the app: the organizer's next call then founds the group with themselves.
+            // Gone only with the app; then the chat stays without encryption (nobody else founds it).
             state.try_write(|backend| backend.set_up_meeting_chat(meeting.conversation_id, invitees));
             state.close_overlay();
           }

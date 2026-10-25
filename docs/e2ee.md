@@ -713,23 +713,24 @@ never by the server's member list:
 
 - **Founding.** Only the device that scheduled or started the meeting founds the group, right after
   the server created it (`set_up_meeting_chat`), like a group DM's: a setup record holding the users
-  invited in that request, founded only when the server shows no group and has no group information
-  for it, finished later when cut short. It publishes the group's information at once, so the
-  organizer's other devices join by external commit even while the group holds nobody else (an
-  instant meeting). Any other device, the organizer's included, only joins: as a further device, from
-  a welcome, or by a device-add request. It never founds, so a server that hides a group can't make
-  a second device fork it.
+  invited in that request (noted before the first request, so a setup cut short by a lost network
+  or a closed app is finished on a later sync), founded only when the server shows no group and has
+  no group information for it. It publishes the group's information at once (and again on a sync
+  while the group is still at epoch 0), so the organizer's other devices join by external commit
+  even while the group holds nobody else (an instant meeting). Any other device, the organizer's
+  included, only joins: as a further device, from a welcome, or by a device-add request. It never
+  founds, so a server that hides a group can't make a second device fork it.
 - **Admission.** A host's "admit" in the lobby is the host's own decision: the host's device adds the
-  admitted user with history from the join on (§4.7), signed like any addition; a user without a
-  device yet goes in when the first one appears. Being made a member by the server alone lets
-  nobody in.
+  devices the admitted user has at that moment, with history from the join on (§4.7), signed like
+  any addition. Nothing waits for a device that appears later, unattended, since the server could
+  register one of its own. Being made a member by the server alone lets nobody in.
 - **Calls.** A call needs the device in the group (§8). Starting one first takes the next step of
   this device's setup, picks up a waiting welcome or joins as a further device; without a group after
   that, the call fails at once with "not let into the encryption yet" and a retry, instead of
   waiting for keys.
 
 Not covered yet: users invited later by editing the meeting (#475); guests have no device that can
-join a group until #446, so an admitted guest is added once their page sets one up.
+join a group until #446, so admitting a guest lets nobody into the encryption yet.
 
 **Server time for merge decisions.** Whether every member merges a commit must not depend on its own
 clock, or a skewed clock would split the group. The roster freshness (admin.md §2.3) is judged at the

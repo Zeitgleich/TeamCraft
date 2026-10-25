@@ -3,15 +3,20 @@
 //! for a group that isn't there (e2ee.md §4.6, "Meeting chats"; §8).
 #![allow(clippy::unwrap_used)]
 
+use std::sync::Arc;
+
 use crate::common;
 
-use common::{Peer, link_device, settle};
+use common::{Peer, link_device, settings, settle};
 #[cfg(feature = "ui")]
 use teamcraft_client_api::failure::{CallFailure, FailureKind};
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
+use teamcraft_core::clock::ManualClock;
 use teamcraft_core::error::CoreError;
 use teamcraft_proto::{AddConversationMemberRequest, ConversationId};
+
+const NOW_MS: i64 = 1_800_000_000_000;
 
 #[tokio::test]
 async fn the_organizer_sets_the_chat_up_and_both_can_start_the_call() {
@@ -181,6 +186,55 @@ async fn the_hosts_admit_lets_somebody_into_the_chat() {
   alice.client.let_into_meeting_chat(chat, bob_id).await.unwrap();
   bob.client.full_sync().await.unwrap();
   assert_eq!(bob.client.prepare_call(chat).await.unwrap().devices.len(), 2);
+}
+
+#[tokio::test]
+async fn a_setup_cut_off_before_its_first_request_is_finished_on_a_later_sync() {
+  let server = FakeServer::new();
+  let clock = Arc::new(ManualClock::new(NOW_MS));
+  let mut alice = Peer::enroll_on_clock(
+    server.add_user("Alice"),
+    "Alice",
+    settings(),
+    Box::new(clock.clone()),
+  )
+  .await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let chat = server.create_meeting_chat(alice.client.user_id(), &[bob.client.user_id()]);
+  let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+  server.set_offline(alice_id, true);
+  assert!(alice.client.set_up_meeting_chat(chat, &[bob_id]).await.is_err());
+  server.set_offline(alice_id, false);
+
+  clock.advance(i64::try_from(settings().rejoin_retry.as_millis()).unwrap());
+  alice.client.full_sync().await.unwrap();
+  assert!(
+    alice.client.has_group(chat).unwrap(),
+    "finished from the setup record"
+  );
+  bob.client.full_sync().await.unwrap();
+  assert_eq!(bob.client.prepare_call(chat).await.unwrap().devices.len(), 2);
+}
+
+#[tokio::test]
+async fn an_admitted_user_without_a_device_is_not_let_in_later_unattended() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  // A user with no device yet (a guest before #446), whom the server could give one later.
+  let carol_api = server.add_user("Carol");
+  let carol_id = carol_api.user_id();
+  let chat = server.create_meeting_chat(alice.client.user_id(), &[carol_id]);
+  alice.client.set_up_meeting_chat(chat, &[]).await.unwrap();
+  alice.client.let_into_meeting_chat(chat, carol_id).await.unwrap();
+
+  let mut carol = Peer::enroll_as(carol_api, "Carol").await;
+  alice.client.full_sync().await.unwrap();
+  carol.client.full_sync().await.unwrap();
+  assert!(
+    !carol.client.has_group(chat).unwrap(),
+    "a device that came later isn't added"
+  );
+  assert_eq!(alice.client.verified_call_devices(chat).await.unwrap().len(), 1);
 }
 
 async fn two() -> (FakeServer, Peer, Peer) {

@@ -264,33 +264,46 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     id: ConversationId,
     invitees: &[UserId],
   ) -> Result<bool, CoreError> {
+    let had_setup = self.dm_setup(id)?.is_some();
+    let me = self.user_id();
+    let others = conversation_members(invitees, me);
+    // Noted before anything can fail: a setup cut short here (no network, the app closed) is
+    // finished on a later sync (`repair_dm_setups`).
+    self.note_participants_setup(id, &others)?;
     let conversation = self.api.conversation(id).await?;
     if conversation.kind != ConversationKind::Meeting {
+      self.store.delete(Table::SyncState, &dm_setup_key(id))?;
       return Err(CoreError::NotAMeetingChat(id));
     }
     records::put_json(&self.store, Table::Conversations, &id.to_string(), &conversation)?;
-    if !self.has_group(id)? && self.dm_setup(id)?.is_none() && self.server_has_group_info(id).await? {
-      // Founded already (by this user's other device): this device joins it.
+    if !self.has_group(id)? && !had_setup && self.server_has_group_info(id).await? {
+      // Founded already (by this user's other device): this device joins it, never founds.
+      self.store.delete(Table::SyncState, &dm_setup_key(id))?;
       self.join_as_member_device(id).await?;
       return self.has_group(id);
     }
-    let me = self.user_id();
-    let others = conversation_members(invitees, me);
-    let is_complete = self.start_participants_setup(id, &others).await?;
+    let is_complete = self.finish_dm_setup(id, &others).await?;
     if self.has_group(id)? {
       self.publish_group_info_if_missing(id).await?;
     }
     Ok(is_complete)
   }
 
-  /// "Admit" by a host of a meeting: lets the admitted user into the chat's encryption group with
-  /// history from now on, signed by this host's device. Only ever on the host's own decision,
-  /// never because the server made somebody a member (e2ee.md §4.6, "Meeting chats"). A user
-  /// without a device yet (a guest whose page hasn't set one up) goes in when their first device
-  /// appears.
+  /// "Admit" by a host of a meeting: lets the admitted user's devices into the chat's encryption
+  /// group with history from now on, signed by this host's device. Only ever on the host's own
+  /// decision, never because the server made somebody a member (e2ee.md §4.6, "Meeting chats").
+  /// Only the devices the user has now go in: nothing waits for a device that appears later,
+  /// unattended (the server could register one of its own).
   pub async fn let_into_meeting_chat(&mut self, id: ConversationId, user: UserId) -> Result<(), CoreError> {
     if !self.has_group(id)? {
       return Err(CoreError::NoGroup(id));
+    }
+    let is_meeting_chat = self
+      .cached_conversations()?
+      .get(&id)
+      .is_some_and(|response| response.kind == ConversationKind::Meeting);
+    if !is_meeting_chat {
+      return Err(CoreError::NotAMeetingChat(id));
     }
     let history = self.effective_history(user, HistoryShare::FromJoin).await?;
     self
@@ -302,7 +315,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         }),
       )
       .await?;
-    self.queue_user_addition_if_missing(id, user, history).await
+    if !self.group_users(id)?.contains(&user) {
+      tracing::info!(conversation_id = %id, "the admitted user has no device to let in yet");
+    }
+    Ok(())
   }
 
   async fn server_has_group_info(&mut self, id: ConversationId) -> Result<bool, CoreError> {
@@ -331,6 +347,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     id: ConversationId,
     others: &[UserId],
   ) -> Result<bool, CoreError> {
+    self.note_participants_setup(id, others)?;
+    self.finish_dm_setup(id, others).await
+  }
+
+  /// Notes (or renews) the setup record of a DM, group DM or meeting chat with `others`.
+  fn note_participants_setup(&mut self, id: ConversationId, others: &[UserId]) -> Result<(), CoreError> {
     let maybe_setup = self.dm_setup(id)?;
     // Asked for by the user: tried now, whatever the backoff of an earlier attempt says.
     let setup = DmSetupRecord {
@@ -344,8 +366,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       is_waiting_for_device: false,
       maybe_welcome_deadline_ms: None,
     };
-    records::put_json(&self.store, Table::SyncState, &dm_setup_key(id), &setup)?;
-    self.finish_dm_setup(id, others).await
+    records::put_json(&self.store, Table::SyncState, &dm_setup_key(id), &setup)
   }
 
   /// Finishes the MLS setup of DMs this device created whose setup was cut short, at a growing
@@ -364,9 +385,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       else {
         continue;
       };
-      let is_member = conversations
-        .get(&id)
-        .is_some_and(|response| response.maybe_my_membership.is_some());
+      let is_member = match conversations.get(&id) {
+        Some(response) => response.maybe_my_membership.is_some(),
+        // Noted before the conversation was known here (a meeting chat whose setup was cut off
+        // right away): asked once more instead of dropped.
+        None => match self.api.conversation(id).await {
+          Ok(response) => {
+            records::put_json(&self.store, Table::Conversations, &id.to_string(), &response)?;
+            response.maybe_my_membership.is_some()
+          },
+          Err(error) if error.is_not_found() || error.is_forbidden() => false,
+          Err(error) => {
+            maybe_first_error.get_or_insert(error.into());
+            continue;
+          },
+        },
+      };
       if !is_member {
         // Gone or left: nothing to set up any more.
         self.store.delete(Table::SyncState, &key)?;

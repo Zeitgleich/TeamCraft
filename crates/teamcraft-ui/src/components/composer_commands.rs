@@ -258,7 +258,7 @@ fn start_meeting(state: AppState, i18n: I18n) -> Outcome {
   leptos::task::spawn_local(async move {
     if let Ok(meeting) = client.start_instant(None, Some(IdempotencyKey::random())).await {
       // The server makes the chat without encryption; an instant meeting invites nobody.
-      // Gone only with the app: the organizer's next call then founds the group with themselves.
+      // Gone only with the app; then the chat stays without encryption (nobody else founds it).
       state.try_write(|backend| backend.set_up_meeting_chat(meeting.conversation_id, Vec::new()));
       state.open_meetings();
     }
