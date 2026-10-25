@@ -9,6 +9,9 @@ use teamcraft_proto::ErrorCode;
 
 /// Prefix of a failure that never reached the server.
 const NETWORK_PREFIX: &str = "network";
+/// Prefixes of a failure where something on the network answered instead of the server.
+const CAPTIVE_PORTAL_PREFIX: &str = "captive_portal";
+const UNTRUSTED_CERTIFICATE_PREFIX: &str = "untrusted_certificate";
 
 /// What went wrong and the technical detail behind it, for the "Details" of an error message.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,6 +28,11 @@ pub enum FailureKind {
   Server(ErrorCode),
   /// The server could not be reached.
   Network,
+  /// A captive portal answered instead of the server: sign in to the network first.
+  CaptivePortal,
+  /// The connection was refused over the certificate: usually a proxy that inspects encrypted
+  /// traffic with a CA this device doesn't trust.
+  UntrustedCertificate,
   /// Anything else (local store, encryption, a stopped core).
   Other,
 }
@@ -37,6 +45,15 @@ impl ActionFailure {
     }
   }
 
+  /// Never reached the server: offline, or intercepted on the way. The connection banner already
+  /// says so, so background work stays quiet about it.
+  pub fn is_unreachable(&self) -> bool {
+    matches!(
+      self.kind,
+      FailureKind::Network | FailureKind::CaptivePortal | FailureKind::UntrustedCertificate
+    )
+  }
+
   /// A failure whose cause is not known; worded as a generic error with the detail.
   pub fn other(detail: impl Into<String>) -> Self {
     Self::new(FailureKind::Other, detail)
@@ -47,8 +64,14 @@ impl ActionFailure {
     let Some((prefix, detail)) = text.split_once(": ") else {
       return Self::other(text);
     };
-    if prefix == NETWORK_PREFIX {
-      return Self::new(FailureKind::Network, detail);
+    let maybe_kind = match prefix {
+      NETWORK_PREFIX => Some(FailureKind::Network),
+      CAPTIVE_PORTAL_PREFIX => Some(FailureKind::CaptivePortal),
+      UNTRUSTED_CERTIFICATE_PREFIX => Some(FailureKind::UntrustedCertificate),
+      _ => None,
+    };
+    if let Some(kind) = maybe_kind {
+      return Self::new(kind, detail);
     }
     match ErrorCode::from(prefix.to_owned()) {
       ErrorCode::Unknown(_) => Self::other(text),
@@ -61,6 +84,8 @@ impl ActionFailure {
     match &self.kind {
       FailureKind::Server(code) => format!("{}: {}", code.as_str(), self.detail),
       FailureKind::Network => format!("{NETWORK_PREFIX}: {}", self.detail),
+      FailureKind::CaptivePortal => format!("{CAPTIVE_PORTAL_PREFIX}: {}", self.detail),
+      FailureKind::UntrustedCertificate => format!("{UNTRUSTED_CERTIFICATE_PREFIX}: {}", self.detail),
       FailureKind::Other => self.detail.clone(),
     }
   }
@@ -87,6 +112,16 @@ mod tests {
   fn network_failures_round_trip() {
     let failure = ActionFailure::new(FailureKind::Network, "server: network error: offline");
     assert_eq!(ActionFailure::from_wire(&failure.to_wire()), failure);
+  }
+
+  #[test]
+  fn interceptions_round_trip_and_count_as_unreachable() {
+    for kind in [FailureKind::CaptivePortal, FailureKind::UntrustedCertificate] {
+      let failure = ActionFailure::new(kind.clone(), "server: the network intercepted the connection");
+      assert_eq!(ActionFailure::from_wire(&failure.to_wire()), failure);
+      assert!(failure.is_unreachable());
+    }
+    assert!(!ActionFailure::other("x").is_unreachable());
   }
 
   #[test]

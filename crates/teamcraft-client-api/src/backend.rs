@@ -160,6 +160,10 @@ pub trait ChatBackend {
   }
   /// Trusts the contact's new identity key after the user compared it.
   fn accept_key_change(&self, _user: UserId) {}
+  /// The user opened this conversation: a catch-up still running takes it next (issue #247). Only a
+  /// hint; a conversation with nothing stored yet asks the core for no messages, so this is the
+  /// only way the core learns it.
+  fn focus_conversation(&self, _conversation: ConversationId) {}
   /// The device became idle or active; the server derives "away" from it.
   fn set_activity(&self, _is_idle: bool) {}
   /// Whether the user is looking at this desktop or web session right now (notifications.md,
@@ -373,6 +377,15 @@ pub trait ChatBackend {
     _history: HistoryPolicy,
     _joins_space: bool,
   ) {
+  }
+  /// The channel's members with their roles; empty until the member list is loaded.
+  fn channel_roles(&self, _conversation: ConversationId) -> Vec<crate::model::ChannelMember> {
+    Vec::new()
+  }
+  /// Gives a channel member another role. The UI offers only what [`crate::role_rules`] allows;
+  /// the server enforces the permission and its invariants, and a refusal shows as a failed
+  /// action. The role is the server's record, not yet a signed assignment (issue #380).
+  fn set_channel_role(&self, _conversation: ConversationId, _user: UserId, _role: crate::model::ChannelRole) {
   }
   /// The members of a space with their roles, as far as the user may see them.
   fn space_members(&self, _space: SpaceId) -> crate::model::SpaceRoster {

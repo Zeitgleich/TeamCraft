@@ -15,7 +15,8 @@ use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_engine::{CallEngine, CallEngineConfig, CallEngineEvent, EngineOutput};
 use teamcraft_media::rtp::AudioLevel;
 use teamcraft_proto::{
-  CallClientMessage, CallEvent, CallId, CallServerMessage, DeviceId, Id, MediaCapabilities, Snowflake, UserId,
+  CallClientMessage, CallEvent, CallId, CallServerMessage, DeviceId, Id, MediaCapabilities,
+  SFU_GOING_AWAY_CLOSE_CODE, Snowflake, UserId,
 };
 use teamcraft_sfu::auth::JoinGrant;
 use teamcraft_sfu::config::SfuConfig;
@@ -123,6 +124,61 @@ mod lost_connection {
     network.speak(BOB, 1);
     assert_eq!(network.heard(BOB, ALICE).len(), 1);
     assert_eq!(network.heard(ALICE, BOB).len(), 1);
+  }
+}
+
+mod sfu_restart {
+  use super::*;
+
+  #[test]
+  fn going_away_closes_every_connection_as_not_final() {
+    let network = Network::with_secured(&[ALICE, BOB]);
+    assert!(!network.rooms.is_going_away());
+    let links = network.links();
+    assert_eq!(network.rooms.go_away(), 2);
+    assert!(network.rooms.is_going_away());
+    for link in links {
+      assert_eq!(link.close_code(), Some(SFU_GOING_AWAY_CLOSE_CODE));
+    }
+  }
+
+  #[test]
+  fn restarted_sfu_takes_everyone_back_in_a_fresh_room_and_group() {
+    let mut network = Network::with_secured(&[ALICE, BOB]);
+    network.speak(BOB, 2);
+    assert_eq!(network.heard(ALICE, BOB).len(), 2);
+
+    network.restart_sfu();
+    assert!(network.saw(ALICE, &CallEngineEvent::Reconnecting));
+    assert!(network.saw(BOB, &CallEngineEvent::Reconnecting));
+    // The new SFU knows no slots: both join afresh, the first founds a new DAVE group.
+    assert_eq!(network.rejoin(ALICE), JoinOutcome::Joined);
+    assert_eq!(network.rejoin(BOB), JoinOutcome::Joined);
+    assert!(network.saw(ALICE, &CallEngineEvent::Reconnected));
+    assert!(network.saw(BOB, &CallEngineEvent::Reconnected));
+    assert!(network.is_secured(ALICE) && network.is_secured(BOB));
+    assert_eq!(
+      network.client(ALICE).engine.privacy_code(),
+      network.client(BOB).engine.privacy_code()
+    );
+    network.speak(ALICE, 1);
+    network.speak(BOB, 1);
+    assert_eq!(network.heard(BOB, ALICE).len(), 1);
+    assert_eq!(network.heard(ALICE, BOB).len(), 1);
+    assert!(!network.client(ALICE).engine.is_over());
+  }
+
+  #[test]
+  fn rejoins_arriving_in_any_order_get_back_together() {
+    let mut network = Network::with_secured(&[ALICE, BOB]);
+    network.restart_sfu();
+    // Bob's spread delay happened to be shorter.
+    assert_eq!(network.rejoin(BOB), JoinOutcome::Joined);
+    network.advance(Duration::from_millis(500));
+    assert_eq!(network.rejoin(ALICE), JoinOutcome::Joined);
+    assert!(network.is_secured(ALICE) && network.is_secured(BOB));
+    network.speak(ALICE, 1);
+    assert_eq!(network.heard(BOB, ALICE).len(), 1);
   }
 }
 
@@ -264,6 +320,28 @@ impl Network {
       .disconnect(&connection.room, device(id), connection.session, self.now);
     assert!(slot_kept);
     self.pump();
+  }
+
+  /// The links of every connected client.
+  fn links(&self) -> Vec<Arc<MemoryLink>> {
+    self
+      .clients
+      .values()
+      .filter_map(|client| client.maybe_connection.as_ref())
+      .map(|connection| Arc::clone(&connection.link))
+      .collect()
+  }
+
+  /// The SFU shuts down (every connection closed as going away) and a fresh process takes its
+  /// place: no rooms, no slots.
+  fn restart_sfu(&mut self) {
+    self.rooms.go_away();
+    let ids: Vec<i64> = self.clients.keys().copied().collect();
+    for id in ids {
+      self.drop_connection_silently(id);
+      self.client_mut(id).lost_sessions.clear();
+    }
+    self.rooms = Rooms::new(SfuConfig::default());
   }
 
   /// The client's connection dies without the SFU noticing (yet).

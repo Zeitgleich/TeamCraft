@@ -3,7 +3,11 @@
 //! For platforms without SQLCipher: the browser (IndexedDB) and Android (plain SQLite; the NDK has
 //! no libcrypto for SQLCipher). Every record is sealed by `teamcraft-crypto::local_store` under a
 //! pseudorandom lookup ID. Opening decrypts all records into a [`MemoryStore`], which answers every
-//! read; writes update the cache and go to the backend right away.
+//! read; writes update the cache and go to the backend right away. A backend that collects writes
+//! may seal a record only when it writes it ([`RecordBackend::put_lazy`]), so a record rewritten
+//! before then is sealed once (issue #326: the MLS state, megabytes, after every group joined).
+
+use std::sync::Arc;
 
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
@@ -21,14 +25,32 @@ const MESSAGE_NAMESPACE: &str = "message";
 /// The encrypted store over a record backend; see the module docs.
 pub struct SealedStore<B> {
   backend: B,
-  keys: LocalStoreKeys,
+  /// Shared with the seals a backend runs later ([`LazySeal`]).
+  keys: Arc<LocalStoreKeys>,
   cache: MemoryStore,
 }
+
+/// Seals one record when called (again, if a seal failed).
+pub type LazySeal = Box<dyn Fn() -> Result<Vec<u8>, StoreError>>;
 
 /// Where sealed records are kept: opaque IDs and opaque bytes.
 pub trait RecordBackend {
   fn put_record(&self, id: &LookupId, sealed: &[u8]) -> Result<(), StoreError>;
   fn delete_record(&self, id: &LookupId) -> Result<(), StoreError>;
+
+  /// See [`LocalStore::purge_freed`]; backends without such files do nothing.
+  fn purge_freed(&self) -> Result<(), StoreError> {
+    Ok(())
+  }
+
+  /// Puts the record `seal` makes, about `size_hint` bytes. A backend that collects writes may
+  /// call `seal` only when it writes the record, and not at all when a newer write of the same
+  /// record comes first. Writes keep their order either way.
+  fn put_lazy(&self, id: &LookupId, size_hint: usize, seal: LazySeal) -> Result<(), StoreError> {
+    let _ = size_hint;
+    let sealed = seal()?;
+    self.put_record(id, &sealed)
+  }
 }
 
 /// What a sealed record holds: the plaintext name next to the value, so loading can rebuild the
@@ -63,7 +85,7 @@ impl<B: RecordBackend> SealedStore<B> {
   ) -> Result<Self, StoreError> {
     let store = Self {
       backend,
-      keys: LocalStoreKeys::derive(database_key),
+      keys: Arc::new(LocalStoreKeys::derive(database_key)),
       cache: MemoryStore::new(),
     };
     for (id, sealed) in records {
@@ -96,15 +118,20 @@ impl<B: RecordBackend> SealedStore<B> {
     }
   }
 
-  fn write(&self, id: &LookupId, record: &Record) -> Result<(), StoreError> {
-    let plaintext = zeroize::Zeroizing::new(
-      serde_json::to_vec(record).map_err(|error| StoreError::Corrupt(error.to_string()))?,
-    );
-    let sealed = self
-      .keys
-      .seal(id, &plaintext, &mut OsRng)
-      .map_err(|error| StoreError::Database(error.to_string()))?;
-    self.backend.put_record(id, &sealed)
+  /// Seals an entry when the backend writes it. Until then the seal holds the value; it is wiped
+  /// when the seal is dropped (sealed, or replaced by a newer write): entries hold the MLS state,
+  /// with key package private keys and epoch secrets.
+  fn write_entry(&self, table: Table, key: &str, value: &[u8]) -> Result<(), StoreError> {
+    let id = self.entry_id(table, key);
+    let pending = PendingEntry {
+      table: table.name().to_string(),
+      key: key.to_string(),
+      value: zeroize::Zeroizing::new(value.to_vec()),
+    };
+    let size_hint = pending.size_hint();
+    let keys = Arc::clone(&self.keys);
+    let seal = Box::new(move || pending.seal(&keys, &id));
+    self.backend.put_lazy(&id, size_hint, seal)
   }
 
   fn entry_id(&self, table: Table, key: &str) -> LookupId {
@@ -129,14 +156,7 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
 
   fn put(&self, table: Table, key: &str, value: &[u8]) -> Result<(), StoreError> {
     self.cache.put(table, key, value)?;
-    self.write(
-      &self.entry_id(table, key),
-      &Record::Entry {
-        table: table.name().to_string(),
-        key: key.to_string(),
-        value: Base64Bytes::new(value.to_vec()),
-      },
-    )
+    self.write_entry(table, key, value)
   }
 
   fn delete(&self, table: Table, key: &str) -> Result<(), StoreError> {
@@ -150,12 +170,14 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
 
   fn upsert_message(&self, message: &StoredMessage) -> Result<(), StoreError> {
     self.cache.upsert_message(message)?;
-    self.write(
-      &self.message_id(message.conversation_id, message.client_message_id),
-      &Record::Message {
-        message: Box::new(message.clone()),
-      },
-    )
+    // Sealed at once: a message is written about once, so there is nothing to save by waiting.
+    let id = self.message_id(message.conversation_id, message.client_message_id);
+    let record = Record::Message {
+      message: Box::new(message.clone()),
+    };
+    self
+      .backend
+      .put_record(&id, &seal_record(&self.keys, &id, &record)?)
   }
 
   fn message(
@@ -190,12 +212,53 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     }
     self.cache.delete_messages(conversation)
   }
+
+  fn purge_freed(&self) -> Result<(), StoreError> {
+    self.backend.purge_freed()
+  }
+}
+
+/// An entry waiting to be sealed ([`SealedStore::write_entry`]); the value is wiped on drop.
+struct PendingEntry {
+  table: String,
+  key: String,
+  value: zeroize::Zeroizing<Vec<u8>>,
+}
+
+impl PendingEntry {
+  /// About the sealed size (the value travels as base64), for a backend's batch accounting.
+  fn size_hint(&self) -> usize {
+    self.value.len().saturating_mul(4) / 3 + self.key.len() + 64
+  }
+
+  fn seal(&self, keys: &LocalStoreKeys, id: &LookupId) -> Result<Vec<u8>, StoreError> {
+    let record = Record::Entry {
+      table: self.table.clone(),
+      key: self.key.clone(),
+      value: Base64Bytes::new(self.value.to_vec()),
+    };
+    let sealed = seal_record(keys, id, &record);
+    // The record's copy of the value doesn't wipe itself.
+    if let Record::Entry { value, .. } = record {
+      zeroize::Zeroize::zeroize(&mut value.into_vec());
+    }
+    sealed
+  }
 }
 
 impl<B> std::fmt::Debug for SealedStore<B> {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("SealedStore").finish_non_exhaustive()
   }
+}
+
+fn seal_record(keys: &LocalStoreKeys, id: &LookupId, record: &Record) -> Result<Vec<u8>, StoreError> {
+  let plaintext = zeroize::Zeroizing::new(
+    serde_json::to_vec(record).map_err(|error| StoreError::Corrupt(error.to_string()))?,
+  );
+  keys
+    .seal(id, &plaintext, &mut OsRng)
+    .map_err(|error| StoreError::Database(error.to_string()))
 }
 
 /// Lowercase hex, for backends with text keys.

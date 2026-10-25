@@ -18,6 +18,7 @@
 //! per kind of browser process. `PERF_SECOND_IDLE=1` watches a second idle period of the same length
 //! afterwards (after a large catch-up the browser stays busy for a few minutes, docs/performance.md).
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chromiumoxide::cdp::browser_protocol::network::{
@@ -26,7 +27,7 @@ use chromiumoxide::cdp::browser_protocol::network::{
 };
 use chromiumoxide::cdp::browser_protocol::performance::{EnableParams, GetMetricsParams};
 use chromiumoxide::cdp::js_protocol::heap_profiler::CollectGarbageParams;
-use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+use chromiumoxide::cdp::js_protocol::runtime::{EvaluateParams, EventConsoleApiCalled};
 use chromiumoxide::page::Page;
 use futures_util::StreamExt;
 use teamcraft_core::client::OutgoingFile;
@@ -57,6 +58,9 @@ const SENTENCES: [&str; 6] = [
 ];
 /// Channel switches measured for latency.
 const SWITCHES: usize = 40;
+/// Channel switches measured while the background catch-up runs and right after it, while the
+/// browser still writes it to IndexedDB (issue #326).
+const BUSY_SWITCHES: usize = 20;
 /// Channel switches of the leak check (the budget's "memory growth over 100 channel switches").
 const LEAK_CHECK_SWITCHES: usize = 100;
 const MIB: f64 = 1024.0 * 1024.0;
@@ -181,6 +185,15 @@ struct Report {
   /// 1 when the identity provider's session had expired while Carol was away (she signed in again,
   /// which is part of `seconds_return_to_channel_list`).
   signed_in_again: f64,
+  /// Switches while the background catch-up runs (issue #326), and when they were done.
+  switch_ms_p95_during_catch_up: f64,
+  switch_ms_max_during_catch_up: f64,
+  seconds_return_busy_switches_done: f64,
+  /// Switches right after the catch-up, while IndexedDB may still be writing it.
+  switch_ms_p95_after_catch_up: f64,
+  switch_ms_max_after_catch_up: f64,
+  /// Gateway connections lost while coming back (issue #325: a long sync must keep its heartbeats).
+  return_gateway_connections_lost: f64,
   return_long_task_count: f64,
   return_long_task_total_ms: f64,
   return_longest_task_ms: f64,
@@ -218,6 +231,12 @@ struct Report {
   idle_running_animations: f64,
   /// Gateway frames in both directions while idle (heartbeats and their answers).
   idle_gateway_frames_per_minute: f64,
+  /// Memory at the start and the end of the idle period, after a full collection (issue #399: an
+  /// idle client must not grow).
+  pss_mib_idle_start: f64,
+  pss_mib_idle_end: f64,
+  js_heap_mib_idle_start: f64,
+  js_heap_mib_idle_end: f64,
   wasm_kib: f64,
 }
 
@@ -476,6 +495,7 @@ async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> R
   // the page's only thread busy for a long time, which is part of what is measured here.
   page.evaluate_on_new_document(LONG_TASK_RECORDER).await.unwrap();
   let started = Instant::now();
+  let catch_up_log = watch_catch_up_log(page, started).await;
   page
     .evaluate(format!("location.href = '{WEB_ORIGIN}/?backend=server'"))
     .await
@@ -490,9 +510,26 @@ async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> R
     }
   }
   report.seconds_return_until_all_channels_read = started.elapsed().as_secs_f64();
+  // Switching while the rest of the workspace is caught up in the background (issue #326).
+  let mut times = busy_switches(page, &seeded.first_space_channels[1..]).await;
+  report.switch_ms_p95_during_catch_up = percentile(&times, 95);
+  report.switch_ms_max_during_catch_up = times.last().copied().unwrap_or(0.0);
+  report.seconds_return_busy_switches_done = started.elapsed().as_secs_f64();
   // The rest of the workspace is caught up in the background (issue #247): until the sync lets go
   // of the connection and the client stops asking the server.
   report.seconds_return_until_caught_up = wait_until_done(page).await.duration_since(started).as_secs_f64();
+  // Right after the catch-up, while the browser may still write it to IndexedDB (issue #326).
+  times = busy_switches(page, &seeded.first_space_channels[1..]).await;
+  report.switch_ms_p95_after_catch_up = percentile(&times, 95);
+  report.switch_ms_max_after_catch_up = times.last().copied().unwrap_or(0.0);
+  let lines = catch_up_log.lock().unwrap().clone();
+  for (at, line) in &lines {
+    eprintln!("catch-up log {at:>7.1} s  {line}");
+  }
+  report.return_gateway_connections_lost = lines
+    .iter()
+    .filter(|(_, line)| line.contains("gateway connection lost"))
+    .count() as f64;
   let long_tasks = evaluate_value(page, "window.__longTasks || [0, 0, 0]".into()).await;
   report.return_long_task_count = long_tasks[0].as_f64().unwrap_or(0.0);
   report.return_long_task_total_ms = long_tasks[1].as_f64().unwrap_or(0.0);
@@ -547,12 +584,18 @@ async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> R
   // and the switches started is finished first.
   wait_until_done(page).await;
   report.idle_running_animations = running_animations(page).await;
+  collect_garbage(page).await;
+  report.js_heap_mib_idle_start = metric(page, "JSHeapUsedSize").await / MIB;
+  report.pss_mib_idle_start = mib(ProcessUsage::of_matching(profile).pss_bytes);
   let kinds_before = ProcessUsage::by_kind(profile);
   let usage_before = ProcessUsage::of_matching(profile);
   let tasks_before = metric(page, "TaskDuration").await;
   let traffic = count_traffic(page, scale.idle).await;
   let usage_after = ProcessUsage::of_matching(profile);
   let tasks_after = metric(page, "TaskDuration").await;
+  collect_garbage(page).await;
+  report.js_heap_mib_idle_end = metric(page, "JSHeapUsedSize").await / MIB;
+  report.pss_mib_idle_end = mib(ProcessUsage::of_matching(profile).pss_bytes);
   for (kind, after) in ProcessUsage::by_kind(profile) {
     let before = kinds_before.get(&kind).copied().unwrap_or_default();
     eprintln!(
@@ -587,6 +630,51 @@ async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> R
   }
   report.wasm_kib = wasm_bytes() as f64 / 1024.0;
   report
+}
+
+/// [`BUSY_SWITCHES`] switches between the first space's channels, sorted. Generous timeout: the
+/// channel may still be catching up.
+async fn busy_switches(page: &Page, channels: &[(String, String)]) -> Vec<f64> {
+  let mut times = Vec::with_capacity(BUSY_SWITCHES);
+  for index in 0..BUSY_SWITCHES {
+    let (name, last) = &channels[index % channels.len()];
+    times.push(switch_within(page, name, last, Duration::from_secs(280)).await);
+  }
+  times.sort_by(f64::total_cmp);
+  times
+}
+
+/// The client's console lines about the catch-up and the gateway (phase timings, lost
+/// connections), with the seconds since `since`.
+async fn watch_catch_up_log(page: &Page, since: Instant) -> Arc<Mutex<Vec<(f64, String)>>> {
+  const WATCHED: [&str; 4] = [
+    "catch-up",
+    "full sync",
+    "gateway connection lost",
+    "gateway connected",
+  ];
+  let lines = Arc::new(Mutex::new(Vec::new()));
+  let sink = lines.clone();
+  let mut events = page.event_listener::<EventConsoleApiCalled>().await.unwrap();
+  tokio::spawn(async move {
+    while let Some(event) = events.next().await {
+      let text: Vec<String> = event
+        .args
+        .iter()
+        .map(|arg| {
+          arg
+            .value
+            .as_ref()
+            .map_or_else(|| arg.description.clone().unwrap_or_default(), |v| v.to_string())
+        })
+        .collect();
+      let text = text.join(" ");
+      if WATCHED.iter().any(|watched| text.contains(watched)) {
+        sink.lock().unwrap().push((since.elapsed().as_secs_f64(), text));
+      }
+    }
+  });
+  lines
 }
 
 fn mib(bytes: u64) -> f64 {
@@ -930,6 +1018,24 @@ impl Report {
         self.seconds_return_until_caught_up,
       ),
       ("signed_in_again", self.signed_in_again),
+      (
+        "switch_ms_p95_during_catch_up",
+        self.switch_ms_p95_during_catch_up,
+      ),
+      (
+        "switch_ms_max_during_catch_up",
+        self.switch_ms_max_during_catch_up,
+      ),
+      (
+        "seconds_return_busy_switches_done",
+        self.seconds_return_busy_switches_done,
+      ),
+      ("switch_ms_p95_after_catch_up", self.switch_ms_p95_after_catch_up),
+      ("switch_ms_max_after_catch_up", self.switch_ms_max_after_catch_up),
+      (
+        "return_gateway_connections_lost",
+        self.return_gateway_connections_lost,
+      ),
       ("return_long_task_count", self.return_long_task_count),
       ("return_long_task_total_ms", self.return_long_task_total_ms),
       ("return_longest_task_ms", self.return_longest_task_ms),
@@ -983,6 +1089,10 @@ impl Report {
         "idle_gateway_frames_per_minute",
         self.idle_gateway_frames_per_minute,
       ),
+      ("pss_mib_idle_start", self.pss_mib_idle_start),
+      ("pss_mib_idle_end", self.pss_mib_idle_end),
+      ("js_heap_mib_idle_start", self.js_heap_mib_idle_start),
+      ("js_heap_mib_idle_end", self.js_heap_mib_idle_end),
       ("wasm_kib", self.wasm_kib),
     ]
   }
@@ -1019,6 +1129,15 @@ impl Report {
       "heap grows with channel switches: {self:#?}"
     );
     assert!(self.idle_cpu_percent < 5.0, "busy while idle: {self:#?}");
+    // Issue #399: a loop while idle showed as growth of several MiB per second.
+    assert!(
+      self.pss_mib_idle_end < self.pss_mib_idle_start * 1.1 + 30.0,
+      "memory grows while idle: {self:#?}"
+    );
+    assert!(
+      self.js_heap_mib_idle_end < self.js_heap_mib_idle_start * 1.5 + 5.0,
+      "heap grows while idle: {self:#?}"
+    );
     // Issue #252: nothing is read on a timer while connected.
     assert_eq!(
       self.idle_api_requests_per_minute, 0.0,

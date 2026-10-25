@@ -90,6 +90,30 @@ impl Peer {
       })
       .collect()
   }
+
+  /// The content key ID the server stored for the text message `text` this peer has.
+  pub async fn content_key_of(&self, conversation: ConversationId, text: &str) -> Vec<u8> {
+    let server_id = self
+      .store
+      .messages(conversation, MessageFilter::TopLevel)
+      .unwrap()
+      .into_iter()
+      .find(|message| matches!(&message.content, MessageContent::Text { body, .. } if body == text))
+      .and_then(|message| message.maybe_server_id)
+      .unwrap();
+    self
+      .api
+      .list_messages(conversation, &teamcraft_proto::ListMessagesQuery::default())
+      .await
+      .unwrap()
+      .messages
+      .into_iter()
+      .find(|message| message.id == server_id)
+      .unwrap()
+      .content_key_id
+      .as_slice()
+      .to_vec()
+  }
 }
 
 /// Links a second device of `owner` over the relay (e2ee.md §5) and enrolls it.
@@ -193,7 +217,8 @@ pub fn linked_options(secrets: teamcraft_core::client::LinkedSecrets) -> Enrollm
 #[cfg(not(target_arch = "wasm32"))]
 /// Wall-clock time that follows tokio's (paused) clock, so a runner's deadlines and its sleeps
 /// agree. The wall clock can also jump ahead on its own, as it does when a laptop wakes up (tokio's
-/// clock is monotonic and stands still during sleep).
+/// clock is monotonic and stands still during sleep). Clones share the jumps.
+#[derive(Clone)]
 pub struct TokioClock {
   started: tokio::time::Instant,
   jumped_ms: Arc<AtomicI64>,

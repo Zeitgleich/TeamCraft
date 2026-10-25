@@ -210,8 +210,12 @@ Result:
   can't hold it back from some members and leave them on a key the removed person knows; the removed
   device never gets the epoch's secrets. (A member that never receives the removal commit stays in
   the old epoch and keeps using the old key; it can't tell.)
-- Content key bundles (MLS application messages) only carry history for new members. A member takes a
-  bundle's "current" key only if it has none yet, so an old or delayed bundle can't switch it back.
+- Content key bundles (MLS application messages) to the whole group carry only a current key: for a
+  new member or a further device of a member. History for a new member and the keys a device added
+  back missed are sealed to the devices they are for (§4.3, §4.6). A member takes only the current
+  key of a bundle sent to the whole group, and takes it as current only if it has none yet, so an
+  old or delayed bundle can't switch it back; the one exception is a device that just joined and
+  waits for its first one (§4.6).
 - Each message header (plaintext) carries `content_key_id`, so clients know which key to use.
 - `content_key_id` is a random 128-bit value, not a sequence number: two members may rotate at the same
   time (e.g. both reach the message limit), and random IDs keep both keys usable without coordination.
@@ -221,8 +225,20 @@ Result:
 ### 4.3 New channel members
 
 - When a member is added, the adding client (or any online member, if the adder is offline) sends the
-  channel's past content keys to the new member through MLS. With history from the join on, it sends
-  only the new epoch key, which the other members derive themselves.
+  channel's past content keys to the new member through MLS: the current key in a bundle to the
+  group, every key of its ring sealed to each of the new member's devices (HPKE to the device's
+  certified agreement key, as for a device added back, §4.6; at most `max_missed_keys` keys per
+  message). The other members see that keys went to the new member, not which: a member who joined
+  from the join on (a guest) never gets earlier history this way, and ignores history keys in a
+  bundle sent to the whole group, which clients before this version send; only a device that just
+  joined and waits for its first current key takes them, as the new member of such a client, and
+  only from the member whose commit made its welcome, in the epoch it joined. A new member on a
+  client before this version gets only the current key from an updated adder. A history share
+  still waiting to be sent (the adder was offline) goes out only if the adder saw the member stay
+  in the group since the addition: after a removal (and maybe an addition from the join on) it is
+  dropped. With
+  history from the join on, the adder sends only the new epoch key, which the other members derive
+  themselves.
 - The choice is part of the signed change and settled before signing (guests: always from the join
   on); a client refuses to commit an admin's signed full-history add of a guest.
 - Without an explicit choice the client uses the signed workspace default, never the server's
@@ -273,6 +289,35 @@ for months must keep fresh ones on the server:
   packages when fewer than its target are available, and a new last-resort package (replacing the
   old one on the server) when it has none that stays valid. So regular packages are replaced after
   about 27 days and the last-resort package rotates on the same schedule.
+- **Private parts.** openmls deletes a regular package's private part when a welcome uses it. At
+  every check the device also deletes those of packages that expired, and of last-resort packages
+  a newer one replaced on the server, each `key_package_retention` (client, 30 days) later, for
+  welcomes still on the way (#148). A last-resort package counts as replaced only once the server
+  confirmed its successor's upload: after a lost answer the server may still hand out either, and
+  both stay. Nothing is deleted before the device read all its welcomes since its gateway last
+  connected (also a resumed session: a desktop that slept for weeks may have welcomes waiting) or
+  a full sync started, nor while it reads them (asking to be added back tops up the packages
+  mid-sync); the 6-hour check reads the welcomes first (#395). A welcome for a package it no
+  longer holds makes it ask to be added back (§4.6) instead of losing the conversation, unless the
+  server no longer lists the user in the conversation (or refuses its member list): such a welcome
+  (replayed, misrouted, or for a conversation left meanwhile) is dropped. A group keeps its own
+  leaf key, so deleting the package it was joined with changes nothing there. Lifetimes and these
+  times use the system clock openmls checks against.
+- **Wiping.** A deleted package's stored bundle (private init and leaf keys) is overwritten in
+  memory before it goes, and so is every old copy of the MLS storage in the store's cache. The
+  local database zeroes freed pages (SQLite `secure_delete`), and the Android store truncates its
+  write-ahead log after a deletion, so the old storage record isn't left in the files for somebody
+  who later gets the database key (#391). The first start after this change rebuilds each
+  database once (`VACUUM`), wiping free pages left from before. Copies the file system or the flash controller keep are
+  out of reach; the browser's IndexedDB gives no such control. The listing and the wiping rely on
+  how `openmls_memory_storage` 0.6 keys bundles; a test fails when a new version changes it.
+- **History of a first add-back (known gap).** A user whose first device can't open the welcome
+  that added them (its package deleted, or opened but not joined) is added back with history from
+  that epoch on: the content keys the adder shared for a full-history add went into the group the
+  device never joined, and the add-back doesn't send them again. The keys of earlier epochs stay
+  unreadable for that user until somebody adds them again with history (#400). This needs a
+  welcome that waited past the package's lifetime plus `key_package_retention` (about 72 days
+  after the server handed it out), or a network error at the exact moment of joining.
 - **One bad device.** The adder checks every claimed package (signature, lifetime, credential, the
   user's signed device list, not revoked from this group, the device and user the server claims)
   and leaves out bad ones with a warning, so a revoked or broken device doesn't keep its user's other
@@ -291,10 +336,11 @@ flag. Reactions are encrypted messages, so not even reaction counts are visible.
 Encrypted: text, attachments, attachment names, reactions, edits, polls, link previews, drafts.
 
 Directory data, not encrypted: the server has to show and route by it, so it holds it in plain text
-like the identity provider does. Space names, descriptions, colors and **pictures**; channel names
-and topics; people's profiles and avatars. A space picture is uploaded to the server itself, which
-refuses SVG and re-encodes PNG, JPEG and WebP uploads as PNG before storing them, and serves it only
-to people who may see the space. Anything put into these fields is visible to the server operator;
+like the identity provider does. Space names, descriptions, colors and **pictures**; channel names,
+topics and **pictures**; people's profiles and avatars. A space or channel picture is uploaded to the
+server itself, which refuses SVG and re-encodes PNG, JPEG and WebP uploads as PNG before storing
+them, and serves it only to people who may see the space or channel (changing a channel's picture
+needs `manage_channel_properties`). Anything put into these fields is visible to the server operator;
 content that must stay confidential belongs in messages.
 
 MLS: the commits, welcomes and application messages of each group (opaque), and the newest MLS
@@ -457,13 +503,39 @@ its own. See [admin.md](admin.md) §2.
   from an older client, or the device's floor may be stale) the device posts a device-add request
   into the group's queue (`TCDA`, the user ID): members who see it, also later when they come
   online, check that the user's signed device list names the sending device and add it to that
-  conversation's group like a colleague's new device. Nobody sends content keys after an external
-  join: the device has what the user's key bag holds; if that lacks the current key (the user's
-  other devices hadn't uploaded it yet) it can't read new messages until the key bag arrives
-  (#178). `GroupInfo` larger than
+  conversation's group like a colleague's new device. A member handles one device's request once
+  per `rejoin_retry` in each conversation; repeats (a device asking too often, a server replaying
+  entries) cost it no requests (#187). **The current key of a further device.**
+  A further device reads history with what the user's key bag holds, but the bag's current key may
+  be one from before a key switch the user's other devices hadn't uploaded yet, which a removed
+  member knows. So the device doesn't write with it: when it joins (by external commit or from a
+  welcome, unless it was added back) it stops using it (keeping it for reading) and shows that it
+  waits, and the key bag can't make it current again. Every member that merges an unsigned addition
+  of a further device (an external join, or a member's commit, its own included) queues sending the
+  group its current key as a bundle, ranked like an addition (`device_add_stagger` per rank, online
+  users first), so normally one member sends; the others drop theirs once a current key arrives, or
+  when the group switches keys anyway. A member hands over only a current key it had in the group
+  since its own join (derived or received there, see "Keys a device added back missed"). If its
+  current key is one only its key bag knows, which may be stale in the same way (and so is every
+  current key from before devices recorded this), it makes a fresh random key and hands over that
+  one: it is new and reaches only the epoch's members over MLS. It switches to the fresh key only
+  once the bundle went out, so a failed send never leaves it writing with a key nobody has. The
+  same rule holds for the current key in the history it shares with a new member; a device that
+  waits for a key itself makes a fresh one when it shares history (that is safe), never for a
+  hand-over. The waiting device takes the first current key a member sends after its join (the
+  adder's history share for a new user, the hand-over for a further device; only members of the
+  epoch can send it, the server can delay it, not forge it), or the next epoch key it derives
+  itself. So any one member decides which key a waiting device writes with; members that handed
+  over at the same time each keep their own key, and every member has all of them. Members on clients before this version
+  don't send the hand-over: until a member with this version comes online, the device reads but
+  doesn't write.
+  `GroupInfo` larger than
   `max_group_info_bytes` (client, 256 KiB) is not sent, and the server stores a commit without one
-  that exceeds its payload limit; such groups use the request. A further device in a DM or group DM
-  waits for a member as before. The server can still put a user who isn't in a group into a
+  that exceeds its payload limit; such groups use the request. A further device joins DMs and group
+  DMs the same way, but only into a group that already holds every participant the server lists: a
+  DM group of one may still lose its founding race (below), and a device that joined it would be
+  left in a group nobody uses. Otherwise it asks with the request and waits for a member. A DM this
+  device opened itself is finished by its setup. The server can still put a user who isn't in a group into a
   conversation so that the device asks with a signed self-add (as before this change). The app shows "waiting for another device" until
   then. Neither way announces a join: the user was a member all along.
 - **Exception: a device added back.** A device that fell out of the group (see below) can ask to be
@@ -477,6 +549,29 @@ its own. See [admin.md](admin.md) §2.
   but the device can make it give up its leaf. Every member then switches to the new epoch's content
   key, which the device derives from its welcome. Clients before this version refuse such commits;
   all clients have to be updated.
+- **Keys a device added back missed.** Content keys introduced while the device couldn't follow the
+  group (a removal, a "from join" addition in between) would otherwise stay unknown to it. The
+  member that added it back sends it the keys of the epochs it was a member in, as an MLS
+  application message whose keys are sealed to the device alone: HPKE (RFC 9180, base mode,
+  X25519, HKDF-SHA256, ChaCha20-Poly1305) to the agreement key in the device's verified certificate,
+  with the conversation, the epoch, the sending member and the device in the HPKE info
+  (`TeamCraft-v1 sealed content keys`). Other members see that keys went to the device, not which:
+  they may not have been members in those epochs (a guest added from the join on). A sealed bundle
+  never names a current key; the device opens it only if it is for this device, from that member, in
+  that epoch, and only adds its keys to the ring. Which keys: each device notes, per content key,
+  the first epoch it had it in the group (derived as the epoch's key, or received from a member in
+  an application message of that epoch, which every member of the epoch got too), and, per member
+  device, the epoch its leaf was added in, when it saw that. It sends the keys noted for epochs since
+  both its own join and the device's addition, newest first, at most `max_missed_keys` (client, 512).
+  Keys from the user's key bag or sealed to it have no epoch and are never sent on. A member that
+  joined after the device fell out lacks the keys before its join; so when a member added back a
+  device and the committer joined after this member (it saw the committer's leaf added, or the
+  committer added back, which starts its own record afresh), this member
+  sends its own keys too, ranked among the members whose record starts before the committer's
+  (online users first, then the oldest record, `device_add_stagger` per rank), unless a member
+  that joined no later than itself sent them first. Each device
+  keeps the epochs of at most `max_missed_keys` keys (the newest, and its current key), since no
+  more are ever sent. Clients before this version ignore the sealed bundles.
 - Commits with other proposal types (PSK, re-init, external init, group context changes), from
   external senders, or whose update changes a member's user or device are rejected.
 
@@ -578,11 +673,18 @@ whose commit fails doesn't stop the others, and it is tried again.
 **Falling out and coming back.** A device can still miss or refuse a commit the others merged (a bug,
 a restored backup of the app's store, an old client). It notices when, with every earlier entry of the
 queue handled, an entry from a later epoch comes. Then it asks to be added back (above) and keeps its
-old group until the welcome arrives; it asks again after `rejoin_retry` (10 minutes) without one. The
-members queue the request like a new device of a colleague: ranked, so normally one commits. The
-cursor stays before the later entries, so nothing after the welcome is lost. Messages encrypted with
-content keys of epochs the device missed stay unreadable unless another device of the user had them
-in the key bag.
+old group until the welcome arrives; it asks again after `rejoin_retry` (10 minutes) without one,
+also when no later entry comes (its group's epoch is still below the server's). The
+members queue the request like a new device of a colleague: ranked, so normally one commits. Each
+answer costs a commit and a key package of the device, so a member ignores, with a warning, a
+request for a device it saw added back less than `rejoin_cooldown` (client, 30 minutes) before
+the request, by the server times of the commit and the request (#149); a member that joined after
+that commit hasn't seen it and may answer once. A malicious member can thus delay a device's return
+by up to one cooldown (30 minutes): an add-back that doesn't work for the device still starts it.
+The
+cursor stays before the later entries, so nothing after the welcome is lost. The keys of the epochs
+it missed are sealed to it after the commit (above, "Keys a device added back missed"); the user's
+key bag may hold them too.
 
 **Founding a DM, and finishing it.** A DM or group DM has no creator who must found it: whichever
 participant's device first commits at epoch 0 owns the group, and the server keeps only that commit.
@@ -860,7 +962,16 @@ restored together with them on a new device.
 - **Removed senders.** When devices last left conversations and last came back (the removal commit
   and the commit that added them back, server times; only the last absence), so every device of the
   user refuses what they signed while out, by the server's message timestamp (§4.4).
-  Merging keeps the later time of each, so a device's clock never decides. Never pruned yet (#186).
+  Merging keeps the later time of each, so a device's clock never decides. Each full sync drops
+  records that can't matter any more (#186): absences that ended (the device came back) before
+  anything the workspace's retention limit keeps, counted back from the newest server time the
+  device saw (its MLS queue cursors) with `removed_sender_retention_leeway` (client, 1 day), and
+  only when pinned messages don't survive retention. A device that is still out keeps its record,
+  and so does every absence of a conversation the user left: a re-join may share its history
+  again, and what a removed device signed while out must still be refused. A dropped record
+  leaves a tombstone with its left time for the usual 90 days, so the same absence isn't taken
+  back from another device's local records or an older key bag (possibly without its return); a
+  later removal of the device counts as before.
 - **The activity feed's read mark** (`activity_read`) is the sent time of the newest feed entry the
   user looked at. Merging takes the later one, so reading on any device counts everywhere and never
   moves back. The feed itself is computed from decrypted messages on each device (notifications.md).
@@ -937,8 +1048,24 @@ Details:
   (subscribing again with the old subscription's key where the browser did not) and tells open pages;
   the page that owns the store (§9.4), at every start and on that message, compares
   `pushManager.getSubscription()` with what it registered and registers a changed or new one under
-  the same push key (`Client::check_web_push`). Until a page opens, pushes to a rotated subscription
-  are lost: registering needs the device's keys, which only the owning page uses.
+  the same push key (`Client::check_web_push`).
+  So that pushes don't go to the old subscription until a page opens, the worker also tells the
+  server itself (`POST /api/v1/push/web/subscription-change`, issue #145). It can't use the page's
+  credentials (the access token in the `PushSession` has usually expired by then, and no long-lived
+  token is kept for it), so the request proves knowledge of the **push key**, which the server holds
+  anyway: `HMAC-SHA-256(HKDF(push key, "TeamCraft-v1 push subscription change key"), label ||
+  device ID || SHA-256(old subscription) || SHA-256(new subscription))`. The server verifies it in
+  constant time and swaps the subscription only if the old one is what it stores (compare-and-swap),
+  so a captured request can't be replayed once the subscription moved on, and it can't change the
+  provider, the push key or anything else. Every refusal is the same 401, counted by the per-address
+  limits like a wrong token. The worker only reads the store (§9.4); the page re-registers as before,
+  which is then a no-op on the server. A second rotation before a page opened finds the server
+  holding the subscription the worker sent before (409); the worker then retries from the browser's
+  `oldSubscription`. Browsers that don't hand one over leave that case to the page.
+  *What the push key now also allows:* whoever holds it (the device's store, the server) can point
+  the device's Web Push at another endpoint. That redirects wake-ups, which the push key opens anyway
+  (conversation, message and sender IDs, never content), and can make the device miss pushes; it
+  gives no access to messages, keys or the account.
 - iOS caveat: an NSE must show every notification it receives, unless the app has Apple's
   `com.apple.developer.usernotifications.filtering` entitlement. Threema has it (its NSE entitlements
   set it to `true`), so getting it for an E2EE messenger is realistic. We request it; until granted,

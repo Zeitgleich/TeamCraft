@@ -673,7 +673,7 @@ struct JumpDownButton: View {
         .background(.regularMaterial)
         .clipShape(Circle())
         .overlay(alignment: .topTrailing) {
-          if count > 0 { CountBadge(count: UInt32(min(count, 999))).offset(x: 6, y: -6) }
+          if count > 0 { CountBadge(count: UInt32(min(count, 999)), tone: .unread).offset(x: 6, y: -6) }
         }
     }
     .buttonStyle(.plain)

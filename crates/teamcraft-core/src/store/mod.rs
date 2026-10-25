@@ -15,7 +15,14 @@ pub mod sealed;
 mod sealed_sqlite;
 #[cfg(all(feature = "sqlcipher", not(target_arch = "wasm32")))]
 mod sqlite;
+#[cfg(all(
+  any(feature = "sqlcipher", feature = "sealed-sqlite"),
+  not(target_arch = "wasm32")
+))]
+mod sqlite_wipe;
 mod tracked;
+#[cfg(any(test, target_arch = "wasm32"))]
+mod write_queue;
 
 #[cfg(target_arch = "wasm32")]
 pub use browser::{IndexedDbRecords, IndexedDbStore, browser_database_key};
@@ -31,6 +38,11 @@ pub use memory::MemoryStore;
 pub use sealed_sqlite::{SealedSqliteStore, SqliteRecords};
 #[cfg(all(feature = "sqlcipher", not(target_arch = "wasm32")))]
 pub use sqlite::SqlCipherStore;
+#[cfg(all(
+  any(feature = "sqlcipher", feature = "sealed-sqlite"),
+  not(target_arch = "wasm32")
+))]
+use sqlite_wipe::wipe_free_pages_once;
 pub use tracked::{StoreChanges, TrackedStore};
 
 use serde::{Deserialize, Serialize};
@@ -408,6 +420,15 @@ pub trait LocalStore {
     )
   }
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError>;
+
+  /// Overwrites what deleted or replaced records left behind in the store's files (free pages, a
+  /// write-ahead log), so a secret that was deleted can't be read back from them, also not by
+  /// somebody who later gets the database key (issue #391). The store may still hold it until this
+  /// returns; data the file system or flash controller copied elsewhere is out of reach. Stores
+  /// without such files do nothing.
+  fn purge_freed(&self) -> Result<(), StoreError> {
+    Ok(())
+  }
 }
 
 /// A store shared between the engine and readers (UI adapters, tests).
@@ -460,6 +481,10 @@ macro_rules! forward_local_store {
 
       fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {
         (**self).delete_messages(conversation)
+      }
+
+      fn purge_freed(&self) -> Result<(), StoreError> {
+        (**self).purge_freed()
       }
     }
   };

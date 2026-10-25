@@ -236,6 +236,7 @@ fn is_unauthenticated_endpoint(path: &str) -> bool {
   path == "/api/v1/meetings/join"
     || path == "/api/v1/auth/backchannel-logout"
     || path.starts_with("/api/v1/shares/")
+    || path == "/api/v1/push/web/subscription-change"
     || path == "/api/v1/auth/local/activate"
     || path == "/api/v1/auth/local/login"
     || path.starts_with("/api/internal/")

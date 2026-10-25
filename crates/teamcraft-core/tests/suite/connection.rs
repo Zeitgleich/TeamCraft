@@ -13,10 +13,13 @@ use std::time::Duration;
 use common::{ClockJump, PASSPHRASE, TokioClock, options, settings};
 use teamcraft_core::PendingEnrollment;
 use teamcraft_core::api::fake::FakeServer;
-use teamcraft_core::connection::{ConnectionState, ConnectionStatus, NetworkChanges};
+use teamcraft_core::clock::Clock;
+use teamcraft_core::connection::{
+  ConnectionSettings, ConnectionState, ConnectionStatus, ConnectionSupervisor, NetworkChanges,
+};
 use teamcraft_core::runner::{RunnerCommand, RunnerHandle, RunnerSettings, SyncRunner};
 use teamcraft_core::store::MemoryStore;
-use teamcraft_proto::UserId;
+use teamcraft_proto::{GatewayEvent, GatewayServerMessage, UserId};
 use tokio::time::Instant;
 
 /// Steps in which the tests look at the state.
@@ -192,6 +195,52 @@ async fn an_idle_connection_does_not_report_changes_for_its_heartbeats() {
       assert!(changes <= 5, "{changes} changes in five idle minutes");
     })
     .await;
+}
+
+/// Issue #325: work that holds the loop longer than the server's heartbeat timeout (a big upload,
+/// a resync of many conversations) keeps the connection, and what arrives meanwhile comes after it.
+#[tokio::test(start_paused = true)]
+async fn long_work_keeps_the_connection_and_holds_what_arrives() {
+  let server = FakeServer::new();
+  let api = server.add_user("Judy");
+  let user = api.user_id();
+  let (clock, _) = TokioClock::new();
+  let mut client = PendingEnrollment::new()
+    .complete(
+      api,
+      Arc::new(MemoryStore::new()),
+      Box::new(clock.clone()),
+      settings(),
+      options(PASSPHRASE),
+    )
+    .await
+    .unwrap();
+  let timeout = Duration::from_secs(90);
+  server.enforce_heartbeat_timeout(Arc::new(clock.clone()), timeout);
+  let mut supervisor = ConnectionSupervisor::new(ConnectionSettings::default(), ConnectionStatus::new());
+  assert!(supervisor.connect_if_due(&mut client).await.is_some());
+  let publisher = server.clone();
+  let work = async move {
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    publisher.publish_event(&[user], &GatewayEvent::AnnouncementUpdate);
+    tokio::time::sleep(timeout).await;
+    "done"
+  };
+  assert_eq!(supervisor.keep_alive(clock.now_ms(), work).await, "done");
+  let held = supervisor.receive().await;
+  assert!(
+    matches!(held, Some(Ok(GatewayServerMessage::Event { .. }))),
+    "{held:?}"
+  );
+  supervisor.on_frame(&mut client, held).await;
+  supervisor.on_tick(clock.now_ms()).await;
+  assert_eq!(supervisor.state(), ConnectionState::Connected);
+  assert_eq!(server.heartbeat_timeout_count(), 0);
+  assert!(
+    server.heartbeat_count() >= 5,
+    "{} heartbeats",
+    server.heartbeat_count()
+  );
 }
 
 /// A runner on the fake server, with handles to steer the network and the clock.

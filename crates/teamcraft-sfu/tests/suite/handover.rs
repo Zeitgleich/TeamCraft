@@ -1,7 +1,8 @@
 //! Network changes with the real native client over loopback. A UDP relay in front of the SFU
 //! plays the device's network: a new upstream socket is a new address (Wi-Fi to LTE, a NAT
-//! rebinding), so QUIC has to migrate; a black hole is a network that is gone, so the client has
-//! to rejoin on a fresh ticket through its "new network" (straight to the SFU).
+//! rebinding), so QUIC has to migrate; a cut-off client socket is a socket the new network can't
+//! use, so the client has to move to a new one; a black hole is a network that is gone, so the
+//! client has to rejoin on a fresh ticket through its "new network" (straight to the SFU).
 
 // clippy.toml only relaxes these lints inside #[test] functions; the helpers below are test code too.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -64,6 +65,47 @@ async fn new_address_migrates_the_connection_without_rejoining() {
   );
   alice.leave().await.unwrap();
   bob.leave().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn old_socket_unusable_after_a_change_moves_to_a_new_socket_without_rejoining() {
+  let (sfu_port, hash) = start_sfu().await;
+  let relay = Relay::start(sfu_port).await;
+  let mut alice = join(relay.port(), hash, ALICE, None).await;
+  let mut bob = join(sfu_port, hash, BOB, None).await;
+  wait_for(&mut alice, |event| {
+    matches!(event, CallEngineEvent::Secured { .. })
+  })
+  .await;
+  wait_for(&mut bob, |event| matches!(event, CallEngineEvent::Secured { .. })).await;
+
+  // The new network can't carry the old socket's packets (its interface is gone).
+  relay.cut_off_client();
+  alice.network_changed();
+  let (alice_events, bob_events) = tokio::join!(
+    collect(&mut alice, Duration::from_secs(2)),
+    collect(&mut bob, Duration::from_secs(2)),
+  );
+  for event in alice_events.iter().chain(&bob_events) {
+    assert!(
+      !matches!(
+        event,
+        CallEngineEvent::Reconnecting
+          | CallEngineEvent::ParticipantReconnecting(_)
+          | CallEngineEvent::ParticipantLeft(_)
+      ),
+      "{event:?}"
+    );
+  }
+  // Bob's tone reaches Alice's new socket: same connection, no rejoin, no re-key.
+  assert!(
+    relay.downstream_after_cut_off() > 25,
+    "{}",
+    relay.downstream_after_cut_off()
+  );
+  let alice_stats = alice.leave().await.unwrap();
+  let bob_stats = bob.leave().await.unwrap();
+  assert_eq!(alice_stats.maybe_privacy_code, bob_stats.maybe_privacy_code);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -135,9 +177,12 @@ struct RelayState {
   sfu: SocketAddr,
   upstream: Mutex<Arc<UdpSocket>>,
   maybe_client: Mutex<Option<SocketAddr>>,
+  /// The client's socket that can't reach the SFU any more.
+  maybe_cut_off_client: Mutex<Option<SocketAddr>>,
   is_black_hole: AtomicBool,
   generation: AtomicU64,
   downstream_on_new_path: AtomicU64,
+  downstream_after_cut_off: AtomicU64,
 }
 
 impl Relay {
@@ -147,9 +192,11 @@ impl Relay {
       sfu: SocketAddr::new(Ipv6Addr::LOCALHOST.into(), sfu_port),
       upstream: Mutex::new(Arc::new(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap())),
       maybe_client: Mutex::new(None),
+      maybe_cut_off_client: Mutex::new(None),
       is_black_hole: AtomicBool::new(false),
       generation: AtomicU64::new(0),
       downstream_on_new_path: AtomicU64::new(0),
+      downstream_after_cut_off: AtomicU64::new(0),
     });
     let relay = Self { front, state };
     relay.spawn_downstream(0);
@@ -157,6 +204,9 @@ impl Relay {
     tokio::spawn(async move {
       let mut buffer = vec![0u8; 65_536];
       while let Ok((length, from)) = front.recv_from(&mut buffer).await {
+        if *state.maybe_cut_off_client.lock().unwrap() == Some(from) {
+          continue;
+        }
         *state.maybe_client.lock().unwrap() = Some(from);
         if state.is_black_hole.load(Ordering::Relaxed) {
           continue;
@@ -179,6 +229,17 @@ impl Relay {
     *self.state.upstream.lock().unwrap() = socket;
     let generation = self.state.generation.fetch_add(1, Ordering::Relaxed) + 1;
     self.spawn_downstream(generation);
+  }
+
+  /// The client's current socket can't reach the SFU any more, neither way; another socket of the
+  /// client can.
+  fn cut_off_client(&self) {
+    let maybe_client = *self.state.maybe_client.lock().unwrap();
+    *self.state.maybe_cut_off_client.lock().unwrap() = maybe_client;
+  }
+
+  fn downstream_after_cut_off(&self) -> u64 {
+    self.state.downstream_after_cut_off.load(Ordering::Relaxed)
   }
 
   fn black_hole(&self) {
@@ -204,9 +265,16 @@ impl Relay {
           continue;
         }
         let maybe_client = *state.maybe_client.lock().unwrap();
+        let maybe_cut_off = *state.maybe_cut_off_client.lock().unwrap();
         if let Some(client) = maybe_client {
+          if maybe_cut_off == Some(client) {
+            continue;
+          }
           if generation > 0 {
             state.downstream_on_new_path.fetch_add(1, Ordering::Relaxed);
+          }
+          if maybe_cut_off.is_some() {
+            state.downstream_after_cut_off.fetch_add(1, Ordering::Relaxed);
           }
           let _ = front.send_to(&buffer[..length], client).await;
         }

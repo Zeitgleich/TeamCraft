@@ -20,6 +20,7 @@ use crate::components::message_actions::{
 };
 use crate::i18n::use_i18n;
 use crate::model::{Message, MessageId, thread_id_of};
+use crate::motion::PopoverSide;
 use crate::state::use_app_state;
 
 /// Quick reactions until the user has used emoji of their own.
@@ -32,8 +33,9 @@ const HIDE_GRACE: Duration = Duration::from_millis(120);
 const OVERLAP_PX: f64 = 16.0;
 /// Space kept between the bar and the top of the visible list.
 const EDGE_PX: f64 = 4.0;
-/// Room the "more" menu needs below its button; with less it opens upwards.
-const MENU_HEIGHT_PX: f64 = 300.0;
+/// Room the "more" menu needs below its button, in rem (it grows with the text size); with less
+/// it opens upwards.
+const MENU_HEIGHT_REM: f64 = 18.75;
 /// Space between the "more" button and its menu.
 const MENU_GAP_PX: f64 = 4.0;
 /// How long a finger rests on a message before its action sheet opens.
@@ -421,7 +423,7 @@ fn ToolbarBar(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
       <Show when=move || host.open.get() == OpenMenu::More fallback=|| ()>
         <div class="popover-backdrop" on:mousedown=move |_| host.close_menu()></div>
         <div
-          class="popover msg-menu"
+          class=move || format!("popover msg-menu {}", placement().side.class())
           style:position="fixed"
           style:right=move || placement().right
           style:top=move || placement().top
@@ -474,17 +476,20 @@ fn menu_placement(button: &web_sys::Element) -> MenuPlacement {
     })
     .unwrap_or((1024.0, 768.0));
   let right = format!("{}px", (width - rect.right()).max(0.0));
-  if height - rect.bottom() >= MENU_HEIGHT_PX || rect.top() < height - rect.bottom() {
+  let menu_height = MENU_HEIGHT_REM * crate::viewport::rem_px();
+  if height - rect.bottom() >= menu_height || rect.top() < height - rect.bottom() {
     MenuPlacement {
       right,
       top: format!("{}px", rect.bottom() + MENU_GAP_PX),
       bottom: "auto".into(),
+      side: PopoverSide::Below,
     }
   } else {
     MenuPlacement {
       right,
       top: "auto".into(),
       bottom: format!("{}px", height - rect.top() + MENU_GAP_PX),
+      side: PopoverSide::Above,
     }
   }
 }
@@ -496,6 +501,8 @@ struct MenuPlacement {
   right: String,
   top: String,
   bottom: String,
+  /// The side it opens on, so it grows out of the button (#359).
+  side: PopoverSide,
 }
 
 /// Arrow keys, Home and End move between the entries of a menu (and not between the messages

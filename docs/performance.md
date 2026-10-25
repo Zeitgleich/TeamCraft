@@ -353,9 +353,78 @@ What the numbers say:
 - 63 tasks over 50 ms (3.9 s in total, the longest 130 ms) while coming back: the catch-up's MLS
   work and decryption on the page's thread.
 
+#### Coming back: the open channel first, heartbeats during the sync
+
+The large workspace again for #247, #325 and #326, same machine and harness, release server,
+October 2026. Two additions to the harness: the client's catch-up phase timings and lost gateway
+connections are printed from its console, and 20 switches each are measured while the background
+catch-up runs and right after it, while the browser still writes it. "Before" ran while other
+builds loaded the machine (load about 12); "after" is the final change on a quiet machine (load
+1.5). An intermediate run of the change under load 28 measured 84 ms during and 125 ms right after
+the catch-up, and 47 / 87 ms settled: switch times move with the machine's load; the catch-up
+times did not.
+
+| What                                                 | Before             | After              | Budget       |
+|------------------------------------------------------|--------------------|--------------------|--------------|
+| Coming back: channel list shows                      | 1.5 s              | 1.5 s              | ≤ 2 s        |
+| Coming back: first channel read                      | 22.4 s             | 1.7 s              | ≤ 5 s        |
+| Coming back: all 15 channels of the first space read | 23.8 s             | 4.9 s              | -            |
+| Coming back: whole workspace caught up               | 28.7 s             | 16.1 s             | -            |
+| Catch-up phases: member lists / welcomes / content   | 0.3 / 20.7 / 6.3 s | 0.3 / 11.5 / 3.6 s | -            |
+| Switch p95 while the catch-up runs                   | 133 ms             | 73 ms              | ≤ 100 ms     |
+| Switch p95 right after the catch-up                  | 98 ms              | 92 ms              | ≤ 100 ms     |
+| Switch p50 / p95, settled                            | 38 / 72 ms         | 39 / 65 ms         | p95 ≤ 100 ms |
+| Tasks over 50 ms while coming back (count / total)   | 60 / 3.6 s         | 57 / 3.2 s         | -            |
+| Gateway connections lost while coming back           | 0                  | 0                  | -            |
+| Idle: CPU, whole browser / API requests per minute   | 0.1 % / 0          | 0.1 % / 0          | ≤ 1 % / none |
+
+What changed and what the numbers say:
+
+- **The open channel first** (#247): between two member-list batches and between two welcomes the
+  catch-up takes the conversation the user opened completely (members, its welcomes, MLS queue,
+  messages). The UI tells the core when a conversation opens (`core_focus`): a channel with nothing
+  stored asked the core for no messages, so the core never learned the focus before. The web core
+  shows a conversation caught up ahead at once instead of with the next one-second progress round.
+  Each of the 15 channels the harness opens in turn is readable 0.3 to 1 s after the click.
+- **Welcomes are the bulk of a catch-up**: 300 joins in the server's order, each reading the
+  conversation, its members and its MLS queue, and each rewriting the MLS state (3.6 MB here, one
+  record for all groups). Those rewrites are what kept the page busy: every write was sealed at
+  once (base64 in JSON, then AES-GCM). IndexedDB now seals a record when its batch goes out, so a
+  replaced write costs nothing, and a batch over 1 MiB waits 200 ms more to take the next rewrite
+  along (#326). The welcomes phase went from 20.7 to 11.5 s.
+- **Heartbeats during the sync** (#325): the full sync, long commands and the upkeep run inside
+  `keep_alive`; the catch-up kept its one connection (before: a sync over 90 s lost it, here the
+  catch-up took less, so the test `runner::a_sync_longer_than_the_heartbeat_timeout_keeps_its_connection`
+  covers the long case).
+- **Left open (#424):** the MLS state is still one record rewritten per group, quadratic in the
+  number of groups; splitting it per group is a change to the store format and needs its own
+  review.
+
 The desktop and Android apps are measured against the same harness (`PERF_MOBILE_USER`) in a local
 session. Slack, Teams and Element were not measured: that needs their apps installed and accounts
 on their services.
+
+### Desktop on Linux: idle (issue #399)
+
+The 1.0.2 desktop app on Linux (WebKitGTK 2.54) grew while nobody touched it. Measured on the
+released binary and on the fix, signed in to a real workspace, window visible, untouched; memory
+and CPU of the `WebKitWebProcess` from `/proc` every 30 s:
+
+| What                                        | 1.0.2                       | Fixed            | Budget   |
+|---------------------------------------------|-----------------------------|------------------|----------|
+| Webview RSS at start / after 8 min          | 552 MiB / 3.76 GiB          | 302 / 303 MiB    | 400 MiB  |
+| Webview anonymous memory after 8 min        | 3.59 GiB                    | 136 MiB          | -        |
+| Webview CPU while idle                      | about 100 % of one core     | 0.1 %            | ≤ 0.5 %  |
+| Shell calls from the webview while idle     | about 770 per second        | none             | -        |
+
+The cause was a loop between the call state and the backend: effects in the desktop call setup emit
+call events, the handler read the backend, which subscribed the effect to every backend change, and
+each call action ends with a change notification. `CallState::emit` now runs the handler untracked
+and the call mirror only notifies when its snapshot changed (unit tests in `calls.rs` and
+`remote_calls.rs`). The web client does not wire these effects and idled cleanly before and after:
+a phone (Android, Chromium 152) over 10 minutes stayed at about 300 MiB renderer RSS, a 4 to 5 MiB
+JS heap and under 1 % CPU. `perf.rs` now also fails when the PSS or the JS heap grows over the idle
+period.
 
 ### Android (first numbers)
 

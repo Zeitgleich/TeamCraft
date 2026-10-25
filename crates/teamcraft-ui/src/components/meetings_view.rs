@@ -11,6 +11,7 @@ use crate::components::compact_back::CompactBack;
 use crate::components::icons::{Icon, IconName};
 use crate::components::meeting_controls::{HostControls, RsvpList};
 use crate::components::modal::Modal;
+use crate::components::sliding_indicator::SlidingIndicator;
 use crate::i18n::{I18n, use_i18n};
 use crate::meetings::{
   ExternalInvitee, FormError, MeetingsHub, Repeat, ScheduleForm, hosts_lobby, is_over, my_rsvp,
@@ -206,6 +207,7 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
           .then(|| {
             view! {
               <div class="segmented" role="group" aria-label=move || i18n.t("meetings-rsvp")>
+                <SlidingIndicator />
                 {[RsvpStatus::Accepted, RsvpStatus::Tentative, RsvpStatus::Declined]
                   .into_iter()
                   .map(|option| {

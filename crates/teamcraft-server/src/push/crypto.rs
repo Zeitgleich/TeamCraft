@@ -2,9 +2,10 @@
 //! the server only turns [`PushWakeUp`] into bytes and back and draws randomness.
 
 use rand_core::OsRng;
+use teamcraft_crypto::ids::DeviceId as DeviceIdCrypto;
 use teamcraft_crypto::push as crypto;
 use teamcraft_crypto::secret::SymmetricKey;
-use teamcraft_proto::PushWakeUp;
+use teamcraft_proto::{DeviceId, Id, PushWakeUp};
 
 pub use teamcraft_crypto::push::{MAX_WEB_PUSH_PLAINTEXT, PushCryptoError, SubscriptionKeys, VapidKey};
 
@@ -23,6 +24,20 @@ pub fn open_wakeup(push_key: &[u8], sealed: &[u8]) -> Result<PushWakeUp, PushCry
   let key = SymmetricKey::from_slice(push_key).ok_or(PushCryptoError::BadPushKey)?;
   let plaintext = crypto::open_wakeup(&key, sealed)?;
   serde_json::from_slice(plaintext.expose_secret()).map_err(|_| PushCryptoError::BadWakeUp)
+}
+
+/// Checks the service worker's proof for a rotated Web Push subscription (e2ee.md §7).
+pub fn verify_subscription_change(
+  push_key: &[u8],
+  device: DeviceId,
+  previous_token: &str,
+  token: &str,
+  mac: &[u8],
+) -> Result<(), PushCryptoError> {
+  let key = SymmetricKey::from_slice(push_key).ok_or(PushCryptoError::BadPushKey)?;
+  // Invariant: snowflakes are never negative (`Snowflake::new` rejects them).
+  let raw = u64::try_from(device.snowflake().get()).unwrap_or(0);
+  crypto::verify_subscription_change(&key, DeviceIdCrypto::new(raw), previous_token, token, mac)
 }
 
 /// Encrypts a payload for a browser subscription (RFC 8291).

@@ -4,7 +4,7 @@
 use leptos::prelude::*;
 
 use crate::model::{Space, initials};
-use crate::space_images::use_space_images;
+use crate::space_images::{ImageOwner, use_space_images};
 
 /// The picture or the initials of a space. Decorative: the surrounding control names the space.
 /// The caller's element carries the tile's shape and `--hue` background.
@@ -14,7 +14,7 @@ pub fn SpaceTileContent(space: Space) -> impl IntoView {
   let id = space.id;
   let maybe_version = space.maybe_image_version.clone();
   let letters = initials(&space.name);
-  let url = move || maybe_hub.and_then(|hub| hub.image_url(id, maybe_version.as_deref()));
+  let url = move || maybe_hub.and_then(|hub| hub.image_url(ImageOwner::Space(id), maybe_version.as_deref()));
   move || match url() {
     Some(src) => {
       view! { <img class="space-image" src=src alt="" aria-hidden="true" draggable="false" /> }.into_any()

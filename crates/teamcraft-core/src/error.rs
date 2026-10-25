@@ -13,6 +13,8 @@ use teamcraft_proto::{ConversationId, DeviceId, UserId};
 use teamcraft_client_api::failure::{ActionFailure, FailureKind};
 
 use crate::api::ApiError;
+#[cfg(feature = "ui")]
+use crate::api::Interception;
 use crate::store::StoreError;
 
 #[derive(Debug, thiserror::Error)]
@@ -149,6 +151,10 @@ impl CoreError {
   pub fn to_failure(&self) -> ActionFailure {
     let kind = match self {
       Self::Api(ApiError::Network(_)) => FailureKind::Network,
+      Self::Api(ApiError::Intercepted { kind, .. }) => match kind {
+        Interception::CaptivePortal => FailureKind::CaptivePortal,
+        Interception::UntrustedCertificate => FailureKind::UntrustedCertificate,
+      },
       Self::Api(error) => error
         .error_code()
         .map_or(FailureKind::Other, |code| FailureKind::Server(code.clone())),
@@ -190,6 +196,11 @@ mod tests {
     );
     let offline = CoreError::Api(ApiError::Network("offline".into()));
     assert_eq!(offline.to_failure().kind, FailureKind::Network);
+    let portal = CoreError::Api(ApiError::Intercepted {
+      kind: crate::api::Interception::CaptivePortal,
+      detail: "HTML".into(),
+    });
+    assert_eq!(portal.to_failure().kind, FailureKind::CaptivePortal);
     assert_eq!(CoreError::NotEnrolled.to_failure().kind, FailureKind::Other);
   }
 

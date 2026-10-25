@@ -3,7 +3,9 @@
 //! Entrances are plain CSS animations that run when an element mounts. Exits need the element to
 //! stay a moment after the view dropped it: [`use_leave_ghost`] leaves an inert copy in its place
 //! that plays the exit animation (`.is-leaving`) and then removes itself. The real element is gone
-//! at once, so focus, state and the next view never wait for an animation.
+//! at once, so focus, state and the next view never wait for an animation. With reduced motion the
+//! ghost still fades out (the stylesheet drops the movement, #360). An element that already played
+//! its own exit (a swiped toast) carries `.has-exited` and leaves no ghost.
 
 use std::time::Duration;
 
@@ -20,7 +22,17 @@ thread_local! {
   static GHOSTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
-/// Whether the user asked the system for less motion.
+/// A monotonic time for comparing moments of the same page (the page's `performance.now()`), never
+/// a date. Zero where there is no page.
+pub fn now() -> Duration {
+  let millis = web_sys::window()
+    .and_then(|window| window.performance())
+    .map_or(0.0, |performance| performance.now());
+  Duration::from_secs_f64(millis.max(0.0) / 1000.0)
+}
+
+/// Whether the user asked the system for less motion: for motion the stylesheet can't turn off
+/// (positions measured and played from Rust).
 pub fn prefers_reduced_motion() -> bool {
   web_sys::window()
     .and_then(|window| {
@@ -32,9 +44,27 @@ pub fn prefers_reduced_motion() -> bool {
     .is_some_and(|query| query.matches())
 }
 
+/// Which side of its trigger a self-placed popover opens on, so it grows out of (and shrinks back
+/// into) the edge that touches the trigger (`.opens-up` in style/main.css, #359).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PopoverSide {
+  #[default]
+  Below,
+  Above,
+}
+
+impl PopoverSide {
+  /// The class that sets the transform origin for this side.
+  pub fn class(self) -> &'static str {
+    match self {
+      Self::Below => "",
+      Self::Above => "opens-up",
+    }
+  }
+}
+
 /// When the component that owns `node` is dropped, a copy of the element plays its exit animation
-/// where the element was. Nothing happens with reduced motion or when the element already left the
-/// page.
+/// where the element was. Nothing happens when the element already left the page.
 pub fn use_leave_ghost<E>(node: NodeRef<E>)
 where
   E: ElementType,
@@ -58,7 +88,7 @@ where
 /// Leaves an inert, hidden-from-assistive-tech copy of `element` at its place on screen, with
 /// `.is-leaving` for the exit animation, and removes it after [`GHOST_LIFETIME`].
 fn leave_ghost(element: &web_sys::Element) {
-  if !element.is_connected() || prefers_reduced_motion() || GHOSTS.get() >= MAX_GHOSTS {
+  if !element.is_connected() || element.class_list().contains("has-exited") || GHOSTS.get() >= MAX_GHOSTS {
     return;
   }
   let Some(body) = web_sys::window()
