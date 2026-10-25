@@ -365,6 +365,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::VerifyContact(user) => view! { <VerifyContactDialog user=user /> }.into_any(),
         Overlay::VerifyKey(conversation) => view! { <VerifyKeyDialog conversation=conversation /> }.into_any(),
         Overlay::ScheduleMeeting => lazy_area(Place::Overlay, || areas::schedule_meeting(())),
+        Overlay::MeetingCreated => lazy_area(Place::Overlay, || areas::meeting_created(())),
         Overlay::Forward(from, message) => view! { <ForwardDialog from=from message=message /> }.into_any(),
         Overlay::Lightbox(conversation, start) => lazy_area(Place::Overlay, move || areas::lightbox(conversation, start)),
         Overlay::NewSpace => lazy_area(Place::Overlay, || areas::new_space(())),

@@ -7,6 +7,8 @@
 //! Only public object IDs go into paths (security.md): never names, message text, search queries
 //! or tokens. The message paths match the permalinks (`teamcraft:/c/{c}/m/{m}[/t/{t}]`).
 
+use teamcraft_proto::MeetingId;
+
 use crate::admin::AdminSection;
 use crate::model::{ConversationId, MessageId, SpaceId, ThreadId};
 use crate::state::{SettingsPage, SettingsTab};
@@ -49,6 +51,10 @@ pub enum Route {
   Activity,
   Calls,
   Meetings,
+  /// `/meeting/{meeting}`: the link of a meeting (docs/meetings.md). It opens the meeting, or asks
+  /// the hosts to let the member in; the address bar then shows `/meetings`. A guest link is the
+  /// same path with `#invite=` and never gets here (`app.rs` shows the guest page first).
+  Meeting(MeetingId),
   /// `/people`: people and user groups.
   People,
   Saved,
@@ -85,6 +91,7 @@ impl Route {
       ["activity"] => Some(Self::Activity),
       ["calls"] => Some(Self::Calls),
       ["meetings"] => Some(Self::Meetings),
+      ["meeting", meeting] => id(meeting).map(Self::Meeting),
       ["people"] => Some(Self::People),
       ["saved"] => Some(Self::Saved),
       ["search"] => Some(Self::Search),
@@ -141,6 +148,7 @@ impl Route {
       Self::Activity => "/activity".to_owned(),
       Self::Calls => "/calls".to_owned(),
       Self::Meetings => "/meetings".to_owned(),
+      Self::Meeting(meeting) => format!("/meeting/{meeting}"),
       Self::People => "/people".to_owned(),
       Self::Saved => "/saved".to_owned(),
       Self::Search => "/search".to_owned(),
@@ -178,6 +186,7 @@ impl Route {
       | Self::Activity
       | Self::Calls
       | Self::Meetings
+      | Self::Meeting(_)
       | Self::People
       | Self::Saved
       | Self::Search
@@ -252,6 +261,7 @@ mod tests {
   const CHANNEL: u64 = 2_000_002;
   const MESSAGE: u64 = 3_000_003;
   const THREAD: u64 = 4_000_004;
+  const MEETING: u64 = 5_000_005;
 
   mod round_trip {
     use super::*;
@@ -541,6 +551,7 @@ mod tests {
       Route::Activity,
       Route::Calls,
       Route::Meetings,
+      Route::Meeting(id_from_raw(MEETING)),
       Route::People,
       Route::Saved,
       Route::Search,
