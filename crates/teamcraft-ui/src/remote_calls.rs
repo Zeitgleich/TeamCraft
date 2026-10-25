@@ -116,7 +116,9 @@ impl RemoteCalls {
     spawn_local(async move {
       match call::<CallSnapshot>("call_snapshot", &json!({})).await {
         Ok(snapshot) => {
-          *calls.snapshot.borrow_mut() = snapshot;
+          if !calls.replace_snapshot(snapshot) {
+            return;
+          }
           let notify = calls.notify.borrow().clone();
           if let Some(notify) = notify {
             notify();
@@ -125,6 +127,18 @@ impl RemoteCalls {
         Err(error) => tracing::warn!(%error, "could not read the call state"),
       }
     });
+  }
+
+  /// Takes a fresh snapshot; returns whether it differs. An unchanged one re-renders nothing: every
+  /// action refreshes, and most (a device or effect choice outside a call) change nothing the UI
+  /// shows (issue #399).
+  fn replace_snapshot(&self, snapshot: CallSnapshot) -> bool {
+    let mut held = self.snapshot.borrow_mut();
+    if *held == snapshot {
+      return false;
+    }
+    *held = snapshot;
+    true
   }
 }
 
@@ -197,5 +211,25 @@ mod tests {
     };
     assert_eq!(roster_of(&snapshot, conversation), vec![carol, dave]);
     assert!(roster_of(&snapshot, id_from_raw(8)).is_empty());
+  }
+
+  /// Issue #399: an action that changed nothing must not re-render the UI.
+  #[test]
+  fn only_a_changed_snapshot_counts_as_a_change() {
+    let calls = RemoteCalls {
+      snapshot: Rc::new(RefCell::new(CallSnapshot::default())),
+      notify: Rc::new(RefCell::new(None)),
+    };
+    assert!(!calls.replace_snapshot(CallSnapshot::default()));
+    let ringing = CallSnapshot {
+      running: vec![RunningCall {
+        conversation: id_from_raw(7),
+        participants: vec![id_from_raw(2)],
+        is_ringing: true,
+      }],
+      ..CallSnapshot::default()
+    };
+    assert!(calls.replace_snapshot(ringing.clone()));
+    assert!(!calls.replace_snapshot(ringing));
   }
 }
