@@ -35,7 +35,8 @@ const SEEN_CALLS: usize = 256;
 /// A follower's calls waiting for the owner, by call ID.
 type PendingCalls = Rc<RefCell<Calls>>;
 
-/// The store's lock, held while this tab owns the store; dropping it hands the store to the next tab.
+/// A held Web Lock: the store's lock while this tab owns the store, or [`exclusive`]'s. Dropping it
+/// hands the lock to the next tab waiting for it.
 pub struct OwnerLock {
   release: js_sys::Function,
 }
@@ -105,7 +106,7 @@ impl Drop for OwnerLock {
 
 /// Takes the store's lock if no other tab has it.
 pub async fn try_own(user: UserId) -> Ownership {
-  match request_lock(user, true).await {
+  match request_lock(&name(user), true).await {
     Ok(Some(lock)) => Ownership::Owned(lock),
     Ok(None) => Ownership::Taken,
     Err(reason) => {
@@ -117,7 +118,7 @@ pub async fn try_own(user: UserId) -> Ownership {
 
 /// Waits until the owning tab lets go of the store, then holds the lock.
 pub async fn wait_to_own(user: UserId) -> Option<OwnerLock> {
-  match request_lock(user, false).await {
+  match request_lock(&name(user), false).await {
     Ok(maybe_lock) => maybe_lock,
     Err(reason) => {
       tracing::warn!(%reason, "could not wait for the store lock");
@@ -126,10 +127,22 @@ pub async fn wait_to_own(user: UserId) -> Option<OwnerLock> {
   }
 }
 
+/// Waits for the Web Lock `name`, which only one tab of the browser holds at a time. `None` without
+/// Web Locks (an old browser): the caller goes ahead alone.
+pub async fn exclusive(name: &str) -> Option<OwnerLock> {
+  match request_lock(name, false).await {
+    Ok(maybe_lock) => maybe_lock,
+    Err(reason) => {
+      tracing::debug!(%reason, lock = name, "no Web Lock");
+      None
+    },
+  }
+}
+
 /// `navigator.locks.request(name, { ifAvailable }, callback)`. The callback returns a promise
 /// that stays pending until [`OwnerLock`] is dropped. web-sys has the Web Locks API only behind its
 /// unstable flag, so it is called through `Reflect`.
-async fn request_lock(user: UserId, if_available: bool) -> Result<Option<OwnerLock>, String> {
+async fn request_lock(name: &str, if_available: bool) -> Result<Option<OwnerLock>, String> {
   let navigator = web_sys::window().ok_or("no window")?.navigator();
   let locks = js_sys::Reflect::get(&navigator, &"locks".into()).map_err(|_| "no navigator.locks")?;
   if locks.is_undefined() || locks.is_null() {
@@ -150,11 +163,16 @@ async fn request_lock(user: UserId, if_available: bool) -> Result<Option<OwnerLo
     }
     let mut maybe_release = None;
     let held = js_sys::Promise::new(&mut |resolve, _reject| maybe_release = Some(resolve));
-    let _ = granted.send(maybe_release);
+    // Nobody waits any more (the caller gave up): let go of the lock right away.
+    if let Err(Some(release)) = granted.send(maybe_release)
+      && release.call0(&JsValue::NULL).is_err()
+    {
+      tracing::debug!("could not release an unwanted lock");
+    }
     held.into()
   });
   request
-    .call3(&locks, &name(user).into(), &options, &callback)
+    .call3(&locks, &name.into(), &options, &callback)
     .map_err(|error| platform::describe_js_error(&error))?;
   match answer.await {
     Ok(Some(release)) => Ok(Some(OwnerLock { release })),

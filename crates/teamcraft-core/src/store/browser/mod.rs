@@ -3,6 +3,8 @@
 mod browser_key;
 mod idb;
 mod indexed_db;
+mod vault;
 
 pub use browser_key::browser_database_key;
 pub use indexed_db::{IndexedDbRecords, IndexedDbStore};
+pub use vault::{vault_delete, vault_get, vault_put};
