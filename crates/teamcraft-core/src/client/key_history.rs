@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::content_key::{ContentKey, ContentKeyId};
 use teamcraft_crypto::mls::{ContentKeyBundle, GroupMember};
@@ -153,6 +154,44 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .key_epochs
         .contains_key(&key_hex(key)),
     )
+  }
+
+  /// The current key to hand to others in a bundle: one this device had in the group since its
+  /// join. A current key only the key bag knows (also every key from before this was recorded)
+  /// may be stale, one a removed member knows (#178): a fresh random key replaces it as this
+  /// device's current key and is the one handed over. It is new and reaches only the group's
+  /// members of this epoch, over MLS. `None` without a current key, or while this device waits
+  /// for one itself.
+  pub(crate) fn group_known_current_key(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<Option<ContentKey>, CoreError> {
+    if super::member_device::is_waiting_for_current_key(&self.store, conversation)? {
+      return Ok(None);
+    }
+    let Some(current) = self
+      .account
+      .key_bag
+      .ring(convert::conversation(conversation))
+      .and_then(|ring| ring.current())
+      .map(ContentKey::duplicate)
+    else {
+      return Ok(None);
+    };
+    if self.has_key_epoch(conversation, current.id())? {
+      return Ok(Some(current));
+    }
+    let fresh = self
+      .account
+      .key_bag
+      .ring_mut(convert::conversation(conversation))
+      .rotate(&mut OsRng)
+      .duplicate();
+    self.persist_keys()?;
+    let epoch = self.group_or_error(conversation)?.epoch();
+    self.note_key_epochs(conversation, &[fresh.id()], epoch)?;
+    tracing::info!(conversation_id = %conversation, "replaced a current key only the key bag knew before handing it over");
+    Ok(Some(fresh))
   }
 
   /// A member added `rejoined` back. If that member joined the group after this device, it may

@@ -275,21 +275,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     {
       return Ok(PendingOutcome::Done);
     }
-    let Some(current) = self
-      .account
-      .key_bag
-      .ring(convert::conversation(conversation))
-      .and_then(|ring| ring.current())
-      .map(|key| key.duplicate())
-    else {
+    // Never a key only the key bag knows: the waiting device would take it (#178).
+    let Some(current) = self.group_known_current_key(conversation)? else {
       return Ok(PendingOutcome::Done);
     };
-    // Only a key this device had in the group since its join: one from the key bag may be stale
-    // (a removed member may know it), and the waiting device would take it (#178).
-    if !self.has_key_epoch(conversation, current.id())? {
-      tracing::debug!(conversation_id = %conversation, "the current key came from the key bag; not handed over");
-      return Ok(PendingOutcome::Done);
-    }
     let bundle = ContentKeyBundle::epoch_key(convert::conversation(conversation), current);
     self.send_bundle(conversation, &bundle, None).await?;
     tracing::info!(conversation_id = %conversation, device_id = %device_id, "sent the current content key for a further device");
@@ -555,7 +544,8 @@ pub fn is_waiting_for_device(
   )
 }
 
-/// Whether this device joined by external commit and no current key came yet (#178).
+/// Whether this device joined (by external commit or from a welcome) and no current key came
+/// yet (#178).
 pub(crate) fn is_waiting_for_current_key(
   store: &impl LocalStore,
   conversation: ConversationId,

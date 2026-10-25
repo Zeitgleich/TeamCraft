@@ -335,8 +335,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(self.group(conversation)?.map(|group| group.epoch()))
   }
 
-  /// Whether this device holds the content key a message names (`content_key_id`), e.g. to tell
-  /// "can't be read here" from "not loaded yet".
+  /// Whether this device holds the content key a message names (`content_key_id`). For tests.
+  #[doc(hidden)]
   pub fn has_content_key(&self, conversation: ConversationId, content_key_id: &[u8]) -> bool {
     let Ok(id) = <[u8; 16]>::try_from(content_key_id) else {
       return false;

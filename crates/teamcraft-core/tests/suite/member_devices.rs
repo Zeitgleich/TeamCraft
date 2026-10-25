@@ -11,7 +11,9 @@ use common::{Peer, linked_options, settings, settle};
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::client::is_waiting_for_device;
-use teamcraft_core::store::{ConversationEvent, LocalStore, MemoryStore, MessageContent, MessageFilter};
+use teamcraft_core::store::{
+  ConversationEvent, LocalStore, MemoryStore, MessageContent, MessageFilter, Table,
+};
 use teamcraft_core::{GroupAccess, LinkOffer, PendingEnrollment};
 use teamcraft_proto::{AddConversationMemberRequest, ConversationId, ListMlsMessagesQuery};
 
@@ -389,6 +391,51 @@ async fn a_further_device_with_a_stale_key_bag_writes_with_the_current_key_only(
   );
   assert!(!carol.client.has_content_key(channel, &laptop_key));
   assert!(bob.texts(channel).contains(&"from the laptop".to_string()));
+}
+
+/// A DM from before key epochs were recorded: nobody's current key is known to come from the
+/// group. A member doesn't hand over that key but a fresh one, so a device linked now writes.
+#[tokio::test]
+async fn a_device_linked_after_the_upgrade_writes_in_a_dm_from_before_it() {
+  let server = FakeServer::new();
+  let mut phone = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let dm = phone.client.open_dm(bob.client.user_id()).await.unwrap();
+  phone.client.send_text(dm, None, "hi Bob").await.unwrap();
+  settle(&mut [&mut phone, &mut bob]).await;
+  for peer in [&phone, &bob] {
+    peer
+      .store
+      .delete(Table::AppliedChanges, &format!("key_history/{dm}"))
+      .unwrap();
+  }
+  phone.client.upload_key_bag().await.unwrap();
+  let mut laptop = link_laptop(&mut phone).await;
+
+  laptop.client.full_sync().await.unwrap();
+  assert!(is_waiting_for_device(laptop.store.as_ref(), dm).unwrap());
+  settle(&mut [&mut phone, &mut bob, &mut laptop]).await;
+  phone.client.apply_pending_changes().await.unwrap();
+  bob.client.apply_pending_changes().await.unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut laptop]).await;
+  assert!(!is_waiting_for_device(laptop.store.as_ref(), dm).unwrap());
+
+  laptop
+    .client
+    .send_text(dm, None, "from the laptop")
+    .await
+    .unwrap();
+  laptop.client.flush_outbox().await.unwrap();
+  bob.client.send_text(dm, None, "hi laptop").await.unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut laptop]).await;
+  assert_eq!(bob.texts(dm), ["hi Bob", "from the laptop", "hi laptop"]);
+  assert_eq!(laptop.texts(dm), ["hi Bob", "from the laptop", "hi laptop"]);
+  let laptop_key = laptop.content_key_of(dm, "from the laptop").await;
+  assert_ne!(
+    laptop_key,
+    phone.content_key_of(dm, "hi Bob").await,
+    "the key bag's key is not handed over"
+  );
 }
 
 /// Issue #179: a further device joins the user's DMs on its own, like channels.

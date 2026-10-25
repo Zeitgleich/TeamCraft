@@ -1401,18 +1401,27 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     share: SharedKeys,
   ) -> Result<(), CoreError> {
-    let ring = self.account.key_bag.ring_mut(convert::conversation(conversation));
+    // The bundle names a current key the new member takes: never one only the key bag knows.
+    let maybe_current = self.group_known_current_key(conversation)?;
     let bundle = match share {
       SharedKeys::FullHistory => {
+        let ring = self.account.key_bag.ring_mut(convert::conversation(conversation));
+        let is_new_key = ring.current().is_none();
         let bundle = ContentKeyBundle::full_history(ring, &mut OsRng);
         self.persist_keys()?;
+        if is_new_key && let Some(current) = bundle.current() {
+          // Made just now for the bundle: a fresh key, so a device waiting for one has it.
+          let epoch = self.group_or_error(conversation)?.epoch();
+          self.note_key_epochs(conversation, &[current], epoch)?;
+          self.store.delete(
+            Table::AppliedChanges,
+            &super::member_device::current_key_wait_key(conversation),
+          )?;
+        }
         bundle
       },
       SharedKeys::CurrentKey => {
-        let key = ring
-          .current()
-          .ok_or(CoreError::NoContentKey(conversation))?
-          .duplicate();
+        let key = maybe_current.ok_or(CoreError::NoContentKey(conversation))?;
         ContentKeyBundle::epoch_key(convert::conversation(conversation), key)
       },
       SharedKeys::MissedKeys { user_id, device_id } => {

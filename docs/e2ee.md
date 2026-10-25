@@ -469,14 +469,16 @@ its own. See [admin.md](admin.md) §2.
   group its current key as a bundle, ranked like an addition (`device_add_stagger` per rank, online
   users first), so normally one member sends; the others drop theirs once a current key arrives, or
   when the group switches keys anyway. A member hands over only a current key it had in the group
-  since its own join (derived or received there, see "Keys a device added back missed"), never one
-  only its key bag knows, which may be stale in the same way. The waiting device takes the first
-  current key a member sends after its join (the adder's history share for a new user, the hand-over
-  for a further device; only members of the epoch can send it, the server can delay it, not forge
-  it), or the next epoch key it derives itself. Members on clients before this version don't send
-  the hand-over, and a member whose current key predates this version only knows it from before:
-  until a member that has a key from the group comes online, or the group switches keys, the device
-  reads but doesn't write.
+  since its own join (derived or received there, see "Keys a device added back missed"). If its
+  current key is one only its key bag knows, which may be stale in the same way (and so is every
+  current key from before devices recorded this), it makes a fresh random key, switches to it and
+  hands over that one: it is new and reaches only the epoch's members over MLS. The same rule holds
+  for the current key in the history it shares with a new member. The waiting device takes the
+  first current key a member sends after its join (the adder's history share for a new user, the
+  hand-over for a further device; only members of the epoch can send it, the server can delay it,
+  not forge it), or the next epoch key it derives itself. Members on clients before this version
+  don't send the hand-over: until a member with this version comes online, the device reads but
+  doesn't write.
   `GroupInfo` larger than
   `max_group_info_bytes` (client, 256 KiB) is not sent, and the server stores a commit without one
   that exceeds its payload limit; such groups use the request. A further device joins DMs and group
