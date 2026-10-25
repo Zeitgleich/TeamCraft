@@ -109,21 +109,8 @@ struct BrowseView: View {
       List {
         Section {
           ForEach(people) { person in
-            let isPicked = picked.contains(person.id)
-            Button {
-              if isPicked { picked.removeAll { $0 == person.id } } else { picked.append(person.id) }
-            } label: {
-              HStack {
-                Image(systemName: isPicked ? "checkmark.circle.fill" : "circle")
-                  .foregroundStyle(isPicked ? Theme.accent : Theme.textMuted)
-                VStack(alignment: .leading) {
-                  Text(verbatim: person.displayName).foregroundStyle(Theme.text)
-                  Text(verbatim: "@" + person.username).font(.footnote).foregroundStyle(Theme.textMuted)
-                }
-              }
-            }
-            .accessibilityAddTraits(isPicked ? .isSelected : [])
-            .disabled(maybePendingDm != nil)
+            PersonPickRow(person: person, picked: $picked)
+              .disabled(maybePendingDm != nil)
           }
         } footer: {
           Text("dm_pick_hint")
@@ -186,5 +173,28 @@ struct BrowseView: View {
   private func open(_ conversationId: String) {
     onOpen(conversationId)
     dismiss()
+  }
+}
+
+/// A person to pick (for a new DM or group, or to add to a call): tapping adds or removes them.
+struct PersonPickRow: View {
+  let person: BrowseSnapshot.Person
+  @Binding var picked: [String]
+
+  var body: some View {
+    let isPicked = picked.contains(person.id)
+    Button {
+      if isPicked { picked.removeAll { $0 == person.id } } else { picked.append(person.id) }
+    } label: {
+      HStack {
+        Image(systemName: isPicked ? "checkmark.circle.fill" : "circle")
+          .foregroundStyle(isPicked ? Theme.accent : Theme.textMuted)
+        VStack(alignment: .leading) {
+          Text(verbatim: person.displayName).foregroundStyle(Theme.text)
+          Text(verbatim: "@" + person.username).font(.footnote).foregroundStyle(Theme.textMuted)
+        }
+      }
+    }
+    .accessibilityAddTraits(isPicked ? .isSelected : [])
   }
 }

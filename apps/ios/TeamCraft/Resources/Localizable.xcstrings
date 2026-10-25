@@ -417,6 +417,70 @@
         }
       }
     },
+    "call_add_people": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add people"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Personen hinzufügen"
+          }
+        }
+      }
+    },
+    "call_add_people_confirm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add and move the call"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hinzufügen und Anruf verlegen"
+          }
+        }
+      }
+    },
+    "call_add_people_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The call moves into a new meeting room with everyone in it and the people you add. This conversation stays as it is."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Anruf wechselt in einen neuen Besprechungsraum mit allen Beteiligten und den Personen, die du hinzufügst. Diese Unterhaltung bleibt, wie sie ist."
+          }
+        }
+      }
+    },
+    "call_add_people_none": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "There is nobody else you can add."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Es gibt niemanden, den du noch hinzufügen kannst."
+          }
+        }
+      }
+    },
     "call_camera_denied": {
       "localizations": {
         "en": {
@@ -557,6 +621,102 @@
           "stringUnit": {
             "state": "translated",
             "value": "Eingehender Anruf"
+          }
+        }
+      }
+    },
+    "call_move_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn't join the meeting room"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Beitritt zum Besprechungsraum fehlgeschlagen"
+          }
+        }
+      }
+    },
+    "call_move_join": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Join the meeting room"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dem Besprechungsraum beitreten"
+          }
+        }
+      }
+    },
+    "call_move_refused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The move into the meeting room couldn't be verified. You stay in this call."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Wechsel in den Besprechungsraum ließ sich nicht bestätigen. Du bleibst in diesem Anruf."
+          }
+        }
+      }
+    },
+    "call_move_someone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Someone"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jemand"
+          }
+        }
+      }
+    },
+    "call_moved_by %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ moved the call into a meeting room."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ hat den Anruf in einen Besprechungsraum verlegt."
+          }
+        }
+      }
+    },
+    "call_moved_by %@ added %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ moved the call into a meeting room and added %2$@."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ hat den Anruf in einen Besprechungsraum verlegt und %2$@ hinzugefügt."
           }
         }
       }

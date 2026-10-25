@@ -13,6 +13,14 @@
   <string name="call_prejoin_camera">Kamera an</string>
   <string name="call_prejoin_muted">Stummgeschaltet beitreten</string>
   <string name="call_prejoin_join">Beitreten</string>
+  <string name="call_add_people">Personen hinzufügen</string>
+  <string name="call_add_hint">Der Anruf zieht mit allen Teilnehmenden in einen neuen Meetingraum um. Die Direktnachrichten bleiben, wie sie sind; die hinzugefügten Personen sehen sie nicht.</string>
+  <string name="call_add_nobody">Es gibt niemanden mehr zum Hinzufügen.</string>
+  <string name="call_add">Zum Anruf hinzufügen</string>
+  <string name="call_meeting_title">Anruf</string>
+  <string name="call_move_offer">%1$s hat den Anruf in einen Meetingraum verschoben und %2$s hinzugefügt.</string>
+  <string name="call_move_join">Meetingraum beitreten</string>
+  <string name="error_call_move_refused">Der Anruf wurde nicht verschoben: Der Meetingraum passt nicht zu dem, was in der Unterhaltung angekündigt wurde. Bleib in diesem Anruf oder tritt dem Meetingraum über die Liste bei, wenn du ihm vertraust.</string>
   <string name="channel_mention_confirm_title">Alle benachrichtigen?</string>
   <plurals name="channel_mention_confirm">
     <item quantity="one">Diese Nachricht benachrichtigt %d Mitglied.</item>

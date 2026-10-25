@@ -41,6 +41,39 @@ struct BrowseSnapshot: Decodable, Sendable {
       $0.kind == kind && Set($0.memberIds ?? []).subtracting([me.id]) == wanted
     }?.id
   }
+
+  /// The people "Add people" in a DM or group DM call offers: everyone the user can message who
+  /// isn't in that conversation, matching `query` (name or username) when one is typed.
+  func addablePeople(to conversationId: String, matching query: String) -> [Person] {
+    let members = Set(members(of: conversationId))
+    let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    return people.filter { person in
+      !members.contains(person.id)
+        && (needle.isEmpty || person.displayName.localizedCaseInsensitiveContains(needle)
+          || person.username.localizedCaseInsensitiveContains(needle))
+    }
+  }
+
+  /// Whom "Add people" in a DM or group DM call starts the meeting room with (docs/meetings.md,
+  /// "A call becomes a meeting"): the people in the call (`inCallUsers`, from the call's verified
+  /// roster) and the user; the core keeps only those in the DM's encryption group. Added are the
+  /// picked people who aren't among them.
+  func callAddition(inCallUsers: [String], picked: [String]) -> CallAddition {
+    let inCall = Array(Set(inCallUsers).union([me.id])).sorted()
+    var added: [String] = []
+    for user in picked where !inCall.contains(user) && !added.contains(user) { added.append(user) }
+    return CallAddition(inCall: inCall, added: added)
+  }
+
+  private func members(of conversationId: String) -> [String] {
+    conversations?.first { $0.id == conversationId }?.memberIds ?? []
+  }
+}
+
+/// The two lists of `TeamCraft.addPeopleToCall`.
+struct CallAddition: Equatable {
+  let inCall: [String]
+  let added: [String]
 }
 
 /// A channel of a space as Browse lists it (`browse_channels`).

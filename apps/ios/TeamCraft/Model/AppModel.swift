@@ -6,7 +6,7 @@ import UserNotifications
 
 /// Why something failed, as the screens show it (translated per case).
 enum AppFailure: Equatable {
-  case network, signedOut, wrongPassphrase, storage, signInFailed, recoveryPending, generic
+  case network, signedOut, wrongPassphrase, storage, signInFailed, recoveryPending, callMoveRefused, generic
 
   init(_ failure: CoreFailure) {
     switch failure {
@@ -15,6 +15,7 @@ enum AppFailure: Equatable {
     case .wrongPassphrase: self = .wrongPassphrase
     case .storage: self = .storage
     case .recoveryPending: self = .recoveryPending
+    case .callMoveRefused: self = .callMoveRefused
     case .notEnrolled, .other: self = .generic
     }
   }
@@ -27,6 +28,7 @@ enum AppFailure: Equatable {
     case .storage: return "error_storage"
     case .signInFailed: return "sign_in_failed"
     case .recoveryPending: return "recovery_pending"
+    case .callMoveRefused: return "call_move_refused"
     case .generic: return "error_generic"
     }
   }
@@ -656,6 +658,7 @@ final class AppModel {
   /// conversations that are read now go.
   private func storeDidChange() {
     changeCount += 1
+    calls.storeDidChange()
     connection = maybeCore?.connectionState()
     guard maybeReconcile == nil else { return }
     maybeReconcile = Task { [weak self] in
@@ -717,6 +720,34 @@ final class AppModel {
   /// Joins the conversation's call (CallKit asked: answered, or started by the user).
   func joinCall(conversationId: String) async throws -> CallSession {
     try await core().joinCall(conversationId: conversationId)
+  }
+
+  /// "Add people" in a DM or group DM call: the meeting room the call moves into
+  /// (docs/meetings.md, "A call becomes a meeting"). The same `requestKey` gets the same room.
+  func addPeopleToCall(conversationId: String, inCall: [String], added: [String], requestKey: String)
+    async throws -> String
+  {
+    try await core().addPeopleToCall(
+      conversationId: conversationId, inCall: inCall, added: added, maybeTitle: nil, requestKey: requestKey)
+  }
+
+  /// Who moved the call and whom they added, once the DM's encrypted announcement is in (`nil`
+  /// before; asked again on later store changes).
+  func callMoveOffer(from: String, to: String) async -> CallMoveInfo? {
+    // A failed read is the same as "not in yet": the next store change asks again.
+    try? await core().callMoveOffer(fromConversationId: from, toConversationId: to)
+  }
+
+  /// Checks an announced move before this device follows it; throws `CallMoveRefused` if it
+  /// doesn't check out.
+  func acceptCallMove(from: String, to: String) async throws {
+    try await core().acceptCallMove(fromConversationId: from, toConversationId: to)
+  }
+
+  /// The signed-in user (`nil` before an account is ready).
+  var maybeUserId: String? {
+    if case .ready(let account) = phase { return account.userId }
+    return nil
   }
 
   /// Where a message link points, if this device is in that conversation and has the message.

@@ -36,6 +36,20 @@ final class BrowseTests: XCTestCase {
     XCTAssertNil(snapshot.directConversation(with: ["2", "3", "4"]))
   }
 
+  func testAddablePeopleLeaveOutTheConversationsMembers() throws {
+    let snapshot = try XCTUnwrap(Wire.decode(BrowseSnapshot.self, from: snapshotJSON))
+    XCTAssertEqual(snapshot.addablePeople(to: "11", matching: "").map(\.id), ["3"])
+    XCTAssertEqual(snapshot.addablePeople(to: "10", matching: "").map(\.id), [])
+    XCTAssertEqual(snapshot.addablePeople(to: "11", matching: "BO").map(\.id), ["3"])
+    XCTAssertEqual(snapshot.addablePeople(to: "11", matching: "alice").map(\.id), [])
+  }
+
+  func testCallAdditionKeepsThePeopleInTheCallOutOfTheAdded() throws {
+    let snapshot = try XCTUnwrap(Wire.decode(BrowseSnapshot.self, from: snapshotJSON))
+    let addition = snapshot.callAddition(inCallUsers: ["2"], picked: ["3", "2", "3"])
+    XCTAssertEqual(addition, CallAddition(inCall: ["1", "2"], added: ["3"]))
+  }
+
   func testBrowseActionsOnTheWire() {
     XCTAssertEqual(ChatAction.openDm(userId: "2").json, #"{"action":"open_dm","user":"2"}"#)
     XCTAssertEqual(

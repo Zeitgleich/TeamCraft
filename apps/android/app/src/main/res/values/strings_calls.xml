@@ -13,6 +13,14 @@
   <string name="call_prejoin_camera">Camera on</string>
   <string name="call_prejoin_muted">Join muted</string>
   <string name="call_prejoin_join">Join</string>
+  <string name="call_add_people">Add people</string>
+  <string name="call_add_hint">The call moves into a new meeting room with everybody in it. The direct messages stay as they are; the people you add don\'t see them.</string>
+  <string name="call_add_nobody">There is nobody else to add.</string>
+  <string name="call_add">Add to the call</string>
+  <string name="call_meeting_title">Call</string>
+  <string name="call_move_offer">%1$s moved the call into a meeting room and added %2$s.</string>
+  <string name="call_move_join">Join the meeting room</string>
+  <string name="error_call_move_refused">The call wasn\'t moved: the meeting room doesn\'t match what was announced in the conversation. Stay in this call, or join the meeting room from the list if you trust it.</string>
   <string name="channel_mention_confirm_title">Notify everyone?</string>
   <plurals name="channel_mention_confirm">
     <item quantity="one">This message notifies %d member.</item>

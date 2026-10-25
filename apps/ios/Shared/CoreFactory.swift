@@ -98,7 +98,10 @@ struct CoreFactory {
 /// What the app acts on when a core call fails. The generated error enum's case spelling depends
 /// on the UniFFI version, so this reads the description (`Network(message: ...)`) instead.
 enum CoreFailure: Equatable {
-  case network, signedOut, notEnrolled, wrongPassphrase, storage, recoveryPending, other
+  case network, signedOut, notEnrolled, wrongPassphrase, storage, recoveryPending
+  /// A move of the call into a meeting room didn't check out (docs/meetings.md): stay in the call.
+  case callMoveRefused
+  case other
 
   init(_ error: Error) {
     let name = String(describing: error).lowercased()
@@ -114,6 +117,8 @@ enum CoreFailure: Equatable {
       self = .storage
     } else if name.hasPrefix("recoverypending") {
       self = .recoveryPending
+    } else if name.hasPrefix("callmoverefused") {
+      self = .callMoveRefused
     } else {
       self = .other
     }

@@ -779,6 +779,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       is TeamCraftException.SignedOut -> R.string.error_signed_out
       is TeamCraftException.WrongPassphrase -> R.string.error_wrong_passphrase
       is TeamCraftException.Storage -> R.string.error_storage
+      is TeamCraftException.CallMoveRefused -> R.string.error_call_move_refused
       else -> R.string.error_generic
     }
   }

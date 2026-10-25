@@ -20,10 +20,34 @@ struct ActiveCall: Identifiable, Equatable {
   /// End-to-end encrypted with every participant's device verified.
   var isSecured = false
   var participantCount: UInt32 = 0
+  /// The people of the other devices in the call, each once (the call's verified roster).
+  var participantUserIds: [String] = []
   /// The code participants compare to rule out a man in the middle (once secured).
   var maybePrivacyCode: String?
   /// Put on hold from the system's call UI: nothing is sent or played.
   var isOnHold = false
+}
+
+/// A move of the call into a meeting room that somebody else announced in the DM's encryption group
+/// (docs/meetings.md, "A call becomes a meeting"); the call screen offers to follow it.
+struct CallMoveOffer: Equatable {
+  let fromConversationId: String
+  let toConversationId: String
+  let byName: String
+  /// The added people this device knows by name.
+  let addedNames: [String]
+}
+
+/// A move of the call from a DM into a meeting room, as the server or this device announced it.
+private struct CallMove: Equatable {
+  let from: String
+  let to: String
+}
+
+/// A switch into another call waits for this device's end of the previous one.
+private struct LeaveWaiter {
+  let conversationId: String
+  let continuation: CheckedContinuation<Void, Never>
 }
 
 /// A remote camera or screen track that is shown in the call.
@@ -40,6 +64,10 @@ struct RemoteVideoStream: Identifiable {
 /// `pushRegistry(_:didReceiveIncomingPushWith:)` and from there into CallKit (e2ee.md §7).
 @Observable
 final class CallManager: NSObject, @unchecked Sendable {
+  /// How long a switch into a meeting room waits for the core to report the DM call's end before
+  /// joining anyway (one call at a time keeps audio and its end sounds apart).
+  private static let leaveTimeout: Duration = .seconds(5)
+
   /// Main-thread state; the in-call screen observes it.
   private(set) var activeCall: ActiveCall?
   /// Why the last call ended, shown briefly on the screen.
@@ -50,6 +78,12 @@ final class CallManager: NSObject, @unchecked Sendable {
   private(set) var isCameraOn = false
   /// The user refused camera access; the screen explains where to change it.
   private(set) var isCameraDenied = false
+  /// A move into a meeting room somebody else announced; the screen offers to follow it.
+  private(set) var maybeMoveOffer: CallMoveOffer?
+  /// The call is being checked and switched into a meeting room.
+  private(set) var isMoving = false
+  /// Why following a move failed (the call stays where it is).
+  private(set) var maybeMoveFailure: AppFailure?
   /// Local picture and sender of the camera.
   @ObservationIgnored let camera = CameraStreamer()
 
@@ -63,6 +97,10 @@ final class CallManager: NSObject, @unchecked Sendable {
   @ObservationIgnored private var isJoining = false
   @ObservationIgnored private var wantsVideoStart = false
   @ObservationIgnored private let renderers = RendererRegistry()
+  /// A move the server (`call_move`) or this device announced; followed only once the encrypted
+  /// announcement is in and `acceptCallMove` checked it.
+  @ObservationIgnored private var maybeAnnouncedMove: CallMove?
+  @ObservationIgnored private var maybeLeaveWaiter: LeaveWaiter?
 
   override init() {
     let configuration = CXProviderConfiguration()
@@ -146,6 +184,167 @@ final class CallManager: NSObject, @unchecked Sendable {
     controller.request(CXTransaction(action: CXEndCallAction(call: call.id)), completion: { _ in })
   }
 
+  // MARK: Moving into a meeting room
+
+  /// "Add people" in the DM or group DM call of `conversationId`: a meeting room with the people in
+  /// the call and `added`, into which the call moves (docs/meetings.md, "A call becomes a
+  /// meeting"). Throws when it failed; a retry with the same `requestKey` gets the same room.
+  @MainActor
+  func addPeople(conversationId: String, inCall: [String], added: [String], requestKey: String) async throws {
+    guard activeCall?.conversationId == conversationId else { return }
+    let room = try await AppModel.shared.addPeopleToCall(
+      conversationId: conversationId, inCall: inCall, added: added, requestKey: requestKey)
+    // The server's `call_move` reaches this device too, but the own announcement is in the store
+    // already: follow it now (still through `acceptCallMove`).
+    noteAnnouncedMove(CallMove(from: conversationId, to: room))
+  }
+
+  /// The user tapped "Join the meeting room" on the offered move.
+  @MainActor
+  func joinMovedCall() {
+    guard let offer = maybeMoveOffer else { return }
+    Task { await follow(CallMove(from: offer.fromConversationId, to: offer.toConversationId)) }
+  }
+
+  func dismissMoveFailure() {
+    maybeMoveFailure = nil
+  }
+
+  /// The store changed: an announced move may have its encrypted announcement now.
+  @MainActor
+  func storeDidChange() {
+    guard maybeAnnouncedMove != nil, maybeMoveOffer == nil, !isMoving else { return }
+    Task { await checkAnnouncedMove() }
+  }
+
+  /// A move of the active call was announced. Nothing moves on this alone: the DM's encrypted
+  /// announcement decides, asked now and again on later store changes.
+  @MainActor
+  private func noteAnnouncedMove(_ move: CallMove) {
+    guard activeCall?.conversationId == move.from, maybeAnnouncedMove != move else { return }
+    maybeAnnouncedMove = move
+    maybeMoveOffer = nil
+    Task { await checkAnnouncedMove() }
+  }
+
+  /// The user's own move is followed at once; somebody else's is offered on the call screen.
+  @MainActor
+  private func checkAnnouncedMove() async {
+    guard let move = maybeAnnouncedMove,
+      let info = await AppModel.shared.callMoveOffer(from: move.from, to: move.to),
+      maybeAnnouncedMove == move, activeCall?.conversationId == move.from
+    else { return }
+    if info.byUserId == AppModel.shared.maybeUserId {
+      await follow(move)
+      return
+    }
+    let names = await AppModel.shared.displayNames()
+    guard maybeAnnouncedMove == move else { return }
+    maybeMoveOffer = CallMoveOffer(
+      fromConversationId: move.from, toConversationId: move.to,
+      byName: names[info.byUserId] ?? String(localized: "call_move_someone"),
+      addedNames: info.addedUserIds.compactMap { names[$0] })
+  }
+
+  /// Checks the move in the core, then switches the call over. A refused move is dropped (the
+  /// call stays); any other failure keeps it for another try.
+  @MainActor
+  private func follow(_ move: CallMove) async {
+    guard !isMoving, activeCall?.conversationId == move.from else { return }
+    isMoving = true
+    defer { isMoving = false }
+    do {
+      try await AppModel.shared.acceptCallMove(from: move.from, to: move.to)
+    } catch {
+      let failure = AppFailure(CoreFailure(error))
+      maybeMoveFailure = failure
+      if failure == .callMoveRefused {
+        maybeAnnouncedMove = nil
+        maybeMoveOffer = nil
+      }
+      return
+    }
+    guard activeCall?.conversationId == move.from else { return }
+    maybeAnnouncedMove = nil
+    maybeMoveOffer = nil
+    await switchCall(to: move.to)
+  }
+
+  /// Leaves the DM's call and joins the meeting room's with microphone, camera and hold as they
+  /// were. The CallKit call stays; only the core's call underneath changes.
+  @MainActor
+  private func switchCall(to conversationId: String) async {
+    guard var call = activeCall else { return }
+    let previousConversationId = call.conversationId
+    let wasMuted = call.isMuted
+    let wasCameraOn = isCameraOn
+    let name = await AppModel.shared.conversationName(conversationId)
+    guard activeCall?.id == call.id else { return }
+    call.conversationId = conversationId
+    call.displayName = name
+    call.phase = .connecting
+    call.isSecured = false
+    call.participantCount = 0
+    call.participantUserIds = []
+    call.maybePrivacyCode = nil
+    activeCall = call
+    camera.stop()
+    isCameraOn = false
+    renderers.removeAll()
+    remoteVideo = []
+    if let previous = maybeSession {
+      maybeSession = nil
+      await leave(previous, conversationId: previousConversationId)
+    }
+    do {
+      let session = try await AppModel.shared.joinCall(conversationId: conversationId)
+      guard activeCall?.id == call.id else {
+        // Hung up while joining.
+        session.leave()
+        return
+      }
+      maybeSession = session
+      configure(session)
+      if wasMuted { session.setMuted(isMuted: true) }
+      if call.isOnHold { session.setHeld(isHeld: true) }
+      if var current = activeCall {
+        current.phase = .connected
+        activeCall = current
+      }
+      if wasCameraOn {
+        camera.start(sending: session)
+        isCameraOn = true
+      }
+      let update = CXCallUpdate()
+      update.remoteHandle = CXHandle(type: .generic, value: conversationId)
+      update.localizedCallerName = name
+      provider.reportCall(with: call.id, updated: update)
+    } catch {
+      failCall(call, reason: .failed)
+    }
+  }
+
+  /// Leaves `session` and waits until the core reported its end (or `leaveTimeout` passed), so the
+  /// next call starts after the previous one is gone.
+  @MainActor
+  private func leave(_ session: CallSession, conversationId: String) async {
+    await withCheckedContinuation { continuation in
+      maybeLeaveWaiter = LeaveWaiter(conversationId: conversationId, continuation: continuation)
+      session.leave()
+      Task { @MainActor in
+        try? await Task.sleep(for: Self.leaveTimeout)
+        self.resumeLeaveWaiter(for: conversationId)
+      }
+    }
+  }
+
+  /// On the main thread, like the rest of the call state.
+  private func resumeLeaveWaiter(for conversationId: String) {
+    guard let waiter = maybeLeaveWaiter, waiter.conversationId == conversationId else { return }
+    maybeLeaveWaiter = nil
+    waiter.continuation.resume()
+  }
+
   // MARK: Incoming
 
   /// Shows the system's incoming call screen. `completion` runs once CallKit has the call (PushKit
@@ -206,8 +405,7 @@ final class CallManager: NSObject, @unchecked Sendable {
       do {
         let session = try await AppModel.shared.joinCall(conversationId: call.conversationId)
         maybeSession = session
-        session.setStatusSounds(sounds: CallStatusSoundsSetting.current.sounds)
-        session.setEncodedVideoListener(listener: self)
+        configure(session)
         if var current = activeCall {
           current.phase = .connected
           activeCall = current
@@ -223,6 +421,12 @@ final class CallManager: NSObject, @unchecked Sendable {
         failCall(call, reason: .failed)
       }
     }
+  }
+
+  /// What every joined session of this manager gets: the status sounds and the encoded video path.
+  private func configure(_ session: CallSession) {
+    session.setStatusSounds(sounds: CallStatusSoundsSetting.current.sounds)
+    session.setEncodedVideoListener(listener: self)
   }
 
   private func requestMicrophone() async -> Bool {
@@ -265,6 +469,9 @@ final class CallManager: NSObject, @unchecked Sendable {
       self.maybeSession = nil
       self.wantsJoin = false
       self.isAudioActive = false
+      self.maybeAnnouncedMove = nil
+      self.maybeMoveOffer = nil
+      self.maybeMoveFailure = nil
       self.activeCall = nil
     }
   }
@@ -439,10 +646,12 @@ extension CallManager: PKPushRegistryDelegate {
 extension CallManager: CallListener {
   func onCallState(state: CallStateInfo) {
     DispatchQueue.main.async {
+      if state.phase == .ended { self.resumeLeaveWaiter(for: state.conversationId) }
       guard var call = self.activeCall, call.conversationId == state.conversationId else { return }
       call.isMuted = state.isMuted
       call.isSecured = state.isSecured
       call.participantCount = state.participantCount
+      call.participantUserIds = state.participantUserIds
       call.maybePrivacyCode = state.maybePrivacyCode
       switch state.phase {
       case .connected: call.phase = .connected
@@ -473,6 +682,14 @@ extension CallManager: CallListener {
       // Answered on another device, declined or over: stop ringing here.
       self.provider.reportCall(with: call.id, endedAt: Date(), reason: .answeredElsewhere)
       self.clear()
+    }
+  }
+
+  /// The server says the call moved into a meeting room; only the encrypted announcement makes it
+  /// an offer (or, for the user's own move, followed at once).
+  func onCallMoved(fromConversationId: String, toConversationId: String) {
+    Task { @MainActor in
+      self.noteAnnouncedMove(CallMove(from: fromConversationId, to: toConversationId))
     }
   }
 
