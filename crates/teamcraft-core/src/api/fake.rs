@@ -191,6 +191,8 @@ struct State {
   clock_offset_ms: i64,
   /// Users whose conversation list answers only after this long (a slow server in a big sync).
   conversation_list_delays: HashMap<UserId, std::time::Duration>,
+  /// Users whose member lists answer only after this long.
+  member_list_delays: HashMap<UserId, std::time::Duration>,
   /// The gateway's heartbeat timeout on a clock of the test's ([`FakeServer::enforce_heartbeat_timeout`]).
   maybe_heartbeat_timeout: Option<(Arc<dyn Clock + Send + Sync>, i64)>,
   /// When each gateway connection last sent a frame, while the timeout is enforced.
@@ -455,6 +457,11 @@ impl FakeServer {
   /// How many connections [`Self::enforce_heartbeat_timeout`] closed.
   pub fn heartbeat_timeout_count(&self) -> u64 {
     self.lock().heartbeat_timeouts
+  }
+
+  /// The user's member lists answer only after `delay` (a catch-up of many conversations).
+  pub fn delay_member_lists(&self, user: UserId, delay: std::time::Duration) {
+    self.lock().member_list_delays.insert(user, delay);
   }
 
   /// The user's `GET /conversations` answers only after `delay` (a long full sync).
@@ -1389,6 +1396,10 @@ impl ServerApi for FakeServerApi {
     &self,
     conversation: ConversationId,
   ) -> Result<ListConversationMembersResponse, ApiError> {
+    let maybe_delay = self.server.lock().member_list_delays.get(&self.user).copied();
+    if let Some(delay) = maybe_delay {
+      crate::platform::sleep(delay).await;
+    }
     self.with(|state, me| {
       if state.broken_member_lists.contains(&conversation) {
         return Err(ApiError::Decode("fake server: unreadable member list".into()));

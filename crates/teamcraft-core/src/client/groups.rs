@@ -1688,6 +1688,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Moves the welcome cursor past `welcome` once it has been joined or definitely rejected. Only
   /// then: a welcome skipped after a network error would be lost, and with it the conversation.
   fn welcome_handled(&mut self, welcome: &MlsMessageResponse) -> Result<(), CoreError> {
+    if self.is_welcome_cursor_held {
+      // Handled out of order (a catch-up's focused conversation): the in-order pass meets it
+      // again and finds it outdated.
+      return Ok(());
+    }
     self.sync.maybe_welcome_cursor = Some(
       self
         .sync

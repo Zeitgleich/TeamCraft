@@ -3,17 +3,23 @@
 //! [`super::ClientSettings::catch_up_concurrency`]), and a mark on each conversation still being
 //! caught up, so the UI shows "catching up" there instead of a list that looks complete.
 //!
+//! The conversation the user looks at doesn't wait for the others: as soon as the host names it
+//! ([`CatchUpFocus`]), the catch-up takes it completely (members, its welcomes, its MLS queue and
+//! messages) between two steps of the rest, so it is readable within seconds also when every
+//! member list and 300 welcomes are still to come.
+//!
 //! The MLS state is one per device, so the groups are still processed one after the other; what
 //! runs side by side is waiting for the server: member lists, and the first page of each
 //! conversation's MLS queue and messages.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use futures_util::future::join_all;
 use teamcraft_proto::{
   ConversationId, Id, ListConversationMembersResponse, ListMessagesQuery, ListMessagesResponse,
-  ListMlsMessagesQuery, ListMlsMessagesResponse, Snowflake,
+  ListMlsMessagesQuery, ListMlsMessagesResponse, MlsMessageResponse, Snowflake,
 };
 
 use super::Client;
@@ -33,6 +39,15 @@ pub struct CatchUpFocus(Arc<AtomicI64>);
 
 /// What [`CatchUpFocus`] holds before a conversation was set (snowflakes are never negative).
 const NO_FOCUS: i64 = -1;
+
+/// The conversations of one catch-up and those the focus took ahead of the rest.
+struct AheadOfTheRest {
+  conversations: BTreeSet<ConversationId>,
+  /// Taken ahead once each, whatever came of it.
+  tried: BTreeSet<ConversationId>,
+  /// Completely caught up ahead; the rest of the catch-up leaves them out.
+  done: BTreeSet<ConversationId>,
+}
 
 /// The first page of a conversation's MLS queue and messages, read ahead.
 #[derive(Default)]
@@ -89,6 +104,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversations: &[ConversationId],
     members_order: &[ConversationId],
   ) -> Result<(), CoreError> {
+    // A catch-up dropped while it held the cursor (the app went away) must not keep it held.
+    self.is_welcome_cursor_held = false;
     for conversation in conversations {
       records::put_json(&self.store, Table::SyncState, &marker_key(*conversation), &true)?;
     }
@@ -105,15 +122,26 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     members_order: &[ConversationId],
   ) -> Result<(), CoreError> {
     let mut phases = PhaseTimer::start(self.now_ms());
-    self.refresh_members_of(members_order).await?;
+    let mut ahead = AheadOfTheRest {
+      conversations: conversations.iter().copied().collect(),
+      tried: BTreeSet::new(),
+      done: BTreeSet::new(),
+    };
+    self
+      .refresh_members_around_focus(members_order, &mut ahead, &phases)
+      .await?;
     phases.lap("member lists", self.now_ms());
-    // Welcomes in the server's order: their cursor only moves forward.
-    self.sync_welcomes().await?;
+    self.sync_welcomes_around_focus(&mut ahead, &phases).await?;
     phases.lap("welcomes", self.now_ms());
     // After the welcomes: a member's add (with a Welcome) wins over claiming the place ourselves.
     self.join_missing_groups().await?;
     phases.lap("missing groups", self.now_ms());
-    self.catch_up_each(conversations.to_vec(), &phases).await?;
+    let waiting = conversations
+      .iter()
+      .copied()
+      .filter(|conversation| !ahead.done.contains(conversation))
+      .collect();
+    self.catch_up_each(waiting, &phases).await?;
     phases.lap("content", self.now_ms());
     tracing::info!(
       conversations = conversations.len(),
@@ -153,6 +181,120 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }
     }
     Ok(())
+  }
+
+  /// Member lists like [`Self::refresh_members_of`], the focused conversation taken ahead between
+  /// two batches.
+  async fn refresh_members_around_focus(
+    &mut self,
+    members_order: &[ConversationId],
+    ahead: &mut AheadOfTheRest,
+    phases: &PhaseTimer,
+  ) -> Result<(), CoreError> {
+    let batch_size = self.settings.catch_up_concurrency.max(1);
+    let mut rest = members_order.iter().copied();
+    loop {
+      self.catch_up_focus_ahead(ahead, phases).await?;
+      let batch: Vec<ConversationId> = rest
+        .by_ref()
+        .filter(|conversation| !ahead.tried.contains(conversation))
+        .take(batch_size)
+        .collect();
+      if batch.is_empty() {
+        return Ok(());
+      }
+      self.refresh_members_of(&batch).await?;
+    }
+  }
+
+  /// [`Self::sync_welcomes`] in the server's order (their cursor only moves forward), the focused
+  /// conversation taken ahead between two welcomes.
+  async fn sync_welcomes_around_focus(
+    &mut self,
+    ahead: &mut AheadOfTheRest,
+    phases: &PhaseTimer,
+  ) -> Result<(), CoreError> {
+    loop {
+      let query = ListMlsMessagesQuery {
+        maybe_after: self.sync.maybe_welcome_cursor,
+        maybe_limit: None,
+      };
+      let page = self.api.list_welcomes(self.account.device_id, &query).await?;
+      for welcome in &page.messages {
+        self.catch_up_focus_ahead(ahead, phases).await?;
+        self.join_from_welcome(welcome).await?;
+      }
+      if !page.has_more || page.messages.is_empty() {
+        return Ok(());
+      }
+    }
+  }
+
+  /// Catches up the focused conversation completely, ahead of the rest, once per catch-up: its
+  /// member list, its welcomes (out of the server's order, without moving the welcome cursor, so
+  /// the in-order pass still meets the welcomes before them), its MLS queue and messages. Without
+  /// a group after its welcomes, it waits for the rest of the catch-up (claiming a place comes
+  /// after all welcomes).
+  async fn catch_up_focus_ahead(
+    &mut self,
+    ahead: &mut AheadOfTheRest,
+    phases: &PhaseTimer,
+  ) -> Result<(), CoreError> {
+    let Some(focus) = self.catch_up_focus.get() else {
+      return Ok(());
+    };
+    if !ahead.conversations.contains(&focus) || !ahead.tried.insert(focus) {
+      return Ok(());
+    }
+    let read = self.api.list_members(focus).await;
+    let result = self.store_members(focus, read);
+    if self.isolate(focus, ResyncPart::Members, result)? {
+      self.unmark_resync(focus, ResyncPart::Members)?;
+    }
+    if !self.has_group(focus)? {
+      self.join_welcomes_of(focus).await?;
+    }
+    if !self.has_group(focus)? {
+      return Ok(());
+    }
+    let result = self.catch_up_content_from(focus, FirstPages::default()).await;
+    if self.isolate(focus, ResyncPart::Content, result)? {
+      self.unmark_resync(focus, ResyncPart::Content)?;
+    }
+    self.store.delete(Table::SyncState, &marker_key(focus))?;
+    ahead.done.insert(focus);
+    tracing::info!(
+      ms = self.now_ms().saturating_sub(phases.started_ms),
+      "catch-up: the focused conversation is caught up ahead of the rest"
+    );
+    Ok(())
+  }
+
+  /// Joins the conversation's waiting welcomes, in their order, with the welcome cursor held.
+  async fn join_welcomes_of(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    let mut maybe_after = self.sync.maybe_welcome_cursor;
+    loop {
+      let query = ListMlsMessagesQuery {
+        maybe_after,
+        maybe_limit: None,
+      };
+      let page = self.api.list_welcomes(self.account.device_id, &query).await?;
+      let welcomes: Vec<&MlsMessageResponse> = page
+        .messages
+        .iter()
+        .filter(|welcome| welcome.conversation_id == conversation)
+        .collect();
+      for welcome in welcomes {
+        self.is_welcome_cursor_held = true;
+        let joined = self.join_from_welcome(welcome).await;
+        self.is_welcome_cursor_held = false;
+        joined?;
+      }
+      match page.messages.last() {
+        Some(last) if page.has_more => maybe_after = Some(last.id),
+        _ => return Ok(()),
+      }
+    }
   }
 
   /// One conversation's part of a catch-up, with its first pages possibly read ahead: its MLS

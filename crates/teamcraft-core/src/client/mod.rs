@@ -204,6 +204,9 @@ pub struct Client<A, S> {
   maybe_replay_left: Option<u64>,
   /// The conversation the user looks at; a catch-up takes it first (issue #247).
   catch_up_focus: CatchUpFocus,
+  /// Set while a catch-up joins the focused conversation's welcomes ahead of the others: the
+  /// welcome cursor then stays where it is, so the welcomes before them are still read in order.
+  is_welcome_cursor_held: bool,
 }
 
 impl Default for ClientSettings {
@@ -281,6 +284,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       member_join_attempts: HashMap::new(),
       maybe_waiting_checked_at_ms: None,
       catch_up_focus: CatchUpFocus::default(),
+      is_welcome_cursor_held: false,
     };
     // A catch-up the app was closed during left its marks; the next one sets them again.
     catch_up::clear_marks(&client.store)?;
