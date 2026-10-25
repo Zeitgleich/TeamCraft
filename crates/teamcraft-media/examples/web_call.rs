@@ -83,7 +83,7 @@ pub async fn join_dev_call(
   };
   let config = WebCallConfig {
     sfu_url,
-    maybe_certificate_hash,
+    certificate_hashes: maybe_certificate_hash.into_iter().collect(),
     token,
     engine,
     source: parse_source(&source)?,

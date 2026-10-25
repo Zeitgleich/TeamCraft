@@ -8,7 +8,7 @@
 //! for the rest.
 //!
 //! The module exports [`EXPORT_START`] and the other `EXPORT_*` functions. `start` takes an object
-//! with the page's callbacks:
+//! with the page's callbacks and the `worklet` URL:
 //!
 //! | Callback  | Arguments                                  | Answer                                  |
 //! |-----------|--------------------------------------------|-----------------------------------------|
@@ -26,11 +26,13 @@ use teamcraft_proto::{DeviceId, UserId};
 
 pub use crate::call_view::CallSignal;
 
-/// Where the page finds the module (trunk builds it next to the app).
-pub const MODULE_URL: &str = "/teamcraft-web-calls.js";
-/// The call's AudioWorklet module, served from the page's origin: the web client's
-/// Content-Security-Policy allows no blob: scripts.
-pub const WORKLET_URL: &str = "/teamcraft-call-worklet.js";
+/// `<meta name>` under which the page finds the module's URL: the build names it after its content
+/// (`scripts/finish-calls.sh`), so a page never loads another build's module.
+pub const MODULE_META: &str = "teamcraft-calls";
+/// `<meta name>` with the URL of the call's AudioWorklet module, served from the page's origin (the
+/// web client's Content-Security-Policy allows no blob: scripts). The page hands it to the module
+/// as the `worklet` property of the callbacks.
+pub const WORKLET_META: &str = "teamcraft-call-worklet";
 /// `start(callbacks)`: once, after the module is initialized.
 pub const EXPORT_START: &str = "start";
 /// `act(CallAction JSON) -> Promise`.
@@ -62,9 +64,9 @@ pub struct PreparedCall {
   /// which the browser can't apply: the camera stays off.
   #[serde(default)]
   pub requires_background: bool,
-  /// The SFU certificate's SHA-256 (hex) when it is self-signed (development, tests).
+  /// The SFU certificates' SHA-256s (hex) when they are self-signed (development, tests).
   #[serde(default)]
-  pub maybe_certificate_sha256: Option<String>,
+  pub certificate_sha256: Vec<String>,
 }
 
 // The join token doesn't belong in logs.
@@ -91,7 +93,7 @@ mod tests {
       device_id: id_from_raw(10),
       trusted_devices: vec![id_from_raw(20)],
       requires_background: false,
-      maybe_certificate_sha256: None,
+      certificate_sha256: Vec::new(),
     };
     let json = serde_json::to_string(&prepared).unwrap();
     assert_eq!(serde_json::from_str::<PreparedCall>(&json).unwrap(), prepared);

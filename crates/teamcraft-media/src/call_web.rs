@@ -84,6 +84,8 @@ const OPUS_BITRATE_BPS: u32 = 32_000;
 const OPUS_LOSS_FLOOR_PERCENT: u8 = 5;
 /// The planned loss changes the encoder's configuration only in steps this big.
 const OPUS_LOSS_STEP_PERCENT: u8 = 5;
+/// What a page without `navigator.mediaDevices` lacks: browsers offer it only to HTTPS pages.
+const SECURE_CONTEXT: &str = "camera and microphone access (the page needs HTTPS)";
 /// Mixed frames above this amplitude count as audible in [`CallStats`].
 const AUDIBLE_AMPLITUDE: f32 = 0.01;
 
@@ -99,9 +101,9 @@ pub struct WebCall {
 pub struct WebCallConfig {
   /// WebTransport URL from the join token response, e.g. `https://sfu.example.com:4433/call`.
   pub sfu_url: String,
-  /// Accept a self-signed SFU certificate by its SHA-256 hash (`serverCertificateHashes`,
-  /// development); `None` uses the browser's trusted roots.
-  pub maybe_certificate_hash: Option<[u8; 32]>,
+  /// Accept self-signed SFU certificates by their SHA-256 hashes (`serverCertificateHashes`,
+  /// development and tests); empty uses the browser's trusted roots.
+  pub certificate_hashes: Vec<[u8; 32]>,
   pub token: String,
   pub engine: CallEngineConfig,
   pub source: AudioSource,
@@ -340,7 +342,7 @@ impl WebCall {
       &inputs,
     )
     .await?;
-    let transport = Transport::connect(&config.sfu_url, config.maybe_certificate_hash, &inputs, 0).await?;
+    let transport = Transport::connect(&config.sfu_url, &config.certificate_hashes, &inputs, 0).await?;
     let (event_tx, events) = mpsc::unbounded();
     let (finished_tx, finished) = oneshot::channel();
     let task_inputs = inputs.clone();
@@ -568,7 +570,7 @@ async fn run_call(
       sfu_url: config.sfu_url.clone(),
       token: config.token.clone(),
     },
-    maybe_certificate_hash: config.maybe_certificate_hash,
+    certificate_hashes: config.certificate_hashes.clone(),
     resilience: config.resilience,
     maybe_ticket_source: config.maybe_ticket_source.clone(),
     cues: CuePlayer::new(config.status_cues),
@@ -641,7 +643,7 @@ struct CallState<'a> {
   /// When the connection was lost, while rejoining.
   maybe_lost_at: Option<Instant>,
   ticket: JoinTicket,
-  maybe_certificate_hash: Option<[u8; 32]>,
+  certificate_hashes: Vec<[u8; 32]>,
   resilience: ResilienceConfig,
   maybe_ticket_source: Option<Rc<dyn WebJoinTicketSource>>,
   /// Status sounds, mixed into the playback (never sent).
@@ -841,7 +843,7 @@ impl CallState<'_> {
     let inputs = self.inputs.clone();
     let maybe_source = self.maybe_ticket_source.clone();
     let fallback = self.ticket.clone();
-    let maybe_hash = self.maybe_certificate_hash;
+    let hashes = self.certificate_hashes.clone();
     let resilience = self.resilience;
     spawn_local(async move {
       let mut schedule = ReconnectSchedule::new(lost_at, grace);
@@ -858,7 +860,7 @@ impl CallState<'_> {
             Some(source) => source.fetch().await?,
             None => fallback.clone(),
           };
-          let transport = Transport::connect(&ticket.sfu_url, maybe_hash, &inputs, generation).await?;
+          let transport = Transport::connect(&ticket.sfu_url, &hashes, &inputs, generation).await?;
           Ok::<_, WebCallError>((transport, ticket))
         };
         match attempt.await {
@@ -1047,23 +1049,23 @@ impl Transport {
   /// `generation`.
   async fn connect(
     sfu_url: &str,
-    maybe_certificate_hash: Option<[u8; 32]>,
+    certificate_hashes: &[[u8; 32]],
     inputs: &mpsc::UnboundedSender<Input>,
     generation: u64,
   ) -> Result<Self, WebCallError> {
     let options = Object::new();
-    if let Some(hash) = maybe_certificate_hash {
-      let entry = dictionary(&[
-        ("algorithm", JsValue::from_str("sha-256")),
-        ("value", Uint8Array::from(&hash[..]).into()),
-      ])
-      .map_err(browser("WebTransport options"))?;
-      Reflect::set(
-        &options,
-        &JsValue::from_str("serverCertificateHashes"),
-        &Array::of1(&entry),
-      )
-      .map_err(browser("WebTransport options"))?;
+    if !certificate_hashes.is_empty() {
+      let entries = Array::new();
+      for hash in certificate_hashes {
+        let entry = dictionary(&[
+          ("algorithm", JsValue::from_str("sha-256")),
+          ("value", Uint8Array::from(&hash[..]).into()),
+        ])
+        .map_err(browser("WebTransport options"))?;
+        entries.push(&entry);
+      }
+      Reflect::set(&options, &JsValue::from_str("serverCertificateHashes"), &entries)
+        .map_err(browser("WebTransport options"))?;
     }
     let transport = WebTransport::new(sfu_url, &options).map_err(browser("WebTransport"))?;
     JsFuture::from(transport.ready())
@@ -1209,7 +1211,7 @@ impl Capture {
     let promise = window()?
       .navigator()
       .media_devices()
-      .map_err(media_access(MediaInput::Microphone))?
+      .map_err(|_| WebCallError::Unsupported(SECURE_CONTEXT))?
       .get_user_media_with_constraints(&constraints)
       .map_err(media_access(MediaInput::Microphone))?;
     let stream: MediaStream = JsFuture::from(promise)
@@ -1673,7 +1675,7 @@ fn media_access(input: MediaInput) -> impl Fn(JsValue) -> WebCallError {
 
 fn media_access_reason(dom_exception_name: &str) -> MediaAccessReason {
   match dom_exception_name {
-    "NotAllowedError" | "SecurityError" | "TypeError" => MediaAccessReason::Denied,
+    "NotAllowedError" | "SecurityError" => MediaAccessReason::Denied,
     "NotFoundError" | "OverconstrainedError" => MediaAccessReason::NotFound,
     "NotReadableError" | "AbortError" => MediaAccessReason::InUse,
     _ => MediaAccessReason::Other,
@@ -1706,6 +1708,7 @@ mod tests {
       ("OverconstrainedError", MediaAccessReason::NotFound),
       ("NotReadableError", MediaAccessReason::InUse),
       ("AbortError", MediaAccessReason::InUse),
+      ("TypeError", MediaAccessReason::Other),
       ("", MediaAccessReason::Other),
       ("SomeFutureError", MediaAccessReason::Other),
     ] {

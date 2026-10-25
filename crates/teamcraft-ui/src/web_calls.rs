@@ -23,7 +23,7 @@ use teamcraft_client_api::calls::CallsUnavailableReason;
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::page_calls::{
   EXPORT_ACT, EXPORT_CAMERA_VIEW, EXPORT_RING, EXPORT_SIGNAL, EXPORT_START, EXPORT_STOP,
-  EXPORT_UNWATCH_VIDEO, EXPORT_WATCH_VIDEO, MODULE_URL, PreparedCall,
+  EXPORT_UNWATCH_VIDEO, EXPORT_WATCH_VIDEO, MODULE_META, PreparedCall, WORKLET_META,
 };
 use teamcraft_client_api::remote::{CallAction, CallSnapshot};
 use teamcraft_core::CallKeySigner;
@@ -37,6 +37,8 @@ use web_sys::Element;
 
 /// What a browser needs for calls (as `teamcraft_media::call_web` checks it).
 const REQUIRED_GLOBALS: [&str; 4] = ["WebTransport", "AudioEncoder", "AudioDecoder", "AudioWorkletNode"];
+/// Gateway call events kept while the module loads; older ones go first (later ones repeat the state).
+const MAX_PENDING_SIGNALS: usize = 64;
 /// The call module loads this long after sign-in, out of the way of the first screen.
 const LOAD_DELAY: Duration = Duration::from_secs(3);
 
@@ -201,7 +203,12 @@ impl WebCallHost {
         module.call_sync(EXPORT_SIGNAL, &[JsValue::from_str(&json)]);
       },
       None => {
-        self.pending_signals.borrow_mut().push(json);
+        let mut pending = self.pending_signals.borrow_mut();
+        if pending.len() >= MAX_PENDING_SIGNALS {
+          pending.remove(0);
+        }
+        pending.push(json);
+        drop(pending);
         let host = self.clone();
         spawn_local(async move {
           if let Err(error) = host.module().await {
@@ -285,7 +292,7 @@ impl WebCallHost {
       device_id: own_device,
       trusted_devices,
       requires_background: crate::web_core::requires_org_background().await,
-      maybe_certificate_sha256: preparation.join.maybe_sfu_certificate_sha256,
+      certificate_sha256: preparation.join.sfu_certificate_sha256,
     })
   }
 
@@ -369,7 +376,8 @@ impl CallBindingSigner for CoreSigner {
 
 /// Imports and initializes the call module and hands it the page's callbacks.
 async fn load_module(host: Weak<WebCallHost>) -> Result<CallModule, String> {
-  let exports = JsFuture::from(import_module(MODULE_URL))
+  let module_url = meta_content(MODULE_META).ok_or("the page names no call module")?;
+  let exports = JsFuture::from(import_module(&module_url))
     .await
     .map_err(|error| format!("could not load the call module: {}", js_text(&error)))?;
   let init: Function = Reflect::get(&exports, &JsValue::from_str("default"))
@@ -448,6 +456,13 @@ impl Callbacks {
       )
     };
     let object = Object::new();
+    let worklet = meta_content(WORKLET_META).ok_or("the page names no call worklet")?;
+    Reflect::set(
+      &object,
+      &JsValue::from_str("worklet"),
+      &JsValue::from_str(&worklet),
+    )
+    .map_err(|error| js_text(&error))?;
     for (name, function) in [
       ("changed", changed.as_ref()),
       ("prepare", prepare.as_ref()),
@@ -464,6 +479,15 @@ impl Callbacks {
       _verify: verify,
     })
   }
+}
+
+/// The `content` of `<meta name="…">` in the page (the build writes the call module's names there).
+fn meta_content(name: &str) -> Option<String> {
+  web_sys::window()?
+    .document()?
+    .query_selector(&format!("meta[name=\"{name}\"]"))
+    .ok()??
+    .get_attribute("content")
 }
 
 fn json_value<T: serde::Serialize>(value: &T) -> JsValue {

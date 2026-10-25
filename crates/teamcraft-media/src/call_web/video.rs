@@ -433,7 +433,7 @@ pub(super) async fn capture_camera(maybe_device: Option<&str>) -> Result<MediaSt
   let promise = window()?
     .navigator()
     .media_devices()
-    .map_err(media_access(MediaInput::Camera))?
+    .map_err(|_| WebCallError::Unsupported(super::SECURE_CONTEXT))?
     .get_user_media_with_constraints(&constraints)
     .map_err(media_access(MediaInput::Camera))?;
   Ok(
@@ -457,7 +457,7 @@ pub(super) async fn capture_screen() -> Result<MediaStream, WebCallError> {
   let promise = window()?
     .navigator()
     .media_devices()
-    .map_err(media_access(MediaInput::Screen))?
+    .map_err(|_| WebCallError::Unsupported(super::SECURE_CONTEXT))?
     .get_display_media_with_constraints(&constraints)
     .map_err(media_access(MediaInput::Screen))?;
   Ok(

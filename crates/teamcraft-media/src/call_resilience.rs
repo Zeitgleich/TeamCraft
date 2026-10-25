@@ -201,6 +201,8 @@ pub fn certificate_hash_from_hex(text: &str) -> Option<[u8; 32]> {
 
 #[cfg(test)]
 mod tests {
+  use super::*;
+
   #[test]
   fn certificate_hashes_read_from_hex_with_or_without_colons() {
     let plain = "ab".repeat(32);
@@ -211,8 +213,6 @@ mod tests {
       assert_eq!(certificate_hash_from_hex(bad), None, "{bad}");
     }
   }
-
-  use super::*;
 
   mod path {
     use super::*;

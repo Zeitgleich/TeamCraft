@@ -129,12 +129,9 @@ pub fn can_show_video() -> bool {
 #[component]
 pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -> impl IntoView {
   let host = NodeRef::<leptos::html::Div>::new();
-  let state = crate::state::use_app_state();
+  // Once: the call module keeps the element current (another camera is a new stream in the same
+  // `<video>`, a watched track keeps drawing into its canvas).
   Effect::new(move |_| {
-    // Again whenever the call changes: a camera switched to another device is a new stream.
-    if source == VideoSource::OwnCamera {
-      state.read(|backend| backend.active_call().map(|active| active.is_camera_on));
-    }
     if let Some(element) = host.get() {
       show(&element, source);
     }
@@ -147,12 +144,13 @@ pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -
   view! { <div class="live-video" class:mirrored=move || is_mirrored.get() node_ref=host aria-hidden="true"></div> }
 }
 
-/// Puts the call module's element for `source` into `host`, replacing an older one.
+/// Puts the call module's element for `source` into `host`.
 #[cfg(target_arch = "wasm32")]
 fn show(host: &web_sys::HtmlDivElement, source: VideoSource) {
+  if host.child_element_count() > 0 {
+    return;
+  }
   let maybe_element = match source {
-    // Watched once; the canvas keeps showing the track.
-    VideoSource::Remote(_) if host.child_element_count() > 0 => return,
     VideoSource::Remote(stream_id) => crate::web_calls::watch_video(stream_id),
     VideoSource::OwnCamera => crate::web_calls::camera_view(),
   };

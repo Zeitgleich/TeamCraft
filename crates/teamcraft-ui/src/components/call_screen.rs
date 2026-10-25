@@ -70,7 +70,8 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
       })
       .flatten()
   };
-  let own_video = Signal::derive(move || {
+  // Memos: a view that changed the same way (another backend revision) must not remount the video.
+  let own_video = Memo::new(move |_| {
     let is_sending = state.read(|backend| backend.active_call().is_some_and(|active| active.is_camera_on));
     (can_show_video() && is_sending).then_some(VideoSource::OwnCamera)
   });
@@ -183,7 +184,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         has_hand_raised=participant.has_hand_raised
         is_speaking=Signal::derive(move || speaking.get() == Some(id))
         is_reconnecting=Signal::derive(move || reconnecting.get().contains(&id))
-        video=Signal::derive(move || track_of(id, VideoTrackKind::Camera))
+        video=Memo::new(move |_| track_of(id, VideoTrackKind::Camera))
       />
     }
   };

@@ -91,6 +91,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       CallFailure::CameraInUse => "error-call-camera-in-use",
       CallFailure::ScreenUnavailable => "error-call-screen-unavailable",
       CallFailure::Unsupported => "error-call-unsupported",
+      CallFailure::ServerUnreachable => "error-call-server-unreachable",
       CallFailure::BackgroundRequired => "error-call-background-required",
     },
     FailureKind::Server(code) => match code {

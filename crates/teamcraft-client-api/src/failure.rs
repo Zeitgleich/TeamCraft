@@ -49,13 +49,16 @@ pub enum CallFailure {
   ScreenUnavailable,
   /// The browser lacks what calls need (WebTransport, WebCodecs, AudioWorklet).
   Unsupported,
+  /// The call server (SFU) can't be reached, while the chat server can: often a network that
+  /// blocks UDP (QUIC).
+  ServerUnreachable,
   /// The organization requires a background behind the camera image, which this device can't
   /// apply.
   BackgroundRequired,
 }
 
 impl CallFailure {
-  const ALL: [Self; 9] = [
+  const ALL: [Self; 10] = [
     Self::MicrophoneDenied,
     Self::MicrophoneMissing,
     Self::MicrophoneInUse,
@@ -64,6 +67,7 @@ impl CallFailure {
     Self::CameraInUse,
     Self::ScreenUnavailable,
     Self::Unsupported,
+    Self::ServerUnreachable,
     Self::BackgroundRequired,
   ];
 
@@ -78,6 +82,7 @@ impl CallFailure {
       Self::CameraInUse => "camera_in_use",
       Self::ScreenUnavailable => "screen_unavailable",
       Self::Unsupported => "unsupported",
+      Self::ServerUnreachable => "server_unreachable",
       Self::BackgroundRequired => "background_required",
     }
   }

@@ -27,7 +27,7 @@ use teamcraft_client_api::calls::{
   PushToTalk, ScreenShareSound,
 };
 use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
-use teamcraft_client_api::page_calls::{PreparedCall, WORKLET_URL};
+use teamcraft_client_api::page_calls::PreparedCall;
 use teamcraft_client_api::remote::{CallAction, CallSnapshot};
 use teamcraft_media::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInfo, AudioSink, AudioSource};
 use teamcraft_media::bwe::BweConfig;
@@ -68,6 +68,8 @@ struct Host {
   maybe_media: RefCell<Option<Media>>,
   /// Lists the devices again when the browser says they changed (kept for as long as the host).
   _on_device_change: Closure<dyn FnMut()>,
+  /// Where the page serves the AudioWorklet module.
+  worklet_url: String,
   /// The last state handed to the page: an unchanged one isn't handed again.
   last_sent: RefCell<String>,
 }
@@ -93,6 +95,8 @@ struct State {
   requires_background: bool,
   /// The stream the camera sends, shown as the self view.
   maybe_local_camera: Option<MediaStream>,
+  /// The self view: one `<video>` for the whole session, playing whichever camera is on.
+  maybe_camera_view: Option<HtmlVideoElement>,
 }
 
 /// The task that owns the [`WebCall`].
@@ -140,6 +144,9 @@ struct PageTickets;
 #[wasm_bindgen]
 pub fn start(callbacks: JsValue) -> Result<(), JsValue> {
   init_logging();
+  let worklet_url = Reflect::get(&callbacks, &JsValue::from_str("worklet"))?
+    .as_string()
+    .ok_or_else(|| JsValue::from_str("the page gave no `worklet` URL"))?;
   let callbacks = Callbacks {
     changed: function(&callbacks, "changed")?,
     prepare: function(&callbacks, "prepare")?,
@@ -157,6 +164,7 @@ pub fn start(callbacks: JsValue) -> Result<(), JsValue> {
     state: RefCell::new(State::default()),
     maybe_media: RefCell::new(None),
     _on_device_change: on_device_change,
+    worklet_url,
     last_sent: RefCell::new(String::new()),
   });
   HOST.with(|slot| *slot.borrow_mut() = Some(host.clone()));
@@ -221,21 +229,27 @@ pub fn unwatch_video(stream_id: String) {
   }
 }
 
-/// A new muted `<video>` playing the camera this device sends, for the self view.
+/// The muted `<video>` playing the camera this device sends, for the self view. Always the same
+/// element: a camera switched to another device plays in it, so the page never rebuilds it.
 #[wasm_bindgen]
 pub fn camera_view() -> Option<HtmlVideoElement> {
-  let stream = host().ok()?.state.borrow().maybe_local_camera.clone()?;
-  let video: HtmlVideoElement = web_sys::window()?
-    .document()?
-    .create_element("video")
-    .ok()?
-    .dyn_into()
-    .ok()?;
-  video.set_muted(true);
-  video.set_autoplay(true);
-  // iOS Safari plays inline only with this attribute.
-  let _ = video.set_attribute("playsinline", "");
-  video.set_src_object(Some(&stream));
+  let host = host().ok()?;
+  let mut state = host.state.borrow_mut();
+  if state.maybe_camera_view.is_none() {
+    let video: HtmlVideoElement = web_sys::window()?
+      .document()?
+      .create_element("video")
+      .ok()?
+      .dyn_into()
+      .ok()?;
+    video.set_muted(true);
+    video.set_autoplay(true);
+    // iOS Safari plays inline only with this attribute.
+    let _ = video.set_attribute("playsinline", "");
+    state.maybe_camera_view = Some(video);
+  }
+  let video = state.maybe_camera_view.clone()?;
+  video.set_src_object(state.maybe_local_camera.as_ref());
   Some(video)
 }
 
@@ -265,10 +279,11 @@ impl Host {
     let own_device = prepared.device_id;
     let config = WebCallConfig {
       sfu_url: prepared.sfu_url,
-      maybe_certificate_hash: prepared
-        .maybe_certificate_sha256
-        .as_deref()
-        .and_then(certificate_hash_from_hex),
+      certificate_hashes: prepared
+        .certificate_sha256
+        .iter()
+        .filter_map(|hash| certificate_hash_from_hex(hash))
+        .collect(),
       token: prepared.token,
       engine: CallEngineConfig {
         user_id: prepared.user_id,
@@ -289,7 +304,7 @@ impl Host {
       resilience: ResilienceConfig::default(),
       maybe_ticket_source: Some(Rc::new(PageTickets)),
       status_cues: status_cues(sounds),
-      maybe_worklet_url: Some(WORKLET_URL.to_owned()),
+      maybe_worklet_url: Some(self.worklet_url.clone()),
     };
     let call = WebCall::join(config).await.map_err(failure)?;
     if self.state.borrow().push_to_talk.is_enabled {
@@ -470,7 +485,13 @@ impl Host {
       stop_tracks(&stream);
       return Err(error);
     }
-    self.state.borrow_mut().maybe_local_camera = Some(stream);
+    {
+      let mut state = self.state.borrow_mut();
+      if let Some(view) = &state.maybe_camera_view {
+        view.set_src_object(Some(&stream));
+      }
+      state.maybe_local_camera = Some(stream);
+    }
     self.update_active(|active| active.is_camera_on = true);
     Ok(())
   }
@@ -488,11 +509,13 @@ impl Host {
   async fn start_screen_share(&self, has_sound: bool) -> Result<(), ActionFailure> {
     match self.ask_media(|done| Control::Screen { done }).await {
       Ok(()) => {},
+      // The user closed the picker. A refusal by the system or a policy ("Permission denied by
+      // system" in Chromium) is reported.
       Err(WebCallError::MediaAccess {
         input: MediaInput::Screen,
         reason: MediaAccessReason::Denied,
-        ..
-      }) => return Ok(()),
+        message,
+      }) if !message.contains("system") => return Ok(()),
       Err(error) => return Err(failure(error)),
     }
     self.update_active(|active| {
@@ -713,29 +736,34 @@ impl WebJoinTicketSource for PageTickets {
 /// How a failed call action reads in the page: what to do about it, then the detail.
 fn failure(error: WebCallError) -> ActionFailure {
   let kind = match &error {
-    WebCallError::MediaAccess { input, reason, .. } => FailureKind::Call(media_failure(*input, *reason)),
+    WebCallError::MediaAccess { input, reason, .. } => {
+      media_failure(*input, *reason).map_or(FailureKind::Other, FailureKind::Call)
+    },
     WebCallError::Unsupported(_) => FailureKind::Call(CallFailure::Unsupported),
     // The page's own failure text (a refused join token, offline), already in wire form.
     WebCallError::Ticket(error) => return ActionFailure::from_wire(&error.reason),
+    // The chat server answered (it handed out the token); the SFU didn't: likely UDP blocked.
     WebCallError::Browser {
       context: "WebTransport connect",
       ..
-    } => FailureKind::Network,
+    } => FailureKind::Call(CallFailure::ServerUnreachable),
     _ => FailureKind::Other,
   };
   ActionFailure::new(kind, error.to_string())
 }
 
-fn media_failure(input: MediaInput, reason: MediaAccessReason) -> CallFailure {
-  match (input, reason) {
+/// The call failure a refused device means; `None` when the browser gave no known reason.
+fn media_failure(input: MediaInput, reason: MediaAccessReason) -> Option<CallFailure> {
+  Some(match (input, reason) {
+    (_, MediaAccessReason::Other) => return None,
     (MediaInput::Microphone, MediaAccessReason::Denied) => CallFailure::MicrophoneDenied,
     (MediaInput::Microphone, MediaAccessReason::NotFound) => CallFailure::MicrophoneMissing,
-    (MediaInput::Microphone, _) => CallFailure::MicrophoneInUse,
+    (MediaInput::Microphone, MediaAccessReason::InUse) => CallFailure::MicrophoneInUse,
     (MediaInput::Camera, MediaAccessReason::Denied) => CallFailure::CameraDenied,
     (MediaInput::Camera, MediaAccessReason::NotFound) => CallFailure::CameraMissing,
-    (MediaInput::Camera, _) => CallFailure::CameraInUse,
+    (MediaInput::Camera, MediaAccessReason::InUse) => CallFailure::CameraInUse,
     (MediaInput::Screen, _) => CallFailure::ScreenUnavailable,
-  }
+  })
 }
 
 fn failure_value(failure: ActionFailure) -> JsValue {

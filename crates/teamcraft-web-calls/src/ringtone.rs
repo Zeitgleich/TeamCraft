@@ -40,6 +40,9 @@ pub fn set_ringing(is_ringing: bool) {
 
 fn start() -> Result<Ringing, wasm_bindgen::JsValue> {
   let context = AudioContext::new()?;
+  // A context made outside a user gesture starts suspended; it plays once the page may (the
+  // promise settles then, or never in a tab nobody touched).
+  let _ = context.resume();
   let samples = ringtone::synthesize();
   let buffer = context.create_buffer(1, samples.len() as u32, SAMPLE_RATE_HZ as f32)?;
   buffer.copy_to_channel(&samples, 0)?;

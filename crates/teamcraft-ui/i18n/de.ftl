@@ -2287,6 +2287,7 @@ error-call-camera-missing = Es wurde keine Kamera gefunden. Schließe eine an un
 error-call-camera-in-use = Die Kamera lässt sich nicht öffnen. Schließe andere Apps, die sie nutzen, und versuche es erneut.
 error-call-screen-unavailable = Dein Bildschirm kann von hier aus nicht geteilt werden.
 error-call-unsupported = Dieser Browser kann keine Anrufe führen. Nutze ein aktuelles Chrome, Edge, Firefox oder Safari oder die TeamCraft-App.
+error-call-server-unreachable = Der Anrufserver ist nicht erreichbar. Das Netzwerk blockiert vielleicht Anrufe (UDP); versuche ein anderes Netzwerk oder frag deinen Admin.
 error-call-background-required = Deine Organisation verlangt einen Hintergrund hinter deinem Kamerabild, den der Browser noch nicht einfügen kann. Schalte deine Kamera in der TeamCraft-App ein.
 action-running = Läuft…
 panic-title = Etwas ist schiefgelaufen

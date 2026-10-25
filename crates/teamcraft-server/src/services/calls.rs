@@ -36,8 +36,8 @@ pub struct CallService {
   signing_key: EncodingKey,
   issuer: String,
   sfu_url: String,
-  /// The SFU certificate's SHA-256 (lowercase hex) for browsers, when it is self-signed.
-  maybe_sfu_certificate_sha256: Option<String>,
+  /// The SFU certificates' SHA-256s (lowercase hex) for browsers, when they are self-signed.
+  sfu_certificate_sha256: Vec<String>,
   token_ttl: Duration,
   call_idle_timeout: Duration,
   ring_timeout: Duration,
@@ -155,11 +155,15 @@ impl CallService {
       signing_key: EncodingKey::from_ed_pem(signing_key_pem)?,
       issuer: config.issuer.clone(),
       sfu_url: config.sfu_url.clone(),
-      maybe_sfu_certificate_sha256: config
+      sfu_certificate_sha256: config
         .maybe_sfu_certificate_sha256
         .as_deref()
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|hash| !hash.is_empty())
         .map(normalized_sha256)
-        .transpose()?,
+        .collect::<Result<_, _>>()?,
       token_ttl: Duration::from_secs(config.join_token_ttl_secs),
       call_idle_timeout: Duration::from_secs(config.call_idle_secs),
       ring_timeout: Duration::from_secs(config.ring_timeout_secs),
@@ -497,7 +501,7 @@ pub async fn create_join_token(
     token: calls.sign(&claims)?,
     sfu_url: calls.sfu_url.clone(),
     expires_at: UnixMillis(i64::try_from(claims.exp).unwrap_or(i64::MAX).saturating_mul(1000)),
-    maybe_sfu_certificate_sha256: calls.maybe_sfu_certificate_sha256.clone(),
+    sfu_certificate_sha256: calls.sfu_certificate_sha256.clone(),
   })
 }
 
@@ -886,9 +890,12 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
   fn the_sfu_certificate_hash_is_normalized_or_refused() {
     let dotted = vec!["AB"; 32].join(":");
     let mut config = config();
-    config.maybe_sfu_certificate_sha256 = Some(dotted);
+    config.maybe_sfu_certificate_sha256 = Some(format!("{dotted}, {}", "cd".repeat(32)));
     let service = CallService::new(&config, TEST_SIGNING_KEY_PEM.as_bytes()).unwrap();
-    assert_eq!(service.maybe_sfu_certificate_sha256, Some("ab".repeat(32)));
+    assert_eq!(
+      service.sfu_certificate_sha256,
+      vec!["ab".repeat(32), "cd".repeat(32)]
+    );
     config.maybe_sfu_certificate_sha256 = Some("abc".into());
     assert!(matches!(
       CallService::new(&config, TEST_SIGNING_KEY_PEM.as_bytes()),

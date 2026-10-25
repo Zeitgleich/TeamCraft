@@ -739,11 +739,12 @@ fn native_config(
   let authenticator =
     DeviceCallKeyAuthenticator::from_verified(Arc::new(CoreSigner(preparation.signer)), preparation.devices)
       .map_err(|error| error.to_string())?;
+  // The native driver pins one certificate: the first the server names.
   let maybe_server_hash = preparation
     .join
-    .maybe_sfu_certificate_sha256
-    .as_deref()
-    .and_then(certificate_hash_from_hex);
+    .sfu_certificate_sha256
+    .first()
+    .and_then(|hash| certificate_hash_from_hex(hash));
   let mut config = NativeCallConfig::device_bound(
     preparation.join.sfu_url,
     preparation.join.token,
