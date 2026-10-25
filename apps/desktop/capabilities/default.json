@@ -18,6 +18,8 @@
     "allow-api-request-bytes",
     "allow-public-get",
     "allow-public-asset",
+    "allow-avatar-download",
+    "allow-avatar-upload",
     "allow-server-state",
     "allow-server-check",
     "allow-server-suggest",

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use teamcraft_client_api::window_chrome::{TitleBar, WindowAction, WindowChrome};
+use teamcraft_proto::{AvatarContentType, UserId};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
@@ -151,6 +152,44 @@ impl Authenticator for TauriAuth {
       })
     })
   }
+}
+
+/// The picture of `user`, downloaded by the shell from the presigned URL the API names: the
+/// webview's content security policy keeps object storage out of the page.
+pub async fn avatar_download(user: UserId) -> Result<ApiBytes, AuthError> {
+  use base64::Engine;
+
+  let invalid = |_| AuthError::InvalidResponse("could not build the request".to_owned());
+  let args = js_sys::Object::new();
+  js_sys::Reflect::set(&args, &"user_id".into(), &user.to_string().into()).map_err(invalid)?;
+  let value = invoke("avatar_download", args.into()).await?;
+  let response: ApiBytesPayload = serde_wasm_json(&value)?;
+  let body = base64::engine::general_purpose::STANDARD
+    .decode(response.body_base64)
+    .map_err(|_| AuthError::InvalidResponse("the body is not base64".to_owned()))?;
+  Ok(ApiBytes {
+    status: response.status,
+    maybe_content_type: response.content_type,
+    body,
+  })
+}
+
+/// Makes `bytes` the signed-in user's picture through the shell (announce, upload, complete). The
+/// answer is the first refusal or the completion's, like an API call's.
+pub async fn avatar_upload(content_type: &AvatarContentType, bytes: &[u8]) -> Result<ApiResponse, AuthError> {
+  use base64::Engine;
+
+  let invalid = |_| AuthError::InvalidResponse("could not build the request".to_owned());
+  let args = js_sys::Object::new();
+  let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+  js_sys::Reflect::set(&args, &"content_type".into(), &content_type.as_str().into()).map_err(invalid)?;
+  js_sys::Reflect::set(&args, &"body_base64".into(), &encoded.into()).map_err(invalid)?;
+  let value = invoke("avatar_upload", args.into()).await?;
+  let response: ApiPayload = serde_wasm_json(&value)?;
+  Ok(ApiResponse {
+    status: response.status,
+    body: response.body,
+  })
 }
 
 #[derive(Deserialize)]

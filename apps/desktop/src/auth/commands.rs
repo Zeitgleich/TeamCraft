@@ -10,10 +10,11 @@ use teamcraft_client_api::brand::BrandView;
 use teamcraft_client_api::remote::ApiMethod;
 use teamcraft_client_api::server_entry::{ServerOrigin, ServerProfile, is_provider_endpoint};
 use teamcraft_client_api::sign_in_look::SignInLook;
-use teamcraft_proto::BrandResponse;
+use teamcraft_proto::{AvatarContentType, BrandResponse, UserId};
 
 use base64::Engine;
 
+use super::avatars::MAX_AVATAR_BYTES;
 use super::servers::ServerState;
 use super::{
   ApiBytesResponse, ApiResponse, AuthError, AuthService, DesktopConfig, HTTP_POLICY, KeyringStore,
@@ -385,6 +386,37 @@ pub async fn api_request_bytes(
     _ => None,
   };
   Ok(service.api_request_bytes(method, &path, maybe_body).await?)
+}
+
+/// The picture of a user, fetched by the shell from the presigned URL the API names (the
+/// webview's content security policy keeps object storage out).
+#[tauri::command(rename_all = "snake_case")]
+pub async fn avatar_download(
+  user_id: UserId,
+  service: State<'_, Arc<Service>>,
+) -> Result<ApiBytesResponse, CommandError> {
+  Ok(service.avatar_download(user_id).await?)
+}
+
+/// Makes the picture (base64 `body_base64`) the signed-in user's avatar: announce, upload to the
+/// presigned URL and complete, all in the shell. Answers like `api_request`.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn avatar_upload(
+  content_type: AvatarContentType,
+  body_base64: String,
+  service: State<'_, Arc<Service>>,
+) -> Result<ApiResponse, CommandError> {
+  // Refused before decoding: base64 is 4 characters per 3 bytes.
+  if body_base64.len() as u64 > MAX_AVATAR_BYTES.div_ceil(3) * 4 {
+    return Err(CommandError::new(
+      "unsupported",
+      "the picture is too large".to_owned(),
+    ));
+  }
+  let bytes = base64::engine::general_purpose::STANDARD
+    .decode(body_base64)
+    .map_err(|_| CommandError::new("invalid_response", "the body is not base64".to_owned()))?;
+  Ok(service.avatar_upload(content_type, bytes).await?)
 }
 
 fn view(profile: &ServerProfile) -> ServerView {

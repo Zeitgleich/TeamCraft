@@ -14,6 +14,8 @@ const COMMANDS: &[&str] = &[
   "api_request_bytes",
   "public_get",
   "public_asset",
+  "avatar_download",
+  "avatar_upload",
   "server_state",
   "server_check",
   "server_suggest",
