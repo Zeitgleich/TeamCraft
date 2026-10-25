@@ -360,7 +360,10 @@ impl Inner {
 }
 
 impl Writes {
-  /// Records the write as the record's latest and queues its key, once.
+  /// Records the write as the record's latest and queues its key, once. A queued write it replaces
+  /// no longer counts towards [`MAX_QUEUED_BYTES`]: the MLS state (one record for every group) is
+  /// rewritten after each group a catch-up joins, and counting every copy issued a transaction
+  /// every few groups instead of one per batch (issue #326).
   fn queue(&mut self, key: String, maybe_value: Option<Vec<u8>>) {
     self.next_sequence = self.next_sequence.wrapping_add(1);
     self.queued_bytes = self
@@ -371,12 +374,16 @@ impl Writes {
       maybe_value,
       state: WriteState::Queued,
     };
-    let was_queued = self
+    let maybe_replaced = self
       .open
       .insert(key.clone(), write)
-      .is_some_and(|earlier| earlier.state == WriteState::Queued);
-    if !was_queued {
-      self.queued.push(key);
+      .filter(|earlier| earlier.state == WriteState::Queued);
+    match maybe_replaced {
+      Some(replaced) => {
+        let replaced_bytes = replaced.maybe_value.as_ref().map_or(0, Vec::len);
+        self.queued_bytes = self.queued_bytes.saturating_sub(replaced_bytes);
+      },
+      None => self.queued.push(key),
     }
   }
 
