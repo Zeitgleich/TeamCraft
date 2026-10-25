@@ -176,6 +176,7 @@ impl PendingEnrollment {
       mls_current: Default::default(),
       maybe_replay_left: None,
       member_join_attempts: HashMap::new(),
+      device_add_requests_handled: HashMap::new(),
       maybe_waiting_checked_at_ms: None,
       catch_up_focus: super::CatchUpFocus::default(),
     };

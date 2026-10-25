@@ -125,6 +125,10 @@ pub struct ClientSettings {
   /// A device without a group (a welcome it couldn't join) waits twice as long after each rejoin
   /// request, up to this.
   pub rejoin_retry_max: std::time::Duration,
+  /// Members ignore a device's rejoin request for this long after it was added back (server
+  /// times): each answer costs a commit, and a broken or malicious device could ask far more often
+  /// than `rejoin_retry` (issue #149).
+  pub rejoin_cooldown: std::time::Duration,
   /// A DM device that waits for the welcome of a group someone else founded shows "setting up
   /// encryption" this long, then that it failed, with a retry (#278).
   pub dm_welcome_timeout: std::time::Duration,
@@ -196,6 +200,9 @@ pub struct Client<A, S> {
   /// When this device last tried to join each conversation's group as a further device (backs
   /// off while waiting for a member).
   member_join_attempts: HashMap<ConversationId, i64>,
+  /// When this device last handled a further device's request to be added, per conversation and
+  /// device: repeats within `rejoin_retry` cost no requests (issue #187).
+  device_add_requests_handled: HashMap<(ConversationId, teamcraft_proto::DeviceId), i64>,
   /// When people waiting for a first device were last checked after a full sync
   /// ([`Client::recheck_waiting_additions`]).
   maybe_waiting_checked_at_ms: Option<i64>,
@@ -222,6 +229,7 @@ impl Default for ClientSettings {
       device_add_attempts: 6,
       rejoin_retry: std::time::Duration::from_secs(10 * 60),
       rejoin_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
+      rejoin_cooldown: std::time::Duration::from_secs(30 * 60),
       dm_welcome_timeout: std::time::Duration::from_secs(2 * 60),
       removal_retry: std::time::Duration::from_secs(60 * 60),
       removal_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
@@ -283,6 +291,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       mls_current: Default::default(),
       maybe_replay_left: None,
       member_join_attempts: HashMap::new(),
+      device_add_requests_handled: HashMap::new(),
       maybe_waiting_checked_at_ms: None,
       catch_up_focus: CatchUpFocus::default(),
     };

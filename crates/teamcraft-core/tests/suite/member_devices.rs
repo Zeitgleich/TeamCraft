@@ -12,7 +12,10 @@ use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::store::{ConversationEvent, LocalStore, MemoryStore, MessageContent, MessageFilter};
 use teamcraft_core::{GroupAccess, LinkOffer, PendingEnrollment};
-use teamcraft_proto::{AddConversationMemberRequest, ConversationId, ListMlsMessagesQuery};
+use teamcraft_proto::{
+  AddConversationMemberRequest, Base64Bytes, ConversationId, Id, ListMlsMessagesQuery, MlsMessageKind,
+  PostMlsMessageRequest,
+};
 
 #[tokio::test]
 async fn a_linked_device_joins_on_its_own_and_reads_while_everybody_else_is_offline() {
@@ -91,6 +94,33 @@ async fn without_group_information_a_linked_device_waits_and_a_member_publishes_
   // Bob sees the request and publishes the group information (and queues the addition).
   bob.client.sync_mls(channel).await.unwrap();
   assert!(bob.api.mls_group_info(channel).await.is_ok());
+}
+
+/// Issue #187: a member handles a device's request to be added once per `rejoin_retry`; repeats
+/// (a device asking too often, a server replaying entries) cost it no requests.
+#[tokio::test]
+async fn a_repeated_device_add_request_costs_no_requests() {
+  let server = FakeServer::new();
+  let (mut phone, mut bob, channel) = channel_with_history(&server).await;
+  server.forget_group_infos();
+  let mut laptop = link_laptop(&mut phone).await;
+  laptop.client.full_sync().await.unwrap();
+  bob.client.sync_mls(channel).await.unwrap();
+  assert!(bob.api.mls_group_info(channel).await.is_ok());
+  let bob_id = bob.client.user_id();
+
+  // What reading the queue costs when nothing new is in it.
+  let before = server.rest_call_count(bob_id);
+  bob.client.sync_mls(channel).await.unwrap();
+  let idle_cost = server.rest_call_count(bob_id) - before;
+
+  server.forget_group_infos();
+  for _ in 0..3 {
+    post_device_add_request(&laptop, channel).await;
+  }
+  let before = server.rest_call_count(bob_id);
+  bob.client.sync_mls(channel).await.unwrap();
+  assert_eq!(server.rest_call_count(bob_id) - before, idle_cost);
 }
 
 #[tokio::test]
@@ -302,6 +332,29 @@ async fn channel_with_history(server: &FakeServer) -> (Peer, Peer, ConversationI
   settle(&mut [&mut phone, &mut bob]).await;
   phone.client.upload_key_bag().await.unwrap();
   (phone, bob, channel)
+}
+
+/// Posts the device's request to be added straight to the queue, past its client's own limit.
+async fn post_device_add_request(device: &Peer, channel: ConversationId) {
+  let query = ListMlsMessagesQuery {
+    maybe_after: None,
+    maybe_limit: Some(1),
+  };
+  let epoch = device
+    .api
+    .list_mls_messages(channel, &query)
+    .await
+    .unwrap()
+    .current_epoch;
+  let mut payload = b"TCDA".to_vec();
+  payload.extend_from_slice(&device.client.user_id().snowflake().get().to_be_bytes());
+  let request = PostMlsMessageRequest {
+    device_id: device.client.device_id(),
+    epoch,
+    kind: MlsMessageKind::Proposal,
+    payload: Base64Bytes::new(payload),
+  };
+  device.api.post_mls_message(channel, &request).await.unwrap();
 }
 
 /// Links a laptop of the phone's user (the phone approves) and connects it.

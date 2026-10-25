@@ -274,7 +274,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// A member's device saw a further device of `user` ask, in this conversation's queue, to be
   /// added: if the user's signed device list names that device, it is queued like a colleague's new
   /// device (ranked; checked again when committed), and the group information is published if the
-  /// server has none, so the device can join on its own next time.
+  /// server has none, so the device can join on its own next time. A repeat from the same device
+  /// within `rejoin_retry` is skipped before any request (a device asking too often, or a server
+  /// replaying entries); the queued addition is deduplicated by its key anyway.
   pub(crate) async fn note_device_add_request(
     &mut self,
     conversation: ConversationId,
@@ -290,7 +292,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       tracing::warn!(conversation_id = %conversation, "ignored a malformed device add request");
       return Ok(());
     };
+    if self.is_device_add_request_repeated(conversation, sender_device) {
+      tracing::debug!(conversation_id = %conversation, device_id = %sender_device, "skipped a repeated device add request");
+      return Ok(());
+    }
     let directory = self.trusted_directory([user]).await?;
+    // Only once the device lists are in: a request that failed on the network is handled again.
+    self.note_device_add_request_handled(conversation, sender_device);
     let is_listed = self.stored_device_lists(&directory, &[user]).iter().any(|list| {
       list
         .devices()
@@ -306,6 +314,30 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       tracing::debug!(conversation_id = %conversation, %error, "group information not published");
     }
     Ok(())
+  }
+
+  /// Whether this device handled a request from `device` to be added to the conversation's group
+  /// less than `rejoin_retry` ago.
+  fn is_device_add_request_repeated(&self, conversation: ConversationId, device: DeviceId) -> bool {
+    let retry_ms = i64::try_from(self.settings.rejoin_retry.as_millis()).unwrap_or(i64::MAX);
+    let now = self.now_ms();
+    self
+      .device_add_requests_handled
+      .get(&(conversation, device))
+      .is_some_and(|handled_at| now.saturating_sub(*handled_at) < retry_ms)
+  }
+
+  /// Notes that a request from `device` was handled now, and forgets those past `rejoin_retry`, so
+  /// the map holds only the requests of the last interval.
+  fn note_device_add_request_handled(&mut self, conversation: ConversationId, device: DeviceId) {
+    let retry_ms = i64::try_from(self.settings.rejoin_retry.as_millis()).unwrap_or(i64::MAX);
+    let now = self.now_ms();
+    self
+      .device_add_requests_handled
+      .retain(|_, handled_at| now.saturating_sub(*handled_at) < retry_ms);
+    self
+      .device_add_requests_handled
+      .insert((conversation, device), now);
   }
 
   /// Publishes this device's group information for the current epoch when the server has none
