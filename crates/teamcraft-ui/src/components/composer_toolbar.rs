@@ -126,7 +126,7 @@ pub fn FormatToolbar(
         <Show when=move || is_style_menu_open.get() fallback=|| ()>
           <div class="popover-backdrop" on:mousedown=move |_| is_style_menu_open.set(false)></div>
           <div
-            class="popover format-style-menu"
+            class="popover format-style-menu opens-up align-start"
             role="menu"
             aria-label=move || i18n.t("format-style")
             on:keydown=move |ev: web_sys::KeyboardEvent| {
@@ -224,7 +224,7 @@ pub fn SendOptionsMenu(
   view! {
     <div class="popover-backdrop" on:mousedown=move |_| on_close.run(())></div>
     <div
-      class="popover send-options"
+      class="popover send-options opens-up"
       role="menu"
       aria-label=move || i18n.t("composer-send-options")
       node_ref=menu

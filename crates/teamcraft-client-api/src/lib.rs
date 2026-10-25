@@ -24,6 +24,7 @@ pub mod notify;
 pub mod os_notify;
 pub mod privacy;
 pub mod remote;
+pub mod role_rules;
 pub mod search;
 pub mod security;
 pub mod server_entry;

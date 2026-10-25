@@ -5,14 +5,16 @@
 
 use openmls::ciphersuite::hash_ref::make_key_package_ref;
 use openmls::prelude::{KeyPackageBundle, KeyPackageRef, OpenMlsProvider};
-use openmls_traits::storage::StorageProvider;
+use openmls_traits::storage::{CURRENT_VERSION, StorageProvider};
 use tls_codec::{Deserialize as _, Serialize as _, VLBytes};
+use zeroize::Zeroize as _;
 
 use super::{CIPHERSUITE, DefaultMlsProvider, MlsError};
 
 /// The storage label of key package bundles in `openmls_memory_storage` (its keys are the label,
-/// the JSON of the hash reference and the storage version). Entries under it that don't decode as
-/// a bundle are skipped.
+/// the JSON of the hash reference and the storage version, see [`storage_key`]). Entries under it
+/// that don't decode as a bundle are skipped. The format is that of `openmls_memory_storage` 0.6;
+/// the tests fail when a new version changes it.
 const KEY_PACKAGE_LABEL: &[u8] = b"KeyPackage";
 
 /// One of this device's key packages whose private part is stored.
@@ -58,15 +60,40 @@ pub fn stored_key_packages(provider: &DefaultMlsProvider) -> Result<Vec<StoredKe
 }
 
 /// Deletes the private part of one of this device's key packages: nobody can add the device with
-/// that package afterwards (a welcome for it can't be opened).
+/// that package afterwards (a welcome for it can't be opened). The stored bundle (the private init
+/// and leaf keys) is overwritten in memory before it goes; the caller persists the storage, and the
+/// local store overwrites what the old copy left on disk (`LocalStore::purge_freed` in
+/// `teamcraft-core`, issue #391).
 pub fn delete_key_package(provider: &DefaultMlsProvider, hash_ref: &[u8]) -> Result<(), MlsError> {
   // openmls builds a reference from bytes only through its TLS encoding (a length-prefixed value).
   let encoded = VLBytes::new(hash_ref.to_vec()).tls_serialize_detached()?;
   let hash_ref = KeyPackageRef::tls_deserialize_exact(encoded)?;
+  let key = storage_key(&hash_ref)?;
+  if let Some(mut bundle) = provider
+    .storage()
+    .values
+    .write()
+    .map_err(|_| MlsError::UnexpectedMessage("MLS storage lock poisoned"))?
+    .remove(&key)
+  {
+    bundle.zeroize();
+  }
+  // Removes whatever else the storage keeps about the package (nothing more in this version).
   provider
     .storage()
     .delete_key_package(&hash_ref)
     .map_err(|error| MlsError::openmls("key package deletion", error))
+}
+
+/// Where `openmls_memory_storage` keeps the bundle of a key package: the label, the JSON of the
+/// hash reference, the storage version (big-endian).
+fn storage_key(hash_ref: &KeyPackageRef) -> Result<Vec<u8>, MlsError> {
+  let mut key = KEY_PACKAGE_LABEL.to_vec();
+  let encoded_ref = serde_json::to_vec(hash_ref)
+    .map_err(|_| MlsError::UnexpectedMessage("key package reference not serializable"))?;
+  key.extend_from_slice(&encoded_ref);
+  key.extend_from_slice(&CURRENT_VERSION.to_be_bytes());
+  Ok(key)
 }
 
 /// The hash reference of an encoded key package (as [`super::create_key_package`] returns it), to
@@ -124,6 +151,48 @@ mod tests {
     let stored = stored_key_packages(&provider).unwrap();
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].hash_ref, last_resort_ref);
+  }
+
+  /// Pins the storage format the listing and the wiping rely on (issue #391): a new version of
+  /// `openmls_memory_storage` that keys or encodes bundles differently fails here, not silently in
+  /// the field (the cleanup would find nothing to delete, or leave the bundle unwiped).
+  #[test]
+  fn the_bundle_is_stored_where_the_wipe_looks_for_it() {
+    let provider = DefaultMlsProvider::default();
+    let user = TestUser::new(1);
+    let package = create_key_package(&provider, &user.device, &user.certificate, NOW_UNIX_SECS).unwrap();
+    let encoded = VLBytes::new(key_package_ref(&package).unwrap())
+      .tls_serialize_detached()
+      .unwrap();
+    let hash_ref = KeyPackageRef::tls_deserialize_exact(encoded).unwrap();
+    let key = storage_key(&hash_ref).unwrap();
+
+    let values = provider.storage().values.read().unwrap();
+    let bundle_keys: Vec<&Vec<u8>> = values
+      .keys()
+      .filter(|key| key.starts_with(KEY_PACKAGE_LABEL))
+      .collect();
+    assert_eq!(bundle_keys, vec![&key]);
+    assert!(key.ends_with(&[0, 1]), "storage version 1, big-endian");
+    let bundle: KeyPackageBundle = serde_json::from_slice(&values[&key]).unwrap();
+    assert_eq!(
+      bundle.key_package().hash_ref(provider.crypto()).unwrap(),
+      hash_ref
+    );
+  }
+
+  #[test]
+  fn deleting_removes_every_trace_of_the_bundle() {
+    let provider = DefaultMlsProvider::default();
+    let user = TestUser::new(1);
+    let package = create_key_package(&provider, &user.device, &user.certificate, NOW_UNIX_SECS).unwrap();
+    let before = provider.storage().values.read().unwrap().len();
+
+    delete_key_package(&provider, &key_package_ref(&package).unwrap()).unwrap();
+
+    let values = provider.storage().values.read().unwrap();
+    assert_eq!(values.len(), before - 1);
+    assert!(!values.keys().any(|key| key.starts_with(KEY_PACKAGE_LABEL)));
   }
 
   #[test]

@@ -6,6 +6,7 @@ use wasm_bindgen::JsCast;
 
 use crate::emoji_catalog::{search, shortcode};
 use crate::i18n::use_i18n;
+use crate::motion::PopoverSide;
 use crate::state::use_app_state;
 
 /// Emoji per row of the grid; ↑/↓ move by this many.
@@ -32,7 +33,7 @@ pub fn EmojiPicker(
   let query = RwSignal::new(String::new());
   let active = RwSignal::new(0_usize);
   let input = NodeRef::<html::Input>::new();
-  let (top, left) = placement(&anchor);
+  let (top, left, side) = placement(&anchor);
   if returns_focus {
     let anchor = StoredValue::new_local(anchor.clone());
     on_cleanup(move || {
@@ -106,7 +107,7 @@ pub fn EmojiPicker(
   view! {
     <div class="popover-backdrop" on:mousedown=move |_| on_close.run(())></div>
     <div
-      class="emoji-picker"
+      class=format!("emoji-picker {}", side.class())
       role="dialog"
       aria-label=move || i18n.t("emoji-picker-title")
       style:top=format!("{top}px")
@@ -169,7 +170,7 @@ pub fn EmojiPicker(
 
 /// Fixed position (top, left) that keeps the picker inside the window: above the anchor when there is
 /// room, otherwise below it; right-aligned with it.
-fn placement(anchor: &web_sys::Element) -> (f64, f64) {
+fn placement(anchor: &web_sys::Element) -> (f64, f64, PopoverSide) {
   let rect = anchor.get_bounding_client_rect();
   let (width, height) = web_sys::window()
     .map(|window| {
@@ -179,12 +180,15 @@ fn placement(anchor: &web_sys::Element) -> (f64, f64) {
       (read(window.inner_width()), read(window.inner_height()))
     })
     .unwrap_or((1024.0, 768.0));
-  let top = if rect.top() - PICKER_HEIGHT_PX - EDGE_PX >= 0.0 {
-    rect.top() - PICKER_HEIGHT_PX - 4.0
+  let (top, side) = if rect.top() - PICKER_HEIGHT_PX - EDGE_PX >= 0.0 {
+    (rect.top() - PICKER_HEIGHT_PX - 4.0, PopoverSide::Above)
   } else {
-    (rect.bottom() + 4.0).min(height - PICKER_HEIGHT_PX - EDGE_PX)
+    (
+      (rect.bottom() + 4.0).min(height - PICKER_HEIGHT_PX - EDGE_PX),
+      PopoverSide::Below,
+    )
   };
   let left =
     (rect.right() - PICKER_WIDTH_PX).clamp(EDGE_PX, (width - PICKER_WIDTH_PX - EDGE_PX).max(EDGE_PX));
-  (top.max(EDGE_PX), left)
+  (top.max(EDGE_PX), left, side)
 }
