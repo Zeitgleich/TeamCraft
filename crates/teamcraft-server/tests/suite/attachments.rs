@@ -403,16 +403,24 @@ mod multipart {
     let created = announce_parts(&app, &carol, &channel, PART + 10).await;
     let id = created["id"].as_str().unwrap().to_owned();
     let part = |number: u64, size: u64| json!({"part_number": number, "size_bytes": size});
+    // Two parts at most for this size, and the second gets only what the first leaves.
+    assert_eq!(created["max_parts"], 2);
 
     for bad in [
       part(0, 10),
       part(10_001, 10),
+      part(3, 10),
+      part(2, 11),
       part(1, 0),
       part(1, (PART + 11) as u64),
     ] {
       let reply = app.post(&carol, &format!("/attachments/{id}/parts"), bad).await;
       assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
     }
+    let last = app
+      .post(&carol, &format!("/attachments/{id}/parts"), part(2, 10))
+      .await;
+    assert_eq!(last.status, StatusCode::OK, "{}", last.body);
     let foreign = app
       .post(&dave, &format!("/attachments/{id}/parts"), part(1, 10))
       .await;

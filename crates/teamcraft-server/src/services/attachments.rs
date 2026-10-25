@@ -20,11 +20,14 @@ use crate::error::ApiError;
 use crate::state::AppState;
 use crate::storage::{BlobStore, StorageError};
 
-/// S3's limits for uploads in parts: every part but the last has at least 5 MiB, at most 5 GiB, and
-/// there are at most 10 000 parts.
+/// S3's limits for uploads in parts: every part but the last has at least 5 MiB, and there are at
+/// most 10 000 parts.
 const MIN_PART_SIZE_BYTES: u64 = 5 * 1024 * 1024;
-const MAX_PART_SIZE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const MAX_PARTS: u16 = 10_000;
+/// Largest part this server presigns (clients send about 8 MiB). With the part numbers limited to
+/// what the announced size needs at the minimum part size, the storage an upload can fill, parts
+/// sent again included, stays within about three times its announced (quota-checked) size.
+const MAX_PART_SIZE_BYTES: u64 = 16 * 1024 * 1024;
 /// Longest `ETag` taken from a client; S3's are quoted hex digests, far shorter.
 const MAX_ETAG_LEN: usize = 256;
 
@@ -119,7 +122,8 @@ pub async fn create_multipart_attachment(
   Ok(CreateMultipartAttachmentResponse {
     id,
     min_part_size_bytes: MIN_PART_SIZE_BYTES,
-    max_parts: MAX_PARTS,
+    max_part_size_bytes: MAX_PART_SIZE_BYTES,
+    max_parts: max_parts(request.size_bytes),
     expires_at: unix_millis(OffsetDateTime::now_utc() + store.multipart_expiry()),
   })
 }
@@ -140,17 +144,7 @@ pub async fn presign_part(
   let upload_id = attachment
     .maybe_multipart_upload_id
     .ok_or_else(|| ApiError::Conflict("the attachment is not uploaded in parts".into()))?;
-  if !(1..=MAX_PARTS).contains(&request.part_number) {
-    return Err(ApiError::InvalidRequest(format!(
-      "part_number must be between 1 and {MAX_PARTS}"
-    )));
-  }
-  let max_part_bytes = attachment.size_bytes.min(MAX_PART_SIZE_BYTES);
-  if request.size_bytes == 0 || request.size_bytes > max_part_bytes {
-    return Err(ApiError::InvalidRequest(format!(
-      "size_bytes must be between 1 and {max_part_bytes}"
-    )));
-  }
+  check_part(attachment.size_bytes, &request)?;
   state.database.touch_attachment(id).await?;
   Ok(AttachmentPartUrlResponse {
     upload_url: store
@@ -393,6 +387,32 @@ fn attachment_response(attachment: &teamcraft_db::Attachment) -> Result<Attachme
   })
 }
 
+/// Most parts an upload of `size_bytes` needs: all but the last at the minimum part size.
+fn max_parts(size_bytes: u64) -> u16 {
+  let parts = size_bytes.div_ceil(MIN_PART_SIZE_BYTES).max(1);
+  u16::try_from(parts).unwrap_or(MAX_PARTS).min(MAX_PARTS)
+}
+
+/// A part of an upload of `size_bytes` may exist and has a size the upload can hold: the parts
+/// before it take at least the minimum part size each, so it gets at most what is left after them.
+fn check_part(size_bytes: u64, request: &PresignAttachmentPartRequest) -> Result<(), ApiError> {
+  let max_parts = max_parts(size_bytes);
+  if !(1..=max_parts).contains(&request.part_number) {
+    return Err(ApiError::InvalidRequest(format!(
+      "part_number must be between 1 and {max_parts}"
+    )));
+  }
+  let before = u64::from(request.part_number - 1) * MIN_PART_SIZE_BYTES;
+  let max_part_bytes = size_bytes.saturating_sub(before).min(MAX_PART_SIZE_BYTES);
+  if request.size_bytes == 0 || request.size_bytes > max_part_bytes {
+    return Err(ApiError::InvalidRequest(format!(
+      "size_bytes of part {} must be between 1 and {max_part_bytes}",
+      request.part_number
+    )));
+  }
+  Ok(())
+}
+
 /// The parts' `ETag`s in part order; the parts must be numbered 1 to n without gaps.
 fn part_etags(request: &CompleteMultipartAttachmentRequest) -> Result<Vec<String>, ApiError> {
   if request.parts.is_empty() || request.parts.len() > usize::from(MAX_PARTS) {
@@ -454,9 +474,30 @@ fn expires_at(store: &BlobStore) -> UnixMillis {
 
 #[cfg(test)]
 mod tests {
-  use teamcraft_proto::{Snowflake, UploadedPart};
+  use teamcraft_proto::{PresignAttachmentPartRequest, Snowflake, UploadedPart};
 
   use super::*;
+
+  #[test]
+  fn parts_are_limited_to_what_the_announced_size_needs() {
+    const MIB: u64 = 1024 * 1024;
+    let part = |part_number, size_bytes| PresignAttachmentPartRequest {
+      part_number,
+      size_bytes,
+    };
+    let size = 12 * MIB;
+    assert_eq!(max_parts(size), 3);
+    assert_eq!(max_parts(1), 1);
+    assert_eq!(max_parts(u64::MAX), MAX_PARTS);
+    assert!(check_part(size, &part(1, 8 * MIB)).is_ok());
+    assert!(check_part(size, &part(2, 4 * MIB)).is_ok());
+    assert!(check_part(size, &part(3, 2 * MIB)).is_ok());
+    // Beyond the parts the size needs, more than what's left, empty, larger than a part may be.
+    assert!(check_part(size, &part(4, 1)).is_err());
+    assert!(check_part(size, &part(3, 2 * MIB + 1)).is_err());
+    assert!(check_part(size, &part(1, 0)).is_err());
+    assert!(check_part(64 * MIB, &part(1, MAX_PART_SIZE_BYTES + 1)).is_err());
+  }
 
   #[test]
   fn parts_must_be_numbered_without_gaps() {

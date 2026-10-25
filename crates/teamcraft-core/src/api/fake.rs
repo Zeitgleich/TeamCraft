@@ -3070,6 +3070,7 @@ impl ServerApi for FakeServerApi {
       Ok(CreateMultipartAttachmentResponse {
         id: created.id,
         min_part_size_bytes: FAKE_MIN_PART_BYTES,
+        max_part_size_bytes: 16 * 1024 * 1024,
         max_parts: 10_000,
         expires_at: UnixMillis(0),
       })

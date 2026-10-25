@@ -48,7 +48,10 @@ pub struct CreateMultipartAttachmentResponse {
   pub id: AttachmentId,
   /// Every part except the last must have at least this many bytes.
   pub min_part_size_bytes: u64,
-  /// Highest part number the upload may use (parts are numbered from 1).
+  /// No part may have more bytes than this.
+  pub max_part_size_bytes: u64,
+  /// Highest part number the upload may use (parts are numbered from 1); part `n` holds at most
+  /// what the announced size leaves after `n - 1` parts of `min_part_size_bytes`.
   pub max_parts: u16,
   /// Until when the upload can be continued without new parts; each presigned part extends it.
   pub expires_at: UnixMillis,
