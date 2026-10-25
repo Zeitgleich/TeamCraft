@@ -598,7 +598,23 @@ fn ColorColumn(draft: RwSignal<BrandDraft>, show_errors: RwSignal<bool>, is_dark
     "admin-brands-colors-light"
   };
   let colors = Signal::derive(move || draft.with(|draft| draft.theme_colors(is_dark)));
-  let style = Signal::derive(move || preview_style(&colors.get()));
+  let preview = NodeRef::<leptos::html::Div>::new();
+  // CSSOM properties, not a `style` attribute: the CSP (`style-src 'self'`) blocks those.
+  let applied = StoredValue::new(Vec::<&'static str>::new());
+  Effect::new(move || {
+    let properties = preview_properties(&colors.get());
+    let Some(element) = preview.get() else {
+      return;
+    };
+    let style = web_sys::HtmlElement::style(&element);
+    for property in applied.get_value() {
+      drop(style.remove_property(property));
+    }
+    for (property, value) in &properties {
+      drop(style.set_property(property, value));
+    }
+    applied.set_value(properties.into_iter().map(|(property, _)| property).collect());
+  });
   let checks = Signal::derive(move || contrast_checks(&colors.get()));
   view! {
     <div class="brand-color-column">
@@ -653,7 +669,7 @@ fn ColorColumn(draft: RwSignal<BrandDraft>, show_errors: RwSignal<bool>, is_dark
           }
         })
         .collect_view()}
-      <div class=if is_dark { "brand-preview is-dark" } else { "brand-preview" } style=move || style.get() aria-hidden="true">
+      <div class=if is_dark { "brand-preview is-dark" } else { "brand-preview" } node_ref=preview aria-hidden="true">
         <div class="brand-preview-chrome"></div>
         <div class="brand-preview-body">
           <div class="brand-preview-sidebar">
@@ -1155,19 +1171,19 @@ fn contrast_checks(colors: &[(&'static str, String)]) -> Vec<ContrastCheck> {
   }
 }
 
-/// CSS custom properties for the preview: only valid hex colors reach the style attribute.
-fn preview_style(colors: &[(&'static str, String)]) -> String {
-  let mut style = String::new();
+/// CSS custom properties for the preview: only valid hex colors reach the element's style.
+fn preview_properties(colors: &[(&'static str, String)]) -> Vec<(&'static str, String)> {
+  let mut properties = Vec::new();
   for (key, value) in colors {
     let value = value.trim();
     if !is_brand_hex_color(value) {
       continue;
     }
     for property in brand_color_properties(key).unwrap_or_default() {
-      style.push_str(&format!("{property}:{value};"));
+      properties.push((*property, value.to_owned()));
     }
   }
-  style
+  properties
 }
 
 /// Accepted images: a known type within the size limit.
@@ -1263,13 +1279,21 @@ mod tests {
   }
 
   #[test]
-  fn the_preview_style_carries_only_valid_colors() {
-    let style = preview_style(&[
+  fn the_preview_carries_only_valid_colors() {
+    let properties = preview_properties(&[
       ("accent", "#0b7f78".to_owned()),
       ("chrome", "red; background:url(x)".to_owned()),
       ("sidebar", "#123".to_owned()),
     ]);
-    assert_eq!(style, "--accent:#0b7f78;--focus:#0b7f78;--sb-bg:#123;");
+    let expected = [
+      ("--accent", "#0b7f78"),
+      ("--focus", "#0b7f78"),
+      ("--sb-bg", "#123"),
+    ];
+    assert_eq!(
+      properties,
+      expected.map(|(property, value)| (property, value.to_owned()))
+    );
   }
 
   #[test]

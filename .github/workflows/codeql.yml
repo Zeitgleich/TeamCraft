@@ -1,0 +1,47 @@
+name: CodeQL
+
+# Code scanning on main and once a week, not on every pull request: branches are checked locally
+# before merging, and pull request scans queued in front of the release builds on the runner budget.
+# Replaces GitHub's CodeQL default setup (same languages, extended query suite, remote threat model).
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  schedule:
+    - cron: "41 4 * * 1"
+  workflow_dispatch:
+
+# A newer push to main replaces a scan that is still waiting; a running one finishes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # No build needed: Rust, Python, JavaScript/TypeScript and workflow files are extracted from
+        # source. Kotlin and Swift would need the Android and iOS builds and stay out, as before.
+        language: [actions, javascript-typescript, python, rust]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+      - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          category: /language:${{ matrix.language }}

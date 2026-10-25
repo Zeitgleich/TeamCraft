@@ -944,6 +944,8 @@ select.input {
   position: relative;
   width: 40px;
   height: 40px;
+  /* No button padding: the space picture fills the whole tile instead of being squeezed. */
+  padding: 0;
   border: 0;
   border-radius: var(--radius-md);
   background: hsl(var(--hue) 40% 32%);
@@ -5130,24 +5132,6 @@ ol.md-list {
   margin: var(--space-4) auto 0;
   color: var(--text-muted);
   font-size: var(--text-sm);
-}
-
-.auth-foot {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
-  margin-top: var(--space-6);
-  padding-top: var(--space-4);
-  border-top: 1px solid var(--border);
-  font-size: var(--text-xs);
-  text-align: center;
-}
-
-.auth-foot .icon {
-  flex: none;
-  width: 14px;
-  height: 14px;
 }
 
 .auth-organization {
