@@ -85,7 +85,18 @@ const ENTRIES: &[(SettingsTab, &str)] = &[
   (SettingsTab::About, "settings-help-version"),
   (SettingsTab::About, "settings-help-copy-debug"),
   (SettingsTab::About, "settings-updates"),
-  (SettingsTab::About, "about-notices"),
+  (SettingsTab::About, "about-title"),
+];
+
+/// Rows only the desktop app has; the web app doesn't offer them as hits.
+const DESKTOP_APP_ONLY: &[&str] = &[
+  "settings-zoom",
+  "settings-autostart",
+  "settings-close-to-tray",
+  "settings-start-minimized",
+  "settings-system-title-bar",
+  "notif-ringtone",
+  "settings-updates",
 ];
 
 /// One search hit: where it is and what it is called.
@@ -97,8 +108,9 @@ pub struct SettingsHit {
   pub text: String,
 }
 
-/// The sections and rows whose name contains every word of `query` (any case).
-pub fn search(i18n: I18n, query: &str) -> Vec<SettingsHit> {
+/// The sections and rows whose name contains every word of `query` (any case); rows of the
+/// desktop app only where `is_desktop_app`.
+pub fn search(i18n: I18n, query: &str, is_desktop_app: bool) -> Vec<SettingsHit> {
   let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
   if words.is_empty() {
     return Vec::new();
@@ -115,14 +127,17 @@ pub fn search(i18n: I18n, query: &str) -> Vec<SettingsHit> {
       text,
     })
   });
-  let rows = ENTRIES.iter().filter_map(|(tab, key)| {
-    let text = i18n.t(key);
-    matches(&text).then_some(SettingsHit {
-      tab: *tab,
-      maybe_label_key: Some(key),
-      text,
-    })
-  });
+  let rows = ENTRIES
+    .iter()
+    .filter(|(_, key)| is_desktop_app || !DESKTOP_APP_ONLY.contains(key))
+    .filter_map(|(tab, key)| {
+      let text = i18n.t(key);
+      matches(&text).then_some(SettingsHit {
+        tab: *tab,
+        maybe_label_key: Some(key),
+        text,
+      })
+    });
   sections.chain(rows).take(MAX_HITS).collect()
 }
 
@@ -148,6 +163,40 @@ mod tests {
   fn every_section_is_searchable_by_a_row() {
     for tab in SettingsTab::ALL {
       assert!(ENTRIES.iter().any(|(candidate, _)| *candidate == tab), "{tab:?}");
+    }
+  }
+
+  /// A hit jumps to the element `set-{key}` or the card heading `set-{key}-heading`: every entry
+  /// names a row label, a card heading or an explicit `row_id` in the settings sources.
+  #[test]
+  fn every_entry_has_an_element_to_jump_to() {
+    let sources = [
+      include_str!("settings_account.rs"),
+      include_str!("settings_keyboard.rs"),
+      include_str!("settings_notifications.rs"),
+      include_str!("settings_security.rs"),
+      include_str!("settings_tabs.rs"),
+    ]
+    .concat();
+    for (_, key) in ENTRIES {
+      let is_found = [
+        format!("label=\"{key}\""),
+        format!("heading=\"{key}\""),
+        format!("row_id(\"{key}\")"),
+        format!("{{ \"{key}\" }}"),
+        // The profile's text fields: `text_field(id, label, ..)`.
+        format!(", \"{key}\", "),
+      ]
+      .iter()
+      .any(|marker| sources.contains(marker.as_str()));
+      assert!(is_found, "{key} has no element to jump to");
+    }
+  }
+
+  #[test]
+  fn desktop_only_rows_are_listed() {
+    for key in DESKTOP_APP_ONLY {
+      assert!(ENTRIES.iter().any(|(_, entry)| entry == key), "{key}");
     }
   }
 

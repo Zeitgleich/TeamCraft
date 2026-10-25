@@ -186,6 +186,49 @@ pub fn SegmentedRow(
   }
 }
 
+/// Most entries a settings list renders at once; a filter finds the others on big instances.
+pub const MAX_LIST_ENTRIES: usize = 50;
+
+/// A filter field above a long list, and below it how many of the matches show.
+#[component]
+pub fn ListFilter(
+  /// i18n key of the field's label and placeholder.
+  label: &'static str,
+  query: RwSignal<String>,
+  #[prop(into)] matching: Signal<usize>,
+) -> impl IntoView {
+  let i18n = use_i18n();
+  view! {
+    <div class="set-row is-field">
+      <input
+        type="search"
+        class="input"
+        enterkeyhint="search"
+        aria-label=move || i18n.t(label)
+        placeholder=move || i18n.t(label)
+        prop:value=move || query.get()
+        on:input=move |ev| query.set(event_target_value(&ev))
+      />
+      <Show when=move || { matching.get() > MAX_LIST_ENTRIES } fallback=|| ()>
+        <span class="set-row-hint" role="status">
+          {move || {
+            i18n.t_with(
+              "settings-list-limited",
+              &[("shown", &MAX_LIST_ENTRIES.to_string()), ("total", &matching.get().to_string())],
+            )
+          }}
+        </span>
+      </Show>
+    </div>
+  }
+}
+
+/// Whether `text` contains `query` (any case); an empty query matches everything.
+pub fn matches_filter(text: &str, query: &str) -> bool {
+  let needle = query.trim().to_lowercase();
+  needle.is_empty() || text.to_lowercase().contains(&needle)
+}
+
 /// The element ID of the row labelled `label_key`: what the settings search jumps to.
 pub fn row_id(label_key: &str) -> String {
   format!("set-{label_key}")
@@ -215,6 +258,13 @@ fn row_hint(hint: Option<&'static str>, live_hint: Option<Signal<String>>, hint_
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn filters_ignore_case_and_blank_queries() {
+    assert!(matches_filter("Design", " des "));
+    assert!(matches_filter("Design", ""));
+    assert!(!matches_filter("Design", "sales"));
+  }
 
   #[test]
   fn rows_are_found_by_their_label() {

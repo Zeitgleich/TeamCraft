@@ -2318,7 +2318,7 @@ settings-search-count = { $count ->
    *[other] { $count } Einstellungen gefunden
 }
 settings-back-to-list = Alle Einstellungen
-settings-copy-user-id = Benutzer-ID kopieren
+settings-copy-username = Benutzernamen kopieren
 settings-name-from-sign-in = Dein Name kommt aus der Anmeldung deiner Organisation.
 settings-profile-details = Profildetails
 settings-profile-details-hint = Andere sehen das auf deiner Profilkarte.
@@ -2382,3 +2382,5 @@ security-recovery-row = Wiederherstellungs-Passphrase
 security-passphrase-mismatch = Die beiden Passphrasen sind nicht gleich.
 security-verified-count = { $verified } von { $total } Personen verifiziert
 security-advanced = Erweitert
+settings-list-limited = { $shown } von { $total } angezeigt. Filtern, um die anderen zu finden.
+security-verify-filter = Personen filtern

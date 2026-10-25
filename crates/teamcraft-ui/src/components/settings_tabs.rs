@@ -325,12 +325,14 @@ pub fn PreferencesSection() -> impl IntoView {
 }
 
 /// Desktop app only: start at login, close to the tray, start minimized, the title bar. The shell
-/// stores them; a refused change is reported and the switch goes back.
+/// stores them; a refused change is reported and the switch goes back. The shell options are saved
+/// as one snapshot, so their rows wait while one is saving: two saves could land out of order.
 #[component]
 fn DesktopCard() -> impl IntoView {
   let prefs = RwSignal::new(None::<tauri::ShellPrefs>);
   let autostart = RwSignal::new(None::<bool>);
-  let saving = PendingAction::new();
+  let saving_prefs = PendingAction::new();
+  let saving_autostart = PendingAction::new();
   leptos::task::spawn_local(async move {
     prefs.set_if_alive(tauri::shell_prefs().await);
     autostart.set_if_alive(tauri::autostart().await);
@@ -342,7 +344,7 @@ fn DesktopCard() -> impl IntoView {
     let mut next = before;
     change(&mut next, value);
     prefs.set(Some(next));
-    saving.spawn(async move {
+    saving_prefs.spawn(async move {
       if let Err(error) = tauri::set_shell_prefs(next).await {
         prefs.set_if_alive(Some(before));
         return Err(ActionFailure::new(FailureKind::Other, error));
@@ -352,7 +354,7 @@ fn DesktopCard() -> impl IntoView {
   };
   let set_autostart = move |on: bool| {
     autostart.set(Some(on));
-    saving.spawn(async move {
+    saving_autostart.spawn(async move {
       if let Err(error) = tauri::set_autostart(on).await {
         autostart.set_if_alive(Some(!on));
         return Err(ActionFailure::new(FailureKind::Other, error));
@@ -360,34 +362,34 @@ fn DesktopCard() -> impl IntoView {
       Ok(())
     });
   };
-  let is_loading = Signal::derive(move || prefs.get().is_none());
+  let is_busy = Signal::derive(move || prefs.get().is_none() || saving_prefs.is_pending());
   let current = move || prefs.get().unwrap_or_default();
 
   view! {
     <SettingsCard heading="settings-desktop">
       <SwitchRow
         label="settings-autostart"
-        is_disabled=Signal::derive(move || autostart.get().is_none())
+        is_disabled=Signal::derive(move || autostart.get().is_none() || saving_autostart.is_pending())
         value=Signal::derive(move || autostart.get().unwrap_or(false))
         on_change=Callback::new(set_autostart)
       />
       <SwitchRow
         label="settings-close-to-tray"
         hint="settings-close-to-tray-hint"
-        is_disabled=is_loading
+        is_disabled=is_busy
         value=Signal::derive(move || current().is_close_to_tray)
         on_change=Callback::new(move |on: bool| save(|prefs, on| prefs.is_close_to_tray = on, on))
       />
       <SwitchRow
         label="settings-start-minimized"
-        is_disabled=is_loading
+        is_disabled=is_busy
         value=Signal::derive(move || current().is_start_minimized)
         on_change=Callback::new(move |on: bool| save(|prefs, on| prefs.is_start_minimized = on, on))
       />
       <SwitchRow
         label="settings-system-title-bar"
         hint="settings-system-title-bar-hint"
-        is_disabled=is_loading
+        is_disabled=is_busy
         value=Signal::derive(move || current().title_bar == TitleBar::System)
         on_change=Callback::new(move |on: bool| {
           save(|prefs, on| prefs.title_bar = if on { TitleBar::System } else { TitleBar::Custom }, on)
@@ -551,15 +553,15 @@ pub fn HelpSection() -> impl IntoView {
   view! {
     <SettingsCard heading="settings-help-app">
       <SettingRow label="settings-help-version" live_hint=Signal::derive(move || format!("TeamCraft {version}"))>
-        <button type="button" class="btn btn-small" on:click=copy_debug>
+        <button type="button" class="btn btn-small" id=row_id("settings-help-copy-debug") on:click=copy_debug>
           <Icon name=IconName::Copy />
           <span>{move || i18n.t("settings-help-copy-debug")}</span>
         </button>
       </SettingRow>
       <p class="set-note">{move || i18n.t("settings-help-copy-debug-hint")}</p>
     </SettingsCard>
-    {tauri::is_available().then(|| view! { <div class="set-card"><UpdatesSection /></div> })}
-    <div class="set-card set-about"><AboutSection /></div>
+    {tauri::is_available().then(|| view! { <div class="set-card" id=row_id("settings-updates")><UpdatesSection /></div> })}
+    <div class="set-card set-about" id=row_id("about-title")><AboutSection /></div>
     {demo_tools()}
   }
 }

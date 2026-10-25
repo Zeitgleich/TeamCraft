@@ -11,7 +11,10 @@ use crate::clock::local_time_zone;
 use crate::components::icons::{Icon, IconName};
 use crate::components::pending_button::PendingButton;
 use crate::components::settings_account::WeekdayChips;
-use crate::components::settings_rows::{SelectRow, SettingRow, SettingsCard, SwitchRow, slug_options};
+use crate::components::settings_rows::{
+  ListFilter, MAX_LIST_ENTRIES, SelectRow, SettingRow, SettingsCard, SwitchRow, matches_filter, row_id,
+  slug_options,
+};
 use crate::feedback::{ActionFailure, FailureKind, PendingAction};
 use crate::i18n::use_i18n;
 use crate::model::{Conversation, User, UserId};
@@ -247,6 +250,8 @@ fn ThisDeviceCard() -> impl IntoView {
   let has_tested = RwSignal::new(false);
   let is_granted = move || is_desktop || page_permission.get().as_deref() == Some("granted");
 
+  // Read here, inside the reactive owner: the spawned future has no context to find it in.
+  let maybe_session = crate::session::use_session();
   // Allowing notifications also subscribes to Web Push, so they arrive with no page open.
   let allow = move |_| {
     let push_key = push_key.get_value();
@@ -259,8 +264,11 @@ fn ThisDeviceCard() -> impl IntoView {
         // The user said no in the browser's own prompt; the hint says how to change that.
         return Ok(());
       }
-      let Some(session) = crate::session::use_session() else {
-        return Ok(());
+      let Some(session) = maybe_session else {
+        return Err(ActionFailure::new(
+          FailureKind::Other,
+          "no session to subscribe to push with",
+        ));
       };
       crate::remote_backend::enable_web_push(session.authenticator().as_ref())
         .await
@@ -280,7 +288,9 @@ fn ThisDeviceCard() -> impl IntoView {
       maybe_reply: None,
     };
     testing.spawn(async move {
-      tauri::show_notification(&notification).await;
+      tauri::try_show_notification(&notification)
+        .await
+        .map_err(|error| ActionFailure::new(FailureKind::Other, error))?;
       has_tested.set_if_alive(true);
       Ok(())
     });
@@ -313,10 +323,12 @@ fn ThisDeviceCard() -> impl IntoView {
           </PendingButton>
         </Show>
         <Show when=is_granted fallback=|| ()>
-          <PendingButton pending=testing class="btn btn-small" on_click=send_test>
-            <Icon name=IconName::Bell />
-            <span>{move || i18n.t("notif-test")}</span>
-          </PendingButton>
+          <span class="set-inline" id=row_id("notif-test")>
+            <PendingButton pending=testing class="btn btn-small" on_click=send_test>
+              <Icon name=IconName::Bell />
+              <span>{move || i18n.t("notif-test")}</span>
+            </PendingButton>
+          </span>
         </Show>
       </SettingRow>
     </SettingsCard>
@@ -628,28 +640,22 @@ fn PerConversationCard() -> impl IntoView {
       list
     })
   });
-  let shown = Memo::new(move |_| {
-    let needle = filter.get().trim().to_lowercase();
-    conversations
-      .get()
-      .into_iter()
-      .filter(|conversation| needle.is_empty() || conversation.name.to_lowercase().contains(&needle))
-      .collect::<Vec<_>>()
+  let matching = Memo::new(move |_| {
+    let query = filter.get();
+    conversations.with(|list| {
+      list
+        .iter()
+        .filter(|conversation| matches_filter(&conversation.name, &query))
+        .cloned()
+        .collect::<Vec<_>>()
+    })
   });
+  let shown =
+    Memo::new(move |_| matching.with(|list| list.iter().take(MAX_LIST_ENTRIES).cloned().collect::<Vec<_>>()));
 
   view! {
     <SettingsCard heading="notif-per-conversation" hint="notif-per-conversation-hint">
-      <div class="set-row is-field">
-        <input
-          type="search"
-          class="input"
-          enterkeyhint="search"
-          aria-label=move || i18n.t("notif-per-conversation-filter")
-          placeholder=move || i18n.t("notif-per-conversation-filter")
-          prop:value=move || filter.get()
-          on:input=move |ev| filter.set(event_target_value(&ev))
-        />
-      </div>
+      <ListFilter label="notif-per-conversation-filter" query=filter matching=Signal::derive(move || matching.with(Vec::len)) />
       <ul class="set-conversations">
         <For each=move || shown.get() key=|conversation| conversation.id let:conversation>
           {

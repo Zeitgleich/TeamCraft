@@ -6,6 +6,7 @@ use leptos::prelude::*;
 use crate::components::composer_toolbar::{FORMAT_SHORTCUTS, action_label};
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
+use crate::components::settings_rows::row_id;
 use crate::i18n::{I18n, use_i18n};
 use crate::keys::{ENTER, ESCAPE, Key, Modifier, QUICK_SWITCHER, Shortcut, ShortcutList, shortcut_text};
 use crate::state::use_app_state;
@@ -29,7 +30,7 @@ pub fn KeyboardSection() -> impl IntoView {
       .collect::<Vec<_>>()
   };
   view! {
-    <div class="set-row is-field">
+    <div class="set-row is-field" id=row_id("shortcuts-title")>
       <input
         type="search"
         class="input"

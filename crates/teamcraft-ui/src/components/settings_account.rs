@@ -137,8 +137,8 @@ fn ProfileHeader(maybe_hub: Option<ProfileHub>) -> impl IntoView {
           <button
             type="button"
             class="icon-btn icon-btn-small"
-            aria-label=move || i18n.t("settings-copy-user-id")
-            title=move || i18n.t("settings-copy-user-id")
+            aria-label=move || i18n.t("settings-copy-username")
+            title=move || i18n.t("settings-copy-username")
             on:click=move |_| copy_and_confirm(copied_handle.clone())
           >
             <Icon name=IconName::Copy />
@@ -147,7 +147,7 @@ fn ProfileHeader(maybe_hub: Option<ProfileHub>) -> impl IntoView {
         <p class="set-row-hint">{move || i18n.t("settings-name-from-sign-in")}</p>
         {maybe_hub.is_some().then(|| view! {
           <div class="set-profile-actions">
-            <label class="btn btn-small">
+            <label class="btn btn-small" id=row_id("profile-avatar-change")>
               <Icon name=IconName::Camera />
               <span>{move || i18n.t("profile-avatar-change")}</span>
               <input type="file" class="visually-hidden" accept="image/png,image/jpeg,image/webp" on:change=pick_avatar />

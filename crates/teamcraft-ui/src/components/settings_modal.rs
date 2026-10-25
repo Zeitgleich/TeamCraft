@@ -3,6 +3,7 @@ use std::time::Duration;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
+use crate::auth::tauri;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::components::settings_account::AccountSection;
@@ -159,7 +160,7 @@ pub fn SettingsModal() -> impl IntoView {
 #[component]
 fn SearchHits(query: RwSignal<String>, on_open: Callback<SettingsHit>) -> impl IntoView {
   let i18n = use_i18n();
-  let hits = Memo::new(move |_| search(i18n, &query.get()));
+  let hits = Memo::new(move |_| search(i18n, &query.get(), tauri::is_available()));
   view! {
     <p class="visually-hidden" role="status">
       {move || i18n.t_count("settings-search-count", hits.with(Vec::len))}
@@ -267,12 +268,13 @@ fn reveal_row(label_key: &'static str) {
     }
     // `scroll-margin` on the rows keeps them clear of the sticky header.
     row.scroll_into_view();
-    if let Some(control) = row
-      .query_selector("input, select, button")
-      .ok()
-      .flatten()
-      .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
-    {
+    const CONTROLS: &str = "input, select, button";
+    let maybe_control = if row.matches(CONTROLS).unwrap_or(false) {
+      Some(row.clone())
+    } else {
+      row.query_selector(CONTROLS).ok().flatten()
+    };
+    if let Some(control) = maybe_control.and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok()) {
       drop(control.focus());
     }
     let classes = row.class_list();

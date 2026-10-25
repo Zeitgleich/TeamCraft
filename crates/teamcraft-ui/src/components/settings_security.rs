@@ -11,7 +11,10 @@ use crate::auth::tauri;
 use crate::clock::{format_relative, now_ms};
 use crate::components::icons::{Icon, IconName};
 use crate::components::pending_button::PendingButton;
-use crate::components::settings_rows::{SelectRow, SettingRow, SettingsCard, SwitchRow, slug_options};
+use crate::components::settings_rows::{
+  ListFilter, MAX_LIST_ENTRIES, SelectRow, SettingRow, SettingsCard, SwitchRow, matches_filter, row_id,
+  slug_options,
+};
 use crate::feedback::{ActionFailure, FailureKind, PendingAction};
 use crate::i18n::use_i18n;
 use crate::model::{DeviceId, UserId};
@@ -73,11 +76,12 @@ pub fn DevicesSection() -> impl IntoView {
         <p class="set-empty">{move || i18n.t("settings-device-no-others")}</p>
       </Show>
       <div class="set-card-actions">
-        <button type="button" class="btn" on:click=move |_| state.overlay.set(Overlay::LinkDevice)>
+        <button type="button" class="btn" id=row_id("settings-device-link") on:click=move |_| state.overlay.set(Overlay::LinkDevice)>
           <Icon name=IconName::QrCode />
           <span>{move || i18n.t("settings-device-link")}</span>
         </button>
         <Show when=move || others.with(|list| list.len() > 1) fallback=|| ()>
+          <span class="set-inline" id=row_id("settings-device-sign-out-others")>
           <Show
             when=move || is_confirming_all.get()
             fallback=move || view! {
@@ -100,6 +104,7 @@ pub fn DevicesSection() -> impl IntoView {
               </div>
             </div>
           </Show>
+          </span>
         </Show>
       </div>
     </SettingsCard>
@@ -202,6 +207,19 @@ pub fn SecuritySection() -> impl IntoView {
       list
     })
   });
+  let filter = RwSignal::new(String::new());
+  let matching = Memo::new(move |_| {
+    let query = filter.get();
+    contacts.with(|list| {
+      list
+        .iter()
+        .filter(|(user, _)| matches_filter(&user.display_name, &query))
+        .cloned()
+        .collect::<Vec<_>>()
+    })
+  });
+  let shown =
+    Memo::new(move |_| matching.with(|list| list.iter().take(MAX_LIST_ENTRIES).cloned().collect::<Vec<_>>()));
   let verified_count =
     Memo::new(move |_| contacts.with(|list| list.iter().filter(|(_, is_verified)| *is_verified).count()));
   let has_keys = Memo::new(move |_| !fingerprint.with(String::is_empty));
@@ -235,8 +253,9 @@ pub fn SecuritySection() -> impl IntoView {
           )
         }}
       </p>
+      <ListFilter label="security-verify-filter" query=filter matching=Signal::derive(move || matching.with(Vec::len)) />
       <ul class="set-devices">
-        <For each=move || contacts.get() key=|(user, verified)| (user.id, *verified) let:entry>
+        <For each=move || shown.get() key=|(user, verified)| (user.id, *verified) let:entry>
           {
             let (user, is_verified) = entry;
             let user_id: UserId = user.id;
