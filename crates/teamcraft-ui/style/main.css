@@ -2816,30 +2816,28 @@ ol.md-list {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  min-height: 34px;
-  padding: 0 4px 0 10px;
+  min-height: 48px;
+  padding: 0 4px 0 6px;
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-sm);
   background: var(--surface);
   box-shadow: var(--shadow-card);
   font-weight: var(--weight-medium);
 }
 
-/* The file icon carries the accent, so a waiting attachment stands out from the feed above. */
+/* Files and images share one shape: a 36 px tile in front, the file icon on an accent tint or the
+   picture's thumbnail, so a waiting attachment stands out from the feed above. */
 .chip > .icon {
+  box-sizing: content-box;
+  padding: 9px;
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
   color: var(--accent-strong);
 }
 
-/* A pasted or dropped image shows a thumbnail instead of the file icon. */
-.chip-image {
-  height: 52px;
-  padding-left: 4px;
-  border-radius: var(--radius-sm);
-}
-
 .chip-thumb {
-  width: 44px;
-  height: 44px;
+  width: 36px;
+  height: 36px;
   border-radius: var(--radius-xs);
   object-fit: cover;
 }

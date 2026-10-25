@@ -942,13 +942,12 @@ pub fn Composer(
             <For each=attachment_list key=|(i, name, _)| (*i, name.clone()) let:item>
               {
                 let (index, name, maybe_preview_url) = item;
-                let leading_is_image = maybe_preview_url.is_some();
                 let leading = match maybe_preview_url {
                   Some(url) => view! { <img class="chip-thumb" src=url alt="" /> }.into_any(),
                   None => view! { <Icon name=IconName::File /> }.into_any(),
                 };
                 view! {
-                  <li class="chip" class:chip-image=leading_is_image>
+                  <li class="chip">
                     {leading}
                     <span class="chip-name">{name}</span>
                     <button
