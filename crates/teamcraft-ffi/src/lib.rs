@@ -493,6 +493,9 @@ pub fn login_brand(response_json: String, server_url: String, language: String) 
   let brand = teamcraft_client_api::brand::BrandView::from_response(response, &server_url)?;
   Some(LoginBrand {
     display_name: brand.display_name.clone(),
+    is_product: brand.is_product(),
+    maybe_icon_url: brand.asset("icon", false).map(str::to_owned),
+    maybe_icon_dark_url: brand.asset("icon", true).map(str::to_owned),
     maybe_logo_url: brand.asset("logo", false).map(str::to_owned),
     maybe_logo_dark_url: brand.asset("logo", true).map(str::to_owned),
     maybe_title: brand.login_title(&language).map(str::to_owned),

@@ -262,7 +262,7 @@ fn apply_to_document(view: &BrandView, is_dark: bool) {
       }
     });
   }
-  document.set_title(&view.display_name);
+  document.set_title(&view.page_title());
   // The desktop has no tab, and its webview could not load the server's images anyway.
   if !tauri::is_available()
     && let Some(icon) = view.favicon(is_dark)

@@ -4978,6 +4978,55 @@ ol.md-list {
   max-height: none;
 }
 
+/* A server brand: the product's tile and the brand's side by side, like two app icons. */
+.auth-tiles {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.auth-tile {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-card);
+}
+
+/* The mark inside its tile, as on the app icons (scripts/brand/icons.py). Above the brand's
+   tile, which the loading screen's handover slides out from behind it (loader.js). */
+.auth-tile-product {
+  position: relative;
+  z-index: 1;
+  padding: 8px;
+}
+
+.auth-tile-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.auth-tile-product .auth-tile-img {
+  object-fit: contain;
+}
+
+/* No icon: the brand's initial on its accent, like a launcher's placeholder icon. */
+.auth-tile-brand:has(.auth-tile-initial) {
+  border-color: transparent;
+  background: var(--accent);
+}
+
+.auth-tile-initial {
+  color: var(--on-accent);
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-semibold);
+}
+
 .auth-product-wordmark {
   display: block;
   height: 26px;

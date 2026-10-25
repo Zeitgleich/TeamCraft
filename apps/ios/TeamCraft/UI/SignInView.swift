@@ -54,7 +54,13 @@ struct SignInView: View {
 
   @ViewBuilder
   private func header(_ brand: BrandStore) -> some View {
-    BrandLogo(brand: brand)
+    if let current = brand.brand, !current.isProduct {
+      // A server brand: TeamCraft's tile and the brand's beside it, then its logo if it has one.
+      BrandTiles(brand: brand)
+      if brand.logo != nil { BrandLogo(brand: brand) }
+    } else {
+      BrandLogo(brand: brand)
+    }
     Group {
       if let title = brand.brand?.maybeTitle ?? brand.brand?.displayName {
         Text(verbatim: title)

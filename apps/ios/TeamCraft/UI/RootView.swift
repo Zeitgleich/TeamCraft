@@ -9,7 +9,8 @@ struct RootView: View {
       Theme.background.ignoresSafeArea()
       switch model.phase {
       case .starting:
-        ProgressView("loading")
+        // The loading mark below stands in for this screen.
+        EmptyView()
       case .needsServer(let address, let failure):
         ServerEntryView(address: address, failure: failure)
       case .confirmServer(let checked):
@@ -27,11 +28,18 @@ struct RootView: View {
       case .failed(let failure):
         FailureView(failure: failure)
       }
+      // The animated mark while the core starts, handing over to whatever screen comes next (#463).
+      LoadingMarkOverlay(isLoading: isStarting)
     }
     .overlay { if model.isBusy { BusyOverlay() } }
     .fullScreenCover(item: callBinding) { call in
       CallScreen(call: call)
     }
+  }
+
+  private var isStarting: Bool {
+    if case .starting = model.phase { return true }
+    return false
   }
 
   private var callBinding: Binding<ActiveCall?> {

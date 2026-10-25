@@ -329,7 +329,7 @@ An optional label per user, taken from the identity provider.
 - The space settings dialog has no brand picker; the tag is set through the API.
 - Push notification texts do not name a brand yet; when they do they take the recipient's home brand from
   `BrandRegistry::for_email`.
-- Android and iOS show the brand on the sign-in screen only (name, logo, login title and text, links;
+- Android and iOS show the brand on the sign-in screen only (tile, name, logo, login title and text, links;
   checked through the FFI's `login_brand`); colors and the in-app chrome don't follow it yet. The server
   URL is fixed per build; a server-URL screen needs a public way to learn the OIDC issuer. SVG logos
   aren't drawn on mobile (the name is shown instead).
@@ -338,8 +338,18 @@ An optional label per user, taken from the identity provider.
 ## 14. The product mark
 
 Without a server brand the apps show TeamCraft's own mark: three people around a speech bubble,
-and the wordmark "TeamCraft". A server brand replaces both (§5); the product mark is only the
-default.
+and the wordmark "TeamCraft". With a server brand the sign-in screen shows TeamCraft's tile and the
+brand's beside it, like two app icons (the brand's `icon`, else its initial on its accent), then the
+brand's logo or name (§5). The server's built-in brand (no brand configured) counts as no brand.
+
+Loading screens always show the mark, animated (issue #463): the heads swirl in, the bodies rise,
+the speech bubble pops and types. The web (`index.html`, `style/loader.css`) animates the inlined
+mark in CSS before any script runs; once the app is mounted, `loader.js` flies it into the sign-in
+card's tile (or the top bar's logo) while the screen fades. Android and iOS draw the same parts with
+the same timing on a canvas (`LoadingMark.kt`, `LoadingMarkView.swift`); on Android 12+ the system
+splash plays the assembly as an animated vector and the app takes over at its clock and place. iOS's
+launch screen is the background only, so the assembly starts there. Reduced motion: no movement,
+the mark fades in and its dots brighten in turn.
 
 | File                                 | What it is                                                         |
 |--------------------------------------|--------------------------------------------------------------------|
@@ -353,15 +363,17 @@ default.
 grid, tangent fillets, the same clear space of 15 units around every head), so every curve is a
 true arc. `wordmark.py` traces the letters and fits smooth Béziers, as the typeface isn't available
 as a font. `icons.py` renders every platform icon from them: Tauri's PNGs, `.ico`, `.icns` and tray
-icons; the web app's install icons, favicon and the images of the loading and sign-in screens; the
-iOS icon (light, dark, tinted) and launch logo; Android's adaptive icon layers, themed icon and
-notification icon. The generated files are committed because the builds use them; change a master
+icons; the web app's install icons, favicon and the image of the sign-in screen; the iOS icon
+(light, dark, tinted); Android's adaptive icon layers, themed icon and notification icon.
+`mark_parts.py` writes the mark's parts as code for the apps' loading screens and Android's splash
+icon (the web's loading screen inlines the mark in `index.html`; update it by hand). The generated files are committed because the builds use them; change a master
 or a script and run:
 
 ```sh
 python3 scripts/brand/mark.py
 python3 scripts/brand/wordmark.py   # numpy, scipy, Pillow, potrace
 python3 scripts/brand/icons.py --contact-sheet /path/to/sheet.png   # rsvg-convert or ImageMagick 7
+python3 scripts/brand/mark_parts.py
 ```
 
 The product's accent colour is the mark's blue: `#005dfc` in the light theme (5.3:1 with white
