@@ -3,7 +3,8 @@ import Foundation
 
 /// Hands the system's HTTP proxy to the Rust core, which can't read it itself (issue #157). iOS
 /// keeps one proxy for HTTPS (Wi-Fi settings, an MDM profile); PAC scripts aren't evaluated, so
-/// with only a PAC URL the core connects directly.
+/// with only a PAC URL the core connects directly. Called when a core opens (app and notification
+/// extension) and on every network path change.
 enum SystemProxy {
   static func report() {
     guard let settings = CFNetworkCopySystemProxySettings()?.takeRetainedValue() as? [String: Any]

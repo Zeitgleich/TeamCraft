@@ -19,7 +19,7 @@
   <string name="offline_banner">Keine Verbindung. Nachrichten werden gesendet, sobald du wieder online bist.</string>
   <string name="connection_unreachable">Der Server ist nicht erreichbar. Nachrichten warten, bis er wieder da ist. Nächster Versuch in %1$d s.</string>
   <string name="connection_captive_portal">Dieses Netzwerk verlangt zuerst eine Anmeldung. Öffne eine Webseite, um dich anzumelden; Nachrichten warten. Nächster Versuch in %1$d s.</string>
-  <string name="connection_untrusted_certificate">Der Verbindung zum Server wird nicht vertraut: Dieses Netzwerk prüft eventuell verschlüsselten Verkehr. Nutze ein anderes Netzwerk oder frag deine IT. Nächster Versuch in %1$d s.</string>
+  <string name="connection_untrusted_certificate">Dem Zertifikat des Servers wird nicht vertraut. In einem Netzwerk, das verschlüsselten Verkehr prüft: Nutze ein anderes Netzwerk oder frag deine IT; passiert es überall, sag deiner Administration Bescheid. Nächster Versuch in %1$d s.</string>
   <string name="connection_retry">Jetzt versuchen</string>
   <string name="connection_sign_in">Deine Sitzung ist abgelaufen. Nachrichten warten, bis du dich wieder anmeldest.</string>
   <string name="connection_sign_in_action">Erneut anmelden</string>

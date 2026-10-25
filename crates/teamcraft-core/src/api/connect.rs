@@ -33,7 +33,7 @@ pub(crate) enum TunnelError {
 }
 
 /// A TCP connection to the host of `url` (`ws`/`wss`), through `maybe_proxy` (an `http://` proxy
-/// from [`super::proxy::proxy_for`]) or directly.
+/// from [`super::proxy::tunnel_proxy_for`]) or directly.
 pub(crate) async fn connect_via(url: &Url, maybe_proxy: Option<&Url>) -> Result<TcpStream, TunnelError> {
   let (host, port) = host_and_port(url).ok_or(TunnelError::Malformed)?;
   match maybe_proxy {

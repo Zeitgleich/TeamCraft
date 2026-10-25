@@ -248,6 +248,26 @@ mod subscription_change {
     app.stop().await;
   }
 
+  #[tokio::test]
+  async fn empty_or_oversized_subscriptions_are_rejected_before_any_lookup() {
+    let app = app!();
+    let carol = member("carol");
+    let device = register_web_push(&app, &carol).await;
+    let huge = "x".repeat(5000);
+    for (previous, token) in [
+      ("", ROTATED),
+      (SUBSCRIPTION, ""),
+      (huge.as_str(), ROTATED),
+      (SUBSCRIPTION, huge.as_str()),
+    ] {
+      let request = change(&device, previous, token, &push_key());
+      let reply = app.call(Method::POST, None, PATH, Some(request)).await;
+      assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    }
+    assert_eq!(registered_token(&app, &device).await, SUBSCRIPTION);
+    app.stop().await;
+  }
+
   async fn register_web_push(app: &TestApp, user: &TestUser) -> String {
     let device = register_device(app, user).await;
     let reply = app

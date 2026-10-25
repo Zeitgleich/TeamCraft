@@ -1364,7 +1364,7 @@ async fn connect_websocket(url: &str) -> Result<NativeSocket, ApiError> {
   // A black-holed server or proxy would otherwise stall the caller's loop (outbox, heartbeats) for
   // minutes.
   let parsed = url::Url::parse(url).map_err(|error| ApiError::Network(format!("{url}: {error}")))?;
-  let maybe_proxy = super::proxy::proxy_for(&parsed);
+  let maybe_proxy = super::proxy::tunnel_proxy_for(&parsed);
   tokio::time::timeout(CONNECT_TIMEOUT, open_websocket(&parsed, maybe_proxy.as_ref()))
     .await
     .map_err(|_| ApiError::Network("WebSocket connection timed out".into()))?
@@ -1432,10 +1432,11 @@ async fn send(request: RequestBuilder) -> Result<Response, ApiError> {
   })
 }
 
-/// Why `response` comes from a captive portal rather than the server, if it does: HTTP 511, a
-/// redirect that ended on another site, or a successful answer that is an HTML page (the API and
-/// object storage never answer HTML). Error pages of the server's own reverse proxy (a 502 in HTML)
-/// are server trouble, not a portal.
+/// Why `response` comes from a captive portal rather than the server, if it does: HTTP 511, or a
+/// successful answer that is an HTML page (the API and object storage never answer HTML), named
+/// with the site it was redirected to. A redirect alone is no sign: object storage may hand a blob
+/// over to a CDN. Error pages of the server's own reverse proxy (a 502 in HTML) are server trouble,
+/// not a portal.
 fn captive_portal_sign(origin: &url::Origin, response: &Response) -> Option<String> {
   let status = response.status();
   if status == reqwest::StatusCode::NETWORK_AUTHENTICATION_REQUIRED {
@@ -1444,11 +1445,14 @@ fn captive_portal_sign(origin: &url::Origin, response: &Response) -> Option<Stri
   if !status.is_success() {
     return None;
   }
+  if !is_html(response.headers()) {
+    return None;
+  }
   if response.url().origin() != *origin {
     let host = response.url().host_str().unwrap_or_default();
-    return Some(format!("redirected to {host}"));
+    return Some(format!("redirected to an HTML page on {host}"));
   }
-  is_html(response.headers()).then(|| format!("HTTP {} with an HTML page", status.as_u16()))
+  Some(format!("HTTP {} with an HTML page", status.as_u16()))
 }
 
 fn is_html(headers: &reqwest::header::HeaderMap) -> bool {
@@ -1625,6 +1629,8 @@ mod tests {
 
   #[cfg(not(target_arch = "wasm32"))]
   mod hostile_networks {
+    use std::sync::Arc;
+
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
@@ -1710,6 +1716,77 @@ mod tests {
       let url = url::Url::parse(&base.replace("http://", "ws://")).unwrap();
       let error = open_websocket(&url, None).await.unwrap_err();
       assert_eq!(error.interception(), Some(Interception::CaptivePortal), "{error}");
+    }
+
+    /// A proxy that inspects TLS with its own CA: the certificate it shows isn't trusted, both for
+    /// REST (reqwest) and the gateway WebSocket (tungstenite).
+    #[tokio::test]
+    async fn a_certificate_nobody_trusts_is_named_as_interception() {
+      let base = untrusted_tls_server().await;
+      let api = HttpServerApi::new(base.clone(), StaticToken("t".into()));
+      let error = api.me().await.unwrap_err();
+      assert_eq!(
+        error.interception(),
+        Some(Interception::UntrustedCertificate),
+        "{error}"
+      );
+      assert!(error.is_transient());
+      let url = url::Url::parse(&format!("{}/api/v1/gateway", base.replace("https://", "wss://"))).unwrap();
+      let error = open_websocket(&url, None).await.unwrap_err();
+      assert_eq!(
+        error.interception(),
+        Some(Interception::UntrustedCertificate),
+        "{error}"
+      );
+    }
+
+    /// The portal sends the request to its own site, which answers its login page.
+    #[tokio::test]
+    async fn a_redirect_to_an_html_page_elsewhere_is_a_captive_portal() {
+      let portal = canned_server("200 OK", "text/html", "<html>Accept the terms</html>").await;
+      let redirect: &'static str =
+        Box::leak(format!("302 Found\r\nlocation: {portal}/login").into_boxed_str());
+      let base = canned_server(redirect, "text/plain", "").await;
+      let api = HttpServerApi::new(base, StaticToken("t".into()));
+      let error = api.me().await.unwrap_err();
+      assert_eq!(error.interception(), Some(Interception::CaptivePortal), "{error}");
+      assert!(error.to_string().contains("redirected"), "{error}");
+    }
+
+    /// Object storage may hand a blob over to a CDN: a redirect to bytes is no portal.
+    #[tokio::test]
+    async fn a_redirect_to_a_blob_elsewhere_is_fine() {
+      let cdn = canned_server("200 OK", "application/octet-stream", "ciphertext").await;
+      let redirect: &'static str = Box::leak(format!("302 Found\r\nlocation: {cdn}/blob").into_boxed_str());
+      let storage = canned_server(redirect, "text/plain", "").await;
+      let api = HttpServerApi::new("http://[::1]:1", StaticToken("t".into()));
+      assert_eq!(
+        api.get_blob(&format!("{storage}/blob")).await.unwrap(),
+        b"ciphertext"
+      );
+    }
+
+    /// Serves TLS on localhost with a fresh self-signed certificate and answers nothing useful.
+    async fn untrusted_tls_server() -> String {
+      let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+      let key = rustls::pki_types::PrivateKeyDer::Pkcs8(certified.signing_key.serialize_der().into());
+      let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+      let config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![certified.cert.der().clone()], key)
+        .unwrap();
+      let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+      let listener = loopback_listener().await;
+      let port = listener.local_addr().unwrap().port();
+      tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+          // The handshake fails on the client's side; nothing to serve.
+          let _ = acceptor.accept(socket).await;
+        }
+      });
+      format!("https://localhost:{port}")
     }
 
     /// A local `CONNECT` proxy: tunnels one connection and hands back the request head it got.

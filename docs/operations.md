@@ -117,10 +117,12 @@ How the apps behave on networks between the user and the server (issue #157):
 | Web      | The browser's                                                                            | The browser's                                                                                                        |
 
 - REST and the WebSockets (gateway, device-link relay) use the same proxy; the WebSockets tunnel with
-  HTTP `CONNECT`, including `user:password@` from a proxy URL. Only `http://` proxies are used: SOCKS
-  proxies and PAC scripts are ignored and the apps connect directly. On Linux desktops only the
-  environment variables count (no GNOME/KDE settings). A proxy change on the desktop applies after a
-  restart of the app; on mobile it applies with the next network change.
+  HTTP `CONNECT`, including `user:password@` from a proxy URL. REST also takes `https://` proxies;
+  the WebSockets tunnel through `http://` ones only and connect directly otherwise. SOCKS proxies
+  are not used. PAC scripts are never evaluated: on a network that only has one, the apps connect
+  directly. On Linux desktops only the environment variables count (no GNOME/KDE settings). A proxy
+  change on the desktop applies after a restart of the app; on mobile it applies when the network or
+  its proxy changes, and the iOS notification extension reads it whenever it opens the core.
 - Android ignores CAs that users install themselves, as Android apps do by default, so a CA someone
   talked the user into installing reads nothing. An organization that inspects TLS on managed
   devices turns on `trust_user_certificates` in its MDM's managed configuration for the app; it

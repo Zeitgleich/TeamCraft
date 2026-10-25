@@ -581,9 +581,9 @@ pub fn set_network_proxy(maybe_proxy: Option<NetworkProxy>) {
 }
 
 /// The certificate authorities this device trusts (DER), for every TLS connection of the core
-/// (issue #157). Android only: call once, before the first `TeamCraft` is created. The app decides
-/// which CAs count (docs/operations.md, "Company proxies and CAs"); without a call the core trusts
-/// the Mozilla roots.
+/// (issue #157). Android only: call at start; connections opened afterwards use them, earlier ones
+/// the Mozilla roots. The app decides which CAs count (docs/operations.md, "Company proxies, TLS
+/// inspection and captive portals").
 #[uniffi::export]
 pub fn set_trusted_certificates(der_certificates: Vec<Vec<u8>>) {
   teamcraft_core::api::set_platform_roots(der_certificates);

@@ -388,7 +388,8 @@ async function renewSubscription(event) {
     const name = await databaseName();
     if (name && hasPushCode()) {
       await loadPush();
-      await wasm_bindgen.handleSubscriptionChange(name);
+      const old = event.oldSubscription ? JSON.stringify(event.oldSubscription.toJSON()) : null;
+      await wasm_bindgen.handleSubscriptionChange(name, old);
     }
   } catch (error) {
     console.warn('renewed push subscription not sent to the server', error);

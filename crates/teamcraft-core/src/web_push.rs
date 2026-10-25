@@ -126,11 +126,12 @@ mod service_worker {
   use wasm_bindgen_futures::JsFuture;
   use web_sys::{NotificationOptions, ServiceWorkerGlobalScope};
 
+  use crate::api::ApiError;
   use crate::api::{HttpServerApi, StaticToken, change_web_push_subscription};
   use crate::clock::{Clock, SystemClock};
   use crate::error::CoreError;
   use crate::push_preview::{PreviewContent, PushPreview, push_preview, push_session};
-  use crate::push_subscription::subscription_change;
+  use crate::push_subscription::{subscription_change, subscription_change_from};
   use crate::store::{IndexedDbStore, browser_database_key};
 
   /// Shown when nothing else is known: the product name, which isn't translated.
@@ -229,9 +230,14 @@ mod service_worker {
   /// browser handed no new subscription: tells the server about the browser's current subscription
   /// right away, so pushes don't go to the old one until a page opens (issue #145). Reads the store
   /// only; the page registers the subscription itself when it starts next. Failures are logged and
-  /// leave that page as the fallback.
+  /// leave that page as the fallback. `maybe_old_subscription` is the browser's `oldSubscription`
+  /// (JSON), for a second rotation before a page opened: the server then holds the one this worker
+  /// sent before, not the one in the store.
   #[wasm_bindgen(js_name = handleSubscriptionChange)]
-  pub async fn handle_subscription_change(database_name: String) -> Result<(), JsValue> {
+  pub async fn handle_subscription_change(
+    database_name: String,
+    maybe_old_subscription: Option<String>,
+  ) -> Result<(), JsValue> {
     let scope: ServiceWorkerGlobalScope = js_sys::global().unchecked_into();
     let request = scope.registration().push_manager()?.get_subscription()?;
     let subscription = JsFuture::from(request).await?;
@@ -240,7 +246,7 @@ mod service_worker {
       return Ok(());
     }
     let token = super::subscription_json(&subscription.unchecked_into()).map_err(core_error)?;
-    match register_change(&database_name, &token).await {
+    match register_change(&database_name, maybe_old_subscription.as_deref(), &token).await {
       Ok(true) => tracing::info!("registered the rotated push subscription"),
       Ok(false) => tracing::debug!("push subscription unchanged or not registered"),
       Err(error) => tracing::warn!(%error, "rotated push subscription not registered"),
@@ -248,13 +254,34 @@ mod service_worker {
     Ok(())
   }
 
-  async fn register_change(database_name: &str, token: &str) -> Result<bool, CoreError> {
+  async fn register_change(
+    database_name: &str,
+    maybe_old_subscription: Option<&str>,
+    token: &str,
+  ) -> Result<bool, CoreError> {
     let key = browser_database_key(database_name).await?;
     let store = IndexedDbStore::open(database_name, &key).await?;
     let Some(change) = subscription_change(&store, token)? else {
       return Ok(false);
     };
-    change_web_push_subscription(&change.server_url, &change.request).await?;
+    let error = match change_web_push_subscription(&change.server_url, &change.request).await {
+      Ok(()) => return Ok(true),
+      Err(error) => error,
+    };
+    // 409: the server no longer holds the store's subscription, most likely the one this worker
+    // sent at an earlier rotation. Without `oldSubscription` (not every browser sends it) the page
+    // registers the new one when it opens.
+    let is_conflict = matches!(error, ApiError::Status { status: 409, .. });
+    let maybe_retry = match maybe_old_subscription {
+      Some(old) if is_conflict && old != change.request.previous_token => {
+        subscription_change_from(&store, old, token)?
+      },
+      _ => None,
+    };
+    let Some(retry) = maybe_retry else {
+      return Err(error.into());
+    };
+    change_web_push_subscription(&retry.server_url, &retry.request).await?;
     Ok(true)
   }
 

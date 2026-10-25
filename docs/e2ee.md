@@ -948,7 +948,9 @@ Details:
   so a captured request can't be replayed once the subscription moved on, and it can't change the
   provider, the push key or anything else. Every refusal is the same 401, counted by the per-address
   limits like a wrong token. The worker only reads the store (§9.4); the page re-registers as before,
-  which is then a no-op on the server.
+  which is then a no-op on the server. A second rotation before a page opened finds the server
+  holding the subscription the worker sent before (409); the worker then retries from the browser's
+  `oldSubscription`. Browsers that don't hand one over leave that case to the page.
   *What the push key now also allows:* whoever holds it (the device's store, the server) can point
   the device's Web Push at another endpoint. That redirects wake-ups, which the push key opens anyway
   (conversation, message and sender IDs, never content), and can make the device miss pushes; it

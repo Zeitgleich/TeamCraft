@@ -12,7 +12,7 @@ use teamcraft_core::push_preview::{
   PreviewContent, PreviewGap, PushSession, device_push_content, push_preview, save_device_push_content,
   save_push_session,
 };
-use teamcraft_core::push_subscription::subscription_change;
+use teamcraft_core::push_subscription::{subscription_change, subscription_change_from};
 use teamcraft_core::store::{LocalStore, MessageFilter};
 use teamcraft_crypto::ids::DeviceId as DeviceIdCrypto;
 use teamcraft_crypto::push::{seal_wakeup, verify_subscription_change};
@@ -62,6 +62,26 @@ async fn the_service_worker_proves_a_rotated_subscription_with_the_push_key() {
   // Nothing in the request is the access token or the push key.
   let wire = serde_json::to_string(&change.request).unwrap();
   assert!(!wire.contains("expired-token"));
+
+  // A second rotation before a page opened: the server holds what the worker sent last time.
+  let again = r#"{"endpoint":"https://push.example.com/again"}"#;
+  let second = subscription_change_from(bob.store.as_ref(), rotated, again)
+    .unwrap()
+    .unwrap();
+  assert_eq!(second.request.previous_token, rotated);
+  verify_subscription_change(
+    &push_key,
+    DeviceIdCrypto::new(raw),
+    rotated,
+    again,
+    second.request.mac.as_slice(),
+  )
+  .unwrap();
+  assert!(
+    subscription_change_from(bob.store.as_ref(), again, again)
+      .unwrap()
+      .is_none()
+  );
 }
 
 #[tokio::test]

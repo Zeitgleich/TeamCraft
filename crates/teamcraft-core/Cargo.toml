@@ -150,6 +150,10 @@ web-sys = { version = "0.3.83", features = [
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
+# A TLS server with a certificate nobody trusts, as a TLS-inspecting proxy presents (api/http.rs
+# tests); both already in the tree (rcgen through wtransport, tokio-rustls through reqwest).
+rcgen = "0.14.10"
+tokio-rustls = { version = "0.26.6", default-features = false }
 # A fake identity provider signing ES256 ID tokens in the attestation tests (both already in the
 # tree through teamcraft-crypto).
 p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "std"] }

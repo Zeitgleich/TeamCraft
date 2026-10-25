@@ -5,10 +5,12 @@
 //! Sources, first match wins: the `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY`
 //! environment variables, then the operating system's settings where hyper-util reads them (macOS
 //! System Settings, the Windows registry). Android and iOS hand theirs to [`set_system_proxy`],
-//! since the platform keeps them out of reach of native code. Only `http://` proxies are used: the
-//! WebSockets tunnel through them with `CONNECT`; other kinds (SOCKS, PAC scripts) are ignored with a
-//! warning and the connection goes direct.
+//! since the platform keeps them out of reach of native code. REST takes `http://` and `https://`
+//! proxies; the WebSockets tunnel with `CONNECT` through `http://` ones only. SOCKS proxies are not
+//! used (a warning, once, and the connection goes direct). PAC scripts are never evaluated: the shells
+//! pass no proxy for a network that only has one.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use base64::Engine as _;
@@ -48,30 +50,67 @@ pub fn set_system_proxy(maybe_proxy: Option<SystemProxy>) {
 }
 
 /// The exclusions in `NO_PROXY` syntax: platforms write `*.example.com` (Android, iOS) where
-/// `NO_PROXY` says `.example.com`.
+/// `NO_PROXY` says `.example.com`, and iOS shortens networks to `169.254/16`.
 fn no_proxy_list(exclusions: &[String]) -> String {
   exclusions
     .iter()
     .map(|entry| entry.trim())
     .filter(|entry| !entry.is_empty())
     .map(|entry| {
-      entry
+      let entry = entry
         .strip_prefix('*')
         .filter(|rest| rest.starts_with('.'))
-        .unwrap_or(entry)
+        .unwrap_or(entry);
+      full_ipv4_network(entry).unwrap_or_else(|| entry.to_owned())
     })
     .collect::<Vec<_>>()
     .join(",")
 }
 
-/// The proxy for a request to `target` (`http`, `https`, `ws` or `wss`), with its credentials in
-/// the URL's user info; `None` to connect directly.
+/// `169.254/16` as `169.254.0.0/16`; `None` for anything that isn't a shortened IPv4 network.
+fn full_ipv4_network(entry: &str) -> Option<String> {
+  let (address, prefix) = entry.split_once('/')?;
+  prefix.parse::<u8>().ok().filter(|bits| *bits <= 32)?;
+  let octets: Vec<&str> = address.split('.').collect();
+  let is_octet = |octet: &&str| octet.parse::<u8>().is_ok();
+  if octets.len() >= 4 || !octets.iter().all(is_octet) {
+    return None;
+  }
+  let mut full = octets.join(".");
+  for _ in octets.len()..4 {
+    full.push_str(".0");
+  }
+  Some(format!("{full}/{prefix}"))
+}
+
+/// The proxy for an HTTP request to `target` (`http` or `https`), with its credentials in the URL's
+/// user info; `None` to connect directly.
 pub(crate) fn proxy_for(target: &Url) -> Option<Url> {
   let matcher = matchers()
     .read()
     .unwrap_or_else(std::sync::PoisonError::into_inner)
     .clone();
   route(&matcher, target)
+}
+
+/// The proxy a WebSocket to `target` (`ws` or `wss`) tunnels through: only `http://` proxies speak
+/// `CONNECT` here; with an `https://` one the WebSocket goes direct (REST still uses it).
+pub(crate) fn tunnel_proxy_for(target: &Url) -> Option<Url> {
+  tunnel_only(proxy_for(target)?)
+}
+
+fn tunnel_only(proxy: Url) -> Option<Url> {
+  if proxy.scheme() == "http" {
+    return Some(proxy);
+  }
+  static WARNED: AtomicBool = AtomicBool::new(false);
+  if !WARNED.swap(true, Ordering::Relaxed) {
+    tracing::warn!(
+      scheme = proxy.scheme(),
+      "WebSockets tunnel through http:// proxies only; connecting them directly"
+    );
+  }
+  None
 }
 
 fn route(matcher: &Matcher, target: &Url) -> Option<Url> {
@@ -83,11 +122,14 @@ fn route(matcher: &Matcher, target: &Url) -> Option<Url> {
   let uri: http::Uri = format!("{scheme}://{host}/").parse().ok()?;
   let intercept = matcher.intercept(&uri)?;
   let mut proxy = Url::parse(&intercept.uri().to_string()).ok()?;
-  if proxy.scheme() != "http" {
-    tracing::warn!(
-      scheme = proxy.scheme(),
-      "only http:// proxies are supported; connecting directly"
-    );
+  if !matches!(proxy.scheme(), "http" | "https") {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+      tracing::warn!(
+        scheme = proxy.scheme(),
+        "only http:// and https:// proxies are supported; connecting directly"
+      );
+    }
     return None;
   }
   let maybe_credentials = match intercept.raw_auth() {
@@ -189,6 +231,37 @@ mod tests {
     let inside = Url::parse("wss://chat.intranet.example.com/").unwrap();
     assert_eq!(route(&matcher, &inside), None);
     assert!(route(&matcher, &Url::parse("wss://chat.example.com/").unwrap()).is_some());
+  }
+
+  #[test]
+  fn https_proxies_serve_rest_but_not_the_websocket_tunnel() {
+    let matcher = Matcher::builder().all("https://proxy.example.com:3129").build();
+    let proxy = route(
+      &matcher,
+      &Url::parse("https://chat.example.com/api/v1/me").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(proxy.scheme(), "https");
+    assert_eq!(tunnel_only(proxy), None);
+    let plain = Url::parse("http://proxy.example.com:3128").unwrap();
+    assert_eq!(tunnel_only(plain.clone()), Some(plain));
+  }
+
+  #[test]
+  fn shortened_ipv4_networks_are_completed() {
+    let exclusions = ["169.254/16", "10/8", "192.168.1.0/24", "fe80::/10", "1.2.3/40"].map(String::from);
+    assert_eq!(
+      no_proxy_list(&exclusions),
+      "169.254.0.0/16,10.0.0.0/8,192.168.1.0/24,fe80::/10,1.2.3/40"
+    );
+    let matcher = Matcher::builder()
+      .all("http://proxy.example.com:3128")
+      .no(no_proxy_list(&exclusions))
+      .build();
+    assert_eq!(
+      route(&matcher, &Url::parse("https://169.254.10.1/").unwrap()),
+      None
+    );
   }
 
   #[test]

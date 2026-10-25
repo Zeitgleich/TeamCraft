@@ -35,7 +35,19 @@ pub fn subscription_change(
   let Some(previous_token) = registered_push_token(store, &PushProvider::WebPush)? else {
     return Ok(None);
   };
-  if previous_token == token {
+  subscription_change_from(store, &previous_token, token)
+}
+
+/// The change from `previous_token` to `token`: for a second rotation before a page opened, where
+/// the server holds the subscription the worker sent last time (the browser's `oldSubscription`)
+/// rather than the one in the store. `None` as for [`subscription_change`], and also when this
+/// device has no Web Push registration at all.
+pub fn subscription_change_from(
+  store: &impl LocalStore,
+  previous_token: &str,
+  token: &str,
+) -> Result<Option<SubscriptionChange>, CoreError> {
+  if previous_token == token || registered_push_token(store, &PushProvider::WebPush)?.is_none() {
     return Ok(None);
   }
   let (Some(device_id), Some(server_url), Some(push_key)) = (
@@ -45,12 +57,12 @@ pub fn subscription_change(
   ) else {
     return Ok(None);
   };
-  let mac = subscription_change_mac(&push_key, convert::device(device_id), &previous_token, token);
+  let mac = subscription_change_mac(&push_key, convert::device(device_id), previous_token, token);
   Ok(Some(SubscriptionChange {
     server_url,
     request: ChangeWebPushSubscriptionRequest {
       device_id,
-      previous_token,
+      previous_token: previous_token.to_owned(),
       token: token.to_string(),
       mac: Base64Bytes::new(mac.to_vec()),
     },

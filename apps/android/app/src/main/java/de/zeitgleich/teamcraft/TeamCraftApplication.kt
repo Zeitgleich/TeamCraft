@@ -56,9 +56,9 @@ class TeamCraftApplication : Application() {
 
   override fun onCreate() {
     super.onCreate()
-    // Before the core's first connection: it keeps the CAs it gets first (issue #157).
-    NetworkTrust.installTrustedCertificates(this)
     graph = AppGraph(this)
+    // The core waits for these before it opens (issue #157).
+    NetworkTrust.startInstalling(this, graph.scope)
     // Before anything opens a session or a store: builds with a baked-in server kept them unkeyed.
     graph.servers.migrateLegacyLayout()
     graph.scope.launch(Dispatchers.IO) { graph.servers.removeLegacyTrash() }

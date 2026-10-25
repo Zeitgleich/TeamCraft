@@ -33,15 +33,19 @@ class NetworkWatcher(context: Context, private val onChange: () -> Unit) {
     NetworkTrust.reportProxy(manager.getLinkProperties(manager.activeNetwork))
     manager.registerDefaultNetworkCallback(
       object : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(network: Network) = changed(network, isValidated = wasValidated)
+        override fun onAvailable(network: Network) {
+          // Before the reconnect that a new network triggers, so it goes through that network's
+          // proxy (onLinkPropertiesChanged comes only after onAvailable).
+          NetworkTrust.reportProxy(manager.getLinkProperties(network))
+          changed(network, isValidated = wasValidated)
+        }
 
         override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) =
           changed(network, capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED))
 
         override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) {
-          // Before the reconnect that a new network triggers, so it goes through the right proxy.
-          NetworkTrust.reportProxy(properties)
-          changed(network, isValidated = wasValidated)
+          // Another proxy on the same network: the open connection still uses the old one.
+          if (NetworkTrust.reportProxy(properties)) onChange()
         }
 
         override fun onLost(network: Network) = changed(null, isValidated = false)

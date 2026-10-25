@@ -7,6 +7,10 @@ import android.net.Uri
 import android.util.Log
 import java.security.KeyStore
 import java.security.cert.X509Certificate
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import uniffi.teamcraft_ffi.NetworkProxy
 import uniffi.teamcraft_ffi.setNetworkProxy
 import uniffi.teamcraft_ffi.setTrustedCertificates
@@ -48,23 +52,53 @@ object NetworkTrust {
     setTrustedCertificates(certificates)
   }
 
-  /** The proxy of the network with [properties] (`null`: none known) for every core connection. */
-  fun reportProxy(properties: LinkProperties?) {
-    val proxy = properties?.httpProxy
-    val host = proxy?.host
-    if (proxy == null || host.isNullOrEmpty() || proxy.port <= 0) {
-      if (proxy != null && proxy.pacFileUrl != Uri.EMPTY) {
+  @Volatile private var maybeReported: NetworkProxy? = null
+  @Volatile private var hasReported = false
+  private val installed = CompletableDeferred<Unit>()
+
+  /**
+   * Reads the CAs off the main thread ([installTrustedCertificates]); the core waits for it with
+   * [awaitTrustedCertificates] before it opens.
+   */
+  fun startInstalling(context: Context, scope: CoroutineScope) {
+    scope.launch(Dispatchers.IO) {
+      try {
+        installTrustedCertificates(context)
+      } finally {
+        installed.complete(Unit)
+      }
+    }
+  }
+
+  suspend fun awaitTrustedCertificates() = installed.await()
+
+  /**
+   * The proxy of the network with [properties] (`null`: none known) for every core connection.
+   * Returns whether it differs from the one reported before.
+   */
+  @Synchronized
+  fun reportProxy(properties: LinkProperties?): Boolean {
+    val maybeProxy = proxyOf(properties)
+    val isChanged = !hasReported || maybeProxy != maybeReported
+    hasReported = true
+    maybeReported = maybeProxy
+    if (isChanged) setNetworkProxy(maybeProxy)
+    return isChanged
+  }
+
+  private fun proxyOf(properties: LinkProperties?): NetworkProxy? {
+    val proxy = properties?.httpProxy ?: return null
+    val host = proxy.host
+    if (host.isNullOrEmpty() || proxy.port <= 0) {
+      if (proxy.pacFileUrl != Uri.EMPTY) {
         Log.w(TAG, "the network uses a PAC script, which the core doesn't evaluate; connecting directly")
       }
-      setNetworkProxy(null)
-      return
+      return null
     }
-    setNetworkProxy(
-      NetworkProxy(
-        host = host,
-        port = proxy.port.toUShort(),
-        exclusions = proxy.exclusionList?.toList().orEmpty(),
-      ),
+    return NetworkProxy(
+      host = host,
+      port = proxy.port.toUShort(),
+      exclusions = proxy.exclusionList?.toList().orEmpty(),
     )
   }
 }

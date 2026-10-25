@@ -3814,13 +3814,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "The connection to the server isn't trusted: this network may inspect encrypted traffic. Use another network or ask your IT. Next attempt in %lld s."
+            "value": "The server's certificate isn't trusted. On a network that inspects encrypted traffic, use another network or ask your IT; if it happens everywhere, tell your administrator. Next attempt in %lld s."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Der Verbindung zum Server wird nicht vertraut: Dieses Netzwerk prüft eventuell verschlüsselten Verkehr. Nutze ein anderes Netzwerk oder frag deine IT. Nächster Versuch in %lld s."
+            "value": "Dem Zertifikat des Servers wird nicht vertraut. In einem Netzwerk, das verschlüsselten Verkehr prüft: Nutze ein anderes Netzwerk oder frag deine IT; passiert es überall, sag deiner Administration Bescheid. Nächster Versuch in %lld s."
           }
         }
       }

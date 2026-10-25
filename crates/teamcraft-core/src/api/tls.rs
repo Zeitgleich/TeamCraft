@@ -14,26 +14,31 @@
 //!   and user or MDM-installed CAs only where the device's management allows it (the app decides,
 //!   see docs/operations.md). Without them, the Mozilla roots.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use rustls::ClientConfig;
 
 /// Root certificates (DER) the app read from the platform, see the module docs.
-static PLATFORM_ROOTS: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
+static PLATFORM_ROOTS: RwLock<Option<Vec<Vec<u8>>>> = RwLock::new(None);
+/// The configuration built from them, until they change.
+static CONFIG: RwLock<Option<Arc<ClientConfig>>> = RwLock::new(None);
 
-/// Hands over the platform's trusted root certificates (DER). Only the first call counts and it must
-/// come before the first connection: the TLS configuration is built once per process. Used on
-/// Android; elsewhere the platform verifier asks the operating system itself.
+/// Hands over the platform's trusted root certificates (DER). Connections opened from now on use
+/// them; the app reads them off its main thread, so a check of the server address at first start
+/// may have used the Mozilla roots already. Used on Android; elsewhere the platform verifier asks
+/// the operating system itself.
 pub fn set_platform_roots(der_certificates: Vec<Vec<u8>>) {
-  if PLATFORM_ROOTS.set(der_certificates).is_err() {
-    tracing::debug!("platform roots were already set");
-  }
+  *PLATFORM_ROOTS.write().unwrap_or_else(PoisonError::into_inner) = Some(der_certificates);
+  *CONFIG.write().unwrap_or_else(PoisonError::into_inner) = None;
 }
 
-/// One client configuration for the process.
+/// One client configuration for the process (until the platform roots change).
 pub(crate) fn client_config() -> Arc<ClientConfig> {
-  static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
-  CONFIG.get_or_init(build_client_config).clone()
+  if let Some(config) = CONFIG.read().unwrap_or_else(PoisonError::into_inner).as_ref() {
+    return config.clone();
+  }
+  let mut slot = CONFIG.write().unwrap_or_else(PoisonError::into_inner);
+  slot.get_or_insert_with(build_client_config).clone()
 }
 
 fn build_client_config() -> Arc<ClientConfig> {
@@ -62,7 +67,8 @@ fn build_client_config() -> Arc<ClientConfig> {
 /// The roots the app handed over, or the Mozilla roots if there are none.
 fn root_store() -> rustls::RootCertStore {
   let mut roots = rustls::RootCertStore::empty();
-  if let Some(platform) = PLATFORM_ROOTS.get() {
+  let platform_roots = PLATFORM_ROOTS.read().unwrap_or_else(PoisonError::into_inner);
+  if let Some(platform) = platform_roots.as_ref() {
     let certificates = platform
       .iter()
       .map(|der| rustls::pki_types::CertificateDer::from(der.clone()));
@@ -82,20 +88,24 @@ fn root_store() -> rustls::RootCertStore {
 /// Whether a connection error is a refused server certificate (rustls'
 /// `InvalidCertificate`) somewhere in its chain: the server isn't who it claims, or, much more
 /// often, a proxy intercepts TLS with a CA this device doesn't trust. rustls errors travel inside
-/// `io::Error`s, whose `source()` skips the wrapped error, so those are unwrapped too.
+/// `io::Error`s, nested ones too (hyper wraps the TLS stream's), and `io::Error::source()` skips
+/// the error it wraps, so those are followed through `get_ref()`.
 pub(crate) fn is_certificate_rejection(error: &(dyn std::error::Error + 'static)) -> bool {
   let mut maybe_error = Some(error);
   while let Some(error) = maybe_error {
-    let maybe_rustls = error.downcast_ref::<rustls::Error>().or_else(|| {
-      error
-        .downcast_ref::<std::io::Error>()
-        .and_then(std::io::Error::get_ref)
-        .and_then(|inner| inner.downcast_ref::<rustls::Error>())
-    });
-    if matches!(maybe_rustls, Some(rustls::Error::InvalidCertificate(_))) {
+    if matches!(
+      error.downcast_ref::<rustls::Error>(),
+      Some(rustls::Error::InvalidCertificate(_))
+    ) {
       return true;
     }
-    maybe_error = error.source();
+    maybe_error = match error.downcast_ref::<std::io::Error>() {
+      Some(io) => match io.get_ref() {
+        Some(inner) => Some(inner as &(dyn std::error::Error + 'static)),
+        None => std::error::Error::source(io),
+      },
+      None => error.source(),
+    };
   }
   false
 }
@@ -113,6 +123,10 @@ mod tests {
     assert!(is_certificate_rejection(&rejected));
     assert!(is_certificate_rejection(&io));
     assert!(is_certificate_rejection(&Wrapper(io)));
+    // hyper wraps the TLS stream's `io::Error` in another one.
+    let inner = std::io::Error::new(std::io::ErrorKind::InvalidData, rejected);
+    let nested = std::io::Error::other(inner);
+    assert!(is_certificate_rejection(&Wrapper(nested)));
   }
 
   #[test]
