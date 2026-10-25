@@ -782,6 +782,7 @@ select.input {
 /* A conversation's messages tab: feed, seen line and composer, laid out as before the tabs. */
 .channel-messages {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -2679,6 +2680,12 @@ ol.md-list {
   font-size: var(--text-2xs);
   letter-spacing: var(--tracking-2xs);
   white-space: nowrap;
+}
+
+/* Always at the toolbar's right end, also where nothing grows in front of it (the hint is hidden on
+   phones). */
+.send-group {
+  margin-left: auto;
 }
 
 .send-group .send-btn {
@@ -6038,6 +6045,7 @@ ol.md-list {
 
 .seen-line {
   padding: 0 20px 4px;
+  overflow-wrap: anywhere;
   font-size: var(--text-xs);
   letter-spacing: var(--tracking-xs);
   color: var(--text-muted);
@@ -8837,17 +8845,28 @@ ol.md-list {
   min-width: 0;
 }
 
-:root[data-layout="compact"] .composer-toolbar > .send-btn {
+:root[data-layout="compact"] .send-group .send-btn {
   width: var(--touch);
   height: var(--touch);
-  margin-left: auto;
 }
 
-/* iOS zooms into fields with text under 16px; it never needs to here. */
-:root[data-layout="compact"] input,
-:root[data-layout="compact"] textarea,
-:root[data-layout="compact"] select {
+:root[data-layout="compact"] .send-menu-btn {
+  width: 28px;
+  height: var(--touch);
+}
+
+/* iOS zooms into fields with text under 16px and doesn't zoom back out: the conversation then looks
+   wider than the screen, its lines and the composer cut off at the right edge. The composer is a
+   contenteditable, not a textarea, so it is listed too. On a touch screen the wide layout (a
+   tablet) gets the same. */
+:root[data-layout="compact"] :is(input, textarea, select, [contenteditable]) {
   font-size: max(16px, 1em);
+}
+
+@media (pointer: coarse) {
+  :root :is(input, textarea, select, [contenteditable]) {
+    font-size: max(16px, 1em);
+  }
 }
 
 /* Messages on a touch screen (#364): a tap does nothing, a long press opens the action sheet. The
