@@ -32,7 +32,7 @@ web-sys = { version = "0.3", features = [
   "Blob", "BlobPropertyBag", "Url", "DragEvent", "DataTransfer", "ClipboardEvent", "Request", "RequestInit", "RequestMode", "RequestRedirect", "RequestCache", "Response", "Headers", "UrlSearchParams", "ResizeObserver", "DomRect",
   "BroadcastChannel", "MouseEvent", "StorageManager", "ServiceWorkerState", "VisibilityState", "NotificationOptions",
   "PointerEvent", "WheelEvent", "HtmlAnchorElement", "HtmlImageElement", "AddEventListenerOptions",
-  "HtmlCanvasElement", "CanvasRenderingContext2d", "HtmlMediaElement", "HtmlVideoElement", "Selection",
+  "HtmlCanvasElement", "CanvasRenderingContext2d", "HtmlMediaElement", "HtmlVideoElement", "Selection", "Performance",
   "VisualViewport",
   "HtmlDocument", "DomParser", "SupportedType", "Range", "Text", "CharacterData", "InputEvent", "TreeWalker",
 ] }

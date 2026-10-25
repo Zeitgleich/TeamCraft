@@ -54,6 +54,7 @@ pub mod image_crop_dialog;
 pub mod incoming_call;
 pub mod lightbox;
 pub mod lightbox_controls;
+pub mod lightbox_motion;
 pub mod log_view;
 pub mod login;
 pub mod meeting_controls;

@@ -5859,7 +5859,9 @@ ol.md-list {
 .preview-site, .preview-description { color: var(--text-muted, #666); font-size: .85em; }
 
 /* Lightbox: one image or video over the whole window, on a blurred backdrop tinted by the picture */
-.modal-backdrop:has(> .modal-lightbox) { padding: 0; background: #0b0d12; }
+/* The lightbox's own backdrop is the dark layer: it fades while a picture is dragged away, showing
+   the conversation behind. */
+.modal-backdrop:has(> .modal-lightbox) { padding: 0; background: transparent; }
 .modal.modal-lightbox { width: 100%; height: 100%; max-height: none; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: #f2f2f2; overflow: hidden; }
 .lightbox { display: flex; height: 100%; position: relative; isolation: isolate; }
 .lightbox:focus { outline: none; }
@@ -5885,12 +5887,20 @@ ol.md-list {
 .lightbox-main .btn[aria-pressed="true"] { background: rgba(255, 255, 255, .24); }
 .lightbox-zoom { min-width: 4.5rem; font-variant-numeric: tabular-nums; }
 .lightbox-body { flex: 1; min-height: 0; position: relative; display: flex; }
-.lightbox-stage { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; touch-action: none; user-select: none; cursor: zoom-in; padding: 0 64px; }
+.lightbox-stage { position: relative; flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; touch-action: none; user-select: none; cursor: zoom-in; padding: 0 64px; }
 .lightbox-stage.zoomed { cursor: grab; }
 .lightbox-stage.zoomed:active { cursor: grabbing; }
 .lightbox-stage.is-video { cursor: default; touch-action: auto; }
 .lightbox-image { max-width: 100%; max-height: 100%; transform-origin: center; will-change: transform; -webkit-user-drag: none; box-shadow: 0 8px 40px rgba(0, 0, 0, .45); transition: transform var(--dur-fast) var(--ease-out); }
-.lightbox-stage.zoomed .lightbox-image { transition: none; }
+.lightbox-stage.zoomed .lightbox-image, .lightbox-stage.is-live .lightbox-image { transition: none; }
+/* The previous, current and next picture side by side; the track moves as one while paging, and
+   carries the picture into and out of its tile. Its transform and opacity are written per frame. */
+.lightbox-track { position: absolute; inset: 0; padding: inherit; transform-origin: center; will-change: transform; }
+.lightbox-track.is-pending { opacity: 0; }
+.lightbox-track.is-fading-in { animation: motion-fade-in var(--dur-base) var(--ease-standard); }
+.lightbox-slot { position: absolute; inset: 0; box-sizing: border-box; padding: inherit; display: flex; align-items: center; justify-content: center; }
+.lightbox-slot.is-previous { transform: translateX(calc(-100% - 24px)); }
+.lightbox-slot.is-next { transform: translateX(calc(100% + 24px)); }
 .lightbox-video { max-width: 100%; max-height: 100%; background: #000; box-shadow: 0 8px 40px rgba(0, 0, 0, .45); }
 /* The thumbnail, scaled up to the size the picture will have, while the full file loads */
 .lightbox-placeholder { width: min(100%, 48rem); max-height: 100%; object-fit: contain; filter: blur(2px); }
@@ -5903,7 +5913,14 @@ ol.md-list {
 .lightbox-next { right: 12px; }
 .lightbox-body:hover .lightbox-nav, .lightbox-nav:focus-visible { opacity: 1; }
 .lightbox-nav:disabled { visibility: hidden; }
-@media (hover: none) { .lightbox-nav { display: none; } }
+/* Touch has no hover: the arrows stay, quieter, and step aside while a picture is zoomed. */
+@media (hover: none) {
+  .lightbox-nav { opacity: 1; background: rgba(20, 22, 30, .55); }
+  .lightbox-stage.zoomed ~ .lightbox-nav { opacity: 0; pointer-events: none; }
+}
+/* A picture dragged away to close takes the stage alone. */
+.lightbox-top, .lightbox-strip, .lightbox-controls, .lightbox-thread, .lightbox-loading, .lightbox-status { transition: opacity var(--dur-fast) var(--ease-standard); }
+.lightbox.is-lifted :is(.lightbox-top, .lightbox-strip, .lightbox-controls, .lightbox-thread, .lightbox-loading, .lightbox-status, .lightbox-nav) { opacity: 0; pointer-events: none; }
 .lightbox-status { position: absolute; left: 50%; bottom: 24px; z-index: 2; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-radius: var(--radius-pill); background: rgba(0, 0, 0, .7); font-size: .9rem; }
 .lightbox-progress { width: 6rem; }
 .lightbox-error { color: #ffb4a8; }
@@ -7478,9 +7495,25 @@ ol.md-list {
   animation: motion-switcher-in var(--dur-fast) var(--ease-emphasized);
 }
 
-/* The lightbox's image has its own transform (zoom); only the whole layer fades. */
+/* The lightbox's picture grows out of its tile (or its track fades in); the backdrop and the
+   chrome fade in around it. */
 .modal.modal-lightbox {
+  animation: none;
+}
+
+.lightbox-backdrop,
+.lightbox-top,
+.lightbox-strip,
+.lightbox-controls {
   animation: motion-fade-in var(--dur-base) var(--ease-standard);
+}
+
+/* Reduced motion: nothing moves, the new picture cross-fades in briefly. */
+@media (prefers-reduced-motion: reduce) {
+  .lightbox-slot.is-current .lightbox-image,
+  .lightbox-track.is-fading-in {
+    animation: motion-fade-in 150ms var(--ease-standard);
+  }
 }
 
 .motion-ghost {
@@ -7494,9 +7527,14 @@ ol.md-list {
   animation: motion-fade-out var(--dur-exit) var(--ease-exit) forwards;
 }
 
-/* The lightbox's full image is released with it; its ghost fades the backdrop only. */
+/* The lightbox's full image is released with it; its ghost fades the backdrop only. A lightbox that
+   closed into its tile has nothing left to fade. */
 .motion-ghost .lightbox-image {
   visibility: hidden;
+}
+
+.motion-ghost:has(.lightbox.is-closed) {
+  display: none;
 }
 
 .motion-ghost.is-leaving .modal {
