@@ -147,6 +147,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   if let Some(sync) = use_context::<StoredValue<NotificationSync, LocalStorage>>() {
     sync.get_value().start(settings);
   }
+  crate::external_links::start();
   if tauri::has_core() {
     crate::os_alerts::start(state, i18n);
   }

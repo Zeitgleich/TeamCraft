@@ -51,6 +51,7 @@ const COMMANDS: &[&str] = &[
   "call_unwatch_video",
   "call_watch_camera",
   "call_unwatch_camera",
+  "open_external",
   "notify_user",
   "withdraw_notifications",
   "request_attention",

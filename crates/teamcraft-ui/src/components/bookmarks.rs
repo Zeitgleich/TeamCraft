@@ -39,10 +39,8 @@ pub fn BookmarksBar(conversation: ConversationId, info: Memo<Option<Conversation
           let target = bookmark.clone();
           let open = move |_| match target.kind {
             BookmarkKind::Link => {
-              if is_openable(&target.url)
-                && let Some(window) = web_sys::window()
-              {
-                drop(window.open_with_url_and_target_and_features(&target.url, "_blank", "noopener,noreferrer"));
+              if is_openable(&target.url) {
+                crate::external_links::open(&target.url);
               }
             },
             BookmarkKind::File => {
