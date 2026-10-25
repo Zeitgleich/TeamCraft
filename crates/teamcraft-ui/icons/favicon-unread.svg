@@ -26,5 +26,7 @@
   <circle fill="url(#head-left)" cx="202.3" cy="621.5" r="131.5"/>
   <circle fill="url(#head-right)" cx="1051.3" cy="621.5" r="131.5"/>
   <path fill="#fff" d="M498 593.5L757.5 593.5A83 83 0 0 1 840.5 676.5L840.5 839.5A76 76 0 0 1 764.5 915.5L760.72 915.5A48 48 0 0 0 729.71 926.86L636.25 1005.94A12 12 0 0 1 616.5 996.78L616.5 928.5A13 13 0 0 0 603.5 915.5L493 915.5A80 80 0 0 1 413 835.5L413 678.5A85 85 0 0 1 498 593.5Z"/>
-  
+  <g fill="#0063ee"><circle cx="528" cy="755.5" r="36.1"/><circle cx="625.8" cy="755.5" r="36.1"/><circle cx="723.7" cy="755.5" r="36.1"/></g>
+  <!-- Unread: a red dot in the corner (brand.rs shows this variant while something is unread). -->
+  <circle cx="961" cy="976" r="226" fill="#e5484d" stroke="#ffffff" stroke-width="40"/>
 </svg>

@@ -256,8 +256,10 @@ the root and registered in the browser (not in the desktop shell); it wakes the 
 the worker can open sealed payloads, shows a generic notification.
 
 `index.html` carries a loading screen in plain HTML and CSS (`style/loader.css`), painted before any
-script runs. `loader.js` is the Trunk initializer: it adds the cached brand and theme, the download
-progress and an error with a retry button, and fades the screen out once the app is mounted. Its texts
+script runs, with the TeamCraft mark assembling and typing. `loader.js` is the Trunk initializer: it
+adds the saved theme, the download progress and an error with a retry button, and once the app is
+mounted flies the mark into the app's brand (the server's logo, or the TeamCraft mark) while the
+screen fades. Its texts
 are the `loader-*` messages of `i18n/*.ftl`, which `scripts/finish-loader.sh` (a Trunk hook) copies into
 `init.js` together with the size of the built wasm. Release builds use the `web-release` Cargo profile
 (size over speed) and `wasm-opt -Oz`; the release tarball adds `.br`/`.gz` variants

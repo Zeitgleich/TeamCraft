@@ -109,6 +109,9 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       CallFailure::Unsupported => "error-call-unsupported",
       CallFailure::ServerUnreachable => "error-call-server-unreachable",
       CallFailure::BackgroundRequired => "error-call-background-required",
+      CallFailure::SpeakersUnavailable => "error-call-speakers-unavailable",
+      CallFailure::SpeakersMissing => "error-call-speakers-missing",
+      CallFailure::SoundBlocked => "error-call-sound-blocked",
     },
     FailureKind::Server(code) => match code {
       ErrorCode::NotSpaceMember => "error-not-space-member",
@@ -380,6 +383,9 @@ mod tests {
         FailureKind::Server(ErrorCode::Conflict),
         FailureKind::Server(ErrorCode::LastOwner),
         FailureKind::Server(ErrorCode::UserNotFound),
+        FailureKind::Call(CallFailure::SpeakersUnavailable),
+        FailureKind::Call(CallFailure::SpeakersMissing),
+        FailureKind::Call(CallFailure::SoundBlocked),
       ];
       for kind in kinds {
         let key = failure_message_key(&ActionFailure::new(kind, "x"));

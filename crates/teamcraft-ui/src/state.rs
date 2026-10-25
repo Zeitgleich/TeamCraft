@@ -775,8 +775,20 @@ impl AppState {
       // Only a catch-up has a use for it; settled switches cost no extra request.
       self.read(|backend| backend.focus_conversation(id));
     }
-    if conversation.unread_count > 0 || conversation.mention_count > 0 {
+    if conversation.has_unread() {
       self.write(|backend| backend.mark_read(id));
+    }
+  }
+
+  /// Sending in a conversation reads everything before the sent message: the user answers what they
+  /// saw. The read marker goes to the newest message already in the store, before the send is
+  /// confirmed, so the sent message itself plays no part. Nothing to send when nothing is unread.
+  pub fn mark_read_on_send(&self, conversation: ConversationId) {
+    let has_unread = self
+      .read(|backend| backend.conversation(conversation))
+      .is_some_and(|conversation| conversation.has_unread());
+    if has_unread {
+      self.write(|backend| backend.mark_read(conversation));
     }
   }
 
@@ -2266,6 +2278,18 @@ mod tests {
       place_divider(&state, unread);
       state.divider_event(unread, DividerEvent::Sent);
       assert_eq!(state.unread_marker.get_untracked(), None);
+    }
+
+    #[test]
+    fn sending_reads_what_came_before() {
+      let state = test_state();
+      let unread = unread_conversation(&state);
+      // Unread although open: a message that arrived while the user read along.
+      state.mark_read_on_send(unread);
+      let after = state
+        .read(|backend| backend.conversation(unread))
+        .expect("still there");
+      assert!(!after.has_unread());
     }
 
     #[test]

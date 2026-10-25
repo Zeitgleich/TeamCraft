@@ -106,6 +106,8 @@ pub fn TextField(
           translate="no"
           placeholder=placeholder
           step=(input_type == "number").then_some("any")
+          // Service credentials (SMTP, CalDAV), never the admin's own login: no autofill.
+          autocomplete=(input_type == "password").then_some("new-password")
           aria-describedby=describedby.clone()
           aria-invalid=move || error.get().map(|_| "true")
           prop:disabled=move || disabled.get()

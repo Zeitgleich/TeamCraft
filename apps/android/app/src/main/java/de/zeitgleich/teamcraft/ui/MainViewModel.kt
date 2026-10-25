@@ -115,6 +115,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** The server's brand for the sign-in screen; the cached one first, then the server's answer. */
   val loginBrand: StateFlow<LoginBrand?> = brand
 
+  private val icons = MutableStateFlow<BrandIcons?>(null)
+
+  /** The brand's icons for its tile on the sign-in screen, decoded off the main thread. */
+  val brandIcons: StateFlow<BrandIcons?> = icons
+
   private val activeServer = MutableStateFlow<StoredServer?>(null)
 
   /** The server the app signs in to; the sign-in screen names its host. */
@@ -151,6 +156,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   fun brandLogo(isDark: Boolean): Bitmap? = maybeBrandStore?.logo(isDark)
+
 
   /**
    * Decides where the app starts: the stored server, the managed (or build default) server to
@@ -664,9 +670,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val store = BrandStore(getApplication(), address.origin, address.storageKey)
     maybeBrandStore = store
     brand.value = checked.maybeBrand
+    icons.value = null
     viewModelScope.launch {
       val maybeFresh = store.refresh()
       if (maybeBrandStore === store) brand.value = maybeFresh ?: checked.maybeBrand
+      loadIcons(store)
     }
   }
 
@@ -677,14 +685,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     if (maybeBrandStore?.let { it.origin == address.origin } != true) {
       maybeBrandStore = BrandStore(getApplication(), address.origin, address.storageKey)
       brand.value = null
+      icons.value = null
     }
     val store = maybeBrandStore ?: return
     viewModelScope.launch {
       val maybeCached = withContext(Dispatchers.IO) { store.cached() }
       if (maybeBrandStore === store && maybeCached != null) brand.value = maybeCached
+      loadIcons(store)
       val maybeFresh = store.refresh()
       if (maybeBrandStore === store) brand.value = maybeFresh
+      loadIcons(store)
     }
+  }
+
+  /** The icons [store] has cached; after a refresh they may be new even when the brand is not. */
+  private suspend fun loadIcons(store: BrandStore) {
+    val loaded = withContext(Dispatchers.IO) { BrandIcons(store.icon(isDark = false), store.icon(isDark = true)) }
+    if (maybeBrandStore === store) icons.value = loaded
   }
 
   private fun forgetActiveServer() {
@@ -692,6 +709,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     activeServer.value = null
     maybeBrandStore = null
     brand.value = null
+    icons.value = null
     page.value = null
     pageIcon.value = null
     maybePageOrigin = null

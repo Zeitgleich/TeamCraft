@@ -231,6 +231,8 @@ pub async fn call_action(
     },
     CallAction::SetTalking { is_talking } => calls.set_talking(is_talking).await,
     CallAction::SetStatusSounds { sounds } => calls.set_status_sounds(sounds).await,
+    CallAction::RefreshDevices => drop(calls.refresh_devices().await?),
+    CallAction::TestSpeakers { maybe_device } => calls.test_speakers(maybe_device).await?,
     CallAction::Unknown => return Err(CommandError::from("unknown call action".to_owned())),
   }
   Ok(())

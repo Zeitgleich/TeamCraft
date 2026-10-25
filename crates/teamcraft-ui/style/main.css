@@ -782,6 +782,7 @@ select.input {
 /* A conversation's messages tab: feed, seen line and composer, laid out as before the tabs. */
 .channel-messages {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -900,6 +901,12 @@ select.input {
   height: 38px;
   font-size: var(--text-sm);
   border-radius: var(--radius);
+}
+
+.avatar-xl {
+  width: clamp(72px, 22vmin, 128px);
+  height: clamp(72px, 22vmin, 128px);
+  font-size: clamp(26px, 7vmin, 44px);
 }
 
 .avatar .presence {
@@ -2675,6 +2682,12 @@ ol.md-list {
   white-space: nowrap;
 }
 
+/* Always at the toolbar's right end, also where nothing grows in front of it (the hint is hidden on
+   phones). */
+.send-group {
+  margin-left: auto;
+}
+
 .send-group .send-btn {
   border-start-end-radius: 0;
   border-end-end-radius: 0;
@@ -3603,6 +3616,30 @@ ol.md-list {
 
 .prejoin-preview .tile {
   aspect-ratio: 16 / 10;
+}
+
+/* The own tile without a camera image: a calm surface with the user's picture, like a muted
+   participant in a call, and what the camera does. */
+.tile.prejoin-self {
+  background: var(--call-surface-solid);
+  outline-color: var(--call-border);
+  outline-width: 1px;
+  outline-offset: -1px;
+}
+
+.prejoin-self-body {
+  position: absolute;
+  inset: 0 0 56px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+}
+
+.prejoin-self-status {
+  color: var(--call-muted);
+  font-size: var(--text-sm);
 }
 
 .preview-controls {
@@ -4978,6 +5015,55 @@ ol.md-list {
   max-height: none;
 }
 
+/* A server brand: the product's tile and the brand's side by side, like two app icons. */
+.auth-tiles {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.auth-tile {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-card);
+}
+
+/* The mark inside its tile, as on the app icons (scripts/brand/icons.py). Above the brand's
+   tile, which the loading screen's handover slides out from behind it (loader.js). */
+.auth-tile-product {
+  position: relative;
+  z-index: 1;
+  padding: 8px;
+}
+
+.auth-tile-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.auth-tile-product .auth-tile-img {
+  object-fit: contain;
+}
+
+/* No icon: the brand's initial on its accent, like a launcher's placeholder icon. */
+.auth-tile-brand:has(.auth-tile-initial) {
+  border-color: transparent;
+  background: var(--accent);
+}
+
+.auth-tile-initial {
+  color: var(--on-accent);
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-semibold);
+}
+
 .auth-product-wordmark {
   display: block;
   height: 26px;
@@ -5959,6 +6045,7 @@ ol.md-list {
 
 .seen-line {
   padding: 0 20px 4px;
+  overflow-wrap: anywhere;
   font-size: var(--text-xs);
   letter-spacing: var(--tracking-xs);
   color: var(--text-muted);
@@ -8796,17 +8883,28 @@ ol.md-list {
   min-width: 0;
 }
 
-:root[data-layout="compact"] .composer-toolbar > .send-btn {
+:root[data-layout="compact"] .send-group .send-btn {
   width: var(--touch);
   height: var(--touch);
-  margin-left: auto;
 }
 
-/* iOS zooms into fields with text under 16px; it never needs to here. */
-:root[data-layout="compact"] input,
-:root[data-layout="compact"] textarea,
-:root[data-layout="compact"] select {
+:root[data-layout="compact"] .send-menu-btn {
+  width: 28px;
+  height: var(--touch);
+}
+
+/* iOS zooms into fields with text under 16px and doesn't zoom back out: the conversation then looks
+   wider than the screen, its lines and the composer cut off at the right edge. The composer is a
+   contenteditable, not a textarea, so it is listed too. On a touch screen the wide layout (a
+   tablet) gets the same. */
+:root[data-layout="compact"] :is(input, textarea, select, [contenteditable]) {
   font-size: max(16px, 1em);
+}
+
+@media (pointer: coarse) {
+  :root :is(input, textarea, select, [contenteditable]) {
+    font-size: max(16px, 1em);
+  }
 }
 
 /* Messages on a touch screen (#364): a tap does nothing, a long press opens the action sheet. The

@@ -395,6 +395,7 @@ mod switches {
     let device = register_device(&app, &alice).await;
     for presence in [
       json!({"statuses_enabled": true, "custom_status_enabled": true, "away_timeout_minutes": 0}),
+      json!({"statuses_enabled": true, "custom_status_enabled": true, "away_timeout_minutes": 4}),
       json!({"statuses_enabled": true, "custom_status_enabled": true, "presets": [{"text": "  "}]}),
       json!({"statuses_enabled": true, "custom_status_enabled": true, "presets": [{"text": "x", "duration_minutes": 0}]}),
       json!({"statuses_enabled": true, "custom_status_enabled": true, "presets": (0..21).map(|n| json!({"text": format!("s{n}")})).collect::<Vec<_>>()}),

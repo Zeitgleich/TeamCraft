@@ -300,6 +300,17 @@ impl MeetingsHub {
     })
   }
 
+  /// The title of the meeting whose chat is `conversation`, if it is one of the user's. Reactive.
+  pub fn title_for(&self, conversation: ConversationId) -> Option<String> {
+    self.meetings.with(|all| {
+      all
+        .iter()
+        .find(|meeting| meeting.conversation_id == conversation)
+        .map(|meeting| meeting.title.clone())
+        .filter(|title| !title.trim().is_empty())
+    })
+  }
+
   /// Reloads the list, then the lobbies of the meetings `me` hosts that use one.
   pub async fn refresh(&self, me: UserId, now: TimestampMs) {
     match self.client().list(now).await {
