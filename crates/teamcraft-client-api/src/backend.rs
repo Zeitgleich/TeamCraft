@@ -127,6 +127,11 @@ pub trait ChatBackend {
   fn live_snapshot(&self) -> Option<crate::live::LiveSnapshot> {
     None
   }
+  /// Counts the changes to the user's meetings the backend heard of (and reconnects, which may
+  /// have lost some); a change means the meetings are to be read again. 0 without a gateway.
+  fn meetings_revision(&self) -> u64 {
+    0
+  }
   /// Other people typing in a conversation right now (the indicator lasts a few seconds).
   fn typing_users(&self, _conversation: ConversationId) -> Vec<UserId> {
     Vec::new()

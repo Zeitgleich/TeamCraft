@@ -1310,6 +1310,16 @@ impl ChatBackend for RemoteChat {
     }
   }
 
+  fn meetings_revision(&self) -> u64 {
+    self
+      .mirror
+      .borrow()
+      .snapshot
+      .maybe_live
+      .as_ref()
+      .map_or(0, |live| live.marks.meetings)
+  }
+
   fn live_snapshot(&self) -> Option<teamcraft_client_api::live::LiveSnapshot> {
     self.mirror.borrow().snapshot.maybe_live.clone()
   }

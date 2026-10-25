@@ -180,6 +180,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     );
   }
 
+  fn meetings_revision(&self) -> u64 {
+    self.chat.meetings_revision()
+  }
+
   fn me(&self) -> User {
     self.with_live_presence(self.chat.me(), &self.chat.presence_policy(), now_ms())
   }

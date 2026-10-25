@@ -339,8 +339,8 @@ fn missed_call_notification(state: AppState, i18n: I18n, call: &IncomingCall) ->
 // ---- Meetings -------------------------------------------------------------------------------------
 
 /// Reminders before and at the start of the user's meetings. One timer sleeps until the next
-/// reminder (at most a quarter of an hour, which is also how often the list is refreshed); right
-/// before showing one, the list is fetched again so a cancelled or moved meeting stays quiet.
+/// reminder; the list is read again when the gateway reports a meeting change, after a reconnect,
+/// on wake, and right before showing a reminder, so a cancelled or moved meeting stays quiet.
 fn watch_meetings(state: AppState, i18n: I18n, hub: MeetingsHub) {
   let watch = Rc::new(MeetingWatch {
     state,
@@ -356,6 +356,18 @@ fn watch_meetings(state: AppState, i18n: I18n, hub: MeetingsHub) {
       hub.meetings.track();
       state.settings.prefs.track();
       watch.plan_next();
+    });
+  }
+  // A meeting created, moved or cancelled elsewhere (gateway `meeting_update`), and a reconnect
+  // (updates in between may be lost): read the list again now. This replaces a periodic refresh.
+  {
+    let watch = watch.clone();
+    Effect::new(move |maybe_last: Option<u64>| {
+      let revision = state.read(|backend| backend.meetings_revision());
+      if maybe_last.is_some_and(|last| last != revision) {
+        watch.check();
+      }
+      revision
     });
   }
   // Laptops sleep: on wake or reconnect the timer may be late or stale, so check now.

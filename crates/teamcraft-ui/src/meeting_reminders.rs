@@ -19,12 +19,14 @@ use crate::meetings::my_rsvp;
 use crate::model::{TimestampMs, UserId};
 
 const MS_PER_MINUTE: i64 = 60_000;
+const MS_PER_HOUR: i64 = 60 * MS_PER_MINUTE;
 /// A start reminder still comes this long after the start (the device slept through it), never later.
 const START_GRACE_MS: i64 = 10 * MS_PER_MINUTE;
 /// Fired reminders are forgotten once their meeting started this long ago.
 const FORGET_AFTER_MS: i64 = 24 * 60 * MS_PER_MINUTE;
-/// How far ahead the next wake-up is planned at most; the list is refreshed by then anyway.
-const MAX_SLEEP_MS: i64 = 15 * MS_PER_MINUTE;
+/// How far ahead the next wake-up is planned at most: a safety net for a timer that browsers or the
+/// system dropped, not a refresh schedule (changes arrive as gateway `meeting_update` events).
+const MAX_SLEEP_MS: i64 = 6 * MS_PER_HOUR;
 
 /// The user's reminder settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -267,9 +269,14 @@ mod tests {
         NOON - 5 * MS_PER_MINUTE
       );
       assert_eq!(schedule.next_due_at(NOON - 2 * MS_PER_MINUTE, &fired), NOON);
+      // A reminder hours away is waited for as such, not woken for every quarter of an hour.
       assert_eq!(
         schedule.next_due_at(NOON - 60 * MS_PER_MINUTE, &fired),
-        NOON - 60 * MS_PER_MINUTE + MAX_SLEEP_MS
+        NOON - 5 * MS_PER_MINUTE
+      );
+      assert_eq!(
+        schedule.next_due_at(NOON - 10 * MS_PER_HOUR, &fired),
+        NOON - 10 * MS_PER_HOUR + MAX_SLEEP_MS
       );
     }
   }

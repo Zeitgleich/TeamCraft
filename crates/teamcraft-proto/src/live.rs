@@ -11,11 +11,14 @@ use serde::{Deserialize, Serialize, Serializer};
 use crate::{ConversationId, MessageId, UserId, UserPresence};
 
 /// Counters that move when the UI should read something from the server once: after each gateway
-/// connection (events in between may be lost) and when the announcement changed.
+/// connection (events in between may be lost), when the announcement changed and when a meeting
+/// changed (or may have: also after each connection).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveMarks {
   pub connections: u64,
   pub announcements: u64,
+  #[serde(default)]
+  pub meetings: u64,
 }
 
 /// How far another member of a DM has read, from `read_receipt` events.
