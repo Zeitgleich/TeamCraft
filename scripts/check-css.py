@@ -51,6 +51,7 @@ FIXED_FONT_SIZES = {
     ".space-image-preview .space-tile": "initials in a 64 px tile",
     ".space-row .space-tile": "initials in a 36 px tile",
     ".tile-initials": "initials sized to the call tile",
+    ".avatar-xl": "initials sized to the pre-join tile's avatar",
     ".sheet-reaction": "an emoji in a 44 px button",
     ".emoji-grid li": "an emoji in a 34 px cell",
     ".approval-code": "a verification code sized to its card",

@@ -2,16 +2,20 @@ use std::cell::Cell;
 
 use leptos::prelude::*;
 
-use crate::calls::{CallEvent, CallKind, CallRequest, MediaDevice};
+use crate::calls::{CallEvent, CallKind, CallRequest, DevicePresence, MediaDevice};
+use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::call_video::{BackgroundPicker, VideoTile};
 use crate::components::icons::{Icon, IconName};
-use crate::i18n::use_i18n;
+use crate::i18n::{I18n, use_i18n};
+use crate::meetings::MeetingsHub;
+use crate::model::User;
 use crate::reactive::use_interval;
 use crate::state::use_app_state;
 
 const METER_BARS: usize = 14;
 const METER_TICK_MS: u64 = 120;
-const SPEAKER_TEST_MS: i32 = 1600;
+/// How long the speaker button says "playing": the test sound (1.4 s) and a little start-up.
+const SPEAKER_TEST_MS: u64 = 1800;
 
 /// Lobby before a call: check camera, microphone and speaker, pick a background, then join.
 #[component]
@@ -20,9 +24,19 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
   let i18n = use_i18n();
   let call = state.call;
   let me = state.me();
+  let maybe_meetings = use_context::<MeetingsHub>();
   let conversation = Memo::new(move |_| state.read(|backend| backend.conversation(request.conversation)));
   // Browsers name their devices only once the page may use them, so the lists can fill in later.
   let devices = Memo::new(move |_| state.read(|backend| backend.media_devices()));
+  let camera = Memo::new(move |_| {
+    devices.with(|devices| InputOffer::new(devices.cameras.clone(), devices.camera_presence))
+  });
+  let microphone = Memo::new(move |_| {
+    devices.with(|devices| InputOffer::new(devices.microphones.clone(), devices.microphone_presence))
+  });
+  let speakers = Memo::new(move |_| {
+    devices.with(|devices| InputOffer::new(devices.speakers.clone(), DevicePresence::Unknown))
+  });
   let has_effects = untrack(|| state.read(|backend| backend.has_background_effects()));
   let participants = Memo::new(move |_| {
     state
@@ -31,6 +45,10 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
   });
 
   let is_real = !untrack(|| state.read(|backend| backend.has_simulated_calls()));
+
+  // The lists may be old: the desktop app lists on request, and a camera may have been plugged in
+  // or a permission changed since. Browsers also report changes themselves (`devicechange`).
+  call.emit(CallEvent::RefreshDevices);
 
   // Remember the first device of each kind when nothing was chosen before.
   Effect::new(move |_| {
@@ -47,14 +65,13 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
       }
     }
   });
+  keep_off_while_unavailable(camera, call.is_camera_on, move |is_on| call.set_camera(is_on));
+  keep_off_while_unavailable(microphone, call.is_mic_on, move |is_on| call.set_muted(!is_on));
 
   let title = move || {
+    let maybe_meeting_title = maybe_meetings.and_then(|hub| hub.title_for(request.conversation));
     let name = conversation.get().map(|conv| conv.name).unwrap_or_default();
-    match request.kind {
-      CallKind::Direct => i18n.t_with("call-title-direct", &[("name", &name)]),
-      CallKind::Group => i18n.t_with("call-title-group", &[("name", &name)]),
-      CallKind::Huddle => i18n.t_with("call-title-huddle", &[("name", &name)]),
-    }
+    call_heading(i18n, request.kind, maybe_meeting_title.as_deref(), &name)
   };
 
   // Simulated microphone level while the microphone is on.
@@ -76,31 +93,57 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
   let is_testing_speaker = RwSignal::new(false);
   let test_speaker = move |_| {
     is_testing_speaker.set(true);
+    // The backend plays the sound and reports a failure (`feedback::report_failure`).
+    call.emit(CallEvent::TestSpeakers(call.speaker_id.get_untracked()));
     set_timeout(
       move || {
         // The pre-join screen may be gone by then; `try_set` ignores a disposed signal.
         let _ = is_testing_speaker.try_set(false);
       },
-      std::time::Duration::from_millis(SPEAKER_TEST_MS as u64),
+      std::time::Duration::from_millis(SPEAKER_TEST_MS),
     );
   };
+
+  // The demo draws a pretend camera image; real calls show the camera only once joined, so the
+  // preview shows who joins instead of a picture that isn't the camera.
+  let shows_pretend_camera =
+    move || !is_real && call.is_camera_on.get() && camera.with(InputOffer::is_usable);
+  let camera_status = Signal::derive(move || {
+    camera
+      .with(|offer| offer.unavailable_key(InputKind::Camera))
+      .unwrap_or(if call.is_camera_on.get() {
+        "prejoin-camera-at-join"
+      } else {
+        "prejoin-camera-off"
+      })
+  });
+  let preview_me = me.clone();
 
   view! {
     <section class="prejoin" aria-labelledby="prejoin-title">
       <div class="prejoin-preview">
-        <VideoTile
-          user=me
-          is_self=true
-          is_large=true
-          is_muted=Signal::derive(move || !call.is_mic_on.get())
-          is_camera_on=call.is_camera_on
-          effect=call.effect
-          is_mirrored=call.mirror_self_view
-        />
+        <Show
+          when=shows_pretend_camera
+          fallback=move || view! {
+            <SelfPreview user=preview_me.clone() is_muted=Signal::derive(move || !call.is_mic_on.get()) status_key=camera_status />
+          }
+        >
+          <VideoTile
+            user=me.clone()
+            is_self=true
+            is_large=true
+            is_muted=Signal::derive(move || !call.is_mic_on.get())
+            is_camera_on=call.is_camera_on
+            effect=call.effect
+            is_mirrored=call.mirror_self_view
+          />
+        </Show>
         <div class="preview-controls" role="group" aria-label=move || i18n.t("prejoin-quick-controls")>
           <button
             class="round-btn"
             class:off=move || !call.is_mic_on.get()
+            disabled=move || !microphone.with(InputOffer::is_usable)
+            title=move || microphone.with(|offer| offer.hint_key(InputKind::Microphone)).map(|key| i18n.t(key))
             aria-pressed=move || (!call.is_mic_on.get()).to_string()
             aria-label=move || if call.is_mic_on.get() { i18n.t("control-mic-mute") } else { i18n.t("control-mic-unmute") }
             on:click=move |_| call.set_muted(call.is_mic_on.get_untracked())
@@ -110,6 +153,8 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
           <button
             class="round-btn"
             class:off=move || !call.is_camera_on.get()
+            disabled=move || !camera.with(InputOffer::is_usable)
+            title=move || camera.with(|offer| offer.hint_key(InputKind::Camera)).map(|key| i18n.t(key))
             aria-pressed=move || (!call.is_camera_on.get()).to_string()
             aria-label=move || if call.is_camera_on.get() { i18n.t("control-camera-off") } else { i18n.t("control-camera-on") }
             on:click=move |_| call.set_camera(!call.is_camera_on.get_untracked())
@@ -134,11 +179,11 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
         </p>
         <div class="field">
           <label for="prejoin-camera">{move || i18n.t("prejoin-camera")}</label>
-          <DeviceSelect id="prejoin-camera" list=Signal::derive(move || devices.get().cameras) selected=call.camera_id on_pick=Callback::new(move |id: String| call.emit(CallEvent::CameraDevice(id))) />
+          <DeviceSelect id="prejoin-camera" kind=InputKind::Camera offer=camera selected=call.camera_id on_pick=Callback::new(move |id: String| call.emit(CallEvent::CameraDevice(id))) />
         </div>
         <div class="field">
           <label for="prejoin-mic">{move || i18n.t("prejoin-microphone")}</label>
-          <DeviceSelect id="prejoin-mic" list=Signal::derive(move || devices.get().microphones) selected=call.microphone_id on_pick=Callback::new(move |id: String| call.emit(CallEvent::Microphone(id))) />
+          <DeviceSelect id="prejoin-mic" kind=InputKind::Microphone offer=microphone selected=call.microphone_id on_pick=Callback::new(move |id: String| call.emit(CallEvent::Microphone(id))) />
           <Show when=move || !is_real fallback=|| ()>
           <div
             class="meter"
@@ -157,7 +202,7 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
         <div class="field">
           <label for="prejoin-speaker">{move || i18n.t("prejoin-speaker")}</label>
           <div class="field-row">
-            <DeviceSelect id="prejoin-speaker" list=Signal::derive(move || devices.get().speakers) selected=call.speaker_id on_pick=Callback::new(move |id: String| call.emit(CallEvent::Speakers(id))) />
+            <DeviceSelect id="prejoin-speaker" kind=InputKind::Speakers offer=speakers selected=call.speaker_id on_pick=Callback::new(move |id: String| call.emit(CallEvent::Speakers(id))) />
             <button type="button" class="btn" on:click=test_speaker disabled=move || is_testing_speaker.get()>
               <Icon name=IconName::Volume />
               <span>
@@ -198,10 +243,60 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
   }
 }
 
+/// The heading of the pre-join and call screens: the meeting's title, else the conversation's
+/// name in a sentence, else a plain "Call" (a conversation whose name isn't known yet).
+pub fn call_heading(
+  i18n: I18n,
+  kind: CallKind,
+  maybe_meeting_title: Option<&str>,
+  conversation_name: &str,
+) -> String {
+  match heading(kind, maybe_meeting_title, conversation_name) {
+    Heading::Title(title) => title.to_owned(),
+    Heading::Named(key, name) => i18n.t_with(key, &[("name", name)]),
+    Heading::Plain(key) => i18n.t(key),
+  }
+}
+
+/// The user's tile while there is no camera image: their picture and what the camera does.
+#[component]
+fn SelfPreview(
+  user: User,
+  #[prop(into)] is_muted: Signal<bool>,
+  #[prop(into)] status_key: Signal<&'static str>,
+) -> impl IntoView {
+  let i18n = use_i18n();
+  view! {
+    <div
+      class="tile tile-large prejoin-self"
+      role="group"
+      aria-label=move || {
+        let mut parts = vec![i18n.t("tile-you"), i18n.t(status_key.get())];
+        if is_muted.get() {
+          parts.push(i18n.t("tile-muted"));
+        }
+        parts.join(", ")
+      }
+    >
+      <div class="prejoin-self-body" aria-hidden="true">
+        <Avatar user=user size=AvatarSize::ExtraLarge />
+        <span class="prejoin-self-status">{move || i18n.t(status_key.get())}</span>
+      </div>
+      <div class="tile-label">
+        <span class="tile-name">{move || i18n.t("tile-you")}</span>
+        <Show when=move || is_muted.get() fallback=|| ()>
+          <Icon name=IconName::MicOff class="tile-badge" />
+        </Show>
+      </div>
+    </div>
+  }
+}
+
 #[component]
 fn DeviceSelect(
   id: &'static str,
-  #[prop(into)] list: Signal<Vec<MediaDevice>>,
+  kind: InputKind,
+  #[prop(into)] offer: Signal<InputOffer>,
   selected: RwSignal<String>,
   on_pick: Callback<String>,
 ) -> impl IntoView {
@@ -210,19 +305,15 @@ fn DeviceSelect(
     <select
       id=id
       class="input grow"
+      disabled=move || !offer.with(InputOffer::is_usable)
       on:change=move |ev| {
         let value = event_target_value(&ev);
         selected.set(value.clone());
         on_pick.run(value);
       }
     >
-      {move || {
-        let devices = list.get();
-        if devices.is_empty() {
-          // Nothing listed yet (the browser names devices only with permission): the default.
-          return view! { <option value="" selected=true>{i18n.t("calls-system-default")}</option> }.into_any();
-        }
-        devices
+      {move || match offer.get() {
+        InputOffer::Devices(devices) => devices
           .into_iter()
           .map(|device| {
             let value = device.id.clone();
@@ -233,8 +324,270 @@ fn DeviceSelect(
             }
           })
           .collect_view()
-          .into_any()
+          .into_any(),
+        other => {
+          let key = other.unavailable_key(kind).unwrap_or("calls-system-default");
+          view! { <option value="" selected=true>{i18n.t(key)}</option> }.into_any()
+        },
       }}
     </select>
+  }
+}
+
+/// Turns an input off while there is none (or access is refused), and back on when one appears
+/// if it was on before: plugging in a camera brings back the user's choice.
+fn keep_off_while_unavailable(
+  offer: Memo<InputOffer>,
+  is_on: RwSignal<bool>,
+  set_on: impl Fn(bool) + 'static,
+) {
+  let was_turned_off = StoredValue::new(false);
+  Effect::new(move |_| {
+    let is_usable = offer.with(InputOffer::is_usable);
+    if !is_usable && is_on.get_untracked() {
+      was_turned_off.set_value(true);
+      set_on(false);
+    } else if is_usable && was_turned_off.get_value() {
+      was_turned_off.set_value(false);
+      set_on(true);
+    }
+  });
+}
+
+/// What the pre-join screen offers for one kind of device, from the device listing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum InputOffer {
+  /// Named devices to pick from.
+  Devices(Vec<MediaDevice>),
+  /// Devices the platform doesn't name (yet), or a listing that hasn't arrived: the default.
+  SystemDefault,
+  /// No device of this kind: nothing to pick, and the input stays off.
+  Missing,
+  /// The user or a site setting refused access: nothing to pick until they allow it.
+  Blocked,
+}
+
+/// Which device a select or toggle is for, for its wording.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InputKind {
+  Camera,
+  Microphone,
+  Speakers,
+}
+
+/// How a call heading reads, before translation.
+#[derive(Debug, PartialEq, Eq)]
+enum Heading<'a> {
+  Title(&'a str),
+  Named(&'static str, &'a str),
+  Plain(&'static str),
+}
+
+impl InputOffer {
+  fn new(devices: Vec<MediaDevice>, presence: DevicePresence) -> Self {
+    if !devices.is_empty() {
+      return Self::Devices(devices);
+    }
+    match presence {
+      DevicePresence::Missing => Self::Missing,
+      DevicePresence::Blocked => Self::Blocked,
+      DevicePresence::Unknown | DevicePresence::Present | DevicePresence::Hidden => Self::SystemDefault,
+    }
+  }
+
+  fn is_usable(&self) -> bool {
+    matches!(self, Self::Devices(_) | Self::SystemDefault)
+  }
+
+  /// The i18n key that says why the device can't be used; `None` while it can.
+  fn unavailable_key(&self, kind: InputKind) -> Option<&'static str> {
+    Some(match (self, kind) {
+      (Self::Devices(_) | Self::SystemDefault, _) | (_, InputKind::Speakers) => return None,
+      (Self::Missing, InputKind::Camera) => "prejoin-no-camera",
+      (Self::Missing, InputKind::Microphone) => "prejoin-no-microphone",
+      (Self::Blocked, InputKind::Camera) => "prejoin-camera-blocked",
+      (Self::Blocked, InputKind::Microphone) => "prejoin-microphone-blocked",
+    })
+  }
+
+  /// The i18n key of the toggle's tooltip: what to do to use the device; `None` while it can.
+  fn hint_key(&self, kind: InputKind) -> Option<&'static str> {
+    Some(match (self, kind) {
+      (Self::Devices(_) | Self::SystemDefault, _) | (_, InputKind::Speakers) => return None,
+      (Self::Missing, InputKind::Camera) => "prejoin-no-camera-hint",
+      (Self::Missing, InputKind::Microphone) => "prejoin-no-microphone-hint",
+      (Self::Blocked, InputKind::Camera) => "prejoin-camera-blocked-hint",
+      (Self::Blocked, InputKind::Microphone) => "prejoin-microphone-blocked-hint",
+    })
+  }
+}
+
+fn heading<'a>(
+  kind: CallKind,
+  maybe_meeting_title: Option<&'a str>,
+  conversation_name: &'a str,
+) -> Heading<'a> {
+  if let Some(title) = maybe_meeting_title
+    .map(str::trim)
+    .filter(|title| !title.is_empty())
+  {
+    return Heading::Title(title);
+  }
+  let name = conversation_name.trim();
+  match (kind, name.is_empty()) {
+    (CallKind::Huddle, true) => Heading::Plain("call-title-huddle-unnamed"),
+    (_, true) => Heading::Plain("call-title-unnamed"),
+    (CallKind::Direct, false) => Heading::Named("call-title-direct", name),
+    (CallKind::Group, false) => Heading::Named("call-title-group", name),
+    (CallKind::Huddle, false) => Heading::Named("call-title-huddle", name),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  mod devices {
+    use super::*;
+
+    #[test]
+    fn a_computer_without_a_camera_offers_none_and_says_so() {
+      let offer = InputOffer::new(Vec::new(), DevicePresence::Missing);
+      assert_eq!(offer, InputOffer::Missing);
+      assert!(!offer.is_usable());
+      assert_eq!(
+        offer.unavailable_key(InputKind::Camera),
+        Some("prejoin-no-camera")
+      );
+      assert_eq!(offer.hint_key(InputKind::Camera), Some("prejoin-no-camera-hint"));
+      assert_eq!(
+        offer.unavailable_key(InputKind::Microphone),
+        Some("prejoin-no-microphone")
+      );
+    }
+
+    #[test]
+    fn a_refused_device_is_blocked_not_missing() {
+      let offer = InputOffer::new(Vec::new(), DevicePresence::Blocked);
+      assert!(!offer.is_usable());
+      assert_eq!(
+        offer.unavailable_key(InputKind::Camera),
+        Some("prejoin-camera-blocked")
+      );
+      assert_eq!(
+        offer.hint_key(InputKind::Microphone),
+        Some("prejoin-microphone-blocked-hint")
+      );
+    }
+
+    #[test]
+    fn unnamed_or_unlisted_devices_offer_the_system_default() {
+      for presence in [
+        DevicePresence::Hidden,
+        DevicePresence::Unknown,
+        DevicePresence::Present,
+      ] {
+        let offer = InputOffer::new(Vec::new(), presence);
+        assert_eq!(offer, InputOffer::SystemDefault, "{presence:?}");
+        assert!(offer.is_usable());
+        assert_eq!(offer.unavailable_key(InputKind::Camera), None);
+        assert_eq!(offer.hint_key(InputKind::Camera), None);
+      }
+    }
+
+    #[test]
+    fn named_devices_win_over_the_presence() {
+      let camera = MediaDevice {
+        id: "cam-1".into(),
+        label: "Camera".into(),
+      };
+      let offer = InputOffer::new(vec![camera.clone()], DevicePresence::Missing);
+      assert_eq!(offer, InputOffer::Devices(vec![camera]));
+      assert!(offer.is_usable());
+    }
+
+    #[test]
+    fn speakers_are_never_reported_missing() {
+      assert_eq!(InputOffer::Missing.unavailable_key(InputKind::Speakers), None);
+      assert_eq!(InputOffer::Blocked.hint_key(InputKind::Speakers), None);
+    }
+
+    #[test]
+    fn every_key_is_translated() {
+      let en = include_str!("../../i18n/en.ftl");
+      let de = include_str!("../../i18n/de.ftl");
+      let offers = [InputOffer::Missing, InputOffer::Blocked];
+      let kinds = [InputKind::Camera, InputKind::Microphone];
+      let keys = offers
+        .iter()
+        .flat_map(|offer| {
+          kinds
+            .iter()
+            .flat_map(move |kind| [offer.unavailable_key(*kind), offer.hint_key(*kind)])
+        })
+        .flatten()
+        .chain([
+          "prejoin-camera-off",
+          "prejoin-camera-at-join",
+          "call-title-unnamed",
+          "call-title-huddle-unnamed",
+        ]);
+      for key in keys {
+        for (name, source) in [("en", en), ("de", de)] {
+          assert!(
+            source.contains(&format!("\n{key} =")),
+            "{key} missing in {name}.ftl"
+          );
+        }
+      }
+    }
+  }
+
+  mod headings {
+    use super::*;
+
+    #[test]
+    fn a_meeting_is_called_by_its_title() {
+      assert_eq!(
+        heading(CallKind::Group, Some("Weekly sync"), ""),
+        Heading::Title("Weekly sync")
+      );
+      assert_eq!(
+        heading(CallKind::Group, Some("Weekly sync"), "Project A"),
+        Heading::Title("Weekly sync")
+      );
+    }
+
+    #[test]
+    fn a_named_conversation_is_in_the_sentence() {
+      assert_eq!(
+        heading(CallKind::Group, None, "Project A"),
+        Heading::Named("call-title-group", "Project A")
+      );
+      assert_eq!(
+        heading(CallKind::Direct, Some("  "), "Alice"),
+        Heading::Named("call-title-direct", "Alice")
+      );
+      assert_eq!(
+        heading(CallKind::Huddle, None, "Project A"),
+        Heading::Named("call-title-huddle", "Project A")
+      );
+    }
+
+    #[test]
+    fn without_a_name_there_is_no_dangling_preposition() {
+      assert_eq!(
+        heading(CallKind::Group, None, ""),
+        Heading::Plain("call-title-unnamed")
+      );
+      assert_eq!(
+        heading(CallKind::Direct, None, " "),
+        Heading::Plain("call-title-unnamed")
+      );
+      assert_eq!(
+        heading(CallKind::Huddle, None, ""),
+        Heading::Plain("call-title-huddle-unnamed")
+      );
+    }
   }
 }

@@ -7,6 +7,8 @@ pub enum AvatarSize {
   Small,
   Medium,
   Large,
+  /// The user's own tile before a call, without a camera image.
+  ExtraLarge,
 }
 
 impl AvatarSize {
@@ -15,6 +17,7 @@ impl AvatarSize {
       Self::Small => "avatar avatar-sm",
       Self::Medium => "avatar avatar-md",
       Self::Large => "avatar avatar-lg",
+      Self::ExtraLarge => "avatar avatar-xl",
     }
   }
 }

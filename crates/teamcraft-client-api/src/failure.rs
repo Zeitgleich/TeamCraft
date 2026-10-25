@@ -63,10 +63,17 @@ pub enum CallFailure {
   /// The organization requires a background behind the camera image, which this device can't
   /// apply.
   BackgroundRequired,
+  /// The chosen speakers can't be used; the sound played on the default output instead.
+  SpeakersUnavailable,
+  /// No speakers or other audio output to play on.
+  SpeakersMissing,
+  /// The browser didn't let the page play sound (no interaction with the page yet, or a site
+  /// setting).
+  SoundBlocked,
 }
 
 impl CallFailure {
-  const ALL: [Self; 10] = [
+  const ALL: [Self; 13] = [
     Self::MicrophoneDenied,
     Self::MicrophoneMissing,
     Self::MicrophoneInUse,
@@ -77,6 +84,9 @@ impl CallFailure {
     Self::Unsupported,
     Self::ServerUnreachable,
     Self::BackgroundRequired,
+    Self::SpeakersUnavailable,
+    Self::SpeakersMissing,
+    Self::SoundBlocked,
   ];
 
   /// Stable name on the wire, after [`CALL_PREFIX`].
@@ -92,6 +102,9 @@ impl CallFailure {
       Self::Unsupported => "unsupported",
       Self::ServerUnreachable => "server_unreachable",
       Self::BackgroundRequired => "background_required",
+      Self::SpeakersUnavailable => "speakers_unavailable",
+      Self::SpeakersMissing => "speakers_missing",
+      Self::SoundBlocked => "sound_blocked",
     }
   }
 

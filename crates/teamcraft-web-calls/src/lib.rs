@@ -11,6 +11,7 @@
 #![cfg(target_arch = "wasm32")]
 
 mod ringtone;
+mod speaker_test;
 
 use std::cell::{Cell, RefCell};
 use std::pin::pin;
@@ -23,8 +24,8 @@ use futures::future::{Either, select};
 use js_sys::{Function, Promise, Reflect, Uint8Array};
 use teamcraft_client_api::call_view::{CallSignal, CallView};
 use teamcraft_client_api::calls::{
-  ActiveCall, BackgroundEffect, CallEndReason, CallRequest, CallStatusSounds, MediaDevice, MediaDevices,
-  PushToTalk, ScreenShareSound,
+  ActiveCall, BackgroundEffect, CallEndReason, CallRequest, CallStatusSounds, DevicePresence, MediaDevice,
+  MediaDevices, PushToTalk, ScreenShareSound,
 };
 use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
 use teamcraft_client_api::page_calls::PreparedCall;
@@ -354,16 +355,19 @@ impl Host {
   fn refresh_devices(self: &Rc<Self>) {
     let host = Rc::downgrade(self);
     spawn_local(async move {
-      let devices = match call_web::list_media_devices().await {
-        Ok(devices) => MediaDevices {
-          cameras: media_devices(&devices.cameras),
-          microphones: media_devices(&devices.inputs),
-          speakers: media_devices(&devices.outputs),
-        },
+      let listed = match call_web::list_media_devices().await {
+        Ok(listed) => listed,
         Err(error) => {
           tracing::debug!(%error, "could not list the media devices");
           return;
         },
+      };
+      let devices = MediaDevices {
+        cameras: media_devices(&listed.cameras),
+        microphones: media_devices(&listed.inputs),
+        speakers: media_devices(&listed.outputs),
+        camera_presence: presence(&listed.cameras, "camera").await,
+        microphone_presence: presence(&listed.inputs, "microphone").await,
       };
       if let Some(host) = host.upgrade() {
         host.state.borrow_mut().devices = devices;
@@ -442,6 +446,8 @@ impl Host {
       // The browser has no background effects (the UI offers none) and no system effects panel.
       CallAction::SetBackgroundEffect { .. } | CallAction::OpenSystemVideoEffects => {},
       CallAction::Join { request } => self.join(request).await?,
+      CallAction::RefreshDevices => self.refresh_devices(),
+      CallAction::TestSpeakers { maybe_device } => speaker_test::play(maybe_device.as_deref()).await?,
       CallAction::Unknown => return Err(ActionFailure::other("unknown call action")),
     }
     Ok(())
@@ -825,6 +831,36 @@ fn media_devices(devices: &[AudioDeviceInfo]) -> Vec<MediaDevice> {
     .collect()
 }
 
+/// What the listing says about one kind of input. Browsers list an unnamed device both before
+/// the user was asked and after they refused; the permission state tells the two apart.
+async fn presence(devices: &[AudioDeviceInfo], permission: &str) -> DevicePresence {
+  let presence = DevicePresence::from_ids(devices.iter().map(|device| device.id.as_str()));
+  if presence == DevicePresence::Hidden && permission_state(permission).await.as_deref() == Some("denied") {
+    return DevicePresence::Blocked;
+  }
+  presence
+}
+
+/// `navigator.permissions.query({ name })`'s state; `None` where the browser can't say (not
+/// every browser knows the camera and microphone permissions).
+async fn permission_state(name: &str) -> Option<String> {
+  let navigator = web_sys::window()?.navigator();
+  let permissions = Reflect::get(&navigator, &JsValue::from_str("permissions"))
+    .ok()
+    .filter(JsValue::is_object)?;
+  let query: Function = Reflect::get(&permissions, &JsValue::from_str("query"))
+    .ok()?
+    .dyn_into()
+    .ok()?;
+  let descriptor = js_sys::Object::new();
+  Reflect::set(&descriptor, &JsValue::from_str("name"), &JsValue::from_str(name)).ok()?;
+  let promise: Promise = query.call1(&permissions, &descriptor).ok()?.dyn_into().ok()?;
+  let status = JsFuture::from(promise).await.ok()?;
+  Reflect::get(&status, &JsValue::from_str("state"))
+    .ok()?
+    .as_string()
+}
+
 fn device_choice(maybe_id: Option<String>) -> AudioDeviceChoice {
   match maybe_id {
     Some(id) if !id.is_empty() => AudioDeviceChoice::Device(AudioDeviceId::new(id)),
@@ -855,7 +891,7 @@ fn remote_error(text: &str) -> CallKeyError {
   CallKeyError::Remote(text.to_owned())
 }
 
-fn js_text(error: &JsValue) -> String {
+pub(crate) fn js_text(error: &JsValue) -> String {
   error
     .as_string()
     .or_else(|| {
