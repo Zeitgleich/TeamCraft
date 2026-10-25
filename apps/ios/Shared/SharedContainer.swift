@@ -97,17 +97,6 @@ struct SharedContainer {
     nonmutating set { defaults.set(newValue, forKey: Self.displayNameKey) }
   }
 
-  /// The data folder of builds that had one server baked in (before server entry). It stays until
-  /// `LegacySignOut` unregistered its push; nothing else opens it.
-  var legacyDataDirectory: URL {
-    containerRoot.appendingPathComponent("teamcraft", isDirectory: true)
-  }
-
-  /// Removes the data folder of builds before server entry.
-  func removeLegacyData() {
-    try? fileManager.removeItem(at: legacyDataDirectory)
-  }
-
   /// Holds a data folder per server.
   private var serversDirectory: URL {
     var url = containerRoot.appendingPathComponent("servers", isDirectory: true)

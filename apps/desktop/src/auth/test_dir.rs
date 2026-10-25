@@ -1,6 +1,6 @@
 //! A directory below the build's temp dir for tests, removed again.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub struct TempDir(pub PathBuf);
 
@@ -11,10 +11,6 @@ impl TempDir {
       .map(|elapsed| elapsed.as_nanos())
       .unwrap_or_default();
     Self(std::env::temp_dir().join(format!("teamcraft-desktop-{name}-{}-{nanos}", std::process::id())))
-  }
-
-  pub fn path(&self) -> &Path {
-    &self.0
   }
 }
 

@@ -102,7 +102,6 @@ final class AppModel {
   @ObservationIgnored private lazy var vault = SessionVault(servers: servers)
   @ObservationIgnored private let container = SharedContainer()
   @ObservationIgnored private lazy var factory = CoreFactory(container: container, vault: vault, servers: servers)
-  @ObservationIgnored private lazy var legacySignOut = LegacySignOut(vault: vault, container: container)
   @ObservationIgnored private let login = WebLogin()
   @ObservationIgnored private let serverInfo = ServerInfoClient()
   @ObservationIgnored private let localAuth = LocalAuthClient()
@@ -129,9 +128,6 @@ final class AppModel {
     storeChanges.observe { [weak self] in self?.storeDidChange() }
     // Starts following the network, so changes reach the core from now on.
     _ = NetworkMonitor.shared
-    detachLegacyAccount()
-    let maybeStored = servers.activeServer
-    Task { await legacySignOut.run(activeServer: maybeStored) }
     // Copies of picked files older than a week were uploaded long ago.
     container.pruneUploads(olderThan: 7 * 24 * 3600)
     await startWithServer()
@@ -181,9 +177,6 @@ final class AppModel {
     servers.activate(checked.server)
     // As stored: with the login hint of an earlier sign-in to this server kept (issue #448).
     maybeServer = servers.activeServer ?? checked.server
-    // The server may be the one of the session from before server entry (#224).
-    let confirmed = checked.server
-    Task { await legacySignOut.run(activeServer: confirmed) }
     maybeSignInPage = checked.signInPage
     isSignInPageFromCheck = true
     phase = .signedOut(nil)
@@ -880,17 +873,6 @@ final class AppModel {
     NotificationAuthenticator().removeKey()
     container.wipeDownloads()
     container.pruneUploads(olderThan: 0)
-    container.activeAccount = nil
-    container.displayName = nil
-    UserDefaults.standard.removeObject(forKey: Self.pushTokenKey)
-  }
-
-  /// Builds before server entry kept one session under a fixed name: the user enters the server
-  /// and signs in again, and `LegacySignOut` unregisters the old device's push, revokes the old
-  /// token and deletes the old session, key and data (#224).
-  private func detachLegacyAccount() {
-    // Only the first time: later starts may already have an account of the new layout.
-    guard vault.hasLegacySession, LegacySignOut.noteLegacySession() else { return }
     container.activeAccount = nil
     container.displayName = nil
     UserDefaults.standard.removeObject(forKey: Self.pushTokenKey)

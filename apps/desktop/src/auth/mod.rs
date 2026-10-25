@@ -13,7 +13,6 @@
 mod avatars;
 mod callback_page;
 pub mod commands;
-pub mod legacy;
 mod local;
 mod loopback;
 pub mod servers;

@@ -236,8 +236,6 @@ enum SessionVaultError: Error, Equatable {
 /// both processes; refreshes run under the cross-process lock's protection by the callers (the
 /// engine only asks while its process holds the lock).
 final class SessionVault {
-  /// The single item of builds that had one server baked in.
-  private static let legacyAccount = "oidc-session"
   private static let accountPrefix = "oidc-session."
   private static let localAccountPrefix = "local-session."
 
@@ -284,22 +282,6 @@ final class SessionVault {
       // Nothing to do about a failed delete; the next sign-in overwrites the item.
       try? keychain.delete(account)
     }
-  }
-
-  /// The session of a build before server entry, kept until `LegacySignOut` signed it out.
-  func legacySession() -> OidcSession? {
-    guard let data = try? keychain.read(Self.legacyAccount) else { return nil }
-    return try? JSONDecoder().decode(OidcSession.self, from: data)
-  }
-
-  /// Whether a build before server entry left its session item (readable or not).
-  var hasLegacySession: Bool {
-    (try? keychain.read(Self.legacyAccount)) != nil
-  }
-
-  /// Deletes the session of a build before server entry.
-  func removeLegacySession() {
-    try? keychain.delete(Self.legacyAccount)
   }
 
   /// A valid access token, refreshed if it is about to expire; `nil` when signed out or the

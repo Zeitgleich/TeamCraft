@@ -111,11 +111,6 @@ impl ServerDirectory {
     }
   }
 
-  /// Every stored server profile.
-  pub fn profiles(&self) -> Vec<ServerProfile> {
-    self.lock().accounts.clone()
-  }
-
   /// The account in use, if any.
   pub fn active(&self) -> Option<ServerProfile> {
     let accounts = self.lock();

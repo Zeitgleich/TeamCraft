@@ -41,8 +41,6 @@ use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_window_state::StateFlags;
 use tracing_subscriber::EnvFilter;
 
-use teamcraft_client_api::server_entry::ServerProfile;
-
 use crate::auth::servers::{ManagedServer, ServerDirectory, ServerState};
 use crate::auth::{AuthService, DesktopConfig, KeyringStore};
 use crate::calls::{BUNDLED_MODEL, CALL_CHANGED_EVENT, CallHost, MediaFiles};
@@ -113,7 +111,6 @@ fn main() -> anyhow::Result<()> {
           }
         },
       }
-      clean_up_legacy_layout(core::commands::base_dir(app.handle())?, servers.directory.profiles());
       app.manage(servers);
       let emitter = app.handle().clone();
       let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
@@ -332,20 +329,6 @@ fn watch_wake(app: &tauri::AppHandle) {
         handle.state::<Arc<CallHost>>().network_changed();
       })
       .await;
-  });
-}
-
-/// Revokes and deletes what builds from before the server entry left behind (#223), in the
-/// background: the keyring and the identity provider may be slow.
-fn clean_up_legacy_layout(base_dir: std::path::PathBuf, profiles: Vec<ServerProfile>) {
-  tauri::async_runtime::spawn(async move {
-    match auth::legacy::HttpRevoker::new() {
-      Ok(revoker) => {
-        let keys = auth::legacy::KeyringDatabaseKeys;
-        auth::legacy::clean_up_once(&base_dir, &profiles, &KeyringStore, &keys, &revoker).await;
-      },
-      Err(error) => tracing::warn!(%error, "could not clean up the old layout"),
-    }
   });
 }
 
