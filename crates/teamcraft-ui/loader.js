@@ -236,7 +236,10 @@ function applyBrandName() {
 function showBrandName(brand) {
   if (!brand || typeof brand !== 'object') return;
   const name = typeof brand.display_name === 'string' ? brand.display_name.trim() : '';
-  if (name && [...name].length <= MAX_NAME_CHARS) document.title = name;
+  if (name && [...name].length <= MAX_NAME_CHARS) {
+    // As the app does (BrandView::page_title): the product name stays in the tab.
+    document.title = name === 'TeamCraft' ? name : `${name} – TeamCraft`;
+  }
 }
 
 // The app's language setting if it has one, else the browser's languages, else English.

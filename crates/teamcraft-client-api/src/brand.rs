@@ -55,6 +55,16 @@ impl BrandView {
     }
   }
 
+  /// The browser tab's title: "Example – TeamCraft", or just the product name without a brand.
+  /// The product stays in it so people recognise the app among their tabs.
+  pub fn page_title(&self) -> String {
+    if self.display_name == FALLBACK_NAME {
+      FALLBACK_NAME.to_owned()
+    } else {
+      format!("{} – {FALLBACK_NAME}", self.display_name)
+    }
+  }
+
   /// Checks a server answer. `server_url` is the base URL the client asked (empty: same origin);
   /// asset URLs are built on it. `None` if the answer is unusable (no name).
   ///
@@ -218,6 +228,13 @@ mod tests {
   use teamcraft_proto::BrandColors;
 
   use super::*;
+
+  #[test]
+  fn the_page_title_keeps_the_product_name() {
+    let view = BrandView::from_response(response(), "").unwrap();
+    assert_eq!(view.page_title(), format!("{} – TeamCraft", view.display_name));
+    assert_eq!(BrandView::fallback().page_title(), "TeamCraft");
+  }
 
   #[test]
   fn header_images_fall_back_from_logo_to_icon_per_theme() {
