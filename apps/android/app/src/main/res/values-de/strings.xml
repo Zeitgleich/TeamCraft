@@ -62,8 +62,13 @@
   <string name="error_wrong_passphrase">Diese Passphrase öffnet deine Schlüsselsicherung nicht.</string>
   <string name="error_storage">Die lokalen Daten konnten nicht geöffnet werden.</string>
   <string name="error_generic">Etwas ist schiefgelaufen.</string>
-  <string name="notification_channel_messages">Nachrichten</string>
-  <string name="notification_channel_mentions">Erwähnungen und Direktnachrichten</string>
+  <string name="notification_channel_messages">Kanalnachrichten</string>
+  <string name="notification_channel_mentions">Erwähnungen</string>
+  <string name="notification_channel_direct_messages">Direktnachrichten</string>
+  <string name="notification_channel_direct_messages_description">Nachrichten von Personen, mit denen du einzeln oder in kleinen Gruppen schreibst.</string>
+  <string name="notification_channel_meetings">Meeting-Erinnerungen</string>
+  <string name="notification_channel_meetings_description">Erinnerungen kurz vor Beginn eines Meetings.</string>
+  <string name="notification_mute">Für 8 Stunden stummschalten</string>
   <string name="notification_new_message">Neue Nachricht</string>
   <string name="notification_file">📎 %1$s</string>
   <string name="notification_reply">Antworten</string>
