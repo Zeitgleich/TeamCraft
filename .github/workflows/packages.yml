@@ -101,7 +101,16 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      # Pages ignores a deployment whose pages_build_version it has already deployed, and
+      # deploy-pages sends GITHUB_SHA as that version. A final release is tagged on its release
+      # candidate's commit, so the SHA alone repeats (issue #279). A 40-hex id unique per run
+      # (hash of the SHA and the run) keeps the shape of a SHA and never repeats.
+      - name: Unique build version
+        id: version
+        run: echo "build_version=$(printf '%s-%s-%s' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" | sha1sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
       - id: deployment
+        env:
+          GITHUB_SHA: ${{ steps.version.outputs.build_version }}
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
       # deploy-pages can report success without the site changing: Pages ignored the deployment of a
       # final release whose commit the release candidate had already deployed (issue #279). Wait for
