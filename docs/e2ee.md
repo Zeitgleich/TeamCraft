@@ -310,10 +310,12 @@ for months must keep fresh ones on the server:
   times use the system clock openmls checks against.
 - **Wiping.** A deleted package's stored bundle (private init and leaf keys) is overwritten in
   memory before it goes, and so is every old copy of the MLS storage in the store's cache. The
-  local database zeroes freed pages (SQLite `secure_delete`), and the Android store truncates its
-  write-ahead log after a deletion, so the old storage record isn't left in the files for somebody
-  who later gets the database key (#391). The first start after this change rebuilds each
-  database once (`VACUUM`), wiping free pages left from before. Copies the file system or the flash controller keep are
+  local database zeroes freed pages (SQLite `secure_delete`), and the native store truncates its
+  write-ahead log after a deletion and after every save of the MLS storage (inside a group of
+  writes, §9.5, once the group is committed), so no old storage record is left in the files for
+  somebody who later gets the database key (#391, #417). The first start after #391 rebuilt each
+  database once (`VACUUM`), wiping free pages left from before. The checkpoint adds no measurable
+  time next to sealing the snapshot (about 20 ms at 64 KiB, 320 ms at 1 MiB). Copies the file system or the flash controller keep are
   out of reach; the browser's IndexedDB gives no such control. The listing and the wiping rely on
   how `openmls_memory_storage` 0.6 keys bundles; a test fails when a new version changes it.
 - **History of a first add-back (known gap).** A user whose first device can't open the welcome

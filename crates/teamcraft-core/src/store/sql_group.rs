@@ -12,6 +12,9 @@ pub(crate) struct WriteGroup {
   depth: u32,
   /// A write of the open group failed: the group is rolled back when it ends.
   has_failed: bool,
+  /// A purge of the write-ahead log was asked for inside the group; it runs once the group is
+  /// committed (a checkpoint inside it would write half of the group to the database file).
+  is_purge_due: bool,
 }
 
 impl WriteGroup {
@@ -69,11 +72,20 @@ impl WriteGroup {
     Ok(())
   }
 
-  /// Whether a group of writes is open on the connection.
-  // Only the sealed store purges its write-ahead log.
+  /// Notes a purge request inside an open group; returns whether the caller must purge now.
   #[cfg_attr(not(feature = "sealed-sqlite"), allow(dead_code))]
-  pub(crate) fn is_open(&self) -> bool {
-    self.depth > 0
+  pub(crate) fn defer_purge(&mut self) -> bool {
+    if self.depth > 0 {
+      self.is_purge_due = true;
+      return false;
+    }
+    true
+  }
+
+  /// Whether a purge was deferred while the group that just ended was open; clears the note.
+  #[cfg_attr(not(feature = "sealed-sqlite"), allow(dead_code))]
+  pub(crate) fn take_due_purge(&mut self) -> bool {
+    self.depth == 0 && std::mem::take(&mut self.is_purge_due)
   }
 
   /// A write failed; inside a group this undoes the group.

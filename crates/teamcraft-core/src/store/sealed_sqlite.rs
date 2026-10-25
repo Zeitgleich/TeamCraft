@@ -112,24 +112,30 @@ impl RecordBackend for SqliteRecords {
   fn end_writes(&self) -> Result<(), StoreError> {
     let mut inner = self.lock();
     let Inner { connection, group } = &mut *inner;
-    group.end(connection)
+    group.end(connection)?;
+    if group.take_due_purge() {
+      checkpoint_truncate(connection)?;
+    }
+    Ok(())
   }
 
   /// Writes the log back into the database (whose freed pages `secure_delete` zeroes) and
-  /// truncates it, so no old page version stays in the log file.
+  /// truncates it, so no old page version stays in the log file. Inside a group of writes it waits
+  /// for the group's commit: a checkpoint before would write half of the group to the database.
   fn purge_freed(&self) -> Result<(), StoreError> {
-    let inner = self.lock();
-    // A checkpoint inside an open group would write half of it to the database file.
-    if inner.group.is_open() {
-      return Err(StoreError::Database(
-        "the local database can't be purged while a group of writes is open".into(),
-      ));
+    let mut inner = self.lock();
+    let Inner { connection, group } = &mut *inner;
+    if group.defer_purge() {
+      checkpoint_truncate(connection)?;
     }
-    inner
-      .connection
-      .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-      .map_err(database_error)
+    Ok(())
   }
+}
+
+fn checkpoint_truncate(connection: &Connection) -> Result<(), StoreError> {
+  connection
+    .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+    .map_err(database_error)
 }
 
 impl SqliteRecords {
@@ -233,6 +239,35 @@ mod tests {
 
     store.delete(Table::MlsStorage, "state").unwrap();
     store.purge_freed().unwrap();
+
+    let raw = std::fs::read(&path).unwrap();
+    let wal = std::fs::read(path.with_extension("db-wal")).unwrap_or_default();
+    for bytes in [&raw, &wal] {
+      assert!(!bytes.windows(needle.len()).any(|window| window == needle));
+    }
+    drop(store);
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  /// Issue #417: saving the MLS storage inside a group of writes clears the old snapshot from the
+  /// log once the group is committed.
+  #[test]
+  fn a_purge_inside_a_group_waits_for_the_commit() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let store =
+      SealedSqliteStore::open(&path, &StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
+    store.put(Table::MlsStorage, "state", &[7; 4096]).unwrap();
+    let sealed: Vec<u8> = Connection::open(&path)
+      .unwrap()
+      .query_row("SELECT value FROM sealed_records", [], |row| row.get(0))
+      .unwrap();
+    let needle = &sealed[sealed.len() / 2..sealed.len() / 2 + 32];
+
+    store.begin_writes().unwrap();
+    store.put(Table::MlsStorage, "state", &[9; 4096]).unwrap();
+    store.purge_freed().unwrap();
+    store.end_writes().unwrap();
 
     let raw = std::fs::read(&path).unwrap();
     let wal = std::fs::read(path.with_extension("db-wal")).unwrap_or_default();
