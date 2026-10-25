@@ -72,6 +72,55 @@ async fn a_dm_with_somebody_without_a_device_adds_them_when_their_first_device_a
   assert_eq!(bob.texts(dm), vec!["welcome Bob", "now you are in"]);
 }
 
+/// Somebody who never sets up the app doesn't keep the conversation waiting forever (#288): after
+/// `pending_addition_expiry` it says so, and a device that appears later still gets them in.
+#[tokio::test]
+async fn somebody_who_never_sets_up_the_app_stops_being_waited_for() {
+  let server = FakeServer::new();
+  let clock = std::sync::Arc::new(teamcraft_core::clock::ManualClock::new(1_800_000_000_000));
+  let mut alice = Peer::enroll_on_clock(
+    server.add_user("Alice"),
+    "Alice",
+    common::settings(),
+    Box::new(clock.clone()),
+  )
+  .await;
+  let bob_api = server.add_user("Bob");
+  let bob_id = bob_api.user_id();
+  let dm = alice.client.open_dm(bob_id).await.unwrap();
+  let expiry_ms = i64::try_from(common::settings().pending_addition_expiry.as_millis()).unwrap();
+
+  clock.advance(expiry_ms - 1);
+  alice.client.apply_pending_changes().await.unwrap();
+  assert_eq!(
+    pending_user_additions(alice.store.as_ref(), dm).unwrap(),
+    vec![(bob_id, UserAddWait::NoDevice)],
+    "still within the waiting time"
+  );
+
+  clock.advance(1);
+  alice.client.apply_pending_changes().await.unwrap();
+  assert_eq!(
+    pending_user_additions(alice.store.as_ref(), dm).unwrap(),
+    vec![(bob_id, UserAddWait::NeverSetUp)]
+  );
+  assert!(!teamcraft_core::client::is_waiting_for_device(alice.store.as_ref(), dm).unwrap());
+
+  // Years later Bob signs in on a first device: he still gets in.
+  let mut bob = Peer::enroll_as(bob_api, "Bob").await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  alice.client.apply_pending_changes().await.unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert!(
+    pending_user_additions(alice.store.as_ref(), dm)
+      .unwrap()
+      .is_empty()
+  );
+  alice.client.send_text(dm, None, "welcome Bob").await.unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert_eq!(bob.texts(dm), vec!["welcome Bob"]);
+}
+
 #[tokio::test]
 async fn a_first_device_missed_while_offline_is_found_by_the_next_full_sync() {
   let server = FakeServer::new();

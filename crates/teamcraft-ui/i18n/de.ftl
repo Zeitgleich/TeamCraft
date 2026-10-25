@@ -688,6 +688,7 @@ removal-unconfirmed-keep = Behalten
 group-refused = Der Server lässt dieses Gerät die verschlüsselte Gruppe dieser Unterhaltung nicht lesen. Neue Nachrichten fehlen eventuell.
 dm-setup-pending = Verschlüsselung wird eingerichtet… Die Gruppe der anderen Seite wird beigetreten; sobald das fertig ist, lassen sich Nachrichten senden.
 dm-setup-failed = Die Verschlüsselung dieser Unterhaltung konnte noch nicht eingerichtet werden. Erneut versuchen bittet die Geräte der anderen Seite, dieses Gerät aufzunehmen.
+never-set-up = { $name } hat TeamCraft nie eingerichtet. { $name } sieht diese Unterhaltung, falls sich { $name } später auf einem Gerät anmeldet.
 waiting-first-device = { $name } hat TeamCraft noch nicht fertig eingerichtet. Du kannst trotzdem schon schreiben: { $name } sieht deine Nachrichten, sobald die Einrichtung abgeschlossen ist.
 devices-unverified = { $name } kann nicht verschlüsselt hinzugefügt werden: Keines der Geräte ließ sich prüfen. Bitte { $name }, sich neu anzumelden; ein neues Gerät wird von selbst versucht.
 waiting-key-package = { $name } kann noch nicht verschlüsselt hinzugefügt werden, weil keines der Geräte mehr Schlüssel auf dem Server hat. Das behebt sich, sobald eines der Geräte wieder online ist.

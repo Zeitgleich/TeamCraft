@@ -327,6 +327,9 @@ pub enum MembershipIssue {
   /// `user` hasn't set up the app yet; they are added to the encryption group (and get the
   /// messages) once their first device appears.
   WaitingForFirstDevice { user: UserId },
+  /// `user` still had no device after the waiting time (`pending_addition_expiry`): they never set
+  /// up the app. Their first device, should it appear, still gets them in.
+  NeverSetUp { user: UserId },
   /// `user`'s devices have no key package left on the server; they are added once one of their
   /// devices comes online and uploads new ones.
   NoKeyPackage { user: UserId },

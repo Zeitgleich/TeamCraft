@@ -248,6 +248,11 @@ fn MembershipIssueBanners(conversation: ConversationId, info: Memo<Option<Conver
             i18n.t_with("waiting-first-device", &[("name", &name_of(user))]),
             None,
           ),
+          MembershipIssue::NeverSetUp { user } => (
+            "status",
+            i18n.t_with("never-set-up", &[("name", &name_of(user))]),
+            None,
+          ),
           MembershipIssue::NoKeyPackage { user } => (
             "status",
             i18n.t_with("waiting-key-package", &[("name", &name_of(user))]),

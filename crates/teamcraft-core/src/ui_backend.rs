@@ -1272,6 +1272,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
           crate::client::UserAddWait::NoDevice => MembershipIssue::WaitingForFirstDevice { user },
           crate::client::UserAddWait::NoKeyPackage => MembershipIssue::NoKeyPackage { user },
           crate::client::UserAddWait::Unverifiable => MembershipIssue::DevicesUnverified { user },
+          crate::client::UserAddWait::NeverSetUp => MembershipIssue::NeverSetUp { user },
         }),
     );
     issues

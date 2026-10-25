@@ -132,6 +132,10 @@ pub struct ClientSettings {
   /// A device without a group (a welcome it couldn't join) waits twice as long after each rejoin
   /// request, up to this.
   pub rejoin_retry_max: std::time::Duration,
+  /// Somebody added to a conversation who has no device for this long is shown as having never set
+  /// up the app, and the wait for their first device ends (their first device still gets them in,
+  /// should it ever appear).
+  pub pending_addition_expiry: std::time::Duration,
   /// Members ignore a device's rejoin request for this long after it was added back (server
   /// times): each answer costs a commit, and a broken or malicious device could ask far more often
   /// than `rejoin_retry` (issue #149).
@@ -267,6 +271,7 @@ impl Default for ClientSettings {
       device_add_attempts: 6,
       rejoin_retry: std::time::Duration::from_secs(10 * 60),
       rejoin_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
+      pending_addition_expiry: std::time::Duration::from_secs(90 * 24 * 60 * 60),
       rejoin_cooldown: std::time::Duration::from_secs(30 * 60),
       removed_sender_retention_leeway: std::time::Duration::from_secs(24 * 60 * 60),
       dm_welcome_timeout: std::time::Duration::from_secs(2 * 60),

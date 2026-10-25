@@ -270,6 +270,11 @@ Result:
   runs), the pending addition then resumes the DM's setup, and a missing key package is the
   setup's own retry. Only the adding device holds the pending addition (robustness audit, F2).
   The conversation shows "X hasn't set up the app yet" (or "… can't be added yet") meanwhile.
+  The wait for a first device ends after `pending_addition_expiry` (default 90 days, noted from
+  when the adding device began to wait): the pending addition turns into a small marker and the
+  conversation says "X never set up the app" instead; a DM's setup record that only waited for the
+  device is dropped. The marker costs nothing but a device-list check at a full sync (like any
+  waiting addition), and X's first device, should it ever appear, still makes the addition due.
 
 #### 4.3.1 Key package lifecycle
 
