@@ -2034,31 +2034,103 @@ select.input {
   font: var(--text-xs) / 16px var(--font-ui);
 }
 
-/* Touch: the actions of a long-pressed message. */
+/* ---- The bottom sheet of the phone layout (#368, components/sheet.rs) ----
+   Message actions, the account menu, the composer's menus, the emoji picker and the conversation's
+   "…" all use it. It rises from the bottom edge, follows a dragging finger (`translate`, set by the
+   component; the enter and exit animations own `transform`) and springs back or leaves downwards. */
 .sheet-backdrop {
   position: fixed;
   inset: 0;
   z-index: 60;
-  background: rgba(16, 24, 40, 0.35);
+  background: rgba(8, 12, 20, 0.45);
+  animation: motion-fade-in var(--dur-base) var(--ease-standard);
 }
 
-.action-sheet {
+.sheet {
   position: fixed;
   inset: auto 0 0 0;
   z-index: 61;
-  max-height: 75vh;
+  display: flex;
+  flex-direction: column;
+  max-height: 90dvh;
   overflow-y: auto;
-  padding: 10px 0 calc(10px + env(safe-area-inset-bottom));
-  border-radius: var(--radius) var(--radius) 0 0;
+  overscroll-behavior: contain;
+  padding: 0 env(safe-area-inset-right) calc(var(--space-2) + env(safe-area-inset-bottom)) env(safe-area-inset-left);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
   background: var(--surface);
   color: var(--text);
   box-shadow: var(--shadow);
+  animation: sheet-in var(--dur-slow) var(--ease-emphasized);
+  transition: translate var(--dur-base) var(--ease-emphasized);
+}
+
+.sheet:focus {
+  /* The sheet takes focus only to move it inside; its items show the ring. */
+  outline: none;
+}
+
+/* Nothing to scroll: every touch may become a drag. */
+.sheet.is-static {
+  touch-action: none;
+}
+
+.sheet.is-dragging {
+  transition: none;
+  user-select: none;
+}
+
+.sheet-handle {
+  flex: none;
+  width: 36px;
+  height: 5px;
+  margin: 8px auto;
+  border-radius: 3px;
+  background: var(--border);
+}
+
+.sheet .menu-item {
+  min-height: 48px;
+}
+
+/* Keyboard shortcuts mean nothing on a touch screen. */
+.sheet .menu-shortcut {
+  display: none;
+}
+
+.sheet .menu-heading {
+  padding-inline: var(--space-4);
+}
+
+/* It leaves the way it came, from wherever the finger let go (the ghost starts there). */
+.motion-ghost.sheet {
+  z-index: 59;
+  translate: none !important;
+}
+
+.motion-ghost.sheet-backdrop {
+  z-index: 58;
+}
+
+.motion-ghost.is-leaving.sheet {
+  animation: sheet-out var(--dur-exit) var(--ease-exit) forwards;
+}
+
+@keyframes sheet-in {
+  from {
+    transform: translateY(100%);
+  }
+}
+
+@keyframes sheet-out {
+  to {
+    transform: translateY(100%);
+  }
 }
 
 .sheet-reactions {
   display: flex;
   justify-content: space-around;
-  padding: 4px 12px 10px;
+  padding: 0 12px 10px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -2071,29 +2143,26 @@ select.input {
   font-size: 22px;
 }
 
-.action-sheet:focus {
-  /* The sheet takes focus only to move it inside; its items show the ring. */
-  outline: none;
+/* The emoji picker in the sheet: the grid scrolls, the search stays on top. */
+.emoji-sheet {
+  height: min(70dvh, 440px);
+  overflow: hidden;
 }
 
-.action-sheet .menu-item {
-  min-height: 48px;
+.emoji-sheet .emoji-search {
+  flex: none;
+  margin: 0 var(--space-3) var(--space-2);
 }
 
-/* Keyboard shortcuts mean nothing on a touch screen. */
-.action-sheet .menu-shortcut {
-  display: none;
+.emoji-sheet .emoji-hint {
+  padding-inline: var(--space-3);
 }
 
-/* The sheet rises from the bottom edge; reduced motion turns it into a fade ("Motion", #360). */
-.action-sheet {
-  animation: sheet-in var(--dur-base) var(--ease-emphasized);
-}
-
-@keyframes sheet-in {
-  from {
-    transform: translateY(100%);
-  }
+.emoji-sheet .emoji-grid {
+  flex: 1;
+  min-height: 0;
+  padding-inline: var(--space-2);
+  overflow-y: auto;
 }
 
 .msg-system {
@@ -8005,7 +8074,7 @@ ol.md-list {
   .key-banner,
   .msg.msg-arriving,
   .sb-section ul.is-opening,
-  .action-sheet {
+  .sheet {
     animation-name: motion-fade-in;
   }
 
@@ -8178,6 +8247,88 @@ ol.md-list {
   max-width: none;
   border-left: 0;
   box-shadow: none;
+}
+
+/* Going deeper slides the new page in from the trailing edge; going back slides the parent in from
+   the leading edge while the page that is left slides out as a ghost (#368: `data-nav` from app.rs,
+   the ghost from motion.rs). Between the bottom navigation's tabs nothing slides. */
+:root[data-layout="compact"] .app[data-nav="push"] > .app-body > .main > *,
+:root[data-layout="compact"] .app[data-nav="push"] > .app-body > .side-panel {
+  animation: pane-push var(--dur-base) var(--ease-emphasized);
+}
+
+:root[data-layout="compact"] .app[data-nav="pop"] > .app-body > .main > *,
+:root[data-layout="compact"] .app[data-nav="pop"] > .app-body > .sidebar,
+:root[data-layout="compact"] .app[data-nav="pop"] > .app-body > .space-rail {
+  animation: pane-pop var(--dur-base) var(--ease-emphasized);
+}
+
+.motion-ghost.is-leaving.pane-ghost {
+  animation: pane-leave var(--dur-exit) var(--ease-exit) forwards;
+}
+
+@keyframes pane-push {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+
+@keyframes pane-pop {
+  from {
+    opacity: 0;
+    transform: translateX(-24px);
+  }
+}
+
+@keyframes pane-leave {
+  to {
+    opacity: 0;
+    transform: translateX(30%);
+  }
+}
+
+/* Swiping back from the leading edge (components/edge_swipe.rs): the page follows the finger
+   (`--swipe-x`), its parent shows underneath and peeks out from -30 % (`--swipe-parent-x`). */
+:root[data-layout="compact"] .app.is-swiping-back > .app-body {
+  position: relative;
+  overflow: hidden;
+}
+
+:root[data-layout="compact"] .app.is-swiping-back > .app-body > *,
+:root[data-layout="compact"] .app.is-swiping-back > .app-body > .main > * {
+  animation: none;
+}
+
+:root[data-layout="compact"] .app.is-swiping-back[data-pane="main"] > .app-body > .main,
+:root[data-layout="compact"] .app.is-swiping-back[data-pane="panel"] > .app-body > .side-panel {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  translate: var(--swipe-x, 0) 0;
+  box-shadow: -8px 0 24px rgba(8, 12, 20, 0.18);
+}
+
+:root[data-layout="compact"] .app.is-swiping-back[data-pane="main"] > .app-body > .sidebar,
+:root[data-layout="compact"] .app.is-swiping-back[data-pane="main"][data-rail="space"] > .app-body > .space-rail,
+:root[data-layout="compact"] .app.is-swiping-back[data-pane="panel"] > .app-body > .main {
+  display: flex;
+  translate: var(--swipe-parent-x, 0) 0;
+}
+
+:root[data-layout="compact"] .app.is-swipe-settling > .app-body > * {
+  transition: translate var(--dur-base) var(--ease-emphasized);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-layout="compact"] .app[data-nav] > .app-body > .main > *,
+  :root[data-layout="compact"] .app[data-nav] > .app-body > :is(.side-panel, .sidebar, .space-rail) {
+    animation-name: motion-fade-in;
+  }
+
+  .motion-ghost.is-leaving.pane-ghost {
+    animation-name: motion-fade-out;
+  }
 }
 
 :root[data-layout="compact"] .compact-back,
@@ -8397,10 +8548,9 @@ ol.md-list {
   animation-name: sheet-out;
 }
 
-@keyframes sheet-out {
-  to {
-    transform: translateY(100%);
-  }
+/* Popovers that stay popovers on a phone (the lightbox's menus) dim what is behind them. */
+:root[data-layout="compact"] .popover-backdrop {
+  background: rgba(8, 12, 20, 0.45);
 }
 
 :root[data-layout="compact"] .modal-body {
@@ -8418,52 +8568,19 @@ ol.md-list {
   display: none;
 }
 
-/* The account menu: a sheet from the bottom, above the navigation. */
-:root[data-layout="compact"] .status-menu {
-  position: fixed;
-  left: 0;
-  right: 0;
-  top: auto;
-  bottom: 0;
-  width: auto;
-  max-height: 85dvh;
-  overflow-y: auto;
-  padding-bottom: calc(var(--space-2) + env(safe-area-inset-bottom));
-  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-  animation: sheet-rise var(--dur-base) var(--ease-emphasized);
-}
-
-:root[data-layout="compact"] .motion-ghost.is-leaving.status-menu {
-  animation: sheet-fall var(--dur-exit) var(--ease-exit) forwards;
-}
-
-:root[data-layout="compact"] .popover-backdrop {
-  background: rgba(8, 12, 20, 0.45);
-}
-
-@keyframes sheet-rise {
-  from {
-    transform: translateY(24px);
-    opacity: 0;
-  }
-}
-
-@keyframes sheet-fall {
-  to {
-    transform: translateY(24px);
-    opacity: 0;
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
   :root[data-layout="compact"] .modal:not(.modal-switcher, .modal-lightbox),
-  :root[data-layout="compact"] .status-menu {
+  .sheet {
     animation-name: motion-fade-in;
   }
 
   :root[data-layout="compact"] .motion-ghost.is-leaving .modal:not(.modal-lightbox),
-  :root[data-layout="compact"] .motion-ghost.is-leaving.status-menu {
+  .motion-ghost.is-leaving.sheet {
     animation-name: motion-fade-out;
+  }
+
+  .sheet {
+    transition: none;
   }
 }
 

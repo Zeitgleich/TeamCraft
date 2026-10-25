@@ -22,7 +22,7 @@ use crate::security::DeviceApproval;
 use crate::settings::Settings;
 use crate::toast_timer::{Hold, ToastClock};
 use crate::unread_divider::{DividerEvent, next_divider};
-use crate::viewport::{CompactPane, Layout, current_layout};
+use crate::viewport::{CompactDepth, CompactPane, Layout, current_layout};
 use teamcraft_client_api::actions::{NewChannel, NewSpace, PermalinkTarget};
 use teamcraft_proto::Role;
 
@@ -311,6 +311,17 @@ fn home_view_without_dms(has_spaces: bool) -> MainView {
 
 /// Which pane a view fills in the compact layout: the lists of Home and of a space, a side panel
 /// over its conversation, and the main column for everything else.
+fn compact_depth_for(view: MainView, panel: SidePanel) -> CompactDepth {
+  match compact_pane_for(view, panel) {
+    CompactPane::Panel => CompactDepth::Panel,
+    CompactPane::List => CompactDepth::TopLevel,
+    CompactPane::Main if matches!(view, MainView::Activity | MainView::GettingStarted) => {
+      CompactDepth::TopLevel
+    },
+    CompactPane::Main => CompactDepth::Page,
+  }
+}
+
 fn compact_pane_for(view: MainView, panel: SidePanel) -> CompactPane {
   match view {
     MainView::Home | MainView::Space => CompactPane::List,
@@ -1224,6 +1235,12 @@ impl AppState {
     get_if_observed(self.layout).is_compact()
   }
 
+  /// How deep the page is in the compact layout (#368); the bottom navigation shows on top-level
+  /// pages only.
+  pub fn compact_depth(&self) -> CompactDepth {
+    compact_depth_for(self.view.get(), self.panel.get())
+  }
+
   /// The pane that fills the window in the compact layout.
   pub fn compact_pane(&self) -> CompactPane {
     compact_pane_for(self.view.get(), self.panel.get())
@@ -2056,6 +2073,21 @@ mod tests {
 
   mod compact {
     use super::*;
+
+    /// #368: what slides which way depends on how deep the page is.
+    #[test]
+    fn lists_and_activity_are_top_level_a_conversation_a_page_a_thread_a_panel() {
+      let state = compact_state();
+      let (space, conversation) = first_channel(&state);
+      state.open_space(space);
+      assert_eq!(state.compact_depth(), CompactDepth::TopLevel);
+      state.open_activity();
+      assert_eq!(state.compact_depth(), CompactDepth::TopLevel);
+      state.open_conversation(conversation);
+      assert_eq!(state.compact_depth(), CompactDepth::Page);
+      state.panel.set(SidePanel::Pins);
+      assert_eq!(state.compact_depth(), CompactDepth::Panel);
+    }
 
     #[test]
     fn home_and_a_space_show_their_list_instead_of_a_conversation() {

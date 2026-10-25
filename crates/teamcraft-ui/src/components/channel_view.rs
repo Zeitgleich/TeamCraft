@@ -10,6 +10,7 @@ use crate::components::huddle_bar::HuddleBar;
 use crate::components::icons::{Icon, IconName};
 use crate::components::log_view::ChannelFeed;
 use crate::components::security_ui::KeyChangeBanner;
+use crate::components::sheet::MenuSurface;
 use crate::components::tab_list::{on_tab_keys, roving_tabindex};
 use crate::i18n::use_i18n;
 use crate::model::{Conversation, ConversationId, ConversationKind, MembershipIssue, UserId};
@@ -710,8 +711,11 @@ fn ConversationMore(
         <Icon name=IconName::More />
       </button>
       <Show when=move || is_open.get() fallback=|| ()>
-        <div class="popover-backdrop" on:mousedown=move |_| is_open.set(false)></div>
-        <div class="popover conversation-menu" role="menu">
+        <MenuSurface
+          class="conversation-menu"
+          label=Signal::derive(move || i18n.t("conversation-more"))
+          on_close=Callback::new(move |()| is_open.set(false))
+        >
           <button type="button" class="menu-item" role="menuitem" on:click=move |_| choose(|_, _, tab| {
             tab.update(|tab| *tab = if *tab == ChannelTab::Files { ChannelTab::Messages } else { ChannelTab::Files });
           })>
@@ -744,7 +748,7 @@ fn ConversationMore(
             <Icon name=IconName::Sliders />
             {move || i18n.t("channel-settings-title")}
           </button>
-        </div>
+        </MenuSurface>
       </Show>
     </div>
   }

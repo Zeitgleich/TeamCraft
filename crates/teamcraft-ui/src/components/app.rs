@@ -27,6 +27,7 @@ use crate::components::calls_view::CallsView;
 use crate::components::channel_preview::ChannelPreview;
 use crate::components::channel_view::ChannelView;
 use crate::components::directory_view::DirectoryView;
+use crate::components::edge_swipe::EdgeSwipeBack;
 use crate::components::getting_started::GettingStarted;
 use crate::components::guest_join::GuestJoinPage;
 use crate::components::home::{HomeSidebar, HomeStart, NewMessageDialog};
@@ -74,7 +75,7 @@ use crate::sections::badge_count;
 use crate::settings::{Settings, Theme};
 use crate::state::{AppState, MainView, Overlay, RailEntry, SidePanel, ToastTone};
 use crate::toast_timer::Hold;
-use crate::viewport::CompactPane;
+use crate::viewport::{CompactDepth, CompactPane, PaneStep};
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -196,6 +197,23 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   on_cleanup(move || listener.remove());
   let banners = NodeRef::<leptos::html::Div>::new();
   track_banner_height(banners);
+  let app_body = NodeRef::<leptos::html::Div>::new();
+  let edge_swipe = EdgeSwipeBack::new(state, app_body);
+  // Which way the phone layout moved last, for the direction the panes slide in (#368). After an
+  // edge swipe the parent is on screen already. Through memos, so a navigation that sets the view
+  // and then the panel counts once; a rerun without a move keeps the step.
+  let depth = Memo::new(move |_| state.compact_depth());
+  let pane = Memo::new(move |_| state.compact_pane());
+  let pane_step = Memo::new(move |previous: Option<&(CompactDepth, CompactPane, PaneStep)>| {
+    let (depth, pane) = (depth.get(), pane.get());
+    let step = match previous {
+      None => PaneStep::Lateral,
+      Some(_) if edge_swipe.is_committed() => PaneStep::Lateral,
+      Some(&(before, before_pane, step)) if before == depth && before_pane == pane => step,
+      Some(&(before, _, _)) => PaneStep::between(before, depth),
+    };
+    (depth, pane, step)
+  });
 
   view! {
     <a class="skip-link" href="#main-content">
@@ -204,6 +222,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
     <div
       class="app"
       data-pane=move || state.compact_pane().slug()
+      data-nav=move || pane_step.get().2.slug()
       data-rail=move || if state.rail.get() == RailEntry::Home { "home" } else { "space" }
       class:has-bottom-nav=move || has_bottom_nav(state)
     >
@@ -217,7 +236,14 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         <UpdateNotice />
       </div>
       <TopBar />
-      <div class="app-body">
+      <div
+        class="app-body"
+        node_ref=app_body
+        on:pointerdown=move |ev| edge_swipe.pointer_down(&ev)
+        on:pointermove=move |ev| edge_swipe.pointer_move(&ev)
+        on:pointerup=move |ev| edge_swipe.pointer_up(&ev)
+        on:pointercancel=move |_| edge_swipe.pointer_cancel()
+      >
         // The administration console takes the whole window, like a system console.
         <Show when=move || !matches!(state.view.get(), MainView::Admin(_)) fallback=|| ()>
           <SpaceRail />
@@ -456,9 +482,7 @@ fn focus_pane_heading(pane: CompactPane) {
 /// The compact layout's bottom navigation shows on the top-level pages: the lists, Activity and
 /// the welcome page. Deeper pages have a back button instead.
 fn has_bottom_nav(state: AppState) -> bool {
-  state.is_compact()
-    && (state.compact_pane() == CompactPane::List
-      || matches!(state.view.get(), MainView::Activity | MainView::GettingStarted))
+  state.is_compact() && state.compact_depth() == CompactDepth::TopLevel
 }
 
 fn handle_global_shortcut(ev: &web_sys::KeyboardEvent, state: AppState) {

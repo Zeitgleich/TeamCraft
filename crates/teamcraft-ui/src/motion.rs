@@ -62,42 +62,78 @@ where
   });
 }
 
+/// Going back on a phone (#368): the page that is left slides out towards the trailing edge while
+/// its parent slides in. Called right after the state went back, while the page is still on screen
+/// (the view updates on the next tick). Scroll positions are copied, so the copy shows what was seen.
+pub fn leave_pane_ghost() {
+  let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+    return;
+  };
+  let maybe_pane = [".app-body > .side-panel", ".app-body > .main"]
+    .into_iter()
+    .filter_map(|selector| document.query_selector(selector).ok().flatten())
+    .find(|pane| pane.get_bounding_client_rect().width() > 0.0);
+  let Some(pane) = maybe_pane else {
+    return;
+  };
+  if let Some(ghost) = leave_ghost(&pane) {
+    drop(ghost.class_list().add_1("pane-ghost"));
+    copy_scroll_positions(&pane, &ghost);
+  }
+}
+
 /// Leaves an inert, hidden-from-assistive-tech copy of `element` at its place on screen, with
 /// `.is-leaving` for the exit animation, and removes it after [`GHOST_LIFETIME`].
-fn leave_ghost(element: &web_sys::Element) {
+fn leave_ghost(element: &web_sys::Element) -> Option<web_sys::HtmlElement> {
   if !element.is_connected() || GHOSTS.get() >= MAX_GHOSTS {
-    return;
+    return None;
   }
-  let Some(body) = web_sys::window()
+  let body = web_sys::window()
     .and_then(|window| window.document())
-    .and_then(|document| document.body())
-  else {
-    return;
-  };
+    .and_then(|document| document.body())?;
   let rect = element.get_bounding_client_rect();
   if rect.width() <= 0.0 || rect.height() <= 0.0 {
-    return;
+    return None;
   }
-  let Some(ghost) = element
+  let ghost = element
     .clone_node_with_deep(true)
     .ok()
-    .and_then(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
-  else {
-    return;
-  };
+    .and_then(|node| node.dyn_into::<web_sys::HtmlElement>().ok())?;
   dress_ghost(&ghost, &rect);
-  if body.append_child(&ghost).is_err() {
-    return;
-  }
+  body.append_child(&ghost).ok()?;
   GHOSTS.set(GHOSTS.get() + 1);
+  let removed = ghost.clone();
   set_timeout(
     move || {
-      ghost.remove();
+      removed.remove();
       // async-ok: a thread-local Cell, not a signal.
       GHOSTS.set(GHOSTS.get().saturating_sub(1));
     },
     GHOST_LIFETIME,
   );
+  Some(ghost)
+}
+
+/// A deep copy starts scrolled to the top; give each scrolled part of it the original's place.
+fn copy_scroll_positions(original: &web_sys::Element, copy: &web_sys::Element) {
+  let (Ok(originals), Ok(copies)) = (original.query_selector_all("*"), copy.query_selector_all("*")) else {
+    return;
+  };
+  for index in 0..originals.length().min(copies.length()) {
+    let pair = (
+      originals
+        .item(index)
+        .and_then(|node| node.dyn_into::<web_sys::Element>().ok()),
+      copies
+        .item(index)
+        .and_then(|node| node.dyn_into::<web_sys::Element>().ok()),
+    );
+    if let (Some(from), Some(to)) = pair
+      && from.scroll_top() > 0
+    {
+      to.set_scroll_top(from.scroll_top());
+    }
+  }
 }
 
 /// A copy that nobody can reach: no ids (they stay unique), no focus, no pointer, not announced,

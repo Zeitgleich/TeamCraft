@@ -4,6 +4,7 @@ use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
+use crate::components::sheet::Sheet;
 use crate::emoji_catalog::{search, shortcode};
 use crate::i18n::use_i18n;
 use crate::motion::PopoverSide;
@@ -65,8 +66,12 @@ pub fn EmojiPicker(
     query.track();
     active.set(0);
   });
+  // On a phone the sheet opens without the on-screen keyboard; the search is a tap away.
+  let is_sheet = state.layout.get_untracked().is_compact();
   Effect::new(move |_| {
-    if let Some(element) = input.get() {
+    if let Some(element) = input.get()
+      && !is_sheet
+    {
       drop(element.focus());
     }
   });
@@ -104,15 +109,7 @@ pub fn EmojiPicker(
     }
   };
 
-  view! {
-    <div class="popover-backdrop" on:mousedown=move |_| on_close.run(())></div>
-    <div
-      class=format!("emoji-picker {}", side.class())
-      role="dialog"
-      aria-label=move || i18n.t("emoji-picker-title")
-      style:top=format!("{top}px")
-      style:left=format!("{left}px")
-    >
+  let content = view! {
       <input
         class="input emoji-search"
         type="text"
@@ -164,8 +161,28 @@ pub fn EmojiPicker(
             .into_any()
         }}
       </ul>
+  };
+  if is_sheet {
+    return view! {
+      <Sheet class="emoji-sheet" label=Signal::derive(move || i18n.t("emoji-picker-title")) on_close=on_close>
+        {content}
+      </Sheet>
+    }
+    .into_any();
+  }
+  view! {
+    <div class="popover-backdrop" on:mousedown=move |_| on_close.run(())></div>
+    <div
+      class=format!("emoji-picker {}", side.class())
+      role="dialog"
+      aria-label=move || i18n.t("emoji-picker-title")
+      style:top=format!("{top}px")
+      style:left=format!("{left}px")
+    >
+      {content}
     </div>
   }
+  .into_any()
 }
 
 /// Fixed position (top, left) that keeps the picker inside the window: above the anchor when there is
