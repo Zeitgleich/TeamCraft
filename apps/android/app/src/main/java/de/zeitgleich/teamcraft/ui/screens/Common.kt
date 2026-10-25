@@ -42,6 +42,7 @@ import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.ui.rememberIsOnline
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
+import de.zeitgleich.teamcraft.ui.theme.darkStatusBarBackdrop
 
 /**
  * What content stays clear of (#309): system bars, the display cutout (landscape) and the keyboard.
@@ -89,6 +90,8 @@ fun ChromeTopBar(
     },
     actions = actions,
     windowInsets = TopBarInsets,
+    // Light status-bar icons over the dark chrome, also in light mode.
+    modifier = Modifier.darkStatusBarBackdrop(),
     colors = TopAppBarDefaults.topAppBarColors(
       containerColor = colors.chrome,
       titleContentColor = colors.chromeText,
