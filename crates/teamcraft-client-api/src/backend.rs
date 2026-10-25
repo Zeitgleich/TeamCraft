@@ -25,8 +25,9 @@ use crate::admin::{
   AdminChannel, AdminSpace, AdminUser, AuditEntry, AuditFilter, Retention, SelfJoinOutcome, SettingsTestKind,
 };
 use crate::calls::{
-  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallHistoryItem, CallRequest, CallStatusSounds,
-  CallsUnavailableReason, HuddleInfo, IncomingCall, MediaDevices, Participant, RemoteVideoTrack,
+  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallHistoryItem, CallMoveOffer, CallRequest,
+  CallStatusSounds, CallsUnavailableReason, HuddleInfo, IncomingCall, MediaDevices, Participant,
+  RemoteVideoTrack,
 };
 use crate::calls::{OrgBackgroundRule, OrgBackgrounds};
 use crate::model::{
@@ -270,6 +271,27 @@ pub trait ChatBackend {
   /// they invited (the organizer's own request: the group is never founded from the server's
   /// member list).
   fn set_up_meeting_chat(&self, _conversation: ConversationId, _invitees: Vec<UserId>) {}
+  /// "Add people" in a DM or group DM call (docs/meetings.md, "A call becomes a meeting"): a meeting
+  /// room with the people in the call (`in_call`, as the call shows them) and `added`, whose
+  /// encryption group gets exactly them, and the call moves there. The same `key` again (a retry)
+  /// gets the same room.
+  fn add_people_to_call(
+    &self,
+    _from: ConversationId,
+    _in_call: Vec<UserId>,
+    _added: Vec<UserId>,
+    _maybe_title: Option<String>,
+    _key: teamcraft_proto::IdempotencyKey,
+  ) {
+  }
+  /// The announced move of the call of `from` into `to`, if a member of `from`'s encryption group
+  /// announced one; the server's `call_move` alone shows nothing.
+  fn call_move_offer(&self, _from: ConversationId, _to: ConversationId) -> Option<CallMoveOffer> {
+    None
+  }
+  /// Checks a move before this device follows it: announced in `from`'s group, and `to`'s group
+  /// holds nobody but `from`'s members and the people the announcement named. Fails otherwise.
+  fn accept_call_move(&self, _from: ConversationId, _to: ConversationId) {}
   /// A host admitted `user` from a meeting's lobby: lets them into the chat's encryption, on this
   /// host's own decision (never because the server made them a member).
   fn let_into_meeting_chat(&self, _conversation: ConversationId, _user: UserId) {}
@@ -522,7 +544,8 @@ pub trait CallBackend {
     Vec::new()
   }
   /// Joins (or starts) the conversation's call, leaving any other call first.
-  fn join_call(&self, _request: CallRequest) {}
+  /// `is_muted`: the microphone stays muted from the first frame (nothing is sent before an unmute).
+  fn join_call(&self, _request: CallRequest, _is_muted: bool) {}
   fn leave_call(&self) {}
   /// Stops ringing for this call on this device; the call goes on for the others.
   fn decline_call(&self, _conversation: ConversationId) {}

@@ -1,10 +1,15 @@
 import SwiftUI
 
 /// The in-call screen: who, state, the privacy code, mute and hang up. The system's call UI
-/// (lock screen, CarPlay) drives the same CallKit actions.
+/// (lock screen, CarPlay) drives the same CallKit actions. DM and group DM calls can add people,
+/// which moves the call into a meeting room (docs/meetings.md, "A call becomes a meeting").
 struct CallScreen: View {
   @Environment(AppModel.self) private var model
   let call: ActiveCall
+
+  /// The call is in a DM or group DM.
+  @State private var canAddPeople = false
+  @State private var isAddingPeople = false
 
   var body: some View {
     ZStack {
@@ -29,6 +34,22 @@ struct CallScreen: View {
       }
       Button("cancel", role: .cancel) {}
     }
+    .alert(
+      "call_move_failed", isPresented: moveFailureBinding, presenting: model.calls.maybeMoveFailure
+    ) { _ in
+      Button("done", role: .cancel) {}
+    } message: { failure in
+      Text(failure.message)
+    }
+    .sheet(isPresented: $isAddingPeople) { AddPeopleView(conversationId: call.conversationId) }
+    .task(id: call.conversationId) {
+      let kind = await model.conversations().first { $0.id == call.conversationId }?.kind
+      canAddPeople = kind == .direct || kind == .group
+    }
+  }
+
+  private var moveFailureBinding: Binding<Bool> {
+    Binding(get: { model.calls.maybeMoveFailure != nil }, set: { if !$0 { model.calls.dismissMoveFailure() } })
   }
 
   private var hasRemoteVideo: Bool { !model.calls.remoteVideo.isEmpty }
@@ -55,7 +76,12 @@ struct CallScreen: View {
       if call.participantCount > 0 {
         Text("call_participants \(Int(call.participantCount))").foregroundStyle(Theme.textMuted)
       }
+      if canAddPeople && call.phase == .connected && model.calls.maybeMoveOffer == nil && !model.calls.isMoving {
+        Button("call_add_people", systemImage: "person.badge.plus") { isAddingPeople = true }
+          .buttonStyle(.bordered)
+      }
       Spacer()
+      if let offer = model.calls.maybeMoveOffer { moveBanner(offer) }
       HStack(spacing: 32) {
         roundButton(
           system: call.isMuted ? "mic.slash.fill" : "mic.fill",
@@ -79,6 +105,29 @@ struct CallScreen: View {
       .padding(.bottom, 32)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
+  }
+
+  /// Somebody moved the call into a meeting room: who, whom they added, and the way over.
+  private func moveBanner(_ offer: CallMoveOffer) -> some View {
+    VStack(spacing: 12) {
+      if offer.addedNames.isEmpty {
+        Text("call_moved_by \(offer.byName)")
+      } else {
+        Text("call_moved_by \(offer.byName) added \(ListFormatter.localizedString(byJoining: offer.addedNames))")
+      }
+      Button {
+        model.calls.joinMovedCall()
+      } label: {
+        if model.calls.isMoving { ProgressView() } else { Text("call_move_join") }
+      }
+      .buttonStyle(.borderedProminent)
+      .disabled(model.calls.isMoving)
+    }
+    .multilineTextAlignment(.center)
+    .padding()
+    .frame(maxWidth: .infinity)
+    .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.radius))
+    .padding(.horizontal)
   }
 
   private var statusText: LocalizedStringKey {

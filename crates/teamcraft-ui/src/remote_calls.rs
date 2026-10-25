@@ -209,8 +209,8 @@ impl RemoteCalls {
     });
   }
 
-  pub fn join(&self, request: CallRequest) {
-    self.act(CallAction::Join { request });
+  pub fn join(&self, request: CallRequest, is_muted: bool) {
+    self.act(CallAction::Join { request, is_muted });
   }
 
   async fn carry_out(&self, action: CallAction) -> Result<(), String> {
@@ -316,6 +316,7 @@ mod tests {
         screen_sound: Default::default(),
         is_reconnecting: false,
         reconnecting: Vec::new(),
+        maybe_moved_to: None,
       }),
       incoming: Vec::new(),
       running: vec![RunningCall {

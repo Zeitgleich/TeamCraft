@@ -189,11 +189,11 @@ pub async fn call_action(
   action: CallAction,
 ) -> Result<(), CommandError> {
   match action {
-    CallAction::Join { request } => {
+    CallAction::Join { request, is_muted } => {
       let runtime = core.current()?;
       let preparation = runtime.prepare_call(request.conversation).await?;
       let tickets = Arc::new(CoreJoinTickets::new(runtime, request.conversation));
-      calls.join(request, preparation, tickets).await?;
+      calls.join(request, is_muted, preparation, tickets).await?;
     },
     CallAction::Leave => calls.leave().await,
     CallAction::Decline { conversation } => calls.decline(conversation),

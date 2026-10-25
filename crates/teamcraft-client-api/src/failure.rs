@@ -66,6 +66,9 @@ pub enum CallFailure {
   /// This device isn't in the conversation's encryption group yet (the welcome hasn't come, or
   /// another device has to let it in), so it can't check who is in the call.
   EncryptionPending,
+  /// A move of the call into a meeting room didn't check out: nobody in the conversation's group
+  /// announced it, or the room holds people the move didn't name (docs/meetings.md).
+  MoveRefused,
   /// The chosen speakers can't be used; the sound played on the default output instead.
   SpeakersUnavailable,
   /// No speakers or other audio output to play on.
@@ -76,7 +79,7 @@ pub enum CallFailure {
 }
 
 impl CallFailure {
-  const ALL: [Self; 14] = [
+  const ALL: [Self; 15] = [
     Self::MicrophoneDenied,
     Self::MicrophoneMissing,
     Self::MicrophoneInUse,
@@ -88,6 +91,7 @@ impl CallFailure {
     Self::ServerUnreachable,
     Self::BackgroundRequired,
     Self::EncryptionPending,
+    Self::MoveRefused,
     Self::SpeakersUnavailable,
     Self::SpeakersMissing,
     Self::SoundBlocked,
@@ -107,6 +111,7 @@ impl CallFailure {
       Self::ServerUnreachable => "server_unreachable",
       Self::BackgroundRequired => "background_required",
       Self::EncryptionPending => "encryption_pending",
+      Self::MoveRefused => "move_refused",
       Self::SpeakersUnavailable => "speakers_unavailable",
       Self::SpeakersMissing => "speakers_missing",
       Self::SoundBlocked => "sound_blocked",

@@ -283,7 +283,7 @@ pub async fn stop() {
 
 impl Host {
   /// Joins the conversation's call with what the page's core prepared, leaving a running call.
-  async fn join(self: &Rc<Self>, request: CallRequest) -> Result<(), ActionFailure> {
+  async fn join(self: &Rc<Self>, request: CallRequest, is_muted: bool) -> Result<(), ActionFailure> {
     self.leave().await;
     let prepared = self.prepare(request.conversation).await?;
     let (microphone, speakers, sounds) = {
@@ -295,6 +295,8 @@ impl Host {
       )
     };
     let own_device = prepared.device_id;
+    // Push-to-talk: the microphone opens only while the key is held.
+    let is_muted_at_start = is_muted || self.state.borrow().push_to_talk.is_enabled;
     let config = WebCallConfig {
       sfu_url: prepared.sfu_url,
       certificate_hashes: certificate_hashes_from_hex(&prepared.certificate_sha256),
@@ -319,17 +321,16 @@ impl Host {
       maybe_ticket_source: Some(Rc::new(PageTickets)),
       status_cues: status_cues(sounds),
       maybe_worklet_url: Some(self.worklet_url.clone()),
+      is_muted_at_start,
     };
     let call = WebCall::join(config).await.map_err(failure)?;
-    if self.state.borrow().push_to_talk.is_enabled {
-      // Push-to-talk: the microphone opens only while the key is held.
-      call.set_muted(true);
+    {
+      let view = &mut self.state.borrow_mut().view;
+      view.start_active(request, BackgroundEffect::None);
+      if let Some(active) = view.maybe_active.as_mut() {
+        active.is_muted = is_muted_at_start;
+      }
     }
-    self
-      .state
-      .borrow_mut()
-      .view
-      .start_active(request, BackgroundEffect::None);
     let (controls, control_rx) = mpsc::unbounded();
     let (finished_tx, finished) = oneshot::channel();
     *self.maybe_media.borrow_mut() = Some(Media { controls, finished });
@@ -454,7 +455,7 @@ impl Host {
       },
       // The browser has no background effects (the UI offers none) and no system effects panel.
       CallAction::SetBackgroundEffect { .. } | CallAction::OpenSystemVideoEffects => {},
-      CallAction::Join { request } => self.join(request).await?,
+      CallAction::Join { request, is_muted } => self.join(request, is_muted).await?,
       CallAction::RefreshDevices => self.refresh_devices(),
       // The page plays the test itself: it has to start inside the click (teamcraft-ui speaker_test).
       CallAction::TestSpeakers { .. } => {

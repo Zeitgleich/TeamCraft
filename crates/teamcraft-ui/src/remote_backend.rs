@@ -10,7 +10,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
-use teamcraft_client_api::calls::OrgBackgroundRule;
+use teamcraft_client_api::calls::{CallMoveOffer, OrgBackgroundRule};
 use teamcraft_proto::OrgBackgroundId;
 
 use futures_util::future::{join_all, join3};
@@ -831,6 +831,23 @@ impl ChatBackend for RemoteChat {
     });
   }
 
+  fn add_people_to_call(
+    &self,
+    from: ConversationId,
+    in_call: Vec<UserId>,
+    added: Vec<UserId>,
+    maybe_title: Option<String>,
+    key: teamcraft_proto::IdempotencyKey,
+  ) {
+    self.act(ChatAction::AddPeopleToCall {
+      from,
+      in_call,
+      added,
+      maybe_title,
+      key,
+    });
+  }
+
   fn let_into_meeting_chat(&self, conversation: ConversationId, user: UserId) {
     self.act(ChatAction::LetIntoMeetingChat { conversation, user });
   }
@@ -1109,6 +1126,17 @@ impl ChatBackend for RemoteChat {
       users,
       is_guest,
     });
+  }
+
+  fn call_move_offer(&self, from: ConversationId, to: ConversationId) -> Option<CallMoveOffer> {
+    match self.ask(ChatQuery::CallMoveOffer { from, to }) {
+      Some(ChatAnswer::CallMoveOffer { maybe_offer }) => maybe_offer,
+      _ => None,
+    }
+  }
+
+  fn accept_call_move(&self, from: ConversationId, to: ConversationId) {
+    self.act(ChatAction::AcceptCallMove { from, to });
   }
 
   fn has_external_people(&self, conversation: ConversationId) -> bool {

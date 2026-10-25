@@ -43,6 +43,11 @@ pub enum CallSignal {
     conversation: ConversationId,
     caller: UserId,
   },
+  /// Somebody added people to the call: it moves into the meeting chat `to`.
+  Moved {
+    conversation: ConversationId,
+    to: ConversationId,
+  },
   #[serde(other)]
   Unknown,
 }
@@ -78,6 +83,14 @@ impl CallSignal {
         conversation: *conversation_id,
         caller: *from_user_id,
       }),
+      GatewayEvent::CallMove {
+        conversation_id,
+        to_conversation_id,
+        ..
+      } => Some(Self::Moved {
+        conversation: *conversation_id,
+        to: *to_conversation_id,
+      }),
       _ => None,
     }
   }
@@ -104,6 +117,7 @@ impl CallView {
       screen_sound: ScreenShareSound::Off,
       is_reconnecting: false,
       reconnecting: Vec::new(),
+      maybe_moved_to: None,
     });
     self.maybe_end_reason = None;
   }
@@ -170,6 +184,17 @@ impl CallView {
             },
           );
         }
+      },
+      CallSignal::Moved { conversation, to } => {
+        let Some(active) = self
+          .maybe_active
+          .as_mut()
+          .filter(|active| active.conversation == conversation)
+        else {
+          // Not in that call on this device: nothing to switch.
+          return false;
+        };
+        active.maybe_moved_to = Some(to);
       },
       CallSignal::Unknown => return false,
     }
@@ -251,6 +276,69 @@ mod tests {
         from_user_id: user(1),
       });
       assert!(view.incoming.is_empty());
+    }
+  }
+
+  mod moves {
+    use super::*;
+
+    #[test]
+    fn the_call_this_device_is_in_learns_where_it_moved() {
+      let mut view = active_view();
+      let is_changed = view.apply_gateway_event(&GatewayEvent::CallMove {
+        conversation_id: conversation(5),
+        call_id: call(),
+        to_conversation_id: conversation(6),
+        moved_by: user(1),
+      });
+      assert!(is_changed);
+      assert_eq!(
+        view
+          .maybe_active
+          .as_ref()
+          .and_then(|active| active.maybe_moved_to),
+        Some(conversation(6))
+      );
+      // Joining the meeting's call starts afresh.
+      view.start_active(
+        CallRequest {
+          conversation: conversation(6),
+          kind: CallKind::Group,
+        },
+        BackgroundEffect::None,
+      );
+      assert_eq!(
+        view
+          .maybe_active
+          .as_ref()
+          .and_then(|active| active.maybe_moved_to),
+        None
+      );
+    }
+
+    #[test]
+    fn devices_outside_the_call_ignore_the_move() {
+      let mut view = CallView::default();
+      let event = GatewayEvent::CallMove {
+        conversation_id: conversation(5),
+        call_id: call(),
+        to_conversation_id: conversation(6),
+        moved_by: user(1),
+      };
+      assert!(!view.apply_gateway_event(&event));
+      let mut elsewhere = CallView::default();
+      elsewhere.start_active(
+        CallRequest {
+          conversation: conversation(7),
+          kind: CallKind::Direct,
+        },
+        BackgroundEffect::None,
+      );
+      assert!(!elsewhere.apply_gateway_event(&event));
+      assert_eq!(
+        elsewhere.maybe_active.and_then(|active| active.maybe_moved_to),
+        None
+      );
     }
   }
 

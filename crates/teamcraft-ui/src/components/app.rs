@@ -375,6 +375,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::BrowseSpaces(maybe_highlight) => lazy_area(Place::Overlay, move || areas::browse_spaces(maybe_highlight)),
         Overlay::InvitePeople(space) => lazy_area(Place::Overlay, move || areas::invite_people(space)),
         Overlay::AddToChannel(conversation) => lazy_area(Place::Overlay, move || areas::add_to_channel(conversation)),
+        Overlay::AddToCall(conversation) => lazy_area(Place::Overlay, move || areas::add_to_call(conversation)),
         Overlay::NewChannel(space) => lazy_area(Place::Overlay, move || areas::new_channel(space)),
         Overlay::BrowseChannels(space) => lazy_area(Place::Overlay, move || areas::browse_channels(space)),
         Overlay::ChannelSettings(id) => lazy_area(Place::Overlay, move || areas::channel_settings(id)),
@@ -883,13 +884,17 @@ fn connect_calls(state: AppState) {
     // Answered or declined here: the ring that ends now was not missed.
     if let (
       Some(alerts),
-      CallEvent::Join(CallRequest { conversation, .. }) | CallEvent::Decline(conversation),
+      CallEvent::Join {
+        request: CallRequest { conversation, .. },
+        ..
+      }
+      | CallEvent::Decline(conversation),
     ) = (maybe_alerts, &event)
     {
       alerts.handled_here(*conversation);
     }
     state.read(|backend| match event {
-      CallEvent::Join(request) => backend.join_call(request),
+      CallEvent::Join { request, is_muted } => backend.join_call(request, is_muted),
       CallEvent::Leave => backend.leave_call(),
       CallEvent::Decline(conversation) => backend.decline_call(conversation),
       CallEvent::Muted(is_muted) => backend.set_call_muted(is_muted),
@@ -924,10 +929,21 @@ fn connect_calls(state: AppState) {
     effect
   });
   // The shell ended the call (the other side hung up, the connection dropped): leave the screen.
-  let was_connected = std::cell::Cell::new(false);
+  // Only the end of the call the screen is for: switching to another one (a call that moved into a
+  // meeting) ends the previous call first.
+  let was_connected_to = Cell::new(None);
   Effect::new(move |_| {
-    let is_connected = state.read(|backend| backend.active_call().is_some());
-    if was_connected.replace(is_connected) && !is_connected && call.phase.get_untracked() == CallPhase::Active
+    let maybe_connected_to = state.read(|backend| backend.active_call().map(|active| active.conversation));
+    let maybe_was_connected_to = was_connected_to.replace(maybe_connected_to);
+    let is_requested = |conversation| {
+      call
+        .maybe_request
+        .get_untracked()
+        .is_some_and(|request| request.conversation == conversation)
+    };
+    if maybe_connected_to.is_none()
+      && maybe_was_connected_to.is_some_and(is_requested)
+      && call.phase.get_untracked() == CallPhase::Active
     {
       call.leave();
     }
@@ -960,10 +976,51 @@ fn connect_calls(state: AppState) {
       }
     }
   });
+  follow_moved_calls(state);
   Effect::new(move |_| {
     let ringing = state.read(|backend| backend.incoming_calls().first().copied());
     if call.phase.get_untracked() == CallPhase::Idle && call.incoming.get_untracked() != ringing {
       call.incoming.set(ringing);
+    }
+  });
+}
+
+/// Somebody added people to the DM call this device is in, and the server says the call moved into
+/// a meeting room (docs/meetings.md, "A call becomes a meeting"). The server's word alone moves
+/// nothing: the move shows only once a member of the DM's encryption group announced it, with who
+/// moved it and whom they added. A move this device asked for follows at once (after the core's
+/// check); any other, the user's own from another device included, waits for a tap in the call
+/// screen.
+fn follow_moved_calls(state: AppState) {
+  let call = state.call;
+  let pending = crate::feedback::PendingAction::new();
+  Effect::new(move |_| {
+    let maybe_offer = state.read(|backend| {
+      let active = backend.active_call()?;
+      let to = active.maybe_moved_to?;
+      let offer = backend.call_move_offer(active.conversation, to)?;
+      Some(crate::calls::MoveOffer {
+        from: active.conversation,
+        to,
+        by: offer.by,
+        added: offer.added,
+        is_requested_here: offer.is_requested_here,
+      })
+    });
+    let is_in_that_call = maybe_offer.as_ref().is_some_and(|offer| {
+      call.phase.get_untracked() == CallPhase::Active
+        && call
+          .maybe_request
+          .get_untracked()
+          .is_some_and(|request| request.conversation == offer.from)
+    });
+    let maybe_offer = maybe_offer.filter(|_| is_in_that_call);
+    if call.move_offer.get_untracked() == maybe_offer {
+      return;
+    }
+    call.move_offer.set(maybe_offer.clone());
+    if let Some(offer) = maybe_offer.filter(|offer| offer.is_requested_here) {
+      state.follow_call_move(offer.from, offer.to, pending);
     }
   });
 }

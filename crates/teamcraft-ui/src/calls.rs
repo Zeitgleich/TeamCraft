@@ -6,12 +6,28 @@ use std::rc::Rc;
 use leptos::prelude::*;
 
 pub use teamcraft_client_api::calls::*;
-use teamcraft_client_api::model::ConversationId;
+use teamcraft_client_api::model::{ConversationId, UserId};
+
+/// The DM call this device is in moved into a meeting room, announced by `by` in the DM's
+/// encryption group with the people they added.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MoveOffer {
+  pub from: ConversationId,
+  pub to: ConversationId,
+  pub by: UserId,
+  pub added: Vec<UserId>,
+  /// This device asked for the move: it follows without a tap.
+  pub is_requested_here: bool,
+}
 
 /// What the user did that the call backend has to carry out.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallEvent {
-  Join(CallRequest),
+  /// `is_muted`: the microphone is muted from the first frame.
+  Join {
+    request: CallRequest,
+    is_muted: bool,
+  },
   Leave,
   Decline(ConversationId),
   Muted(bool),
@@ -56,6 +72,8 @@ pub struct CallState {
   pub share_sound: RwSignal<bool>,
   pub has_hand_raised: RwSignal<bool>,
   pub is_deafened: RwSignal<bool>,
+  /// An announced move of this call into a meeting room the user hasn't followed yet.
+  pub move_offer: RwSignal<Option<MoveOffer>>,
   /// Carries the user's actions to the call backend; set once by the shell.
   handler: StoredValue<Option<CallHandler>, LocalStorage>,
 }
@@ -80,6 +98,7 @@ impl CallState {
       share_sound: RwSignal::new(false),
       has_hand_raised: RwSignal::new(false),
       is_deafened: RwSignal::new(false),
+      move_offer: RwSignal::new(None),
       handler: StoredValue::new_local(None),
     }
   }
@@ -167,13 +186,14 @@ impl CallState {
     self.is_deafened.set(false);
     self.phase.set(CallPhase::Active);
     if let Some(request) = self.maybe_request.get_untracked() {
-      self.emit(CallEvent::Join(request));
-      // The choices of the pre-join screen (or the settings), applied once joined: the backend
-      // carries out actions in order. The phone button joins with the camera off and never asks
-      // for it.
-      if !self.is_mic_on.get_untracked() {
-        self.emit(CallEvent::Muted(true));
-      }
+      // A muted microphone stays muted from the first frame, also when a call moves on into a
+      // meeting room: no audio slips out before the mute is applied.
+      self.emit(CallEvent::Join {
+        request,
+        is_muted: !self.is_mic_on.get_untracked(),
+      });
+      // The camera choice of the pre-join screen, applied once joined: the backend carries out
+      // actions in order. The phone button joins with the camera off and never asks for it.
       if self.is_camera_on.get_untracked() {
         self.emit(CallEvent::Camera(true));
       }

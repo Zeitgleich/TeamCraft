@@ -438,6 +438,17 @@ pub struct HuddleInfo {
   pub participants: Vec<UserId>,
 }
 
+/// A move of the user's DM call into a meeting room, as a member of the DM's encryption group
+/// announced it (docs/meetings.md, "A call becomes a meeting"): who moved it and whom they added.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallMoveOffer {
+  pub by: UserId,
+  pub added: Vec<UserId>,
+  /// This device asked for the move ("Add people" here): it follows without the user's tap.
+  #[serde(default)]
+  pub is_requested_here: bool,
+}
+
 /// A call someone started that the user can accept or decline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IncomingCall {
@@ -497,6 +508,10 @@ pub struct ActiveCall {
   /// Others whose connection was lost and who are rejoining.
   #[serde(default)]
   pub reconnecting: Vec<UserId>,
+  /// Somebody added people to this DM call: it moved into this meeting chat, and the UI switches
+  /// over to its call (docs/meetings.md, "A call becomes a meeting").
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_moved_to: Option<ConversationId>,
 }
 
 /// The sound of a screen share (the computer's playback without the call itself).

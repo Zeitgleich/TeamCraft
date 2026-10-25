@@ -4,17 +4,23 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
 use teamcraft_crypto::identity::{DeviceKeyPair, VerifiedDevice};
 use teamcraft_proto::{
-  CallJoinTokenResponse, ConversationId, CreateCallJoinTokenRequest, DeviceId, GatewayEvent, UserId,
+  CallId, CallJoinTokenResponse, ConversationId, ConversationKind, CreateCallJoinTokenRequest,
+  CreateInstantMeetingRequest, DeviceId, GatewayEvent, IdempotencyKey, MoveCallRequest, UserId,
 };
 
 use super::Client;
-use crate::api::ServerApi;
+use crate::api::{ApiError, ServerApi};
 use crate::error::CoreError;
-use crate::store::LocalStore;
+use crate::records;
+use crate::store::{ConversationEvent, LocalStore, MessageContent, Table};
 use crate::trust::PinnedDirectory;
+
+/// Prefix of the call move announcements in [`Table::SyncState`], per DM and meeting chat.
+const CALL_MOVE_PREFIX: &str = "call_move/";
 
 /// Receives the gateway's call events (start, update, end, ring) for the app's call handling.
 pub type CallEventSink = Box<dyn FnMut(&GatewayEvent)>;
@@ -23,6 +29,20 @@ pub type CallEventSink = Box<dyn FnMut(&GatewayEvent)>;
 /// the length of a call; it can be moved to the thread that runs the media.
 pub struct CallKeySigner {
   device: DeviceKeyPair,
+}
+
+/// A move of a DM's call into a meeting chat, as a member of the DM's group announced it in an
+/// encrypted `CallMoved` event (docs/meetings.md, "A call becomes a meeting").
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallMoveRecord {
+  pub by: UserId,
+  pub added: Vec<UserId>,
+  /// The DM call it moves; a record without one (or of another call) is never followed.
+  #[serde(rename = "call", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_call: Option<CallId>,
+  /// This device asked for the move: it follows without the user's tap.
+  #[serde(default)]
+  pub is_requested_here: bool,
 }
 
 /// Everything joining a conversation's call needs from the core (e2ee.md §8).
@@ -57,6 +77,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn prepare_call(&mut self, conversation: ConversationId) -> Result<CallPreparation, CoreError> {
     self.ensure_call_group(conversation).await?;
     let join = self.call_join_token(conversation).await?;
+    self.call_ids.insert(conversation, join.call_id);
     let devices = self.verified_call_devices(conversation).await?;
     Ok(CallPreparation {
       join,
@@ -108,18 +129,152 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Err(CoreError::CallEncryptionPending(conversation))
   }
 
+  /// "Add people" in this user's DM or group DM call: starts a meeting room with everybody in the
+  /// call and the added people, and moves the call into it ([`Self::move_call_to_meeting`]). The
+  /// same `key` again (a retry after a lost answer) gets the same room. Returns the room's chat.
+  pub async fn add_people_to_call(
+    &mut self,
+    from: ConversationId,
+    in_call: &[UserId],
+    added: &[UserId],
+    maybe_title: Option<String>,
+    key: IdempotencyKey,
+  ) -> Result<ConversationId, CoreError> {
+    let me = self.user_id();
+    let invitees: Vec<UserId> = in_call
+      .iter()
+      .chain(added)
+      .copied()
+      .filter(|user| *user != me)
+      .collect();
+    let meeting = self
+      .api
+      .create_instant_meeting(&CreateInstantMeetingRequest {
+        maybe_title,
+        invitees,
+        maybe_idempotency_key: Some(key),
+      })
+      .await?;
+    let result = self
+      .move_call_to_meeting(from, meeting.conversation_id, in_call, added)
+      .await;
+    if let Err(CoreError::Api(ApiError::Status { status: 409, .. })) = &result {
+      // Somebody else moved the call first: this room stays empty, so it goes again.
+      if let Err(cancel_error) = self.api.cancel_meeting(meeting.id).await {
+        tracing::warn!(error = %cancel_error, "cancelling the room of a refused move failed");
+      }
+    }
+    result.map(|()| meeting.conversation_id)
+  }
+
+  /// Moves this user's DM or group DM call into the meeting chat `meeting` they just started for it,
+  /// because they added people to the call (docs/meetings.md, "A call becomes a meeting"). The
+  /// meeting's encryption group is founded with the people in the call (`in_call`, as the call
+  /// shows them) who are in the conversation's own group, plus `added`: the user's own choice and
+  /// the call's verified group, never the server's member list of either conversation. Only then
+  /// does the server tell everybody in the call to switch over (`call_move`) and ring the added
+  /// people, so they find the group when they join. The DM itself doesn't change.
+  pub async fn move_call_to_meeting(
+    &mut self,
+    from: ConversationId,
+    meeting: ConversationId,
+    in_call: &[UserId],
+    added: &[UserId],
+  ) -> Result<(), CoreError> {
+    let me = self.user_id();
+    // The announcement names this very call, so it can't move a later one.
+    let Some(call) = self.call_ids.get(&from).copied() else {
+      return Err(CoreError::CallMoveRefused {
+        from,
+        to: meeting,
+        reason: "this device isn't in that call",
+      });
+    };
+    // The DM's group is what its members agreed on in signed commits, not what the server lists.
+    let in_group = self.group_users(from)?;
+    let mut invitees: Vec<UserId> = in_call
+      .iter()
+      .copied()
+      .filter(|user| *user != me && in_group.contains(user))
+      .collect();
+    let mut rung = Vec::new();
+    for user in added.iter().copied() {
+      if user != me && !invitees.contains(&user) {
+        invitees.push(user);
+        rung.push(user);
+      }
+    }
+    self.set_up_meeting_chat(meeting, &invitees).await?;
+    if !self.has_group(meeting)? {
+      return Err(CoreError::CallEncryptionPending(meeting));
+    }
+    let request = MoveCallRequest {
+      to_conversation_id: meeting,
+      ring_user_ids: rung.clone(),
+    };
+    // A second move of the same call (somebody else added people at the same time) is refused
+    // with a conflict: everybody follows the first one.
+    self.api.move_call(from, &request).await?;
+    // The others follow only this encrypted announcement, never the server's `call_move` alone.
+    let event = ConversationEvent::CallMoved {
+      meeting,
+      added: rung.clone(),
+      maybe_call: Some(call),
+    };
+    let record = CallMoveRecord {
+      by: me,
+      added: rung,
+      maybe_call: Some(call),
+      is_requested_here: true,
+    };
+    note_call_move(&self.store, from, meeting, &record)?;
+    self.enqueue(from, None, MessageContent::Event { event })?;
+    self.flush_outbox().await?;
+    Ok(())
+  }
+
+  /// Checks the move of `from`'s call into `to` before this device follows it (docs/meetings.md):
+  /// a member of `from`'s group announced it, and `to`'s group, once this device is in it, holds
+  /// nobody but `from`'s members and the people the announcement added. A server that points the
+  /// call somewhere else gets nobody's audio or video there.
+  pub async fn accept_call_move(
+    &mut self,
+    from: ConversationId,
+    to: ConversationId,
+  ) -> Result<(), CoreError> {
+    let refused = |reason| CoreError::CallMoveRefused { from, to, reason };
+    let Some(record) = call_move_announcement(&self.store, from, to)? else {
+      return Err(refused("nobody in the conversation announced it"));
+    };
+    // An announcement of an earlier call (replayed by the server) moves nothing now.
+    if record.maybe_call.is_none() || record.maybe_call != self.call_ids.get(&from).copied() {
+      return Err(refused("announced for another call"));
+    }
+    let in_dm = self.group_users(from)?;
+    if !in_dm.contains(&record.by) {
+      return Err(refused("announced by somebody outside the conversation's group"));
+    }
+    if self.api.conversation(to).await?.kind != ConversationKind::Meeting {
+      return Err(refused("not a meeting room"));
+    }
+    self.ensure_call_group(to).await?;
+    let me = self.user_id();
+    let is_expected = |user: &UserId| *user == me || in_dm.contains(user) || record.added.contains(user);
+    if !self.group_users(to)?.iter().all(is_expected) {
+      return Err(refused("the meeting room holds somebody the move didn't name"));
+    }
+    // Followed once: the same announcement never moves this device again.
+    self.store.delete(Table::SyncState, &call_move_key(from, to))?;
+    Ok(())
+  }
+
   /// The devices of the conversation's MLS group, their certificates verified against the pinned
   /// identities: who may be in its call. This device included.
   pub async fn verified_call_devices(
     &mut self,
     conversation: ConversationId,
   ) -> Result<Vec<VerifiedDevice>, CoreError> {
-    let users: Vec<_> = self
-      .group_or_error(conversation)?
-      .members()?
-      .into_iter()
-      .map(|member| crate::convert::user_from_crypto(member.user_id))
-      .collect::<Result<_, _>>()?;
+    let users = self.group_users(conversation)?;
     let directory: PinnedDirectory = self.pin_identities(users).await?;
     Ok(self.group_or_error(conversation)?.verified_members(&directory)?)
   }
@@ -149,4 +304,28 @@ impl fmt::Debug for CallKeySigner {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.debug_struct("CallKeySigner").finish_non_exhaustive()
   }
+}
+
+/// Notes an announced move of `from`'s call into `meeting` (an own one or a member's, received in
+/// `from`'s group).
+pub(crate) fn note_call_move(
+  store: &impl LocalStore,
+  from: ConversationId,
+  meeting: ConversationId,
+  record: &CallMoveRecord,
+) -> Result<(), CoreError> {
+  records::put_json(store, Table::SyncState, &call_move_key(from, meeting), record)
+}
+
+/// The announced move of `from`'s call into `meeting`, if any.
+pub fn call_move_announcement(
+  store: &impl LocalStore,
+  from: ConversationId,
+  meeting: ConversationId,
+) -> Result<Option<CallMoveRecord>, CoreError> {
+  records::get_json(store, Table::SyncState, &call_move_key(from, meeting))
+}
+
+fn call_move_key(from: ConversationId, meeting: ConversationId) -> String {
+  format!("{CALL_MOVE_PREFIX}{from}/{meeting}")
 }

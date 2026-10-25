@@ -523,6 +523,7 @@ fn workspace_event(event: &ConversationEvent, actor: UserId) -> Option<Workspace
     | ConversationEvent::Left
     | ConversationEvent::Renamed { .. }
     | ConversationEvent::TopicChanged { .. }
+    | ConversationEvent::CallMoved { .. }
     | ConversationEvent::Unknown => return None,
   })
 }

@@ -110,6 +110,9 @@ pub struct NativeCallConfig {
   pub maybe_ticket_source: Option<Arc<dyn JoinTicketSource>>,
   /// Which call status sounds (reconnecting, reconnected, connection lost) play.
   pub status_cues: StatusCues,
+  /// The microphone is muted from the first frame (the user's choice before joining, or a call
+  /// that moves on while muted): nothing of it is sent before a later unmute.
+  pub is_muted_at_start: bool,
 }
 
 /// Gets a fresh join ticket from `teamcraft-server` (a new token, possibly another SFU URL).
@@ -240,6 +243,7 @@ impl NativeCallConfig {
       resilience: ResilienceConfig::default(),
       maybe_ticket_source: None,
       status_cues: StatusCues::default(),
+      is_muted_at_start: false,
     }
   }
 
@@ -448,6 +452,10 @@ async fn run_call(
   if let Some(processor) = &maybe_processor {
     capture = capture.with_processor(Arc::clone(processor));
     mixer = mixer.with_processor(Arc::clone(processor));
+  }
+  if config.is_muted_at_start {
+    engine.set_muted(true);
+    capture.set_muted(true);
   }
   let mut source = config.source.clone();
   let mut devices = AudioDevices::open(&source, &config.sink)?;

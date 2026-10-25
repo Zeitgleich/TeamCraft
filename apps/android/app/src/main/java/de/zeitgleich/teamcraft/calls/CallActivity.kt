@@ -27,18 +27,26 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -56,6 +64,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
@@ -65,15 +74,18 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.security.ScreenPrefs.Companion.prefs
+import de.zeitgleich.teamcraft.ui.toggled
 import de.zeitgleich.teamcraft.ui.theme.TeamCraftTheme
 import uniffi.teamcraft_ffi.CallEndReason
 import uniffi.teamcraft_ffi.CallPhase
 import uniffi.teamcraft_ffi.CallStateInfo
 import uniffi.teamcraft_ffi.VideoTrackInfo
+import uniffi.teamcraft_ffi.newRequestKey
 
 private val SELF_VIEW_WIDTH = 120.dp
 private const val SELF_VIEW_ASPECT = 3f / 4f
 private const val VIDEO_ASPECT = 4f / 3f
+private val ADD_PEOPLE_LIST_HEIGHT = 320.dp
 
 /** The in-call screen: others' video, the self-view, the privacy code and the call's controls. */
 class CallActivity : ComponentActivity() {
@@ -191,6 +203,19 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
     calls.setCameraWanted(isGranted)
   }
   var maybeFullScreen by rememberSaveable { mutableStateOf<Long?>(null) }
+  var isAddingPeople by rememberSaveable { mutableStateOf(false) }
+  var maybeAddChoice by remember { mutableStateOf<AddPeopleChoice?>(null) }
+  val maybeConversationId = maybeState?.conversationId
+  LaunchedEffect(maybeConversationId) {
+    // "Add people" only in a DM or group DM call; a meeting room's call (after a move) has none.
+    maybeAddChoice = maybeConversationId?.let { calls.moves.choice(it) }
+  }
+  // The dialog stays through a reconnect (it keeps its request key); it opens only when connected.
+  val addChoice = maybeAddChoice?.takeIf { it.conversationId == maybeConversationId }
+  val canAddPeople = addChoice != null && maybeState?.phase == CallPhase.CONNECTED
+  if (isAddingPeople && addChoice != null) {
+    AddPeopleDialog(calls.moves, addChoice) { isAddingPeople = false }
+  }
   val maybeFullScreenTrack = tracks.firstOrNull { it.streamId.toLong() == maybeFullScreen }
   if (maybeFullScreenTrack != null) {
     FullScreenVideo(maybeFullScreenTrack, frames[maybeFullScreenTrack.streamId]) { maybeFullScreen = null }
@@ -204,6 +229,7 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
         horizontalAlignment = Alignment.CenterHorizontally,
       ) {
         CallStatus(maybeState)
+        CallMoveBanner(calls.moves)
         if (tracks.isEmpty()) {
           Box(Modifier.weight(1f))
         } else {
@@ -220,6 +246,7 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
           },
           onFlipCamera = { isFrontCamera = !isFrontCamera },
           onSpeaker = { calls.setSpeakerOn(it) },
+          maybeOnAddPeople = if (canAddPeople) ({ isAddingPeople = true }) else null,
           onHangUp = { calls.hangUp() },
         )
       }
@@ -356,6 +383,7 @@ private fun CallControls(
   onCamera: (Boolean) -> Unit,
   onFlipCamera: () -> Unit,
   onSpeaker: (Boolean) -> Unit,
+  maybeOnAddPeople: (() -> Unit)?,
   onHangUp: () -> Unit,
 ) {
   val isMuted = maybeState?.isMuted == true
@@ -380,6 +408,9 @@ private fun CallControls(
     FilterChip(selected = isSpeakerOn, onClick = { onSpeaker(!isSpeakerOn) }, label = {
       Text(stringResource(R.string.call_speaker))
     })
+    maybeOnAddPeople?.let { onAddPeople ->
+      FilterChip(selected = false, onClick = onAddPeople, label = { Text(stringResource(R.string.call_add_people)) })
+    }
   }
   Button(
     onClick = onHangUp,
@@ -387,6 +418,111 @@ private fun CallControls(
   ) {
     Text(stringResource(R.string.call_hang_up))
   }
+}
+
+/**
+ * A move of the call another member announced (docs/meetings.md, "A call becomes a meeting"):
+ * who moved it and whom they added, and joining on a tap only. Also why following a move failed.
+ */
+@Composable
+private fun CallMoveBanner(moves: CallMoves) {
+  val maybeOffer by moves.moveOffer.collectAsStateWithLifecycle()
+  val maybeFailure by moves.moveFailure.collectAsStateWithLifecycle()
+  val isAccepting by moves.isAccepting.collectAsStateWithLifecycle()
+  val offer = maybeOffer
+  val failure = maybeFailure
+  if (offer == null && failure == null) return
+  Surface(
+    color = MaterialTheme.colorScheme.secondaryContainer,
+    shape = MaterialTheme.shapes.medium,
+    modifier = Modifier.fillMaxWidth(),
+  ) {
+    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+      if (offer != null) {
+        Text(stringResource(R.string.call_move_offer, offer.byName, offer.addedNames.joinToString(", ")))
+        Button(onClick = { moves.accept() }, enabled = !isAccepting) {
+          if (isAccepting) {
+            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+          } else {
+            Text(stringResource(R.string.call_move_join))
+          }
+        }
+      }
+      if (failure != null) {
+        Text(stringResource(failure), color = MaterialTheme.colorScheme.error)
+        TextButton(onClick = { moves.dismissFailure() }) { Text(stringResource(R.string.close)) }
+      }
+    }
+  }
+}
+
+/**
+ * Picks people to add to a DM or group DM call. One request key per dialog, so a retry after a
+ * failure or a lost answer gets the same meeting room and adds nobody twice. Stays open (with the
+ * failure) until the core answered the move.
+ */
+@Composable
+private fun AddPeopleDialog(moves: CallMoves, choice: AddPeopleChoice, onClose: () -> Unit) {
+  val requestKey = rememberSaveable { newRequestKey() }
+  var picked by rememberSaveable { mutableStateOf(listOf<String>()) }
+  val addState by moves.addState.collectAsStateWithLifecycle()
+  val isPending = addState == AddPeopleState.Pending
+  val title = stringResource(R.string.call_meeting_title)
+  val close = {
+    moves.addShown()
+    onClose()
+  }
+  LaunchedEffect(addState) {
+    if (addState == AddPeopleState.Done) close()
+  }
+  AlertDialog(
+    onDismissRequest = { if (!isPending) close() },
+    title = { Text(stringResource(R.string.call_add_people)) },
+    text = {
+      Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(stringResource(R.string.call_add_hint), style = MaterialTheme.typography.bodySmall)
+        if (choice.candidates.isEmpty()) {
+          Text(stringResource(R.string.call_add_nobody))
+        }
+        LazyColumn(Modifier.heightIn(max = ADD_PEOPLE_LIST_HEIGHT)) {
+          items(choice.candidates, key = { it.id }) { user ->
+            val isPicked = user.id in picked
+            Row(
+              Modifier
+                .fillMaxWidth()
+                .toggleable(value = isPicked, enabled = !isPending, role = Role.Checkbox) { picked = toggled(picked, user.id) }
+                .padding(vertical = 8.dp),
+              verticalAlignment = Alignment.CenterVertically,
+            ) {
+              Checkbox(checked = isPicked, onCheckedChange = null, modifier = Modifier.padding(end = 12.dp))
+              Column(Modifier.weight(1f)) {
+                Text(user.displayName)
+                Text("@" + user.username, style = MaterialTheme.typography.bodySmall)
+              }
+            }
+          }
+        }
+        (addState as? AddPeopleState.Failed)?.let { failed ->
+          Text(stringResource(failed.text), color = MaterialTheme.colorScheme.error)
+        }
+      }
+    },
+    confirmButton = {
+      Button(
+        onClick = { moves.add(choice, picked.filter { id -> choice.candidates.any { it.id == id } }, title, requestKey) },
+        enabled = picked.isNotEmpty() && !isPending,
+      ) {
+        if (isPending) {
+          CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+        } else {
+          Text(stringResource(R.string.call_add))
+        }
+      }
+    },
+    dismissButton = {
+      TextButton(onClick = close, enabled = !isPending) { Text(stringResource(R.string.cancel)) }
+    },
+  )
 }
 
 private fun phaseText(maybeState: CallStateInfo?): Int = when (maybeState?.phase) {

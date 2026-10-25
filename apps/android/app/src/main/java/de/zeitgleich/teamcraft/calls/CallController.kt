@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.CoreRepository
+import uniffi.teamcraft_ffi.CallEndReason
 import uniffi.teamcraft_ffi.CallListener
 import uniffi.teamcraft_ffi.CallPhase
 import uniffi.teamcraft_ffi.CallSession
@@ -65,6 +66,17 @@ class CallController(
   private val ringing = MutableStateFlow<IncomingRing?>(null)
   private val joining = MutableStateFlow(false)
   private val incomingNotifier = IncomingCallNotifier(context)
+  /** The DM whose call this device left for a meeting room: its late states are not ours any more. */
+  @Volatile private var maybeLeftConversation: String? = null
+
+  /** "Add people" and following a move of the call into a meeting room. */
+  val moves = CallMoves(
+    core,
+    scope,
+    activeConversation = { if (maybeSession != null) state.value?.conversationId else null },
+    callPeople = { state.value?.participantUserIds.orEmpty() },
+    follow = ::follow,
+  )
 
   /** The call this device is in, as the engine reports it; `null` when idle. */
   val callState: StateFlow<CallStateInfo?> = state
@@ -92,6 +104,7 @@ class CallController(
     if (isStarted) return
     registerWithTelecom()
     core.core().setCallListener(Listener())
+    moves.start()
     isStarted = true
   }
 
@@ -308,12 +321,14 @@ class CallController(
   }
 
   private suspend fun joinOnce(conversationId: String): Boolean {
+    if (conversationId == maybeLeftConversation) maybeLeftConversation = null
     showCall()
     if (!hasMicrophone() && !requestMicrophone()) return false
     // Receiving video needs Cisco's OpenH264; without it the call is audio-only for this device.
     VideoCodecInstaller.ensure(context)
     val session = try {
-      core.core().joinCall(conversationId)
+      // Muted from the first frame (a muted call moving into a meeting room): no audio slips out.
+      core.core().joinCall(conversationId, options.isMuted)
     } catch (error: Exception) {
       Log.w(TAG, "joining the call failed", error)
       return false
@@ -321,11 +336,40 @@ class CallController(
     maybeSession = session
     session.setStatusSounds(CallSoundPrefs.prefs(context).statusSounds)
     session.setVideoListener(Video())
-    if (options.isMuted) session.setMuted(true)
     wantsCamera.value = options.isCameraOn
     options = CallOptions()
     CallService.start(context, hasCamera = false)
     return true
+  }
+
+  /**
+   * Follows a move the core accepted: leaves the DM's call and joins the meeting room's in the
+   * same Telecom call, with the microphone and camera as they were. If joining fails, the call
+   * ends as failed (and with it the Telecom call).
+   */
+  private suspend fun follow(from: String, to: String): Boolean {
+    val current = state.value
+    val session = maybeSession
+    if (session == null || current?.conversationId != from) return false
+    options = CallOptions(isCameraOn = wantsCamera.value, isMuted = current.isMuted)
+    maybeLeftConversation = from
+    maybeSession = null
+    session.leave()
+    session.close()
+    tracks.value = emptyList()
+    frames.value = emptyMap()
+    state.value = current.copy(
+      conversationId = to,
+      phase = CallPhase.CONNECTING,
+      isSecured = false,
+      participantCount = 0u,
+      participantUserIds = emptyList(),
+      reconnectingCount = 0u,
+      maybePrivacyCode = null,
+    )
+    if (join(to)) return true
+    state.update { it?.copy(phase = CallPhase.ENDED, maybeEndReason = CallEndReason.FAILED) }
+    return false
   }
 
   /** Ends the ring here: notification, timeout and the Telecom call unless it was answered. */
@@ -382,6 +426,7 @@ class CallController(
     }
     maybeSession = null
     maybeTelecomCall = null
+    moves.reset()
     wantsCamera.value = false
     tracks.value = emptyList()
     frames.value = emptyMap()
@@ -391,6 +436,8 @@ class CallController(
   /** Engine callbacks arrive on the engine's and the call's threads; the state flow is thread-safe. */
   private inner class Listener : CallListener {
     override fun onCallState(state: CallStateInfo) {
+      // The DM's call this device left for a meeting room ends after the room's call began.
+      if (state.conversationId == maybeLeftConversation) return
       this@CallController.state.value = state
     }
 
@@ -412,6 +459,11 @@ class CallController(
     override fun onRingEnded(conversationId: String) {
       // Answered on another device, declined or over: stop ringing here.
       if (ringing.value?.conversationId == conversationId) endRing()
+    }
+
+    override fun onCallMoved(fromConversationId: String, toConversationId: String) {
+      // Only a trigger: the move is shown, and followed, once the DM's group announced it.
+      moves.moved(fromConversationId, toConversationId)
     }
   }
 

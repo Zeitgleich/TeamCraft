@@ -15,8 +15,9 @@ use secrecy::ExposeSecret;
 use subtle::ConstantTimeEq;
 use teamcraft_proto::{
   CALL_JOIN_TOKEN_AUDIENCE, CallId, CallJoinClaims, CallJoinTokenResponse, CallRosterEntry,
-  CallStateResponse, ConversationId, ConversationKind, CreateCallJoinTokenRequest, DeviceId, GatewayEvent,
-  SfuControlAction, SfuControlRequest, SfuParticipantReport, UnixMillis, UserId,
+  CallStateResponse, ChannelRole, ConversationId, ConversationKind, CreateCallJoinTokenRequest, DeviceId,
+  GatewayEvent, MoveCallRequest, SfuControlAction, SfuControlRequest, SfuParticipantReport, UnixMillis,
+  UserId,
 };
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -71,6 +72,18 @@ struct ActiveCall {
   maybe_started: Option<Started>,
   participants: Vec<CallRosterEntry>,
   is_ringing: bool,
+  /// Set when a DM call moved into this meeting chat: the people added there ring when the call
+  /// starts (or at once if it runs), and only they.
+  maybe_added_ring: Option<AddedRing>,
+  /// Set when this DM call moved into a meeting chat: a second move goes nowhere else.
+  maybe_moved_to: Option<ConversationId>,
+}
+
+/// The people added to a call that moved into a meeting (`move_call`), rung on behalf of `by`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddedRing {
+  pub by: UserId,
+  pub users: HashSet<UserId>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -304,6 +317,8 @@ impl CallService {
         maybe_started: None,
         participants: Vec::new(),
         is_ringing: false,
+        maybe_added_ring: None,
+        maybe_moved_to: None,
       },
     );
     Ok(call_id)
@@ -326,8 +341,9 @@ impl CallService {
       .map(|(conversation_id, _)| *conversation_id)
   }
 
-  /// Records a participant. The first one starts the call (ringing if `rings`); a joiner other
-  /// than the starter stops the ringing.
+  /// Records a participant. The first one starts the call (ringing if `rings` or people were added
+  /// to it, [`Self::ring_added`]); a joiner other than the starter stops the ringing, or for added
+  /// people one of them.
   fn participant_joined(
     &self,
     conversation_id: ConversationId,
@@ -349,11 +365,18 @@ impl CallService {
           by: entry.user_id,
           at: now,
         });
-        call.is_ringing = rings;
+        call.is_ringing = match &call.maybe_added_ring {
+          Some(ring) => !ring.users.is_empty(),
+          None => rings,
+        };
         JoinChange::Started(call.snapshot(conversation_id, entry.user_id, now))
       },
       Some(started) => {
-        if call.is_ringing && entry.user_id != started.by {
+        let is_answer = match &call.maybe_added_ring {
+          Some(ring) => ring.users.contains(&entry.user_id),
+          None => entry.user_id != started.by,
+        };
+        if call.is_ringing && is_answer {
           call.is_ringing = false;
         }
         JoinChange::Updated(call.snapshot(conversation_id, started.by, started.at))
@@ -385,6 +408,67 @@ impl CallService {
       Some(started) => LeaveChange::Updated(call.snapshot(conversation_id, started.by, started.at)),
       None => LeaveChange::Unchanged,
     }
+  }
+
+  /// Notes the people added to a call that moves into this meeting chat: they ring when its call
+  /// starts, or now if it runs already (the returned snapshot then rings). Who else joins doesn't
+  /// end their ringing, only one of them answering or the timeout. A new call keeps the entry for
+  /// `call_idle_secs`, like one a join token opened.
+  fn ring_added(
+    &self,
+    conversation_id: ConversationId,
+    ring: AddedRing,
+    now: Instant,
+    new_call_id: impl FnOnce() -> Result<CallId, ApiError>,
+  ) -> Result<Option<CallSnapshot>, ApiError> {
+    self.call_for(conversation_id, now, new_call_id)?;
+    let mut active = self.lock();
+    let Some(call) = active.get_mut(&conversation_id) else {
+      return Ok(None);
+    };
+    let is_anybody_rung = !ring.users.is_empty();
+    call.maybe_added_ring = Some(ring);
+    let Some(started) = call.maybe_started else {
+      return Ok(None);
+    };
+    if !is_anybody_rung {
+      return Ok(None);
+    }
+    call.is_ringing = true;
+    Ok(Some(call.snapshot(conversation_id, started.by, started.at)))
+  }
+
+  /// Whom the conversation's call rings for, if somebody moved a call into it.
+  fn added_ring(&self, conversation_id: ConversationId) -> Option<AddedRing> {
+    self
+      .lock()
+      .get(&conversation_id)
+      .and_then(|call| call.maybe_added_ring.clone())
+  }
+
+  /// Notes that the conversation's running call moves into `to`. Two people adding at the same time
+  /// would split the call into two rooms: the second move into another room is refused with the
+  /// first one's chat; the same move again (a retry) is fine.
+  fn mark_moved(&self, conversation_id: ConversationId, to: ConversationId) -> Result<(), ConversationId> {
+    let mut active = self.lock();
+    let Some(call) = active.get_mut(&conversation_id) else {
+      return Ok(());
+    };
+    match call.maybe_moved_to {
+      Some(existing) if existing != to => Err(existing),
+      _ => {
+        call.maybe_moved_to = Some(to);
+        Ok(())
+      },
+    }
+  }
+
+  /// Whether a device of the user is in the conversation's call.
+  pub fn is_user_in_call(&self, conversation_id: ConversationId, user: UserId) -> bool {
+    self
+      .lock()
+      .get(&conversation_id)
+      .is_some_and(|call| call.participants.iter().any(|entry| entry.user_id == user))
   }
 
   /// Ends the ringing of `call_id` if it still rings.
@@ -630,29 +714,7 @@ pub async fn report_joined(state: &AppState, report: SfuParticipantReport) -> Re
         },
       );
       if snapshot.is_ringing {
-        state.hub.publish(
-          members
-            .iter()
-            .copied()
-            .filter(|member| *member != snapshot.started_by),
-          &GatewayEvent::CallRing {
-            conversation_id,
-            call_id: snapshot.call_id,
-            from_user_id: snapshot.started_by,
-          },
-        );
-        tokio::spawn(crate::push::routing::notify_ring(
-          state.clone(),
-          conversation_id,
-          snapshot.call_id,
-          snapshot.started_by,
-        ));
-        spawn_ring_timeout(
-          state.clone(),
-          conversation_id,
-          snapshot.call_id,
-          calls.ring_timeout,
-        );
+        start_ringing(state, calls, &snapshot, &members);
       }
     },
     JoinChange::Updated(snapshot) => {
@@ -664,6 +726,131 @@ pub async fn report_joined(state: &AppState, report: SfuParticipantReport) -> Re
     },
   }
   refresh_caller_presence(state, report.user_id).await;
+  Ok(())
+}
+
+/// Rings the call's members: in a DM or group DM everybody but the starter, in a meeting a call
+/// moved into the people added to it.
+fn start_ringing(state: &AppState, calls: &CallService, snapshot: &CallSnapshot, members: &[UserId]) {
+  let conversation_id = snapshot.conversation_id;
+  let (caller, maybe_only) = match calls.added_ring(conversation_id) {
+    Some(ring) => (ring.by, Some(ring.users)),
+    None => (snapshot.started_by, None),
+  };
+  let rung: Vec<UserId> = members
+    .iter()
+    .copied()
+    .filter(|member| match &maybe_only {
+      Some(only) => only.contains(member),
+      None => *member != caller,
+    })
+    .collect();
+  state.hub.publish(
+    rung,
+    &GatewayEvent::CallRing {
+      conversation_id,
+      call_id: snapshot.call_id,
+      from_user_id: caller,
+    },
+  );
+  tokio::spawn(crate::push::routing::notify_ring(
+    state.clone(),
+    conversation_id,
+    snapshot.call_id,
+    caller,
+    maybe_only,
+  ));
+  spawn_ring_timeout(
+    state.clone(),
+    conversation_id,
+    snapshot.call_id,
+    calls.ring_timeout,
+  );
+}
+
+/// Somebody in a DM or group DM call added people: the call moves into the meeting chat the caller
+/// just started for it (docs/meetings.md, "A call becomes a meeting"). Everybody in the call is told
+/// to switch over, the added people ring in the meeting. The DM itself doesn't change. A repeat
+/// tells them again and rings anew, which is what a retry after a lost answer needs.
+pub async fn move_call(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  conversation_id: ConversationId,
+  request: MoveCallRequest,
+) -> Result<(), ApiError> {
+  let calls = calls_of(state)?;
+  let access = load_conversation(state, caller, conversation_id).await?;
+  if !access.is_member() {
+    return Err(ApiError::Forbidden("only members can move the call".into()));
+  }
+  if !matches!(
+    access.view.conversation.kind,
+    ConversationKind::Dm | ConversationKind::Group
+  ) {
+    return Err(ApiError::InvalidRequest(
+      "only DM and group DM calls move into a meeting".into(),
+    ));
+  }
+  let Some(call_id) = calls.running_call(conversation_id) else {
+    return Err(ApiError::call_not_found());
+  };
+  if !calls.is_user_in_call(conversation_id, caller.user.id) {
+    return Err(ApiError::Forbidden("only people in the call can move it".into()));
+  }
+  let target = load_conversation(state, caller, request.to_conversation_id).await?;
+  let organizes =
+    target.view.conversation.kind == ConversationKind::Meeting && target.role() == Some(&ChannelRole::Admin);
+  if !organizes {
+    return Err(ApiError::Forbidden(
+      "a call moves only into a meeting the caller organizes".into(),
+    ));
+  }
+  let max_rung = state.settings.get().meeting_mail.max_invitees;
+  if request.ring_user_ids.len() > max_rung {
+    return Err(ApiError::InvalidRequest(format!(
+      "at most {max_rung} people to ring"
+    )));
+  }
+  if let Err(existing) = calls.mark_moved(conversation_id, request.to_conversation_id) {
+    return Err(ApiError::Conflict(format!(
+      "the call moved into {existing} already"
+    )));
+  }
+  let target_members = state
+    .database
+    .conversation_member_ids(request.to_conversation_id)
+    .await?;
+  let ring = AddedRing {
+    by: caller.user.id,
+    users: request
+      .ring_user_ids
+      .iter()
+      .copied()
+      .filter(|user| *user != caller.user.id && target_members.contains(user))
+      .collect(),
+  };
+  let maybe_ringing = calls.ring_added(request.to_conversation_id, ring, Instant::now(), || {
+    state.next_id()
+  })?;
+  info!(
+    conversation_id = %conversation_id,
+    to_conversation_id = %request.to_conversation_id,
+    "call moves into a meeting"
+  );
+  let members = state.database.conversation_member_ids(conversation_id).await?;
+  state.hub.publish(
+    members,
+    &GatewayEvent::CallMove {
+      conversation_id,
+      call_id,
+      to_conversation_id: request.to_conversation_id,
+      moved_by: caller.user.id,
+    },
+  );
+  if let Some(snapshot) = maybe_ringing {
+    publish_update(state, target_members.clone(), &snapshot);
+    start_ringing(state, calls, &snapshot, &target_members);
+  }
   Ok(())
 }
 
@@ -976,6 +1163,71 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
     }
 
     #[test]
+    fn added_people_ring_when_the_call_starts_and_only_they_answer() {
+      let service = service();
+      let ring = AddedRing {
+        by: id(4),
+        users: HashSet::from([id(6)]),
+      };
+      let ringing_now = service
+        .ring_added(id(1), ring, Instant::now(), || Ok(id(100)))
+        .unwrap();
+      assert!(ringing_now.is_none(), "nothing rings before the call starts");
+
+      let started = service.participant_joined(id(1), entry(5, 50), false, UnixMillis(0));
+      assert!(matches!(started, JoinChange::Started(snapshot) if snapshot.is_ringing));
+      service.participant_joined(id(1), entry(4, 40), false, UnixMillis(1));
+      assert!(
+        service.is_ringing(id(1), id(100)),
+        "the mover joining doesn't answer"
+      );
+      service.participant_joined(id(1), entry(6, 60), false, UnixMillis(2));
+      assert!(!service.is_ringing(id(1), id(100)));
+    }
+
+    #[test]
+    fn people_added_to_a_running_call_ring_at_once() {
+      let service = service();
+      service.call_for(id(1), Instant::now(), || Ok(id(100))).unwrap();
+      service.participant_joined(id(1), entry(4, 40), false, UnixMillis(0));
+      let ring = AddedRing {
+        by: id(4),
+        users: HashSet::from([id(6)]),
+      };
+
+      let ringing_now = service
+        .ring_added(id(1), ring, Instant::now(), || Ok(id(101)))
+        .unwrap();
+
+      assert_eq!(ringing_now.map(|snapshot| snapshot.call_id), Some(id(100)));
+      assert!(service.is_ringing(id(1), id(100)));
+    }
+
+    #[test]
+    fn a_move_without_anybody_added_rings_nobody() {
+      let service = service();
+      let ring = AddedRing {
+        by: id(4),
+        users: HashSet::new(),
+      };
+      service
+        .ring_added(id(1), ring, Instant::now(), || Ok(id(100)))
+        .unwrap();
+      let started = service.participant_joined(id(1), entry(4, 40), true, UnixMillis(0));
+      assert!(matches!(started, JoinChange::Started(snapshot) if !snapshot.is_ringing));
+    }
+
+    #[test]
+    fn a_call_moves_into_one_room_only() {
+      let service = service();
+      service.call_for(id(1), Instant::now(), || Ok(id(100))).unwrap();
+      service.participant_joined(id(1), entry(4, 40), false, UnixMillis(0));
+      assert_eq!(service.mark_moved(id(1), id(2)), Ok(()));
+      assert_eq!(service.mark_moved(id(1), id(2)), Ok(()), "a retry");
+      assert_eq!(service.mark_moved(id(1), id(3)), Err(id(2)));
+    }
+
+    #[test]
     fn conversations_have_separate_calls() {
       let service = service();
       let now = Instant::now();
@@ -1000,6 +1252,13 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
       ring_timeout_secs: 30,
       maybe_sfu_control_url: None,
       maybe_sfu_certificate_sha256: None,
+    }
+  }
+
+  fn entry(user: i64, device: i64) -> CallRosterEntry {
+    CallRosterEntry {
+      user_id: id(user),
+      device_id: id(device),
     }
   }
 

@@ -39,12 +39,13 @@ use teamcraft_proto::{
   CreateOrgBackgroundUploadRequest, CreateOrgBackgroundUploadResponse, OrgBackgroundDownloadResponse,
   OrgBackgroundId,
 };
-use teamcraft_proto::{CallId, CallJoinTokenResponse, CreateCallJoinTokenRequest};
+use teamcraft_proto::{CallId, CallJoinTokenResponse, CreateCallJoinTokenRequest, MoveCallRequest};
 use teamcraft_proto::{
   CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest,
   InviteResponse, ListCategoriesResponse, UpdateCategoryRequest, UpdateConversationRequest,
   UpdateSpaceRequest,
 };
+use teamcraft_proto::{CreateInstantMeetingRequest, MeetingKind, MeetingResponse, MeetingStatus};
 use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest};
 use teamcraft_proto::{ErrorBody, RendezvousClientMessage, RendezvousServerMessage};
 use teamcraft_proto::{
@@ -107,6 +108,14 @@ struct State {
   failing_read_positions: HashSet<ConversationId>,
   /// `PUT read-position` requests that arrived, to check that queued ones are sent once.
   read_position_writes: u64,
+  /// Meetings cancelled through the API, in order.
+  cancelled_meetings: Vec<teamcraft_proto::MeetingId>,
+  /// The running call of each conversation (a new one after [`FakeServer::end_call`]).
+  calls: HashMap<ConversationId, CallId>,
+  /// Instant meetings by the idempotency key they were created with.
+  instant_meetings: HashMap<IdempotencyKey, MeetingResponse>,
+  /// Calls moved into a meeting (`move_call`), in order.
+  call_moves: Vec<(ConversationId, MoveCallRequest)>,
   /// REST calls per user, also those that failed (tests about idle traffic).
   rest_calls: HashMap<UserId, u64>,
   users: BTreeMap<UserId, UserSummary>,
@@ -654,6 +663,16 @@ impl FakeServer {
     }
     state.publish(members, &GatewayEvent::ConversationUpdate { conversation_id: id });
     id
+  }
+
+  /// The conversation's call ends: the next join token opens a new call with a new ID.
+  pub fn end_call(&self, conversation: ConversationId) {
+    self.lock().calls.remove(&conversation);
+  }
+
+  /// The calls moved into a meeting so far, in order.
+  pub fn call_moves(&self) -> Vec<(ConversationId, MoveCallRequest)> {
+    self.lock().call_moves.clone()
   }
 
   /// How many channels have this name.
@@ -1926,13 +1945,121 @@ impl ServerApi for FakeServerApi {
           "no such conversation",
         ));
       }
+      let call_id = match state.calls.get(&conversation) {
+        Some(call_id) => *call_id,
+        None => {
+          let call_id = state.next_id();
+          state.calls.insert(conversation, call_id);
+          call_id
+        },
+      };
       Ok(CallJoinTokenResponse {
-        call_id: CallId::from_snowflake(conversation.snowflake()),
+        call_id,
         token: format!("fake:{conversation}"),
         sfu_url: "https://sfu.invalid/call".to_owned(),
         expires_at: UnixMillis(0),
         sfu_certificate_sha256: Vec::new(),
       })
+    })
+  }
+
+  /// A meeting chat like the server's (the caller is admin, the invitees members), without a
+  /// calendar; a retry with the same key returns the same meeting.
+  async fn create_instant_meeting(
+    &self,
+    request: &CreateInstantMeetingRequest,
+  ) -> Result<MeetingResponse, ApiError> {
+    self.with(|state, me| {
+      if let Some(existing) = request
+        .maybe_idempotency_key
+        .as_ref()
+        .and_then(|key| state.instant_meetings.get(key))
+      {
+        return Ok(existing.clone());
+      }
+      let mut members: Vec<UserId> = request
+        .invitees
+        .iter()
+        .copied()
+        .filter(|user| *user != me)
+        .collect();
+      members.push(me);
+      let title = request
+        .maybe_title
+        .clone()
+        .unwrap_or_else(|| "Instant meeting".to_owned());
+      let conversation_id = state.create_conversation(
+        ConversationKind::Meeting,
+        None,
+        Some(title.clone()),
+        HistoryPolicy::Full,
+        &members,
+      );
+      if let Some(conversation) = state.conversations.get_mut(&conversation_id)
+        && let Some(entry) = conversation.members.get_mut(&me)
+      {
+        entry.0 = ChannelRole::Admin;
+      }
+      state.publish(members, &GatewayEvent::ConversationUpdate { conversation_id });
+      let meeting = MeetingResponse {
+        id: state.next_id(),
+        title,
+        maybe_description: None,
+        starts_at: UnixMillis(0),
+        ends_at: UnixMillis(0),
+        kind: MeetingKind::Instant,
+        status: MeetingStatus::Scheduled,
+        has_lobby: true,
+        organizer_user_id: me,
+        conversation_id,
+        join_url: format!("https://chat.example.com/meeting/{conversation_id}"),
+        maybe_recurrence: None,
+        attendees: Vec::new(),
+        undelivered_invitations: Vec::new(),
+      };
+      if let Some(key) = &request.maybe_idempotency_key {
+        state.instant_meetings.insert(*key, meeting.clone());
+      }
+      Ok(meeting)
+    })
+  }
+
+  /// Notes the cancellation; the fake keeps no calendar.
+  async fn cancel_meeting(&self, meeting: teamcraft_proto::MeetingId) -> Result<(), ApiError> {
+    self.with(|state, _| {
+      state.cancelled_meetings.push(meeting);
+      Ok(())
+    })
+  }
+
+  /// Tells the conversation's members that its call moved, like the server; the fake has no call
+  /// roster, so being a member is enough.
+  async fn move_call(&self, conversation: ConversationId, request: &MoveCallRequest) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      let members: Vec<UserId> = state
+        .conversation(conversation)?
+        .members
+        .keys()
+        .copied()
+        .collect();
+      if !members.contains(&me) {
+        return Err(ApiError::status(403, ErrorCode::Forbidden, "not a member"));
+      }
+      state.call_moves.push((conversation, request.clone()));
+      state.publish(
+        members,
+        &GatewayEvent::CallMove {
+          conversation_id: conversation,
+          call_id: state
+            .calls
+            .get(&conversation)
+            .copied()
+            .unwrap_or_else(|| CallId::from_snowflake(conversation.snowflake())),
+          to_conversation_id: request.to_conversation_id,
+          moved_by: me,
+        },
+      );
+      Ok(())
     })
   }
 

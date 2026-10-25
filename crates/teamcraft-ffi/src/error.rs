@@ -38,6 +38,10 @@ pub enum TeamCraftError {
   /// The call couldn't be joined or broke (connection, audio device, key verification).
   #[error("call: {0}")]
   Call(String),
+  /// A move of the call into a meeting room didn't check out (not announced in the DM's group,
+  /// or the room holds somebody unnamed): stay in the call.
+  #[error("call move refused: {0}")]
+  CallMoveRefused(String),
   /// Anything else the core reported.
   #[error("{0}")]
   Core(String),
@@ -54,6 +58,7 @@ impl From<CoreError> for TeamCraftError {
       CoreError::Backup(backup) => Self::WrongPassphrase(backup.to_string()),
       CoreError::KeyBag(key_bag) => Self::WrongPassphrase(key_bag.to_string()),
       CoreError::Store(store) => store.into(),
+      refused @ CoreError::CallMoveRefused { .. } => Self::CallMoveRefused(refused.to_string()),
       other => Self::Core(other.to_string()),
     }
   }

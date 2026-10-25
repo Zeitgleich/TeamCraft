@@ -58,7 +58,10 @@ pub fn MeetingsView() -> impl IntoView {
     spawn_local(async move {
       let client = hub.client();
       let key = Some(IdempotencyKey::random());
-      if let Some(meeting) = hub.run(me, now_ms(), client.start_instant(None, key)).await {
+      if let Some(meeting) = hub
+        .run(me, now_ms(), client.start_instant(None, Vec::new(), key))
+        .await
+      {
         // The server makes the chat without encryption; an instant meeting invites nobody.
         // Gone only with the app; then the chat stays without encryption (nobody else founds it).
         state.try_write(|backend| backend.set_up_meeting_chat(meeting.conversation_id, Vec::new()));

@@ -728,6 +728,23 @@ never by the server's member list:
   this device's setup, picks up a waiting welcome or joins as a further device; without a group after
   that, the call fails at once with "not let into the encryption yet" and a retry, instead of
   waiting for keys.
+- **A call that grows.** A DM or group DM call that somebody adds people to moves into a new meeting
+  chat (docs/meetings.md, "A call becomes a meeting"); the DM's group never changes, so the added
+  people get none of its history. The adding device founds the meeting chat's group as above, with
+  the users who are in the call as the call shows them *and* in the DM's own group (what its members
+  agreed on in signed commits: somebody the server lists gets nobody in), plus the users it added.
+  Only once the group is founded does it ask the server to move the call, so the others find the
+  welcome waiting when they switch over. A retry founds nothing anew and adds only who is missing.
+  The server's `call_move` event is only a trigger: the adding device announces the move in the
+  DM's group (an encrypted `CallMoved` event naming the room, the added people and the DM call's
+  ID), and another device follows only that announcement, decrypted in the DM's group (so its
+  sender is a member), after the user's tap that shows who moved the call and whom they added, and
+  only if it is for the call this device is in now (the call ID of its own join token) and the
+  room's group, once this device is in it, holds nobody but the DM's members and the named people.
+  Only the device that added the people follows without the tap (a flag only it writes into its
+  record); a followed announcement is deleted. A server that redirects the call, replays an earlier
+  move in a later call, or a member who points it at an old room with other people in it, gets
+  nobody's audio or video there.
 
 Not covered yet: users invited later by editing the meeting (#475); guests have no device that can
 join a group until #446, so admitting a guest lets nobody into the encryption yet.

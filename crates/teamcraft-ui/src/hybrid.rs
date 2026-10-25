@@ -11,7 +11,7 @@
 use leptos::prelude::{Get, GetUntracked, RwSignal, Set};
 use std::rc::Rc;
 use teamcraft_client_api::calls::{
-  CallStatusSounds, CallsUnavailableReason, OrgBackgroundRule, RemoteVideoTrack,
+  CallMoveOffer, CallStatusSounds, CallsUnavailableReason, OrgBackgroundRule, RemoteVideoTrack,
 };
 use teamcraft_proto::OrgBackgroundId;
 
@@ -448,6 +448,19 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.set_up_meeting_chat(conversation, invitees);
   }
 
+  fn add_people_to_call(
+    &self,
+    from: ConversationId,
+    in_call: Vec<UserId>,
+    added: Vec<UserId>,
+    maybe_title: Option<String>,
+    key: teamcraft_proto::IdempotencyKey,
+  ) {
+    self
+      .chat
+      .add_people_to_call(from, in_call, added, maybe_title, key);
+  }
+
   fn let_into_meeting_chat(&self, conversation: ConversationId, user: UserId) {
     self.chat.let_into_meeting_chat(conversation, user);
   }
@@ -620,6 +633,14 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
 
   fn add_space_members(&self, space: SpaceId, users: Vec<UserId>, is_guest: bool) {
     self.chat.add_space_members(space, users, is_guest);
+  }
+
+  fn call_move_offer(&self, from: ConversationId, to: ConversationId) -> Option<CallMoveOffer> {
+    self.chat.call_move_offer(from, to)
+  }
+
+  fn accept_call_move(&self, from: ConversationId, to: ConversationId) {
+    self.chat.accept_call_move(from, to);
   }
 
   fn has_external_people(&self, conversation: ConversationId) -> bool {
@@ -823,9 +844,9 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
       .map_or_else(Vec::new, RemoteCalls::incoming)
   }
 
-  fn join_call(&self, request: CallRequest) {
+  fn join_call(&self, request: CallRequest, is_muted: bool) {
     if let Some(calls) = &self.maybe_calls {
-      calls.join(request);
+      calls.join(request, is_muted);
     }
   }
 

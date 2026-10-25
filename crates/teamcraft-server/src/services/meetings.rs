@@ -113,6 +113,7 @@ pub async fn create_meeting(
 }
 
 /// "Meet now": a meeting that starts immediately and is shared by link; no calendar entry, no e-mail.
+/// Users it invites (the people of a call moving into it) become members of its chat.
 pub async fn create_instant_meeting(
   state: &AppState,
   caller: &AuthenticatedUser,
@@ -124,6 +125,12 @@ pub async fn create_instant_meeting(
     Some(title) => validate_name(title, "title", MAX_TITLE_CHARS)?,
     None => DEFAULT_INSTANT_TITLE.to_owned(),
   };
+  let invitees: Vec<MeetingInvitee> = request
+    .invitees
+    .iter()
+    .map(|user_id| MeetingInvitee::User { user_id: *user_id })
+    .collect();
+  let attendees = resolve_invitees(state, caller.user.id, &invitees).await?;
   let now = OffsetDateTime::now_utc();
   let id: MeetingId = state.next_id()?;
   let uid = service.uid(id);
@@ -153,11 +160,15 @@ pub async fn create_instant_meeting(
       maybe_recurrence_rule: None,
       kind: MeetingKind::Instant.as_str(),
       has_lobby: true,
-      attendees: &[],
+      attendees: &attendees,
       maybe_idempotency_key: request.maybe_idempotency_key,
     })
     .await?;
   let meeting = load_meeting(state, created.id).await?;
+  if created.is_new && !attendees.is_empty() {
+    // The people of a call that moves into the meeting see it at once.
+    announce(state, &meeting).await?;
+  }
   respond(state, service, &meeting, Vec::new()).await
 }
 

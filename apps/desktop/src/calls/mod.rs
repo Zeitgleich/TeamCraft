@@ -246,9 +246,11 @@ impl CallHost {
   }
 
   /// Joins the conversation's call with what the core prepared, leaving any other call first.
+  /// `is_muted`: the microphone stays muted from the first frame.
   pub async fn join(
     &self,
     request: CallRequest,
+    is_muted: bool,
     preparation: CallPreparation,
     tickets: Arc<dyn JoinTicketSource>,
   ) -> Result<(), String> {
@@ -264,17 +266,19 @@ impl CallHost {
     let mut config = native_config(preparation, microphone, speakers)?;
     config.maybe_ticket_source = Some(tickets);
     config.status_cues = status_cues(lock(&self.state).status_sounds);
+    // Push-to-talk: the microphone opens only while the key is held.
+    let is_muted_at_start = is_muted || self.push_to_talk().is_enabled;
+    config.is_muted_at_start = is_muted_at_start;
     let call = NativeCall::join(config)
       .await
       .map_err(|error| error.to_string())?;
-    if self.push_to_talk().is_enabled {
-      // Push-to-talk: the microphone opens only while the key is held.
-      call.set_muted(true);
-    }
     {
       let mut state = lock(&self.state);
       let background = state.background;
       state.view.start_active(request, background);
+      if let Some(active) = state.view.maybe_active.as_mut() {
+        active.is_muted = is_muted_at_start;
+      }
     }
     let (controls, control_rx) = mpsc::unbounded_channel();
     lock(&self.video_sinks).clear();

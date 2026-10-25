@@ -184,6 +184,8 @@ pub enum Overlay {
   InvitePeople(SpaceId),
   /// Add people to a channel (through its encryption group).
   AddToChannel(ConversationId),
+  /// Add people to the DM or group DM call of this conversation: the call moves into a meeting.
+  AddToCall(ConversationId),
   NewChannel(SpaceId),
   BrowseChannels(SpaceId),
   ChannelSettings(ConversationId),
@@ -721,6 +723,42 @@ impl AppState {
       | MainView::Space
       | MainView::ChannelPreview(..) => None,
     }
+  }
+
+  /// Follows an announced move of the call of `from` into the meeting room `to`: the core checks it
+  /// (announced in `from`'s group, nobody unexpected in `to`'s), then this device joins the room's
+  /// call with its microphone and camera as they were. A failed check stays in this call and says
+  /// why (a toast and `pending`).
+  pub fn follow_call_move(
+    &self,
+    from: ConversationId,
+    to: ConversationId,
+    pending: crate::feedback::PendingAction,
+  ) {
+    let state = *self;
+    pending.run_and_then(
+      || state.write(|backend| backend.accept_call_move(from, to)),
+      move || {
+        let call = state.call;
+        let is_still_in_it = call
+          .maybe_request
+          .try_get_untracked()
+          .flatten()
+          .is_some_and(|request| request.conversation == from);
+        if !is_still_in_it {
+          return;
+        }
+        let _ = call.move_offer.try_set(None);
+        if state.view.try_get_untracked() == Some(MainView::Conversation(from)) {
+          state.open_conversation(to);
+        }
+        // Joining leaves the DM's call first.
+        call.join(crate::calls::CallRequest {
+          conversation: to,
+          kind: crate::calls::CallKind::Group,
+        });
+      },
+    );
   }
 
   /// Answers a ringing call on this device: opens its conversation and joins. The in-app card and

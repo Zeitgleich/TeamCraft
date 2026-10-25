@@ -254,6 +254,17 @@ pub enum ConversationEvent {
     #[serde(default)]
     space: String,
   },
+  /// The sender added `added` to the conversation's call, which moved into the meeting chat
+  /// `meeting` (docs/meetings.md, "A call becomes a meeting"). Not listed; devices in the call
+  /// follow it only on this announcement from a group member, never on the server's word.
+  CallMoved {
+    meeting: ConversationId,
+    #[serde(default)]
+    added: Vec<UserId>,
+    /// The DM call that moves: an announcement of another call moves nothing.
+    #[serde(rename = "call", default, skip_serializing_if = "Option::is_none")]
+    maybe_call: Option<teamcraft_proto::CallId>,
+  },
   /// From a newer client.
   #[serde(other)]
   Unknown,
@@ -623,6 +634,9 @@ impl StoredMessage {
         | MessageContent::Pin { .. }
         | MessageContent::Bookmarks { .. }
         | MessageContent::IndexSegment { .. }
+        | MessageContent::Event {
+          event: ConversationEvent::CallMoved { .. }
+        }
     )
   }
 

@@ -19,8 +19,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 pub use calls::{
-  CallEndReason, CallListener, CallPhase, CallSession, CallStateInfo, EncodedVideoListener, IncomingCallInfo,
-  RemoteVideoFrame, RemoteVideoTrack, VideoListener, VideoTrackInfo,
+  CallEndReason, CallListener, CallMoveInfo, CallPhase, CallSession, CallStateInfo, EncodedVideoListener,
+  IncomingCallInfo, RemoteVideoFrame, RemoteVideoTrack, VideoListener, VideoTrackInfo,
 };
 pub use error::TeamCraftError;
 pub use legacy_session::{
@@ -447,8 +447,82 @@ impl TeamCraft {
       .await
   }
 
-  /// Joins (or starts) the conversation's call; returns once connected.
-  pub async fn join_call(&self, conversation_id: String) -> Result<Arc<CallSession>, TeamCraftError> {
+  /// "Add people" in the DM or group DM call of `conversation_id` (docs/meetings.md, "A call becomes
+  /// a meeting"): starts a meeting room with the people in the call (`in_call`, as the call shows
+  /// them) and `added`, founds its encryption with exactly them and moves the call there. The DM
+  /// itself doesn't change. `request_key` from [`new_request_key`], kept for retries of this one
+  /// action, gets the same room again. Returns the room's conversation; join its call next.
+  pub async fn add_people_to_call(
+    &self,
+    conversation_id: String,
+    in_call: Vec<String>,
+    added: Vec<String>,
+    maybe_title: Option<String>,
+    request_key: String,
+  ) -> Result<String, TeamCraftError> {
+    self
+      .call(move |engine| {
+        Box::pin(async move {
+          engine
+            .add_people_to_call(&conversation_id, &in_call, &added, maybe_title, &request_key)
+            .await
+        })
+      })
+      .await
+  }
+
+  /// The announced move of the call of `from_conversation_id` into `to_conversation_id` (after
+  /// `CallListener::on_call_moved`): who moved it and whom they added, as a member of the DM's
+  /// encryption group announced it. `None` until that announcement is in; the server's word alone
+  /// shows nothing.
+  pub async fn call_move_offer(
+    &self,
+    from_conversation_id: String,
+    to_conversation_id: String,
+  ) -> Result<Option<CallMoveInfo>, TeamCraftError> {
+    self
+      .call(move |engine| {
+        Box::pin(async move {
+          let from = engine::parse_id(&from_conversation_id)?;
+          let to = engine::parse_id(&to_conversation_id)?;
+          let maybe_record = teamcraft_core::client::call_move_announcement(engine.store.as_ref(), from, to)?;
+          Ok(maybe_record.map(|record| CallMoveInfo {
+            by_user_id: record.by.to_string(),
+            added_user_ids: record.added.iter().map(ToString::to_string).collect(),
+            is_requested_here: record.is_requested_here,
+          }))
+        })
+      })
+      .await
+  }
+
+  /// Checks the move before following it: announced in the DM's group, and the room holds nobody
+  /// but the DM's members and the people it named. `CallMoveRefused` otherwise; then stay.
+  pub async fn accept_call_move(
+    &self,
+    from_conversation_id: String,
+    to_conversation_id: String,
+  ) -> Result<(), TeamCraftError> {
+    self
+      .call(move |engine| {
+        Box::pin(async move {
+          engine
+            .accept_call_move(&from_conversation_id, &to_conversation_id)
+            .await
+        })
+      })
+      .await
+  }
+
+  /// Joins (or starts) the conversation's call; returns once connected. `is_muted`: the
+  /// microphone stays muted from the first frame (a muted call moving into a meeting room), so
+  /// nothing is sent before an unmute.
+  #[uniffi::method(default(is_muted = false))]
+  pub async fn join_call(
+    &self,
+    conversation_id: String,
+    is_muted: bool,
+  ) -> Result<Arc<CallSession>, TeamCraftError> {
     let (preparation, hub) = self
       .call(move |engine| {
         Box::pin(async move {
@@ -457,8 +531,14 @@ impl TeamCraft {
         })
       })
       .await?;
-    calls::join(preparation, hub, self.jobs.clone(), &self.network).await
+    calls::join(preparation, is_muted, hub, self.jobs.clone(), &self.network).await
   }
+}
+
+/// A fresh key for one user action that may be retried (`add_people_to_call`).
+#[uniffi::export]
+pub fn new_request_key() -> String {
+  teamcraft_proto::IdempotencyKey::random().to_hex()
 }
 
 /// Emoji whose names match what the user typed after `:` in the composer (the shared catalog, as

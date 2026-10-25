@@ -15,8 +15,8 @@ use crate::activity::ActivityFeed;
 use crate::admin::DeviceInfo;
 use crate::backend::{ChatBackend, SearchBackend};
 use crate::calls::{
-  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallEndReason, CallHistoryItem, CallRequest,
-  CallStatusSounds, IncomingCall, MediaDevices, OrgBackgroundRule, OrgBackgrounds, PushToTalk,
+  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallEndReason, CallHistoryItem, CallMoveOffer,
+  CallRequest, CallStatusSounds, IncomingCall, MediaDevices, OrgBackgroundRule, OrgBackgrounds, PushToTalk,
   RemoteVideoTrack, RunningCall,
 };
 use crate::live::LiveSnapshot;
@@ -65,6 +65,9 @@ pub struct CallSnapshot {
 pub enum CallAction {
   Join {
     request: CallRequest,
+    /// Join with the microphone muted from the first frame (the pre-join choice).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    is_muted: bool,
   },
   Leave,
   Decline {
@@ -648,6 +651,18 @@ pub enum ChatAction {
     conversation: ConversationId,
     invitees: Vec<UserId>,
   },
+  AddPeopleToCall {
+    from: ConversationId,
+    in_call: Vec<UserId>,
+    added: Vec<UserId>,
+    #[serde(rename = "title", default, skip_serializing_if = "Option::is_none")]
+    maybe_title: Option<String>,
+    key: teamcraft_proto::IdempotencyKey,
+  },
+  AcceptCallMove {
+    from: ConversationId,
+    to: ConversationId,
+  },
   LetIntoMeetingChat {
     conversation: ConversationId,
     user: UserId,
@@ -845,6 +860,14 @@ impl ChatAction {
         conversation,
         invitees,
       } => backend.set_up_meeting_chat(conversation, invitees),
+      Self::AddPeopleToCall {
+        from,
+        in_call,
+        added,
+        maybe_title,
+        key,
+      } => backend.add_people_to_call(from, in_call, added, maybe_title, key),
+      Self::AcceptCallMove { from, to } => backend.accept_call_move(from, to),
       Self::LetIntoMeetingChat { conversation, user } => backend.let_into_meeting_chat(conversation, user),
       Self::SetBookmarks {
         conversation,
@@ -973,6 +996,10 @@ pub enum ChatQuery {
   HasExternalPeople {
     conversation: ConversationId,
   },
+  CallMoveOffer {
+    from: ConversationId,
+    to: ConversationId,
+  },
   Activity,
   LastSeen {
     user: UserId,
@@ -992,6 +1019,9 @@ pub enum ChatQuery {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "answer", rename_all = "snake_case")]
 pub enum ChatAnswer {
+  CallMoveOffer {
+    maybe_offer: Option<CallMoveOffer>,
+  },
   MessageExtras {
     extras: Vec<MessageExtras>,
   },
@@ -1198,6 +1228,9 @@ impl ChatQuery {
       Self::HasExternalPeople { conversation } => ChatAnswer::Flag {
         value: backend.has_external_people(conversation),
       },
+      Self::CallMoveOffer { from, to } => ChatAnswer::CallMoveOffer {
+        maybe_offer: backend.call_move_offer(from, to),
+      },
       Self::Thread { conversation, thread } => ChatAnswer::Messages {
         messages: backend.thread(conversation, thread),
       },
@@ -1360,11 +1393,17 @@ mod tests {
         conversation: id_from_raw(5),
         kind: crate::calls::CallKind::Direct,
       },
+      is_muted: false,
     };
     assert_eq!(
       serde_json::to_string(&join).expect("serialize"),
       r#"{"action":"join","request":{"conversation":"5","kind":"direct"}}"#
     );
+    let muted: CallAction = serde_json::from_str(
+      r#"{"action":"join","request":{"conversation":"5","kind":"direct"},"is_muted":true}"#,
+    )
+    .expect("parse");
+    assert!(matches!(muted, CallAction::Join { is_muted: true, .. }));
   }
 
   #[test]
