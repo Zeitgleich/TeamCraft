@@ -28,7 +28,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{
   ClientMessageId, ConversationId, CustomStatus, MessageId, SetCustomStatusRequest, SetPresenceRequest,
-  SetReadPositionRequest, UnixMillis,
+  SetReadPositionRequest, SetThreadReadRequest, ThreadId, UnixMillis,
 };
 
 use super::Client;
@@ -44,6 +44,12 @@ pub enum PendingAction {
   /// The user read the conversation up to `message`.
   ReadPosition {
     conversation: ConversationId,
+    message: MessageId,
+  },
+  /// The user read the thread up to the reply `message` (the thread's own read position).
+  ThreadReadPosition {
+    conversation: ConversationId,
+    thread: ThreadId,
     message: MessageId,
   },
   /// The user confirmed an urgent message.
@@ -258,6 +264,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         conversation,
         message: message.max(*queued),
       },
+      (
+        Some(PendingAction::ThreadReadPosition { message: queued, .. }),
+        PendingAction::ThreadReadPosition {
+          conversation,
+          thread,
+          message,
+        },
+      ) => PendingAction::ThreadReadPosition {
+        conversation,
+        thread,
+        message: message.max(*queued),
+      },
       (_, action) => action,
     };
     let entries = load_entries(&self.store)?;
@@ -331,6 +349,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       } => {
         let request = SetReadPositionRequest { message_id: *message };
         self.api.set_read_position(*conversation, &request).await
+      },
+      PendingAction::ThreadReadPosition {
+        conversation,
+        thread,
+        message,
+      } => {
+        let request = SetThreadReadRequest { message_id: *message };
+        self.api.set_thread_read(*conversation, *thread, &request).await
       },
       PendingAction::Acknowledge {
         conversation,
@@ -407,6 +433,9 @@ impl PendingAction {
   fn key(&self) -> String {
     match self {
       Self::ReadPosition { conversation, .. } => format!("read/{conversation}"),
+      Self::ThreadReadPosition {
+        conversation, thread, ..
+      } => format!("thread_read/{conversation}/{thread}"),
       Self::Acknowledge {
         conversation,
         message,
@@ -424,6 +453,7 @@ impl PendingAction {
   fn kind(&self) -> &'static str {
     match self {
       Self::ReadPosition { .. } => "read_position",
+      Self::ThreadReadPosition { .. } => "thread_read_position",
       Self::Acknowledge { .. } => "acknowledge",
       Self::ServerPin { .. } => "server_pin",
       Self::Presence { .. } => "presence",

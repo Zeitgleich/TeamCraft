@@ -1040,9 +1040,11 @@ restored together with them on a new device.
   leaves a tombstone with its left time for the usual 90 days, so the same absence isn't taken
   back from another device's local records or an older key bag (possibly without its return); a
   later removal of the device counts as before.
-- **The activity feed's read mark** (`activity_read`) is the sent time of the newest feed entry the
-  user looked at. Merging takes the later one, so reading on any device counts everywhere and never
-  moves back. The feed itself is computed from decrypted messages on each device (notifications.md).
+- **The activity feed has no read mark of its own** (issue #534): an entry is read when the read
+  position of its target (conversation or thread) is at or after it, and those positions sync
+  through the server like any other. The older `activity_read` field is still merged (the later one
+  wins) so old devices keep working, but nothing reads it any more. The feed itself is computed
+  from decrypted messages on each device (notifications.md).
 
 ## 7. Push notifications (Threema model, extended)
 

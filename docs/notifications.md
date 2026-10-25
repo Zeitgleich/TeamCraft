@@ -420,8 +420,17 @@ a jump to the message.
 - Reaction: the newest reaction message of a person, message and emoji, if it adds the reaction and
   the message is mine. Removed reactions leave nothing.
 - Thread reply: a reply from somebody else in a thread I started or replied in.
-- Read mark: the sent time of the newest entry I looked at, kept in the account data of the key bag
-  (`activity_read`, e2ee.md §6.4), so it follows me across devices; reading only moves it forward.
+- Read state: **one rule, no flag of its own.** An entry is read when the read position of its
+  target is at or after it: the thread's position for a message in a followed thread (derived from
+  the thread's unread count, newest replies first), else the conversation's (the member's
+  `last_read_message_id`, or counts of zero from `unread_update`, which reach every device). A
+  reaction counts by the reaction message itself. So reading the message anywhere, on any device,
+  clears the entry, and positions only move forward.
+- Opening an entry reads up to it: the conversation's position moves to the entry (not to the end);
+  a thread entry opens the thread, which reads it. "Mark all as read" moves the positions of every
+  unread entry's target the same way. The rail badge and tab counts are counts of these entries.
+- Limits: a thread the user doesn't follow (or beyond the first page of `GET /threads`) has no
+  position of its own, so its entries follow the conversation's.
 
 ## Call history
 

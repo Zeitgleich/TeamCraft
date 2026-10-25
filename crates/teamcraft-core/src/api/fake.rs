@@ -336,6 +336,8 @@ struct Conversation {
   messages: Vec<MessageResponse>,
   favorites: HashMap<UserId, bool>,
   read_positions: HashMap<UserId, MessageId>,
+  /// How far each member read each thread.
+  thread_read_positions: HashMap<(UserId, ThreadId), MessageId>,
   pinned: HashSet<MessageId>,
   /// The newest MLS group information and the epoch it is for.
   maybe_group_info: Option<(u64, Base64Bytes)>,
@@ -1851,6 +1853,23 @@ impl ServerApi for FakeServerApi {
         .read_positions
         .entry(me)
         .or_insert(request.message_id);
+      *position = (*position).max(request.message_id);
+      Ok(())
+    })
+  }
+
+  async fn set_thread_read(
+    &self,
+    conversation: ConversationId,
+    thread: ThreadId,
+    request: &teamcraft_proto::SetThreadReadRequest,
+  ) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      // Like the server's `GREATEST`: a late or repeated write never moves the position back.
+      let positions = &mut state
+        .member_conversation_mut(conversation, me)?
+        .thread_read_positions;
+      let position = positions.entry((me, thread)).or_insert(request.message_id);
       *position = (*position).max(request.message_id);
       Ok(())
     })
@@ -4067,6 +4086,7 @@ impl State {
         messages: Vec::new(),
         favorites: HashMap::new(),
         read_positions: HashMap::new(),
+        thread_read_positions: HashMap::new(),
         pinned: HashSet::new(),
         maybe_group_info: None,
       },
@@ -4359,7 +4379,7 @@ fn snowflake(raw: i64) -> Snowflake {
 }
 
 impl Conversation {
-  /// Threads `user` follows (started or replied to), without read positions.
+  /// Threads `user` follows (started or replied to), with their unread replies.
   fn threads(&self, user: UserId) -> Vec<ThreadSummary> {
     let mut by_thread: BTreeMap<ThreadId, Vec<&MessageResponse>> = BTreeMap::new();
     for message in &self.messages {
@@ -4375,6 +4395,7 @@ impl Conversation {
           .iter()
           .any(|message| is_root(message, thread) && message.sender_user_id == user);
         let has_replied = replies.iter().any(|reply| reply.sender_user_id == user);
+        let maybe_read = self.thread_read_positions.get(&(user, thread)).copied();
         let follow_reason = match (is_starter, has_replied) {
           (true, _) => ThreadFollowReason::Started,
           (false, true) => ThreadFollowReason::Replied,
@@ -4385,7 +4406,13 @@ impl Conversation {
           thread_id: thread,
           follow_reason,
           reply_count: u32::try_from(replies.len()).unwrap_or(u32::MAX),
-          unread_count: 0,
+          unread_count: u32::try_from(
+            replies
+              .iter()
+              .filter(|reply| reply.sender_user_id != user && maybe_read.is_none_or(|read| reply.id > read))
+              .count(),
+          )
+          .unwrap_or(u32::MAX),
           mention_count: 0,
           maybe_last_reply: replies
             .iter()

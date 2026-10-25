@@ -262,6 +262,13 @@ pub trait ServerApi {
     conversation: ConversationId,
     request: &SetReadPositionRequest,
   ) -> impl Future<Output = Result<(), ApiError>>;
+  /// Moves the caller's read position in a followed thread forward (`PUT /conversations/{id}/threads/{id}/read`).
+  fn set_thread_read(
+    &self,
+    conversation: ConversationId,
+    thread: teamcraft_proto::ThreadId,
+    request: &teamcraft_proto::SetThreadReadRequest,
+  ) -> impl Future<Output = Result<(), ApiError>>;
   fn set_presence(&self, request: &SetPresenceRequest) -> impl Future<Output = Result<(), ApiError>>;
   /// Sets the caller's custom status (`PUT /me/status`); replaces the previous one.
   fn set_custom_status(

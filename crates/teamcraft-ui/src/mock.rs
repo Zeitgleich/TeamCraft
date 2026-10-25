@@ -367,6 +367,7 @@ impl ChatBackend for MockBackend {
         actor: message.author,
         at: message.sent_at,
         excerpt: message.body.chars().take(140).collect(),
+        maybe_read_through: None,
         is_unread: !is_read && index < 2,
       })
       .collect();

@@ -91,6 +91,9 @@ pub trait ChatBackend {
   fn post_message(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>, body: &str);
   fn toggle_reaction(&self, conversation: ConversationId, message: MessageId, emoji: &str);
   fn mark_read(&self, conversation: ConversationId);
+  /// The user looked at `message` (an opened activity entry): the conversation's read position
+  /// moves up to it, not to the end. Never moves back.
+  fn mark_read_through(&self, _conversation: ConversationId, _message: MessageId) {}
   fn set_favorite(&self, conversation: ConversationId, is_favorite: bool);
 
   fn set_presence(&self, presence: PresenceStatus);

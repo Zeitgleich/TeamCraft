@@ -422,6 +422,10 @@ pub enum ChatAction {
   MarkRead {
     conversation: ConversationId,
   },
+  MarkReadThrough {
+    conversation: ConversationId,
+    message: MessageId,
+  },
   SetFavorite {
     conversation: ConversationId,
     is_favorite: bool,
@@ -767,6 +771,10 @@ impl ChatAction {
         emoji,
       } => backend.toggle_reaction(conversation, message, &emoji),
       Self::MarkRead { conversation } => backend.mark_read(conversation),
+      Self::MarkReadThrough {
+        conversation,
+        message,
+      } => backend.mark_read_through(conversation, message),
       Self::SetFavorite {
         conversation,
         is_favorite,

@@ -131,9 +131,17 @@ pub enum CoreCommand {
     conversation: ConversationId,
     from: MessageId,
   },
-  /// The activity feed was read up to the entry sent at this time.
-  MarkActivityRead {
-    up_to_ms: i64,
+  /// The conversation was read up to this message (an activity entry that was opened), not to its
+  /// end. The server keeps the position monotonic.
+  MarkReadThrough {
+    conversation: ConversationId,
+    message: MessageId,
+  },
+  /// The thread was read up to this reply.
+  MarkThreadRead {
+    conversation: ConversationId,
+    thread: ThreadId,
+    message: MessageId,
   },
   /// Presence and last seen of these people.
   RefreshPresence {
@@ -1019,6 +1027,33 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn mark_read(&self, conversation: ConversationId) {
     self.command(CoreCommand::MarkRead { conversation });
+  }
+
+  fn mark_read_through(&self, conversation: ConversationId, message: MessageId) {
+    self.command(CoreCommand::MarkReadThrough {
+      conversation,
+      message,
+    });
+  }
+
+  fn mark_thread_read(&self, conversation: ConversationId, thread: ThreadId) {
+    // The server takes a reply of the thread, not the root; the newest one stored is the furthest
+    // this device has seen.
+    let maybe_latest = self
+      .stored(conversation)
+      .into_iter()
+      .filter(|stored| {
+        stored.maybe_thread_id == Some(thread) && matches!(stored.content, MessageContent::Text { .. })
+      })
+      .filter_map(|stored| stored.maybe_server_id)
+      .max();
+    if let Some(message) = maybe_latest {
+      self.command(CoreCommand::MarkThreadRead {
+        conversation,
+        thread,
+        message,
+      });
+    }
   }
 
   fn set_favorite(&self, conversation: ConversationId, is_favorite: bool) {

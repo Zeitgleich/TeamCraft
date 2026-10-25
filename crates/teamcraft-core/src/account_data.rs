@@ -42,8 +42,8 @@ pub struct AccountData {
   /// encrypted picture lives only here.
   #[serde(default)]
   pub backgrounds: BTreeMap<String, Stamped<BackgroundEntry>>,
-  /// Everything in the activity feed up to this time (the sent time of its newest entry when the
-  /// user looked) counts as read.
+  /// Superseded (issue #534): the feed's unread state follows the read positions of its targets.
+  /// Still merged and written back so that older devices keep their value.
   #[serde(rename = "activity_read", default, skip_serializing_if = "Option::is_none")]
   pub maybe_activity_read: Option<Stamped<i64>>,
   /// Per conversation ID, the newest MLS epoch in which one of the user's devices switched the

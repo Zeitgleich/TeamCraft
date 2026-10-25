@@ -11,8 +11,10 @@ use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::calls::CallDirection;
 use teamcraft_client_api::model::thread_id_of;
 use teamcraft_client_api::privacy::LastSeenVisibility;
+use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_proto::{CallHistoryEntry, GatewayEvent, GatewayServerMessage, PresenceState, UnixMillis};
+use teamcraft_proto::{ConversationUnread, SetReadPositionRequest, SetThreadReadRequest, UnreadResponse};
 
 #[tokio::test]
 async fn mentions_reactions_and_thread_replies_form_one_feed_with_an_unread_state() {
@@ -48,6 +50,8 @@ async fn mentions_reactions_and_thread_replies_form_one_feed_with_an_unread_stat
   run_commands(&mut bob, &bob_ui).await;
   settle(&mut [&mut alice, &mut bob]).await;
   assert!(bob_ui.activity().items.is_empty());
+  server.set_unread(alice.client.user_id(), unread_counts(channel, 2, 1));
+  alice.client.full_sync().await.unwrap();
 
   let feed = alice_ui.activity();
   assert_eq!(feed.items.len(), 3, "{feed:?}");
@@ -63,12 +67,216 @@ async fn mentions_reactions_and_thread_replies_form_one_feed_with_an_unread_stat
   let mention = kind_of(|kind| *kind == ActivityKind::Mention).unwrap();
   assert_eq!(mention.excerpt, "@alice review please");
 
-  // Reading is stored in the account data and moves the unread count to zero.
+  // "Mark all as read" moves the read positions of the targets: the conversation's and the thread's.
   alice_ui.mark_activity_read();
   run_commands(&mut alice, &alice_ui).await;
+  alice.client.full_sync().await.unwrap();
   let read = alice_ui.activity();
   assert_eq!(read.items.len(), 3);
   assert_eq!(read.unread_count, 0);
+}
+
+async fn scenario() -> Scenario {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let channel = alice
+    .client
+    .create_channel(alice.space().await, "team")
+    .await
+    .unwrap();
+  alice
+    .client
+    .add_member(channel, bob.client.user_id())
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+  let (alice_ui, bob_ui) = (backend_of(&alice), backend_of(&bob));
+
+  alice_ui.post_message(channel, None, "ship the release");
+  alice_ui.post_message(channel, None, "what do you think?");
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+
+  // Bob reacts to the first message, mentions Alice and replies in the thread of the second.
+  let seen = bob_ui.messages(channel, 0, 10);
+  let id_of = |body: &str| seen.iter().find(|message| message.body == body).unwrap().id;
+  let (release, question) = (id_of("ship the release"), id_of("what do you think?"));
+  bob_ui.toggle_reaction(channel, release, "🎉");
+  bob_ui.post_message(channel, None, "@alice review please");
+  bob_ui.post_message(channel, Some(thread_id_of(question)), "I think yes");
+  // Bob's own entries never show up for Bob.
+  run_commands(&mut bob, &bob_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert!(bob_ui.activity().items.is_empty());
+  server.set_unread(alice.client.user_id(), unread_counts(channel, 2, 1));
+  alice.client.full_sync().await.unwrap();
+
+  Scenario {
+    server,
+    alice,
+    alice_ui,
+    channel,
+    question,
+  }
+}
+
+struct Scenario {
+  server: FakeServer,
+  alice: Peer,
+  alice_ui: teamcraft_core::ui_backend::CoreChatBackend<std::sync::Arc<teamcraft_core::store::MemoryStore>>,
+  channel: teamcraft_client_api::model::ConversationId,
+  question: teamcraft_client_api::model::MessageId,
+}
+
+/// The kinds of the unread entries, sorted by name (entries sent in the same millisecond have no
+/// fixed order).
+/// The server's counts for `conversation`; zero counts are what a read conversation reports.
+fn unread_counts(
+  conversation: teamcraft_client_api::model::ConversationId,
+  unread_count: u32,
+  mention_count: u32,
+) -> UnreadResponse {
+  UnreadResponse {
+    conversations: (unread_count > 0 || mention_count > 0)
+      .then_some(ConversationUnread {
+        conversation_id: conversation,
+        unread_count,
+        mention_count,
+      })
+      .into_iter()
+      .collect(),
+    unread_thread_count: 0,
+    thread_mention_count: 0,
+    maybe_max_counted: None,
+    maybe_counted_through: None,
+  }
+}
+
+fn unread_kinds(feed: &teamcraft_client_api::activity::ActivityFeed) -> Vec<&'static str> {
+  let mut kinds: Vec<&'static str> = feed
+    .items
+    .iter()
+    .filter(|item| item.is_unread)
+    .map(|item| match item.kind {
+      ActivityKind::Mention => "mention",
+      ActivityKind::Reaction { .. } => "reaction",
+      ActivityKind::ThreadReply => "reply",
+    })
+    .collect();
+  kinds.sort_unstable();
+  kinds
+}
+
+fn entry(
+  feed: &teamcraft_client_api::activity::ActivityFeed,
+  kind: fn(&ActivityKind) -> bool,
+) -> &teamcraft_client_api::activity::ActivityItem {
+  feed.items.iter().find(|item| kind(&item.kind)).unwrap()
+}
+
+#[tokio::test]
+async fn opening_an_entry_reads_it_up_to_that_message_and_never_back() {
+  let Scenario {
+    mut alice,
+    alice_ui,
+    channel,
+    ..
+  } = scenario().await;
+  let feed = alice_ui.activity();
+  let reaction = entry(&feed, |kind| matches!(kind, ActivityKind::Reaction { .. }));
+  assert_eq!(unread_kinds(&feed).len(), 3);
+
+  // The reaction is the oldest top-level entry: opening it reads it, not the mention after it.
+  alice_ui.mark_read_through(channel, reaction.maybe_read_through.unwrap());
+  run_commands(&mut alice, &alice_ui).await;
+  let after = alice_ui.activity();
+  assert_eq!(unread_kinds(&after), ["mention", "reply"]);
+  assert_eq!(after.unread_count, 2);
+
+  // An older position written late doesn't unread it.
+  alice_ui.mark_read_through(channel, reaction.maybe_read_through.unwrap());
+  run_commands(&mut alice, &alice_ui).await;
+  assert_eq!(alice_ui.activity().unread_count, 2);
+}
+
+#[tokio::test]
+async fn reading_the_thread_directly_reads_its_reply_and_nothing_else() {
+  let Scenario {
+    mut alice,
+    alice_ui,
+    channel,
+    question,
+    ..
+  } = scenario().await;
+
+  alice_ui.mark_thread_read(channel, thread_id_of(question));
+  run_commands(&mut alice, &alice_ui).await;
+  alice.client.refresh_read_state().await.unwrap();
+
+  assert_eq!(unread_kinds(&alice_ui.activity()), ["mention", "reaction"]);
+}
+
+#[tokio::test]
+async fn reading_the_conversation_reads_the_reaction_and_the_mention() {
+  let Scenario {
+    mut alice,
+    alice_ui,
+    channel,
+    ..
+  } = scenario().await;
+
+  alice_ui.mark_read(channel);
+  run_commands(&mut alice, &alice_ui).await;
+
+  // The reply belongs to the thread, whose own position is behind.
+  assert_eq!(unread_kinds(&alice_ui.activity()), ["reply"]);
+}
+
+#[tokio::test]
+async fn a_read_position_from_another_device_reads_the_entries() {
+  let Scenario {
+    server,
+    mut alice,
+    alice_ui,
+    channel,
+    question,
+  } = scenario().await;
+  let feed = alice_ui.activity();
+  let mention = entry(&feed, |kind| *kind == ActivityKind::Mention);
+  let reply = entry(&feed, |kind| *kind == ActivityKind::ThreadReply);
+
+  // The other device reads the conversation and the thread: the server keeps the positions.
+  let other_device = alice.api.clone();
+  other_device
+    .set_read_position(
+      channel,
+      &SetReadPositionRequest {
+        message_id: mention.maybe_read_through.unwrap(),
+      },
+    )
+    .await
+    .unwrap();
+  other_device
+    .set_thread_read(
+      channel,
+      thread_id_of(question),
+      &SetThreadReadRequest {
+        message_id: reply.maybe_read_through.unwrap(),
+      },
+    )
+    .await
+    .unwrap();
+  assert_eq!(
+    alice_ui.activity().unread_count,
+    3,
+    "this device hasn't heard yet"
+  );
+
+  // The server's counts follow the position (this device gets them as `unread_update`).
+  server.set_unread(alice.client.user_id(), unread_counts(channel, 0, 0));
+  alice.client.full_sync().await.unwrap();
+  assert_eq!(alice_ui.activity().unread_count, 0);
 }
 
 #[tokio::test]
