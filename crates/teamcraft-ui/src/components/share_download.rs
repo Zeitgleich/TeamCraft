@@ -17,7 +17,9 @@ use crate::components::login::AuthFrame;
 use crate::i18n::use_i18n;
 use crate::object_url::ObjectUrl;
 use crate::reactive::SetIfAlive;
-use crate::share_link::{MAX_PAGE_DOWNLOAD_BYTES, ShareClient, ShareError, decrypt_to_blob};
+use crate::share_link::{
+  MAX_PAGE_DOWNLOAD_BYTES, ShareClient, ShareError, display_file_name, download_to_blob,
+};
 
 /// Lets the "working" state paint before the browser is busy deriving the password key.
 const PAINT_DELAY: Duration = Duration::from_millis(40);
@@ -58,6 +60,9 @@ pub fn ShareDownloadPage(id: String, fragment: String) -> impl IntoView {
   let id = StoredValue::new(id);
   let fragment = StoredValue::new(fragment);
   let opened = StoredValue::new_local(None::<OpenedShareLink>);
+  // The server's grant of this download: a retry presents it so a failure on the way doesn't use up
+  // a link with a download limit.
+  let grant = StoredValue::new(None::<String>);
 
   if phase.get_untracked() == Phase::Loading {
     let client = client.clone();
@@ -71,7 +76,7 @@ pub fn ShareDownloadPage(id: String, fragment: String) -> impl IntoView {
           if !is_protected {
             match open_fragment(&fragment.get_value(), None) {
               Ok(link) => {
-                file_name.set_if_alive(Some(link.file_name.clone()));
+                file_name.set_if_alive(Some(display_file_name(&link.file_name)));
                 opened.set_value(Some(link));
               },
               Err(_) => {
@@ -103,7 +108,7 @@ pub fn ShareDownloadPage(id: String, fragment: String) -> impl IntoView {
           let secret = SecretBytes::new(password.get_untracked().into_bytes());
           match open_fragment(&fragment.get_value(), Some(&secret)) {
             Ok(link) => {
-              file_name.set_if_alive(Some(link.file_name.clone()));
+              file_name.set_if_alive(Some(display_file_name(&link.file_name)));
               opened.set_value(Some(link));
             },
             Err(ShareLinkError::WrongPassword) => {
@@ -117,7 +122,7 @@ pub fn ShareDownloadPage(id: String, fragment: String) -> impl IntoView {
             },
           }
         }
-        let outcome = fetch_and_decrypt(&client, &id.get_value(), opened).await;
+        let outcome = fetch_and_decrypt(&client, &id.get_value(), opened, grant).await;
         match outcome {
           Ok(blob) => {
             let Some(url) = ObjectUrl::from_blob(&blob) else {
@@ -203,9 +208,21 @@ pub fn ShareDownloadPage(id: String, fragment: String) -> impl IntoView {
             Failure::Wrong(ShareError::Network) => ("share-page-failed-title", "share-page-network"),
             Failure::Wrong(ShareError::Damaged) => ("share-page-failed-title", "share-page-damaged"),
           };
+          // A failure on the way can be retried (with the same grant); the rest is final.
+          let can_retry = matches!(
+            failure,
+            Failure::Wrong(ShareError::Network | ShareError::Damaged)
+          ) && opened.with_value(Option::is_some);
           view! {
             <h1>{move || i18n.t(title)}</h1>
             <p role="alert">{move || i18n.t(text)}</p>
+            {can_retry.then(|| view! {
+              <div class="auth-actions">
+                <button class="btn btn-primary" on:click=move |_| phase.set(Phase::Ready)>
+                  {move || i18n.t("share-page-retry")}
+                </button>
+              </div>
+            })}
           }
           .into_any()
         },
@@ -214,20 +231,26 @@ pub fn ShareDownloadPage(id: String, fragment: String) -> impl IntoView {
   }
 }
 
-/// Counts the download, fetches the ciphertext and opens it. The count happens once the password
-/// has been right, so a mistyped one doesn't use up a limited link.
+/// Counts the download (once: a retry carries the grant), then streams the ciphertext through the
+/// decryption. The count happens after the password was right, so a mistyped one doesn't use up a
+/// limited link.
 async fn fetch_and_decrypt(
   client: &ShareClient,
   id: &str,
   opened: StoredValue<Option<OpenedShareLink>, LocalStorage>,
+  grant: StoredValue<Option<String>>,
 ) -> Result<web_sys::Blob, ShareError> {
-  let download = client.start_download(id).await?;
+  let download = client.start_download(id, grant.get_value()).await?;
+  grant.set_value(Some(download.grant.clone()));
   if download.size_bytes > MAX_PAGE_DOWNLOAD_BYTES {
     return Err(ShareError::TooLarge);
   }
-  let ciphertext = client.ciphertext(&download.download_url).await?;
-  opened
-    .try_with_value(|link| link.as_ref().map(|link| decrypt_to_blob(link, &ciphertext)))
+  // The key is taken out for the await and put back, so a retry has it.
+  let link = opened
+    .try_update_value(Option::take)
     .flatten()
-    .unwrap_or(Err(ShareError::Damaged))
+    .ok_or(ShareError::Damaged)?;
+  let outcome = download_to_blob(&download.download_url, &link).await;
+  opened.try_set_value(Some(link));
+  outcome
 }

@@ -141,6 +141,40 @@ impl Database {
     if !is_usable {
       return Ok(None);
     }
+    self.share_target(link).await
+  }
+
+  /// The link and its file when `grant_sha256` is the grant of a download that was counted less
+  /// than the grant window ago: the retry of that download, which doesn't count again. The link
+  /// may be used up by that very download, but not revoked or expired.
+  pub async fn find_share_by_grant(
+    &self,
+    id: &str,
+    grant_sha256: &[u8],
+    now: OffsetDateTime,
+  ) -> Result<Option<(ShareLink, ShareTarget)>, DbError> {
+    let is_granted = sqlx::query_scalar!(
+      r#"SELECT EXISTS (
+           SELECT 1 FROM share_links
+           WHERE id = $1 AND revoked_at IS NULL AND expires_at > $3
+             AND grant_sha256 = $2 AND grant_until > $3
+         ) AS "is_granted!""#,
+      id,
+      grant_sha256,
+      now,
+    )
+    .fetch_one(self.pool())
+    .await?;
+    if !is_granted {
+      return Ok(None);
+    }
+    let Some(link) = self.get_share_link(id).await? else {
+      return Ok(None);
+    };
+    self.share_target(link).await
+  }
+
+  async fn share_target(&self, link: ShareLink) -> Result<Option<(ShareLink, ShareTarget)>, DbError> {
     let Some(attachment) = self.get_attachment(link.attachment).await? else {
       return Ok(None);
     };
@@ -156,15 +190,25 @@ impl Database {
   }
 
   /// Counts a download if the link is still good (not revoked, not expired, downloads left), in one
-  /// statement so concurrent requests cannot exceed the limit. `false` if not.
-  pub async fn count_share_download(&self, id: &str, now: OffsetDateTime) -> Result<bool, DbError> {
+  /// statement so concurrent requests cannot exceed the limit, and stores the grant of this
+  /// download (`grant_sha256`, valid until `grant_until`). `false` if not counted.
+  pub async fn count_share_download(
+    &self,
+    id: &str,
+    now: OffsetDateTime,
+    grant_sha256: &[u8],
+    grant_until: OffsetDateTime,
+  ) -> Result<bool, DbError> {
     let result = sqlx::query!(
       r#"UPDATE share_links
-         SET download_count = download_count + 1, last_downloaded_at = $2
+         SET download_count = download_count + 1, last_downloaded_at = $2,
+             grant_sha256 = $3, grant_until = $4
          WHERE id = $1 AND revoked_at IS NULL AND expires_at > $2
            AND (max_downloads IS NULL OR download_count < max_downloads)"#,
       id,
       now,
+      grant_sha256,
+      grant_until,
     )
     .execute(self.pool())
     .await?;

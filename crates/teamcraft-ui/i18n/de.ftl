@@ -1163,6 +1163,7 @@ share-page-unavailable = Der Link ist abgelaufen, aufgebraucht oder widerrufen. 
 share-page-too-large = Diese Datei ist zu groß, um sie im Browser zu öffnen. Bitte den Absender, sie anders zu teilen.
 share-page-network = Der Server war nicht erreichbar. Verbindung prüfen und die Seite neu laden.
 share-page-damaged = Die Datei konnte nicht entschlüsselt werden. Der Link gehört vielleicht zu einer anderen Datei, oder der Download war beschädigt. Bitte erneut versuchen.
+share-page-retry = Erneut versuchen
 
 policy-blocked-not-owner = Nur Owner können die signierte Richtlinie ändern. Hier kannst du sie lesen.
 policy-blocked-no-keys = Die Richtlinie wird mit deinen Verschlüsselungsschlüsseln signiert. Öffne die Desktop-App, um sie zu ändern.

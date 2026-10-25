@@ -1163,6 +1163,7 @@ share-page-unavailable = The link has expired, was used up or revoked. Ask the s
 share-page-too-large = This file is too large to open in the browser. Ask the sender to share it another way.
 share-page-network = The server could not be reached. Check your connection and reload the page.
 share-page-damaged = The file could not be decrypted. The link may belong to another file, or the download was damaged. Try again.
+share-page-retry = Try again
 
 policy-blocked-not-owner = Only owners can change the signed policy. You can read it here.
 policy-blocked-no-keys = The policy is signed with your encryption keys. Open the desktop app to change it.
