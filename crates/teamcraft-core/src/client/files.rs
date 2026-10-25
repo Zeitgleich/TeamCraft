@@ -1068,7 +1068,7 @@ fn announced_attachment(file: &PendingFile) -> Option<AttachmentId> {
     .or_else(|| file.maybe_slot.as_ref().map(|slot| slot.attachment_id))
 }
 
-fn queue_abandon(store: &impl LocalStore, attachment: AttachmentId) -> Result<(), CoreError> {
+pub(super) fn queue_abandon(store: &impl LocalStore, attachment: AttachmentId) -> Result<(), CoreError> {
   let mut abandoned: Vec<AttachmentId> =
     records::get_json(store, Table::FileTransfers, ABANDONED_KEY)?.unwrap_or_default();
   if !abandoned.contains(&attachment) {

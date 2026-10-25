@@ -7,7 +7,8 @@
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::attachment::{
-  AttachmentKey, AttachmentSegmentEncryptor, CiphertextHasher, DEFAULT_CHUNK_SIZE, chunk_count, encrypted_len,
+  AttachmentKey, AttachmentSegmentEncryptor, CiphertextHasher, DEFAULT_CHUNK_SIZE, chunk_count,
+  content_sha256, encrypted_len,
 };
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{
@@ -18,7 +19,7 @@ use zeroize::Zeroizing;
 
 use super::Client;
 use super::files::{
-  MAX_APP_THUMBNAIL_BYTES, PendingFile, TransferFailure, UploadError, UploadSource, is_status,
+  MAX_APP_THUMBNAIL_BYTES, PendingFile, TransferFailure, UploadError, UploadSource, is_status, queue_abandon,
 };
 use crate::api::{ApiError, DetachedPart, ServerApi};
 use crate::error::CoreError;
@@ -52,6 +53,21 @@ pub struct PartsUpload {
   pub uploaded_bytes: u64,
   /// SHA-256 state over the uploaded parts' ciphertext.
   pub hash_state: Base64Bytes,
+  /// When the file was last modified as its upload began, where the platform tells: an edited file
+  /// starts over with a fresh key instead of mixing old and new parts.
+  #[serde(rename = "modified_ms", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_modified_ms: Option<i64>,
+  /// The part on its way, by the SHA-256 of its plaintext. Sent again (its answer was lost), it must
+  /// be the same plaintext: other bytes under the same key and nonces would give the storage the
+  /// XOR of both. A mismatch starts the upload over with a fresh key.
+  #[serde(rename = "sending", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_sending: Option<SendingPart>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SendingPart {
+  pub part_number: u16,
+  pub plaintext_sha256: Base64Bytes,
 }
 
 /// What one step of an upload in parts sends.
@@ -59,6 +75,7 @@ pub(super) enum PartStep {
   /// One part, and what the upload's state becomes once it is stored.
   Part {
     part_number: u16,
+    plaintext_sha256: [u8; 32],
     ciphertext: Vec<u8>,
     hash_state: Vec<u8>,
     uploaded_bytes: u64,
@@ -111,19 +128,39 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     file: &mut PendingFile,
   ) -> Result<Option<StartedPart>, UploadError> {
-    if file.maybe_parts.is_none() {
-      let Some(parts) = self.announce_parts(conversation, file).await? else {
-        return Ok(None);
-      };
-      file.maybe_parts = Some(parts);
+    let modified_ms = source_modified_ms(&file.source).await;
+    if file
+      .maybe_parts
+      .as_ref()
+      .is_some_and(|parts| parts.maybe_modified_ms != modified_ms)
+    {
+      tracing::info!("a file changed during its upload; it starts over");
+      self.start_over(file)?;
     }
-    let Some(parts) = file.maybe_parts.clone() else {
-      return Err(UploadError::Failed(TransferFailure::LocalFile));
+    // At most twice: a part that doesn't match what was sent before starts the upload over once.
+    let (parts, step) = loop {
+      if file.maybe_parts.is_none() {
+        let Some(mut parts) = self.announce_parts(conversation, file).await? else {
+          return Ok(None);
+        };
+        parts.maybe_modified_ms = modified_ms;
+        file.maybe_parts = Some(parts);
+      }
+      let Some(parts) = file.maybe_parts.clone() else {
+        return Err(UploadError::Failed(TransferFailure::LocalFile));
+      };
+      let step = next_part(&parts, &file.source, file.size_bytes).await?;
+      if is_resent_differently(&parts, &step) {
+        tracing::info!("a part to send again has other bytes; the upload starts over");
+        self.start_over(file)?;
+        continue;
+      }
+      break (parts, step);
     };
     let progress = self.upload_progress(&parts);
-    let step = next_part(&parts, &file.source, file.size_bytes).await?;
     let PartStep::Part {
       part_number,
+      plaintext_sha256,
       ciphertext,
       hash_state,
       uploaded_bytes,
@@ -138,6 +175,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         progress,
       }));
     };
+    if let Some(parts) = file.maybe_parts.as_mut() {
+      // Saved (by the caller) before the part leaves, so a restart knows what it sent.
+      parts.maybe_sending = Some(SendingPart {
+        part_number,
+        plaintext_sha256: Base64Bytes::new(plaintext_sha256.to_vec()),
+      });
+    }
     let url = self
       .api
       .presign_attachment_part(
@@ -190,6 +234,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         return Err(UploadError::Failed(TransferFailure::LocalFile));
       };
       parts.etags.push(etag);
+      parts.maybe_sending = None;
       parts.hash_state = Base64Bytes::new(part.hash_state);
       parts.uploaded_bytes = part.uploaded_bytes;
       if parts.uploaded_bytes < parts.size_bytes {
@@ -197,6 +242,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }
     }
     self.join_parts(file).await.map(PartOutcome::Uploaded)
+  }
+
+  /// Gives up the file's upload in parts (at the server, once reachable) so the next step announces
+  /// a new one with a fresh key.
+  fn start_over(&self, file: &mut PendingFile) -> Result<(), UploadError> {
+    if let Some(parts) = file.maybe_parts.take() {
+      queue_abandon(&self.store, parts.attachment_id).map_err(UploadError::Retry)?;
+    }
+    Ok(())
   }
 
   /// Announces the file's upload in parts with a fresh key and keeps its thumbnail and size for the
@@ -232,6 +286,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       etags: Vec::new(),
       uploaded_bytes: 0,
       hash_state: Base64Bytes::new(CiphertextHasher::new().state()),
+      maybe_modified_ms: None,
+      maybe_sending: None,
     }))
   }
 
@@ -347,6 +403,7 @@ async fn next_part(
   let plaintext = read_segment(source, start, length, plaintext_len)
     .await
     .map_err(|()| local_failure())?;
+  let plaintext_sha256 = content_sha256(&plaintext);
   let key = SymmetricKey::from_slice(parts.key.as_slice()).ok_or_else(local_failure)?;
   let encryptor = AttachmentSegmentEncryptor::resume(&AttachmentKey::from_key(key), parts.header.as_slice())
     .map_err(|_| local_failure())?;
@@ -364,10 +421,44 @@ async fn next_part(
   hasher.update(&ciphertext);
   Ok(PartStep::Part {
     part_number: part_number(index),
+    plaintext_sha256,
     uploaded_bytes: parts.uploaded_bytes + ciphertext.len() as u64,
     hash_state: hasher.state(),
     ciphertext,
   })
+}
+
+/// Whether `step` sends a part again (the one on its way before) with other plaintext.
+fn is_resent_differently(parts: &PartsUpload, step: &PartStep) -> bool {
+  let (
+    Some(sending),
+    PartStep::Part {
+      part_number,
+      plaintext_sha256,
+      ..
+    },
+  ) = (&parts.maybe_sending, step)
+  else {
+    return false;
+  };
+  sending.part_number == *part_number && sending.plaintext_sha256.as_slice() != plaintext_sha256.as_slice()
+}
+
+/// When the file was last modified, in Unix milliseconds, where the platform tells (a file on
+/// disk, a file picked in the browser); bytes held in the store never change.
+async fn source_modified_ms(source: &UploadSource) -> Option<i64> {
+  match source {
+    UploadSource::Bytes { .. } => None,
+    #[cfg(not(target_arch = "wasm32"))]
+    UploadSource::Path { path } => std::fs::metadata(path)
+      .and_then(|metadata| metadata.modified())
+      .ok()
+      .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+      .and_then(|since| i64::try_from(since.as_millis()).ok()),
+    #[cfg(target_arch = "wasm32")]
+    UploadSource::Path { .. } => None,
+    UploadSource::Picked { handle } => crate::picked_files::modified_ms(handle).await,
+  }
 }
 
 /// The `length` bytes of the file at `start`. A file whose size changed since it was queued is

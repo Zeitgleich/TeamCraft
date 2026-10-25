@@ -122,6 +122,7 @@ web-sys = { version = "0.3.83", features = [
   "Element",
   "Event",
   "ExtendableEvent",
+  "File",
   "HtmlAnchorElement",
   "HtmlElement",
   "IdbDatabase",

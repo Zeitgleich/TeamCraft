@@ -39,6 +39,21 @@ pub async fn read(handle: &str, start: u64, end: u64, expected_len: u64) -> Opti
   Some(Zeroizing::new(js_sys::Uint8Array::new(&buffer).to_vec()))
 }
 
+/// When the picked file was last modified (`File.lastModified`), if the browser tells.
+#[cfg(target_arch = "wasm32")]
+pub async fn modified_ms(handle: &str) -> Option<i64> {
+  use wasm_bindgen::JsCast;
+
+  let file: web_sys::File = blob(handle).await?.dyn_into().ok()?;
+  // Invariant: a millisecond timestamp, far below 2^53.
+  Some(file.last_modified() as i64)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn modified_ms(_handle: &str) -> Option<i64> {
+  None
+}
+
 /// Native builds read files from paths; nothing is picked there.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn read(_handle: &str, _start: u64, _end: u64, _expected_len: u64) -> Option<Zeroizing<Vec<u8>>> {

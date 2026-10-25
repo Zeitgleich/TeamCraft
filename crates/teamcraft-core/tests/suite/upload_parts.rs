@@ -130,6 +130,78 @@ async fn a_cancelled_upload_is_given_up_at_the_server_also_after_being_offline()
   assert_eq!(server.abandoned_attachments().len(), 1, "given up once");
 }
 
+/// A part whose answer was lost is sent again; if the file changed meanwhile (here in place, with
+/// the same size and modification time), the same key and nonces must not encrypt the new bytes.
+#[tokio::test]
+async fn a_part_sent_again_with_other_bytes_starts_the_upload_over_with_a_fresh_key() {
+  let (server, mut alice, mut bob, channel) = channel_with_two().await;
+  let alice_ui = backend_of(&alice);
+  let path = scratch_file("edited.bin", &sample(PART + 500));
+  let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+  alice_ui.send_message(with_file(
+    channel,
+    "edited.bin",
+    FileSource::Path {
+      path: path.to_string_lossy().into_owned(),
+    },
+  ));
+  alice_ui.drain_commands();
+  // The first part leaves, but its answer is lost (the app stops).
+  let lost = alice.client.start_upload().await.unwrap().unwrap();
+  drop(lost);
+  let first = server.attachment_count();
+  assert_eq!(first, 1);
+
+  let edited: Vec<u8> = sample(PART + 500).iter().map(|byte| byte ^ 0x5a).collect();
+  std::fs::write(&path, &edited).unwrap();
+  std::fs::File::options()
+    .write(true)
+    .open(&path)
+    .unwrap()
+    .set_modified(modified)
+    .unwrap();
+  assert_eq!(alice.client.upload_pending().await.unwrap(), 1);
+  assert_eq!(
+    server.abandoned_attachments().len(),
+    1,
+    "the first upload is given up, not continued"
+  );
+  alice.client.flush_outbox().await.unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert_eq!(downloaded(&mut bob, channel).await, edited);
+  std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn an_edited_file_starts_its_upload_over() {
+  let (server, mut alice, _bob, channel) = channel_with_two().await;
+  let alice_ui = backend_of(&alice);
+  let path = scratch_file("touched.bin", &sample(2 * PART));
+  alice_ui.send_message(with_file(
+    channel,
+    "touched.bin",
+    FileSource::Path {
+      path: path.to_string_lossy().into_owned(),
+    },
+  ));
+  alice_ui.drain_commands();
+  let mut upload = alice.client.start_upload().await.unwrap().unwrap();
+  let sent = upload.sent().await;
+  alice.client.finish_upload(upload, sent).await.unwrap();
+
+  let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+  std::fs::File::options()
+    .write(true)
+    .open(&path)
+    .unwrap()
+    .set_modified(later)
+    .unwrap();
+  assert_eq!(alice.client.upload_pending().await.unwrap(), 1);
+  assert_eq!(server.abandoned_attachments().len(), 1);
+  assert_eq!(server.part_upload_count(), 3, "both parts went up again");
+  std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
 async fn channel_with_two() -> (FakeServer, Peer, Peer, ConversationId) {
   let server = FakeServer::new();
   let mut alice = Peer::enroll(&server, "Alice").await;
