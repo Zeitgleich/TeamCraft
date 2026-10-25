@@ -25,7 +25,7 @@ use crate::components::pending_button::PendingButton;
 use crate::components::security_ui::QrImage;
 use crate::feedback::PendingAction;
 use crate::hybrid::Hybrid;
-use crate::i18n::use_i18n;
+use crate::i18n::{I18n, use_i18n};
 use crate::meetings::{MeetingsClient, MeetingsHub};
 use crate::notify_sync::NotificationSync;
 use crate::reactive::{SetIfAlive, use_interval};
@@ -111,11 +111,7 @@ pub(crate) fn AuthFrame(
           <div class="auth-brand" translate="no">
             {move || brand_mark(brand)}
           </div>
-          {move || {
-            brand
-              .with(|view| view.login_title(language()).map(str::to_owned))
-              .map(|title| view! { <h2 class="auth-brand-title">{title}</h2> })
-          }}
+          <p class="auth-welcome" translate="no">{move || welcome(brand, i18n, language())}</p>
           {move || {
             brand
               .with(|view| view.login_text(language()).map(str::to_owned))
@@ -144,21 +140,27 @@ pub(crate) fn AuthFrame(
   }
 }
 
-/// The top of the card: no server brand → the product mark and wordmark. A server brand → the
-/// product's tile and the brand's beside it, like two app icons (issue #463), then the brand's logo
-/// (a wordmark) or its name.
+/// The line under the brand's mark: the brand's own sign-in title, else a welcome to this server
+/// (the brand's name is said here once; the marks above are pictures only).
+fn welcome(brand: RwSignal<BrandView>, i18n: I18n, language: &str) -> String {
+  brand.with(|view| {
+    if let Some(title) = view.login_title(language) {
+      title.to_owned()
+    } else if view.is_product() {
+      i18n.t("login-welcome")
+    } else {
+      i18n.t_with("login-welcome-brand", &[("brand", &view.display_name)])
+    }
+  })
+}
+
+/// The top of the card: no server brand → the product mark. A server brand → the product's tile
+/// and the brand's beside it, like two app icons (issue #463). The welcome line below names them.
 fn brand_mark(brand: RwSignal<BrandView>) -> AnyView {
   let name = move || brand.with(|view| view.display_name.clone());
-  let (is_product, has_wordmark) = brand.with(|view| (view.is_product(), view.has_wordmark()));
-  if is_product {
-    // Each wordmark carries the name: only the theme's one is displayed (and so read), and it
-    // still reads "TeamCraft" if the image fails.
-    return view! {
-      <img class="auth-logo-img auth-product-icon" src=crate::brand::product_icon() alt="" />
-      <img class="auth-product-wordmark brand-light" src="/icons/wordmark.svg" alt=name />
-      <img class="auth-product-wordmark brand-dark" src="/icons/wordmark-dark.svg" alt=name />
-    }
-    .into_any();
+  if brand.with(BrandView::is_product) {
+    return view! { <img class="auth-logo-img auth-product-icon" src=crate::brand::product_icon() alt="" /> }
+      .into_any();
   }
   let initial = move || {
     name()
@@ -166,7 +168,7 @@ fn brand_mark(brand: RwSignal<BrandView>) -> AnyView {
       .next()
       .map(|first| first.to_uppercase().collect::<String>())
   };
-  let tiles = view! {
+  view! {
     <div class="auth-tiles" aria-hidden="true">
       <span class="auth-tile auth-tile-product">
         <img class="auth-tile-img auth-product-icon" src=crate::brand::product_icon() alt="" />
@@ -179,18 +181,6 @@ fn brand_mark(brand: RwSignal<BrandView>) -> AnyView {
         />
       </span>
     </div>
-  };
-  if has_wordmark {
-    // Until the logo is there, or when it fails, the name stands in for it.
-    return view! {
-      {tiles}
-      <BrandLogo class="auth-logo-img" fallback=move || view! { <span class="auth-brand-name">{name}</span> } />
-    }
-    .into_any();
-  }
-  view! {
-    {tiles}
-    <span class="auth-brand-name">{name}</span>
   }
   .into_any()
 }

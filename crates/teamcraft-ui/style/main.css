@@ -4994,13 +4994,6 @@ ol.md-list {
   text-align: center;
 }
 
-.auth-brand-name {
-  font-size: var(--text-xl);
-  line-height: var(--leading-xl);
-  font-weight: var(--weight-semibold);
-  letter-spacing: -0.01em;
-}
-
 /* A brand icon: a square beside the name. */
 .auth-icon-img {
   width: 48px;
@@ -5064,12 +5057,6 @@ ol.md-list {
   font-weight: var(--weight-semibold);
 }
 
-.auth-product-wordmark {
-  display: block;
-  height: 26px;
-  width: auto;
-}
-
 .auth-logo-img {
   display: block;
   max-width: 200px;
@@ -5100,12 +5087,15 @@ ol.md-list {
   display: none;
 }
 
-.auth-brand-title {
-  margin: calc(-1 * var(--space-2)) 0 var(--space-1);
-  font-size: var(--text-xl);
-  letter-spacing: var(--tracking-xl);
-  line-height: var(--leading-xl);
+/* The welcome under the brand's mark: it names the server, the heading below says what to do. */
+.auth-welcome {
+  margin: calc(-1 * var(--space-2)) 0 var(--space-5);
+  color: var(--text-muted);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-lg);
   text-align: center;
+  text-wrap: balance;
 }
 
 .auth-brand-text {

@@ -340,8 +340,10 @@ An optional label per user, taken from the identity provider.
 
 Without a server brand the apps show TeamCraft's own mark: three people around a speech bubble,
 and the wordmark "TeamCraft". With a server brand the sign-in screen shows TeamCraft's tile and the
-brand's beside it, like two app icons (the brand's `icon`, else its initial on its accent), then the
-brand's logo or name (§5). The server's built-in brand (no brand configured) counts as no brand.
+brand's beside it, like two app icons (the brand's `icon`, else its initial on its accent). The web
+sign-in card names the brand once, in the line under the mark: the brand's `login_title`, else
+"Welcome to {brand}'s TeamCraft server" ("Welcome to TeamCraft" without a brand); no logo below
+the tiles. The server's built-in brand (no brand configured) counts as no brand.
 
 Loading screens always show the mark, animated (issue #463): the heads swirl in, the bodies rise,
 the speech bubble pops and types. The web (`index.html`, `style/loader.css`) animates the inlined
