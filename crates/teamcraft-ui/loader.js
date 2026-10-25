@@ -14,6 +14,8 @@ const KEY_SERVER_URL = 'teamcraft.server_url';
 const BRAND_CACHE_PREFIX = 'teamcraft.brand:';
 const BRAND_PATH = '/api/v1/brand';
 const BRAND_ASSET_PREFIX = '/api/v1/brand/assets/';
+// The id of the server's built-in brand when no brand is configured (teamcraft-server brand.rs).
+const BUILTIN_BRAND_ID = 'teamcraft';
 const MAX_NAME_CHARS = 64;
 const FADE_MS = 180;
 
@@ -97,6 +99,8 @@ function applyBrand(root) {
 // asset paths (and only from this origin).
 function showBrand(root, brand, isSameOrigin) {
   if (!brand || typeof brand !== 'object') return;
+  // No server brand: the product's own mark (style/loader.css), else neutral dots in its colours.
+  root.classList.toggle('is-product', brand.id === BUILTIN_BRAND_ID);
   const name = typeof brand.display_name === 'string' ? brand.display_name.trim() : '';
   if (name && [...name].length <= MAX_NAME_CHARS) {
     root.querySelector('.tc-loader-name').textContent = name;

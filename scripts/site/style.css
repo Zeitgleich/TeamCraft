@@ -35,10 +35,10 @@
   --muted: #5b6577;
   --accent: #005dfc;
   --accent-hover: #004bd3;
-  --accent-text: #0a716b;
+  --accent-text: #004bd3;
   --on-accent: #ffffff;
-  --accent-soft: #e2f4f2;
-  --accent-line: #a9dcd7;
+  --accent-soft: #e3edff;
+  --accent-line: #a8c6ff;
   --beta: #8a5300;
   --beta-soft: #fff1d6;
   --focus: #005dfc;
@@ -60,7 +60,7 @@
   --app-sidebar: #1a2434;
   --app-sidebar-text: #c6cfdd;
   --app-sidebar-muted: #8793a8;
-  --app-current: #005dfc;
+  --app-current: #0064fc;
   --app-badge: #c8441d;
   --app-huddle: #e3edff;
   --app-mention-bg: #fff2cc;
@@ -94,8 +94,8 @@
     --accent-hover: #8ab8ff;
     --accent-text: #8ab8ff;
     --on-accent: #04122e;
-    --accent-soft: #10302e;
-    --accent-line: #1d5a55;
+    --accent-soft: #13284a;
+    --accent-line: #24477f;
     --beta: #f3be5c;
     --beta-soft: #3a2c10;
     --focus: #8ab8ff;
@@ -114,7 +114,7 @@
     --app-muted: #9aa6ba;
     --app-chrome: #0a0e15;
     --app-sidebar: #0f1520;
-    --app-current: #1f56b8;
+    --app-current: #0064fc;
     --app-huddle: #13284a;
     --app-mention-bg: #4a3b10;
     --app-mention-text: #ffd978;
@@ -1113,9 +1113,9 @@ svg {
   gap: 0.35em;
   margin-right: auto;
   padding: 0.25em 0.6em;
-  border: 1px solid #1d4a46;
+  border: 1px solid #24477f;
   border-radius: 1em;
-  background: #0e2a28;
+  background: #11233f;
   color: #8ab8ff;
   font-family: var(--font-mono);
   font-size: 0.8em;
@@ -1762,9 +1762,9 @@ svg {
   align-items: center;
   gap: 6px;
   padding: 4px 10px;
-  border: 1px solid #1d4a46;
+  border: 1px solid #24477f;
   border-radius: 999px;
-  background: #0e2a28;
+  background: #11233f;
   color: #8ab8ff;
   font-size: 0.75rem;
   font-weight: 600;
@@ -2667,7 +2667,7 @@ details[open] > summary .chevron {
   border-radius: var(--radius-xl);
   background:
     radial-gradient(70% 90% at 100% 0%, rgba(92, 157, 255, 0.22), transparent 60%),
-    linear-gradient(160deg, #111926, #0b1f24);
+    linear-gradient(160deg, #111926, #0b1630);
   color: #c6cfdd;
 }
 

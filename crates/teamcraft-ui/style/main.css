@@ -33,7 +33,8 @@
   --chrome-strong: #ffffff;
   --sb-bg: #1a2434;
   --sb-hover: rgba(255, 255, 255, 0.07);
-  --sb-current: #005dfc;
+  /* 3:1 against --sb-bg in both themes and 4.5:1 with white text. */
+  --sb-current: #0064fc;
   --sb-muted: #8793a8;
   /* Muted channels: dimmer than --sb-muted but still 4.5:1 on --sb-bg; the bell-off icon says why. */
   --sb-dim: #808ca1;
@@ -141,7 +142,7 @@
     --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 16px 40px rgba(0, 0, 0, 0.45);
     --chrome: #0a0e15;
     --sb-bg: #0f1520;
-    --sb-current: #1f56b8;
+    --sb-current: #0064fc;
     --lvl-debug: #8591a4;
     --lvl-info: #6db3f2;
     --lvl-warn: #f0b04a;
@@ -174,7 +175,7 @@
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 16px 40px rgba(0, 0, 0, 0.45);
   --chrome: #0a0e15;
   --sb-bg: #0f1520;
-  --sb-current: #1f56b8;
+  --sb-current: #0064fc;
   --lvl-debug: #8591a4;
   --lvl-info: #6db3f2;
   --lvl-warn: #f0b04a;
@@ -3994,7 +3995,7 @@ ol.md-list {
   flex: 1;
   min-height: 40px;
   border-radius: var(--radius-sm);
-  background: linear-gradient(135deg, #cfe9e6, #9fd3cd);
+  background: linear-gradient(135deg, #d6e4ff, #a8c6ff);
 }
 
 .call-controls {

@@ -343,7 +343,7 @@ default.
 
 | File                                 | What it is                                                         |
 |--------------------------------------|--------------------------------------------------------------------|
-| `assets/brand/reference/*.png`       | The supplied artwork, kept as the reference                        |
+| `assets/brand/reference/wordmark.png`| The supplied wordmark, the input of `wordmark.py`                  |
 | `assets/brand/mark.svg`              | The mark, constructed by `scripts/brand/mark.py`                   |
 | `assets/brand/wordmark.svg`, `-dark` | The wordmark for light and dark backgrounds (`wordmark.py`)        |
 | `assets/brand/icon.svg`              | The mark on its rounded backplate (desktop, web, Linux scalable)   |

@@ -49,7 +49,6 @@ SHADOW = """    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%"
       <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>"""
 LIGHT_BACKPLATE = ("#ffffff", "#eaf1fb")
-DARK_BACKPLATE = ("#16284a", "#0b1426")
 GLYPH_BACKPLATE = ("#2b8cff", "#0050e0")
 ANDROID_DENSITIES = {"mdpi": 1, "hdpi": 1.5, "xhdpi": 2, "xxhdpi": 3, "xxxhdpi": 4}
 
@@ -143,9 +142,10 @@ def ios() -> list[Path]:
   icons = IOS / "AppIcon.appiconset"
   out = [
     render(tile(LIGHT_BACKPLATE, "full", width=0.76), 1024, icons / "icon-1024.png", opaque=True),
-    render(tile(DARK_BACKPLATE, "full", width=0.76), 1024, icons / "icon-1024-dark.png", opaque=True),
-    render(tile(("#000000", "#000000"), "full", width=0.76), 1024, icons / "icon-1024-tinted.png",
-           opaque=True, gray=True),
+    # Dark and tinted: the mark on transparency; iOS draws its own dark backdrop and tints the
+    # grey levels of the tinted one.
+    render(mark_only(width=0.76), 1024, icons / "icon-1024-dark.png"),
+    render(mark_only(width=0.76), 1024, icons / "icon-1024-tinted.png", gray=True),
   ]
   appearance = lambda value: [{"appearance": "luminosity", "value": value}]  # noqa: E731
   contents = {
@@ -243,9 +243,9 @@ def glyph_silhouette(color: str, padding: float) -> str:
   )
 
 
-def mark_only() -> str:
-  """The mark alone on a transparent square (launch screen)."""
-  scale = 1024 / (MARK_BOX[2] - MARK_BOX[0])
+def mark_only(width: float = 1.0) -> str:
+  """The mark alone on a transparent square, `width` of the square wide."""
+  scale = width * 1024 / (MARK_BOX[2] - MARK_BOX[0])
   return svg_doc(
     f"  <defs>\n{mark.defs('m-')}\n  </defs>\n" + place_mark(mark.shapes("m-"), scale, 512, 512)
   )

@@ -137,11 +137,12 @@ fn brand_mark(brand: RwSignal<BrandView>) -> AnyView {
   let name = move || brand.with(|view| view.display_name.clone());
   let (is_product, has_wordmark) = brand.with(|view| (view.is_fallback(), view.has_wordmark()));
   if is_product {
-    // The wordmark's alt text is the name, so it still reads "TeamCraft" if the image fails.
+    // Each wordmark carries the name: only the theme's one is displayed (and so read), and it
+    // still reads "TeamCraft" if the image fails.
     return view! {
       <img class="auth-logo-img auth-product-icon" src=crate::brand::product_icon() alt="" />
       <img class="auth-product-wordmark brand-light" src="/icons/wordmark.svg" alt=name />
-      <img class="auth-product-wordmark brand-dark" src="/icons/wordmark-dark.svg" alt="" aria-hidden="true" />
+      <img class="auth-product-wordmark brand-dark" src="/icons/wordmark-dark.svg" alt=name />
     }
     .into_any();
   }

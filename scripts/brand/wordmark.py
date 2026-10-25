@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Writes the TeamCraft wordmark (assets/brand/wordmark.svg and wordmark-dark.svg).
 
-The letters come from the supplied artwork (assets/brand/reference/wordmark.png); the typeface is
-not available as a font file. Each colour is traced at four times the size, its outlines are
+The letters come from the supplied artwork (assets/brand/reference/wordmark.png, reduced to a
+48-colour palette to keep it small); the typeface is not available as a font file. Each colour is traced at four times the size, its outlines are
 smoothed along the curve (which removes the pixel steps of the artwork) and then fitted with as
 few cubic Béziers as keep within 0.12 px of it.
 

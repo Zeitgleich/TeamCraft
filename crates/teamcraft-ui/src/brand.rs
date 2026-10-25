@@ -283,6 +283,8 @@ fn set_favicon(document: &web_sys::Document, href: &str) {
       Some(link)
     });
   if let Some(link) = link {
+    // index.html's own favicon is an SVG; a brand's may be PNG or ICO, which the browser sniffs.
+    drop(link.remove_attribute("type"));
     drop(link.set_attribute("href", href));
   }
 }

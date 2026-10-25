@@ -4,10 +4,10 @@
 The mark is built from exact geometry, not traced: three heads (circles), three bodies and the
 speech bubble. Every outline is a closed chain of straight lines and circular arcs, with tangent
 fillets of a given radius between neighbouring elements, so all curves are true arcs and every
-joint is smooth. The values were measured from the supplied artwork
-(assets/brand/reference/mark.png) and snapped to the 30° grid the drawing follows.
+joint is smooth. The values were measured from the supplied 1254 px artwork (not kept in the
+repository; this construction replaces it) and snapped to the 30° grid the drawing follows.
 
-Coordinates are those of the 1254 px reference image. Run from the repository root:
+Coordinates are those of that reference image. Run from the repository root:
 python3 scripts/brand/mark.py
 """
 
