@@ -2,15 +2,21 @@
 //! is open rises in, the user's own message settles when the server confirmed it, and a reaction
 //! pops when its count changed. Rows of the virtualized feed are rebuilt when they scroll back into
 //! view or their message changes, so this decides from what a row showed before and what already
-//! moved, never from the clock.
+//! moved. Only a pop that is still playing looks at the time: a count that changes again mid-pop
+//! continues it on the rebuilt row instead of bouncing from zero again (#371).
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use crate::model::{Message, MessageId, is_pending};
 
 /// Messages remembered as having played their entrance. Old ones are forgotten past this; they
 /// would only rise in again after the reader scrolled far away and back.
 const MAX_REMEMBERED: usize = 512;
+/// How long a reaction pops (`motion-pop` at `--dur-slow`).
+const POP: Duration = Duration::from_millis(260);
+/// Pops remembered at once; more only happen when a burst of reactions lands in one frame.
+const MAX_POPS: usize = 64;
 
 /// What a row showed the last time it rendered.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,8 +52,24 @@ pub enum Entrance {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RowMotion {
   pub entrance: Entrance,
-  /// Emoji whose reaction is new or changed its count since the row last rendered.
-  pub popping: Vec<String>,
+  /// Reactions that are new or changed their count since the row last rendered, or are still
+  /// popping from an earlier change.
+  pub popping: Vec<Pop>,
+}
+
+/// A reaction chip that pops.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pop {
+  pub emoji: String,
+  /// How far the pop already got; the rebuilt chip starts its animation there.
+  pub elapsed: Duration,
+}
+
+impl RowMotion {
+  /// The pop of the reaction `emoji`, if it pops.
+  pub fn pop_of(&self, emoji: &str) -> Option<&Pop> {
+    self.popping.iter().find(|pop| pop.emoji == emoji)
+  }
 }
 
 /// What the feed of one open conversation has seen: the newest message when it opened (older ones
@@ -56,6 +78,8 @@ pub struct RowMotion {
 pub struct FeedMotion {
   maybe_baseline: Option<MessageId>,
   moved: HashSet<MessageId>,
+  /// Pops still playing: message, emoji and when the pop started.
+  pops: Vec<(MessageId, String, Duration)>,
 }
 
 impl FeedMotion {
@@ -65,6 +89,7 @@ impl FeedMotion {
     Self {
       maybe_baseline: maybe_newest,
       moved: HashSet::new(),
+      pops: Vec::new(),
     }
   }
 
@@ -74,7 +99,13 @@ impl FeedMotion {
   }
 
   /// Decides how a row showing `message` moves, given what it showed before, and remembers it.
-  pub fn row_motion(&mut self, maybe_previous: Option<&Shown>, message: &Message) -> RowMotion {
+  /// `now` is a monotonic time (the page's clock), only compared with itself.
+  pub fn row_motion(
+    &mut self,
+    maybe_previous: Option<&Shown>,
+    message: &Message,
+    now: Duration,
+  ) -> RowMotion {
     let entrance = match maybe_previous {
       Some(previous) if previous.id == message.id => Entrance::None,
       Some(previous) if is_pending(previous.id) && !is_pending(message.id) => Entrance::Settling,
@@ -84,11 +115,38 @@ impl FeedMotion {
     if entrance != Entrance::None {
       self.remember(message.id);
     }
-    let popping = match maybe_previous {
+    let changed = match maybe_previous {
       Some(previous) if previous.id == message.id => changed_reactions(previous, message),
       _ => Vec::new(),
     };
+    let popping = self.pops_of(message.id, changed, now);
     RowMotion { entrance, popping }
+  }
+
+  /// The pops of a row: the changed reactions start one unless theirs is still playing, which
+  /// continues; a row rebuilt for another reason mid-pop also continues it.
+  fn pops_of(&mut self, id: MessageId, changed: Vec<String>, now: Duration) -> Vec<Pop> {
+    self
+      .pops
+      .retain(|(_, _, started)| now.saturating_sub(*started) < POP);
+    for emoji in changed {
+      let is_playing = self
+        .pops
+        .iter()
+        .any(|(message, playing, _)| *message == id && *playing == emoji);
+      if !is_playing && self.pops.len() < MAX_POPS {
+        self.pops.push((id, emoji, now));
+      }
+    }
+    self
+      .pops
+      .iter()
+      .filter(|(message, _, _)| *message == id)
+      .map(|(_, emoji, started)| Pop {
+        emoji: emoji.clone(),
+        elapsed: now.saturating_sub(*started),
+      })
+      .collect()
   }
 
   fn is_news(&self, id: MessageId) -> bool {
@@ -131,42 +189,70 @@ mod tests {
   use super::*;
   use crate::model::{MessageKind, PENDING_ID_BIT, Reaction, id_from_raw};
 
+  const START: Duration = Duration::from_secs(10);
+
   #[test]
   fn messages_from_before_the_feed_opened_do_not_arrive() {
     let mut motion = FeedMotion::new(Some(id_from_raw(10)));
-    assert_eq!(motion.row_motion(None, &message(9)).entrance, Entrance::None);
-    assert_eq!(motion.row_motion(None, &message(10)).entrance, Entrance::None);
+    assert_eq!(
+      motion.row_motion(None, &message(9), START).entrance,
+      Entrance::None
+    );
+    assert_eq!(
+      motion.row_motion(None, &message(10), START).entrance,
+      Entrance::None
+    );
   }
 
   #[test]
   fn a_new_message_arrives_once() {
     let mut motion = FeedMotion::new(Some(id_from_raw(10)));
-    assert_eq!(motion.row_motion(None, &message(11)).entrance, Entrance::Arriving);
+    assert_eq!(
+      motion.row_motion(None, &message(11), START).entrance,
+      Entrance::Arriving
+    );
     // Scrolled away and back: the row is rebuilt, the message stays put.
-    assert_eq!(motion.row_motion(None, &message(11)).entrance, Entrance::None);
+    assert_eq!(
+      motion.row_motion(None, &message(11), START).entrance,
+      Entrance::None
+    );
   }
 
   #[test]
   fn a_feed_that_opened_empty_takes_its_first_messages_as_history() {
     let mut motion = FeedMotion::new(None);
-    assert_eq!(motion.row_motion(None, &message(5)).entrance, Entrance::None);
+    assert_eq!(
+      motion.row_motion(None, &message(5), START).entrance,
+      Entrance::None
+    );
     motion.set_baseline_if_unset(id_from_raw(5));
     motion.set_baseline_if_unset(id_from_raw(99));
-    assert_eq!(motion.row_motion(None, &message(6)).entrance, Entrance::Arriving);
+    assert_eq!(
+      motion.row_motion(None, &message(6), START).entrance,
+      Entrance::Arriving
+    );
   }
 
   #[test]
   fn the_own_message_arrives_while_pending_and_settles_when_confirmed() {
     let mut motion = FeedMotion::new(Some(id_from_raw(10)));
     let pending = pending(3);
-    assert_eq!(motion.row_motion(None, &pending).entrance, Entrance::Arriving);
+    assert_eq!(
+      motion.row_motion(None, &pending, START).entrance,
+      Entrance::Arriving
+    );
     let confirmed = message(12);
     assert_eq!(
-      motion.row_motion(Some(&Shown::of(&pending)), &confirmed).entrance,
+      motion
+        .row_motion(Some(&Shown::of(&pending)), &confirmed, START)
+        .entrance,
       Entrance::Settling
     );
     // Rebuilt later (scrolled back): no second entrance.
-    assert_eq!(motion.row_motion(None, &confirmed).entrance, Entrance::None);
+    assert_eq!(
+      motion.row_motion(None, &confirmed, START).entrance,
+      Entrance::None
+    );
   }
 
   #[test]
@@ -175,9 +261,66 @@ mod tests {
     let before = with_reactions(4, &[("👍", 1), ("🎉", 2)]);
     let after = with_reactions(4, &[("👍", 2), ("🎉", 2), ("👀", 1)]);
     let shown = Shown::of(&before);
-    assert_eq!(motion.row_motion(Some(&shown), &after).popping, ["👍", "👀"]);
+    assert_eq!(
+      emoji_of(&motion.row_motion(Some(&shown), &after, START)),
+      ["👍", "👀"]
+    );
     // A first render pops nothing.
-    assert!(motion.row_motion(None, &after).popping.is_empty());
+    let other = with_reactions(5, &[("👍", 3)]);
+    assert!(motion.row_motion(None, &other, START).popping.is_empty());
+  }
+
+  mod pops {
+    use super::*;
+
+    #[test]
+    fn a_change_mid_pop_continues_it() {
+      let mut motion = FeedMotion::new(Some(id_from_raw(10)));
+      let one = with_reactions(4, &[("👍", 1)]);
+      let two = with_reactions(4, &[("👍", 2)]);
+      let three = with_reactions(4, &[("👍", 3)]);
+      let first = motion.row_motion(Some(&Shown::of(&one)), &two, START);
+      assert_eq!(first.pop_of("👍").map(|pop| pop.elapsed), Some(Duration::ZERO));
+      let later = START + Duration::from_millis(100);
+      let second = motion.row_motion(Some(&Shown::of(&two)), &three, later);
+      assert_eq!(
+        second.pop_of("👍").map(|pop| pop.elapsed),
+        Some(Duration::from_millis(100))
+      );
+    }
+
+    #[test]
+    fn a_change_after_the_pop_starts_a_new_one() {
+      let mut motion = FeedMotion::new(Some(id_from_raw(10)));
+      let one = with_reactions(4, &[("👍", 1)]);
+      let two = with_reactions(4, &[("👍", 2)]);
+      motion.row_motion(Some(&Shown::of(&one)), &two, START);
+      let after = START + POP;
+      let next = motion.row_motion(Some(&Shown::of(&one)), &two, after);
+      assert_eq!(next.pop_of("👍").map(|pop| pop.elapsed), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn a_row_rebuilt_mid_pop_keeps_popping_and_then_stops() {
+      let mut motion = FeedMotion::new(Some(id_from_raw(10)));
+      let one = with_reactions(4, &[("👍", 1)]);
+      let two = with_reactions(4, &[("👍", 2)]);
+      motion.row_motion(Some(&Shown::of(&one)), &two, START);
+      let mid = START + Duration::from_millis(50);
+      assert!(motion.row_motion(None, &two, mid).pop_of("👍").is_some());
+      assert!(motion.row_motion(None, &two, START + POP).popping.is_empty());
+    }
+
+    #[test]
+    fn pops_stay_bounded() {
+      let mut motion = FeedMotion::new(Some(id_from_raw(10)));
+      for raw in 0..(MAX_POPS as u64 * 2) {
+        let before = with_reactions(raw, &[]);
+        let after = with_reactions(raw, &[("👍", 1)]);
+        motion.row_motion(Some(&Shown::of(&before)), &after, START);
+      }
+      assert!(motion.pops.len() <= MAX_POPS);
+    }
   }
 
   #[test]
@@ -191,9 +334,13 @@ mod tests {
   fn the_memory_stays_bounded() {
     let mut motion = FeedMotion::new(Some(id_from_raw(0)));
     for raw in 1..=(MAX_REMEMBERED as u64 * 2) {
-      motion.row_motion(None, &message(raw));
+      motion.row_motion(None, &message(raw), START);
     }
     assert!(motion.moved.len() <= MAX_REMEMBERED);
+  }
+
+  fn emoji_of(motion: &RowMotion) -> Vec<&str> {
+    motion.popping.iter().map(|pop| pop.emoji.as_str()).collect()
   }
 
   fn pending(raw: u64) -> Message {

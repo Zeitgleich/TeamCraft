@@ -20,6 +20,7 @@ use crate::components::message_actions::{
 };
 use crate::i18n::use_i18n;
 use crate::model::{Message, MessageId, thread_id_of};
+use crate::motion::PopoverSide;
 use crate::state::use_app_state;
 
 /// Quick reactions until the user has used emoji of their own.
@@ -421,7 +422,7 @@ fn ToolbarBar(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
       <Show when=move || host.open.get() == OpenMenu::More fallback=|| ()>
         <div class="popover-backdrop" on:mousedown=move |_| host.close_menu()></div>
         <div
-          class="popover msg-menu"
+          class=move || format!("popover msg-menu {}", placement().side.class())
           style:position="fixed"
           style:right=move || placement().right
           style:top=move || placement().top
@@ -479,12 +480,14 @@ fn menu_placement(button: &web_sys::Element) -> MenuPlacement {
       right,
       top: format!("{}px", rect.bottom() + MENU_GAP_PX),
       bottom: "auto".into(),
+      side: PopoverSide::Below,
     }
   } else {
     MenuPlacement {
       right,
       top: "auto".into(),
       bottom: format!("{}px", height - rect.top() + MENU_GAP_PX),
+      side: PopoverSide::Above,
     }
   }
 }
@@ -496,6 +499,8 @@ struct MenuPlacement {
   right: String,
   top: String,
   bottom: String,
+  /// The side it opens on, so it grows out of the button (#359).
+  side: PopoverSide,
 }
 
 /// Arrow keys, Home and End move between the entries of a menu (and not between the messages

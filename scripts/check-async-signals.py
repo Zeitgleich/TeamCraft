@@ -7,7 +7,9 @@ has already been disposed", which kills the wasm app. The same goes for timers, 
 and JS callbacks. After the first `.await` of a task, and anywhere in a deferred callback
 (`set_timeout`, `request_animation_frame`, `Closure::new`/`wrap`/`once`), signals are only touched
 with `try_get_untracked`, `try_set`, `try_update`, `try_with`, ... (or through helpers such
-as `feedback::PendingAction`, which do).
+as `feedback::PendingAction`, which do). `on:blur` and `on:focusout` handlers count as deferred
+too: the browser fires them when a focused element is removed with its view (#378), after the
+component's owner is disposed.
 
     scripts/check-async-signals.py [paths ...]   # default: crates/teamcraft-ui/src
 
@@ -28,6 +30,8 @@ CALLBACK_CALL = re.compile(
     r"\b(spawn_local|set_timeout|set_timeout_with_handle|request_animation_frame|"
     r"request_animation_frame_with_handle|Closure::(?:<.*?>::)?(?:new|wrap|once|once_into_js))\("
 )
+# Inline view handlers that also run while their element is removed (a focused element blurs).
+REMOVAL_HANDLER = re.compile(r"\bon:(?:blur|focusout)=\s*(?:move\s*)?\|[^|]*\|\s*")
 # `.get()` without arguments only: `.get(&key)` / `.get(index)` are maps and slices.
 ARGUMENT_GETTERS = {"get", "get_untracked"}
 MARKER = "async-ok:"
@@ -120,6 +124,13 @@ def callback_bodies(source):
     # `async fn` bodies: they are spawned by name (`spawn_local(load(state))`) as often as inline.
     for match in re.finditer(r"\basync fn\b[^{;]*\{", source):
         yield match.end(), closing_brace(source, match.end()), False
+    # A block body runs to its closing brace, an expression body to the end of the line.
+    for match in REMOVAL_HANDLER.finditer(source):
+        if source.startswith("{", match.end()):
+            yield match.end() + 1, closing_brace(source, match.end() + 1), True
+        else:
+            end = source.find("\n", match.end())
+            yield match.end(), len(source) if end < 0 else end, True
 
 
 def skip_string(source, position):

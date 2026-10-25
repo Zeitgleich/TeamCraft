@@ -37,9 +37,21 @@ enum HomeFilter: Hashable, CaseIterable {
   }
 }
 
+/// How loud a badge is: red means someone needs you, plain unread is quiet. Mirrors the shared UI's tone.
+enum BadgeTone: Equatable {
+  case mention
+  case unread
+}
+
 extension ConversationItem {
   /// DMs and group DMs live outside spaces and have their own tab.
   var isDirect: Bool { kind == .direct || kind == .group }
+
+  /// Red for a mention and for unread messages in a direct or group conversation (they are addressed
+  /// to the user, unless it is muted); quiet for plain unread in channels.
+  var badgeTone: BadgeTone {
+    mentionCount > 0 || (isDirect && !isMuted && unreadCount > 0) ? .mention : .unread
+  }
 }
 
 private func byName(_ lhs: ConversationItem, _ rhs: ConversationItem) -> Bool {
