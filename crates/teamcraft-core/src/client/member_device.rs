@@ -176,10 +176,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         return Ok(MemberDeviceJoin::Waiting);
       },
     };
-    if self.is_founded_by_participants(conversation)? && !holds_everybody(&group, &users)? {
+    if self.is_direct(conversation)? && !holds_everybody(&group, &users)? {
       // A DM's group that doesn't hold all its participants yet may be a founder's group of one
-      // that still loses the founding race (e2ee.md §4.6), and a meeting chat's founder doesn't
-      // follow the queue until its invitees are in: the members add this device instead.
+      // that still loses the founding race (e2ee.md §4.6): the members add this device instead.
       group.delete(&self.provider)?;
       self.request_device_addition(conversation).await?;
       return Ok(MemberDeviceJoin::Waiting);
@@ -638,19 +637,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
-  /// Whether the conversation's group is founded with its participants by a setup record (DM,
-  /// group DM, meeting chat), by what this device has cached.
-  fn is_founded_by_participants(&self, conversation: ConversationId) -> Result<bool, CoreError> {
+  /// Whether the conversation is a DM or group DM, by what this device has cached.
+  fn is_direct(&self, conversation: ConversationId) -> Result<bool, CoreError> {
     Ok(
       self
         .cached_conversations()?
         .get(&conversation)
-        .is_some_and(|response| {
-          matches!(
-            response.kind,
-            ConversationKind::Dm | ConversationKind::Group | ConversationKind::Meeting
-          )
-        }),
+        .is_some_and(|response| matches!(response.kind, ConversationKind::Dm | ConversationKind::Group)),
     )
   }
 

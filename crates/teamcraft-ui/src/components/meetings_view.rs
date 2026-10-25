@@ -275,6 +275,12 @@ fn Lobby(meeting: MeetingId) -> impl IntoView {
   });
   let decide = move |entry: &LobbyEntry, admit: bool| {
     let guest = entry.user.id;
+    let maybe_chat = hub.meetings.with_untracked(|all| {
+      all
+        .iter()
+        .find(|item| item.id == meeting)
+        .map(|item| item.conversation_id)
+    });
     spawn_local(async move {
       let client = hub.client();
       let outcome = async move {
@@ -284,7 +290,14 @@ fn Lobby(meeting: MeetingId) -> impl IntoView {
           client.deny(meeting, guest).await
         }
       };
-      hub.run(me, now_ms(), outcome).await;
+      let is_done = hub.run(me, now_ms(), outcome).await.is_some();
+      if admit
+        && is_done
+        && let Some(chat) = maybe_chat
+      {
+        // The host's own decision lets the guest into the chat's encryption (e2ee.md §4.6).
+        state.try_write(|backend| backend.let_into_meeting_chat(chat, guest));
+      }
     });
   };
   view! {

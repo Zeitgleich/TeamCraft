@@ -265,6 +265,9 @@ pub trait ChatBackend {
   /// they invited (the organizer's own request: the group is never founded from the server's
   /// member list).
   fn set_up_meeting_chat(&self, _conversation: ConversationId, _invitees: Vec<UserId>) {}
+  /// A host admitted `user` from a meeting's lobby: lets them into the chat's encryption, on this
+  /// host's own decision (never because the server made them a member).
+  fn let_into_meeting_chat(&self, _conversation: ConversationId, _user: UserId) {}
   /// Unconfirmed removals in every conversation, for the admin console: an admin outside the
   /// group doesn't see the conversation.
   fn unconfirmed_removals(&self) -> Vec<(ConversationId, UserId)> {

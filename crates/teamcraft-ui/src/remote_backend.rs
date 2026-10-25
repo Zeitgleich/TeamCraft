@@ -831,6 +831,10 @@ impl ChatBackend for RemoteChat {
     });
   }
 
+  fn let_into_meeting_chat(&self, conversation: ConversationId, user: UserId) {
+    self.act(ChatAction::LetIntoMeetingChat { conversation, user });
+  }
+
   fn discard_removal(&self, conversation: ConversationId, user: UserId) {
     self.act(ChatAction::DiscardRemoval { conversation, user });
   }

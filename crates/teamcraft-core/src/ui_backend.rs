@@ -244,6 +244,11 @@ pub enum CoreCommand {
     conversation: ConversationId,
     invitees: Vec<UserId>,
   },
+  /// A host admitted a user from a meeting's lobby.
+  LetIntoMeetingChat {
+    conversation: ConversationId,
+    user: UserId,
+  },
   InviteToSpace {
     space: SpaceId,
     email: String,
@@ -1242,6 +1247,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       conversation,
       invitees,
     });
+  }
+
+  fn let_into_meeting_chat(&self, conversation: ConversationId, user: UserId) {
+    self.command(CoreCommand::LetIntoMeetingChat { conversation, user });
   }
 
   fn unconfirmed_removals(&self) -> Vec<(ConversationId, UserId)> {

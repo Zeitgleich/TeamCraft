@@ -635,6 +635,10 @@ pub enum ChatAction {
     conversation: ConversationId,
     invitees: Vec<UserId>,
   },
+  LetIntoMeetingChat {
+    conversation: ConversationId,
+    user: UserId,
+  },
   SetBookmarks {
     conversation: ConversationId,
     bookmarks: Vec<crate::model::Bookmark>,
@@ -828,6 +832,7 @@ impl ChatAction {
         conversation,
         invitees,
       } => backend.set_up_meeting_chat(conversation, invitees),
+      Self::LetIntoMeetingChat { conversation, user } => backend.let_into_meeting_chat(conversation, user),
       Self::SetBookmarks {
         conversation,
         bookmarks,

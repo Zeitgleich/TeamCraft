@@ -429,6 +429,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.set_up_meeting_chat(conversation, invitees);
   }
 
+  fn let_into_meeting_chat(&self, conversation: ConversationId, user: UserId) {
+    self.chat.let_into_meeting_chat(conversation, user);
+  }
+
   fn discard_removal(&self, conversation: ConversationId, user: UserId) {
     self.chat.discard_removal(conversation, user);
   }

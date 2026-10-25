@@ -252,11 +252,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(id)
   }
 
-  /// Sets up the encryption group of a meeting chat this user just scheduled or started (the
-  /// server creates the chat with the meeting, without a group): founded like a group DM's with
-  /// the users the organizer invited, from the organizer's own request and never the server's
-  /// member list, joined instead if somebody founded it first, and finished later if cut short
-  /// (e2ee.md §4.6, "Meeting chats"). `Ok(true)` once everybody invited is in.
+  /// Sets up the encryption group of a meeting chat this device just scheduled or started (the
+  /// server creates the chat with the meeting, without a group; e2ee.md §4.6, "Meeting chats"):
+  /// founded like a group DM's with the users the organizer invited, from the organizer's own
+  /// request and never the server's member list, and finished later if cut short. The group's
+  /// information is published right away, so the organizer's other devices join it even while
+  /// it holds nobody else. A group the server already has (information published, or epochs
+  /// past 0) is joined, never founded again. `Ok(true)` once everybody invited is in.
   pub async fn set_up_meeting_chat(
     &mut self,
     id: ConversationId,
@@ -267,9 +269,48 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Err(CoreError::NotAMeetingChat(id));
     }
     records::put_json(&self.store, Table::Conversations, &id.to_string(), &conversation)?;
+    if !self.has_group(id)? && self.dm_setup(id)?.is_none() && self.server_has_group_info(id).await? {
+      // Founded already (by this user's other device): this device joins it.
+      self.join_as_member_device(id).await?;
+      return self.has_group(id);
+    }
     let me = self.user_id();
     let others = conversation_members(invitees, me);
-    self.start_participants_setup(id, &others).await
+    let is_complete = self.start_participants_setup(id, &others).await?;
+    if self.has_group(id)? {
+      self.publish_group_info_if_missing(id).await?;
+    }
+    Ok(is_complete)
+  }
+
+  /// "Admit" by a host of a meeting: lets the admitted user into the chat's encryption group with
+  /// history from now on, signed by this host's device. Only ever on the host's own decision,
+  /// never because the server made somebody a member (e2ee.md §4.6, "Meeting chats"). A user
+  /// without a device yet (a guest whose page hasn't set one up) goes in when their first device
+  /// appears.
+  pub async fn let_into_meeting_chat(&mut self, id: ConversationId, user: UserId) -> Result<(), CoreError> {
+    if !self.has_group(id)? {
+      return Err(CoreError::NoGroup(id));
+    }
+    let history = self.effective_history(user, HistoryShare::FromJoin).await?;
+    self
+      .commit_change(
+        id,
+        ChangeSource::Own(MembershipAction::AddUser {
+          user_id: convert::user(user),
+          history,
+        }),
+      )
+      .await?;
+    self.queue_user_addition_if_missing(id, user, history).await
+  }
+
+  async fn server_has_group_info(&mut self, id: ConversationId) -> Result<bool, CoreError> {
+    match self.api.mls_group_info(id).await {
+      Ok(_) => Ok(true),
+      Err(error) if error.is_not_found() => Ok(false),
+      Err(error) => Err(error.into()),
+    }
   }
 
   /// Takes the next step of this device's setup of the conversation's group, if it set one up.
