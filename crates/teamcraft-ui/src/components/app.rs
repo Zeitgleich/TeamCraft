@@ -213,6 +213,16 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
     (depth, pane, step)
   });
 
+  // The main column and the side panel mount their view again only when it changes: a navigation
+  // that sets the same view again (the router after a click, a notification of the open
+  // conversation) would otherwise mount it anew and play its entrance from the start.
+  let main_view = Memo::new(move |_| state.view.get());
+  let side_panel = Memo::new(move |_| state.panel.get());
+  let open_conversation = Memo::new(move |_| match main_view.get() {
+    MainView::Conversation(id) => Some(id),
+    _ => None,
+  });
+
   view! {
     <a class="skip-link" href="#main-content">
       {move || i18n.t("skip-to-content")}
@@ -250,7 +260,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
           </Show>
         </Show>
         <main id="main-content" class="main" tabindex="-1">
-          {move || match state.view.get() {
+          {move || match main_view.get() {
             MainView::Conversation(id) => view! { <ChannelView conversation=id /> }.into_any(),
             MainView::Threads => view! { <ThreadsInbox /> }.into_any(),
             MainView::Admin(section) => lazy_area(Place::Pane, move || areas::admin_console(section)),
@@ -268,16 +278,16 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
           }}
         </main>
         <Show when=move || matches!(state.view.get(), MainView::Conversation(_)) fallback=|| ()>
-          {move || match state.panel.get() {
+          {move || match side_panel.get() {
             SidePanel::Closed => ().into_any(),
             SidePanel::Thread { conversation, thread } => {
               view! { <ThreadPanel conversation=conversation thread=thread /> }.into_any()
             },
-            SidePanel::Pins => match state.current_conversation_id() {
+            SidePanel::Pins => match open_conversation.get() {
               Some(id) => view! { <PinsPanel conversation=id /> }.into_any(),
               None => ().into_any(),
             },
-            SidePanel::Members => match state.current_conversation_id() {
+            SidePanel::Members => match open_conversation.get() {
               Some(id) => view! { <MembersPanel conversation=id /> }.into_any(),
               None => ().into_any(),
             },

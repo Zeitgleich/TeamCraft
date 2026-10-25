@@ -42,6 +42,11 @@ const CROSSFADE_AT = 0.8;
 // while the backdrop fades into the app.
 const DEPART_MS = 320;
 const DEPART_BLUR = 'blur(3px)';
+// The backdrop's fade (`.is-handing-over::before` in style/loader.css: 120 ms delay, 420 ms), which
+// outlasts the departure: the screen stays until it is through, so the backdrop never cuts out.
+const BACKDROP_FADE_MS = 540;
+// The screen is hidden first and removed two frames later; a hidden tab draws no frames.
+const REMOVE_FALLBACK_MS = 100;
 const EMPHASIZED_EASING = 'cubic-bezier(0.05, 0.7, 0.1, 1)';
 // The screen goes this long after the first view even if the handover never finishes (a hidden
 // tab, an error): the assembly wait, the images, two frames and the flight, with room for a slow
@@ -121,7 +126,15 @@ function showStatus(root) {
 function handOver(root) {
   Promise.race([animateHandOver(root), delay(HANDOVER_TIMEOUT_MS)])
     .catch((error) => console.error('the loading screen could not hand over', error))
-    .finally(() => root.remove());
+    .finally(() => removeScreen(root));
+}
+
+// Hidden first, removed two frames later. The mark holds its last frame (`fill: forwards`); removing
+// the screen drops the layer and its animations in one commit, and WebKit can present one frame of
+// the un-animated mark (centred, opaque) before the layer goes.
+function removeScreen(root) {
+  root.classList.add('is-gone');
+  Promise.race([nextFrame().then(nextFrame), delay(REMOVE_FALLBACK_MS)]).then(() => root.remove());
 }
 
 async function animateHandOver(root) {
@@ -138,7 +151,7 @@ async function animateHandOver(root) {
   root.classList.add('is-handing-over');
   root.setAttribute('aria-busy', 'false');
   const animation = target ? flyInto(mark, target) : depart(mark);
-  await animation.finished;
+  await Promise.all([animation.finished, delay(BACKDROP_FADE_MS)]);
 }
 
 // The mark moves onto the card's mark and scales to its size; the card's mark, hidden meanwhile,

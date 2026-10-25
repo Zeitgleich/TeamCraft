@@ -8333,6 +8333,20 @@ ol.md-list {
   transition: transform var(--dur-fast) var(--ease-standard);
 }
 
+/* The end of a move: WebKit (the desktop webview) draws a moving element in a layer of its own and
+   paints it back into the page when the motion ends, which can shift or sharpen it in that one
+   frame, a snap after the motion. Short-lived surfaces keep their layer while they are up, so
+   nothing is handed back; long-lived ones (the main column) only fade, which hands back unchanged.
+   Indicators are small and slide often. `opacity`, not `transform`: it keeps the layer without
+   making the surface the containing block of fixed menus inside it (the emoji picker, hover cards). */
+:is(.popover, .emoji-picker, .modal, .toast, .sheet, .motion-ghost) {
+  will-change: opacity;
+}
+
+.tab-indicator.is-live {
+  will-change: transform;
+}
+
 /* Views: the main column cross-fades in on a switch (channel to channel, to threads, …) and the
    side panel slides in. Short, so a cached channel still feels instant. */
 .main > * {
@@ -8343,10 +8357,10 @@ ol.md-list {
   animation: motion-panel-in var(--dur-base) var(--ease-emphasized);
 }
 
+/* Only a fade: the column stays put, so its end hands nothing back (above). */
 @keyframes motion-view-in {
   from {
     opacity: 0;
-    transform: translateY(4px);
   }
 }
 
@@ -8408,6 +8422,17 @@ ol.md-list {
 
 .motion-ghost.is-leaving {
   animation: motion-fade-out var(--dur-exit) var(--ease-exit) forwards;
+}
+
+/* A deep copy starts its parts' entrances again (`.main > *`, the lightbox's chrome, unread dots):
+   they would fade in while the copy leaves. Only the exits below play. */
+.motion-ghost * {
+  animation: none;
+}
+
+/* Exit played: hidden with the exit still holding, removed two frames later (motion.rs). */
+.motion-ghost.is-gone {
+  visibility: hidden;
 }
 
 /* The lightbox's full image is released with it; its ghost fades the backdrop only. A lightbox that
