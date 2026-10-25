@@ -302,6 +302,11 @@ async fn a_device_that_joined_on_its_own_writes_once_a_member_handed_it_the_curr
     .await
     .unwrap();
   assert_eq!(laptop.client.flush_outbox().await.unwrap().pending, 1);
+  // The phone's key bag arrives meanwhile: its current key doesn't end the wait.
+  phone.client.upload_key_bag().await.unwrap();
+  laptop.client.full_sync().await.unwrap();
+  assert!(is_waiting_for_device(laptop.store.as_ref(), channel).unwrap());
+  assert_eq!(laptop.client.flush_outbox().await.unwrap().pending, 1);
 
   server.set_offline(bob.client.user_id(), false);
   settle(&mut [&mut phone, &mut bob, &mut laptop]).await;
@@ -311,6 +316,79 @@ async fn a_device_that_joined_on_its_own_writes_once_a_member_handed_it_the_curr
   settle(&mut [&mut phone, &mut bob, &mut laptop]).await;
   assert_eq!(bob.texts(channel), ["one", "two", "three", "from the laptop"]);
   assert_eq!(phone.texts(channel), ["one", "two", "three", "from the laptop"]);
+}
+
+/// Issue #178 for a device added from a welcome: its key bag, served by the server on recovery,
+/// still names the key from before Carol's removal as current. It writes only with the key the
+/// members switched to, which it gets from a member that had it in the group.
+#[tokio::test]
+async fn a_further_device_with_a_stale_key_bag_writes_with_the_current_key_only() {
+  let server = FakeServer::new();
+  let no_stagger = teamcraft_core::ClientSettings {
+    device_add_stagger: std::time::Duration::ZERO,
+    ..settings()
+  };
+  let mut phone = Peer::enroll_with_settings(&server, "Alice", no_stagger).await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let mut carol = Peer::enroll(&server, "Carol").await;
+  let space = phone.space().await;
+  let channel = phone.client.create_channel(space, "general").await.unwrap();
+  for user in [bob.client.user_id(), carol.client.user_id()] {
+    phone.client.add_member(channel, user).await.unwrap();
+  }
+  settle(&mut [&mut phone, &mut bob, &mut carol]).await;
+  phone.client.send_text(channel, None, "with Carol").await.unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut carol]).await;
+  // The key bag on the server is from before the removal and stays so.
+  phone.client.upload_key_bag().await.unwrap();
+  phone
+    .client
+    .remove_member(channel, carol.client.user_id())
+    .await
+    .unwrap();
+  bob
+    .client
+    .send_text(channel, None, "without Carol")
+    .await
+    .unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut carol]).await;
+
+  // Recovered with the passphrase: the old key bag; a member adds it from a welcome.
+  let mut laptop = Peer::enroll_as(phone.api.clone(), "Alice laptop").await;
+  laptop.client.full_sync().await.unwrap();
+  phone.client.full_sync().await.unwrap();
+  phone.client.apply_pending_changes().await.unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut laptop]).await;
+  assert_eq!(laptop.client.group_access(channel).unwrap(), GroupAccess::Member);
+  phone.client.apply_pending_changes().await.unwrap();
+  bob.client.apply_pending_changes().await.unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut laptop]).await;
+
+  laptop
+    .client
+    .send_text(channel, None, "from the laptop")
+    .await
+    .unwrap();
+  laptop.client.flush_outbox().await.unwrap();
+  bob
+    .client
+    .send_text(channel, None, "after the laptop")
+    .await
+    .unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut laptop]).await;
+  let laptop_key = laptop.content_key_of(channel, "from the laptop").await;
+  assert_ne!(
+    laptop_key,
+    phone.content_key_of(channel, "with Carol").await,
+    "not the key Carol knows"
+  );
+  assert_eq!(
+    laptop_key,
+    bob.content_key_of(channel, "after the laptop").await,
+    "the key the members use"
+  );
+  assert!(!carol.client.has_content_key(channel, &laptop_key));
+  assert!(bob.texts(channel).contains(&"from the laptop".to_string()));
 }
 
 /// Issue #179: a further device joins the user's DMs on its own, like channels.

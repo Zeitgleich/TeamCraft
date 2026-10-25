@@ -256,6 +256,10 @@ mod missed_keys {
 
     assert_same_epoch(channel, &mut [&mut alice, &mut bob, &mut carol, &mut dave]);
     assert_eq!(dave.texts(channel), ["hi Dave", "hi Carol"]);
+    // Carol, a member when the keys were sealed to Dave, doesn't get the key from before her join.
+    let hi_dave = alice.content_key_of(channel, "hi Dave").await;
+    assert!(dave.client.has_content_key(channel, &hi_dave));
+    assert!(!carol.client.has_content_key(channel, &hi_dave));
     assert_eq!(carol.texts(channel), ["hi Carol"]);
   }
 }

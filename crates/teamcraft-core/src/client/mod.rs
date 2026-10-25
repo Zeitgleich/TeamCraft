@@ -335,6 +335,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(self.group(conversation)?.map(|group| group.epoch()))
   }
 
+  /// Whether this device holds the content key a message names (`content_key_id`), e.g. to tell
+  /// "can't be read here" from "not loaded yet".
+  pub fn has_content_key(&self, conversation: ConversationId, content_key_id: &[u8]) -> bool {
+    let Ok(id) = <[u8; 16]>::try_from(content_key_id) else {
+      return false;
+    };
+    self
+      .account
+      .key_bag
+      .ring(convert::conversation(conversation))
+      .is_some_and(|ring| {
+        ring
+          .get(teamcraft_crypto::content_key::ContentKeyId::from_bytes(id))
+          .is_some()
+      })
+  }
+
   /// Users whose identity key changed since it was pinned (e2ee.md §1: "security key changed").
   pub fn changed_identities(&self) -> Result<Vec<UserId>, CoreError> {
     Ok(

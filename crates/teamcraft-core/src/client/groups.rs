@@ -906,7 +906,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           match sealed.open(&self.account.device) {
             // Keys of epochs this device missed; none of them becomes current (e2ee.md §4.6).
             Ok(bundle) => {
-              bundle.apply_to(self.account.key_bag.ring_mut(convert::conversation(conversation)))?;
+              let ring = self.account.key_bag.ring_mut(convert::conversation(conversation));
+              let clashing = add_missed_keys(ring, &bundle);
+              if clashing > 0 {
+                // A member sent other key material under a known ID: never replaces a key, and
+                // doesn't hold up the queue.
+                tracing::warn!(conversation_id = %conversation, mls_message_id = %message.id, clashing, "skipped sealed content keys that clash with known ones");
+              }
               self.persist_keys()?;
               self.retry_undecrypted(conversation)?;
             },
@@ -1281,7 +1287,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .ok_or(CoreError::NoGroup(conversation))?;
     let before = group.members()?;
     let update = group.confirm_commit(&self.provider)?;
+    let after = group.members()?;
     self.note_member_changes(conversation, &before)?;
+    if update.maybe_change.is_none() && update.maybe_rejoined.is_none() {
+      // This device's own addition of further devices of members: they wait for a current key
+      // like any (#178); this device takes its turn with the others.
+      for added in after.iter().filter(|member| !before.contains(member)) {
+        self.queue_current_key_share(conversation, *added)?;
+      }
+    }
     self.persist_group(conversation)?;
     self
       .store
@@ -1665,6 +1679,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         let joined_epoch = group.epoch();
         // What this device had in an earlier membership doesn't count for this one.
         self.forget_key_history(conversation)?;
+        self.store.delete(
+          Table::AppliedChanges,
+          &super::member_device::current_key_wait_key(conversation),
+        )?;
+        if !is_rejoin {
+          // The key bag's current key may be stale (#178): a member's bundle brings the current
+          // one (the adder's history share, or the hand-over to a further device).
+          self.wait_for_current_key(conversation)?;
+        }
         self.note_key_epochs(conversation, &[key_id], joined_epoch)?;
         let ring = self.account.key_bag.ring_mut(convert::conversation(conversation));
         ring.insert(key)?;
@@ -2259,6 +2282,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 }
 
+/// Adds the keys sealed to this device; a key whose ID the ring knows with other material is
+/// skipped (counted), never replaced.
+fn add_missed_keys(
+  ring: &mut teamcraft_crypto::content_key::ContentKeyRing,
+  bundle: &ContentKeyBundle,
+) -> usize {
+  bundle
+    .keys()
+    .iter()
+    .filter(|key| ring.insert(key.duplicate()).is_err())
+    .count()
+}
+
 /// The other people of a group DM: `users` without the user and without duplicates, in order.
 fn conversation_members(users: &[UserId], me: UserId) -> Vec<UserId> {
   let mut seen = BTreeSet::new();
@@ -2333,6 +2369,37 @@ mod tests {
   const MY_LAPTOP: i64 = 2;
   const BOB_PHONE: i64 = 3;
   const CAROL_PHONE: i64 = 4;
+
+  mod missed_keys {
+    use teamcraft_crypto::content_key::ContentKeyRing;
+    use teamcraft_crypto::secret::SymmetricKey;
+
+    use super::*;
+
+    #[test]
+    fn a_sealed_key_that_clashes_with_a_known_one_is_skipped_and_the_rest_added() {
+      let conversation = teamcraft_crypto::ids::ConversationId::new(5);
+      let mut ring = ContentKeyRing::new(conversation);
+      let known = ring.rotate(&mut OsRng).duplicate();
+      let clashing = ContentKey::from_parts(known.id(), SymmetricKey::generate(&mut OsRng));
+      let fresh = ContentKey::generate(&mut OsRng);
+      let fresh_id = fresh.id();
+      let bundle = ContentKeyBundle::missed_keys(conversation, vec![clashing, fresh]);
+
+      assert_eq!(add_missed_keys(&mut ring, &bundle), 1);
+      assert!(ring.get(fresh_id).is_some(), "the others still go in");
+      assert_eq!(ring.len(), 2);
+      assert_eq!(
+        ring.current().map(ContentKey::id),
+        Some(known.id()),
+        "the current key stays"
+      );
+      // The known key keeps its material: a message under it still opens with the original.
+      let mut original = ContentKeyRing::new(conversation);
+      original.insert(known).unwrap();
+      assert!(ring.insert(original.keys()[0].duplicate()).is_ok());
+    }
+  }
 
   mod dm_welcome {
     use super::*;

@@ -165,8 +165,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     match self.api.post_mls_commit(conversation, &request).await {
       Ok(response) => {
-        self.persist_group(conversation)?;
+        // Waiting first: a crash right after must not leave the device writing with the key
+        // bag's current key.
+        self.forget_key_history(conversation)?;
         self.wait_for_current_key(conversation)?;
+        self.persist_group(conversation)?;
         self.advance_cursor(conversation, &response.commit)?;
         self.remember_member_keys(
           conversation,
@@ -195,23 +198,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
-  /// After joining by external commit: the key bag's current key may be from before a key switch
-  /// the user's other devices hadn't uploaded yet, one a removed member knows (#178). It stays
-  /// for reading; new messages wait until a member sends the current key or the next epoch key
-  /// switch, and the conversation shows that this device waits.
-  fn wait_for_current_key(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    self.forget_key_history(conversation)?;
-    let ring = self.account.key_bag.ring_mut(convert::conversation(conversation));
-    if let Some(current) = ring.current().map(|key| key.id()) {
-      ring.unset_current(current);
-    }
-    self.persist_keys()?;
+  /// After joining by external commit or from a welcome: the key bag's current key may be from
+  /// before a key switch the user's other devices hadn't uploaded yet, one a removed member knows
+  /// (#178). It stays for reading; new messages wait until a member sends the current key or the
+  /// next epoch key switch, and the conversation shows that this device waits.
+  pub(crate) fn wait_for_current_key(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
     records::put_json(
       &self.store,
       Table::AppliedChanges,
       &current_key_wait_key(conversation),
       &true,
-    )
+    )?;
+    let ring = self.account.key_bag.ring_mut(convert::conversation(conversation));
+    if let Some(current) = ring.current().map(|key| key.id()) {
+      ring.unset_current(current);
+    }
+    self.persist_keys()
   }
 
   /// Queues handing the current key to `added`, a further device of a member that this device
@@ -282,6 +284,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     else {
       return Ok(PendingOutcome::Done);
     };
+    // Only a key this device had in the group since its join: one from the key bag may be stale
+    // (a removed member may know it), and the waiting device would take it (#178).
+    if !self.has_key_epoch(conversation, current.id())? {
+      tracing::debug!(conversation_id = %conversation, "the current key came from the key bag; not handed over");
+      return Ok(PendingOutcome::Done);
+    }
     let bundle = ContentKeyBundle::epoch_key(convert::conversation(conversation), current);
     self.send_bundle(conversation, &bundle, None).await?;
     tracing::info!(conversation_id = %conversation, device_id = %device_id, "sent the current content key for a further device");

@@ -140,6 +140,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     ))
   }
 
+  /// Whether this device had the key in the group since its join (derived or received there, not
+  /// only from the key bag).
+  pub(crate) fn has_key_epoch(
+    &self,
+    conversation: ConversationId,
+    key: ContentKeyId,
+  ) -> Result<bool, CoreError> {
+    Ok(
+      self
+        .key_history(conversation)?
+        .key_epochs
+        .contains_key(&key_hex(key)),
+    )
+  }
+
   /// A member added `rejoined` back. If that member joined the group after this device, it may
   /// lack keys of earlier epochs the device missed: this device sends its own, at its rank.
   pub(crate) fn follow_up_rejoin(

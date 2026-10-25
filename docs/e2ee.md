@@ -213,7 +213,7 @@ Result:
 - Content key bundles (MLS application messages) only carry history for new members, the current
   key for a further device of a member, and the keys a device added back missed (§4.6). A member
   takes a bundle's "current" key only if it has none yet, so an old or delayed bundle can't switch it
-  back; the one exception is a device that joined by external commit and waits for its first one.
+  back; the one exception is a device that just joined and waits for its first one (§4.6).
 - Each message header (plaintext) carries `content_key_id`, so clients know which key to use.
 - `content_key_id` is a random 128-bit value, not a sequence number: two members may rotate at the same
   time (e.g. both reach the message limit), and random IDs keep both keys usable without coordination.
@@ -459,18 +459,24 @@ its own. See [admin.md](admin.md) §2.
   from an older client, or the device's floor may be stale) the device posts a device-add request
   into the group's queue (`TCDA`, the user ID): members who see it, also later when they come
   online, check that the user's signed device list names the sending device and add it to that
-  conversation's group like a colleague's new device. **The current key after an external join.**
-  The device reads history with what the user's key bag holds, but the bag's current key may be one
-  from before a key switch the user's other devices hadn't uploaded yet, which a removed member
-  knows. So the device doesn't write with it: right after its join it stops using it (keeping it for
-  reading) and shows that it waits, and the key bag can't make it current again. Every member that
-  merges an unsigned addition of a further device (an external join, or a colleague's commit) queues
-  sending the group its current key as a bundle, ranked like an addition (`device_add_stagger` per
-  rank, online users first), so normally one member sends; the others drop theirs once a current key
-  arrives, or when the group switches keys anyway. The waiting device takes the first current key a
-  member sends after its join (only members of the epoch can send it; the server can delay it, not
-  forge it), or the next epoch key it derives itself. Members on clients before this version don't
-  send it: until one with this version comes online, the device reads but doesn't write.
+  conversation's group like a colleague's new device. **The current key of a further device.**
+  A further device reads history with what the user's key bag holds, but the bag's current key may
+  be one from before a key switch the user's other devices hadn't uploaded yet, which a removed
+  member knows. So the device doesn't write with it: when it joins (by external commit or from a
+  welcome, unless it was added back) it stops using it (keeping it for reading) and shows that it
+  waits, and the key bag can't make it current again. Every member that merges an unsigned addition
+  of a further device (an external join, or a member's commit, its own included) queues sending the
+  group its current key as a bundle, ranked like an addition (`device_add_stagger` per rank, online
+  users first), so normally one member sends; the others drop theirs once a current key arrives, or
+  when the group switches keys anyway. A member hands over only a current key it had in the group
+  since its own join (derived or received there, see "Keys a device added back missed"), never one
+  only its key bag knows, which may be stale in the same way. The waiting device takes the first
+  current key a member sends after its join (the adder's history share for a new user, the hand-over
+  for a further device; only members of the epoch can send it, the server can delay it, not forge
+  it), or the next epoch key it derives itself. Members on clients before this version don't send
+  the hand-over, and a member whose current key predates this version only knows it from before:
+  until a member that has a key from the group comes online, or the group switches keys, the device
+  reads but doesn't write.
   `GroupInfo` larger than
   `max_group_info_bytes` (client, 256 KiB) is not sent, and the server stores a commit without one
   that exceeds its payload limit; such groups use the request. A further device joins DMs and group
