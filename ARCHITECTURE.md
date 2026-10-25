@@ -305,9 +305,10 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
 - **RTP packets inside QUIC unreliable datagrams.** QUIC handles the transport encryption and connection setup (no ICE/DTLS/SDP).
 - Signaling (join, leave, subscribe, layer selection) on a reliable QUIC stream of the same session.
 - Browser: WebTransport + **WebCodecs** for encoding/decoding; `getUserMedia` for capture (gives the browser's echo cancellation).
-  The call engine is a wasm module of its own (`teamcraft-web-calls`) that the page imports when a
-  call starts, so it isn't part of the app's first download; the page keeps the device key and signs
-  and verifies the call key bindings for it (`teamcraft_client_api::page_calls`). Calls run in the
+  The calls (call state, ringtone, engine) are a wasm module of their own (`teamcraft-web-calls`)
+  that the page imports in the background after sign-in, so it isn't part of the app's first
+  download; the page keeps the client core and the device key, forwards the gateway's call events,
+  and signs and verifies the call key bindings for it (`teamcraft_client_api::page_calls`). Calls run in the
   tab that runs the client core (e2ee.md §9.4); background effects are desktop-only for now.
 - Desktop: `cpal` for audio I/O, `opus`, **`webrtc-audio-processing`** (AEC, noise suppression, AGC) – the only WebRTC component used.
 - Browser support (MDN browser-compat-data, checked 2026-10): WebTransport incl. datagrams in Chrome 97,

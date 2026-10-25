@@ -23,14 +23,14 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
   let conversation = Memo::new(move |_| state.read(|backend| backend.conversation(request.conversation)));
   // Browsers name their devices only once the page may use them, so the lists can fill in later.
   let devices = Memo::new(move |_| state.read(|backend| backend.media_devices()));
-  let has_effects = state.read(|backend| backend.has_background_effects());
+  let has_effects = untrack(|| state.read(|backend| backend.has_background_effects()));
   let participants = Memo::new(move |_| {
     state
       .read(|backend| backend.call_participants(request.conversation))
       .len()
   });
 
-  let is_real = !state.read(|backend| backend.has_simulated_calls());
+  let is_real = !untrack(|| state.read(|backend| backend.has_simulated_calls()));
 
   // Remember the first device of each kind when nothing was chosen before.
   Effect::new(move |_| {
@@ -166,13 +166,13 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
             </button>
           </div>
         </div>
-        <Show when=move || has_effects fallback=|| ()>
+        {has_effects.then(|| view! {
           <div class="field">
             <span class="field-title" id="prejoin-effects-title">{move || i18n.t("prejoin-effects")}</span>
             <BackgroundPicker effect=call.effect />
             <p class="muted-text small">{move || i18n.t("prejoin-effects-hint")}</p>
           </div>
-        </Show>
+        })}
         <label class="checkbox">
           <input
             type="checkbox"

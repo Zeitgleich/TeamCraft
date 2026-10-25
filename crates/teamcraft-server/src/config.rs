@@ -1191,6 +1191,11 @@ pub struct CallsConfig {
   /// it the meeting controls answer 503.
   #[serde(rename = "sfu_control_url", default)]
   pub maybe_sfu_control_url: Option<String>,
+  /// SHA-256 of the SFU's certificate (hex, colons allowed) when it is a short-lived self-signed
+  /// one: join tokens carry it so browsers can connect (`serverCertificateHashes`: ECDSA, valid
+  /// for at most 14 days). Leave unset with a certificate browsers trust.
+  #[serde(rename = "sfu_certificate_sha256", default)]
+  pub maybe_sfu_certificate_sha256: Option<String>,
 }
 
 /// Device-linking relay at /api/v1/rendezvous.

@@ -36,6 +36,7 @@ fn calls_config(ring_timeout_secs: u64, maybe_control_url: Option<String>) -> Ca
     maybe_sfu_registration_token: Some(SFU_TOKEN.to_owned().into()),
     ring_timeout_secs,
     maybe_sfu_control_url: maybe_control_url,
+    maybe_sfu_certificate_sha256: None,
   }
 }
 

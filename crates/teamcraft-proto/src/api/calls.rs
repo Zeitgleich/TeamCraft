@@ -19,6 +19,16 @@ pub struct CallJoinTokenResponse {
   /// WebTransport URL of the SFU, e.g. `https://sfu.example.com:4433/call`.
   pub sfu_url: String,
   pub expires_at: UnixMillis,
+  /// SHA-256 of the SFU's certificate (64 hex digits) when it is a short-lived self-signed one
+  /// (test and development setups): browsers accept it through `serverCertificateHashes`. Absent
+  /// when the certificate chains to a trusted root. The SFU only forwards end-to-end encrypted
+  /// media, so this decides reachability, not confidentiality.
+  #[serde(
+    rename = "sfu_certificate_sha256",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_sfu_certificate_sha256: Option<String>,
 }
 
 // Join tokens don't belong in logs.

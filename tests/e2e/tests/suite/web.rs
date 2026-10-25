@@ -10,7 +10,7 @@ use chromiumoxide::page::Page;
 use teamcraft_e2e::browser::{BrowserSession, WebPortLease, lease_web_port, web_dir};
 use teamcraft_e2e::peer::PASSPHRASE;
 use teamcraft_e2e::scenario::{channel_with, space_with};
-use teamcraft_e2e::{Peer, Stack};
+use teamcraft_e2e::{Peer, Stack, StackBuilder};
 use teamcraft_proto::ConversationId;
 
 pub(crate) const WEB_ORIGIN: &str = "http://127.0.0.1:8082";
@@ -361,24 +361,26 @@ pub(crate) struct Rig {
 
 impl Rig {
   pub(crate) async fn start() -> Option<Self> {
-    Self::start_with(false, &[]).await
+    Self::start_with(|builder| builder, &[]).await
   }
 
-  /// With the SFU (`with_calls`) and extra browser switches.
-  pub(crate) async fn start_with(with_calls: bool, browser_args: &[&str]) -> Option<Self> {
+  /// With more server configuration (`configure`) and extra browser switches.
+  pub(crate) async fn start_with(
+    configure: impl FnOnce(StackBuilder) -> StackBuilder,
+    browser_args: &[&str],
+  ) -> Option<Self> {
     let Some(web_dir) = web_dir() else {
       let is_required = std::env::var("E2E_REQUIRED").is_ok_and(|value| value == "1");
       assert!(!is_required, "no web build: run tests/e2e/web/build.sh");
       eprintln!("skipping: no web build (tests/e2e/web/build.sh)");
       return None;
     };
-    let mut builder = Stack::builder()
-      .with_port(8082)
-      .with_web_dir(web_dir)
-      .with_env("TEAMCRAFT_WEB__CONTENT_SECURITY_POLICY", TEST_CSP);
-    if with_calls {
-      builder = builder.with_calls();
-    }
+    let builder = configure(
+      Stack::builder()
+        .with_port(8082)
+        .with_web_dir(web_dir)
+        .with_env("TEAMCRAFT_WEB__CONTENT_SECURITY_POLICY", TEST_CSP),
+    );
     // One test at a time owns the port.
     let turn = lease_web_port(8082).await;
     let stack = builder.start().await?;

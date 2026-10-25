@@ -368,7 +368,7 @@ pub async fn set_ringtone(is_ringing: bool) {
   if !is_available() {
     // The browser rings in the page, in the tab that runs the calls.
     #[cfg(target_arch = "wasm32")]
-    crate::web_ringtone::set_ringing(is_ringing);
+    crate::web_calls::set_ringing(is_ringing);
     return;
   }
   let args = serde_json::json!({ "is_ringing": is_ringing });

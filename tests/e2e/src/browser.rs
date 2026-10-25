@@ -38,8 +38,9 @@ impl BrowserSession {
     // A fresh profile per launch: the default one is shared and would keep Keycloak's session cookie.
     let profile = std::env::temp_dir().join(format!("teamcraft-e2e-chrome-{:016x}", random_u64()));
     let mut builder = BrowserConfig::builder();
+    // chromiumoxide adds the leading `--` itself.
     for arg in extra_args {
-      builder = builder.arg(*arg);
+      builder = builder.arg(arg.trim_start_matches('-'));
     }
     let config = builder
       .chrome_executable(executable)
@@ -47,8 +48,8 @@ impl BrowserSession {
       // CI containers run as root without user namespaces.
       .no_sandbox()
       // The UI follows the browser language; the tests look for English texts.
-      .arg("--lang=en-US")
-      .arg("--accept-lang=en-US")
+      .arg("lang=en-US")
+      .arg("accept-lang=en-US")
       .window_size(1360, 840)
       // Page scripts that wait for the app (perf.rs) may take longer than the 30 s default.
       .request_timeout(std::time::Duration::from_secs(300))

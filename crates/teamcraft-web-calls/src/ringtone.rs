@@ -2,7 +2,8 @@
 //! synthesized tone (`teamcraft_media::ringtone`), looped with Web Audio while the call rings.
 //!
 //! Browsers let a page play sound only after the user interacted with it; a tab nobody touched
-//! since it loaded stays quiet and shows the incoming call card and notification only.
+//! since it loaded stays quiet and shows the incoming call card and notification only. The page
+//! asks for it through the module's `ring` export.
 
 use std::cell::RefCell;
 

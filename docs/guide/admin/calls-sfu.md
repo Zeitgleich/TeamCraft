@@ -55,13 +55,15 @@ and pointing `sfu_url` at one (single SFU per instance today).
 The web client connects to the SFU straight from the page (WebTransport), so:
 
 - The SFU needs a certificate **browsers trust** for the host name in `sfu_url` (a public CA, or your
-  company CA on managed machines). The short-lived self-signed one works for desktop and mobile
-  apps in tests only; browsers refuse it.
+  company CA on managed machines). For tests and development, a self-signed ECDSA certificate valid
+  for at most 14 days works too when `[calls] sfu_certificate_sha256` names its SHA-256: join tokens
+  carry it, and browsers (and the apps) accept exactly that certificate. It has to change with
+  every new certificate, so it is no setup for production.
 - The page's Content-Security-Policy must allow the SFU in `connect-src`. The default allows any
   `https:` origin; a stricter custom policy has to list `sfu_url`'s origin.
 - The web root must contain `teamcraft-web-calls.js`, `teamcraft-web-calls_bg.wasm` and
-  `teamcraft-call-worklet.js` (they ship with the web client): the call engine loads only when a
-  call starts, so it doesn't slow down the first visit.
+  `teamcraft-call-worklet.js` (they ship with the web client): the calls load in the background
+  after sign-in, so they don't slow down the first visit.
 - Browsers: current Chrome, Edge, Firefox and Safari (26.4 or later). Older ones show why they
   can't call.
 

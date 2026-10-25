@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{CallRosterEntry, ConversationId, GatewayEvent, MediaStreamId, UserId};
+use teamcraft_proto::{ConversationId, GatewayEvent, MediaStreamId, UserId};
 
 use crate::calls::{
   ActiveCall, BackgroundEffect, CallEndReason, CallRequest, IncomingCall, RemoteVideoTrack, RunningCall,
@@ -24,16 +24,63 @@ pub struct CallView {
   pub maybe_end_reason: Option<CallEndReason>,
 }
 
-/// The part of a [`CallView`] the media layer keeps: the call this device is in. The browser runs the
-/// media in a module of its own, which reports this after every change.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MediaCallState {
-  #[serde(default)]
-  pub maybe_active: Option<ActiveCall>,
-  #[serde(default)]
-  pub video_tracks: Vec<RemoteVideoTrack>,
-  #[serde(default)]
-  pub maybe_end_reason: Option<CallEndReason>,
+/// What a gateway call event says about the user's calls: the part [`CallView`] needs. The web
+/// client hands these to its call module (`page_calls`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "signal", rename_all = "snake_case")]
+pub enum CallSignal {
+  /// A call started or its roster changed. `participants` may name a person once per device.
+  Running {
+    conversation: ConversationId,
+    participants: Vec<UserId>,
+    is_ringing: bool,
+  },
+  Ended {
+    conversation: ConversationId,
+  },
+  /// Someone calls the user.
+  Ring {
+    conversation: ConversationId,
+    caller: UserId,
+  },
+  #[serde(other)]
+  Unknown,
+}
+
+impl CallSignal {
+  /// The call part of a gateway event; `None` for every other event.
+  pub fn from_gateway(event: &GatewayEvent) -> Option<Self> {
+    match event {
+      GatewayEvent::CallStart {
+        conversation_id,
+        is_ringing,
+        participants,
+        ..
+      }
+      | GatewayEvent::CallUpdate {
+        conversation_id,
+        is_ringing,
+        participants,
+        ..
+      } => Some(Self::Running {
+        conversation: *conversation_id,
+        participants: participants.iter().map(|entry| entry.user_id).collect(),
+        is_ringing: *is_ringing,
+      }),
+      GatewayEvent::CallEnd { conversation_id, .. } => Some(Self::Ended {
+        conversation: *conversation_id,
+      }),
+      GatewayEvent::CallRing {
+        conversation_id,
+        from_user_id,
+        ..
+      } => Some(Self::Ring {
+        conversation: *conversation_id,
+        caller: *from_user_id,
+      }),
+      _ => None,
+    }
+  }
 }
 
 impl CallView {
@@ -81,86 +128,57 @@ impl CallView {
 
   /// Applies one of the gateway's call events; `true` if the UI should read again.
   pub fn apply_gateway_event(&mut self, event: &GatewayEvent) -> bool {
-    match event {
-      GatewayEvent::CallStart {
-        conversation_id,
-        is_ringing,
+    CallSignal::from_gateway(event).is_some_and(|signal| self.apply_signal(signal))
+  }
+
+  /// Applies a call event; `true` if the UI should read again.
+  pub fn apply_signal(&mut self, signal: CallSignal) -> bool {
+    match signal {
+      CallSignal::Running {
+        conversation,
         participants,
-        ..
-      }
-      | GatewayEvent::CallUpdate {
-        conversation_id,
         is_ringing,
-        participants,
-        ..
       } => {
         if !is_ringing {
-          self.incoming.remove(conversation_id);
+          self.incoming.remove(&conversation);
         }
         self.running.insert(
-          *conversation_id,
+          conversation,
           RunningCall {
-            conversation: *conversation_id,
-            participants: users_of(participants),
-            is_ringing: *is_ringing,
+            conversation,
+            participants: people(participants),
+            is_ringing,
           },
         );
       },
-      GatewayEvent::CallEnd { conversation_id, .. } => {
-        self.running.remove(conversation_id);
-        self.incoming.remove(conversation_id);
+      CallSignal::Ended { conversation } => {
+        self.running.remove(&conversation);
+        self.incoming.remove(&conversation);
       },
-      GatewayEvent::CallRing {
-        conversation_id,
-        from_user_id,
-        ..
-      } => {
+      CallSignal::Ring { conversation, caller } => {
         let is_in_it = self
           .maybe_active
           .as_ref()
-          .is_some_and(|active| active.conversation == *conversation_id);
+          .is_some_and(|active| active.conversation == conversation);
         if !is_in_it {
           self.incoming.insert(
-            *conversation_id,
+            conversation,
             IncomingCall {
-              caller: *from_user_id,
-              conversation: *conversation_id,
+              caller,
+              conversation,
               with_video: false,
             },
           );
         }
       },
-      _ => return false,
+      CallSignal::Unknown => return false,
     }
     true
   }
-
-  /// What the media layer knows about the call this device is in.
-  pub fn media_state(&self) -> MediaCallState {
-    MediaCallState {
-      maybe_active: self.maybe_active.clone(),
-      video_tracks: self.video_tracks.values().cloned().collect(),
-      maybe_end_reason: self.maybe_end_reason,
-    }
-  }
-
-  /// Takes over what the media layer reported (see [`MediaCallState`]).
-  pub fn set_media_state(&mut self, state: MediaCallState) {
-    if let Some(active) = &state.maybe_active {
-      self.incoming.remove(&active.conversation);
-    }
-    self.maybe_active = state.maybe_active;
-    self.video_tracks = state
-      .video_tracks
-      .into_iter()
-      .map(|track| (track.stream_id, track))
-      .collect();
-    self.maybe_end_reason = state.maybe_end_reason;
-  }
 }
 
-fn users_of(entries: &[CallRosterEntry]) -> Vec<UserId> {
-  let mut users: Vec<UserId> = entries.iter().map(|entry| entry.user_id).collect();
+/// Each person once (they may be in a call with several devices).
+fn people(mut users: Vec<UserId>) -> Vec<UserId> {
   users.sort_unstable();
   users.dedup();
   users
@@ -168,7 +186,7 @@ fn users_of(entries: &[CallRosterEntry]) -> Vec<UserId> {
 
 #[cfg(test)]
 mod tests {
-  use teamcraft_proto::{CallId, Id, Snowflake, UnixMillis};
+  use teamcraft_proto::{CallId, CallRosterEntry, Id, Snowflake, UnixMillis};
 
   use super::*;
   use crate::calls::CallKind;
@@ -237,20 +255,16 @@ mod tests {
   }
 
   #[test]
-  fn the_media_state_round_trips_and_ends_the_ring() {
-    let mut view = CallView::default();
-    view.apply_gateway_event(&GatewayEvent::CallRing {
-      conversation_id: conversation(5),
-      call_id: call(),
-      from_user_id: user(1),
-    });
-    let reported = active_view().media_state();
-    view.set_media_state(reported.clone());
-    assert!(
-      view.incoming.is_empty(),
-      "joined elsewhere in the page: no longer ringing"
-    );
-    assert_eq!(view.media_state(), reported);
+  fn signals_round_trip_and_unknown_ones_are_ignored() {
+    let signal = CallSignal::Ring {
+      conversation: conversation(5),
+      caller: user(1),
+    };
+    let json = serde_json::to_string(&signal).unwrap();
+    assert_eq!(serde_json::from_str::<CallSignal>(&json).unwrap(), signal);
+    let future: CallSignal = serde_json::from_str(r#"{"signal":"hold","conversation":"5"}"#).unwrap();
+    assert_eq!(future, CallSignal::Unknown);
+    assert!(!CallView::default().apply_signal(future));
   }
 
   #[test]

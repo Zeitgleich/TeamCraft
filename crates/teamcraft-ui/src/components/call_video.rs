@@ -124,50 +124,41 @@ pub fn can_show_video() -> bool {
 }
 
 /// Real call video: another device's track drawn into a canvas, or the own camera in a muted
-/// `<video>`. Watching starts when it is shown and stops when it goes away, so tracks nobody looks
-/// at aren't received (robustness.md, "Performance and resources").
+/// `<video>`; the call module makes the element. Watching starts when it is shown and stops when it
+/// goes away, so tracks nobody looks at aren't received (robustness.md, "Performance and resources").
 #[component]
 pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -> impl IntoView {
-  match source {
-    VideoSource::Remote(stream_id) => {
-      let canvas = NodeRef::<leptos::html::Canvas>::new();
-      Effect::new(move |_| {
-        if let Some(element) = canvas.get() {
-          watch(stream_id, &element);
-        }
-      });
-      on_cleanup(move || unwatch(stream_id));
-      view! { <canvas class="live-video" node_ref=canvas aria-hidden="true"></canvas> }.into_any()
-    },
-    VideoSource::OwnCamera => {
-      let video = NodeRef::<leptos::html::Video>::new();
-      let state = crate::state::use_app_state();
-      Effect::new(move |_| {
-        // Again whenever the call changes: a camera switched to another device is a new stream.
-        state.read(|backend| backend.active_call().map(|active| active.is_camera_on));
-        if let Some(element) = video.get() {
-          show_own_camera(&element);
-        }
-      });
-      view! {
-        <video
-          class="live-video"
-          class:mirrored=move || is_mirrored.get()
-          node_ref=video
-          autoplay=true
-          muted=true
-          playsinline=true
-          aria-hidden="true"
-        ></video>
-      }
-      .into_any()
-    },
-  }
+  let host = NodeRef::<leptos::html::Div>::new();
+  let state = crate::state::use_app_state();
+  Effect::new(move |_| {
+    // Again whenever the call changes: a camera switched to another device is a new stream.
+    if source == VideoSource::OwnCamera {
+      state.read(|backend| backend.active_call().map(|active| active.is_camera_on));
+    }
+    if let Some(element) = host.get() {
+      show(&element, source);
+    }
+  });
+  on_cleanup(move || {
+    if let VideoSource::Remote(stream_id) = source {
+      unwatch(stream_id);
+    }
+  });
+  view! { <div class="live-video" class:mirrored=move || is_mirrored.get() node_ref=host aria-hidden="true"></div> }
 }
 
+/// Puts the call module's element for `source` into `host`, replacing an older one.
 #[cfg(target_arch = "wasm32")]
-fn watch(stream_id: MediaStreamId, canvas: &web_sys::HtmlCanvasElement) {
-  crate::web_calls::watch_video(stream_id, canvas);
+fn show(host: &web_sys::HtmlDivElement, source: VideoSource) {
+  let maybe_element = match source {
+    // Watched once; the canvas keeps showing the track.
+    VideoSource::Remote(_) if host.child_element_count() > 0 => return,
+    VideoSource::Remote(stream_id) => crate::web_calls::watch_video(stream_id),
+    VideoSource::OwnCamera => crate::web_calls::camera_view(),
+  };
+  if let Some(element) = maybe_element {
+    host.replace_children_with_node_1(&element);
+  }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -175,21 +166,10 @@ fn unwatch(stream_id: MediaStreamId) {
   crate::web_calls::unwatch_video(stream_id);
 }
 
-#[cfg(target_arch = "wasm32")]
-fn show_own_camera(video: &web_sys::HtmlVideoElement) {
-  let maybe_stream = crate::web_calls::local_camera();
-  if video.src_object() != maybe_stream {
-    video.set_src_object(maybe_stream.as_ref());
-  }
-}
-
 #[cfg(not(target_arch = "wasm32"))]
-fn watch(_stream_id: MediaStreamId, _canvas: &web_sys::HtmlCanvasElement) {}
+fn show(_host: &web_sys::HtmlDivElement, _source: VideoSource) {}
 
 #[cfg(not(target_arch = "wasm32"))]
 fn unwatch(_stream_id: MediaStreamId) {}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn show_own_camera(_video: &web_sys::HtmlVideoElement) {}
 
 pub use crate::components::background_picker::BackgroundPicker;

@@ -51,8 +51,7 @@ use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_proto::{
-  CallJoinTokenResponse, ConversationId, DeviceActivity, GatewayClientMessage, GatewayServerMessage,
-  MessageId, UserId,
+  ConversationId, DeviceActivity, GatewayClientMessage, GatewayServerMessage, MessageId, UserId,
 };
 use wasm_bindgen::JsCast;
 
@@ -186,9 +185,13 @@ pub async fn prepare_call(conversation: ConversationId) -> Result<CallPreparatio
   ask(|reply| Request::PrepareCall(conversation, reply)).await?
 }
 
-/// A fresh join token for the conversation's call.
-pub async fn call_join_token(conversation: ConversationId) -> Result<CallJoinTokenResponse, String> {
-  ask(|reply| Request::CallJoinToken(conversation, reply)).await?
+/// Whether the workspace requires an organization background behind the camera image for this
+/// user (admin.md §3.5). Unknown restricts nothing, as on desktop.
+pub async fn requires_org_background() -> bool {
+  match ask(|reply| Request::Query(ChatQuery::OrgBackgrounds, reply)).await {
+    Ok(Ok(ChatAnswer::OrgBackgrounds { backgrounds })) => backgrounds.is_required(),
+    _ => false,
+  }
 }
 
 /// Answers one `core_*` command the way the desktop shell does.
@@ -593,11 +596,6 @@ enum Request {
   NetworkChanged,
   /// What joining a conversation's call needs (`web_calls`).
   PrepareCall(ConversationId, oneshot::Sender<Result<CallPreparation, String>>),
-  /// A fresh join token for rejoining a call after a lost connection.
-  CallJoinToken(
-    ConversationId,
-    oneshot::Sender<Result<CallJoinTokenResponse, String>>,
-  ),
 }
 
 /// What woke the loop.
@@ -953,16 +951,6 @@ impl Core {
       Request::PrepareCall(conversation, reply) => {
         let result = match self.client.as_mut() {
           Some(client) => client.prepare_call(conversation).await.map_err(describe_failure),
-          None => Err(not_set_up()),
-        };
-        drop(reply.send(result));
-      },
-      Request::CallJoinToken(conversation, reply) => {
-        let result = match self.client.as_ref() {
-          Some(client) => client
-            .call_join_token(conversation)
-            .await
-            .map_err(describe_failure),
           None => Err(not_set_up()),
         };
         drop(reply.send(result));

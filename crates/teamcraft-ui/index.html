@@ -25,7 +25,7 @@
     <!-- wasm-opt only runs in release builds; the features are what rustc enables for wasm32 by default.
          loader.js drives the loading screen below. -->
     <link data-trunk rel="rust" data-bin="teamcraft-ui" data-cargo-profile-release="web-release" data-wasm-opt="z" data-wasm-opt-params="--converge --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue" data-initializer="loader.js" />
-    <!-- The call media (#330): its own ES module, which the app imports when a call starts (web_calls.rs), so it isn't part of the first download. -->
+    <!-- The calls (#330): their own ES module, which the app imports in the background after sign-in (web_calls.rs), so they are not part of the first download. -->
     <link data-trunk rel="copy-file" href="../teamcraft-media/src/call_web/teamcraft-call-worklet.js" />
     <link data-trunk rel="rust" href="../teamcraft-web-calls/Cargo.toml" data-type="worker" data-bindgen-target="web" data-cargo-profile-release="web-release" data-wasm-opt="z" data-wasm-opt-params="--converge --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue" />
     <!-- The service worker's Rust half (push wake-ups); scripts/finish-sw.sh inlines it into sw.js. -->

@@ -54,8 +54,8 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
 
   // Real calls report who is speaking; the demo rotates the active speaker among people who are not
   // muted.
-  let is_real = !state.read(|backend| backend.has_simulated_calls());
-  let has_effects = state.read(|backend| backend.has_background_effects());
+  let is_real = !untrack(|| state.read(|backend| backend.has_simulated_calls()));
+  let has_effects = untrack(|| state.read(|backend| backend.has_background_effects()));
   // Real video where the page shows it: others' tracks by person and kind, and the own camera once
   // the media layer sends it.
   let video_tracks = Memo::new(move |_| state.read(|backend| backend.call_video_tracks()));
@@ -438,7 +438,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
             on_press=move || call.has_hand_raised.update(|on| *on = !*on)
           />
         </Show>
-        <Show when=move || has_effects fallback=|| ()>
+        {has_effects.then(|| view! {
           <ControlButton
             is_active=Signal::derive(move || effects_open.get())
             icon=IconName::Image
@@ -448,7 +448,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
               effects_open.update(|open| *open = !*open);
             }
           />
-        </Show>
+        })}
         <ControlButton
           icon=Signal::derive(move || if call.layout.get() == CallLayout::Gallery { IconName::Spotlight } else { IconName::Grid })
           label=Signal::derive(move || {

@@ -1,32 +1,31 @@
-//! Calls in the browser (#330): what the desktop shell's call host does, in the page.
+//! Calls in the browser (#330): the page's half.
 //!
-//! [`WebCallHost`] keeps the call state the UI shows ([`CallSnapshot`]): the roster and ringing
-//! from the client core's gateway events, and the active call from the call module. The call
-//! module (`teamcraft-web-calls`) runs the media; it is a wasm module of its own that is loaded on
-//! the first call, so the call engine doesn't add to the app's download (`page_calls` has the
-//! contract). The device key stays here: the module asks the page to sign this device's call key
-//! and to verify the others' (e2ee.md §8).
+//! The calls themselves (call state, ringtone, media) are a wasm module of their own,
+//! `teamcraft-web-calls`, which [`WebCallHost`] loads in the background once the user is signed in,
+//! so it doesn't count against the app's first download. The page keeps what needs the client core:
+//! it forwards the gateway's call events, prepares joins, and signs this device's call key and
+//! verifies the others' with the device key, which never leaves the core (e2ee.md §8). The contract
+//! is `teamcraft_client_api::page_calls`.
 //!
 //! Calls run in the tab that runs the client core ([`crate::web_core::runs_here`]); other tabs of
 //! the same account say so instead of offering calls.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::FutureExt;
 use futures_util::future::{LocalBoxFuture, Shared};
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
-use teamcraft_client_api::call_view::{CallView, MediaCallState};
-use teamcraft_client_api::calls::{
-  CallRequest, CallStatusSounds, CallsUnavailableReason, MediaDevices, PushToTalk,
-};
-use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
+use teamcraft_client_api::call_view::CallSignal;
+use teamcraft_client_api::calls::CallsUnavailableReason;
+use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::page_calls::{
-  EXPORT_ACT, EXPORT_DEVICES, EXPORT_JOIN, EXPORT_LOCAL_CAMERA, EXPORT_START, EXPORT_STOP,
-  EXPORT_UNWATCH_VIDEO, EXPORT_WATCH_VIDEO, MODULE_URL, WebCallJoin,
+  EXPORT_ACT, EXPORT_CAMERA_VIEW, EXPORT_RING, EXPORT_SIGNAL, EXPORT_START, EXPORT_STOP,
+  EXPORT_UNWATCH_VIDEO, EXPORT_WATCH_VIDEO, MODULE_URL, PreparedCall,
 };
-use teamcraft_client_api::remote::{CallAction, CallSnapshot, ChatAnswer, ChatQuery};
+use teamcraft_client_api::remote::{CallAction, CallSnapshot};
 use teamcraft_core::CallKeySigner;
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
 use teamcraft_media::call_auth::{CallBindingSigner, CallKeyAuthenticator, DeviceCallKeyAuthenticator};
@@ -34,10 +33,12 @@ use teamcraft_proto::{CallId, ConversationId, DeviceId, GatewayEvent, MediaStrea
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, future_to_promise, spawn_local};
-use web_sys::{HtmlCanvasElement, MediaStream};
+use web_sys::Element;
 
 /// What a browser needs for calls (as `teamcraft_media::call_web` checks it).
 const REQUIRED_GLOBALS: [&str; 4] = ["WebTransport", "AudioEncoder", "AudioDecoder", "AudioWorkletNode"];
+/// The call module loads this long after sign-in, out of the way of the first screen.
+const LOAD_DELAY: Duration = Duration::from_secs(3);
 
 #[wasm_bindgen(inline_js = "export function import_module(url) { return import(url); }")]
 extern "C" {
@@ -52,27 +53,20 @@ thread_local! {
 type ChangeHandler = Rc<dyn Fn(CallSnapshot)>;
 type ModuleLoad = Shared<LocalBoxFuture<'static, Result<CallModule, String>>>;
 
-/// The calls of the signed-in account in this page.
+/// The page's side of the calls of the signed-in account.
 pub struct WebCallHost {
-  state: RefCell<HostState>,
   maybe_on_change: RefCell<Option<ChangeHandler>>,
   maybe_module: RefCell<Option<ModuleLoad>>,
+  /// Gateway call events that arrived before the module ran, in order.
+  pending_signals: RefCell<Vec<String>>,
+  is_ringing: Cell<bool>,
+  /// Whether the last snapshot had a call this device is in.
+  was_in_call: Cell<bool>,
   /// The call being joined or running: who may be in it, and the key that signs for this device.
-  maybe_call: RefCell<Option<PreparedCall>>,
+  maybe_call: RefCell<Option<PreparedKeys>>,
 }
 
-#[derive(Default)]
-struct HostState {
-  view: CallView,
-  devices: MediaDevices,
-  push_to_talk: PushToTalk,
-  status_sounds: CallStatusSounds,
-  maybe_microphone: Option<String>,
-  maybe_speakers: Option<String>,
-}
-
-struct PreparedCall {
-  conversation: ConversationId,
+struct PreparedKeys {
   authenticator: DeviceCallKeyAuthenticator,
 }
 
@@ -86,9 +80,9 @@ struct CallModule {
 struct Callbacks {
   object: Object,
   _changed: Closure<dyn Fn(String)>,
+  _prepare: Closure<dyn Fn(String) -> Promise>,
   _sign: Closure<dyn Fn(String, Uint8Array) -> Result<Uint8Array, JsValue>>,
   _verify: Closure<dyn Fn(String, String, Uint8Array) -> Result<Uint8Array, JsValue>>,
-  _ticket: Closure<dyn Fn() -> Promise>,
 }
 
 /// Lets the media layer's authenticator sign with the core's signer.
@@ -109,41 +103,48 @@ pub fn support() -> Result<(), CallsUnavailableReason> {
   Ok(())
 }
 
-/// The client core's call events (ringing, rosters) for the page's calls.
+/// The client core's call events (ringing, rosters) for the call module.
 pub fn on_gateway_event(event: &GatewayEvent) {
-  if let Some(host) = current() {
-    host.on_gateway_event(event);
+  if let (Some(host), Some(signal)) = (current(), CallSignal::from_gateway(event)) {
+    host.signal(&signal);
   }
 }
 
-/// Whether the page shows real call video (a call module is loaded).
+/// Starts or stops the ringtone.
+pub fn set_ringing(is_ringing: bool) {
+  if let Some(host) = current() {
+    host.is_ringing.set(is_ringing);
+    if let Some(module) = host.loaded_module() {
+      module.call_sync(EXPORT_RING, &[JsValue::from_bool(is_ringing)]);
+    }
+  }
+}
+
+/// Whether the page shows real call video (the call module runs).
 pub fn can_show_video() -> bool {
   current().is_some_and(|host| host.loaded_module().is_some())
 }
 
-/// Draws another device's track into `canvas` until [`unwatch_video`].
-pub fn watch_video(stream_id: MediaStreamId, canvas: &HtmlCanvasElement) {
-  if let Some(module) = current().and_then(|host| host.loaded_module())
-    && let Ok(id) = serde_json::to_string(&stream_id)
-  {
-    module.call_sync(EXPORT_WATCH_VIDEO, &[JsValue::from_str(&id), canvas.into()]);
-  }
+/// A new element showing another device's track until [`unwatch_video`].
+pub fn watch_video(stream_id: MediaStreamId) -> Option<Element> {
+  let module = current()?.loaded_module()?;
+  module
+    .call_sync(EXPORT_WATCH_VIDEO, &[json_value(&stream_id)])
+    .and_then(|canvas| canvas.dyn_into().ok())
 }
 
 pub fn unwatch_video(stream_id: MediaStreamId) {
-  if let Some(module) = current().and_then(|host| host.loaded_module())
-    && let Ok(id) = serde_json::to_string(&stream_id)
-  {
-    module.call_sync(EXPORT_UNWATCH_VIDEO, &[JsValue::from_str(&id)]);
+  if let Some(module) = current().and_then(|host| host.loaded_module()) {
+    module.call_sync(EXPORT_UNWATCH_VIDEO, &[json_value(&stream_id)]);
   }
 }
 
-/// The camera this device sends, for the self view.
-pub fn local_camera() -> Option<MediaStream> {
+/// A new element playing the camera this device sends, for the self view.
+pub fn camera_view() -> Option<Element> {
   let module = current()?.loaded_module()?;
   module
-    .call_sync(EXPORT_LOCAL_CAMERA, &[])
-    .and_then(|stream| stream.dyn_into().ok())
+    .call_sync(EXPORT_CAMERA_VIEW, &[])
+    .and_then(|video| video.dyn_into().ok())
 }
 
 fn current() -> Option<Rc<WebCallHost>> {
@@ -151,122 +152,119 @@ fn current() -> Option<Rc<WebCallHost>> {
 }
 
 impl WebCallHost {
-  /// The host of this page's calls; the gateway events of the core reach the newest one.
+  /// The calls of this page; the module loads shortly after.
   pub fn new() -> Rc<Self> {
     let host = Rc::new(Self {
-      state: RefCell::new(HostState::default()),
       maybe_on_change: RefCell::new(None),
       maybe_module: RefCell::new(None),
+      pending_signals: RefCell::new(Vec::new()),
+      is_ringing: Cell::new(false),
+      was_in_call: Cell::new(false),
       maybe_call: RefCell::new(None),
     });
     HOST.with(|slot| *slot.borrow_mut() = Rc::downgrade(&host));
+    let weak = Rc::downgrade(&host);
+    spawn_local(async move {
+      teamcraft_core::platform::sleep(LOAD_DELAY).await;
+      if let Some(host) = weak.upgrade()
+        && let Err(error) = host.module().await
+      {
+        // Tried again with the next call event or action.
+        tracing::warn!(%error, "the call module did not load");
+      }
+    });
     host
   }
 
+  /// Gets every new call state of the module.
   pub fn set_on_change(&self, on_change: ChangeHandler) {
     *self.maybe_on_change.borrow_mut() = Some(on_change);
   }
 
-  pub fn snapshot(&self) -> CallSnapshot {
-    let state = self.state.borrow();
-    CallSnapshot {
-      maybe_active: state.view.maybe_active.clone(),
-      incoming: state.view.incoming.values().copied().collect(),
-      running: state.view.running.values().cloned().collect(),
-      devices: state.devices.clone(),
-      video_tracks: state.view.video_tracks.values().cloned().collect(),
-      push_to_talk: state.push_to_talk.clone(),
-      maybe_end_reason: state.view.maybe_end_reason,
-    }
-  }
-
   /// Carries out one of the user's call actions; a failure comes back as `ActionFailure` wire text.
   pub async fn act(self: &Rc<Self>, action: CallAction) -> Result<(), String> {
-    self.act_inner(action).await.map_err(|failure| failure.to_wire())
+    let module = self.module().await?;
+    let json = serde_json::to_string(&action).map_err(|error| error.to_string())?;
+    module
+      .call(EXPORT_ACT, &[JsValue::from_str(&json)])
+      .await
+      .map(|_| ())
+      .map_err(|failure| failure.to_wire())
   }
 
-  async fn act_inner(self: &Rc<Self>, action: CallAction) -> Result<(), ActionFailure> {
-    match action {
-      CallAction::Join { request } => self.join(request).await,
-      CallAction::Leave => {
-        self.forward(&CallAction::Leave).await?;
-        self.maybe_call.borrow_mut().take();
-        Ok(())
+  fn signal(self: &Rc<Self>, signal: &CallSignal) {
+    let Ok(json) = serde_json::to_string(signal) else {
+      return;
+    };
+    match self.loaded_module() {
+      Some(module) => {
+        module.call_sync(EXPORT_SIGNAL, &[JsValue::from_str(&json)]);
       },
-      CallAction::Decline { conversation } => {
-        self.state.borrow_mut().view.decline(conversation);
-        self.changed();
-        Ok(())
-      },
-      CallAction::SetPushToTalk {
-        is_enabled,
-        maybe_shortcut,
-      } => {
-        {
-          let mut state = self.state.borrow_mut();
-          let shortcut = maybe_shortcut.unwrap_or_else(|| state.push_to_talk.shortcut.clone());
-          // Browsers have no global shortcuts: the key works while the page has focus.
-          state.push_to_talk = PushToTalk {
-            is_enabled,
-            shortcut,
-            is_global: false,
-            is_talking: false,
-          };
-        }
-        self.changed();
-        self.forward(&CallAction::SetMuted { is_muted: is_enabled }).await
-      },
-      CallAction::SetTalking { is_talking } => {
-        {
-          let mut state = self.state.borrow_mut();
-          if !state.push_to_talk.is_enabled || state.push_to_talk.is_talking == is_talking {
-            return Ok(());
+      None => {
+        self.pending_signals.borrow_mut().push(json);
+        let host = self.clone();
+        spawn_local(async move {
+          if let Err(error) = host.module().await {
+            tracing::warn!(%error, "the call module did not load");
           }
-          state.push_to_talk.is_talking = is_talking;
-        }
-        self.changed();
-        self
-          .forward(&CallAction::SetMuted {
-            is_muted: !is_talking,
-          })
-          .await
+        });
       },
-      CallAction::SelectMicrophone { maybe_device } => {
-        self.state.borrow_mut().maybe_microphone = maybe_device.clone();
-        self.forward(&CallAction::SelectMicrophone { maybe_device }).await
-      },
-      CallAction::SelectSpeakers { maybe_device } => {
-        self.state.borrow_mut().maybe_speakers = maybe_device.clone();
-        self.forward(&CallAction::SelectSpeakers { maybe_device }).await
-      },
-      CallAction::SetStatusSounds { sounds } => {
-        self.state.borrow_mut().status_sounds = sounds;
-        self.forward(&CallAction::SetStatusSounds { sounds }).await
-      },
-      CallAction::SetCamera { is_on: true } => {
-        // admin.md §3.5: the browser can't put a background behind the camera image, so where the
-        // organization requires one, the camera stays off.
-        if org_requires_background().await {
-          return Err(ActionFailure::new(
-            FailureKind::Call(CallFailure::BackgroundRequired),
-            "the organization requires a background, which the browser can't apply",
-          ));
-        }
-        self.forward(&CallAction::SetCamera { is_on: true }).await
-      },
-      // The browser has no background effects (the UI offers none) and no system effects panel.
-      CallAction::SetBackgroundEffect { .. } | CallAction::OpenSystemVideoEffects => Ok(()),
-      CallAction::Unknown => Err(ActionFailure::other("unknown call action")),
-      other => self.forward(&other).await,
     }
   }
 
-  async fn join(self: &Rc<Self>, request: CallRequest) -> Result<(), ActionFailure> {
-    let module = self.module().await.map_err(ActionFailure::other)?;
-    // Leave the running call first: its end must not clear the keys of the new one.
-    self.forward(&CallAction::Leave).await?;
-    self.maybe_call.borrow_mut().take();
-    let preparation = crate::web_core::prepare_call(request.conversation)
+  /// The call module, loading it on first use.
+  async fn module(self: &Rc<Self>) -> Result<CallModule, String> {
+    let load = {
+      let mut slot = self.maybe_module.borrow_mut();
+      slot
+        .get_or_insert_with(|| load_module(Rc::downgrade(self)).boxed_local().shared())
+        .clone()
+    };
+    let result = load.await;
+    match &result {
+      // A network hiccup while loading: the next use tries again.
+      Err(_) => drop(self.maybe_module.borrow_mut().take()),
+      Ok(module) => self.flush_pending(module),
+    }
+    result
+  }
+
+  /// What arrived while the module loaded.
+  fn flush_pending(&self, module: &CallModule) {
+    let signals = std::mem::take(&mut *self.pending_signals.borrow_mut());
+    for json in signals {
+      module.call_sync(EXPORT_SIGNAL, &[JsValue::from_str(&json)]);
+    }
+    if self.is_ringing.get() {
+      module.call_sync(EXPORT_RING, &[JsValue::TRUE]);
+    }
+  }
+
+  fn loaded_module(&self) -> Option<CallModule> {
+    let load = self.maybe_module.borrow().clone()?;
+    load.peek().and_then(|result| result.as_ref().ok().cloned())
+  }
+
+  fn on_snapshot(&self, json: &str) {
+    match serde_json::from_str::<CallSnapshot>(json) {
+      Ok(snapshot) => {
+        let is_in_call = snapshot.maybe_active.is_some();
+        if self.was_in_call.replace(is_in_call) && !is_in_call {
+          // The call ended: its keys go. (A join in progress has no active call yet.)
+          self.maybe_call.borrow_mut().take();
+        }
+        let maybe_on_change = self.maybe_on_change.borrow().clone();
+        if let Some(on_change) = maybe_on_change {
+          on_change(snapshot);
+        }
+      },
+      Err(error) => tracing::warn!(%error, "unreadable call state from the call module"),
+    }
+  }
+
+  /// Asks the core for a join token and the verified devices, and keeps the keys for the call.
+  async fn prepare(&self, conversation: ConversationId) -> Result<PreparedCall, ActionFailure> {
+    let preparation = crate::web_core::prepare_call(conversation)
       .await
       .map_err(|text| ActionFailure::from_wire(&text))?;
     let own_device = preparation.device_id;
@@ -279,120 +277,16 @@ impl WebCallHost {
       .device_ids()
       .filter(|device| *device != own_device)
       .collect();
-    *self.maybe_call.borrow_mut() = Some(PreparedCall {
-      conversation: request.conversation,
-      authenticator,
-    });
-    let (join, is_push_to_talk) = {
-      let state = self.state.borrow();
-      let join = WebCallJoin {
-        request,
-        sfu_url: preparation.join.sfu_url,
-        token: preparation.join.token,
-        user_id: preparation.user_id,
-        device_id: own_device,
-        trusted_devices,
-        maybe_microphone: state.maybe_microphone.clone(),
-        maybe_speakers: state.maybe_speakers.clone(),
-        status_sounds: state.status_sounds,
-      };
-      (join, state.push_to_talk.is_enabled)
-    };
-    let json = serde_json::to_string(&join).map_err(|error| ActionFailure::other(error.to_string()))?;
-    module.call(EXPORT_JOIN, &[JsValue::from_str(&json)]).await?;
-    if is_push_to_talk {
-      // Push-to-talk: the microphone opens only while the key is held.
-      self.forward(&CallAction::SetMuted { is_muted: true }).await?;
-    }
-    // With the microphone allowed, the browser names its devices.
-    self.refresh_devices();
-    Ok(())
-  }
-
-  /// Passes an action to the call module; before it is loaded there is no call to change.
-  async fn forward(&self, action: &CallAction) -> Result<(), ActionFailure> {
-    let Some(module) = self.loaded_module() else {
-      return Ok(());
-    };
-    let json = serde_json::to_string(action).map_err(|error| ActionFailure::other(error.to_string()))?;
-    module.call(EXPORT_ACT, &[JsValue::from_str(&json)]).await?;
-    Ok(())
-  }
-
-  /// The call module, loading it on first use.
-  async fn module(self: &Rc<Self>) -> Result<CallModule, String> {
-    let load = {
-      let mut slot = self.maybe_module.borrow_mut();
-      slot
-        .get_or_insert_with(|| load_module(Rc::downgrade(self)).boxed_local().shared())
-        .clone()
-    };
-    let result = load.await;
-    if result.is_err() {
-      // Try again on the next call (a network hiccup while loading).
-      self.maybe_module.borrow_mut().take();
-    } else {
-      self.refresh_devices_once();
-    }
-    result
-  }
-
-  fn loaded_module(&self) -> Option<CallModule> {
-    let load = self.maybe_module.borrow().clone()?;
-    load.peek().and_then(|result| result.as_ref().ok().cloned())
-  }
-
-  fn refresh_devices_once(self: &Rc<Self>) {
-    let state = self.state.borrow();
-    let devices = &state.devices;
-    if devices.microphones.is_empty() && devices.speakers.is_empty() && devices.cameras.is_empty() {
-      drop(state);
-      self.refresh_devices();
-    }
-  }
-
-  /// Lists the browser's devices again (they come and go, and get names with permission).
-  fn refresh_devices(self: &Rc<Self>) {
-    let Some(module) = self.loaded_module() else {
-      return;
-    };
-    let host = Rc::downgrade(self);
-    spawn_local(async move {
-      let devices = match module.call(EXPORT_DEVICES, &[]).await {
-        Ok(answer) => answer
-          .as_string()
-          .and_then(|text| serde_json::from_str::<MediaDevices>(&text).ok()),
-        Err(failure) => {
-          tracing::debug!(detail = %failure.detail, "could not list the media devices");
-          None
-        },
-      };
-      if let (Some(host), Some(devices)) = (host.upgrade(), devices) {
-        host.state.borrow_mut().devices = devices;
-        host.changed();
-      }
-    });
-  }
-
-  fn on_gateway_event(&self, event: &GatewayEvent) {
-    let is_changed = self.state.borrow_mut().view.apply_gateway_event(event);
-    if is_changed {
-      self.changed();
-    }
-  }
-
-  fn on_media_state(&self, json: &str) {
-    match serde_json::from_str::<MediaCallState>(json) {
-      Ok(media) => {
-        let has_ended = media.maybe_active.is_none();
-        self.state.borrow_mut().view.set_media_state(media);
-        if has_ended {
-          self.maybe_call.borrow_mut().take();
-        }
-        self.changed();
-      },
-      Err(error) => tracing::warn!(%error, "unreadable call state from the call module"),
-    }
+    *self.maybe_call.borrow_mut() = Some(PreparedKeys { authenticator });
+    Ok(PreparedCall {
+      sfu_url: preparation.join.sfu_url,
+      token: preparation.join.token,
+      user_id: preparation.user_id,
+      device_id: own_device,
+      trusted_devices,
+      requires_background: crate::web_core::requires_org_background().await,
+      maybe_certificate_sha256: preparation.join.maybe_sfu_certificate_sha256,
+    })
   }
 
   fn sign(&self, call_id: &str, dave_public_key: &[u8]) -> Result<Vec<u8>, String> {
@@ -414,18 +308,6 @@ impl WebCallHost {
       .authenticator
       .verify(call_id, device_id, binding)
       .map_err(|error| error.to_string())
-  }
-
-  fn call_conversation(&self) -> Option<ConversationId> {
-    self.maybe_call.borrow().as_ref().map(|call| call.conversation)
-  }
-
-  fn changed(&self) {
-    let snapshot = self.snapshot();
-    let maybe_on_change = self.maybe_on_change.borrow().clone();
-    if let Some(on_change) = maybe_on_change {
-      on_change(snapshot);
-    }
   }
 }
 
@@ -494,11 +376,10 @@ async fn load_module(host: Weak<WebCallHost>) -> Result<CallModule, String> {
     .ok()
     .and_then(|value| value.dyn_into().ok())
     .ok_or("the call module has no initializer")?;
-  let started = init
+  let started: Promise = init
     .call0(&JsValue::NULL)
-    .map_err(|error| js_text(&error))?
-    .dyn_into::<Promise>()
-    .map_err(|_| "the call module's initializer answered no promise".to_owned())?;
+    .and_then(JsCast::dyn_into)
+    .map_err(|error| js_text(&error))?;
   JsFuture::from(started)
     .await
     .map_err(|error| format!("could not start the call module: {}", js_text(&error)))?;
@@ -512,7 +393,6 @@ async fn load_module(host: Weak<WebCallHost>) -> Result<CallModule, String> {
     .map_err(|failure| failure.detail)?
     .call1(&JsValue::NULL, &callbacks.object)
     .map_err(|error| js_text(&error))?;
-  tracing::info!("call module loaded");
   Ok(module)
 }
 
@@ -522,8 +402,26 @@ impl Callbacks {
       let host = host.clone();
       Closure::<dyn Fn(String)>::new(move |json: String| {
         if let Some(host) = host.upgrade() {
-          host.on_media_state(&json);
+          host.on_snapshot(&json);
         }
+      })
+    };
+    let prepare = {
+      let host = host.clone();
+      Closure::<dyn Fn(String) -> Promise>::new(move |conversation: String| {
+        let host = host.clone();
+        future_to_promise(async move {
+          let rejected = |failure: ActionFailure| JsValue::from_str(&failure.to_wire());
+          let conversation: ConversationId = serde_json::from_str(&conversation)
+            .map_err(|error| rejected(ActionFailure::other(error.to_string())))?;
+          let host = host
+            .upgrade()
+            .ok_or_else(|| rejected(ActionFailure::other("signed out")))?;
+          let prepared = host.prepare(conversation).await.map_err(rejected)?;
+          serde_json::to_string(&prepared)
+            .map(|json| JsValue::from_str(&json))
+            .map_err(|error| rejected(ActionFailure::other(error.to_string())))
+        })
       })
     };
     let sign = {
@@ -539,7 +437,6 @@ impl Callbacks {
       )
     };
     let verify = {
-      let host = host.clone();
       Closure::<dyn Fn(String, String, Uint8Array) -> Result<Uint8Array, JsValue>>::new(
         move |call_id: String, device_id: String, binding: Uint8Array| {
           let host = host.upgrade().ok_or_else(|| JsValue::from_str("signed out"))?;
@@ -550,50 +447,28 @@ impl Callbacks {
         },
       )
     };
-    let ticket = Closure::<dyn Fn() -> Promise>::new(move || {
-      let maybe_conversation = host.upgrade().and_then(|host| host.call_conversation());
-      future_to_promise(async move {
-        let conversation = maybe_conversation.ok_or_else(|| JsValue::from_str("no call to rejoin"))?;
-        let token = crate::web_core::call_join_token(conversation)
-          .await
-          .map_err(|text| JsValue::from_str(&text))?;
-        let json = serde_json::to_string(&token).map_err(|error| JsValue::from_str(&error.to_string()))?;
-        Ok(JsValue::from_str(&json))
-      })
-    });
     let object = Object::new();
     for (name, function) in [
       ("changed", changed.as_ref()),
+      ("prepare", prepare.as_ref()),
       ("sign", sign.as_ref()),
       ("verify", verify.as_ref()),
-      ("ticket", ticket.as_ref()),
     ] {
       Reflect::set(&object, &JsValue::from_str(name), function).map_err(|error| js_text(&error))?;
     }
     Ok(Self {
       object,
       _changed: changed,
+      _prepare: prepare,
       _sign: sign,
       _verify: verify,
-      _ticket: ticket,
     })
   }
 }
 
-/// Whether the workspace policy requires an organization background behind the camera image
-/// (and it applies to this user). Unknown policy restricts nothing, as on desktop.
-async fn org_requires_background() -> bool {
-  let query = serde_json::json!({ "query": ChatQuery::OrgBackgrounds });
-  match crate::web_core::call("core_query", query).await {
-    Ok(answer) => matches!(
-      serde_json::from_value::<ChatAnswer>(answer),
-      Ok(ChatAnswer::OrgBackgrounds { backgrounds }) if backgrounds.is_required()
-    ),
-    Err(error) => {
-      tracing::debug!(%error, "workspace backgrounds unknown");
-      false
-    },
-  }
+fn json_value<T: serde::Serialize>(value: &T) -> JsValue {
+  // Ids always serialize; an empty string would only match nothing.
+  JsValue::from_str(&serde_json::to_string(value).unwrap_or_default())
 }
 
 fn js_text(error: &JsValue) -> String {

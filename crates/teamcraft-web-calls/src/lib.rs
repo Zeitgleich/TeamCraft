@@ -1,12 +1,16 @@
-//! The web client's call media (#330): a wasm module of its own that the page loads when a call
-//! starts, so the call engine doesn't add to the app's download (robustness.md, "Download size").
+//! The web client's calls (#330): a wasm module of its own that the page loads in the background
+//! once the user is signed in, so the call engine doesn't add to the app's first download
+//! (robustness.md, "Download size").
 //!
-//! The page (`teamcraft-ui`, `web_calls`) keeps the call roster from the gateway, the device key
-//! and the UI. This module runs `teamcraft-media`'s browser driver ([`WebCall`]: WebTransport,
-//! WebCodecs, Web Audio, DAVE) and keeps the part of the call view the media layer knows
-//! ([`MediaCallState`]), which it reports to the page after every change. The contract between the
-//! two, and why it goes through JavaScript, is in `teamcraft_client_api::page_calls`.
+//! The module keeps the call state the UI shows ([`CallView`]: rosters and ringing from the
+//! gateway signals the page forwards, the active call from the media engine), plays the ringtone
+//! and runs `teamcraft-media`'s browser driver ([`WebCall`]: WebTransport, WebCodecs, Web Audio,
+//! DAVE). The page keeps the client core and the device key: it prepares joins, signs this
+//! device's call key and verifies the others'. The contract between the two, and why it goes
+//! through JavaScript, is in `teamcraft_client_api::page_calls`.
 #![cfg(target_arch = "wasm32")]
+
+mod ringtone;
 
 use std::cell::{Cell, RefCell};
 use std::pin::pin;
@@ -17,33 +21,36 @@ use futures::StreamExt;
 use futures::channel::{mpsc, oneshot};
 use futures::future::{Either, select};
 use js_sys::{Function, Promise, Reflect, Uint8Array};
-use teamcraft_client_api::call_view::{CallView, MediaCallState};
+use teamcraft_client_api::call_view::{CallSignal, CallView};
 use teamcraft_client_api::calls::{
-  BackgroundEffect, CallEndReason, CallStatusSounds, MediaDevice, MediaDevices, ScreenShareSound,
+  ActiveCall, BackgroundEffect, CallEndReason, CallRequest, CallStatusSounds, MediaDevice, MediaDevices,
+  PushToTalk, ScreenShareSound,
 };
 use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
-use teamcraft_client_api::page_calls::{WORKLET_URL, WebCallJoin};
-use teamcraft_client_api::remote::CallAction;
+use teamcraft_client_api::page_calls::{PreparedCall, WORKLET_URL};
+use teamcraft_client_api::remote::{CallAction, CallSnapshot};
 use teamcraft_media::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInfo, AudioSink, AudioSource};
 use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{CallKeyAuthenticator, CallKeyError};
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
-use teamcraft_media::call_resilience::{JoinTicket, JoinTicketError, ResilienceConfig};
+use teamcraft_media::call_resilience::{
+  JoinTicket, JoinTicketError, ResilienceConfig, certificate_hash_from_hex,
+};
 use teamcraft_media::call_view::{CallRoster, status_cues};
 use teamcraft_media::call_web::{
   self, LocalTicketFuture, MediaAccessReason, MediaInput, WebCall, WebCallConfig, WebCallError,
   WebJoinTicketSource,
 };
 use teamcraft_media::jitter::JitterBufferConfig;
-use teamcraft_proto::{
-  AudioCodec, CallId, CallJoinTokenResponse, DeviceId, MediaCapabilities, MediaStreamId, VideoCodec,
-};
+use teamcraft_proto::{AudioCodec, CallId, DeviceId, MediaCapabilities, MediaStreamId, VideoCodec};
+use tracing_subscriber::Layer;
+use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
-use web_sys::{HtmlCanvasElement, MediaStream, MediaStreamTrack};
+use web_sys::{HtmlCanvasElement, HtmlVideoElement, MediaStream, MediaStreamTrack};
 
 /// Simulcast layers the camera sends (as on desktop).
 const MAX_SIMULCAST_LAYERS: u8 = 3;
@@ -53,29 +60,37 @@ thread_local! {
   static IS_LOGGING: Cell<bool> = const { Cell::new(false) };
 }
 
-/// The call of this page and what the user chose for the next one.
+/// The calls of this page and what the user chose for the next one.
 struct Host {
   callbacks: Callbacks,
   state: RefCell<State>,
   /// The running call, if any.
   maybe_media: RefCell<Option<Media>>,
+  /// Lists the devices again when the browser says they changed (kept for as long as the host).
+  _on_device_change: Closure<dyn FnMut()>,
+  /// The last state handed to the page: an unchanged one isn't handed again.
+  last_sent: RefCell<String>,
 }
 
 /// The page's functions (see `page_calls`).
 struct Callbacks {
   changed: Function,
+  prepare: Function,
   sign: Function,
   verify: Function,
-  ticket: Function,
 }
 
 #[derive(Default)]
 struct State {
-  /// Only the media part (active call, video, end reason) is kept here; the page has the rest.
   view: CallView,
+  devices: MediaDevices,
+  push_to_talk: PushToTalk,
+  status_sounds: CallStatusSounds,
   microphone: AudioDeviceChoice,
   speakers: AudioDeviceChoice,
   maybe_camera: Option<String>,
+  /// The workspace requires a background the browser can't apply (from the last preparation).
+  requires_background: bool,
   /// The stream the camera sends, shown as the self view.
   maybe_local_camera: Option<MediaStream>,
 }
@@ -127,29 +142,30 @@ pub fn start(callbacks: JsValue) -> Result<(), JsValue> {
   init_logging();
   let callbacks = Callbacks {
     changed: function(&callbacks, "changed")?,
+    prepare: function(&callbacks, "prepare")?,
     sign: function(&callbacks, "sign")?,
     verify: function(&callbacks, "verify")?,
-    ticket: function(&callbacks, "ticket")?,
   };
+  let on_device_change = Closure::<dyn FnMut()>::new(|| {
+    if let Ok(host) = host() {
+      host.refresh_devices();
+    }
+  });
+  watch_device_changes(&on_device_change);
   let host = Rc::new(Host {
     callbacks,
     state: RefCell::new(State::default()),
     maybe_media: RefCell::new(None),
+    _on_device_change: on_device_change,
+    last_sent: RefCell::new(String::new()),
   });
-  HOST.with(|slot| *slot.borrow_mut() = Some(host));
+  HOST.with(|slot| *slot.borrow_mut() = Some(host.clone()));
+  host.refresh_devices();
+  host.changed();
   Ok(())
 }
 
-/// Joins a call (`WebCallJoin` JSON), leaving a running one first.
-#[wasm_bindgen]
-pub async fn join(join: String) -> Result<(), JsValue> {
-  let host = host()?;
-  let join: WebCallJoin = serde_json::from_str(&join)
-    .map_err(|error| failure_value(ActionFailure::other(format!("unreadable join: {error}"))))?;
-  host.join(join).await.map_err(failure_value)
-}
-
-/// Carries out a `CallAction` (JSON) other than joining.
+/// Carries out a `CallAction` (JSON).
 #[wasm_bindgen]
 pub async fn act(action: String) -> Result<(), JsValue> {
   let host = host()?;
@@ -158,27 +174,44 @@ pub async fn act(action: String) -> Result<(), JsValue> {
   host.act(action).await.map_err(failure_value)
 }
 
-/// Microphones, speakers and cameras as `MediaDevices` JSON. Labels are empty until the page has
-/// permission for the kind.
+/// A call event from the gateway (`CallSignal` JSON).
 #[wasm_bindgen]
-pub async fn devices() -> Result<String, JsValue> {
-  let devices = call_web::list_media_devices()
-    .await
-    .map_err(|error| failure_value(failure(error)))?;
-  let devices = MediaDevices {
-    cameras: media_devices(&devices.cameras),
-    microphones: media_devices(&devices.inputs),
-    speakers: media_devices(&devices.outputs),
-  };
-  serde_json::to_string(&devices).map_err(|error| JsValue::from_str(&error.to_string()))
+pub fn signal(signal: String) {
+  match (host(), serde_json::from_str::<CallSignal>(&signal)) {
+    (Ok(host), Ok(signal)) => {
+      let is_changed = host.state.borrow_mut().view.apply_signal(signal);
+      if is_changed {
+        host.changed();
+      }
+    },
+    (_, Err(error)) => tracing::warn!(%error, "unreadable call signal"),
+    (Err(_), Ok(_)) => {},
+  }
 }
 
-/// Draws another device's track (`MediaStreamId` JSON) into `canvas` until unwatched.
+/// Starts or stops the ringtone of an incoming call.
 #[wasm_bindgen]
-pub fn watch_video(stream_id: String, canvas: HtmlCanvasElement) {
-  if let (Ok(host), Ok(stream_id)) = (host(), serde_json::from_str(&stream_id)) {
-    host.control(Control::Watch { stream_id, canvas });
-  }
+pub fn ring(is_ringing: bool) {
+  ringtone::set_ringing(is_ringing);
+}
+
+/// A new canvas that shows another device's track (`MediaStreamId` JSON) until unwatched.
+#[wasm_bindgen]
+pub fn watch_video(stream_id: String) -> Option<HtmlCanvasElement> {
+  let (Ok(host), Ok(stream_id)) = (host(), serde_json::from_str(&stream_id)) else {
+    return None;
+  };
+  let canvas: HtmlCanvasElement = web_sys::window()?
+    .document()?
+    .create_element("canvas")
+    .ok()?
+    .dyn_into()
+    .ok()?;
+  host.control(Control::Watch {
+    stream_id,
+    canvas: canvas.clone(),
+  });
+  Some(canvas)
 }
 
 #[wasm_bindgen]
@@ -188,15 +221,28 @@ pub fn unwatch_video(stream_id: String) {
   }
 }
 
-/// The camera stream this device sends, for the self view.
+/// A new muted `<video>` playing the camera this device sends, for the self view.
 #[wasm_bindgen]
-pub fn local_camera() -> Option<MediaStream> {
-  host().ok()?.state.borrow().maybe_local_camera.clone()
+pub fn camera_view() -> Option<HtmlVideoElement> {
+  let stream = host().ok()?.state.borrow().maybe_local_camera.clone()?;
+  let video: HtmlVideoElement = web_sys::window()?
+    .document()?
+    .create_element("video")
+    .ok()?
+    .dyn_into()
+    .ok()?;
+  video.set_muted(true);
+  video.set_autoplay(true);
+  // iOS Safari plays inline only with this attribute.
+  let _ = video.set_attribute("playsinline", "");
+  video.set_src_object(Some(&stream));
+  Some(video)
 }
 
 /// Leaves a running call and forgets the page's callbacks (the page signs out).
 #[wasm_bindgen]
 pub async fn stop() {
+  ringtone::set_ringing(false);
   let maybe_host = HOST.with(|slot| slot.borrow_mut().take());
   if let Some(host) = maybe_host {
     host.leave().await;
@@ -204,21 +250,28 @@ pub async fn stop() {
 }
 
 impl Host {
-  async fn join(self: &Rc<Self>, join: WebCallJoin) -> Result<(), ActionFailure> {
+  /// Joins the conversation's call with what the page's core prepared, leaving a running call.
+  async fn join(self: &Rc<Self>, request: CallRequest) -> Result<(), ActionFailure> {
     self.leave().await;
-    let (microphone, speakers) = {
-      let mut state = self.state.borrow_mut();
-      state.microphone = device_choice(join.maybe_microphone.clone());
-      state.speakers = device_choice(join.maybe_speakers.clone());
-      (state.microphone.clone(), state.speakers.clone())
+    let prepared = self.prepare(request.conversation).await?;
+    let (microphone, speakers, sounds) = {
+      let state = self.state.borrow();
+      (
+        state.microphone.clone(),
+        state.speakers.clone(),
+        state.status_sounds,
+      )
     };
-    let own_device = join.device_id;
+    let own_device = prepared.device_id;
     let config = WebCallConfig {
-      sfu_url: join.sfu_url,
-      maybe_certificate_hash: None,
-      token: join.token,
+      sfu_url: prepared.sfu_url,
+      maybe_certificate_hash: prepared
+        .maybe_certificate_sha256
+        .as_deref()
+        .and_then(certificate_hash_from_hex),
+      token: prepared.token,
       engine: CallEngineConfig {
-        user_id: join.user_id,
+        user_id: prepared.user_id,
         device_id: own_device,
         capabilities: MediaCapabilities {
           audio_codecs: vec![AudioCodec::Opus],
@@ -230,20 +283,24 @@ impl Host {
       },
       source: AudioSource::Microphone(microphone),
       sink: AudioSink::Speakers(speakers),
-      maybe_trusted_roster: Some(join.trusted_devices),
+      maybe_trusted_roster: Some(prepared.trusted_devices),
       maybe_authenticator: Some(Arc::new(PageAuthenticator)),
       jitter: JitterBufferConfig::default(),
       resilience: ResilienceConfig::default(),
       maybe_ticket_source: Some(Rc::new(PageTickets)),
-      status_cues: status_cues(join.status_sounds),
+      status_cues: status_cues(sounds),
       maybe_worklet_url: Some(WORKLET_URL.to_owned()),
     };
     let call = WebCall::join(config).await.map_err(failure)?;
+    if self.state.borrow().push_to_talk.is_enabled {
+      // Push-to-talk: the microphone opens only while the key is held.
+      call.set_muted(true);
+    }
     self
       .state
       .borrow_mut()
       .view
-      .start_active(join.request, BackgroundEffect::None);
+      .start_active(request, BackgroundEffect::None);
     let (controls, control_rx) = mpsc::unbounded();
     let (finished_tx, finished) = oneshot::channel();
     *self.maybe_media.borrow_mut() = Some(Media { controls, finished });
@@ -254,7 +311,44 @@ impl Host {
       let _ = finished_tx.send(());
     });
     self.changed();
+    // With the microphone allowed, the browser names its devices.
+    self.refresh_devices();
     Ok(())
+  }
+
+  /// A join token and the trusted devices from the page's client core.
+  async fn prepare(
+    &self,
+    conversation: teamcraft_proto::ConversationId,
+  ) -> Result<PreparedCall, ActionFailure> {
+    let id = serde_json::to_string(&conversation).map_err(|error| ActionFailure::other(error.to_string()))?;
+    let answer = call_promise(&self.callbacks.prepare, &JsValue::from_str(&id)).await?;
+    let text = answer
+      .as_string()
+      .ok_or_else(|| ActionFailure::other("the page prepared no call"))?;
+    serde_json::from_str(&text).map_err(|error| ActionFailure::other(error.to_string()))
+  }
+
+  /// Lists the browser's devices again (they come and go, and get names with permission).
+  fn refresh_devices(self: &Rc<Self>) {
+    let host = Rc::downgrade(self);
+    spawn_local(async move {
+      let devices = match call_web::list_media_devices().await {
+        Ok(devices) => MediaDevices {
+          cameras: media_devices(&devices.cameras),
+          microphones: media_devices(&devices.inputs),
+          speakers: media_devices(&devices.outputs),
+        },
+        Err(error) => {
+          tracing::debug!(%error, "could not list the media devices");
+          return;
+        },
+      };
+      if let Some(host) = host.upgrade() {
+        host.state.borrow_mut().devices = devices;
+        host.changed();
+      }
+    });
   }
 
   async fn act(self: &Rc<Self>, action: CallAction) -> Result<(), ActionFailure> {
@@ -273,7 +367,8 @@ impl Host {
       CallAction::SetCamera { is_on: true } => self.start_camera().await?,
       CallAction::SetCamera { is_on: false } => self.stop_camera(),
       CallAction::SelectCamera { maybe_device } => {
-        self.state.borrow_mut().maybe_camera = maybe_device;
+        // An empty id is the "system default" entry.
+        self.state.borrow_mut().maybe_camera = maybe_device.filter(|id| !id.is_empty());
         if self.state.borrow().view.is_camera_on() {
           self.start_camera().await?;
         }
@@ -286,16 +381,47 @@ impl Host {
           active.screen_sound = ScreenShareSound::Off;
         });
       },
-      CallAction::SetStatusSounds { sounds } => self.control(Control::StatusSounds(sounds)),
-      // The page answers these itself (ringing, push-to-talk) or the browser has none (effects).
-      CallAction::Decline { .. }
-      | CallAction::SetBackgroundEffect { .. }
-      | CallAction::OpenSystemVideoEffects
-      | CallAction::SetPushToTalk { .. }
-      | CallAction::SetTalking { .. } => {},
-      CallAction::Join { .. } | CallAction::Unknown => {
-        return Err(ActionFailure::other("not a call module action"));
+      CallAction::SetStatusSounds { sounds } => {
+        self.state.borrow_mut().status_sounds = sounds;
+        self.control(Control::StatusSounds(sounds));
       },
+      CallAction::Decline { conversation } => {
+        self.state.borrow_mut().view.decline(conversation);
+        self.changed();
+      },
+      CallAction::SetPushToTalk {
+        is_enabled,
+        maybe_shortcut,
+      } => {
+        {
+          let mut state = self.state.borrow_mut();
+          let shortcut = maybe_shortcut.unwrap_or_else(|| state.push_to_talk.shortcut.clone());
+          // Browsers have no global shortcuts: the key works while the page has focus.
+          state.push_to_talk = PushToTalk {
+            is_enabled,
+            shortcut,
+            is_global: false,
+            is_talking: false,
+          };
+        }
+        self.control(Control::Mute(is_enabled));
+        self.changed();
+      },
+      CallAction::SetTalking { is_talking } => {
+        {
+          let mut state = self.state.borrow_mut();
+          if !state.push_to_talk.is_enabled || state.push_to_talk.is_talking == is_talking {
+            return Ok(());
+          }
+          state.push_to_talk.is_talking = is_talking;
+        }
+        self.control(Control::Mute(!is_talking));
+        self.changed();
+      },
+      // The browser has no background effects (the UI offers none) and no system effects panel.
+      CallAction::SetBackgroundEffect { .. } | CallAction::OpenSystemVideoEffects => {},
+      CallAction::Join { request } => self.join(request).await?,
+      CallAction::Unknown => return Err(ActionFailure::other("unknown call action")),
     }
     Ok(())
   }
@@ -323,8 +449,17 @@ impl Host {
 
   /// Opens the camera (the browser may ask) and sends it; replaces a running camera.
   async fn start_camera(&self) -> Result<(), ActionFailure> {
+    // Not in a call (its join failed and said why): nothing to send the camera to.
     if self.maybe_media.borrow().is_none() {
-      return Err(ActionFailure::other("not in a call"));
+      return Ok(());
+    }
+    // admin.md §3.5: the browser can't put a background behind the camera image, so where the
+    // organization requires one, the camera stays off.
+    if self.state.borrow().requires_background {
+      return Err(ActionFailure::new(
+        FailureKind::Call(CallFailure::BackgroundRequired),
+        "the organization requires a background, which the browser can't apply",
+      ));
     }
     let maybe_camera = self.state.borrow().maybe_camera.clone();
     let stream = call_web::capture_camera(maybe_camera.as_deref())
@@ -424,7 +559,7 @@ impl Host {
     self.changed();
   }
 
-  fn update_active(&self, change: impl FnOnce(&mut teamcraft_client_api::calls::ActiveCall)) {
+  fn update_active(&self, change: impl FnOnce(&mut ActiveCall)) {
     if let Some(active) = self.state.borrow_mut().view.maybe_active.as_mut() {
       change(active);
     }
@@ -432,10 +567,25 @@ impl Host {
   }
 
   fn changed(&self) {
-    let state: MediaCallState = self.state.borrow().view.media_state();
-    let Ok(json) = serde_json::to_string(&state) else {
+    let snapshot = {
+      let state = self.state.borrow();
+      CallSnapshot {
+        maybe_active: state.view.maybe_active.clone(),
+        incoming: state.view.incoming.values().copied().collect(),
+        running: state.view.running.values().cloned().collect(),
+        devices: state.devices.clone(),
+        video_tracks: state.view.video_tracks.values().cloned().collect(),
+        push_to_talk: state.push_to_talk.clone(),
+        maybe_end_reason: state.view.maybe_end_reason,
+      }
+    };
+    let Ok(json) = serde_json::to_string(&snapshot) else {
       return;
     };
+    if *self.last_sent.borrow() == json {
+      return;
+    }
+    self.last_sent.replace(json.clone());
     if let Err(error) = self
       .callbacks
       .changed
@@ -540,23 +690,21 @@ impl WebJoinTicketSource for PageTickets {
     Box::pin(async {
       let ticket_error = |reason: String| JoinTicketError { reason };
       let host = host().map_err(|_| ticket_error("the page is gone".into()))?;
-      let promise: Promise = host
-        .callbacks
-        .ticket
-        .call0(&JsValue::NULL)
-        .and_then(JsCast::dyn_into)
-        .map_err(|error| ticket_error(js_text(&error)))?;
-      let answer = JsFuture::from(promise)
+      let conversation = host
+        .state
+        .borrow()
+        .view
+        .maybe_active
+        .as_ref()
+        .map(|active| active.conversation)
+        .ok_or_else(|| ticket_error("no call to rejoin".into()))?;
+      let prepared = host
+        .prepare(conversation)
         .await
-        .map_err(|error| ticket_error(js_text(&error)))?;
-      let text = answer
-        .as_string()
-        .ok_or_else(|| ticket_error("the page answered no join token".into()))?;
-      let response: CallJoinTokenResponse =
-        serde_json::from_str(&text).map_err(|error| ticket_error(error.to_string()))?;
+        .map_err(|failure| ticket_error(failure.to_wire()))?;
       Ok(JoinTicket {
-        sfu_url: response.sfu_url,
-        token: response.token,
+        sfu_url: prepared.sfu_url,
+        token: prepared.token,
       })
     })
   }
@@ -598,6 +746,28 @@ fn host() -> Result<Rc<Host>, JsValue> {
   HOST
     .with(|slot| slot.borrow().clone())
     .ok_or_else(|| failure_value(ActionFailure::other("the call module was not started")))
+}
+
+/// Calls one of the page's async callbacks; a rejection is `ActionFailure` wire text.
+async fn call_promise(function: &Function, argument: &JsValue) -> Result<JsValue, ActionFailure> {
+  let promise: Promise = function
+    .call1(&JsValue::NULL, argument)
+    .and_then(JsCast::dyn_into)
+    .map_err(|error| ActionFailure::other(js_text(&error)))?;
+  JsFuture::from(promise)
+    .await
+    .map_err(|error| ActionFailure::from_wire(&js_text(&error)))
+}
+
+/// `navigator.mediaDevices.ondevicechange`: devices plugged in or out.
+fn watch_device_changes(callback: &Closure<dyn FnMut()>) {
+  let maybe_devices = web_sys::window()
+    .and_then(|window| Reflect::get(&window.navigator(), &JsValue::from_str("mediaDevices")).ok())
+    .filter(|devices| devices.is_object());
+  if let Some(devices) = maybe_devices {
+    // Without the property (old browsers) the lists are read at joins only.
+    let _ = Reflect::set(&devices, &JsValue::from_str("ondevicechange"), callback.as_ref());
+  }
 }
 
 fn function(object: &JsValue, name: &str) -> Result<Function, JsValue> {
@@ -665,10 +835,12 @@ fn init_logging() {
     return;
   }
   console_error_panic_hook::set_once();
+  // INFO at most: the DAVE library logs key material at TRACE (security.md: never log keys).
   let fmt_layer = tracing_subscriber::fmt::layer()
     .with_ansi(false)
     .without_time()
-    .with_writer(tracing_web::MakeWebConsoleWriter::new());
+    .with_writer(tracing_web::MakeWebConsoleWriter::new())
+    .with_filter(LevelFilter::INFO);
   // Another dispatcher only exists if the page initialized this module twice; keep that one.
   let _ = tracing_subscriber::registry().with(fmt_layer).try_init();
 }

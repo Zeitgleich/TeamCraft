@@ -3489,10 +3489,15 @@ ol.md-list {
 .live-video {
   position: absolute;
   inset: 0;
+  background: #05070b;
+}
+
+.live-video > canvas,
+.live-video > video {
+  display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
-  background: #05070b;
 }
 
 .live-video.mirrored {
@@ -3501,6 +3506,11 @@ ol.md-list {
 
 .shared-screen .live-video {
   position: static;
+  width: 100%;
+  height: 100%;
+}
+
+.shared-screen .live-video > canvas {
   object-fit: contain;
 }
 

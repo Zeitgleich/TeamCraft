@@ -58,7 +58,7 @@ impl RemoteCalls {
   /// Calls with the media in this page.
   #[cfg(target_arch = "wasm32")]
   pub fn in_page(host: Rc<crate::web_calls::WebCallHost>) -> Self {
-    let calls = Self::new(host.snapshot(), CallLink::Page(host.clone()));
+    let calls = Self::new(CallSnapshot::default(), CallLink::Page(host.clone()));
     // Not the calls themselves: the host must not keep what keeps it alive.
     let (snapshot, notify) = (calls.snapshot.clone(), calls.notify.clone());
     host.set_on_change(Rc::new(move |next| {
@@ -201,9 +201,8 @@ impl RemoteCalls {
 
   fn refresh(&self) {
     #[cfg(target_arch = "wasm32")]
-    if let CallLink::Page(host) = &self.link {
-      *self.snapshot.borrow_mut() = host.snapshot();
-      self.notify_changed();
+    // The page's calls hand over every new snapshot themselves.
+    if let CallLink::Page(_) = &self.link {
       return;
     }
     let calls = self.clone();

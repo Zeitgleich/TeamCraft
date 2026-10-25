@@ -21,7 +21,7 @@ pub fn CallsUnavailableDialog() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let brand = Brand::use_current().0;
-  let reason = state.read(|backend| backend.calls_unavailable_reason());
+  let reason = untrack(|| state.read(|backend| backend.calls_unavailable_reason()));
   let (title_key, body_key) = match reason {
     CallsUnavailableReason::BrowserUnsupported => ("calls-unsupported-title", "calls-unsupported-body"),
     CallsUnavailableReason::OtherTab => ("calls-other-tab-title", "calls-other-tab-body"),
@@ -48,12 +48,12 @@ pub fn CallsUnavailableDialog() -> impl IntoView {
         <button class="btn" on:click=move |_| state.close_overlay()>
           {move || i18n.t("close")}
         </button>
-        <Show when=move || offers_apps fallback=|| ()>
+        {offers_apps.then(|| view! {
           <a class="btn btn-primary" href=download_page target="_blank" rel="noopener noreferrer" data-autofocus>
             <Icon name=IconName::Download />
             <span>{move || i18n.t("calls-browser-download")}</span>
           </a>
-        </Show>
+        })}
       </footer>
     </Modal>
   }

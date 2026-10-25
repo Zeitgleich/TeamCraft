@@ -36,7 +36,7 @@ use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
 use teamcraft_media::call_native::{
   JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError, TicketFuture,
 };
-use teamcraft_media::call_resilience::{JoinTicket, JoinTicketError};
+use teamcraft_media::call_resilience::{JoinTicket, JoinTicketError, certificate_hash_from_hex};
 use teamcraft_media::call_video::ReceivedVideoFrame;
 use teamcraft_media::call_view::{CallRoster, status_cues};
 use teamcraft_media::effects::{BackgroundImage, EffectHandle};
@@ -739,13 +739,19 @@ fn native_config(
   let authenticator =
     DeviceCallKeyAuthenticator::from_verified(Arc::new(CoreSigner(preparation.signer)), preparation.devices)
       .map_err(|error| error.to_string())?;
+  let maybe_server_hash = preparation
+    .join
+    .maybe_sfu_certificate_sha256
+    .as_deref()
+    .and_then(certificate_hash_from_hex);
   let mut config = NativeCallConfig::device_bound(
     preparation.join.sfu_url,
     preparation.join.token,
     engine,
     authenticator,
   );
-  config.maybe_certificate_hash = certificate_hash_from_env()?;
+  // A development SFU's certificate: pinned here, or announced by the server with the token.
+  config.maybe_certificate_hash = certificate_hash_from_env()?.or(maybe_server_hash);
   config.source = AudioSource::Microphone(microphone);
   config.sink = AudioSink::Speakers(speakers);
   config.maybe_processing = Some(AudioProcessingConfig::default());
@@ -756,16 +762,9 @@ fn certificate_hash_from_env() -> Result<Option<[u8; 32]>, String> {
   let Ok(value) = std::env::var(CERT_HASH_VARIABLE) else {
     return Ok(None);
   };
-  let hex: String = value.chars().filter(|c| *c != ':').collect();
-  if hex.len() != 64 {
-    return Err(format!("{CERT_HASH_VARIABLE} needs 32 bytes as hex"));
-  }
-  let mut hash = [0u8; 32];
-  for (index, byte) in hash.iter_mut().enumerate() {
-    *byte = u8::from_str_radix(&hex[2 * index..2 * index + 2], 16)
-      .map_err(|_| format!("{CERT_HASH_VARIABLE} is not hex"))?;
-  }
-  Ok(Some(hash))
+  certificate_hash_from_hex(&value)
+    .map(Some)
+    .ok_or_else(|| format!("{CERT_HASH_VARIABLE} needs 32 bytes as hex"))
 }
 
 fn media_device(info: &AudioDeviceInfo) -> MediaDevice {

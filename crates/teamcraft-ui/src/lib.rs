@@ -81,8 +81,6 @@ pub mod web_calls;
 #[cfg(target_arch = "wasm32")]
 pub mod web_core;
 #[cfg(target_arch = "wasm32")]
-mod web_ringtone;
-#[cfg(target_arch = "wasm32")]
 mod web_tabs;
 
 pub use components::app::App;
