@@ -165,7 +165,10 @@ data class ForwardedFrom(
 @Serializable
 data class MessageEdit(val body: String, @SerialName("replaced_at") val replacedAt: Long)
 
-/** Where a file stands: `remote`, `uploading`, `downloading`, `local` or `failed`. */
+/**
+ * Where a file stands: `remote`, `uploading`, `downloading`, `local`, `failed`, or for an own file
+ * that stopped going up `upload_stalled` (retried on "Try again") and `upload_failed` (for good).
+ */
 @Serializable
 data class FileTransfer(
   val state: String,
@@ -175,6 +178,9 @@ data class FileTransfer(
   val reason: String? = null,
 ) {
   val isMoving: Boolean get() = state == "uploading" || state == "downloading"
+
+  /** An own file still on its way up, or stopped: it can be cancelled. */
+  val isCancellable: Boolean get() = state == "uploading" || state == "upload_stalled"
 
   /** 0..1 while uploading or downloading. */
   val maybeProgress: Float?
