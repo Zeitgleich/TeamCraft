@@ -11,6 +11,7 @@ loader-loading = Wird geladen
 loader-failed-title = Die App konnte nicht geladen werden
 loader-failed-body = Prüfe deine Verbindung und versuche es dann erneut.
 loader-retry = Erneut versuchen
+loader-checking = Sitzung wird geprüft …
 
 ## Kopfleiste und Kontomenü
 search-placeholder = Suchen
@@ -705,6 +706,8 @@ login-subtitle = Melde dich mit deinem Firmenkonto an.
 login-use-demo = Stattdessen Demodaten verwenden
 login-use-other-account = Abmelden und anderes Konto verwenden
 login-brand-links = Über diesen Dienst
+login-welcome = Willkommen bei TeamCraft
+login-welcome-brand = Willkommen beim TeamCraft-Server von { $brand }
 login-brand-support = Support
 login-brand-privacy = Datenschutz
 login-brand-terms = Nutzungsbedingungen

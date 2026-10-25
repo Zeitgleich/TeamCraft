@@ -43,6 +43,7 @@ pub fn GuestJoinPage(meeting: MeetingId, invite_token: String) -> impl IntoView 
   let phase = RwSignal::new(GuestPhase::AskName);
   let name = RwSignal::new(String::new());
   let invite_token = StoredValue::new(invite_token);
+  crate::startup::first_view();
 
   let join = {
     let client = client.clone();

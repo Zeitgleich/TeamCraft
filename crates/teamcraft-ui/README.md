@@ -257,9 +257,11 @@ the worker can open sealed payloads, shows a generic notification.
 
 `index.html` carries a loading screen in plain HTML and CSS (`style/loader.css`), painted before any
 script runs, with the TeamCraft mark assembling and typing. `loader.js` is the Trunk initializer: it
-adds the saved theme, the download progress and an error with a retry button, and once the app is
-mounted flies the mark into the app's brand (the server's logo, or the TeamCraft mark) while the
-screen fades. Its texts
+adds the saved theme, the download progress and an error with a retry button. The screen stays while
+the app checks the session and opens the account's data, until the app's first view is there
+(`src/startup.rs`): then the mark flies onto the sign-in card's mark, or the screen crossfades into the
+chat. A check that takes longer says so under the bar. A reload with single sign-on loads the page
+twice (to the identity provider and back); the second load shows the mark already assembled. Its texts
 are the `loader-*` messages of `i18n/*.ftl`, which `scripts/finish-loader.sh` (a Trunk hook) copies into
 `init.js` together with the size of the built wasm. Release builds use the `web-release` Cargo profile
 (size over speed) and `wasm-opt -Oz`; the release tarball adds `.br`/`.gz` variants
