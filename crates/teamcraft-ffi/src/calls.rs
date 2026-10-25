@@ -64,6 +64,19 @@ pub trait CallListener: Send + Sync {
   fn on_incoming_call(&self, call: IncomingCallInfo);
   /// The conversation's call stopped ringing (answered elsewhere, declined or ended).
   fn on_ring_ended(&self, conversation_id: String);
+  /// The server says the call this device is in moved into the meeting chat `to_conversation_id`
+  /// because somebody added people (docs/meetings.md, "A call becomes a meeting"). Nothing moves
+  /// on this alone: ask `call_move_offer` (again on later changes, until the announcement from
+  /// the DM's encryption group is in), show who moved it and whom they added, and on the user's
+  /// tap `accept_call_move`, then join the room's call.
+  fn on_call_moved(&self, from_conversation_id: String, to_conversation_id: String);
+}
+
+/// An announced move of a DM call into a meeting room: who moved it and whom they added.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CallMoveInfo {
+  pub by_user_id: String,
+  pub added_user_ids: Vec<String>,
 }
 
 /// Told about other devices' video in the call and their decoded frames (on decoder threads).
@@ -385,6 +398,13 @@ impl CallHub {
         ..
       }
       | GatewayEvent::CallEnd { conversation_id, .. } => listener.on_ring_ended(conversation_id.to_string()),
+      GatewayEvent::CallMove {
+        conversation_id,
+        to_conversation_id,
+        ..
+      } if maybe_active == Some(*conversation_id) => {
+        listener.on_call_moved(conversation_id.to_string(), to_conversation_id.to_string());
+      },
       _ => {},
     }
   }
@@ -967,6 +987,29 @@ mod tests {
   use super::*;
 
   #[test]
+  fn a_move_reaches_the_listener_only_for_the_call_this_device_is_in() {
+    let hub = CallHub::default();
+    let listener = Arc::new(RecordingListener::default());
+    hub.set_listener(listener.clone());
+    let moved = |from: i64| GatewayEvent::CallMove {
+      conversation_id: conversation(from),
+      call_id: call(1),
+      to_conversation_id: conversation(9),
+      moved_by: UserId::from_snowflake(Snowflake::new(2).unwrap()),
+    };
+
+    hub.on_gateway_event(&moved(5));
+    lock(&hub.inner).maybe_active = Some(conversation(5));
+    hub.on_gateway_event(&moved(5));
+    hub.on_gateway_event(&moved(6));
+
+    assert_eq!(
+      *listener.moved.lock().unwrap(),
+      vec![("5".to_owned(), "9".to_owned())]
+    );
+  }
+
+  #[test]
   fn rings_reach_the_listener_unless_in_that_call() {
     let hub = CallHub::default();
     let listener = Arc::new(RecordingListener::default());
@@ -1088,6 +1131,7 @@ mod tests {
   struct RecordingListener {
     incoming: Mutex<Vec<String>>,
     ring_ended: Mutex<Vec<String>>,
+    moved: Mutex<Vec<(String, String)>>,
   }
 
   impl CallListener for RecordingListener {
@@ -1099,6 +1143,14 @@ mod tests {
 
     fn on_ring_ended(&self, conversation_id: String) {
       self.ring_ended.lock().unwrap().push(conversation_id);
+    }
+
+    fn on_call_moved(&self, from_conversation_id: String, to_conversation_id: String) {
+      self
+        .moved
+        .lock()
+        .unwrap()
+        .push((from_conversation_id, to_conversation_id));
     }
   }
 

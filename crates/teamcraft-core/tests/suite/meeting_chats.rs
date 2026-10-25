@@ -426,7 +426,11 @@ mod call_moves {
       .await
       .unwrap();
     // Somebody the announcement didn't name is in the room by the time Bob follows.
-    alice.client.let_into_meeting_chat(meeting, dave_id).await.unwrap();
+    alice
+      .client
+      .let_into_meeting_chat(meeting, dave_id)
+      .await
+      .unwrap();
     carol.client.full_sync().await.unwrap();
 
     bob.client.full_sync().await.unwrap();

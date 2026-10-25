@@ -46,6 +46,7 @@ use teamcraft_proto::{
   InviteResponse, ListCategoriesResponse, SpaceResponse, UpdateCategoryRequest, UpdateConversationRequest,
   UpdateSpaceRequest,
 };
+use teamcraft_proto::{CreateInstantMeetingRequest, MeetingResponse};
 use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest, UserEnrollmentResponse};
 use teamcraft_proto::{
   ListCallHistoryQuery, ListCallHistoryResponse, ListPresenceResponse, PrivacyResponse, UpdatePrivacyRequest,
@@ -502,6 +503,13 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
         request,
       )
       .await
+  }
+
+  async fn create_instant_meeting(
+    &self,
+    request: &CreateInstantMeetingRequest,
+  ) -> Result<MeetingResponse, ApiError> {
+    self.send_json(Method::POST, "/meetings/instant", request).await
   }
 
   async fn move_call(&self, conversation: ConversationId, request: &MoveCallRequest) -> Result<(), ApiError> {

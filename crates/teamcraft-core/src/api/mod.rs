@@ -53,6 +53,7 @@ use teamcraft_proto::{
   InviteResponse, ListCategoriesResponse, ListInvitesResponse, SpaceResponse, UpdateCategoryRequest,
   UpdateConversationRequest, UpdateSpaceMemberRequest, UpdateSpaceRequest,
 };
+use teamcraft_proto::{CreateInstantMeetingRequest, MeetingResponse};
 use teamcraft_proto::{GatewayInfoResponse, PushGatewayResponse, WebPushKeyResponse};
 use teamcraft_proto::{
   ListCallHistoryQuery, ListCallHistoryResponse, ListPresenceResponse, PrivacyResponse, UpdatePrivacyRequest,
@@ -269,6 +270,12 @@ pub trait ServerApi {
     conversation: ConversationId,
     request: &CreateCallJoinTokenRequest,
   ) -> impl Future<Output = Result<CallJoinTokenResponse, ApiError>>;
+
+  /// "Meet now" (`POST /meetings/instant`); `invitees` become members of its chat.
+  fn create_instant_meeting(
+    &self,
+    request: &CreateInstantMeetingRequest,
+  ) -> impl Future<Output = Result<MeetingResponse, ApiError>>;
 
   /// Moves the conversation's DM call into a meeting the user started for it (docs/meetings.md).
   fn move_call(

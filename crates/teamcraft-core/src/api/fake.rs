@@ -45,6 +45,7 @@ use teamcraft_proto::{
   InviteResponse, ListCategoriesResponse, UpdateCategoryRequest, UpdateConversationRequest,
   UpdateSpaceRequest,
 };
+use teamcraft_proto::{CreateInstantMeetingRequest, MeetingKind, MeetingResponse, MeetingStatus};
 use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest};
 use teamcraft_proto::{ErrorBody, RendezvousClientMessage, RendezvousServerMessage};
 use teamcraft_proto::{
@@ -107,6 +108,8 @@ struct State {
   failing_read_positions: HashSet<ConversationId>,
   /// `PUT read-position` requests that arrived, to check that queued ones are sent once.
   read_position_writes: u64,
+  /// Instant meetings by the idempotency key they were created with.
+  instant_meetings: HashMap<IdempotencyKey, MeetingResponse>,
   /// Calls moved into a meeting (`move_call`), in order.
   call_moves: Vec<(ConversationId, MoveCallRequest)>,
   /// REST calls per user, also those that failed (tests about idle traffic).
@@ -1940,6 +1943,67 @@ impl ServerApi for FakeServerApi {
         expires_at: UnixMillis(0),
         sfu_certificate_sha256: Vec::new(),
       })
+    })
+  }
+
+  /// A meeting chat like the server's (the caller is admin, the invitees members), without a
+  /// calendar; a retry with the same key returns the same meeting.
+  async fn create_instant_meeting(
+    &self,
+    request: &CreateInstantMeetingRequest,
+  ) -> Result<MeetingResponse, ApiError> {
+    self.with(|state, me| {
+      if let Some(existing) = request
+        .maybe_idempotency_key
+        .as_ref()
+        .and_then(|key| state.instant_meetings.get(key))
+      {
+        return Ok(existing.clone());
+      }
+      let mut members: Vec<UserId> = request
+        .invitees
+        .iter()
+        .copied()
+        .filter(|user| *user != me)
+        .collect();
+      members.push(me);
+      let title = request
+        .maybe_title
+        .clone()
+        .unwrap_or_else(|| "Instant meeting".to_owned());
+      let conversation_id = state.create_conversation(
+        ConversationKind::Meeting,
+        None,
+        Some(title.clone()),
+        HistoryPolicy::Full,
+        &members,
+      );
+      if let Some(conversation) = state.conversations.get_mut(&conversation_id)
+        && let Some(entry) = conversation.members.get_mut(&me)
+      {
+        entry.0 = ChannelRole::Admin;
+      }
+      state.publish(members, &GatewayEvent::ConversationUpdate { conversation_id });
+      let meeting = MeetingResponse {
+        id: state.next_id(),
+        title,
+        maybe_description: None,
+        starts_at: UnixMillis(0),
+        ends_at: UnixMillis(0),
+        kind: MeetingKind::Instant,
+        status: MeetingStatus::Scheduled,
+        has_lobby: true,
+        organizer_user_id: me,
+        conversation_id,
+        join_url: format!("https://chat.example.com/meeting/{conversation_id}"),
+        maybe_recurrence: None,
+        attendees: Vec::new(),
+        undelivered_invitations: Vec::new(),
+      };
+      if let Some(key) = &request.maybe_idempotency_key {
+        state.instant_meetings.insert(*key, meeting.clone());
+      }
+      Ok(meeting)
     })
   }
 

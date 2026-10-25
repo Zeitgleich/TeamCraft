@@ -599,6 +599,44 @@ impl Engine {
     result
   }
 
+  /// "Add people" in the DM call of `conversation_id`: a meeting room with everybody in the call
+  /// and `added`, into which the call moves (docs/meetings.md). The same `request_key` again gets
+  /// the same room. Returns the room's chat.
+  pub(crate) async fn add_people_to_call(
+    &mut self,
+    conversation_id: &str,
+    in_call: &[String],
+    added: &[String],
+    maybe_title: Option<String>,
+    request_key: &str,
+  ) -> Result<String, TeamCraftError> {
+    let from: ConversationId = parse_id(conversation_id)?;
+    let in_call = parse_ids(in_call)?;
+    let added = parse_ids(added)?;
+    let key = teamcraft_proto::IdempotencyKey::from_hex(request_key)
+      .map_err(|_| TeamCraftError::InvalidInput("not a request key".to_owned()))?;
+    let was_running = matches!(self.client, ClientSlot::Running { .. });
+    let mut client = self.take_client().await?;
+    let result = client
+      .add_people_to_call(from, &in_call, &added, maybe_title, key)
+      .await;
+    self.client = ClientSlot::Idle(client);
+    if was_running {
+      self.start().await?;
+    }
+    self.listener.on_change();
+    Ok(result?.to_string())
+  }
+
+  /// Checks an announced move of the call before this device follows it.
+  pub(crate) async fn accept_call_move(&mut self, from: &str, to: &str) -> Result<(), TeamCraftError> {
+    let from: ConversationId = parse_id(from)?;
+    let to: ConversationId = parse_id(to)?;
+    self
+      .with_client(move |client| Box::pin(async move { client.accept_call_move(from, to).await }))
+      .await
+  }
+
   /// A fresh join token for the conversation's call, to rejoin after a lost connection.
   pub(crate) async fn call_join_token(
     &mut self,
@@ -982,6 +1020,10 @@ fn enrollment_options(device_name: String, secret: EnrollmentSecret) -> Enrollme
     argon2: Argon2Settings::default(),
     maybe_attestation: None,
   }
+}
+
+fn parse_ids<T: Id + std::str::FromStr>(texts: &[String]) -> Result<Vec<T>, TeamCraftError> {
+  texts.iter().map(|text| parse_id(text)).collect()
 }
 
 pub(crate) fn parse_id<T: Id + std::str::FromStr>(text: &str) -> Result<T, TeamCraftError> {

@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
 use teamcraft_crypto::identity::{DeviceKeyPair, VerifiedDevice};
 use teamcraft_proto::{
-  CallJoinTokenResponse, ConversationId, CreateCallJoinTokenRequest, DeviceId, GatewayEvent, MoveCallRequest,
-  UserId,
+  CallJoinTokenResponse, ConversationId, CreateCallJoinTokenRequest, CreateInstantMeetingRequest, DeviceId,
+  GatewayEvent, IdempotencyKey, MoveCallRequest, UserId,
 };
 
 use super::Client;
@@ -120,6 +120,38 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(());
     }
     Err(CoreError::CallEncryptionPending(conversation))
+  }
+
+  /// "Add people" in this user's DM or group DM call: starts a meeting room with everybody in the
+  /// call and the added people, and moves the call into it ([`Self::move_call_to_meeting`]). The
+  /// same `key` again (a retry after a lost answer) gets the same room. Returns the room's chat.
+  pub async fn add_people_to_call(
+    &mut self,
+    from: ConversationId,
+    in_call: &[UserId],
+    added: &[UserId],
+    maybe_title: Option<String>,
+    key: IdempotencyKey,
+  ) -> Result<ConversationId, CoreError> {
+    let me = self.user_id();
+    let invitees: Vec<UserId> = in_call
+      .iter()
+      .chain(added)
+      .copied()
+      .filter(|user| *user != me)
+      .collect();
+    let meeting = self
+      .api
+      .create_instant_meeting(&CreateInstantMeetingRequest {
+        maybe_title,
+        invitees,
+        maybe_idempotency_key: Some(key),
+      })
+      .await?;
+    self
+      .move_call_to_meeting(from, meeting.conversation_id, in_call, added)
+      .await?;
+    Ok(meeting.conversation_id)
   }
 
   /// Moves this user's DM or group DM call into the meeting chat `meeting` they just started for it,
