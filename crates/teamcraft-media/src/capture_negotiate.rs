@@ -26,26 +26,38 @@ pub struct OfferedMode {
   pub framerate: u32,
 }
 
-/// The best offered mode for `wanted`: closest resolution first, then closest frame rate (the
-/// higher one on a tie), then the cheapest pixel format to convert. Modes in formats we can't
-/// convert are ignored; `None` if nothing is left.
+/// The best offered mode for the call's send target `wanted`. What a camera delivers is scaled to
+/// the target before encoding, so more pixels than needed only cost CPU: the smallest mode that
+/// covers the target wins; if none does, the largest below it. The same for the frame rate (the
+/// lowest rate at or above the target, else the highest below), then the cheapest pixel format.
+/// Modes in formats we can't convert are ignored; `None` if nothing is left.
 pub fn choose_mode(offered: &[OfferedMode], wanted: CaptureFormat) -> Option<OfferedMode> {
-  let wanted_width = i64::from(wanted.resolution.width);
-  let wanted_height = i64::from(wanted.resolution.height);
-  let wanted_rate = i64::from(wanted.framerate);
+  let (wanted_width, wanted_height) = (
+    u64::from(wanted.resolution.width),
+    u64::from(wanted.resolution.height),
+  );
+  let wanted_rate = u64::from(wanted.framerate);
   offered
     .iter()
     .filter_map(|mode| {
       let rank = PIXEL_FORMAT_PREFERENCE
         .iter()
         .position(|format| *format == mode.pixel_format)?;
-      let resolution_distance =
-        (i64::from(mode.width) - wanted_width).pow(2) + (i64::from(mode.height) - wanted_height).pow(2);
-      let rate = i64::from(mode.framerate);
-      Some((
-        (resolution_distance, (rate - wanted_rate).abs(), -rate, rank),
-        *mode,
-      ))
+      let covers_size = u64::from(mode.width) >= wanted_width && u64::from(mode.height) >= wanted_height;
+      let area = u64::from(mode.width) * u64::from(mode.height);
+      // Covering modes by ascending area, then the others by descending area.
+      let size_key = if covers_size {
+        (0, area)
+      } else {
+        (1, u64::MAX - area)
+      };
+      let rate = u64::from(mode.framerate);
+      let rate_key = if rate >= wanted_rate {
+        (0, rate)
+      } else {
+        (1, u64::MAX - rate)
+      };
+      Some(((size_key, rate_key, rank), *mode))
     })
     .min_by_key(|(key, _)| *key)
     .map(|(_, mode)| mode)

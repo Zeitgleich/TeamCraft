@@ -164,6 +164,27 @@ impl VideoResolution {
   }
 }
 
+/// `source` shrunk to fit inside `limit`, keeping its aspect ratio and even sides (I420); never
+/// enlarged. A camera may capture at 4K, but what is sent stays within the call's send target.
+pub fn fit_within(source: VideoResolution, limit: VideoResolution) -> VideoResolution {
+  if source.width <= limit.width && source.height <= limit.height {
+    return source;
+  }
+  let (width, height) = (u32::from(source.width), u32::from(source.height));
+  let (limit_width, limit_height) = (u32::from(limit.width), u32::from(limit.height));
+  // The tighter of the two ratios decides: compare width*limit_height with height*limit_width.
+  let (fitted_width, fitted_height) = if width * limit_height > height * limit_width {
+    (limit_width, (height * limit_width / width).max(2))
+  } else {
+    ((width * limit_height / height).max(2), limit_height)
+  };
+  VideoResolution {
+    // Sides are at most the limit's, so they fit a u16.
+    width: u16::try_from(fitted_width & !1).unwrap_or(limit.width),
+    height: u16::try_from(fitted_height & !1).unwrap_or(limit.height),
+  }
+}
+
 /// Simulcast layers for a source resolution: up to three layers at 1/4, 1/2 and full size, with
 /// bitrates scaled from `full_bitrate_bps` by pixel count. Layers below 160 px width are skipped.
 pub fn simulcast_layers(
@@ -244,6 +265,17 @@ impl std::fmt::Debug for EncodedVideoFrame {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn fit_within_shrinks_to_the_limit_and_never_enlarges() {
+    let res = |width, height| VideoResolution { width, height };
+    let hd = res(1280, 720);
+    assert_eq!(fit_within(res(3840, 2160), hd), hd);
+    assert_eq!(fit_within(res(1920, 1080), hd), hd);
+    assert_eq!(fit_within(res(1280, 960), hd), res(960, 720));
+    assert_eq!(fit_within(res(640, 480), hd), res(640, 480));
+    assert_eq!(fit_within(res(720, 1280), hd), res(404, 720));
+  }
+
   use super::*;
 
   const HD: VideoResolution = VideoResolution {

@@ -24,7 +24,7 @@ use teamcraft_media::effects::{
   TractSegmenter,
 };
 use teamcraft_media::system_audio::SystemAudioCapture;
-use teamcraft_media::video::{VideoResolution, simulcast_layers};
+use teamcraft_media::video::{VideoResolution, fit_within, simulcast_layers};
 use teamcraft_media::video_capture::{CameraInfo, CaptureFormat, VideoCapture};
 use teamcraft_media::video_codec::OpenH264Decoder;
 use teamcraft_media::video_jpeg::JpegTranscoder;
@@ -195,7 +195,13 @@ pub(super) fn open_system_audio() -> Box<dyn SystemAudioCapture> {
 
 /// Three simulcast layers for a camera.
 pub(super) fn camera_layers(format: CaptureFormat) -> Vec<VideoLayerInfo> {
-  simulcast_layers(format.resolution, format.framerate, CAMERA_BITRATE_BPS, 3)
+  // The camera may capture more (4K, 60 fps); what is sent stays within the camera preset.
+  simulcast_layers(
+    fit_within(format.resolution, CAMERA_FORMAT.resolution),
+    format.framerate.min(CAMERA_FORMAT.framerate),
+    CAMERA_BITRATE_BPS,
+    3,
+  )
 }
 
 /// One layer for a screen (no simulcast: text must stay readable).
@@ -449,6 +455,23 @@ mod tests {
     assert!(camera_failure_wire("no camera available".into()).starts_with("call_camera_missing: "));
     assert!(camera_failure_wire("capture: device busy".into()).starts_with("call_camera_in_use: "));
     assert_eq!(camera_failure_wire("the call ended".into()), "the call ended");
+  }
+
+  #[test]
+  fn a_4k_camera_is_sent_as_720p_within_the_bitrate_cap() {
+    let capture = CaptureFormat {
+      resolution: VideoResolution {
+        width: 3840,
+        height: 2160,
+      },
+      framerate: 60,
+    };
+    let layers = camera_layers(capture);
+    assert_eq!(layers.len(), 3);
+    let top = layers.last().unwrap();
+    assert_eq!((top.width, top.height, top.max_framerate), (1280, 720, 30));
+    assert!(layers.iter().map(|layer| layer.max_bitrate_bps).sum::<u32>() <= CAMERA_BITRATE_BPS * 2);
+    assert_eq!(top.max_bitrate_bps, CAMERA_BITRATE_BPS);
   }
 
   #[test]

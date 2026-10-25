@@ -24,7 +24,7 @@ use super::{
   media_access, window,
 };
 use crate::call_video::ReceivedVideoFrame;
-use crate::video::{VideoResolution, simulcast_layers};
+use crate::video::{VideoResolution, fit_within, simulcast_layers};
 use crate::web_api::{Canvas2d, EncodedVideoChunk, VideoDecoder, VideoEncoder, VideoFrame as WebVideoFrame};
 
 /// WebCodecs codec string: H.264 Constrained Baseline, level 4.0 (up to 1080p).
@@ -90,6 +90,9 @@ pub(super) struct TrackPlan {
   pub framerate: u8,
   pub bitrate_bps: u32,
   pub max_layers: u8,
+  /// What is sent never exceeds this size, whatever the camera delivers (4K cameras); the
+  /// encoders scale. `None`: the source size.
+  pub maybe_max_resolution: Option<VideoResolution>,
   #[cfg(feature = "effects")]
   pub maybe_effects: Option<crate::effects::EffectsPipeline>,
 }
@@ -117,6 +120,9 @@ impl TrackSender {
         .and_then(|height| u16::try_from(height & !1).ok())
         .unwrap_or(720),
     };
+    let resolution = plan
+      .maybe_max_resolution
+      .map_or(resolution, |limit| fit_within(resolution, limit));
     let video = play_hidden(&stream).await?;
     let infos = simulcast_layers(resolution, plan.framerate, plan.bitrate_bps, plan.max_layers);
     let layers = infos
@@ -402,6 +408,10 @@ pub(super) fn camera_plan() -> TrackPlan {
     framerate: CAMERA_FRAMERATE,
     bitrate_bps: CAMERA_BITRATE_BPS,
     max_layers: 3,
+    maybe_max_resolution: Some(VideoResolution {
+      width: CAMERA_WIDTH as u16,
+      height: CAMERA_HEIGHT as u16,
+    }),
     #[cfg(feature = "effects")]
     maybe_effects: None,
   }
@@ -414,6 +424,7 @@ pub(super) fn screen_plan() -> TrackPlan {
     framerate: SCREEN_FRAMERATE,
     bitrate_bps: SCREEN_BITRATE_BPS,
     max_layers: 1,
+    maybe_max_resolution: None,
     #[cfg(feature = "effects")]
     maybe_effects: None,
   }
