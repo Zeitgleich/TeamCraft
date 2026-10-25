@@ -57,6 +57,7 @@ async fn a_large_file_goes_up_one_part_at_a_time() {
         path: path.to_string_lossy().into_owned(),
       },
       maybe_thumbnail: None,
+      maybe_duration_ms: None,
     }],
   });
   ui.drain_commands();

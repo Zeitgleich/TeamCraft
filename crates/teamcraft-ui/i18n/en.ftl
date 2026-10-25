@@ -2385,6 +2385,8 @@ lightbox-details-sent = Sent
 lightbox-thumbnails = Files in this view
 lightbox-thumbnail = Show { $name }
 media-open = Open { $name }
+video-play = Play { $name }
+video-expand = Open larger
 
 ## Failed actions (an error toast) and the panic overlay
 

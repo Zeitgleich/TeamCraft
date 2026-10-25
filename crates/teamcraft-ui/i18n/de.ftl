@@ -2385,6 +2385,8 @@ lightbox-details-sent = Gesendet
 lightbox-thumbnails = Dateien in dieser Ansicht
 lightbox-thumbnail = { $name } anzeigen
 media-open = { $name } öffnen
+video-play = { $name } abspielen
+video-expand = Größer anzeigen
 
 ## Failed actions (an error toast) and the panic overlay
 

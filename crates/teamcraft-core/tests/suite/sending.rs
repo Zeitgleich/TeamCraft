@@ -184,6 +184,7 @@ fn file(name: &str, bytes: &[u8]) -> OutgoingFile {
       bytes: bytes.to_vec(),
     },
     maybe_thumbnail: None,
+    maybe_duration_ms: None,
   }
 }
 

@@ -415,6 +415,14 @@ in the page; "open in a new window" opens a blank window of the page itself (`ab
 window the desktop app allows) that shows the same `blob:` URL. Neither creates a URL the server or
 anyone else could load.
 
+**Videos.** The sender's browser (the core has no video decoder) takes the poster frame, about a second in,
+and the length from the file itself through a `blob:` URL it streams from, so even a large video is not read
+into memory; the JPEG goes in as the thumbnail and the length as `duration_ms` of the attachment's details in
+the encrypted message (optional; older clients ignore it). The message shows the poster with the length as a
+badge. A click plays the video in the row (one at a time, paused when scrolled out of view) when it is at most
+64 MiB, as the player gets the whole decrypted file as a `blob:` (`MAX_INLINE_VIDEO_BYTES`); bigger videos
+open in the lightbox. The desktop app's CSP allows `media-src 'self' blob:` for this, as the web client's does.
+
 An attachment's file is untrusted content from another member. Only images and videos get a `blob:`
 of their own media type; everything else is opaque bytes. SVG is a document that can carry scripts,
 and a `blob:` URL has the page's origin, so an SVG is never shown as itself: the page decodes it in an

@@ -47,8 +47,7 @@ use teamcraft_media::system_audio::SystemAudioCapture;
 use teamcraft_media::video_pipeline::{VideoSendConfig, preferred_encoders};
 use teamcraft_proto::{
   AudioCodec, ConversationId, DeviceId, GatewayEvent, MediaCapabilities, MediaStreamId, ScreenContentMode,
-  VideoCodec,
-  VideoTrackKind,
+  VideoCodec, VideoTrackKind,
 };
 use tokio::sync::{mpsc, oneshot};
 

@@ -382,6 +382,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .clone()
         .filter(|thumbnail| thumbnail.as_slice().len() <= MAX_APP_THUMBNAIL_BYTES),
       maybe_dimensions: file.maybe_dimensions,
+      maybe_duration_ms: file.maybe_duration_ms,
     })
   }
 }

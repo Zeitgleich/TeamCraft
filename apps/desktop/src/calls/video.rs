@@ -203,7 +203,10 @@ pub(super) fn camera_layers(format: CaptureFormat) -> Vec<VideoLayerInfo> {
 /// The largest picture a screen share of `mode` asks the capture for (#530).
 fn screen_format(mode: ScreenContentMode) -> CaptureFormat {
   let (resolution, framerate) = screen_limits(mode);
-  CaptureFormat { resolution, framerate }
+  CaptureFormat {
+    resolution,
+    framerate,
+  }
 }
 
 /// Two layers for a screen: the picture within the mode's limits, and a half-size one for weak
@@ -480,9 +483,15 @@ mod tests {
   #[test]
   fn cameras_get_three_layers_and_screens_two() {
     assert_eq!(camera_layers(CAMERA_FORMAT).len(), 3);
-    let screen = screen_layers(screen_format(ScreenContentMode::Detail), ScreenContentMode::Detail);
+    let screen = screen_layers(
+      screen_format(ScreenContentMode::Detail),
+      ScreenContentMode::Detail,
+    );
     assert_eq!(screen.len(), 2);
-    assert_eq!((screen[1].width, screen[1].height, screen[1].max_framerate), (2560, 1440, 30));
+    assert_eq!(
+      (screen[1].width, screen[1].height, screen[1].max_framerate),
+      (2560, 1440, 30)
+    );
     assert_eq!((screen[0].width, screen[0].height), (1280, 720));
   }
 

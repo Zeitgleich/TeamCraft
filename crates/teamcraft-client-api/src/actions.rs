@@ -58,6 +58,9 @@ pub struct OutgoingFile {
   /// the platform can: the browser draws SVG, AVIF and HEIC. The core's own thumbnail wins.
   #[serde(rename = "thumbnail", default, skip_serializing_if = "Option::is_none")]
   pub maybe_thumbnail: Option<Vec<u8>>,
+  /// How long a video plays, read by the app from the file (the core has no video decoder).
+  #[serde(rename = "duration_ms", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_duration_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,6 +202,9 @@ pub struct FileInfo {
   /// Width and height of a picture, from the sender; reserves its space before anything loads.
   #[serde(default)]
   pub maybe_dimensions: Option<PixelSize>,
+  /// How long a video plays, from the sender.
+  #[serde(default)]
+  pub maybe_duration_ms: Option<u64>,
 }
 
 /// A size in pixels.

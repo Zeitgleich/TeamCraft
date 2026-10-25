@@ -65,6 +65,9 @@ pub struct PendingFile {
   /// The picture's upright size, so the pending message reserves the space the sent one takes.
   #[serde(rename = "dimensions", default, skip_serializing_if = "Option::is_none")]
   pub maybe_dimensions: Option<ImageDimensions>,
+  /// The video's length, from the sender's app; it goes into the attachment's details.
+  #[serde(rename = "duration_ms", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_duration_ms: Option<u64>,
   /// A large file's upload in parts once announced: a restart continues at its next part.
   #[serde(rename = "parts", default, skip_serializing_if = "Option::is_none")]
   pub maybe_parts: Option<PartsUpload>,
@@ -298,6 +301,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           retry: UploadRetry::default(),
           maybe_thumbnail: None,
           maybe_dimensions: None,
+          maybe_duration_ms: None,
         })
         .collect(),
     };
@@ -634,6 +638,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       size_bytes: content.len() as u64,
       maybe_thumbnail: maybe_thumbnail.map(Base64Bytes::new),
       maybe_dimensions,
+      maybe_duration_ms: file.maybe_duration_ms,
     };
     Ok((attachment, request, progress))
   }
@@ -1464,6 +1469,7 @@ mod tests {
         retry: UploadRetry::default(),
         maybe_thumbnail: None,
         maybe_dimensions: None,
+        maybe_duration_ms: None,
       }],
     };
     save_pending_upload(&store, &upload).unwrap();
@@ -1509,6 +1515,24 @@ mod tests {
     }
 
     #[test]
+    fn a_video_duration_is_stored_and_older_files_have_none() {
+      let mut file: PendingFile = serde_json::from_value(serde_json::json!({
+        "file_name": "a.mp4",
+        "media_type": "video/mp4",
+        "source": { "kind": "bytes", "bytes": "YQ==" },
+        "size_bytes": 1,
+      }))
+      .unwrap();
+      assert_eq!(file.maybe_duration_ms, None, "stored before the field existed");
+      assert!(serde_json::to_value(&file).unwrap().get("duration_ms").is_none());
+      file.maybe_duration_ms = Some(12_500);
+      let json = serde_json::to_value(&file).unwrap();
+      assert_eq!(json["duration_ms"], 12_500);
+      let again: PendingFile = serde_json::from_value(json).unwrap();
+      assert_eq!(again.maybe_duration_ms, Some(12_500));
+    }
+
+    #[test]
     fn a_fresh_retry_is_not_stored() {
       let file = PendingFile {
         file_name: "a.txt".into(),
@@ -1524,6 +1548,7 @@ mod tests {
         retry: UploadRetry::default(),
         maybe_thumbnail: None,
         maybe_dimensions: None,
+        maybe_duration_ms: None,
       };
       let json = serde_json::to_value(&file).unwrap();
       assert!(json.get("retry").is_none() && json.get("slot").is_none());

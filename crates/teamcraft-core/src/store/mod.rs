@@ -366,6 +366,9 @@ pub struct AttachmentRef {
   /// ignore it; files from them have none.
   #[serde(rename = "dimensions", default, skip_serializing_if = "Option::is_none")]
   pub maybe_dimensions: Option<ImageDimensions>,
+  /// How long a video plays, read by the sender's app; older clients ignore it.
+  #[serde(rename = "duration_ms", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_duration_ms: Option<u64>,
 }
 
 /// The size of a picture in pixels.

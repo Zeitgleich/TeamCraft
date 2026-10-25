@@ -235,6 +235,7 @@ fn with_file(conversation: ConversationId, name: &str, source: FileSource) -> Ou
       media_type: "application/octet-stream".into(),
       source,
       maybe_thumbnail: None,
+      maybe_duration_ms: None,
     }],
   }
 }

@@ -67,6 +67,8 @@ struct PendingFile {
   maybe_preview_url: Option<String>,
   /// A thumbnail the browser drew for a format the core can't decode (`OutgoingFile`).
   maybe_thumbnail: Option<Vec<u8>>,
+  /// How long a video plays, read by the browser along with its poster frame.
+  maybe_duration_ms: Option<u64>,
 }
 
 /// A small file is read into memory at once; a large one stays the browser's `File` until it is sent
@@ -410,8 +412,15 @@ pub fn Composer(
           media_type: file.media_type,
           source: FileSource::Bytes { bytes },
           maybe_thumbnail: file.maybe_thumbnail,
+          maybe_duration_ms: file.maybe_duration_ms,
         }),
-        FileContent::Large(picked) => large.push((file.name, file.media_type, picked, file.maybe_thumbnail)),
+        FileContent::Large(picked) => large.push((
+          file.name,
+          file.media_type,
+          picked,
+          file.maybe_thumbnail,
+          file.maybe_duration_ms,
+        )),
       }
     }
     let body = text;
@@ -439,13 +448,14 @@ pub fn Composer(
     } else {
       // Large files are handed to the core first (staged or registered); the message follows.
       leptos::task::spawn_local(async move {
-        for (file_name, media_type, picked, maybe_thumbnail) in large {
+        for (file_name, media_type, picked, maybe_thumbnail, maybe_duration_ms) in large {
           match large_files::source_of(&picked).await {
             Ok(source) => message.files.push(OutgoingFile {
               file_name,
               media_type,
               source,
               maybe_thumbnail,
+              maybe_duration_ms,
             }),
             Err(error) => {
               tracing::warn!(%error, "a large file could not be handed to the core");
@@ -811,7 +821,15 @@ pub fn Composer(
         };
         match read {
           Ok(maybe_bytes) => {
+            // A video's poster frame and length, read by the browser from the file itself (never
+            // read into memory whole): the message shows them before the video is played.
+            let maybe_poster = match media_type.starts_with("video/") {
+              true => raster::video_poster(&file, APP_THUMBNAIL_SIDE).await,
+              false => None,
+            };
+            let maybe_duration_ms = maybe_poster.as_ref().and_then(|poster| poster.maybe_duration_ms);
             let maybe_thumbnail = match (&maybe_bytes, wants_thumbnail) {
+              _ if maybe_poster.is_some() => maybe_poster.map(|poster| poster.jpeg),
               (Some(bytes), true) => raster::app_thumbnail(bytes, &media_type, APP_THUMBNAIL_SIDE).await,
               _ => None,
             };
@@ -826,6 +844,7 @@ pub fn Composer(
               content,
               maybe_preview_url,
               maybe_thumbnail,
+              maybe_duration_ms,
             };
             if let Some(PendingFile {
               maybe_preview_url: Some(url),
@@ -1456,6 +1475,7 @@ mod tests {
       content: FileContent::Read(b"x".to_vec()),
       maybe_preview_url: None,
       maybe_thumbnail: None,
+      maybe_duration_ms: None,
     }
   }
 }

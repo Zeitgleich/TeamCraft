@@ -1357,6 +1357,7 @@ mod tests {
       maybe_sender: None,
       maybe_sent_at: None,
       maybe_dimensions: None,
+      maybe_duration_ms: None,
     }
   }
 
