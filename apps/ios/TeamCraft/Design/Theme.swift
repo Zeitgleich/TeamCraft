@@ -82,18 +82,18 @@ struct AvatarView: View {
   }
 }
 
-/// An unread or mention counter.
+/// An unread or mention counter: red for mentions, quiet for plain unread.
 struct CountBadge: View {
   let count: UInt32
-  var isMention = false
+  var tone: BadgeTone = .mention
 
   var body: some View {
     Text(count > 99 ? "99+" : "\(count)")
       .font(.caption2.weight(.bold))
-      .foregroundStyle(.white)
+      .foregroundStyle(tone == .mention ? Color.white : Theme.textMuted)
       .padding(.horizontal, 7)
       .padding(.vertical, 2)
-      .background(isMention ? Theme.badge : Theme.accent)
+      .background(tone == .mention ? Theme.badge : Color(.tertiarySystemFill))
       .clipShape(Capsule())
   }
 }

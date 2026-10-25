@@ -33,6 +33,7 @@ pub mod call_screen;
 pub mod call_video;
 pub mod calls_unavailable;
 pub mod calls_view;
+pub mod channel_glyph;
 pub mod channel_preview;
 pub mod channel_view;
 pub mod compact_back;

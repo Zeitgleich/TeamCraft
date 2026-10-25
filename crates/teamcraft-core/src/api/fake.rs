@@ -214,6 +214,13 @@ struct State {
   removal_requests: u64,
   /// The next proposal of these users fails this way ([`FakeServer::cut_next_proposal`]).
   proposal_cuts: HashMap<UserId, NetworkCut>,
+  /// The next application message of these users fails this way
+  /// ([`FakeServer::cut_next_application`]).
+  application_cuts: HashMap<UserId, NetworkCut>,
+  /// The next application message of these users is accepted but published only on
+  /// [`FakeServer::release_held_messages`].
+  holding_application_of: HashSet<UserId>,
+  held_applications: Vec<(UserId, ConversationId, PostMlsMessageRequest)>,
   /// Members refused their groups' queues ([`FakeServer::refuse_queue_to`]).
   queue_refused_to: HashSet<UserId>,
   /// The next identity key lookup of these users fails with a network error.
@@ -611,6 +618,40 @@ impl FakeServer {
   /// The user's next MLS proposal (a signed change, a rejoin request) fails as `cut` says.
   pub fn cut_next_proposal(&self, user: UserId, cut: NetworkCut) {
     self.lock().proposal_cuts.insert(user, cut);
+  }
+
+  /// The user's next MLS application message (content keys) fails as `cut` says.
+  pub fn cut_next_application(&self, user: UserId, cut: NetworkCut) {
+    self.lock().application_cuts.insert(user, cut);
+  }
+
+  /// The user's next MLS application message is accepted but reaches the group's queue only on
+  /// [`Self::release_held_messages`]: two members sending at once, each before seeing the other's.
+  pub fn hold_next_application(&self, user: UserId) {
+    self.lock().holding_application_of.insert(user);
+  }
+
+  /// Publishes the held application messages, after everything posted meanwhile.
+  pub fn release_held_messages(&self) {
+    let held = std::mem::take(&mut self.lock().held_applications);
+    for (user, conversation, request) in held {
+      let mut state = self.lock();
+      let message = MlsMessageResponse {
+        id: state.next_id(),
+        conversation_id: conversation,
+        epoch: request.epoch,
+        kind: request.kind.clone(),
+        sender_device_id: request.device_id,
+        maybe_recipient_device_id: None,
+        payload: request.payload.clone(),
+      };
+      let Ok(entry) = state.actor_conversation_mut(conversation, user) else {
+        continue;
+      };
+      entry.mls.push(message.clone());
+      let members: Vec<UserId> = entry.members.keys().copied().collect();
+      state.publish(members, &GatewayEvent::MlsMessage { message });
+    }
   }
 
   /// From now on the server refuses `user` the queues of their groups (`403`) while still listing
@@ -1417,6 +1458,10 @@ impl ServerApi for FakeServerApi {
         &[me],
       );
       let entry = state.conversation_mut(id)?;
+      // The creator administers the channel.
+      if let Some((role, _)) = entry.members.get_mut(&me) {
+        *role = ChannelRole::Admin;
+      }
       entry.response.visibility = request.visibility.clone();
       entry.response.maybe_topic = request.maybe_topic.clone();
       entry.response.maybe_category_id = request.maybe_category_id;
@@ -1556,6 +1601,68 @@ impl ServerApi for FakeServerApi {
     request: &UpdateConversationMemberRequest,
   ) -> Result<(), ApiError> {
     self.with(|state, me| {
+      let is_instance_admin = state.admins.contains(&me);
+      if let Some(role) = &request.maybe_role {
+        // Like the server: channel admins and workspace admins manage roles; guests stay members;
+        // a channel keeps an admin. (The clients also never change their own role.)
+        if user == me {
+          return Err(ApiError::status(
+            403,
+            ErrorCode::Forbidden,
+            "people can't change their own role",
+          ));
+        }
+        let is_guest = state.user(user)?.kind == UserKind::Guest
+          || state
+            .conversation(conversation)?
+            .response
+            .maybe_space_id
+            .and_then(|space| state.space_roles.get(&(space, user)))
+            .is_some_and(|role| *role == SpaceRole::Guest);
+        if is_guest && *role != ChannelRole::Member {
+          return Err(ApiError::status(
+            400,
+            ErrorCode::InvalidRequest,
+            "guests can't be channel admins or moderators",
+          ));
+        }
+        let entry = state.actor_conversation_mut(conversation, me)?;
+        let is_channel_admin = entry
+          .members
+          .get(&me)
+          .is_some_and(|(own, _)| *own == ChannelRole::Admin);
+        if !is_channel_admin && !is_instance_admin {
+          return Err(ApiError::status(
+            403,
+            ErrorCode::Forbidden,
+            "missing permission manage_channel_roles",
+          ));
+        }
+        if matches!(role, ChannelRole::Unknown(_)) {
+          return Err(ApiError::status(
+            400,
+            ErrorCode::InvalidRequest,
+            "unknown channel role",
+          ));
+        }
+        let admins = entry
+          .members
+          .values()
+          .filter(|(held, _)| *held == ChannelRole::Admin)
+          .count();
+        let Some((held, _)) = entry.members.get_mut(&user) else {
+          return Err(ApiError::status(404, ErrorCode::UserNotFound, "not a member"));
+        };
+        if *held == ChannelRole::Admin && *role != ChannelRole::Admin && admins <= 1 {
+          return Err(ApiError::status(
+            409,
+            ErrorCode::Conflict,
+            "a channel needs at least one admin",
+          ));
+        }
+        *held = role.clone();
+        return Ok(());
+      }
       let entry = state.member_conversation_mut(conversation, me)?;
       if let Some(is_favorite) = request.maybe_is_favorite {
         if user != me {
@@ -1869,10 +1976,28 @@ impl ServerApi for FakeServerApi {
     conversation: ConversationId,
     request: &PostMlsMessageRequest,
   ) -> Result<MlsMessageResponse, ApiError> {
-    let maybe_cut = if request.kind == MlsMessageKind::Proposal {
-      self.server.lock().proposal_cuts.remove(&self.user)
-    } else {
-      None
+    let maybe_cut = match request.kind {
+      MlsMessageKind::Proposal => self.server.lock().proposal_cuts.remove(&self.user),
+      MlsMessageKind::Application => {
+        let mut state = self.server.lock();
+        if state.holding_application_of.remove(&self.user) {
+          let id = state.next_id();
+          state
+            .held_applications
+            .push((self.user, conversation, request.clone()));
+          return Ok(MlsMessageResponse {
+            id,
+            conversation_id: conversation,
+            epoch: request.epoch,
+            kind: request.kind.clone(),
+            sender_device_id: request.device_id,
+            maybe_recipient_device_id: None,
+            payload: request.payload.clone(),
+          });
+        }
+        state.application_cuts.remove(&self.user)
+      },
+      _ => None,
     };
     match maybe_cut {
       None => self.post_mls_message_now(conversation, request),
@@ -3449,6 +3574,7 @@ impl State {
       contains_guests: false,
       maybe_my_membership: None,
       participants: Vec::new(),
+      maybe_image: None,
     };
     let members = members
       .iter()

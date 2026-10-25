@@ -7,13 +7,14 @@
 
 use std::collections::BTreeSet;
 
-use teamcraft_crypto::mls::{ConversationGroup, MlsError};
+use teamcraft_crypto::mls::{ContentKeyBundle, ConversationGroup, GroupMember, MlsError};
 use teamcraft_proto::{
-  Base64Bytes, ConversationId, DeviceId, Id, ListMlsMessagesQuery, MessageResponse, MlsMessageKind,
-  PostMlsCommitRequest, PostMlsMessageRequest, PutMlsGroupInfoRequest, Snowflake, UserId,
+  Base64Bytes, ConversationId, ConversationKind, DeviceId, Id, ListMlsMessagesQuery, MessageResponse,
+  MlsMessageKind, PostMlsCommitRequest, PostMlsMessageRequest, PutMlsGroupInfoRequest, Snowflake, UserId,
 };
 
 use super::Client;
+use super::workspace::{PendingChange, PendingOutcome};
 use crate::api::ServerApi;
 use crate::convert;
 use crate::error::CoreError;
@@ -94,7 +95,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .map(|member| member.user.id)
       .chain([me])
       .collect();
-    let directory = self.trusted_directory(users).await?;
+    let directory = self.trusted_directory(users.iter().copied()).await?;
     // A single device is a user joining, not a further device.
     if !self.has_other_devices(&directory)? {
       return Ok(MemberDeviceJoin::NotAMember);
@@ -143,6 +144,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         return Ok(MemberDeviceJoin::Waiting);
       },
     };
+    if self.is_direct(conversation)? && !holds_everybody(&group, &users)? {
+      // A DM's group that doesn't hold all its participants yet may be a founder's group of one
+      // that still loses the founding race (e2ee.md §4.6): the members add this device instead.
+      group.delete(&self.provider)?;
+      self.request_device_addition(conversation).await?;
+      return Ok(MemberDeviceJoin::Waiting);
+    }
     // The epoch the signed group information was for; the group is one past it.
     let epoch = group.epoch().saturating_sub(1);
     // Kept in memory only until the server accepts: a crash before leaves nothing behind.
@@ -160,6 +168,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     match self.api.post_mls_commit(conversation, &request).await {
       Ok(response) => {
+        // Waiting first: a crash right after must not leave the device writing with the key
+        // bag's current key.
+        self.forget_key_history(conversation)?;
+        self.wait_for_current_key(conversation)?;
         self.persist_group(conversation)?;
         self.advance_cursor(conversation, &response.commit)?;
         self.remember_member_keys(
@@ -187,6 +199,94 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         Err(error.into())
       },
     }
+  }
+
+  /// After joining by external commit or from a welcome: the key bag's current key may be from
+  /// before a key switch the user's other devices hadn't uploaded yet, one a removed member knows
+  /// (#178). It stays for reading; new messages wait until a member sends the current key or the
+  /// next epoch key switch, and the conversation shows that this device waits.
+  pub(crate) fn wait_for_current_key(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    records::put_json(
+      &self.store,
+      Table::AppliedChanges,
+      &current_key_wait_key(conversation),
+      &true,
+    )?;
+    let ring = self.account.key_bag.ring_mut(convert::conversation(conversation));
+    if let Some(current) = ring.current().map(|key| key.id()) {
+      ring.unset_current(current);
+    }
+    self.persist_keys()
+  }
+
+  /// Queues handing the current key to `added`, a further device of a member that this device
+  /// didn't add: ranked among the group's devices like an addition, so normally one member sends.
+  pub(crate) fn queue_current_key_share(
+    &mut self,
+    conversation: ConversationId,
+    added: GroupMember,
+  ) -> Result<(), CoreError> {
+    let device = convert::device_from_crypto(added.device_id)?;
+    if device == self.account.device_id {
+      return Ok(());
+    }
+    let not_before_ms = self
+      .now_ms()
+      .saturating_add(self.commit_delay_ms(conversation, device)?);
+    self.queue_pending(PendingChange::ShareCurrentKey {
+      conversation_id: conversation,
+      device_id: device,
+      not_before_ms,
+    })
+  }
+
+  /// A member sent a current key, or the group switched keys: no hand-over is needed any more.
+  pub(crate) fn drop_current_key_shares(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    let prefix = PendingChange::current_key_share_prefix(conversation);
+    for (key, _) in self.store.list(Table::PendingChanges)? {
+      if key.starts_with(&prefix) {
+        self.store.delete(Table::PendingChanges, &key)?;
+      }
+    }
+    Ok(())
+  }
+
+  /// Sends the current key to the group for a further device once this device's turn came, unless
+  /// another member did or the device left.
+  pub(crate) async fn apply_current_key_share(
+    &mut self,
+    change: &PendingChange,
+  ) -> Result<PendingOutcome, CoreError> {
+    let PendingChange::ShareCurrentKey {
+      conversation_id,
+      device_id,
+      not_before_ms,
+    } = change
+    else {
+      return Ok(PendingOutcome::Done);
+    };
+    let conversation = *conversation_id;
+    if self.now_ms() < *not_before_ms {
+      return Ok(PendingOutcome::Later(change.clone()));
+    }
+    // Another member's key may have arrived meanwhile, also earlier in this round.
+    self.sync_mls(conversation).await?;
+    let key = PendingChange::current_key_share_key(conversation, *device_id);
+    if self.stored_pending(&key)?.is_none()
+      || !self.has_group(conversation)?
+      || !self.group_device_ids(conversation)?.contains(device_id)
+    {
+      return Ok(PendingOutcome::Done);
+    }
+    // Never a key only the key bag knows: the waiting device would take it (#178).
+    let Some(handed) = self.hand_over_key(conversation, false)? else {
+      return Ok(PendingOutcome::Done);
+    };
+    let bundle = ContentKeyBundle::epoch_key(convert::conversation(conversation), handed.key().duplicate());
+    self.send_bundle(conversation, &bundle, None).await?;
+    self.adopt_handed_over_key(conversation, &handed)?;
+    tracing::info!(conversation_id = %conversation, device_id = %device_id, "sent the current content key for a further device");
+    Ok(PendingOutcome::Done)
   }
 
   /// Records the signing keys of the devices that sent messages this device couldn't verify yet,
@@ -495,6 +595,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
+  /// Whether the conversation is a DM or group DM, by what this device has cached.
+  fn is_direct(&self, conversation: ConversationId) -> Result<bool, CoreError> {
+    Ok(
+      self
+        .cached_conversations()?
+        .get(&conversation)
+        .is_some_and(|response| matches!(response.kind, ConversationKind::Dm | ConversationKind::Group)),
+    )
+  }
+
   /// Whether this device's key bag came over the link from another device of the user (not from
   /// the server, as on recovery).
   fn has_key_bag_from_link(&self) -> Result<bool, CoreError> {
@@ -514,8 +624,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 }
 
+/// Whether every user in `users` has a device in the group.
+fn holds_everybody(group: &ConversationGroup, users: &BTreeSet<UserId>) -> Result<bool, CoreError> {
+  let mut in_group = BTreeSet::new();
+  for member in group.members()? {
+    in_group.insert(convert::user_from_crypto(member.user_id)?);
+  }
+  Ok(users.is_subset(&in_group))
+}
+
 /// Whether this device asked to be let into (or added back to) the conversation's group and no
-/// welcome or own join came yet. Read by the UI from the store.
+/// welcome or own join came yet, or joined and waits for a member's current key. Read by the UI
+/// from the store.
 pub fn is_waiting_for_device(
   store: &impl LocalStore,
   conversation: ConversationId,
@@ -526,8 +646,27 @@ pub fn is_waiting_for_device(
       .is_some()
       || store
         .get(Table::AppliedChanges, &super::groups::rejoin_key(conversation))?
-        .is_some(),
+        .is_some()
+      || is_waiting_for_current_key(store, conversation)?,
   )
+}
+
+/// Whether this device joined (by external commit or from a welcome) and no current key came
+/// yet (#178).
+pub(crate) fn is_waiting_for_current_key(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+) -> Result<bool, CoreError> {
+  Ok(
+    store
+      .get(Table::AppliedChanges, &current_key_wait_key(conversation))?
+      .is_some(),
+  )
+}
+
+/// Where this device notes that it waits for a member's current key.
+pub(crate) fn current_key_wait_key(conversation: ConversationId) -> String {
+  format!("current_key_wait/{conversation}")
 }
 
 /// Whether `at_ms` lies less than `window_ms` before `now_ms`. A time ahead of now (the clock was

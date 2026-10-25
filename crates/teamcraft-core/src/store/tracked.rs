@@ -174,6 +174,10 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     self.note(Change::Conversation(conversation));
     Ok(())
   }
+
+  fn purge_freed(&self) -> Result<(), StoreError> {
+    self.inner.purge_freed()
+  }
 }
 
 /// What a write to `table` under `key` may change in the snapshot.

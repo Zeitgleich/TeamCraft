@@ -5,6 +5,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
 use crate::components::avatar::PresenceDot;
+use crate::components::channel_glyph::ChannelGlyph;
 use crate::components::huddle_bar::CallPill;
 use crate::components::icons::{Icon, IconName};
 use crate::components::space_tile::SpaceTile;
@@ -12,7 +13,7 @@ use crate::i18n::use_i18n;
 use crate::meetings::MeetingsHub;
 use crate::model::{Conversation, ConversationId, ConversationKind, PresenceStatus, SpaceId};
 use crate::sections::{
-  GroupedSidebar, SectionKind, SpaceGroup, build_grouped, build_sections, move_favorite,
+  GroupedSidebar, SectionKind, SpaceGroup, badge_count, build_grouped, build_sections, move_favorite,
 };
 use crate::settings::{load_json, store_json};
 use crate::state::{MainView, Overlay, use_app_state};
@@ -196,7 +197,7 @@ pub fn GlobalEntries() -> impl IntoView {
 /// What makes a section look different on screen: its kind and the state of its rows.
 type SectionKey = (
   SectionKind,
-  Vec<(crate::model::ConversationId, u32, u32, bool, bool)>,
+  Vec<(crate::model::ConversationId, u32, u32, bool, bool, Option<String>)>,
 );
 
 fn section_key(section: &crate::sections::Section) -> SectionKey {
@@ -210,6 +211,7 @@ fn section_key(section: &crate::sections::Section) -> SectionKey {
         c.mention_count,
         c.is_favorite,
         c.is_catching_up,
+        c.maybe_image_version.clone(),
       )
     })
     .collect();
@@ -229,7 +231,7 @@ fn GroupedSections(
     </For>
     <For
       each=move || grouped.get().spaces
-      key=|group| (group.space, group.conversations.iter().map(|c| (c.id, c.unread_count, c.mention_count, c.is_catching_up)).collect::<Vec<_>>())
+      key=|group| (group.space, group.conversations.iter().map(|c| (c.id, c.unread_count, c.mention_count, c.is_catching_up, c.maybe_image_version.clone())).collect::<Vec<_>>())
       let:group
     >
       <SpaceGroupSection group=group collapsed=collapsed_spaces />
@@ -361,7 +363,14 @@ fn SidebarSection(
 ) -> impl IntoView {
   let i18n = use_i18n();
   let is_collapsed = move || collapsed.with(|set| set.contains(&kind));
-  let unread_hidden: u32 = conversations.iter().map(|conv| conv.mention_count).sum();
+  // Hidden mentions and unread DMs stay red (like every other badge); plain unread messages in
+  // channels that aren't muted are quiet.
+  let mentions_hidden = badge_count(&conversations);
+  let unread_hidden: u32 = conversations
+    .iter()
+    .filter(|conv| !conv.is_muted && !matches!(conv.kind, ConversationKind::Direct | ConversationKind::Group))
+    .map(|conv| conv.unread_count.saturating_sub(conv.mention_count))
+    .sum();
   let list_id = format!("sb-{}", kind.slug());
   // Only a click animates the rows, not a re-render with new counts.
   let phase = RwSignal::new(SectionPhase::Still);
@@ -387,7 +396,8 @@ fn SidebarSection(
         >
           <Icon name=IconName::ChevronDown class="chevron" />
           <span>{move || i18n.t(kind.title_key())}</span>
-          {move || (is_collapsed() && unread_hidden > 0).then(|| view! { <span class="badge-count">{unread_hidden}</span> })}
+          {move || (is_collapsed() && mentions_hidden > 0).then(|| view! { <span class="badge-count">{mentions_hidden}</span> })}
+          {move || (is_collapsed() && unread_hidden > 0).then(|| view! { <span class="badge-count is-quiet">{unread_hidden}</span> })}
         </button>
         {(kind == SectionKind::Unreads)
           .then(|| {
@@ -506,8 +516,14 @@ pub fn SidebarItem(conversation: Conversation) -> impl IntoView {
     .and_then(|member| state.read(|backend| backend.user(member)));
 
   let leading = match conversation.kind {
-    ConversationKind::Public => view! { <Icon name=IconName::Hash /> }.into_any(),
-    ConversationKind::Private => view! { <Icon name=IconName::Lock /> }.into_any(),
+    ConversationKind::Public | ConversationKind::Private => {
+      let fallback = if conversation.kind == ConversationKind::Public {
+        IconName::Hash
+      } else {
+        IconName::Lock
+      };
+      view! { <ChannelGlyph conversation=id maybe_version=conversation.maybe_image_version.clone() fallback=fallback /> }.into_any()
+    },
     ConversationKind::Integration => view! { <Icon name=IconName::Terminal /> }.into_any(),
     ConversationKind::Group => view! { <Icon name=IconName::Users /> }.into_any(),
     ConversationKind::Direct => {

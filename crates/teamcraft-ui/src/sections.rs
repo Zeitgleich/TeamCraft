@@ -1,6 +1,8 @@
 //! Pure grouping of conversations into sidebar sections: the channels of a space, and the
 //! Home (DMs and group DMs live outside spaces).
 
+use teamcraft_client_api::activity::{ActivityItem, ActivityKind};
+
 use crate::model::{Conversation, ConversationId, ConversationKind, SidebarCategory, SpaceId, TimestampMs};
 use crate::prefs::{DmSort, SidebarSort};
 
@@ -251,6 +253,15 @@ impl RailBadge {
   }
 }
 
+/// Whether an unread activity item is addressed to the user: a mention, or anything in a direct or
+/// group conversation. `is_direct` tells whether a conversation is one.
+pub fn has_urgent_activity(items: &[ActivityItem], is_direct: impl Fn(ConversationId) -> bool) -> bool {
+  items
+    .iter()
+    .filter(|item| item.is_unread)
+    .any(|item| item.kind == ActivityKind::Mention || is_direct(item.conversation))
+}
+
 /// The number on the app's badge (dock, taskbar, tray): mentions everywhere plus unread direct and
 /// group messages, as people know it from other chat apps. Muted conversations count only mentions.
 pub fn badge_count(conversations: &[Conversation]) -> u32 {
@@ -362,6 +373,41 @@ mod tests {
     muted_direct.mention_count = 1;
     assert_eq!(badge_count(&[channel, direct, muted_direct]), 2 + 3 + 1);
     assert_eq!(badge_count(&[]), 0);
+  }
+
+  mod urgent_activity {
+    use teamcraft_client_api::activity::ActivityKind;
+
+    use super::*;
+
+    #[test]
+    fn mentions_and_direct_messages_are_urgent_other_unread_is_not() {
+      let reply = item(ActivityKind::ThreadReply, 1, true);
+      let reaction = item(ActivityKind::Reaction { emoji: "x".into() }, 1, true);
+      let mention = item(ActivityKind::Mention, 1, true);
+      let direct_reply = item(ActivityKind::ThreadReply, 2, true);
+      let read_mention = item(ActivityKind::Mention, 1, false);
+      let is_direct = |id: ConversationId| id == crate::model::id_from_raw(2);
+      assert!(!has_urgent_activity(&[reply.clone(), reaction], is_direct));
+      assert!(has_urgent_activity(&[reply.clone(), mention], is_direct));
+      assert!(has_urgent_activity(&[reply.clone(), direct_reply], is_direct));
+      assert!(!has_urgent_activity(&[reply, read_mention], is_direct));
+      assert!(!has_urgent_activity(&[], is_direct));
+    }
+
+    fn item(kind: ActivityKind, conversation: u64, is_unread: bool) -> ActivityItem {
+      ActivityItem {
+        id: "a".into(),
+        kind,
+        conversation: crate::model::id_from_raw(conversation),
+        message: crate::model::id_from_raw(9),
+        maybe_thread: None,
+        actor: crate::model::id_from_raw(3),
+        at: 0,
+        excerpt: String::new(),
+        is_unread,
+      }
+    }
   }
 
   mod favorite_order {
@@ -639,6 +685,7 @@ mod tests {
       can_post: true,
       bookmarks: Vec::new(),
       is_catching_up: false,
+      maybe_image_version: None,
     }
   }
 }

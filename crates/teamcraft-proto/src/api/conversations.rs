@@ -4,7 +4,7 @@ use utoipa::ToSchema;
 use crate::wire_enum::wire_enum;
 use crate::{
   CategoryId, ChannelModeration, ChannelRole, ConversationId, ConversationKind, ConversationVisibility,
-  HistoryPolicy, IdempotencyKey, MessageId, SpaceId, UnixMillis, UserId, UserSummary,
+  HistoryPolicy, IdempotencyKey, MessageId, SpaceId, SpaceImage, UnixMillis, UserId, UserSummary,
 };
 
 wire_enum! {
@@ -66,6 +66,9 @@ pub struct ConversationResponse {
   /// The other participants of DMs and group DMs; empty for channels.
   #[serde(default)]
   pub participants: Vec<UserSummary>,
+  /// The channel's picture (`PUT /api/v1/conversations/{id}/image`, `manage_channel_properties`).
+  #[serde(rename = "image", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_image: Option<SpaceImage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
