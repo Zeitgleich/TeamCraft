@@ -734,6 +734,17 @@ pub enum ChatAction {
   },
 }
 
+/// How soon the UI wants a file's bytes (`core_attachment`): the image viewer before the previews.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentPriority {
+  /// A preview in the conversation: in turn.
+  #[default]
+  Background,
+  /// The user opened it.
+  Now,
+}
+
 impl ChatAction {
   /// A new message: the host answers it once it is in the outbox and sends it afterwards, so the
   /// message shows at once, also while a sync or an upload holds the client.

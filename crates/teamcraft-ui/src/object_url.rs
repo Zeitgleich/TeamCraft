@@ -7,6 +7,8 @@
 
 use wasm_bindgen::JsCast;
 
+use teamcraft_client_api::remote::AttachmentPriority;
+
 use crate::media_formats::{displayable_type, essence, is_animated, is_svg};
 use crate::model::{ConversationId, MessageId};
 use crate::raster::{Encoding, SVG_DISPLAY_SIDE, rasterize};
@@ -94,8 +96,9 @@ pub async fn fetch_decrypted(
   conversation: ConversationId,
   message: MessageId,
   file_id: String,
+  priority: AttachmentPriority,
 ) -> Result<js_sys::Uint8Array, FetchError> {
-  fetch_bytes(conversation, message, file_id)
+  fetch_bytes(conversation, message, file_id, priority)
     .await
     .map_err(FetchError::Unavailable)
 }
@@ -118,6 +121,7 @@ async fn fetch_bytes(
   conversation: ConversationId,
   message: MessageId,
   file_id: String,
+  priority: AttachmentPriority,
 ) -> Result<js_sys::Uint8Array, String> {
   #[cfg(feature = "demo")]
   if crate::settings::BackendMode::load() == crate::settings::BackendMode::Mock {
@@ -125,9 +129,9 @@ async fn fetch_bytes(
     return Ok(js_sys::Uint8Array::from(bytes));
   }
   if crate::auth::tauri::is_available() {
-    return fetch_from_shell(conversation, message, file_id).await;
+    return fetch_from_shell(conversation, message, file_id, priority).await;
   }
-  fetch_from_page_core(conversation, message, file_id).await
+  fetch_from_page_core(conversation, message, file_id, priority).await
 }
 
 /// A URL the page shows for decrypted bytes: a still picture scaled down when asked to, anything
@@ -172,8 +176,14 @@ async fn fetch_from_shell(
   conversation: ConversationId,
   message: MessageId,
   file_id: String,
+  priority: AttachmentPriority,
 ) -> Result<js_sys::Uint8Array, String> {
-  let args = serde_json::json!({ "conversation": conversation, "message": message, "file_id": file_id });
+  let args = serde_json::json!({
+    "conversation": conversation,
+    "message": message,
+    "file_id": file_id,
+    "priority": priority,
+  });
   let js_args =
     js_sys::JSON::parse(&args.to_string()).map_err(|_| "could not encode the arguments".to_owned())?;
   let answer = crate::auth::tauri::invoke("core_attachment", js_args)
@@ -190,8 +200,9 @@ async fn fetch_from_page_core(
   conversation: ConversationId,
   message: MessageId,
   file_id: String,
+  priority: AttachmentPriority,
 ) -> Result<js_sys::Uint8Array, String> {
-  let plaintext = crate::web_core::attachment(conversation, message, file_id).await?;
+  let plaintext = crate::web_core::attachment(conversation, message, file_id, priority).await?;
   Ok(js_sys::Uint8Array::from(plaintext.expose_secret()))
 }
 
@@ -200,6 +211,7 @@ async fn fetch_from_page_core(
   _conversation: ConversationId,
   _message: MessageId,
   _file_id: String,
+  _priority: AttachmentPriority,
 ) -> Result<js_sys::Uint8Array, String> {
   Err("files need the desktop app or a browser".to_owned())
 }

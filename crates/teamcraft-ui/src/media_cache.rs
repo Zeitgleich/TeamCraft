@@ -21,6 +21,8 @@ use std::thread::LocalKey;
 
 use futures_channel::oneshot;
 
+use teamcraft_client_api::remote::AttachmentPriority;
+
 use crate::lightbox::MediaKey;
 use crate::model::ConversationId;
 use crate::object_url::{FetchError, ObjectUrl, fetch_decrypted, url_for};
@@ -40,7 +42,8 @@ thread_local! {
   /// Renditions being made, so a second ask for one gets the same URL.
   static LOADING_URLS: RefCell<InFlight<(MediaKey, Rendition), UrlResult>> = RefCell::new(InFlight::default());
   /// Files being downloaded and decrypted, shared by the renditions made from them.
-  static LOADING_BYTES: RefCell<InFlight<MediaKey, BytesResult>> = RefCell::new(InFlight::default());
+  static LOADING_BYTES: RefCell<InFlight<(MediaKey, AttachmentPriority), BytesResult>> =
+    RefCell::new(InFlight::default());
 }
 
 type UrlResult = Result<Rc<ObjectUrl>, FetchError>;
@@ -109,9 +112,13 @@ pub async fn load(
   if let Some(hit) = cached(key, rendition) {
     return Ok(Some(hit));
   }
-  let (_permit, maybe_max_side) = match rendition {
-    Rendition::Full => (None, None),
-    Rendition::Inline => (Some(Permit::acquire().await), Some(INLINE_RENDITION_SIDE)),
+  let (_permit, maybe_max_side, priority) = match rendition {
+    Rendition::Full => (None, None, AttachmentPriority::Now),
+    Rendition::Inline => (
+      Some(Permit::acquire().await),
+      Some(INLINE_RENDITION_SIDE),
+      AttachmentPriority::Background,
+    ),
   };
   if let Some(hit) = cached(key, rendition) {
     return Ok(Some(hit));
@@ -120,8 +127,10 @@ pub async fn load(
     return Ok(None);
   }
   let url = shared(&LOADING_URLS, (key, rendition), || async move {
-    let bytes = shared(&LOADING_BYTES, key, || {
-      fetch_decrypted(conversation, key.message, key.attachment.to_string())
+    // Per priority: the viewer doesn't wait for a preview's download of the same file (the core
+    // downloads it once while both wait).
+    let bytes = shared(&LOADING_BYTES, (key, priority), || {
+      fetch_decrypted(conversation, key.message, key.attachment.to_string(), priority)
     })
     .await?;
     let url = Rc::new(url_for(&bytes, media_type, maybe_max_side).await?);

@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use teamcraft_client_api::model::{Message, ThreadId};
+use teamcraft_client_api::remote::AttachmentPriority;
 use teamcraft_client_api::remote::{
   CORE_CHANGED_EVENT, CORE_FAILED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection,
   CoreStatus, EnrollRequest, LinkStatus, MessageWindow,
@@ -331,8 +332,13 @@ pub async fn core_attachment(
   conversation: ConversationId,
   message: MessageId,
   file_id: String,
+  // A webview from before priorities sends none: a preview.
+  priority: Option<AttachmentPriority>,
 ) -> Result<tauri::ipc::Response, CommandError> {
-  let plaintext = host.current()?.attachment(conversation, message, file_id).await?;
+  let plaintext = host
+    .current()?
+    .attachment(conversation, message, file_id, priority.unwrap_or_default())
+    .await?;
   Ok(tauri::ipc::Response::new(plaintext.expose_secret().to_vec()))
 }
 
