@@ -104,15 +104,31 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversations: &[ConversationId],
     members_order: &[ConversationId],
   ) -> Result<(), CoreError> {
+    let mut phases = PhaseTimer::start(self.now_ms());
     self.refresh_members_of(members_order).await?;
+    phases.lap("member lists", self.now_ms());
     // Welcomes in the server's order: their cursor only moves forward.
     self.sync_welcomes().await?;
+    phases.lap("welcomes", self.now_ms());
     // After the welcomes: a member's add (with a Welcome) wins over claiming the place ourselves.
     self.join_missing_groups().await?;
-    self.catch_up_each(conversations.to_vec()).await
+    phases.lap("missing groups", self.now_ms());
+    self.catch_up_each(conversations.to_vec(), &phases).await?;
+    phases.lap("content", self.now_ms());
+    tracing::info!(
+      conversations = conversations.len(),
+      total_ms = phases.total_ms(),
+      mls_storage_bytes = records::mls_storage_len(&self.provider),
+      "catch-up done"
+    );
+    Ok(())
   }
 
-  async fn catch_up_each(&mut self, mut waiting: Vec<ConversationId>) -> Result<(), CoreError> {
+  async fn catch_up_each(
+    &mut self,
+    mut waiting: Vec<ConversationId>,
+    phases: &PhaseTimer,
+  ) -> Result<(), CoreError> {
     while !waiting.is_empty() {
       let batch = next_batch(
         &mut waiting,
@@ -128,6 +144,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           self.unmark_resync(conversation, ResyncPart::Content)?;
         }
         self.store.delete(Table::SyncState, &marker_key(conversation))?;
+        if self.catch_up_focus.get() == Some(conversation) {
+          tracing::info!(
+            ms = self.now_ms().saturating_sub(phases.started_ms),
+            "catch-up: the focused conversation is caught up"
+          );
+        }
       }
     }
     Ok(())
@@ -244,6 +266,35 @@ fn next_batch(
   }
   let size = size.max(1).min(waiting.len());
   waiting.drain(..size).collect()
+}
+
+/// Logs how long each phase of a catch-up took (docs/performance.md: where the time to a readable
+/// channel goes on a large workspace). Client clock; only durations, nothing about the content.
+struct PhaseTimer {
+  started_ms: i64,
+  lap_ms: i64,
+}
+
+impl PhaseTimer {
+  fn start(now_ms: i64) -> Self {
+    Self {
+      started_ms: now_ms,
+      lap_ms: now_ms,
+    }
+  }
+
+  fn lap(&mut self, phase: &'static str, now_ms: i64) {
+    tracing::info!(
+      phase,
+      ms = now_ms.saturating_sub(self.lap_ms),
+      "catch-up phase done"
+    );
+    self.lap_ms = now_ms;
+  }
+
+  fn total_ms(&self) -> i64 {
+    self.lap_ms.saturating_sub(self.started_ms)
+  }
 }
 
 fn marker_key(conversation: ConversationId) -> String {

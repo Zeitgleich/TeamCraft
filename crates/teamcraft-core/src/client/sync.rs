@@ -36,6 +36,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// messages (the conversation the user looks at first, several at once, issue #247), then the
   /// outbox, key packages and the key bag.
   pub async fn full_sync(&mut self) -> Result<(), CoreError> {
+    let started_ms = self.now_ms();
     // Removal records of the user's devices count before anything is decrypted, and this device's
     // own (also from older versions) reach the others.
     self.apply_shared_removals()?;
@@ -64,6 +65,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         conversation,
       )?;
     }
+    tracing::info!(
+      conversations = conversations.len(),
+      ms = self.now_ms().saturating_sub(started_ms),
+      "full sync: conversation list stored"
+    );
     let ids: Vec<ConversationId> = conversations.iter().map(|conversation| conversation.id).collect();
     self
       .catch_up_conversations(&ids, &members_order(&conversations))
