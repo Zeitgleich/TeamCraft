@@ -4,14 +4,20 @@
 //! [`fake::FakeServer`] in process for tests. Futures are not required to be `Send`, so the same
 //! code runs on a single-threaded browser executor.
 
+#[cfg(not(target_arch = "wasm32"))]
+mod connect;
 pub mod fake;
 mod http;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod proxy;
 #[cfg(not(target_arch = "wasm32"))]
 mod tls;
 #[cfg(target_arch = "wasm32")]
 mod web_socket;
 
 use std::future::Future;
+
+use serde::{Deserialize, Serialize};
 
 pub use http::{
   AccessTokenSource, HttpGateway, HttpRendezvous, HttpServerApi, StaticToken, change_web_push_subscription,
@@ -55,6 +61,8 @@ use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, UnreadRe
 use teamcraft_proto::{NotificationSettings, TestPushResponse};
 use teamcraft_proto::{RendezvousClientMessage, RendezvousServerMessage};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
+#[cfg(not(target_arch = "wasm32"))]
+pub use tls::set_platform_roots;
 
 /// Everything the sync engine needs from the server.
 pub trait ServerApi {
@@ -449,11 +457,36 @@ pub enum RendezvousFrame {
   Binary(Vec<u8>),
 }
 
+/// What answered instead of the server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Interception {
+  /// A login or terms page of the network (hotel, train, guest Wi-Fi): an HTML page where the API
+  /// answers JSON, a redirect to another site, or HTTP 511.
+  CaptivePortal,
+  /// The TLS certificate isn't trusted: usually a proxy that inspects encrypted traffic with a
+  /// company CA this device doesn't trust.
+  UntrustedCertificate,
+}
+
+impl std::fmt::Display for Interception {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(match self {
+      Self::CaptivePortal => "captive portal",
+      Self::UntrustedCertificate => "untrusted certificate",
+    })
+  }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
   /// The server could not be reached; the request may be retried later.
   #[error("network error: {0}")]
   Network(String),
+  /// Something on the way answered instead of the server: a captive portal or a TLS-intercepting
+  /// proxy (issue #157). Retried like [`Self::Network`]; the UI says what the user can do.
+  #[error("the network intercepted the connection ({kind}): {detail}")]
+  Intercepted { kind: Interception, detail: String },
   #[error("server answered {status}: {}", .maybe_body.as_ref().map_or("", |body| body.message.as_str()))]
   Status {
     status: u16,
@@ -504,10 +537,24 @@ impl ApiError {
     matches!(self, Self::Status { status: 403, .. })
   }
 
-  /// Worth retrying later without changing the request (offline, server overloaded).
+  /// The request never reached the server: offline, or intercepted on the way.
+  pub fn is_unreachable(&self) -> bool {
+    matches!(self, Self::Network(_) | Self::Intercepted { .. })
+  }
+
+  /// What intercepted the connection, if something did.
+  pub fn interception(&self) -> Option<Interception> {
+    match self {
+      Self::Intercepted { kind, .. } => Some(*kind),
+      _ => None,
+    }
+  }
+
+  /// Worth retrying later without changing the request (offline, server overloaded, a captive
+  /// portal the user has yet to sign in to).
   pub fn is_transient(&self) -> bool {
     match self {
-      Self::Network(_) => true,
+      Self::Network(_) | Self::Intercepted { .. } => true,
       Self::Status { status, .. } => *status == 429 || *status >= 500,
       _ => false,
     }

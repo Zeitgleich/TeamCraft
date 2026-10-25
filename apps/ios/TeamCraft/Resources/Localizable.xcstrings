@@ -3793,6 +3793,38 @@
         }
       }
     },
+    "connection_captive_portal %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This network wants you to sign in first. Open a web page to sign in; messages wait. Next attempt in %lld s."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Netzwerk verlangt zuerst eine Anmeldung. Öffne eine Webseite, um dich anzumelden; Nachrichten warten. Nächster Versuch in %lld s."
+          }
+        }
+      }
+    },
+    "connection_untrusted_certificate %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The connection to the server isn't trusted: this network may inspect encrypted traffic. Use another network or ask your IT. Next attempt in %lld s."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Verbindung zum Server wird nicht vertraut: Dieses Netzwerk prüft eventuell verschlüsselten Verkehr. Nutze ein anderes Netzwerk oder frag deine IT. Nächster Versuch in %lld s."
+          }
+        }
+      }
+    },
     "connection_retry": {
       "localizations": {
         "en": {

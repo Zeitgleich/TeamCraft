@@ -126,6 +126,8 @@ struct State {
   rest_failing_users: HashSet<UserId>,
   /// Users whose access token the server rejects (401), as after an expired session.
   signed_out_users: HashSet<UserId>,
+  /// Users whose REST calls a captive portal answers (`set_behind_captive_portal`).
+  portal_users: HashSet<UserId>,
   /// Heartbeats received, to check that a busy client keeps sending them.
   heartbeats: u64,
   /// What `GET /unread` answers per user; without an entry nothing is unread.
@@ -439,6 +441,16 @@ impl FakeServer {
   /// How many gateway heartbeats arrived so far.
   pub fn heartbeat_count(&self) -> u64 {
     self.lock().heartbeats
+  }
+
+  /// While set, a captive portal answers this user's REST calls (hotel Wi-Fi before signing in).
+  pub fn set_behind_captive_portal(&self, user: UserId, is_behind: bool) {
+    let mut state = self.lock();
+    if is_behind {
+      state.portal_users.insert(user);
+    } else {
+      state.portal_users.remove(&user);
+    }
   }
 
   /// While set, this user's REST calls fail but the gateway still connects (REST timing out
@@ -943,6 +955,12 @@ impl FakeServerApi {
     }
     if state.signed_out_users.contains(&self.user) {
       return Err(ApiError::status(401, ErrorCode::Unauthorized, "token expired"));
+    }
+    if state.portal_users.contains(&self.user) {
+      return Err(ApiError::Intercepted {
+        kind: super::Interception::CaptivePortal,
+        detail: "fake server: HTTP 200 with an HTML page".into(),
+      });
     }
     let Some(cut) = state.take_network_cut(self.user) else {
       return action(&mut state, self.user);

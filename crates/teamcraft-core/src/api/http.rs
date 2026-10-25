@@ -54,7 +54,7 @@ use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversa
 
 #[cfg(target_arch = "wasm32")]
 use super::web_socket::{BrowserSocket, SocketFrame};
-use super::{ApiError, GatewayConnection, RendezvousConnection, RendezvousFrame, ServerApi};
+use super::{ApiError, GatewayConnection, Interception, RendezvousConnection, RendezvousFrame, ServerApi};
 use crate::clock::{Clock, SystemClock};
 
 /// How long a TCP and TLS (or WebSocket) handshake may take.
@@ -1334,6 +1334,8 @@ fn http_client() -> reqwest::Client {
   let builder = builder.tcp_user_timeout(UNACKNOWLEDGED_TIMEOUT);
   #[cfg(target_os = "android")]
   let builder = builder.tls_backend_preconfigured((*super::tls::client_config()).clone());
+  // The same proxy as the WebSockets, also one the mobile app set (api/proxy.rs).
+  let builder = builder.proxy(reqwest::Proxy::custom(super::proxy::proxy_for));
   match builder.build() {
     Ok(client) => client,
     // Only a reqwest/rustls version mismatch can cause this; the default client still works for
@@ -1355,25 +1357,71 @@ fn http_client() -> reqwest::Client {
 type NativeSocket =
   tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+/// Opens a WebSocket: TCP with Happy Eyeballs, through the system or environment proxy with
+/// `CONNECT` if one applies (issue #157), then TLS and the WebSocket handshake.
 #[cfg(not(target_arch = "wasm32"))]
 async fn connect_websocket(url: &str) -> Result<NativeSocket, ApiError> {
-  // Always an explicit configuration: tungstenite's default one panics in rustls (api/tls.rs).
-  let maybe_connector = Some(tokio_tungstenite::Connector::Rustls(super::tls::client_config()));
-  let connecting = tokio_tungstenite::connect_async_tls_with_config(url, None, false, maybe_connector);
-  // A black-holed server would otherwise stall the caller's loop (outbox, heartbeats) for minutes.
-  let (socket, _) = tokio::time::timeout(CONNECT_TIMEOUT, connecting)
+  // A black-holed server or proxy would otherwise stall the caller's loop (outbox, heartbeats) for
+  // minutes.
+  let parsed = url::Url::parse(url).map_err(|error| ApiError::Network(format!("{url}: {error}")))?;
+  let maybe_proxy = super::proxy::proxy_for(&parsed);
+  tokio::time::timeout(CONNECT_TIMEOUT, open_websocket(&parsed, maybe_proxy.as_ref()))
     .await
     .map_err(|_| ApiError::Network("WebSocket connection timed out".into()))?
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn open_websocket(url: &url::Url, maybe_proxy: Option<&url::Url>) -> Result<NativeSocket, ApiError> {
+  let stream = super::connect::connect_via(url, maybe_proxy)
+    .await
     .map_err(|error| ApiError::Network(error.to_string()))?;
+  // Always an explicit configuration: tungstenite's default one panics in rustls (api/tls.rs).
+  let maybe_connector = Some(tokio_tungstenite::Connector::Rustls(super::tls::client_config()));
+  let (socket, _) =
+    tokio_tungstenite::client_async_tls_with_config(url.as_str(), stream, None, maybe_connector)
+      .await
+      .map_err(websocket_error)?;
   Ok(socket)
 }
 
+/// A failed WebSocket handshake, told apart like [`network_error`]: a refused certificate, or an
+/// HTTP answer instead of the upgrade that looks like a captive portal (a page, a redirect, 511).
+#[cfg(not(target_arch = "wasm32"))]
+fn websocket_error(error: tokio_tungstenite::tungstenite::Error) -> ApiError {
+  use tokio_tungstenite::tungstenite::Error as WsError;
+  if super::tls::is_certificate_rejection(&error) {
+    return ApiError::Intercepted {
+      kind: Interception::UntrustedCertificate,
+      detail: error_chain(&error),
+    };
+  }
+  if let WsError::Http(response) = &error {
+    let status = response.status();
+    let is_portal = status.is_success()
+      || status.is_redirection()
+      || status == reqwest::StatusCode::NETWORK_AUTHENTICATION_REQUIRED;
+    if is_portal {
+      return ApiError::Intercepted {
+        kind: Interception::CaptivePortal,
+        detail: format!("HTTP {} instead of a WebSocket", status.as_u16()),
+      };
+    }
+  }
+  ApiError::Network(error_chain(&error))
+}
+
 async fn send(request: RequestBuilder) -> Result<Response, ApiError> {
-  let response = request
-    .send()
-    .await
-    .map_err(|error| ApiError::Network(error.to_string()))?;
+  let (client, request) = request.build_split();
+  let request = request.map_err(|error| ApiError::Network(error.to_string()))?;
+  let origin = request.url().origin();
+  let response = client.execute(request).await.map_err(network_error)?;
   let status = response.status();
+  if let Some(detail) = captive_portal_sign(&origin, &response) {
+    return Err(ApiError::Intercepted {
+      kind: Interception::CaptivePortal,
+      detail,
+    });
+  }
   if status.is_success() {
     return Ok(response);
   }
@@ -1382,6 +1430,64 @@ async fn send(request: RequestBuilder) -> Result<Response, ApiError> {
     status: status.as_u16(),
     maybe_body,
   })
+}
+
+/// Why `response` comes from a captive portal rather than the server, if it does: HTTP 511, a
+/// redirect that ended on another site, or a successful answer that is an HTML page (the API and
+/// object storage never answer HTML). Error pages of the server's own reverse proxy (a 502 in HTML)
+/// are server trouble, not a portal.
+fn captive_portal_sign(origin: &url::Origin, response: &Response) -> Option<String> {
+  let status = response.status();
+  if status == reqwest::StatusCode::NETWORK_AUTHENTICATION_REQUIRED {
+    return Some("HTTP 511 network authentication required".into());
+  }
+  if !status.is_success() {
+    return None;
+  }
+  if response.url().origin() != *origin {
+    let host = response.url().host_str().unwrap_or_default();
+    return Some(format!("redirected to {host}"));
+  }
+  is_html(response.headers()).then(|| format!("HTTP {} with an HTML page", status.as_u16()))
+}
+
+fn is_html(headers: &reqwest::header::HeaderMap) -> bool {
+  headers
+    .get(reqwest::header::CONTENT_TYPE)
+    .and_then(|value| value.to_str().ok())
+    .is_some_and(|value| {
+      let essence = value.split(';').next().unwrap_or_default().trim();
+      essence.eq_ignore_ascii_case("text/html") || essence.eq_ignore_ascii_case("application/xhtml+xml")
+    })
+}
+
+/// A request that got no answer: a certificate the device refuses means interception (or a server
+/// that isn't who it claims), everything else is the network.
+fn network_error(error: reqwest::Error) -> ApiError {
+  #[cfg(not(target_arch = "wasm32"))]
+  if super::tls::is_certificate_rejection(&error) {
+    return ApiError::Intercepted {
+      kind: Interception::UntrustedCertificate,
+      detail: error_chain(&error),
+    };
+  }
+  ApiError::Network(error_chain(&error))
+}
+
+/// The error and its causes, so the details name the actual reason ("certificate expired") and not
+/// only reqwest's "error sending request".
+fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+  let mut text = error.to_string();
+  let mut maybe_source = error.source();
+  while let Some(source) = maybe_source {
+    let cause = source.to_string();
+    if !text.contains(&cause) {
+      text.push_str(": ");
+      text.push_str(&cause);
+    }
+    maybe_source = source.source();
+  }
+  text
 }
 
 /// The single endpoints' 404: nothing published.
@@ -1515,6 +1621,141 @@ mod tests {
     let api = HttpServerApi::new(format!("http://{address}"), StaticToken("token".into()));
     let result = api.me().await;
     assert!(matches!(result, Err(ApiError::Network(_))), "{result:?}");
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  mod hostile_networks {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::*;
+
+    /// A mandatory company proxy: the gateway goes through `CONNECT` to the server.
+    #[tokio::test]
+    async fn the_gateway_connects_through_a_connect_proxy() {
+      let server = loopback_listener().await;
+      let server_address = server.local_addr().unwrap();
+      tokio::spawn(async move {
+        let (socket, _) = server.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+        use futures_util::SinkExt;
+        socket
+          .send(tokio_tungstenite::tungstenite::Message::text(
+            "hello through the proxy",
+          ))
+          .await
+          .unwrap();
+      });
+      let (proxy_url, requests) = connect_proxy().await;
+      let url = url::Url::parse(&format!("ws://{server_address}/api/v1/gateway")).unwrap();
+      let mut socket = open_websocket(&url, Some(&proxy_url)).await.unwrap();
+      use futures_util::StreamExt;
+      let frame = socket.next().await.unwrap().unwrap();
+      assert_eq!(frame.into_text().unwrap().as_str(), "hello through the proxy");
+      let request = requests.await.unwrap();
+      let authority = server_address.to_string();
+      assert!(
+        request.starts_with(&format!("CONNECT {authority} HTTP/1.1\r\n")),
+        "{request}"
+      );
+    }
+
+    /// A captive portal: the login page arrives with 200 where the API answers JSON. That's a
+    /// network problem to retry (the outbox waits), not an unreadable answer that fails for good.
+    #[tokio::test]
+    async fn an_html_page_instead_of_json_is_a_captive_portal_and_retried() {
+      let base = canned_server(
+        "200 OK",
+        "text/html; charset=utf-8",
+        "<html>Sign in to the Wi-Fi</html>",
+      )
+      .await;
+      let api = HttpServerApi::new(base, StaticToken("t".into()));
+      let error = api.me().await.unwrap_err();
+      assert_eq!(error.interception(), Some(Interception::CaptivePortal), "{error}");
+      assert!(error.is_transient() && error.is_retry_later() && error.is_unreachable());
+      // Also where no answer body is read (read markers, uploads' completion).
+      let device =
+        <DeviceId as teamcraft_proto::Id>::from_snowflake(teamcraft_proto::Snowflake::new(1).unwrap());
+      let error = api.unregister_push(device).await.unwrap_err();
+      assert_eq!(error.interception(), Some(Interception::CaptivePortal), "{error}");
+    }
+
+    #[tokio::test]
+    async fn http_511_is_a_captive_portal() {
+      let base = canned_server("511 Network Authentication Required", "text/plain", "sign in").await;
+      let api = HttpServerApi::new(base, StaticToken("t".into()));
+      assert_eq!(
+        api.me().await.unwrap_err().interception(),
+        Some(Interception::CaptivePortal)
+      );
+    }
+
+    #[tokio::test]
+    async fn an_html_error_page_of_the_reverse_proxy_is_server_trouble() {
+      let base = canned_server("502 Bad Gateway", "text/html", "<html>bad gateway</html>").await;
+      let api = HttpServerApi::new(base, StaticToken("t".into()));
+      let error = api.me().await.unwrap_err();
+      assert!(matches!(error, ApiError::Status { status: 502, .. }), "{error}");
+      assert!(error.is_transient());
+    }
+
+    #[tokio::test]
+    async fn a_portal_answering_the_websocket_handshake_is_a_captive_portal() {
+      let base = canned_server(
+        "302 Found\r\nlocation: http://portal.example.com/login",
+        "text/html",
+        "",
+      )
+      .await;
+      let url = url::Url::parse(&base.replace("http://", "ws://")).unwrap();
+      let error = open_websocket(&url, None).await.unwrap_err();
+      assert_eq!(error.interception(), Some(Interception::CaptivePortal), "{error}");
+    }
+
+    /// A local `CONNECT` proxy: tunnels one connection and hands back the request head it got.
+    async fn connect_proxy() -> (url::Url, tokio::task::JoinHandle<String>) {
+      let listener = loopback_listener().await;
+      let address = listener.local_addr().unwrap();
+      let requests = tokio::spawn(async move {
+        let (mut client, _) = listener.accept().await.unwrap();
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+          let mut byte = [0u8; 1];
+          client.read_exact(&mut byte).await.unwrap();
+          head.push(byte[0]);
+        }
+        let head = String::from_utf8(head).unwrap();
+        let target = head.split_whitespace().nth(1).unwrap().to_owned();
+        let mut upstream = tokio::net::TcpStream::connect(target).await.unwrap();
+        client
+          .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+          .await
+          .unwrap();
+        tokio::spawn(async move {
+          let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+        });
+        head
+      });
+      (url::Url::parse(&format!("http://{address}")).unwrap(), requests)
+    }
+
+    /// Answers every request with `status`, `content_type` and `body`.
+    async fn canned_server(status: &'static str, content_type: &'static str, body: &'static str) -> String {
+      let listener = loopback_listener().await;
+      let address = listener.local_addr().unwrap();
+      tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+          let mut request = [0u8; 4096];
+          let _ = socket.read(&mut request).await;
+          let response = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+          );
+          let _ = socket.write_all(response.as_bytes()).await;
+        }
+      });
+      format!("http://{address}")
+    }
   }
 
   mod liveness {

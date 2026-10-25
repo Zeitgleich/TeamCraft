@@ -14,6 +14,7 @@ import de.zeitgleich.teamcraft.auth.AuthRepository
 import de.zeitgleich.teamcraft.auth.LegacySignOut
 import de.zeitgleich.teamcraft.calls.CallController
 import de.zeitgleich.teamcraft.core.CoreRepository
+import de.zeitgleich.teamcraft.core.NetworkTrust
 import de.zeitgleich.teamcraft.notifications.MentionPrefs
 import de.zeitgleich.teamcraft.notifications.MessageNotifier
 import de.zeitgleich.teamcraft.notifications.NotificationContentPrefs
@@ -55,6 +56,8 @@ class TeamCraftApplication : Application() {
 
   override fun onCreate() {
     super.onCreate()
+    // Before the core's first connection: it keeps the CAs it gets first (issue #157).
+    NetworkTrust.installTrustedCertificates(this)
     graph = AppGraph(this)
     // Before anything opens a session or a store: builds with a baked-in server kept them unkeyed.
     graph.servers.migrateLegacyLayout()
