@@ -86,7 +86,7 @@ class StoreScreenshots {
       Shot("channel") { viewModel -> ChannelSample(viewModel) },
       Shot("thread") { viewModel -> ThreadSample(viewModel) },
       Shot("spaces") { ChatsSample(ChatTab.Spaces) },
-      // The call screen is being redesigned; its picture is only taken with `-e call true`.
+      // The call screen is being redesigned (#497); its picture is only taken with `-e call true`.
       Shot("call") { CallSample() }.takeIf { isCallWanted },
       Shot("join-call") { viewModel ->
         ChannelSample(viewModel)

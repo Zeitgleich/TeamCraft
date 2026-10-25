@@ -29,5 +29,5 @@ TEAMCRAFT_ANDROID_CACHE=/big/disk/android scripts/screenshots/android-store.sh
 ```
 
 All pictures are dark: in light mode the status bar's icons are dark on the app's dark top bar.
-The call screen is being redesigned; its picture is left out until then. `TEAMCRAFT_SCREENSHOT_CALL=true`
+The call screen is being redesigned (#497); its picture is left out until then. `TEAMCRAFT_SCREENSHOT_CALL=true`
 takes it too (the test's `-e call true`).
