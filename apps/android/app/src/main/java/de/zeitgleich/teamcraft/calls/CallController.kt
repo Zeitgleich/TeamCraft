@@ -391,6 +391,9 @@ class CallController(
     isTelecomRegistered = true
   }
 
+  /** The name the call screen shows for a conversation. */
+  suspend fun displayName(conversationId: String): String = displayNameOf(conversationId)
+
   private suspend fun displayNameOf(conversationId: String): String =
     conversationNameOf(conversationId) ?: context.getString(R.string.app_name)
 

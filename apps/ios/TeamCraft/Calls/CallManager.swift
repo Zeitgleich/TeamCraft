@@ -6,7 +6,7 @@ import PushKit
 
 /// The call this device is in or rings for, as the in-call screen shows it.
 struct ActiveCall: Identifiable, Equatable {
-  enum Phase: Equatable { case ringing, connecting, connected, reconnecting }
+  enum Phase: Equatable, Hashable { case ringing, connecting, connected, reconnecting }
 
   let id: UUID
   /// Empty while a VoIP push is still being opened (the call was reported before it was readable).

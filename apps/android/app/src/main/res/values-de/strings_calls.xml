@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+  <string name="call_more">Weitere Optionen</string>
+  <string name="call_you_muted">Du bist stummgeschaltet</string>
+  <string name="call_toggle_controls">Anruf-Steuerung ein- oder ausblenden</string>
+  <string name="call_video_spotlight">Größer anzeigen</string>
+  <string name="call_encryption_open">Verschlüsselungscode anzeigen</string>
+  <string name="call_encryption_title">Ende-zu-Ende-verschlüsselt</string>
+  <string name="call_encryption_body">Nur die Personen in diesem Anruf können ihn hören und sehen, nicht einmal der Server. Damit sicher niemand dazwischensitzt, vergleiche den Code mit den anderen.</string>
   <string name="call_deafen">Taub schalten</string>
   <string name="call_undeafen">Ton wieder an</string>
   <string name="call_camera_on">Kamera an</string>

@@ -4,27 +4,19 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.WindowManager
 import android.view.WindowManager.LayoutParams.FLAG_SECURE
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -32,9 +24,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.AlertDialog
@@ -42,7 +31,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -51,18 +39,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
@@ -74,17 +60,15 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.security.ScreenPrefs.Companion.prefs
-import de.zeitgleich.teamcraft.ui.toggled
 import de.zeitgleich.teamcraft.ui.theme.TeamCraftTheme
-import uniffi.teamcraft_ffi.CallEndReason
+import de.zeitgleich.teamcraft.ui.toggled
+import kotlinx.coroutines.delay
 import uniffi.teamcraft_ffi.CallPhase
 import uniffi.teamcraft_ffi.CallStateInfo
-import uniffi.teamcraft_ffi.VideoTrackInfo
 import uniffi.teamcraft_ffi.newRequestKey
 
-private val SELF_VIEW_WIDTH = 120.dp
-private const val SELF_VIEW_ASPECT = 3f / 4f
-private const val VIDEO_ASPECT = 4f / 3f
+private const val MILLIS_PER_SECOND = 1000L
+private const val CONTROLS_HIDE_DELAY_MILLIS = 5000L
 private val ADD_PEOPLE_LIST_HEIGHT = 320.dp
 
 /** The in-call screen: others' video, the self-view, the privacy code and the call's controls. */
@@ -202,7 +186,6 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
     hasCamera = isGranted
     calls.setCameraWanted(isGranted)
   }
-  var maybeFullScreen by rememberSaveable { mutableStateOf<Long?>(null) }
   var isAddingPeople by rememberSaveable { mutableStateOf(false) }
   var maybeAddChoice by remember { mutableStateOf<AddPeopleChoice?>(null) }
   val maybeConversationId = maybeState?.conversationId
@@ -210,142 +193,77 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
     // "Add people" only in a DM or group DM call; a meeting room's call (after a move) has none.
     maybeAddChoice = maybeConversationId?.let { calls.moves.choice(it) }
   }
+  val name by produceState("", maybeConversationId) {
+    value = maybeConversationId?.let { calls.displayName(it) } ?: ""
+  }
   // The dialog stays through a reconnect (it keeps its request key); it opens only when connected.
   val addChoice = maybeAddChoice?.takeIf { it.conversationId == maybeConversationId }
   val canAddPeople = addChoice != null && maybeState?.phase == CallPhase.CONNECTED
   if (isAddingPeople && addChoice != null) {
     AddPeopleDialog(calls.moves, addChoice) { isAddingPeople = false }
   }
-  val maybeFullScreenTrack = tracks.firstOrNull { it.streamId.toLong() == maybeFullScreen }
-  if (maybeFullScreenTrack != null) {
-    FullScreenVideo(maybeFullScreenTrack, frames[maybeFullScreenTrack.streamId]) { maybeFullScreen = null }
-    return
-  }
-  Surface(modifier = Modifier.fillMaxSize()) {
-    Box(Modifier.fillMaxSize().safeDrawingPadding()) {
-      Column(
-        modifier = Modifier.fillMaxSize().padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-      ) {
-        CallStatus(maybeState)
-        CallMoveBanner(calls.moves)
-        if (tracks.isEmpty()) {
-          Box(Modifier.weight(1f))
-        } else {
-          VideoGrid(tracks, frames, Modifier.weight(1f)) { track -> maybeFullScreen = track.streamId.toLong() }
-        }
-        CallControls(
-          maybeState = maybeState,
-          isCameraOn = isCameraWanted,
-          isSpeakerOn = isSpeakerOn,
-          onMute = { calls.setMuted(it) },
-          onDeafen = { calls.setDeafened(it) },
-          onCamera = { isOn ->
-            if (isOn && !hasCamera) cameraPermission.launch(Manifest.permission.CAMERA) else calls.setCameraWanted(isOn)
-          },
-          onFlipCamera = { isFrontCamera = !isFrontCamera },
-          onSpeaker = { calls.setSpeakerOn(it) },
-          maybeOnAddPeople = if (canAddPeople) ({ isAddingPeople = true }) else null,
-          onHangUp = { calls.hangUp() },
-        )
-      }
-      if (isCameraWanted && hasCamera) {
-        CameraFeed(
-          calls = calls,
-          isFrontCamera = isFrontCamera,
-          modifier = Modifier
-            .align(Alignment.TopEnd)
-            .padding(16.dp)
-            .size(width = SELF_VIEW_WIDTH, height = SELF_VIEW_WIDTH / SELF_VIEW_ASPECT),
-        )
-      }
-    }
-  }
-}
 
-@Composable
-internal fun CallStatus(maybeState: CallStateInfo?) {
-  Text(stringResource(phaseText(maybeState)), style = MaterialTheme.typography.headlineSmall)
-  maybeState?.let { state ->
-    if (state.phase == CallPhase.CONNECTED) {
-      val count = state.participantCount.toInt()
-      Text(pluralStringResource(R.plurals.call_participants, count, count))
-    }
-    state.maybePrivacyCode?.let { code ->
-      Text(stringResource(R.string.call_privacy_code_hint), style = MaterialTheme.typography.bodySmall)
-      Text(code, style = MaterialTheme.typography.titleMedium)
+  val isConnected = maybeState?.phase == CallPhase.CONNECTED
+  var maybeStartedAt by remember { mutableStateOf<Long?>(null) }
+  var maybeElapsed by remember { mutableStateOf<Long?>(null) }
+  LaunchedEffect(isConnected) {
+    // The clock starts with the first connection and runs through reconnects.
+    if (isConnected && maybeStartedAt == null) maybeStartedAt = SystemClock.elapsedRealtime()
+  }
+  LaunchedEffect(maybeStartedAt) {
+    val startedAt = maybeStartedAt ?: return@LaunchedEffect
+    while (true) {
+      maybeElapsed = (SystemClock.elapsedRealtime() - startedAt) / MILLIS_PER_SECOND
+      delay(MILLIS_PER_SECOND)
     }
   }
-}
 
-@Composable
-internal fun VideoGrid(
-  tracks: List<VideoTrackInfo>,
-  frames: Map<UInt, Bitmap>,
-  modifier: Modifier,
-  onFullScreen: (VideoTrackInfo) -> Unit,
-) {
-  val columns = if (tracks.size > 1) 2 else 1
-  LazyVerticalGrid(
-    columns = GridCells.Fixed(columns),
-    modifier = modifier.fillMaxWidth(),
-    horizontalArrangement = Arrangement.spacedBy(8.dp),
-    verticalArrangement = Arrangement.spacedBy(8.dp),
-  ) {
-    items(tracks, key = { it.streamId.toLong() }) { track ->
-      val maybeFrame = frames[track.streamId]
-      Box(
-        Modifier
-          .fillMaxWidth()
-          .aspectRatio(VIDEO_ASPECT)
-          .background(Color.Black)
-          .clickable(onClickLabel = stringResource(R.string.call_video_fullscreen)) { onFullScreen(track) },
-        contentAlignment = Alignment.Center,
-      ) {
-        if (maybeFrame == null) {
-          Text(stringResource(R.string.call_video_waiting), color = Color.White)
-        } else {
-          Image(
-            bitmap = maybeFrame.asImageBitmap(),
-            contentDescription = stringResource(
-              if (track.isScreen) R.string.call_video_screen else R.string.call_video_camera,
-            ),
-            contentScale = ContentScale.Fit,
-            modifier = Modifier.fillMaxSize(),
-          )
-        }
-      }
+  // The chrome steps aside after a while when there is video to look at; a tap brings it back.
+  val hasVideo = tracks.isNotEmpty()
+  var areControlsShown by rememberSaveable { mutableStateOf(true) }
+  var interactions by remember { mutableIntStateOf(0) }
+  LaunchedEffect(areControlsShown, interactions, hasVideo, isConnected) {
+    if (!hasVideo) {
+      areControlsShown = true
+    } else if (areControlsShown && isConnected) {
+      delay(CONTROLS_HIDE_DELAY_MILLIS)
+      areControlsShown = false
     }
   }
-}
+  if (hasVideo && !areControlsShown) ImmersiveWindow()
 
-/**
- * One video over the whole screen, cutout included, with the system bars hidden (a swipe from the
- * edge shows them for a moment) until a tap or Back returns to the call (#309).
- */
-@Composable
-private fun FullScreenVideo(track: VideoTrackInfo, maybeFrame: Bitmap?, onExit: () -> Unit) {
-  ImmersiveWindow()
-  BackHandler(onBack = onExit)
-  Box(
-    Modifier
-      .fillMaxSize()
-      .background(Color.Black)
-      .clickable(onClickLabel = stringResource(R.string.call_video_exit_fullscreen), onClick = onExit),
-    contentAlignment = Alignment.Center,
-  ) {
-    if (maybeFrame == null) {
-      Text(stringResource(R.string.call_video_waiting), color = Color.White)
-    } else {
-      Image(
-        bitmap = maybeFrame.asImageBitmap(),
-        contentDescription = stringResource(if (track.isScreen) R.string.call_video_screen else R.string.call_video_camera),
-        contentScale = ContentScale.Fit,
-        modifier = Modifier.fillMaxSize(),
-      )
-    }
+  val selfView: (@Composable (Modifier) -> Unit)? = if (isCameraWanted && hasCamera) {
+    { modifier: Modifier -> CameraFeed(calls = calls, isFrontCamera = isFrontCamera, modifier = modifier) }
+  } else {
+    null
   }
+  InCallContent(
+    ui = CallUiState(
+      name = name,
+      maybeState = maybeState,
+      tracks = tracks,
+      frames = frames,
+      isCameraOn = isCameraWanted,
+      isSpeakerOn = isSpeakerOn,
+      elapsedSeconds = maybeElapsed,
+      areControlsShown = areControlsShown,
+    ),
+    actions = CallUiActions(
+      onToggleControls = { areControlsShown = !areControlsShown },
+      onInteraction = { interactions++ },
+      onMute = { calls.setMuted(it) },
+      onDeafen = { calls.setDeafened(it) },
+      onCamera = { isOn ->
+        if (isOn && !hasCamera) cameraPermission.launch(Manifest.permission.CAMERA) else calls.setCameraWanted(isOn)
+      },
+      onFlipCamera = { isFrontCamera = !isFrontCamera },
+      onSpeaker = { calls.setSpeakerOn(it) },
+      maybeOnAddPeople = if (canAddPeople) ({ isAddingPeople = true }) else null,
+      onHangUp = { calls.hangUp() },
+    ),
+    banner = { CallMoveBanner(calls.moves) },
+    selfView = selfView,
+  )
 }
 
 /** Hides the system bars while this is shown, and lets the content use the cutout's edge too. */
@@ -369,54 +287,6 @@ private fun ImmersiveWindow() {
         window.attributes = window.attributes.apply { layoutInDisplayCutoutMode = maybeCutoutMode }
       }
     }
-  }
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-internal fun CallControls(
-  maybeState: CallStateInfo?,
-  isCameraOn: Boolean,
-  isSpeakerOn: Boolean,
-  onMute: (Boolean) -> Unit,
-  onDeafen: (Boolean) -> Unit,
-  onCamera: (Boolean) -> Unit,
-  onFlipCamera: () -> Unit,
-  onSpeaker: (Boolean) -> Unit,
-  maybeOnAddPeople: (() -> Unit)?,
-  onHangUp: () -> Unit,
-) {
-  val isMuted = maybeState?.isMuted == true
-  val isDeafened = maybeState?.isDeafened == true
-  FlowRow(
-    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-    verticalArrangement = Arrangement.spacedBy(8.dp),
-    modifier = Modifier.fillMaxWidth(),
-  ) {
-    FilterChip(selected = isMuted, onClick = { onMute(!isMuted) }, label = {
-      Text(stringResource(if (isMuted) R.string.call_unmute else R.string.call_mute))
-    })
-    FilterChip(selected = isDeafened, onClick = { onDeafen(!isDeafened) }, label = {
-      Text(stringResource(if (isDeafened) R.string.call_undeafen else R.string.call_deafen))
-    })
-    FilterChip(selected = isCameraOn, onClick = { onCamera(!isCameraOn) }, label = {
-      Text(stringResource(if (isCameraOn) R.string.call_camera_off else R.string.call_camera_on))
-    })
-    if (isCameraOn) {
-      FilterChip(selected = false, onClick = onFlipCamera, label = { Text(stringResource(R.string.call_camera_flip)) })
-    }
-    FilterChip(selected = isSpeakerOn, onClick = { onSpeaker(!isSpeakerOn) }, label = {
-      Text(stringResource(R.string.call_speaker))
-    })
-    maybeOnAddPeople?.let { onAddPeople ->
-      FilterChip(selected = false, onClick = onAddPeople, label = { Text(stringResource(R.string.call_add_people)) })
-    }
-  }
-  Button(
-    onClick = onHangUp,
-    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-  ) {
-    Text(stringResource(R.string.call_hang_up))
   }
 }
 
@@ -523,16 +393,4 @@ private fun AddPeopleDialog(moves: CallMoves, choice: AddPeopleChoice, onClose: 
       TextButton(onClick = close, enabled = !isPending) { Text(stringResource(R.string.cancel)) }
     },
   )
-}
-
-private fun phaseText(maybeState: CallStateInfo?): Int = when (maybeState?.phase) {
-  null, CallPhase.CONNECTING -> R.string.call_connecting
-  CallPhase.CONNECTED -> if (maybeState.isSecured) R.string.call_secured else R.string.call_securing
-  CallPhase.RECONNECTING -> R.string.call_reconnecting
-  CallPhase.ENDED -> when (maybeState.maybeEndReason) {
-    CallEndReason.REMOVED_BY_HOST -> R.string.call_removed_by_host
-    CallEndReason.ENDED_BY_HOST -> R.string.call_ended_by_host
-    CallEndReason.FAILED -> R.string.call_failed
-    else -> R.string.call_ended
-  }
 }

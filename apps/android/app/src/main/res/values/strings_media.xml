@@ -8,6 +8,4 @@
   <!-- Composer -->
   <string name="composer_remove_file">Remove %1$s</string>
   <!-- Calls -->
-  <string name="call_video_fullscreen">Show full screen</string>
-  <string name="call_video_exit_fullscreen">Exit full screen</string>
 </resources>

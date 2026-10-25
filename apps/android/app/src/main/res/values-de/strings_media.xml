@@ -8,6 +8,4 @@
   <!-- Eingabefeld -->
   <string name="composer_remove_file">%1$s entfernen</string>
   <!-- Anrufe -->
-  <string name="call_video_fullscreen">Im Vollbild zeigen</string>
-  <string name="call_video_exit_fullscreen">Vollbild beenden</string>
 </resources>
