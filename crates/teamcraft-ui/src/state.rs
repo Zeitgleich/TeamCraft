@@ -174,6 +174,8 @@ pub enum Overlay {
   MeetingCreated,
   /// Pick a conversation to forward a message to.
   Forward(ConversationId, MessageId),
+  /// The public links of one file of a message: new ones with options, the live ones with Revoke.
+  ShareFile(ConversationId, MessageId, teamcraft_proto::AttachmentId),
   NewSpace,
   /// Pick one or several people to write to (a DM or a group DM).
   NewMessage,

@@ -33,8 +33,8 @@ use teamcraft_proto::{
 use teamcraft_proto::{
   AttachmentDownloadResponse, AttachmentId, AttachmentPartUrlResponse, AttachmentResponse,
   CompleteMultipartAttachmentRequest, CreateAttachmentRequest, CreateAttachmentResponse,
-  CreateMultipartAttachmentResponse, CreateShareLinkRequest, PresignAttachmentPartRequest,
-  RegisterPushRequest, ShareLinkResponse,
+  CreateMultipartAttachmentResponse, CreateShareLinkRequest, ListShareLinksResponse,
+  PresignAttachmentPartRequest, RegisterPushRequest, ShareLinkResponse,
 };
 use teamcraft_proto::{
   BackgroundDownloadResponse, BackgroundId, CreateBackgroundUploadRequest, CreateBackgroundUploadResponse,
@@ -189,6 +189,8 @@ struct State {
   /// Uploads in parts keep only the parts' sizes, not their bytes (memory tests with large files).
   is_discarding_parts: bool,
   share_links: HashMap<String, AttachmentId>,
+  /// Links that were revoked; the server still lists them, as revoked.
+  revoked_share_links: std::collections::HashSet<String>,
   backgrounds: HashMap<BackgroundId, FakeBackground>,
   org_backgrounds: HashMap<OrgBackgroundId, FakeBackground>,
   /// Spaces besides the default one, and changes to the default one.
@@ -1043,8 +1045,16 @@ impl FakeServer {
   /// What the public download page of a share link serves: the ciphertext, no account needed.
   pub fn shared_blob(&self, share_id: &str) -> Option<Vec<u8>> {
     let state = self.lock();
+    if state.revoked_share_links.contains(share_id) {
+      return None;
+    }
     let attachment = state.share_links.get(share_id)?;
     state.attachments.get(attachment)?.maybe_blob.clone()
+  }
+
+  /// A share link revoked behind the client's back (an admin, another device).
+  pub fn revoke_shared_link(&self, share_id: &str) {
+    self.lock().revoked_share_links.insert(share_id.to_owned());
   }
 
   /// The push registration of a device (to seal wake-ups in tests).
@@ -3107,6 +3117,49 @@ impl ServerApi for FakeServerApi {
         maybe_last_downloaded_at: None,
         is_revoked: false,
       })
+    })
+  }
+
+  async fn revoke_share_link(&self, share_id: &str) -> Result<(), ApiError> {
+    self.with(|state, _| {
+      if !state.share_links.contains_key(share_id) {
+        return Err(ApiError::status(
+          404,
+          ErrorCode::AttachmentNotFound,
+          "no such link",
+        ));
+      }
+      if !state.revoked_share_links.insert(share_id.to_owned()) {
+        return Err(ApiError::status(
+          409,
+          ErrorCode::Conflict,
+          "the link was revoked already",
+        ));
+      }
+      Ok(())
+    })
+  }
+
+  async fn list_share_links(&self) -> Result<ListShareLinksResponse, ApiError> {
+    self.with(|state, _| {
+      let mut links: Vec<ShareLinkResponse> = state
+        .share_links
+        .iter()
+        .map(|(id, attachment)| ShareLinkResponse {
+          maybe_url: Some(format!("https://chat.example.com/f/{id}")),
+          id: id.clone(),
+          attachment_id: *attachment,
+          created_at: UnixMillis(0),
+          expires_at: UnixMillis(i64::MAX),
+          maybe_max_downloads: None,
+          is_password_protected: false,
+          download_count: 0,
+          maybe_last_downloaded_at: None,
+          is_revoked: state.revoked_share_links.contains(id),
+        })
+        .collect();
+      links.sort_by(|a, b| a.id.cmp(&b.id));
+      Ok(ListShareLinksResponse { links })
     })
   }
 

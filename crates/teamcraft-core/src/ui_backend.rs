@@ -173,9 +173,17 @@ pub enum CoreCommand {
   CreateShareLink {
     conversation: ConversationId,
     attachment: AttachmentId,
-    maybe_expires_at: Option<i64>,
+    maybe_expires_in_seconds: Option<u64>,
     maybe_max_downloads: Option<u32>,
     maybe_password: Option<RedactedText>,
+  },
+  RevokeShareLink {
+    conversation: ConversationId,
+    attachment: AttachmentId,
+    share_id: String,
+  },
+  RefreshShareLinks {
+    attachment: AttachmentId,
   },
   CreateSpace {
     request: Box<CreateSpaceRequest>,
@@ -334,6 +342,12 @@ pub(crate) fn history_jump_key(conversation: ConversationId) -> String {
 /// Text that must not show up in logs (a share link password); `Debug` prints `[redacted]`.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RedactedText(pub String);
+
+impl Drop for RedactedText {
+  fn drop(&mut self) {
+    zeroize::Zeroize::zeroize(&mut self.0);
+  }
+}
 
 impl std::fmt::Debug for RedactedText {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1468,6 +1482,18 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn share_links(&self, conversation: ConversationId, message: MessageId, file_id: &str) -> Vec<ShareLink> {
     self.ui_share_links(conversation, message, file_id)
+  }
+  fn revoke_share_link(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+    share_id: &str,
+  ) {
+    self.ui_revoke_share_link(conversation, message, file_id, share_id);
+  }
+  fn refresh_share_links(&self, conversation: ConversationId, message: MessageId, file_id: &str) {
+    self.ui_refresh_share_links(conversation, message, file_id);
   }
 
   fn max_upload_bytes(&self) -> Option<u64> {

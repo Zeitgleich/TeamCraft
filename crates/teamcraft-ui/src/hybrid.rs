@@ -549,6 +549,20 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
   fn share_links(&self, conversation: ConversationId, message: MessageId, file_id: &str) -> Vec<ShareLink> {
     self.chat.share_links(conversation, message, file_id)
   }
+  fn revoke_share_link(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+    share_id: &str,
+  ) {
+    self
+      .chat
+      .revoke_share_link(conversation, message, file_id, share_id);
+  }
+  fn refresh_share_links(&self, conversation: ConversationId, message: MessageId, file_id: &str) {
+    self.chat.refresh_share_links(conversation, message, file_id);
+  }
 
   fn max_upload_bytes(&self) -> Option<u64> {
     self.chat.max_upload_bytes()

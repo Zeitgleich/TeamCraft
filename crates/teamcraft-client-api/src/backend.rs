@@ -385,6 +385,18 @@ pub trait ChatBackend {
   ) -> Vec<ShareLink> {
     Vec::new()
   }
+  /// Stops the share link `share_id` of one file from working.
+  fn revoke_share_link(
+    &self,
+    _conversation: ConversationId,
+    _message: MessageId,
+    _file_id: &str,
+    _share_id: &str,
+  ) {
+  }
+  /// Asks the server for the current download counts of the file's links (they show in
+  /// [`Self::share_links`] once the answer is in); links revoked elsewhere or expired drop out.
+  fn refresh_share_links(&self, _conversation: ConversationId, _message: MessageId, _file_id: &str) {}
   /// Largest file the server accepts, if known.
   fn max_upload_bytes(&self) -> Option<u64> {
     None

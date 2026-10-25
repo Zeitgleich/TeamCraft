@@ -29,8 +29,8 @@ use teamcraft_proto::{
 use teamcraft_proto::{
   AttachmentDownloadResponse, AttachmentId, AttachmentPartUrlResponse, AttachmentResponse,
   CompleteMultipartAttachmentRequest, CreateAttachmentRequest, CreateAttachmentResponse,
-  CreateMultipartAttachmentResponse, CreateShareLinkRequest, PresignAttachmentPartRequest,
-  RegisterPushRequest, ShareLinkResponse,
+  CreateMultipartAttachmentResponse, CreateShareLinkRequest, ListShareLinksResponse,
+  PresignAttachmentPartRequest, RegisterPushRequest, ShareLinkResponse,
 };
 use teamcraft_proto::{
   BackgroundDownloadResponse, BackgroundId, CreateBackgroundUploadRequest, CreateBackgroundUploadResponse,
@@ -1092,6 +1092,16 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     request: &CreateShareLinkRequest,
   ) -> Result<ShareLinkResponse, ApiError> {
     self.send_json(Method::POST, "/shares", request).await
+  }
+
+  async fn revoke_share_link(&self, share_id: &str) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/shares/{share_id}"), None)
+      .await
+  }
+
+  async fn list_share_links(&self) -> Result<ListShareLinksResponse, ApiError> {
+    self.get("/shares").await
   }
 
   async fn register_push(&self, device: DeviceId, request: &RegisterPushRequest) -> Result<(), ApiError> {

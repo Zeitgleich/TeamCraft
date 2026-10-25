@@ -43,7 +43,8 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{
   AttachmentDownloadResponse, AttachmentId, AttachmentResponse, CreateAttachmentRequest,
-  CreateAttachmentResponse, CreateShareLinkRequest, RegisterPushRequest, ShareLinkResponse,
+  CreateAttachmentResponse, CreateShareLinkRequest, ListShareLinksResponse, RegisterPushRequest,
+  ShareLinkResponse,
 };
 use teamcraft_proto::{
   AttachmentPartUrlResponse, CompleteMultipartAttachmentRequest, CreateMultipartAttachmentResponse,
@@ -480,6 +481,10 @@ pub trait ServerApi {
     attachment: AttachmentId,
     request: &CreateShareLinkRequest,
   ) -> impl Future<Output = Result<ShareLinkResponse, ApiError>>;
+  /// Stops a share link from working (`DELETE /shares/{id}`).
+  fn revoke_share_link(&self, share_id: &str) -> impl Future<Output = Result<(), ApiError>>;
+  /// The caller's share links with their download counts (`GET /shares`).
+  fn list_share_links(&self) -> impl Future<Output = Result<ListShareLinksResponse, ApiError>>;
   fn register_push(
     &self,
     device: DeviceId,

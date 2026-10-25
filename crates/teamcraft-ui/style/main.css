@@ -11808,3 +11808,49 @@ ol.md-list {
   gap: var(--space-2);
   margin-top: var(--space-3);
 }
+
+/* The share link dialog: the file's live links, then the options of a new one. */
+.share-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.share-heading {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-lg);
+}
+
+.share-links {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.share-link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.share-link-info {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.share-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.share-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--space-2);
+}

@@ -324,6 +324,8 @@ mod links {
       json!({"attachment_id": s.attachment, "expires_at": now_ms - 1000}),
       json!({"attachment_id": s.attachment, "max_downloads": 0}),
       json!({"attachment_id": s.attachment, "max_downloads": 6}),
+      json!({"attachment_id": s.attachment, "expires_in_seconds": 0}),
+      json!({"attachment_id": s.attachment, "expires_in_seconds": 60, "expires_at": now_ms + day}),
     ] {
       assert_eq!(
         share(&s, body.clone()).await.status,
@@ -337,6 +339,23 @@ mod links {
     )
     .await;
     assert_eq!(fine.status, StatusCode::CREATED);
+
+    // A relative duration is counted by the server's clock, whatever the client's says, and is
+    // shortened to the maximum instead of refused.
+    let hour = share(
+      &s,
+      json!({"attachment_id": s.attachment, "expires_in_seconds": 3600}),
+    )
+    .await;
+    assert_eq!(hour.status, StatusCode::CREATED, "{}", hour.body);
+    assert!((hour.body["expires_at"].as_i64().unwrap() - (now_ms + 3_600_000)).abs() < 60_000);
+    let long = share(
+      &s,
+      json!({"attachment_id": s.attachment, "expires_in_seconds": 365 * 86_400_u64}),
+    )
+    .await;
+    assert_eq!(long.status, StatusCode::CREATED, "{}", long.body);
+    assert!((long.body["expires_at"].as_i64().unwrap() - (now_ms + 10 * day)).abs() < 60_000);
     s.app.stop().await;
   }
 

@@ -174,21 +174,27 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       CoreCommand::CreateShareLink {
         conversation,
         attachment,
-        maybe_expires_at,
+        maybe_expires_in_seconds,
         maybe_max_downloads,
         maybe_password,
       } => {
         let settings = crate::client::files::ShareLinkSettings {
-          maybe_expires_at,
+          maybe_expires_in_seconds,
           maybe_max_downloads,
-          maybe_password: maybe_password
-            .map(|password| teamcraft_crypto::secret::SecretBytes::new(password.0.into_bytes())),
+          maybe_password: maybe_password.map(|mut password| {
+            // The text is wiped when `password` drops; the secret owns the bytes from here.
+            teamcraft_crypto::secret::SecretBytes::new(std::mem::take(&mut password.0).into_bytes())
+          }),
         };
         self
           .create_share_link(conversation, attachment, settings)
           .await
           .map(|_| ())
       },
+      CoreCommand::RevokeShareLink {
+        attachment, share_id, ..
+      } => self.revoke_share_link(attachment, &share_id).await,
+      CoreCommand::RefreshShareLinks { attachment } => self.refresh_share_links(attachment).await,
       CoreCommand::CreateSpace { request } => self.create_space(&request).await.map(|_| ()),
       CoreCommand::UpdateSpace { space, request } => self.update_space(space, &request).await.map(|_| ()),
       CoreCommand::CreateChannelWith { space, options } => {

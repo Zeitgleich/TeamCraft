@@ -17,6 +17,15 @@ pub struct CreateShareLinkRequest {
   /// The link stops working after this many downloads.
   #[serde(rename = "max_downloads", default, skip_serializing_if = "Option::is_none")]
   pub maybe_max_downloads: Option<u32>,
+  /// Alternative to `expires_at` that does not depend on the client's clock: the link lasts this
+  /// long from the moment the server gets the request, at most the instance maximum (longer
+  /// durations are shortened to it; the response says when the link ends). Not both.
+  #[serde(
+    rename = "expires_in_seconds",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_expires_in_seconds: Option<u64>,
   /// The client wrapped the file key with a password; the download page asks for it. The server
   /// never sees the password, it only tells the page to ask.
   #[serde(default)]

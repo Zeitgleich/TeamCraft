@@ -45,6 +45,7 @@ use crate::components::settings_modal::ShortcutsModal;
 use crate::components::settings_tabs::apply_call_prefs;
 #[cfg(target_arch = "wasm32")]
 use crate::components::share_download::ShareDownloadPage;
+use crate::components::share_link_dialog::ShareLinkDialog;
 use crate::components::sidebar::Sidebar;
 use crate::components::status_menu::CustomStatusDialog;
 use crate::components::status_menu::StatusMenu;
@@ -395,6 +396,9 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::VerifyKey(conversation) => view! { <VerifyKeyDialog conversation=conversation /> }.into_any(),
         Overlay::ScheduleMeeting => lazy_area(Place::Overlay, || areas::schedule_meeting(())),
         Overlay::MeetingCreated => lazy_area(Place::Overlay, || areas::meeting_created(())),
+        Overlay::ShareFile(conversation, message, file) => {
+          view! { <ShareLinkDialog conversation=conversation message=message file=file /> }.into_any()
+        },
         Overlay::Forward(from, message) => view! { <ForwardDialog from=from message=message /> }.into_any(),
         Overlay::Lightbox(conversation, start) => lazy_area(Place::Overlay, move || areas::lightbox(conversation, start)),
         Overlay::FilePreview(conversation, key) => lazy_area(Place::Overlay, move || areas::file_preview(conversation, key)),
