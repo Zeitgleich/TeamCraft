@@ -560,26 +560,67 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
       })
     })
   };
-  let delivery_view = move || match delivery.get() {
-    Delivery::Sent => None,
-    Delivery::Delayed if !is_uploading() => Some(
-      view! {
-        <span class="msg-delivery msg-delayed" role="status">
-          <Icon name=IconName::Alert />
-          {move || i18n.t("message-not-sent")}
-        </span>
-      }
-      .into_any(),
-    ),
-    Delivery::Sending | Delivery::Delayed => Some(
-      view! {
-        <span class="msg-delivery" role="status">
-          <Icon name=IconName::Clock />
-          {move || i18n.t("message-sending")}
-        </span>
-      }
-      .into_any(),
-    ),
+  // Refused by the server for good (no permission, too large): only then is it an error.
+  let is_send_failed =
+    move || extras.with(|maybe_extras| maybe_extras.as_ref().is_some_and(|extras| extras.is_send_failed));
+  let delivery_view = move || {
+    if is_send_failed() {
+      return Some(
+        view! {
+          <span class="msg-delivery msg-failed" role="alert">
+            <Icon name=IconName::Alert />
+            {move || i18n.t("message-send-failed")}
+            <button
+              class="link-btn"
+              on:click=move |_| state.write(|backend| backend.retry_send(conversation, message_id))
+            >
+              {move || i18n.t("message-send-retry")}
+            </button>
+            <button
+              class="link-btn"
+              on:click=move |_| state.write(|backend| backend.discard_unsent(conversation, message_id))
+            >
+              {move || i18n.t("message-send-discard")}
+            </button>
+          </span>
+        }
+        .into_any(),
+      );
+    }
+    match delivery.get() {
+      Delivery::Sent => None,
+      // Unconfirmed: a small clock, retried in the background (offline, reconnect, reload).
+      Delivery::Sending => Some(
+        view! {
+          <span
+            class="msg-delivery is-pending"
+            role="status"
+            aria-label=move || i18n.t("message-sending")
+            data-tip=move || i18n.t("message-sending")
+          >
+            <Icon name=IconName::Clock />
+          </span>
+        }
+        .into_any(),
+      ),
+      Delivery::Delayed if is_uploading() => Some(
+        view! {
+          <span class="msg-delivery is-pending" role="status" aria-label=move || i18n.t("message-sending")>
+            <Icon name=IconName::Clock />
+          </span>
+        }
+        .into_any(),
+      ),
+      Delivery::Delayed => Some(
+        view! {
+          <span class="msg-delivery is-pending msg-delayed" role="status">
+            <Icon name=IconName::Clock />
+            {move || i18n.t("message-not-sent")}
+          </span>
+        }
+        .into_any(),
+      ),
+    }
   };
   let is_long_body = markdown::is_long(&body_text);
   let is_expanded = RwSignal::new(false);

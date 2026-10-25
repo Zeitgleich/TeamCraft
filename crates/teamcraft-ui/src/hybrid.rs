@@ -481,6 +481,18 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.set_draft(conversation, maybe_thread, body);
   }
 
+  fn retry_send(&self, conversation: ConversationId, message: MessageId) {
+    self.chat.retry_send(conversation, message);
+  }
+
+  fn discard_unsent(&self, conversation: ConversationId, message: MessageId) {
+    self.chat.discard_unsent(conversation, message);
+  }
+
+  fn cancel_upload(&self, conversation: ConversationId, message: MessageId, file_id: &str) {
+    self.chat.cancel_upload(conversation, message, file_id);
+  }
+
   fn acknowledge(&self, conversation: ConversationId, message: MessageId) {
     self.chat.acknowledge(conversation, message);
   }

@@ -8,12 +8,13 @@ use teamcraft_proto::{AttachmentId, Base64Bytes};
 
 use crate::client::files::{
   PendingFile, PendingUpload, TransferFailure, TransferState, UploadRetry, UploadSource, attachments_of,
-  failed_uploads, pending_upload, save_pending_upload, share_links, transfer_state,
+  cancel_pending_file, failed_uploads, pending_upload, save_pending_upload, share_links, transfer_state,
 };
 use crate::records;
 use crate::store::{
   AttachmentRef, ImageDimensions, LocalStore, MessageContent, MessageMeta, StoredMessage, Table,
 };
+use crate::transfers::Transfers;
 use crate::ui_backend::{CoreChatBackend, CoreCommand, RedactedText, ui_message_id};
 
 impl<S: LocalStore> CoreChatBackend<S> {
@@ -42,7 +43,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
             .maybe_thumbnail
             .as_ref()
             .map(|thumbnail| thumbnail.as_slice().to_vec()),
-          transfer: upload_transfer(file),
+          transfer: upload_transfer(file, self.transfers()),
           maybe_sender,
           maybe_sent_at,
           maybe_dimensions: file.maybe_dimensions.map(|size| PixelSize {
@@ -89,6 +90,14 @@ impl<S: LocalStore> CoreChatBackend<S> {
           .as_ref()
           .map(|png| png.as_slice().to_vec()),
         transfer: match self.read(transfer_state(self.store_ref(), attachment.attachment_id)) {
+          // Opened (the picture, the viewer) or saved right now: how far it got.
+          _ if self.transfers().progress(attachment.attachment_id).is_some() => {
+            let maybe_progress = self.transfers().progress(attachment.attachment_id);
+            FileTransfer::Downloading {
+              done_bytes: maybe_progress.map_or(0, |progress| progress.of_size(attachment.size_bytes)),
+              total_bytes: attachment.size_bytes,
+            }
+          },
           None => FileTransfer::Remote,
           Some(TransferState::Downloading { total_bytes }) => FileTransfer::Downloading {
             done_bytes: 0,
@@ -145,6 +154,24 @@ impl<S: LocalStore> CoreChatBackend<S> {
     }
     self.queue_link_preview(conversation, id, body);
     self.command(CoreCommand::UploadFiles);
+  }
+
+  /// "Cancel" on a file still going up; the host drops its running upload and sends the rest.
+  pub(crate) fn ui_cancel_upload(&self, conversation: ConversationId, message: MessageId, file_id: &str) {
+    let Some(index) = file_id
+      .strip_prefix("pending-")
+      .and_then(|index| index.parse::<usize>().ok())
+    else {
+      return;
+    };
+    let Some(stored) = self.find_stored(conversation, message) else {
+      return;
+    };
+    match cancel_pending_file(self.store_ref(), conversation, stored.client_message_id, index) {
+      Ok(true) => self.command(CoreCommand::UploadFiles),
+      Ok(false) => {},
+      Err(error) => tracing::error!(%error, "could not cancel the upload"),
+    }
   }
 
   pub(crate) fn ui_conversation_files(&self, conversation: ConversationId) -> Vec<FileInfo> {
@@ -335,9 +362,8 @@ fn file_size(_path: &str) -> u64 {
   0
 }
 
-/// Progress of one file of an upload: done once uploaded, nothing before (a file goes up in one
-/// request, which reports no progress).
-fn upload_transfer(file: &PendingFile) -> FileTransfer {
+/// Progress of one file of an upload: the bytes sent while it goes up, all once it is up.
+fn upload_transfer(file: &PendingFile, transfers: &Transfers) -> FileTransfer {
   if let Some(reason) = file.maybe_failure {
     return FileTransfer::UploadFailed {
       reason: failure_view(reason),
@@ -348,9 +374,12 @@ fn upload_transfer(file: &PendingFile) -> FileTransfer {
       reason: FileFailure::Network,
     };
   }
-  let done_bytes = match file.maybe_done {
-    Some(_) => file.size_bytes,
-    None => 0,
+  let done_bytes = match (&file.maybe_done, &file.maybe_slot) {
+    (Some(_), _) => file.size_bytes,
+    (None, Some(slot)) => transfers
+      .progress(slot.attachment_id)
+      .map_or(0, |progress| progress.of_size(file.size_bytes)),
+    (None, None) => 0,
   };
   FileTransfer::Uploading {
     done_bytes,

@@ -25,6 +25,7 @@ pub mod store;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod svg_thumbnail;
 pub mod thumbnail;
+pub mod transfers;
 #[cfg(feature = "ui")]
 mod ui_actions;
 #[cfg(feature = "ui")]

@@ -902,6 +902,14 @@ impl ChatBackend for RemoteChat {
     });
   }
 
+  fn cancel_upload(&self, conversation: ConversationId, message: MessageId, file_id: &str) {
+    self.act(ChatAction::CancelUpload {
+      conversation,
+      message,
+      file_id: file_id.to_owned(),
+    });
+  }
+
   fn discard_unsent(&self, conversation: ConversationId, message: MessageId) {
     self.act(ChatAction::DiscardUnsent {
       conversation,

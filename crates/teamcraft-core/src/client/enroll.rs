@@ -170,6 +170,7 @@ impl PendingEnrollment {
       sync,
       typing: Default::default(),
       background_failures: Vec::new(),
+      transfers: crate::transfers::Transfers::new(),
       maybe_call_sink: None,
       call_ids: HashMap::new(),
       maybe_preview_fetcher,

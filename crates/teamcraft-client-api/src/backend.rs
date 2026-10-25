@@ -320,6 +320,10 @@ pub trait ChatBackend {
   fn retry_send(&self, _conversation: ConversationId, _message: MessageId) {}
   /// Drops an own message the server rejected, instead of sending it again.
   fn discard_unsent(&self, _conversation: ConversationId, _message: MessageId) {}
+  /// Stops uploading one file of an own message that is still going up (`file_id` from its
+  /// [`crate::actions::FileInfo`]): the message goes out without it, or not at all when nothing is
+  /// left of it.
+  fn cancel_upload(&self, _conversation: ConversationId, _message: MessageId, _file_id: &str) {}
 
   // Files.
 

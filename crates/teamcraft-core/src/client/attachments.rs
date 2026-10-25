@@ -118,18 +118,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     maybe_max_plaintext_bytes: Option<u64>,
   ) -> Result<SecretBytes, CoreError> {
     let download = self.api.download_attachment(attachment.attachment_id).await?;
-    let ciphertext = match maybe_max_plaintext_bytes {
-      Some(max) => {
-        self
-          .api
-          .get_blob_capped(
-            &download.download_url,
-            max.saturating_add(CIPHERTEXT_OVERHEAD_BYTES),
-          )
-          .await?
-      },
-      None => self.api.get_blob(&download.download_url).await?,
-    };
+    // Listed while it runs: the file card and the picture show how far it got.
+    let progress = self
+      .transfers
+      .start(attachment.attachment_id, attachment.size_bytes);
+    let maybe_max_bytes = maybe_max_plaintext_bytes.map(|max| max.saturating_add(CIPHERTEXT_OVERHEAD_BYTES));
+    let ciphertext = self
+      .api
+      .get_blob_counted(&download.download_url, maybe_max_bytes, progress.counter())
+      .await?;
+    drop(progress);
     if !ciphertext_matches(&ciphertext, attachment.ciphertext_sha256.as_slice()) {
       return Err(CoreError::Corrupt(
         "attachment blob doesn't match its hash".into(),

@@ -845,7 +845,8 @@ impl Engine {
     self.identity_fingerprint = client.identity_fingerprint();
     self.maybe_backend = Some(
       CoreChatBackend::new(self.store.clone(), client.user_id(), Box::new(SystemClock))
-        .with_typing(client.typing_state()),
+        .with_typing(client.typing_state())
+        .with_transfers(client.transfers()),
     );
     self.client = ClientSlot::Idle(Box::new(client));
   }
@@ -914,6 +915,9 @@ impl Engine {
         handle.send(RunnerCommand::Flush);
       },
       ClientSlot::Idle(client) => {
+        // What the action wrote locally (a new message in the outbox) shows before the server
+        // answers.
+        self.listener.on_change();
         for command in commands {
           run_offline_tolerant(client, command).await?;
         }

@@ -50,6 +50,8 @@ const MAX_APPROVAL_MISSES: u8 = 3;
 /// Retries (outbox, uploads, previews), staggered commits and the other periodic upkeep; also the
 /// connection's regular check.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+/// How often the UI is told to read again while a file goes up, for its progress.
+const TRANSFER_PROGRESS: Duration = Duration::from_millis(500);
 /// How long a failed account data sync waits before it is retried; also how often the roster's age
 /// is checked locally. Account data itself is read after each connection and on `key_bag_update`
 /// (issue #252), not on a timer.
@@ -644,6 +646,8 @@ struct Core {
   maybe_upload: Option<BlobUpload>,
   /// A file may be waiting for its upload: one was queued, a retry came due, or one finished.
   is_upload_due: bool,
+  /// The bytes the transfers in flight had moved when the UI was last told.
+  maybe_reported_bytes: Option<u64>,
 }
 
 /// Why the client could not be opened.
@@ -727,6 +731,7 @@ impl Core {
       has_queued_sends: false,
       maybe_upload: None,
       is_upload_due: true,
+      maybe_reported_bytes: None,
     }
   }
 
@@ -751,6 +756,8 @@ impl Core {
         sent = upload_sent(&mut self.maybe_upload), if self.maybe_upload.is_some() => {
           self.on_uploaded(sent).await;
         },
+        // While a file goes up, the UI reads its progress again every so often.
+        () = tokio::time::sleep(TRANSFER_PROGRESS), if self.maybe_reported_bytes.is_some() => {},
         () = sleep_for(maybe_deadline), if maybe_deadline.is_some() => {
           self.connection.on_tick(SystemClock.now_ms()).await;
         },
@@ -764,6 +771,7 @@ impl Core {
         self.send_queued().await;
       }
       self.start_upload().await;
+      self.report_progress();
       self.report_background_failures();
     }
   }
@@ -930,11 +938,10 @@ impl Core {
     let status = CoreStatus::Ready {
       identity_fingerprint: client.identity_fingerprint(),
     };
-    self.backend = Some(CoreChatBackend::new(
-      client.store().clone(),
-      client.user_id(),
-      Box::new(SystemClock),
-    ));
+    self.backend = Some(
+      CoreChatBackend::new(client.store().clone(), client.user_id(), Box::new(SystemClock))
+        .with_transfers(client.transfers()),
+    );
     self.client = Some(client);
     status
   }
@@ -1453,7 +1460,17 @@ impl Core {
   /// Starts the next due upload, if none runs: the file is encrypted and announced, then goes up
   /// beside the loop.
   async fn start_upload(&mut self) {
-    if !self.is_upload_due || self.maybe_upload.is_some() {
+    if !self.is_upload_due {
+      return;
+    }
+    // A cancelled file (or a message deleted meanwhile) stops its upload: dropping it aborts it.
+    if let (Some(upload), Some(client)) = (&self.maybe_upload, &self.client)
+      && !client.is_upload_current(upload)
+    {
+      self.maybe_upload = None;
+      self.changed();
+    }
+    if self.maybe_upload.is_some() {
       return;
     }
     let Some(client) = self.client.as_mut() else {
@@ -1472,6 +1489,18 @@ impl Core {
       },
       Ok(None) => {},
       Err(error) => tracing::debug!(%error, "upload not started"),
+    }
+  }
+
+  /// Tells the UI to read again when the transfers in flight moved on.
+  fn report_progress(&mut self) {
+    let Some(client) = self.client.as_ref() else {
+      return;
+    };
+    let moved = client.transfers().moved_bytes();
+    if moved != self.maybe_reported_bytes {
+      self.maybe_reported_bytes = moved;
+      self.changed();
     }
   }
 
@@ -1514,6 +1543,9 @@ impl Core {
     };
     if self.connection.connect_if_due(client).await.is_some() {
       self.repeat_reports().await;
+      // Back online: what waited goes out now, not on the next tick.
+      self.has_queued_sends = true;
+      self.is_upload_due = true;
       self.changed();
     }
   }

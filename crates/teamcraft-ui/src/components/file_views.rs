@@ -36,6 +36,8 @@ use crate::state::{AppState, Overlay, use_app_state};
 
 /// Most tiles a grid shows; the last one counts the pictures it doesn't show ("+3").
 const MAX_GRID_TILES: usize = 4;
+/// From this size on, a transfer's progress is told in bytes ("12 MB / 48 MB"), below in percent.
+const LARGE_TRANSFER_BYTES: u64 = 1024 * 1024;
 
 /// The files attached to one message: pictures and videos inline (one large, several in a grid),
 /// everything else as cards. Pictures still going up show where they will be, from their local
@@ -157,19 +159,23 @@ fn UploadTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
       done_bytes,
       total_bytes,
     } if done_bytes < total_bytes || total_bytes == 0 => view! {
-      <span class="upload-state" role="status">
-        <span class="spinner" aria-hidden="true"></span>
-        <span class="visually-hidden">{move || i18n.t("file-uploading")}</span>
+      <span class="upload-state">
+        <TransferRing done_bytes=done_bytes total_bytes=total_bytes />
+        <span class="upload-label" role="status">{transfer_label(i18n, done_bytes, total_bytes)}</span>
+        <CancelUploadButton actions=actions />
       </span>
     }
     .into_any(),
     FileTransfer::UploadStalled { .. } => view! {
       <span class="upload-state is-failed" role="alert">
         <span>{move || i18n.t("file-upload-failed")}</span>
-        <button class="btn btn-small" on:click=move |_| actions.retry_upload()>
-          <Icon name=IconName::Rotate />
-          <span>{move || i18n.t("file-retry")}</span>
-        </button>
+        <span class="upload-actions">
+          <button class="btn btn-small" on:click=move |_| actions.retry_upload()>
+            <Icon name=IconName::Rotate />
+            <span>{move || i18n.t("file-retry")}</span>
+          </button>
+          <CancelUploadButton actions=actions />
+        </span>
       </span>
     }
     .into_any(),
@@ -199,6 +205,59 @@ fn UploadTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
       <span class="media-open">{picture}</span>
       {status}
     </div>
+  }
+}
+
+/// How far a transfer got, as a ring; a turning one before the first bytes moved.
+#[component]
+fn TransferRing(done_bytes: u64, total_bytes: u64) -> impl IntoView {
+  let percent = percent_of(done_bytes, total_bytes);
+  match done_bytes {
+    0 => view! { <span class="spinner" aria-hidden="true"></span> }.into_any(),
+    _ => view! {
+      <span class="transfer-ring" style:--media-progress=percent.to_string() aria-hidden="true"></span>
+    }
+    .into_any(),
+  }
+}
+
+/// "Cancel" on a file that is still going up.
+#[component]
+fn CancelUploadButton(actions: FileActions) -> impl IntoView {
+  let i18n = use_i18n();
+  view! {
+    <button
+      class="icon-btn upload-cancel"
+      aria-label=move || i18n.t("file-cancel-upload")
+      data-tip=move || i18n.t("file-cancel-upload")
+      on:click=move |_| actions.cancel_upload()
+    >
+      <Icon name=IconName::Close />
+    </button>
+  }
+}
+
+/// A transfer's progress in words: bytes of large files ("12 MB / 48 MB"), percent of small ones.
+fn transfer_label(i18n: I18n, done_bytes: u64, total_bytes: u64) -> String {
+  if total_bytes >= LARGE_TRANSFER_BYTES {
+    return i18n.t_with(
+      "file-progress-bytes",
+      &[
+        ("done", &format_bytes(done_bytes)),
+        ("total", &format_bytes(total_bytes)),
+      ],
+    );
+  }
+  i18n.t_with(
+    "file-progress-percent",
+    &[("percent", &percent_of(done_bytes, total_bytes).to_string())],
+  )
+}
+
+fn percent_of(done_bytes: u64, total_bytes: u64) -> u64 {
+  match total_bytes {
+    0 => 0,
+    total => u64::try_from(u128::from(done_bytes.min(total)) * 100 / u128::from(total)).unwrap_or(100),
   }
 }
 
@@ -316,6 +375,14 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
     TileLayout::Single => None,
   };
   let is_single = layout == TileLayout::Single;
+  // A large picture or video on its way down shows how far it got.
+  let downloading = file.with_value(|file| match file.transfer {
+    FileTransfer::Downloading {
+      done_bytes,
+      total_bytes,
+    } if total_bytes >= LARGE_TRANSFER_BYTES => Some((done_bytes, total_bytes)),
+    _ => None,
+  });
   let has_size = maybe_dimensions.is_some() || maybe_thumbnail_size.is_some();
   let badge = file.with_value(|file| animation_label(&file.media_type));
   let size_bytes = file.with_value(|file| file.size_bytes);
@@ -383,6 +450,12 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
             <Icon name=IconName::Rotate />
             <span>{move || i18n.t("file-retry")}</span>
           </button>
+        })}
+        {downloading.map(|(done, total)| view! {
+          <span class="upload-state">
+            <TransferRing done_bytes=done total_bytes=total />
+            <span class="upload-label" role="status">{transfer_label(i18n, done, total)}</span>
+          </span>
         })}
         <MediaToolbar file=file.get_value() />
       </div>
@@ -565,9 +638,26 @@ fn transfer_status(transfer: &FileTransfer, actions: FileActions) -> AnyView {
   let i18n = use_i18n();
   match transfer {
     FileTransfer::Remote => ().into_any(),
-    FileTransfer::Uploading { done_bytes, total_bytes } | FileTransfer::Downloading { done_bytes, total_bytes } => {
-      let (done, total) = (*done_bytes, (*total_bytes).max(1));
-      view! { <progress class="file-progress" max=total value=done aria-label=move || i18n.t("file-progress")></progress> }.into_any()
+    FileTransfer::Uploading { done_bytes, total_bytes } => {
+      let (done, total) = (*done_bytes, *total_bytes);
+      view! {
+        <span class="file-transfer">
+          <progress class="file-progress" max=total.max(1) value=done aria-label=move || i18n.t("file-progress")></progress>
+          <span class="file-state">{transfer_label(i18n, done, total)}</span>
+          <CancelUploadButton actions=actions />
+        </span>
+      }
+      .into_any()
+    },
+    FileTransfer::Downloading { done_bytes, total_bytes } => {
+      let (done, total) = (*done_bytes, *total_bytes);
+      view! {
+        <span class="file-transfer">
+          <progress class="file-progress" max=total.max(1) value=done aria-label=move || i18n.t("file-progress")></progress>
+          <span class="file-state">{transfer_label(i18n, done, total)}</span>
+        </span>
+      }
+      .into_any()
     },
     FileTransfer::Local { path } => view! {
       <span class="file-state" translate="no" title=path.clone()>{move || i18n.t("file-saved")}</span>
@@ -584,6 +674,7 @@ fn transfer_status(transfer: &FileTransfer, actions: FileActions) -> AnyView {
     FileTransfer::UploadStalled { .. } => view! {
       <span class="file-error" role="alert">{move || i18n.t("file-upload-stalled")}</span>
       <button class="link-btn" on:click=move |_| actions.retry_upload()>{move || i18n.t("file-retry")}</button>
+      <button class="link-btn" on:click=move |_| actions.cancel_upload()>{move || i18n.t("file-cancel-upload")}</button>
     }
     .into_any(),
     FileTransfer::UploadFailed { reason } => {
@@ -805,6 +896,14 @@ impl FileActions {
       None => "lightbox-link-unavailable",
     };
     self.state.show_brief_toast(self.i18n.t(key));
+  }
+
+  /// Stops the file's upload; the message goes out without it.
+  fn cancel_upload(self) {
+    let file_id = self.file_id.get_value();
+    self
+      .state
+      .write(|backend| backend.cancel_upload(self.conversation, self.message, &file_id));
   }
 
   /// "Retry" on an upload that stopped retrying by itself; the message waits for it.

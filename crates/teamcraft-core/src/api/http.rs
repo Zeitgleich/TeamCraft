@@ -62,6 +62,7 @@ use super::{
   ServerApi,
 };
 use crate::clock::{Clock, SystemClock};
+use crate::transfers::ByteCounter;
 
 /// How long a TCP and TLS (or WebSocket) handshake may take.
 #[cfg(not(target_arch = "wasm32"))]
@@ -933,9 +934,58 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     send(self.client.put(url).body(bytes)).await.map(|_| ())
   }
 
-  fn put_blob_detached(&self, url: &str, bytes: Vec<u8>) -> DetachedRequest {
-    let request = self.client.put(url).body(bytes);
+  #[cfg(not(target_arch = "wasm32"))]
+  fn put_blob_detached(&self, url: &str, bytes: Vec<u8>, sent: ByteCounter) -> DetachedRequest {
+    // Presigned URLs want the exact length; a streamed body would otherwise go chunked.
+    let request = self
+      .client
+      .put(url)
+      .header(reqwest::header::CONTENT_LENGTH, bytes.len())
+      .body(counted_body(bytes, sent));
     Box::pin(async move { send(request).await.map(|_| ()) })
+  }
+
+  #[cfg(target_arch = "wasm32")]
+  fn put_blob_detached(&self, url: &str, bytes: Vec<u8>, sent: ByteCounter) -> DetachedRequest {
+    let url = url.to_owned();
+    Box::pin(async move { super::xhr::put(&url, bytes, sent).await })
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  async fn get_blob_counted(
+    &self,
+    url: &str,
+    maybe_max_bytes: Option<u64>,
+    received: ByteCounter,
+  ) -> Result<Vec<u8>, ApiError> {
+    let mut response = send(self.client.get(url)).await?;
+    let max_bytes = maybe_max_bytes.unwrap_or(u64::MAX);
+    if response.content_length().is_some_and(|length| length > max_bytes) {
+      return Err(ApiError::BlobTooLarge { max_bytes });
+    }
+    let mut blob = Vec::new();
+    while let Some(chunk) = response
+      .chunk()
+      .await
+      .map_err(|error| ApiError::Network(error.to_string()))?
+    {
+      if blob.len() as u64 + chunk.len() as u64 > max_bytes {
+        return Err(ApiError::BlobTooLarge { max_bytes });
+      }
+      blob.extend_from_slice(&chunk);
+      received.add(chunk.len() as u64);
+    }
+    Ok(blob)
+  }
+
+  #[cfg(target_arch = "wasm32")]
+  async fn get_blob_counted(
+    &self,
+    url: &str,
+    maybe_max_bytes: Option<u64>,
+    received: ByteCounter,
+  ) -> Result<Vec<u8>, ApiError> {
+    super::xhr::get(url, maybe_max_bytes, received).await
   }
 
   async fn get_blob(&self, url: &str) -> Result<Vec<u8>, ApiError> {
@@ -1108,6 +1158,20 @@ async fn read_capped(mut response: reqwest::Response, max_bytes: u64) -> Result<
     blob.extend_from_slice(&chunk);
   }
   Ok(blob)
+}
+
+/// An upload body in chunks of 64 KiB, each counted into `sent` as the connection takes it.
+#[cfg(not(target_arch = "wasm32"))]
+fn counted_body(bytes: Vec<u8>, sent: ByteCounter) -> reqwest::Body {
+  const CHUNK_BYTES: usize = 64 * 1024;
+  let length = bytes.len();
+  let chunks = futures_util::stream::iter((0..length).step_by(CHUNK_BYTES).map(move |start| {
+    let end = start.saturating_add(CHUNK_BYTES).min(length);
+    let chunk = bytes[start..end].to_vec();
+    sent.add(chunk.len() as u64);
+    Ok::<_, std::io::Error>(chunk)
+  }));
+  reqwest::Body::wrap_stream(chunks)
 }
 
 /// The browser's fetch has no chunked reads in reqwest, so the body is read whole; the
