@@ -191,6 +191,10 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     self.inner.purge_freed()
   }
 
+  fn purge_freed_soon(&self) {
+    self.inner.purge_freed_soon();
+  }
+
   fn begin_writes(&self) -> Result<(), StoreError> {
     self.inner.begin_writes()
   }

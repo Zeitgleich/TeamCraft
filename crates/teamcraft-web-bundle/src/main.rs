@@ -396,9 +396,10 @@ const INIT_TEMPLATE: &str = r#"import init from '__MAIN_JS__';
 import initializer from '__INITIALIZER__';
 
 // The signed-in app is a chunk of its own (areas.rs): fetched at once, next to the app, unless this
-// is a guest's meeting link (`/meeting/<id>#invite=…`, meetings.rs `parse_guest_link`), which never
-// needs it. The chunk loader's own requests then come from these.
-const isGuestLink = /^\/meeting\/[^/]+\/?$/.test(location.pathname) && /(^#|&)invite=[^&]/.test(location.hash);
+// is a guest's meeting link (`/meeting/<id>#invite=…`, meetings.rs `parse_guest_link`) or a share
+// link's download page (`/f/<id>#…`, share_link.rs), which never need it. The chunk loader's own requests then come from these.
+const isGuestLink = (/^\/meeting\/[^/]+\/?$/.test(location.pathname) && /(^#|&)invite=[^&]/.test(location.hash))
+  || (/^\/f\/[A-Za-z0-9_-]+\/?$/.test(location.pathname) && location.hash.length > 1);
 if (!isGuestLink) {
   for (const href of [__SESSION_FILES__]) {
     const link = document.createElement('link');
