@@ -11818,7 +11818,7 @@ ol.md-list {
 
 .share-heading {
   margin: var(--space-2) 0 0;
-  font-size: 1rem;
+  font-size: var(--text-lg);
 }
 
 .share-links {
