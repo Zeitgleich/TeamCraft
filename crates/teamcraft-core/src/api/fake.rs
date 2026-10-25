@@ -683,8 +683,19 @@ impl FakeServer {
     {
       entry.0 = ChannelRole::Admin;
     }
+    if let Some(conversation) = state.conversations.get_mut(&id) {
+      conversation.response.maybe_organizer_user_id = Some(organizer);
+    }
     state.publish(members, &GatewayEvent::ConversationUpdate { conversation_id: id });
     id
+  }
+
+  /// Group information the server holds for the conversation's current epoch although no member
+  /// published it: a member or the server planting information nobody can join.
+  pub fn plant_group_info(&self, conversation: ConversationId, group_info: &[u8]) {
+    if let Some(entry) = self.lock().conversations.get_mut(&conversation) {
+      entry.maybe_group_info = Some((entry.epoch, Base64Bytes::new(group_info.to_vec())));
+    }
   }
 
   /// The conversation's call ends: the next join token opens a new call with a new ID.
@@ -2427,8 +2438,21 @@ impl ServerApi for FakeServerApi {
           format!("the group is in epoch {}", entry.epoch),
         ));
       }
-      // Like the server: at epoch 0 the first information wins (two founders' groups differ).
+      // Like the server: a meeting chat's first information comes from the organizer's devices only.
       if request.epoch == 0
+        && entry.response.kind == ConversationKind::Meeting
+        && entry.response.maybe_organizer_user_id != Some(me)
+      {
+        return Err(ApiError::status(
+          403,
+          ErrorCode::Forbidden,
+          "only the organizer publishes a meeting chat's first group information",
+        ));
+      }
+      // At epoch 0 the first information wins (two founders' groups differ), unless the
+      // organizer replaces it.
+      if request.epoch == 0
+        && !request.is_replacement
         && entry
           .maybe_group_info
           .as_ref()
@@ -4100,6 +4124,7 @@ impl State {
       moderation: ChannelModeration::default(),
       is_integration: false,
       contains_guests: false,
+      maybe_organizer_user_id: None,
       maybe_my_membership: None,
       participants: Vec::new(),
       maybe_image: None,

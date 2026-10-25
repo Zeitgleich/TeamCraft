@@ -310,14 +310,28 @@ async fn the_first_group_information_of_epoch_zero_wins() {
     .unwrap();
 
   let accepted = |outcome| matches!(outcome, PostOutcome::Accepted);
-  assert!(accepted(db.put_mls_group_info(chat, 0, b"first").await.unwrap()));
-  assert!(!accepted(
-    db.put_mls_group_info(chat, 0, b"second").await.unwrap()
+  assert!(accepted(
+    db.put_mls_group_info(chat, 0, b"first", false).await.unwrap()
   ));
-  assert!(accepted(db.put_mls_group_info(chat, 0, b"first").await.unwrap()));
+  assert!(!accepted(
+    db.put_mls_group_info(chat, 0, b"second", false).await.unwrap()
+  ));
+  assert!(accepted(
+    db.put_mls_group_info(chat, 0, b"first", false).await.unwrap()
+  ));
   assert_eq!(
     db.current_mls_group_info(chat).await.unwrap(),
     Some((0, b"first".to_vec()))
+  );
+  // The organizer may replace it while the group is in epoch 0 (the first one could not be joined).
+  assert!(accepted(
+    db.put_mls_group_info(chat, 0, b"replacement", true)
+      .await
+      .unwrap()
+  ));
+  assert_eq!(
+    db.current_mls_group_info(chat).await.unwrap(),
+    Some((0, b"replacement".to_vec()))
   );
   test_db.drop_database().await;
 }

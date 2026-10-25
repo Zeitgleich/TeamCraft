@@ -128,12 +128,14 @@ impl Database {
   }
 
   /// Stores the group information for `epoch` if the group is still in it (a member publishing it
-  /// later than its commit).
+  /// later than its commit). With `is_replacement`, information that holds epoch 0 is replaced
+  /// (the caller checked that this is allowed).
   pub async fn put_mls_group_info(
     &self,
     conversation: ConversationId,
     epoch: u64,
     group_info: &[u8],
+    is_replacement: bool,
   ) -> Result<PostOutcome, DbError> {
     let epoch_db = epoch_to_db(epoch)?;
     let mut tx = self.pool().begin().await?;
@@ -151,7 +153,16 @@ impl Database {
     }
     if !store_group_info(&mut tx, conversation, epoch_db, group_info).await? {
       // Another founder's information holds epoch 0 (see `store_group_info`).
-      return Ok(PostOutcome::EpochConflict { current_epoch: epoch });
+      if !(is_replacement && epoch_db == 0) {
+        return Ok(PostOutcome::EpochConflict { current_epoch: epoch });
+      }
+      sqlx::query!(
+        "UPDATE mls_group_infos SET group_info = $2, updated_at = now() WHERE conversation_id = $1 AND epoch = 0",
+        to_db(conversation),
+        group_info,
+      )
+      .execute(&mut *tx)
+      .await?;
     }
     tx.commit().await?;
     Ok(PostOutcome::Accepted)

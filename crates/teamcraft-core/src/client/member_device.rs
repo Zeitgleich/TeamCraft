@@ -50,6 +50,9 @@ pub(crate) enum MemberDeviceJoin {
   Waiting,
   /// The user has no device in the group: this is a user joining, not a further device.
   NotAMember,
+  /// The group information on the server can't be joined: it doesn't open, or it isn't the
+  /// group of the meeting's organizer. Members were asked to add this device instead.
+  Unjoinable,
 }
 
 /// That this device waits for a member's current key, and from whose welcome.
@@ -184,9 +187,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Err(error) => {
         tracing::warn!(conversation_id = %conversation, %error, "could not join by external commit");
         self.request_device_addition(conversation).await?;
-        return Ok(MemberDeviceJoin::Waiting);
+        return Ok(MemberDeviceJoin::Unjoinable);
       },
     };
+    if !self.is_founded_by_organizer(conversation, &group).await? {
+      group.delete(&self.provider)?;
+      self.request_device_addition(conversation).await?;
+      return Ok(MemberDeviceJoin::Unjoinable);
+    }
     if self.is_direct(conversation)? && !holds_everybody(&group, &users)? {
       // A DM's group that doesn't hold all its participants yet may be a founder's group of one
       // that still loses the founding race (e2ee.md §4.6): the members add this device instead.
@@ -564,6 +572,36 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     i64::try_from(self.settings.rejoin_retry.as_millis()).unwrap_or(i64::MAX)
   }
 
+  /// Whether a meeting chat's group was founded by the meeting's organizer (its first member is
+  /// the organizer's device); any other conversation passes. The organizer is the server's word
+  /// (the answer for the conversation names it): a member who founded the group of a meeting
+  /// can't pass as its organizer, but a server that names somebody else can (e2ee.md §4.6).
+  pub(super) async fn is_founded_by_organizer(
+    &mut self,
+    conversation: ConversationId,
+    group: &ConversationGroup,
+  ) -> Result<bool, CoreError> {
+    let maybe_cached_kind = self
+      .cached_conversations()?
+      .get(&conversation)
+      .map(|response| response.kind.clone());
+    if maybe_cached_kind.is_some_and(|kind| kind != ConversationKind::Meeting) {
+      return Ok(true);
+    }
+    let response = self.api.conversation(conversation).await?;
+    if response.kind != ConversationKind::Meeting {
+      return Ok(true);
+    }
+    // A server that doesn't name the organizer (older) leaves the check out.
+    let Some(organizer) = response.maybe_organizer_user_id else {
+      return Ok(true);
+    };
+    let Some(founder) = group.members()?.into_iter().next() else {
+      return Ok(false);
+    };
+    Ok(convert::user_from_crypto(founder.user_id)? == organizer)
+  }
+
   /// Publishes this device's group information for the current epoch when the server has none
   /// (the last commit came from an older client).
   pub(super) async fn publish_group_info_if_missing(
@@ -575,6 +613,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Err(error) if error.is_not_found() => {},
       Err(error) => return Err(error.into()),
     }
+    self.publish_group_info(conversation, false).await
+  }
+
+  /// Publishes this device's group information for the current epoch. With `is_replacement` (the
+  /// meeting organizer's device, after it founded a meeting chat's group anew) it replaces
+  /// information at epoch 0 that couldn't be joined.
+  pub(super) async fn publish_group_info(
+    &mut self,
+    conversation: ConversationId,
+    is_replacement: bool,
+  ) -> Result<GroupInfoOutcome, CoreError> {
     if !self.has_group(conversation)? {
       return Ok(GroupInfoOutcome::NotPublished);
     }
@@ -593,6 +642,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       device_id: self.account.device_id,
       epoch,
       group_info: Base64Bytes::new(group_info),
+      is_replacement,
     };
     match self.api.put_mls_group_info(conversation, &request).await {
       Ok(()) => Ok(GroupInfoOutcome::OnServer),

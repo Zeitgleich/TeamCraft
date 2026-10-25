@@ -69,7 +69,15 @@ pub async fn get_conversation(
   id: ConversationId,
 ) -> Result<ConversationResponse, ApiError> {
   let access = load_conversation(state, caller, id).await?;
-  respond(state, &access.view).await
+  let mut response = respond(state, &access.view).await?;
+  if response.kind == ConversationKind::Meeting {
+    response.maybe_organizer_user_id = state
+      .database
+      .get_meeting_by_conversation(id)
+      .await?
+      .map(|meeting| meeting.organizer);
+  }
+  Ok(response)
 }
 
 pub async fn create_channel(

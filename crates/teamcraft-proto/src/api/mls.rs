@@ -142,6 +142,10 @@ pub struct PutMlsGroupInfoRequest {
   pub device_id: DeviceId,
   pub epoch: u64,
   pub group_info: Base64Bytes,
+  /// The meeting organizer's device founds the group again and replaces the information that
+  /// holds epoch 0 (it could not be joined). Only the organizer, only while the group is in epoch 0.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_replacement: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
