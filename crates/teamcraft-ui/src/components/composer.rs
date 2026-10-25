@@ -7,13 +7,13 @@ use teamcraft_client_api::admin::format_bytes;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::components::avatar::{Avatar, AvatarSize};
-use crate::components::channel_view::DroppedFiles;
 use crate::components::composer_commands::{self, Notice, Outcome};
 use crate::components::composer_editor;
 use crate::components::composer_toolbar::{
   ActiveFormats, FormatAction, FormatToolbar, SendOptionsMenu, format_action_for, move_focus_vertical,
 };
 use crate::components::emoji_picker::EmojiPicker;
+use crate::components::file_drop::{DroppedFiles, transfer_files};
 use crate::components::file_views::blob_url;
 use crate::components::icons::{Icon, IconName};
 use crate::components::sheet::MenuSurface;
@@ -191,7 +191,6 @@ pub fn Composer(
   let is_empty = RwSignal::new(true);
   let attachments = RwSignal::new(Vec::<PendingFile>::new());
   let upload_error = RwSignal::new(None::<String>);
-  let is_drag_over = RwSignal::new(false);
   let notice = RwSignal::new(None::<Notice>);
   let suggestions = RwSignal::new(Vec::<Suggestion>::new());
   let selected_suggestion = RwSignal::new(0_usize);
@@ -809,10 +808,8 @@ pub fn Composer(
       element.click();
     }
   };
-  // Drops anywhere on the conversation arrive through the channel view (main composer only).
-  if maybe_thread.is_none()
-    && let Some(DroppedFiles(dropped)) = use_context::<DroppedFiles>()
-  {
+  // Drops anywhere on the conversation or thread arrive through its drop zone (`FileDrop`).
+  if let Some(DroppedFiles(dropped)) = use_context::<DroppedFiles>() {
     Effect::new(move |_| {
       let files = dropped.get();
       if !files.is_empty() {
@@ -825,13 +822,13 @@ pub fn Composer(
   let on_drop = move |ev: web_sys::DragEvent| {
     // Marks the drop as handled, so the conversation around doesn't attach the files a second time.
     ev.prevent_default();
-    is_drag_over.set(false);
     let Some(transfer) = ev.data_transfer() else {
       return;
     };
-    match transfer.files().filter(|files| files.length() > 0) {
-      Some(files) => add_files((0..files.length()).filter_map(|i| files.item(i)).collect()),
-      None => {
+    let files = transfer_files(&transfer);
+    match files.is_empty() {
+      false => add_files(files),
+      true => {
         if let (Ok(text), Some(element)) = (transfer.get_data("text/plain"), editor.get_untracked())
           && !text.is_empty()
         {
@@ -849,10 +846,9 @@ pub fn Composer(
       return;
     };
     ev.prevent_default();
-    if let Some(files) = data.files()
-      && files.length() > 0
-    {
-      add_files((0..files.length()).filter_map(|i| files.item(i)).collect());
+    let files = transfer_files(&data);
+    if !files.is_empty() {
+      add_files(files);
       return;
     }
     let Some(element) = editor.get_untracked() else {
@@ -931,12 +927,8 @@ pub fn Composer(
     <div
       class="composer"
       class:composer-disabled=!can_post
-      class:composer-drop=move || is_drag_over.get()
-      on:dragover=move |ev| {
-        ev.prevent_default();
-        is_drag_over.set(true);
-      }
-      on:dragleave=move |_| is_drag_over.set(false)
+      // The drop zone around (`FileDrop`) shows where files go; this only accepts the drop.
+      on:dragover=move |ev: web_sys::DragEvent| ev.prevent_default()
       on:drop=on_drop
     >
       <Show
@@ -950,13 +942,12 @@ pub fn Composer(
             <For each=attachment_list key=|(i, name, _)| (*i, name.clone()) let:item>
               {
                 let (index, name, maybe_preview_url) = item;
-                let leading_is_image = maybe_preview_url.is_some();
                 let leading = match maybe_preview_url {
                   Some(url) => view! { <img class="chip-thumb" src=url alt="" /> }.into_any(),
                   None => view! { <Icon name=IconName::File /> }.into_any(),
                 };
                 view! {
-                  <li class="chip" class:chip-image=leading_is_image>
+                  <li class="chip">
                     {leading}
                     <span class="chip-name">{name}</span>
                     <button

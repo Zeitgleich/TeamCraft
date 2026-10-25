@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 
 use crate::components::composer::Composer;
+use crate::components::file_drop::{DropStrip, FileDrop};
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_list::handle_list_keys;
 use crate::components::message_row::MessageRow;
@@ -33,6 +34,8 @@ pub fn ThreadPanel(
   let can_post = state
     .read(|backend| backend.conversation(conversation))
     .is_none_or(|conv| conv.can_post);
+  // Files dropped anywhere on the thread go to its reply composer.
+  let zone = FileDrop::provide(can_post);
   let scroll = NodeRef::<leptos::html::Div>::new();
   let toolbar = ToolbarHost::provide(scroll);
   let is_following = RwSignal::new(state.read(|backend| backend.is_thread_followed(conversation, thread)));
@@ -43,7 +46,14 @@ pub fn ThreadPanel(
   });
 
   view! {
-    <aside class="side-panel thread-panel" class:embedded=embedded aria-label=move || i18n.t("thread-panel-label")>
+    <aside class="side-panel thread-panel" class:embedded=embedded aria-label=move || i18n.t("thread-panel-label")
+      on:dragenter=move |ev| zone.on_dragenter(&ev)
+      on:dragleave=move |_| zone.on_dragleave()
+      on:dragover=move |ev| zone.on_dragover(&ev)
+      on:drop=move |ev| {
+        zone.on_drop(&ev);
+      }
+    >
       <header class="panel-header">
         <div class="panel-title">
           <h2>{move || i18n.t("thread-title")}</h2>
@@ -102,6 +112,7 @@ pub fn ThreadPanel(
         }}
         <MessageToolbar host=toolbar />
       </div>
+      <DropStrip zone=zone />
       <Composer
         conversation=conversation
         maybe_thread=thread
