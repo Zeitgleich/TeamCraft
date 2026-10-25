@@ -191,6 +191,26 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         }
         continue;
       }
+      let is_direct = matches!(response.kind, ConversationKind::Dm | ConversationKind::Group);
+      if is_direct {
+        // A further device joins the user's DMs and group DMs on its own too (#179); a DM this
+        // device opened is finished by its setup (`repair_dm_setups`), and nobody self-adds.
+        if response.maybe_my_membership.is_none()
+          || response.is_archived
+          || self.has_group(response.id)?
+          || self.has_dm_setup(response.id)?
+        {
+          continue;
+        }
+        match self.join_as_member_device(response.id).await {
+          Err(error) if error.is_transient() => return Err(error),
+          Err(error) => {
+            tracing::warn!(conversation_id = %response.id, %error, "could not join a DM as a further device");
+          },
+          Ok(_) => {},
+        }
+        continue;
+      }
       let is_channel = response.maybe_space_id.is_some() && response.kind == ConversationKind::Channel;
       let key = format!("self-add/{}", response.id);
       if !is_channel
@@ -350,6 +370,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     self.api.update_space_member(space, user, &request).await?;
     self.refresh_space_roster(space).await
+  }
+
+  /// Gives a channel member another role (admin.md §2.3). The server checks the permission and
+  /// the invariants (a channel keeps an admin, guests stay members); the member list is read again
+  /// so the UI shows what the server stored, not what was asked for. Roles are not yet signed
+  /// assignments in the roster, so this is the server's word until they are.
+  pub async fn set_channel_role(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+    role: teamcraft_proto::ChannelRole,
+  ) -> Result<(), CoreError> {
+    let request = teamcraft_proto::UpdateConversationMemberRequest {
+      maybe_role: Some(role),
+      ..Default::default()
+    };
+    self.api.update_member(conversation, user, &request).await?;
+    self.refresh_members(conversation).await
   }
 
   /// Removes someone from the space; the server also takes them out of its channels, whose

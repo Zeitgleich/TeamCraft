@@ -6,6 +6,11 @@
 //! Positions are in CSS pixels relative to the centre of the stage (the area the image is shown in).
 //! The image is first fitted into the stage ("fit", scale 1) and then rotated, scaled around its
 //! centre and moved by an offset, which is what the view writes into the image's `transform`.
+//!
+//! The motion of gestures (following the finger, springs, momentum, rubber-banding) is in
+//! [`physics`].
+
+pub mod physics;
 
 use std::ops::Range;
 
@@ -20,8 +25,6 @@ pub const DEFAULT_MAX_SCALE: f64 = 8.0;
 pub const DOUBLE_CLICK_SCALE: f64 = 2.5;
 /// Zoom step of the `+` and `-` keys and buttons.
 pub const KEY_ZOOM_STEP: f64 = 1.25;
-/// Horizontal travel of a finger on a fitted image that pages to the next or previous image.
-pub const SWIPE_MIN_PX: f64 = 60.0;
 /// Two taps closer than this in time and space are a double-tap.
 pub const DOUBLE_TAP_MAX_MS: f64 = 300.0;
 pub const DOUBLE_TAP_MAX_PX: f64 = 30.0;
@@ -137,6 +140,8 @@ pub struct Pointers {
   active: Vec<(i32, Point)>,
   /// Where the single pointer of the current press went down; `None` once a second one joined.
   maybe_press_start: Option<Point>,
+  /// The current press moved further than a tap may: its release is no tap.
+  is_drag: bool,
   /// Time and place of the last tap, to recognise a double-tap.
   maybe_last_tap: Option<(f64, Point)>,
 }
@@ -153,14 +158,14 @@ pub enum Gesture {
   },
 }
 
-/// What releasing a pointer means.
+/// What releasing a pointer means. Drags (paging, closing, panning) follow the finger while it moves
+/// and settle on release; see [`physics`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Release {
-  /// Still pressed by another pointer, or a drag that panned.
+  /// Still pressed by another pointer, or the end of a drag.
   None,
   Tap(Point),
   DoubleTap(Point),
-  Swipe(Direction),
 }
 
 impl MediaKey {
@@ -173,6 +178,11 @@ impl MediaKey {
       message: file.message,
       attachment,
     })
+  }
+
+  /// The `data-media-key` of the tiles that open this file, for the lightbox to grow out of.
+  pub fn dom_key(&self) -> String {
+    format!("{}:{}", self.message, self.attachment)
   }
 
   pub fn matches(&self, file: &FileInfo) -> bool {
@@ -350,7 +360,7 @@ impl Point {
     Self { x, y }
   }
 
-  fn minus(self, other: Self) -> Self {
+  pub fn minus(self, other: Self) -> Self {
     Self::new(self.x - other.x, self.y - other.y)
   }
 
@@ -468,6 +478,41 @@ impl Viewport {
     }
   }
 
+  pub fn max_scale(&self) -> f64 {
+    self.max_scale
+  }
+
+  /// Shows `scale` and `offset` as they are, also past their limits: the frames of a pinch or pan
+  /// that rubber-bands, and of the spring that settles it.
+  pub fn present(&mut self, scale: f64, offset: Point) {
+    if scale.is_finite() && scale > 0.0 && offset.x.is_finite() && offset.y.is_finite() {
+      self.scale = scale;
+      self.offset = offset;
+    }
+  }
+
+  /// How far the offset may go each way at `scale`: half of what the shown image is larger than the
+  /// stage.
+  pub fn pan_limits(&self, scale: f64, image: Size, stage: Size) -> Point {
+    let shown = self.rotation.orient(image);
+    let scale = scale * self.fit_factor(image, stage);
+    let limit = |image_side: f64, stage_side: f64| ((image_side * scale - stage_side) / 2.0).max(0.0);
+    Point::new(limit(shown.width, stage.width), limit(shown.height, stage.height))
+  }
+
+  /// Where a pinch or pan released here comes to rest: the zoom back inside its limits around
+  /// `anchor` (the last pinch centre), and the offset back inside the stage.
+  pub fn settled(&self, anchor: Point, image: Size, stage: Size) -> (f64, Point) {
+    let scale = self.scale.clamp(MIN_SCALE, self.max_scale);
+    let applied = scale / self.scale;
+    let limits = self.pan_limits(scale, image, stage);
+    let offset = Point::new(
+      (anchor.x - (anchor.x - self.offset.x) * applied).clamp(-limits.x, limits.x),
+      (anchor.y - (anchor.y - self.offset.y) * applied).clamp(-limits.y, limits.y),
+    );
+    (scale, offset)
+  }
+
   /// Moves a zoomed image; it can't be dragged out of the stage.
   pub fn pan_by(&mut self, delta: Point, image: Size, stage: Size) {
     self.offset = Point::new(self.offset.x + delta.x, self.offset.y + delta.y);
@@ -477,14 +522,18 @@ impl Viewport {
   /// The image's edges never come inside the stage's edges; a side smaller than the stage stays
   /// centred.
   fn clamp_offset(&mut self, image: Size, stage: Size) {
-    let shown = self.rotation.orient(image);
-    let scale = self.display_scale(image, stage);
-    let limit = |image_side: f64, stage_side: f64| ((image_side * scale - stage_side) / 2.0).max(0.0);
-    let (limit_x, limit_y) = (limit(shown.width, stage.width), limit(shown.height, stage.height));
+    let limits = self.pan_limits(self.scale, image, stage);
     self.offset = Point::new(
-      self.offset.x.clamp(-limit_x, limit_x),
-      self.offset.y.clamp(-limit_y, limit_y),
+      self.offset.x.clamp(-limits.x, limits.x),
+      self.offset.y.clamp(-limits.y, limits.y),
     );
+  }
+
+  /// The size the image takes on screen at fit, turned: what the lightbox opens from and closes to.
+  pub fn fitted_size(&self, image: Size, stage: Size) -> Size {
+    let shown = self.rotation.orient(image);
+    let fit = self.fit_factor(image, stage);
+    Size::new(shown.width * fit, shown.height * fit)
   }
 
   /// A sideways image may be too tall or wide for the stage once turned: shrink it until it fits.
@@ -507,6 +556,19 @@ impl Pointers {
       1 => Some(at),
       _ => None,
     };
+    if self.active.len() == 1 {
+      self.is_drag = false;
+    }
+  }
+
+  /// How many pointers are pressed.
+  pub fn count(&self) -> usize {
+    self.active.len()
+  }
+
+  /// Where the single pointer of the current press went down.
+  pub fn press_start(&self) -> Option<Point> {
+    self.maybe_press_start
   }
 
   /// A pressed pointer moved: one pointer pans, two pinch.
@@ -516,6 +578,12 @@ impl Pointers {
     };
     let before = self.active[slot].1;
     self.active[slot].1 = at;
+    if self
+      .maybe_press_start
+      .is_some_and(|start| at.distance(start) > TAP_MAX_PX)
+    {
+      self.is_drag = true;
+    }
     match self.active.as_slice() {
       [_] => Gesture::Pan(at.minus(before)),
       [(_, first), (_, second)] => {
@@ -533,9 +601,8 @@ impl Pointers {
     }
   }
 
-  /// A pointer was released at `time_ms` (the event's time stamp). `is_zoomed` turns horizontal
-  /// drags into pans instead of swipes.
-  pub fn up(&mut self, id: i32, at: Point, time_ms: f64, is_zoomed: bool) -> Release {
+  /// A pointer was released at `time_ms` (the event's time stamp).
+  pub fn up(&mut self, id: i32, at: Point, time_ms: f64) -> Release {
     let was_pressed = self.active.iter().any(|(known, _)| *known == id);
     self.active.retain(|(known, _)| *known != id);
     if !was_pressed || !self.active.is_empty() {
@@ -546,17 +613,11 @@ impl Pointers {
     let Some(start) = self.maybe_press_start.take() else {
       return Release::None;
     };
-    let travel = at.minus(start);
-    if travel.x.hypot(travel.y) <= TAP_MAX_PX {
+    if !self.is_drag && at.distance(start) <= TAP_MAX_PX {
       return self.tap(at, time_ms);
     }
     self.maybe_last_tap = None;
-    let is_horizontal = travel.x.abs() > 2.0 * travel.y.abs();
-    match (is_zoomed, is_horizontal, travel.x) {
-      (false, true, dx) if dx <= -SWIPE_MIN_PX => Release::Swipe(Direction::Next),
-      (false, true, dx) if dx >= SWIPE_MIN_PX => Release::Swipe(Direction::Previous),
-      _ => Release::None,
-    }
+    Release::None
   }
 
   /// The pointer left without a release (the browser took it over, the window lost focus).
@@ -811,6 +872,46 @@ mod tests {
       viewport.zoom_by(4.0, Point::new(400.0, 300.0), IMAGE, STAGE);
       viewport.zoom_by(0.25, Point::new(-400.0, -300.0), IMAGE, STAGE);
       assert_eq!(viewport.offset(), Point::ORIGIN);
+    }
+
+    #[test]
+    fn a_pinch_past_the_limits_settles_back_inside() {
+      let mut viewport = Viewport::new(4.0);
+      // Pinched to 5× (past the maximum) around (100, 0), and panned past the edge.
+      viewport.present(5.0, Point::new(2000.0, -50.0));
+      let (scale, offset) = viewport.settled(Point::new(100.0, 0.0), IMAGE, STAGE);
+      assert_eq!(scale, 4.0);
+      // 3200×2400 in 1000×800: 1100 px to spare horizontally, 800 vertically.
+      assert_eq!(viewport.pan_limits(4.0, IMAGE, STAGE), Point::new(1100.0, 800.0));
+      assert_eq!(offset.x, 1100.0, "back at the edge");
+      assert!(
+        (offset.y + 40.0).abs() < 1e-9,
+        "zoomed back around the anchor: {}",
+        offset.y
+      );
+      viewport.present(0.7, Point::new(30.0, 0.0));
+      assert_eq!(
+        viewport.settled(Point::ORIGIN, IMAGE, STAGE),
+        (1.0, Point::ORIGIN),
+        "pinched below fit: back to fit"
+      );
+    }
+
+    #[test]
+    fn presenting_rejects_invalid_values() {
+      let mut viewport = Viewport::default();
+      viewport.present(f64::NAN, Point::ORIGIN);
+      viewport.present(0.0, Point::ORIGIN);
+      viewport.present(2.0, Point::new(f64::INFINITY, 0.0));
+      assert_eq!(viewport, Viewport::default());
+    }
+
+    #[test]
+    fn the_fitted_size_is_turned_with_the_view() {
+      let mut viewport = Viewport::default();
+      assert_eq!(viewport.fitted_size(IMAGE, STAGE), IMAGE);
+      viewport.rotate_clockwise();
+      assert_eq!(viewport.fitted_size(IMAGE, STAGE), Size::new(600.0, 800.0));
     }
 
     #[test]
@@ -1090,34 +1191,18 @@ mod tests {
     }
 
     #[test]
-    fn a_fitted_horizontal_drag_swipes_and_a_zoomed_one_does_not() {
+    fn a_drag_is_no_tap_even_when_it_comes_back() {
       let mut pointers = Pointers::default();
       pointers.down(1, Point::new(300.0, 0.0));
-      assert_eq!(
-        pointers.up(1, Point::new(100.0, 10.0), 0.0, false),
-        Release::Swipe(Direction::Next)
-      );
-      pointers.down(1, Point::new(100.0, 0.0));
-      assert_eq!(
-        pointers.up(1, Point::new(300.0, 0.0), 1000.0, false),
-        Release::Swipe(Direction::Previous)
-      );
-      pointers.down(1, Point::new(300.0, 0.0));
-      assert_eq!(
-        pointers.up(1, Point::new(100.0, 0.0), 2000.0, true),
-        Release::None
-      );
-    }
-
-    #[test]
-    fn short_or_vertical_drags_do_not_swipe() {
-      let mut pointers = Pointers::default();
+      assert_eq!(pointers.press_start(), Some(Point::new(300.0, 0.0)));
+      pointers.moved(1, Point::new(100.0, 10.0));
+      assert_eq!(pointers.up(1, Point::new(300.0, 0.0), 0.0), Release::None);
       pointers.down(1, Point::new(0.0, 0.0));
-      assert_eq!(pointers.up(1, Point::new(-40.0, 0.0), 0.0, false), Release::None);
-      pointers.down(1, Point::new(0.0, 0.0));
+      pointers.moved(1, Point::new(4.0, 3.0));
       assert_eq!(
-        pointers.up(1, Point::new(-80.0, 200.0), 500.0, false),
-        Release::None
+        pointers.up(1, Point::new(4.0, 3.0), 1000.0),
+        Release::Tap(Point::new(4.0, 3.0)),
+        "a wobble is still a tap"
       );
     }
 
@@ -1126,17 +1211,17 @@ mod tests {
       let mut pointers = Pointers::default();
       let at = Point::new(10.0, 10.0);
       pointers.down(1, at);
-      assert_eq!(pointers.up(1, at, 0.0, false), Release::Tap(at));
+      assert_eq!(pointers.up(1, at, 0.0), Release::Tap(at));
       pointers.down(1, at);
-      assert_eq!(pointers.up(1, at, 200.0, false), Release::DoubleTap(at));
+      assert_eq!(pointers.up(1, at, 200.0), Release::DoubleTap(at));
       pointers.down(1, at);
       assert_eq!(
-        pointers.up(1, at, 2000.0, false),
+        pointers.up(1, at, 2000.0),
         Release::Tap(at),
         "a third tap starts over"
       );
       pointers.down(1, at);
-      assert_eq!(pointers.up(1, at, 2500.0, false), Release::Tap(at), "too slow");
+      assert_eq!(pointers.up(1, at, 2500.0), Release::Tap(at), "too slow");
     }
 
     #[test]
@@ -1144,18 +1229,18 @@ mod tests {
       let mut pointers = Pointers::default();
       pointers.down(1, Point::new(0.0, 0.0));
       pointers.down(2, Point::new(100.0, 0.0));
-      assert_eq!(pointers.up(2, Point::new(300.0, 0.0), 0.0, false), Release::None);
-      assert_eq!(pointers.up(1, Point::new(0.0, 0.0), 10.0, false), Release::None);
+      assert_eq!(pointers.up(2, Point::new(300.0, 0.0), 0.0), Release::None);
+      assert_eq!(pointers.up(1, Point::new(0.0, 0.0), 10.0), Release::None);
     }
 
     #[test]
     fn unknown_or_cancelled_pointers_are_ignored() {
       let mut pointers = Pointers::default();
       assert_eq!(pointers.moved(7, Point::ORIGIN), Gesture::None);
-      assert_eq!(pointers.up(7, Point::ORIGIN, 0.0, false), Release::None);
+      assert_eq!(pointers.up(7, Point::ORIGIN, 0.0), Release::None);
       pointers.down(1, Point::ORIGIN);
       pointers.cancel(1);
-      assert_eq!(pointers.up(1, Point::ORIGIN, 0.0, false), Release::None);
+      assert_eq!(pointers.up(1, Point::ORIGIN, 0.0), Release::None);
     }
   }
 

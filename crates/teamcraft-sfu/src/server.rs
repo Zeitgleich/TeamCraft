@@ -7,19 +7,26 @@
 //! (Wi-Fi to LTE, NAT rebinding) continues on the same connection after path validation. A
 //! connection that is lost anyway (idle timeout) keeps its participant's slot for the reconnect
 //! grace period; a deliberate close (the client leaving, a host control) ends it at once.
+//!
+//! Restarts and rolling deploys: on shutdown the SFU closes every connection with
+//! [`SFU_GOING_AWAY_CLOSE_CODE`] ([`Sfu::run_until`]). Clients rejoin with a fresh join token; the
+//! restarted SFU (or another instance at the same address) creates the room again and DAVE founds a
+//! new group. Leaves are not reported to the server while going away, so the call stays up there.
 
 use std::{
+  future::Future,
   net::SocketAddr,
   sync::Arc,
   time::{Duration, Instant},
 };
 
 use teamcraft_proto::{
-  CallClientMessage, CallEvent, CallServerMessage, ErrorBody, ErrorCode, SfuControlRequest,
+  CallClientMessage, CallEvent, CallServerMessage, ErrorBody, ErrorCode, SFU_GOING_AWAY_CLOSE_CODE,
+  SfuControlRequest,
 };
 use thiserror::Error;
 use tokio::sync::mpsc;
-use tracing::{Instrument, debug, info, info_span};
+use tracing::{Instrument, debug, info, info_span, warn};
 use wtransport::{
   Connection, Endpoint, Identity, RecvStream, SendStream, ServerConfig,
   config::Ipv6DualStackConfig,
@@ -175,6 +182,21 @@ impl Sfu {
 
   /// Accepts sessions until the task is dropped.
   pub async fn run(self) {
+    self.run_until(std::future::pending()).await;
+  }
+
+  /// Accepts sessions until `shutdown` resolves (SIGTERM), then goes away: every connection is
+  /// closed with [`SFU_GOING_AWAY_CLOSE_CODE`], so its client rejoins instead of ending the call,
+  /// and the closes get up to [`SfuConfig::shutdown_drain`] to reach the clients.
+  pub async fn run_until(self, shutdown: impl Future<Output = ()>) {
+    tokio::select! {
+      () = self.accept_sessions() => {},
+      () = shutdown => {},
+    }
+    self.go_away().await;
+  }
+
+  async fn accept_sessions(&self) {
     let mut session_number: u64 = 0;
     loop {
       session_number = session_number.wrapping_add(1);
@@ -190,6 +212,22 @@ impl Sfu {
       );
     }
   }
+
+  async fn go_away(&self) {
+    // Rooms first: from here on, the sessions' ends are not reported as leaves.
+    self.shared.rooms.go_away();
+    // Also the sessions that haven't joined yet.
+    self
+      .endpoint
+      .close(SFU_GOING_AWAY_CLOSE_CODE.into(), b"going away");
+    if tokio::time::timeout(self.shared.config.shutdown_drain, self.endpoint.wait_idle())
+      .await
+      .is_err()
+    {
+      warn!("not every client confirmed the close in time");
+    }
+    info!("went away");
+  }
 }
 
 async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<(), SessionError> {
@@ -199,6 +237,10 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
     return Ok(());
   }
   let connection = request.accept().await?;
+  if shared.rooms.is_going_away() {
+    connection.close(SFU_GOING_AWAY_CLOSE_CODE.into(), b"going away");
+    return Ok(());
+  }
   let remote_ip = connection.remote_address().ip().to_canonical();
   let Some(prejoin_slot) = shared
     .prejoin
@@ -284,7 +326,8 @@ async fn release_slot(
   {
     tokio::time::sleep(shared.config.reconnect_grace).await;
   }
-  if shared.rooms.leave(room, grant.device_id, session_id) {
+  // Going away: the participant rejoins on the restarted SFU, and the server keeps it in the call.
+  if shared.rooms.leave(room, grant.device_id, session_id) && !shared.rooms.is_going_away() {
     shared.reporter.left(grant);
   }
 }

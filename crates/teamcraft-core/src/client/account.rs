@@ -139,11 +139,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.store_wrapped_keys_blob(wrapped_keys)?;
     }
     for ring in decrypted.conversations() {
+      // A device that joined by external commit takes the current key from a member, not from
+      // a key bag that may predate the last key switch (#178).
+      let conversation = convert::conversation_from_crypto(ring.conversation_id())?;
+      let is_waiting = super::member_device::is_waiting_for_current_key(&self.store, conversation)?;
       let local = self.account.key_bag.ring_mut(ring.conversation_id());
       for key in ring.keys() {
         local.insert(key.duplicate())?;
       }
       if local.current().is_none()
+        && !is_waiting
         && let Some(current) = ring.current()
       {
         local.set_current(current.id())?;

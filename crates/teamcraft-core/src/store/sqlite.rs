@@ -64,8 +64,16 @@ impl SqlCipherStore {
         row.get::<_, i64>(0)
       })
       .map_err(|_| StoreError::WrongKey)?;
+    // Freed pages are zeroed (before encryption), so an old copy of a rewritten or deleted record
+    // doesn't stay readable to whoever later gets the key (issue #391). The rollback journal holds
+    // old pages during a transaction; it is unlinked afterwards, not overwritten, so its blocks may
+    // linger on disk until reused (encrypted with the database key).
+    connection
+      .execute_batch("PRAGMA secure_delete = ON;")
+      .map_err(database_error)?;
     connection.execute_batch(SCHEMA).map_err(database_error)?;
     migrate(&connection)?;
+    super::wipe_free_pages_once(&connection);
     Ok(Self {
       connection: Mutex::new(connection),
     })
@@ -273,6 +281,18 @@ mod tests {
   use super::*;
   use crate::store::StaticKeySource;
   use crate::store::tests::exercise_store;
+
+  /// Issue #391: freed pages are zeroed, so a deleted record's old copy doesn't stay in the file.
+  #[test]
+  fn freed_pages_are_overwritten() {
+    let key = StaticKeySource::new(SymmetricKey::generate(&mut OsRng));
+    let store = SqlCipherStore::open_in_memory(&key).unwrap();
+    let secure_delete: i64 = store
+      .lock()
+      .query_row("PRAGMA secure_delete", [], |row| row.get(0))
+      .unwrap();
+    assert_eq!(secure_delete, 1);
+  }
 
   #[test]
   fn sqlcipher_store_behaves_like_a_store() {

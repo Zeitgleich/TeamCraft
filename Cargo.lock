@@ -10478,6 +10478,7 @@ dependencies = [
  "rand_core 0.6.4",
  "screencapturekit",
  "serde_json",
+ "socket2",
  "teamcraft-crypto",
  "teamcraft-proto",
  "thiserror 2.0.21",
@@ -12961,8 +12962,6 @@ dependencies = [
 [[package]]
 name = "wtransport"
 version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4273ce3157a3262a68665f8d3f20a0ac0c5b8a69ffd67f05ae986832ebec036"
 dependencies = [
  "bytes",
  "pem",

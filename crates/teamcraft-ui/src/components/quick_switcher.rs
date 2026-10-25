@@ -186,7 +186,7 @@ pub fn QuickSwitcher() -> impl IntoView {
   };
 
   view! {
-    <Modal labelled_by="quick-switcher-title" class="modal-switcher">
+    <Modal labelled_by="quick-switcher-title" class="modal-switcher" has_exit_motion=false>
       <h2 id="quick-switcher-title" class="visually-hidden">
         {move || i18n.t("switcher-title")}
       </h2>
@@ -826,6 +826,7 @@ mod tests {
       can_post: true,
       bookmarks: Vec::new(),
       is_catching_up: false,
+      maybe_image_version: None,
     }
   }
 

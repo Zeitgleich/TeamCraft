@@ -105,8 +105,11 @@ figment = { version = "0.10", features = ["toml", "env"] }
 
 # davey 0.1.5 ported to openmls 0.9, so chat and calls share one MLS stack (ARCHITECTURE.md §6.2)
 # without the libcrux advisories of the openmls 0.8 stack. See crates/vendor/davey/VENDORED.md.
+# wtransport 0.7.2 with a client Endpoint::rebind, so calls survive network changes (ARCHITECTURE.md
+# §6.5). See crates/vendor/wtransport/VENDORED.md.
 [patch.crates-io]
 davey = { path = "crates/vendor/davey" }
+wtransport = { path = "crates/vendor/wtransport" }
 
 # Keep target/ small: several worktrees build in parallel on one disk. Line tables are enough
 # for backtraces; dependencies carry no debug info.

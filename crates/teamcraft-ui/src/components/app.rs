@@ -73,6 +73,8 @@ use crate::reactive::use_interval;
 use crate::sections::badge_count;
 use crate::settings::{Settings, Theme};
 use crate::state::{AppState, MainView, Overlay, RailEntry, SidePanel, ToastTone};
+use crate::toast_motion::{Swipe, use_flip_stack};
+use crate::toast_timer::Hold;
 use crate::viewport::CompactPane;
 
 #[component]
@@ -141,6 +143,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
     }
   });
   focus_new_compact_pane(state);
+  hold_toasts_while_hidden(state);
   // Backends that load in the background (the desktop core) say so through this hook.
   change_source.set_change_notifier(Rc::new(move || state.backend_changed()));
   // A failed action is never silent (issue #322).
@@ -195,6 +198,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   on_cleanup(move || listener.remove());
   let banners = NodeRef::<leptos::html::Div>::new();
   track_banner_height(banners);
+  let toast_stack = NodeRef::<leptos::html::Div>::new();
+  use_flip_stack(toast_stack);
 
   view! {
     <a class="skip-link" href="#main-content">
@@ -278,15 +283,36 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       <IncomingCallDialog />
       // Always in the page: screen readers only announce changes in a live region that already
       // existed when the toast arrived.
-      <div class="toasts" role="status">
+      <div
+        class="toasts"
+        role="status"
+        node_ref=toast_stack
+        on:pointerenter=move |_| state.hold_toasts(Hold::Pointer, true)
+        on:pointerleave=move |_| state.hold_toasts(Hold::Pointer, false)
+        on:focusin=move |_| state.hold_toasts(Hold::Focus, true)
+        on:focusout=move |ev: ev::FocusEvent| {
+          if !focus_stays_inside(&ev) {
+            state.hold_toasts(Hold::Focus, false);
+          }
+        }
+      >
         <For each=move || state.toasts.get() key=|toast| toast.id let:toast>
           {
             let id = toast.id;
             let node = NodeRef::<leptos::html::Div>::new();
             use_leave_ghost(node);
+            let swipe = Swipe::new();
             let is_error = matches!(toast.tone, ToastTone::Error { .. });
             view! {
-              <div class=if is_error { "toast toast-error" } else { "toast" } role=is_error.then_some("alert") node_ref=node>
+              <div
+                class=if is_error { "toast toast-error" } else { "toast" }
+                role=is_error.then_some("alert")
+                node_ref=node
+                on:pointerdown=move |ev| swipe.start(&ev)
+                on:pointermove=move |ev| swipe.track(&ev)
+                on:pointerup=move |ev| swipe.end(&ev, move || state.dismiss_toast(id))
+                on:pointercancel=move |ev| swipe.cancel(&ev)
+              >
                 <div class="toast-body">
                   <span>{toast.text}</span>
                   {match toast.tone {
@@ -341,6 +367,61 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::None | Overlay::StatusMenu => ().into_any(),
       }}
     </div>
+  }
+}
+
+/// A hidden tab or minimized window doesn't eat the countdown of a toast (#367).
+fn hold_toasts_while_hidden(state: AppState) {
+  let is_visible = crate::reactive::use_page_visible();
+  Effect::new(move |_| state.hold_toasts(Hold::Hidden, !is_visible.get()));
+  end_timed_toasts_when_the_page_goes(state);
+}
+
+/// A page that is closed, navigated away, frozen or about to be discarded does what its Undo toasts
+/// hold back now, or a deletion would never be sent. Capturing on the window runs this before the
+/// browser core writes its store on the same events (`web_core.rs`), so the action is in it. The
+/// page listens once; a new shell (after signing in again) takes it over.
+fn end_timed_toasts_when_the_page_goes(state: AppState) {
+  thread_local! {
+    static SHELL: Cell<Option<AppState>> = const { Cell::new(None) };
+    static IS_LISTENING: Cell<bool> = const { Cell::new(false) };
+  }
+  SHELL.with(|shell| shell.set(Some(state)));
+  if IS_LISTENING.with(|is_listening| is_listening.replace(true)) {
+    return;
+  }
+  let Some(window) = web_sys::window() else {
+    return;
+  };
+  let listener = Closure::<dyn FnMut(web_sys::Event)>::new(|_: web_sys::Event| {
+    // async-ok: a thread-local, not a signal; a gone shell's state does nothing (`try_*`).
+    if let Some(state) = SHELL.with(Cell::get) {
+      state.end_timed_toasts();
+    }
+  });
+  for kind in ["pagehide", "freeze"] {
+    if window
+      .add_event_listener_with_callback_and_bool(kind, listener.as_ref().unchecked_ref(), true)
+      .is_err()
+    {
+      tracing::debug!(kind, "could not watch the page lifecycle");
+    }
+  }
+  // Lives as long as the page.
+  listener.forget();
+}
+
+/// Whether focus moves to another element of the same container (from Undo to the close button).
+fn focus_stays_inside(ev: &ev::FocusEvent) -> bool {
+  let maybe_container = ev
+    .current_target()
+    .and_then(|target| target.dyn_into::<web_sys::Node>().ok());
+  let maybe_next = ev
+    .related_target()
+    .and_then(|target| target.dyn_into::<web_sys::Node>().ok());
+  match (maybe_container, maybe_next) {
+    (Some(container), Some(next)) => container.contains(Some(&next)),
+    _ => false,
   }
 }
 

@@ -43,6 +43,7 @@ pub type CropUpload = LocalBoxFuture<'static, Result<(), ActionFailure>>;
 pub enum CropTarget {
   Avatar,
   SpacePicture,
+  ChannelPicture,
 }
 
 /// Where the dialog stands with the picked file.
@@ -91,6 +92,7 @@ impl CropTarget {
     match self {
       Self::Avatar => "crop-title-avatar",
       Self::SpacePicture => "crop-title-space",
+      Self::ChannelPicture => "crop-title-channel",
     }
   }
 
@@ -98,7 +100,7 @@ impl CropTarget {
   fn output_px(self) -> u32 {
     match self {
       Self::Avatar => 512,
-      Self::SpacePicture => 256,
+      Self::SpacePicture | Self::ChannelPicture => 256,
     }
   }
 
@@ -114,6 +116,11 @@ impl CropTarget {
       Self::SpacePicture => [
         preview(64.0, "var(--radius-lg)", "crop-preview-settings"),
         preview(40.0, "var(--radius-md)", "crop-preview-rail"),
+        preview(20.0, "var(--radius-sm)", "crop-preview-sidebar"),
+      ],
+      Self::ChannelPicture => [
+        preview(64.0, "var(--radius-lg)", "crop-preview-settings"),
+        preview(28.0, "var(--radius-sm)", "crop-preview-header"),
         preview(20.0, "var(--radius-sm)", "crop-preview-sidebar"),
       ],
     }
