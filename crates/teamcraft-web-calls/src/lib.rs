@@ -502,9 +502,22 @@ impl Host {
       ));
     }
     let maybe_camera = self.state.borrow().maybe_camera.clone();
-    let stream = call_web::capture_camera(maybe_camera.as_deref())
-      .await
-      .map_err(failure)?;
+    // Phones open one camera at a time: release the running one before asking for the other (the
+    // flip button), or the browser refuses the second.
+    let maybe_running = self.state.borrow_mut().maybe_local_camera.take();
+    if let Some(running) = &maybe_running {
+      stop_tracks(running);
+    }
+    let stream = match call_web::capture_camera(maybe_camera.as_deref()).await {
+      Ok(stream) => stream,
+      Err(error) => {
+        if maybe_running.is_some() {
+          // The old camera is gone, so don't claim it still sends.
+          self.stop_camera();
+        }
+        return Err(failure(error));
+      },
+    };
     let sent = stream.clone();
     if let Err(error) = self.ask(|done| Control::Camera { stream: sent, done }).await {
       stop_tracks(&stream);

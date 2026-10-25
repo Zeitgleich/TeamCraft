@@ -135,6 +135,15 @@ impl CallState {
     self.emit_in_call(CallEvent::Camera(is_on));
   }
 
+  /// Switches to the next camera of `cameras` (front and back on a phone), wrapping around; the
+  /// running camera restarts on it. Nothing to switch to with fewer than two.
+  pub fn flip_camera(&self, cameras: &[MediaDevice]) {
+    if let Some(next) = next_camera(cameras, &self.camera_id.get_untracked()) {
+      self.camera_id.set(next.id.clone());
+      self.emit(CallEvent::CameraDevice(next.id.clone()));
+    }
+  }
+
   fn emit_in_call(&self, event: CallEvent) {
     if self.phase.get_untracked() == CallPhase::Active {
       self.emit(event);
@@ -226,12 +235,76 @@ impl Default for CallState {
   }
 }
 
+/// The camera after `current_id` in the list, wrapping around. A `current_id` that isn't listed
+/// (nothing chosen yet: the system default) counts as the first, so the flip lands on the second.
+pub fn next_camera<'a>(cameras: &'a [MediaDevice], current_id: &str) -> Option<&'a MediaDevice> {
+  if cameras.len() < 2 {
+    return None;
+  }
+  let current = cameras
+    .iter()
+    .position(|camera| camera.id == current_id)
+    .unwrap_or(0);
+  cameras.get((current + 1) % cameras.len())
+}
+
+/// Whether a camera faces away from the user, judged by its label (browsers give no facing
+/// without opening it): "Back Camera" (iOS), "camera2 0, facing back" (Android), "environment".
+/// Such a camera is shown unmirrored; only the front camera is mirrored like a mirror.
+pub fn is_rear_camera(label: &str) -> bool {
+  let label = label.to_lowercase();
+  ["back", "rear", "environment", "hinten", "rück"]
+    .iter()
+    .any(|word| label.contains(word))
+}
+
+/// Whether the camera chosen for the call faces away from the user; the system default (nothing
+/// chosen) counts as the first one listed.
+pub fn selected_camera_is_rear(cameras: &[MediaDevice], selected_id: &str) -> bool {
+  cameras
+    .iter()
+    .find(|camera| camera.id == selected_id)
+    .or(cameras.first())
+    .is_some_and(|camera| is_rear_camera(&camera.label))
+}
+
 #[cfg(test)]
 mod tests {
   use std::sync::Arc;
   use std::sync::atomic::{AtomicU32, Ordering};
 
   use super::*;
+
+  #[test]
+  fn flipping_cycles_through_the_cameras() {
+    let cameras = [
+      camera("a", "Front Camera"),
+      camera("b", "Back Camera"),
+      camera("c", "USB"),
+    ];
+    assert_eq!(next_camera(&cameras, "a").map(|c| c.id.as_str()), Some("b"));
+    assert_eq!(next_camera(&cameras, "c").map(|c| c.id.as_str()), Some("a"));
+    assert_eq!(next_camera(&cameras, "").map(|c| c.id.as_str()), Some("b"));
+    assert_eq!(next_camera(&cameras[..1], "a"), None);
+    assert_eq!(next_camera(&[], ""), None);
+  }
+
+  #[test]
+  fn rear_cameras_are_recognised_by_label() {
+    assert!(is_rear_camera("Back Camera"));
+    assert!(is_rear_camera("camera2 0, facing back"));
+    assert!(is_rear_camera("Rückkamera"));
+    assert!(!is_rear_camera("Front Camera"));
+    assert!(!is_rear_camera("camera2 1, facing front"));
+    assert!(!is_rear_camera(""));
+  }
+
+  fn camera(id: &str, label: &str) -> MediaDevice {
+    MediaDevice {
+      id: id.into(),
+      label: label.into(),
+    }
+  }
 
   /// Issue #399: the effect picker's effect emitted, the handler read the backend, and the
   /// backend's change notification re-ran the effect, which emitted again, forever.

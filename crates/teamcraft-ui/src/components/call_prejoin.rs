@@ -3,7 +3,7 @@ use std::cell::Cell;
 use leptos::ev;
 use leptos::prelude::*;
 
-use crate::calls::{CallEvent, CallKind, CallRequest, DevicePresence, MediaDevice};
+use crate::calls::{CallEvent, CallKind, CallRequest, DevicePresence, MediaDevice, selected_camera_is_rear};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::call_video::{BackgroundPicker, VideoTile};
 use crate::components::icons::{Icon, IconName};
@@ -152,7 +152,9 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
             is_muted=Signal::derive(move || !call.is_mic_on.get())
             is_camera_on=call.is_camera_on
             effect=call.effect
-            is_mirrored=call.mirror_self_view
+            is_mirrored=Signal::derive(move || {
+              call.mirror_self_view.get() && !devices.with(|devices| selected_camera_is_rear(&devices.cameras, &call.camera_id.get()))
+            })
           />
         </Show>
         <div class="preview-controls" role="group" aria-label=move || i18n.t("prejoin-quick-controls")>
@@ -167,6 +169,16 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
           >
             <Icon name=Signal::derive(move || if call.is_mic_on.get() { IconName::Mic } else { IconName::MicOff }) />
           </button>
+          <Show when=move || devices.with(|devices| devices.cameras.len() > 1) fallback=|| ()>
+            <button
+              class="round-btn"
+              aria-label=move || i18n.t("control-camera-flip")
+              title=move || i18n.t("control-camera-flip")
+              on:click=move |_| devices.with_untracked(|devices| call.flip_camera(&devices.cameras))
+            >
+              <Icon name=IconName::SwitchCamera />
+            </button>
+          </Show>
           <button
             class="round-btn"
             class:off=move || !call.is_camera_on.get()

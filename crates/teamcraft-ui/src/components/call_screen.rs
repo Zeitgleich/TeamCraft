@@ -4,9 +4,13 @@ use leptos::prelude::*;
 
 use teamcraft_proto::VideoTrackKind;
 
-use crate::calls::{CallKind, CallLayout, CallRequest, Participant, ScreenShareSound};
+use crate::calls::{
+  CallKind, CallLayout, CallRequest, Participant, ScreenShareSound, selected_camera_is_rear,
+};
 use crate::components::call_prejoin::call_heading;
-use crate::components::call_video::{BackgroundPicker, LiveVideo, VideoSource, VideoTile, can_show_video};
+use crate::components::call_video::{
+  BackgroundPicker, LiveVideo, VideoSource, VideoTile, can_share_screen, can_show_video,
+};
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 use crate::model::{User, UserId};
@@ -159,6 +163,13 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
   };
   let participant_count = move || remote.get().len() + 1;
 
+  let cameras = Memo::new(move |_| state.read(|backend| backend.media_devices()).cameras);
+  // Only the front camera is mirrored; a back camera shows the scene as it is.
+  let is_self_mirrored = Signal::derive(move || {
+    call.mirror_self_view.get()
+      && !cameras.with(|cameras| selected_camera_is_rear(cameras, &call.camera_id.get()))
+  });
+
   let self_tile = move |is_large: bool| {
     view! {
       <VideoTile
@@ -169,7 +180,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         is_camera_on=call.is_camera_on
         has_hand_raised=call.has_hand_raised
         effect=call.effect
-        is_mirrored=call.mirror_self_view
+        is_mirrored=is_self_mirrored
         video=own_video
       />
     }
@@ -425,6 +436,14 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           label=Signal::derive(move || if call.is_camera_on.get() { i18n.t("control-camera-off") } else { i18n.t("control-camera-on") })
           on_press=move || call.set_camera(!call.is_camera_on.get_untracked())
         />
+        <Show when=move || cameras.with(|cameras| cameras.len() > 1) fallback=|| ()>
+          <ControlButton
+            icon=IconName::SwitchCamera
+            label=Signal::derive(move || i18n.t("control-camera-flip"))
+            on_press=move || cameras.with_untracked(|cameras| call.flip_camera(cameras))
+          />
+        </Show>
+        <Show when=can_share_screen fallback=|| ()>
         <ControlButton
           is_active=Signal::derive(move || call.is_sharing_screen.get() || share_open.get())
           icon=IconName::Monitor
@@ -439,6 +458,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
             }
           }
         />
+        </Show>
         // Raising a hand has no wire message yet; it stays a demo-only control.
         <Show when=move || !is_real fallback=|| ()>
           <ControlButton

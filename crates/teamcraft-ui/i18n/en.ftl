@@ -301,6 +301,7 @@ control-mic-mute = Mute microphone
 control-mic-unmute = Unmute microphone
 control-camera-off = Turn camera off
 control-camera-on = Turn camera on
+control-camera-flip = Switch camera
 share-start = Share screen
 share-stop = Stop sharing
 share-options = Share your screen

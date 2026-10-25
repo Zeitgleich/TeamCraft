@@ -36,6 +36,7 @@ pub enum IconName {
   Phone,
   Video,
   VideoOff,
+  SwitchCamera,
   Mic,
   MicOff,
   Headphones,
@@ -157,6 +158,9 @@ impl IconName {
       },
       Self::Headphones => {
         "M3 18v-6a9 9 0 0 1 18 0v6 M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3z M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"
+      },
+      Self::SwitchCamera => {
+        "M20 7h-3a2 2 0 0 1-2-2V4H9v1a2 2 0 0 1-2 2H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z M9.5 12.5a2.5 2.5 0 0 1 4.5-1.5 M14.5 13.5a2.5 2.5 0 0 1-4.5 1.5"
       },
       Self::Monitor => "M2 4h20v12H2z M8 20h8 M12 16v4",
       Self::Hand => {
