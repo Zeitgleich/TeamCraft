@@ -103,7 +103,7 @@ mod imp {
       // SAFETY: `context` is the `OnResume` leaked by `watch_resume`, never freed and only shared.
       let on_resume = unsafe { &*context.cast::<OnResume>() };
       // A panic must not unwind into the system's thread; the next resume tries again.
-      if catch_unwind(AssertUnwindSafe(|| on_resume())).is_err() {
+      if catch_unwind(AssertUnwindSafe(on_resume)).is_err() {
         tracing::error!("resume callback panicked");
       }
     }
