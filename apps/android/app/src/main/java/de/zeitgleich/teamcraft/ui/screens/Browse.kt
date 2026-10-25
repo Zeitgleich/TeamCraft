@@ -1,14 +1,18 @@
 package de.zeitgleich.teamcraft.ui.screens
 
 import androidx.annotation.StringRes
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.Button
@@ -33,6 +37,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -126,7 +131,7 @@ fun BrowseScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
                   color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
               }
-              Text(presenceDot(user.presence))
+              PresenceDot(user.presence)
             }
             HorizontalDivider()
           }
@@ -208,10 +213,14 @@ fun directWith(snapshot: ChatSnapshot, users: List<String>): String? {
   return snapshot.conversations.firstOrNull { it.kind == kind && it.memberIds.toSet() - snapshot.me.id == wanted }?.id
 }
 
-/** A small marker for a presence state as the core reports it. */
-fun presenceDot(presence: String): String = when (presence) {
-  "Online" -> "🟢"
-  "Away" -> "🟡"
-  "DoNotDisturb" -> "⛔"
-  else -> "⚪"
+/** A small coloured dot for a presence state as the core reports it. */
+@Composable
+fun PresenceDot(presence: String) {
+  val color = when (presence) {
+    "Online" -> Color(0xFF34C759)
+    "Away" -> Color(0xFFFF9F0A)
+    "DoNotDisturb" -> Color(0xFFFF3B30)
+    else -> MaterialTheme.colorScheme.outline
+  }
+  Box(Modifier.size(10.dp).background(color, CircleShape))
 }

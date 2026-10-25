@@ -264,7 +264,7 @@ private fun ApproveDevice(viewModel: MainViewModel) {
 /** An emoji and text shown next to the user's name, cleared after the chosen time. */
 @Composable
 private fun CustomStatusSection(viewModel: MainViewModel) {
-  var emoji by rememberSaveable { mutableStateOf("💬") }
+  var emoji by rememberSaveable { mutableStateOf("") }
   var text by rememberSaveable { mutableStateOf("") }
   Heading(R.string.custom_status_title)
   Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

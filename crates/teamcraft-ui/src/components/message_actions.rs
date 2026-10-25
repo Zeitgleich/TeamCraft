@@ -221,7 +221,7 @@ pub fn run_message_action(action: MessageAction, message: &Message, maybe_extras
         .map(|conv| conv.bookmarks)
         .unwrap_or_default();
       bookmarks.push(crate::model::Bookmark {
-        emoji: "📎".to_owned(),
+        emoji: String::new(),
         title: file.file_name,
         kind: crate::model::BookmarkKind::File,
         url: String::new(),

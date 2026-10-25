@@ -95,7 +95,14 @@ fn VisibleCard(target: PermalinkTarget, message: Message, files: Vec<FileInfo>) 
   let me = state.me().username;
   let body = truncated(&message.body, PREVIEW_CHARS);
   // A message of files only names them in its body; the chips show them already.
-  let has_text = !body.trim().is_empty() && !(body.starts_with("📎") && !files.is_empty());
+  let file_names = files
+    .iter()
+    .map(|file| file.file_name.as_str())
+    .collect::<Vec<_>>()
+    .join(" ");
+  // The core names file messages by their file names; with the chips shown, that label is noise.
+  let is_only_file_names = !files.is_empty() && message.body.trim() == file_names;
+  let has_text = !body.trim().is_empty() && !is_only_file_names;
   view! {
     <div class="linked-message">
       <div class="linked-head">

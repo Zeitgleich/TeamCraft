@@ -159,7 +159,7 @@ async fn uploads_resume_after_network_loss_and_respect_the_size_limit() {
   let received = last(&bob_ui, channel);
   let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
   assert_eq!(files.len(), 1, "only the file within the limit went out");
-  assert_eq!(received.body, "📎 small.txt");
+  assert_eq!(received.body, "small.txt");
   // The sender still sees which file didn't make it, and why.
   let sent = last(&alice_ui, channel);
   let mine = alice_ui.message_extras(channel, &[sent.id])[0].files.clone();

@@ -724,12 +724,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
       MessageContent::Text { body, meta, .. } if body.is_empty() && !meta.attachments.is_empty() => meta
         .attachments
         .iter()
-        .map(|attachment| format!("📎 {}", attachment.file_name))
+        .map(|attachment| attachment.file_name.clone())
         .collect::<Vec<_>>()
         .join(" "),
       MessageContent::Text { body, .. } => body.clone(),
       // The UI recognizes files by their name in the body (search filter `has:file`).
-      MessageContent::File { attachment } => format!("📎 {}", attachment.file_name),
+      MessageContent::File { attachment } => attachment.file_name.clone(),
       MessageContent::Reaction { .. }
       | MessageContent::Edit { .. }
       | MessageContent::Delete { .. }

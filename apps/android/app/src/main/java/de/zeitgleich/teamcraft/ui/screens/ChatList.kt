@@ -152,7 +152,7 @@ fun ChatListScreen(
 ) {
   var conversations by remember { mutableStateOf<List<ConversationItem>?>(null) }
   var previews by remember { mutableStateOf<Map<String, ChatListEntry>>(emptyMap()) }
-  // Long-press starts selecting several conversations, as in WhatsApp; back or ✕ ends it.
+  // Long-press starts selecting several conversations, as in WhatsApp; back or the close button ends it.
   var selection by rememberSaveable { mutableStateOf(listOf<String>()) }
   var maybeNotifying by remember { mutableStateOf<String?>(null) }
   var tab by rememberSaveable { mutableStateOf(ChatTab.Home) }
@@ -872,7 +872,7 @@ private fun listTime(context: Context, sentAt: Long): String {
 @Composable
 private fun ConversationAvatar(conversation: ConversationItem) {
   val isPerson = conversation.kind == ConversationKind.DIRECT || conversation.kind == ConversationKind.GROUP
-  val label = if (isPerson) conversation.name.firstOrNull()?.uppercase() ?: "?" else prefix(conversation.kind)
+  val label = if (isPerson || conversation.kind == ConversationKind.INTEGRATION) conversation.name.firstOrNull()?.uppercase() ?: "?" else prefix(conversation.kind)
   Box {
     Box(
       Modifier
@@ -945,7 +945,7 @@ private fun prefix(kind: ConversationKind): String = when (kind) {
   ConversationKind.PRIVATE -> "◆"
   ConversationKind.DIRECT -> "@"
   ConversationKind.GROUP -> "@"
-  ConversationKind.INTEGRATION -> "⚙"
+  ConversationKind.INTEGRATION -> ""
 }
 
 /** The global entries of Home: route, icon, label. */

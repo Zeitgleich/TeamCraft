@@ -126,9 +126,9 @@
     <item quantity="one">%1$d neue Nachricht von %2$s</item>
     <item quantity="other">%1$d neue Nachrichten von %2$s</item>
   </plurals>
-  <string name="notification_photo">📷 Bild</string>
-  <string name="notification_video">🎬 Video</string>
-  <string name="notification_audio">🎤 Audio</string>
+  <string name="notification_photo">Bild</string>
+  <string name="notification_video">Video</string>
+  <string name="notification_audio">Audio</string>
   <string name="notification_content_title">Inhalt der Benachrichtigungen</string>
   <string name="notification_content_full">Absender und Nachricht</string>
   <string name="notification_content_sender">Nur Absender</string>
