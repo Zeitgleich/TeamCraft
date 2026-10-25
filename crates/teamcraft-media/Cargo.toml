@@ -23,7 +23,7 @@ dave = [
 ]
 # Native clients: Opus via libopus (C, built with cmake), audio device I/O via cpal (ALSA on Linux
 # needs libasound2-dev) and the WebTransport call driver. Browsers use WebCodecs and Web Audio.
-native = ["dave", "dep:webpki-roots", "dep:ndk", "dep:openh264", "dep:bzip2", "dep:zune-jpeg", "dep:jpeg-encoder", "dep:opus", "dep:cpal", "dep:tokio", "dep:wtransport", "dep:socket2", "dep:serde_json", "dep:tracing-subscriber", "dep:anyhow"]
+native = ["dave", "dep:webpki-roots", "dep:ndk", "dep:openh264", "dep:bzip2", "dep:zune-jpeg", "dep:jpeg-encoder", "dep:opus", "dep:cpal", "dep:tokio", "dep:wtransport", "dep:socket2", "dep:teamcraft-net", "dep:serde_json", "dep:tracing-subscriber", "dep:anyhow"]
 
 # OpenH264 built from source into the binary: development and tests only. Release builds load
 # Cisco's binary at runtime instead (openh264_library.rs explains why).
@@ -119,6 +119,8 @@ wtransport = { version = "0.7.2", optional = true, features = ["quinn"] }
 # A fresh dual-stack socket to move a call connection to after a network change (wtransport
 # binds its first socket the same way; already in the tree through it and quinn).
 socket2 = { version = "0.6.3", optional = true }
+# Happy Eyeballs for the QUIC handshake to the SFU (src/sfu_address.rs, issue #420).
+teamcraft-net = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 # Browser call driver: JS bindings, promises as futures, and channels into its single task.
 wasm-bindgen = { version = "0.2.129", optional = true }
@@ -188,6 +190,8 @@ webrtc-audio-processing = { version = "2.1.0", features = ["bundled"] }
 prost = "0.14"
 # Device identities for call key binding tests.
 rand_core.workspace = true
+# A local WebTransport server with a self-signed certificate (call_native tests).
+wtransport = { version = "0.7.2", features = ["quinn", "self-signed"] }
 
 [[bin]]
 name = "teamcraft-call"
