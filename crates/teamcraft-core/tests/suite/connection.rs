@@ -64,14 +64,33 @@ async fn a_network_change_replaces_a_dead_connection_within_five_seconds() {
       rig.server.freeze_gateways(rig.user);
       rig.network.notify();
       let started = Instant::now();
-      rig.wait_for(is_offline, Duration::from_secs(5)).await;
-      rig.wait_for(is_connected, Duration::from_secs(5)).await;
+      rig.wait_for_new_connection(2, Duration::from_secs(5)).await;
       assert!(
         started.elapsed() < Duration::from_secs(5),
         "took {:?}",
         started.elapsed()
       );
-      assert_eq!(rig.server.gateway_connect_count(), 2);
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_dead_connection_found_by_the_probe_is_replaced_without_a_backoff() {
+  let rig = Rig::start("Grace").await;
+  rig
+    .drive(|rig| async move {
+      rig.wait_for(is_connected, Duration::from_secs(5)).await;
+      // Back from the camera app: the socket died while the page was frozen.
+      rig.server.freeze_gateways(rig.user);
+      rig.network.notify();
+      let started = Instant::now();
+      rig.wait_for_new_connection(2, Duration::from_secs(4)).await;
+      let probe = ConnectionSettings::default().probe_timeout;
+      assert!(
+        started.elapsed() <= probe + POLL * 3,
+        "took {:?}",
+        started.elapsed()
+      );
     })
     .await;
 }
@@ -335,6 +354,21 @@ impl Steer {
   async fn wait_for(&self, matches: impl Fn(ConnectionState) -> bool, limit: Duration) {
     let started = Instant::now();
     while !matches(self.status.get()) {
+      assert!(
+        started.elapsed() <= limit,
+        "still {:?} after {limit:?}",
+        self.status.get()
+      );
+      tokio::time::sleep(POLL).await;
+    }
+  }
+}
+
+impl Steer {
+  /// Waits until the `count`th gateway connection is up, at most `limit`.
+  async fn wait_for_new_connection(&self, count: u64, limit: Duration) {
+    let started = Instant::now();
+    while self.server.gateway_connect_count() < count || !is_connected(self.status.get()) {
       assert!(
         started.elapsed() <= limit,
         "still {:?} after {limit:?}",

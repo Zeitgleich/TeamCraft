@@ -11,7 +11,9 @@ use crate::client::files::{
   failed_uploads, pending_upload, save_pending_upload, share_links, transfer_state,
 };
 use crate::records;
-use crate::store::{AttachmentRef, LocalStore, MessageContent, MessageMeta, StoredMessage, Table};
+use crate::store::{
+  AttachmentRef, ImageDimensions, LocalStore, MessageContent, MessageMeta, StoredMessage, Table,
+};
 use crate::ui_backend::{CoreChatBackend, CoreCommand, RedactedText, ui_message_id};
 
 impl<S: LocalStore> CoreChatBackend<S> {
@@ -36,11 +38,17 @@ impl<S: LocalStore> CoreChatBackend<S> {
           file_name: file.file_name.clone(),
           media_type: file.media_type.clone(),
           size_bytes: file.size_bytes,
-          maybe_thumbnail_png: None,
-          transfer: upload_transfer(&upload, file),
+          maybe_thumbnail_png: file
+            .maybe_thumbnail
+            .as_ref()
+            .map(|thumbnail| thumbnail.as_slice().to_vec()),
+          transfer: upload_transfer(file),
           maybe_sender,
           maybe_sent_at,
-          maybe_dimensions: None,
+          maybe_dimensions: file.maybe_dimensions.map(|size| PixelSize {
+            width: size.width,
+            height: size.height,
+          }),
         })
         .collect();
     }
@@ -297,6 +305,12 @@ fn pending_file(file: OutgoingFile) -> PendingFile {
       (UploadSource::Path { path }, size)
     },
   };
+  // Read from the header only: the pending message reserves the picture's space at once.
+  let maybe_dimensions = match &source {
+    UploadSource::Bytes { bytes } => crate::thumbnail::image_dimensions(bytes.as_slice(), &file.media_type)
+      .map(|(width, height)| ImageDimensions { width, height }),
+    UploadSource::Path { .. } => None,
+  };
   PendingFile {
     file_name: file.file_name,
     media_type: file.media_type,
@@ -307,6 +321,7 @@ fn pending_file(file: OutgoingFile) -> PendingFile {
     maybe_slot: None,
     retry: UploadRetry::default(),
     maybe_thumbnail: file.maybe_thumbnail.map(Base64Bytes::new),
+    maybe_dimensions,
   }
 }
 
@@ -320,9 +335,9 @@ fn file_size(_path: &str) -> u64 {
   0
 }
 
-/// Progress of a file in an upload: done files count fully, the rest not at all (uploads are one
-/// request per file).
-fn upload_transfer(upload: &PendingUpload, file: &PendingFile) -> FileTransfer {
+/// Progress of one file of an upload: done once uploaded, nothing before (a file goes up in one
+/// request, which reports no progress).
+fn upload_transfer(file: &PendingFile) -> FileTransfer {
   if let Some(reason) = file.maybe_failure {
     return FileTransfer::UploadFailed {
       reason: failure_view(reason),
@@ -333,16 +348,13 @@ fn upload_transfer(upload: &PendingUpload, file: &PendingFile) -> FileTransfer {
       reason: FileFailure::Network,
     };
   }
-  let total_bytes: u64 = upload.files.iter().map(|file| file.size_bytes).sum();
-  let done_bytes: u64 = upload
-    .files
-    .iter()
-    .filter(|file| file.maybe_done.is_some())
-    .map(|file| file.size_bytes)
-    .sum();
+  let done_bytes = match file.maybe_done {
+    Some(_) => file.size_bytes,
+    None => 0,
+  };
   FileTransfer::Uploading {
     done_bytes,
-    total_bytes,
+    total_bytes: file.size_bytes,
   }
 }
 

@@ -15,7 +15,9 @@ use std::rc::Rc;
 use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use teamcraft_client_api::actions::{FileFailure, FileInfo, FileTransfer, LinkPreview, ShareLinkOptions};
+use teamcraft_client_api::actions::{
+  FileFailure, FileInfo, FileTransfer, LinkPreview, PixelSize, ShareLinkOptions,
+};
 use teamcraft_client_api::admin::format_bytes;
 
 use crate::components::empty_state::EmptyState;
@@ -29,22 +31,25 @@ use crate::media_formats::animation_label;
 use crate::media_layout::{EmbedImage, fit_picture, inline_size, loads_inline, thumbnail_size};
 use crate::model::{ConversationId, MessageId};
 use crate::object_url::{FetchError, ObjectUrl};
+use crate::prefs::ImageSize;
 use crate::state::{AppState, Overlay, use_app_state};
 
 /// Most tiles a grid shows; the last one counts the pictures it doesn't show ("+3").
 const MAX_GRID_TILES: usize = 4;
 
 /// The files attached to one message: pictures and videos inline (one large, several in a grid),
-/// everything else as cards.
+/// everything else as cards. Pictures still going up show where they will be, from their local
+/// thumbnail.
 #[component]
 pub fn MessageFiles(files: Vec<FileInfo>) -> impl IntoView {
-  let (media, cards): (Vec<FileInfo>, Vec<FileInfo>) =
-    files.into_iter().partition(|file| MediaKey::of(file).is_some());
+  let (media, cards): (Vec<FileInfo>, Vec<FileInfo>) = files
+    .into_iter()
+    .partition(|file| MediaKey::of(file).is_some() || is_media_upload(file));
   let media = match media.len() {
     0 => ().into_any(),
     1 => media
       .into_iter()
-      .map(|file| view! { <MediaTile file=file layout=TileLayout::Single /> })
+      .map(|file| tile(file, TileLayout::Single))
       .collect_view()
       .into_any(),
     _ => view! { <MediaGrid files=media /> }.into_any(),
@@ -79,13 +84,134 @@ fn MediaGrid(files: Vec<FileInfo>) -> impl IntoView {
       let layout = TileLayout::Grid {
         maybe_hidden: (index + 1 == MAX_GRID_TILES && hidden > 0).then_some(hidden),
       };
-      view! { <MediaTile file=file layout=layout /> }
+      tile(file, layout)
     })
     .collect_view();
   view! {
     <div class="media-grid" data-tiles=count.min(MAX_GRID_TILES).to_string()>
       {tiles}
     </div>
+  }
+}
+
+/// A sent picture or video, or one still going up.
+fn tile(file: FileInfo, layout: TileLayout) -> AnyView {
+  match MediaKey::of(&file) {
+    Some(_) => view! { <MediaTile file=file layout=layout /> }.into_any(),
+    None => view! { <UploadTile file=file layout=layout /> }.into_any(),
+  }
+}
+
+/// A picture or video of the user's own message that is going up, or failed to.
+fn is_media_upload(file: &FileInfo) -> bool {
+  MediaKind::of(&file.media_type).is_some()
+    && matches!(
+      file.transfer,
+      FileTransfer::Uploading { .. } | FileTransfer::UploadStalled { .. } | FileTransfer::UploadFailed { .. }
+    )
+}
+
+/// A picture of a message that is still going up: its local thumbnail where the sent picture will
+/// be, at the same size, so nothing moves when it is sent. Over it a turning ring while it goes up,
+/// or why it stopped and "Try again".
+#[component]
+fn UploadTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let kind = MediaKind::of(&file.media_type).unwrap_or(MediaKind::Image);
+  let thumbnail = file
+    .maybe_thumbnail_png
+    .as_deref()
+    .and_then(ObjectUrl::from_thumbnail);
+  let maybe_src = thumbnail.as_ref().map(|url| url.as_str().to_owned());
+  // Revoked when the row leaves the screen.
+  StoredValue::new_local(thumbnail);
+  let maybe_thumbnail_size = file.maybe_thumbnail_png.as_deref().and_then(thumbnail_size);
+  let maybe_dimensions = file.maybe_dimensions;
+  let maybe_size = move || {
+    (layout == TileLayout::Single)
+      .then(|| {
+        let image_size = state.settings.prefs.with(|prefs| prefs.display.image_size);
+        tile_size(maybe_dimensions, maybe_thumbnail_size, image_size)
+      })
+      .flatten()
+  };
+  let media_width = move || {
+    maybe_size()
+      .map(|(width, _)| format!("{width}px"))
+      .unwrap_or_default()
+  };
+  let media_height = move || {
+    maybe_size()
+      .map(|(_, height)| format!("{height}px"))
+      .unwrap_or_default()
+  };
+  let actions = FileActions::new(state, &file);
+  let name = file.file_name.clone();
+  let picture = match maybe_src {
+    Some(src) => view! { <img src=src alt=name class="is-preview" draggable="false" /> }.into_any(),
+    None => view! { <span class="media-placeholder"><Icon name=file_icon(Some(kind)) /></span> }.into_any(),
+  };
+  let status = match file.transfer {
+    FileTransfer::Uploading {
+      done_bytes,
+      total_bytes,
+    } if done_bytes < total_bytes || total_bytes == 0 => view! {
+      <span class="upload-state" role="status">
+        <span class="spinner" aria-hidden="true"></span>
+        <span class="visually-hidden">{move || i18n.t("file-uploading")}</span>
+      </span>
+    }
+    .into_any(),
+    FileTransfer::UploadStalled { .. } => view! {
+      <span class="upload-state is-failed" role="alert">
+        <span>{move || i18n.t("file-upload-failed")}</span>
+        <button class="btn btn-small" on:click=move |_| actions.retry_upload()>
+          <Icon name=IconName::Rotate />
+          <span>{move || i18n.t("file-retry")}</span>
+        </button>
+      </span>
+    }
+    .into_any(),
+    FileTransfer::UploadFailed { reason } => {
+      let key = match reason {
+        FileFailure::TooLarge => "file-too-large",
+        _ => "file-upload-failed",
+      };
+      view! {
+        <span class="upload-state is-failed" role="alert">
+          <span>{move || i18n.t(key)}</span>
+        </span>
+      }
+      .into_any()
+    },
+    _ => ().into_any(),
+  };
+  let has_size = maybe_dimensions.is_some() || maybe_thumbnail_size.is_some();
+  view! {
+    <div
+      class="media-tile is-uploading"
+      class:media-single=layout == TileLayout::Single
+      class:has-size=has_size
+      style:--media-w=media_width
+      style:--media-h=media_height
+    >
+      <span class="media-open">{picture}</span>
+      {status}
+    </div>
+  }
+}
+
+/// The inline size of a single picture: the sender's exact size, else its thumbnail's.
+fn tile_size(
+  maybe_dimensions: Option<PixelSize>,
+  maybe_thumbnail_size: Option<(u32, u32)>,
+  image_size: ImageSize,
+) -> Option<(u32, u32)> {
+  match (maybe_dimensions, maybe_thumbnail_size) {
+    (Some(picture), _) => Some(fit_picture(picture.width, picture.height, image_size)),
+    (None, Some((width, height))) => Some(inline_size(width, height, image_size)),
+    (None, None) => None,
   }
 }
 
@@ -173,11 +299,7 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
       return None;
     }
     let image_size = state.settings.prefs.with(|prefs| prefs.display.image_size);
-    match (maybe_dimensions, maybe_thumbnail_size) {
-      (Some(picture), _) => Some(fit_picture(picture.width, picture.height, image_size)),
-      (None, Some((width, height))) => Some(inline_size(width, height, image_size)),
-      (None, None) => None,
-    }
+    tile_size(maybe_dimensions, maybe_thumbnail_size, image_size)
   };
   let media_width = move || {
     maybe_size()

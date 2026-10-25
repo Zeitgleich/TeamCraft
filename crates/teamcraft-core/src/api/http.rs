@@ -57,7 +57,10 @@ use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversa
 
 #[cfg(target_arch = "wasm32")]
 use super::web_socket::{BrowserSocket, SocketFrame};
-use super::{ApiError, GatewayConnection, Interception, RendezvousConnection, RendezvousFrame, ServerApi};
+use super::{
+  ApiError, DetachedRequest, GatewayConnection, Interception, RendezvousConnection, RendezvousFrame,
+  ServerApi,
+};
 use crate::clock::{Clock, SystemClock};
 
 /// How long a TCP and TLS (or WebSocket) handshake may take.
@@ -928,6 +931,11 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   async fn put_blob(&self, url: &str, bytes: Vec<u8>) -> Result<(), ApiError> {
     // Presigned: the URL carries the authorization, so no bearer token goes to object storage.
     send(self.client.put(url).body(bytes)).await.map(|_| ())
+  }
+
+  fn put_blob_detached(&self, url: &str, bytes: Vec<u8>) -> DetachedRequest {
+    let request = self.client.put(url).body(bytes);
+    Box::pin(async move { send(request).await.map(|_| ()) })
   }
 
   async fn get_blob(&self, url: &str) -> Result<Vec<u8>, ApiError> {

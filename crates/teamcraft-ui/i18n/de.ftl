@@ -1228,6 +1228,7 @@ file-failed = Übertragung fehlgeschlagen
 file-too-large = Datei ist zu groß
 file-retry = Erneut versuchen
 file-upload-stalled = Hochladen fehlgeschlagen. Die Nachricht wartet, bis die Datei gesendet ist.
+file-uploading = Wird hochgeladen…
 file-upload-failed = Hochladen fehlgeschlagen
 file-preview = Vorschau anzeigen
 file-share = Freigabelink erstellen

@@ -1228,6 +1228,7 @@ file-failed = Transfer failed
 file-too-large = File is too large
 file-retry = Try again
 file-upload-stalled = Upload failed. The message waits until the file is sent.
+file-uploading = Uploading…
 file-upload-failed = Upload failed
 file-preview = Show preview
 file-share = Create share link

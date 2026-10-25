@@ -730,6 +730,12 @@ pub enum ChatAction {
 }
 
 impl ChatAction {
+  /// A new message: the host answers it once it is in the outbox and sends it afterwards, so the
+  /// message shows at once, also while a sync or an upload holds the client.
+  pub fn is_new_message(&self) -> bool {
+    matches!(self, Self::SendMessage { .. } | Self::PostMessage { .. })
+  }
+
   /// Runs the action on a backend. The original actions are left to the host, which handles
   /// some of them itself (enrollment state, admin flows); returns them back.
   pub fn apply_to(self, backend: &(impl ChatBackend + SearchBackend)) -> Option<Self> {

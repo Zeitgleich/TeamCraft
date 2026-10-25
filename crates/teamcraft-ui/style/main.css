@@ -6343,6 +6343,12 @@ ol.md-list {
 .media-play-badge svg { width: 18px; height: 18px; }
 .media-gif-badge { position: absolute; left: 8px; bottom: 8px; padding: 1px 6px; border-radius: 4px; background: rgba(0, 0, 0, .6); color: var(--on-fill); font-size: var(--text-xs); font-weight: var(--weight-bold); letter-spacing: .04em; pointer-events: none; }
 .media-more { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(0, 0, 0, .5); color: var(--on-fill); font-size: var(--text-2xl); letter-spacing: var(--tracking-2xl); line-height: var(--leading-2xl); font-weight: var(--weight-semibold); pointer-events: none; }
+/* A picture of the user's own message still going up: its local thumbnail, a turning ring over it,
+   or why it stopped and "Try again" */
+.media-tile.is-uploading .media-open { cursor: default; }
+.upload-state { position: absolute; left: 50%; top: 50%; z-index: 1; transform: translate(-50%, -50%); display: inline-flex; align-items: center; gap: 8px; padding: 8px; border-radius: 999px; background: rgba(0, 0, 0, .6); color: var(--on-fill); }
+.upload-state .spinner { width: 22px; height: 22px; border-color: rgba(255, 255, 255, .35); border-top-color: var(--on-fill); }
+.upload-state.is-failed { flex-direction: column; max-width: calc(100% - 16px); padding: 10px 12px; border-radius: var(--radius-md); font-size: var(--text-sm); text-align: center; }
 .media-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px; width: min(360px, 100%); }
 .media-grid .media-tile { aspect-ratio: 1; border-radius: var(--radius-sm); }
 .media-grid .media-open img { object-fit: cover; }

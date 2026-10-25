@@ -29,6 +29,18 @@ pub struct Upkeep {
   has_failed: bool,
   /// When the roster and workspace head were last checked.
   last_local_check_ms: i64,
+  uploads: UploadMode,
+}
+
+/// Who runs the file uploads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UploadMode {
+  /// The upkeep, in [`flush`]: the loop waits for every upload (the mobile runner).
+  #[default]
+  Inline,
+  /// The host, beside its loop (`Client::start_upload`), so reads and sends are answered while a
+  /// large file goes up (the web and desktop cores).
+  Host,
 }
 
 impl Upkeep {
@@ -39,7 +51,14 @@ impl Upkeep {
       last_attempt_ms: i64::MIN,
       has_failed: false,
       last_local_check_ms: i64::MIN,
+      uploads: UploadMode::Inline,
     }
+  }
+
+  /// Leaves the uploads to the host ([`UploadMode::Host`]).
+  pub fn with_uploads(mut self, uploads: UploadMode) -> Self {
+    self.uploads = uploads;
+    self
   }
 
   /// Runs what is due. Returns whether the store may have changed (the UI re-reads it then).
@@ -69,7 +88,11 @@ impl Upkeep {
     if let Err(error) = client.apply_pending_changes().await {
       tracing::debug!(%error, "pending membership changes not applied yet");
     }
-    is_changed | flush(client).await
+    let is_flushed = match self.uploads {
+      UploadMode::Inline => flush(client).await,
+      UploadMode::Host => flush_sends(client).await,
+    };
+    is_changed | is_flushed
   }
 
   /// Due after a new gateway connection and after a local change; after a failed attempt not
@@ -118,17 +141,24 @@ async fn check_workspace<A: ServerApi, S: LocalStore>(client: &mut Client<A, S>)
   }
 }
 
-/// Sends what is waiting: link previews, then file uploads, then the outbox (a message with files
+/// Sends what is waiting: file uploads, then link previews, then the outbox (a message with files
 /// goes out once they are uploaded), then queued read positions, acknowledgements, pins and
 /// presence. Returns whether the store changed.
 pub async fn flush<A: ServerApi, S: LocalStore>(client: &mut Client<A, S>) -> bool {
   let mut is_changed = false;
-  if let Err(error) = client.generate_pending_previews().await {
-    tracing::debug!(%error, "link previews not made");
-  }
   match client.upload_pending().await {
     Ok(uploaded) => is_changed |= uploaded > 0,
     Err(error) => tracing::debug!(%error, "uploads did not finish"),
+  }
+  is_changed | flush_sends(client).await
+}
+
+/// [`flush`] without the file uploads, for a host that runs them itself ([`UploadMode::Host`]).
+/// Link previews are made first, so a message goes out with its preview.
+pub async fn flush_sends<A: ServerApi, S: LocalStore>(client: &mut Client<A, S>) -> bool {
+  let mut is_changed = false;
+  if let Err(error) = client.generate_pending_previews().await {
+    tracing::debug!(%error, "link previews not made");
   }
   match client.flush_outbox().await {
     Ok(report) => {

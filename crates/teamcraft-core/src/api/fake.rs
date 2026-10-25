@@ -3172,6 +3172,11 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  fn put_blob_detached(&self, url: &str, bytes: Vec<u8>) -> super::DetachedRequest {
+    let (api, url) = (self.clone(), url.to_owned());
+    Box::pin(async move { api.put_blob(&url, bytes).await })
+  }
+
   async fn put_blob(&self, url: &str, bytes: Vec<u8>) -> Result<(), ApiError> {
     if let Some(raw) = url.strip_prefix(ORG_BACKGROUND_SCHEME) {
       return self.with(|state, _| {

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use leptos::prelude::*;
-use teamcraft_client_api::actions::{MessagePriority, WorkspaceEvent};
+use teamcraft_client_api::actions::{FileTransfer, MessagePriority, WorkspaceEvent};
 use teamcraft_client_api::log::{LogEntry, log_entries};
 use teamcraft_proto::HistoryPolicy;
 use wasm_bindgen::JsCast;
@@ -548,22 +548,34 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
       delivery.set(Delivery::of(message_id, sent_at, now_ms()))
     });
   }
+  // A message waits for its files: "Sending…" while they go up, however long that takes. A file
+  // that stopped says so on its own tile.
+  let is_uploading = move || {
+    extras.with(|maybe_extras| {
+      maybe_extras.as_ref().is_some_and(|extras| {
+        extras
+          .files
+          .iter()
+          .any(|file| matches!(file.transfer, FileTransfer::Uploading { .. }))
+      })
+    })
+  };
   let delivery_view = move || match delivery.get() {
     Delivery::Sent => None,
-    Delivery::Sending => Some(
-      view! {
-        <span class="msg-delivery" role="status">
-          <Icon name=IconName::Clock />
-          {move || i18n.t("message-sending")}
-        </span>
-      }
-      .into_any(),
-    ),
-    Delivery::Delayed => Some(
+    Delivery::Delayed if !is_uploading() => Some(
       view! {
         <span class="msg-delivery msg-delayed" role="status">
           <Icon name=IconName::Alert />
           {move || i18n.t("message-not-sent")}
+        </span>
+      }
+      .into_any(),
+    ),
+    Delivery::Sending | Delivery::Delayed => Some(
+      view! {
+        <span class="msg-delivery" role="status">
+          <Icon name=IconName::Clock />
+          {move || i18n.t("message-sending")}
         </span>
       }
       .into_any(),
