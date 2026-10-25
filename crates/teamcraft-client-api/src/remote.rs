@@ -610,6 +610,17 @@ pub enum ChatAction {
     file_id: String,
     options: ShareLinkOptions,
   },
+  RevokeShareLink {
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: String,
+    share_id: String,
+  },
+  RefreshShareLinks {
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: String,
+  },
   CreateSpace {
     space: NewSpace,
   },
@@ -875,6 +886,17 @@ impl ChatAction {
         file_id,
         options,
       } => backend.create_share_link(conversation, message, &file_id, options),
+      Self::RevokeShareLink {
+        conversation,
+        message,
+        file_id,
+        share_id,
+      } => backend.revoke_share_link(conversation, message, &file_id, &share_id),
+      Self::RefreshShareLinks {
+        conversation,
+        message,
+        file_id,
+      } => backend.refresh_share_links(conversation, message, &file_id),
       Self::CreateSpace { space } => backend.create_space(space),
       Self::UpdateSpace { space, changes } => backend.update_space(space, changes),
       Self::CreateChannelWith { channel } => backend.create_channel_with(channel),

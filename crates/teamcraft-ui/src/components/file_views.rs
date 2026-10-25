@@ -15,9 +15,7 @@ use std::rc::Rc;
 use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use teamcraft_client_api::actions::{
-  FileFailure, FileInfo, FileTransfer, LinkPreview, PixelSize, ShareLinkOptions,
-};
+use teamcraft_client_api::actions::{FileFailure, FileInfo, FileTransfer, LinkPreview, PixelSize};
 use teamcraft_client_api::admin::format_bytes;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -909,7 +907,6 @@ fn FileMenu(actions: FileActions) -> impl IntoView {
   let is_open = RwSignal::new(false);
   let trigger = NodeRef::<html::Button>::new();
   let is_saved = actions.is_saved();
-  let share_link = actions.share_link();
   let close = move || {
     is_open.set(false);
     if let Some(trigger) = trigger.get_untracked() {
@@ -958,9 +955,7 @@ fn FileMenu(actions: FileActions) -> impl IntoView {
           </button>
           <button class="menu-item" role="menuitem" on:click=item(FileActions::share)>
             <Icon name=IconName::Link />
-            <span class="menu-label">
-              {move || if share_link.get().is_some() { i18n.t("file-copy-share") } else { i18n.t("file-share") }}
-            </span>
+            <span class="menu-label">{move || i18n.t("file-share")}</span>
           </button>
           <button class="menu-item" role="menuitem" on:click=item(FileActions::forward)>
             <Icon name=IconName::Forward />
@@ -1015,19 +1010,6 @@ impl FileActions {
     })
   }
 
-  fn share_link(self) -> Memo<Option<String>> {
-    Memo::new(move |_| {
-      self.file_id.with_value(|file_id| {
-        self
-          .state
-          .read(|backend| backend.share_links(self.conversation, self.message, file_id))
-          .into_iter()
-          .next()
-          .map(|link| link.url)
-      })
-    })
-  }
-
   /// The core downloads and decrypts the file again and saves it (the download folder on the
   /// desktop, the browser's download on the web).
   fn download(self) {
@@ -1038,35 +1020,17 @@ impl FileActions {
     });
   }
 
-  /// Copies the file's share link, creating one first if there is none yet.
+  /// Opens the options and the list of the file's share links.
   fn share(self) {
-    let existing = self.file_id.with_value(|file_id| {
+    let maybe_file = self
+      .file_id
+      .with_value(|file_id| file_id.parse::<teamcraft_proto::AttachmentId>().ok());
+    if let Some(file) = maybe_file {
       self
         .state
-        .read(|backend| backend.share_links(self.conversation, self.message, file_id))
-        .into_iter()
-        .next()
-    });
-    let key = match existing {
-      Some(link) => {
-        copy_to_clipboard(&link.url);
-        "lightbox-share-copied"
-      },
-      None => {
-        self.file_id.with_value(|file_id| {
-          self.state.write(|backend| {
-            backend.create_share_link(
-              self.conversation,
-              self.message,
-              file_id,
-              ShareLinkOptions::default(),
-            )
-          });
-        });
-        "lightbox-share-created"
-      },
-    };
-    self.state.show_brief_toast(self.i18n.t(key));
+        .overlay
+        .set(Overlay::ShareFile(self.conversation, self.message, file));
+    }
   }
 
   fn forward(self) {

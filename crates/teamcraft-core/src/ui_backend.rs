@@ -177,6 +177,14 @@ pub enum CoreCommand {
     maybe_max_downloads: Option<u32>,
     maybe_password: Option<RedactedText>,
   },
+  RevokeShareLink {
+    conversation: ConversationId,
+    attachment: AttachmentId,
+    share_id: String,
+  },
+  RefreshShareLinks {
+    attachment: AttachmentId,
+  },
   CreateSpace {
     request: Box<CreateSpaceRequest>,
   },
@@ -1468,6 +1476,18 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn share_links(&self, conversation: ConversationId, message: MessageId, file_id: &str) -> Vec<ShareLink> {
     self.ui_share_links(conversation, message, file_id)
+  }
+  fn revoke_share_link(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+    share_id: &str,
+  ) {
+    self.ui_revoke_share_link(conversation, message, file_id, share_id);
+  }
+  fn refresh_share_links(&self, conversation: ConversationId, message: MessageId, file_id: &str) {
+    self.ui_refresh_share_links(conversation, message, file_id);
   }
 
   fn max_upload_bytes(&self) -> Option<u64> {

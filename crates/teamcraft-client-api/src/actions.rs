@@ -310,6 +310,12 @@ impl std::fmt::Debug for ShareLinkOptions {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShareLink {
   pub file_id: String,
+  /// The link's ID on the server, to revoke it.
+  #[serde(default)]
+  pub share_id: String,
+  /// Downloads so far, as of the last refresh.
+  #[serde(default)]
+  pub download_count: u32,
   /// The full link including the `#` fragment with the key. Show it only to the creator.
   pub url: String,
   #[serde(default)]

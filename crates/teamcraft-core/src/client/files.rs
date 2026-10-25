@@ -261,6 +261,9 @@ pub struct StoredShareLink {
   #[serde(rename = "max_downloads", default, skip_serializing_if = "Option::is_none")]
   pub maybe_max_downloads: Option<u32>,
   pub has_password: bool,
+  /// Downloads so far, as of the last refresh from the server.
+  #[serde(default)]
+  pub download_count: u32,
 }
 
 /// Options of a new share link.
@@ -553,14 +556,58 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         ))?
       ),
       share_id: response.id,
-      maybe_expires_at: settings.maybe_expires_at,
-      maybe_max_downloads: settings.maybe_max_downloads,
+      // What the server granted (its defaults and caps), not what was asked for.
+      maybe_expires_at: Some(response.expires_at.0),
+      maybe_max_downloads: response.maybe_max_downloads,
       has_password: settings.maybe_password.is_some(),
+      download_count: 0,
     };
     let mut links = share_links(&self.store, attachment)?;
     links.push(link.clone());
     records::put_json(&self.store, Table::ShareLinks, &attachment.to_string(), &links)?;
     Ok(link)
+  }
+
+  /// Stops a share link from working and forgets it. A link the server no longer knows or has
+  /// revoked already is gone either way.
+  pub async fn revoke_share_link(
+    &mut self,
+    attachment: AttachmentId,
+    share_id: &str,
+  ) -> Result<(), CoreError> {
+    match self.api.revoke_share_link(share_id).await {
+      Ok(()) => {},
+      Err(error) if is_status(&error, 409) || is_status(&error, 404) => {},
+      Err(error) => return Err(error.into()),
+    }
+    let mut links = share_links(&self.store, attachment)?;
+    links.retain(|link| link.share_id != share_id);
+    records::put_json(&self.store, Table::ShareLinks, &attachment.to_string(), &links)?;
+    Ok(())
+  }
+
+  /// Updates the download counts of the file's links from the server and forgets the ones that were
+  /// revoked (maybe by an admin or on another device) or have expired.
+  pub async fn refresh_share_links(&mut self, attachment: AttachmentId) -> Result<(), CoreError> {
+    let mut links = share_links(&self.store, attachment)?;
+    if links.is_empty() {
+      return Ok(());
+    }
+    let listed = self.api.list_share_links().await?.links;
+    let now = self.now_ms();
+    links.retain_mut(
+      |link| match listed.iter().find(|listed| listed.id == link.share_id) {
+        Some(listed) if listed.is_revoked || listed.expires_at.0 <= now => false,
+        Some(listed) => {
+          link.download_count = listed.download_count;
+          true
+        },
+        // The list is capped; a link missing from it is not necessarily gone.
+        None => true,
+      },
+    );
+    records::put_json(&self.store, Table::ShareLinks, &attachment.to_string(), &links)?;
+    Ok(())
   }
 
   /// Starts the file's next upload step: a large file's next part, any other file whole.

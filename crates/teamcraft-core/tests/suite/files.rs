@@ -461,6 +461,53 @@ async fn share_links_carry_the_key_only_in_the_fragment() {
 }
 
 #[tokio::test]
+async fn a_revoked_share_link_stops_working_and_is_forgotten() {
+  let (server, mut alice, mut bob, channel) = channel_with_two().await;
+  let alice_ui = backend_of(&alice);
+  alice_ui.send_message(with_files(
+    channel,
+    "",
+    vec![file("plan.txt", "text/plain", b"the plan".to_vec())],
+  ));
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  let message = last(&alice_ui, channel);
+  let file_id = alice_ui.message_extras(channel, &[message.id])[0].files[0]
+    .file_id
+    .clone();
+  for _ in 0..2 {
+    alice_ui.create_share_link(channel, message.id, &file_id, ShareLinkOptions::default());
+    run_commands(&mut alice, &alice_ui).await;
+  }
+  let links = alice_ui.share_links(channel, message.id, &file_id);
+  assert_eq!(links.len(), 2);
+  let revoked = links[0].share_id.clone();
+  let kept = links[1].share_id.clone();
+  assert!(server.shared_blob(&revoked).is_some());
+
+  alice_ui.revoke_share_link(channel, message.id, &file_id, &revoked);
+  run_commands(&mut alice, &alice_ui).await;
+  assert!(
+    server.shared_blob(&revoked).is_none(),
+    "the server stopped serving it"
+  );
+  let remaining = alice_ui.share_links(channel, message.id, &file_id);
+  assert_eq!(remaining.len(), 1);
+  assert_eq!(remaining[0].share_id, kept);
+
+  // Revoking it again (another device did it first) is not an error and changes nothing.
+  alice_ui.revoke_share_link(channel, message.id, &file_id, &revoked);
+  run_commands(&mut alice, &alice_ui).await;
+  assert_eq!(alice_ui.share_links(channel, message.id, &file_id).len(), 1);
+
+  // A link revoked elsewhere drops out of the list when the counts are refreshed.
+  server.revoke_shared_link(&kept);
+  alice_ui.refresh_share_links(channel, message.id, &file_id);
+  run_commands(&mut alice, &alice_ui).await;
+  assert!(alice_ui.share_links(channel, message.id, &file_id).is_empty());
+}
+
+#[tokio::test]
 async fn each_file_of_a_message_has_its_own_share_link() {
   let (server, mut alice, mut bob, channel) = channel_with_two().await;
   let alice_ui = backend_of(&alice);

@@ -274,6 +274,35 @@ impl<S: LocalStore> CoreChatBackend<S> {
     });
   }
 
+  pub(crate) fn ui_revoke_share_link(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+    share_id: &str,
+  ) {
+    let Some(attachment) = self.attachment_id(conversation, message, file_id) else {
+      return;
+    };
+    self.command(CoreCommand::RevokeShareLink {
+      conversation,
+      attachment,
+      share_id: share_id.to_owned(),
+    });
+  }
+
+  pub(crate) fn ui_refresh_share_links(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+  ) {
+    let Some(attachment) = self.attachment_id(conversation, message, file_id) else {
+      return;
+    };
+    self.command(CoreCommand::RefreshShareLinks { attachment });
+  }
+
   pub(crate) fn ui_share_links(
     &self,
     conversation: ConversationId,
@@ -288,6 +317,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .into_iter()
       .map(|link| ShareLink {
         file_id: link.attachment_id.to_string(),
+        share_id: link.share_id,
+        download_count: link.download_count,
         url: link.url,
         maybe_expires_at: link.maybe_expires_at,
         maybe_max_downloads: link.maybe_max_downloads,

@@ -891,6 +891,8 @@ impl ChatBackend for MockBackend {
   ) {
     let link = ShareLink {
       file_id: file_id.to_owned(),
+      share_id: format!("demo{file_id}"),
+      download_count: 0,
       url: format!("https://chat.example.com/s/demo{file_id}#demo-key"),
       maybe_expires_at: options.maybe_expires_at,
       maybe_max_downloads: options.maybe_max_downloads,
@@ -901,6 +903,23 @@ impl ChatBackend for MockBackend {
       .borrow_mut()
       .share_links
       .insert(file_id.to_owned(), link);
+  }
+
+  fn revoke_share_link(
+    &self,
+    _conversation: ConversationId,
+    _message: MessageId,
+    file_id: &str,
+    share_id: &str,
+  ) {
+    let mut state = self.state.borrow_mut();
+    if state
+      .share_links
+      .get(file_id)
+      .is_some_and(|link| link.share_id == share_id)
+    {
+      state.share_links.remove(file_id);
+    }
   }
 
   fn share_links(&self, _conversation: ConversationId, _message: MessageId, file_id: &str) -> Vec<ShareLink> {

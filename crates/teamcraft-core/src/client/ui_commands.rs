@@ -189,6 +189,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           .await
           .map(|_| ())
       },
+      CoreCommand::RevokeShareLink {
+        attachment, share_id, ..
+      } => self.revoke_share_link(attachment, &share_id).await,
+      CoreCommand::RefreshShareLinks { attachment } => self.refresh_share_links(attachment).await,
       CoreCommand::CreateSpace { request } => self.create_space(&request).await.map(|_| ()),
       CoreCommand::UpdateSpace { space, request } => self.update_space(space, &request).await.map(|_| ()),
       CoreCommand::CreateChannelWith { space, options } => {

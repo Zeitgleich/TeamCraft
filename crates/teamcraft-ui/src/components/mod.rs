@@ -96,6 +96,7 @@ pub mod settings_security;
 pub mod settings_tabs;
 #[cfg(target_arch = "wasm32")]
 pub mod share_download;
+pub mod share_link_dialog;
 pub mod sheet;
 pub mod sidebar;
 pub mod skeleton;

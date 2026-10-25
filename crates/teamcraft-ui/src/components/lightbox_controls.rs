@@ -11,7 +11,7 @@ use std::time::Duration;
 use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use teamcraft_client_api::actions::{FileInfo, ShareLinkOptions};
+use teamcraft_client_api::actions::FileInfo;
 use teamcraft_client_api::admin::format_bytes;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
@@ -384,13 +384,6 @@ fn MoreMenu(
       .next()
       .is_some_and(|extras| extras.is_saved)
   });
-  let share_link = Memo::new(move |_| {
-    let file = actions.current_file.get()?;
-    state
-      .read(|backend| backend.share_links(conversation, file.message, &file.file_id))
-      .into_iter()
-      .next()
-  });
   let can_copy_image = move || {
     actions.kind.get().is_some_and(MediaKind::can_transform)
       && matches!(actions.full.get(), FullMedia::Ready(_))
@@ -461,28 +454,14 @@ fn MoreMenu(
     close();
   };
   let share = move |_| {
-    let key = match share_link.get_untracked() {
-      Some(link) => {
-        copy_to_clipboard(&link.url);
-        "lightbox-share-copied"
-      },
-      None => {
-        let Some(file) = actions.current_file.get_untracked() else {
-          return;
-        };
-        state.write(|backend| {
-          backend.create_share_link(
-            conversation,
-            file.message,
-            &file.file_id,
-            ShareLinkOptions::default(),
-          )
-        });
-        "lightbox-share-created"
-      },
+    let Some(file) = actions.current_file.get_untracked() else {
+      return;
     };
-    actions.notice.show(i18n.t(key));
-    close();
+    if let Ok(attachment) = file.file_id.parse::<teamcraft_proto::AttachmentId>() {
+      state
+        .overlay
+        .set(Overlay::ShareFile(conversation, file.message, attachment));
+    }
   };
   let shortcut = move |command: Command| command.shortcut_label(modifier);
 
@@ -524,9 +503,7 @@ fn MoreMenu(
           </button>
           <button class="menu-item" role="menuitem" on:click=share>
             <Icon name=IconName::Link />
-            <span class="menu-label">
-              {move || if share_link.get().is_some() { i18n.t("file-copy-share") } else { i18n.t("file-share") }}
-            </span>
+            <span class="menu-label">{move || i18n.t("file-share")}</span>
           </button>
           <Show when=can_copy_image fallback=|| ()>
             <button class="menu-item" role="menuitem" on:click=move |_| { actions.run(Command::CopyImage); close(); }>
