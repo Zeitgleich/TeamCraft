@@ -247,6 +247,10 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     .visible(!is_hidden)
     .inner_size(1360.0, 860.0)
     .min_inner_size(720.0, 520.0)
+    // Files dragged onto the window reach the page as HTML5 drag and drop (#484), the same path as
+    // in the browser: the UI gets `File` objects and attaches them like the + button. Tauri's own
+    // handler would swallow the drop on every platform and only report file paths.
+    .disable_drag_drop_handler()
     .on_new_window({
       let app = app.handle().clone();
       move |url, _features| {

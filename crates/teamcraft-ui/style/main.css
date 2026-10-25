@@ -1557,24 +1557,64 @@ select.input {
   flex-direction: column;
 }
 
-/* Dragging files over a conversation: they will be attached to its composer. */
-.drop-overlay {
+/* Dragging files over a conversation or thread (#484): a tab slides up out of the composer, where
+   the dropped files will appear as chips, and the composer's frame turns to the accent. A
+   zero-height anchor right above the composer holds it, so nothing in the layout moves; the
+   composer paints over it, so the tab emerges from behind its top edge. */
+.drop-strip-anchor {
+  position: relative;
+  flex: none;
+  height: 0;
+  z-index: 5;
+}
+
+.drop-strip-anchor + .composer {
+  position: relative;
+  z-index: 6;
+}
+
+.drop-strip {
   position: absolute;
-  inset: 8px;
-  z-index: 20;
+  bottom: -1px;
+  left: 50%;
   display: flex;
-  flex-direction: column;
   align-items: center;
-  justify-content: center;
   gap: 8px;
-  border: 2px dashed var(--accent);
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--surface) 85%, transparent);
-  color: var(--accent-strong);
-  font-size: var(--text-lg);
-  letter-spacing: var(--tracking-lg);
+  height: 40px;
+  padding: 0 18px;
+  border: 1px solid var(--accent);
+  border-bottom: 0;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  background: var(--accent);
+  color: var(--on-fill);
   font-weight: var(--weight-semibold);
+  white-space: nowrap;
   pointer-events: none;
+  opacity: 0;
+  transform: translate(-50%, 100%);
+  transition:
+    opacity var(--dur-exit) var(--ease-exit),
+    transform var(--dur-exit) var(--ease-exit);
+}
+
+.drop-strip.is-visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+  transition:
+    opacity var(--dur-fast) var(--ease-out),
+    transform var(--dur-slow) var(--ease-emphasized);
+}
+
+.drop-strip-anchor:has(.is-visible) + .composer .composer-box {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drop-strip,
+  .drop-strip.is-visible {
+    transform: translate(-50%, 0);
+  }
 }
 
 /* The header measures itself (#365): what fits depends on its own width, which the sidebar, the
@@ -2399,6 +2439,10 @@ select.input {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   background: var(--surface);
+  /* The frame lights up while files are dragged over the conversation (.drop-strip). */
+  transition:
+    border-color var(--dur-base) var(--ease-out),
+    box-shadow var(--dur-base) var(--ease-out);
 }
 
 .composer-box:focus-within {
@@ -2771,12 +2815,19 @@ ol.md-list {
 .chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  min-height: 28px;
-  padding: 0 4px 0 8px;
-  border: 1px solid var(--border);
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 4px 0 10px;
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-pill);
-  background: var(--surface-2);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+  font-weight: var(--weight-medium);
+}
+
+/* The file icon carries the accent, so a waiting attachment stands out from the feed above. */
+.chip > .icon {
+  color: var(--accent-strong);
 }
 
 /* A pasted or dropped image shows a thumbnail instead of the file icon. */
@@ -6581,7 +6632,6 @@ ol.md-list {
   .lightbox-image { will-change: auto; transition: none; }
   .lightbox-nav { transition: none; }
 }
-.composer-drop .composer-box { outline: 2px dashed var(--accent); }
 .composer-error { color: var(--danger); margin: .25rem 0; }
 
 /* Workspace dialogs */

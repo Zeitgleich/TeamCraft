@@ -47,6 +47,7 @@ pub mod directory_view;
 pub mod edge_swipe;
 pub mod emoji_picker;
 pub mod empty_state;
+pub mod file_drop;
 pub mod file_views;
 pub mod getting_started;
 pub mod guest_join;

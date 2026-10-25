@@ -25,6 +25,7 @@ use crate::components::calls_view::CallsView;
 use crate::components::channel_preview::ChannelPreview;
 use crate::components::channel_view::ChannelView;
 use crate::components::edge_swipe::EdgeSwipeBack;
+use crate::components::file_drop;
 use crate::components::getting_started::GettingStarted;
 use crate::components::guest_join::GuestJoinPage;
 use crate::components::home::{HomeSidebar, HomeStart, NewMessageDialog};
@@ -190,6 +191,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   let listener = window_event_listener(ev::keydown, move |ev| handle_global_shortcut(&ev, state));
   // Removed with the component: a late event must not reach its disposed signals.
   on_cleanup(move || listener.remove());
+  file_drop::block_stray_file_drops();
   let banners = NodeRef::<leptos::html::Div>::new();
   track_banner_height(banners);
   let toast_stack = NodeRef::<leptos::html::Div>::new();
