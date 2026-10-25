@@ -129,5 +129,18 @@ class InlineStylesTest(unittest.TestCase):
         self.assertEqual(check.inline_styles("x.rs", source), [])
 
 
+
+class LayerHintsTest(unittest.TestCase):
+    def test_will_change_on_an_unlisted_selector_is_found(self):
+        self.assertEqual(
+            findings(".sidebar { will-change: transform; }\n"),
+            ["x.css:1: will-change on .sidebar keeps a GPU layer; list it in WILL_CHANGE with the reason, or drop it"],
+        )
+
+    def test_listed_selectors_and_auto_pass(self):
+        css = ".lightbox-image { will-change: transform; }\n.sidebar { will-change: auto; }\n"
+        self.assertEqual(findings(css), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1537,14 +1537,38 @@ select.input {
   display: none;
 }
 
-/* Without a window manager frame the window needs its own edge (Windows draws one itself). */
-:root[data-titlebar="custom"][data-platform="linux"][data-window="normal"]::after {
+/* Without a window manager frame the window needs its own edge (Windows draws one itself). Four
+   one-pixel lines, not one bordered box over the window: WebKitGTK gives a fixed element its own
+   compositing layer, and a window-sized one costs a window of GPU memory and a blend every frame. */
+:root[data-titlebar="custom"][data-platform="linux"][data-window="normal"]::before,
+:root[data-titlebar="custom"][data-platform="linux"][data-window="normal"]::after,
+:root[data-titlebar="custom"][data-platform="linux"][data-window="normal"] body::before,
+:root[data-titlebar="custom"][data-platform="linux"][data-window="normal"] body::after {
   content: "";
   position: fixed;
-  inset: 0;
   z-index: 1000;
-  border: 1px solid rgba(128, 128, 128, 0.4);
+  background: rgba(128, 128, 128, 0.4);
   pointer-events: none;
+}
+
+:root[data-titlebar="custom"][data-platform="linux"][data-window="normal"]::before {
+  inset: 0 0 auto;
+  height: 1px;
+}
+
+:root[data-titlebar="custom"][data-platform="linux"][data-window="normal"]::after {
+  inset: auto 0 0;
+  height: 1px;
+}
+
+:root[data-titlebar="custom"][data-platform="linux"][data-window="normal"] body::before {
+  inset: 1px auto 1px 0;
+  width: 1px;
+}
+
+:root[data-titlebar="custom"][data-platform="linux"][data-window="normal"] body::after {
+  inset: 1px 0 1px auto;
+  width: 1px;
 }
 
 /* ---- Channel view ---- */
