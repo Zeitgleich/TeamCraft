@@ -59,6 +59,8 @@ pub mod call_view;
 pub mod call_web;
 #[cfg(any(feature = "native", feature = "web"))]
 pub mod capture_convert;
+#[cfg(any(feature = "native", feature = "web"))]
+pub mod capture_negotiate;
 #[cfg(any(
   all(feature = "avfoundation", target_os = "macos"),
   all(feature = "mediafoundation", target_os = "windows")
