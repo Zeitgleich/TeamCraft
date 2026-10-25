@@ -919,6 +919,8 @@ select.input {
   position: relative;
   width: 40px;
   height: 40px;
+  /* No button padding: the space picture fills the whole tile instead of being squeezed. */
+  padding: 0;
   border: 0;
   border-radius: var(--radius-md);
   background: hsl(var(--hue) 40% 32%);
