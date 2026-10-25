@@ -107,6 +107,7 @@ sidebar-integrations = Integrations
 sidebar-direct-messages = Direct messages
 sidebar-item-mentions = { $name }, { $count } mentions
 sidebar-item-unread = { $name }, unread messages
+sidebar-item-muted = Notifications muted
 sidebar-item-catching-up = { $name }, catching up
 catching-up = Catching up…
 catching-up-detail = Messages from while you were away are still loading.

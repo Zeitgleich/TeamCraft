@@ -11,6 +11,9 @@
   --surface-2: #eff1f5;
   --surface-3: #e5e8ee;
   --border: #dce0e7;
+  /* Edges of controls (fields, switches, checkboxes): 3:1 against the surface (WCAG 1.4.11), as
+     Android's outline. --border stays for dividers and cards, which need no contrast. */
+  --border-strong: #848ea0;
   --text: #1b2230;
   --text-muted: #566175;
   --accent: #0b7f78;
@@ -19,6 +22,7 @@
   --accent-soft: #dff3f1;
   --focus: #0b7f78;
   --danger: #c0392b;
+  --on-danger: #ffffff;
   --mention-bg: #fff2cc;
   --mention-text: #6a4b00;
   --code-bg: #eef0f4;
@@ -31,6 +35,8 @@
   --sb-hover: rgba(255, 255, 255, 0.07);
   --sb-current: #0b7f78;
   --sb-muted: #8793a8;
+  /* Muted channels: dimmer than --sb-muted but still 4.5:1 on --sb-bg; the bell-off icon says why. */
+  --sb-dim: #808ca1;
   /* White text on it needs 4.5:1 (WCAG AA). */
   --badge-bg: #c8441d;
 
@@ -41,6 +47,8 @@
 
   --online: #2eb67d;
   --away: #e8a317;
+  /* A "favourite" star that is on: 3:1 on the surface (--away is 2.2:1 on white). */
+  --star: #b07a00;
   --dnd: #e0463a;
   --offline: #8b95a5;
 
@@ -87,7 +95,10 @@
   --ease-pop: cubic-bezier(0.34, 1.56, 0.64, 1);
   --ease-out: var(--ease-standard);
   --press-scale: 0.98;
-  --focus-ring: color-mix(in srgb, var(--focus) 28%, transparent);
+  /* One focus ring everywhere (issue #362): an outline in --focus, never a box-shadow alone, so it
+     stays 3:1 and forced-colours mode (which drops shadows) keeps it. */
+  --focus-width: 2px;
+  --focus-offset: 2px;
   --danger-soft: color-mix(in srgb, var(--danger) 9%, transparent);
   --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.05), 0 16px 40px rgba(16, 24, 40, 0.1);
 }
@@ -110,6 +121,7 @@
     --surface-2: #1c2433;
     --surface-3: #263044;
     --border: #28324a;
+    --border-strong: #626d86;
     --text: #e4e9f2;
     --text-muted: #9aa6ba;
     --accent: #35c6ba;
@@ -118,6 +130,8 @@
     --accent-soft: #123a38;
     --focus: #5fd8ce;
     --danger: #ff7a6b;
+    --on-danger: #2a0905;
+    --star: #e8a317;
     --mention-bg: #4a3b10;
     --mention-text: #ffd978;
     --code-bg: #1d2535;
@@ -140,6 +154,7 @@
   --surface-2: #1c2433;
   --surface-3: #263044;
   --border: #28324a;
+  --border-strong: #626d86;
   --text: #e4e9f2;
   --text-muted: #9aa6ba;
   --accent: #35c6ba;
@@ -148,6 +163,8 @@
   --accent-soft: #123a38;
   --focus: #5fd8ce;
   --danger: #ff7a6b;
+  --on-danger: #2a0905;
+  --star: #e8a317;
   --mention-bg: #4a3b10;
   --mention-text: #ffd978;
   --code-bg: #1d2535;
@@ -225,8 +242,8 @@ kbd {
 }
 
 :focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 1px;
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: var(--focus-offset);
 }
 
 .visually-hidden {
@@ -288,6 +305,7 @@ kbd {
   min-width: 0;
   display: flex;
   background: var(--surface);
+  /* Takes focus only from code (tabindex -1, after navigation), never from Tab: no ring. */
   outline: none;
 }
 
@@ -316,7 +334,7 @@ kbd {
 }
 
 .top-bar .brand:focus-visible {
-  outline: 2px solid var(--chrome-strong);
+  outline: var(--focus-width) solid var(--chrome-strong);
   outline-offset: -2px;
   border-radius: var(--radius-sm);
 }
@@ -426,7 +444,7 @@ kbd {
 }
 
 .icon-btn[aria-pressed="true"] .icon {
-  color: var(--away);
+  color: var(--star);
   fill: currentColor;
 }
 
@@ -465,7 +483,7 @@ kbd {
 .input {
   height: 34px;
   padding: 0 10px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   background: var(--surface);
   min-width: 0;
@@ -473,6 +491,12 @@ kbd {
 
 .input:hover {
   border-color: var(--text-muted);
+}
+
+/* Fields: the ring hugs the box. */
+.input:focus-visible {
+  outline-offset: 0;
+  border-color: var(--focus);
 }
 
 select.input {
@@ -483,16 +507,17 @@ select.input {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin: 0 0 18px;
+  margin: 0 0 var(--space-3);
   padding: 0;
   border: 0;
   min-width: 0;
 }
 
-.field > label,
+.field label,
 .field > legend {
-  font-weight: 600;
   padding: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
 }
 
 .field-row {
@@ -990,7 +1015,7 @@ select.input {
   flex: none;
   width: var(--sidebar-w);
   background: var(--sb-bg);
-  color: var(--sb-text, var(--chrome-text));
+  color: var(--chrome-text);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -1040,7 +1065,6 @@ select.input {
 .sb-section-head .chevron {
   width: 14px;
   height: 14px;
-  transition: transform 0.12s ease;
 }
 
 .sb-section-head[aria-expanded="false"] .chevron {
@@ -1072,8 +1096,15 @@ select.input {
   font-weight: 700;
 }
 
+/* Muted: a dimmer colour that still reads at 4.5:1, plus the bell-off icon (not opacity). */
 .sb-item.muted {
-  opacity: 0.55;
+  color: var(--sb-dim);
+}
+
+.sb-muted-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
 }
 
 .sb-item.current {
@@ -1113,7 +1144,7 @@ select.input {
 .sidebar :focus-visible,
 .space-rail :focus-visible,
 .top-bar :focus-visible {
-  outline-color: #fff;
+  outline-color: var(--chrome-strong);
 }
 
 /* ---- Custom title bar (desktop app, components/window_controls.rs) ----
@@ -1235,7 +1266,7 @@ select.input {
 }
 
 .window-btn:focus-visible {
-  outline: 2px solid var(--window-btn-ring);
+  outline: var(--focus-width) solid var(--window-btn-ring);
   outline-offset: -2px;
 }
 
@@ -1286,6 +1317,7 @@ select.input {
 }
 
 :root[data-platform="linux"] .window-btn:focus-visible {
+  /* The ring is drawn by .window-glyph below. */
   outline: none;
 }
 
@@ -1296,7 +1328,8 @@ select.input {
 }
 
 :root[data-platform="linux"] .window-btn:focus-visible .window-glyph {
-  box-shadow: 0 0 0 2px var(--window-btn-ring);
+  outline: var(--focus-width) solid var(--window-btn-ring);
+  outline-offset: 0;
 }
 
 /* GNOME: a light fill at rest, stronger on hover and press; close is not red. */
@@ -1699,7 +1732,7 @@ select.input {
 }
 
 .md-link {
-  color: var(--accent);
+  color: var(--accent-strong);
 }
 
 .mention {
@@ -1756,7 +1789,7 @@ select.input {
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--accent);
+  color: var(--accent-strong);
   font-weight: 600;
   font-size: var(--text-xs);
 }
@@ -1804,11 +1837,11 @@ select.input {
 
 .menu-shortcut {
   margin-inline-start: auto;
-  padding: 0 5px;
+  padding: 0 var(--space-1);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text-muted);
-  font: 11px/16px var(--font-ui);
+  font: var(--text-xs) / 16px var(--font-ui);
 }
 
 /* Touch: the actions of a long-pressed message. */
@@ -1849,6 +1882,7 @@ select.input {
 }
 
 .action-sheet:focus {
+  /* The sheet takes focus only to move it inside; its items show the ring. */
   outline: none;
 }
 
@@ -1976,14 +2010,14 @@ select.input {
 .composer-box {
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   background: var(--surface);
 }
 
 .composer-box:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent);
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: -1px;
 }
 
 .composer-input {
@@ -1995,6 +2029,7 @@ select.input {
   border: 0;
   background: transparent;
   resize: none;
+  /* .composer-box draws the ring round the whole box. */
   outline: none;
 }
 
@@ -2059,7 +2094,7 @@ select.input {
 .md-quote {
   margin: 4px 0;
   padding: 0 0 0 10px;
-  border-inline-start: 3px solid var(--border-strong, var(--border));
+  border-inline-start: 3px solid var(--border-strong);
   color: var(--text-muted);
 }
 
@@ -2180,11 +2215,6 @@ ol.md-list {
 
 .menu-item[aria-checked="true"] {
   color: var(--accent-strong);
-}
-
-.menu-shortcut {
-  color: var(--text-muted);
-  font-size: 11px;
 }
 
 .menu-heading {
@@ -2601,10 +2631,11 @@ ol.md-list {
   color: var(--text-muted);
 }
 
-.empty-icon {
+/* Not the shared `.empty-icon` tile: a plain glyph, 3:1 on the surface. */
+.threads-empty-icon {
   width: 40px;
   height: 40px;
-  opacity: 0.5;
+  color: var(--border-strong);
 }
 
 /* ---- Popover (status menu) ---- */
@@ -2724,6 +2755,7 @@ ol.md-list {
   background: var(--surface);
   box-shadow: var(--shadow);
   overflow: hidden;
+  /* Takes focus only from code to hold the focus trap; its controls show the ring. */
   outline: none;
 }
 
@@ -2733,10 +2765,6 @@ ol.md-list {
 
 .modal-small {
   width: min(460px, 100%);
-}
-
-.modal-settings {
-  width: min(760px, 100%);
 }
 
 .modal-switcher {
@@ -2888,6 +2916,8 @@ ol.md-list {
   background: transparent;
   color: var(--text);
   font-size: var(--text-lg);
+  /* The switcher's only field, focused whenever it is open: the caret marks it, a ring would only
+     frame the whole dialog. */
   outline: none;
 }
 
@@ -3079,13 +3109,13 @@ ol.md-list {
 }
 
 .btn-danger {
-  background: #d64533;
-  border-color: #d64533;
-  color: #fff;
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--on-danger);
 }
 
 .btn-danger:hover {
-  background: #a93226;
+  background: color-mix(in srgb, var(--danger) 85%, black);
 }
 
 .small {
@@ -4656,12 +4686,6 @@ ol.md-list {
     box-shadow var(--dur-fast) ease;
 }
 
-.auth-card .input:focus-visible {
-  outline: none;
-  border-color: var(--focus);
-  box-shadow: 0 0 0 3px var(--focus-ring);
-}
-
 .auth-card .input[aria-invalid="true"] {
   border-color: var(--danger);
 }
@@ -5294,14 +5318,14 @@ ol.md-list {
   align-items: center;
   gap: 10px;
   padding: 6px 8px 6px 12px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   background: var(--surface);
 }
 
 .search-box:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent);
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: -1px;
 }
 
 .search-box input {
@@ -5311,6 +5335,7 @@ ol.md-list {
   border: 0;
   background: transparent;
   font-size: var(--text-md);
+  /* .search-box draws the ring round the whole box. */
   outline: none;
 }
 
@@ -5779,7 +5804,7 @@ ol.md-list {
 /* Message actions */
 .msg-menu { right: 0; top: 100%; min-width: 14rem; }
 .menu-danger { color: var(--danger, #c0392b); }
-.msg-quote { margin: 0 0 .25rem; padding: .1rem .6rem; border-inline-start: 3px solid var(--border-strong, #888); color: var(--text-muted, #666); display: flex; flex-direction: column; font-size: .9em; }
+.msg-quote { margin: 0 0 .25rem; padding: .1rem .6rem; border-inline-start: 3px solid var(--border-strong); color: var(--text-muted); display: flex; flex-direction: column; font-size: .9em; }
 .quote-author { font-weight: 600; }
 .msg-forwarded { display: flex; align-items: center; gap: .35rem; color: var(--text-muted, #666); font-size: .85em; }
 .msg-deleted { color: var(--text-muted, #666); }
@@ -5791,12 +5816,12 @@ ol.md-list {
 .badge-urgent { margin-inline-start: .35rem; background: var(--danger, #c0392b); color: #fff; }
 .forward-list { list-style: none; margin: .5rem 0; padding: 0; max-height: 16rem; overflow: auto; }
 .forward-item { width: 100%; text-align: start; padding: .4rem .6rem; background: none; border: 0; border-radius: var(--radius-xs); cursor: pointer; color: inherit; }
-.forward-item:hover, .forward-item.current { background: var(--surface-hover, rgba(128,128,128,.18)); }
+.forward-item:hover, .forward-item.current { background: var(--surface-2); }
 .saved-list { list-style: none; margin: 0; padding: .5rem 1rem; }
 .saved-item { padding: .6rem 0; border-bottom: 1px solid var(--border, rgba(128,128,128,.25)); }
 .saved-meta { display: flex; align-items: center; gap: .5rem; color: var(--text-muted, #666); font-size: .85em; }
 .saved-actions { display: flex; gap: .35rem; margin-top: .35rem; }
-.reply-banner { display: flex; align-items: center; gap: .5rem; padding: .3rem .6rem; border-inline-start: 3px solid var(--border-strong, #888); color: var(--text-muted, #666); font-size: .9em; }
+.reply-banner { display: flex; align-items: center; gap: .5rem; padding: .3rem .6rem; border-inline-start: 3px solid var(--border-strong); color: var(--text-muted); font-size: .9em; }
 .reply-banner .grow { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Files: pictures inline (one large, several in a grid), other files as compact cards (issue #316) */
@@ -5812,7 +5837,7 @@ ol.md-list {
 .media-single:not(.has-size) .media-open img { width: auto; height: auto; max-width: min(360px, 100%); max-height: 480px; }
 /* The thumbnail scaled up until the full picture is there: softened so it doesn't look pixelated */
 .media-open img.is-preview { filter: blur(1.5px); }
-.media-open:focus-visible { outline: 2px solid var(--focus, var(--accent)); outline-offset: -2px; }
+.media-open:focus-visible { outline: var(--focus-width) solid var(--focus); outline-offset: -2px; }
 .media-placeholder { display: grid; width: 100%; height: 100%; min-height: 120px; place-items: center; color: var(--text-muted); }
 /* A picture that didn't arrive (offline, server trouble): try again from the tile */
 .media-retry { position: absolute; left: 50%; bottom: 10px; z-index: 1; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 6px; }
@@ -5860,6 +5885,7 @@ ol.md-list {
 .modal-backdrop:has(> .modal-lightbox) { padding: 0; background: #0b0d12; }
 .modal.modal-lightbox { width: 100%; height: 100%; max-height: none; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: #f2f2f2; overflow: hidden; }
 .lightbox { display: flex; height: 100%; position: relative; isolation: isolate; }
+/* Takes focus only from code for the arrow keys; its controls show the (white) ring. */
 .lightbox:focus { outline: none; }
 .lightbox-backdrop { position: absolute; inset: -10%; z-index: -1; background-color: #0b0d12; background-position: center; background-size: cover; filter: blur(48px) saturate(1.3) brightness(.4); transform: translateZ(0); }
 .lightbox-backdrop::after { content: ""; position: absolute; inset: 0; background: rgba(8, 10, 16, .55); }
@@ -5877,7 +5903,7 @@ ol.md-list {
 .lightbox-main .icon-btn:hover:not(:disabled) { background: rgba(255, 255, 255, .14); color: #fff; }
 .lightbox-main .icon-btn:disabled { opacity: .35; }
 .lightbox-main .icon-btn.is-active { background: rgba(255, 255, 255, .2); color: #fff; }
-.lightbox-main .icon-btn:focus-visible, .lightbox-main .btn:focus-visible, .lightbox-nav:focus-visible, .lightbox-strip-tile:focus-visible, .lightbox-slider:focus-visible { outline: 2px solid #fff; outline-offset: 1px; }
+.lightbox-main .icon-btn:focus-visible, .lightbox-main .btn:focus-visible, .lightbox-nav:focus-visible, .lightbox-strip-tile:focus-visible, .lightbox-slider:focus-visible { outline: var(--focus-width) solid #fff; outline-offset: var(--focus-offset); }
 .lightbox-main .btn { background: rgba(255, 255, 255, .08); border-color: rgba(255, 255, 255, .2); color: inherit; }
 .lightbox-main .btn:hover:not(:disabled) { background: rgba(255, 255, 255, .16); }
 .lightbox-main .btn[aria-pressed="true"] { background: rgba(255, 255, 255, .24); }
@@ -5923,7 +5949,6 @@ ol.md-list {
 .lightbox-notice { flex: 1; min-width: 0; text-align: center; font-size: .85rem; color: rgba(255, 255, 255, .8); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lightbox-menu-wrap { position: relative; }
 .lightbox .lightbox-menu { top: auto; bottom: calc(100% + 8px); width: 260px; color: var(--text); }
-.menu-shortcut { margin-left: auto; padding: 0 6px; border: 1px solid var(--border); border-radius: 4px; font: inherit; font-size: .75rem; color: var(--text-muted); }
 .lightbox-details { position: absolute; right: 14px; bottom: calc(100% + 8px); z-index: 3; width: min(320px, calc(100vw - 28px)); padding: 10px 14px 12px; border-radius: 12px; background: rgba(20, 22, 30, .94); box-shadow: 0 8px 32px rgba(0, 0, 0, .5); }
 .lightbox-details-head { display: flex; align-items: center; justify-content: space-between; }
 .lightbox-details-head h3 { margin: 0; font-size: .95rem; }
@@ -5991,8 +6016,8 @@ ol.md-list {
 .settings-subject { margin: 0 0 var(--space-2, 8px); }
 .section-tabs { padding: 0; margin: 0 0 var(--space-3, 12px); overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
 .section-panel > h3:first-child { margin-top: 0; }
-.settings-form, .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: var(--space-3, 12px); }
-.settings-form label, .field label { font-weight: 600; font-size: var(--text-sm, .875rem); }
+.settings-form { display: flex; flex-direction: column; gap: 6px; margin-bottom: var(--space-3); }
+.settings-form label { font-weight: 600; font-size: var(--text-sm); }
 .settings-row { display: flex; align-items: center; gap: var(--space-2, 8px); margin-bottom: var(--space-2, 8px); }
 .settings-member-list { list-style: none; margin: 0; padding: 0; }
 .settings-member .member-name { flex: none; }
@@ -6005,14 +6030,13 @@ ol.md-list {
 .settings-row .grow { flex: 1; min-width: 0; }
 .inline-actions { display: flex; gap: var(--space-2, 8px); margin: 6px 0; }
 .switch-row { display: flex; align-items: flex-start; gap: 10px; margin: var(--space-3, 12px) 0; cursor: pointer; }
-.switch-row input[role="switch"] { appearance: none; flex: none; width: 34px; height: 20px; margin-top: 2px; border-radius: 10px; background: var(--surface-3, #ccc); position: relative; }
+.switch-row input[role="switch"] { appearance: none; flex: none; width: 34px; height: 20px; margin-top: 2px; border-radius: 10px; background: var(--border-strong); position: relative; }
 .switch-row input[role="switch"]::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform var(--dur-fast) var(--ease-standard); }
 .switch-row input[role="switch"]:checked { background: var(--accent); }
 .switch-row input[role="switch"]:checked::after { transform: translateX(14px); }
-.switch-row input[role="switch"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .switch-text { display: flex; flex-direction: column; gap: 2px; }
 .person-item.is-member { opacity: .55; cursor: default; }
-.person-item .pick-box { flex: none; display: inline-grid; place-items: center; width: 18px; height: 18px; border: 1.5px solid var(--border-strong, var(--border)); border-radius: 4px; }
+.person-item .pick-box { flex: none; display: inline-grid; place-items: center; width: 18px; height: 18px; border: 1.5px solid var(--border-strong); border-radius: 4px; }
 .person-item.is-picked .pick-box { background: var(--accent); border-color: var(--accent); color: #fff; }
 .person-item .pick-box svg { width: 14px; height: 14px; }
 .person-note { margin-left: auto; font-size: .8em; }
@@ -6140,11 +6164,10 @@ ol.md-list {
   cursor: grab;
   touch-action: none;
   user-select: none;
-  outline: none;
 }
 
 .crop-stage:focus-visible {
-  box-shadow: 0 0 0 3px var(--focus-ring);
+  outline-offset: var(--focus-offset);
 }
 
 .crop-stage.is-dragging {
@@ -6326,7 +6349,7 @@ ol.md-list {
 /* Composer extras */
 .suggestions { list-style: none; margin: 0 0 .25rem; padding: .25rem; border: 1px solid var(--border, rgba(128,128,128,.35)); border-radius: var(--radius-sm); background: var(--surface, Canvas); max-height: 14rem; overflow: auto; }
 .suggestion { display: flex; align-items: center; gap: .5rem; width: 100%; text-align: start; background: none; border: 0; color: inherit; padding: .3rem .4rem; border-radius: var(--radius-xs); cursor: pointer; }
-.suggestion.current, .suggestion:hover { background: var(--surface-hover, rgba(128,128,128,.18)); }
+.suggestion.current, .suggestion:hover { background: var(--surface-2); }
 .suggestion-detail { color: var(--text-muted, #666); font-size: .85em; margin-inline-start: auto; }
 .composer-notice { margin: .25rem 0; padding: .3rem .6rem; border-inline-start: 3px solid var(--accent, #3b7ddd); color: var(--text-muted, #666); }
 .composer-help ul { columns: 2; margin: .25rem 0 0; padding-inline-start: 1.1rem; }
@@ -6350,7 +6373,7 @@ ol.md-list {
 .panic-card h2 { margin: 0; font-size: 1.2em; }
 .panic-card p { margin: 0; }
 .panic-details { width: 100%; min-height: 6rem; resize: vertical; font: 12px/1.4 ui-monospace, monospace; }
-.panic-reload { align-self: flex-start; padding: 8px 16px; border-radius: 8px; background: var(--accent, #2563eb); color: var(--accent-contrast, #fff); text-decoration: none; font-weight: 600; }
+.panic-reload { align-self: flex-start; padding: 8px 16px; border-radius: 8px; background: var(--accent, #2563eb); color: var(--on-accent, #fff); text-decoration: none; font-weight: 600; }
 
 /* Meeting responses and host controls */
 .host-controls { margin-top: .5rem; padding: .5rem; border: 1px solid var(--border, rgba(128,128,128,.35)); border-radius: var(--radius-sm); }
@@ -6421,7 +6444,7 @@ ol.md-list {
 .moderation-table td { text-align: center; }
 
 .preset-editor { margin-top: 12px; }
-.preset-list { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 6px; }
+.preset-editor .preset-list { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 6px; }
 .preset-row { display: flex; gap: 6px; align-items: center; }
 .preset-emoji { width: 4rem; text-align: center; }
 .preset-text { flex: 1; min-width: 0; }
@@ -7958,30 +7981,8 @@ ol.md-list {
   font-size: max(16px, 1em);
 }
 
-/* Messages: the actions show on tap (the row takes focus) and on long press, as a bar that fits a
-   finger; no hover-only controls. */
-:root[data-layout="compact"] .msg-actions {
-  right: var(--space-2);
-  top: -20px;
-  max-width: calc(100% - var(--space-4));
-  overflow-x: auto;
-}
-
-:root[data-layout="compact"] .msg-actions .icon-btn {
-  min-width: var(--touch);
-  min-height: var(--touch);
-}
-
+/* Messages: a long press opens the action sheet, so the system's own callout stays out of it. */
 @media (hover: none) {
-  .msg-user:hover .msg-actions {
-    display: none;
-  }
-
-  .msg-user:focus-within .msg-actions,
-  .msg-user:focus .msg-actions {
-    display: flex;
-  }
-
   .msg-user {
     -webkit-touch-callout: none;
   }
@@ -8285,4 +8286,58 @@ ol.md-list {
 .linked-jump {
   align-self: flex-start;
   font-size: 12px;
+}
+
+/* ---- Increase contrast and forced colours (issues #361, #362) ---- */
+
+/* "Increase contrast": edges and secondary text take the strong values. Listed with the dark
+   selectors so it also wins over the dark blocks above. */
+@media (prefers-contrast: more) {
+  :root,
+  :root:not([data-theme="light"]) {
+    --border: var(--border-strong);
+    --text-muted: var(--text);
+    /* Muted channels keep only their bell-off icon. */
+    --sb-dim: var(--sb-muted);
+  }
+}
+
+/* Windows High Contrast and other forced palettes drop every box-shadow and background image, so
+   rings are outlines (above) and the few things drawn only with fills get a system colour. */
+@media (forced-colors: active) {
+  :focus-visible {
+    outline-color: Highlight;
+  }
+
+  .badge-count,
+  .unread-dot,
+  .dot-unread {
+    forced-color-adjust: none;
+  }
+
+  /* The switch is drawn from fills only: draw it in system colours ourselves. */
+  .switch-row input[role="switch"],
+  .switch-row input[role="switch"]::after {
+    forced-color-adjust: none;
+  }
+
+  .switch-row input[role="switch"] {
+    border: 1px solid CanvasText;
+    background: Canvas;
+  }
+
+  .switch-row input[role="switch"]::after {
+    top: 1px;
+    left: 1px;
+    background: CanvasText;
+  }
+
+  .switch-row input[role="switch"]:checked {
+    border-color: Highlight;
+    background: Highlight;
+  }
+
+  .switch-row input[role="switch"]:checked::after {
+    background: HighlightText;
+  }
 }
