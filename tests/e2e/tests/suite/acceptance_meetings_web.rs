@@ -7,7 +7,7 @@ use serde_json::json;
 use teamcraft_e2e::browser::{BrowserSession, web_dir};
 use teamcraft_e2e::{Mailpit, Peer, Stack};
 
-use crate::web::{click_text, wait_for_element, wait_for_text};
+use crate::web::{click_text, type_until_kept, wait_for_element, wait_for_text};
 
 const STARTS_AT: i64 = 1_893_488_400_000;
 
@@ -70,14 +70,8 @@ async fn a_guest_joins_a_meeting_through_the_web_lobby() {
         .unwrap();
       page.goto(link).await.unwrap();
       wait_for_text(&page, "Join the meeting").await;
-      let name = wait_for_element(&page, "input.input").await;
-      name
-        .click()
-        .await
-        .unwrap()
-        .type_str("Gus (customer)")
-        .await
-        .unwrap();
+      wait_for_element(&page, "input.input").await;
+      type_until_kept(&page, "input.input", "Gus (customer)").await;
       click_text(&page, "Ask to join").await;
       wait_for_text(&page, "Waiting for the host").await;
 
