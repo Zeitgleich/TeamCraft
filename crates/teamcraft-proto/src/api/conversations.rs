@@ -69,6 +69,15 @@ pub struct ConversationResponse {
   /// The channel's picture (`PUT /api/v1/conversations/{id}/image`, `manage_channel_properties`).
   #[serde(rename = "image", default, skip_serializing_if = "Option::is_none")]
   pub maybe_image: Option<SpaceImage>,
+  /// The organizer of a meeting chat; only in the answer for a single conversation
+  /// (`GET /api/v1/conversations/{id}`). Clients check that a meeting chat's encryption group was
+  /// founded by this user (e2ee.md §4.6, "Meeting chats"); the server's word, not a signature.
+  #[serde(
+    rename = "organizer_user_id",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_organizer_user_id: Option<UserId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

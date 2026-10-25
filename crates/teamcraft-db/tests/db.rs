@@ -9,7 +9,7 @@
 use teamcraft_db::testing::TestDatabase;
 use teamcraft_db::{
   ImageChange, KeyPackageCounts, NewConversation, NewDevice, NewKeyPackage, NewMessage, NewSpace,
-  OidcIdentity, SnowflakeGenerator, StoredSpaceImage, participants_key,
+  OidcIdentity, PostOutcome, SnowflakeGenerator, StoredSpaceImage, participants_key,
 };
 use teamcraft_proto::{
   ClientMessageId, ConversationId, ConversationKind, ConversationVisibility, DeviceId, HistoryPolicy, Id,
@@ -270,6 +270,69 @@ async fn direct_messages_are_created_once_per_pair() {
   assert!(created && !created_again);
   assert_eq!(first, second);
   assert_eq!(db.conversation_member_ids(first).await.unwrap().len(), 2);
+  test_db.drop_database().await;
+}
+
+/// Two devices founding a group at once publish different information for epoch 0: the first stays
+/// (#504). Repeating it is fine, and later epochs replace each other.
+#[tokio::test]
+async fn the_first_group_information_of_epoch_zero_wins() {
+  let Some(test_db) = TestDatabase::create().await else {
+    return;
+  };
+  let db = &test_db.db;
+  let ids = SnowflakeGenerator::new(1).unwrap();
+  let alice = db
+    .upsert_oidc_user(&identity("a", "Alice"), ids.next_id().unwrap())
+    .await
+    .unwrap();
+  let bob = db
+    .upsert_oidc_user(&identity("b", "Bob"), ids.next_id().unwrap())
+    .await
+    .unwrap();
+  let participants = [alice.id, bob.id];
+  let new_dm = NewConversation {
+    id: ids.next_id().unwrap(),
+    maybe_space: None,
+    kind: ConversationKind::Dm,
+    maybe_name: None,
+    maybe_topic: None,
+    maybe_description: None,
+    visibility: ConversationVisibility::Private,
+    history_policy: HistoryPolicy::FromJoin,
+    maybe_category: None,
+    maybe_participants_key: Some(participants_key(&participants)),
+    is_integration: false,
+  };
+  let (chat, _) = db
+    .get_or_create_participants_conversation(&new_dm, &participants)
+    .await
+    .unwrap();
+
+  let accepted = |outcome| matches!(outcome, PostOutcome::Accepted);
+  assert!(accepted(
+    db.put_mls_group_info(chat, 0, b"first", false).await.unwrap()
+  ));
+  assert!(!accepted(
+    db.put_mls_group_info(chat, 0, b"second", false).await.unwrap()
+  ));
+  assert!(accepted(
+    db.put_mls_group_info(chat, 0, b"first", false).await.unwrap()
+  ));
+  assert_eq!(
+    db.current_mls_group_info(chat).await.unwrap(),
+    Some((0, b"first".to_vec()))
+  );
+  // The organizer may replace it while the group is in epoch 0 (the first one could not be joined).
+  assert!(accepted(
+    db.put_mls_group_info(chat, 0, b"replacement", true)
+      .await
+      .unwrap()
+  ));
+  assert_eq!(
+    db.current_mls_group_info(chat).await.unwrap(),
+    Some((0, b"replacement".to_vec()))
+  );
   test_db.drop_database().await;
 }
 

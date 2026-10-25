@@ -660,6 +660,11 @@ pub enum ChatAction {
     conversation: ConversationId,
     invitees: Vec<UserId>,
   },
+  UpdateMeetingChatMembers {
+    conversation: ConversationId,
+    invitees: Vec<UserId>,
+    removed: Vec<UserId>,
+  },
   AddPeopleToCall {
     from: ConversationId,
     in_call: Vec<UserId>,
@@ -895,6 +900,11 @@ impl ChatAction {
         conversation,
         invitees,
       } => backend.set_up_meeting_chat(conversation, invitees),
+      Self::UpdateMeetingChatMembers {
+        conversation,
+        invitees,
+        removed,
+      } => backend.update_meeting_chat_members(conversation, invitees, removed),
       Self::AddPeopleToCall {
         from,
         in_call,

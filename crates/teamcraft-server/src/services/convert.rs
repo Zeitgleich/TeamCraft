@@ -179,6 +179,7 @@ pub fn conversation_response(
       size_bytes: image.size_bytes,
     }),
     contains_guests: extras.with_guests.contains(&conversation.id),
+    maybe_organizer_user_id: None,
     maybe_my_membership: view.maybe_membership.as_ref().map(my_membership),
     participants: extras
       .participants

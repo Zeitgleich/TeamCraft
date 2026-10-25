@@ -12,7 +12,9 @@ calendar and in the invitation e-mails anyway. The meeting **chat and media are 
 other conversation (e2ee.md). Guests get an ephemeral device and show up as "Guest (unverified)".
 The server creates the chat without an encryption group; the organizer's app sets it up with the
 users the organizer invited, and a host's "admit" lets an admitted person in (e2ee.md §4.6,
-"Meeting chats").
+"Meeting chats"). A meeting from before that change gets its group the first time its organizer
+opens or joins it; people invited later are added by the organizer's app when the organizer saves
+the change, and people taken off the list are removed from the group.
 
 ## Model
 

@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use teamcraft_db::{CommitOutcome, MlsBacklogQuery, NewMlsMessage, PostOutcome, StoredMlsMessage};
 use teamcraft_proto::{
-  Base64Bytes, ConversationId, DeviceId, ErrorCode, GatewayEvent, ListMlsMessagesQuery,
+  Base64Bytes, ConversationId, ConversationKind, DeviceId, ErrorCode, GatewayEvent, ListMlsMessagesQuery,
   ListMlsMessagesResponse, MlsGroupInfoResponse, MlsMessageId, MlsMessageKind, MlsMessageResponse,
   Permission, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutMlsGroupInfoRequest,
   UserId,
@@ -215,9 +215,28 @@ pub async fn put_group_info(
   }
   ensure_own_device(state, caller, request.device_id).await?;
   check_payload(state, &request.group_info)?;
+  // A meeting chat's group is founded by the organizer's devices only (e2ee.md §4.6): at epoch 0
+  // nobody else can occupy the slot the others join from.
+  if request.epoch == 0 && access.view.conversation.kind == ConversationKind::Meeting {
+    let maybe_meeting = state.database.get_meeting_by_conversation(conversation).await?;
+    if maybe_meeting.is_none_or(|meeting| meeting.organizer != caller.user.id) {
+      return Err(ApiError::Forbidden(
+        "only the organizer's devices publish a meeting chat's first group information".into(),
+      ));
+    }
+  } else if request.is_replacement {
+    return Err(ApiError::Forbidden(
+      "only a meeting chat's first group information is replaced".into(),
+    ));
+  }
   match state
     .database
-    .put_mls_group_info(conversation, request.epoch, request.group_info.as_slice())
+    .put_mls_group_info(
+      conversation,
+      request.epoch,
+      request.group_info.as_slice(),
+      request.is_replacement,
+    )
     .await?
   {
     PostOutcome::Accepted => Ok(()),

@@ -177,6 +177,175 @@ async fn a_meeting_nobody_joins_costs_no_group_info_request_per_sync() {
   assert!(missing.is_err_and(|error| error.is_not_found()));
 }
 
+/// A meeting from before 1.0.3 has a chat without a group: the organizer's device founds it once it
+/// opens the meeting, and asking again costs nothing (#504).
+#[tokio::test]
+async fn the_organizer_founds_the_group_of_an_old_meeting_once() {
+  let (server, mut alice, mut bob) = two().await;
+  let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+  let chat = server.create_meeting_chat(alice_id, &[bob_id]);
+  assert!(matches!(
+    bob.client.prepare_call(chat).await,
+    Err(CoreError::CallEncryptionPending(_))
+  ));
+
+  assert!(alice.client.set_up_meeting_chat(chat, &[bob_id]).await.unwrap());
+  let calls_after_setup = server.rest_call_count(alice_id);
+  assert!(alice.client.set_up_meeting_chat(chat, &[bob_id]).await.unwrap());
+  assert_eq!(server.rest_call_count(alice_id), calls_after_setup, "no request");
+
+  bob.client.full_sync().await.unwrap();
+  assert_eq!(bob.client.prepare_call(chat).await.unwrap().devices.len(), 2);
+}
+
+/// Two devices of the organizer open an old meeting at the same moment: both found a group, the
+/// server keeps the first one's information, and the other device joins that group (#504).
+#[tokio::test]
+async fn two_organizer_devices_founding_at_once_end_up_in_one_group() {
+  let (server, mut alice, _bob) = two().await;
+  let mut laptop = link_device(&mut alice).await;
+  let chat = server.create_meeting_chat(alice.client.user_id(), &[]);
+  alice.client.set_up_meeting_chat(chat, &[]).await.unwrap();
+  // The laptop looked before the phone published: it founds its own group and publishes second.
+  server.hide_group_info_reads(chat, 2);
+  laptop.set_up_meeting_chat(chat, &[]).await.unwrap();
+
+  alice.client.full_sync().await.unwrap();
+  laptop.full_sync().await.unwrap();
+  assert_eq!(
+    alice.client.mls_epoch(chat).unwrap(),
+    laptop.mls_epoch(chat).unwrap(),
+    "one group"
+  );
+  assert_eq!(laptop.prepare_call(chat).await.unwrap().devices.len(), 2);
+  assert_eq!(alice.client.prepare_call(chat).await.unwrap().devices.len(), 2);
+}
+
+/// People invited later (a meeting edit) go into the group by the organizer's signed add, the
+/// ones taken off the list out of it; the server's member list decides nothing (#475).
+#[tokio::test]
+async fn people_invited_later_join_the_group_and_removed_ones_leave_it() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let bob = Peer::enroll(&server, "Bob").await;
+  let mut carol = Peer::enroll(&server, "Carol").await;
+  let (alice_id, bob_id, carol_id) = (
+    alice.client.user_id(),
+    bob.client.user_id(),
+    carol.client.user_id(),
+  );
+  let chat = server.create_meeting_chat(alice_id, &[bob_id, carol_id]);
+  alice.client.set_up_meeting_chat(chat, &[bob_id]).await.unwrap();
+  carol.client.full_sync().await.unwrap();
+  assert!(!carol.client.has_group(chat).unwrap(), "not invited at first");
+
+  assert!(
+    alice
+      .client
+      .update_meeting_chat_members(chat, &[bob_id, carol_id], &[])
+      .await
+      .unwrap()
+  );
+  carol.client.full_sync().await.unwrap();
+  assert_eq!(carol.client.prepare_call(chat).await.unwrap().devices.len(), 3);
+
+  alice
+    .client
+    .update_meeting_chat_members(chat, &[carol_id], &[bob_id])
+    .await
+    .unwrap();
+  assert_eq!(
+    alice.client.verified_call_devices(chat).await.unwrap().len(),
+    2,
+    "Alice and Carol"
+  );
+}
+
+/// Only the organizer's devices publish a meeting chat's first group information: another member
+/// can't take the slot the others join from (#535 review, M1).
+#[tokio::test]
+async fn a_member_cannot_publish_the_first_group_information_of_a_meeting_chat() {
+  let server = FakeServer::new();
+  let alice = Peer::enroll(&server, "Alice").await;
+  let mallory = Peer::enroll(&server, "Mallory").await;
+  let chat = server.create_meeting_chat(alice.client.user_id(), &[mallory.client.user_id()]);
+
+  let request = teamcraft_proto::PutMlsGroupInfoRequest {
+    device_id: mallory.client.device_id(),
+    epoch: 0,
+    group_info: teamcraft_proto::Base64Bytes::new(b"junk".to_vec()),
+    is_replacement: false,
+  };
+  let refused = mallory.api.put_mls_group_info(chat, &request).await;
+  assert!(refused.is_err_and(|error| error.is_forbidden()));
+}
+
+/// Junk the server holds at epoch 0 (planted by a member before, or by the server) can't be joined:
+/// the organizer founds the group anew and replaces it, so the chat is not left unencrypted (M1).
+#[tokio::test]
+async fn the_organizer_replaces_group_information_nobody_can_join() {
+  let (server, mut alice, mut bob) = two().await;
+  let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+  let chat = server.create_meeting_chat(alice_id, &[bob_id]);
+  server.plant_group_info(chat, b"junk");
+
+  assert!(alice.client.set_up_meeting_chat(chat, &[bob_id]).await.unwrap());
+  bob.client.full_sync().await.unwrap();
+  assert_eq!(bob.client.prepare_call(chat).await.unwrap().devices.len(), 2);
+}
+
+/// A member who founded a meeting chat's group is not its organizer: invitees refuse the welcome
+/// into it (M2).
+#[tokio::test]
+async fn a_group_a_member_founded_in_a_meeting_chat_is_not_joined() {
+  let server = FakeServer::new();
+  let alice = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let mut mallory = Peer::enroll(&server, "Mallory").await;
+  let (bob_id, mallory_id) = (bob.client.user_id(), mallory.client.user_id());
+  let chat = server.create_meeting_chat(alice.client.user_id(), &[bob_id, mallory_id]);
+
+  // Mallory founds a group and adds Bob; the server lets the commit and welcome through.
+  let _ = mallory.client.set_up_meeting_chat(chat, &[bob_id]).await;
+  bob.client.full_sync().await.unwrap();
+
+  assert!(
+    !bob.client.has_group(chat).unwrap(),
+    "Bob refused Mallory's group"
+  );
+}
+
+/// A removal whose commit is lost is finished on a later sync, not forgotten (L3).
+#[tokio::test]
+async fn a_removal_that_failed_is_finished_on_a_later_sync() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let bob = Peer::enroll(&server, "Bob").await;
+  let carol = Peer::enroll(&server, "Carol").await;
+  let (alice_id, bob_id, carol_id) = (
+    alice.client.user_id(),
+    bob.client.user_id(),
+    carol.client.user_id(),
+  );
+  let chat = server.create_meeting_chat(alice_id, &[bob_id, carol_id]);
+  alice
+    .client
+    .set_up_meeting_chat(chat, &[bob_id, carol_id])
+    .await
+    .unwrap();
+
+  server.drop_next_commit(alice_id);
+  let failed = alice
+    .client
+    .update_meeting_chat_members(chat, &[carol_id], &[bob_id])
+    .await;
+  assert!(failed.is_err());
+  assert_eq!(alice.client.verified_call_devices(chat).await.unwrap().len(), 3);
+
+  alice.client.full_sync().await.unwrap();
+  assert_eq!(alice.client.verified_call_devices(chat).await.unwrap().len(), 2);
+}
+
 #[tokio::test]
 async fn the_hosts_admit_lets_somebody_into_the_chat() {
   let (server, mut alice, mut bob) = two().await;

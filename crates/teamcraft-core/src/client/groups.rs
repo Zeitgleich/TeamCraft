@@ -20,6 +20,7 @@ use teamcraft_proto::{
   PostMlsCommitRequest, PostMlsMessageRequest, SpaceId, UserId,
 };
 
+use super::member_device::{GroupInfoOutcome, MemberDeviceJoin};
 use super::workspace::{PendingChange, SharedKeys};
 use super::{Client, pending_post_key};
 use crate::api::{ApiError, ServerApi};
@@ -55,6 +56,9 @@ const READDED_PREFIX: &str = "readded/";
 /// Key prefix of the notes in [`Table::SyncState`] that the server holds a meeting chat's group
 /// information (#494).
 const GROUP_INFO_PUBLISHED_PREFIX: &str = "group-info-published/";
+/// Key prefix of the lists of users taken off a meeting's invitees whom this device still has to
+/// remove from the chat's group, in [`Table::SyncState`].
+const MEETING_REMOVALS_PREFIX: &str = "meeting-removals/";
 
 /// This device's commit, merged: what it did and when the server stored it.
 struct OwnCommit {
@@ -275,6 +279,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let had_setup = self.dm_setup(id)?.is_some();
     let me = self.user_id();
     let others = conversation_members(invitees, me);
+    // Nothing to do, and no request to make, when this device is in a group that holds everybody.
+    if !had_setup && self.has_group(id)? && self.group_holds(id, &others)? {
+      return Ok(true);
+    }
     // Noted before anything can fail: a setup cut short here (no network, the app closed) is
     // finished on a later sync (`repair_dm_setups`).
     self.note_participants_setup(id, &others, true)?;
@@ -287,14 +295,138 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if !self.has_group(id)? && !had_setup && self.server_has_group_info(id).await? {
       // Founded already (by this user's other device): this device joins it, never founds.
       self.store.delete(Table::SyncState, &dm_setup_key(id))?;
-      self.join_as_member_device(id).await?;
+      if matches!(
+        self.join_as_member_device(id).await?,
+        MemberDeviceJoin::Unjoinable | MemberDeviceJoin::NotAMember
+      ) {
+        // The information on the server can't be joined, or this user has no other device that
+        // could be in that group (a member planted it, or it is not the organizer's group): the
+        // organizer founds the group anew and replaces it.
+        self.note_participants_setup(id, &others, true)?;
+        return self.found_again_replacing(id, &others).await;
+      }
       return self.has_group(id);
     }
     let is_complete = self.finish_dm_setup(id, &others).await?;
-    if self.has_group(id)? {
-      self.publish_group_info_if_missing(id).await?;
+    if self.has_group(id)? && self.publish_group_info_if_missing(id).await? == GroupInfoOutcome::Superseded {
+      // Two devices of the organizer founded it at once and the other one was first: this one
+      // joins that group, then adds whoever is still missing; if that group can't be joined, the
+      // organizer founds anew and replaces it.
+      return match self.rejoin_superseded_group(id).await? {
+        MemberDeviceJoin::Unjoinable | MemberDeviceJoin::NotAMember => {
+          self.found_again_replacing(id, &others).await
+        },
+        _ => self.finish_dm_setup(id, &others).await,
+      };
     }
     Ok(is_complete)
+  }
+
+  /// The group information at epoch 0 can't be joined: founds this device's group (the organizer's
+  /// own request is the only thing that gets here) and publishes its information over it, which
+  /// the server allows the organizer while the group is in epoch 0.
+  async fn found_again_replacing(
+    &mut self,
+    id: ConversationId,
+    others: &[UserId],
+  ) -> Result<bool, CoreError> {
+    tracing::warn!(conversation_id = %id, "the meeting chat's group information can't be joined; founding the group anew");
+    let is_complete = self.finish_dm_setup(id, others).await?;
+    if self.has_group(id)? && self.mls_epoch(id)? == Some(0) {
+      self.publish_group_info(id, true).await?;
+    }
+    Ok(is_complete)
+  }
+
+  /// The organizer changed who is invited to a meeting (`PATCH /meetings/{id}`): `invitees` is the
+  /// whole invitee list as the organizer just saved it, `removed` the users taken off it. Signed by
+  /// this device: the users missing from the encryption group are added (or wait for their first
+  /// device), the removed ones are removed, with a commit that rotates the key so they read nothing
+  /// new. Never from the server's member list; guests the host admitted stay (e2ee.md §4.6,
+  /// "Meeting chats"). `Ok(true)` once everybody invited is in.
+  pub async fn update_meeting_chat_members(
+    &mut self,
+    id: ConversationId,
+    invitees: &[UserId],
+    removed: &[UserId],
+  ) -> Result<bool, CoreError> {
+    let is_complete = self.set_up_meeting_chat(id, invitees).await?;
+    let me = self.user_id();
+    // Noted before anything can fail: the removal is finished later (`repair_dm_setups`), also
+    // when this commit is lost or the app is closed. Somebody invited again isn't removed.
+    let mut pending = self.pending_meeting_removals(id)?;
+    pending.retain(|user| !invitees.contains(user));
+    for user in removed {
+      if *user != me && !invitees.contains(user) && !pending.contains(user) {
+        pending.push(*user);
+      }
+    }
+    self.save_meeting_removals(id, &pending)?;
+    self.apply_meeting_removals(id).await?;
+    Ok(is_complete)
+  }
+
+  /// Removes the users the organizer took off a meeting's invitee list from the encryption group,
+  /// one signed commit each, and forgets each once it is out. Without a group on this device
+  /// nothing happens now (the record waits). Admitted guests and members are not on the list.
+  pub(super) async fn apply_meeting_removals(&mut self, id: ConversationId) -> Result<(), CoreError> {
+    let pending = self.pending_meeting_removals(id)?;
+    if pending.is_empty() || !self.has_group(id)? {
+      return Ok(());
+    }
+    let mut remaining = Vec::new();
+    let mut maybe_error = None;
+    for user in pending {
+      if !self.group_users(id)?.contains(&user) {
+        continue;
+      }
+      let removed = self
+        .commit_change(
+          id,
+          ChangeSource::Own(MembershipAction::RemoveUser {
+            user_id: convert::user(user),
+          }),
+        )
+        .await;
+      match removed {
+        Ok(()) if !self.group_users(id)?.contains(&user) => {},
+        Ok(()) => remaining.push(user),
+        Err(error) => {
+          remaining.push(user);
+          maybe_error.get_or_insert(error);
+        },
+      }
+    }
+    self.save_meeting_removals(id, &remaining)?;
+    maybe_error.map_or(Ok(()), Err)
+  }
+
+  fn pending_meeting_removals(&self, id: ConversationId) -> Result<Vec<UserId>, CoreError> {
+    Ok(records::get_json(&self.store, Table::SyncState, &meeting_removals_key(id))?.unwrap_or_default())
+  }
+
+  fn save_meeting_removals(&self, id: ConversationId, users: &[UserId]) -> Result<(), CoreError> {
+    if users.is_empty() {
+      return Ok(self.store.delete(Table::SyncState, &meeting_removals_key(id))?);
+    }
+    records::put_json(&self.store, Table::SyncState, &meeting_removals_key(id), &users)
+  }
+
+  /// This device founded a meeting chat's group alone while another device's group holds epoch 0
+  /// on the server: gives its own up and joins the server's by external commit, so the organizer's
+  /// devices never run two groups (e2ee.md §4.6, "Meeting chats").
+  pub(super) async fn rejoin_superseded_group(
+    &mut self,
+    id: ConversationId,
+  ) -> Result<MemberDeviceJoin, CoreError> {
+    tracing::info!(conversation_id = %id, "another device founded the meeting chat's group first");
+    self.drop_group(id)?;
+    self.join_as_member_device(id).await
+  }
+
+  fn group_holds(&mut self, id: ConversationId, users: &[UserId]) -> Result<bool, CoreError> {
+    let in_group = self.group_users(id)?;
+    Ok(users.iter().all(|user| in_group.contains(user)))
   }
 
   /// "Admit" by a host of a meeting: lets the admitted user's devices into the chat's encryption
@@ -402,6 +534,26 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub(crate) async fn repair_dm_setups(&mut self) -> Result<usize, CoreError> {
     let mut repaired = 0;
     let mut maybe_first_error = None;
+    // Removals from meeting chats' groups that did not go through yet.
+    let removals: Vec<(String, Vec<UserId>)> =
+      records::list_json_with_prefix(&self.store, Table::SyncState, MEETING_REMOVALS_PREFIX)?;
+    for (key, _) in removals {
+      let Some(id) = key
+        .strip_prefix(MEETING_REMOVALS_PREFIX)
+        .and_then(|id| id.parse::<ConversationId>().ok())
+      else {
+        continue;
+      };
+      match self.apply_meeting_removals(id).await {
+        Ok(()) => {},
+        Err(error) if error.is_transient() => {
+          maybe_first_error.get_or_insert(error);
+        },
+        Err(error) => {
+          tracing::warn!(conversation_id = %id, %error, "could not remove a user from a meeting chat's group");
+        },
+      }
+    }
     let conversations = self.cached_conversations()?;
     let setups: Vec<(String, DmSetupRecord)> =
       records::list_json_with_prefix(&self.store, Table::SyncState, DM_SETUP_PREFIX)?;
@@ -491,7 +643,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_limit: Some(1),
     };
     let server_epoch = self.api.list_mls_messages(id, &query).await?.current_epoch;
+    let is_meeting_chat = self.dm_setup(id)?.is_some_and(|setup| setup.is_meeting_chat);
     match self.mls_epoch(id)? {
+      // A meeting chat is only ever founded by the organizer's devices: the winner is the
+      // organizer's other device, which sends this one no welcome. It joins by external commit.
+      Some(0) if server_epoch > 0 && is_meeting_chat => {
+        self.rejoin_superseded_group(id).await?;
+        if !self.has_group(id)? {
+          return self.complete_dm_setup(id, others);
+        }
+      },
       Some(0) if server_epoch > 0 => {
         // Another founding won, says the server: this device waits for the winner's welcome.
         // Adding now would only lose the epoch again and spend the others' key packages.
@@ -2144,6 +2305,26 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Ok(group) => group,
       Err(error) => return Ok(WelcomeJoin::Rejected(error)),
     };
+    match self.is_founded_by_organizer(conversation, &group).await {
+      Ok(true) => {},
+      Ok(false) => {
+        tracing::warn!(conversation_id = %conversation, "welcome into a meeting chat group its organizer didn't found; dropped");
+        // Opening the welcome stored the group.
+        group.delete(&self.provider)?;
+        return Ok(WelcomeJoin::Rejected(MlsError::UnexpectedMessage(
+          "the meeting chat's group was not founded by its organizer",
+        )));
+      },
+      // The welcome is opened already: like a failed pin, be added back once the network is there.
+      Err(error) if error.is_transient() => {
+        group.delete(&self.provider)?;
+        return Ok(WelcomeJoin::KeyPackageSpent);
+      },
+      Err(error) => {
+        group.delete(&self.provider)?;
+        return Err(error);
+      },
+    };
     if maybe_founded_for.is_some() {
       // Only now that the join went through: a failed one leaves the founded group as it was.
       tracing::info!(conversation_id = %conversation, "joined the DM group that was founded first");
@@ -2767,6 +2948,10 @@ fn left_members(update: &MembershipUpdate) -> Vec<GroupMember> {
 }
 
 /// Where this device notes a DM setup it hasn't finished.
+fn meeting_removals_key(conversation: ConversationId) -> String {
+  format!("{MEETING_REMOVALS_PREFIX}{conversation}")
+}
+
 pub(super) fn group_info_published_key(conversation: ConversationId) -> String {
   format!("{GROUP_INFO_PUBLISHED_PREFIX}{conversation}")
 }

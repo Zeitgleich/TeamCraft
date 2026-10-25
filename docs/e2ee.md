@@ -738,6 +738,34 @@ never by the server's member list:
   even while the group holds nobody else (an instant meeting). Any other device, the organizer's
   included, only joins: as a further device, from a welcome, or by a device-add request. It never
   founds, so a server that hides a group can't make a second device fork it.
+- **Old meetings.** A meeting made before the server stopped founding these groups has a chat
+  without one. The organizer's device founds it the first time the organizer opens or joins the
+  meeting (the same `set_up_meeting_chat`, with the attendees as that device knows the meeting; it
+  does nothing when the group is there) and publishes the group's information at once. Another
+  member's device only gets the usual "not let into the encryption yet" until then. If two of the
+  organizer's devices found it at the same moment, the server keeps the first group's information
+  at epoch 0 (a second, different one gets `409 epoch_conflict` while the group is still in epoch
+  0), and the second device gives its group up and joins the first by external commit; the same
+  goes when one device's first commit wins the epoch. Epoch 0 is the only epoch where the first
+  information stays.
+  Only the organizer's devices may publish a meeting chat's group information at epoch 0 (`403`
+  for any other member), so a member can't take the slot the others join from. If the information
+  at epoch 0 can't be joined (planted by the server, or not the organizer's group), the organizer's
+  device founds the group anew and replaces it (`is_replacement`, allowed to the organizer while
+  the group is in epoch 0).
+- **Whose group.** The answer for a single meeting chat (`GET /conversations/{id}`) names the
+  meeting's organizer. A device that joins the chat's group, from a welcome or by external commit,
+  checks that the group's first member (the founder's leaf) is the organizer's device and refuses
+  the group otherwise, so a member can't found the group and add the others. Remaining gap: the
+  organizer is the server's word, not a signature, so a hostile server can name somebody else (a
+  signed organizer in the invitation would close it); and a group whose first leaf was reused after
+  the organizer's first device was removed is refused as well.
+- **Later invitees.** When the organizer saves a changed invitee list (`PATCH /meetings/{id}`),
+  the organizer's device adds the new users to the group with signed adds (`update_meeting_chat_members`,
+  from the list the organizer saved, never the server's member list) and removes the users taken
+  off the list with a signed removal commit, so they read nothing new. The removals are noted on
+  the device first and finished on later syncs if a commit fails; admitted guests and members are
+  not on that list and stay.
 - **Admission.** A host's "admit" in the lobby is the host's own decision: the host's device adds the
   devices the admitted user has at that moment, with history from the join on (§4.7), signed like
   any addition. Nothing waits for a device that appears later, unattended, since the server could

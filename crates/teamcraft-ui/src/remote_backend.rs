@@ -831,6 +831,19 @@ impl ChatBackend for RemoteChat {
     });
   }
 
+  fn update_meeting_chat_members(
+    &self,
+    conversation: ConversationId,
+    invitees: Vec<UserId>,
+    removed: Vec<UserId>,
+  ) {
+    self.act(ChatAction::UpdateMeetingChatMembers {
+      conversation,
+      invitees,
+      removed,
+    });
+  }
+
   fn add_people_to_call(
     &self,
     from: ConversationId,

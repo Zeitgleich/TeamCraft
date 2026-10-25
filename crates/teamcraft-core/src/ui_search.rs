@@ -360,6 +360,7 @@ mod tests {
       moderation: ChannelModeration::default(),
       is_integration: false,
       contains_guests: false,
+      maybe_organizer_user_id: None,
       maybe_my_membership: None,
       participants: Vec::new(),
       maybe_image: None,
