@@ -870,7 +870,7 @@ impl Core {
     {
       self.status = CoreStatus::NeedsEnrollment {
         has_existing_identity: maybe_key.is_some(),
-        was_data_lost: false,
+        was_data_lost: self.was_store_set_aside,
       };
     }
   }

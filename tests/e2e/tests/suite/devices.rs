@@ -34,9 +34,10 @@ async fn a_linked_device_shares_the_identity_and_joins_the_channels() {
   let (laptop_side, phone_side) = (laptop_side.unwrap(), phone_side.unwrap());
   assert_eq!(laptop_side.short_code(), phone_side.short_code());
   // The phone reports success only once the laptop confirmed the transfer: both run at once.
+  let laptop_store = Arc::new(MemoryStore::new());
   let (approved, received) = tokio::join!(
     carol.client.complete_link_approval(phone_side),
-    laptop_side.receive_secrets()
+    laptop_side.receive_secrets(&laptop_store, "carol linked laptop")
   );
   approved.unwrap();
   let secrets = received.unwrap();
@@ -48,7 +49,7 @@ async fn a_linked_device_shares_the_identity_and_joins_the_channels() {
   let mut laptop = PendingEnrollment::new()
     .complete(
       laptop_api,
-      Arc::new(MemoryStore::new()),
+      laptop_store,
       Box::new(SystemClock),
       ClientSettings::default(),
       options,
