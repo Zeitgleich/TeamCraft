@@ -6427,11 +6427,11 @@ ol.md-list {
 .lightbox-facts dt { color: rgba(255, 255, 255, .6); }
 .lightbox-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 /* The conversation's thread beside the picture */
-/* Its content shrinks to the column (flex and grid items default to their content's width) and long
-   words wrap; menus inside may still overlap the picture, so nothing clips them. */
+/* The panel shrinks to its column (a flex item defaults to its content's width, and a wide image
+   in the thread would push it past the window) and long words wrap; menus inside may still overlap
+   the picture, so nothing clips them. */
 .lightbox-thread { min-width: 0; min-height: 0; display: flex; color: var(--text); }
 .lightbox-thread .side-panel { flex: 1; min-width: 0; border-left: 1px solid var(--border); overflow-wrap: anywhere; }
-.lightbox-thread .side-panel :where(*) { min-width: 0; }
 .lightbox-thread .side-panel > * { max-width: 100%; }
 /* Tooltips that name the key: shown on hover and on keyboard focus */
 .lightbox-main [data-tip]:focus-visible::after {

@@ -728,7 +728,6 @@ fn Stage(
             (FullMedia::Ready(url), _) => {
               // Paused: the still frame once it is made, the placeholder until then.
               let file_src = url.as_str().to_owned();
-              let file_url = file_src.clone();
               let src = move || {
                 if !is_paused.get() {
                   return file_src.clone();
@@ -749,10 +748,12 @@ fn Stage(
                 motion.shown();
               };
               // A file decoded before the listener was there (cached) fires no `load` of its own.
-              // The node ref may still hold the previous file's image: only this file's counts.
+              // The node ref may still hold the previous file's image: only one showing what this
+              // one shows counts (the file, or while paused its still frame or placeholder).
+              let expected_src = src.clone();
               Effect::new(move |_| {
                 if let Some(element) = image.get()
-                  && element.src() == file_url
+                  && element.src() == untrack(&expected_src)
                   && element.complete()
                   && element.natural_width() > 0
                 {
