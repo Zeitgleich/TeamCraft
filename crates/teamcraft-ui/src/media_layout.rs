@@ -12,6 +12,29 @@ pub const THUMBNAIL_SIDE_PX: u32 = 320;
 /// Longest side of the thumbnails the browser draws for formats the core can't decode (as large as
 /// the core's own, `teamcraft_core::thumbnail::THUMBNAIL_SIZE` in newer apps).
 pub const APP_THUMBNAIL_SIDE: u32 = 640;
+/// Smallest width-to-height ratio at which a link preview's picture goes wide under the text.
+const WIDE_EMBED_RATIO: f32 = 1.3;
+/// How a link preview shows its picture (issue #372).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum EmbedImage {
+  /// Full width under the text, in the picture's own ratio (width / height).
+  Wide { aspect_ratio: f32 },
+  /// A small square thumbnail at the end of the card.
+  Thumbnail,
+}
+
+impl EmbedImage {
+  /// Wide for landscape pictures, a thumbnail for the rest and for unknown sizes.
+  pub fn of(size: Option<(u32, u32)>) -> Self {
+    match size {
+      Some((width, height)) if width as f32 / height as f32 >= WIDE_EMBED_RATIO => Self::Wide {
+        aspect_ratio: width as f32 / height as f32,
+      },
+      _ => Self::Thumbnail,
+    }
+  }
+}
+
 /// Largest file an inline preview downloads by itself; bigger ones keep their thumbnail until opened.
 pub const MAX_INLINE_LOAD_BYTES: u64 = 16 * 1024 * 1024;
 /// Smallest side of an inline picture, so a thin strip stays clickable.
@@ -20,19 +43,61 @@ const MIN_SIDE_PX: u32 = 48;
 /// The media type of thumbnail bytes from their magic bytes: senders made PNGs, newer ones may make
 /// JPEGs, and the message doesn't say which.
 pub fn thumbnail_type(bytes: &[u8]) -> &'static str {
-  match bytes.starts_with(&JPEG_START) {
-    true => "image/jpeg",
-    false => "image/png",
+  if bytes.starts_with(&JPEG_START) {
+    "image/jpeg"
+  } else if is_webp(bytes) {
+    "image/webp"
+  } else {
+    "image/png"
   }
 }
 
-/// Width and height of a PNG or JPEG thumbnail from its header; `None` for anything else.
+/// Width and height of a PNG, JPEG or WebP thumbnail from its header; `None` for anything else.
 pub fn thumbnail_size(bytes: &[u8]) -> Option<(u32, u32)> {
-  let (width, height) = match bytes.starts_with(&JPEG_START) {
-    true => jpeg_size(bytes)?,
-    false => png_size(bytes)?,
+  let (width, height) = if bytes.starts_with(&JPEG_START) {
+    jpeg_size(bytes)?
+  } else if is_webp(bytes) {
+    webp_size(bytes)?
+  } else {
+    png_size(bytes)?
   };
   (width > 0 && height > 0).then_some((width, height))
+}
+
+fn is_webp(bytes: &[u8]) -> bool {
+  bytes.get(..4) == Some(b"RIFF") && bytes.get(8..12) == Some(b"WEBP")
+}
+
+/// The size from the first chunk of a WebP file: lossy (`VP8 `), lossless (`VP8L`) or extended
+/// (`VP8X`, canvas size).
+fn webp_size(bytes: &[u8]) -> Option<(u32, u32)> {
+  let little = |range: std::ops::Range<usize>| -> Option<u32> {
+    let slice = bytes.get(range)?;
+    Some(
+      slice
+        .iter()
+        .rev()
+        .fold(0, |value, byte| (value << 8) | u32::from(*byte)),
+    )
+  };
+  match bytes.get(12..16)? {
+    b"VP8 " => {
+      // Frame tag (3 bytes), start code 9d 01 2a, then 14-bit width and height.
+      if bytes.get(23..26)? != [0x9d, 0x01, 0x2a] {
+        return None;
+      }
+      Some((little(26..28)? & 0x3fff, little(28..30)? & 0x3fff))
+    },
+    b"VP8L" => {
+      if *bytes.get(20)? != 0x2f {
+        return None;
+      }
+      let packed = little(21..25)?;
+      Some(((packed & 0x3fff) + 1, ((packed >> 14) & 0x3fff) + 1))
+    },
+    b"VP8X" => Some((little(24..27)? + 1, little(27..30)? + 1)),
+    _ => None,
+  }
 }
 
 const JPEG_START: [u8; 3] = [0xff, 0xd8, 0xff];
@@ -143,6 +208,54 @@ mod tests {
   use super::*;
 
   const LARGE: ImageSize = ImageSize::Large;
+
+  #[test]
+  fn webp_headers_give_type_and_size_in_all_three_formats() {
+    let riff = |chunk: &[u8], body: &[u8]| {
+      let mut file = b"RIFF\0\0\0\0WEBP".to_vec();
+      file.extend_from_slice(chunk);
+      file.extend_from_slice(&[0; 4]);
+      file.extend_from_slice(body);
+      file
+    };
+    // Lossy: frame tag, start code, 14-bit sizes.
+    let mut lossy = vec![0, 0, 0, 0x9d, 0x01, 0x2a];
+    lossy.extend_from_slice(&640_u16.to_le_bytes());
+    lossy.extend_from_slice(&320_u16.to_le_bytes());
+    // Lossless: signature byte, then 14-bit (size - 1) values packed in 28 bits.
+    let packed: u32 = (640 - 1) | ((320 - 1) << 14);
+    let mut lossless = vec![0x2f];
+    lossless.extend_from_slice(&packed.to_le_bytes());
+    // Extended: flags, reserved, 24-bit (size - 1) values.
+    let mut extended = vec![0; 4];
+    extended.extend_from_slice(&(640_u32 - 1).to_le_bytes()[..3]);
+    extended.extend_from_slice(&(320_u32 - 1).to_le_bytes()[..3]);
+    for file in [
+      riff(b"VP8 ", &lossy),
+      riff(b"VP8L", &lossless),
+      riff(b"VP8X", &extended),
+    ] {
+      assert_eq!(thumbnail_type(&file), "image/webp");
+      assert_eq!(thumbnail_size(&file), Some((640, 320)), "{:?}", &file[12..16]);
+    }
+    assert_eq!(thumbnail_size(&riff(b"VP8 ", &[0; 4])), None);
+    assert_eq!(thumbnail_size(b"RIFF\0\0\0\0WAVEfmt "), None);
+  }
+
+  #[test]
+  fn landscape_embed_images_go_wide_and_the_rest_are_thumbnails() {
+    assert_eq!(
+      EmbedImage::of(Some((640, 320))),
+      EmbedImage::Wide { aspect_ratio: 2.0 }
+    );
+    assert_eq!(
+      EmbedImage::of(Some((130, 100))),
+      EmbedImage::Wide { aspect_ratio: 1.3 }
+    );
+    assert_eq!(EmbedImage::of(Some((100, 100))), EmbedImage::Thumbnail);
+    assert_eq!(EmbedImage::of(Some((100, 300))), EmbedImage::Thumbnail);
+    assert_eq!(EmbedImage::of(None), EmbedImage::Thumbnail);
+  }
 
   #[test]
   fn png_headers_give_the_size_and_anything_else_none() {

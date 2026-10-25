@@ -607,6 +607,18 @@ select.input {
   font-variant-numeric: tabular-nums;
 }
 
+/* Plain unread: quiet, so red stays for mentions and direct messages (#366). */
+.badge-count.is-quiet {
+  background: color-mix(in srgb, var(--chrome-strong) 22%, transparent);
+  color: var(--chrome-strong);
+}
+
+.main .badge-count.is-quiet,
+.side-panel .badge-count.is-quiet {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
 .empty-state {
   padding: 24px;
   text-align: center;
@@ -1111,6 +1123,10 @@ select.input {
 
 .sb-section-head .badge-count {
   margin-left: auto;
+}
+
+.sb-section-head .badge-count + .badge-count {
+  margin-left: 4px;
 }
 
 .sb-section-head .chevron {
@@ -1829,7 +1845,7 @@ select.input {
   display: block;
   visibility: hidden;
   padding-top: 3px;
-  font-size: 10px;
+  font-size: var(--text-2xs);
   text-align: center;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
@@ -6088,10 +6104,25 @@ ol.md-list {
 .file-action { flex: none; }
 .files-list { display: flex; flex-direction: column; gap: .5rem; padding: .5rem 1rem; }
 .files-list .file-card { width: 100%; }
-.link-preview { display: flex; gap: .6rem; margin-top: .35rem; padding: .4rem .6rem; border-inline-start: 3px solid var(--accent, #3b7ddd); max-width: 32rem; }
-.preview-image { flex: none; width: 96px; height: 96px; border-radius: var(--radius-xs); object-fit: cover; background: var(--surface-3); }
-.preview-text { display: flex; flex-direction: column; min-width: 0; }
-.preview-site, .preview-description { color: var(--text-muted, #666); font-size: .85em; }
+/* One card for linked messages and link previews (#372). */
+.embed-card, .linked-message {
+  display: flex;
+  gap: var(--space-3);
+  max-width: 36rem;
+  margin-top: 6px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-inline-start: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.embed-card.has-wide-image { flex-direction: column; gap: var(--space-2); }
+.embed-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.embed-card .embed-site { color: var(--text-muted); font-size: var(--text-xs); }
+.embed-card .embed-title { font-weight: 600; }
+.embed-card .embed-description { color: var(--text-muted); font-size: var(--text-sm); }
+.embed-thumb { flex: none; width: 64px; height: 64px; border-radius: var(--radius-xs); object-fit: cover; background: var(--surface-3); }
+.embed-wide { display: block; width: 100%; max-height: 200px; border-radius: var(--radius-xs); object-fit: cover; background: var(--surface-3); }
 
 /* Lightbox: one image or video over the whole window, on a blurred backdrop tinted by the picture */
 .modal-backdrop:has(> .modal-lightbox) { padding: 0; background: #0b0d12; }
@@ -8625,16 +8656,8 @@ ol.md-list {
 
 /* Previews of linked messages (#319). */
 .linked-message {
-  display: flex;
   flex-direction: column;
   gap: 2px;
-  max-width: 36rem;
-  margin-top: 6px;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-inline-start: 3px solid var(--accent);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
 }
 
 .linked-unavailable .icon {
