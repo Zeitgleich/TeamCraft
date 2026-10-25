@@ -182,6 +182,7 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
     },
     viewport,
   );
+  Effect::new(move |_| motion.enter());
   // A button, a key or the strip changed the picture: whatever moved is done.
   Effect::new(move |previous: Option<MediaKey>| {
     let key = current.get();
@@ -207,6 +208,7 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
     video,
     stage,
     viewport,
+    motion,
     is_paused,
     is_thread_shown,
     notice,
@@ -562,6 +564,7 @@ fn Stage(
   };
   let toggle_at = move |anchor: Point| {
     let (image_size, stage_size) = sizes(image, stage);
+    motion.stop_view();
     viewport.update(|viewport| viewport.toggle_zoom(anchor, image_size, stage_size));
   };
   let on_wheel = move |ev: web_sys::WheelEvent| {

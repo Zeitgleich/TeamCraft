@@ -9,7 +9,7 @@
 use std::collections::VecDeque;
 use std::f64::consts::TAU;
 
-use super::{Direction, Point};
+use super::{Direction, Point, Size};
 
 /// Travel before a drag picks its axis (paging or closing), so a wobbly tap stays a tap.
 pub const DRAG_HYSTERESIS_PX: f64 = 10.0;
@@ -277,6 +277,16 @@ pub fn flip_from(tile: Rect, shown: Rect) -> (Point, f64) {
     tile.center().y - shown.center().y,
   );
   (offset, scale)
+}
+
+/// The picture a box shows with `object-fit: contain`: `natural` scaled to fit `bounds`, the box
+/// itself while the natural size is unknown.
+pub fn contained_size(bounds: Size, natural: Size) -> Size {
+  if natural.width <= 0.0 || natural.height <= 0.0 {
+    return bounds;
+  }
+  let scale = (bounds.width / natural.width).min(bounds.height / natural.height);
+  Size::new(natural.width * scale, natural.height * scale)
 }
 
 /// A rectangle in CSS pixels, from `getBoundingClientRect()`.
@@ -860,6 +870,18 @@ mod tests {
         flip_from(tile, Rect::default()),
         (Point::ORIGIN, 1.0),
         "not laid out"
+      );
+    }
+
+    #[test]
+    fn a_letterboxed_picture_is_measured_by_what_it_shows() {
+      // A portrait picture in a wide placeholder box shows narrower than the box.
+      let shown = contained_size(Size::new(768.0, 600.0), Size::new(900.0, 1200.0));
+      assert_eq!(shown, Size::new(450.0, 600.0));
+      assert_eq!(
+        contained_size(Size::new(768.0, 600.0), Size::default()),
+        Size::new(768.0, 600.0),
+        "not decoded yet"
       );
     }
 

@@ -5896,7 +5896,10 @@ ol.md-list {
 /* The previous, current and next picture side by side; the track moves as one while paging, and
    carries the picture into and out of its tile. Its transform and opacity are written per frame. */
 .lightbox-track { position: absolute; inset: 0; padding: inherit; transform-origin: center; will-change: transform; }
-.lightbox-track.is-pending { opacity: 0; }
+.lightbox-track.is-pending { visibility: hidden; }
+/* Opening, closing or lifted, the picture travels alone, and may leave the stage for its tile. */
+.lightbox.is-flying .lightbox-slot:not(.is-current) { visibility: hidden; }
+.lightbox.is-flying .lightbox-stage { overflow: visible; }
 .lightbox-track.is-fading-in { animation: motion-fade-in var(--dur-base) var(--ease-standard); }
 .lightbox-slot { position: absolute; inset: 0; box-sizing: border-box; padding: inherit; display: flex; align-items: center; justify-content: center; }
 .lightbox-slot.is-previous { transform: translateX(calc(-100% - 24px)); }
@@ -5914,7 +5917,7 @@ ol.md-list {
 .lightbox-body:hover .lightbox-nav, .lightbox-nav:focus-visible { opacity: 1; }
 .lightbox-nav:disabled { visibility: hidden; }
 /* Touch has no hover: the arrows stay, quieter, and step aside while a picture is zoomed. */
-@media (hover: none) {
+@media not ((hover: hover) and (pointer: fine)) {
   .lightbox-nav { opacity: 1; background: rgba(20, 22, 30, .55); }
   .lightbox-stage.zoomed ~ .lightbox-nav { opacity: 0; pointer-events: none; }
 }
@@ -5981,6 +5984,8 @@ ol.md-list {
 }
 @media (max-width: 640px) {
   .lightbox-stage { padding: 0; }
+  /* On a phone the arrows sit low and small, off the middle of the picture. */
+  .lightbox-nav { top: auto; bottom: 12px; width: 36px; height: 36px; margin-top: 0; }
   .lightbox-context { flex-wrap: wrap; white-space: normal; }
   .lightbox-slider { display: none; }
   .lightbox-strip { display: none; }
@@ -7495,13 +7500,12 @@ ol.md-list {
   animation: motion-switcher-in var(--dur-fast) var(--ease-emphasized);
 }
 
-/* The lightbox's picture grows out of its tile (or its track fades in); the backdrop and the
-   chrome fade in around it. */
+/* The lightbox's picture grows out of its tile (or its track fades in) and the chrome fades in
+   around it; the backdrop's fade is driven with the picture (lightbox_motion.rs). */
 .modal.modal-lightbox {
   animation: none;
 }
 
-.lightbox-backdrop,
 .lightbox-top,
 .lightbox-strip,
 .lightbox-controls {

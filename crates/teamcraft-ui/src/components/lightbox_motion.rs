@@ -20,14 +20,13 @@ use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-use crate::components::lightbox::sizes;
+use crate::components::lightbox::{prefers_reduced_motion, sizes};
 use crate::lightbox::physics::{
-  Animated, DragAxis, PAGE_GAP_PX, PageOutcome, Rect, VelocityTracker, dismiss_backdrop_opacity,
-  dismiss_progress, dismiss_scale, drag_axis, flip_from, page_offset, page_outcome, page_target,
-  rubberband_clamp, rubberband_scale, should_dismiss, unrubberband_clamp, unrubberband_scale,
+  Animated, DRAG_HYSTERESIS_PX, DragAxis, PAGE_GAP_PX, PageOutcome, Rect, VelocityTracker, contained_size,
+  dismiss_backdrop_opacity, dismiss_progress, dismiss_scale, drag_axis, flip_from, page_offset, page_outcome,
+  page_target, rubberband_clamp, rubberband_scale, should_dismiss, unrubberband_clamp, unrubberband_scale,
 };
 use crate::lightbox::{Direction, Gesture, MediaKey, Point, Size, Viewport};
-use crate::motion::prefers_reduced_motion;
 
 /// An opening picture that took longer than this to show is no longer connected to its tile: it
 /// fades in instead of growing out of it.
@@ -88,6 +87,8 @@ struct Inner {
   drag_offset: Point,
   /// Whether the press caught something moving: then its release is no tap.
   has_caught: bool,
+  /// The page turn the press caught, which its release finishes or takes back.
+  maybe_caught_page: Option<Direction>,
   track: TrackPose,
   view: ViewMotion,
   pending: Pending,
@@ -117,7 +118,10 @@ enum Mode {
 enum Pending {
   None,
   Page(Direction),
-  Close,
+  /// `into_tile`: the picture flies into its tile, so nothing is left for the exit fade.
+  Close {
+    into_tile: bool,
+  },
 }
 
 /// The track's transform, the picture's opacity and the backdrop's opacity.
@@ -148,6 +152,9 @@ struct Paint {
   content: f64,
   backdrop: f64,
   is_lifted: bool,
+  /// Scaled or moved off the paging axis (opening, closing, lifted): the neighbours stay hidden and
+  /// the picture may leave the stage on its way to the tile.
+  is_flying: bool,
   maybe_view: Option<(f64, Point)>,
 }
 
@@ -156,7 +163,7 @@ struct Paint {
 enum Commit {
   None,
   Go(Direction),
-  Close,
+  Close { into_tile: bool },
 }
 
 impl StageMotion {
@@ -183,14 +190,14 @@ impl StageMotion {
     let stage = stage_size(self.nodes);
     self.inner.update_value(|inner| {
       inner.is_reduced = is_reduced;
-      inner.has_caught = inner.pending != Pending::None || inner.track.is_moving() || inner.view.is_moving();
-      if inner.pending == Pending::Close {
-        // Grabbed on its way out: it stays open and follows the finger again.
-        inner.pending = Pending::None;
-      }
-      if matches!(inner.pending, Pending::Page(_)) {
-        inner.pending = Pending::None;
-      }
+      let is_view_caught = inner.view.is_moving();
+      inner.has_caught = inner.pending != Pending::None || inner.track.is_moving() || is_view_caught;
+      inner.maybe_caught_page = match inner.pending {
+        Pending::Page(direction) => Some(direction),
+        _ => None,
+      };
+      // Grabbed on its way out (or to the neighbour): it stays and follows the finger again.
+      inner.pending = Pending::None;
       inner.track.stop();
       inner.view.stop();
       inner.cancel_wheel();
@@ -198,7 +205,8 @@ impl StageMotion {
       inner.track_at_press = Point::new(inner.track.x.value(), inner.track.y.value());
       inner.drag_offset = inner.track_at_press;
       inner.velocity.reset(time_ms, at);
-      inner.mode = match (pointers, viewport.is_zoomed()) {
+      // A zoom caught while settling (also below fit) stays the finger's to pan and pinch.
+      inner.mode = match (pointers, viewport.is_zoomed() || is_view_caught) {
         (1, false) => Mode::Pressed,
         _ => {
           // A second finger on a picture that was paging or lifted: the track goes back.
@@ -231,11 +239,17 @@ impl StageMotion {
         inner.velocity.push(time_ms, at);
       }
       if inner.mode == Mode::Pressed {
-        inner.mode = match drag_axis(at.minus(inner.press)) {
+        let travel = at.minus(inner.press);
+        inner.mode = match drag_axis(travel) {
           Some(DragAxis::Horizontal) => Mode::Page,
           Some(DragAxis::Vertical) => Mode::Dismiss,
           None => Mode::Pressed,
         };
+        if inner.mode != Mode::Pressed {
+          // The hysteresis is no movement: the picture starts following from here, without a jump.
+          let share = DRAG_HYSTERESIS_PX / travel.x.hypot(travel.y);
+          inner.press = Point::new(inner.press.x + travel.x * share, inner.press.y + travel.y * share);
+        }
       }
       let travel = at.minus(inner.press);
       let wanted = Point::new(
@@ -298,7 +312,7 @@ impl StageMotion {
         Mode::Dismiss => {
           let offset = inner.drag_offset;
           if should_dismiss(offset.y, velocity.y, stage.height) {
-            (Commit::Close, Some(velocity))
+            (Commit::Close { into_tile: false }, Some(velocity))
           } else {
             inner.settle_track(velocity, time_ms);
             (Commit::None, None)
@@ -320,7 +334,7 @@ impl StageMotion {
       return false;
     };
     match (commit, close_velocity) {
-      (Commit::Close, maybe_velocity) => self.close_with(maybe_velocity.unwrap_or(Point::ORIGIN)),
+      (Commit::Close { .. }, maybe_velocity) => self.close_with(maybe_velocity.unwrap_or(Point::ORIGIN)),
       (Commit::Go(direction), _) => {
         self.hooks.go.run(direction);
         self.request_frame();
@@ -357,7 +371,8 @@ impl StageMotion {
     let maybe_paint = self.inner.try_update_value(|inner| {
       let is_sideways = delta.x.abs() > delta.y.abs();
       match inner.mode {
-        Mode::Idle if is_sideways => {
+        // Not while the picture opens, closes or settles from a lift: that motion isn't the strip's.
+        Mode::Idle if is_sideways && !inner.is_flying() => {
           inner.is_reduced = is_reduced;
           inner.pending = Pending::None;
           inner.track.stop();
@@ -440,6 +455,25 @@ impl StageMotion {
     self.request_frame();
   }
 
+  /// The lightbox mounted: its backdrop fades in (springs, so a picture growing out of its tile can
+  /// take it over without a jump).
+  pub fn enter(self) {
+    if prefers_reduced_motion() {
+      return;
+    }
+    let now = now_ms();
+    let Some(paint) = self.inner.try_update_value(|inner| {
+      inner.track.backdrop.set(0.0);
+      let paint = inner.paint();
+      inner.track.backdrop.spring_to(1.0, 0.0, now);
+      paint
+    }) else {
+      return;
+    };
+    self.apply(&paint);
+    self.request_frame();
+  }
+
   /// Closes the lightbox: into the tile of the picture when it is in view, else it fades.
   pub fn close(self) {
     self.close_with(Point::ORIGIN);
@@ -448,7 +482,7 @@ impl StageMotion {
   /// Back to rest at once: the picture changed by a button, a key or the strip.
   pub fn reset(self) {
     let maybe_paint = self.inner.try_update_value(|inner| {
-      if inner.pending == Pending::Close {
+      if matches!(inner.pending, Pending::Close { .. }) {
         return None;
       }
       inner.pending = Pending::None;
@@ -470,7 +504,7 @@ impl StageMotion {
 
   fn close_with(self, velocity: Point) {
     if prefers_reduced_motion() {
-      self.set_root_class("is-closed", true);
+      // The dialog's exit fade (if any) runs as usual.
       self.hooks.close.run(());
       return;
     }
@@ -478,7 +512,9 @@ impl StageMotion {
     let now = now_ms();
     self.inner.update_value(|inner| {
       inner.mode = Mode::Idle;
-      inner.pending = Pending::Close;
+      inner.pending = Pending::Close {
+        into_tile: maybe_flip.is_some(),
+      };
       inner.cancel_wheel();
       let track = &mut inner.track;
       match maybe_flip {
@@ -512,12 +548,12 @@ impl StageMotion {
       .ok()?;
     let laid_out = Size::new(f64::from(media.offset_width()), f64::from(media.offset_height()));
     let stage_size = Size::new(f64::from(stage.client_width()), f64::from(stage.client_height()));
-    // A picture may be turned; the placeholder and a video are shown as laid out.
+    // A picture may be turned; the placeholder and a video letterbox their picture in their box.
     let classes = media.class_list();
     let is_picture = classes.contains("lightbox-image") && !classes.contains("lightbox-placeholder");
     let fitted = match is_picture {
       true => self.viewport.get_untracked().fitted_size(laid_out, stage_size),
-      false => laid_out,
+      false => contained_size(laid_out, natural_size(&media)),
     };
     let center = rect_of(&stage).center();
     let shown = Rect::new(
@@ -590,8 +626,9 @@ impl StageMotion {
       Commit::Go(direction) => {
         self.hooks.go.try_run(direction);
       },
-      Commit::Close => {
-        self.set_root_class("is-closed", true);
+      Commit::Close { into_tile } => {
+        // The picture is in its tile: the dialog's exit fade would only show it once more.
+        self.set_root_class("is-closed", into_tile);
         self.hooks.close.try_run(());
         return;
       },
@@ -619,6 +656,7 @@ impl StageMotion {
       drop(web_sys::HtmlElement::style(&backdrop).set_property("opacity", &format!("{:.3}", paint.backdrop)));
     }
     self.set_root_class("is-lifted", paint.is_lifted);
+    self.set_root_class("is-flying", paint.is_flying);
     if let Some((scale, offset)) = paint.maybe_view {
       self
         .viewport
@@ -642,6 +680,7 @@ impl Inner {
       track_at_press: Point::ORIGIN,
       drag_offset: Point::ORIGIN,
       has_caught: false,
+      maybe_caught_page: None,
       track: TrackPose::new(),
       view: ViewMotion::new(),
       pending: Pending::None,
@@ -685,6 +724,11 @@ impl Inner {
   /// A press that caught the track and let go without dragging.
   fn release_caught(&mut self, page_width: f64, has_previous: bool, has_next: bool, now: f64) -> Commit {
     if !self.has_caught {
+      return Commit::None;
+    }
+    // Only a caught page turn may still turn; anything else (an open, a close, a lift) goes back.
+    if self.maybe_caught_page.is_none() {
+      self.settle_track(Point::ORIGIN, now);
       return Commit::None;
     }
     let commit = self.release_page(0.0, page_width, has_previous, has_next, now);
@@ -820,7 +864,7 @@ impl Inner {
         self.track.rest();
         Commit::Go(direction)
       },
-      Pending::Close if self.track.has_arrived() => Commit::Close,
+      Pending::Close { into_tile } if self.track.has_arrived() => Commit::Close { into_tile },
       _ => Commit::None,
     }
   }
@@ -834,9 +878,21 @@ impl Inner {
       scale: track.scale.value(),
       content: track.content.value(),
       backdrop: track.backdrop.value(),
-      is_lifted: self.mode == Mode::Dismiss || self.pending == Pending::Close,
+      is_lifted: self.mode == Mode::Dismiss || matches!(self.pending, Pending::Close { .. }),
+      is_flying: self.is_flying(),
       maybe_view: is_view_owned.then(|| (view.scale.value(), Point::new(view.x.value(), view.y.value()))),
     }
+  }
+
+  /// Whether the track is off the paging axis: lifted, opening or closing.
+  fn is_flying(&self) -> bool {
+    let track = &self.track;
+    matches!(self.pending, Pending::Close { .. })
+      || [&track.y, &track.scale, &track.content, &track.backdrop]
+        .iter()
+        .any(|value| value.is_moving())
+      || track.y.value().abs() > 0.5
+      || (track.scale.value() - 1.0).abs() > 0.001
   }
 
   fn cancel_wheel(&mut self) {
@@ -994,6 +1050,20 @@ fn visible_bounds(window: &web_sys::Window, element: &web_sys::Element) -> Rect 
     maybe_parent = parent.parent_element();
   }
   bounds
+}
+
+/// The intrinsic size of a picture or video, zero before it is known.
+fn natural_size(media: &web_sys::HtmlElement) -> Size {
+  if let Some(image) = media.dyn_ref::<web_sys::HtmlImageElement>() {
+    return Size::new(
+      f64::from(image.natural_width()),
+      f64::from(image.natural_height()),
+    );
+  }
+  if let Some(video) = media.dyn_ref::<web_sys::HtmlVideoElement>() {
+    return Size::new(f64::from(video.video_width()), f64::from(video.video_height()));
+  }
+  Size::default()
 }
 
 fn rect_of(element: &web_sys::Element) -> Rect {
