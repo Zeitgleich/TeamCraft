@@ -55,6 +55,26 @@ class CheckAsyncSignalsTest(unittest.TestCase):
         )
         self.assertEqual(len(findings(source)), 2)
 
+    def test_blur_and_focusout_handlers_are_checked_as_a_whole(self):
+        source = (
+            "<div\n  on:blur=move |_| {\n    if let Some(e) = editor.get_untracked() {\n"
+            "      saved.set_value(1);\n    }\n  }\n"
+            "  on:focusout=move |_| hidden.set(true)\n"
+            "  on:click=move |_| clicked.set(true)\n>\n"
+        )
+        self.assertEqual(
+            findings(source),
+            [
+                "x.rs:3: if let Some(e) = editor.get_untracked() {",
+                "x.rs:4: saved.set_value(1);",
+                "x.rs:7: on:focusout=move |_| hidden.set(true)",
+            ],
+        )
+
+    def test_guarded_blur_handlers_pass(self):
+        source = "on:blur=move |_| {\n  if let Some(e) = editor.try_get_untracked().flatten() {\n    saved.try_set_value(1);\n  }\n}\n"
+        self.assertEqual(findings(source), [])
+
     def test_async_fn_bodies_are_checked_after_their_first_await(self):
         source = "async fn load(&self) {\n  self.busy.set(true);\n  fetch().await;\n  self.data.set(1);\n}\n"
         self.assertEqual(findings(source), ["x.rs:4: self.data.set(1);"])
