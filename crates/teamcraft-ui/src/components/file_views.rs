@@ -226,6 +226,7 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
       >
         <button
           class="media-open"
+          data-media-key=key.dom_key()
           aria-label=move || i18n.t_with("media-open", &[("name", &label)])
           on:click=move |_| state.overlay.set(Overlay::Lightbox(conversation, key))
         >
@@ -392,6 +393,7 @@ pub fn FileCard(file: FileInfo) -> impl IntoView {
     (Some(src), Some(key)) => view! {
       <button
         class="file-thumb"
+        data-media-key=key.dom_key()
         aria-label=move || i18n.t("file-preview")
         on:click=move |_| state.overlay.set(Overlay::Lightbox(conversation, key))
       >
