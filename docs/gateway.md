@@ -13,8 +13,10 @@ types are ignored on both sides, so new ones can be added without breaking old c
    connection after an `error` frame.
 3. Server answers `ready` (with the `session_id`) or `resumed` and then the missed events, or
    `session_invalid`: the client then identifies again and refetches state over REST.
-4. The client sends `heartbeat` at the announced interval (answered by `heartbeat_ack`). A connection without
-   any frame for `heartbeat_timeout_secs` is closed. After `connection_max_age_secs` the server closes it so a
+4. The client sends `heartbeat` at the announced interval (answered by `heartbeat_ack`), also while the REST
+   sync after `ready` and long commands run: it keeps reading the connection then and applies the events that
+   arrived once the work is done, in their order. A connection without any frame for
+   `heartbeat_timeout_secs` is closed. After `connection_max_age_secs` the server closes it so a
    fresh token is checked; clients reconnect with `resume`.
 
 ## Events and resume

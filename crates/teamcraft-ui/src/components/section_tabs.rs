@@ -4,6 +4,7 @@
 
 use leptos::prelude::*;
 
+use crate::components::sliding_indicator::SlidingIndicator;
 use crate::components::tab_list::{on_tab_keys, roving_tabindex};
 use crate::i18n::use_i18n;
 
@@ -52,6 +53,7 @@ where
   };
   view! {
     <div class="view-tabs section-tabs" role="tablist" aria-label=move || i18n.t(label_key) on:keydown=on_keydown>
+      <SlidingIndicator inset_px=8.0 />
       {sections
         .into_iter()
         .map(|section| {

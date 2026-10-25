@@ -647,6 +647,15 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::SetAttention { is_attentive });
   }
 
+  fn focus_conversation(&self, conversation: ConversationId) {
+    spawn_local(async move {
+      // A hint for the catch-up order; nothing for the user to act on if it is lost.
+      if let Err(error) = call::<()>("core_focus", &json!({ "conversation": conversation })).await {
+        tracing::debug!(%error, "the core did not take the focus");
+      }
+    });
+  }
+
   fn search_backend(&self) -> Option<&dyn SearchBackend> {
     Some(self)
   }
@@ -1017,6 +1026,26 @@ impl ChatBackend for RemoteChat {
       Some(ChatAnswer::SpaceMembers { roster }) => roster,
       _ => SpaceRoster::Loading,
     }
+  }
+
+  fn channel_roles(&self, conversation: ConversationId) -> Vec<teamcraft_client_api::model::ChannelMember> {
+    match self.ask(ChatQuery::ChannelRoles { conversation }) {
+      Some(ChatAnswer::ChannelRoles { members }) => members,
+      _ => Vec::new(),
+    }
+  }
+
+  fn set_channel_role(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    role: teamcraft_client_api::model::ChannelRole,
+  ) {
+    self.act(ChatAction::SetChannelRole {
+      conversation,
+      user,
+      role,
+    });
   }
 
   fn space_invites(&self, space: SpaceId) -> Vec<PendingInvite> {

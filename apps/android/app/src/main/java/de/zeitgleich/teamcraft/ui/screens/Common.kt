@@ -26,6 +26,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.delay
 import uniffi.teamcraft_ffi.ConnectionState
+import uniffi.teamcraft_ffi.NetworkInterception
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
@@ -122,7 +123,12 @@ fun OfflineBanner(onSignInAgain: () -> Unit) {
     !isOnline -> stringResource(R.string.offline_banner) to null
     connection is ConnectionState.Offline -> {
       val seconds = ((connection.retryAtMs - now).coerceAtLeast(0) + 999) / 1000
-      stringResource(R.string.connection_unreachable, seconds) to
+      val text = when (connection.maybeInterception) {
+        NetworkInterception.CAPTIVE_PORTAL -> R.string.connection_captive_portal
+        NetworkInterception.UNTRUSTED_CERTIFICATE -> R.string.connection_untrusted_certificate
+        null -> R.string.connection_unreachable
+      }
+      stringResource(text, seconds) to
         (stringResource(R.string.connection_retry) to { graph.core.networkChanged() })
     }
     connection is ConnectionState.SignInRequired ->

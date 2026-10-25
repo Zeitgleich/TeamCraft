@@ -67,7 +67,8 @@ secrecy = { version = "0.10", features = ["serde"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.7", features = ["trace", "request-id", "fs"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls", "http2"] }
+# `system-proxy`: macOS and Windows proxy settings (environment variables are read anyway).
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls", "http2", "system-proxy"] }
 # `Retry-After` as an HTTP date (push services); already in the tree through hyper.
 httpdate = "1"
 
@@ -105,8 +106,11 @@ figment = { version = "0.10", features = ["toml", "env"] }
 
 # davey 0.1.5 ported to openmls 0.9, so chat and calls share one MLS stack (ARCHITECTURE.md §6.2)
 # without the libcrux advisories of the openmls 0.8 stack. See crates/vendor/davey/VENDORED.md.
+# wtransport 0.7.2 with a client Endpoint::rebind, so calls survive network changes (ARCHITECTURE.md
+# §6.5). See crates/vendor/wtransport/VENDORED.md.
 [patch.crates-io]
 davey = { path = "crates/vendor/davey" }
+wtransport = { path = "crates/vendor/wtransport" }
 
 # Keep target/ small: several worktrees build in parallel on one disk. Line tables are enough
 # for backtraces; dependencies carry no debug info.

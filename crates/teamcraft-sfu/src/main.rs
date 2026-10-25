@@ -22,6 +22,9 @@
 //! - `TEAMCRAFT_SFU_RECONNECT_GRACE_SECS`: how long a participant whose connection was lost keeps
 //!   its slot to rejoin, default 30
 //! - `TEAMCRAFT_SFU_IDLE_TIMEOUT_SECS`: a connection silent this long is lost, default 10
+//! - `TEAMCRAFT_SFU_SHUTDOWN_DRAIN_SECS`: on SIGTERM every call connection is closed as "going
+//!   away" (clients rejoin, ARCHITECTURE.md §6.5); how long those closes get to reach the clients
+//!   before the process exits, default 2
 
 use std::io::Write;
 use std::net::SocketAddr;
@@ -89,6 +92,9 @@ async fn run() -> anyhow::Result<()> {
   if let Some(timeout) = env_duration_secs("TEAMCRAFT_SFU_IDLE_TIMEOUT_SECS")? {
     config.idle_timeout = timeout;
   }
+  if let Some(drain) = env_duration_secs("TEAMCRAFT_SFU_SHUTDOWN_DRAIN_SECS")? {
+    config.shutdown_drain = drain;
+  }
 
   let identity = load_identity().await?;
   let verifier = load_verifier(&config)?;
@@ -130,11 +136,11 @@ async fn run() -> anyhow::Result<()> {
       None => std::future::pending().await,
     }
   };
+  // SIGTERM (a restart, a rolling deploy): calls are told the SFU is going away and rejoin.
   tokio::select! {
-    () = sfu.run() => {},
+    () = sfu.run_until(shutdown_signal()) => {},
     result = dev_page => result.context("dev page")?,
     result = serve_health(health_addr()?, internal_routes) => result.context("health endpoint")?,
-    () = shutdown_signal() => {},
   }
   Ok(())
 }

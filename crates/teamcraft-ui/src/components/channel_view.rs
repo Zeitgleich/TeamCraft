@@ -3,6 +3,7 @@ use leptos::prelude::*;
 use crate::calls::{CallKind, CallPhase, CallRequest};
 use crate::components::avatar::PresenceDot;
 use crate::components::bookmarks::BookmarksBar;
+use crate::components::channel_glyph::ChannelGlyph;
 use crate::components::compact_back::CompactBack;
 use crate::components::composer::Composer;
 use crate::components::file_views::ChannelFiles;
@@ -11,6 +12,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::log_view::ChannelFeed;
 use crate::components::security_ui::KeyChangeBanner;
 use crate::components::sheet::MenuSurface;
+use crate::components::sliding_indicator::SlidingIndicator;
 use crate::components::tab_list::{on_tab_keys, roving_tabindex};
 use crate::i18n::use_i18n;
 use crate::model::{Conversation, ConversationId, ConversationKind, MembershipIssue, UserId};
@@ -430,8 +432,15 @@ fn ChannelHeader(
   let title = move || {
     let conv = info.get()?;
     let icon = match conv.kind {
-      ConversationKind::Public => view! { <Icon name=IconName::Hash class="header-icon" /> }.into_any(),
-      ConversationKind::Private => view! { <Icon name=IconName::Lock class="header-icon" /> }.into_any(),
+      ConversationKind::Public | ConversationKind::Private => {
+        let fallback = if conv.kind == ConversationKind::Public {
+          IconName::Hash
+        } else {
+          IconName::Lock
+        };
+        let version = Signal::derive(move || info.get().and_then(|found| found.maybe_image_version));
+        view! { <ChannelGlyph conversation=conversation maybe_version=version fallback=fallback class="header-icon" /> }.into_any()
+      },
       ConversationKind::Integration => {
         view! { <Icon name=IconName::Terminal class="header-icon" /> }.into_any()
       },
@@ -653,6 +662,7 @@ fn ChannelTabs(tab: RwSignal<ChannelTab>) -> impl IntoView {
     move |ev: web_sys::KeyboardEvent| on_tab_keys(&ev, &ChannelTab::ALL, tab, ChannelTab::tab_id);
   view! {
     <div class="view-tabs header-tabs" role="tablist" aria-label=move || i18n.t("channel-tabs") on:keydown=on_keydown>
+      <SlidingIndicator inset_px=8.0 />
       {ChannelTab::ALL
         .into_iter()
         .map(|value| {

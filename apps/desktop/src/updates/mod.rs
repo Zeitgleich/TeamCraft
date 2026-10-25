@@ -397,18 +397,18 @@ impl UpdateHost {
   }
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn update_status(app: AppHandle, host: State<'_, Arc<UpdateHost>>) -> UpdateStatus {
   host.status(&app)
 }
 
 /// "Check now".
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn update_check(host: State<'_, Arc<UpdateHost>>) {
   host.wake.notify_one();
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn update_set_preference(app: AppHandle, host: State<'_, Arc<UpdateHost>>, preference: UpdatePreference) {
   {
     let mut inner = host.lock();
@@ -419,7 +419,7 @@ pub fn update_set_preference(app: AppHandle, host: State<'_, Arc<UpdateHost>>, p
 }
 
 /// Notify-only: downloads the update the user asked for.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn update_download(
   app: AppHandle,
   host: State<'_, Arc<UpdateHost>>,
@@ -444,7 +444,7 @@ pub async fn update_download(
 
 /// "Restart to update": installs the downloaded update and starts the new version. Refused during
 /// a call. After a package manager update there is nothing to install, only to restart.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn update_restart(app: AppHandle, host: State<'_, Arc<UpdateHost>>) -> Result<(), UpdateCommandError> {
   if is_in_call(&app) {
     return Err(in_call());
@@ -475,7 +475,7 @@ pub fn update_restart(app: AppHandle, host: State<'_, Arc<UpdateHost>>) -> Resul
 }
 
 /// deb/rpm: asks PackageKit to install the update (docs/updates.md §4.5).
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn update_with_package_manager(
   app: AppHandle,
   host: State<'_, Arc<UpdateHost>>,

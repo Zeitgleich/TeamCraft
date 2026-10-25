@@ -12,8 +12,9 @@ use crate::state::use_app_state;
 
 /// Emoji per row of the grid; ↑/↓ move by this many.
 const COLUMNS: usize = 8;
-const PICKER_WIDTH_PX: f64 = 324.0;
-const PICKER_HEIGHT_PX: f64 = 300.0;
+/// The picker's size in rem (main.css `.emoji-picker`): it grows with the text size.
+const PICKER_WIDTH_REM: f64 = 20.25;
+const PICKER_HEIGHT_REM: f64 = 18.75;
 /// Space kept between the picker and the window edge.
 const EDGE_PX: f64 = 8.0;
 
@@ -189,6 +190,8 @@ pub fn EmojiPicker(
 /// room, otherwise below it; right-aligned with it.
 fn placement(anchor: &web_sys::Element) -> (f64, f64, PopoverSide) {
   let rect = anchor.get_bounding_client_rect();
+  let rem = crate::viewport::rem_px();
+  let (picker_width, picker_height) = (PICKER_WIDTH_REM * rem, PICKER_HEIGHT_REM * rem);
   let (width, height) = web_sys::window()
     .map(|window| {
       let read = |value: Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue>| {
@@ -197,15 +200,14 @@ fn placement(anchor: &web_sys::Element) -> (f64, f64, PopoverSide) {
       (read(window.inner_width()), read(window.inner_height()))
     })
     .unwrap_or((1024.0, 768.0));
-  let (top, side) = if rect.top() - PICKER_HEIGHT_PX - EDGE_PX >= 0.0 {
-    (rect.top() - PICKER_HEIGHT_PX - 4.0, PopoverSide::Above)
+  let (top, side) = if rect.top() - picker_height - EDGE_PX >= 0.0 {
+    (rect.top() - picker_height - 4.0, PopoverSide::Above)
   } else {
     (
-      (rect.bottom() + 4.0).min(height - PICKER_HEIGHT_PX - EDGE_PX),
+      (rect.bottom() + 4.0).min(height - picker_height - EDGE_PX),
       PopoverSide::Below,
     )
   };
-  let left =
-    (rect.right() - PICKER_WIDTH_PX).clamp(EDGE_PX, (width - PICKER_WIDTH_PX - EDGE_PX).max(EDGE_PX));
+  let left = (rect.right() - picker_width).clamp(EDGE_PX, (width - picker_width - EDGE_PX).max(EDGE_PX));
   (top.max(EDGE_PX), left, side)
 }

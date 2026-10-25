@@ -60,13 +60,37 @@ class OverridesTest(unittest.TestCase):
         self.assertEqual(findings(css), [])
 
 
-class TinyFontsTest(unittest.TestCase):
-    def test_sizes_below_the_ratchet_fail(self):
-        css = "".join(f".f{i} {{ font-size: 9px; }}\n" for i in range(check.MAX_TINY_FONT_SIZES + 1))
-        self.assertTrue(findings(css)[0].startswith(f"{check.MAX_TINY_FONT_SIZES + 1} font sizes below 11px"))
+class TypeScaleTest(unittest.TestCase):
+    def test_a_raw_size_is_found(self):
+        self.assertEqual(
+            findings(".x { font-size: 13px; }"),
+            ["x.css:1: font-size: 13px is off the type scale; use var(--text-*)"],
+        )
 
-    def test_the_font_shorthand_reads_the_size_not_the_line_height(self):
-        css = "".join(f".f{i} {{ font: 12px/10px sans-serif; }}\n" for i in range(check.MAX_TINY_FONT_SIZES + 1))
+    def test_tokens_inherit_and_allowed_values_pass(self):
+        css = ".a { font-size: var(--text-sm); }\n.b { font-size: inherit; }\n.c { font-size: max(16px, 1em); }\n"
+        self.assertEqual(findings(":root { --text-sm: 1rem; }\n" + css), [])
+
+    def test_the_font_shorthand_reads_the_size_not_the_weight_or_line_height(self):
+        css = ":root { --text-xs: 1rem; --f: x; }\n.a { font: 700 var(--text-xs)/16px var(--f); }\n.b { font: 12px/1.5 var(--f); }\n"
+        self.assertEqual([f.split(":")[1] for f in findings(css)], ["3"])
+
+    def test_dot_leading_and_unitless_values_in_the_font_shorthand(self):
+        css = ":root { --f: x; }\n.a { font: .85rem/1.4 var(--f); }\n.b { font: 700 0.9em var(--f); }\n.c { font: italic 600 13px var(--f); }\n"
+        self.assertEqual([f.split(":")[1] for f in findings(css)], ["2", "4"])
+
+    def test_fixed_glyphs_pass_but_not_below_11px(self):
+        self.assertEqual(findings(".avatar-sm { font-size: 11px; }"), [])
+        self.assertEqual(findings(".avatar-sm { font-size: 9px; }"), ["x.css:1: font-size: 9px is below 11px"])
+
+
+class HexColoursTest(unittest.TestCase):
+    def test_raw_colours_beyond_the_ratchet_fail(self):
+        css = "".join(f".c{i} {{ color: #123456; }}\n" for i in range(check.MAX_RAW_HEX_COLOURS + 1))
+        self.assertTrue(findings(css)[0].startswith(f"{check.MAX_RAW_HEX_COLOURS + 1} declarations with a raw hex colour"))
+
+    def test_colours_in_token_definitions_do_not_count(self):
+        css = "".join(f".c{i} {{ --tone: #123456; }}\n" for i in range(check.MAX_RAW_HEX_COLOURS + 1))
         self.assertEqual(findings(css), [])
 
 

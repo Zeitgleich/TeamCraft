@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 
 use rand_core::OsRng;
 use teamcraft_crypto::content_key::{ContentKey, ContentKeyId};
+use teamcraft_crypto::identity::VerifiedDevice;
 use teamcraft_crypto::membership::{
   HistoryShare, MembershipAction, MembershipChange, SignedMembershipChange,
 };
@@ -49,6 +50,8 @@ const PENDING_COMMIT_ROUNDS: u32 = 3;
 pub(crate) const CREATE_ATTEMPTS: u32 = 3;
 /// Key prefix of [`DmSetupRecord`]s in the sync state.
 const DM_SETUP_PREFIX: &str = "dm-setup/";
+/// Key prefix of [`ReaddedRecord`]s in the applied changes.
+const READDED_PREFIX: &str = "readded/";
 
 /// This device's commit, merged: what it did and when the server stored it.
 struct OwnCommit {
@@ -136,10 +139,14 @@ pub fn dm_setup_status(
 
 /// What became of opening a welcome.
 enum WelcomeJoin {
-  Joined(Box<(ConversationGroup, PinnedDirectory)>),
+  /// With the member whose commit made the welcome.
+  Joined(Box<(ConversationGroup, PinnedDirectory, GroupMember)>),
   /// Not for this device or not acceptable; the welcome is done with.
   Rejected(MlsError),
-  /// Opened (which spends this device's key package), then a network error stopped the join.
+  /// This device's leaf is in the members' tree, but it has no group and can't open the welcome
+  /// again, so it asks to be added back: the welcome was opened (which spends the key package)
+  /// and a network error stopped the join, or its key package was deleted already (e2ee.md
+  /// §4.3.1) while the server still lists the user in the conversation.
   KeyPackageSpent,
 }
 
@@ -557,6 +564,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
+  /// Whether this device opened the DM and keeps its setup record.
+  pub(crate) fn has_dm_setup(&self, id: ConversationId) -> Result<bool, CoreError> {
+    Ok(self.dm_setup(id)?.is_some())
+  }
+
   fn dm_setup(&self, id: ConversationId) -> Result<Option<DmSetupRecord>, CoreError> {
     records::get_json(&self.store, Table::SyncState, &dm_setup_key(id))
   }
@@ -675,8 +687,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(recipients.len())
   }
 
-  /// Fetches welcomes for this device and joins those groups.
+  /// Fetches welcomes for this device and joins those groups. Spent key packages aren't deleted
+  /// while this runs (a welcome later in the queue may need one, issue #395): a rejoin request for
+  /// an unopenable welcome tops up the key packages, whose cleanup waits for the last page.
   pub async fn sync_welcomes(&mut self) -> Result<(), CoreError> {
+    self.are_welcomes_synced = false;
+    self.is_welcome_cursor_held = false;
     loop {
       let query = ListMlsMessagesQuery {
         maybe_after: self.sync.maybe_welcome_cursor,
@@ -901,15 +917,37 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .groups
       .get_mut(&conversation)
       .ok_or(CoreError::NoGroup(conversation))?;
+    let before = group.members()?;
     let result = group.process_message(&self.provider, message.payload.as_slice(), &directory, &authority);
     if result.is_ok() {
       self.remember_member_keys(conversation, &directory, at_ms)?;
     }
     match result {
-      Ok(GroupEvent::ContentKeys { bundle, .. }) => {
-        bundle.apply_to(self.account.key_bag.ring_mut(convert::conversation(conversation)))?;
-        self.persist_keys()?;
-        self.retry_undecrypted(conversation)?;
+      Ok(GroupEvent::ContentKeys { sender, bundle }) => {
+        self.apply_bundle(conversation, bundle, epoch, sender)?;
+      },
+      Ok(GroupEvent::SealedContentKeys { sender, sealed }) => {
+        if sealed.recipient() != self.own_member() {
+          self.note_sealed_keys_sent(conversation, sender, sealed.recipient())?;
+        } else {
+          match sealed.open(&self.account.device) {
+            // Keys of epochs this device missed; none of them becomes current (e2ee.md §4.6).
+            Ok(bundle) => {
+              let ring = self.account.key_bag.ring_mut(convert::conversation(conversation));
+              let clashing = add_sealed_keys(ring, &bundle);
+              if clashing > 0 {
+                // A member sent other key material under a known ID: never replaces a key, and
+                // doesn't hold up the queue.
+                tracing::warn!(conversation_id = %conversation, mls_message_id = %message.id, clashing, "skipped sealed content keys that clash with known ones");
+              }
+              self.persist_keys()?;
+              self.retry_undecrypted(conversation)?;
+            },
+            Err(error) => {
+              tracing::warn!(conversation_id = %conversation, mls_message_id = %message.id, %error, "rejected content keys sealed to this device");
+            },
+          }
+        }
       },
       Ok(GroupEvent::MembershipChanged(update)) => {
         if update.is_self_removed {
@@ -931,6 +969,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         if let Some(device) = update.maybe_rejoined {
           // Somebody answered that device's request already.
           self.note_device_readded(conversation, device, at_ms)?;
+        }
+        self.note_member_changes(conversation, &before, update.maybe_rejoined)?;
+        if let (Some(rejoined), Some(committer)) = (update.maybe_rejoined, update.maybe_committer) {
+          self.follow_up_rejoin(conversation, rejoined, committer)?;
+        }
+        if update.maybe_change.is_none() && update.maybe_rejoined.is_none() {
+          // Further devices of members (an external join, or a colleague's commit): their key
+          // bag may lack the current key (#178). One member hands it over (e2ee.md §4.6).
+          for added in &update.added {
+            self.queue_current_key_share(conversation, *added)?;
+          }
         }
         let is_from_join_add = matches!(
           update.maybe_change.as_ref().map(MembershipChange::action),
@@ -997,8 +1046,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       None => {},
     }
+    let maybe_current = ring.current().map(ContentKey::id);
     self.persist_group(conversation)?;
-    self.persist_keys()
+    self.persist_keys()?;
+    self.forget_key_history(conversation)?;
+    match maybe_current {
+      Some(current) => self.note_key_epochs(conversation, &[current], 0),
+      None => Ok(()),
+    }
   }
 
   /// Signs and commits a membership change; on an epoch conflict, catches up and tries again.
@@ -1257,7 +1312,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .groups
       .get_mut(&conversation)
       .ok_or(CoreError::NoGroup(conversation))?;
+    let before = group.members()?;
     let update = group.confirm_commit(&self.provider)?;
+    let after = group.members()?;
+    self.note_member_changes(conversation, &before, update.maybe_rejoined)?;
+    if update.maybe_change.is_none() && update.maybe_rejoined.is_none() {
+      // This device's own addition of further devices of members: they wait for a current key
+      // like any (#178); this device takes its turn with the others.
+      for added in after.iter().filter(|member| !before.contains(member)) {
+        self.queue_current_key_share(conversation, *added)?;
+      }
+    }
     self.persist_group(conversation)?;
     self
       .store
@@ -1308,8 +1373,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     match update.maybe_change.as_ref().map(MembershipChange::action) {
       Some(MembershipAction::AddUser {
         history: HistoryShare::Full,
-        ..
-      }) => Ok(Some(SharedKeys::FullHistory)),
+        user_id,
+      }) => Ok(Some(SharedKeys::HistoryFor {
+        user_id: convert::user_from_crypto(*user_id)?,
+        added_epoch: self.group_or_error(conversation)?.epoch(),
+      })),
       Some(MembershipAction::AddUser {
         history: HistoryShare::FromJoin,
         ..
@@ -1324,14 +1392,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         Ok(None)
       },
       // Everybody switches to the new epoch's key, which the device added back derives from its
-      // welcome. Keys of epochs it missed come only from the user's key bag, if another device
-      // of the user had them.
-      None if update.maybe_rejoined.is_some() => {
-        self.rotate_to_epoch_key(conversation)?;
-        Ok(None)
+      // welcome. The keys of the epochs it missed are sealed to it (e2ee.md §4.6).
+      None => match update.maybe_rejoined {
+        Some(device) => {
+          self.rotate_to_epoch_key(conversation)?;
+          Ok(Some(SharedKeys::MissedKeys {
+            user_id: convert::user_from_crypto(device.user_id)?,
+            device_id: convert::device_from_crypto(device.device_id)?,
+          }))
+        },
+        // Further devices of members: the user's key bag carries the history.
+        None => Ok(None),
       },
-      // Further devices of members: the user's key bag carries the history.
-      None => Ok(None),
     }
   }
 
@@ -1353,28 +1425,196 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
-  /// Sends the content keys a new member needs to the group.
+  /// Sends the content keys a new member needs: the current key to the group, the history (if
+  /// shared) sealed to the new member's devices.
   pub(crate) async fn share_history(
     &mut self,
     conversation: ConversationId,
     share: SharedKeys,
   ) -> Result<(), CoreError> {
-    let ring = self.account.key_bag.ring_mut(convert::conversation(conversation));
-    let bundle = match share {
+    // The bundle names a current key the new member takes: never one only the key bag knows.
+    let (bundle, handed) = match share {
+      SharedKeys::HistoryFor { user_id, added_epoch } => {
+        let handed = self
+          .hand_over_key(conversation, true)?
+          .ok_or(CoreError::NoContentKey(conversation))?;
+        let bundle =
+          ContentKeyBundle::epoch_key(convert::conversation(conversation), handed.key().duplicate());
+        self.send_bundle(conversation, &bundle, None).await?;
+        self.adopt_handed_over_key(conversation, &handed)?;
+        return self.send_history(conversation, user_id, added_epoch).await;
+      },
       SharedKeys::FullHistory => {
-        let bundle = ContentKeyBundle::full_history(ring, &mut OsRng);
-        self.persist_keys()?;
-        bundle
+        tracing::info!(conversation_id = %conversation, "a history share of an earlier version sends only the current key");
+        let handed = self
+          .hand_over_key(conversation, true)?
+          .ok_or(CoreError::NoContentKey(conversation))?;
+        (
+          ContentKeyBundle::epoch_key(convert::conversation(conversation), handed.key().duplicate()),
+          handed,
+        )
       },
       SharedKeys::CurrentKey => {
-        let key = ring
-          .current()
-          .ok_or(CoreError::NoContentKey(conversation))?
-          .duplicate();
-        ContentKeyBundle::epoch_key(convert::conversation(conversation), key)
+        let handed = self
+          .hand_over_key(conversation, false)?
+          .ok_or(CoreError::NoContentKey(conversation))?;
+        (
+          ContentKeyBundle::epoch_key(convert::conversation(conversation), handed.key().duplicate()),
+          handed,
+        )
+      },
+      SharedKeys::MissedKeys { user_id, device_id } => {
+        return self.send_missed_keys(conversation, user_id, device_id).await;
       },
     };
-    self.send_bundle(conversation, &bundle).await
+    self.send_bundle(conversation, &bundle, None).await?;
+    self.adopt_handed_over_key(conversation, &handed)
+  }
+
+  /// Seals every key of the conversation to each of `user`'s devices in the group, in bundles of at
+  /// most `max_missed_keys` keys: the history of a member added with it in `added_epoch` (e2ee.md
+  /// §4.3). The other members, who may have joined from the join on, see that keys went to them,
+  /// not which (#403). Nothing goes out unless this device saw the user stay a member since: a
+  /// share still pending after a removal (and maybe a new addition from the join on) is dropped.
+  async fn send_history(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+    added_epoch: u64,
+  ) -> Result<(), CoreError> {
+    if !self.stayed_member_since(conversation, user, added_epoch)? {
+      tracing::info!(conversation_id = %conversation, "dropped a history share: the member left since the addition");
+      return Ok(());
+    }
+    let keys: Vec<ContentKey> = self
+      .account
+      .key_bag
+      .ring(convert::conversation(conversation))
+      .map(|ring| ring.keys().iter().map(ContentKey::duplicate).collect())
+      .unwrap_or_default();
+    if keys.is_empty() {
+      return Ok(());
+    }
+    let directory = self.member_directory(conversation).await?;
+    let crypto_user = convert::user(user);
+    let group = self.group_or_error(conversation)?;
+    let mut recipients = Vec::new();
+    for member in group.members()? {
+      if member.user_id != crypto_user {
+        continue;
+      }
+      match group.verified_member(member, &directory) {
+        Ok(Some(device)) => recipients.push(device),
+        Ok(None) => {},
+        // One device whose leaf doesn't verify doesn't keep the history from the others.
+        Err(error) => {
+          tracing::warn!(conversation_id = %conversation, %error, "history not sealed to a device that doesn't verify");
+        },
+      }
+    }
+    let chunk_len = self.settings.max_missed_keys.max(1);
+    for recipient in &recipients {
+      for chunk in keys.chunks(chunk_len) {
+        let bundle = ContentKeyBundle::without_current(
+          convert::conversation(conversation),
+          chunk.iter().map(ContentKey::duplicate).collect(),
+        );
+        self.send_bundle(conversation, &bundle, Some(recipient)).await?;
+      }
+    }
+    Ok(())
+  }
+
+  /// Sends every key of the ring in one bundle to the whole group, as clients before v1.0.3 shared
+  /// history with a new member. Only for tests of how this version takes such bundles.
+  #[doc(hidden)]
+  pub async fn send_history_to_the_group_as_before(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<(), CoreError> {
+    let ring = self.account.key_bag.ring_mut(convert::conversation(conversation));
+    let bundle = ContentKeyBundle::full_history(ring, &mut OsRng);
+    self.persist_keys()?;
+    self.send_bundle(conversation, &bundle, None).await
+  }
+
+  /// Seals to a device added back the keys of the epochs it was a member in (e2ee.md §4.6). Done
+  /// when there are none or the device is no longer in the group.
+  async fn send_missed_keys(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+    device: DeviceId,
+  ) -> Result<(), CoreError> {
+    let member = GroupMember {
+      user_id: convert::user(user),
+      device_id: convert::device(device),
+    };
+    let bundle = self.missed_keys(conversation, member)?;
+    if bundle.keys().is_empty() {
+      return Ok(());
+    }
+    let directory = self.member_directory(conversation).await?;
+    let Some(recipient) = self
+      .group_or_error(conversation)?
+      .verified_member(member, &directory)?
+    else {
+      return Ok(());
+    };
+    self.send_bundle(conversation, &bundle, Some(&recipient)).await
+  }
+
+  /// Applies a content key bundle a member sent to the whole group in `epoch`: only its current
+  /// key, which every member may have; history goes sealed to the members it is for (#403). The
+  /// key is noted with that epoch (every member then got it). A device that just joined waits for
+  /// a member's current key (#178) and takes the first one sent to it; it also takes the history
+  /// of a plain bundle, which members on earlier versions send a member they add.
+  fn apply_bundle(
+    &mut self,
+    conversation: ConversationId,
+    bundle: ContentKeyBundle,
+    epoch: u64,
+    sender: GroupMember,
+  ) -> Result<(), CoreError> {
+    let is_waiting = super::member_device::is_waiting_for_current_key(&self.store, conversation)?;
+    // History from a plain bundle only as the new member of a member on an earlier version: from
+    // the device whose commit made this device's welcome, in the epoch it joined, while it still
+    // waits for its first current key. Anything else gets only the current key.
+    let is_own_history = is_waiting
+      && super::member_device::welcome_origin(&self.store, conversation)?
+        .is_some_and(|origin| origin.is(sender, epoch));
+    let maybe_current = bundle.current();
+    let keys = plain_bundle_keys(&bundle, is_own_history);
+    if keys.len() < bundle.keys().len() {
+      tracing::info!(conversation_id = %conversation, ignored = bundle.keys().len() - keys.len(), "ignored history keys sent to the whole group");
+    }
+    // Only the current key counts as one every member of the epoch got.
+    let ids: Vec<ContentKeyId> = maybe_current.into_iter().collect();
+    let ring = self.account.key_bag.ring_mut(convert::conversation(conversation));
+    let clashing = keys
+      .into_iter()
+      .filter(|key| ring.insert(key.duplicate()).is_err())
+      .count();
+    if clashing > 0 {
+      tracing::warn!(conversation_id = %conversation, clashing, "skipped content keys that clash with known ones");
+    }
+    if let Some(current) = maybe_current.filter(|current| ring.get(*current).is_some()) {
+      if ring.current().is_none() {
+        ring.set_current(current)?;
+      }
+      if is_waiting {
+        ring.set_current(current)?;
+        self.store.delete(
+          Table::AppliedChanges,
+          &super::member_device::current_key_wait_key(conversation),
+        )?;
+      }
+      // The new device has it now; nobody else needs to send it.
+      self.drop_current_key_shares(conversation)?;
+    }
+    self.persist_keys()?;
+    self.note_key_epochs(conversation, &ids, epoch)?;
+    self.retry_undecrypted(conversation)
   }
 
   /// Pinned identities of the conversation's members, to check the group's devices against.
@@ -1479,17 +1719,26 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     ring.insert(key.duplicate())?;
     ring.set_current(key.id())?;
     self.persist_keys()?;
+    // A device that joined by external commit has the current key now (#178).
+    self.store.delete(
+      Table::AppliedChanges,
+      &super::member_device::current_key_wait_key(conversation),
+    )?;
+    self.drop_current_key_shares(conversation)?;
     // A new device of the user won't join from group information older than this (e2ee.md §4.6).
     let epoch = self.group_or_error(conversation)?.epoch();
+    self.note_key_epochs(conversation, &[key.id()], epoch)?;
     self.update_account_data(|data, _| data.note_group_epoch(conversation, epoch))?;
     Ok(key)
   }
 
   /// Sends content keys to the group as an MLS application message.
-  async fn send_bundle(
+  /// With `maybe_recipient`, sealed to that member device only.
+  pub(crate) async fn send_bundle(
     &mut self,
     conversation: ConversationId,
     bundle: &ContentKeyBundle,
+    maybe_recipient: Option<&VerifiedDevice>,
   ) -> Result<(), CoreError> {
     let attempts = self.settings.max_commit_attempts.max(1);
     for _ in 0..attempts {
@@ -1498,7 +1747,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .groups
         .get_mut(&conversation)
         .ok_or(CoreError::NoGroup(conversation))?;
-      let payload = group.send_content_keys(&self.provider, &self.account.device, bundle)?;
+      let payload = match maybe_recipient {
+        Some(recipient) => {
+          group.send_sealed_content_keys(&self.provider, &self.account.device, recipient, bundle)?
+        },
+        None => group.send_content_keys(&self.provider, &self.account.device, bundle)?,
+      };
       let request = PostMlsMessageRequest {
         device_id: self.account.device_id,
         epoch: group.epoch(),
@@ -1555,11 +1809,25 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .await?
     {
       WelcomeJoin::Joined(joined) => {
-        let (group, directory) = *joined;
+        let (group, directory, welcome_sender) = *joined;
         // The joining epoch's key: the members switched to it if they shared history from the
         // join on; the committer's bundle says which key is current.
         let key = group.epoch_content_key(&self.provider)?;
         let key_id = key.id();
+        let joined_epoch = group.epoch();
+        // What this device had in an earlier membership doesn't count for this one.
+        self.forget_key_history(conversation)?;
+        self.store.delete(
+          Table::AppliedChanges,
+          &super::member_device::current_key_wait_key(conversation),
+        )?;
+        if !is_rejoin {
+          // The key bag's current key may be stale (#178): a member's bundle brings the current
+          // one (the adder's history share, or the hand-over to a further device).
+          let origin = super::member_device::WelcomeOrigin::new(welcome_sender, joined_epoch)?;
+          self.wait_for_current_key(conversation, Some(origin))?;
+        }
+        self.note_key_epochs(conversation, &[key_id], joined_epoch)?;
         let ring = self.account.key_bag.ring_mut(convert::conversation(conversation));
         ring.insert(key)?;
         if is_rejoin {
@@ -1629,8 +1897,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     maybe_founded_for: Option<&[UserId]>,
   ) -> Result<WelcomeJoin, CoreError> {
     // Pinned before the welcome is opened, which takes this device's key package: a network error
-    // here leaves the welcome for the next try.
-    let members = self.api.list_members(conversation).await?;
+    // here leaves the welcome for the next try. A conversation the server doesn't let this user
+    // read (left, removed, or a misrouted welcome) has no group to join.
+    let members = match self.api.list_members(conversation).await {
+      Ok(members) => members,
+      Err(error) if error.is_not_found() || error.is_forbidden() => {
+        return Ok(WelcomeJoin::Rejected(MlsError::UnexpectedMessage(
+          "welcome for a conversation this user isn't in",
+        )));
+      },
+      Err(error) => return Err(error.into()),
+    };
+    let me = self.user_id();
+    let is_listed = members.members.iter().any(|member| member.user.id == me);
     self
       .pin_identities(members.members.iter().map(|member| member.user.id))
       .await?;
@@ -1651,7 +1930,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     ) {
       Ok(staged) => staged,
       // The key package is gone (deleted after it expired or was replaced, e2ee.md §4.3.1): the
-      // members' tree holds this device's leaf, so it asks to be added back.
+      // members' tree holds this device's leaf, so it asks to be added back, unless the user is no
+      // longer in the conversation (a welcome replayed or misrouted after leaving): the members
+      // wouldn't answer, and the server would refuse the request (issue #395).
+      Err(MlsError::NoMatchingKeyPackage) if !is_listed => {
+        tracing::info!(conversation_id = %conversation, "welcome for a spent key package of a conversation this user isn't in; dropped");
+        return Ok(WelcomeJoin::Rejected(MlsError::NoMatchingKeyPackage));
+      },
       Err(MlsError::NoMatchingKeyPackage) => {
         tracing::warn!(conversation_id = %conversation, "welcome for a key package this device no longer holds; asking to be added back");
         return Ok(WelcomeJoin::KeyPackageSpent);
@@ -1683,6 +1968,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         return Ok(WelcomeJoin::Rejected(error));
       }
     }
+    let welcome_sender = match staged.sender() {
+      Ok(sender) => sender,
+      Err(error) => return Ok(WelcomeJoin::Rejected(error)),
+    };
     let group = match staged.complete(&self.provider, &directory) {
       Ok(group) => group,
       Err(error) => return Ok(WelcomeJoin::Rejected(error)),
@@ -1692,7 +1981,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       tracing::info!(conversation_id = %conversation, "joined the DM group that was founded first");
       self.give_up_founded_group(conversation)?;
     }
-    Ok(WelcomeJoin::Joined(Box::new((group, directory))))
+    Ok(WelcomeJoin::Joined(Box::new((group, directory, welcome_sender))))
   }
 
   /// Whether this device's group is already at or past the welcome's epoch.
@@ -1711,6 +2000,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Moves the welcome cursor past `welcome` once it has been joined or definitely rejected. Only
   /// then: a welcome skipped after a network error would be lost, and with it the conversation.
   fn welcome_handled(&mut self, welcome: &MlsMessageResponse) -> Result<(), CoreError> {
+    if self.is_welcome_cursor_held {
+      // Handled out of order (a catch-up's focused conversation): the in-order pass meets it
+      // again and finds it outdated.
+      return Ok(());
+    }
     self.sync.maybe_welcome_cursor = Some(
       self
         .sync
@@ -2013,7 +2307,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(false)
   }
 
-  fn own_member(&self) -> GroupMember {
+  pub(crate) fn own_member(&self) -> GroupMember {
     GroupMember {
       user_id: convert::user(self.account.user_id),
       device_id: convert::device(self.account.device_id),
@@ -2133,11 +2427,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let Some(own) = self.post_commit(conversation, output, &[device]).await? else {
       return Ok(false);
     };
-    if let Some(share) = self.after_own_commit(conversation, &own.update, own.at_ms)? {
-      self.queue_pending(PendingChange::ShareHistory {
-        conversation_id: conversation,
-        share,
-      })?;
+    if let Some(share) = self.after_own_commit(conversation, &own.update, own.at_ms)?
+      && let Err(error) = self.share_history_or_queue(conversation, share).await
+    {
+      // Queued when it may work later; the device is back in the group either way.
+      tracing::warn!(conversation_id = %conversation, %error, "keys for a device added back not sent yet");
     }
     tracing::info!(conversation_id = %conversation, device_id = %device, "added back a device that fell out of the group");
     Ok(true)
@@ -2185,6 +2479,36 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(true)
   }
 
+  /// Drops the re-add records whose cooldown is over by the newest server time this device saw
+  /// (its MLS queue cursors), so they don't pile up (issue #391); [`Self::was_readded_recently`]
+  /// would drop them for the next request anyway. A request older than the re-add (replayed) is
+  /// then answered once more, bounded by the request's own freshness (e2ee.md §4.6).
+  pub(crate) fn prune_readded_records(&mut self) -> Result<(), CoreError> {
+    let Some(server_now_ms) = self
+      .sync
+      .mls_cursors
+      .values()
+      .map(|cursor| cursor.snowflake().unix_millis())
+      .max()
+    else {
+      return Ok(());
+    };
+    let cooldown_ms = i64::try_from(self.settings.rejoin_cooldown.as_millis()).unwrap_or(i64::MAX);
+    let mut pruned = 0_usize;
+    let records =
+      records::list_json_with_prefix::<ReaddedRecord>(&self.store, Table::AppliedChanges, READDED_PREFIX)?;
+    for (key, record) in records {
+      if server_now_ms >= record.at_ms.saturating_add(cooldown_ms) {
+        self.store.delete(Table::AppliedChanges, &key)?;
+        pruned += 1;
+      }
+    }
+    if pruned > 0 {
+      tracing::debug!(pruned, "dropped re-add records past their cooldown");
+    }
+    Ok(())
+  }
+
   pub(crate) fn advance_cursor(
     &mut self,
     conversation: ConversationId,
@@ -2196,6 +2520,31 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     self.persist_sync()
   }
+}
+
+/// The keys of a bundle sent to the whole group that this device takes: its current key only, or
+/// every key when it is this device's own history from a member on an earlier version, which
+/// shares history with a new member that way.
+fn plain_bundle_keys(bundle: &ContentKeyBundle, is_own_history: bool) -> Vec<ContentKey> {
+  bundle
+    .keys()
+    .iter()
+    .filter(|key| is_own_history || bundle.current() == Some(key.id()))
+    .map(ContentKey::duplicate)
+    .collect()
+}
+
+/// Adds the keys sealed to this device; a key whose ID the ring knows with other material is
+/// skipped (counted), never replaced.
+fn add_sealed_keys(
+  ring: &mut teamcraft_crypto::content_key::ContentKeyRing,
+  bundle: &ContentKeyBundle,
+) -> usize {
+  bundle
+    .keys()
+    .iter()
+    .filter(|key| ring.insert(key.duplicate()).is_err())
+    .count()
 }
 
 /// The other people of a group DM: `users` without the user and without duplicates, in order.
@@ -2261,7 +2610,7 @@ pub(crate) fn rejoin_key(conversation: ConversationId) -> String {
 
 /// Where a member notes when another device was last added back to the conversation's group.
 fn readded_key(conversation: ConversationId, device: DeviceId) -> String {
-  format!("readded/{conversation}/{device}")
+  format!("{READDED_PREFIX}{conversation}/{device}")
 }
 
 #[cfg(test)]
@@ -2277,6 +2626,58 @@ mod tests {
   const MY_LAPTOP: i64 = 2;
   const BOB_PHONE: i64 = 3;
   const CAROL_PHONE: i64 = 4;
+
+  mod missed_keys {
+    use teamcraft_crypto::content_key::ContentKeyRing;
+    use teamcraft_crypto::secret::SymmetricKey;
+
+    use super::*;
+
+    #[test]
+    fn a_bundle_sent_to_the_whole_group_gives_members_only_its_current_key() {
+      // Issue #403: a full-history bundle of an earlier version reaches every member.
+      let conversation = teamcraft_crypto::ids::ConversationId::new(5);
+      let mut ring = ContentKeyRing::new(conversation);
+      let old = ring.rotate(&mut OsRng).id();
+      let current = ring.rotate(&mut OsRng).id();
+      let bundle = ContentKeyBundle::full_history(&mut ring, &mut OsRng);
+      let ids = |keys: Vec<ContentKey>| keys.iter().map(ContentKey::id).collect::<Vec<_>>();
+
+      assert_eq!(ids(plain_bundle_keys(&bundle, false)), [current]);
+      assert_eq!(
+        ids(plain_bundle_keys(&bundle, true)),
+        [old, current],
+        "a device that just joined is the new member"
+      );
+      let without_current =
+        ContentKeyBundle::without_current(conversation, vec![ContentKey::generate(&mut OsRng)]);
+      assert!(plain_bundle_keys(&without_current, false).is_empty());
+    }
+
+    #[test]
+    fn a_sealed_key_that_clashes_with_a_known_one_is_skipped_and_the_rest_added() {
+      let conversation = teamcraft_crypto::ids::ConversationId::new(5);
+      let mut ring = ContentKeyRing::new(conversation);
+      let known = ring.rotate(&mut OsRng).duplicate();
+      let clashing = ContentKey::from_parts(known.id(), SymmetricKey::generate(&mut OsRng));
+      let fresh = ContentKey::generate(&mut OsRng);
+      let fresh_id = fresh.id();
+      let bundle = ContentKeyBundle::without_current(conversation, vec![clashing, fresh]);
+
+      assert_eq!(add_sealed_keys(&mut ring, &bundle), 1);
+      assert!(ring.get(fresh_id).is_some(), "the others still go in");
+      assert_eq!(ring.len(), 2);
+      assert_eq!(
+        ring.current().map(ContentKey::id),
+        Some(known.id()),
+        "the current key stays"
+      );
+      // The known key keeps its material: a message under it still opens with the original.
+      let mut original = ContentKeyRing::new(conversation);
+      original.insert(known).unwrap();
+      assert!(ring.insert(original.keys()[0].duplicate()).is_ok());
+    }
+  }
 
   mod dm_welcome {
     use super::*;

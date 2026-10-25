@@ -17,6 +17,7 @@ pub mod files;
 mod gateway;
 mod group_health;
 mod groups;
+mod key_history;
 mod key_packages;
 mod linking;
 mod member_device;
@@ -51,7 +52,10 @@ pub use calls::{CallEventSink, CallKeySigner};
 pub(crate) use catch_up::CATCHING_UP_PREFIX;
 pub use catch_up::{CatchUpFocus, is_catching_up};
 pub use enroll::{EnrollmentOptions, EnrollmentSecret, OrgRecoveryUnlock, PendingEnrollment};
-pub use gateway::{DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart};
+pub use gateway::{
+  DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart, GatewayTiming, HeldFrames, HeldLimits, KeptAlive,
+  keep_alive,
+};
 pub use group_health::{
   RemovalStatus, group_leftovers, is_queue_refused, pending_removals, unconfirmed_removals,
 };
@@ -62,6 +66,7 @@ pub use messaging::FlushReport;
 pub(crate) use messaging::{REMOVED_SENDER_GRACE_MS, decrypt_content};
 #[cfg(feature = "ui")]
 pub(crate) use messaging::{apply_control, bookmarks_key};
+pub(crate) use notifications::registered_push_token;
 pub use notifications::{TYPING_TIMEOUT_MS, TypingState};
 use openmls_rust_crypto::OpenMlsRustCrypto;
 pub use org_recovery::{SealedShare, recovery_request};
@@ -157,6 +162,9 @@ pub struct ClientSettings {
   /// Larger MLS group information is not sent with a commit (it would push the commit over the
   /// server's payload limit); a further device then waits for a member instead.
   pub max_group_info_bytes: usize,
+  /// At most this many content keys are sent to a device added back, the newest first (e2ee.md
+  /// §4.6): bounds the size of that one message.
+  pub max_missed_keys: usize,
   /// Ranks beyond this commit together at `device_add_max_rank × device_add_stagger`: bounds how
   /// long a new device waits when the first-ranked members are away (presence isn't per device).
   pub device_add_max_rank: u32,
@@ -206,8 +214,10 @@ pub struct Client<A, S> {
   /// When this device last handled a further device's request to be added, per conversation and
   /// device: repeats within `rejoin_retry` cost no requests (issue #187).
   device_add_requests_handled: HashMap<(ConversationId, teamcraft_proto::DeviceId), i64>,
-  /// Whether this session read all welcomes once: only then may spent key packages go, so a
-  /// welcome that waited for one is opened first (e2ee.md §4.3.1).
+  /// Whether all welcomes were read since the last reset: only then may spent key packages go, so a
+  /// welcome that waited for one is opened first (e2ee.md §4.3.1). Reset when a gateway connection
+  /// starts (fresh or resumed), when a full sync starts and when a welcome sync starts; set when a
+  /// welcome sync read the last page.
   are_welcomes_synced: bool,
   /// When people waiting for a first device were last checked after a full sync
   /// ([`Client::recheck_waiting_additions`]).
@@ -220,6 +230,11 @@ pub struct Client<A, S> {
   maybe_replay_left: Option<u64>,
   /// The conversation the user looks at; a catch-up takes it first (issue #247).
   catch_up_focus: CatchUpFocus,
+  /// Set while a catch-up joins the focused conversation's welcomes ahead of the others: the
+  /// welcome cursor then stays where it is, so the welcomes before them are still read in order.
+  /// Cleared right after each such join; a catch-up future dropped in between leaves it set until
+  /// the next catch-up, which clears it before anything else (only welcomes are affected).
+  is_welcome_cursor_held: bool,
 }
 
 impl Default for ClientSettings {
@@ -245,6 +260,7 @@ impl Default for ClientSettings {
       max_pending_revocation_checks: 16,
       removal_watch: std::time::Duration::from_secs(30 * 24 * 60 * 60),
       max_group_info_bytes: 256 * 1024,
+      max_missed_keys: 512,
       max_upload_bytes: 100 * 1024 * 1024,
       maybe_download_dir: None,
       maybe_push_gateway_url: None,
@@ -302,6 +318,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       are_welcomes_synced: false,
       maybe_waiting_checked_at_ms: None,
       catch_up_focus: CatchUpFocus::default(),
+      is_welcome_cursor_held: false,
     };
     // A catch-up the app was closed during left its marks; the next one sets them again.
     catch_up::clear_marks(&client.store)?;
@@ -351,6 +368,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// The epoch of the conversation's MLS group on this device; `None` without a group.
   pub fn mls_epoch(&mut self, conversation: ConversationId) -> Result<Option<u64>, CoreError> {
     Ok(self.group(conversation)?.map(|group| group.epoch()))
+  }
+
+  /// Whether this device holds the content key a message names (`content_key_id`). For tests.
+  #[doc(hidden)]
+  pub fn has_content_key(&self, conversation: ConversationId, content_key_id: &[u8]) -> bool {
+    let Ok(id) = <[u8; 16]>::try_from(content_key_id) else {
+      return false;
+    };
+    self
+      .account
+      .key_bag
+      .ring(convert::conversation(conversation))
+      .is_some_and(|ring| {
+        ring
+          .get(teamcraft_crypto::content_key::ContentKeyId::from_bytes(id))
+          .is_some()
+      })
   }
 
   /// Users whose identity key changed since it was pinned (e2ee.md §1: "security key changed").
@@ -436,6 +470,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self
       .store
       .delete(Table::AppliedChanges, &groups::rejoin_key(conversation))?;
+    self
+      .store
+      .delete(Table::AppliedChanges, &key_history::key_history_key(conversation))?;
+    self.store.delete(
+      Table::AppliedChanges,
+      &member_device::current_key_wait_key(conversation),
+    )?;
     self
       .store
       .delete(Table::AppliedChanges, &group_health::leftovers_key(conversation))?;

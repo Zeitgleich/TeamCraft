@@ -27,7 +27,7 @@ pub struct OsProbe {
   buses: std::sync::Arc<crate::freedesktop::Buses>,
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn os_attention(probe: State<'_, OsProbe>) -> Result<OsAttention, ()> {
   Ok(probe.read().await)
 }

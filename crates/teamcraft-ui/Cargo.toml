@@ -33,7 +33,7 @@ web-sys = { version = "0.3", features = [
   "BroadcastChannel", "MouseEvent", "StorageManager", "ServiceWorkerState", "VisibilityState", "NotificationOptions",
   "PointerEvent", "WheelEvent", "HtmlAnchorElement", "HtmlImageElement", "AddEventListenerOptions",
   "HtmlCanvasElement", "CanvasRenderingContext2d", "HtmlMediaElement", "HtmlVideoElement", "Selection",
-  "VisualViewport", "TouchEvent", "TouchList", "Touch",
+  "VisualViewport", "MutationObserver", "MutationObserverInit", "Performance", "TouchEvent", "TouchList", "Touch",
   "HtmlDocument", "DomParser", "SupportedType", "Range", "Text", "CharacterData", "InputEvent", "TreeWalker",
 ] }
 # Fluent: the i18n format mandated by the project rules (English source + translations).

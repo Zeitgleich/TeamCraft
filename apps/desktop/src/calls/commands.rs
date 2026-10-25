@@ -13,13 +13,13 @@ use teamcraft_proto::MediaStreamId;
 use super::{CallHost, CoreJoinTickets, push_to_talk, video};
 use crate::core::commands::{CommandError, CoreHost};
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn call_snapshot(calls: State<'_, Arc<CallHost>>) -> CallSnapshot {
   calls.snapshot()
 }
 
 /// Lists microphones and speakers again; the snapshot keeps the result.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn call_media_devices(calls: State<'_, Arc<CallHost>>) -> Result<MediaDevices, CommandError> {
   Ok(calls.refresh_devices().await?)
 }
@@ -27,7 +27,7 @@ pub async fn call_media_devices(calls: State<'_, Arc<CallHost>>) -> Result<Media
 /// Streams another device's video track to the webview through `frames`, one binary message
 /// per frame (format: `calls::video::video_message`): H.264 for WebCodecs, or with `prefer_jpeg`
 /// JPEG images for webviews without it.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn call_watch_video(
   calls: State<'_, Arc<CallHost>>,
   stream_id: MediaStreamId,
@@ -50,7 +50,7 @@ pub async fn call_watch_video(
   Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn call_unwatch_video(
   calls: State<'_, Arc<CallHost>>,
   stream_id: MediaStreamId,
@@ -134,7 +134,7 @@ async fn org_backgrounds(core: &CoreHost) -> OrgBackgrounds {
 }
 
 /// A small JPEG of a preset or one of the user's own backgrounds, for the picker.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn call_background_preview(
   core: State<'_, CoreHost>,
   effect: UiBackgroundEffect,
@@ -155,7 +155,7 @@ pub async fn call_background_preview(
   Ok(tauri::ipc::Response::new(jpeg))
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn call_action(
   app: AppHandle,
   core: State<'_, CoreHost>,

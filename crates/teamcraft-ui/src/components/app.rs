@@ -39,7 +39,7 @@ use crate::components::meetings_view::{MeetingsView, ScheduleMeetingDialog};
 use crate::components::members_panel::MembersPanel;
 use crate::components::message_actions::{EditHistoryDialog, ForwardDialog, PinsPanel, SavedView};
 use crate::components::offline_banner::OfflineBanner;
-use crate::components::profile_views::{EditProfileDialog, UserProfileDialog};
+use crate::components::profile_views::UserProfileDialog;
 use crate::components::quick_switcher::QuickSwitcher;
 use crate::components::rail::SpaceRail;
 use crate::components::search_view::SearchView;
@@ -74,6 +74,7 @@ use crate::reactive::use_interval;
 use crate::sections::badge_count;
 use crate::settings::{Settings, Theme};
 use crate::state::{AppState, MainView, Overlay, RailEntry, SidePanel, ToastTone};
+use crate::toast_motion::{Swipe, use_flip_stack};
 use crate::toast_timer::Hold;
 use crate::viewport::{CompactDepth, CompactPane, PaneStep};
 
@@ -86,6 +87,7 @@ pub fn App() -> impl IntoView {
   apply_theme(settings.theme);
   apply_density(settings);
   apply_zoom(settings);
+  apply_text_size(settings);
   apply_language_attribute();
   crate::viewport::sync_theme_color(move || settings.theme.track());
   crate::brand::provide_brand(settings);
@@ -197,6 +199,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   on_cleanup(move || listener.remove());
   let banners = NodeRef::<leptos::html::Div>::new();
   track_banner_height(banners);
+  let toast_stack = NodeRef::<leptos::html::Div>::new();
+  use_flip_stack(toast_stack);
   let app_body = NodeRef::<leptos::html::Div>::new();
   let edge_swipe = EdgeSwipeBack::new(state, app_body);
   // Which way the phone layout moved last, for the direction the panes slide in (#368). After an
@@ -308,6 +312,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       <div
         class="toasts"
         role="status"
+        node_ref=toast_stack
         on:pointerenter=move |_| state.hold_toasts(Hold::Pointer, true)
         on:pointerleave=move |_| state.hold_toasts(Hold::Pointer, false)
         on:focusin=move |_| state.hold_toasts(Hold::Focus, true)
@@ -322,9 +327,18 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
             let id = toast.id;
             let node = NodeRef::<leptos::html::Div>::new();
             use_leave_ghost(node);
+            let swipe = Swipe::new();
             let is_error = matches!(toast.tone, ToastTone::Error { .. });
             view! {
-              <div class=if is_error { "toast toast-error" } else { "toast" } role=is_error.then_some("alert") node_ref=node>
+              <div
+                class=if is_error { "toast toast-error" } else { "toast" }
+                role=is_error.then_some("alert")
+                node_ref=node
+                on:pointerdown=move |ev| swipe.start(&ev)
+                on:pointermove=move |ev| swipe.track(&ev)
+                on:pointerup=move |ev| swipe.end(&ev, move || state.dismiss_toast(id))
+                on:pointercancel=move |ev| swipe.cancel(&ev)
+              >
                 <div class="toast-body">
                   <span>{toast.text}</span>
                   {match toast.tone {
@@ -373,7 +387,6 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::SpaceSettings(space) => view! { <SpaceSettingsDialog space=space /> }.into_any(),
         Overlay::EditHistory(conversation, message) => view! { <EditHistoryDialog conversation=conversation message=message /> }.into_any(),
         Overlay::Bookmarks(conversation) => view! { <BookmarksDialog conversation=conversation /> }.into_any(),
-        Overlay::EditProfile => view! { <EditProfileDialog /> }.into_any(),
         Overlay::UserProfile(user) => view! { <UserProfileDialog user=user /> }.into_any(),
         Overlay::CallsUnavailable => view! { <CallsUnavailableDialog /> }.into_any(),
         Overlay::None | Overlay::StatusMenu => ().into_any(),
@@ -666,6 +679,26 @@ fn apply_zoom(settings: Settings) {
   Effect::new(move |_| {
     let percent = settings.prefs.get().display.zoom.percent();
     leptos::task::spawn_local(async move { tauri::set_zoom(percent).await });
+  });
+}
+
+/// Every platform: the text size setting sets `--text-scale` on the root (CSSOM, the CSP blocks
+/// style attributes); the stylesheet's rem type scale follows it.
+fn apply_text_size(settings: Settings) {
+  // Only a change of the text size touches the root, not every other preference change.
+  let text_size = Memo::new(move |_| settings.prefs.with(|prefs| prefs.display.text_size));
+  Effect::new(move |_| {
+    let scale = text_size.get().css_scale();
+    let Some(root) = web_sys::window()
+      .and_then(|window| window.document())
+      .and_then(|doc| doc.document_element())
+      .and_then(|root| root.dyn_into::<web_sys::HtmlElement>().ok())
+    else {
+      return;
+    };
+    if root.style().set_property("--text-scale", &scale).is_err() {
+      tracing::debug!("could not apply the text size");
+    }
   });
 }
 

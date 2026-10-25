@@ -702,7 +702,7 @@ fn RowSlot(
       {move || match data.get() {
         Some((message, maybe_prev)) => {
           let row_motion = motion
-            .try_update_value(|motion| shown.with_value(|shown| motion.row_motion(shown.as_ref(), &message)))
+            .try_update_value(|motion| shown.with_value(|shown| motion.row_motion(shown.as_ref(), &message, crate::motion::now())))
             .unwrap_or_default();
           shown.set_value(Some(Shown::of(&message)));
           view! { <MessageRow message=message maybe_prev=maybe_prev motion=row_motion /> }.into_any()

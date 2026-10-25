@@ -278,6 +278,27 @@ async fn an_expired_token_keeps_queued_messages_pending() {
   assert_eq!(alice.client.flush_outbox().await.unwrap().sent, 2);
 }
 
+/// Hotel Wi-Fi before signing in: the portal's login page answers instead of the server (issue
+/// #157). Queued messages wait for the network instead of failing as unreadable answers.
+#[tokio::test]
+async fn a_captive_portal_keeps_queued_messages_pending() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let channel = alice
+    .client
+    .create_channel(alice.space().await, "on the train")
+    .await
+    .unwrap();
+
+  server.set_behind_captive_portal(alice.client.user_id(), true);
+  let _ = alice.client.send_text(channel, None, "boarding now").await;
+  let report = alice.client.flush_outbox().await.unwrap();
+  assert_eq!((report.pending, report.failed), (1, 0));
+
+  server.set_behind_captive_portal(alice.client.user_id(), false);
+  assert_eq!(alice.client.flush_outbox().await.unwrap().sent, 1);
+}
+
 #[tokio::test]
 async fn gateway_resumes_and_falls_back_to_full_sync() {
   let server = FakeServer::new();

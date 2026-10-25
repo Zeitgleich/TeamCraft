@@ -70,7 +70,7 @@ impl Authenticator for TauriAuth {
       js_sys::Reflect::set(&args, &"login".into(), &login.into()).map_err(invalid)?;
       js_sys::Reflect::set(&args, &"password".into(), &password.into()).map_err(invalid)?;
       if let Some(code) = maybe_totp {
-        js_sys::Reflect::set(&args, &"totpCode".into(), &code.into()).map_err(invalid)?;
+        js_sys::Reflect::set(&args, &"totp_code".into(), &code.into()).map_err(invalid)?;
       }
       invoke("auth_login_local", args.into()).await.map(|_| ())
     })
@@ -136,8 +136,8 @@ impl Authenticator for TauriAuth {
       js_sys::Reflect::set(&args, &"path".into(), &path.into()).map_err(invalid)?;
       if let Some(body) = maybe_body {
         let encoded = base64::engine::general_purpose::STANDARD.encode(&body.bytes);
-        js_sys::Reflect::set(&args, &"contentType".into(), &body.content_type.into()).map_err(invalid)?;
-        js_sys::Reflect::set(&args, &"bodyBase64".into(), &encoded.into()).map_err(invalid)?;
+        js_sys::Reflect::set(&args, &"content_type".into(), &body.content_type.into()).map_err(invalid)?;
+        js_sys::Reflect::set(&args, &"body_base64".into(), &encoded.into()).map_err(invalid)?;
       }
       let value = invoke("api_request_bytes", args.into()).await?;
       let response: ApiBytesPayload = serde_wasm_json(&value)?;
@@ -329,14 +329,19 @@ async fn server_call<T: for<'de> Deserialize<'de>>(
 /// registration where there is one, so buttons work and a click reaches the worker). A newer one with
 /// the same tag replaces it. Failures are logged, never shown.
 pub async fn show_notification(notification: &OsNotification) {
-  if !is_available() {
-    show_page_notification(notification).await;
-    return;
-  }
-  let args = serde_json::json!({ "notification": notification });
-  if let Err(error) = call::<()>("notify_user", &args).await {
+  if let Err(error) = try_show_notification(notification).await {
     tracing::debug!(%error, "could not show a notification");
   }
+}
+
+/// [`show_notification`] for a caller that tells the user what happened (the test notification in
+/// the settings): why it could not be shown. The system may still hide a shown one (focus modes).
+pub async fn try_show_notification(notification: &OsNotification) -> Result<(), String> {
+  if !is_available() {
+    return show_page_notification(notification).await;
+  }
+  let args = serde_json::json!({ "notification": notification });
+  call::<()>("notify_user", &args).await
 }
 
 /// Removes the notifications of conversations that were read (here or on another device).
@@ -695,26 +700,24 @@ thread_local! {
 /// service worker); without permission nothing is shown. Through the worker's registration when
 /// there is one: only those notifications have buttons, and their clicks reach the worker, which
 /// hands them back to an open page (`teamcraft_core::web_push`). Otherwise the page's own.
-async fn show_page_notification(notification: &OsNotification) {
+async fn show_page_notification(notification: &OsNotification) -> Result<(), String> {
   if notification_permission().as_deref() != Some("granted") {
-    return;
+    return Err("notifications are not allowed in this browser".to_owned());
   }
   let options = page_notification_options(notification);
   if show_through_worker(&notification.title, &options).await {
-    return;
+    return Ok(());
   }
   let Some(constructor) = notification_constructor() else {
-    return;
+    return Err("this browser has no notifications".to_owned());
   };
   let args = js_sys::Array::of2(&JsValue::from_str(&notification.title), &options);
-  match js_sys::Reflect::construct(&constructor, &args) {
-    Ok(shown) => {
-      let tag = notification.tag.as_str().to_owned();
-      // async-ok: a thread-local, not a signal.
-      PAGE_NOTIFICATIONS.with(|page| page.borrow_mut().insert(tag, shown));
-    },
-    Err(_) => tracing::debug!("could not show a notification"),
-  }
+  let shown = js_sys::Reflect::construct(&constructor, &args)
+    .map_err(|_| "the browser refused the notification".to_owned())?;
+  let tag = notification.tag.as_str().to_owned();
+  // async-ok: a thread-local, not a signal.
+  PAGE_NOTIFICATIONS.with(|page| page.borrow_mut().insert(tag, shown));
+  Ok(())
 }
 
 /// The options of `showNotification` / `new Notification`: body, tag, buttons, and the data the

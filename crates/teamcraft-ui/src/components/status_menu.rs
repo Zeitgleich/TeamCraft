@@ -16,7 +16,7 @@ use crate::components::sheet::MenuSurface;
 use crate::i18n::use_i18n;
 use crate::model::{CustomStatus, PresenceStatus, StatusExpiry, TimestampMs};
 use crate::session::use_session;
-use crate::state::{Overlay, use_app_state};
+use crate::state::{Overlay, SettingsTab, use_app_state};
 
 /// "Until tomorrow morning" means 08:00 local time.
 const MORNING_MINUTE: u16 = 8 * 60;
@@ -239,7 +239,7 @@ pub fn StatusMenu() -> impl IntoView {
         </button>
       </Show>
       <Show when=|| crate::profiles::use_profiles().is_some() fallback=|| ()>
-        <button class="menu-item" role="menuitem" tabindex="-1" on:click=move |_| state.overlay.set(Overlay::EditProfile)>
+        <button class="menu-item" role="menuitem" tabindex="-1" on:click=move |_| state.open_settings_at(SettingsTab::Account)>
           <Icon name=IconName::User />
           <span class="menu-label">{move || i18n.t("profile-edit-title")}</span>
         </button>

@@ -157,3 +157,150 @@ async fn unified_push_registrations_are_checked_like_web_push() {
   }
   app.stop().await;
 }
+
+mod subscription_change {
+  use base64::Engine;
+  use base64::engine::general_purpose::STANDARD;
+  use reqwest::Method;
+  use teamcraft_crypto::ids::DeviceId as DeviceIdCrypto;
+  use teamcraft_crypto::push::subscription_change_mac;
+  use teamcraft_crypto::secret::SymmetricKey;
+  use teamcraft_server::testing::TestUser;
+
+  use super::*;
+
+  /// The same browser keys under a new endpoint, as after a rotation.
+  const ROTATED: &str = r#"{"endpoint":"https://push.example.com/send/rotated","keys":{"p256dh":"BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4","auth":"BTBZMqHH6r4Tts7J_aSIgg"}}"#;
+  const PATH: &str = "/push/web/subscription-change";
+
+  #[tokio::test]
+  async fn the_service_worker_replaces_the_subscription_without_a_token() {
+    let app = app!();
+    let carol = member("carol");
+    let device = register_web_push(&app, &carol).await;
+    let request = change(&device, SUBSCRIPTION, ROTATED, &push_key());
+    let reply = app.call(Method::POST, None, PATH, Some(request.clone())).await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+    assert_eq!(registered_token(&app, &device).await, ROTATED);
+    // A retry of the same request is fine; it changes nothing.
+    let retry = app.call(Method::POST, None, PATH, Some(request)).await;
+    assert_eq!(retry.status, StatusCode::NO_CONTENT, "{}", retry.body);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_proof_under_another_key_or_for_another_device_is_refused_alike() {
+    let app = app!();
+    let carol = member("carol");
+    let device = register_web_push(&app, &carol).await;
+    let wrong_key = SymmetricKey::from_bytes([9; 32]);
+    let mut tampered = change(&device, SUBSCRIPTION, ROTATED, &push_key());
+    tampered["token"] = json!(ROTATED.replace("rotated", "attacker"));
+    for request in [
+      change(&device, SUBSCRIPTION, ROTATED, &wrong_key),
+      change("123456789", SUBSCRIPTION, ROTATED, &push_key()),
+      tampered,
+    ] {
+      let reply = app.call(Method::POST, None, PATH, Some(request)).await;
+      assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{}", reply.body);
+    }
+    assert_eq!(registered_token(&app, &device).await, SUBSCRIPTION);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_change_from_a_subscription_that_was_replaced_meanwhile_conflicts() {
+    let app = app!();
+    let carol = member("carol");
+    let device = register_web_push(&app, &carol).await;
+    let first = change(&device, SUBSCRIPTION, ROTATED, &push_key());
+    app.call(Method::POST, None, PATH, Some(first)).await;
+    // A second worker run (or a replay) that still names the first subscription as current.
+    let third = ROTATED.replace("rotated", "third");
+    let stale = change(&device, SUBSCRIPTION, &third, &push_key());
+    let reply = app.call(Method::POST, None, PATH, Some(stale)).await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    assert_eq!(registered_token(&app, &device).await, ROTATED);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn only_web_push_registrations_and_valid_subscriptions_change() {
+    let app = app!();
+    let carol = member("carol");
+    let device = register_device(&app, &carol).await;
+    app
+      .put(
+        &carol,
+        &format!("/devices/{device}/push"),
+        json!({"provider": "fcm", "token": SUBSCRIPTION, "push_key": PUSH_KEY}),
+      )
+      .await;
+    let request = change(&device, SUBSCRIPTION, ROTATED, &push_key());
+    let reply = app.call(Method::POST, None, PATH, Some(request)).await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{}", reply.body);
+
+    let device = register_web_push(&app, &carol).await;
+    let private = r#"{"endpoint":"https://169.254.169.254/x","keys":{"p256dh":"BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4","auth":"BTBZMqHH6r4Tts7J_aSIgg"}}"#;
+    let request = change(&device, SUBSCRIPTION, private, &push_key());
+    let reply = app.call(Method::POST, None, PATH, Some(request)).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn empty_or_oversized_subscriptions_are_rejected_before_any_lookup() {
+    let app = app!();
+    let carol = member("carol");
+    let device = register_web_push(&app, &carol).await;
+    let huge = "x".repeat(5000);
+    for (previous, token) in [
+      ("", ROTATED),
+      (SUBSCRIPTION, ""),
+      (huge.as_str(), ROTATED),
+      (SUBSCRIPTION, huge.as_str()),
+    ] {
+      let request = change(&device, previous, token, &push_key());
+      let reply = app.call(Method::POST, None, PATH, Some(request)).await;
+      assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    }
+    assert_eq!(registered_token(&app, &device).await, SUBSCRIPTION);
+    app.stop().await;
+  }
+
+  async fn register_web_push(app: &TestApp, user: &TestUser) -> String {
+    let device = register_device(app, user).await;
+    let reply = app
+      .put(
+        user,
+        &format!("/devices/{device}/push"),
+        json!({"provider": "webpush", "token": SUBSCRIPTION, "push_key": PUSH_KEY}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+    device
+  }
+
+  fn change(device: &str, previous: &str, token: &str, key: &SymmetricKey) -> serde_json::Value {
+    let id = DeviceIdCrypto::new(device.parse().unwrap());
+    let mac = subscription_change_mac(key, id, previous, token);
+    json!({
+      "device_id": device,
+      "previous_token": previous,
+      "token": token,
+      "mac": STANDARD.encode(mac),
+    })
+  }
+
+  fn push_key() -> SymmetricKey {
+    SymmetricKey::from_slice(&STANDARD.decode(PUSH_KEY).unwrap()).unwrap()
+  }
+
+  async fn registered_token(app: &TestApp, device: &str) -> String {
+    teamcraft_db::testing::sqlx::query_scalar::<_, String>("SELECT push_token FROM devices WHERE id = $1")
+      .bind(device.parse::<i64>().unwrap())
+      .fetch_one(app.sql_pool())
+      .await
+      .unwrap()
+  }
+}

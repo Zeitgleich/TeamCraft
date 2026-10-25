@@ -15,7 +15,7 @@ pub struct RingtoneState {
   maybe_player: Mutex<Option<RingtonePlayer>>,
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn set_ringtone(
   ringtone: State<'_, RingtoneState>,
   probe: State<'_, crate::attention::OsProbe>,

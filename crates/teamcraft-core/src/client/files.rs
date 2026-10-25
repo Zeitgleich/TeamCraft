@@ -571,9 +571,10 @@ fn slot_failure(file: &mut PendingFile, error: ApiError) -> UploadError {
   UploadError::Retry(CoreError::Api(error))
 }
 
-/// The request never got an answer: this device is offline or the server is out of reach.
+/// The request never got an answer: this device is offline, the server is out of reach, or a
+/// captive portal or proxy answered instead.
 fn is_unreachable(error: &ApiError) -> bool {
-  matches!(error, ApiError::Network(_))
+  error.is_unreachable()
 }
 
 enum UploadError {

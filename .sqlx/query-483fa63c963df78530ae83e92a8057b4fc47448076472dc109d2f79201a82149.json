@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT c.id, c.space_id, c.kind, c.name, c.topic, c.description, c.visibility, c.history_policy,\n                c.category_id, c.archived_at IS NOT NULL AS \"is_archived!\", c.is_integration, c.member_denied, c.guest_denied,\n                m.role AS \"role?\", m.notification_level AS \"notification_level?\",\n                m.is_favorite AS \"is_favorite?\", m.last_read_message_id, m.muted_until,\n                NOT m.notification_overridden AS \"is_inherited?\",\n                tc_snowflake_floor(m.joined_at) AS \"joined_floor?\"\n         FROM conversations c\n         LEFT JOIN memberships m ON m.conversation_id = c.id AND m.user_id = $1\n         WHERE ($2::bigint IS NULL OR c.id = $2)\n           AND ($3::bigint IS NULL OR c.space_id = $3)\n           AND (NOT $4 OR m.user_id IS NOT NULL)\n           AND (NOT $5 OR (c.kind = 'channel' AND c.visibility = 'public' AND c.archived_at IS NULL\n                           AND m.user_id IS NULL))\n         ORDER BY c.id",
+  "query": "SELECT c.id, c.space_id, c.kind, c.name, c.topic, c.description, c.visibility, c.history_policy,\n                c.category_id, c.archived_at IS NOT NULL AS \"is_archived!\", c.is_integration, c.member_denied, c.guest_denied,\n                c.image_key, c.image_version, c.image_size_bytes,\n                m.role AS \"role?\", m.notification_level AS \"notification_level?\",\n                m.is_favorite AS \"is_favorite?\", m.last_read_message_id, m.muted_until,\n                NOT m.notification_overridden AS \"is_inherited?\",\n                tc_snowflake_floor(m.joined_at) AS \"joined_floor?\"\n         FROM conversations c\n         LEFT JOIN memberships m ON m.conversation_id = c.id AND m.user_id = $1\n         WHERE ($2::bigint IS NULL OR c.id = $2)\n           AND ($3::bigint IS NULL OR c.space_id = $3)\n           AND (NOT $4 OR m.user_id IS NOT NULL)\n           AND (NOT $5 OR (c.kind = 'channel' AND c.visibility = 'public' AND c.archived_at IS NULL\n                           AND m.user_id IS NULL))\n         ORDER BY c.id",
   "describe": {
     "columns": [
       {
@@ -143,6 +143,39 @@
       },
       {
         "ordinal": 13,
+        "name": "image_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "image_key"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "image_version",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "image_version"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "image_size_bytes",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "image_size_bytes"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
         "name": "role?",
         "type_info": "Text",
         "origin": {
@@ -153,7 +186,7 @@
         }
       },
       {
-        "ordinal": 14,
+        "ordinal": 17,
         "name": "notification_level?",
         "type_info": "Text",
         "origin": {
@@ -164,7 +197,7 @@
         }
       },
       {
-        "ordinal": 15,
+        "ordinal": 18,
         "name": "is_favorite?",
         "type_info": "Bool",
         "origin": {
@@ -175,7 +208,7 @@
         }
       },
       {
-        "ordinal": 16,
+        "ordinal": 19,
         "name": "last_read_message_id",
         "type_info": "Int8",
         "origin": {
@@ -186,7 +219,7 @@
         }
       },
       {
-        "ordinal": 17,
+        "ordinal": 20,
         "name": "muted_until",
         "type_info": "Timestamptz",
         "origin": {
@@ -197,13 +230,13 @@
         }
       },
       {
-        "ordinal": 18,
+        "ordinal": 21,
         "name": "is_inherited?",
         "type_info": "Bool",
         "origin": "Expression"
       },
       {
-        "ordinal": 19,
+        "ordinal": 22,
         "name": "joined_floor?",
         "type_info": "Int8",
         "origin": "Expression"
@@ -232,6 +265,9 @@
       false,
       false,
       false,
+      true,
+      true,
+      true,
       false,
       false,
       false,
@@ -241,5 +277,5 @@
       null
     ]
   },
-  "hash": "98869f0fd8a9f6332d9b263a1ee521cf4d6f3f3ee85f752f4118f1028322b943"
+  "hash": "483fa63c963df78530ae83e92a8057b4fc47448076472dc109d2f79201a82149"
 }

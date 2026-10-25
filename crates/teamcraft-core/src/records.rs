@@ -173,6 +173,16 @@ pub fn save_key_bag(store: &impl LocalStore, account: &Account) -> Result<(), Co
   Ok(())
 }
 
+/// This device's ID alone, for helpers that run next to the app (the service worker) and need no
+/// keys: only the ID field of the account record is read.
+pub fn stored_device_id(store: &impl LocalStore) -> Result<Option<DeviceId>, CoreError> {
+  #[derive(Deserialize)]
+  struct DeviceOnly {
+    device_id: DeviceId,
+  }
+  Ok(get_json::<DeviceOnly>(store, Table::Account, ACCOUNT_KEY)?.map(|record| record.device_id))
+}
+
 pub fn load_account(store: &impl LocalStore) -> Result<Option<Account>, CoreError> {
   let Some(record) = get_json::<AccountRecord>(store, Table::Account, ACCOUNT_KEY)? else {
     return Ok(None);
@@ -391,6 +401,16 @@ pub fn save_mls_storage(store: &impl LocalStore, provider: &OpenMlsRustCrypto) -
   }
   store.put(Table::MlsStorage, MLS_STORAGE_KEY, &encoded)?;
   Ok(())
+}
+
+/// Roughly how many bytes [`save_mls_storage`] writes (diagnostics; 0 if the lock is poisoned).
+pub fn mls_storage_len(provider: &OpenMlsRustCrypto) -> usize {
+  provider.storage().values.read().map_or(0, |values| {
+    values
+      .iter()
+      .map(|(key, value)| key.len().saturating_add(value.len()))
+      .sum()
+  })
 }
 
 pub fn load_mls_storage(store: &impl LocalStore) -> Result<OpenMlsRustCrypto, CoreError> {

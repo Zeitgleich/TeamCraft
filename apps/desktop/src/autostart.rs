@@ -12,12 +12,12 @@ pub struct AutostartError {
 }
 
 /// Whether the app starts when the user logs in.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn autostart_get(app: AppHandle) -> Result<bool, AutostartError> {
   platform::is_enabled(&app)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn autostart_set(app: AppHandle, enabled: bool) -> Result<(), AutostartError> {
   platform::set_enabled(&app, enabled)
 }
