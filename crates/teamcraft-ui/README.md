@@ -5,7 +5,7 @@ signs in to a server. For UI work without a server there is a **mock backend** w
 data behind the development-only `demo` feature:
 
 ```sh
-(cd crates/teamcraft-ui && trunk serve --features demo)   # then open /?backend=mock
+(cd crates/teamcraft-ui && TEAMCRAFT_WEB_FEATURES=demo trunk serve)   # then open /?backend=mock
 ```
 
 The demo data never ships: an optimized (`--release`) build with `demo` fails to compile, release builds
@@ -59,7 +59,7 @@ contains demo fixtures.
 | Phone (390×844), dark           | ![Phone dark](docs/screenshots/mobile-dark.png)                |
 | Phone in landscape, light / dark | ![Landscape light](docs/screenshots/mobile-landscape-light.png) ![Landscape dark](docs/screenshots/mobile-landscape-dark.png) |
 
-Screenshots are produced with Playwright against `trunk build --features demo` (English, 1360×840); the
+Screenshots are produced with Playwright against `TEAMCRAFT_WEB_FEATURES=demo trunk build` (English, 1360×840); the
 tour also walks every screen in German and fails on missing translation keys.
 
 The 50,000-line `#app-logs` channel (see `docs/screenshots/log-channel-dark.png`) keeps scrolling at
@@ -248,7 +248,9 @@ not hold (sign-in rules, guest domains, DM scope) are shown disabled.
 
 `trunk build --release` produces the web client; point the server's `[web] static_dir` at the output
 and it serves the app with its Content-Security-Policy (no inline scripts or styles). A Trunk hook
-(`scripts/externalize-init.sh`) moves the loader script into `init.js`, and all dynamic styles are set
+(`scripts/build-app.sh`) builds the app's wasm, splits it into chunks that load when their part of the
+app is first used (`crates/teamcraft-web-bundle`, `src/areas.rs`; Trunk can't split wasm) and starts it
+from `init.js`; the development demo is `TEAMCRAFT_WEB_FEATURES=demo trunk serve`. All dynamic styles are set
 through the CSSOM (`style:prop=`), so the default policy needs no `unsafe-inline`. `sw.js` is copied to
 the root and registered in the browser (not in the desktop shell); it wakes the app for pushes and, until
 the worker can open sealed payloads, shows a generic notification.

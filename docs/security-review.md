@@ -744,7 +744,7 @@ with full history. The same applies to `api_request` with the user's bearer toke
 **Status: fixed** in `8a121e6` (`fix/security-server`). `connect-src` is generated from the configuration (`web.connect_origins`, issuer, SFU and storage origins) instead of allowing any HTTPS host, an invalid configured CSP is a startup error (and the fallback is `default-src 'none'`), and `init.js` and `sw.js` are served `no-cache`. Trusted Types are not in the default CSP; operators can add `require-trusted-types-for 'script'` through `content_security_policy`.
 
 Default CSP (`config.rs:342-344`): `script-src 'self' 'wasm-unsafe-eval'`, no inline scripts (the
-inline loader is moved out by `scripts/externalize-init.sh`), plus `frame-ancestors 'none'`,
+loader is `init.js`, written by `scripts/build-app.sh`), plus `frame-ancestors 'none'`,
 `base-uri 'none'`, `form-action 'self'`. That is good. The gaps:
 
 - `connect-src 'self' wss: https:` lets injected code `fetch` any HTTPS host, which makes #2 an

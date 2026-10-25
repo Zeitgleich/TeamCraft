@@ -2290,6 +2290,8 @@ media-open = { $name } öffnen
 
 error-details = Details
 error-generic = Das hat nicht geklappt. Versuche es erneut; wenn es weiter fehlschlägt, kopiere die Details für deinen Admin.
+area-load-failed = Dieser Teil der App konnte nicht geladen werden. Prüfe deine Verbindung und versuche es dann erneut. Klappt es weiterhin nicht, lade die App neu: Vielleicht gibt es eine neue Version.
+area-reload = App neu laden
 error-network = Der Server ist nicht erreichbar. Prüfe deine Verbindung und versuche es erneut.
 error-captive-portal = Dieses Netzwerk verlangt zuerst eine Anmeldung. Öffne eine Webseite, melde dich an und versuche es dann erneut.
 error-untrusted-certificate = Dem Zertifikat des Servers wird nicht vertraut. In einem Netzwerk, das verschlüsselten Verkehr prüft: Nutze ein anderes Netzwerk oder bitte deine IT, das Firmenzertifikat auf diesem Gerät zu installieren. Passiert es überall, ist vielleicht das Zertifikat des Servers fehlerhaft: Sag deiner Administration Bescheid.

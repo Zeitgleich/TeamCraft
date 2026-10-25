@@ -1,5 +1,5 @@
 #!/bin/sh
-# Run by externalize-init.sh (Trunk post_build hook) once init.js exists: puts the loading screen's
+# Run by build-app.sh (Trunk post_build hook) once init.js exists: puts the loading screen's
 # texts (the `loader-*` messages of every i18n/*.ftl) into init.js as `globalThis.teamcraftLoaderTexts`,
 # where loader.js picks them by language. Not into loader.js itself: index.html pins that file by its
 # integrity value.

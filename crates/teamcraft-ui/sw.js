@@ -6,6 +6,10 @@
 // below. This worker then
 //   - on install and on every update fetches release.json, checks the signature, fetches every listed
 //     file, checks the hashes and only then stores them in a versioned cache and activates;
+//   - except the parts of the app that load when first used (`lazy` in release.json, #334): those are
+//     fetched and checked against the signed hash when a page first asks for one, and in the
+//     background a little after a page (not a guest's meeting page) asked for the status, so they
+//     work offline too;
 //   - serves the app from that cache, never from the network;
 //   - keeps running the previous verified version if a new one does not verify, and tells the pages.
 // A build without a pinned key (development) skips all of this and says so.
@@ -28,6 +32,15 @@ const SIGNATURE_LABEL = 'teamcraft-web-release-v1\n';
 const CACHE_PREFIX = 'teamcraft-release-';
 // Files fetched at the same time while a release is installed.
 const PARALLEL_DOWNLOADS = 4;
+// Where a release's cache keeps its verified file list, for the files fetched later (no file of a
+// release has this path).
+const FILES_KEY = '/.release-files';
+// The lazily loaded files are fetched this long after a page loaded, so they don't compete with what
+// the page itself loads first.
+const WARM_DELAY_MS = 15 * 1000;
+// Guests' meeting pages (`/meeting/<id>`, meetings.rs) never use the signed-in app: no background
+// fetch for them. A member who opens one gets the files with the next other page.
+const GUEST_PATH_PREFIX = '/meeting/';
 
 const STATE_CACHE = 'teamcraft-sw-state';
 // The verified status of a release that is installed but not active yet; it becomes `/state` on
@@ -84,7 +97,9 @@ self.addEventListener('message', (event) => {
     // The user chose to reload into the new release (sent to the waiting worker).
     event.waitUntil(self.skipWaiting());
   } else if (data.type === 'status') {
+    // Every page asks once when it loaded: the moment to fetch the lazily loaded files.
     event.waitUntil(restored.then(() => event.source.postMessage(statusMessage())));
+    if (IS_PINNED && !isGuestPage(event.source)) event.waitUntil(restored.then(() => warmLazyFiles(status.version)));
   } else if (data.type === 'push_probe') {
     // Whether the push code loads (tests, diagnostics): answers { type: 'push', ready, reason }.
     event.waitUntil(
@@ -156,10 +171,58 @@ async function fromVerifiedCache(event, url) {
   const known = releases.clients[event.clientId];
   const versions = known ? [known.version] : [status.version, ...releases.retired.slice().reverse()];
   for (const candidate of versions) {
-    const hit = await (await caches.open(CACHE_PREFIX + candidate)).match(url.pathname);
+    const cache = await caches.open(CACHE_PREFIX + candidate);
+    const hit = (await cache.match(url.pathname)) || (await fetchLazyFile(cache, url.pathname));
     if (hit) return hit;
   }
   return notInRelease();
+}
+
+// A file of the release that is fetched when first used (#334): downloaded and checked against the
+// release's signed hash, then kept like the others. Null when the release doesn't list it.
+async function fetchLazyFile(cache, pathname) {
+  const files = await (await cache.match(FILES_KEY))?.json();
+  const path = pathname.slice(1);
+  if (!files || !Object.hasOwn(files, path)) return null;
+  try {
+    await storeVerified(cache, [cache], path, files[path]);
+  } catch (error) {
+    // Not what was signed: the pages warn like for a release that doesn't verify (the release
+    // itself stays verified and keeps running; the part just doesn't load).
+    if (error instanceof HashMismatch) await broadcast({ ...statusMessage(), state: 'rejected', reason: reasonOf(error) });
+    throw error;
+  }
+  return cache.match(pathname);
+}
+
+function isGuestPage(client) {
+  try {
+    return !!client && new URL(client.url).pathname.startsWith(GUEST_PATH_PREFIX);
+  } catch (error) {
+    return false;
+  }
+}
+
+// Fetches the release's lazily loaded files that aren't cached yet, one at a time, after a delay.
+// Failures are left for the page's own request (it retries, and says so when it can't).
+let warming = null;
+function warmLazyFiles(version) {
+  if (status.state !== 'verified' || !version) return Promise.resolve();
+  if (!warming) {
+    warming = (async () => {
+      await new Promise((resolve) => setTimeout(resolve, WARM_DELAY_MS));
+      const cache = await caches.open(CACHE_PREFIX + version);
+      const files = await (await cache.match(FILES_KEY))?.json();
+      for (const path of Object.keys(files || {})) {
+        if (!(await cache.match('/' + path))) await storeVerified(cache, [cache], path, files[path]);
+      }
+    })()
+      .catch(() => {})
+      .finally(() => {
+        warming = null;
+      });
+  }
+  return warming;
 }
 
 // Not part of the signed release: nothing the app needs. Let it fail instead of trusting the network.
@@ -203,7 +266,9 @@ async function installVerified() {
     if (status.state === 'verified' && status.version && status.version !== manifest.version) {
       sources.push(await caches.open(CACHE_PREFIX + status.version));
     }
-    const queue = Object.entries(manifest.files);
+    // Kept first: an install that stops halfway resumes with it, and later fetches check against it.
+    await cache.put(FILES_KEY, new Response(JSON.stringify(manifest.files)));
+    const queue = Object.entries(manifest.files).filter(([path]) => !manifest.lazy.has(path));
     const worker = async () => {
       for (let next = queue.shift(); next; next = queue.shift()) await storeVerified(cache, sources, ...next);
     };
@@ -254,8 +319,10 @@ async function storeVerified(cache, sources, path, expected) {
       return;
     }
   }
-  throw new Error('hash mismatch for ' + path);
+  throw new HashMismatch('hash mismatch for ' + path);
 }
+
+class HashMismatch extends Error {}
 
 async function verifiedManifest() {
   const response = await fetch('/release.json', { cache: 'no-store' });
@@ -270,7 +337,10 @@ async function verifiedManifest() {
     throw new Error('the release manifest is not signed by the release key');
   }
   if (!manifest.files['index.html']) throw new Error('the release has no index.html');
-  return { version: String(manifest.version), files };
+  // Which files wait until they are used is a hint outside the signature: every file is still checked
+  // against its signed hash, whenever it is fetched.
+  const lazy = new Set((Array.isArray(manifest.lazy) ? manifest.lazy : []).filter((path) => path !== 'index.html'));
+  return { version: String(manifest.version), files, lazy };
 }
 
 async function sha256Hex(bytes) {
@@ -296,8 +366,8 @@ function statusMessage() {
   return { type: 'bundle', ...status };
 }
 
-async function broadcast() {
-  for (const client of await self.clients.matchAll({ includeUncontrolled: true })) client.postMessage(statusMessage());
+async function broadcast(message = statusMessage()) {
+  for (const client of await self.clients.matchAll({ includeUncontrolled: true })) client.postMessage(message);
 }
 
 // ---- Push wake-ups ---------------------------------------------------------------------------------

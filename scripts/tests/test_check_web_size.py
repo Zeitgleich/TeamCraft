@@ -40,6 +40,15 @@ class BudgetTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("gzip -9, over the budget of 1,000", err)
 
+    def test_lazy_chunks_are_listed_but_not_counted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = dist_with(tmp, app_bytes=600, service_worker_bytes=300)
+            (dist / "teamcraft-ui-split-admin-0123abcd.wasm").write_bytes(os.urandom(5000))
+            code, out, _ = run(str(dist), "--budget-bytes", "2000")
+        self.assertEqual(code, 0)
+        self.assertIn("Loaded when first used", out)
+        self.assertIn("teamcraft-ui-split-admin-0123abcd.wasm", out)
+
     def test_close_to_the_compressed_budget_only_warns(self):
         with tempfile.TemporaryDirectory() as tmp:
             dist = dist_with(tmp, app_bytes=600, service_worker_bytes=500)
@@ -55,22 +64,37 @@ class BudgetTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertNotIn("::warning::", out)
 
-    def test_over_the_uncompressed_ratchet_fails_even_within_the_budget(self):
+    def test_the_signed_in_app_counts_and_a_guest_visit_is_printed(self):
         with tempfile.TemporaryDirectory() as tmp:
-            dist = dist_with(tmp, app_bytes=600_000, service_worker_bytes=50_000, compressible=True)
-            code, out, err = run(str(dist), "--budget-bytes", "100000",
-                                 "--max-uncompressed-bytes", "640000")
+            dist = dist_with(tmp, app_bytes=600, service_worker_bytes=300)
+            (dist / "teamcraft-ui-split-session-0123abcd.wasm").write_bytes(os.urandom(700))
+            (dist / "teamcraft-ui-split-admin-0123abcd.wasm").write_bytes(os.urandom(5000))
+            (dist / "init.js").write_text(
+                "for (const href of ['/teamcraft-ui-split-session-0123abcd.wasm']) {}\n")
+            code, out, err = run(str(dist), "--budget-bytes", "1500")
         self.assertEqual(code, 1)
-        self.assertIn("uncompressed, over the ratchet of 640,000", err)
-        self.assertIn("Uncompressed ratchet", out)
+        self.assertIn("| signed-in app ", out)
+        self.assertIn("A guest's first visit", out)
+        self.assertIn("over the budget of 1,500", err)
+        lazy = out.split("Loaded when first used")[1]
+        self.assertNotIn("split-session", lazy)
+        self.assertIn("split-admin", lazy)
 
-    def test_under_the_uncompressed_ratchet_passes(self):
+    def test_a_listed_session_file_that_is_missing_is_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
-            dist = dist_with(tmp, app_bytes=600_000, service_worker_bytes=50_000, compressible=True)
-            code, _, err = run(str(dist), "--budget-bytes", "100000",
-                               "--max-uncompressed-bytes", "650000")
-        self.assertEqual(code, 0)
-        self.assertEqual(err, "")
+            dist = dist_with(tmp, app_bytes=10, service_worker_bytes=10)
+            (dist / "init.js").write_text("for (const href of ['/gone.wasm']) {}\n")
+            code, _, err = run(str(dist))
+        self.assertEqual(code, 2)
+        self.assertIn("gone.wasm", err)
+
+    def test_an_init_js_without_the_session_list_is_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = dist_with(tmp, app_bytes=10, service_worker_bytes=10)
+            (dist / "init.js").write_text("import init from '/app.js';\n")
+            code, _, err = run(str(dist))
+        self.assertEqual(code, 2)
+        self.assertIn("signed-in app", err)
 
     def test_a_missing_file_is_an_error_not_a_pass(self):
         with tempfile.TemporaryDirectory() as tmp:

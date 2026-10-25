@@ -438,8 +438,9 @@ image does not boot on this AMD host), signed out:
 
 ### Web bundle size
 
-The budget counts the **compressed** wasm a first visit transfers: the app and the service worker,
-which is installed on the first visit too. That is what a user waits for: the server sends the wasm
+The budget counts the **compressed** wasm a signed-in user's first visit transfers: the app, the
+signed-in app's chunks that `init.js` fetches next to it, and the service worker, which is installed
+on the first visit too. That is what a user waits for: the server sends the wasm
 with gzip or brotli, the browser compiles it while it streams (`instantiateStreaming`), and the
 service worker serves it from its cache on every later visit. The uncompressed size of a Leptos app
 of this scope is not a useful budget on its own; 10 MB uncompressed was reached with the features of
@@ -447,24 +448,53 @@ v1, and nothing cheap is left to cut (below).
 
 `.github/workflows/web-size.yml` builds the release bundle on every change to the crates in it and
 runs `scripts/check-web-size.py`. The script prints uncompressed, gzip -9 and (when the `brotli`
-module is installed) brotli -11 sizes and the gzip delta to `main`. Two limits:
+module is installed) brotli -11 sizes, the gzip delta to `main` and a guest's first visit, and lists
+the chunks that load later. The limit:
 
-| Limit                                   | Value          | Above it                                    |
-|-----------------------------------------|----------------|---------------------------------------------|
-| Budget: gzip -9 total                   | 4,700,000 B    | fails; warns from 95 % (4.47 MB)            |
-| Ratchet: uncompressed total             | 11,850,000 B   | fails (`WEB_WASM_MAX_UNCOMPRESSED_BYTES`)   |
-
-**Temporarily over the target:** browser calls (#330) put the bundle about 1 KB over 4,700,000 B
-(4,700,810 B on its base), so `check-web-size.py` allows 4,710,000 B until #334 splits the bundle;
-#334 brings it back under the target and restores the value. The call engine itself is a lazily
-loaded module of its own (`teamcraft-web-calls`, about 2 MB uncompressed) that the budget doesn't
-count: it loads in the background after sign-in, not on the first visit.
+| Limit                 | Value       | Above it                         |
+|-----------------------|-------------|----------------------------------|
+| Budget: gzip -9 total | 4,700,000 B | fails; warns from 95 % (4.47 MB) |
 
 The budget is the gzip total measured on `main` c55b2e58 plus about 10 %. gzip -9 is the measure
 because every server and browser supports it and it is reproducible; brotli is printed as
-information. The ratchet is not a budget: it is the uncompressed total plus 5 %, so the bundle
-can't grow unnoticed (memory and compile time grow with it) while the UI changes in flight fit. It
-may be lowered after a reduction; raising either limit is a decision, not a fix.
+information. The uncompressed size is printed but not limited: what a user waits for is the
+transfer. The earlier growth ratchet on it (11.85 MB) was dropped with the split (#334): main had
+outgrown it anyway, and the split moves code between files without changing what matters. Raising
+the budget is a decision, not a fix.
+
+#### The split (#334)
+
+The app is split into wasm chunks (`crates/teamcraft-ui/src/areas.rs`, built by
+`crates/teamcraft-web-bundle` from the Trunk hook `scripts/build-app.sh`; Trunk 0.22 can't split):
+
+- **The signed-in app** (`session`: sign-in, the shell, everything a member uses) is a chunk of its
+  own. `init.js` fetches its files next to the app's for every page except a guest's meeting link,
+  so signed-in users load both at once and a guest only loads the guest pages. As the app grows,
+  what a guest downloads doesn't.
+- **Areas loaded when first used:** the administration console, settings, the lightbox, the
+  workspace dialogs (spaces, channels, invitations), the call screens, meetings, the directory and
+  search. `lazy_area` shows a spinner when a chunk takes a moment and an error with a retry when it
+  can't load.
+- Code several modules share goes into shared chunks (one per combination of modules), so each file
+  is downloaded once.
+- The call engine (`teamcraft-web-calls`, #330) stays a module of its own that loads in the
+  background after sign-in; the budget doesn't count it.
+- A signed release's service worker installs without the chunks (the signed-in app's included) and
+  fetches each one, checked against its signed hash, when it is first used or in the background
+  about 15 s after a page loaded; not for a guest's meeting page (e2ee.md §9.3).
+
+Release `trunk build` in the CI image (Rust 1.99.1, trunk 0.22.0, wasm-opt 131), gzip -9:
+
+| Build                            | First visit, signed in | First visit, guest | Loaded later |
+|----------------------------------|------------------------|--------------------|--------------|
+| `main` b301a0d2 (one module)     | 4.93 MB                | 4.93 MB            | –            |
+| Split (#334)                     | 4.15 MB                | 2.47 MB            | 1.12 MB      |
+
+First visit = app + service worker (+ the signed-in app's chunks when signed in); the call module is
+not counted in either. The split costs a signed-in first visit about 0.2 MB of overhead over one
+module (each chunk imports what it uses from the app, which keeps those functions exported) and
+156 requests instead of one; in exchange a guest loads half and everything an area alone uses
+waits until it opens.
 
 Release `trunk build` in the CI image (Rust 1.99.1, trunk 0.22.0, wasm-opt 131), `main` c55b2e58:
 
@@ -515,9 +545,7 @@ Debug sections are already stripped (`strip = true`; the only custom sections le
 and the profile is already `opt-level = "z"`, fat LTO, one codegen unit and `panic = "abort"`. So
 there is no cheap megabyte left. What would make the first visit smaller:
 
-- **Split the bundle:** load the admin console (and the call UI) on demand. Leptos 0.8 supports
-  this with `#[lazy]` and `LazyRoute`, split by `cargo leptos --split`; trunk 0.22 has no
-  wasm-split step (tracked in #334).
+- **Split the bundle:** done (#334, above).
 - **Thumbnails through the browser** (`createImageBitmap` and `OffscreenCanvas`) instead of the
   `image` decoders on wasm: about 0.35 MB.
 - **Leaner deserializers** for the largest wire enums: `ChatAction` alone is 129 kB, decoded from a

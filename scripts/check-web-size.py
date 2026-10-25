@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """Checks the web client's wasm against the download budget and prints its size.
 
-The budget (.claude/rules/robustness.md, "Download size") counts the compressed wasm a first visit
-transfers: the app (`teamcraft-ui-*_bg.wasm`) and the service worker (`teamcraft-web-sw*_bg.wasm`,
-installed on the first visit too). The server sends them compressed, the browser compiles while it
+The budget (.claude/rules/robustness.md, "Download size") counts the compressed wasm a signed-in
+user's first visit transfers: the app (`teamcraft-ui-*_bg.wasm`), the signed-in app's chunks that
+`init.js` fetches next to it (#334; a guest's meeting link skips them) and the service worker
+(`teamcraft-web-sw*_bg.wasm`, installed on the first visit too). The server sends them compressed, the browser compiles while it
 streams, and the service worker caches them afterwards, so the transfer size is what a user waits
 for. It is measured as gzip -9, which every server and browser supports; brotli (smaller) is
 printed too when the `brotli` module is installed. CI runs this after the release `trunk build`
 (`.github/workflows/web-size.yml`) on every change to the web client.
 
-Limits:
+Parts of the app that load when first used (the other split chunks and the call module) are listed
+after the table; they are not part of the first visit and not of the budget.
 
-- `--budget-bytes`: the gzip -9 total. It warns within 5 % of it and fails above it.
-- `--max-uncompressed-bytes`: a growth ratchet on the uncompressed total (memory and compile time
-  grow with it). It sits a little above the current size so the bundle can't grow unnoticed; lower it
-    after a reduction, raising it is a decision (docs/performance.md, "Web bundle size").
+`--budget-bytes` is the gzip -9 total. It warns within 5 % of it and fails above it. The
+uncompressed size is printed for information only: what users wait for is the transfer.
 
         scripts/check-web-size.py crates/teamcraft-ui/dist [--budget-bytes N]
-                [--max-uncompressed-bytes N] [--baseline main.json] [--write sizes.json]
+                [--baseline main.json] [--write sizes.json]
 
 `--baseline` is the `--write` output of an earlier build (CI keeps main's); the delta to it is
 printed. With `GITHUB_STEP_SUMMARY` set, the table also goes to the job summary.
@@ -27,6 +27,7 @@ import gzip
 import json
 import os
 import pathlib
+import re
 import sys
 
 try:
@@ -35,10 +36,9 @@ except ImportError:  # Optional: gzip is the budget, brotli is informational.
     brotli = None
 
 # The gzip -9 total of app + service worker, decimal megabytes: 4.25 MB measured on main c55b2e58
-# plus about 10 % (docs/performance.md, "Web bundle size"). The target stays 4,700,000; this is
-# 10 KB above it TEMPORARILY: browser calls (#330) put the main bundle about 1 KB over, and #334
-# (splitting the bundle) brings it back under the target and restores 4_700_000 here.
-DEFAULT_BUDGET_BYTES = 4_710_000
+# plus about 10 % (docs/performance.md, "Web bundle size"). Since the split (#334) the app counts
+# only what a first visit loads; the chunks loaded when first used are listed apart.
+DEFAULT_BUDGET_BYTES = 4_700_000
 # Warn when the gzip total is above this share of the budget.
 WARN_SHARE = 0.95
 # The files of a first visit, by the name trunk gives them (with a content hash).
@@ -46,6 +46,9 @@ PARTS = {
     "app": "teamcraft-ui-*_bg.wasm",
     "service_worker": "teamcraft-web-sw*_bg.wasm",
 }
+# The signed-in app's chunks: the list `init.js` fetches next to the app (teamcraft-web-bundle).
+SESSION_LIST = re.compile(r"for \(const href of \[([^\]]*)\]\)")
+LABELS = {"app": "app", "session": "signed-in app", "service_worker": "service worker"}
 
 
 def main(argv=None):
@@ -53,16 +56,19 @@ def main(argv=None):
     parser.add_argument("dist", type=pathlib.Path, help="the trunk output directory")
     parser.add_argument("--budget-bytes", type=int, default=DEFAULT_BUDGET_BYTES,
                         help="fail above this gzip -9 total, warn close to it")
-    parser.add_argument("--max-uncompressed-bytes", type=int,
-                        help="fail above this uncompressed total (the growth ratchet)")
     parser.add_argument("--baseline", type=pathlib.Path, help="sizes of an earlier build (JSON)")
     parser.add_argument("--write", type=pathlib.Path, help="write this build's sizes (JSON)")
     args = parser.parse_args(argv)
-    sizes = measure(args.dist)
+    try:
+        sizes = measure(args.dist)
+    except SessionListMissing as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
     if sizes is None:
         return 2
     maybe_baseline = load_baseline(args.baseline)
-    report = render(sizes, maybe_baseline, args.budget_bytes, args.max_uncompressed_bytes)
+    report = render(sizes, maybe_baseline, args.budget_bytes)
+    report += render_lazy(measure_lazy(args.dist, session_files(args.dist)))
     print(report)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
@@ -71,7 +77,7 @@ def main(argv=None):
     if args.write:
         args.write.parent.mkdir(parents=True, exist_ok=True)
         args.write.write_text(json.dumps(sizes, indent=2) + "\n", encoding="utf-8")
-    return check_limits(sizes, args.budget_bytes, args.max_uncompressed_bytes)
+    return check_limits(sizes, args.budget_bytes)
 
 
 def measure(dist):
@@ -83,27 +89,77 @@ def measure(dist):
         if len(matches) != 1:
             print(f"error: expected one {pattern} in {dist}, found {len(matches)}", file=sys.stderr)
             return None
-        data = matches[0].read_bytes()
-        sizes[part] = {"bytes": len(data), "gzip_bytes": len(gzip.compress(data, compresslevel=9))}
-        if brotli is not None:
-            sizes[part]["brotli_bytes"] = len(brotli.compress(data, quality=11))
+        sizes[part] = sizes_of([matches[0]])
+    session = session_files(dist)
+    if session:
+        missing = [path.name for path in session if not path.is_file()]
+        if missing:
+            print(f"error: init.js fetches files that aren't there: {', '.join(missing)}", file=sys.stderr)
+            return None
+        sizes["session"] = sizes_of(session)
     return sizes
 
 
-def check_limits(sizes, budget_bytes, maybe_max_uncompressed_bytes):
-    """The exit code: 1 when a limit is exceeded, 0 otherwise (with a warning close to the budget)."""
+def sizes_of(paths):
+    """{"bytes", "gzip_bytes"[, "brotli_bytes"]} summed over the files; each is compressed on its own,
+    as it is sent."""
+    total = {"bytes": 0, "gzip_bytes": 0}
+    if brotli is not None:
+        total["brotli_bytes"] = 0
+    for path in paths:
+        data = path.read_bytes()
+        total["bytes"] += len(data)
+        total["gzip_bytes"] += len(gzip.compress(data, compresslevel=9))
+        if brotli is not None:
+            total["brotli_bytes"] += len(brotli.compress(data, quality=11))
+    return total
+
+
+def session_files(dist):
+    """The files `init.js` fetches next to the app (empty for a build without the list)."""
+    init = dist / "init.js"
+    if not init.is_file():
+        return []
+    match = SESSION_LIST.search(init.read_text(encoding="utf-8"))
+    if not match:
+        # Else the signed-in app would silently drop out of the budget.
+        raise SessionListMissing("init.js has no list of the signed-in app's files")
+    return [dist / name for name in re.findall(r"'/([^'/]+)'", match.group(1))]
+
+
+class SessionListMissing(Exception):
+    pass
+
+
+def measure_lazy(dist, session):
+    """[(name, bytes, gzip_bytes)] of every other wasm file: what loads later."""
+    first_visit = {path for pattern in PARTS.values() for path in dist.glob(pattern)} | set(session)
+    lazy = []
+    for path in sorted(dist.glob("*.wasm")):
+        if path in first_visit:
+            continue
+        data = path.read_bytes()
+        lazy.append((path.name, len(data), len(gzip.compress(data, compresslevel=9))))
+    return lazy
+
+
+def render_lazy(lazy):
+    if not lazy:
+        return ""
+    lines = ["", "", "Loaded when first used (not part of the first visit or the budget):", "",
+             "| Chunk                                            | Uncompressed | gzip -9    |",
+             "|--------------------------------------------------|--------------|------------|"]
+    for name, size, gzip_size in lazy:
+        lines.append(f"| {name:<48} | {mb(size):>12} | {mb(gzip_size):>10} |")
+    return "\n".join(lines)
+
+
+def check_limits(sizes, budget_bytes):
+    """The exit code: 1 above the budget, 0 otherwise (with a warning close to it)."""
     gzip_total = total_bytes(sizes, "gzip_bytes")
-    uncompressed_total = total_bytes(sizes, "bytes")
-    failed = False
     if gzip_total > budget_bytes:
         print(f"error: the web wasm is {gzip_total:,} bytes gzip -9, over the budget of "
               f"{budget_bytes:,}", file=sys.stderr)
-        failed = True
-    if maybe_max_uncompressed_bytes is not None and uncompressed_total > maybe_max_uncompressed_bytes:
-        print(f"error: the web wasm is {uncompressed_total:,} bytes uncompressed, over the ratchet of "
-              f"{maybe_max_uncompressed_bytes:,}", file=sys.stderr)
-        failed = True
-    if failed:
         return 1
     if gzip_total > budget_bytes * WARN_SHARE:
         # A workflow annotation where CI runs it; plain text elsewhere.
@@ -126,13 +182,12 @@ def total_bytes(sizes, key):
     return sum(part[key] for part in sizes.values())
 
 
-def render(sizes, maybe_baseline, budget_bytes, maybe_max_uncompressed_bytes):
+def render(sizes, maybe_baseline, budget_bytes):
     """A Markdown table: each part, the total against the limits, and the gzip delta to the baseline."""
     has_brotli = all("brotli_bytes" in part for part in sizes.values())
     keys = ["bytes", "gzip_bytes"] + (["brotli_bytes"] if has_brotli else [])
     total = {key: total_bytes(sizes, key) for key in keys}
-    rows = [("app", sizes["app"], "app"), ("service worker", sizes["service_worker"], "service_worker"),
-            ("total", total, None)]
+    rows = [(LABELS[part], sizes[part], part) for part in LABELS if part in sizes] + [("total", total, None)]
     brotli_header = " brotli -11 |" if has_brotli else ""
     brotli_rule = "------------|" if has_brotli else ""
     lines = [
@@ -146,9 +201,9 @@ def render(sizes, maybe_baseline, budget_bytes, maybe_max_uncompressed_bytes):
                      f"{brotli_cell} {delta:>18} |")
     lines.append("")
     lines.append(f"Budget {mb(budget_bytes)} gzip -9; headroom {mb(budget_bytes - total['gzip_bytes'])}.")
-    if maybe_max_uncompressed_bytes is not None:
-        lines.append(f"Uncompressed ratchet {mb(maybe_max_uncompressed_bytes)}; headroom "
-                     f"{mb(maybe_max_uncompressed_bytes - total['bytes'])}.")
+    if "session" in sizes:
+        guest = total["gzip_bytes"] - sizes["session"]["gzip_bytes"]
+        lines.append(f"A guest's first visit (meeting link, no signed-in app): {mb(guest)} gzip -9.")
     return "\n".join(lines)
 
 
