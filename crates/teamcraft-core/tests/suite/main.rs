@@ -43,5 +43,6 @@ mod snapshot_cache;
 mod store_integrity;
 mod sync_engine;
 mod upkeep;
+mod upload_parts;
 mod workspace;
 mod workspace_admin;

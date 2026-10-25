@@ -3,6 +3,7 @@
 mod browser_key;
 mod idb;
 mod indexed_db;
+pub(crate) mod picked;
 mod vault;
 
 pub use browser_key::browser_database_key;

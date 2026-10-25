@@ -1,6 +1,8 @@
 //! Files beyond single attachments: sending text with several files (uploads resume per file
 //! after a restart or network loss), downloading to disk, and share links (e2ee.md §4.5.1).
 
+use std::pin::Pin;
+
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::attachment::{AttachmentKey, DEFAULT_CHUNK_SIZE, encrypt_attachment};
@@ -14,7 +16,8 @@ use teamcraft_proto::{
 
 use super::Client;
 use super::attachments::{BlobDownload, OutgoingFile};
-use crate::api::{ApiError, DetachedRequest, ServerApi};
+use super::upload_parts::{PartOutcome, PartTarget, PartsUpload, is_multipart};
+use crate::api::{ApiError, ServerApi};
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{AttachmentRef, ImageDimensions, LocalStore, MessageContent, MessageFilter, Table};
@@ -62,6 +65,9 @@ pub struct PendingFile {
   /// The picture's upright size, so the pending message reserves the space the sent one takes.
   #[serde(rename = "dimensions", default, skip_serializing_if = "Option::is_none")]
   pub maybe_dimensions: Option<ImageDimensions>,
+  /// A large file's upload in parts once announced: a restart continues at its next part.
+  #[serde(rename = "parts", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_parts: Option<PartsUpload>,
 }
 
 /// One file's encrypted bytes on their way to storage. The client prepares it
@@ -71,11 +77,24 @@ pub struct PendingFile {
 pub struct BlobUpload {
   conversation_id: ConversationId,
   client_message_id: ClientMessageId,
-  slot: UploadSlot,
-  attachment: AttachmentRef,
-  request: DetachedRequest,
-  /// Lists the upload's progress until it is finished or dropped.
-  _progress: TransferGuard,
+  target: UploadTarget,
+  /// `None` when nothing goes to the storage (the parts of a file are only joined).
+  maybe_request: Option<Pin<Box<dyn Future<Output = Result<Option<String>, ApiError>>>>>,
+  /// What storage answered once [`Self::sent`] resolved successfully: a part's `ETag`.
+  maybe_etag: Option<String>,
+  /// Lists the upload's progress until it is finished or dropped (kept across a file's parts).
+  progress: TransferGuard,
+}
+
+/// What a [`BlobUpload`] sends.
+enum UploadTarget {
+  /// A file in one blob, into its announced slot.
+  Whole {
+    slot: UploadSlot,
+    attachment: AttachmentRef,
+  },
+  /// One part of a large file (or only the joining of its parts).
+  Part(PartTarget),
 }
 
 /// Largest thumbnail an app may hand in: as large as the core's own (the message carries it); a
@@ -125,6 +144,9 @@ pub enum UploadSource {
   Bytes { bytes: Base64Bytes },
   /// A file on this device, read when uploading.
   Path { path: String },
+  /// A file the user picked in the browser, read in slices while it goes up
+  /// ([`crate::picked_files`]).
+  Picked { handle: String },
 }
 
 impl Default for UploadRetrySettings {
@@ -194,6 +216,10 @@ fn millis(duration: std::time::Duration) -> i64 {
 pub(super) const MAX_DOWNLOAD_BYTES: Option<u64> = Some(256 * 1024 * 1024);
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) const MAX_DOWNLOAD_BYTES: Option<u64> = None;
+
+/// Unfinished uploads the user cancelled, to give up at the server (it frees their parts and they
+/// stop counting against the unfinished uploads); kept until the server is reached.
+const ABANDONED_KEY: &str = "abandoned";
 
 /// Longest saved file name in bytes; common file systems allow 255 and the copy suffix needs room.
 const MAX_FILE_NAME_BYTES: usize = 200;
@@ -268,6 +294,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           maybe_done: None,
           maybe_failure: None,
           maybe_slot: None,
+          maybe_parts: None,
           retry: UploadRetry::default(),
           maybe_thumbnail: None,
           maybe_dimensions: None,
@@ -304,16 +331,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.current_file(upload).ok().flatten().is_some()
   }
 
-  /// The pending upload `upload` belongs to and the index of its file, found by the upload slot (a
-  /// cancelled file before it moves the index).
+  /// The pending upload `upload` belongs to and the index of its file, found by the upload slot or
+  /// the part it sends (a cancelled file before it moves the index).
   fn current_file(&self, upload: &BlobUpload) -> Result<Option<(PendingUpload, usize)>, CoreError> {
     let Some(pending) = pending_upload(&self.store, upload.conversation_id, upload.client_message_id)? else {
       return Ok(None);
     };
     let maybe_index = pending.files.iter().position(|file| {
-      file.maybe_done.is_none()
-        && file.maybe_failure.is_none()
-        && file.maybe_slot.as_ref() == Some(&upload.slot)
+      file.maybe_done.is_none() && file.maybe_failure.is_none() && upload.target.is_sending(file)
     });
     Ok(maybe_index.map(|index| (pending, index)))
   }
@@ -323,26 +348,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// that can never go up is marked failed on the way; a network error stops the search (the rest
   /// resumes next time).
   pub async fn start_upload(&mut self) -> Result<Option<BlobUpload>, CoreError> {
+    self.abandon_cancelled_uploads().await;
     let pending: Vec<PendingUpload> = records::list_json(&self.store, Table::PendingUploads)?;
     for mut upload in pending {
       while let Some(index) = next_due_file(&upload, self.now_ms()) {
         match self
-          .prepare_blob(upload.conversation_id, &mut upload.files[index])
+          .start_file(upload.conversation_id, &mut upload.files[index])
           .await
         {
-          Ok((attachment, request, progress)) => {
-            let Some(slot) = upload.files[index].maybe_slot.clone() else {
-              // Invariant: `prepare_blob` leaves the slot it uploads into on the file.
-              return Err(CoreError::Corrupt("prepared upload without a slot".into()));
-            };
+          Ok((target, maybe_request, progress)) => {
             save_pending_upload(&self.store, &upload)?;
             return Ok(Some(BlobUpload {
               conversation_id: upload.conversation_id,
               client_message_id: upload.client_message_id,
-              slot,
-              attachment,
-              request,
-              _progress: progress,
+              target,
+              maybe_request,
+              maybe_etag: None,
+              progress,
             }));
           },
           Err(error) => self.record_upload_error(&mut upload, index, error)?,
@@ -351,6 +373,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.complete_upload(&upload)?;
       self.remove_staged_copies(&upload);
     }
+    // Nothing goes up: a progress entry kept from a part is not shown any longer.
+    self.held_upload_progress = None;
+    self.sweep_picked_files().await;
     Ok(None)
   }
 
@@ -366,14 +391,38 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       tracing::debug!(conversation_id = %upload.conversation_id, "upload finished for a file that is gone");
       return Ok(UploadStep::Dropped);
     };
-    let BlobUpload { slot, attachment, .. } = upload;
-    let confirmed = match self.confirm_blob(&slot, sent, &mut pending.files[index]).await {
-      Ok(()) => {
+    let BlobUpload {
+      target,
+      maybe_etag,
+      progress,
+      ..
+    } = upload;
+    let finished = match target {
+      UploadTarget::Whole { slot, attachment } => self
+        .confirm_blob(&slot, sent, &mut pending.files[index])
+        .await
+        .map(|()| PartOutcome::Uploaded(attachment)),
+      UploadTarget::Part(target) => {
+        // A stored part's ETag was kept by `BlobUpload::sent`.
+        let answer = sent.map(|()| maybe_etag);
+        self.held_upload_progress = Some(progress);
+        self.finish_part(target, answer, &mut pending.files[index]).await
+      },
+    };
+    let confirmed = match finished {
+      Ok(PartOutcome::Uploaded(attachment)) => {
         let file = &mut pending.files[index];
         file.maybe_done = Some(attachment);
         file.maybe_slot = None;
+        file.maybe_parts = None;
         file.retry = UploadRetry::default();
+        self.held_upload_progress = None;
         UploadStep::Uploaded
+      },
+      Ok(PartOutcome::Stored) => {
+        // A part got through: the backoff starts over for the next one.
+        pending.files[index].retry = UploadRetry::default();
+        UploadStep::PartUploaded
       },
       Err(error) => {
         self.record_upload_error(&mut pending, index, error)?;
@@ -510,17 +559,45 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(link)
   }
 
+  /// Starts the file's next upload step: a large file's next part, any other file whole.
+  async fn start_file(
+    &mut self,
+    conversation: ConversationId,
+    file: &mut PendingFile,
+  ) -> Result<(UploadTarget, Option<BlobRequest>, TransferGuard), UploadError> {
+    if file.size_bytes > self.settings.max_upload_bytes {
+      return Err(UploadError::Failed(TransferFailure::TooLarge));
+    }
+    if is_multipart(file.size_bytes)
+      && let Some(started) = self.start_part(conversation, file).await?
+    {
+      let maybe_request = started
+        .request
+        .map(|request| -> BlobRequest { Box::pin(async move { request.await.map(Some) }) });
+      return Ok((
+        UploadTarget::Part(started.target),
+        maybe_request,
+        started.progress,
+      ));
+    }
+    let (attachment, request, progress) = self.prepare_blob(conversation, file).await?;
+    let Some(slot) = file.maybe_slot.clone() else {
+      // Invariant: `prepare_blob` leaves the slot it uploads into on the file.
+      return Err(UploadError::Failed(TransferFailure::LocalFile));
+    };
+    Ok((UploadTarget::Whole { slot, attachment }, Some(request), progress))
+  }
+
   /// Encrypts one file and starts its upload into its slot, announcing one first if it has none.
   /// Keeps the thumbnail and the picture's size on the file for the pending message.
   async fn prepare_blob(
     &self,
     conversation: ConversationId,
     file: &mut PendingFile,
-  ) -> Result<(AttachmentRef, DetachedRequest, TransferGuard), UploadError> {
-    if file.size_bytes > self.settings.max_upload_bytes {
-      return Err(UploadError::Failed(TransferFailure::TooLarge));
-    }
-    let content = read_source(&file.source).map_err(|()| UploadError::Failed(TransferFailure::LocalFile))?;
+  ) -> Result<(AttachmentRef, BlobRequest, TransferGuard), UploadError> {
+    let content = read_source(&file.source, file.size_bytes)
+      .await
+      .map_err(|()| UploadError::Failed(TransferFailure::LocalFile))?;
     let maybe_thumbnail = crate::thumbnail::thumbnail(&content, &file.media_type).or_else(|| {
       file
         .maybe_thumbnail
@@ -543,9 +620,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       _ => self.announce_upload(conversation, size_bytes).await?,
     };
     let progress = self.transfers.start(slot.attachment_id, size_bytes);
-    let request = self
+    let blob = self
       .api
       .put_blob_detached(&slot.upload_url, encrypted.ciphertext, progress.counter());
+    let request: BlobRequest = Box::pin(async move { blob.await.map(|()| None) });
     file.maybe_slot = Some(slot.clone());
     let attachment = AttachmentRef {
       attachment_id: slot.attachment_id,
@@ -645,15 +723,72 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
-  /// Deletes the app's staged plaintext copies of a finished upload (see
-  /// [`super::ClientSettings::maybe_upload_staging_dir`]).
-  fn remove_staged_copies(&self, upload: &PendingUpload) {
-    let Some(staging) = &self.settings.maybe_upload_staging_dir else {
+  /// Gives up the uploads the user cancelled at the server; what doesn't get through (offline) is
+  /// tried on the next upload step.
+  async fn abandon_cancelled_uploads(&mut self) {
+    let Ok(Some(abandoned)) =
+      records::get_json::<Vec<AttachmentId>>(&self.store, Table::FileTransfers, ABANDONED_KEY)
+    else {
       return;
     };
+    let mut left = Vec::new();
+    for attachment in abandoned {
+      match self.api.abandon_attachment(attachment).await {
+        Err(error) if error.is_unreachable() => left.push(attachment),
+        // A completed one stays (409); any other refusal won't change by asking again.
+        Err(error) => tracing::debug!(%error, "a cancelled upload was not given up"),
+        Ok(()) => {},
+      }
+    }
+    let saved = if left.is_empty() {
+      self
+        .store
+        .delete(Table::FileTransfers, ABANDONED_KEY)
+        .map_err(CoreError::from)
+    } else {
+      records::put_json(&self.store, Table::FileTransfers, ABANDONED_KEY, &left)
+    };
+    if let Err(error) = saved {
+      tracing::warn!(%error, "the cancelled uploads could not be saved");
+    }
+  }
+
+  /// Drops the browser's picked files that no pending upload reads any more.
+  async fn sweep_picked_files(&mut self) {
+    if !self.is_picked_sweep_due {
+      return;
+    }
+    self.is_picked_sweep_due = false;
+    let Ok(uploads) = records::list_json::<PendingUpload>(&self.store, Table::PendingUploads) else {
+      return;
+    };
+    let referenced = uploads
+      .iter()
+      .flat_map(|upload| upload.files.iter())
+      .filter_map(|file| match &file.source {
+        UploadSource::Picked { handle } => Some(handle.clone()),
+        _ => None,
+      })
+      .collect();
+    crate::picked_files::forget_all_but(&referenced).await;
+  }
+
+  /// Deletes the app's staged plaintext copies of a finished upload (see
+  /// [`super::ClientSettings::maybe_upload_staging_dir`]).
+  fn remove_staged_copies(&mut self, upload: &PendingUpload) {
     if !is_finished(upload) {
       return;
     }
+    if upload
+      .files
+      .iter()
+      .any(|file| matches!(file.source, UploadSource::Picked { .. }))
+    {
+      self.is_picked_sweep_due = true;
+    }
+    let Some(staging) = &self.settings.maybe_upload_staging_dir else {
+      return;
+    };
     for file in &upload.files {
       remove_staged(staging, &file.source);
     }
@@ -682,15 +817,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .iter()
       .filter(|file| file.maybe_failure.is_some())
       .map(|file| PendingFile {
-        // The bytes aren't needed any more, only the name and the reason.
+        // The bytes and the upload's key aren't needed any more, only the name and the reason.
         source: UploadSource::Bytes {
           bytes: Base64Bytes::new(Vec::new()),
         },
+        maybe_parts: None,
         ..file.clone()
       })
       .collect();
     if !failed.is_empty() {
       records::put_json(&self.store, Table::FileTransfers, &failed_key(&key), &failed)?;
+    }
+    for attachment in upload
+      .files
+      .iter()
+      .filter(|file| file.maybe_failure.is_some())
+      .filter_map(announced_attachment)
+    {
+      queue_abandon(&self.store, attachment)?;
     }
     self.store.delete(Table::PendingUploads, &key)?;
     Ok(())
@@ -763,6 +907,8 @@ pub struct DiskDownload {
 pub enum UploadStep {
   /// The file is up and in its message.
   Uploaded,
+  /// One part of a large file is up; the next follows on the next step.
+  PartUploaded,
   /// It failed for good (shown on the message).
   Failed,
   /// The message was deleted or its upload retried meanwhile: nothing changed.
@@ -773,9 +919,35 @@ impl BlobUpload {
   /// Resolves once storage answered. Polling may stop half way (a host's `select`) and resume on
   /// the next call; after it resolved, the upload goes to [`Client::finish_upload`].
   pub async fn sent(&mut self) -> Result<(), ApiError> {
-    (&mut self.request).await
+    let answer = match &mut self.maybe_request {
+      Some(request) => request.await,
+      None => Ok(None),
+    };
+    self.maybe_request = None;
+    // A part's ETag stays here for `finish_upload`; an error goes to the host, which hands it on.
+    self.maybe_etag = answer?;
+    Ok(())
   }
 }
+
+impl UploadTarget {
+  /// Whether `file` is the one this upload sends: by its slot, or by the part that comes next.
+  fn is_sending(&self, file: &PendingFile) -> bool {
+    match self {
+      Self::Whole { slot, .. } => file.maybe_slot.as_ref() == Some(slot),
+      Self::Part(target) => file.maybe_parts.as_ref().is_some_and(|parts| {
+        parts.attachment_id == target.attachment_id
+          && target
+            .maybe_part
+            .as_ref()
+            .is_none_or(|part| usize::from(part.part_number) == parts.etags.len() + 1)
+      }),
+    }
+  }
+}
+
+/// A blob or part request beside the host's loop; a part answers with its `ETag`.
+type BlobRequest = Pin<Box<dyn Future<Output = Result<Option<String>, ApiError>>>>;
 
 /// The first file of `upload` that is neither done nor failed and whose attempt is due.
 fn next_due_file(upload: &PendingUpload, now_ms: i64) -> Option<usize> {
@@ -785,7 +957,7 @@ fn next_due_file(upload: &PendingUpload, now_ms: i64) -> Option<usize> {
     .position(|file| file.maybe_done.is_none() && file.maybe_failure.is_none() && file.retry.is_due(now_ms))
 }
 
-enum UploadError {
+pub(super) enum UploadError {
   /// The server can't be reached: keep the file pending, without counting an attempt.
   Offline(CoreError),
   /// The upload itself failed (refused blob, lost slot, 409): try again after a backoff.
@@ -864,7 +1036,10 @@ pub fn cancel_pending_file(
   {
     return Ok(false);
   }
-  upload.files.remove(index);
+  let file = upload.files.remove(index);
+  if let Some(attachment) = announced_attachment(&file) {
+    queue_abandon(store, attachment)?;
+  }
   let has_text = store.message(conversation, message)?.is_some_and(
     |stored| matches!(&stored.content, MessageContent::Text { body, .. } if !body.trim().is_empty()),
   );
@@ -882,6 +1057,25 @@ pub fn cancel_pending_file(
     Ok::<_, CoreError>(())
   })?;
   Ok(true)
+}
+
+/// The attachment the server announced for a file that isn't up yet, if any.
+fn announced_attachment(file: &PendingFile) -> Option<AttachmentId> {
+  file
+    .maybe_parts
+    .as_ref()
+    .map(|parts| parts.attachment_id)
+    .or_else(|| file.maybe_slot.as_ref().map(|slot| slot.attachment_id))
+}
+
+fn queue_abandon(store: &impl LocalStore, attachment: AttachmentId) -> Result<(), CoreError> {
+  let mut abandoned: Vec<AttachmentId> =
+    records::get_json(store, Table::FileTransfers, ABANDONED_KEY)?.unwrap_or_default();
+  if !abandoned.contains(&attachment) {
+    abandoned.push(attachment);
+    records::put_json(store, Table::FileTransfers, ABANDONED_KEY, &abandoned)?;
+  }
+  Ok(())
 }
 
 /// Files of a sent message that couldn't be uploaded (shown to the sender only).
@@ -958,7 +1152,7 @@ pub fn sweep_staged_copies(store: &impl LocalStore, staging: &std::path::Path) -
     .flat_map(|upload| upload.files.iter())
     .filter_map(|file| match &file.source {
       UploadSource::Path { path } => Some(std::path::PathBuf::from(path)),
-      UploadSource::Bytes { .. } => None,
+      UploadSource::Bytes { .. } | UploadSource::Picked { .. } => None,
     })
     .collect();
   let Ok(entries) = std::fs::read_dir(staging) else {
@@ -996,7 +1190,7 @@ fn remove_staged(staging: &std::path::Path, source: &UploadSource) {
 #[cfg(target_arch = "wasm32")]
 fn remove_staged(_staging: &std::path::Path, _source: &UploadSource) {}
 
-fn read_source(source: &UploadSource) -> Result<Vec<u8>, ()> {
+async fn read_source(source: &UploadSource, size_bytes: u64) -> Result<Vec<u8>, ()> {
   match source {
     UploadSource::Bytes { bytes } => Ok(bytes.as_slice().to_vec()),
     #[cfg(not(target_arch = "wasm32"))]
@@ -1005,6 +1199,9 @@ fn read_source(source: &UploadSource) -> Result<Vec<u8>, ()> {
     }),
     #[cfg(target_arch = "wasm32")]
     UploadSource::Path { .. } => Err(()),
+    UploadSource::Picked { handle } => crate::picked_files::read(handle, 0, size_bytes, size_bytes)
+      .await
+      .map(|bytes| bytes.to_vec()),
   }
 }
 
@@ -1018,7 +1215,7 @@ fn failure_of(error: &CoreError) -> TransferFailure {
   }
 }
 
-fn is_status(error: &ApiError, status: u16) -> bool {
+pub(super) fn is_status(error: &ApiError, status: u16) -> bool {
   matches!(error, ApiError::Status { status: actual, .. } if *actual == status)
 }
 
@@ -1262,6 +1459,7 @@ mod tests {
         maybe_done: None,
         maybe_failure: None,
         maybe_slot: None,
+        maybe_parts: None,
         retry: UploadRetry::default(),
         maybe_thumbnail: None,
         maybe_dimensions: None,
@@ -1321,6 +1519,7 @@ mod tests {
         maybe_done: None,
         maybe_failure: None,
         maybe_slot: None,
+        maybe_parts: None,
         retry: UploadRetry::default(),
         maybe_thumbnail: None,
         maybe_dimensions: None,

@@ -14,8 +14,21 @@ use web_sys::{ProgressEvent, XmlHttpRequest, XmlHttpRequestResponseType};
 use super::{ApiError, Interception};
 use crate::transfers::ByteCounter;
 
-/// Uploads `bytes` with `PUT`, counting the bytes sent into `sent`.
+/// Uploads `bytes` with `PUT`, adding the bytes sent to `sent`.
 pub async fn put(url: &str, bytes: Vec<u8>, sent: ByteCounter) -> Result<(), ApiError> {
+  send_put(url, bytes, sent).await.map(|_| ())
+}
+
+/// Uploads one part of an upload in parts like [`put`]; resolves to the part's `ETag` (the storage's
+/// CORS rule must expose it).
+pub async fn put_part(url: &str, bytes: Vec<u8>, sent: ByteCounter) -> Result<String, ApiError> {
+  let xhr = send_put(url, bytes, sent).await?;
+  xhr.get_response_header("etag").ok().flatten().ok_or_else(|| {
+    ApiError::Decode("the storage answered a part without an ETag (CORS ExposeHeaders)".into())
+  })
+}
+
+async fn send_put(url: &str, bytes: Vec<u8>, sent: ByteCounter) -> Result<XmlHttpRequest, ApiError> {
   let mut request = Transfer::open("PUT", url)?;
   let upload: web_sys::XmlHttpRequestEventTarget = request.xhr.upload().map_err(js_error)?.into();
   request.on_progress(&upload, sent, None);
@@ -25,7 +38,7 @@ pub async fn put(url: &str, bytes: Vec<u8>, sent: ByteCounter) -> Result<(), Api
     .xhr
     .send_with_opt_buffer_source(Some(&body))
     .map_err(js_error)?;
-  request.finish().await.map(|_| ())
+  request.finish().await
 }
 
 /// Downloads with `GET`, counting the bytes received into `received`; fails once more than
@@ -100,7 +113,8 @@ impl Transfer {
     Ok(transfer)
   }
 
-  /// Counts the bytes moved; stops the request once more than `maybe_max_bytes` arrived.
+  /// Counts the bytes moved on top of what `counter` had (the parts before this one); stops the
+  /// request once more than `maybe_max_bytes` arrived.
   fn on_progress(
     &mut self,
     target: &web_sys::XmlHttpRequestEventTarget,
@@ -108,9 +122,10 @@ impl Transfer {
     maybe_max_bytes: Option<u64>,
   ) {
     let xhr = self.xhr.clone();
+    let before = counter.get();
     self.on(target, "progress", move |event| {
       let loaded = event.loaded() as u64;
-      counter.set(loaded);
+      counter.set(before + loaded);
       let max_bytes = maybe_max_bytes?;
       if loaded <= max_bytes {
         return None;

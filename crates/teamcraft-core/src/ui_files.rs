@@ -331,12 +331,13 @@ fn pending_file(file: OutgoingFile) -> PendingFile {
       let size = file_size(&path);
       (UploadSource::Path { path }, size)
     },
+    FileSource::Picked { handle, size_bytes } => (UploadSource::Picked { handle }, size_bytes),
   };
   // Read from the header only: the pending message reserves the picture's space at once.
   let maybe_dimensions = match &source {
     UploadSource::Bytes { bytes } => crate::thumbnail::image_dimensions(bytes.as_slice(), &file.media_type)
       .map(|(width, height)| ImageDimensions { width, height }),
-    UploadSource::Path { .. } => None,
+    UploadSource::Path { .. } | UploadSource::Picked { .. } => None,
   };
   PendingFile {
     file_name: file.file_name,
@@ -346,6 +347,7 @@ fn pending_file(file: OutgoingFile) -> PendingFile {
     maybe_done: None,
     maybe_failure: None,
     maybe_slot: None,
+    maybe_parts: None,
     retry: UploadRetry::default(),
     maybe_thumbnail: file.maybe_thumbnail.map(Base64Bytes::new),
     maybe_dimensions,

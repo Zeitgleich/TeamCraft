@@ -5,7 +5,7 @@
 //! one for tests stay interchangeable. Typed records on top live in [`crate::records`].
 
 #[cfg(target_arch = "wasm32")]
-mod browser;
+pub(crate) mod browser;
 #[cfg(all(
   test,
   feature = "sqlcipher",

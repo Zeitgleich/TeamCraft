@@ -12,6 +12,7 @@ pub mod downloads;
 pub mod error;
 pub mod link_preview;
 pub mod notify_rules;
+pub mod picked_files;
 pub mod platform;
 pub mod prefetch;
 pub mod push_guard;
