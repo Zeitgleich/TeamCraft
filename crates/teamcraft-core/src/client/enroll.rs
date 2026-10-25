@@ -180,6 +180,7 @@ impl PendingEnrollment {
       are_welcomes_synced: false,
       maybe_waiting_checked_at_ms: None,
       catch_up_focus: super::CatchUpFocus::default(),
+      is_welcome_cursor_held: false,
     };
     client.persist_sync()?;
     client.store_wrapped_keys_blob(&wrapped_keys)?;

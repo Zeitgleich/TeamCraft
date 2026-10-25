@@ -156,10 +156,16 @@ struct OfflineBanner: View {
   private func notice(at now: Date) -> Notice? {
     if !network.isOnline { return Notice(text: Text("offline_banner"), action: nil) }
     switch model.connection {
-    case .offline(let retryAtMs):
+    case .offline(let retryAtMs, let maybeInterception):
       let seconds = max(0, Int((Double(retryAtMs) / 1000 - now.timeIntervalSince1970).rounded(.up)))
+      let text: Text =
+        switch maybeInterception {
+        case .captivePortal: Text("connection_captive_portal \(seconds)")
+        case .untrustedCertificate: Text("connection_untrusted_certificate \(seconds)")
+        case nil: Text("connection_unreachable \(seconds)")
+        }
       return Notice(
-        text: Text("connection_unreachable \(seconds)"),
+        text: text,
         action: Action(label: "connection_retry") { model.networkChanged() })
     case .signInRequired:
       return Notice(

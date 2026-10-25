@@ -254,6 +254,14 @@ pub fn push_session(store: &impl LocalStore, now_ms: i64) -> Result<Option<PushS
   )
 }
 
+/// The server of the stored session, also after its token expired.
+pub fn push_server_url(store: &impl LocalStore) -> Result<Option<String>, CoreError> {
+  Ok(
+    records::get_json::<PushSession>(store, Table::Account, PUSH_SESSION_RECORD)?
+      .map(|session| session.server_url),
+  )
+}
+
 impl std::fmt::Debug for PushSession {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("PushSession")

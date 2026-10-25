@@ -67,7 +67,8 @@ secrecy = { version = "0.10", features = ["serde"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.7", features = ["trace", "request-id", "fs"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls", "http2"] }
+# `system-proxy`: macOS and Windows proxy settings (environment variables are read anyway).
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls", "http2", "system-proxy"] }
 # `Retry-After` as an HTTP date (push services); already in the tree through hyper.
 httpdate = "1"
 

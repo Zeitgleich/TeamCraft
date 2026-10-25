@@ -52,7 +52,10 @@ pub use calls::{CallEventSink, CallKeySigner};
 pub(crate) use catch_up::CATCHING_UP_PREFIX;
 pub use catch_up::{CatchUpFocus, is_catching_up};
 pub use enroll::{EnrollmentOptions, EnrollmentSecret, OrgRecoveryUnlock, PendingEnrollment};
-pub use gateway::{DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart};
+pub use gateway::{
+  DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart, GatewayTiming, HeldFrames, HeldLimits, KeptAlive,
+  keep_alive,
+};
 pub use group_health::{
   RemovalStatus, group_leftovers, is_queue_refused, pending_removals, unconfirmed_removals,
 };
@@ -63,6 +66,7 @@ pub use messaging::FlushReport;
 pub(crate) use messaging::{REMOVED_SENDER_GRACE_MS, decrypt_content};
 #[cfg(feature = "ui")]
 pub(crate) use messaging::{apply_control, bookmarks_key};
+pub(crate) use notifications::registered_push_token;
 pub use notifications::{TYPING_TIMEOUT_MS, TypingState};
 use openmls_rust_crypto::OpenMlsRustCrypto;
 pub use org_recovery::{SealedShare, recovery_request};
@@ -226,6 +230,11 @@ pub struct Client<A, S> {
   maybe_replay_left: Option<u64>,
   /// The conversation the user looks at; a catch-up takes it first (issue #247).
   catch_up_focus: CatchUpFocus,
+  /// Set while a catch-up joins the focused conversation's welcomes ahead of the others: the
+  /// welcome cursor then stays where it is, so the welcomes before them are still read in order.
+  /// Cleared right after each such join; a catch-up future dropped in between leaves it set until
+  /// the next catch-up, which clears it before anything else (only welcomes are affected).
+  is_welcome_cursor_held: bool,
 }
 
 impl Default for ClientSettings {
@@ -309,6 +318,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       are_welcomes_synced: false,
       maybe_waiting_checked_at_ms: None,
       catch_up_focus: CatchUpFocus::default(),
+      is_welcome_cursor_held: false,
     };
     // A catch-up the app was closed during left its marks; the next one sets them again.
     catch_up::clear_marks(&client.store)?;

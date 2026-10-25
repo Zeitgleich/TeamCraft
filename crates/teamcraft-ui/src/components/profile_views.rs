@@ -1,42 +1,20 @@
-//! Profiles: the form for the signed-in user (picture, title, department, phone, time zone, working
-//! hours) and the card of another person with their local time.
+//! Profiles: the card of another person with their local time, and the helpers the profile form
+//! (Settings > Account, `settings_account.rs`) shares with it.
 
 use leptos::prelude::*;
-use teamcraft_proto::{AvatarContentType, ErrorCode, UpdateProfileRequest, UserId, WorkingHours};
-use wasm_bindgen::JsCast;
+use teamcraft_proto::{UserId, WorkingHours};
 
-use crate::clock::{
-  format_date_time, format_relative, local_time_zone, now_ms, time_in_zone, time_zone_names,
-};
+use crate::clock::{format_date_time, format_relative, now_ms, time_in_zone};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
-use crate::components::image_crop_dialog::{
-  CropTarget, CropUpload, ImageCropDialog, allow_image_drop, dropped_file,
-};
 use crate::components::modal::Modal;
-use crate::feedback::{ActionFailure, FailureKind};
 use crate::i18n::use_i18n;
-use crate::image_crop::check_pick;
 use crate::model::{PresenceStatus, User};
-use crate::profiles::{MAX_AVATAR_BYTES, use_profiles};
-use crate::reactive::SetIfAlive;
+use crate::profiles::use_profiles;
 use crate::state::use_app_state;
 
 pub use teamcraft_proto::Weekday;
 
-fn weekdays() -> [Weekday; 7] {
-  [
-    Weekday::Monday,
-    Weekday::Tuesday,
-    Weekday::Wednesday,
-    Weekday::Thursday,
-    Weekday::Friday,
-    Weekday::Saturday,
-    Weekday::Sunday,
-  ]
-}
-const DEFAULT_START: u16 = 9 * 60;
-const DEFAULT_END: u16 = 17 * 60;
 /// Below this, "last seen" reads "just now": seconds are noise, and the label doesn't tick.
 const LAST_SEEN_JUST_NOW_MS: i64 = 2 * 60_000;
 
@@ -49,248 +27,6 @@ pub fn parse_minutes(text: &str) -> Option<u16> {
 
 pub fn format_minutes(minutes: u16) -> String {
   format!("{:02}:{:02}", minutes / 60, minutes % 60)
-}
-
-fn non_empty(text: &str) -> Option<String> {
-  let trimmed = text.trim();
-  (!trimmed.is_empty()).then(|| trimmed.to_owned())
-}
-
-/// The form of the signed-in user's own profile.
-#[component]
-pub fn EditProfileDialog() -> impl IntoView {
-  let state = use_app_state();
-  let i18n = use_i18n();
-  let Some(hub) = use_profiles() else {
-    return view! { <Modal labelled_by="profile-title"><p>{move || i18n.t("profile-unavailable")}</p></Modal> }.into_any();
-  };
-  let me = state.me();
-  let current = hub.profile(me.id);
-  let title = RwSignal::new(String::new());
-  let department = RwSignal::new(String::new());
-  let phone = RwSignal::new(String::new());
-  let time_zone = RwSignal::new(String::new());
-  let has_hours = RwSignal::new(false);
-  let days = RwSignal::new(vec![
-    Weekday::Monday,
-    Weekday::Tuesday,
-    Weekday::Wednesday,
-    Weekday::Thursday,
-    Weekday::Friday,
-  ]);
-  let start = RwSignal::new(format_minutes(DEFAULT_START));
-  let end = RwSignal::new(format_minutes(DEFAULT_END));
-  let error = RwSignal::new(None::<String>);
-  let is_saving = RwSignal::new(false);
-  let zones = time_zone_names();
-
-  // The stored profile arrives after the dialog opened: fill the form once.
-  let is_filled = RwSignal::new(false);
-  Effect::new(move |_| {
-    if is_filled.get_untracked() {
-      return;
-    }
-    let Some(profile) = hub.profile(me.id) else { return };
-    is_filled.set(true);
-    title.set(profile.maybe_title.unwrap_or_default());
-    department.set(profile.maybe_department.unwrap_or_default());
-    phone.set(profile.maybe_phone.unwrap_or_default());
-    time_zone.set(
-      profile
-        .maybe_time_zone
-        .unwrap_or_else(|| local_time_zone().unwrap_or_default()),
-    );
-    if let Some(hours) = profile.maybe_working_hours {
-      has_hours.set(true);
-      days.set(hours.weekdays);
-      start.set(format_minutes(hours.start_minute));
-      end.set(format_minutes(hours.end_minute));
-    }
-  });
-  drop(current);
-
-  let save = move |ev: leptos::ev::SubmitEvent| {
-    ev.prevent_default();
-    let maybe_working_hours = if has_hours.get_untracked() {
-      let (Some(start_minute), Some(end_minute)) = (
-        parse_minutes(&start.get_untracked()),
-        parse_minutes(&end.get_untracked()),
-      ) else {
-        error.set(Some(i18n.t("profile-hours-invalid")));
-        return;
-      };
-      if end_minute <= start_minute || days.with_untracked(Vec::is_empty) {
-        error.set(Some(i18n.t("profile-hours-invalid")));
-        return;
-      }
-      Some(WorkingHours {
-        weekdays: days.get_untracked(),
-        start_minute,
-        end_minute,
-      })
-    } else {
-      None
-    };
-    let request = UpdateProfileRequest {
-      maybe_title: non_empty(&title.get_untracked()),
-      maybe_department: non_empty(&department.get_untracked()),
-      maybe_phone: non_empty(&phone.get_untracked()),
-      maybe_time_zone: non_empty(&time_zone.get_untracked()),
-      maybe_working_hours,
-    };
-    is_saving.set(true);
-    leptos::task::spawn_local(async move {
-      match hub.save(request).await {
-        Ok(()) => state.close_overlay(),
-        Err(failure) => error.set_if_alive(Some(failure.to_string())),
-      }
-      is_saving.set_if_alive(false);
-    });
-  };
-
-  let picked = RwSignal::new_local(None::<web_sys::File>);
-  let open_crop = move |file: web_sys::File| {
-    if let Err(pick_error) = check_pick(&file.type_(), file.size()) {
-      error.set(Some(i18n.t(pick_error.i18n_key())));
-      return;
-    }
-    error.set(None);
-    picked.set(Some(file));
-  };
-  let pick_avatar = move |ev: leptos::ev::Event| {
-    let Some(input) = ev
-      .target()
-      .and_then(|target| target.dyn_into::<web_sys::HtmlInputElement>().ok())
-    else {
-      return;
-    };
-    let maybe_file = input.files().and_then(|files| files.item(0));
-    input.set_value("");
-    if let Some(file) = maybe_file {
-      open_crop(file);
-    }
-  };
-  let me_id = me.id;
-  let apply_avatar = Callback::new(move |png: Vec<u8>| -> CropUpload {
-    Box::pin(async move {
-      if png.len() as u64 > MAX_AVATAR_BYTES {
-        return Err(ActionFailure::new(
-          FailureKind::Server(ErrorCode::PayloadTooLarge),
-          "cropped avatar above the upload limit",
-        ));
-      }
-      hub
-        .upload_avatar(me_id, AvatarContentType::Png, png)
-        .await
-        .map_err(|failure| failure.to_failure())?;
-      picked.set_if_alive(None);
-      Ok(())
-    })
-  });
-  let cancel_crop = Callback::new(move |()| picked.set(None));
-  let remove_avatar = move |_| {
-    leptos::task::spawn_local(async move {
-      if let Err(failure) = hub.remove_avatar(me.id).await {
-        error.set_if_alive(Some(failure.to_string()));
-      }
-    });
-  };
-
-  view! {
-    <Modal labelled_by="profile-title">
-      <form on:submit=save>
-        <header class="modal-head">
-          <h2 id="profile-title">{move || i18n.t("profile-edit-title")}</h2>
-          <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
-            <Icon name=IconName::Close />
-          </button>
-        </header>
-        <div class="modal-body">
-          <div class="profile-avatar-row" on:dragover=allow_image_drop on:drop=move |ev| {
-            if let Some(file) = dropped_file(&ev) {
-              open_crop(file);
-            }
-          }>
-            <Avatar user=me.clone() size=AvatarSize::Large />
-            <label class="btn btn-small">
-              {move || i18n.t("profile-avatar-change")}
-              <input type="file" class="visually-hidden" accept="image/png,image/jpeg,image/webp" on:change=pick_avatar />
-            </label>
-            <Show when=move || hub.profile(me.id).is_some_and(|profile| profile.has_avatar) fallback=|| ()>
-              <button type="button" class="btn btn-small" on:click=remove_avatar>{move || i18n.t("profile-avatar-remove")}</button>
-            </Show>
-          </div>
-          <label for="profile-title-field">{move || i18n.t("profile-title")}</label>
-          <input id="profile-title-field" class="input" maxlength="100" prop:value=move || title.get() on:input=move |ev| title.set(event_target_value(&ev)) />
-          <label for="profile-department">{move || i18n.t("profile-department")}</label>
-          <input id="profile-department" class="input" maxlength="100" prop:value=move || department.get() on:input=move |ev| department.set(event_target_value(&ev)) />
-          <label for="profile-phone">{move || i18n.t("profile-phone")}</label>
-          <input id="profile-phone" class="input" type="tel" maxlength="40" prop:value=move || phone.get() on:input=move |ev| phone.set(event_target_value(&ev)) />
-          <label for="profile-zone">{move || i18n.t("profile-time-zone")}</label>
-          <input id="profile-zone" class="input" list="profile-zones" autocomplete="off" prop:value=move || time_zone.get() on:input=move |ev| time_zone.set(event_target_value(&ev)) />
-          <datalist id="profile-zones">
-            {zones.into_iter().map(|zone| view! { <option value=zone></option> }).collect_view()}
-          </datalist>
-          <label class="check-row">
-            <input type="checkbox" prop:checked=move || has_hours.get() on:change=move |ev| has_hours.set(event_target_checked(&ev)) />
-            <span>{move || i18n.t("profile-hours")}</span>
-          </label>
-          <Show when=move || has_hours.get() fallback=|| ()>
-            <fieldset class="weekday-picker">
-              <legend class="visually-hidden">{move || i18n.t("profile-hours-days")}</legend>
-              {weekdays()
-                .into_iter()
-                .map(|day| {
-                  let key = format!("weekday-{}", day.as_str());
-                  let day_on_change = day.clone();
-                  let day_checked = day.clone();
-                  view! {
-                    <label class="check-row">
-                      <input
-                        type="checkbox"
-                        prop:checked=move || days.with(|list| list.contains(&day_checked))
-                        on:change=move |ev| {
-                          let on = event_target_checked(&ev);
-                          days.update(|list| {
-                            list.retain(|candidate| *candidate != day_on_change);
-                            if on {
-                              list.push(day_on_change.clone());
-                            }
-                          });
-                        }
-                      />
-                      <span>{move || i18n.t(&key)}</span>
-                    </label>
-                  }
-                })
-                .collect_view()}
-            </fieldset>
-            <div class="hours-row">
-              <label for="profile-start">{move || i18n.t("profile-hours-from")}</label>
-              <input id="profile-start" class="input" type="time" prop:value=move || start.get() on:input=move |ev| start.set(event_target_value(&ev)) />
-              <label for="profile-end">{move || i18n.t("profile-hours-to")}</label>
-              <input id="profile-end" class="input" type="time" prop:value=move || end.get() on:input=move |ev| end.set(event_target_value(&ev)) />
-            </div>
-          </Show>
-          {move || error.get().map(|message| view! { <p class="field-error" role="alert">{message}</p> })}
-        </div>
-        <footer class="modal-foot">
-          <span class="grow"></span>
-          <button type="button" class="btn" on:click=move |_| state.close_overlay()>{move || i18n.t("cancel")}</button>
-          <button type="submit" class="btn btn-primary" prop:disabled=move || is_saving.get()>{move || i18n.t("save")}</button>
-        </footer>
-      </form>
-      {move || picked.get().map(|file| view! {
-        <ImageCropDialog
-          file=file
-          target=CropTarget::Avatar
-          on_apply=apply_avatar
-          on_cancel=cancel_crop
-        />
-      })}
-    </Modal>
-  }
-  .into_any()
 }
 
 /// "In a meeting" next to a person who is in a call right now (from the server's call rosters).
@@ -384,7 +120,7 @@ pub fn UserProfileDialog(user: UserId) -> impl IntoView {
       <footer class="modal-foot">
         <span class="grow"></span>
         {is_me
-          .then(|| view! { <button class="btn" on:click=move |_| state.overlay.set(crate::state::Overlay::EditProfile)>{move || i18n.t("profile-edit-title")}</button> })}
+          .then(|| view! { <button class="btn" on:click=move |_| state.open_settings_at(crate::state::SettingsTab::Account)>{move || i18n.t("profile-edit-title")}</button> })}
         {(!is_me)
           .then(|| {
             view! {
@@ -401,7 +137,7 @@ pub fn UserProfileDialog(user: UserId) -> impl IntoView {
 
 /// "Mon–Fri 09:00–17:00" style summary in the viewer's language.
 pub fn working_hours_text(hours: &WorkingHours, translate: impl Fn(&str) -> String) -> String {
-  let days: Vec<String> = weekdays()
+  let days: Vec<String> = crate::prefs::EVERY_DAY
     .iter()
     .filter(|day| hours.weekdays.contains(day))
     .map(|day| translate(&format!("weekday-{}", day.as_str())))

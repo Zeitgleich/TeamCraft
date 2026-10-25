@@ -21,6 +21,8 @@ mod sqlite;
 ))]
 mod sqlite_wipe;
 mod tracked;
+#[cfg(any(test, target_arch = "wasm32"))]
+mod write_queue;
 
 #[cfg(target_arch = "wasm32")]
 pub use browser::{IndexedDbRecords, IndexedDbStore, browser_database_key};

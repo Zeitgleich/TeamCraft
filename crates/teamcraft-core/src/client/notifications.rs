@@ -102,6 +102,19 @@ struct SealedRecord {
   blob: Base64Bytes,
 }
 
+/// The token registered for `provider` (raw, as the platform gave it), if that is the provider this
+/// device registered with. Reads the store only, for the service worker.
+pub(crate) fn registered_push_token(
+  store: &impl LocalStore,
+  provider: &PushProvider,
+) -> Result<Option<String>, CoreError> {
+  Ok(
+    records::get_json::<StoredPushRegistration>(store, Table::Account, PUSH_REGISTRATION_RECORD)?
+      .filter(|stored| stored.provider == *provider)
+      .map(|stored| stored.raw_token),
+  )
+}
+
 /// What sealing a device token needs: the gateway, the server's ID there, and the gateway's key.
 struct GatewayPlan {
   gateway_url: String,

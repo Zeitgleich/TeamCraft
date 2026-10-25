@@ -9,3 +9,5 @@ __pycache__/
 # Core dumps of crashed processes (the e2e suite once committed seven of them).
 core
 core.[0-9]*
+# ... but not source folders named `core` (the Android app's `teamcraft/core/`).
+!core/
