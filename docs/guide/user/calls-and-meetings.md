@@ -26,9 +26,24 @@ graphics hardware where the system offers it.
 |---------------------------------------------------|------------------------------------------------------|
 | Desktop calls, camera, screen share, push-to-talk | Works; needs the admin to run the media server (SFU) |
 | Android calls (system call UI, Android Auto)      | Works                                                |
+| Browser calls, camera, screen share               | Works in current Chrome, Edge, Firefox and Safari    |
 | Background blur and scenes                        | Works on desktop; the segmentation model is bundled  |
-| iOS, browser calls                                | In preparation                                       |
+| iOS calls                                         | In preparation                                       |
 | Reactions in calls, recording, live captions      | Coming soon                                          |
+
+### Calls in the browser
+
+The web app calls like the desktop app: audio and video, 1:1 and group calls, huddles and screen
+sharing, end-to-end encrypted the same way. The browser asks for the microphone when you join and for
+the camera only when you turn it on, so the phone button never asks for the camera. If you blocked
+either, the app says so: allow it with the icon in the address bar and try again.
+
+- **One tab:** calls run in the tab where TeamCraft opened first. A second tab of the same browser
+  says so instead of calling.
+- **Ringing:** an incoming call rings in that tab and shows a notification. Browsers play sound only
+  after you clicked or typed in the tab once since it loaded.
+- **Not in the browser yet:** background effects, sharing your computer's sound with the screen.
+- **Older browsers** without WebTransport can't call; the call buttons explain this.
 
 If calls fail to start with *service unavailable*, the admin has not configured the call service
 ([Admin: calls and SFU](../admin/calls-sfu.md)).

@@ -128,21 +128,16 @@ pub async fn link_device(owner: &mut Peer) -> TestClient {
   )
   .await;
   // The owner's device succeeds only once the new device confirmed the transfer.
+  let new_store = Arc::new(MemoryStore::new());
   let (approved, received) = futures_util::future::join(
     owner.client.complete_link_approval(owner_side.unwrap()),
-    new_side.unwrap().receive_secrets(),
+    new_side.unwrap().receive_secrets(&new_store, "Test device"),
   )
   .await;
   approved.unwrap();
   let link_options = linked_options(received.unwrap());
   PendingEnrollment::new()
-    .complete(
-      api,
-      Arc::new(MemoryStore::new()),
-      clock(),
-      settings(),
-      link_options,
-    )
+    .complete(api, new_store, clock(), settings(), link_options)
     .await
     .unwrap()
 }
@@ -217,7 +212,8 @@ pub fn linked_options(secrets: teamcraft_core::client::LinkedSecrets) -> Enrollm
 #[cfg(not(target_arch = "wasm32"))]
 /// Wall-clock time that follows tokio's (paused) clock, so a runner's deadlines and its sleeps
 /// agree. The wall clock can also jump ahead on its own, as it does when a laptop wakes up (tokio's
-/// clock is monotonic and stands still during sleep).
+/// clock is monotonic and stands still during sleep). Clones share the jumps.
+#[derive(Clone)]
 pub struct TokioClock {
   started: tokio::time::Instant,
   jumped_ms: Arc<AtomicI64>,

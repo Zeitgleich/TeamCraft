@@ -14,7 +14,7 @@
   padding: 24px;
   background: var(--bg, #f6f7f9);
   color: var(--text, #1b2230);
-  font: 14px/1.45 var(--font-ui, system-ui, sans-serif);
+  font: var(--text-base, 14px) / 1.45 var(--font-ui, system-ui, sans-serif);
   transition: opacity 180ms ease-out;
 }
 
@@ -106,7 +106,7 @@
 
 .tc-loader-name {
   min-height: 1.45em;
-  font-size: 17px;
+  font-size: var(--text-lg, 16px);
   font-weight: 600;
   letter-spacing: 0.01em;
 }
@@ -159,7 +159,7 @@
 
 .tc-loader-error-title {
   margin: 0 0 4px;
-  font-size: 15px;
+  font-size: var(--text-md, 15px);
   font-weight: 600;
 }
 

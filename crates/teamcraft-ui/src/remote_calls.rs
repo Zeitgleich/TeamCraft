@@ -1,16 +1,22 @@
-//! The call side of the desktop shell as the UI sees it: a mirror of the shell's [`CallSnapshot`]
-//! (ringing, running calls, the active call, devices) and the actions the user takes. The media
-//! (audio, WebTransport to the SFU, DAVE) runs in the shell; the shell emits `call-changed` and
-//! the mirror re-reads.
+//! The calls as the UI sees them: a mirror of a [`CallSnapshot`] (ringing, running calls, the
+//! active call, devices) and the actions the user takes. On desktop the media runs in the shell,
+//! which emits `call-changed` when the mirror should re-read; in the browser it runs in the page
+//! (`web_calls`), which hands over each new snapshot.
+//!
+//! Actions run one after the other, in the order the user took them: a camera turned on right
+//! after joining reaches the media layer after the join. A failed action reaches the user
+//! (issue #322).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 use leptos::task::spawn_local;
 use serde_json::json;
 use teamcraft_client_api::calls::{
-  ActiveCall, CallRequest, HuddleInfo, IncomingCall, MediaDevices, Participant,
+  ActiveCall, CallRequest, HuddleInfo, IncomingCall, MediaDevices, Participant, RemoteVideoTrack,
 };
+use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::model::{ConversationId, UserId};
 use teamcraft_client_api::remote::{CALL_CHANGED_EVENT, CallAction, CallSnapshot};
 
@@ -22,23 +28,79 @@ type ChangeNotifier = Rc<dyn Fn()>;
 pub struct RemoteCalls {
   snapshot: Rc<RefCell<CallSnapshot>>,
   notify: Rc<RefCell<Option<ChangeNotifier>>>,
+  link: CallLink,
+  /// Actions waiting for the one in flight.
+  queue: Rc<RefCell<VecDeque<CallAction>>>,
+  is_draining: Rc<Cell<bool>>,
+  join_failures: Rc<Cell<u64>>,
+}
+
+/// Where the media runs.
+#[derive(Clone)]
+enum CallLink {
+  /// The desktop shell, through its commands.
+  Shell,
+  /// This page (browser).
+  #[cfg(target_arch = "wasm32")]
+  Page(Rc<crate::web_calls::WebCallHost>),
 }
 
 impl RemoteCalls {
   /// Reads the first snapshot and follows the shell's `call-changed` events.
   pub async fn connect() -> Result<Self, String> {
     let snapshot: CallSnapshot = call("call_snapshot", &json!({})).await?;
-    let calls = Self {
-      snapshot: Rc::new(RefCell::new(snapshot)),
-      notify: Rc::new(RefCell::new(None)),
-    };
+    let calls = Self::new(snapshot, CallLink::Shell);
     let listener = calls.clone();
     listen(CALL_CHANGED_EVENT, move || listener.refresh());
     Ok(calls)
   }
 
+  /// Calls with the media in this page.
+  #[cfg(target_arch = "wasm32")]
+  pub fn in_page(host: Rc<crate::web_calls::WebCallHost>) -> Self {
+    let calls = Self::new(CallSnapshot::default(), CallLink::Page(host.clone()));
+    // Not the calls themselves: the host must not keep what keeps it alive.
+    let (snapshot, notify) = (calls.snapshot.clone(), calls.notify.clone());
+    host.set_on_change(Rc::new(move |next| {
+      *snapshot.borrow_mut() = next;
+      let maybe_notify = notify.borrow().clone();
+      if let Some(notify) = maybe_notify {
+        notify();
+      }
+    }));
+    calls
+  }
+
+  fn new(snapshot: CallSnapshot, link: CallLink) -> Self {
+    Self {
+      snapshot: Rc::new(RefCell::new(snapshot)),
+      notify: Rc::new(RefCell::new(None)),
+      link,
+      queue: Rc::default(),
+      is_draining: Rc::default(),
+      join_failures: Rc::default(),
+    }
+  }
+
   pub fn set_change_notifier(&self, notify: ChangeNotifier) {
     *self.notify.borrow_mut() = Some(notify);
+  }
+
+  /// Whether the media runs in this page (the browser), which has no background effects.
+  pub fn is_in_page(&self) -> bool {
+    !matches!(self.link, CallLink::Shell)
+  }
+
+  pub fn join_failures(&self) -> u64 {
+    self.join_failures.get()
+  }
+
+  pub fn has_pending_actions(&self) -> bool {
+    self.is_draining.get() || !self.queue.borrow().is_empty()
+  }
+
+  pub fn video_tracks(&self) -> Vec<RemoteVideoTrack> {
+    self.snapshot.borrow().video_tracks.clone()
   }
 
   pub fn devices(&self) -> MediaDevices {
@@ -97,12 +159,30 @@ impl RemoteCalls {
       })
   }
 
+  /// Queues an action behind those still running.
   pub fn act(&self, action: CallAction) {
+    self.queue.borrow_mut().push_back(action);
+    if self.is_draining.replace(true) {
+      return;
+    }
     let calls = self.clone();
     spawn_local(async move {
-      if let Err(error) = call::<()>("call_action", &json!({ "action": action })).await {
-        tracing::warn!(%error, "call action failed");
+      loop {
+        let maybe_action = calls.queue.borrow_mut().pop_front();
+        let Some(action) = maybe_action else {
+          break;
+        };
+        let is_join = matches!(action, CallAction::Join { .. });
+        if let Err(error) = calls.carry_out(action).await {
+          if is_join {
+            // async-ok: a Cell the calls share, not a signal.
+            calls.join_failures.set(calls.join_failures.get() + 1);
+          }
+          crate::feedback::report_failure(ActionFailure::from_wire(&error));
+        }
       }
+      // async-ok: a Cell the calls share, not a signal.
+      calls.is_draining.set(false);
       calls.refresh();
     });
   }
@@ -111,7 +191,20 @@ impl RemoteCalls {
     self.act(CallAction::Join { request });
   }
 
+  async fn carry_out(&self, action: CallAction) -> Result<(), String> {
+    match &self.link {
+      CallLink::Shell => call::<()>("call_action", &json!({ "action": action })).await,
+      #[cfg(target_arch = "wasm32")]
+      CallLink::Page(host) => host.act(action).await,
+    }
+  }
+
   fn refresh(&self) {
+    #[cfg(target_arch = "wasm32")]
+    // The page's calls hand over every new snapshot themselves.
+    if let CallLink::Page(_) = &self.link {
+      return;
+    }
     let calls = self.clone();
     spawn_local(async move {
       match call::<CallSnapshot>("call_snapshot", &json!({})).await {
@@ -119,14 +212,18 @@ impl RemoteCalls {
           if !calls.replace_snapshot(snapshot) {
             return;
           }
-          let notify = calls.notify.borrow().clone();
-          if let Some(notify) = notify {
-            notify();
-          }
+          calls.notify_changed();
         },
         Err(error) => tracing::warn!(%error, "could not read the call state"),
       }
     });
+  }
+
+  fn notify_changed(&self) {
+    let maybe_notify = self.notify.borrow().clone();
+    if let Some(notify) = maybe_notify {
+      notify();
+    }
   }
 
   /// Takes a fresh snapshot; returns whether it differs. An unchanged one re-renders nothing: every
@@ -216,10 +313,7 @@ mod tests {
   /// Issue #399: an action that changed nothing must not re-render the UI.
   #[test]
   fn only_a_changed_snapshot_counts_as_a_change() {
-    let calls = RemoteCalls {
-      snapshot: Rc::new(RefCell::new(CallSnapshot::default())),
-      notify: Rc::new(RefCell::new(None)),
-    };
+    let calls = RemoteCalls::new(CallSnapshot::default(), CallLink::Shell);
     assert!(!calls.replace_snapshot(CallSnapshot::default()));
     let ringing = CallSnapshot {
       running: vec![RunningCall {

@@ -9,7 +9,7 @@
 
 use crate::admin::AdminSection;
 use crate::model::{ConversationId, MessageId, SpaceId, ThreadId};
-use crate::state::SettingsTab;
+use crate::state::{SettingsPage, SettingsTab};
 
 /// More segments than the longest route (`/c/{c}/m/{m}/t/{t}`) are never a route.
 const MAX_SEGMENTS: usize = 6;
@@ -54,8 +54,8 @@ pub enum Route {
   Saved,
   /// `/search`: the search page. The query never goes into the URL.
   Search,
-  /// `/settings/{tab}`: the settings dialog.
-  Settings(SettingsTab),
+  /// `/settings`: the settings dialog's list of sections (phones); `/settings/{tab}`: a section.
+  Settings(SettingsPage),
   /// `/admin/{section}`: the administration console.
   Admin(AdminSection),
 }
@@ -88,8 +88,8 @@ impl Route {
       ["people"] => Some(Self::People),
       ["saved"] => Some(Self::Saved),
       ["search"] => Some(Self::Search),
-      ["settings"] => Some(Self::Settings(SettingsTab::DEFAULT)),
-      ["settings", tab] => SettingsTab::from_slug(tab).map(Self::Settings),
+      ["settings"] => Some(Self::Settings(SettingsPage::Sections)),
+      ["settings", tab] => SettingsTab::from_slug(tab).map(|tab| Self::Settings(SettingsPage::Section(tab))),
       ["admin"] => Some(Self::Admin(AdminSection::ALL[0])),
       ["admin", section] => admin_section(section).map(Self::Admin),
       ["s", space] => id(space).map(Self::Space),
@@ -144,7 +144,8 @@ impl Route {
       Self::People => "/people".to_owned(),
       Self::Saved => "/saved".to_owned(),
       Self::Search => "/search".to_owned(),
-      Self::Settings(tab) => format!("/settings/{}", tab.slug()),
+      Self::Settings(SettingsPage::Sections) => "/settings".to_owned(),
+      Self::Settings(SettingsPage::Section(tab)) => format!("/settings/{}", tab.slug()),
       Self::Admin(section) => format!("/admin/{}", section.slug()),
     }
   }
@@ -186,11 +187,12 @@ impl Route {
   }
 
   /// Whether `other` is the same page in another spelling or another tab of it: the same
-  /// conversation once its kind has loaded (`/c/1` and `/s/2/c/1`), or another settings tab. Moving
-  /// between those replaces the history entry instead of adding one.
+  /// conversation once its kind has loaded (`/c/1` and `/s/2/c/1`), or another settings section.
+  /// Moving between those replaces the history entry instead of adding one. The phones' list of
+  /// settings sections is a page of its own, so Back returns to it from a section.
   pub fn is_same_page(&self, other: &Self) -> bool {
     match (self, other) {
-      (Self::Settings(_), Self::Settings(_)) => true,
+      (Self::Settings(SettingsPage::Section(_)), Self::Settings(SettingsPage::Section(_))) => true,
       (
         Self::Channel { .. } | Self::Conversation(_) | Self::Direct(_),
         Self::Channel { .. } | Self::Conversation(_) | Self::Direct(_),
@@ -265,9 +267,11 @@ mod tests {
     #[test]
     fn every_settings_tab_and_admin_section_has_a_path() {
       for tab in SettingsTab::ALL {
-        let route = Route::Settings(tab);
+        let route = Route::Settings(SettingsPage::Section(tab));
         assert_eq!(Route::parse(&route.path()), Some(route));
       }
+      let sections = Route::Settings(SettingsPage::Sections);
+      assert_eq!(Route::parse(&sections.path()), Some(sections));
       for section in AdminSection::ALL {
         let route = Route::Admin(section);
         assert_eq!(Route::parse(&route.path()), Some(route));
@@ -316,7 +320,7 @@ mod tests {
     fn bare_settings_and_admin_open_their_first_page() {
       assert_eq!(
         Route::parse("/settings"),
-        Some(Route::Settings(SettingsTab::DEFAULT))
+        Some(Route::Settings(SettingsPage::Sections))
       );
       assert_eq!(Route::parse("/admin"), Some(Route::Admin(AdminSection::ALL[0])));
     }
@@ -427,7 +431,7 @@ mod tests {
       };
       assert_eq!(HistoryStep::between(&channel, &thread, false), HistoryStep::Push);
       assert_eq!(
-        HistoryStep::between(&channel, &Route::Settings(SettingsTab::DEFAULT), false),
+        HistoryStep::between(&channel, &Route::Settings(SettingsPage::Sections), false),
         HistoryStep::Push
       );
     }
@@ -442,12 +446,42 @@ mod tests {
       );
       assert_eq!(
         HistoryStep::between(
-          &Route::Settings(SettingsTab::DEFAULT),
-          &Route::Settings(SettingsTab::Calls),
+          &Route::Settings(SettingsPage::Section(SettingsTab::DEFAULT)),
+          &Route::Settings(SettingsPage::Section(SettingsTab::AudioVideo)),
           false
         ),
         HistoryStep::Replace
       );
+    }
+
+    #[test]
+    fn a_section_from_the_phones_section_list_is_a_new_entry() {
+      assert_eq!(
+        HistoryStep::between(
+          &Route::Settings(SettingsPage::Sections),
+          &Route::Settings(SettingsPage::Section(SettingsTab::Devices)),
+          false
+        ),
+        HistoryStep::Push
+      );
+    }
+
+    #[test]
+    fn the_settings_tabs_before_the_rework_still_open() {
+      for (old, tab) in [
+        ("display", SettingsTab::Appearance),
+        ("sidebar", SettingsTab::Preferences),
+        ("language", SettingsTab::Preferences),
+        ("privacy", SettingsTab::Security),
+        ("calls", SettingsTab::AudioVideo),
+        ("advanced", SettingsTab::About),
+      ] {
+        assert_eq!(
+          Route::parse(&format!("/settings/{old}")),
+          Some(Route::Settings(SettingsPage::Section(tab))),
+          "{old}"
+        );
+      }
     }
 
     #[test]
@@ -510,7 +544,8 @@ mod tests {
       Route::People,
       Route::Saved,
       Route::Search,
-      Route::Settings(SettingsTab::Privacy),
+      Route::Settings(SettingsPage::Sections),
+      Route::Settings(SettingsPage::Section(SettingsTab::Security)),
       Route::Admin(AdminSection::Audit),
     ]
   }

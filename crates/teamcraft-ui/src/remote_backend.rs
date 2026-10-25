@@ -134,6 +134,12 @@ pub async fn enable_web_push(auth: &dyn Authenticator) -> Result<(), String> {
   call("core_enable_push", &json!({ "vapid_key": vapid_key })).await
 }
 
+/// Sets the unreadable local database aside (desktop) or deletes it (browser) and opens a new one,
+/// so the device can be set up again (issue #160).
+pub async fn reset_store() -> Result<(), String> {
+  call("core_reset_store", &json!({})).await
+}
+
 /// Signs the core out; the backend of this session gets no more events (#344).
 pub async fn stop_core() -> Result<(), String> {
   // async-ok: a thread-local, not a signal.
@@ -645,6 +651,15 @@ impl ChatBackend for RemoteChat {
 
   fn set_attention(&self, is_attentive: bool) {
     self.act(ChatAction::SetAttention { is_attentive });
+  }
+
+  fn focus_conversation(&self, conversation: ConversationId) {
+    spawn_local(async move {
+      // A hint for the catch-up order; nothing for the user to act on if it is lost.
+      if let Err(error) = call::<()>("core_focus", &json!({ "conversation": conversation })).await {
+        tracing::debug!(%error, "the core did not take the focus");
+      }
+    });
   }
 
   fn search_backend(&self) -> Option<&dyn SearchBackend> {

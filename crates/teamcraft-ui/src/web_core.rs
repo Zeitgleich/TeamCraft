@@ -30,7 +30,7 @@ use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{
   ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreConnection, CoreStatus, EnrollRequest,
-  LinkStatus, MessageWindow, SecuritySnapshot, StoreHealth,
+  LinkStatus, MessageWindow, SecuritySnapshot, StoreHealth, StoreProblem,
 };
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
@@ -44,8 +44,8 @@ use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
 use teamcraft_core::ui_snapshot::SnapshotCache;
 use teamcraft_core::upkeep::{self, Upkeep};
 use teamcraft_core::{
-  Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer, PendingEnrollment,
-  platform,
+  CallPreparation, Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer,
+  PendingEnrollment, UnreadableStore, platform,
 };
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::identity::IdentityPublicKey;
@@ -173,6 +173,27 @@ pub fn listen(callback: impl FnMut() + 'static) {
   LISTENERS.with(|listeners| listeners.borrow_mut().push(Rc::new(RefCell::new(callback))));
 }
 
+/// Whether the core runs in this tab (not in another tab this one follows). Calls need it: the
+/// device key that signs a call's keys stays with the core.
+pub fn runs_here() -> bool {
+  RUNNING.with(|running| matches!(running.borrow().as_ref(), Some(Running::Owner { .. })))
+}
+
+/// A join token, the signer and the verified devices for the conversation's call (e2ee.md §8).
+/// Only in the tab that runs the core.
+pub async fn prepare_call(conversation: ConversationId) -> Result<CallPreparation, String> {
+  ask(|reply| Request::PrepareCall(conversation, reply)).await?
+}
+
+/// Whether the workspace requires an organization background behind the camera image for this
+/// user (admin.md §3.5). Unknown restricts nothing, as on desktop.
+pub async fn requires_org_background() -> bool {
+  match ask(|reply| Request::Query(ChatQuery::OrgBackgrounds, reply)).await {
+    Ok(Ok(ChatAnswer::OrgBackgrounds { backgrounds })) => backgrounds.is_required(),
+    _ => false,
+  }
+}
+
 /// Answers one `core_*` command the way the desktop shell does.
 pub async fn call(command: &str, args: Value) -> Result<Value, String> {
   match command {
@@ -181,6 +202,11 @@ pub async fn call(command: &str, args: Value) -> Result<Value, String> {
       to_value(start(user).await?)
     },
     "core_stop" => {
+      // Signing out of a tab that isn't set up yet leaves no keys of the attempt behind (#168).
+      if current_follower().is_none() {
+        // An error means the core isn't running here: nothing to forget.
+        let _ = ask(Request::ForgetUnfinishedSetup).await;
+      }
       stop();
       Ok(Value::Null)
     },
@@ -208,6 +234,10 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
     "core_connection" => to_value(connection_state()?),
     "core_network_changed" => {
       send(Request::NetworkChanged)?;
+      Ok(Value::Null)
+    },
+    "core_focus" => {
+      send(Request::Focus(field(&args, "conversation")?))?;
       Ok(Value::Null)
     },
     "core_store_health" => to_value(ask(Request::StoreHealth).await?),
@@ -280,6 +310,10 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
     },
     "core_link_cancel" => {
       send(Request::LinkCancel)?;
+      Ok(Value::Null)
+    },
+    "core_reset_store" => {
+      ask(Request::ResetStore).await??;
       Ok(Value::Null)
     },
     "core_approval_start" => {
@@ -562,6 +596,10 @@ enum Request {
     reply: oneshot::Sender<Result<(), String>>,
   },
   LinkCancel,
+  /// The local database is unreadable: delete it and start this device afresh (issue #160).
+  ResetStore(oneshot::Sender<Result<(), String>>),
+  /// The user signs out: drop what an unfinished enrollment kept (issue #168).
+  ForgetUnfinishedSetup(oneshot::Sender<()>),
   ApprovalStart {
     code: String,
     reply: oneshot::Sender<Result<(), String>>,
@@ -573,6 +611,10 @@ enum Request {
   ApprovalCancel,
   /// The browser went online, the tab became visible or was resumed: check the connection now.
   NetworkChanged,
+  /// What joining a conversation's call needs (`web_calls`).
+  PrepareCall(ConversationId, oneshot::Sender<Result<CallPreparation, String>>),
+  /// The user opened a conversation; a running catch-up takes it next (issue #247).
+  Focus(ConversationId),
 }
 
 /// What woke the loop.
@@ -797,27 +839,83 @@ impl Core {
     let key = browser_database_key(&name)
       .await
       .map_err(|error| error.to_string())?;
-    let store = TrackedStore::new(Rc::new(
-      IndexedDbStore::open(&name, &key)
-        .await
-        .map_err(|error| error.to_string())?,
-    ));
+    let opened = match IndexedDbStore::open(&name, &key).await {
+      Ok(opened) => opened,
+      Err(error) => return unreadable_status(error.into()),
+    };
+    let store = TrackedStore::new(Rc::new(opened));
     self.store = Some(store.clone());
     watch_page_lifecycle(store.inner());
-    match Client::open(
+    let maybe_client = match Client::open(
+      self.api(),
+      store.clone(),
+      Box::new(SystemClock),
+      ClientSettings::default(),
+    ) {
+      Ok(maybe_client) => maybe_client,
+      Err(error) => return unreadable_status(error),
+    };
+    match maybe_client {
+      Some(client) => Ok(self.adopt(client)),
+      None => {
+        if let Some(client) = self.resume_link(store).await? {
+          return Ok(self.adopt(client));
+        }
+        Ok(CoreStatus::NeedsEnrollment {
+          has_existing_identity: self.has_existing_identity().await?,
+          was_data_lost: load_string(&self.store_ready_key()).is_some(),
+        })
+      },
+    }
+  }
+
+  /// A device link whose keys arrived before the page went away finishes enrolling now (#168).
+  async fn resume_link(&self, store: Store) -> Result<Option<Client<Api, Store>>, String> {
+    let resumed = PendingEnrollment::resume_link(
       self.api(),
       store,
       Box::new(SystemClock),
       ClientSettings::default(),
+      Argon2Settings::default(),
     )
-    .map_err(|error| error.to_string())?
-    {
-      Some(client) => Ok(self.adopt(client)),
-      None => Ok(CoreStatus::NeedsEnrollment {
-        has_existing_identity: self.has_existing_identity().await?,
-        was_data_lost: load_string(&self.store_ready_key()).is_some(),
-      }),
+    .await;
+    match resumed {
+      Ok(maybe_client) => Ok(maybe_client),
+      // Kept for the next start; "Try again" opens the core again.
+      Err(error) if error.is_transient() || error.is_sign_in_required() => Err(describe(error)),
+      // Dropped if they can't work; the user links again.
+      Err(error) => {
+        tracing::warn!(%error, "could not finish the enrollment of an interrupted device link");
+        Ok(None)
+      },
     }
+  }
+
+  /// Deletes the unreadable database and opens a new one (issue #160). A browser can't keep the
+  /// old one aside: its key is wrapped in the same database, and the space would stay used.
+  async fn reset_store(&mut self) -> Result<(), String> {
+    match self.status {
+      CoreStatus::StoreUnreadable {
+        problem: StoreProblem::NewerVersion,
+      } => {
+        // A newer bundle (after a reload, or in another tab) reads it: never wiped from here.
+        return Err("the local data is from a newer version; reload the page instead".to_owned());
+      },
+      CoreStatus::StoreUnreadable { .. } => {},
+      _ => return Err("the local data is readable; nothing to reset".to_owned()),
+    }
+    self.client = None;
+    self.backend = None;
+    // Dropping the last handle closes the database, so it can be deleted.
+    self.store = None;
+    let name = format!("teamcraft-{}", self.user);
+    IndexedDbStore::delete(&name)
+      .await
+      .map_err(|error| error.to_string())?;
+    tracing::warn!("deleted the unreadable local database");
+    self.open().await;
+    notify_changed();
+    Ok(())
   }
 
   async fn has_existing_identity(&self) -> Result<bool, String> {
@@ -852,6 +950,9 @@ impl Core {
       Box::new(SystemClock),
     ));
     self.catch_up_focus = client.catch_up_focus();
+    let mut client = client;
+    // Calls ring and show their roster in the tab that runs the core.
+    client.set_call_event_sink(Box::new(crate::web_calls::on_gateway_event));
     self.client = Some(client);
     self.maybe_push_check_at_ms = Some(i64::MIN);
     store_string(&self.store_ready_key(), "1");
@@ -915,6 +1016,30 @@ impl Core {
       Request::LinkCancel => {
         self.link = None;
         self.link_failure = LinkStatus::Idle;
+        // The user gave up on linking: keys from an earlier attempt aren't used any more.
+        if self.client.is_none()
+          && let Some(store) = &self.store
+          && let Err(error) = records::delete_pending_link(store)
+        {
+          tracing::warn!(%error, "could not drop the keys of an abandoned device link");
+        }
+      },
+      Request::ResetStore(reply) => drop(reply.send(self.reset_store().await)),
+      Request::ForgetUnfinishedSetup(reply) => {
+        if self.client.is_none()
+          && let Some(store) = &self.store
+        {
+          // Flushed: the core stops right after, and queued writes would be lost with it.
+          let forgotten = match records::forget_unfinished_enrollment(store) {
+            Ok(()) => store.inner().flush().await.map_err(CoreError::from),
+            Err(error) => Err(error),
+          };
+          if let Err(error) = forgotten {
+            tracing::warn!(%error, "could not drop the keys of an unfinished setup");
+          }
+        }
+        // Deliberately ignored: the caller may have stopped waiting; nothing is left to tell.
+        let _ = reply.send(());
       },
       Request::ApprovalStart { code, reply } => drop(reply.send(self.approval_start(&code).await)),
       Request::ApprovalConfirm { short_code, reply } => {
@@ -922,6 +1047,15 @@ impl Core {
       },
       Request::ApprovalCancel => self.approval = None,
       Request::NetworkChanged => self.connection.network_changed(now_ms()).await,
+      Request::PrepareCall(conversation, reply) => {
+        let result = match self.client.as_mut() {
+          Some(client) => client.prepare_call(conversation).await.map_err(describe_failure),
+          None => Err(not_set_up()),
+        };
+        drop(reply.send(result));
+      },
+      // async-ok: the core's catch-up focus (a shared cell), not a signal.
+      Request::Focus(conversation) => self.catch_up_focus.set(conversation),
       Request::Snapshot(reply) => drop(reply.send(self.snapshot())),
       Request::SnapshotChanges(maybe_since, reply) => drop(reply.send(self.snapshot_changes(maybe_since))),
       Request::Messages {
@@ -1049,7 +1183,17 @@ impl Core {
     let view = Rc::new(RefCell::new(LinkStatus::WaitingForScan {
       code: offer.to_code(),
     }));
-    let future = Box::pin(link_task(self.api(), offer, view.clone()));
+    let store = self
+      .store
+      .clone()
+      .ok_or_else(|| "the local database is not open".to_owned())?;
+    let future = Box::pin(link_task(
+      self.api(),
+      store,
+      device_name.clone(),
+      offer,
+      view.clone(),
+    ));
     self.link_failure = LinkStatus::Idle;
     self.link = Some(LinkRun {
       device_name,
@@ -1336,7 +1480,12 @@ impl Core {
     let count = commands.len();
     let mut maybe_failure = None;
     for command in commands {
-      if let Err(error) = client.run_ui_command(command).await {
+      // A command can take long (an upload, a big history page); heartbeats go on meanwhile.
+      let result = self
+        .connection
+        .keep_alive(now_ms(), client.run_ui_command(command))
+        .await;
+      if let Err(error) = result {
         tracing::warn!(%error, "UI command failed");
         maybe_failure.get_or_insert(error);
       }
@@ -1348,7 +1497,7 @@ impl Core {
     let Some(client) = self.client.as_mut() else {
       return;
     };
-    if upkeep::flush(client).await {
+    if self.connection.keep_alive(now_ms(), upkeep::flush(client)).await {
       notify_changed();
     }
   }
@@ -1429,7 +1578,8 @@ impl Core {
     let Some(client) = self.client.as_mut() else {
       return;
     };
-    if self.upkeep.tick(client).await {
+    // The upkeep may resync many conversations; heartbeats go on meanwhile.
+    if self.connection.keep_alive(now, self.upkeep.tick(client)).await {
       notify_changed();
     }
   }
@@ -1498,14 +1648,19 @@ impl SyncReads<'_> {
     is_closed: &mut bool,
   ) -> F::Output {
     let mut seen_revision = self.store.inner().write_revision();
+    let mut seen_caught_up = self.focus.caught_up_count();
+    // Deadlines, not a fresh sleep per wake-up: a burst of reads must not postpone the progress.
+    let mut progress = Box::pin(platform::sleep(SYNC_PROGRESS));
     loop {
-      let progress = pin!(platform::sleep(SYNC_PROGRESS));
       let request = if *is_closed {
         Either::Left(pending())
       } else {
         Either::Right(requests.next())
       };
-      match select(&mut connecting, select(request, progress)).await {
+      // The conversation the user opened is shown as soon as the sync woke this for it.
+      let focus_caught_up = pin!(self.focus.caught_up_since(seen_caught_up));
+      let wakes = select(progress.as_mut(), focus_caught_up);
+      match select(&mut connecting, select(request, wakes)).await {
         Either::Left((outcome, _)) => return outcome,
         Either::Right((Either::Left((Some(request), _)), _)) => {
           if let Some(request) = self.answer(request) {
@@ -1513,13 +1668,21 @@ impl SyncReads<'_> {
           }
         },
         Either::Right((Either::Left((None, _)), _)) => *is_closed = true,
-        Either::Right((Either::Right(((), _)), _)) => {
+        Either::Right((Either::Right((Either::Left(((), _)), _)), _)) => {
+          progress = Box::pin(platform::sleep(SYNC_PROGRESS));
           let revision = self.store.inner().write_revision();
           if revision != seen_revision && self.has_become_known(deferred) {
             notify_local();
           }
           if revision != seen_revision && is_page_visible() {
             seen_revision = revision;
+            notify_local();
+          }
+        },
+        Either::Right((Either::Right((Either::Right((caught_up, _)), _)), _)) => {
+          seen_caught_up = caught_up;
+          if is_page_visible() {
+            seen_revision = self.store.inner().write_revision();
             notify_local();
           }
         },
@@ -1549,6 +1712,11 @@ impl SyncReads<'_> {
   fn answer(&self, request: Request) -> Option<Request> {
     let request = match request {
       Request::Snapshot(_) | Request::SnapshotChanges(..) => return self.answer_snapshot(request),
+      Request::Focus(conversation) => {
+        // The sync holding the client takes it between two steps.
+        self.focus.set(conversation);
+        return None;
+      },
       other => other,
     };
     let read = match &request {
@@ -1639,6 +1807,23 @@ fn not_set_up() -> String {
   "this device is not set up yet".to_owned()
 }
 
+/// The status for an error of opening the store or the client: unreadable data asks the user what
+/// to do (issue #160); anything else is a failure.
+fn unreadable_status(error: CoreError) -> Result<CoreStatus, String> {
+  match error.unreadable_store() {
+    Some(problem) => {
+      tracing::error!(%error, ?problem, "the local database is unreadable");
+      Ok(CoreStatus::StoreUnreadable {
+        problem: match problem {
+          UnreadableStore::Damaged => StoreProblem::Damaged,
+          UnreadableStore::NewerVersion => StoreProblem::NewerVersion,
+        },
+      })
+    },
+    None => Err(error.to_string()),
+  }
+}
+
 /// Error text for the UI: the cause, without internal type names.
 fn describe(error: CoreError) -> String {
   error.to_string()
@@ -1652,6 +1837,8 @@ fn describe_failure(error: CoreError) -> String {
 /// Waits for the existing device to answer, shows the short code, then waits for the keys.
 async fn link_task(
   api: Api,
+  store: Store,
+  device_name: String,
   offer: LinkOffer,
   view: Rc<RefCell<LinkStatus>>,
 ) -> Result<LinkedSecrets, String> {
@@ -1661,7 +1848,7 @@ async fn link_task(
     short_code: link.short_code(),
   };
   notify_changed();
-  link.receive_secrets().await.map_err(describe)
+  link.receive_secrets(&store, &device_name).await.map_err(describe)
 }
 
 /// Issues the store's queued writes at once when the page is hidden, frozen or unloaded: a tab in

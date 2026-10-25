@@ -18,6 +18,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::message_actions::{
   ActionContext, ActionSurface, MessageAction, message_actions, run_message_action, with_shortcut,
 };
+use crate::components::sheet::Sheet;
 use crate::i18n::use_i18n;
 use crate::model::{Message, MessageId, thread_id_of};
 use crate::motion::PopoverSide;
@@ -33,8 +34,9 @@ const HIDE_GRACE: Duration = Duration::from_millis(120);
 const OVERLAP_PX: f64 = 16.0;
 /// Space kept between the bar and the top of the visible list.
 const EDGE_PX: f64 = 4.0;
-/// Room the "more" menu needs below its button; with less it opens upwards.
-const MENU_HEIGHT_PX: f64 = 300.0;
+/// Room the "more" menu needs below its button, in rem (it grows with the text size); with less
+/// it opens upwards.
+const MENU_HEIGHT_REM: f64 = 18.75;
 /// Space between the "more" button and its menu.
 const MENU_GAP_PX: f64 = 4.0;
 /// How long a finger rests on a message before its action sheet opens.
@@ -475,7 +477,8 @@ fn menu_placement(button: &web_sys::Element) -> MenuPlacement {
     })
     .unwrap_or((1024.0, 768.0));
   let right = format!("{}px", (width - rect.right()).max(0.0));
-  if height - rect.bottom() >= MENU_HEIGHT_PX || rect.top() < height - rect.bottom() {
+  let menu_height = MENU_HEIGHT_REM * crate::viewport::rem_px();
+  if height - rect.bottom() >= menu_height || rect.top() < height - rect.bottom() {
     MenuPlacement {
       right,
       top: format!("{}px", rect.bottom() + MENU_GAP_PX),
@@ -597,28 +600,8 @@ fn ActionSheet(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
   let actions = NodeRef::<html::Div>::new();
   let picker_button = NodeRef::<html::Button>::new();
   let is_picking = RwSignal::new(false);
-  let sheet = NodeRef::<html::Div>::new();
-  // The dialog takes the focus (for screen readers), without a ring on the first entry.
-  Effect::new(move |_| {
-    if let Some(element) = sheet.get() {
-      drop(element.focus());
-    }
-  });
   view! {
-    <div class="sheet-backdrop" on:click=move |_| close()></div>
-    <div
-      class="action-sheet"
-      node_ref=sheet
-      tabindex="-1"
-      role="dialog"
-      aria-modal="true"
-      aria-label=move || i18n.t("message-action-sheet")
-      on:keydown=move |ev| {
-        if ev.key() == "Escape" && !is_picking.get_untracked() {
-          close();
-        }
-      }
-    >
+    <Sheet class="action-sheet" label=Signal::derive(move || i18n.t("message-action-sheet")) on_close=Callback::new(move |()| close())>
       <div class="sheet-reactions">
         {quick
           .into_iter()
@@ -662,6 +645,6 @@ fn ActionSheet(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
             .collect_view()
         }}
       </div>
-    </div>
+    </Sheet>
   }
 }

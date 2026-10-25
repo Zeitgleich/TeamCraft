@@ -7,20 +7,25 @@
 //!    the SFU validates the new path; the QUIC connection, the DAVE group and the RTP numbering
 //!    simply continue. [`PathMonitor`] watches that the path is alive: any received UDP packet
 //!    counts, keep-alive answers included.
+//!    When the system reports a network change, the native driver also moves the connection to a
+//!    fresh socket (`rebind`), for networks the old socket can't reach the SFU from.
 //! 2. **Rejoin.** If the path stays silent (the old network is gone and migration didn't happen,
-//!    or the browser can't migrate), the driver opens a new connection with a fresh join token
-//!    and the engine rejoins the call ([`crate::call_engine::CallEngine::rejoin`]); the SFU keeps
-//!    the device's slot for a grace period. [`ReconnectSchedule`] paces the attempts and gives up
-//!    when the grace period is over.
+//!    or the browser can't migrate), or the SFU shuts down (a restart, a deploy: it closes with
+//!    `SFU_GOING_AWAY_CLOSE_CODE`), the driver opens a new connection with a fresh join token and
+//!    the engine rejoins the call ([`crate::call_engine::CallEngine::rejoin`]); the SFU keeps the
+//!    device's slot for a grace period, a restarted SFU starts a fresh room. [`ReconnectSchedule`]
+//!    paces the attempts with back-off and jitter, and gives up when the grace period is over.
 //!
 //! Pure state: time is passed in, so all of it is tested without a network.
 
+use std::collections::hash_map::RandomState;
 use std::fmt;
+use std::hash::{BuildHasher, Hasher};
 use std::time::Duration;
 
 use thiserror::Error;
-// `std::time::Instant` on native; the browser clock on wasm, where `std` has none.
-use web_time::Instant;
+// `std::time` on native; the browser clock on wasm, where `std` has none.
+use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// Timing of keep-alives, loss detection and rejoining.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +45,9 @@ pub struct ResilienceConfig {
   /// Pause before the second rejoin attempt; it doubles up to `max_retry_interval`.
   pub first_retry_interval: Duration,
   pub max_retry_interval: Duration,
+  /// After the SFU announced it is going away, the first rejoin attempt waits a random part of
+  /// this, so the restarted SFU isn't hit by every client of every call at the same moment.
+  pub going_away_spread: Duration,
 }
 
 /// Watches whether the connection's path is alive, from the count of received UDP packets.
@@ -67,6 +75,14 @@ pub struct ReconnectSchedule {
   grace: Duration,
   attempts: u32,
   next_attempt_at: Instant,
+  jitter: Jitter,
+}
+
+/// Spreads retry times, so clients that lost the SFU at the same moment (its restart, an office's
+/// network outage) don't come back in lockstep. Not for security: a small generator (SplitMix64).
+#[derive(Debug, Clone)]
+pub struct Jitter {
+  state: u64,
 }
 
 /// What a client needs to join a call: from `teamcraft-server`'s join token response.
@@ -93,6 +109,7 @@ impl Default for ResilienceConfig {
       default_reconnect_grace: Duration::from_secs(30),
       first_retry_interval: Duration::from_millis(250),
       max_retry_interval: Duration::from_secs(2),
+      going_away_spread: Duration::from_secs(1),
     }
   }
 }
@@ -136,11 +153,26 @@ impl PathMonitor {
 impl ReconnectSchedule {
   /// The connection was lost at `now`; the first attempt is due at once.
   pub fn new(now: Instant, grace: Duration) -> Self {
+    Self::with_jitter(now, grace, Jitter::random())
+  }
+
+  /// [`Self::new`] with a given jitter source (tests).
+  pub fn with_jitter(now: Instant, grace: Duration, jitter: Jitter) -> Self {
     Self {
       lost_at: now,
       grace,
       attempts: 0,
       next_attempt_at: now,
+      jitter,
+    }
+  }
+
+  /// The SFU closed the connection because it is going away (a restart, a deploy): the first
+  /// attempt waits a random part of [`ResilienceConfig::going_away_spread`] instead of starting at
+  /// once.
+  pub fn spread_first_attempt(&mut self, now: Instant, config: &ResilienceConfig) {
+    if self.attempts == 0 {
+      self.next_attempt_at = now + config.going_away_spread.mul_f64(self.jitter.next_fraction());
     }
   }
 
@@ -149,15 +181,17 @@ impl ReconnectSchedule {
     self.next_attempt_at
   }
 
-  /// Records an attempt that failed at `now` and schedules the next one.
+  /// Records an attempt that failed at `now` and schedules the next one: exponential back-off
+  /// with "equal jitter", between half and all of the interval.
   pub fn on_failed_attempt(&mut self, now: Instant, config: &ResilienceConfig) {
     let factor = 2u32.saturating_pow(self.attempts.min(16));
     let interval = config
       .first_retry_interval
       .saturating_mul(factor)
       .min(config.max_retry_interval);
+    let jittered = interval / 2 + (interval / 2).mul_f64(self.jitter.next_fraction());
     self.attempts += 1;
-    self.next_attempt_at = now + interval;
+    self.next_attempt_at = now + jittered;
   }
 
   /// Makes the next attempt due at once (the network came back).
@@ -175,6 +209,34 @@ impl ReconnectSchedule {
   }
 }
 
+impl Jitter {
+  /// Seeded from the process's random hash keys and the wall clock: different on every device
+  /// and every call. (The browser has no random hash keys; the clock's nanoseconds differ there.)
+  pub fn random() -> Self {
+    let mut hasher = RandomState::new().build_hasher();
+    let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    hasher.write_u128(since_epoch.as_nanos());
+    Self::seeded(hasher.finish())
+  }
+
+  /// A fixed sequence (tests).
+  pub fn seeded(seed: u64) -> Self {
+    Self { state: seed }
+  }
+
+  /// The next value in `[0, 1)`.
+  fn next_fraction(&mut self) -> f64 {
+    // SplitMix64 (Steele, Lea, Flood 2014).
+    self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut z = self.state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^= z >> 31;
+    // The top 53 bits, exactly representable as an f64 fraction.
+    (z >> 11) as f64 / (1u64 << 53) as f64
+  }
+}
+
 // Join tokens don't belong in logs.
 impl fmt::Debug for JoinTicket {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -185,9 +247,34 @@ impl fmt::Debug for JoinTicket {
   }
 }
 
+/// A certificate hash written as hex (colons allowed), as `serverCertificateHashes` and the
+/// native driver take it; `None` unless it is exactly 32 bytes.
+pub fn certificate_hash_from_hex(text: &str) -> Option<[u8; 32]> {
+  let hex: Vec<u8> = text.bytes().filter(|byte| *byte != b':').collect();
+  if hex.len() != 64 {
+    return None;
+  }
+  let mut hash = [0u8; 32];
+  for (byte, pair) in hash.iter_mut().zip(hex.chunks(2)) {
+    *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+  }
+  Some(hash)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn certificate_hashes_read_from_hex_with_or_without_colons() {
+    let plain = "ab".repeat(32);
+    let dotted = vec!["AB"; 32].join(":");
+    assert_eq!(certificate_hash_from_hex(&plain), Some([0xab; 32]));
+    assert_eq!(certificate_hash_from_hex(&dotted), Some([0xab; 32]));
+    for bad in ["", "ab", &"zz".repeat(32), &"ab".repeat(33)] {
+      assert_eq!(certificate_hash_from_hex(bad), None, "{bad}");
+    }
+  }
 
   mod path {
     use super::*;
@@ -234,32 +321,83 @@ mod tests {
     use super::*;
 
     #[test]
-    fn attempts_back_off_up_to_the_maximum() {
+    fn attempts_back_off_up_to_the_maximum_with_jitter() {
       let start = Instant::now();
-      let mut schedule = ReconnectSchedule::new(start, Duration::from_secs(30));
+      let mut schedule = ReconnectSchedule::with_jitter(start, Duration::from_secs(30), Jitter::seeded(7));
       assert_eq!(schedule.next_attempt_at(), start);
       let mut now = start;
-      let mut intervals = Vec::new();
-      for _ in 0..6 {
+      for base_millis in [250, 500, 1000, 2000, 2000, 2000] {
         schedule.on_failed_attempt(now, &config());
-        intervals.push(schedule.next_attempt_at() - now);
+        let interval = schedule.next_attempt_at() - now;
+        let base = Duration::from_millis(base_millis);
+        assert!(
+          interval >= base / 2 && interval <= base,
+          "{interval:?} not within half of {base:?}"
+        );
         now = schedule.next_attempt_at();
       }
-      let millis: Vec<u128> = intervals.iter().map(Duration::as_millis).collect();
-      assert_eq!(millis, vec![250, 500, 1000, 2000, 2000, 2000]);
       assert_eq!(schedule.attempts(), 6);
+    }
+
+    #[test]
+    fn clients_lost_together_retry_at_different_times() {
+      let start = Instant::now();
+      let retries: Vec<Instant> = (0..8)
+        .map(|seed| {
+          let mut schedule =
+            ReconnectSchedule::with_jitter(start, Duration::from_secs(30), Jitter::seeded(seed));
+          for _ in 0..3 {
+            schedule.on_failed_attempt(start, &config());
+          }
+          schedule.next_attempt_at()
+        })
+        .collect();
+      let mut distinct = retries.clone();
+      distinct.sort();
+      distinct.dedup();
+      assert!(distinct.len() >= 6, "{retries:?}");
     }
 
     #[test]
     fn network_coming_back_makes_the_next_attempt_due() {
       let start = Instant::now();
-      let mut schedule = ReconnectSchedule::new(start, Duration::from_secs(30));
+      let mut schedule = ReconnectSchedule::with_jitter(start, Duration::from_secs(30), Jitter::seeded(1));
       for _ in 0..4 {
         schedule.on_failed_attempt(start, &config());
       }
-      assert_eq!(schedule.next_attempt_at(), at(start, 2_000));
+      assert!(schedule.next_attempt_at() >= at(start, 1_000));
       schedule.hurry(at(start, 300));
       assert_eq!(schedule.next_attempt_at(), at(start, 300));
+    }
+
+    #[test]
+    fn going_away_spreads_the_first_attempt() {
+      let start = Instant::now();
+      let firsts: Vec<Instant> = (0..8)
+        .map(|seed| {
+          let mut schedule =
+            ReconnectSchedule::with_jitter(start, Duration::from_secs(30), Jitter::seeded(seed));
+          schedule.spread_first_attempt(start, &config());
+          schedule.next_attempt_at()
+        })
+        .collect();
+      for first in &firsts {
+        assert!(*first >= start && *first < at(start, 1_000), "{firsts:?}");
+      }
+      let mut distinct = firsts.clone();
+      distinct.sort();
+      distinct.dedup();
+      assert!(distinct.len() >= 6, "{firsts:?}");
+    }
+
+    #[test]
+    fn spreading_doesnt_delay_a_rejoin_already_under_way() {
+      let start = Instant::now();
+      let mut schedule = ReconnectSchedule::with_jitter(start, Duration::from_secs(30), Jitter::seeded(3));
+      schedule.on_failed_attempt(start, &config());
+      let due = schedule.next_attempt_at();
+      schedule.spread_first_attempt(start, &config());
+      assert_eq!(schedule.next_attempt_at(), due);
     }
 
     #[test]
@@ -269,6 +407,19 @@ mod tests {
       assert!(!schedule.has_expired(at(start, 29_999)));
       assert!(schedule.has_expired(at(start, 30_000)));
     }
+  }
+
+  #[test]
+  fn jitter_fractions_stay_in_the_unit_interval() {
+    let mut jitter = Jitter::seeded(0);
+    for _ in 0..10_000 {
+      let fraction = jitter.next_fraction();
+      assert!((0.0..1.0).contains(&fraction), "{fraction}");
+    }
+    assert_ne!(
+      Jitter::seeded(1).next_fraction(),
+      Jitter::seeded(2).next_fraction()
+    );
   }
 
   #[test]

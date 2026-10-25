@@ -180,6 +180,7 @@ impl PendingEnrollment {
       are_welcomes_synced: false,
       maybe_waiting_checked_at_ms: None,
       catch_up_focus: super::CatchUpFocus::default(),
+      is_welcome_cursor_held: false,
     };
     client.persist_sync()?;
     client.store_wrapped_keys_blob(&wrapped_keys)?;
@@ -191,19 +192,92 @@ impl PendingEnrollment {
     }
     // A key bag from the link is as fresh as the user's other device; one the server served may not
     // be (e2ee.md §4.6, joining by external commit).
-    records::put_json(
-      &client.store,
-      Table::Account,
-      super::member_device::KEY_BAG_FROM_LINK_KEY,
-      &matches!(options.secret, EnrollmentSecret::Linked(_)),
-    )?;
-    records::save_account(&client.store, &client.account)?;
-    records::delete_pending_device(&client.store)?;
+    let is_linked = matches!(options.secret, EnrollmentSecret::Linked(_));
+    // One group of writes: the account and its key bag replace the pending device and the
+    // secrets of a link together (issue #160).
+    crate::store::write_group(&client.store, || {
+      records::put_json(
+        &client.store,
+        Table::Account,
+        super::member_device::KEY_BAG_FROM_LINK_KEY,
+        &is_linked,
+      )?;
+      records::save_account(&client.store, &client.account)?;
+      records::delete_pending_device(&client.store)?;
+      records::delete_pending_link(&client.store)
+    })?;
     // Removal records from the key bag count before the first message is decrypted.
     client.apply_shared_removals()?;
     client.finish_enrollment().await?;
     Ok(client)
   }
+}
+
+impl PendingEnrollment {
+  /// Finishes an enrollment by linking that stopped after the existing device handed over the keys
+  /// (issue #168): the secrets were stored when they arrived. `Ok(None)` if there is none.
+  ///
+  /// A failure that will repeat (the key bag no longer opens, the account's identity changed, the
+  /// secrets belong to another account) drops the stored secrets, so the device asks to be set up
+  /// again; anything else (the network) keeps them for the next try.
+  pub async fn resume_link<A: ServerApi, S: LocalStore + Clone>(
+    api: A,
+    store: S,
+    clock: Box<dyn Clock>,
+    settings: ClientSettings,
+    argon2: Argon2Settings,
+  ) -> Result<Option<Client<A, S>>, CoreError> {
+    let pending = match records::load_pending_link(&store) {
+      Ok(Some(pending)) => pending,
+      Ok(None) => return Ok(None),
+      // An unreadable record would fail the same way on every start.
+      Err(CoreError::Corrupt(error)) => {
+        tracing::warn!(%error, "dropping the unreadable keys of an interrupted device link");
+        records::delete_pending_link(&store)?;
+        return Ok(None);
+      },
+      Err(error) => return Err(error),
+    };
+    let me = api.me().await?;
+    if me.id != pending.user_id {
+      tracing::warn!("dropping the keys of a device link for another account");
+      records::delete_pending_link(&store)?;
+      return Ok(None);
+    }
+    tracing::info!("finishing the enrollment of a device link that was interrupted");
+    let options = EnrollmentOptions {
+      device_name: pending.device_name,
+      secret: EnrollmentSecret::Linked(pending.secrets),
+      argon2,
+      maybe_attestation: None,
+    };
+    match Self::new()
+      .complete(api, store.clone(), clock, settings, options)
+      .await
+    {
+      Ok(client) => Ok(Some(client)),
+      Err(error) => {
+        if is_link_failure_final(&error) {
+          tracing::warn!(%error, "the keys of an interrupted device link no longer work; dropping them");
+          records::delete_pending_link(&store)?;
+        }
+        Err(error)
+      },
+    }
+  }
+}
+
+/// Whether resuming a link enrollment would fail the same way every time.
+fn is_link_failure_final(error: &CoreError) -> bool {
+  matches!(
+    error,
+    CoreError::KeyBag(_)
+      | CoreError::Corrupt(_)
+      | CoreError::Backup(_)
+      | CoreError::IdentityMismatch
+      | CoreError::IdentityMissing
+      | CoreError::KeyBagRollback { .. }
+  )
 }
 
 impl Default for PendingEnrollment {

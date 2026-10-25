@@ -15,6 +15,7 @@ pub mod platform;
 pub mod prefetch;
 pub mod push_guard;
 pub mod push_preview;
+pub mod push_subscription;
 pub mod read_state;
 pub mod records;
 pub mod runner;
@@ -49,8 +50,8 @@ mod convert;
 mod trust;
 
 pub use client::{
-  AttestationSettings, CallEventSink, CallKeySigner, Client, ClientSettings, EnrollmentOptions,
-  EnrollmentSecret, FlushReport, GatewayOutcome, GroupAccess, JwksSource, LinkOffer, MAX_VIEWER_BYTES,
-  OrgRecoveryUnlock, PendingEnrollment, TypingState,
+  AttestationSettings, CallEventSink, CallKeySigner, CallPreparation, Client, ClientSettings,
+  EnrollmentOptions, EnrollmentSecret, FlushReport, GatewayOutcome, GroupAccess, JwksSource, LinkOffer,
+  MAX_VIEWER_BYTES, OrgRecoveryUnlock, PendingEnrollment, TypingState,
 };
-pub use error::CoreError;
+pub use error::{CoreError, UnreadableStore};

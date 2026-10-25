@@ -210,10 +210,12 @@ Result:
   can't hold it back from some members and leave them on a key the removed person knows; the removed
   device never gets the epoch's secrets. (A member that never receives the removal commit stays in
   the old epoch and keeps using the old key; it can't tell.)
-- Content key bundles (MLS application messages) only carry history for new members, the current
-  key for a further device of a member, and the keys a device added back missed (§4.6). A member
-  takes a bundle's "current" key only if it has none yet, so an old or delayed bundle can't switch it
-  back; the one exception is a device that just joined and waits for its first one (§4.6).
+- Content key bundles (MLS application messages) to the whole group carry only a current key: for a
+  new member or a further device of a member. History for a new member and the keys a device added
+  back missed are sealed to the devices they are for (§4.3, §4.6). A member takes only the current
+  key of a bundle sent to the whole group, and takes it as current only if it has none yet, so an
+  old or delayed bundle can't switch it back; the one exception is a device that just joined and
+  waits for its first one (§4.6).
 - Each message header (plaintext) carries `content_key_id`, so clients know which key to use.
 - `content_key_id` is a random 128-bit value, not a sequence number: two members may rotate at the same
   time (e.g. both reach the message limit), and random IDs keep both keys usable without coordination.
@@ -223,8 +225,20 @@ Result:
 ### 4.3 New channel members
 
 - When a member is added, the adding client (or any online member, if the adder is offline) sends the
-  channel's past content keys to the new member through MLS. With history from the join on, it sends
-  only the new epoch key, which the other members derive themselves.
+  channel's past content keys to the new member through MLS: the current key in a bundle to the
+  group, every key of its ring sealed to each of the new member's devices (HPKE to the device's
+  certified agreement key, as for a device added back, §4.6; at most `max_missed_keys` keys per
+  message). The other members see that keys went to the new member, not which: a member who joined
+  from the join on (a guest) never gets earlier history this way, and ignores history keys in a
+  bundle sent to the whole group, which clients before this version send; only a device that just
+  joined and waits for its first current key takes them, as the new member of such a client, and
+  only from the member whose commit made its welcome, in the epoch it joined. A new member on a
+  client before this version gets only the current key from an updated adder. A history share
+  still waiting to be sent (the adder was offline) goes out only if the adder saw the member stay
+  in the group since the addition: after a removal (and maybe an addition from the join on) it is
+  dropped. With
+  history from the join on, the adder sends only the new epoch key, which the other members derive
+  themselves.
 - The choice is part of the signed change and settled before signing (guests: always from the join
   on); a client refuses to commit an admin's signed full-history add of a guest.
 - Without an explicit choice the client uses the signed workspace default, never the server's
@@ -553,8 +567,11 @@ its own. See [admin.md](admin.md) §2.
   joined after the device fell out lacks the keys before its join; so when a member added back a
   device and the committer joined after this member (it saw the committer's leaf added, or the
   committer added back, which starts its own record afresh), this member
-  sends its own keys too, ranked like an addition, unless a member that joined no later than itself
-  sent them first. Clients before this version ignore the sealed bundles.
+  sends its own keys too, ranked among the members whose record starts before the committer's
+  (online users first, then the oldest record, `device_add_stagger` per rank), unless a member
+  that joined no later than itself sent them first. Each device
+  keeps the epochs of at most `max_missed_keys` keys (the newest, and its current key), since no
+  more are ever sent. Clients before this version ignore the sealed bundles.
 - Commits with other proposal types (PSK, re-init, external init, group context changes), from
   external senders, or whose update changes a member's user or device are rejected.
 
@@ -802,7 +819,15 @@ Implemented as (`teamcraft-crypto::rendezvous`, `teamcraft-core` linking):
   transfer frame, a closed relay or 60 seconds without a receipt fail on the existing device, and the
   new device fails because the transfer never arrives (the relay closes when the existing device
   gives up). A lost receipt makes the existing device report a failure although the new device has
-  the keys; linking again is harmless. The new device then enrolls (§3.2) and joins the user's
+  the keys; linking again is harmless. Before it sends `received`, the new device stores the backup
+  key and the encrypted key bag in its local store, as a record next to the account protected the
+  same way (§9; on the web the write is issued at once instead of after the batching delay). If the
+  app stops before the account is stored, the next start finishes the enrollment with them, so the
+  existing device's success is never a lie the user has to undo by linking again. The record goes
+  with the account write that completes enrollment (one group of writes, §9.5), when the user
+  cancels linking or signs out before the device is set up (with the pending device key pair), or
+  when it can't work any more (the key bag no longer opens, the record is unreadable, another
+  account signed in). The new device then enrolls (§3.2) and joins the user's
   groups on its own (§4.6, "A further device joins on its own"); where it can't yet, an existing
   member adds it when it comes online. It reads the history the key bag opens at once.
 
@@ -1031,8 +1056,24 @@ Details:
   (subscribing again with the old subscription's key where the browser did not) and tells open pages;
   the page that owns the store (§9.4), at every start and on that message, compares
   `pushManager.getSubscription()` with what it registered and registers a changed or new one under
-  the same push key (`Client::check_web_push`). Until a page opens, pushes to a rotated subscription
-  are lost: registering needs the device's keys, which only the owning page uses.
+  the same push key (`Client::check_web_push`).
+  So that pushes don't go to the old subscription until a page opens, the worker also tells the
+  server itself (`POST /api/v1/push/web/subscription-change`, issue #145). It can't use the page's
+  credentials (the access token in the `PushSession` has usually expired by then, and no long-lived
+  token is kept for it), so the request proves knowledge of the **push key**, which the server holds
+  anyway: `HMAC-SHA-256(HKDF(push key, "TeamCraft-v1 push subscription change key"), label ||
+  device ID || SHA-256(old subscription) || SHA-256(new subscription))`. The server verifies it in
+  constant time and swaps the subscription only if the old one is what it stores (compare-and-swap),
+  so a captured request can't be replayed once the subscription moved on, and it can't change the
+  provider, the push key or anything else. Every refusal is the same 401, counted by the per-address
+  limits like a wrong token. The worker only reads the store (§9.4); the page re-registers as before,
+  which is then a no-op on the server. A second rotation before a page opened finds the server
+  holding the subscription the worker sent before (409); the worker then retries from the browser's
+  `oldSubscription`. Browsers that don't hand one over leave that case to the page.
+  *What the push key now also allows:* whoever holds it (the device's store, the server) can point
+  the device's Web Push at another endpoint. That redirects wake-ups, which the push key opens anyway
+  (conversation, message and sender IDs, never content), and can make the device miss pushes; it
+  gives no access to messages, keys or the account.
 - iOS caveat: an NSE must show every notification it receives, unless the app has Apple's
   `com.apple.developer.usernotifications.filtering` entitlement. Threema has it (its NSE entitlements
   set it to `true`), so getting it for an E2EE messenger is realistic. We request it; until granted,
@@ -1097,6 +1138,23 @@ This way the SFU can neither add a device of its own choosing nor swap a member'
 calls are verified with no extra prompts, and the DAVE privacy code and per-member verification codes
 remain available for out-of-band comparison. Meeting guests without an account get an ephemeral
 key and are shown as "Guest (unverified)".
+
+**Who signs in the browser.** The web client's call engine is a wasm module of its own
+(`teamcraft-web-calls`, loaded by the page; `teamcraft_client_api::page_calls`). It never holds the
+device key: the page prepares the join with its client core and keeps a `DeviceCallKeyAuthenticator`
+(the core's signer and the conversation's verified devices); the module asks the page through
+JavaScript callbacks to sign its fresh DAVE key (step 2) and to verify the others' bindings (step 3),
+and gets back only the signed binding or the verified DAVE key. Both run in the same page and origin,
+so this adds no party: whoever can run script in the page could use the core's signer anyway (§9.3).
+A rejoin prepares again, so the trusted roster follows membership changes.
+
+**The SFU's certificate.** Clients reach the SFU over TLS (QUIC). Normally its certificate chains to
+a trusted root. For test and development setups with a short-lived self-signed certificate, the
+server can hand out its SHA-256 with the join token (`[calls] sfu_certificate_sha256`, several while
+one replaces another): browsers pass them as `serverCertificateHashes`, the desktop app pins the
+first. A compromised server could point clients at an SFU of its choosing this way, but it can do
+that through `sfu_url` already, and the SFU only ever sees DAVE-encrypted media and verified
+bindings: the hash decides reachability, not confidentiality.
 
 **Lost connections** (ARCHITECTURE.md §6.5). A QUIC connection that migrates to another network
 keeps its DAVE state; nothing changes for the keys. A connection the SFU loses (idle timeout) keeps
@@ -1252,6 +1310,11 @@ everything (§9.1). Signing the releases narrows this to what the operator contr
   releases. Pages call `registration.update()` when they become visible, come back online and
   hourly, at most every 15 minutes, and ask `GET /api/v1/client-compatibility`; a version the server
   no longer supports asks for the reload too.
+- **Call module.** The browser's call engine (`teamcraft-web-calls`, §8) is a separate ES module and
+  wasm the page imports after sign-in. Its files are part of the release like any other (listed in
+  the manifest, served from the verified cache); the build gives them content-hashed names and writes
+  them into `index.html` (`<meta name="teamcraft-calls">`), so a page never imports another build's
+  module, also without a service worker.
 - **Push code.** The service worker needs Rust for push (§7: open the sealed wake-up, read the store,
   build the notification). A worker cannot verify scripts it loads with `importScripts`, so
   `scripts/finish-sw.sh` (a Trunk hook) inlines the JS glue into `sw.js`, and the worker reads the wasm
@@ -1299,6 +1362,49 @@ can: the enrollment screen comes up again, and when this browser had the account
 marker in local storage), it says that the browser deleted the data and offers the recovery
 passphrase or linking from another device. If the browser deleted the marker as well, it looks like a
 first visit, which offers the same two ways.
+
+### 9.5 Integrity: groups of writes, layout versions, recovery (implemented)
+
+**Groups of writes.** Records that must agree are written as one group (`LocalStore::begin_writes` /
+`end_writes`, `write_group`, `Client::atomically`): after a crash, or when one of the group's writes
+fails, the store holds all of them or none. SQLite stores (SQLCipher, sealed SQLite) run a group as
+one transaction; IndexedDB never splits a group between two batches, and a batch is one
+transaction (§9.4). Groups are synchronous, so none stays open across a network request. Grouped:
+a new message and its outbox entry, a sent message and the removal of its outbox entry, the MLS
+state after a processed entry, a merged own commit, a joined welcome or a join as a further device
+together with the cursor past it, the applied changes and pending commit next to the MLS state, the
+key bag and its "upload me" flag, the account with its key bag and the end of a pending enrollment.
+If SQLite rolls a group's transaction back by itself (a full disk), the group's later writes are
+refused instead of being committed one by one. Where order alone is enough (content keys are written before
+the MLS state that consumed the epoch), reprocessing an entry after a crash is idempotent.
+
+**Layout versions.** The SQLite stores keep their layout version in `PRAGMA user_version`. Each store
+has a list of numbered steps (forward-only, never edited once released); opening runs the missing
+ones, each in its own transaction together with setting its version, so a crash or a failed step
+leaves the database at the last step that completed. Upkeep that can't run in a transaction (the
+one-time wipe of free pages, version 2, issue #391) runs after the earlier steps committed and
+counts as done only once it succeeded; a failure (a full disk) is tried again on the next start.
+Released 1.0 databases carry version 0 and the layout of version 1. A newer layout is refused
+without touching it.
+IndexedDB versions its object stores itself and refuses a newer database (`VersionError`). Databases
+written by every release are kept as fixtures (`crates/teamcraft-core/tests/fixtures/store/`) and
+opened by every later version in CI. Records inside the store stay JSON with defaults for new
+fields and an `Unknown` catch-all, so newer records are read or skipped, not misread.
+
+**Unreadable data.** A store that is damaged (SQLite's corruption codes; a sealed store whose records
+only partly open), whose key no longer opens it (the keystore lost or replaced the key), or whose
+layout is newer is not a generic failure: the app says what happened and offers to set the device
+up again (recovery passphrase or linking, §5, §6), after a confirmation. The desktop sets the old
+file aside (`<user>.db.unreadable-<time>`, never deleted); the browser deletes the database,
+because its key wrapping lives in the same database (if another tab doesn't let go of it within
+seconds, the reset fails with that reason). Data from a newer version is never reset in the
+browser: a newer bundle reads it, so the page offers to reload; an old cached page must not wipe
+it. A keystore that is just unavailable (locked, no keyring service) stays a "try again" failure,
+since the data is intact.
+
+**Concurrent edits.** Two devices editing the same message converge: the edit with the highest
+server ID wins on every device, whatever order the edits arrive in (history loads newest first). An
+own edit shows at once and competes with the others once the server numbered it.
 
 ## 10. Search
 

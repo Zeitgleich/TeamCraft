@@ -6,7 +6,10 @@
 //! queued or on [`IndexedDbStore::flush`]). Of several writes of one record in that time only the
 //! last is issued: a catch-up rewrites some records (the MLS state) after every group it processes,
 //! and one transaction per write left the browser writing for minutes after the catch-up was done
-//! (docs/performance.md). IndexedDB runs read-write transactions on the same object store in the
+//! (docs/performance.md). Records are sealed only when their batch is issued, so a replaced write
+//! costs no encryption either, and a batch holding a large record (the MLS state, megabytes on a
+//! big workspace) waits [`LARGE_BATCH_EXTRA`] longer to take the next rewrite of it along (issue
+//! #326: sealing it after every group a catch-up joined blocked the page). IndexedDB runs read-write transactions on the same object store in the
 //! order they were created, so the database follows the cache in order.
 //! [`IndexedDbStore::flush`] waits until everything written so far is committed.
 //!
@@ -17,13 +20,16 @@
 //! it is hidden, frozen or unloaded ([`IndexedDbStore::write_now`]). A write lost anyway is one the
 //! server never heard of; the next start catches up from the last persisted cursor.
 //!
+//! A group of writes ([`crate::store::LocalStore::begin_writes`]) is never split between two
+//! transactions: it runs synchronously, so the batch timer and the page's lifecycle events can't
+//! issue in the middle of it, and the size limit waits until the group ended.
+//!
 //! A write that fails (quota exceeded, the database closed for a newer version) is kept and written
 //! again on the next flush, so the database catches up with the cache once space is free again
 //! instead of silently rolling back on the next reload (e2ee.md §9.4). The flush reports the
 //! failure; the app shows it to the user.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
@@ -35,13 +41,14 @@ use web_sys::{IdbDatabase, IdbObjectStore, IdbTransaction, IdbTransactionMode};
 
 use super::idb::{self, RECORDS};
 use crate::store::StoreError;
-use crate::store::sealed::{RecordBackend, SealedStore, format_id, parse_id};
+use crate::store::sealed::{LazySeal, RecordBackend, SealedStore, format_id, parse_id};
+use crate::store::write_queue::{Issue, RecordValue, WriteFailure, Writes};
 
 /// How long writes are collected before they are issued together. Short enough that little is
 /// lost when the page dies, long enough that a burst of writes becomes one transaction.
 const BATCH_DELAY: Duration = Duration::from_millis(50);
-/// Queued this much, the writes are issued right away instead of waiting for the batch delay.
-const MAX_QUEUED_BYTES: usize = 8 * 1024 * 1024;
+/// How much longer a batch over `LARGE_BATCH_BYTES` waits after its delay.
+const LARGE_BATCH_EXTRA: Duration = Duration::from_millis(200);
 /// Property on a write transaction naming the batch of writes it carries.
 const BATCH_PROPERTY: &str = "teamcraftBatch";
 /// `DOMException.name` of a write refused for lack of space.
@@ -64,63 +71,33 @@ struct Inner {
   _on_version_change: Closure<dyn FnMut(web_sys::Event)>,
 }
 
-/// Writes that have not committed yet, by record key.
-#[derive(Default)]
-struct Writes {
-  next_sequence: u32,
-  open: HashMap<String, OpenWrite>,
-  /// Keys whose latest write waits for the next batch, each once.
-  queued: Vec<String>,
-  queued_bytes: usize,
-  /// A batch timer is running.
-  is_scheduled: bool,
-  next_batch: u32,
-  /// The writes each issued transaction carries, by batch number.
-  batches: HashMap<u32, Vec<(String, u32)>>,
-  maybe_last_failure: Option<WriteFailure>,
-  /// Another page (a newer version) asked for the database; it was closed, writes wait for a reload.
-  is_closed: bool,
-}
-
-/// The latest write of one record. Its value is kept until it committed, to write it again.
-struct OpenWrite {
-  sequence: u32,
-  /// `None` deletes the record.
-  maybe_value: Option<Vec<u8>>,
-  state: WriteState,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WriteState {
-  /// Waits for the next batch.
-  Queued,
-  /// In a transaction that has not finished.
-  Issued,
-  /// Refused or aborted; issued again by the next flush.
-  Failed,
-}
-
-#[derive(Clone, Copy)]
-enum WriteFailure {
-  QuotaExceeded,
-  Closed,
-  Other,
-}
-
 impl SealedStore<IndexedDbRecords> {
   /// Opens the database `name` and decrypts it into memory with `database_key`.
   pub async fn open(name: &str, database_key: &SymmetricKey) -> Result<Self, StoreError> {
     let database = idb::open_database(name).await?;
-    let records = read_all(&database).await?;
+    let records = match read_all(&database).await {
+      Ok(records) => records,
+      Err(error) => {
+        // Closed, so a reset can delete the database (issue #160) instead of being blocked by it.
+        database.close();
+        return Err(error);
+      },
+    };
     let backend = IndexedDbRecords::new(database);
     Self::load(backend, database_key, records)
+  }
+
+  /// Deletes the database `name` (records and key wrapping): the user chose to set up a device
+  /// whose data can't be read again (issue #160). The store must be closed first.
+  pub async fn delete(name: &str) -> Result<(), StoreError> {
+    idb::delete_database(name).await
   }
 
   /// Issues what is queued and waits until every write issued so far is committed. Writes that
   /// failed are issued again, and the flush fails with the reason, until they went through.
   pub async fn flush(&self) -> Result<(), StoreError> {
     let inner = &self.backend().inner;
-    inner.retry_failed();
+    inner.writes.borrow_mut().retry_failed();
     inner.issue_queued();
     if !inner.writes.borrow().is_closed {
       // A read-only transaction over the same store starts only after earlier read-write ones ended.
@@ -130,7 +107,7 @@ impl SealedStore<IndexedDbRecords> {
         .map_err(|error| idb::js_error("flush", &error))?;
       idb::transaction_done(&transaction).await?;
     }
-    inner.failure()
+    inner.writes.borrow_mut().failure()
   }
 
   /// Issues what is queued now instead of after the batch delay, without waiting for it (the page
@@ -148,13 +125,47 @@ impl SealedStore<IndexedDbRecords> {
 
 impl RecordBackend for IndexedDbRecords {
   fn put_record(&self, id: &LookupId, sealed: &[u8]) -> Result<(), StoreError> {
-    self.write(format_id(id), Some(sealed.to_vec()));
+    self.write(
+      format_id(id),
+      Some(RecordValue::Sealed(sealed.to_vec())),
+      sealed.len(),
+    );
     Ok(())
   }
 
   fn delete_record(&self, id: &LookupId) -> Result<(), StoreError> {
-    self.write(format_id(id), None);
+    self.write(format_id(id), None, 0);
     Ok(())
+  }
+
+  fn put_lazy(&self, id: &LookupId, size_hint: usize, seal: LazySeal) -> Result<(), StoreError> {
+    self.write(format_id(id), Some(RecordValue::Unsealed(seal)), size_hint);
+    Ok(())
+  }
+
+  fn begin_writes(&self) -> Result<(), StoreError> {
+    let mut writes = self.inner.writes.borrow_mut();
+    writes.group_depth = writes.group_depth.saturating_add(1);
+    Ok(())
+  }
+
+  /// The group is complete: what it queued goes out with the next batch (now, if much is queued).
+  fn end_writes(&self) -> Result<(), StoreError> {
+    let is_due = {
+      let mut writes = self.inner.writes.borrow_mut();
+      writes.group_depth = writes.group_depth.saturating_sub(1);
+      writes.group_depth == 0 && writes.is_over_limit()
+    };
+    if is_due {
+      self.inner.issue_queued();
+    }
+    Ok(())
+  }
+
+  fn write_soon(&self) {
+    if self.inner.writes.borrow().group_depth == 0 {
+      self.inner.issue_queued();
+    }
   }
 }
 
@@ -194,9 +205,7 @@ impl IndexedDbRecords {
       move |_| {
         tracing::warn!("a newer version needs the local database; closing it");
         database.close();
-        let mut writes = writes.borrow_mut();
-        writes.is_closed = true;
-        writes.maybe_last_failure = Some(WriteFailure::Closed);
+        writes.borrow_mut().close();
       }
     });
     database.set_onversionchange(Some(on_version_change.as_ref().unchecked_ref()));
@@ -212,16 +221,15 @@ impl IndexedDbRecords {
   }
 
   /// Queues the write; the batch goes out after [`BATCH_DELAY`], or now when much is queued.
-  fn write(&self, key: String, maybe_value: Option<Vec<u8>>) {
+  fn write(&self, key: String, maybe_value: Option<RecordValue>, bytes: usize) {
     let is_due = {
       let mut writes = self.inner.writes.borrow_mut();
-      writes.queue(key, maybe_value);
-      if writes.queued_bytes >= MAX_QUEUED_BYTES {
+      if writes.queue(key, maybe_value, bytes) {
         true
       } else {
         if !writes.is_scheduled {
           writes.is_scheduled = true;
-          schedule(Rc::downgrade(&self.inner));
+          schedule(Rc::downgrade(&self.inner), BATCH_DELAY, true);
         }
         false
       }
@@ -237,14 +245,12 @@ impl Inner {
   fn issue_queued(&self) {
     // Writes that failed go with every batch: a later write never commits without them, so what
     // is on disk stays a prefix of what was written.
-    if !self.writes.borrow().queued.is_empty() {
-      self.retry_failed();
-    }
     let keys = {
       let mut writes = self.writes.borrow_mut();
-      writes.is_scheduled = false;
-      writes.queued_bytes = 0;
-      std::mem::take(&mut writes.queued)
+      if writes.has_queued() {
+        writes.retry_failed();
+      }
+      writes.take_queued()
     };
     if keys.is_empty() {
       return;
@@ -263,26 +269,20 @@ impl Inner {
     let mut carried = Vec::with_capacity(keys.len());
     let mut maybe_refused = None;
     for key in &keys {
-      let key = key.clone();
-      let Some(write) = writes
-        .open
-        .get(&key)
-        .filter(|write| write.state == WriteState::Queued)
-      else {
-        continue;
-      };
-      let sequence = write.sequence;
-      let record = JsValue::from_str(&key);
-      let issued = match &write.maybe_value {
-        Some(value) => records.put_with_key(&js_sys::Uint8Array::from(value.as_slice()), &record),
-        None => records.delete(&record),
+      let record = JsValue::from_str(key);
+      let (issued, sequence) = match writes.issue(key) {
+        Some(Issue::Put { sealed, sequence }) => (
+          records.put_with_key(&js_sys::Uint8Array::from(sealed), &record),
+          sequence,
+        ),
+        Some(Issue::Delete { sequence }) => (records.delete(&record), sequence),
+        // Replaced, or dropped for a failed seal.
+        None => continue,
       };
       match issued {
         Ok(_) => {
-          if let Some(write) = writes.open.get_mut(&key) {
-            write.state = WriteState::Issued;
-          }
-          carried.push((key, sequence));
+          writes.issued(key);
+          carried.push((key.clone(), sequence));
         },
         // Refused at once (a full disk can refuse at once): nothing of the batch may commit.
         Err(error) => {
@@ -299,9 +299,7 @@ impl Inner {
       }
       return;
     }
-    writes.next_batch = writes.next_batch.wrapping_add(1);
-    let batch = writes.next_batch;
-    writes.batches.insert(batch, carried);
+    let batch = writes.start_batch(carried);
     // The events fire after this returns, so the handlers are in time. Setting a property on a
     // fresh transaction object can't fail.
     let _ = js_sys::Reflect::set(&transaction, &BATCH_PROPERTY.into(), &batch.into());
@@ -322,107 +320,6 @@ impl Inner {
       .map_err(|error| failure_of(&error))?;
     Ok((transaction, records))
   }
-
-  /// Queues every failed write again, with its latest value.
-  fn retry_failed(&self) {
-    let mut writes = self.writes.borrow_mut();
-    let failed: Vec<String> = writes
-      .open
-      .iter()
-      .filter(|(_, write)| write.state == WriteState::Failed)
-      .map(|(key, _)| key.clone())
-      .collect();
-    for key in failed {
-      if let Some(write) = writes.open.get_mut(&key) {
-        write.state = WriteState::Queued;
-      }
-      writes.queued.push(key);
-    }
-  }
-
-  /// The reason writes are failing, while any failed write is still open.
-  fn failure(&self) -> Result<(), StoreError> {
-    let writes = self.writes.borrow();
-    let failed = writes
-      .open
-      .values()
-      .filter(|write| write.state == WriteState::Failed)
-      .count();
-    if failed == 0 && !writes.is_closed {
-      return Ok(());
-    }
-    Err(match writes.maybe_last_failure.unwrap_or(WriteFailure::Other) {
-      WriteFailure::QuotaExceeded => StoreError::QuotaExceeded,
-      WriteFailure::Closed => StoreError::Closed,
-      WriteFailure::Other => StoreError::Database(format!("{failed} IndexedDB writes failed")),
-    })
-  }
-}
-
-impl Writes {
-  /// Records the write as the record's latest and queues its key, once.
-  fn queue(&mut self, key: String, maybe_value: Option<Vec<u8>>) {
-    self.next_sequence = self.next_sequence.wrapping_add(1);
-    self.queued_bytes = self
-      .queued_bytes
-      .saturating_add(maybe_value.as_ref().map_or(0, Vec::len));
-    let write = OpenWrite {
-      sequence: self.next_sequence,
-      maybe_value,
-      state: WriteState::Queued,
-    };
-    let was_queued = self
-      .open
-      .insert(key.clone(), write)
-      .is_some_and(|earlier| earlier.state == WriteState::Queued);
-    if !was_queued {
-      self.queued.push(key);
-    }
-  }
-
-  /// Only the latest write of a record closes it; an older one committing changes nothing.
-  fn committed(&mut self, batch: u32) {
-    for (key, sequence) in self.batches.remove(&batch).unwrap_or_default() {
-      if self
-        .open
-        .get(&key)
-        .is_some_and(|write| write.sequence == sequence && write.state == WriteState::Issued)
-      {
-        self.open.remove(&key);
-      }
-    }
-  }
-
-  fn aborted(&mut self, batch: u32, failure: WriteFailure) {
-    for (key, sequence) in self.batches.remove(&batch).unwrap_or_default() {
-      if let Some(write) = self.open.get_mut(&key)
-        && write.sequence == sequence
-        && write.state == WriteState::Issued
-      {
-        write.state = WriteState::Failed;
-        self.maybe_last_failure = Some(failure);
-      }
-    }
-  }
-
-  /// A write of the batch that was aborted before it was sent (queued or already issued).
-  fn fail_open(&mut self, key: &str, failure: WriteFailure) {
-    if let Some(write) = self.open.get_mut(key)
-      && write.state != WriteState::Failed
-    {
-      write.state = WriteState::Failed;
-      self.maybe_last_failure = Some(failure);
-    }
-  }
-
-  fn fail_queued(&mut self, key: &str, failure: WriteFailure) {
-    if let Some(write) = self.open.get_mut(key)
-      && write.state == WriteState::Queued
-    {
-      write.state = WriteState::Failed;
-      self.maybe_last_failure = Some(failure);
-    }
-  }
 }
 
 impl Drop for IndexedDbRecords {
@@ -433,17 +330,23 @@ impl Drop for IndexedDbRecords {
   }
 }
 
-/// Issues the queued writes after the batch delay, unless the store is gone by then.
-fn schedule(inner: Weak<Inner>) {
+/// Issues the queued writes after `delay`, unless the store is gone by then. A large batch gets
+/// [`LARGE_BATCH_EXTRA`] once when `may_extend`.
+fn schedule(inner: Weak<Inner>, delay: Duration, may_extend: bool) {
   wasm_bindgen_futures::spawn_local(async move {
-    crate::platform::sleep(BATCH_DELAY).await;
-    if let Some(inner) = inner.upgrade() {
+    crate::platform::sleep(delay).await;
+    let Some(inner) = inner.upgrade() else {
+      return;
+    };
+    let is_large = inner.writes.borrow().is_large();
+    if may_extend && is_large {
+      schedule(Rc::downgrade(&inner), LARGE_BATCH_EXTRA, false);
+    } else {
       inner.issue_queued();
     }
   });
 }
 
-/// The batch a write transaction carries.
 fn batch_of(event: &web_sys::Event) -> Option<u32> {
   let transaction = event.target()?;
   let batch = js_sys::Reflect::get(&transaction, &BATCH_PROPERTY.into())

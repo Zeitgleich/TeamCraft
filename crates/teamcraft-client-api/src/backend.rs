@@ -26,7 +26,7 @@ use crate::admin::{
 };
 use crate::calls::{
   ActiveCall, BackgroundEffect, BackgroundImageInfo, CallHistoryItem, CallRequest, CallStatusSounds,
-  HuddleInfo, IncomingCall, MediaDevices, Participant,
+  CallsUnavailableReason, HuddleInfo, IncomingCall, MediaDevices, Participant, RemoteVideoTrack,
 };
 use crate::calls::{OrgBackgroundRule, OrgBackgrounds};
 use crate::model::{
@@ -160,6 +160,10 @@ pub trait ChatBackend {
   }
   /// Trusts the contact's new identity key after the user compared it.
   fn accept_key_change(&self, _user: UserId) {}
+  /// The user opened this conversation: a catch-up still running takes it next (issue #247). Only a
+  /// hint; a conversation with nothing stored yet asks the core for no messages, so this is the
+  /// only way the core learns it.
+  fn focus_conversation(&self, _conversation: ConversationId) {}
   /// The device became idle or active; the server derives "away" from it.
   fn set_activity(&self, _is_idle: bool) {}
   /// Whether the user is looking at this desktop or web session right now (notifications.md,
@@ -463,6 +467,38 @@ pub trait CallBackend {
   /// buttons instead of a call screen that connects nowhere.
   fn has_calls(&self) -> bool {
     false
+  }
+
+  /// Why [`CallBackend::has_calls`] is `false`, for the dialog the call buttons open then.
+  fn calls_unavailable_reason(&self) -> CallsUnavailableReason {
+    CallsUnavailableReason::NotInThisApp
+  }
+
+  /// Calls are a simulation (the development demo): speaking, levels and codes are made up.
+  fn has_simulated_calls(&self) -> bool {
+    false
+  }
+
+  /// Whether the camera image can get a background effect here. Without, the UI offers none.
+  fn has_background_effects(&self) -> bool {
+    true
+  }
+
+  /// Counts joins that failed since the app started (a refused microphone, an unreachable call
+  /// server), so the UI can leave the call screen it opened for them.
+  fn call_join_failures(&self) -> u64 {
+    0
+  }
+
+  /// Whether call actions the user took are still being carried out. Until they are, the UI keeps
+  /// its own idea of the camera and screen share instead of the media layer's.
+  fn has_pending_call_actions(&self) -> bool {
+    false
+  }
+
+  /// Others' video in the active call.
+  fn call_video_tracks(&self) -> Vec<RemoteVideoTrack> {
+    Vec::new()
   }
 
   /// The call this device is in.

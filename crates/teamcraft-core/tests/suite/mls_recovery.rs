@@ -380,6 +380,174 @@ mod missed_keys {
   }
 }
 
+mod history_shares {
+  use super::*;
+
+  /// Issue #403: Gus joined from the join on; Alice later adds Uma with full history. Uma reads
+  /// everything, Gus has no key from before his join: the history went sealed to Uma alone.
+  #[tokio::test]
+  async fn a_from_join_member_learns_no_history_when_somebody_else_gets_it() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut gus, channel) = channel_with_two_keys_and_gus(&server).await;
+    let mut uma = Peer::enroll(&server, "Uma").await;
+    alice
+      .client
+      .add_member_with_history(channel, uma.client.user_id(), Some(HistoryPolicy::Full))
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut gus, &mut uma]).await;
+    uma.client.full_sync().await.unwrap();
+    assert!(uma.texts(channel).contains(&"with Carol".to_string()));
+
+    for text in ["with Carol", "without Carol"] {
+      let key = alice.content_key_of(channel, text).await;
+      assert!(uma.client.has_content_key(channel, &key), "{text}");
+      assert!(!gus.client.has_content_key(channel, &key), "{text}");
+    }
+    // Everybody still writes and reads under the shared current key.
+    gus.client.send_text(channel, None, "hi Uma").await.unwrap();
+    uma.client.send_text(channel, None, "hi Gus").await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut gus, &mut uma]).await;
+    assert!(uma.texts(channel).contains(&"hi Uma".to_string()));
+    assert!(gus.texts(channel).contains(&"hi Gus".to_string()));
+    assert!(bob.texts(channel).contains(&"hi Gus".to_string()));
+  }
+
+  /// Clients before this version share history in a bundle to the whole group: a member who
+  /// joined from the join on takes only its current key.
+  #[tokio::test]
+  async fn a_from_join_member_ignores_history_sent_to_the_whole_group() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut gus, channel) = channel_with_two_keys_and_gus(&server).await;
+    bob
+      .client
+      .send_history_to_the_group_as_before(channel)
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut gus]).await;
+    assert_has_no_key_from_before_joining(&alice, &gus, channel).await;
+  }
+
+  /// A device waiting for its first current key takes history from a bundle to the whole group
+  /// only from the member that made its welcome, in the epoch it joined: not from anybody else.
+  #[tokio::test]
+  async fn a_waiting_member_ignores_history_from_another_member() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, channel) = channel_with_two_keys(&server).await;
+    let mut gus = Peer::enroll(&server, "Gus").await;
+    // Alice's current key for Gus is held back: Gus waits.
+    server.hold_next_application(alice.client.user_id());
+    alice
+      .client
+      .add_member_with_history(channel, gus.client.user_id(), Some(HistoryPolicy::FromJoin))
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut gus]).await;
+    assert!(teamcraft_core::client::is_waiting_for_device(gus.store.as_ref(), channel).unwrap());
+    bob
+      .client
+      .send_history_to_the_group_as_before(channel)
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut gus]).await;
+    server.release_held_messages();
+    settle(&mut [&mut alice, &mut bob, &mut gus]).await;
+    assert_has_no_key_from_before_joining(&alice, &gus, channel).await;
+  }
+
+  /// A history share still pending when Uma is removed and added back from the join on is
+  /// dropped: the keys of the time she was out never reach her.
+  #[tokio::test]
+  async fn a_history_share_pending_across_a_removal_is_dropped() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, channel) = channel_with_two_keys(&server).await;
+    let mut uma = Peer::enroll(&server, "Uma").await;
+    let uma_id = uma.client.user_id();
+    // The share's first message never reaches the server: it stays queued.
+    server.cut_next_application(
+      alice.client.user_id(),
+      teamcraft_core::api::fake::NetworkCut::BeforeRequest,
+    );
+    assert!(
+      alice
+        .client
+        .add_member_with_history(channel, uma_id, Some(HistoryPolicy::Full))
+        .await
+        .is_err()
+    );
+    // Alice doesn't get to the queue (asleep) until Uma was removed and added back.
+    settle(&mut [&mut bob, &mut uma]).await;
+    alice.client.remove_member(channel, uma_id).await.unwrap();
+    settle(&mut [&mut bob, &mut uma]).await;
+    alice
+      .client
+      .send_text(channel, None, "while Uma was out")
+      .await
+      .unwrap();
+    settle(&mut [&mut bob]).await;
+    server.advance_clock(std::time::Duration::from_secs(10 * 60));
+    alice
+      .client
+      .add_member_with_history(channel, uma_id, Some(HistoryPolicy::FromJoin))
+      .await
+      .unwrap();
+    settle(&mut [&mut bob, &mut uma]).await;
+    alice.client.apply_pending_changes().await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut uma]).await;
+
+    let while_out = alice.content_key_of(channel, "while Uma was out").await;
+    assert!(!uma.client.has_content_key(channel, &while_out));
+    alice
+      .client
+      .send_text(channel, None, "welcome back")
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut uma]).await;
+    assert!(uma.texts(channel).contains(&"welcome back".to_string()));
+  }
+
+  /// Alice, Bob and Carol, a message, Carol removed (a new key), another message.
+  async fn channel_with_two_keys(server: &FakeServer) -> (Peer, Peer, ConversationId) {
+    let (mut alice, mut bob, mut carol) = three(server).await;
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
+    alice.client.send_text(channel, None, "with Carol").await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    alice
+      .client
+      .remove_member(channel, carol.client.user_id())
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    alice
+      .client
+      .send_text(channel, None, "without Carol")
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    (alice, bob, channel)
+  }
+
+  /// [`channel_with_two_keys`] and Gus added from the join on.
+  async fn channel_with_two_keys_and_gus(server: &FakeServer) -> (Peer, Peer, Peer, ConversationId) {
+    let (mut alice, mut bob, channel) = channel_with_two_keys(server).await;
+    let mut gus = Peer::enroll(server, "Gus").await;
+    alice
+      .client
+      .add_member_with_history(channel, gus.client.user_id(), Some(HistoryPolicy::FromJoin))
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut gus]).await;
+    (alice, bob, gus, channel)
+  }
+
+  async fn assert_has_no_key_from_before_joining(alice: &Peer, gus: &Peer, channel: ConversationId) {
+    for text in ["with Carol", "without Carol"] {
+      let key = alice.content_key_of(channel, text).await;
+      assert!(!gus.client.has_content_key(channel, &key), "{text}");
+    }
+  }
+}
+
 mod skewed_clocks {
   use super::*;
 

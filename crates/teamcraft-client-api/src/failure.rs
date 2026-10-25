@@ -9,6 +9,11 @@ use teamcraft_proto::ErrorCode;
 
 /// Prefix of a failure that never reached the server.
 const NETWORK_PREFIX: &str = "network";
+/// Prefix of a call failure on this device ([`CallFailure`]): `call_<failure>`.
+const CALL_PREFIX: &str = "call_";
+/// Prefixes of a failure where something on the network answered instead of the server.
+const CAPTIVE_PORTAL_PREFIX: &str = "captive_portal";
+const UNTRUSTED_CERTIFICATE_PREFIX: &str = "untrusted_certificate";
 
 /// What went wrong and the technical detail behind it, for the "Details" of an error message.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,8 +30,74 @@ pub enum FailureKind {
   Server(ErrorCode),
   /// The server could not be reached.
   Network,
+  /// A call could not use this device's microphone, camera or screen, or the browser lacks what
+  /// calls need.
+  Call(CallFailure),
+  /// A captive portal answered instead of the server: sign in to the network first.
+  CaptivePortal,
+  /// The connection was refused over the certificate: usually a proxy that inspects encrypted
+  /// traffic with a CA this device doesn't trust.
+  UntrustedCertificate,
   /// Anything else (local store, encryption, a stopped core).
   Other,
+}
+
+/// Why a call action failed on this device, so the UI can say what to do about it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallFailure {
+  /// The user or a site setting blocked the microphone.
+  MicrophoneDenied,
+  MicrophoneMissing,
+  /// Another app holds the microphone.
+  MicrophoneInUse,
+  CameraDenied,
+  CameraMissing,
+  CameraInUse,
+  /// The screen could not be shared (not offered by the browser, or refused by a policy).
+  ScreenUnavailable,
+  /// The browser lacks what calls need (WebTransport, WebCodecs, AudioWorklet).
+  Unsupported,
+  /// The call server (SFU) can't be reached, while the chat server can: often a network that
+  /// blocks UDP (QUIC).
+  ServerUnreachable,
+  /// The organization requires a background behind the camera image, which this device can't
+  /// apply.
+  BackgroundRequired,
+}
+
+impl CallFailure {
+  const ALL: [Self; 10] = [
+    Self::MicrophoneDenied,
+    Self::MicrophoneMissing,
+    Self::MicrophoneInUse,
+    Self::CameraDenied,
+    Self::CameraMissing,
+    Self::CameraInUse,
+    Self::ScreenUnavailable,
+    Self::Unsupported,
+    Self::ServerUnreachable,
+    Self::BackgroundRequired,
+  ];
+
+  /// Stable name on the wire, after [`CALL_PREFIX`].
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::MicrophoneDenied => "microphone_denied",
+      Self::MicrophoneMissing => "microphone_missing",
+      Self::MicrophoneInUse => "microphone_in_use",
+      Self::CameraDenied => "camera_denied",
+      Self::CameraMissing => "camera_missing",
+      Self::CameraInUse => "camera_in_use",
+      Self::ScreenUnavailable => "screen_unavailable",
+      Self::Unsupported => "unsupported",
+      Self::ServerUnreachable => "server_unreachable",
+      Self::BackgroundRequired => "background_required",
+    }
+  }
+
+  fn from_wire(name: &str) -> Option<Self> {
+    Self::ALL.into_iter().find(|failure| failure.as_str() == name)
+  }
 }
 
 impl ActionFailure {
@@ -35,6 +106,15 @@ impl ActionFailure {
       kind,
       detail: detail.into(),
     }
+  }
+
+  /// Never reached the server: offline, or intercepted on the way. The connection banner already
+  /// says so, so background work stays quiet about it.
+  pub fn is_unreachable(&self) -> bool {
+    matches!(
+      self.kind,
+      FailureKind::Network | FailureKind::CaptivePortal | FailureKind::UntrustedCertificate
+    )
   }
 
   /// A failure whose cause is not known; worded as a generic error with the detail.
@@ -47,8 +127,17 @@ impl ActionFailure {
     let Some((prefix, detail)) = text.split_once(": ") else {
       return Self::other(text);
     };
-    if prefix == NETWORK_PREFIX {
-      return Self::new(FailureKind::Network, detail);
+    let maybe_kind = match prefix {
+      NETWORK_PREFIX => Some(FailureKind::Network),
+      CAPTIVE_PORTAL_PREFIX => Some(FailureKind::CaptivePortal),
+      UNTRUSTED_CERTIFICATE_PREFIX => Some(FailureKind::UntrustedCertificate),
+      _ => None,
+    };
+    if let Some(kind) = maybe_kind {
+      return Self::new(kind, detail);
+    }
+    if let Some(failure) = prefix.strip_prefix(CALL_PREFIX).and_then(CallFailure::from_wire) {
+      return Self::new(FailureKind::Call(failure), detail);
     }
     match ErrorCode::from(prefix.to_owned()) {
       ErrorCode::Unknown(_) => Self::other(text),
@@ -61,6 +150,9 @@ impl ActionFailure {
     match &self.kind {
       FailureKind::Server(code) => format!("{}: {}", code.as_str(), self.detail),
       FailureKind::Network => format!("{NETWORK_PREFIX}: {}", self.detail),
+      FailureKind::Call(failure) => format!("{CALL_PREFIX}{}: {}", failure.as_str(), self.detail),
+      FailureKind::CaptivePortal => format!("{CAPTIVE_PORTAL_PREFIX}: {}", self.detail),
+      FailureKind::UntrustedCertificate => format!("{UNTRUSTED_CERTIFICATE_PREFIX}: {}", self.detail),
       FailureKind::Other => self.detail.clone(),
     }
   }
@@ -90,11 +182,34 @@ mod tests {
   }
 
   #[test]
+  fn call_failures_round_trip() {
+    for failure in CallFailure::ALL {
+      let failure = ActionFailure::new(FailureKind::Call(failure), "getUserMedia: Permission denied");
+      assert_eq!(ActionFailure::from_wire(&failure.to_wire()), failure);
+    }
+    assert_eq!(
+      ActionFailure::new(FailureKind::Call(CallFailure::CameraDenied), "x").to_wire(),
+      "call_camera_denied: x"
+    );
+  }
+
+  #[test]
+  fn interceptions_round_trip_and_count_as_unreachable() {
+    for kind in [FailureKind::CaptivePortal, FailureKind::UntrustedCertificate] {
+      let failure = ActionFailure::new(kind.clone(), "server: the network intercepted the connection");
+      assert_eq!(ActionFailure::from_wire(&failure.to_wire()), failure);
+      assert!(failure.is_unreachable());
+    }
+    assert!(!ActionFailure::other("x").is_unreachable());
+  }
+
+  #[test]
   fn text_without_a_known_kind_is_other_and_kept_whole() {
     for text in [
       "this device is not set up yet",
       "server: server answered 400: invalid request: nope",
       "some_future_code: detail",
+      "call_some_future_failure: detail",
       "",
     ] {
       assert_eq!(

@@ -8,7 +8,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_proto::{ErrorBody, ErrorCode, GetMeResponse};
 
-use teamcraft_client_api::remote::{CoreStatus, EnrollRequest};
+use teamcraft_client_api::remote::{CoreStatus, EnrollRequest, StoreProblem};
 
 use crate::auth::tauri::{ServerCheck, ServerProblem, ServerView};
 use crate::auth::{ApiResponse, AuthError, Authenticator, SignInLook, tauri};
@@ -66,6 +66,9 @@ pub enum LoginProblem {
   ServerUnreachable,
   /// The encrypted local data could not be opened (keystore, database); the text is for details.
   CoreFailed(String),
+  /// The local database can't be read by this version (issue #160): set the device up again, or
+  /// update the app.
+  StoreUnreadable(StoreProblem),
   /// The client core stopped on an internal error (not the keystore or the database): restart the
   /// app and report it.
   CoreStopped,
@@ -331,6 +334,13 @@ impl SessionControl {
       Ok(CoreStatus::Failed { message }) => self
         .state
         .set_if_alive(SessionState::SignedOut(Some(LoginProblem::CoreFailed(message)))),
+      Ok(CoreStatus::StoreUnreadable { problem }) => {
+        self
+          .state
+          .set_if_alive(SessionState::SignedOut(Some(LoginProblem::StoreUnreadable(
+            problem,
+          ))))
+      },
       Ok(CoreStatus::Stopped) => self
         .state
         .set_if_alive(SessionState::SignedOut(Some(LoginProblem::CoreStopped))),
@@ -366,6 +376,22 @@ impl SessionControl {
     let control = *self;
     control.state.set(SessionState::SigningIn);
     spawn_local(async move { control.load_account().await });
+  }
+
+  /// The user confirmed setting this device up again after its local data turned out unreadable:
+  /// the core sets the data aside (desktop) or deletes it (browser) and asks for setup (issue
+  /// #160). A failure (another tab holds the database) shows as the core failure card with the
+  /// reason, never as nothing.
+  pub async fn reset_store(&self) {
+    match remote_backend::reset_store().await {
+      Ok(()) => {
+        self.state.set_if_alive(SessionState::SigningIn);
+        self.load_account().await;
+      },
+      Err(error) => self
+        .state
+        .set_if_alive(SessionState::SignedOut(Some(LoginProblem::CoreFailed(error)))),
+    }
   }
 
   /// Creates this device's keys (or recovers them) with the passphrase, then enters the app.

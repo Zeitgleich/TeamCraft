@@ -20,6 +20,7 @@ use wasm_bindgen_futures::JsFuture;
 use crate::clock::format_date_time;
 use crate::components::icons::{Icon, IconName};
 use crate::components::lightbox::{FullMedia, sizes};
+use crate::components::lightbox_motion::StageMotion;
 use crate::components::message_actions::copy_to_clipboard;
 use crate::i18n::{I18n, use_i18n};
 use crate::lightbox::{
@@ -56,6 +57,8 @@ pub struct MediaActions {
   pub video: NodeRef<html::Video>,
   pub stage: NodeRef<html::Div>,
   pub viewport: RwSignal<Viewport>,
+  /// Owns the zoom while a gesture settles; a button or key takes it over.
+  pub motion: StageMotion,
   pub is_paused: RwSignal<bool>,
   pub is_thread_shown: RwSignal<bool>,
   pub notice: Notice,
@@ -100,6 +103,12 @@ impl MediaActions {
   /// lightbox itself.
   pub fn run(self, command: Command) {
     let can_transform = self.kind.get_untracked().is_some_and(MediaKind::can_transform);
+    if matches!(
+      command,
+      Command::ZoomIn | Command::ZoomOut | Command::ZoomReset | Command::Rotate
+    ) {
+      self.motion.stop_view();
+    }
     match command {
       Command::ZoomIn | Command::ZoomOut if can_transform => {
         let factor = match command {
@@ -206,6 +215,7 @@ pub fn Controls(
       return;
     };
     let (image, stage) = sizes(actions.image, actions.stage);
+    actions.motion.stop_view();
     viewport.update(|viewport| viewport.zoom_to_slider(value / SLIDER_STEPS, image, stage));
   };
   let thread_label = Signal::derive(move || match actions.is_thread_shown.get() {

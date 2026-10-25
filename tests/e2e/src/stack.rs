@@ -72,12 +72,24 @@ pub struct StackBuilder {
   maybe_port: Option<u16>,
   extra_env: Vec<(String, String)>,
   has_database_relay: bool,
+  /// PEM certificate and key for the SFU instead of its own self-signed one.
+  maybe_sfu_identity: Option<(String, String)>,
 }
 
 impl StackBuilder {
   /// Starts an SFU and configures calls on the server.
   pub fn with_calls(mut self) -> Self {
     self.has_calls = true;
+    self
+  }
+
+  /// Starts the SFU with this self-signed certificate and key (PEM), and has the server hand out
+  /// the certificate's SHA-256 (hex) with join tokens, so browsers can connect to it.
+  pub fn with_sfu_identity(mut self, certificate_pem: String, key_pem: String, sha256_hex: String) -> Self {
+    self.maybe_sfu_identity = Some((certificate_pem, key_pem));
+    self
+      .extra_env
+      .push(("TEAMCRAFT_CALLS__SFU_CERTIFICATE_SHA256".into(), sha256_hex));
     self
   }
 
@@ -428,7 +440,7 @@ impl Stack {
       .await?;
 
     let maybe_sfu = if settings.has_calls {
-      Some(start_sfu(&dir, &base_url, sfu_port).await?)
+      Some(start_sfu(&dir, &base_url, sfu_port, settings.maybe_sfu_identity.as_ref()).await?)
     } else {
       None
     };
@@ -447,10 +459,15 @@ impl Stack {
   }
 }
 
-async fn start_sfu(dir: &std::path::Path, server_url: &str, port: u16) -> anyhow::Result<SfuHandle> {
+async fn start_sfu(
+  dir: &std::path::Path,
+  server_url: &str,
+  port: u16,
+  maybe_identity: Option<&(String, String)>,
+) -> anyhow::Result<SfuHandle> {
   let public_key_path = dir.join("call-signing.pub.pem");
   std::fs::write(&public_key_path, CALL_PUBLIC_KEY_PEM)?;
-  let envs = vec![
+  let mut envs = vec![
     ("TEAMCRAFT_SFU_BIND".into(), format!("[::]:{port}")),
     (
       "TEAMCRAFT_SFU_HEALTH_BIND".into(),
@@ -469,6 +486,16 @@ async fn start_sfu(dir: &std::path::Path, server_url: &str, port: u16) -> anyhow
     ("NO_COLOR".into(), "1".into()),
     ("RUST_LOG".into(), "info".into()),
   ];
+  if let Some((certificate, key)) = maybe_identity {
+    let (certificate_path, key_path) = (dir.join("sfu-cert.pem"), dir.join("sfu-key.pem"));
+    std::fs::write(&certificate_path, certificate)?;
+    std::fs::write(&key_path, key)?;
+    envs.push((
+      "TEAMCRAFT_SFU_CERT".into(),
+      certificate_path.display().to_string(),
+    ));
+    envs.push(("TEAMCRAFT_SFU_KEY".into(), key_path.display().to_string()));
+  }
   let mut service = Service::spawn("sfu", &binary("teamcraft-sfu"), &[], &envs, dir)?;
   service.wait_for_log("SFU listening", START_TIMEOUT).await?;
   let certificate_hash = parse_certificate_hash(&service.plain_log())?;

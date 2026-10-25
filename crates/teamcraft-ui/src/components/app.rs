@@ -12,7 +12,7 @@ use crate::attention::{AttentionReporter, AttentionSignals, is_attentive};
 use crate::auth::tauri;
 use crate::backend::Backend;
 use crate::calls::CallPhase;
-use crate::calls::{CallEvent, CallRequest};
+use crate::calls::{BackgroundEffect, CallEvent, CallRequest, CallStatusSounds};
 use crate::clock::now_ms;
 use crate::components::activity_view::ActivityView;
 use crate::components::admin_console::AdminConsole;
@@ -27,6 +27,7 @@ use crate::components::calls_view::CallsView;
 use crate::components::channel_preview::ChannelPreview;
 use crate::components::channel_view::ChannelView;
 use crate::components::directory_view::DirectoryView;
+use crate::components::edge_swipe::EdgeSwipeBack;
 use crate::components::getting_started::GettingStarted;
 use crate::components::guest_join::GuestJoinPage;
 use crate::components::home::{HomeSidebar, HomeStart, NewMessageDialog};
@@ -38,7 +39,7 @@ use crate::components::meetings_view::{MeetingsView, ScheduleMeetingDialog};
 use crate::components::members_panel::MembersPanel;
 use crate::components::message_actions::{EditHistoryDialog, ForwardDialog, PinsPanel, SavedView};
 use crate::components::offline_banner::OfflineBanner;
-use crate::components::profile_views::{EditProfileDialog, UserProfileDialog};
+use crate::components::profile_views::UserProfileDialog;
 use crate::components::quick_switcher::QuickSwitcher;
 use crate::components::rail::SpaceRail;
 use crate::components::search_view::SearchView;
@@ -75,7 +76,7 @@ use crate::settings::{Settings, Theme};
 use crate::state::{AppState, MainView, Overlay, RailEntry, SidePanel, ToastTone};
 use crate::toast_motion::{Swipe, use_flip_stack};
 use crate::toast_timer::Hold;
-use crate::viewport::CompactPane;
+use crate::viewport::{CompactDepth, CompactPane, PaneStep};
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -86,6 +87,7 @@ pub fn App() -> impl IntoView {
   apply_theme(settings.theme);
   apply_density(settings);
   apply_zoom(settings);
+  apply_text_size(settings);
   apply_language_attribute();
   crate::viewport::sync_theme_color(move || settings.theme.track());
   crate::brand::provide_brand(settings);
@@ -184,7 +186,9 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       leptos::task::spawn_local(async move { tauri::show_notification(&shown).await });
     }
   });
-  if tauri::is_available() {
+  // Real calls (desktop shell or the page's call module); the demo's simulated ones need no wiring.
+  // Untracked: the shell must not render again on every backend change.
+  if untrack(|| state.read(|backend| backend.has_calls() && !backend.has_simulated_calls())) {
     connect_calls(state);
   }
   watch_activity(state);
@@ -199,6 +203,23 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   track_banner_height(banners);
   let toast_stack = NodeRef::<leptos::html::Div>::new();
   use_flip_stack(toast_stack);
+  let app_body = NodeRef::<leptos::html::Div>::new();
+  let edge_swipe = EdgeSwipeBack::new(state, app_body);
+  // Which way the phone layout moved last, for the direction the panes slide in (#368). After an
+  // edge swipe the parent is on screen already. Through memos, so a navigation that sets the view
+  // and then the panel counts once; a rerun without a move keeps the step.
+  let depth = Memo::new(move |_| state.compact_depth());
+  let pane = Memo::new(move |_| state.compact_pane());
+  let pane_step = Memo::new(move |previous: Option<&(CompactDepth, CompactPane, PaneStep)>| {
+    let (depth, pane) = (depth.get(), pane.get());
+    let step = match previous {
+      None => PaneStep::Lateral,
+      Some(_) if edge_swipe.is_committed() => PaneStep::Lateral,
+      Some(&(before, before_pane, step)) if before == depth && before_pane == pane => step,
+      Some(&(before, _, _)) => PaneStep::between(before, depth),
+    };
+    (depth, pane, step)
+  });
 
   view! {
     <a class="skip-link" href="#main-content">
@@ -207,6 +228,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
     <div
       class="app"
       data-pane=move || state.compact_pane().slug()
+      data-nav=move || pane_step.get().2.slug()
       data-rail=move || if state.rail.get() == RailEntry::Home { "home" } else { "space" }
       class:has-bottom-nav=move || has_bottom_nav(state)
     >
@@ -220,7 +242,14 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         <UpdateNotice />
       </div>
       <TopBar />
-      <div class="app-body">
+      <div
+        class="app-body"
+        node_ref=app_body
+        on:pointerdown=move |ev| edge_swipe.pointer_down(&ev)
+        on:pointermove=move |ev| edge_swipe.pointer_move(&ev)
+        on:pointerup=move |ev| edge_swipe.pointer_up(&ev)
+        on:pointercancel=move |_| edge_swipe.pointer_cancel()
+      >
         // The administration console takes the whole window, like a system console.
         <Show when=move || !matches!(state.view.get(), MainView::Admin(_)) fallback=|| ()>
           <SpaceRail />
@@ -360,7 +389,6 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::SpaceSettings(space) => view! { <SpaceSettingsDialog space=space /> }.into_any(),
         Overlay::EditHistory(conversation, message) => view! { <EditHistoryDialog conversation=conversation message=message /> }.into_any(),
         Overlay::Bookmarks(conversation) => view! { <BookmarksDialog conversation=conversation /> }.into_any(),
-        Overlay::EditProfile => view! { <EditProfileDialog /> }.into_any(),
         Overlay::UserProfile(user) => view! { <UserProfileDialog user=user /> }.into_any(),
         Overlay::CallsUnavailable => view! { <CallsUnavailableDialog /> }.into_any(),
         Overlay::None | Overlay::StatusMenu => ().into_any(),
@@ -469,9 +497,7 @@ fn focus_pane_heading(pane: CompactPane) {
 /// The compact layout's bottom navigation shows on the top-level pages: the lists, Activity and
 /// the welcome page. Deeper pages have a back button instead.
 fn has_bottom_nav(state: AppState) -> bool {
-  state.is_compact()
-    && (state.compact_pane() == CompactPane::List
-      || matches!(state.view.get(), MainView::Activity | MainView::GettingStarted))
+  state.is_compact() && state.compact_depth() == CompactDepth::TopLevel
 }
 
 fn handle_global_shortcut(ev: &web_sys::KeyboardEvent, state: AppState) {
@@ -658,6 +684,26 @@ fn apply_zoom(settings: Settings) {
   });
 }
 
+/// Every platform: the text size setting sets `--text-scale` on the root (CSSOM, the CSP blocks
+/// style attributes); the stylesheet's rem type scale follows it.
+fn apply_text_size(settings: Settings) {
+  // Only a change of the text size touches the root, not every other preference change.
+  let text_size = Memo::new(move |_| settings.prefs.with(|prefs| prefs.display.text_size));
+  Effect::new(move |_| {
+    let scale = text_size.get().css_scale();
+    let Some(root) = web_sys::window()
+      .and_then(|window| window.document())
+      .and_then(|doc| doc.document_element())
+      .and_then(|root| root.dyn_into::<web_sys::HtmlElement>().ok())
+    else {
+      return;
+    };
+    if root.style().set_property("--text-scale", &scale).is_err() {
+      tracing::debug!("could not apply the text size");
+    }
+  });
+}
+
 fn apply_language_attribute() {
   let i18n = use_i18n();
   Effect::new(move |_| {
@@ -780,7 +826,6 @@ fn guest_link_from_location() -> Option<(teamcraft_proto::MeetingId, String)> {
   parse_guest_link(&location.pathname().ok()?, &location.hash().ok()?)
 }
 
-/// Desktop: the user's call actions go to the shell, and calls that ring there show the dialog.
 /// Keeps `--banners-h` on the root element at the height of the banner row: overlays that are fixed
 /// below the top bar (call screens, side panels on narrow windows) start below the banners too.
 fn track_banner_height(banners: NodeRef<leptos::html::Div>) {
@@ -818,6 +863,8 @@ fn track_banner_height(banners: NodeRef<leptos::html::Div>) {
   });
 }
 
+/// The user's call actions go to the call backend (the desktop shell or the page's call module), and
+/// calls that ring there show the dialog.
 fn connect_calls(state: AppState) {
   let call = state.call;
   let maybe_alerts = use_context::<crate::os_alerts::CallAlertsCell>();
@@ -846,17 +893,22 @@ fn connect_calls(state: AppState) {
       CallEvent::StatusSounds(sounds) => backend.set_call_status_sounds(sounds),
     });
   });
-  // The status sounds setting reaches the shell at start and on every change.
-  Effect::new(move |_| {
+  // The status sounds setting reaches the call backend at start and on every change (not on
+  // every settings write: the same value again is no change).
+  Effect::new(move |previous: Option<CallStatusSounds>| {
     let sounds = state.settings.prefs.with(|prefs| prefs.calls.status_sounds);
-    call.emit(CallEvent::StatusSounds(sounds));
+    if previous != Some(sounds) {
+      call.emit(CallEvent::StatusSounds(sounds));
+    }
+    sounds
   });
   // The effect picker writes the signal; the media layer applies it to the camera image.
-  Effect::new(move |previous: Option<()>| {
+  Effect::new(move |previous: Option<BackgroundEffect>| {
     let effect = call.effect.get();
-    if previous.is_some() {
+    if previous.is_some_and(|previous| previous != effect) {
       call.emit(CallEvent::Effect(effect));
     }
+    effect
   });
   // The shell ended the call (the other side hung up, the connection dropped): leave the screen.
   let was_connected = std::cell::Cell::new(false);
@@ -865,6 +917,34 @@ fn connect_calls(state: AppState) {
     if was_connected.replace(is_connected) && !is_connected && call.phase.get_untracked() == CallPhase::Active
     {
       call.leave();
+    }
+  });
+  // A join that failed (a refused microphone, an unreachable call server) already told the user
+  // why: the call screen it opened closes. Once the user's actions are carried out, the camera and
+  // screen share buttons show what the media layer did (a camera the browser refused, a share
+  // ended from the system's indicator).
+  let seen_join_failures = Cell::new(untrack(|| state.read(|backend| backend.call_join_failures())));
+  Effect::new(move |_| {
+    let (failures, maybe_media) = state.read(|backend| {
+      let maybe_media = (!backend.has_pending_call_actions())
+        .then(|| backend.active_call())
+        .flatten()
+        .map(|active| (active.is_camera_on, active.is_sharing_screen));
+      (backend.call_join_failures(), maybe_media)
+    });
+    if call.phase.get_untracked() != CallPhase::Active {
+      seen_join_failures.set(failures);
+      return;
+    }
+    if seen_join_failures.replace(failures) < failures {
+      call.leave();
+    } else if let Some((is_camera_on, is_sharing_screen)) = maybe_media {
+      if call.is_camera_on.get_untracked() != is_camera_on {
+        call.is_camera_on.set(is_camera_on);
+      }
+      if call.is_sharing_screen.get_untracked() != is_sharing_screen {
+        call.is_sharing_screen.set(is_sharing_screen);
+      }
     }
   });
   Effect::new(move |_| {

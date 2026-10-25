@@ -225,6 +225,7 @@ fn message(conversation: i64, client: u8, text: &str) -> StoredMessage {
     },
     is_edited: false,
     edits: Vec::new(),
+    maybe_edit_id: None,
     is_pinned: false,
   }
 }

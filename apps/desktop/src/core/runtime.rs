@@ -13,11 +13,11 @@ use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{
   ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreStatus, EnrollRequest, LinkStatus,
-  MessageWindow, SecuritySnapshot,
+  MessageWindow, SecuritySnapshot, StoreProblem,
 };
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
-use teamcraft_core::client::{LinkApproval, LinkedSecrets, NewDeviceLink};
+use teamcraft_core::client::{CatchUpFocus, LinkApproval, LinkedSecrets, NewDeviceLink};
 use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::connection::{
   ConnectionSettings, ConnectionState, ConnectionStatus, ConnectionSupervisor,
@@ -30,15 +30,14 @@ use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
 use teamcraft_core::ui_snapshot::SnapshotCache;
 use teamcraft_core::upkeep::{self, Upkeep};
 use teamcraft_core::{
-  CallKeySigner, Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer,
-  PendingEnrollment,
+  CallPreparation, Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer,
+  PendingEnrollment, UnreadableStore,
 };
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::identity::IdentityPublicKey;
-use teamcraft_crypto::identity::VerifiedDevice;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::{
-  BackgroundId, CallJoinTokenResponse, ClientUpdatePolicy, ConversationId, DeviceActivity, DeviceId,
+  BackgroundId, CallJoinTokenResponse, ClientUpdatePolicy, ConversationId, DeviceActivity,
   GatewayClientMessage, GatewayEvent, MessageId, OrgBackgroundId, UserId,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -210,17 +209,6 @@ struct Hooks {
   on_call_event: CallEventHandler,
 }
 
-/// Everything joining a conversation's call needs from the core (e2ee.md §8).
-pub struct CallPreparation {
-  pub join: CallJoinTokenResponse,
-  pub user_id: UserId,
-  pub device_id: DeviceId,
-  /// Signs this device's per-call DAVE key; the device key itself stays in the core.
-  pub signer: CallKeySigner,
-  /// The conversation's devices (this one included) whose certificates verified.
-  pub devices: Vec<VerifiedDevice>,
-}
-
 type Api = HttpServerApi<ServerTokens>;
 type Gateway = <Api as ServerApi>::Gateway;
 /// Notes what each write changes, so the UI's snapshot is rebuilt per conversation (issue #246).
@@ -270,6 +258,10 @@ enum Request {
   },
   LinkStatus(oneshot::Sender<LinkStatus>),
   LinkCancel,
+  /// The local database is unreadable: set it aside and start this device afresh (issue #160).
+  ResetStore(oneshot::Sender<Result<(), String>>),
+  /// The user signs out: drop what an unfinished enrollment kept (issue #168).
+  ForgetUnfinishedSetup(oneshot::Sender<()>),
   ApprovalStart {
     code: String,
     reply: oneshot::Sender<Result<(), String>>,
@@ -290,6 +282,8 @@ pub struct CoreRuntime {
   requests: mpsc::UnboundedSender<Request>,
   /// Read without asking the core thread, which may be busy connecting.
   connection: ConnectionStatus,
+  /// Shared with the client: the conversation the user opened, set while the core thread syncs.
+  focus: CatchUpFocus,
   /// Taken by [`CoreRuntime::shutdown`] or on drop.
   thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
@@ -310,6 +304,8 @@ impl CoreRuntime {
     let (requests, receiver) = mpsc::unbounded_channel();
     let connection = ConnectionStatus::new();
     let status = connection.clone();
+    let focus = CatchUpFocus::default();
+    let shared_focus = focus.clone();
     let thread = std::thread::Builder::new()
       .name("teamcraft-core".to_owned())
       .spawn(move || {
@@ -325,7 +321,7 @@ impl CoreRuntime {
           on_failure,
           on_call_event,
         };
-        let core = Core::new(config, user, key, tokens, hooks, status);
+        let core = Core::new(config, user, key, tokens, hooks, status, shared_focus);
         // A panic ends the core for good: logged here, and `status` then answers `Stopped`, so the
         // UI shows an internal error instead of a keystore problem.
         let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| runtime.block_on(core.run(receiver))));
@@ -337,8 +333,15 @@ impl CoreRuntime {
     Self {
       requests,
       connection,
+      focus,
       thread: Mutex::new(thread),
     }
+  }
+
+  /// The user opened `conversation`: a catch-up still running takes it next (issue #247). Set
+  /// without the core thread, which doesn't serve requests while it syncs.
+  pub fn focus(&self, conversation: ConversationId) {
+    self.focus.set(conversation);
   }
 
   /// Stops the core thread and waits until it closed the database and released the store lock,
@@ -452,6 +455,22 @@ impl CoreRuntime {
 
   pub fn link_cancel(&self) {
     drop(self.requests.send(Request::LinkCancel));
+  }
+
+  /// The user signs out: drops the keys of an unfinished link and the pending device key, if this
+  /// device isn't set up yet.
+  pub async fn forget_unfinished_setup(&self) {
+    // `None`: the core already stopped, so there is nothing to forget in it.
+    let _ = self.ask(Request::ForgetUnfinishedSetup).await;
+  }
+
+  /// Sets an unreadable local database aside (renamed, not deleted) and opens a new one, so the
+  /// device can be set up again (issue #160).
+  pub async fn reset_store(&self) -> Result<(), String> {
+    self
+      .ask(Request::ResetStore)
+      .await
+      .unwrap_or_else(|| Err(stopped()))
   }
 
   /// Existing device: joins the new device's link with its code. The short code is shown only on the
@@ -596,6 +615,8 @@ struct Core {
   client: Option<Client<Api, Store>>,
   backend: Option<CoreChatBackend<Store>>,
   connection: ConnectionSupervisor<Gateway>,
+  /// Handed to every client this core adopts ([`CoreRuntime::focus`]).
+  catch_up_focus: CatchUpFocus,
   status: CoreStatus,
   upkeep: Upkeep,
   link: Option<LinkRun>,
@@ -608,6 +629,8 @@ struct Core {
   maybe_attention: Option<bool>,
   /// Set while opening waits for an access token.
   maybe_open_retry: Option<OpenRetry>,
+  /// The unreadable database was set aside: setup explains why it is asked for again.
+  was_store_set_aside: bool,
   /// The UI's snapshot, rebuilt per conversation from what the store's writes touched (#246).
   snapshots: SnapshotCache,
 }
@@ -616,6 +639,8 @@ struct Core {
 enum OpenError {
   /// No access token yet: retried, the user is not stuck.
   NoToken(String),
+  /// The database can't be read by this version (issue #160): the user decides what happens to it.
+  Unreadable(UnreadableStore, String),
   Failed(String),
 }
 
@@ -653,6 +678,7 @@ impl Core {
     tokens: TokenCache,
     hooks: Hooks,
     status: ConnectionStatus,
+    catch_up_focus: CatchUpFocus,
   ) -> Self {
     let Hooks {
       on_change,
@@ -675,6 +701,7 @@ impl Core {
       client: None,
       backend: None,
       connection,
+      catch_up_focus,
       status: CoreStatus::NotStarted,
       upkeep: Upkeep::new(UPKEEP_INTERVAL),
       link: None,
@@ -683,6 +710,7 @@ impl Core {
       approval_misses: 0,
       maybe_attention: None,
       maybe_open_retry: None,
+      was_store_set_aside: false,
       snapshots: SnapshotCache::new(SystemClock.now_ms().unsigned_abs()),
     }
   }
@@ -729,6 +757,13 @@ impl Core {
         self.status = CoreStatus::NotStarted;
         self.maybe_open_retry = Some(retry);
       },
+      Err(OpenError::Unreadable(problem, message)) => {
+        tracing::error!(%message, ?problem, "the local database is unreadable");
+        self.status = CoreStatus::StoreUnreadable {
+          problem: store_problem(problem),
+        };
+        self.maybe_open_retry = None;
+      },
       Err(OpenError::Failed(message)) => {
         tracing::error!(%message, "could not open the local client");
         self.status = CoreStatus::Failed { message };
@@ -747,7 +782,7 @@ impl Core {
       Some(store) => store.clone(),
       None => {
         let store = TrackedStore::new(Arc::new(
-          SqlCipherStore::open(&path, &self.key).map_err(|error| OpenError::Failed(error.to_string()))?,
+          SqlCipherStore::open(&path, &self.key).map_err(|error| open_error(error.into()))?,
         ));
         self.store = Some(store.clone());
         store
@@ -755,17 +790,20 @@ impl Core {
     };
     match Client::open(
       self.api(),
-      store,
+      store.clone(),
       Box::new(SystemClock),
       ClientSettings::default(),
     )
-    .map_err(|e| OpenError::Failed(e.to_string()))?
+    .map_err(open_error)?
     {
       Some(client) => {
         let status = self.adopt(client);
         Ok(status)
       },
       None => {
+        if let Some(status) = self.resume_link(store).await? {
+          return Ok(status);
+        }
         let has_existing_identity = match self.api().identity_key(self.user).await {
           Ok(maybe_key) => maybe_key.is_some(),
           Err(error @ ApiError::Token(_)) => return Err(OpenError::NoToken(error.to_string())),
@@ -773,10 +811,65 @@ impl Core {
         };
         Ok(CoreStatus::NeedsEnrollment {
           has_existing_identity,
-          was_data_lost: false,
+          was_data_lost: self.was_store_set_aside,
         })
       },
     }
+  }
+
+  /// A device link whose keys arrived before the app stopped finishes enrolling now (issue #168).
+  async fn resume_link(&mut self, store: Store) -> Result<Option<CoreStatus>, OpenError> {
+    let resumed = PendingEnrollment::resume_link(
+      self.api(),
+      store,
+      Box::new(SystemClock),
+      ClientSettings::default(),
+      self.config.argon2,
+    )
+    .await;
+    match resumed {
+      Ok(Some(client)) => Ok(Some(self.adopt(client))),
+      Ok(None) => Ok(None),
+      // Kept for the next try, which comes soon.
+      Err(error) if error.is_transient() || error.is_sign_in_required() => {
+        Err(OpenError::NoToken(error.to_string()))
+      },
+      // The keys are dropped if they can't work; the user links again.
+      Err(error) => {
+        tracing::warn!(%error, "could not finish the enrollment of an interrupted device link");
+        Ok(None)
+      },
+    }
+  }
+
+  /// Renames the unreadable database (and its journal) beside itself and opens a new one. The old
+  /// file stays for support; nothing is deleted.
+  async fn reset_store(&mut self) -> Result<(), String> {
+    if !matches!(self.status, CoreStatus::StoreUnreadable { .. }) {
+      return Err("the local data is readable; nothing to reset".to_owned());
+    }
+    self.client = None;
+    self.backend = None;
+    self.store = None;
+    let path = self.config.data_dir.join(format!("{}.db", self.user));
+    let suffix = format!("unreadable-{}", SystemClock.now_ms());
+    for (file, aside) in [
+      (path.clone(), path.with_extension(format!("db.{suffix}"))),
+      (
+        path.with_extension("db-journal"),
+        path.with_extension(format!("db-journal.{suffix}")),
+      ),
+    ] {
+      match std::fs::rename(&file, &aside) {
+        Ok(()) => tracing::warn!(path = %aside.display(), "set the unreadable local database aside"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Err(error) => return Err(format!("could not set the local database aside: {error}")),
+      }
+    }
+    self.was_store_set_aside = true;
+    self.open().await;
+    self.changed();
+    Ok(())
   }
 
   /// Another device may have enrolled the account since the database was opened; the enrollment
@@ -789,7 +882,7 @@ impl Core {
     {
       self.status = CoreStatus::NeedsEnrollment {
         has_existing_identity: maybe_key.is_some(),
-        was_data_lost: false,
+        was_data_lost: self.was_store_set_aside,
       };
     }
   }
@@ -797,6 +890,7 @@ impl Core {
   fn adopt(&mut self, mut client: Client<Api, Store>) -> CoreStatus {
     let on_call_event = self.on_call_event.clone();
     client.set_call_event_sink(Box::new(move |event| on_call_event(event.clone())));
+    client.share_catch_up_focus(self.catch_up_focus.clone());
     let status = CoreStatus::Ready {
       identity_fingerprint: client.identity_fingerprint(),
     };
@@ -844,6 +938,24 @@ impl Core {
       Request::LinkCancel => {
         self.link = None;
         self.link_failure = LinkStatus::Idle;
+        // The user gave up on linking: keys from an earlier attempt aren't used any more.
+        if self.client.is_none()
+          && let Some(store) = &self.store
+          && let Err(error) = records::delete_pending_link(store)
+        {
+          tracing::warn!(%error, "could not drop the keys of an abandoned device link");
+        }
+      },
+      Request::ResetStore(reply) => drop(reply.send(self.reset_store().await)),
+      Request::ForgetUnfinishedSetup(reply) => {
+        if self.client.is_none()
+          && let Some(store) = &self.store
+          && let Err(error) = records::forget_unfinished_enrollment(store)
+        {
+          tracing::warn!(%error, "could not drop the keys of an unfinished setup");
+        }
+        // Deliberately ignored: the caller may have stopped waiting; nothing is left to tell.
+        let _ = reply.send(());
       },
       Request::ApprovalStart { code, reply } => drop(reply.send(self.approval_start(&code).await)),
       Request::ApprovalConfirm { short_code, reply } => {
@@ -960,18 +1072,7 @@ impl Core {
 
   async fn prepare_call(&mut self, conversation: ConversationId) -> Result<CallPreparation, String> {
     let client = self.client.as_mut().ok_or("this device is not set up yet")?;
-    let join = client.call_join_token(conversation).await.map_err(describe)?;
-    let devices = client
-      .verified_call_devices(conversation)
-      .await
-      .map_err(describe)?;
-    Ok(CallPreparation {
-      join,
-      user_id: client.user_id(),
-      device_id: client.device_id(),
-      signer: client.call_key_signer(),
-      devices,
-    })
+    client.prepare_call(conversation).await.map_err(describe)
   }
 
   async fn enroll(&mut self, request: EnrollRequest) -> Result<(), String> {
@@ -1005,11 +1106,19 @@ impl Core {
     if self.client.is_some() {
       return Err("this device is already set up".to_owned());
     }
+    let store = self.store.clone().ok_or("the local database is not open")?;
     let offer = LinkOffer::generate();
     let view = Rc::new(RefCell::new(LinkStatus::WaitingForScan {
       code: offer.to_code(),
     }));
-    let future = Box::pin(link_task(self.api(), offer, view.clone(), self.on_change.clone()));
+    let future = Box::pin(link_task(
+      self.api(),
+      store,
+      device_name.clone(),
+      offer,
+      view.clone(),
+      self.on_change.clone(),
+    ));
     self.link_failure = LinkStatus::Idle;
     self.link = Some(LinkRun {
       device_name,
@@ -1241,7 +1350,12 @@ impl Core {
     let count = commands.len();
     let mut maybe_failure = None;
     for command in commands {
-      if let Err(error) = client.run_ui_command(command).await {
+      // A command can take long (an upload, a big history page); heartbeats go on meanwhile.
+      let result = self
+        .connection
+        .keep_alive(SystemClock.now_ms(), client.run_ui_command(command))
+        .await;
+      if let Err(error) = result {
         tracing::warn!(%error, "UI command failed");
         maybe_failure.get_or_insert(error);
       }
@@ -1253,7 +1367,11 @@ impl Core {
     let Some(client) = self.client.as_mut() else {
       return;
     };
-    if upkeep::flush(client).await {
+    if self
+      .connection
+      .keep_alive(SystemClock.now_ms(), upkeep::flush(client))
+      .await
+    {
       self.changed();
     }
   }
@@ -1263,7 +1381,12 @@ impl Core {
     let Some(client) = self.client.as_mut() else {
       return;
     };
-    if self.upkeep.tick(client).await {
+    // The upkeep may resync many conversations; heartbeats go on meanwhile.
+    if self
+      .connection
+      .keep_alive(SystemClock.now_ms(), self.upkeep.tick(client))
+      .await
+    {
       self.changed();
     }
   }
@@ -1346,6 +1469,21 @@ async fn sleep_for(maybe_duration: Option<Duration>) {
   }
 }
 
+/// An error of opening the store or the client: unreadable data gets its own status.
+fn open_error(error: CoreError) -> OpenError {
+  match error.unreadable_store() {
+    Some(problem) => OpenError::Unreadable(problem, error.to_string()),
+    None => OpenError::Failed(error.to_string()),
+  }
+}
+
+fn store_problem(problem: UnreadableStore) -> StoreProblem {
+  match problem {
+    UnreadableStore::Damaged => StoreProblem::Damaged,
+    UnreadableStore::NewerVersion => StoreProblem::NewerVersion,
+  }
+}
+
 /// Error text for the UI: the cause, without internal type names.
 fn describe(error: CoreError) -> String {
   error.to_string()
@@ -1359,6 +1497,8 @@ fn describe_failure(error: CoreError) -> String {
 /// Waits for the existing device to answer, shows the short code, then waits for the keys.
 async fn link_task(
   api: Api,
+  store: Store,
+  device_name: String,
   offer: LinkOffer,
   view: Rc<RefCell<LinkStatus>>,
   on_change: Arc<dyn Fn() + Send + Sync>,
@@ -1369,7 +1509,7 @@ async fn link_task(
     short_code: link.short_code(),
   };
   on_change();
-  link.receive_secrets().await.map_err(describe)
+  link.receive_secrets(&store, &device_name).await.map_err(describe)
 }
 
 async fn poll_link(link: &mut Option<LinkRun>) -> Result<LinkedSecrets, String> {

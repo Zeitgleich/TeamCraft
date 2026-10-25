@@ -48,11 +48,14 @@ pub const MAX_UPLOAD_KEY: &str = "max_upload_bytes";
 pub use actions::{OutgoingText, REPLY_EXCERPT_CHARS, forward_content, reply_ref};
 pub use attachments::{MAX_VIEWER_BYTES, OutgoingFile};
 pub use attested::{AttestationSettings, JwksSource};
-pub use calls::{CallEventSink, CallKeySigner};
+pub use calls::{CallEventSink, CallKeySigner, CallPreparation};
 pub(crate) use catch_up::CATCHING_UP_PREFIX;
 pub use catch_up::{CatchUpFocus, is_catching_up};
 pub use enroll::{EnrollmentOptions, EnrollmentSecret, OrgRecoveryUnlock, PendingEnrollment};
-pub use gateway::{DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart};
+pub use gateway::{
+  DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart, GatewayTiming, HeldFrames, HeldLimits, KeptAlive,
+  keep_alive,
+};
 pub use group_health::{
   RemovalStatus, group_leftovers, is_queue_refused, pending_removals, unconfirmed_removals,
 };
@@ -63,6 +66,7 @@ pub use messaging::FlushReport;
 pub(crate) use messaging::{REMOVED_SENDER_GRACE_MS, decrypt_content};
 #[cfg(feature = "ui")]
 pub(crate) use messaging::{apply_control, bookmarks_key};
+pub(crate) use notifications::registered_push_token;
 pub use notifications::{TYPING_TIMEOUT_MS, TypingState};
 use openmls_rust_crypto::OpenMlsRustCrypto;
 pub use org_recovery::{SealedShare, recovery_request};
@@ -226,6 +230,11 @@ pub struct Client<A, S> {
   maybe_replay_left: Option<u64>,
   /// The conversation the user looks at; a catch-up takes it first (issue #247).
   catch_up_focus: CatchUpFocus,
+  /// Set while a catch-up joins the focused conversation's welcomes ahead of the others: the
+  /// welcome cursor then stays where it is, so the welcomes before them are still read in order.
+  /// Cleared right after each such join; a catch-up future dropped in between leaves it set until
+  /// the next catch-up, which clears it before anything else (only welcomes are affected).
+  is_welcome_cursor_held: bool,
 }
 
 impl Default for ClientSettings {
@@ -309,6 +318,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       are_welcomes_synced: false,
       maybe_waiting_checked_at_ms: None,
       catch_up_focus: CatchUpFocus::default(),
+      is_welcome_cursor_held: false,
     };
     // A catch-up the app was closed during left its marks; the next one sets them again.
     catch_up::clear_marks(&client.store)?;
@@ -444,6 +454,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// The part of [`Self::drop_group`] outside the MLS state: what this device noted about the
   /// group next to it. Alone for a group whose MLS state a joined group took over.
   fn forget_group_records(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    self.atomically(|client| client.delete_group_records(conversation))
+  }
+
+  fn delete_group_records(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
     self.groups.remove(&conversation);
     self
       .store
@@ -478,8 +492,27 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     records::save_mls_storage(&self.store, &self.provider)
   }
 
-  /// Writes MLS state (provider storage and applied change IDs) after a group operation.
+  /// Writes MLS state (provider storage and applied change IDs) after a group operation, as one
+  /// group of writes.
   fn persist_group(&self, conversation: ConversationId) -> Result<(), CoreError> {
+    crate::store::write_group(&self.store, || self.write_group_state(conversation))
+  }
+
+  /// [`Self::persist_group`] after an MLS entry was processed: the state and the cursor past the
+  /// entry go to the store together, so a restart never processes it again on a state that
+  /// already moved on.
+  pub(crate) fn persist_group_at(
+    &mut self,
+    conversation: ConversationId,
+    message: &teamcraft_proto::MlsMessageResponse,
+  ) -> Result<(), CoreError> {
+    self.atomically(|client| {
+      client.write_group_state(conversation)?;
+      client.advance_cursor(conversation, message)
+    })
+  }
+
+  fn write_group_state(&self, conversation: ConversationId) -> Result<(), CoreError> {
     records::save_mls_storage(&self.store, &self.provider)?;
     if let Some(group) = self.groups.get(&conversation) {
       let applied: Vec<[u8; 16]> = group.applied_changes().map(|id| *id.as_bytes()).collect();
@@ -510,11 +543,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
-  /// Writes the key bag after content keys changed, and marks it for upload.
+  /// Writes the key bag after content keys changed, and marks it for upload (together, so a bag
+  /// saved with new keys is never left unmarked).
   pub(crate) fn persist_keys(&mut self) -> Result<(), CoreError> {
-    records::save_key_bag(&self.store, &self.account)?;
     self.sync.is_key_bag_dirty = true;
-    self.persist_sync()
+    crate::store::write_group(&self.store, || {
+      records::save_key_bag(&self.store, &self.account)?;
+      records::save_sync_state(&self.store, &self.sync)
+    })
   }
 
   fn persist_sync(&self) -> Result<(), CoreError> {
@@ -617,6 +653,27 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   pub(crate) fn now_ms(&self) -> i64 {
     self.clock.now_ms()
+  }
+
+  /// Runs `writes` as one group of store writes (issue #160): after a crash or a failed write, the
+  /// store holds all of them or none. For steps whose records must agree (MLS state, cursor, keys);
+  /// synchronous, so a group never stays open across a network request.
+  pub(crate) fn atomically<T>(
+    &mut self,
+    writes: impl FnOnce(&mut Self) -> Result<T, CoreError>,
+  ) -> Result<T, CoreError> {
+    self.store.begin_writes()?;
+    // A panic must not leave the group open: nothing would be committed again.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| writes(self)));
+    let ended = self.store.end_writes();
+    match result {
+      Ok(result) => {
+        let value = result?;
+        ended?;
+        Ok(value)
+      },
+      Err(panic) => std::panic::resume_unwind(panic),
+    }
   }
 }
 

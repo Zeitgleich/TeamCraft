@@ -17,8 +17,8 @@ use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{GatewayClientMessage, GatewayServerMessage};
 
-use crate::api::{ApiError, GatewayConnection, ServerApi};
-use crate::client::{Client, GatewayOutcome};
+use crate::api::{ApiError, GatewayConnection, Interception, ServerApi};
+use crate::client::{Client, GatewayOutcome, GatewayTiming, HeldFrames, HeldLimits, keep_alive};
 use crate::error::CoreError;
 use crate::store::LocalStore;
 
@@ -32,9 +32,12 @@ pub enum ConnectionState {
   Connecting,
   Connected,
   /// The last attempt failed or the connection was lost; the next attempt starts at `retry_at_ms`
-  /// (Unix milliseconds), or at once when the network changes.
+  /// (Unix milliseconds), or at once when the network changes. `maybe_interception` names what
+  /// answered instead of the server, if the last attempt found out (a captive portal, a TLS proxy).
   Offline {
     retry_at_ms: i64,
+    #[serde(rename = "interception", default, skip_serializing_if = "Option::is_none")]
+    maybe_interception: Option<Interception>,
   },
   /// The server refused the access token. Tried again when the app has another token, or when the
   /// network changes.
@@ -59,6 +62,9 @@ pub struct ConnectionSettings {
   pub probe_timeout: Duration,
   /// A gap this long between two ticks means the device slept or the tab was frozen.
   pub wake_gap: Duration,
+  /// What is kept while a long sync or command runs ([`ConnectionSupervisor::keep_alive`]); beyond
+  /// it the connection isn't read until the work is done.
+  pub held_limits: HeldLimits,
 }
 
 /// The current [`ConnectionState`], readable from other threads and while the shell's loop is busy
@@ -93,6 +99,8 @@ pub struct ConnectionSupervisor<G> {
   /// A fingerprint of the token the server refused, so it isn't offered again and again (each
   /// refusal counts against the address on the server).
   maybe_refused_token: Option<u64>,
+  /// What arrived while long work kept the connection alive; [`Self::receive`] hands it out first.
+  held: HeldFrames,
   jitter: Jitter,
 }
 
@@ -110,6 +118,7 @@ impl Default for ConnectionSettings {
       stable_after: Duration::from_secs(30),
       probe_timeout: Duration::from_secs(3),
       wake_gap: Duration::from_secs(30),
+      held_limits: HeldLimits::default(),
     }
   }
 }
@@ -177,6 +186,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
       maybe_probe_deadline_ms: None,
       maybe_last_tick_ms: None,
       maybe_refused_token: None,
+      held: HeldFrames::default(),
       jitter: Jitter::new(OsRng.next_u64()),
     }
   }
@@ -239,16 +249,26 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
       return None;
     }
     self.set_state(ConnectionState::Connecting);
-    let result = client.start_gateway(self.settings.handshake_timeout).await;
+    let timing = GatewayTiming {
+      handshake_timeout: self.settings.handshake_timeout,
+      max_heartbeat: self.settings.max_heartbeat,
+      held_limits: self.settings.held_limits,
+    };
+    let result = client.start_gateway(timing).await;
     let now = client.now_ms();
     match result {
       Ok(start) => {
         tracing::info!(outcome = ?start.outcome, "gateway connected");
         self.heartbeat = start.heartbeat_interval.min(self.settings.max_heartbeat);
         self.maybe_gateway = Some(start.connection);
+        self.held = start.held;
+        // The heartbeats went on during the sync: the next one is due an interval from now at the
+        // latest, and the loop was busy, not asleep.
+        self.held.take_kept_alive();
         self.connected_at_ms = now;
         self.last_heard_ms = now;
         self.last_heartbeat_ms = now;
+        self.maybe_last_tick_ms = Some(now);
         self.maybe_probe_deadline_ms = None;
         self.maybe_refused_token = None;
         self.set_state(ConnectionState::Connected);
@@ -262,14 +282,22 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
       },
       Err(error) => {
         tracing::warn!(%error, "gateway connection failed");
-        self.schedule_attempt(now);
+        let maybe_interception = match &error {
+          CoreError::Api(api) => api.interception(),
+          _ => None,
+        };
+        self.schedule_attempt(now, maybe_interception);
         None
       },
     }
   }
 
-  /// The next frame of the open connection; never completes while there is none.
+  /// The next frame of the open connection, frames held during long work first; never completes
+  /// while there is none.
   pub async fn receive(&mut self) -> Option<Result<GatewayServerMessage, ApiError>> {
+    if let Some(held) = self.held.pop() {
+      return held;
+    }
     match self.maybe_gateway.as_mut() {
       Some(connection) => connection.receive().await,
       None => std::future::pending().await,
@@ -295,7 +323,10 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
         self.last_heard_ms = now;
         self.maybe_probe_deadline_ms = None;
         let is_heartbeat_ack = matches!(frame, GatewayServerMessage::HeartbeatAck);
-        client.handle_frame(frame).await.map(|()| !is_heartbeat_ack)
+        // An event can start a long catch-up (a welcome, a membership change).
+        let handled = self.keep_alive(now, client.handle_frame(frame)).await;
+        self.note_kept_alive(client.now_ms());
+        handled.map(|()| !is_heartbeat_ack)
       },
       Some(Err(error)) => Err(CoreError::Api(error)),
       None => Err(CoreError::Gateway("connection closed".into())),
@@ -312,6 +343,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
   /// Heartbeats, dead-connection detection and wake-up detection. Call it at least every few
   /// seconds and at [`Self::next_deadline_ms`].
   pub async fn on_tick(&mut self, now_ms: i64) {
+    self.note_kept_alive(now_ms);
     let has_slept = self
       .maybe_last_tick_ms
       .is_some_and(|last| now_ms.saturating_sub(last) >= millis(self.settings.wake_gap));
@@ -347,6 +379,27 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     }
   }
 
+  /// Runs `work` (a UI command, the upkeep, the outbox) while the connection keeps its heartbeats
+  /// and reads what arrives (issue #325): a long command can't get the connection dropped. `now_ms`
+  /// is the time the work starts; what arrived is handed out by [`Self::receive`] afterwards, and
+  /// the next [`Self::on_tick`] or [`Self::on_frame`] counts the heartbeats sent meanwhile.
+  pub async fn keep_alive<T>(&mut self, now_ms: i64, work: impl std::future::Future<Output = T>) -> T {
+    let Some(connection) = self.maybe_gateway.as_mut() else {
+      return work.await;
+    };
+    let heartbeat_due = self.last_heartbeat_ms.saturating_add(millis(self.heartbeat));
+    let first_in = Duration::from_millis(heartbeat_due.saturating_sub(now_ms).max(0).unsigned_abs());
+    keep_alive(
+      connection,
+      first_in,
+      self.heartbeat,
+      self.settings.held_limits,
+      &mut self.held,
+      work,
+    )
+    .await
+  }
+
   /// Sends a frame on the open connection; `false` if there is none or the send failed (the
   /// connection is then replaced).
   pub async fn send(&mut self, now_ms: i64, message: &GatewayClientMessage) -> bool {
@@ -375,7 +428,24 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     self.maybe_refused_token = None;
     self.next_attempt_ms = now_ms;
     if self.state() == ConnectionState::SignInRequired {
-      self.set_state(ConnectionState::Offline { retry_at_ms: now_ms });
+      self.set_state(ConnectionState::Offline {
+        retry_at_ms: now_ms,
+        maybe_interception: None,
+      });
+    }
+  }
+
+  /// Counts what [`Self::keep_alive`] did: heartbeats sent and answers heard move the timers, and a
+  /// long work isn't mistaken for a device that slept.
+  fn note_kept_alive(&mut self, now_ms: i64) {
+    let kept = self.held.take_kept_alive();
+    if kept.heartbeats_sent > 0 {
+      self.last_heartbeat_ms = now_ms;
+      self.maybe_last_tick_ms = Some(now_ms);
+    }
+    if kept.was_heard {
+      self.last_heard_ms = now_ms;
+      self.maybe_probe_deadline_ms = None;
     }
   }
 
@@ -398,16 +468,18 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
   fn lose(&mut self, now_ms: i64, reason: &dyn std::fmt::Display) {
     tracing::warn!(%reason, "gateway connection lost");
     self.maybe_gateway = None;
+    // Frames of the old connection: a resume replays them, a fresh session syncs.
+    self.held = HeldFrames::default();
     self.maybe_probe_deadline_ms = None;
     if now_ms.saturating_sub(self.connected_at_ms) >= millis(self.settings.stable_after) {
       self.failures = 0;
     }
-    self.schedule_attempt(now_ms);
+    self.schedule_attempt(now_ms, None);
   }
 
   /// Equal jitter: half the backoff plus a random part of the other half, so clients that lost
   /// the server at the same moment (a restart) don't come back in lock-step.
-  fn schedule_attempt(&mut self, now_ms: i64) {
+  fn schedule_attempt(&mut self, now_ms: i64, maybe_interception: Option<Interception>) {
     let exponent = self.failures.min(16);
     let base = self
       .settings
@@ -420,6 +492,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     self.next_attempt_ms = now_ms.saturating_add(delay_ms);
     self.set_state(ConnectionState::Offline {
       retry_at_ms: self.next_attempt_ms,
+      maybe_interception,
     });
   }
 
@@ -448,7 +521,18 @@ impl From<ConnectionState> for teamcraft_client_api::remote::CoreConnection {
     match state {
       ConnectionState::Connecting => Self::Connecting,
       ConnectionState::Connected => Self::Connected,
-      ConnectionState::Offline { retry_at_ms } => Self::Offline { retry_at_ms },
+      ConnectionState::Offline {
+        retry_at_ms,
+        maybe_interception,
+      } => Self::Offline {
+        retry_at_ms,
+        maybe_interception: maybe_interception.map(|kind| match kind {
+          Interception::CaptivePortal => teamcraft_client_api::remote::NetworkInterception::CaptivePortal,
+          Interception::UntrustedCertificate => {
+            teamcraft_client_api::remote::NetworkInterception::UntrustedCertificate
+          },
+        }),
+      },
       ConnectionState::SignInRequired => Self::SignInRequired,
     }
   }
@@ -515,10 +599,23 @@ mod tests {
 
   #[test]
   fn the_state_serializes_with_a_tag() {
-    let offline = serde_json::to_value(ConnectionState::Offline { retry_at_ms: 5 }).ok();
+    let offline = serde_json::to_value(ConnectionState::Offline {
+      retry_at_ms: 5,
+      maybe_interception: None,
+    })
+    .ok();
     assert_eq!(
       offline,
       Some(serde_json::json!({ "state": "offline", "retry_at_ms": 5 }))
+    );
+    let portal = serde_json::to_value(ConnectionState::Offline {
+      retry_at_ms: 5,
+      maybe_interception: Some(Interception::CaptivePortal),
+    })
+    .ok();
+    assert_eq!(
+      portal,
+      Some(serde_json::json!({ "state": "offline", "retry_at_ms": 5, "interception": "captive_portal" }))
     );
     let sign_in = serde_json::to_value(ConnectionState::SignInRequired).ok();
     assert_eq!(sign_in, Some(serde_json::json!({ "state": "sign_in_required" })));

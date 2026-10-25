@@ -311,9 +311,24 @@ pub enum CoreStatus {
   },
   /// The encrypted data could not be opened (keystore, database); `message` is for details.
   Failed { message: String },
+  /// The local database can't be read by this version, and a retry won't change that (issue
+  /// #160): the user can set the device up again, which sets the file aside instead of deleting it.
+  StoreUnreadable { problem: StoreProblem },
   /// The client core ended unexpectedly (an internal error such as a panic), not because of the
   /// keystore or the database: the user is asked to restart the app and report it.
   Stopped,
+}
+
+/// Why the local database can't be read ([`CoreStatus::StoreUnreadable`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoreProblem {
+  /// The file is damaged, or the key that opens it is gone.
+  Damaged,
+  /// A newer version of the app changed it: update the app.
+  NewerVersion,
+  #[serde(other)]
+  Unknown,
 }
 
 /// Where the core's gateway connection stands, for the connection banner (the core's
@@ -326,9 +341,22 @@ pub enum CoreConnection {
   /// Not connected; the next attempt starts at `retry_at_ms` (Unix milliseconds).
   Offline {
     retry_at_ms: i64,
+    /// What answered instead of the server, if the core found out.
+    #[serde(rename = "interception", default, skip_serializing_if = "Option::is_none")]
+    maybe_interception: Option<NetworkInterception>,
   },
   /// The server refused the access token: the user has to sign in again.
   SignInRequired,
+}
+
+/// Something on the network that answered instead of the server (issue #157).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkInterception {
+  /// The network's login page (hotel, train, guest Wi-Fi).
+  CaptivePortal,
+  /// A certificate the device doesn't trust, usually a proxy that inspects encrypted traffic.
+  UntrustedCertificate,
 }
 
 /// Whether the local data keeps up with the core. The browser can refuse writes (quota) or hand
@@ -1367,6 +1395,21 @@ mod tests {
     assert_eq!(
       serde_json::to_string(&CoreStatus::Stopped).expect("serialize"),
       r#"{"state":"stopped"}"#
+    );
+    let unreadable = CoreStatus::StoreUnreadable {
+      problem: StoreProblem::NewerVersion,
+    };
+    assert_eq!(
+      serde_json::to_string(&unreadable).expect("serialize"),
+      r#"{"state":"store_unreadable","problem":"newer_version"}"#
+    );
+    let newer: CoreStatus =
+      serde_json::from_str(r#"{"state":"store_unreadable","problem":"locked"}"#).expect("parse");
+    assert_eq!(
+      newer,
+      CoreStatus::StoreUnreadable {
+        problem: StoreProblem::Unknown
+      }
     );
   }
 

@@ -58,7 +58,10 @@ impl CoreHost {
     }
     if let Some(runtime) = self.running_for(server_url, user)? {
       let status = runtime.status().await;
-      if !matches!(status, CoreStatus::Failed { .. } | CoreStatus::Stopped) {
+      if !matches!(
+        status,
+        CoreStatus::Failed { .. } | CoreStatus::StoreUnreadable { .. } | CoreStatus::Stopped
+      ) {
         return Ok(status);
       }
       tracing::info!(
@@ -127,7 +130,7 @@ impl From<String> for CommandError {
 }
 
 /// Starts (or reuses) the core for `user` of the active server and reports where it stands.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_start(
   app: AppHandle,
   host: State<'_, CoreHost>,
@@ -178,26 +181,35 @@ pub async fn core_start(
   Ok(status)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_status(host: State<'_, CoreHost>) -> Result<CoreStatus, CommandError> {
   Ok(host.current()?.status().await)
 }
 
 /// Where the gateway connection stands, for the banner; answered without waiting for the core.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn core_connection(host: State<'_, CoreHost>) -> Result<CoreConnection, CommandError> {
   Ok(host.current()?.connection_state().into())
 }
 
 /// The webview saw the network come back or the window become visible again: the gateway and a
 /// running call check their connections at once.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn core_network_changed(host: State<'_, CoreHost>, calls: State<'_, Arc<CallHost>>) {
   host.network_changed();
   calls.network_changed();
 }
 
-#[tauri::command]
+/// The user opened a conversation (issue #247: a running catch-up takes it next).
+#[tauri::command(rename_all = "snake_case")]
+pub fn core_focus(host: State<'_, CoreHost>, conversation: ConversationId) {
+  // No running core: nothing is catching up that the focus could steer.
+  if let Ok(runtime) = host.current() {
+    runtime.focus(conversation);
+  }
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_enroll(host: State<'_, CoreHost>, request: EnrollRequest) -> Result<(), CommandError> {
   Ok(host.current()?.enroll(request).await?)
 }
@@ -208,18 +220,18 @@ pub async fn core_link_start(host: State<'_, CoreHost>, device_name: String) -> 
   Ok(host.current()?.link_start(device_name).await?)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_link_status(host: State<'_, CoreHost>) -> Result<LinkStatus, CommandError> {
   Ok(host.current()?.link_status().await)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn core_link_cancel(host: State<'_, CoreHost>) -> Result<(), CommandError> {
   host.current()?.link_cancel();
   Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_approval_start(host: State<'_, CoreHost>, code: String) -> Result<(), CommandError> {
   Ok(host.current()?.approval_start(code).await?)
 }
@@ -233,19 +245,19 @@ pub async fn core_approval_confirm(
   Ok(host.current()?.approval_confirm(short_code).await?)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn core_approval_cancel(host: State<'_, CoreHost>) -> Result<(), CommandError> {
   host.current()?.approval_cancel();
   Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_snapshot(host: State<'_, CoreHost>) -> Result<ChatSnapshot, CommandError> {
   Ok(host.current()?.snapshot().await?)
 }
 
 /// What changed in the snapshot since the webview's cursor (issue #246).
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_snapshot_changes(
   host: State<'_, CoreHost>,
   since: Option<SnapshotCursor>,
@@ -253,7 +265,7 @@ pub async fn core_snapshot_changes(
   Ok(host.current()?.snapshot_changes(since).await?)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_messages(
   host: State<'_, CoreHost>,
   conversation: ConversationId,
@@ -263,7 +275,7 @@ pub async fn core_messages(
   Ok(host.current()?.messages(conversation, start, len).await?)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_thread(
   host: State<'_, CoreHost>,
   conversation: ConversationId,
@@ -272,7 +284,7 @@ pub async fn core_thread(
   Ok(host.current()?.thread(conversation, thread).await?)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_action(host: State<'_, CoreHost>, action: ChatAction) -> Result<(), CommandError> {
   let action = match action {
     // A picture of the user's own: re-encoded here (decoded, scaled to Full HD, JPEG without
@@ -305,7 +317,7 @@ pub async fn core_action(host: State<'_, CoreHost>, action: ChatAction) -> Resul
 }
 
 /// Search, saved items, files, message extras and the other reads of client-api's `ChatQuery`.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_query(host: State<'_, CoreHost>, query: ChatQuery) -> Result<ChatAnswer, CommandError> {
   Ok(host.current()?.query(query).await?)
 }
@@ -324,9 +336,19 @@ pub async fn core_attachment(
   Ok(tauri::ipc::Response::new(plaintext.expose_secret().to_vec()))
 }
 
+/// Sets an unreadable local database aside and opens a new one (issue #160).
+#[tauri::command(rename_all = "snake_case")]
+pub async fn core_reset_store(host: State<'_, CoreHost>) -> Result<(), CommandError> {
+  Ok(host.current()?.reset_store().await?)
+}
+
 /// Stops the core, e.g. on sign-out. The encrypted database stays on disk.
-#[tauri::command]
-pub fn core_stop(host: State<'_, CoreHost>) -> Result<(), CommandError> {
+#[tauri::command(rename_all = "snake_case")]
+pub async fn core_stop(host: State<'_, CoreHost>) -> Result<(), CommandError> {
+  // Signing out of a device that isn't set up yet leaves no keys of the attempt behind (#168).
+  if let Ok(runtime) = host.current() {
+    runtime.forget_unfinished_setup().await;
+  }
   Ok(host.stop()?)
 }
 
@@ -347,6 +369,7 @@ mod tests {
   use std::time::{SystemTime, UNIX_EPOCH};
 
   use secrecy::SecretString;
+  use teamcraft_client_api::remote::StoreProblem;
   use teamcraft_proto::{Id, Snowflake};
   use tokio::io::{AsyncReadExt, AsyncWriteExt};
   use tokio::net::TcpListener;
@@ -394,7 +417,8 @@ mod tests {
     let host = CoreHost::new(TokenCache::live(service.clone()));
     let directory = scratch_dir("replace");
     std::fs::create_dir_all(&directory).expect("dir");
-    // A damaged database: opening fails after the store lock was taken.
+    // A damaged database: opening fails after the store lock was taken, and the user is asked what
+    // to do with it (issue #160).
     let database = directory.join(format!("{}.db", user(1)));
     std::fs::write(&database, b"not a database").expect("file");
 
@@ -414,9 +438,62 @@ mod tests {
       .await
       .expect("second start");
 
-    assert!(matches!(first, CoreStatus::Failed { .. }), "{first:?}");
+    assert!(
+      matches!(
+        first,
+        CoreStatus::StoreUnreadable {
+          problem: StoreProblem::Damaged
+        }
+      ),
+      "{first:?}"
+    );
     assert!(matches!(second, CoreStatus::NeedsEnrollment { .. }), "{second:?}");
     drop(still_held);
+    host.stop().expect("stop");
+    drop(std::fs::remove_dir_all(&directory));
+  }
+
+  #[tokio::test]
+  async fn an_unreadable_database_is_set_aside_and_the_device_set_up_again() {
+    let (server_url, _) = spawn_not_found_server().await;
+    let service = signed_in_service(&server_url).await;
+    let host = CoreHost::new(TokenCache::live(service.clone()));
+    let directory = scratch_dir("reset");
+    std::fs::create_dir_all(&directory).expect("dir");
+    let database = directory.join(format!("{}.db", user(1)));
+    std::fs::write(&database, b"not a database").expect("file");
+    let status = host
+      .start(&service, &server_url, user(1), |tokens| {
+        runtime(&server_url, directory.clone(), tokens)
+      })
+      .await
+      .expect("start");
+    assert!(matches!(status, CoreStatus::StoreUnreadable { .. }), "{status:?}");
+
+    let core = host.current().expect("core");
+    core.reset_store().await.expect("reset");
+    let after = core.status().await;
+    assert!(
+      matches!(
+        after,
+        CoreStatus::NeedsEnrollment {
+          was_data_lost: true,
+          ..
+        }
+      ),
+      "set up again, and told why: {after:?}"
+    );
+    // The old file is kept beside the new database, untouched.
+    let kept: Vec<_> = std::fs::read_dir(&directory)
+      .expect("list")
+      .filter_map(|entry| entry.ok())
+      .filter(|entry| entry.file_name().to_string_lossy().contains(".db.unreadable-"))
+      .collect();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(std::fs::read(kept[0].path()).expect("read"), b"not a database");
+    // A readable database is never reset.
+    assert!(core.reset_store().await.is_err());
+    drop(core);
     host.stop().expect("stop");
     drop(std::fs::remove_dir_all(&directory));
   }

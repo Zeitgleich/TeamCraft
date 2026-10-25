@@ -19,7 +19,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_proto::ErrorCode;
 
-pub use teamcraft_client_api::failure::{ActionFailure, FailureKind};
+pub use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
 
 use crate::i18n::I18n;
 use crate::model::TimestampMs;
@@ -59,7 +59,7 @@ pub fn report_failure(failure: ActionFailure) {
 /// says so, and scrolling while offline must not stack up toasts. The same failure again within
 /// [`BACKGROUND_COOLDOWN_MS`] stays quiet too (#344).
 pub fn report_background_failure(failure: ActionFailure) {
-  if failure.kind == FailureKind::Network {
+  if failure.is_unreachable() {
     tracing::debug!(detail = %failure.detail, "background command failed offline");
     return;
   }
@@ -95,7 +95,21 @@ pub fn failure_message(i18n: I18n, failure: &ActionFailure) -> String {
 pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
   match &failure.kind {
     FailureKind::Network => "error-network",
+    FailureKind::CaptivePortal => "error-captive-portal",
+    FailureKind::UntrustedCertificate => "error-untrusted-certificate",
     FailureKind::Other => "error-generic",
+    FailureKind::Call(failure) => match failure {
+      CallFailure::MicrophoneDenied => "error-call-microphone-denied",
+      CallFailure::MicrophoneMissing => "error-call-microphone-missing",
+      CallFailure::MicrophoneInUse => "error-call-microphone-in-use",
+      CallFailure::CameraDenied => "error-call-camera-denied",
+      CallFailure::CameraMissing => "error-call-camera-missing",
+      CallFailure::CameraInUse => "error-call-camera-in-use",
+      CallFailure::ScreenUnavailable => "error-call-screen-unavailable",
+      CallFailure::Unsupported => "error-call-unsupported",
+      CallFailure::ServerUnreachable => "error-call-server-unreachable",
+      CallFailure::BackgroundRequired => "error-call-background-required",
+    },
     FailureKind::Server(code) => match code {
       ErrorCode::NotSpaceMember => "error-not-space-member",
       ErrorCode::Forbidden | ErrorCode::NoTeamcraftRole => "error-forbidden",

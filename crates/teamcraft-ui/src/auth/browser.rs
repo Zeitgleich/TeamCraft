@@ -704,7 +704,7 @@ mod tests {
       "/c/123/m/456",
       "/s/1/c/2",
       "/dm/7",
-      "/settings/privacy",
+      "/settings/security",
       "/admin/users",
       "/home",
     ] {

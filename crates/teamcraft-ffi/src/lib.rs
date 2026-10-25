@@ -31,15 +31,17 @@ pub use server_entry::{
   CheckedServer, ServerAddress, ServerEntryError, SignInOption, SignInPageInfo, StoredServer,
   check_server_info, normalize_server_address, sign_in_page, sso_only_sign_in_page, stored_server,
 };
+use teamcraft_core::api::proxy::SystemProxy;
 use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
 use teamcraft_media::openh264_library::{self, OpenH264Binary};
 use tokio::sync::{mpsc, oneshot};
 pub use types::{
   AccountState, AppConfig, BrandAccent, BrandLinks, ConnectionState, ConversationItem, ConversationKind,
-  EmojiSuggestion, LoginBrand, MentionSettings, MessageItem, NotificationAttachmentKind, NotificationContent,
-  NotificationContentSettings, NotificationGap, NotificationSuppression, OrgRecoveryStart, Presence,
-  PushDiagnosticsInfo, PushNotification, PushNotificationKind, PushService, ReactionItem, SearchHitItem,
-  SegmentPrefetchMode, SegmentPrefetchResult, TestPushOutcome, TestPushResult,
+  EmojiSuggestion, LoginBrand, MentionSettings, MessageItem, NetworkInterception, NetworkProxy,
+  NotificationAttachmentKind, NotificationContent, NotificationContentSettings, NotificationGap,
+  NotificationSuppression, OrgRecoveryStart, Presence, PushDiagnosticsInfo, PushNotification,
+  PushNotificationKind, PushService, ReactionItem, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult,
+  TestPushOutcome, TestPushResult,
 };
 
 pub use video::{CameraFrame, VideoFrameRgba};
@@ -563,6 +565,28 @@ pub fn install_video_codec(directory: String, compressed: Vec<u8>) -> Result<(),
     .and_then(|binary| binary.install(Path::new(&directory), &compressed))
     .map(drop)
     .map_err(|error| TeamCraftError::Call(error.to_string()))
+}
+
+/// The platform's HTTP proxy for every connection of the core (issue #157): Android
+/// `LinkProperties.httpProxy`, iOS `CFNetworkCopySystemProxySettings`. Call it at start and whenever
+/// the network changes; `None` when there is none. PAC scripts aren't evaluated: pass the proxy
+/// they would pick, or none.
+#[uniffi::export]
+pub fn set_network_proxy(maybe_proxy: Option<NetworkProxy>) {
+  teamcraft_core::api::proxy::set_system_proxy(maybe_proxy.map(|proxy| SystemProxy {
+    host: proxy.host,
+    port: proxy.port,
+    exclusions: proxy.exclusions,
+  }));
+}
+
+/// The certificate authorities this device trusts (DER), for every TLS connection of the core
+/// (issue #157). Android only: call at start; connections opened afterwards use them, earlier ones
+/// the Mozilla roots. The app decides which CAs count (docs/operations.md, "Company proxies, TLS
+/// inspection and captive portals").
+#[uniffi::export]
+pub fn set_trusted_certificates(der_certificates: Vec<Vec<u8>>) {
+  teamcraft_core::api::set_platform_roots(der_certificates);
 }
 
 impl TeamCraft {

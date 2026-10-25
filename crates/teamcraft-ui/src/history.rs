@@ -52,8 +52,9 @@ pub enum Travel {
 #[derive(Clone, Copy)]
 struct AddressBar {
   shown: StoredValue<Route>,
-  /// The page the settings dialog was opened over, while its entry is the one below.
-  maybe_below_settings: StoredValue<Option<Route>>,
+  /// The page the settings dialog was opened over and the depth of its entry, below the
+  /// settings' entries (one, or two on phones: the list of sections and a section).
+  maybe_below_settings: StoredValue<Option<(Route, u32)>>,
   /// The app's route when a waiting route was given; going elsewhere meanwhile drops the wait.
   maybe_waiting_on: StoredValue<Option<Route>>,
 }
@@ -80,7 +81,9 @@ pub fn start(state: AppState, i18n: I18n) {
     }
     count
   });
-  on_window("popstate", move || untrack(|| follow_location(state, bar)));
+  on_window("popstate", move || {
+    untrack(|| with_pop_motion(state, || follow_location(state, bar)))
+  });
   if tauri::is_available() {
     handle_mouse_buttons();
     tauri::listen_text(DEEP_LINK_EVENT, move |link| {
@@ -105,6 +108,17 @@ pub fn travel(travel: Travel) {
   }
 }
 
+/// `steps` entries back at once, so the entries in between don't show on the way.
+fn go_back(steps: u32) {
+  let Some(history) = web_sys::window().and_then(|window| window.history().ok()) else {
+    return;
+  };
+  let delta = -i32::try_from(steps).unwrap_or(1);
+  if history.go_with_delta(delta).is_err() {
+    tracing::debug!(steps, "could not move back through the history");
+  }
+}
+
 /// Goes back to the view before the current one when that entry is the app's own, otherwise Home.
 /// A page opened by a link (or a fresh tab) has nothing in-app to go back to.
 pub fn back_or_home(state: AppState) {
@@ -119,9 +133,24 @@ pub fn back_or_home(state: AppState) {
 /// level up (thread → conversation → its list).
 pub fn back_or_up(state: AppState) {
   if depth_of_current_entry() > 0 {
+    // The page moves when `popstate` arrives.
     travel(Travel::Back);
   } else {
-    state.go_up();
+    with_pop_motion(state, || state.go_up());
+  }
+}
+
+/// Runs a step through the app; when it took the phone layout back up (#368), the page that is
+/// left slides out while the view updates.
+fn with_pop_motion(state: AppState, step: impl FnOnce()) {
+  if !state.layout.get_untracked().is_compact() {
+    step();
+    return;
+  }
+  let before = state.compact_depth();
+  step();
+  if state.compact_depth() < before {
+    crate::motion::leave_pane_ghost();
   }
 }
 
@@ -176,20 +205,25 @@ fn sync_address_bar(state: AppState, bar: AddressBar, next: Route, is_waiting: b
     is_redirect = true;
   }
   let shown = bar.shown.get_value();
-  if matches!(shown, Route::Settings(_))
-    && !matches!(next, Route::Settings(_))
-    && bar.maybe_below_settings.get_value() == Some(next)
+  let is_leaving_settings = matches!(shown, Route::Settings(_)) && !matches!(next, Route::Settings(_));
+  if is_leaving_settings
+    && let Some((below, below_depth)) = bar.maybe_below_settings.get_value()
+    && below == next
   {
+    // Back over every entry the settings added (the phones' section list and a section).
     bar.maybe_below_settings.set_value(None);
     bar.shown.set_value(next);
-    travel(Travel::Back);
+    go_back(depth_of_current_entry().saturating_sub(below_depth).max(1));
     return;
   }
   let step = HistoryStep::between(&shown, &next, is_redirect);
-  if step == HistoryStep::Push {
-    let below_settings =
-      (matches!(next, Route::Settings(_)) && !matches!(shown, Route::Settings(_))).then_some(shown);
-    bar.maybe_below_settings.set_value(below_settings);
+  let is_entering_settings = matches!(next, Route::Settings(_)) && !matches!(shown, Route::Settings(_));
+  if step == HistoryStep::Push && is_entering_settings {
+    bar
+      .maybe_below_settings
+      .set_value(Some((shown, depth_of_current_entry())));
+  } else if step == HistoryStep::Push && !matches!(next, Route::Settings(_)) {
+    bar.maybe_below_settings.set_value(None);
   }
   write_address_bar(step, &next.path());
   bar.shown.set_value(next);

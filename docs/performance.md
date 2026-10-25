@@ -353,6 +353,53 @@ What the numbers say:
 - 63 tasks over 50 ms (3.9 s in total, the longest 130 ms) while coming back: the catch-up's MLS
   work and decryption on the page's thread.
 
+#### Coming back: the open channel first, heartbeats during the sync
+
+The large workspace again for #247, #325 and #326, same machine and harness, release server,
+October 2026. Two additions to the harness: the client's catch-up phase timings and lost gateway
+connections are printed from its console, and 20 switches each are measured while the background
+catch-up runs and right after it, while the browser still writes it. "Before" ran while other
+builds loaded the machine (load about 12); "after" is the final change on a quiet machine (load
+1.5). An intermediate run of the change under load 28 measured 84 ms during and 125 ms right after
+the catch-up, and 47 / 87 ms settled: switch times move with the machine's load; the catch-up
+times did not.
+
+| What                                                 | Before             | After              | Budget       |
+|------------------------------------------------------|--------------------|--------------------|--------------|
+| Coming back: channel list shows                      | 1.5 s              | 1.5 s              | ≤ 2 s        |
+| Coming back: first channel read                      | 22.4 s             | 1.7 s              | ≤ 5 s        |
+| Coming back: all 15 channels of the first space read | 23.8 s             | 4.9 s              | -            |
+| Coming back: whole workspace caught up               | 28.7 s             | 16.1 s             | -            |
+| Catch-up phases: member lists / welcomes / content   | 0.3 / 20.7 / 6.3 s | 0.3 / 11.5 / 3.6 s | -            |
+| Switch p95 while the catch-up runs                   | 133 ms             | 73 ms              | ≤ 100 ms     |
+| Switch p95 right after the catch-up                  | 98 ms              | 92 ms              | ≤ 100 ms     |
+| Switch p50 / p95, settled                            | 38 / 72 ms         | 39 / 65 ms         | p95 ≤ 100 ms |
+| Tasks over 50 ms while coming back (count / total)   | 60 / 3.6 s         | 57 / 3.2 s         | -            |
+| Gateway connections lost while coming back           | 0                  | 0                  | -            |
+| Idle: CPU, whole browser / API requests per minute   | 0.1 % / 0          | 0.1 % / 0          | ≤ 1 % / none |
+
+What changed and what the numbers say:
+
+- **The open channel first** (#247): between two member-list batches and between two welcomes the
+  catch-up takes the conversation the user opened completely (members, its welcomes, MLS queue,
+  messages). The UI tells the core when a conversation opens (`core_focus`): a channel with nothing
+  stored asked the core for no messages, so the core never learned the focus before. The web core
+  shows a conversation caught up ahead at once instead of with the next one-second progress round.
+  Each of the 15 channels the harness opens in turn is readable 0.3 to 1 s after the click.
+- **Welcomes are the bulk of a catch-up**: 300 joins in the server's order, each reading the
+  conversation, its members and its MLS queue, and each rewriting the MLS state (3.6 MB here, one
+  record for all groups). Those rewrites are what kept the page busy: every write was sealed at
+  once (base64 in JSON, then AES-GCM). IndexedDB now seals a record when its batch goes out, so a
+  replaced write costs nothing, and a batch over 1 MiB waits 200 ms more to take the next rewrite
+  along (#326). The welcomes phase went from 20.7 to 11.5 s.
+- **Heartbeats during the sync** (#325): the full sync, long commands and the upkeep run inside
+  `keep_alive`; the catch-up kept its one connection (before: a sync over 90 s lost it, here the
+  catch-up took less, so the test `runner::a_sync_longer_than_the_heartbeat_timeout_keeps_its_connection`
+  covers the long case).
+- **Left open (#424):** the MLS state is still one record rewritten per group, quadratic in the
+  number of groups; splitting it per group is a change to the store format and needs its own
+  review.
+
 The desktop and Android apps are measured against the same harness (`PERF_MOBILE_USER`) in a local
 session. Slack, Teams and Element were not measured: that needs their apps installed and accounts
 on their services.
@@ -406,6 +453,12 @@ module is installed) brotli -11 sizes and the gzip delta to `main`. Two limits:
 |-----------------------------------------|----------------|---------------------------------------------|
 | Budget: gzip -9 total                   | 4,700,000 B    | fails; warns from 95 % (4.47 MB)            |
 | Ratchet: uncompressed total             | 11,850,000 B   | fails (`WEB_WASM_MAX_UNCOMPRESSED_BYTES`)   |
+
+**Temporarily over the target:** browser calls (#330) put the bundle about 1 KB over 4,700,000 B
+(4,700,810 B on its base), so `check-web-size.py` allows 4,710,000 B until #334 splits the bundle;
+#334 brings it back under the target and restores the value. The call engine itself is a lazily
+loaded module of its own (`teamcraft-web-calls`, about 2 MB uncompressed) that the budget doesn't
+count: it loads in the background after sign-in, not on the first visit.
 
 The budget is the gzip total measured on `main` c55b2e58 plus about 10 %. gzip -9 is the measure
 because every server and browser supports it and it is reproducible; brotli is printed as
