@@ -304,7 +304,7 @@ impl AttachmentSegmentEncryptor {
       let (body, last) = plaintext.split_at(full_chunks * chunk_len);
       (body, Some(last))
     } else {
-      if plaintext.is_empty() || plaintext.len() % chunk_len != 0 {
+      if plaintext.is_empty() || !plaintext.len().is_multiple_of(chunk_len) {
         return Err(AttachmentError::WrongChunkLength {
           expected: chunk_len,
           actual: plaintext.len() % chunk_len,

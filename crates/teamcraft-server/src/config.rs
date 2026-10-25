@@ -351,6 +351,10 @@ pub struct StorageConfig {
   /// Largest attachment (ciphertext) a client may announce.
   #[serde(default = "default_max_attachment_bytes")]
   pub max_attachment_bytes: u64,
+  /// How long an unfinished upload in parts waits for its next part before the server aborts it
+  /// (a device that went offline continues within this time).
+  #[serde(default = "default_multipart_expiry_secs")]
+  pub multipart_expiry_secs: u64,
 }
 
 /// Push sending (e2ee.md §7). Each provider is on when its credentials are set: a VAPID key pair for
@@ -1568,6 +1572,10 @@ fn default_presign_expiry_secs() -> u64 {
 
 fn default_max_attachment_bytes() -> u64 {
   100 * 1024 * 1024
+}
+
+fn default_multipart_expiry_secs() -> u64 {
+  24 * 60 * 60
 }
 
 fn default_max_connections() -> u32 {

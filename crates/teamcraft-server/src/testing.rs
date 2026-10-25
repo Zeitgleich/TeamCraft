@@ -275,6 +275,7 @@ impl TestApp {
       path_style: true,
       presign_expiry_secs: 300,
       max_attachment_bytes: 1024 * 1024,
+      multipart_expiry_secs: 3600,
     };
     Self::start_full(
       customize,

@@ -54,7 +54,7 @@ pub use admin::{
   DeactivationEffects, PushDeviceCount, StorageTotals, UserStatusFilter,
 };
 pub use announcement::{NewAnnouncement, StoredAnnouncement};
-pub use attachment::{Attachment, NewAttachment};
+pub use attachment::{Attachment, NewAttachment, RemovedAttachment};
 pub use audit::{AuditEntry, AuditQuery, NewAuditEntry};
 pub use background::UserBackground;
 pub use bot::{BOT_ISSUER, StoredBot};

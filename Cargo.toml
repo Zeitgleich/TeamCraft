@@ -90,8 +90,8 @@ aws-lc-rs = "1"
 # E-mail (iMIP meeting invitations); rustls with the aws-lc-rs provider like the rest of the tree
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls", "aws-lc-rs", "webpki-roots"] }
 
-# S3 presigned URLs (sans-IO, no SDK)
-rusty-s3 = { version = "0.10", default-features = false, features = ["aws-lc-rs"] }
+# S3 presigned URLs (sans-IO, no SDK); `xml` for the multipart upload requests and answers
+rusty-s3 = { version = "0.10", default-features = false, features = ["aws-lc-rs", "xml"] }
 url = "2"
 
 # Push tests (the payload crypto lives in teamcraft-crypto)
