@@ -33,20 +33,20 @@
   --text: #121826;
   --text-2: #3b4555;
   --muted: #5b6577;
-  --accent: #0b7f78;
-  --accent-hover: #096c66;
-  --accent-text: #0a716b;
+  --accent: #005dfc;
+  --accent-hover: #004bd3;
+  --accent-text: #004bd3;
   --on-accent: #ffffff;
-  --accent-soft: #e2f4f2;
-  --accent-line: #a9dcd7;
+  --accent-soft: #e3edff;
+  --accent-line: #a8c6ff;
   --beta: #8a5300;
   --beta-soft: #fff1d6;
-  --focus: #0b7f78;
+  --focus: #005dfc;
   --code-bg: #f3f5f8;
   --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
   --shadow-md: 0 1px 2px rgba(16, 24, 40, 0.05), 0 8px 24px -6px rgba(16, 24, 40, 0.12);
   --shadow-lg: 0 2px 6px rgba(16, 24, 40, 0.06), 0 28px 64px -16px rgba(16, 24, 40, 0.28);
-  --glow: rgba(11, 127, 120, 0.16);
+  --glow: rgba(0, 93, 252, 0.16);
   --grid-line: rgba(18, 24, 38, 0.05);
 
   /* The app's own surfaces, for the illustrations. */
@@ -60,9 +60,9 @@
   --app-sidebar: #1a2434;
   --app-sidebar-text: #c6cfdd;
   --app-sidebar-muted: #8793a8;
-  --app-current: #0b7f78;
+  --app-current: #0064fc;
   --app-badge: #c8441d;
-  --app-huddle: #dff3f1;
+  --app-huddle: #e3edff;
   --app-mention-bg: #fff2cc;
   --app-mention-text: #6a4b00;
   --app-call: #0d121b;
@@ -90,20 +90,20 @@
     --text: #eef2f8;
     --text-2: #c5cdda;
     --muted: #97a3b6;
-    --accent: #35c6ba;
-    --accent-hover: #5fd8ce;
-    --accent-text: #5fd8ce;
-    --on-accent: #04211e;
-    --accent-soft: #10302e;
-    --accent-line: #1d5a55;
+    --accent: #5c9dff;
+    --accent-hover: #8ab8ff;
+    --accent-text: #8ab8ff;
+    --on-accent: #04122e;
+    --accent-soft: #13284a;
+    --accent-line: #24477f;
     --beta: #f3be5c;
     --beta-soft: #3a2c10;
-    --focus: #5fd8ce;
+    --focus: #8ab8ff;
     --code-bg: #0f151f;
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
     --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -6px rgba(0, 0, 0, 0.5);
     --shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.4), 0 32px 72px -16px rgba(0, 0, 0, 0.7);
-    --glow: rgba(53, 198, 186, 0.14);
+    --glow: rgba(92, 157, 255, 0.14);
     --grid-line: rgba(238, 242, 248, 0.045);
 
     --app-bg: #0f141d;
@@ -114,8 +114,8 @@
     --app-muted: #9aa6ba;
     --app-chrome: #0a0e15;
     --app-sidebar: #0f1520;
-    --app-current: #1d6f69;
-    --app-huddle: #123a38;
+    --app-current: #0064fc;
+    --app-huddle: #13284a;
     --app-mention-bg: #4a3b10;
     --app-mention-text: #ffd978;
     --app-call: #080b11;
@@ -841,7 +841,7 @@ svg {
   margin-left: auto;
   padding: 0.35em 0.9em;
   border-radius: 0.45em;
-  background: #0b7f78;
+  background: #005dfc;
   color: #fff;
   font-size: 0.9em;
   font-weight: 650;
@@ -1075,7 +1075,7 @@ svg {
 }
 
 .m-tile.is-speaking {
-  box-shadow: 0 0 0 2px #35c6ba;
+  box-shadow: 0 0 0 2px #5c9dff;
 }
 
 .m-tile .m-avatar {
@@ -1113,10 +1113,10 @@ svg {
   gap: 0.35em;
   margin-right: auto;
   padding: 0.25em 0.6em;
-  border: 1px solid #1d4a46;
+  border: 1px solid #24477f;
   border-radius: 1em;
-  background: #0e2a28;
-  color: #5fd8ce;
+  background: #11233f;
+  color: #8ab8ff;
   font-family: var(--font-mono);
   font-size: 0.8em;
 }
@@ -1142,8 +1142,8 @@ svg {
 }
 
 .m-ctrl.is-on {
-  background: #35c6ba;
-  color: #04211e;
+  background: #5c9dff;
+  color: #04122e;
 }
 
 .m-leave {
@@ -1250,7 +1250,7 @@ svg {
 .m-bubble.is-mine {
   align-self: flex-end;
   border-radius: 1.1em 1.1em 0.3em 1.1em;
-  background: #0b7f78;
+  background: #005dfc;
   color: #fff;
   box-shadow: none;
 }
@@ -1274,7 +1274,7 @@ svg {
 
 .m-phone-composer .m-send {
   border-radius: 50%;
-  background: #0b7f78;
+  background: #005dfc;
   color: #fff;
 }
 
@@ -1762,10 +1762,10 @@ svg {
   align-items: center;
   gap: 6px;
   padding: 4px 10px;
-  border: 1px solid #1d4a46;
+  border: 1px solid #24477f;
   border-radius: 999px;
-  background: #0e2a28;
-  color: #5fd8ce;
+  background: #11233f;
+  color: #8ab8ff;
   font-size: 0.75rem;
   font-weight: 600;
 }
@@ -1831,13 +1831,13 @@ svg {
   flex: 1;
   height: 40%;
   border-radius: 3px 3px 0 0;
-  background: #0b7f78;
+  background: #005dfc;
 }
 
 .share-bars i:nth-child(2) { height: 58%; }
 .share-bars i:nth-child(3) { height: 50%; }
 .share-bars i:nth-child(4) { height: 78%; }
-.share-bars i:nth-child(5) { height: 100%; background: #35c6ba; }
+.share-bars i:nth-child(5) { height: 100%; background: #5c9dff; }
 
 .share-lines {
   display: grid;
@@ -2666,13 +2666,13 @@ details[open] > summary .chevron {
   padding: 56px;
   border-radius: var(--radius-xl);
   background:
-    radial-gradient(70% 90% at 100% 0%, rgba(53, 198, 186, 0.22), transparent 60%),
-    linear-gradient(160deg, #111926, #0b1f24);
+    radial-gradient(70% 90% at 100% 0%, rgba(92, 157, 255, 0.22), transparent 60%),
+    linear-gradient(160deg, #111926, #0b1630);
   color: #c6cfdd;
 }
 
 .self-hosting-panel .eyebrow {
-  color: #5fd8ce;
+  color: #8ab8ff;
 }
 
 .self-hosting-panel h2 {
@@ -2697,7 +2697,7 @@ details[open] > summary .chevron {
 }
 
 .button-light:hover {
-  background: #dff3f1;
+  background: #e3edff;
   color: #111926;
 }
 
@@ -2712,7 +2712,7 @@ details[open] > summary .chevron {
 }
 
 .self-hosting-panel :focus-visible {
-  outline-color: #5fd8ce;
+  outline-color: #8ab8ff;
 }
 
 .stack {
@@ -3023,7 +3023,7 @@ details[open] > summary .chevron {
 
 @keyframes speak {
   50% {
-    box-shadow: 0 0 0 3px rgba(53, 198, 186, 0.55);
+    box-shadow: 0 0 0 3px rgba(92, 157, 255, 0.55);
   }
 }
 

@@ -49,9 +49,11 @@ hovering the custom maximize button (Tauri can't do that yet, tauri-apps/tauri#4
 
 ## Icons
 
-`icons/` holds the app icon: PNGs from 32 px to 1024 px and `icon.icns` for macOS (PNG payloads for
-16–1024 px). The glyph is a placeholder; replace `icon-1024.png` with the real artwork and regenerate the
-smaller sizes and the `.icns` (for example with `cargo tauri icon icons/icon-1024.png`).
+`icons/` holds the app icon: PNGs from 32 px to 1024 px, `icon.ico` (Windows) and `icon.icns`
+(macOS, on Apple's icon grid), plus `tray.png` and `tray-template.png` (macOS menu bar). Sizes below
+40 px show the glyph (the speech bubble of the mark) instead of the detailed mark. All of them are
+generated from the brand masters in `assets/brand`; don't edit them by hand, run
+`python3 scripts/brand/icons.py` (see [docs/branding.md](../../../docs/branding.md#14-the-product-mark)).
 
 ## Flatpak
 

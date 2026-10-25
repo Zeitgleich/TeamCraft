@@ -197,13 +197,13 @@ pub fn show_product_brand() {
   }
 }
 
-/// The product mark (the app icon of the desktop build) as a `data:` URL: shown while no server
-/// brand is known, without a request.
+/// The product mark (assets/brand/mark.svg) as a `data:` URL: shown while no server brand is
+/// known, without a request.
 pub fn product_icon() -> String {
-  const ICON: &[u8] = include_bytes!("../../../apps/desktop/icons/128x128@2x.png");
+  const MARK: &str = include_str!("../icons/mark.svg");
   format!(
-    "data:image/png;base64,{}",
-    base64::engine::general_purpose::STANDARD.encode(ICON)
+    "data:image/svg+xml;base64,{}",
+    base64::engine::general_purpose::STANDARD.encode(MARK)
   )
 }
 
@@ -283,6 +283,8 @@ fn set_favicon(document: &web_sys::Document, href: &str) {
       Some(link)
     });
   if let Some(link) = link {
+    // index.html's own favicon is an SVG; a brand's may be PNG or ICO, which the browser sniffs.
+    drop(link.remove_attribute("type"));
     drop(link.set_attribute("href", href));
   }
 }
