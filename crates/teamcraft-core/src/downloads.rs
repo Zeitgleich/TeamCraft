@@ -42,6 +42,16 @@ pub enum Finished {
 /// Called with the opened file (or why it couldn't be opened).
 pub type Deliver = Box<dyn FnOnce(Result<SecretBytes, String>)>;
 
+/// Whether anybody still wants the result (the caller gave up: the row scrolled away, the viewer
+/// closed). A file nobody wants isn't started.
+pub type IsWanted = Box<dyn Fn() -> bool>;
+
+/// One who asked for a file.
+struct Waiter {
+  deliver: Deliver,
+  is_wanted: IsWanted,
+}
+
 /// How soon a file for the viewer is wanted.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DownloadPriority {
@@ -57,7 +67,7 @@ enum Job {
     reference: AttachmentRef,
     priority: DownloadPriority,
     /// Everybody who asked for the file while it waited.
-    delivers: Vec<Deliver>,
+    delivers: Vec<Waiter>,
   },
   Save {
     conversation: ConversationId,
@@ -78,6 +88,18 @@ impl Downloads {
   /// Queues opening a file for the viewer or an inline picture. A file the user opened goes ahead of
   /// the previews; asked for again while it waits, it is downloaded once for both.
   pub fn view(&mut self, reference: AttachmentRef, priority: DownloadPriority, deliver: Deliver) {
+    self.view_while(reference, priority, deliver, Box::new(|| true));
+  }
+
+  /// Like [`Self::view`]; the file is dropped from the queue when `is_wanted` turns false for
+  /// everybody who asked before it started.
+  pub fn view_while(
+    &mut self,
+    reference: AttachmentRef,
+    priority: DownloadPriority,
+    deliver: Deliver,
+    is_wanted: IsWanted,
+  ) {
     let maybe_index = self
       .waiting
       .iter()
@@ -95,7 +117,7 @@ impl Downloads {
       ..
     } = &mut job
     {
-      delivers.push(deliver);
+      delivers.push(Waiter { deliver, is_wanted });
       if priority == DownloadPriority::Now {
         *waiting = DownloadPriority::Now;
       }
@@ -140,12 +162,18 @@ impl Downloads {
       match job {
         Job::View {
           reference, delivers, ..
-        } => match client.start_viewer_download(&reference).await {
-          Ok(download) => self.running.push(Box::pin(async move {
-            deliver_all(delivers, download.open().await);
-            Finished::Viewed
-          })),
-          Err(error) => deliver_all(delivers, Err(error)),
+        } => {
+          let delivers: Vec<Waiter> = delivers.into_iter().filter(|w| (w.is_wanted)()).collect();
+          if delivers.is_empty() {
+            continue;
+          }
+          match client.start_viewer_download(&reference).await {
+            Ok(download) => self.running.push(Box::pin(async move {
+              deliver_all(delivers, download.open().await);
+              Finished::Viewed
+            })),
+            Err(error) => deliver_all(delivers, Err(error)),
+          }
         },
         Job::Save {
           conversation,
@@ -206,9 +234,9 @@ impl Job {
 }
 
 /// Hands the file to everybody who asked for it.
-fn deliver_all(delivers: Vec<Deliver>, opened: Result<SecretBytes, CoreError>) {
+fn deliver_all(delivers: Vec<Waiter>, opened: Result<SecretBytes, CoreError>) {
   let opened = opened.map_err(|error| error.to_string());
-  for deliver in delivers {
+  for Waiter { deliver, .. } in delivers {
     let copy = match &opened {
       Ok(bytes) => Ok(SecretBytes::new(bytes.expose_secret().to_vec())),
       Err(error) => Err(error.clone()),
@@ -273,6 +301,24 @@ mod tests {
     };
     deliver_all(delivers, Ok(SecretBytes::new(b"picture".to_vec())));
     assert_eq!(*delivered.borrow(), 2, "everybody who asked got it");
+  }
+
+  #[test]
+  fn a_file_nobody_wants_anymore_is_not_started() {
+    let mut downloads = Downloads::new(2);
+    let wanted = Rc::new(RefCell::new(true));
+    let probe = wanted.clone();
+    downloads.view_while(
+      file(1),
+      DownloadPriority::Background,
+      Box::new(|_| {}),
+      Box::new(move || *probe.borrow()),
+    );
+    *wanted.borrow_mut() = false;
+    let Some(Job::View { delivers, .. }) = downloads.waiting.pop_front() else {
+      panic!("not a view");
+    };
+    assert!(delivers.iter().all(|waiter| !(waiter.is_wanted)()));
   }
 
   fn waiting(downloads: &Downloads) -> Vec<i64> {
