@@ -3,7 +3,6 @@ package de.zeitgleich.teamcraft.auth
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import androidx.browser.customtabs.ExperimentalEphemeralBrowsing
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -113,7 +112,6 @@ class AuthRepository(private val context: Context, private val servers: ServerSt
    * setting), it sends `prompt=login` and opens an ephemeral Custom Tab where the browser supports
    * one, so the browser's provider session isn't reused. Otherwise silent single sign-on works.
    */
-  @OptIn(ExperimentalEphemeralBrowsing::class)
   suspend fun loginIntent(maybeLoginPageAlwaysShown: Boolean?): Intent {
     val session = session() ?: throw IllegalStateException("no server")
     val configuration = discover(session)

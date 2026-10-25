@@ -199,8 +199,6 @@ webrtc-audio-processing = { version = "2.1.0", features = ["bundled"] }
 prost = "0.14"
 # Device identities for call key binding tests.
 rand_core.workspace = true
-# A local WebTransport server with a self-signed certificate (call_native tests).
-wtransport = { version = "0.7.2", features = ["quinn", "self-signed"] }
 
 [[bin]]
 name = "teamcraft-call"
@@ -226,6 +224,11 @@ required-features = ["pipewire"]
 name = "web_call"
 crate-type = ["cdylib"]
 required-features = ["web"]
+
+# A local WebTransport server with a self-signed certificate (call_native tests). Native only:
+# its QUIC stack (ring) doesn't build for the browser.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+wtransport = { version = "0.7.2", features = ["quinn", "self-signed"] }
 
 # davey pulls in rand 0.8 (getrandom 0.2), which needs its JS backend in the browser.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
