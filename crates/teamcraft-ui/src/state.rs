@@ -246,6 +246,8 @@ pub struct AppState {
   pub view: RwSignal<MainView>,
   pub panel: RwSignal<SidePanel>,
   pub overlay: RwSignal<Overlay>,
+  /// The video playing inside its message row; one at a time (#483).
+  pub active_inline_video: RwSignal<Option<MediaKey>>,
   /// The layout the window's size calls for (`viewport.rs`).
   pub layout: RwSignal<Layout>,
   /// Text of the search box, kept when leaving and re-entering the search page.
@@ -370,6 +372,7 @@ impl AppState {
       view: RwSignal::new(view),
       panel: RwSignal::new(SidePanel::Closed),
       overlay: RwSignal::new(Overlay::None),
+      active_inline_video: RwSignal::new(None),
       layout: RwSignal::new(current_layout()),
       search_query: RwSignal::new(String::new()),
       switcher_query: RwSignal::new(String::new()),

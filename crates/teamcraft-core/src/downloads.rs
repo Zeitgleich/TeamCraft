@@ -342,6 +342,7 @@ mod tests {
       size_bytes: 1,
       maybe_thumbnail: None,
       maybe_dimensions: None,
+      maybe_duration_ms: None,
     }
   }
 

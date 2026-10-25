@@ -79,6 +79,129 @@ pub async fn app_thumbnail(bytes: &[u8], media_type: &str, max_side: u32) -> Opt
   Some(js_sys::Uint8Array::new(&buffer).to_vec())
 }
 
+/// How long the browser gets to load a video's first frame before the poster is given up on.
+const VIDEO_LOAD_TIMEOUT: Duration = Duration::from_secs(10);
+/// Where the poster frame of a video is taken (clamped to half of a shorter video): past the
+/// fade-in or black first frame many videos start with.
+const POSTER_SECONDS: f64 = 1.0;
+
+/// A video's poster frame and length, read by the browser (#483).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VideoPoster {
+  /// The frame as a JPEG, its longer side at most the one asked for.
+  pub jpeg: Vec<u8>,
+  /// `None` for a stream without a known end.
+  pub maybe_duration_ms: Option<u64>,
+}
+
+/// The poster frame of a video file, seeked to about a second in, and its length. The browser reads
+/// the file through a `blob:` URL it streams from, so even a large video isn't read into memory
+/// here. `None` where the browser can't decode the video (a codec it lacks) or takes too long.
+pub async fn video_poster(file: &web_sys::File, max_side: u32) -> Option<VideoPoster> {
+  let source = web_sys::Url::create_object_url_with_blob(file).ok()?;
+  let poster = poster_from(&source, max_side).await;
+  drop(web_sys::Url::revoke_object_url(&source));
+  poster
+}
+
+async fn poster_from(source: &str, max_side: u32) -> Option<VideoPoster> {
+  let video = web_sys::window()?
+    .document()?
+    .create_element("video")
+    .ok()?
+    .dyn_into::<web_sys::HtmlVideoElement>()
+    .ok()?;
+  video.set_muted(true);
+  video.set_preload("auto");
+  // Listeners go on before the source, so no event is missed.
+  let loaded = event_within(&video, "loadeddata", VIDEO_LOAD_TIMEOUT);
+  video.set_src(source);
+  let is_loaded = JsFuture::from(loaded).await.is_ok();
+  let poster = match is_loaded {
+    true => draw_poster(&video, max_side).await,
+    false => None,
+  };
+  // Lets the browser free the decoder now.
+  video.remove_attribute("src").ok();
+  video.load();
+  poster
+}
+
+async fn draw_poster(video: &web_sys::HtmlVideoElement, max_side: u32) -> Option<VideoPoster> {
+  let duration = video.duration();
+  let maybe_duration_ms = (duration.is_finite() && duration > 0.0).then_some((duration * 1000.0) as u64);
+  let at = if duration.is_finite() {
+    POSTER_SECONDS.min(duration / 2.0)
+  } else {
+    0.0
+  };
+  if at > 0.05 {
+    let seeked = event_within(video, "seeked", VIDEO_LOAD_TIMEOUT);
+    video.set_current_time(at);
+    // Without the seek the first frame is still a usable poster.
+    drop(JsFuture::from(seeked).await);
+  }
+  let (width, height) = target_size(video.video_width(), video.video_height(), max_side, false)?;
+  let canvas = web_sys::window()?
+    .document()?
+    .create_element("canvas")
+    .ok()?
+    .dyn_into::<web_sys::HtmlCanvasElement>()
+    .ok()?;
+  canvas.set_width(width);
+  canvas.set_height(height);
+  let context = canvas
+    .get_context("2d")
+    .ok()??
+    .dyn_into::<web_sys::CanvasRenderingContext2d>()
+    .ok()?;
+  context
+    .draw_image_with_html_video_element_and_dw_and_dh(video, 0.0, 0.0, f64::from(width), f64::from(height))
+    .ok()?;
+  let blob: web_sys::Blob = JsFuture::from(to_blob(&canvas, Encoding::Jpeg)?)
+    .await
+    .ok()?
+    .dyn_into()
+    .ok()?;
+  let buffer = JsFuture::from(blob.array_buffer()).await.ok()?;
+  Some(VideoPoster {
+    jpeg: js_sys::Uint8Array::new(&buffer).to_vec(),
+    maybe_duration_ms,
+  })
+}
+
+/// Resolves when `target` fires `name` once, rejects on its `error` or after `timeout`.
+fn event_within(target: &web_sys::EventTarget, name: &str, timeout: Duration) -> js_sys::Promise {
+  js_sys::Promise::new(&mut |resolve, reject| {
+    let once = web_sys::AddEventListenerOptions::new();
+    once.set_once(true);
+    let on_event = Closure::once_into_js(move || drop(resolve.call0(&JsValue::NULL)));
+    let on_error = Closure::once_into_js({
+      let reject = reject.clone();
+      move || drop(reject.call0(&JsValue::NULL))
+    });
+    // Only fails for a listener that isn't a function; both are.
+    drop(
+      target.add_event_listener_with_callback_and_add_event_listener_options(
+        name,
+        on_event.unchecked_ref(),
+        &once,
+      ),
+    );
+    drop(
+      target.add_event_listener_with_callback_and_add_event_listener_options(
+        "error",
+        on_error.unchecked_ref(),
+        &once,
+      ),
+    );
+    if let Some(window) = web_sys::window() {
+      let millis = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+      drop(window.set_timeout_with_callback_and_timeout_and_arguments_0(&reject, millis));
+    }
+  })
+}
+
 /// A temporary URL of the source bytes for the off-page `<img>`. SVG keeps its type only here.
 fn source_url(bytes: &js_sys::Uint8Array, media_type: &str) -> Option<String> {
   let parts = js_sys::Array::of1(bytes);

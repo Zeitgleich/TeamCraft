@@ -50,6 +50,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
             width: size.width,
             height: size.height,
           }),
+          maybe_duration_ms: file.maybe_duration_ms,
         })
         .collect();
     }
@@ -75,6 +76,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
         maybe_sender,
         maybe_sent_at,
         maybe_dimensions: None,
+        maybe_duration_ms: file.maybe_duration_ms,
       });
     attachments_of(&stored.content)
       .into_iter()
@@ -119,6 +121,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
           width: size.width,
           height: size.height,
         }),
+        maybe_duration_ms: attachment.maybe_duration_ms,
       })
       .chain(failed)
       .collect()
@@ -351,6 +354,7 @@ fn pending_file(file: OutgoingFile) -> PendingFile {
     retry: UploadRetry::default(),
     maybe_thumbnail: file.maybe_thumbnail.map(Base64Bytes::new),
     maybe_dimensions,
+    maybe_duration_ms: file.maybe_duration_ms,
   }
 }
 

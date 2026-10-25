@@ -19,6 +19,8 @@ use teamcraft_client_api::actions::{
   FileFailure, FileInfo, FileTransfer, LinkPreview, PixelSize, ShareLinkOptions,
 };
 use teamcraft_client_api::admin::format_bytes;
+use wasm_bindgen::JsCast;
+use wasm_bindgen::closure::Closure;
 
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
@@ -28,7 +30,9 @@ use crate::i18n::{I18n, use_i18n};
 use crate::lightbox::{MediaKey, MediaKind};
 use crate::media_cache::{self, Rendition};
 use crate::media_formats::animation_label;
-use crate::media_layout::{EmbedImage, fit_picture, inline_size, loads_inline, thumbnail_size};
+use crate::media_layout::{
+  EmbedImage, MAX_INLINE_VIDEO_BYTES, fit_picture, format_duration, inline_size, loads_inline, thumbnail_size,
+};
 use crate::model::{ConversationId, MessageId};
 use crate::object_url::{FetchError, ObjectUrl};
 use crate::prefs::ImageSize;
@@ -405,8 +409,25 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
       full.with(|maybe_url| maybe_url.as_ref().is_some_and(|url| url.is_animated())) && is_motion_reduced;
     is_still_gif || is_still_animation
   };
+  let maybe_duration = file
+    .with_value(|file| file.maybe_duration_ms)
+    .map(format_duration);
+  let playback = InlinePlayback::new(
+    state,
+    conversation,
+    key,
+    file.with_value(|file| file.media_type.clone()),
+    // Videos play in the row only as a single tile (not in a grid) and when the player can hold
+    // the whole file.
+    kind == MediaKind::Video && is_single && size_bytes <= MAX_INLINE_VIDEO_BYTES,
+  );
+  let open_lightbox = move || {
+    playback.stop();
+    state.overlay.set(Overlay::Lightbox(conversation, key));
+  };
   let tile = move || {
     let (name, label, badge) = (name.clone(), label.clone(), badge.clone());
+    let maybe_duration = maybe_duration.clone();
     let src = src.clone();
     view! {
       <div
@@ -428,8 +449,14 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
         <button
           class="media-open"
           data-media-key=key.dom_key()
-          aria-label=move || i18n.t_with("media-open", &[("name", &label)])
-          on:click=move |_| state.overlay.set(Overlay::Lightbox(conversation, key))
+          aria-label=move || match playback.is_inline {
+            true => i18n.t_with("video-play", &[("name", &label)]),
+            false => i18n.t_with("media-open", &[("name", &label)]),
+          }
+          on:click=move |_| match playback.is_inline {
+            true => playback.start(),
+            false => open_lightbox(),
+          }
         >
           {move || match src() {
             Some(src) => view! {
@@ -448,6 +475,7 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
           }}
           {(kind == MediaKind::Video).then(|| view! { <span class="media-play-badge" aria-hidden="true"><Icon name=IconName::Play /></span> })}
           {move || has_badge().then(|| view! { <span class="media-gif-badge" aria-hidden="true">{badge.clone()}</span> })}
+          {maybe_duration.map(|duration| view! { <span class="media-duration" aria-hidden="true">{duration}</span> })}
           {maybe_hidden.map(|hidden| view! { <span class="media-more" aria-hidden="true">{format!("+{hidden}")}</span> })}
         </button>
         // Not loaded (offline, server trouble) and nothing else to show: try again on demand.
@@ -469,7 +497,11 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
             <span class="upload-label" role="status">{transfer_label(i18n, done, total)}</span>
           </span>
         })}
-        <MediaToolbar file=file.get_value() />
+        {move || playback.is_playing.get().then(|| view! { <InlineVideo playback=playback on_expand=Callback::new(move |()| open_lightbox()) /> })}
+        {match playback.is_inline {
+          true => view! { <MediaToolbar file=file.get_value() on_expand=Callback::new(move |()| open_lightbox()) /> }.into_any(),
+          false => view! { <MediaToolbar file=file.get_value() /> }.into_any(),
+        }}
       </div>
     }
   };
@@ -479,6 +511,152 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
     </Show>
   }
   .into_any()
+}
+
+/// Playing a video inside its message row (#483): one at a time, paused when scrolled out of view.
+#[derive(Clone, Copy)]
+struct InlinePlayback {
+  state: AppState,
+  conversation: ConversationId,
+  key: MediaKey,
+  media_type: StoredValue<String>,
+  /// The video is small enough to play in the row (else a click opens the lightbox).
+  is_inline: bool,
+  /// The player is on screen, loading or playing.
+  is_playing: RwSignal<bool>,
+  url: RwSignal<Option<Rc<ObjectUrl>>, LocalStorage>,
+}
+
+impl InlinePlayback {
+  fn new(
+    state: AppState,
+    conversation: ConversationId,
+    key: MediaKey,
+    media_type: String,
+    is_inline: bool,
+  ) -> Self {
+    let playback = Self {
+      state,
+      conversation,
+      key,
+      media_type: StoredValue::new(media_type),
+      is_inline,
+      is_playing: RwSignal::new(false),
+      url: RwSignal::new_local(None),
+    };
+    // Another video started, or the lightbox opened: this one makes room.
+    Effect::new(move |_| {
+      if state.active_inline_video.get() != Some(key) {
+        playback.is_playing.set(false);
+      }
+    });
+    playback
+  }
+
+  /// Loads the decrypted file (the cache the lightbox shares) and plays it in the row.
+  fn start(self) {
+    let Self {
+      state,
+      conversation,
+      key,
+      is_playing,
+      url,
+      ..
+    } = self;
+    state.active_inline_video.set(Some(key));
+    is_playing.set(true);
+    if url.with_untracked(Option::is_some) {
+      return;
+    }
+    let media_type = self.media_type.get_value();
+    spawn_local(async move {
+      let is_wanted = move || is_playing.try_get_untracked().unwrap_or(false);
+      match media_cache::load(conversation, key, &media_type, Rendition::Full, is_wanted).await {
+        Ok(Some(loaded)) => drop(url.try_set(Some(loaded))),
+        Ok(None) => {},
+        Err(error) => {
+          tracing::debug!(%error, conversation_id = %conversation, "inline video not loaded");
+          // The lightbox says what went wrong and offers a retry.
+          if is_playing.try_set(false).is_none() {
+            state.overlay.try_set(Overlay::Lightbox(conversation, key));
+          }
+        },
+      }
+    });
+  }
+
+  fn stop(self) {
+    self.is_playing.set(false);
+    if self.state.active_inline_video.get_untracked() == Some(self.key) {
+      self.state.active_inline_video.set(None);
+    }
+  }
+}
+
+/// The player over a video tile; "expand" opens the lightbox.
+#[component]
+fn InlineVideo(playback: InlinePlayback, on_expand: Callback<()>) -> impl IntoView {
+  let i18n = use_i18n();
+  let video = NodeRef::<html::Video>::new();
+  pause_when_hidden(video);
+  let on_error = move |_| {
+    // The browser can't play it (a codec it lacks): the lightbox explains.
+    on_expand.run(());
+  };
+  view! {
+    <div class="media-video">
+      {move || match playback.url.get() {
+        Some(url) => view! {
+          <video
+            node_ref=video
+            src=url.as_str().to_owned()
+            prop:controls=true
+            prop:autoplay=true
+            playsinline=""
+            preload="auto"
+            on:error=on_error
+          ></video>
+        }
+        .into_any(),
+        None => view! { <span class="spinner" role="status" aria-label=move || i18n.t("loader-loading")></span> }.into_any(),
+      }}
+    </div>
+  }
+}
+
+/// The observer and the callback it needs kept alive.
+type VisibilityWatch = (web_sys::IntersectionObserver, Closure<dyn Fn(js_sys::Array)>);
+
+/// Pauses the video when it scrolls out of view: a message row's video must not play on, unheard of,
+/// behind the list.
+fn pause_when_hidden(video: NodeRef<html::Video>) {
+  let observer: StoredValue<Option<VisibilityWatch>, LocalStorage> = StoredValue::new_local(None);
+  Effect::new(move |_| {
+    let Some(element) = video.get() else {
+      return;
+    };
+    let target = element.clone();
+    let callback = Closure::<dyn Fn(js_sys::Array)>::new(move |entries: js_sys::Array| {
+      let is_hidden = entries
+        .iter()
+        .filter_map(|entry| entry.dyn_into::<web_sys::IntersectionObserverEntry>().ok())
+        .any(|entry| !entry.is_intersecting());
+      if is_hidden {
+        drop(target.pause());
+      }
+    });
+    if let Ok(created) = web_sys::IntersectionObserver::new(callback.as_ref().unchecked_ref()) {
+      created.observe(&element);
+      observer.set_value(Some((created, callback)));
+    }
+  });
+  on_cleanup(move || {
+    observer.update_value(|maybe_observer| {
+      if let Some((created, _)) = maybe_observer.take() {
+        created.disconnect();
+      }
+    });
+  });
 }
 
 /// The inline rendition of one picture and what became of loading it.
@@ -537,13 +715,16 @@ impl InlineLoad {
 
 /// The floating actions over a picture: download, share link, forward, save, and "…".
 #[component]
-fn MediaToolbar(file: FileInfo) -> impl IntoView {
+fn MediaToolbar(file: FileInfo, #[prop(optional, into)] on_expand: Option<Callback<()>>) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let actions = FileActions::new(state, &file);
   let is_saved = actions.is_saved();
   view! {
     <div class="media-toolbar" role="group" aria-label=move || i18n.t("lightbox-toolbar")>
+      {on_expand.map(|expand| view! {
+        <ToolbarButton label="video-expand" icon=IconName::Maximize on_click=move || expand.run(()) />
+      })}
       <ToolbarButton label="file-download" icon=IconName::Download on_click=move || actions.download() />
       <ToolbarButton label="file-copy-share" icon=IconName::Link on_click=move || actions.share() />
       <ToolbarButton label="lightbox-forward" icon=IconName::Forward on_click=move || actions.forward() />

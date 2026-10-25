@@ -116,6 +116,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       size_bytes: file.content.len() as u64,
       maybe_thumbnail: None,
       maybe_dimensions: None,
+      maybe_duration_ms: None,
     })
   }
 

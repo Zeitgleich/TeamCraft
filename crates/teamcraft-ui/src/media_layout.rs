@@ -37,6 +37,10 @@ impl EmbedImage {
 
 /// Largest file an inline preview downloads by itself; bigger ones keep their thumbnail until opened.
 pub const MAX_INLINE_LOAD_BYTES: u64 = 16 * 1024 * 1024;
+/// Largest video that plays inside the message row (#483). The player gets the whole decrypted file
+/// as a `blob:` (the core has no streaming read for the page), so a bigger video opens in the
+/// lightbox, the user's deliberate choice to hold it in memory.
+pub const MAX_INLINE_VIDEO_BYTES: u64 = 64 * 1024 * 1024;
 /// Smallest side of an inline picture, so a thin strip stays clickable.
 const MIN_SIDE_PX: u32 = 48;
 
@@ -191,6 +195,16 @@ pub fn fit_picture(width: u32, height: u32, size: ImageSize) -> (u32, u32) {
   (scale(width, max_width), scale(height, max_height))
 }
 
+/// A video's length as the badge on its thumbnail shows it: `0:07`, `12:34`, `1:02:03`.
+pub fn format_duration(duration_ms: u64) -> String {
+  let total_seconds = duration_ms / 1000;
+  let (hours, minutes, seconds) = (total_seconds / 3600, total_seconds / 60 % 60, total_seconds % 60);
+  match hours {
+    0 => format!("{minutes}:{seconds:02}"),
+    _ => format!("{hours}:{minutes:02}:{seconds:02}"),
+  }
+}
+
 /// Whether an inline preview downloads the full file: pictures within the size limit do, an
 /// animated one only when the user doesn't ask for reduced motion (its thumbnail stays still then),
 /// and videos never play by themselves.
@@ -208,6 +222,14 @@ mod tests {
   use super::*;
 
   const LARGE: ImageSize = ImageSize::Large;
+
+  #[test]
+  fn durations_read_as_a_player_shows_them() {
+    assert_eq!(format_duration(0), "0:00");
+    assert_eq!(format_duration(7_400), "0:07");
+    assert_eq!(format_duration(754_000), "12:34");
+    assert_eq!(format_duration(3_723_000), "1:02:03");
+  }
 
   #[test]
   fn webp_headers_give_type_and_size_in_all_three_formats() {
