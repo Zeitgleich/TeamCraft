@@ -10,10 +10,11 @@ use std::sync::Arc;
 use common::{PASSPHRASE, Peer, options, settings, settle};
 use teamcraft_core::Client;
 use teamcraft_core::PendingEnrollment;
+use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::clock::{Clock, ManualClock, SystemClock};
 use teamcraft_core::store::MemoryStore;
-use teamcraft_proto::{ConversationId, HistoryPolicy};
+use teamcraft_proto::{ConversationId, HistoryPolicy, ListMlsMessagesQuery, MlsMessageKind};
 
 const TEN_MINUTES_MS: i64 = 10 * 60 * 1000;
 
@@ -171,6 +172,77 @@ mod fallen_out {
     settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
     assert_eq!(dave.texts(channel), ["all here?", "yes", "back"]);
   }
+
+  /// Issue #149: members add a device back at most once per `rejoin_cooldown` (server times). A
+  /// device that falls out again right away is added back only after it.
+  #[tokio::test]
+  async fn a_device_added_back_is_not_added_back_again_within_the_cooldown() {
+    let server = FakeServer::new();
+    let bob_clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut bob = enroll_on(&server, "Bob", Box::new(bob_clock.clone())).await;
+    let mut carol = Peer::enroll(&server, "Carol").await;
+    let mut dave = Peer::enroll(&server, "Dave").await;
+    let mut erin = Peer::enroll(&server, "Erin").await;
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol, &mut erin]).await;
+
+    server.garble_next_commit_for(bob.client.user_id());
+    alice
+      .client
+      .add_member(channel, dave.client.user_id())
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave, &mut erin]).await;
+    assert_same_epoch(
+      channel,
+      &mut [&mut alice, &mut bob, &mut carol, &mut dave, &mut erin],
+    );
+
+    // Bob falls out again at once and asks again: the members, who all saw him added back, don't
+    // commit for him this time.
+    server.garble_next_commit_for(bob.client.user_id());
+    alice
+      .client
+      .remove_member(channel, dave.client.user_id())
+      .await
+      .unwrap();
+    // The next commit shows Bob that he missed one.
+    alice
+      .client
+      .remove_member(channel, erin.client.user_id())
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave, &mut erin]).await;
+    assert_eq!(
+      proposals_by(&alice, &bob, channel).await,
+      2,
+      "Bob asked again at once"
+    );
+    // Unanswered, he asks again after `rejoin_retry` by his clock; the server's has hardly moved.
+    let retry = settings().rejoin_retry + std::time::Duration::from_secs(60);
+    bob_clock.advance(i64::try_from(retry.as_millis()).unwrap());
+    bob.client.full_sync().await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+    assert_eq!(
+      proposals_by(&alice, &bob, channel).await,
+      3,
+      "and after the retry"
+    );
+    assert_same_epoch(channel, &mut [&mut alice, &mut carol]);
+    assert_ne!(
+      bob.client.mls_epoch(channel).unwrap(),
+      alice.client.mls_epoch(channel).unwrap(),
+      "not added back within the cooldown"
+    );
+
+    // Past the cooldown Bob's next request is answered.
+    let past_cooldown = settings().rejoin_cooldown + std::time::Duration::from_secs(60);
+    server.advance_clock(past_cooldown);
+    bob_clock.advance(i64::try_from(past_cooldown.as_millis()).unwrap());
+    bob.client.full_sync().await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+    assert_same_epoch(channel, &mut [&mut alice, &mut bob, &mut carol]);
+  }
 }
 
 mod skewed_clocks {
@@ -207,6 +279,20 @@ mod skewed_clocks {
     settle(&mut [&mut alice, &mut bob]).await;
     assert_eq!(alice.texts(channel), ["last words", "still here"]);
   }
+}
+
+/// How many proposals (rejoin requests) `sender`'s device put into the conversation's queue.
+async fn proposals_by(reader: &Peer, sender: &Peer, channel: ConversationId) -> usize {
+  let device = sender.client.device_id();
+  reader
+    .api
+    .list_mls_messages(channel, &ListMlsMessagesQuery::default())
+    .await
+    .unwrap()
+    .messages
+    .iter()
+    .filter(|entry| entry.kind == MlsMessageKind::Proposal && entry.sender_device_id == device)
+    .count()
 }
 
 async fn three(server: &FakeServer) -> (Peer, Peer, Peer) {
@@ -262,16 +348,15 @@ async fn restart(peer: Peer) -> Peer {
 
 /// A peer whose clock shows `now_ms`.
 async fn enroll_at(server: &FakeServer, name: &str, now_ms: i64) -> Peer {
+  enroll_on(server, name, Box::new(ManualClock::new(now_ms))).await
+}
+
+/// A peer whose client runs on `clock`.
+async fn enroll_on(server: &FakeServer, name: &str, clock: Box<dyn Clock>) -> Peer {
   let api = server.add_user(name);
   let store = Arc::new(MemoryStore::new());
   let mut client = PendingEnrollment::new()
-    .complete(
-      api.clone(),
-      store.clone(),
-      Box::new(ManualClock::new(now_ms)),
-      settings(),
-      options(PASSPHRASE),
-    )
+    .complete(api.clone(), store.clone(), clock, settings(), options(PASSPHRASE))
     .await
     .unwrap();
   let (gateway, _) = client.connect_gateway().await.unwrap();

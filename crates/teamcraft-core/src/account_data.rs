@@ -58,6 +58,11 @@ pub struct AccountData {
   /// so no device's clock decides.
   #[serde(default)]
   pub removed_senders: BTreeMap<String, SenderAbsence>,
+  /// Removal records dropped because they can't matter any more (issue #186), keyed like
+  /// `removed_senders`: an absence that left at or before the tombstone's time is not taken back
+  /// from another device or an older key bag. Kept for [`TOMBSTONE_LIFETIME_MS`].
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub pruned_senders: BTreeMap<String, PrunedSender>,
   /// The workspace's first owner, as the first of the user's devices verified it.
   #[serde(rename = "workspace_root", default, skip_serializing_if = "Option::is_none")]
   pub maybe_workspace_root: Option<PinnedKey>,
@@ -89,6 +94,21 @@ impl SenderAbsence {
     self.left_at_ms = self.left_at_ms.max(other.left_at_ms);
     self.maybe_back_at_ms = self.maybe_back_at_ms.max(other.maybe_back_at_ms);
     *self != before
+  }
+}
+
+/// A dropped removal record: when the device had left (server time) and when it was dropped
+/// (the pruning device's clock, for forgetting the tombstone like the others).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrunedSender {
+  pub left_at_ms: i64,
+  pub pruned_at_ms: i64,
+}
+
+impl PrunedSender {
+  /// Whether an absence that started at `left_at_ms` was dropped with this tombstone.
+  pub fn covers(&self, left_at_ms: i64) -> bool {
+    left_at_ms <= self.left_at_ms
   }
 }
 
@@ -167,6 +187,11 @@ impl AccountData {
     merge_map(&mut self.marked_unread, &other.marked_unread);
     merge_map(&mut self.pins, &other.pins);
     merge_map(&mut self.backgrounds, &other.backgrounds);
+    for (key, theirs) in &other.pruned_senders {
+      let entry = self.pruned_senders.entry(key.clone()).or_insert(*theirs);
+      entry.left_at_ms = entry.left_at_ms.max(theirs.left_at_ms);
+      entry.pruned_at_ms = entry.pruned_at_ms.max(theirs.pruned_at_ms);
+    }
     for (key, theirs) in &other.removed_senders {
       self
         .removed_senders
@@ -174,6 +199,13 @@ impl AccountData {
         .or_insert(*theirs)
         .merge(theirs);
     }
+    // Pruned on either side stays pruned, unless the device left again since.
+    let pruned = &self.pruned_senders;
+    self.removed_senders.retain(|key, absence| {
+      !pruned
+        .get(key)
+        .is_some_and(|tombstone| tombstone.covers(absence.left_at_ms))
+    });
     for (conversation, epoch) in &other.group_epochs {
       let entry = self.group_epochs.entry(conversation.clone()).or_insert(*epoch);
       *entry = (*entry).max(*epoch);
@@ -214,6 +246,43 @@ impl AccountData {
     self
       .backgrounds
       .retain(|_, entry| is_fresh(entry.is_removed, entry.updated_at_ms));
+    self
+      .pruned_senders
+      .retain(|_, tombstone| is_fresh(true, tombstone.pruned_at_ms));
+  }
+
+  /// Drops the removal records `is_spent` picks (issue #186) and leaves tombstones, so the same
+  /// absence isn't taken back from another device's records or an older key bag. Returns whether
+  /// anything was dropped.
+  pub fn prune_removed_senders(
+    &mut self,
+    is_spent: impl Fn(&str, &SenderAbsence) -> bool,
+    now_ms: i64,
+  ) -> bool {
+    let spent: Vec<(String, i64)> = self
+      .removed_senders
+      .iter()
+      .filter(|(key, absence)| is_spent(key, absence))
+      .map(|(key, absence)| (key.clone(), absence.left_at_ms))
+      .collect();
+    for (key, left_at_ms) in &spent {
+      self.removed_senders.remove(key);
+      let tombstone = self.pruned_senders.entry(key.clone()).or_insert(PrunedSender {
+        left_at_ms: *left_at_ms,
+        pruned_at_ms: now_ms,
+      });
+      tombstone.left_at_ms = tombstone.left_at_ms.max(*left_at_ms);
+      tombstone.pruned_at_ms = tombstone.pruned_at_ms.max(now_ms);
+    }
+    !spent.is_empty()
+  }
+
+  /// Whether the absence of `key` that started at `left_at_ms` was dropped as spent.
+  pub fn is_pruned_sender(&self, key: &str, left_at_ms: i64) -> bool {
+    self
+      .pruned_senders
+      .get(key)
+      .is_some_and(|tombstone| tombstone.covers(left_at_ms))
   }
 
   /// When the device `key` (`conversation/user/device`) left its conversation, if it is out (not
@@ -227,8 +296,11 @@ impl AccountData {
   }
 
   /// Records that a device left a conversation at `left_at_ms` (server time); returns whether that
-  /// changed anything. A removal before the one recorded changes nothing.
+  /// changed anything. A removal before the one recorded, or one already pruned, changes nothing.
   pub fn note_removed_sender(&mut self, key: &str, left_at_ms: i64) -> bool {
+    if self.is_pruned_sender(key, left_at_ms) {
+      return false;
+    }
     match self.removed_senders.get_mut(key) {
       Some(entry) if entry.left_at_ms >= left_at_ms => false,
       Some(entry) => {
@@ -596,6 +668,70 @@ mod tests {
     // Back after the last removal: a member again.
     assert!(merged.note_sender_back(key, 400));
     assert_eq!(merged.removed_sender(key), None);
+  }
+
+  mod pruned_senders {
+    use super::*;
+
+    const KEY: &str = "9/1/2";
+
+    #[test]
+    fn a_pruned_absence_is_not_taken_back_from_an_older_bag() {
+      let mut older = AccountData::default();
+      assert!(older.note_removed_sender(KEY, 100));
+      assert!(older.note_sender_back(KEY, 200));
+      // A device that missed the return still has only the removal.
+      let mut stale = AccountData::default();
+      assert!(stale.note_removed_sender(KEY, 100));
+
+      let mut pruned = older.clone();
+      assert!(pruned.prune_removed_senders(|key, _| key == KEY, 1_000));
+      assert!(!pruned.removed_senders.contains_key(KEY));
+      for other in [&older, &stale] {
+        let mut merged = pruned.clone();
+        merged.merge(other, 1_000);
+        assert!(!merged.removed_senders.contains_key(KEY), "stays pruned");
+        let mut merged_other_way = other.clone();
+        merged_other_way.merge(&pruned, 1_000);
+        assert_eq!(merged, merged_other_way, "merging is symmetric");
+      }
+      assert!(!pruned.note_removed_sender(KEY, 100), "the same absence");
+    }
+
+    #[test]
+    fn a_later_removal_after_pruning_counts() {
+      let mut data = AccountData::default();
+      assert!(data.note_removed_sender(KEY, 100));
+      assert!(data.prune_removed_senders(|_, _| true, 1_000));
+      assert!(data.note_removed_sender(KEY, 300));
+      assert_eq!(data.removed_sender(KEY), Some(300));
+      let mut other = AccountData::default();
+      other.merge(&data, 1_000);
+      assert_eq!(other.removed_sender(KEY), Some(300));
+    }
+
+    #[test]
+    fn only_picked_records_are_pruned() {
+      let mut data = AccountData::default();
+      assert!(data.note_removed_sender(KEY, 100));
+      assert!(data.note_removed_sender("9/1/3", 100));
+      assert!(!data.prune_removed_senders(|_, _| false, 1_000));
+      assert!(data.prune_removed_senders(|key, _| key == KEY, 1_000));
+      assert_eq!(data.removed_sender("9/1/3"), Some(100));
+      assert!(data.pruned_senders.contains_key(KEY));
+      assert!(!data.pruned_senders.contains_key("9/1/3"));
+    }
+
+    #[test]
+    fn tombstones_are_forgotten_like_the_others() {
+      let mut data = AccountData::default();
+      assert!(data.note_removed_sender(KEY, 100));
+      assert!(data.prune_removed_senders(|_, _| true, 1_000));
+      data.forget_tombstones(1_000 + TOMBSTONE_LIFETIME_MS - 1);
+      assert!(data.is_pruned_sender(KEY, 100));
+      data.forget_tombstones(1_000 + TOMBSTONE_LIFETIME_MS);
+      assert!(data.pruned_senders.is_empty());
+    }
   }
 
   #[test]

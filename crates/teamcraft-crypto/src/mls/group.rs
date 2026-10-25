@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use openmls::prelude::{
   GroupId, KeyPackage, LeafNodeIndex, MlsGroup, MlsGroupJoinConfig, MlsMessageBodyIn, MlsMessageIn,
-  MlsMessageOut, ProcessedMessageContent, Proposal, Sender, StagedCommit, StagedWelcome,
+  MlsMessageOut, ProcessedMessageContent, Proposal, Sender, StagedCommit, StagedWelcome, WelcomeError,
 };
 use openmls_traits::OpenMlsProvider;
 use tls_codec::{
@@ -207,7 +207,10 @@ impl ConversationGroup {
     // lifetime only bounds when a package may be *added* (RFC 9420 §7.3, openmls #1810), which
     // the committer and every member checked then; credentials are verified on completion.
     let mut builder = StagedWelcome::build_from_welcome(provider, &config, welcome)
-      .map_err(|error| MlsError::openmls("welcome processing", error))?
+      .map_err(|error| match error {
+        WelcomeError::NoMatchingKeyPackage => MlsError::NoMatchingKeyPackage,
+        other => MlsError::openmls("welcome processing", other),
+      })?
       .skip_lifetime_validation();
     if is_replacing {
       // Only lifts openmls' check that no group with this ID is stored; nothing is written
