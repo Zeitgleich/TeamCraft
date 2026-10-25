@@ -39,6 +39,9 @@ pub struct SfuConfig {
   /// How long a participant whose connection was lost keeps its slot to rejoin; the others see
   /// it as reconnecting meanwhile. Clients learn it with `joined`.
   pub reconnect_grace: Duration,
+  /// On shutdown, how long the going-away closes get to reach the clients before the process
+  /// exits (clients that miss it notice the dead path within seconds anyway).
+  pub shutdown_drain: Duration,
 }
 
 impl Default for SfuConfig {
@@ -56,6 +59,7 @@ impl Default for SfuConfig {
       keep_alive_interval: Duration::from_secs(2),
       idle_timeout: Duration::from_secs(10),
       reconnect_grace: Duration::from_secs(30),
+      shutdown_drain: Duration::from_secs(2),
     }
   }
 }

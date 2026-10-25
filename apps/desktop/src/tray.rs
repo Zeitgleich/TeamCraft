@@ -253,7 +253,7 @@ pub fn show_main_window(app: &AppHandle) {
 }
 
 /// Zooms the main window's webview (1.0 = normal); the UI keeps the user's choice.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn set_zoom(app: AppHandle, factor: f64) {
   let factor = factor.clamp(MIN_ZOOM, MAX_ZOOM);
   if let Some(window) = app.get_webview_window(MAIN_WINDOW)
@@ -291,7 +291,7 @@ fn host_state(_app: &AppHandle) -> Option<bool> {
   Some(true)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn tray_update(app: AppHandle, last_unread: State<'_, LastUnread>, update: TrayUpdate) {
   if let Some(menu) = app.try_state::<TrayMenu>() {
     update_tray(&app, &menu, &update);

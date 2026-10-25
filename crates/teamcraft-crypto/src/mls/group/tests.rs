@@ -799,6 +799,182 @@ mod key_package_lifetime {
   }
 }
 
+/// Content keys for a device added back, sealed to it (e2ee.md §4.6, #147).
+mod sealed_keys {
+  use super::*;
+  use crate::mls::content_keys::{ApplicationPayload, SealedContentKeys};
+
+  #[test]
+  fn only_the_device_they_are_sealed_to_opens_them() {
+    let mut world = World::new();
+    let output = world.commit_change(
+      &world.signed_change(ALICE, add(BOB, HistoryShare::Full)),
+      &[world.bob.key_package()],
+    );
+    world.carol_processes(&output.commit).unwrap();
+    let mut bob_group = world.bob_joins(&output);
+    let missed = missed_keys_of(&world.alice_ring);
+    let message = world
+      .alice_group
+      .send_sealed_content_keys(
+        &world.alice.provider,
+        &world.alice.user.device,
+        &verified(&world, &world.carol.user),
+        &missed,
+      )
+      .unwrap();
+
+    let GroupEvent::SealedContentKeys { sender, sealed } = world.carol_processes(&message).unwrap() else {
+      panic!("expected sealed content keys")
+    };
+    assert_eq!(sender, member(&world.alice.user));
+    assert_eq!(sealed.recipient(), member(&world.carol.user));
+    let opened = sealed.open(&world.carol.user.device).unwrap();
+    assert_eq!(key_ids(opened.keys()), key_ids(world.alice_ring.keys()));
+    assert_eq!(opened.current(), None, "never a current key");
+
+    // Bob is a member and sees the message, but it opens only on Carol's device.
+    let GroupEvent::SealedContentKeys { sealed, .. } = bob_group
+      .process_message(&world.bob.provider, &message, &world.directory, &world.authority)
+      .unwrap()
+    else {
+      panic!("expected sealed content keys")
+    };
+    assert!(matches!(
+      sealed.open(&world.bob.user.device),
+      Err(MlsError::SealedKeysRejected)
+    ));
+  }
+
+  #[test]
+  fn tampered_or_moved_sealed_keys_are_rejected() {
+    let world = World::new();
+    let carol = verified(&world, &world.carol.user);
+    let alice = member(&world.alice.user);
+    let epoch = world.alice_group.epoch();
+    let sealed = missed_keys_of(&world.alice_ring)
+      .seal_for(&carol, alice, epoch)
+      .unwrap();
+    let open = |bytes: &[u8], sender: GroupMember, epoch: u64| {
+      let ApplicationPayload::Sealed(wire) = ApplicationPayload::from_bytes(bytes)? else {
+        panic!("expected a sealed payload")
+      };
+      SealedContentKeys::received(wire, sender, epoch).open(&world.carol.user.device)
+    };
+    assert!(open(&sealed, alice, epoch).is_ok());
+
+    let mut tampered = sealed.clone();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 1;
+    let bob = member(&world.bob.user);
+    for (bytes, sender, at_epoch) in [
+      (tampered.as_slice(), alice, epoch),
+      (sealed.as_slice(), bob, epoch),
+      (sealed.as_slice(), alice, epoch + 1),
+      (sealed.as_slice(), alice, epoch.saturating_sub(1)),
+    ] {
+      assert!(matches!(
+        open(bytes, sender, at_epoch),
+        Err(MlsError::SealedKeysRejected)
+      ));
+    }
+    // Moved to another conversation: the version byte, the conversation ID (8 bytes), then the
+    // recipient.
+    let mut moved = sealed.clone();
+    moved[8] ^= 1;
+    assert!(matches!(
+      open(&moved, alice, epoch),
+      Err(MlsError::SealedKeysRejected)
+    ));
+    assert!(
+      open(&sealed[..sealed.len() - 1], alice, epoch).is_err(),
+      "truncated"
+    );
+  }
+
+  #[test]
+  fn sealed_keys_name_no_current_key_and_go_only_to_members() {
+    let mut world = World::new();
+    let carol = verified(&world, &world.carol.user);
+    let with_current = ContentKeyBundle::full_history(&mut world.alice_ring, &mut OsRng);
+    assert!(matches!(
+      world.alice_group.send_sealed_content_keys(
+        &world.alice.provider,
+        &world.alice.user.device,
+        &carol,
+        &with_current,
+      ),
+      Err(MlsError::UnexpectedMessage(_))
+    ));
+    let dave = verified(&world, &world.dave.user);
+    assert!(matches!(
+      world.alice_group.send_sealed_content_keys(
+        &world.alice.provider,
+        &world.alice.user.device,
+        &dave,
+        &missed_keys_of(&world.alice_ring),
+      ),
+      Err(MlsError::UnexpectedMessage(_))
+    ));
+  }
+
+  fn missed_keys_of(ring: &ContentKeyRing) -> ContentKeyBundle {
+    ContentKeyBundle::without_current(
+      CONVERSATION,
+      ring.keys().iter().map(ContentKey::duplicate).collect(),
+    )
+  }
+
+  fn verified(world: &World, user: &TestUser) -> VerifiedDevice {
+    user
+      .certificate
+      .verify(&world.directory.pinned_identity(user.user_id).unwrap())
+      .unwrap()
+  }
+
+  fn key_ids(keys: &[ContentKey]) -> Vec<crate::content_key::ContentKeyId> {
+    keys.iter().map(ContentKey::id).collect()
+  }
+}
+
+#[test]
+fn one_member_is_verified_alone_and_a_welcome_names_its_maker() {
+  let mut world = World::new();
+  let carol = world
+    .alice_group
+    .verified_member(member(&world.carol.user), &world.directory)
+    .unwrap()
+    .unwrap();
+  assert_eq!(GroupMember::from(&carol), member(&world.carol.user));
+  assert!(
+    world
+      .alice_group
+      .verified_member(member(&world.dave.user), &world.directory)
+      .unwrap()
+      .is_none(),
+    "not in the group"
+  );
+  // Carol's identity isn't pinned: only her leaf fails, Alice's still verifies.
+  let without_carol = TestDirectory::with(&[&world.alice.user]);
+  assert!(
+    world
+      .alice_group
+      .verified_member(member(&world.carol.user), &without_carol)
+      .is_err()
+  );
+  assert!(
+    world
+      .alice_group
+      .verified_member(member(&world.alice.user), &without_carol)
+      .unwrap()
+      .is_some()
+  );
+
+  let welcome = world.welcome_for_bob();
+  let staged = ConversationGroup::stage_join(&world.bob.provider, &welcome, CONVERSATION).unwrap();
+  assert_eq!(staged.sender().unwrap(), member(&world.alice.user));
+}
+
 /// Alice (admin) and Carol share a group; Bob and Dave are pinned but not members.
 struct World {
   alice: Client,
@@ -1564,4 +1740,44 @@ fn last_resort_key_package_can_be_used_twice() {
     &world.directory,
   )
   .unwrap();
+}
+
+#[test]
+fn group_keeps_working_after_its_key_package_is_deleted() {
+  let mut world = World::new();
+  let last_resort = crate::mls::create_last_resort_key_package(
+    &world.bob.provider,
+    &world.bob.user.device,
+    &world.bob.user.certificate,
+    now_secs(),
+  )
+  .unwrap();
+  let add_bob = world.signed_change(ALICE, add(BOB, HistoryShare::Full));
+  let output = world.commit_change(&add_bob, std::slice::from_ref(&last_resort));
+  let mut bob_group = world.bob_joins(&output);
+
+  // e2ee.md §4.3.1: a replaced last-resort package's private part goes; the group keeps its own
+  // leaf key.
+  let hash_ref = crate::mls::key_package_ref(&last_resort).unwrap();
+  crate::mls::delete_key_package(&world.bob.provider, &hash_ref).unwrap();
+  assert!(
+    crate::mls::stored_key_packages(&world.bob.provider)
+      .unwrap()
+      .is_empty()
+  );
+
+  let bundle = ContentKeyBundle::full_history(&mut world.alice_ring, &mut OsRng);
+  let key_message = world
+    .alice_group
+    .send_content_keys(&world.alice.provider, &world.alice.user.device, &bundle)
+    .unwrap();
+  let mut bob_ring = ContentKeyRing::new(CONVERSATION);
+  apply_keys(
+    &mut bob_group,
+    &world.bob,
+    &key_message,
+    &world.directory,
+    &world.authority,
+    &mut bob_ring,
+  );
 }

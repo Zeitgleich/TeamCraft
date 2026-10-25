@@ -398,7 +398,7 @@ pub struct LimitSettings {
   pub max_attachment_bytes: u64,
   pub max_attachment_bytes_per_user: u64,
   pub max_avatar_bytes: u64,
-  /// Largest space picture after the server re-encoded it. Absent from older clients' requests:
+  /// Largest space or channel picture (the one limit for both) after the server re-encoded it. Absent from older clients' requests:
   /// the default applies.
   #[serde(default = "default_max_space_image_bytes")]
   pub max_space_image_bytes: u64,

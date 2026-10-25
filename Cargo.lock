@@ -10291,6 +10291,8 @@ dependencies = [
  "base64 0.23.1",
  "futures-channel",
  "futures-util",
+ "http",
+ "hyper-util",
  "image",
  "js-sys",
  "keyring",
@@ -10298,19 +10300,22 @@ dependencies = [
  "openmls_traits",
  "p256",
  "rand_core 0.6.4",
+ "rcgen",
  "reqwest",
  "resvg",
  "rusqlite",
  "rustls",
- "rustls-native-certs",
+ "rustls-platform-verifier",
  "serde",
  "serde_json",
  "tantivy",
  "teamcraft-client-api",
  "teamcraft-crypto",
+ "teamcraft-net",
  "teamcraft-proto",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite 0.30.0",
  "tracing",
  "url",
@@ -10492,8 +10497,10 @@ dependencies = [
  "rand_core 0.6.4",
  "screencapturekit",
  "serde_json",
+ "socket2",
  "teamcraft-client-api",
  "teamcraft-crypto",
+ "teamcraft-net",
  "teamcraft-proto",
  "thiserror 2.0.21",
  "tls_codec",
@@ -10515,6 +10522,15 @@ dependencies = [
  "wtransport",
  "zune-jpeg",
  "zune-png",
+]
+
+[[package]]
+name = "teamcraft-net"
+version = "1.0.2"
+dependencies = [
+ "futures-util",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
@@ -12997,8 +13013,6 @@ dependencies = [
 [[package]]
 name = "wtransport"
 version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4273ce3157a3262a68665f8d3f20a0ac0c5b8a69ffd67f05ae986832ebec036"
 dependencies = [
  "bytes",
  "pem 3.0.6",

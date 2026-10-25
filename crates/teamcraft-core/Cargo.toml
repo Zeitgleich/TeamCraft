@@ -55,6 +55,8 @@ image = { version = "0.25.9", default-features = false, features = ["png", "jpeg
 teamcraft-client-api = { path = "../teamcraft-client-api", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Happy Eyeballs for the WebSocket connects (src/api/connect.rs).
+teamcraft-net.workspace = true
 # SQLCipher: e2ee.md §9. Version matches the libsqlite3-sys already in the lock file (sqlx).
 rusqlite = { version = "0.39", optional = true }
 tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
@@ -64,6 +66,10 @@ tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 # src/api/tls.rs; same rustls as reqwest. Mozilla roots for Android and as a fallback.
 rustls = "0.23.46"
 webpki-roots = "1.0.10"
+# Proxy settings from the environment, macOS and Windows for the native WebSockets (src/api/proxy.rs),
+# the same matcher reqwest uses for REST; already in the tree through reqwest.
+hyper-util = { version = "0.1.21", default-features = false, features = ["client-proxy", "client-proxy-system"] }
+http = "1.5"
 # Full-text search over decrypted messages and shared index segments (e2ee.md §10.1). Native only:
 # tantivy doesn't target wasm32; the browser falls back to scanning the local store.
 tantivy = { version = "0.27.0", default-features = false, features = ["lz4-compression", "stemmer"] }
@@ -74,9 +80,9 @@ resvg = { version = "0.49.0", default-features = false }
 
 
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
-# The operating system's roots for the WebSockets (src/api/tls.rs); already in the tree via
-# tokio-tungstenite's native-roots feature.
-rustls-native-certs = "0.8.5"
+# The operating system's certificate verification for the WebSockets (src/api/tls.rs), as reqwest
+# does for HTTP; already in the tree through reqwest.
+rustls-platform-verifier = "0.7.1"
 
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))'.dependencies]
 # OS keystore for the database key (Keychain, Secret Service, Windows Credential Manager). Android
@@ -146,6 +152,10 @@ web-sys = { version = "0.3.83", features = [
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
+# A TLS server with a certificate nobody trusts, as a TLS-inspecting proxy presents (api/http.rs
+# tests); both already in the tree (rcgen through wtransport, tokio-rustls through reqwest).
+rcgen = "0.14.10"
+tokio-rustls = { version = "0.26.6", default-features = false }
 # A fake identity provider signing ES256 ID tokens in the attestation tests (both already in the
 # tree through teamcraft-crypto).
 p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "std"] }

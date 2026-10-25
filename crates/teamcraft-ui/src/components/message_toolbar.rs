@@ -18,8 +18,10 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::message_actions::{
   ActionContext, ActionSurface, MessageAction, message_actions, run_message_action, with_shortcut,
 };
+use crate::components::sheet::Sheet;
 use crate::i18n::use_i18n;
 use crate::model::{Message, MessageId, thread_id_of};
+use crate::motion::PopoverSide;
 use crate::state::use_app_state;
 
 /// Quick reactions until the user has used emoji of their own.
@@ -32,8 +34,9 @@ const HIDE_GRACE: Duration = Duration::from_millis(120);
 const OVERLAP_PX: f64 = 16.0;
 /// Space kept between the bar and the top of the visible list.
 const EDGE_PX: f64 = 4.0;
-/// Room the "more" menu needs below its button; with less it opens upwards.
-const MENU_HEIGHT_PX: f64 = 300.0;
+/// Room the "more" menu needs below its button, in rem (it grows with the text size); with less
+/// it opens upwards.
+const MENU_HEIGHT_REM: f64 = 18.75;
 /// Space between the "more" button and its menu.
 const MENU_GAP_PX: f64 = 4.0;
 /// How long a finger rests on a message before its action sheet opens.
@@ -276,6 +279,12 @@ fn ToolbarBar(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
   let is_saved = move || extras.get().is_some_and(|extras| extras.is_saved);
   let react_button = NodeRef::<html::Button>::new();
   let more_button = NodeRef::<html::Button>::new();
+  let placement = move || {
+    more_button
+      .get_untracked()
+      .map(|button| menu_placement(&button))
+      .unwrap_or_default()
+  };
   let run = move |action: MessageAction| {
     host.close_menu();
     message.with_value(|message| run_message_action(action, message, extras.get_untracked().as_ref()));
@@ -415,8 +424,11 @@ fn ToolbarBar(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
       <Show when=move || host.open.get() == OpenMenu::More fallback=|| ()>
         <div class="popover-backdrop" on:mousedown=move |_| host.close_menu()></div>
         <div
-          class="popover msg-menu"
-          style=move || more_button.get_untracked().map(|button| menu_placement(&button)).unwrap_or_default()
+          class=move || format!("popover msg-menu {}", placement().side.class())
+          style:position="fixed"
+          style:right=move || placement().right
+          style:top=move || placement().top
+          style:bottom=move || placement().bottom
           role="menu"
           aria-label=move || i18n.t("message-more")
           node_ref=menu
@@ -454,7 +466,7 @@ fn ToolbarBar(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
 
 /// Where the "more" menu goes: fixed to the window (the list would clip it), below its button or
 /// above it when the window has no room below.
-fn menu_placement(button: &web_sys::Element) -> String {
+fn menu_placement(button: &web_sys::Element) -> MenuPlacement {
   let rect = button.get_bounding_client_rect();
   let (width, height) = web_sys::window()
     .map(|window| {
@@ -464,18 +476,34 @@ fn menu_placement(button: &web_sys::Element) -> String {
       (read(window.inner_width()), read(window.inner_height()))
     })
     .unwrap_or((1024.0, 768.0));
-  let right = (width - rect.right()).max(0.0);
-  if height - rect.bottom() >= MENU_HEIGHT_PX || rect.top() < height - rect.bottom() {
-    format!(
-      "position: fixed; right: {right}px; top: {}px; bottom: auto;",
-      rect.bottom() + MENU_GAP_PX
-    )
+  let right = format!("{}px", (width - rect.right()).max(0.0));
+  let menu_height = MENU_HEIGHT_REM * crate::viewport::rem_px();
+  if height - rect.bottom() >= menu_height || rect.top() < height - rect.bottom() {
+    MenuPlacement {
+      right,
+      top: format!("{}px", rect.bottom() + MENU_GAP_PX),
+      bottom: "auto".into(),
+      side: PopoverSide::Below,
+    }
   } else {
-    format!(
-      "position: fixed; right: {right}px; top: auto; bottom: {}px;",
-      height - rect.top() + MENU_GAP_PX
-    )
+    MenuPlacement {
+      right,
+      top: "auto".into(),
+      bottom: format!("{}px", height - rect.top() + MENU_GAP_PX),
+      side: PopoverSide::Above,
+    }
   }
+}
+
+/// Where the "More" menu sits, as CSSOM values: the CSP (`style-src 'self'`) blocks `style`
+/// attributes.
+#[derive(Clone, Default)]
+struct MenuPlacement {
+  right: String,
+  top: String,
+  bottom: String,
+  /// The side it opens on, so it grows out of the button (#359).
+  side: PopoverSide,
 }
 
 /// Arrow keys, Home and End move between the entries of a menu (and not between the messages
@@ -572,28 +600,8 @@ fn ActionSheet(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
   let actions = NodeRef::<html::Div>::new();
   let picker_button = NodeRef::<html::Button>::new();
   let is_picking = RwSignal::new(false);
-  let sheet = NodeRef::<html::Div>::new();
-  // The dialog takes the focus (for screen readers), without a ring on the first entry.
-  Effect::new(move |_| {
-    if let Some(element) = sheet.get() {
-      drop(element.focus());
-    }
-  });
   view! {
-    <div class="sheet-backdrop" on:click=move |_| close()></div>
-    <div
-      class="action-sheet"
-      node_ref=sheet
-      tabindex="-1"
-      role="dialog"
-      aria-modal="true"
-      aria-label=move || i18n.t("message-action-sheet")
-      on:keydown=move |ev| {
-        if ev.key() == "Escape" && !is_picking.get_untracked() {
-          close();
-        }
-      }
-    >
+    <Sheet class="action-sheet" label=Signal::derive(move || i18n.t("message-action-sheet")) on_close=Callback::new(move |()| close())>
       <div class="sheet-reactions">
         {quick
           .into_iter()
@@ -637,6 +645,6 @@ fn ActionSheet(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
             .collect_view()
         }}
       </div>
-    </div>
+    </Sheet>
   }
 }

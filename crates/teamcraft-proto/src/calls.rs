@@ -23,6 +23,11 @@ use crate::{
 /// `aud` of call join tokens.
 pub const CALL_JOIN_TOKEN_AUDIENCE: &str = "teamcraft-sfu";
 
+/// QUIC application close code of an SFU that shuts down (a restart, a rolling deploy). Unlike the
+/// SFU's other closes it is not final: clients rejoin with a fresh join token, spread over a short
+/// moment so the restarted SFU isn't hit by every client at once (ARCHITECTURE.md §6.5).
+pub const SFU_GOING_AWAY_CLOSE_CODE: u32 = 0x4805;
+
 /// Claims of a call join token: a JWT signed by `teamcraft-server` (EdDSA) and verified by the
 /// SFU with the server's public key. Short-lived (about a minute); the SFU checks it once on join.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -46,11 +46,31 @@ pub enum ConnectionState {
   Connecting,
   Connected,
   /// Not connected; the next attempt starts at `retry_at_ms` (Unix milliseconds).
+  /// `maybe_interception` names what answered instead of the server, if known.
   Offline {
     retry_at_ms: i64,
+    maybe_interception: Option<NetworkInterception>,
   },
   /// The server refused the access token: the user has to sign in again.
   SignInRequired,
+}
+
+/// An HTTP proxy the platform reports (see `set_network_proxy`).
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NetworkProxy {
+  pub host: String,
+  pub port: u16,
+  /// Hosts that bypass it (`example.com`, `*.example.com`, `10.0.0.0/8`).
+  pub exclusions: Vec<String>,
+}
+
+/// Something on the network that answered instead of the server (issue #157).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum NetworkInterception {
+  /// The network's login page (hotel, train, guest Wi-Fi): the user signs in to it first.
+  CaptivePortal,
+  /// A certificate the device doesn't trust, usually a proxy that inspects encrypted traffic.
+  UntrustedCertificate,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -615,11 +635,21 @@ impl From<MentionSettings> for MentionPreferences {
 
 impl From<teamcraft_core::connection::ConnectionState> for ConnectionState {
   fn from(state: teamcraft_core::connection::ConnectionState) -> Self {
+    use teamcraft_core::api::Interception;
     use teamcraft_core::connection::ConnectionState as Core;
     match state {
       Core::Connecting => Self::Connecting,
       Core::Connected => Self::Connected,
-      Core::Offline { retry_at_ms } => Self::Offline { retry_at_ms },
+      Core::Offline {
+        retry_at_ms,
+        maybe_interception,
+      } => Self::Offline {
+        retry_at_ms,
+        maybe_interception: maybe_interception.map(|kind| match kind {
+          Interception::CaptivePortal => NetworkInterception::CaptivePortal,
+          Interception::UntrustedCertificate => NetworkInterception::UntrustedCertificate,
+        }),
+      },
       Core::SignInRequired => Self::SignInRequired,
     }
   }

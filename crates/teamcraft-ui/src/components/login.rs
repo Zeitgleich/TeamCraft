@@ -110,10 +110,6 @@ pub(crate) fn AuthFrame(
           }}
         })}
         <div class="auth-content">{children()}</div>
-        <p class="auth-foot muted-text small">
-          <Icon name=IconName::Lock />
-          <span>{move || i18n.t("login-footer")}</span>
-        </p>
         {move || {
           brand
             .with(|view| view.maybe_organization_name.clone())

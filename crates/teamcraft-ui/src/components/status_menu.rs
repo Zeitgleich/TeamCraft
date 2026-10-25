@@ -12,10 +12,11 @@ use crate::clock::{
 use crate::components::avatar::{Avatar, AvatarSize, PresenceDot};
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
+use crate::components::sheet::MenuSurface;
 use crate::i18n::use_i18n;
 use crate::model::{CustomStatus, PresenceStatus, StatusExpiry, TimestampMs};
 use crate::session::use_session;
-use crate::state::{Overlay, use_app_state};
+use crate::state::{Overlay, SettingsTab, use_app_state};
 
 /// "Until tomorrow morning" means 08:00 local time.
 const MORNING_MINUTE: u16 = 8 * 60;
@@ -35,7 +36,10 @@ pub fn StatusMenu() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let menu = NodeRef::<html::Div>::new();
-  crate::motion::use_leave_ghost(menu);
+  // The phone's sheet leaves by itself.
+  if !state.layout.get_untracked().is_compact() {
+    crate::motion::use_leave_ghost(menu);
+  }
   let session = use_session();
   let me = Memo::new(move |_| state.me());
   let is_admin = Memo::new(move |_| state.read(|backend| backend.my_role()).includes(&Role::Admin));
@@ -103,8 +107,14 @@ pub fn StatusMenu() -> impl IntoView {
   };
 
   view! {
-    <div class="popover-backdrop" on:mousedown=move |_| state.close_overlay()></div>
-    <div class="popover status-menu" role="menu" aria-label=move || i18n.t("status-menu-label") node_ref=menu on:keydown=on_keydown>
+    <MenuSurface
+      class="status-menu"
+      sheet_class="status-menu"
+      label=Signal::derive(move || i18n.t("status-menu-label"))
+      on_close=Callback::new(move |()| state.close_overlay())
+      node_ref=menu
+      on_keydown=Callback::new(on_keydown)
+    >
       <div class="menu-user">
         {move || view! { <Avatar user=me.get() size=AvatarSize::Large /> }}
         <div>
@@ -229,7 +239,7 @@ pub fn StatusMenu() -> impl IntoView {
         </button>
       </Show>
       <Show when=|| crate::profiles::use_profiles().is_some() fallback=|| ()>
-        <button class="menu-item" role="menuitem" tabindex="-1" on:click=move |_| state.overlay.set(Overlay::EditProfile)>
+        <button class="menu-item" role="menuitem" tabindex="-1" on:click=move |_| state.open_settings_at(SettingsTab::Account)>
           <Icon name=IconName::User />
           <span class="menu-label">{move || i18n.t("profile-edit-title")}</span>
         </button>
@@ -262,7 +272,7 @@ pub fn StatusMenu() -> impl IntoView {
         <Icon name=IconName::Close />
         <span class="menu-label">{move || i18n.t("menu-log-out")}</span>
       </button>
-    </div>
+    </MenuSurface>
   }
 }
 

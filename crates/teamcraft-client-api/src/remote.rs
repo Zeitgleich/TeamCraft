@@ -326,9 +326,22 @@ pub enum CoreConnection {
   /// Not connected; the next attempt starts at `retry_at_ms` (Unix milliseconds).
   Offline {
     retry_at_ms: i64,
+    /// What answered instead of the server, if the core found out.
+    #[serde(rename = "interception", default, skip_serializing_if = "Option::is_none")]
+    maybe_interception: Option<NetworkInterception>,
   },
   /// The server refused the access token: the user has to sign in again.
   SignInRequired,
+}
+
+/// Something on the network that answered instead of the server (issue #157).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkInterception {
+  /// The network's login page (hotel, train, guest Wi-Fi).
+  CaptivePortal,
+  /// A certificate the device doesn't trust, usually a proxy that inspects encrypted traffic.
+  UntrustedCertificate,
 }
 
 /// Whether the local data keeps up with the core. The browser can refuse writes (quota) or hand
@@ -634,6 +647,11 @@ pub enum ChatAction {
     user: UserId,
     role: crate::model::SpaceRole,
   },
+  SetChannelRole {
+    conversation: ConversationId,
+    user: UserId,
+    role: crate::model::ChannelRole,
+  },
   RemoveSpaceMember {
     space: SpaceId,
     user: UserId,
@@ -805,6 +823,11 @@ impl ChatAction {
         joins_space,
       } => backend.add_people_to_channel(conversation, people, history, joins_space),
       Self::SetSpaceRole { space, user, role } => backend.set_space_role(space, user, role),
+      Self::SetChannelRole {
+        conversation,
+        user,
+        role,
+      } => backend.set_channel_role(conversation, user, role),
       Self::RemoveSpaceMember { space, user } => backend.remove_space_member(space, user),
       Self::RevokeSpaceInvite { space, invite } => backend.revoke_space_invite(space, invite),
       Self::SaveSearch { name, query } => backend.save_search(&name, &query),
@@ -874,6 +897,9 @@ pub enum ChatQuery {
   JoinableSpaces,
   SpaceMembers {
     space: SpaceId,
+  },
+  ChannelRoles {
+    conversation: ConversationId,
   },
   SpaceInvites {
     space: SpaceId,
@@ -973,6 +999,10 @@ pub enum ChatAnswer {
   SpaceMembers {
     #[serde(default)]
     roster: crate::model::SpaceRoster,
+  },
+  ChannelRoles {
+    #[serde(default)]
+    members: Vec<crate::model::ChannelMember>,
   },
   SpaceInvites {
     invites: Vec<crate::model::PendingInvite>,
@@ -1102,6 +1132,9 @@ impl ChatQuery {
       },
       Self::JoinableSpaces => ChatAnswer::JoinableSpaces {
         spaces: backend.joinable_spaces(),
+      },
+      Self::ChannelRoles { conversation } => ChatAnswer::ChannelRoles {
+        members: backend.channel_roles(conversation),
       },
       Self::SpaceMembers { space } => ChatAnswer::SpaceMembers {
         roster: backend.space_members(space),

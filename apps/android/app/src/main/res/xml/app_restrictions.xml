@@ -14,4 +14,10 @@
     android:description="@string/restriction_lock_server_description"
     android:restrictionType="bool"
     android:defaultValue="false" />
+  <restriction
+    android:key="trust_user_certificates"
+    android:title="@string/restriction_trust_user_certificates_title"
+    android:description="@string/restriction_trust_user_certificates_description"
+    android:restrictionType="bool"
+    android:defaultValue="false" />
 </restrictions>

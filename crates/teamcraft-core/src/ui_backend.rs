@@ -263,6 +263,11 @@ pub enum CoreCommand {
     user: UserId,
     role: SpaceRole,
   },
+  SetChannelRole {
+    conversation: ConversationId,
+    user: UserId,
+    role: teamcraft_proto::ChannelRole,
+  },
   RemoveSpaceMember {
     space: SpaceId,
     user: UserId,
@@ -488,6 +493,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       can_post: true,
       bookmarks: self.bookmarks_of(response.id),
       is_catching_up: self.read(crate::client::is_catching_up(&self.store, response.id)),
+      maybe_image_version: response.maybe_image.as_ref().map(|image| image.version.clone()),
     }
   }
 
@@ -1485,6 +1491,30 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.command(CoreCommand::RefreshSpaceRoster { space });
   }
 
+  fn channel_roles(&self, conversation: ConversationId) -> Vec<teamcraft_client_api::model::ChannelMember> {
+    let stored: Option<teamcraft_proto::ListConversationMembersResponse> = self.read(records::get_json(
+      &self.store,
+      Table::Members,
+      &conversation.to_string(),
+    ));
+    stored
+      .into_iter()
+      .flat_map(|list| list.members)
+      .map(|member| teamcraft_client_api::model::ChannelMember {
+        user: member.user.id,
+        role: member.role,
+      })
+      .collect()
+  }
+
+  fn set_channel_role(&self, conversation: ConversationId, user: UserId, role: teamcraft_proto::ChannelRole) {
+    self.command(CoreCommand::SetChannelRole {
+      conversation,
+      user,
+      role,
+    });
+  }
+
   fn set_space_role(&self, space: SpaceId, user: UserId, role: SpaceRole) {
     self.command(CoreCommand::SetSpaceRole { space, user, role });
   }
@@ -1714,6 +1744,7 @@ mod tests {
       contains_guests: false,
       maybe_my_membership: None,
       participants: vec![participant(1, "Alice Example"), participant(2, "Bob Example")],
+      maybe_image: None,
     };
     let conversation = backend.to_conversation(&direct, &BTreeMap::new(), &MentionPreferences::default());
     assert_eq!(conversation.name, "Bob Example");
@@ -1959,6 +1990,7 @@ mod tests {
         contains_guests: false,
         maybe_my_membership: None,
         participants: Vec::new(),
+        maybe_image: None,
       };
       for (index, (sender, body, mentions)) in messages.iter().enumerate() {
         store_message(&backend, &conversation, index, *sender, body, mentions);

@@ -4,14 +4,17 @@ use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
+use crate::components::sheet::Sheet;
 use crate::emoji_catalog::{search, shortcode};
 use crate::i18n::use_i18n;
+use crate::motion::PopoverSide;
 use crate::state::use_app_state;
 
 /// Emoji per row of the grid; ↑/↓ move by this many.
 const COLUMNS: usize = 8;
-const PICKER_WIDTH_PX: f64 = 324.0;
-const PICKER_HEIGHT_PX: f64 = 300.0;
+/// The picker's size in rem (main.css `.emoji-picker`): it grows with the text size.
+const PICKER_WIDTH_REM: f64 = 20.25;
+const PICKER_HEIGHT_REM: f64 = 18.75;
 /// Space kept between the picker and the window edge.
 const EDGE_PX: f64 = 8.0;
 
@@ -32,7 +35,7 @@ pub fn EmojiPicker(
   let query = RwSignal::new(String::new());
   let active = RwSignal::new(0_usize);
   let input = NodeRef::<html::Input>::new();
-  let (top, left) = placement(&anchor);
+  let (top, left, side) = placement(&anchor);
   if returns_focus {
     let anchor = StoredValue::new_local(anchor.clone());
     on_cleanup(move || {
@@ -64,8 +67,12 @@ pub fn EmojiPicker(
     query.track();
     active.set(0);
   });
+  // On a phone the sheet opens without the on-screen keyboard; the search is a tap away.
+  let is_sheet = state.layout.get_untracked().is_compact();
   Effect::new(move |_| {
-    if let Some(element) = input.get() {
+    if let Some(element) = input.get()
+      && !is_sheet
+    {
       drop(element.focus());
     }
   });
@@ -103,15 +110,7 @@ pub fn EmojiPicker(
     }
   };
 
-  view! {
-    <div class="popover-backdrop" on:mousedown=move |_| on_close.run(())></div>
-    <div
-      class="emoji-picker"
-      role="dialog"
-      aria-label=move || i18n.t("emoji-picker-title")
-      style:top=format!("{top}px")
-      style:left=format!("{left}px")
-    >
+  let content = view! {
       <input
         class="input emoji-search"
         type="text"
@@ -163,14 +162,36 @@ pub fn EmojiPicker(
             .into_any()
         }}
       </ul>
+  };
+  if is_sheet {
+    return view! {
+      <Sheet class="emoji-sheet" label=Signal::derive(move || i18n.t("emoji-picker-title")) on_close=on_close>
+        {content}
+      </Sheet>
+    }
+    .into_any();
+  }
+  view! {
+    <div class="popover-backdrop" on:mousedown=move |_| on_close.run(())></div>
+    <div
+      class=format!("emoji-picker {}", side.class())
+      role="dialog"
+      aria-label=move || i18n.t("emoji-picker-title")
+      style:top=format!("{top}px")
+      style:left=format!("{left}px")
+    >
+      {content}
     </div>
   }
+  .into_any()
 }
 
 /// Fixed position (top, left) that keeps the picker inside the window: above the anchor when there is
 /// room, otherwise below it; right-aligned with it.
-fn placement(anchor: &web_sys::Element) -> (f64, f64) {
+fn placement(anchor: &web_sys::Element) -> (f64, f64, PopoverSide) {
   let rect = anchor.get_bounding_client_rect();
+  let rem = crate::viewport::rem_px();
+  let (picker_width, picker_height) = (PICKER_WIDTH_REM * rem, PICKER_HEIGHT_REM * rem);
   let (width, height) = web_sys::window()
     .map(|window| {
       let read = |value: Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue>| {
@@ -179,12 +200,14 @@ fn placement(anchor: &web_sys::Element) -> (f64, f64) {
       (read(window.inner_width()), read(window.inner_height()))
     })
     .unwrap_or((1024.0, 768.0));
-  let top = if rect.top() - PICKER_HEIGHT_PX - EDGE_PX >= 0.0 {
-    rect.top() - PICKER_HEIGHT_PX - 4.0
+  let (top, side) = if rect.top() - picker_height - EDGE_PX >= 0.0 {
+    (rect.top() - picker_height - 4.0, PopoverSide::Above)
   } else {
-    (rect.bottom() + 4.0).min(height - PICKER_HEIGHT_PX - EDGE_PX)
+    (
+      (rect.bottom() + 4.0).min(height - picker_height - EDGE_PX),
+      PopoverSide::Below,
+    )
   };
-  let left =
-    (rect.right() - PICKER_WIDTH_PX).clamp(EDGE_PX, (width - PICKER_WIDTH_PX - EDGE_PX).max(EDGE_PX));
-  (top.max(EDGE_PX), left)
+  let left = (rect.right() - picker_width).clamp(EDGE_PX, (width - picker_width - EDGE_PX).max(EDGE_PX));
+  (top.max(EDGE_PX), left, side)
 }

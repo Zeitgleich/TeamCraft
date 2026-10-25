@@ -368,12 +368,15 @@ short outages of a train ride. Two layers do that; the call only ends when both 
 
 **1. Connection migration (native clients).** The client's UDP socket is bound to the wildcard
 address, so after a network change its packets leave through the new route; quinn clients don't
-pin a source address. The SFU allows migration (`allow_migration`) and validates the new path
-(QUIC `PATH_CHALLENGE`), then sends there. The QUIC connection, the DAVE group, the RTP numbering
-and the jitter buffers carry on; the call loses what was in flight during the switch. `wtransport`
-0.7 doesn't expose quinn's `Endpoint::rebind` for clients, so the socket itself isn't replaced;
-when the new network can't reach the SFU from it (an IPv6-only network and an IPv4 SFU address),
-layer 2 takes over.
+pin a source address. On a reported network change (below) the client also moves the connection
+to a fresh wildcard socket of the same family (`Endpoint::rebind`; IPv6 sockets are dual-stack):
+quinn switches to a new connection ID and probes at once, which covers sockets the old network
+took with it (an OS that invalidates them with their interface, a VPN coming up). `wtransport`
+0.7.2 has no client rebind, so it is vendored with one (`crates/vendor/wtransport/VENDORED.md`).
+The SFU allows migration (`allow_migration`) and validates the new path (QUIC `PATH_CHALLENGE`),
+then sends there. The QUIC connection, the DAVE group, the RTP numbering and the jitter buffers
+carry on; the call loses what was in flight during the switch. When the new network can't reach
+the SFU at all from this connection, layer 2 takes over.
 
 **Noticing a dead path.** Clients and the SFU send QUIC keep-alives every 2 s (mobile carriers drop
 idle UDP NAT mappings after about 30 s, some after 20 s), with a 10 s idle timeout. The native
@@ -400,6 +403,21 @@ numbering, own tracks, subscriptions and mute state, and reconciles everything e
 call ("connection lost"). Refused joins, removal or end by the host and `connection_replaced` are
 final: they are never answered with a rejoin. A locked meeting still lets a device of its roster
 back in.
+
+Rejoin attempts back off exponentially (250 ms doubling to 2 s) with jitter (each pause between
+half and all of its interval), so clients that lost the SFU together don't come back in lockstep.
+
+**SFU restarts.** Rooms live in the SFU's memory. On SIGTERM (a restart, a rolling deploy) the SFU
+closes every connection with the application code `SFU_GOING_AWAY_CLOSE_CODE` and exits after a
+short drain (`TEAMCRAFT_SFU_SHUTDOWN_DRAIN_SECS`, default 2 s). Unlike its other closes, clients
+answer this one with a rejoin, the first attempt after a random part of a second, then with the
+back-off above within the grace period they learnt. The restarted SFU (at the same address)
+creates the room again on the first join, and DAVE founds a new group as the others join. While
+going away the SFU reports no leaves, so `teamcraft-server` keeps the call, its roster and its
+ringing state; the new SFU's join reports change nothing there. A crash sends nothing: clients
+notice the dead path after the stall timeout (5 s) and rejoin the same way. Host controls kept in
+the SFU (locks, removals) start fresh; the server's meeting admission still applies to every join
+ticket.
 
 **Browsers** can't migrate a WebTransport session to another network; when it closes, the
 browser driver rejoins as above.

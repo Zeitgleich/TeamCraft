@@ -103,6 +103,10 @@ Inside an `impl`:
 ## Frontend and mobile
 
 - UI: Leptos (Rust), shared between desktop (Tauri) and web. No TypeScript application code.
+- The web CSP is `style-src 'self'` (and `script-src 'self'`): no `style="…"` attributes, no
+  `set_attribute("style", …)`, no inline `<style>` or `<script>`, also not in popups (they inherit
+  the policy). Dynamic styles use CSSOM: Leptos `style:prop=` / `style:--var=` directives or
+  `HtmlElement::style().set_property`; everything else is a class in the stylesheet.
 - iOS: Swift + SwiftUI, formatted with `swift-format`. Android: Kotlin + Jetpack Compose, `ktlint`.
   Mobile shells stay thin: logic belongs in `teamcraft-core` behind UniFFI.
 

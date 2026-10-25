@@ -20,8 +20,9 @@ use crate::route::Route;
 use crate::sections::{HomeFilter, apply_favorite_order, build_direct, build_sections};
 use crate::security::DeviceApproval;
 use crate::settings::Settings;
+use crate::toast_timer::{Hold, ToastClock};
 use crate::unread_divider::{DividerEvent, next_divider};
-use crate::viewport::{CompactPane, Layout, current_layout};
+use crate::viewport::{CompactDepth, CompactPane, Layout, current_layout};
 use teamcraft_client_api::actions::{NewChannel, NewSpace, PermalinkTarget};
 use teamcraft_proto::Role;
 
@@ -191,25 +192,32 @@ pub enum Overlay {
   EditHistory(ConversationId, MessageId),
   /// Edit the bookmarks bar of a conversation.
   Bookmarks(ConversationId),
-  /// The signed-in user's profile form.
-  EditProfile,
   /// Another person's profile card.
   UserProfile(UserId),
   /// Calls aren't available in this client (the browser, for now): where the apps are.
   CallsUnavailable,
 }
 
-/// The tabs of the settings dialog (PLAN.md §4 and §5).
+/// The sections of the settings dialog (PLAN.md §4 and §5, issue #327).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsTab {
+  Account,
+  Appearance,
   Notifications,
-  Display,
-  Sidebar,
-  Language,
-  Privacy,
+  Preferences,
+  Keyboard,
+  AudioVideo,
   Devices,
-  Calls,
-  Advanced,
+  Security,
+  About,
+}
+
+/// What the settings dialog shows: on phones the list of sections is a page of its own
+/// (`/settings`); wider layouts always show a section beside the list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsPage {
+  Sections,
+  Section(SettingsTab),
 }
 
 /// What became of a route the app was asked to show.
@@ -249,6 +257,8 @@ pub struct AppState {
   /// Short messages shown over the app until dismissed (reminders, undo).
   pub toasts: RwSignal<Vec<Toast>>,
   next_toast: StoredValue<u64>,
+  /// Countdowns of the toasts that close by themselves; they pause on hover and focus (#367).
+  toast_clock: StoredValue<ToastClock, LocalStorage>,
   /// Messages deleted with an undo window: hidden now, deleted when the window ends.
   pub hidden_messages: RwSignal<HashSet<MessageId>>,
   /// Channels left with an undo window: gone from the sidebar now, left when the window ends.
@@ -271,8 +281,8 @@ pub struct AppState {
   pub highlighted: RwSignal<Option<MessageId>>,
   /// A message the composer asked to edit (↑ in the empty composer); its row opens the editor.
   pub edit_request: RwSignal<Option<MessageId>>,
-  /// The tab the settings dialog shows.
-  pub settings_tab: RwSignal<SettingsTab>,
+  /// The page the settings dialog shows.
+  pub settings_page: RwSignal<SettingsPage>,
   /// The message a link or jump opened in the current conversation: the URL names it until the
   /// user goes somewhere else.
   linked_message: RwSignal<Option<PermalinkTarget>>,
@@ -308,6 +318,17 @@ fn home_view_without_dms(has_spaces: bool) -> MainView {
 
 /// Which pane a view fills in the compact layout: the lists of Home and of a space, a side panel
 /// over its conversation, and the main column for everything else.
+fn compact_depth_for(view: MainView, panel: SidePanel) -> CompactDepth {
+  match compact_pane_for(view, panel) {
+    CompactPane::Panel => CompactDepth::Panel,
+    CompactPane::List => CompactDepth::TopLevel,
+    CompactPane::Main if matches!(view, MainView::Activity | MainView::GettingStarted) => {
+      CompactDepth::TopLevel
+    },
+    CompactPane::Main => CompactDepth::Page,
+  }
+}
+
 fn compact_pane_for(view: MainView, panel: SidePanel) -> CompactPane {
   match view {
     MainView::Home | MainView::Space => CompactPane::List,
@@ -337,6 +358,7 @@ impl AppState {
       pending_dm: RwSignal::new(None),
       toasts: RwSignal::new(Vec::new()),
       next_toast: StoredValue::new(0),
+      toast_clock: StoredValue::new_local(ToastClock::default()),
       hidden_messages: RwSignal::new(HashSet::new()),
       hidden_conversations: RwSignal::new(HashSet::new()),
       pending_open: RwSignal::new(None),
@@ -348,7 +370,7 @@ impl AppState {
       edit_request: RwSignal::new(None),
       highlighted: RwSignal::new(None),
       scroll_anchors: StoredValue::new(HashMap::new()),
-      settings_tab: RwSignal::new(SettingsTab::DEFAULT),
+      settings_page: RwSignal::new(SettingsPage::Section(SettingsTab::DEFAULT)),
       linked_message: RwSignal::new(None),
       pending_route: RwSignal::new(None),
       unavailable_routes: RwSignal::new(0),
@@ -744,6 +766,10 @@ impl AppState {
     }
     self.view.set(MainView::Conversation(id));
     self.overlay.set(Overlay::None);
+    if conversation.is_catching_up {
+      // Only a catch-up has a use for it; settled switches cost no extra request.
+      self.read(|backend| backend.focus_conversation(id));
+    }
     if conversation.unread_count > 0 || conversation.mention_count > 0 {
       self.write(|backend| backend.mark_read(id));
     }
@@ -831,8 +857,8 @@ impl AppState {
   }
 
   /// Shows a failed action until the user closes it. Called from outside the reactive tree (the
-  /// core answered), so it does nothing once the shell is gone. The same error twice in a row
-  /// shows once.
+  /// core answered), so it does nothing once the shell is gone. A repeat of any error still shown
+  /// adds no second toast; background failures are rate-limited before they get here (#344).
   pub fn show_error(&self, text: String, detail: String) {
     let Some(id) = self.next_toast.try_get_value() else {
       return;
@@ -858,14 +884,50 @@ impl AppState {
 
   /// Shows a confirmation that goes away by itself ("Link copied").
   pub fn show_brief_toast(&self, text: String) {
-    let state = *self;
     let toast = self.push_toast(text, None);
-    set_timeout(move || state.dismiss_toast(toast), BRIEF_TOAST);
+    self.close_toast_after(toast, BRIEF_TOAST, || {});
   }
 
+  /// Closes a toast and runs what its end does (an Undo toast commits now). Also called by the
+  /// toast timer, which may fire after the shell is gone.
   pub fn dismiss_toast(&self, id: u64) {
-    // Also called by timers, which may fire after the shell is gone.
     let _ = self.toasts.try_update(|list| list.retain(|toast| toast.id != id));
+    // A hold from a toast that went away must not stall the others: nothing is left to point at,
+    // and a removed toast takes the focus with it without a `focusout`.
+    if self.toasts.try_with_untracked(Vec::is_empty) == Some(true) {
+      self.hold_toasts(Hold::Pointer, false);
+    }
+    if !is_focus_in_toasts() {
+      self.hold_toasts(Hold::Focus, false);
+    }
+    let maybe_end = self.toast_clock.try_update_value(|clock| clock.end(id)).flatten();
+    if let Some(end) = maybe_end {
+      end();
+    }
+  }
+
+  /// The page goes away (closed, navigated, frozen or discarded): what the Undo toasts hold back is
+  /// done now rather than never.
+  pub fn end_timed_toasts(&self) {
+    let pending: Vec<u64> = self
+      .toast_clock
+      .try_with_value(|clock| clock.on_end.keys().copied().collect())
+      .unwrap_or_default();
+    for toast in pending {
+      self.dismiss_toast(toast);
+    }
+  }
+
+  /// The pointer or focus is on the toasts, or the page is hidden: countdowns stand still (#367).
+  pub fn hold_toasts(&self, hold: Hold, is_on: bool) {
+    let now = crate::clock::now_ms();
+    if self
+      .toast_clock
+      .try_update_value(|clock| clock.timers.set_hold(hold, is_on, now))
+      .is_some()
+    {
+      self.schedule_toast_wake();
+    }
   }
 
   /// Hides an own message at once and deletes it after the undo window, unless Undo was pressed.
@@ -875,19 +937,15 @@ impl AppState {
       hidden.insert(message);
     });
     let toast = self.push_toast(text, Some(Undo::RestoreMessage(message)));
-    set_timeout(
-      move || {
-        state.dismiss_toast(toast);
-        let is_still_deleted = state
-          .hidden_messages
-          .try_update(|hidden| hidden.remove(&message))
-          .unwrap_or(false);
-        if is_still_deleted {
-          state.try_write(|backend| backend.delete_message(conversation, message));
-        }
-      },
-      UNDO_WINDOW,
-    );
+    self.close_toast_after(toast, UNDO_WINDOW, move || {
+      let is_still_deleted = state
+        .hidden_messages
+        .try_update(|hidden| hidden.remove(&message))
+        .unwrap_or(false);
+      if is_still_deleted {
+        state.try_write(|backend| backend.delete_message(conversation, message));
+      }
+    });
   }
 
   /// Runs the Undo of a toast and closes it.
@@ -923,19 +981,15 @@ impl AppState {
       hidden.insert(conversation);
     });
     let toast = self.push_toast(text, Some(Undo::StayInChannel(conversation)));
-    set_timeout(
-      move || {
-        state.dismiss_toast(toast);
-        let is_still_leaving = state
-          .hidden_conversations
-          .try_update(|hidden| hidden.remove(&conversation))
-          .unwrap_or(false);
-        if is_still_leaving {
-          state.try_write(|backend| backend.leave_channel(conversation));
-        }
-      },
-      UNDO_WINDOW,
-    );
+    self.close_toast_after(toast, UNDO_WINDOW, move || {
+      let is_still_leaving = state
+        .hidden_conversations
+        .try_update(|hidden| hidden.remove(&conversation))
+        .unwrap_or(false);
+      if is_still_leaving {
+        state.try_write(|backend| backend.leave_channel(conversation));
+      }
+    });
   }
 
   /// Conversations as the sidebar shows them: without the ones being left, favorites in the user's
@@ -965,6 +1019,68 @@ impl AppState {
       }
     });
     list
+  }
+
+  /// Closes `toast` after `duration` of countdown, which pauses while held; `on_end` runs when it
+  /// closes, by the countdown or earlier.
+  fn close_toast_after(&self, toast: u64, duration: Duration, on_end: impl FnOnce() + 'static) {
+    let now = crate::clock::now_ms();
+    let is_alive = self
+      .toast_clock
+      .try_update_value(|clock| {
+        clock.timers.start(toast, duration, now);
+        clock.on_end.insert(toast, Box::new(on_end));
+      })
+      .is_some();
+    if is_alive {
+      self.schedule_toast_wake();
+    }
+  }
+
+  /// One browser timer for the nearest deadline; none while the countdowns are held. Native builds
+  /// (tests) have no browser timer and drive the countdowns themselves.
+  fn schedule_toast_wake(&self) {
+    let state = *self;
+    let now = crate::clock::now_ms();
+    let _ = self.toast_clock.try_update_value(|clock| {
+      if let Some(wake) = clock.maybe_wake.take() {
+        wake.clear();
+      }
+      let Some(deadline) = clock.timers.next_deadline() else {
+        return;
+      };
+      let wait = Duration::from_millis(u64::try_from(deadline - now).unwrap_or(0));
+      #[cfg(target_arch = "wasm32")]
+      match leptos::leptos_dom::helpers::set_timeout_with_handle(move || state.wake_toasts(), wait) {
+        Ok(handle) => clock.maybe_wake = Some(handle),
+        // Without a timer the toast stays until closed: worse, but nothing is lost.
+        Err(_) => tracing::debug!("could not start the toast timer"),
+      }
+      #[cfg(not(target_arch = "wasm32"))]
+      let _ = (state, wait);
+    });
+  }
+
+  /// The toast timer fired: closes the toasts whose time ran out and waits for the next one.
+  #[cfg(target_arch = "wasm32")]
+  fn wake_toasts(&self) {
+    self.wake_toasts_at(crate::clock::now_ms());
+  }
+
+  /// Native builds have no toast timer; tests call this with their own clock.
+  #[cfg(any(target_arch = "wasm32", test))]
+  fn wake_toasts_at(&self, now: TimestampMs) {
+    let expired = self
+      .toast_clock
+      .try_update_value(|clock| {
+        clock.maybe_wake = None;
+        clock.timers.take_expired(now)
+      })
+      .unwrap_or_default();
+    for toast in expired {
+      self.dismiss_toast(toast);
+    }
+    self.schedule_toast_wake();
   }
 
   fn push_toast(&self, text: String, maybe_undo: Option<Undo>) -> u64 {
@@ -1130,6 +1246,12 @@ impl AppState {
     get_if_observed(self.layout).is_compact()
   }
 
+  /// How deep the page is in the compact layout (#368); the bottom navigation shows on top-level
+  /// pages only.
+  pub fn compact_depth(&self) -> CompactDepth {
+    compact_depth_for(self.view.get(), self.panel.get())
+  }
+
   /// The pane that fills the window in the compact layout.
   pub fn compact_pane(&self) -> CompactPane {
     compact_pane_for(self.view.get(), self.panel.get())
@@ -1168,9 +1290,26 @@ impl AppState {
     self.panel.set(SidePanel::Closed);
   }
 
-  /// Opens the settings dialog on its first tab.
+  /// Opens the settings dialog: on phones its list of sections, otherwise the first section.
   pub fn open_settings(&self) {
-    self.settings_tab.set(SettingsTab::DEFAULT);
+    self.show_settings(SettingsPage::Sections);
+  }
+
+  /// Opens the settings dialog on one section.
+  pub fn open_settings_at(&self, tab: SettingsTab) {
+    self.show_settings(SettingsPage::Section(tab));
+  }
+
+  /// The list of sections is a page of its own only on phones; elsewhere it stands beside the
+  /// first section.
+  fn show_settings(&self, page: SettingsPage) {
+    let page = match page {
+      SettingsPage::Sections if !self.layout.get_untracked().is_compact() => {
+        SettingsPage::Section(SettingsTab::DEFAULT)
+      },
+      other => other,
+    };
+    self.settings_page.set(page);
     self.overlay.set(Overlay::Settings);
   }
 
@@ -1225,7 +1364,7 @@ impl AppState {
   /// The route of what the app shows now; the address bar follows it (`history.rs`).
   pub fn route(&self) -> Route {
     if self.overlay.get() == Overlay::Settings {
-      return Route::Settings(self.settings_tab.get());
+      return Route::Settings(self.settings_page.get());
     }
     match self.view.get() {
       MainView::Conversation(id) => self.conversation_route(id),
@@ -1414,10 +1553,7 @@ impl AppState {
       Route::People => self.open_directory(),
       Route::Saved => self.open_saved(),
       Route::Search => self.open_search(None),
-      Route::Settings(tab) => {
-        self.settings_tab.set(tab);
-        self.overlay.set(Overlay::Settings);
-      },
+      Route::Settings(page) => self.show_settings(page),
       Route::Admin(section) => {
         if !self.read(|backend| backend.my_role()).includes(&Role::Admin) {
           return RouteOutcome::Unavailable;
@@ -1471,34 +1607,46 @@ pub fn use_app_state() -> AppState {
 }
 
 impl SettingsTab {
-  pub const ALL: [SettingsTab; 8] = [
+  /// In the order of the section list.
+  pub const ALL: [SettingsTab; 9] = [
+    Self::Account,
+    Self::Appearance,
     Self::Notifications,
-    Self::Display,
-    Self::Sidebar,
-    Self::Language,
-    Self::Privacy,
+    Self::Preferences,
+    Self::Keyboard,
+    Self::AudioVideo,
     Self::Devices,
-    Self::Calls,
-    Self::Advanced,
+    Self::Security,
+    Self::About,
   ];
-  /// The tab the dialog opens with.
-  pub const DEFAULT: SettingsTab = Self::Notifications;
+  /// The section the dialog opens with beside the list.
+  pub const DEFAULT: SettingsTab = Self::Account;
 
   pub fn slug(self) -> &'static str {
     match self {
+      Self::Account => "account",
+      Self::Appearance => "appearance",
       Self::Notifications => "notifications",
-      Self::Display => "display",
-      Self::Sidebar => "sidebar",
-      Self::Language => "language",
-      Self::Privacy => "privacy",
+      Self::Preferences => "preferences",
+      Self::Keyboard => "keyboard",
+      Self::AudioVideo => "audio-video",
       Self::Devices => "devices",
-      Self::Calls => "calls",
-      Self::Advanced => "advanced",
+      Self::Security => "security",
+      Self::About => "about",
     }
   }
 
+  /// The section of a path segment, including the tabs before #327, so old links keep working.
   pub fn from_slug(slug: &str) -> Option<Self> {
-    Self::ALL.into_iter().find(|tab| tab.slug() == slug)
+    let legacy = match slug {
+      "display" => Some(Self::Appearance),
+      "sidebar" | "language" => Some(Self::Preferences),
+      "privacy" => Some(Self::Security),
+      "calls" => Some(Self::AudioVideo),
+      "advanced" => Some(Self::About),
+      _ => None,
+    };
+    legacy.or_else(|| Self::ALL.into_iter().find(|tab| tab.slug() == slug))
   }
 }
 
@@ -1508,6 +1656,22 @@ fn has_exactly(members: &[UserId], users: &[UserId], me: UserId) -> bool {
     && members
       .iter()
       .all(|member| *member == me || users.contains(member))
+}
+
+/// Whether the keyboard focus is on a toast (native builds have no focus).
+fn is_focus_in_toasts() -> bool {
+  #[cfg(target_arch = "wasm32")]
+  {
+    web_sys::window()
+      .and_then(|window| window.document())
+      .and_then(|document| document.active_element())
+      .and_then(|element| element.closest(".toasts").ok().flatten())
+      .is_some()
+  }
+  #[cfg(not(target_arch = "wasm32"))]
+  {
+    false
+  }
 }
 
 /// Adds a toast and closes the oldest beyond [`MAX_TOASTS`]. Toasts with an Undo stay: closing
@@ -1599,9 +1763,17 @@ mod tests {
       state.open_admin(AdminSection::Audit);
       assert_eq!(state.route(), Route::Admin(AdminSection::Audit));
       state.open_settings();
-      assert_eq!(state.route(), Route::Settings(SettingsTab::DEFAULT));
-      state.settings_tab.set(SettingsTab::Calls);
-      assert_eq!(state.route(), Route::Settings(SettingsTab::Calls));
+      assert_eq!(
+        state.route(),
+        Route::Settings(SettingsPage::Section(SettingsTab::DEFAULT))
+      );
+      state
+        .settings_page
+        .set(SettingsPage::Section(SettingsTab::AudioVideo));
+      assert_eq!(
+        state.route(),
+        Route::Settings(SettingsPage::Section(SettingsTab::AudioVideo))
+      );
       state.close_overlay();
       assert_eq!(state.route(), Route::Admin(AdminSection::Audit));
     }
@@ -1629,7 +1801,7 @@ mod tests {
         Route::People,
         Route::Saved,
         Route::Search,
-        Route::Settings(SettingsTab::Privacy),
+        Route::Settings(SettingsPage::Section(SettingsTab::Security)),
         Route::Admin(AdminSection::Users),
       ] {
         assert_eq!(state.follow_route(route), RouteOutcome::Shown, "{route:?}");
@@ -1667,7 +1839,7 @@ mod tests {
     fn leaving_settings_by_route_closes_the_dialog() {
       let state = test_state();
       let dm = first_dm(&state);
-      state.follow_route(Route::Settings(SettingsTab::Display));
+      state.follow_route(Route::Settings(SettingsPage::Section(SettingsTab::Appearance)));
       assert_eq!(state.overlay.get(), Overlay::Settings);
       state.follow_route(Route::Direct(dm));
       assert_eq!(state.overlay.get(), Overlay::None);
@@ -1861,6 +2033,75 @@ mod tests {
       assert_eq!(state.toasts.get_untracked().len(), 2);
     }
 
+    /// #367: an Undo toast closed before its countdown ran out commits at once (the message leaves
+    /// the hidden set because its deletion went out).
+    #[test]
+    fn closing_an_undo_toast_commits_at_once() {
+      let state = test_state();
+      let (_, conversation) = first_channel(&state);
+      let message = id_from_raw(1);
+      state.delete_with_undo(conversation, message, "deleted".into());
+      assert!(state.hidden_messages.get_untracked().contains(&message));
+      state.dismiss_toast(state.toasts.get_untracked()[0].id);
+      assert!(state.toasts.get_untracked().is_empty());
+      assert!(!state.hidden_messages.get_untracked().contains(&message));
+    }
+
+    #[test]
+    fn toasts_close_when_their_countdown_ran_out_but_not_while_held() {
+      let state = test_state();
+      let (_, conversation) = first_channel(&state);
+      let message = id_from_raw(1);
+      let now = crate::clock::now_ms();
+      state.show_brief_toast("Link copied".into());
+      state.delete_with_undo(conversation, message, "deleted".into());
+      state.hold_toasts(Hold::Pointer, true);
+      state.wake_toasts_at(now + 60_000);
+      assert_eq!(state.toasts.get_untracked().len(), 2, "held under the pointer");
+      state.hold_toasts(Hold::Pointer, false);
+      state.wake_toasts_at(now + BRIEF_TOAST.as_millis() as i64);
+      assert_eq!(state.toasts.get_untracked().len(), 1, "the brief toast closed");
+      state.wake_toasts_at(now + UNDO_WINDOW.as_millis() as i64);
+      assert!(state.toasts.get_untracked().is_empty());
+      assert!(
+        !state.hidden_messages.get_untracked().contains(&message),
+        "the deletion went out"
+      );
+    }
+
+    /// Review of #387: closing the focused toast moves the focus away without a `focusout`; the
+    /// other toast's countdown must go on.
+    #[test]
+    fn closing_the_focused_toast_releases_the_focus_hold() {
+      let state = test_state();
+      let now = crate::clock::now_ms();
+      state.show_brief_toast("one".into());
+      state.show_brief_toast("two".into());
+      let first = state.toasts.get_untracked()[0].id;
+      state.hold_toasts(Hold::Focus, true);
+      state.dismiss_toast(first);
+      state.wake_toasts_at(now + BRIEF_TOAST.as_millis() as i64);
+      assert!(
+        state.toasts.get_untracked().is_empty(),
+        "the second toast closed on time"
+      );
+    }
+
+    #[test]
+    fn leaving_the_page_commits_what_undo_toasts_hold_back() {
+      let state = test_state();
+      let (_, conversation) = first_channel(&state);
+      let message = id_from_raw(1);
+      state.delete_with_undo(conversation, message, "deleted".into());
+      state.show_brief_toast("Link copied".into());
+      state.end_timed_toasts();
+      assert!(state.toasts.get_untracked().is_empty());
+      assert!(
+        !state.hidden_messages.get_untracked().contains(&message),
+        "the deletion went out"
+      );
+    }
+
     #[test]
     fn the_oldest_toast_closes_beyond_the_cap_but_undo_toasts_stay() {
       let state = test_state();
@@ -1877,6 +2118,21 @@ mod tests {
 
   mod compact {
     use super::*;
+
+    /// #368: what slides which way depends on how deep the page is.
+    #[test]
+    fn lists_and_activity_are_top_level_a_conversation_a_page_a_thread_a_panel() {
+      let state = compact_state();
+      let (space, conversation) = first_channel(&state);
+      state.open_space(space);
+      assert_eq!(state.compact_depth(), CompactDepth::TopLevel);
+      state.open_activity();
+      assert_eq!(state.compact_depth(), CompactDepth::TopLevel);
+      state.open_conversation(conversation);
+      assert_eq!(state.compact_depth(), CompactDepth::Page);
+      state.panel.set(SidePanel::Pins);
+      assert_eq!(state.compact_depth(), CompactDepth::Panel);
+    }
 
     #[test]
     fn home_and_a_space_show_their_list_instead_of_a_conversation() {
@@ -1953,6 +2209,25 @@ mod tests {
       state.layout.set(Layout::Compact);
       state.backend_changed();
       assert_eq!(state.route(), Route::Home);
+    }
+
+    #[test]
+    fn settings_open_on_their_section_list_on_phones_only() {
+      let state = compact_state();
+      state.open_settings();
+      assert_eq!(state.route(), Route::Settings(SettingsPage::Sections));
+      state.close_overlay();
+      state.layout.set(Layout::Medium);
+      state.open_settings();
+      assert_eq!(
+        state.route(),
+        Route::Settings(SettingsPage::Section(SettingsTab::DEFAULT))
+      );
+      state.follow_route(Route::Settings(SettingsPage::Sections));
+      assert_eq!(
+        state.settings_page.get(),
+        SettingsPage::Section(SettingsTab::DEFAULT)
+      );
     }
 
     fn compact_state() -> AppState {

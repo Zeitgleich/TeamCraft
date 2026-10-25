@@ -4,14 +4,15 @@ use std::collections::BTreeSet;
 
 use openmls::prelude::{
   GroupId, KeyPackage, LeafNodeIndex, MlsGroup, MlsGroupJoinConfig, MlsMessageBodyIn, MlsMessageIn,
-  MlsMessageOut, ProcessedMessageContent, Proposal, Sender, StagedCommit, StagedWelcome,
+  MlsMessageOut, ProcessedMessageContent, Proposal, Sender, StagedCommit, StagedWelcome, WelcomeError,
 };
 use openmls_traits::OpenMlsProvider;
 use tls_codec::{
   Deserialize as _, DeserializeBytes as _, Serialize as _, TlsDeserializeBytes, TlsSerialize, TlsSize,
 };
+use zeroize::Zeroizing;
 
-use super::content_keys::ContentKeyBundle;
+use super::content_keys::{ApplicationPayload, ContentKeyBundle, SealedContentKeys};
 use super::rejoin::{SignedRejoinRequest, VerifiedRejoinRequest};
 use super::{CIPHERSUITE, GroupMember, MlsError, credential, validate_key_package};
 use crate::content_key::{ContentKey, ContentKeyId};
@@ -111,6 +112,12 @@ pub enum GroupEvent {
     sender: GroupMember,
     bundle: ContentKeyBundle,
   },
+  /// A member sealed content keys to one device ([`SealedContentKeys`]); only that device opens
+  /// them, the others ignore the event.
+  SealedContentKeys {
+    sender: GroupMember,
+    sealed: SealedContentKeys,
+  },
   /// An authorized commit was merged; the group is in a new epoch.
   MembershipChanged(MembershipUpdate),
 }
@@ -128,6 +135,8 @@ pub struct MembershipUpdate {
   /// both `removed` (its old leaf) and `added`, and stays a member.
   pub maybe_rejoined: Option<GroupMember>,
   pub is_self_removed: bool,
+  /// The member whose commit it was, from its credential; `None` for this device's own commits.
+  pub maybe_committer: Option<GroupMember>,
 }
 
 /// The membership effect of a commit, with every added device verified.
@@ -207,7 +216,10 @@ impl ConversationGroup {
     // lifetime only bounds when a package may be *added* (RFC 9420 §7.3, openmls #1810), which
     // the committer and every member checked then; credentials are verified on completion.
     let mut builder = StagedWelcome::build_from_welcome(provider, &config, welcome)
-      .map_err(|error| MlsError::openmls("welcome processing", error))?
+      .map_err(|error| match error {
+        WelcomeError::NoMatchingKeyPackage => MlsError::NoMatchingKeyPackage,
+        other => MlsError::openmls("welcome processing", other),
+      })?
       .skip_lifetime_validation();
     if is_replacing {
       // Only lifts openmls' check that no group with this ID is stored; nothing is written
@@ -393,6 +405,12 @@ impl ConversationGroup {
     self.group.epoch().as_u64()
   }
 
+  /// The epoch this device joined the group in (by welcome or external commit); persisted with
+  /// the change history.
+  pub fn joined_epoch(&self) -> u64 {
+    self.history.joined_epoch
+  }
+
   /// The content key of the current epoch, derived from the MLS exporter (RFC 9420 §8.5). Every
   /// member that merged the epoch's commit derives the same key, and nobody else can: after a
   /// removal it becomes the current key at once, so the new key can't be withheld from members and
@@ -400,7 +418,7 @@ impl ConversationGroup {
   pub fn epoch_content_key(&self, provider: &impl OpenMlsProvider) -> Result<ContentKey, MlsError> {
     let mut context = self.conversation_id.get().to_be_bytes().to_vec();
     context.extend_from_slice(&self.epoch().to_be_bytes());
-    let exported = zeroize::Zeroizing::new(
+    let exported = Zeroizing::new(
       self
         .group
         .export_secret(provider.crypto(), domain::EPOCH_CONTENT_KEY, &context, 48)
@@ -419,6 +437,22 @@ impl ConversationGroup {
       .members()
       .map(|member| credential::member_of(&member.credential))
       .collect()
+  }
+
+  /// One member device with its certificate verified against the pinned identity; `None` if it
+  /// isn't in the group. Other members' leaves aren't looked at, so one bad leaf doesn't keep
+  /// keys from reaching the device.
+  pub fn verified_member(
+    &self,
+    member: GroupMember,
+    directory: &impl IdentityDirectory,
+  ) -> Result<Option<VerifiedDevice>, MlsError> {
+    for leaf in self.group.members() {
+      if credential::member_of(&leaf.credential)? == member {
+        return credential::verify(&leaf.credential, &leaf.signature_key, directory).map(Some);
+      }
+    }
+    Ok(None)
   }
 
   /// All member devices with their certificates verified against the pinned identities, e.g. to
@@ -592,6 +626,7 @@ impl ConversationGroup {
       removed: pending.removed,
       maybe_rejoined: pending.maybe_rejoin.map(|(member, _)| member),
       is_self_removed: false,
+      maybe_committer: None,
     })
   }
 
@@ -622,6 +657,35 @@ impl ConversationGroup {
       .map_err(|error| MlsError::openmls("message encoding", error))
   }
 
+  /// Sends content keys to one member device only, sealed to the agreement key its verified
+  /// certificate names (e2ee.md §4.6): the other members see that keys went to it, not which.
+  pub fn send_sealed_content_keys(
+    &mut self,
+    provider: &impl OpenMlsProvider,
+    device: &DeviceKeyPair,
+    recipient: &VerifiedDevice,
+    bundle: &ContentKeyBundle,
+  ) -> Result<Vec<u8>, MlsError> {
+    self.ensure_conversation(bundle.conversation_id())?;
+    if !self.members()?.contains(&GroupMember::from(recipient)) {
+      return Err(MlsError::UnexpectedMessage(
+        "sealed content keys for a device outside the group",
+      ));
+    }
+    let sender = GroupMember {
+      user_id: device.user_id(),
+      device_id: device.public_keys().device_id,
+    };
+    let payload = Zeroizing::new(bundle.seal_for(recipient, sender, self.epoch())?);
+    let message = self
+      .group
+      .create_message(provider, device, &payload)
+      .map_err(|error| MlsError::openmls("application message", error))?;
+    message
+      .to_bytes()
+      .map_err(|error| MlsError::openmls("message encoding", error))
+  }
+
   /// Processes a commit or application message from the group. Commits are merged only if they
   /// pass TeamCraft's authorization rules; otherwise the group stays in its current epoch.
   pub fn process_message(
@@ -646,17 +710,26 @@ impl ConversationGroup {
     };
     let sender = credential::member_of(processed.credential())?;
     let authenticated_data = processed.aad().to_vec();
+    let message_epoch = processed.epoch().as_u64();
     match processed.into_content() {
       ProcessedMessageContent::ApplicationMessage(application) => {
         if maybe_sender_index.is_none() {
           return Err(MlsError::ExternalSender);
         }
-        let bundle = ContentKeyBundle::from_bytes(&zeroize::Zeroizing::new(application.into_bytes()))?;
-        self.ensure_conversation(bundle.conversation_id())?;
-        Ok(GroupEvent::ContentKeys { sender, bundle })
+        match ApplicationPayload::from_bytes(&Zeroizing::new(application.into_bytes()))? {
+          ApplicationPayload::Bundle(bundle) => {
+            self.ensure_conversation(bundle.conversation_id())?;
+            Ok(GroupEvent::ContentKeys { sender, bundle })
+          },
+          ApplicationPayload::Sealed(wire) => {
+            let sealed = SealedContentKeys::received(wire, sender, message_epoch);
+            self.ensure_conversation(sealed.conversation_id())?;
+            Ok(GroupEvent::SealedContentKeys { sender, sealed })
+          },
+        }
       },
       ProcessedMessageContent::StagedCommitMessage(staged) => {
-        let (update, maybe_request_id) = match maybe_sender_index {
+        let (mut update, maybe_request_id) = match maybe_sender_index {
           Some(sender_index) => {
             self.authorize_commit(&staged, sender_index, &authenticated_data, directory, authority)?
           },
@@ -665,6 +738,7 @@ impl ConversationGroup {
             None,
           ),
         };
+        update.maybe_committer = Some(sender);
         let epoch = self.epoch();
         self
           .group
@@ -813,6 +887,7 @@ impl ConversationGroup {
         removed: proposed.removed,
         maybe_rejoined: Some(member),
         is_self_removed: staged.self_removed(),
+        maybe_committer: None,
       };
       return Ok((update, Some(verified.request().request_id())));
     }
@@ -834,6 +909,7 @@ impl ConversationGroup {
       removed: proposed.removed,
       maybe_rejoined: None,
       is_self_removed: staged.self_removed(),
+      maybe_committer: None,
     };
     Ok((update, None))
   }
@@ -886,6 +962,7 @@ impl ConversationGroup {
       removed: Vec::new(),
       maybe_rejoined: None,
       is_self_removed: false,
+      maybe_committer: None,
     })
   }
 
@@ -1110,6 +1187,20 @@ impl StagedJoin {
       }
     }
     Ok(users)
+  }
+
+  /// The member whose commit made the welcome, as its leaf claims; [`Self::complete`] verifies
+  /// every leaf, this one included.
+  pub fn sender(&self) -> Result<GroupMember, MlsError> {
+    let sender_index = self.staged.welcome_sender_index();
+    for member in self.staged.members() {
+      if member.index == sender_index {
+        return credential::member_of(&member.credential);
+      }
+    }
+    Err(MlsError::UnexpectedMessage(
+      "the welcome's sender isn't in its group",
+    ))
   }
 
   /// Verifies every leaf against its user's pinned identity without joining yet: who is in the

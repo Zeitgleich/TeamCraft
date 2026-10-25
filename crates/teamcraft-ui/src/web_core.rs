@@ -231,6 +231,10 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
       send(Request::NetworkChanged)?;
       Ok(Value::Null)
     },
+    "core_focus" => {
+      send(Request::Focus(field(&args, "conversation")?))?;
+      Ok(Value::Null)
+    },
     "core_store_health" => to_value(ask(Request::StoreHealth).await?),
     "core_enroll" => {
       let request: EnrollRequest = field(&args, "request")?;
@@ -596,6 +600,8 @@ enum Request {
   NetworkChanged,
   /// What joining a conversation's call needs (`web_calls`).
   PrepareCall(ConversationId, oneshot::Sender<Result<CallPreparation, String>>),
+  /// The user opened a conversation; a running catch-up takes it next (issue #247).
+  Focus(ConversationId),
 }
 
 /// What woke the loop.
@@ -955,6 +961,8 @@ impl Core {
         };
         drop(reply.send(result));
       },
+      // async-ok: the core's catch-up focus (a shared cell), not a signal.
+      Request::Focus(conversation) => self.catch_up_focus.set(conversation),
       Request::Snapshot(reply) => drop(reply.send(self.snapshot())),
       Request::SnapshotChanges(maybe_since, reply) => drop(reply.send(self.snapshot_changes(maybe_since))),
       Request::Messages {
@@ -1369,7 +1377,12 @@ impl Core {
     let count = commands.len();
     let mut maybe_failure = None;
     for command in commands {
-      if let Err(error) = client.run_ui_command(command).await {
+      // A command can take long (an upload, a big history page); heartbeats go on meanwhile.
+      let result = self
+        .connection
+        .keep_alive(now_ms(), client.run_ui_command(command))
+        .await;
+      if let Err(error) = result {
         tracing::warn!(%error, "UI command failed");
         maybe_failure.get_or_insert(error);
       }
@@ -1381,7 +1394,7 @@ impl Core {
     let Some(client) = self.client.as_mut() else {
       return;
     };
-    if upkeep::flush(client).await {
+    if self.connection.keep_alive(now_ms(), upkeep::flush(client)).await {
       notify_changed();
     }
   }
@@ -1462,7 +1475,8 @@ impl Core {
     let Some(client) = self.client.as_mut() else {
       return;
     };
-    if self.upkeep.tick(client).await {
+    // The upkeep may resync many conversations; heartbeats go on meanwhile.
+    if self.connection.keep_alive(now, self.upkeep.tick(client)).await {
       notify_changed();
     }
   }
@@ -1531,14 +1545,19 @@ impl SyncReads<'_> {
     is_closed: &mut bool,
   ) -> F::Output {
     let mut seen_revision = self.store.inner().write_revision();
+    let mut seen_caught_up = self.focus.caught_up_count();
+    // Deadlines, not a fresh sleep per wake-up: a burst of reads must not postpone the progress.
+    let mut progress = Box::pin(platform::sleep(SYNC_PROGRESS));
     loop {
-      let progress = pin!(platform::sleep(SYNC_PROGRESS));
       let request = if *is_closed {
         Either::Left(pending())
       } else {
         Either::Right(requests.next())
       };
-      match select(&mut connecting, select(request, progress)).await {
+      // The conversation the user opened is shown as soon as the sync woke this for it.
+      let focus_caught_up = pin!(self.focus.caught_up_since(seen_caught_up));
+      let wakes = select(progress.as_mut(), focus_caught_up);
+      match select(&mut connecting, select(request, wakes)).await {
         Either::Left((outcome, _)) => return outcome,
         Either::Right((Either::Left((Some(request), _)), _)) => {
           if let Some(request) = self.answer(request) {
@@ -1546,13 +1565,21 @@ impl SyncReads<'_> {
           }
         },
         Either::Right((Either::Left((None, _)), _)) => *is_closed = true,
-        Either::Right((Either::Right(((), _)), _)) => {
+        Either::Right((Either::Right((Either::Left(((), _)), _)), _)) => {
+          progress = Box::pin(platform::sleep(SYNC_PROGRESS));
           let revision = self.store.inner().write_revision();
           if revision != seen_revision && self.has_become_known(deferred) {
             notify_local();
           }
           if revision != seen_revision && is_page_visible() {
             seen_revision = revision;
+            notify_local();
+          }
+        },
+        Either::Right((Either::Right((Either::Right((caught_up, _)), _)), _)) => {
+          seen_caught_up = caught_up;
+          if is_page_visible() {
+            seen_revision = self.store.inner().write_revision();
             notify_local();
           }
         },
@@ -1582,6 +1609,11 @@ impl SyncReads<'_> {
   fn answer(&self, request: Request) -> Option<Request> {
     let request = match request {
       Request::Snapshot(_) | Request::SnapshotChanges(..) => return self.answer_snapshot(request),
+      Request::Focus(conversation) => {
+        // The sync holding the client takes it between two steps.
+        self.focus.set(conversation);
+        return None;
+      },
       other => other,
     };
     let read = match &request {

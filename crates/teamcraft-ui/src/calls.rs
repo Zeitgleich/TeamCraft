@@ -82,9 +82,13 @@ impl CallState {
     self.handler.set_value(Some(Rc::new(handler)));
   }
 
+  /// Hands the event to the backend. The handler runs untracked: an effect that emits (the effect
+  /// picker, the status sounds setting) must not subscribe to what the handler reads. Otherwise
+  /// the backend's change notification after the action re-runs the effect, which emits again: a
+  /// loop of call actions and refreshes that kept the desktop app busy while idle (issue #399).
   pub fn emit(&self, event: CallEvent) {
     if let Some(handler) = self.handler.get_value() {
-      handler(event);
+      untrack(|| handler(event));
     }
   }
 
@@ -193,5 +197,48 @@ impl CallState {
 impl Default for CallState {
   fn default() -> Self {
     Self::new()
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::sync::Arc;
+  use std::sync::atomic::{AtomicU32, Ordering};
+
+  use super::*;
+
+  /// Issue #399: the effect picker's effect emitted, the handler read the backend, and the
+  /// backend's change notification re-ran the effect, which emitted again, forever.
+  #[test]
+  fn a_computation_that_emits_does_not_track_what_the_handler_reads() {
+    let owner = Owner::new();
+    owner.with(|| {
+      let call = CallState::new();
+      let backend_revision = RwSignal::new(0_u32);
+      call.set_handler(move |_| {
+        backend_revision.get();
+      });
+      let runs = Arc::new(AtomicU32::new(0));
+      let counted = runs.clone();
+      let emitting = Memo::new(move |_| {
+        counted.fetch_add(1, Ordering::Relaxed);
+        call.emit(CallEvent::Effect(call.effect.get()));
+      });
+      emitting.get();
+      backend_revision.set(1);
+      emitting.get();
+      assert_eq!(
+        runs.load(Ordering::Relaxed),
+        1,
+        "a backend change re-ran the emitting computation"
+      );
+      call.effect.set(BackgroundEffect::BlurLight);
+      emitting.get();
+      assert_eq!(
+        runs.load(Ordering::Relaxed),
+        2,
+        "the computation's own input still re-runs it"
+      );
+    });
   }
 }

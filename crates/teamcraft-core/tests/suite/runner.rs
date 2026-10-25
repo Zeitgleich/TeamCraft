@@ -7,6 +7,7 @@ use crate::common;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use common::{PASSPHRASE, TokioClock, clock, options, settings};
 use teamcraft_core::PendingEnrollment;
@@ -14,6 +15,10 @@ use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::runner::{RunnerCommand, RunnerSettings, SyncRunner};
 use teamcraft_core::store::{LocalStore, MemoryStore, MessageFilter};
+use teamcraft_proto::GatewayEvent;
+
+/// The server's default `heartbeat_timeout_secs`.
+const SERVER_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[tokio::test]
 async fn runner_connects_flushes_and_returns_the_client_on_stop() {
@@ -87,6 +92,52 @@ async fn a_busy_runner_keeps_sending_heartbeats() {
     server.heartbeat_count() >= 3,
     "heartbeats while busy: {}",
     server.heartbeat_count()
+  );
+}
+
+/// Issue #325: a full sync that takes longer than the server's heartbeat timeout (90 s) keeps its
+/// connection, and an event that arrives meanwhile is applied afterwards.
+#[tokio::test(start_paused = true)]
+async fn a_sync_longer_than_the_heartbeat_timeout_keeps_its_connection() {
+  let server = FakeServer::new();
+  let api = server.add_user("Carol");
+  let carol = api.user_id();
+  let client = PendingEnrollment::new()
+    .complete(
+      api,
+      Arc::new(MemoryStore::new()),
+      Box::new(TokioClock::new().0),
+      settings(),
+      options(PASSPHRASE),
+    )
+    .await
+    .unwrap();
+  // A fresh session, so the runner's connect runs the full sync, and a slow server during it.
+  server.expire_sessions();
+  server.enforce_heartbeat_timeout(Arc::new(TokioClock::new().0), SERVER_HEARTBEAT_TIMEOUT);
+  server.delay_conversation_list(carol, SERVER_HEARTBEAT_TIMEOUT + Duration::from_secs(60));
+  let connects_before = server.gateway_connect_count();
+  let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  let event_server = server.clone();
+  let driver = async move {
+    // In the middle of the sync.
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    event_server.publish_event(&[carol], &GatewayEvent::AnnouncementUpdate);
+    // Well past the sync, so heartbeats after it count too.
+    tokio::time::sleep(SERVER_HEARTBEAT_TIMEOUT * 2).await;
+    assert!(handle.send(RunnerCommand::Stop));
+  };
+  let (client, ()) = tokio::join!(runner.run(), driver);
+  assert_eq!(server.heartbeat_timeout_count(), 0, "a connection timed out");
+  assert_eq!(
+    server.gateway_connect_count() - connects_before,
+    1,
+    "the connection was replaced"
+  );
+  let marks = teamcraft_core::read_state::marks(client.store()).unwrap();
+  assert_eq!(
+    marks.announcements, 1,
+    "the event held during the sync was applied"
   );
 }
 

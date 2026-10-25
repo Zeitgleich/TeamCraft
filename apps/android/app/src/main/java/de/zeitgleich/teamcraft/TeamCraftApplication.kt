@@ -14,6 +14,7 @@ import de.zeitgleich.teamcraft.auth.AuthRepository
 import de.zeitgleich.teamcraft.auth.LegacySignOut
 import de.zeitgleich.teamcraft.calls.CallController
 import de.zeitgleich.teamcraft.core.CoreRepository
+import de.zeitgleich.teamcraft.core.NetworkTrust
 import de.zeitgleich.teamcraft.notifications.MentionPrefs
 import de.zeitgleich.teamcraft.notifications.MessageNotifier
 import de.zeitgleich.teamcraft.notifications.NotificationContentPrefs
@@ -56,6 +57,8 @@ class TeamCraftApplication : Application() {
   override fun onCreate() {
     super.onCreate()
     graph = AppGraph(this)
+    // The core waits for these before it opens (issue #157).
+    NetworkTrust.startInstalling(this, graph.scope)
     // Before anything opens a session or a store: builds with a baked-in server kept them unkeyed.
     graph.servers.migrateLegacyLayout()
     graph.scope.launch(Dispatchers.IO) { graph.servers.removeLegacyTrash() }

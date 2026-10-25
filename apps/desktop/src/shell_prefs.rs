@@ -73,12 +73,12 @@ impl ShellPrefsState {
   }
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn shell_prefs_get(state: State<'_, ShellPrefsState>) -> ShellPrefs {
   state.get()
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn shell_prefs_set(
   app: AppHandle,
   state: State<'_, ShellPrefsState>,

@@ -75,6 +75,23 @@ pub(crate) enum PendingChange {
     conversation_id: ConversationId,
     share: SharedKeys,
   },
+  /// A device was added back by a member who joined the group after this device: that member
+  /// may lack keys of epochs before its join that the device missed. Staggered like
+  /// [`Self::AddDevice`]; dropped once a member who joined no later than this device sent it keys.
+  ShareMissedKeys {
+    conversation_id: ConversationId,
+    user_id: UserId,
+    device_id: DeviceId,
+    not_before_ms: i64,
+  },
+  /// A further device of a member joined without this device's commit (by external commit, or a
+  /// colleague added it): its key bag may lack the current key (#178). Staggered like
+  /// [`Self::AddDevice`]; dropped once any member sent a current key to the group.
+  ShareCurrentKey {
+    conversation_id: ConversationId,
+    device_id: DeviceId,
+    not_before_ms: i64,
+  },
   /// A removal (or leave) this device started: the MLS side first, then the server's membership
   /// (e2ee.md §4.6, removal order). Kept until both are done.
   Removal {
@@ -200,10 +217,20 @@ pub(crate) enum RevocationStep {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SharedKeys {
-  /// Every key of the conversation ("share history").
+  /// Queued by earlier versions for "share history" without saying for whom: only the current
+  /// key is shared now (the history went to the whole group, issue #403).
   FullHistory,
+  /// "Share history": the current key to the group, every key sealed to the new member's
+  /// devices only (e2ee.md §4.3).
+  /// `added_epoch`: the epoch the addition made; the history goes only to devices of a user that
+  /// stayed a member since (a share still pending after a removal and a new addition must not
+  /// hand over the keys of the time between).
+  HistoryFor { user_id: UserId, added_epoch: u64 },
   /// The current key only (history from the join on).
   CurrentKey,
+  /// To a device added back, sealed to it: the keys of the epochs it was a member in (e2ee.md
+  /// §4.6).
+  MissedKeys { user_id: UserId, device_id: DeviceId },
 }
 
 /// What became of a pending change in this round.
@@ -222,6 +249,21 @@ impl PendingChange {
   /// Where the addition of a user without a device waits ([`PendingChange::AddUser`]).
   pub(crate) fn user_add_key(conversation: ConversationId, user: UserId) -> String {
     format!("add_user/{conversation}/{user}")
+  }
+
+  /// Where the hand-over of the current key to a further device waits
+  /// ([`PendingChange::ShareCurrentKey`]).
+  pub(crate) fn current_key_share_key(conversation: ConversationId, device: DeviceId) -> String {
+    format!("{}{device}", Self::current_key_share_prefix(conversation))
+  }
+
+  pub(crate) fn current_key_share_prefix(conversation: ConversationId) -> String {
+    format!("share_current/{conversation}/")
+  }
+
+  /// Where the follow-up keys for a device added back wait ([`PendingChange::ShareMissedKeys`]).
+  pub(crate) fn missed_keys_share_key(conversation: ConversationId, device: DeviceId) -> String {
+    format!("share_missed/{conversation}/{device}")
   }
 
   /// Where a removal this device started waits ([`PendingChange::Removal`]).
@@ -555,6 +597,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         conversation_id,
         share,
       } => format!("share_history/{conversation_id}/{share:?}"),
+      PendingChange::ShareCurrentKey {
+        conversation_id,
+        device_id,
+        ..
+      } => PendingChange::current_key_share_key(*conversation_id, *device_id),
+      PendingChange::ShareMissedKeys {
+        conversation_id,
+        device_id,
+        ..
+      } => PendingChange::missed_keys_share_key(*conversation_id, *device_id),
       PendingChange::Removal {
         conversation_id,
         user_id,
@@ -649,7 +701,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// From the last presence the gateway reported; this device's own user counts as online.
-  fn is_probably_online(&self, user: UserId) -> Result<bool, CoreError> {
+  pub(crate) fn is_probably_online(&self, user: UserId) -> Result<bool, CoreError> {
     if user == self.account.user_id {
       return Ok(true);
     }
@@ -722,6 +774,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         }
         return Ok(PendingOutcome::Done);
       },
+      PendingChange::ShareCurrentKey { .. } => return self.apply_current_key_share(change).await,
+      PendingChange::ShareMissedKeys { .. } => return self.apply_missed_keys_share(change).await,
     };
     self.commit_change(source.0, source.1).await?;
     Ok(PendingOutcome::Done)

@@ -75,12 +75,51 @@ impl Layout {
   }
 }
 
+/// How deep a page of the compact layout is: the pages of the bottom navigation, a page opened
+/// from them (a conversation, search), a side panel over it (a thread).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CompactDepth {
+  TopLevel,
+  Page,
+  Panel,
+}
+
+/// Which way the compact layout just moved (#368): deeper pages slide in from the trailing edge,
+/// going back slides the parent in from the leading edge. Between pages of the same depth (the
+/// bottom navigation's tabs) nothing slides.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PaneStep {
+  #[default]
+  Lateral,
+  Push,
+  Pop,
+}
+
 impl CompactPane {
   pub fn slug(self) -> &'static str {
     match self {
       Self::List => "list",
       Self::Main => "main",
       Self::Panel => "panel",
+    }
+  }
+}
+
+impl PaneStep {
+  pub fn between(before: CompactDepth, after: CompactDepth) -> Self {
+    match after.cmp(&before) {
+      std::cmp::Ordering::Greater => Self::Push,
+      std::cmp::Ordering::Less => Self::Pop,
+      std::cmp::Ordering::Equal => Self::Lateral,
+    }
+  }
+
+  /// The value of `data-nav` on `.app`; `None` leaves the attribute off.
+  pub fn slug(self) -> Option<&'static str> {
+    match self {
+      Self::Lateral => None,
+      Self::Push => Some("push"),
+      Self::Pop => Some("pop"),
     }
   }
 }
@@ -166,6 +205,21 @@ pub fn is_touch_primary() -> bool {
   web_sys::window()
     .and_then(|window| window.match_media("(pointer: coarse)").ok().flatten())
     .is_some_and(|query| query.matches())
+}
+
+/// Size of one CSS `rem` in pixels: the browser's default text size times the text size setting
+/// (issue #370). Sizes that follow the text, such as menus measured before they render, scale
+/// with it. 16 when the root can't be read.
+pub fn rem_px() -> f64 {
+  web_sys::window()
+    .and_then(|window| {
+      let root = window.document()?.document_element()?;
+      window.get_computed_style(&root).ok().flatten()
+    })
+    .and_then(|style| style.get_property_value("font-size").ok())
+    .and_then(|size| size.trim_end_matches("px").parse::<f64>().ok())
+    .filter(|px| *px > 0.0)
+    .unwrap_or(16.0)
 }
 
 /// Mirrors the visible part of the window into `--vv-height` and `--vv-top` on `<html>`, so the
@@ -262,6 +316,17 @@ fn apply_theme_color() {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn deeper_is_a_push_shallower_a_pop_and_same_depth_lateral() {
+    use CompactDepth::{Page, Panel, TopLevel};
+    assert_eq!(PaneStep::between(TopLevel, Page), PaneStep::Push);
+    assert_eq!(PaneStep::between(Page, Panel), PaneStep::Push);
+    assert_eq!(PaneStep::between(Panel, TopLevel), PaneStep::Pop);
+    assert_eq!(PaneStep::between(Page, TopLevel), PaneStep::Pop);
+    assert_eq!(PaneStep::between(TopLevel, TopLevel), PaneStep::Lateral);
+    assert_eq!(PaneStep::Lateral.slug(), None);
+  }
 
   #[test]
   fn phones_get_the_compact_layout_in_portrait_and_landscape() {
