@@ -12,6 +12,8 @@
 
 use std::{
   collections::{HashMap, HashSet},
+  future::Future,
+  pin::Pin,
   sync::{
     Arc, Mutex, MutexGuard, PoisonError,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -40,6 +42,8 @@ use crate::{
 
 /// How long a closing participant has to receive the host's event before the connection drops.
 const CLOSE_GRACE: Duration = Duration::from_millis(250);
+/// How long a close waits for the peer to confirm the WebTransport session close.
+const SESSION_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 /// QUIC application close code for connections a meeting host ended.
 const CLOSED_BY_HOST: u32 = 0x4801;
 const SIGNALING_OVERFLOW: u32 = 0x4802;
@@ -87,6 +91,17 @@ pub trait ParticipantLink: Send + Sync {
   fn send_datagram(&self, bytes: &[u8]);
   /// Closes the connection with a QUIC application error code.
   fn close(&self, code: u32, reason: &[u8]);
+  /// Like [`Self::close`], but first tells the peer's WebTransport session why (a
+  /// `CLOSE_WEBTRANSPORT_SESSION` capsule with the code, which a browser reads as the `closeCode`
+  /// of `WebTransport.closed`) and waits until the peer has it, up to [`SESSION_CLOSE_TIMEOUT`].
+  fn close_gracefully<'a>(
+    &'a self,
+    code: u32,
+    reason: &'a [u8],
+  ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    self.close(code, reason);
+    Box::pin(std::future::ready(()))
+  }
 }
 
 /// Whether a join started a new participant or took back a slot.
@@ -150,8 +165,33 @@ impl ParticipantLink for Connection {
     }
   }
 
+  /// Ends the session with its close capsule and the connection after it, in the background; a
+  /// connection closed with no runtime to do that in is closed at once.
   fn close(&self, code: u32, reason: &[u8]) {
-    Connection::close(self, code.into(), reason);
+    if tokio::runtime::Handle::try_current().is_err() {
+      Connection::close(self, code.into(), reason);
+      return;
+    }
+    let (connection, reason) = (self.clone(), reason.to_vec());
+    tokio::spawn(async move { ParticipantLink::close_gracefully(&connection, code, &reason).await });
+  }
+
+  fn close_gracefully<'a>(
+    &'a self,
+    code: u32,
+    reason: &'a [u8],
+  ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    Box::pin(async move {
+      // Lossy: the capsule's reason is text, ours always is.
+      let text = String::from_utf8_lossy(reason);
+      if tokio::time::timeout(SESSION_CLOSE_TIMEOUT, self.close_session(code, &text))
+        .await
+        .is_err()
+      {
+        debug!("the peer did not confirm the session close in time");
+      }
+      Connection::close(self, code.into(), reason);
+    })
   }
 }
 
@@ -172,17 +212,37 @@ impl Rooms {
   /// to the server ([`Self::is_going_away`]): the participants are on their way back, and the
   /// server keeps the call meanwhile. Returns how many connections were closed.
   pub fn go_away(&self) -> usize {
-    self.is_going_away.store(true, Ordering::Relaxed);
-    let rooms: Vec<Arc<Room>> = lock(&self.rooms).values().cloned().collect();
-    let mut closed = 0;
-    for room in rooms {
-      for handle in room.connected_handles() {
-        handle.link.close(SFU_GOING_AWAY_CLOSE_CODE, b"going away");
-        closed += 1;
-      }
+    let handles = self.begin_going_away();
+    for handle in &handles {
+      handle.link.close(SFU_GOING_AWAY_CLOSE_CODE, b"going away");
     }
+    info!(closed = handles.len(), "going away: closed every call connection");
+    handles.len()
+  }
+
+  /// [`Self::go_away`] for a shutdown: returns once every client has the session close with the
+  /// code (or [`SESSION_CLOSE_TIMEOUT`] passed), so the endpoint can be closed after it.
+  pub async fn go_away_gracefully(&self) -> usize {
+    let handles = self.begin_going_away();
+    let closed = handles.len();
+    let mut closes = tokio::task::JoinSet::new();
+    for handle in handles {
+      closes.spawn(async move {
+        handle
+          .link
+          .close_gracefully(SFU_GOING_AWAY_CLOSE_CODE, b"going away")
+          .await;
+      });
+    }
+    while closes.join_next().await.is_some() {}
     info!(closed, "going away: closed every call connection");
     closed
+  }
+
+  fn begin_going_away(&self) -> Vec<ParticipantHandle> {
+    self.is_going_away.store(true, Ordering::Relaxed);
+    let rooms: Vec<Arc<Room>> = lock(&self.rooms).values().cloned().collect();
+    rooms.iter().flat_map(|room| room.connected_handles()).collect()
   }
 
   pub fn is_going_away(&self) -> bool {

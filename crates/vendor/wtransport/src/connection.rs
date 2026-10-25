@@ -301,14 +301,34 @@ impl Connection {
         self.driver.send_datagram(self.session_id, payload.as_ref())
     }
 
+    /// Ends the WebTransport session with a `CLOSE_WEBTRANSPORT_SESSION` capsule carrying
+    /// `error_code` and `reason` (cut to 1024 bytes), so the peer's session reports that code
+    /// (a browser's `WebTransport.closed`). Returns once the peer has received it. Unlike
+    /// [`close`](Self::close), the QUIC connection itself stays open: call `close` afterwards.
+    pub async fn close_session(&self, error_code: u32, reason: &str) {
+        self.driver.close_session(error_code, reason).await;
+    }
+
     /// Closes the connection immediately.
     pub fn close(&self, error_code: VarInt, reason: &[u8]) {
         self.quic_connection.close(varint_w2q(error_code), reason);
     }
 
     /// Waits for the connection to be closed for any reason.
+    ///
+    /// A session the peer ended with a `CLOSE_WEBTRANSPORT_SESSION` capsule reports its code and
+    /// reason as [`ConnectionError::ApplicationClosed`] (the QUIC connection is closed locally
+    /// on receiving it, which alone would only say "locally closed").
     pub async fn closed(&self) -> ConnectionError {
-        self.quic_connection.closed().await.into()
+        let error = ConnectionError::from(self.quic_connection.closed().await);
+
+        if matches!(error, ConnectionError::LocallyClosed) {
+            if let Some(close) = self.driver.session_close().await {
+                return ConnectionError::ApplicationClosed(close);
+            }
+        }
+
+        error
     }
 
     /// Returns the WebTransport session identifier.

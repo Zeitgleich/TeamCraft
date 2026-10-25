@@ -215,7 +215,7 @@ impl Sfu {
 
   async fn go_away(&self) {
     // Rooms first: from here on, the sessions' ends are not reported as leaves.
-    self.shared.rooms.go_away();
+    self.shared.rooms.go_away_gracefully().await;
     // Also the sessions that haven't joined yet.
     self
       .endpoint

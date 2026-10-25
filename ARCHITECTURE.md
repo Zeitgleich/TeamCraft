@@ -415,7 +415,9 @@ Rejoin attempts back off exponentially (250 ms doubling to 2 s) with jitter (eac
 half and all of its interval), so clients that lost the SFU together don't come back in lockstep.
 
 **SFU restarts.** Rooms live in the SFU's memory. On SIGTERM (a restart, a rolling deploy) the SFU
-closes every connection with the application code `SFU_GOING_AWAY_CLOSE_CODE` and exits after a
+ends every WebTransport session with a `CLOSE_WEBTRANSPORT_SESSION` capsule carrying
+`SFU_GOING_AWAY_CLOSE_CODE` (what a browser reads as `closeCode`), then closes the QUIC connection
+with the same application code, and exits after a
 short drain (`TEAMCRAFT_SFU_SHUTDOWN_DRAIN_SECS`, default 2 s). Unlike its other closes, clients
 answer this one with a rejoin, the first attempt after a random part of a second, then with the
 back-off above within the grace period they learnt. The restarted SFU (at the same address)
