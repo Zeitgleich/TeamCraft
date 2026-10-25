@@ -808,10 +808,16 @@ impl LongPress {
 
 /// A short vibration where the device offers one; without it the sheet itself is the feedback.
 fn tick_haptic() {
-  if let Some(window) = web_sys::window() {
-    // Refused (no permission yet, no motor): nothing to tell the user.
-    let _ = window.navigator().vibrate_with_duration(LONG_PRESS_HAPTIC_MS);
+  let Some(window) = web_sys::window() else {
+    return;
+  };
+  let navigator = window.navigator();
+  // WebKit (iOS Safari, WKWebView, WebKitGTK) has no `vibrate`; calling it would throw.
+  if !js_sys::Reflect::has(&navigator, &"vibrate".into()).unwrap_or(false) {
+    return;
   }
+  // Refused (no permission yet, no motor): nothing to tell the user.
+  let _ = navigator.vibrate_with_duration(LONG_PRESS_HAPTIC_MS);
 }
 
 /// The i18n key and arguments that describe a workspace event; `None` for events not worth a line.

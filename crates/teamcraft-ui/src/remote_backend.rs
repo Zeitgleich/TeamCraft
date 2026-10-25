@@ -134,7 +134,10 @@ pub async fn enable_web_push(auth: &dyn Authenticator) -> Result<(), String> {
   call("core_enable_push", &json!({ "vapid_key": vapid_key })).await
 }
 
+/// Signs the core out; the backend of this session gets no more events (#344).
 pub async fn stop_core() -> Result<(), String> {
+  // async-ok: a thread-local, not a signal.
+  CORE_EVENTS.with(|route| route.borrow_mut().clear());
   call("core_stop", &json!({})).await
 }
 
@@ -261,6 +264,11 @@ impl<T: Clone> EventRoute<T> {
 
   fn target(&self) -> Option<T> {
     self.maybe_target.clone()
+  }
+
+  /// Drops the receiver (sign-out); the subscription stays for the next one.
+  fn clear(&mut self) {
+    self.maybe_target = None;
   }
 }
 
@@ -1448,6 +1456,16 @@ mod tests {
         Some("second"),
         "events go to the newest backend only"
       );
+    }
+
+    #[test]
+    fn after_sign_out_events_reach_no_backend_until_the_next_connect() {
+      let mut route = EventRoute::new();
+      route.route_to("first");
+      route.clear();
+      assert_eq!(route.target(), None);
+      assert!(!route.route_to("second"), "still subscribed");
+      assert_eq!(route.target(), Some("second"));
     }
   }
 

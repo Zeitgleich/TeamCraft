@@ -360,6 +360,41 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
 fn hold_toasts_while_hidden(state: AppState) {
   let is_visible = crate::reactive::use_page_visible();
   Effect::new(move |_| state.hold_toasts(Hold::Hidden, !is_visible.get()));
+  end_timed_toasts_when_the_page_goes(state);
+}
+
+/// A page that is closed, navigated away, frozen or about to be discarded does what its Undo toasts
+/// hold back now, or a deletion would never be sent. Capturing on the window runs this before the
+/// browser core writes its store on the same events (`web_core.rs`), so the action is in it. The
+/// page listens once; a new shell (after signing in again) takes it over.
+fn end_timed_toasts_when_the_page_goes(state: AppState) {
+  thread_local! {
+    static SHELL: Cell<Option<AppState>> = const { Cell::new(None) };
+    static IS_LISTENING: Cell<bool> = const { Cell::new(false) };
+  }
+  SHELL.with(|shell| shell.set(Some(state)));
+  if IS_LISTENING.with(|is_listening| is_listening.replace(true)) {
+    return;
+  }
+  let Some(window) = web_sys::window() else {
+    return;
+  };
+  let listener = Closure::<dyn FnMut(web_sys::Event)>::new(|_: web_sys::Event| {
+    // async-ok: a thread-local, not a signal; a gone shell's state does nothing (`try_*`).
+    if let Some(state) = SHELL.with(Cell::get) {
+      state.end_timed_toasts();
+    }
+  });
+  for kind in ["pagehide", "freeze"] {
+    if window
+      .add_event_listener_with_callback_and_bool(kind, listener.as_ref().unchecked_ref(), true)
+      .is_err()
+    {
+      tracing::debug!(kind, "could not watch the page lifecycle");
+    }
+  }
+  // Lives as long as the page.
+  listener.forget();
 }
 
 /// Whether focus moves to another element of the same container (from Undo to the close button).

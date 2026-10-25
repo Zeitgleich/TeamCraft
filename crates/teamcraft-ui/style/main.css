@@ -1341,8 +1341,7 @@ select.input {
 }
 
 /* Linux: the button is a full-height target; the circle is the glyph's own box. A square never
-   shows,
-so the focus ring is drawn round the circle too. */
+   shows, so the focus ring is drawn round the circle too. */
 :root[data-platform="linux"] .window-btn,
 :root[data-platform="linux"] .window-btn:active {
   background: transparent;
@@ -8286,12 +8285,12 @@ ol.md-list {
     -webkit-touch-callout: none;
   }
 
-  .msg-user:focus:not(:focus-visible):not(.msg-active),
-  .msg-user:focus-within:not(:has(:focus-visible)):not(.msg-active) {
+  .msg-user:focus:not(:focus-visible):not(.msg-active):not(.is-pressing):not(.msg-highlight),
+  .msg-user:focus-within:not(:has(:focus-visible)):not(.msg-active):not(.is-pressing):not(.msg-highlight) {
     background: transparent;
   }
 
-  .msg-user:focus:not(:focus-visible):not(.msg-active) .hover-time {
+  .msg-user:focus:not(:focus-visible):not(.msg-active):not(.is-pressing) .hover-time {
     visibility: hidden;
   }
 }

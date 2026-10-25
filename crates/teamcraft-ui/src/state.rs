@@ -870,14 +870,29 @@ impl AppState {
   /// toast timer, which may fire after the shell is gone.
   pub fn dismiss_toast(&self, id: u64) {
     let _ = self.toasts.try_update(|list| list.retain(|toast| toast.id != id));
-    // Nothing left to point at or focus: a hold from a toast that went away must not stall the next.
+    // A hold from a toast that went away must not stall the others: nothing is left to point at,
+    // and a removed toast takes the focus with it without a `focusout`.
     if self.toasts.try_with_untracked(Vec::is_empty) == Some(true) {
       self.hold_toasts(Hold::Pointer, false);
+    }
+    if !is_focus_in_toasts() {
       self.hold_toasts(Hold::Focus, false);
     }
     let maybe_end = self.toast_clock.try_update_value(|clock| clock.end(id)).flatten();
     if let Some(end) = maybe_end {
       end();
+    }
+  }
+
+  /// The page goes away (closed, navigated, frozen or discarded): what the Undo toasts hold back is
+  /// done now rather than never.
+  pub fn end_timed_toasts(&self) {
+    let pending: Vec<u64> = self
+      .toast_clock
+      .try_with_value(|clock| clock.on_end.keys().copied().collect())
+      .unwrap_or_default();
+    for toast in pending {
+      self.dismiss_toast(toast);
     }
   }
 
@@ -988,11 +1003,16 @@ impl AppState {
   /// closes, by the countdown or earlier.
   fn close_toast_after(&self, toast: u64, duration: Duration, on_end: impl FnOnce() + 'static) {
     let now = crate::clock::now_ms();
-    self.toast_clock.update_value(|clock| {
-      clock.timers.start(toast, duration, now);
-      clock.on_end.insert(toast, Box::new(on_end));
-    });
-    self.schedule_toast_wake();
+    let is_alive = self
+      .toast_clock
+      .try_update_value(|clock| {
+        clock.timers.start(toast, duration, now);
+        clock.on_end.insert(toast, Box::new(on_end));
+      })
+      .is_some();
+    if is_alive {
+      self.schedule_toast_wake();
+    }
   }
 
   /// One browser timer for the nearest deadline; none while the countdowns are held. Native builds
@@ -1584,6 +1604,22 @@ fn has_exactly(members: &[UserId], users: &[UserId], me: UserId) -> bool {
       .all(|member| *member == me || users.contains(member))
 }
 
+/// Whether the keyboard focus is on a toast (native builds have no focus).
+fn is_focus_in_toasts() -> bool {
+  #[cfg(target_arch = "wasm32")]
+  {
+    web_sys::window()
+      .and_then(|window| window.document())
+      .and_then(|document| document.active_element())
+      .and_then(|element| element.closest(".toasts").ok().flatten())
+      .is_some()
+  }
+  #[cfg(not(target_arch = "wasm32"))]
+  {
+    false
+  }
+}
+
 /// Adds a toast and closes the oldest beyond [`MAX_TOASTS`]. Toasts with an Undo stay: closing
 /// one would take away the only way back.
 fn push_capped(list: &mut Vec<Toast>, toast: Toast) {
@@ -1964,6 +2000,39 @@ mod tests {
       state.wake_toasts_at(now + BRIEF_TOAST.as_millis() as i64);
       assert_eq!(state.toasts.get_untracked().len(), 1, "the brief toast closed");
       state.wake_toasts_at(now + UNDO_WINDOW.as_millis() as i64);
+      assert!(state.toasts.get_untracked().is_empty());
+      assert!(
+        !state.hidden_messages.get_untracked().contains(&message),
+        "the deletion went out"
+      );
+    }
+
+    /// Review of #387: closing the focused toast moves the focus away without a `focusout`; the
+    /// other toast's countdown must go on.
+    #[test]
+    fn closing_the_focused_toast_releases_the_focus_hold() {
+      let state = test_state();
+      let now = crate::clock::now_ms();
+      state.show_brief_toast("one".into());
+      state.show_brief_toast("two".into());
+      let first = state.toasts.get_untracked()[0].id;
+      state.hold_toasts(Hold::Focus, true);
+      state.dismiss_toast(first);
+      state.wake_toasts_at(now + BRIEF_TOAST.as_millis() as i64);
+      assert!(
+        state.toasts.get_untracked().is_empty(),
+        "the second toast closed on time"
+      );
+    }
+
+    #[test]
+    fn leaving_the_page_commits_what_undo_toasts_hold_back() {
+      let state = test_state();
+      let (_, conversation) = first_channel(&state);
+      let message = id_from_raw(1);
+      state.delete_with_undo(conversation, message, "deleted".into());
+      state.show_brief_toast("Link copied".into());
+      state.end_timed_toasts();
       assert!(state.toasts.get_untracked().is_empty());
       assert!(
         !state.hidden_messages.get_untracked().contains(&message),

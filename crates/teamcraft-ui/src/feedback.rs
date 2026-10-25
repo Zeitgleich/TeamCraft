@@ -132,7 +132,15 @@ pub struct ActionTicket {
 /// When each recent background failure was last shown, for the per-failure rate limit.
 #[derive(Default)]
 struct Cooldown {
-  shown: Vec<(ActionFailure, TimestampMs)>,
+  shown: Vec<(CooldownKey, TimestampMs)>,
+}
+
+/// What makes two failures "the same" for the cooldown: the kind and the detail without the parts
+/// that change from one try to the next (IDs, counts, offsets).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CooldownKey {
+  kind: FailureKind,
+  stable_detail: String,
 }
 
 impl PendingAction {
@@ -279,14 +287,30 @@ impl Cooldown {
     self
       .shown
       .retain(|(_, at)| (0..BACKGROUND_COOLDOWN_MS).contains(&(now - at)));
-    if self.shown.iter().any(|(shown, _)| shown == failure) {
+    let key = CooldownKey::of(failure);
+    if self.shown.iter().any(|(shown, _)| *shown == key) {
       return false;
     }
     if self.shown.len() >= COOLDOWN_CAPACITY {
       self.shown.remove(0);
     }
-    self.shown.push((failure.clone(), now));
+    self.shown.push((key, now));
     true
+  }
+}
+
+impl CooldownKey {
+  fn of(failure: &ActionFailure) -> Self {
+    let first_line = failure.detail.lines().next().unwrap_or_default();
+    let stable_detail = first_line
+      .split_whitespace()
+      .filter(|word| !word.chars().any(|char| char.is_ascii_digit()))
+      .collect::<Vec<_>>()
+      .join(" ");
+    Self {
+      kind: failure.kind.clone(),
+      stable_detail,
+    }
   }
 }
 
@@ -459,6 +483,14 @@ mod tests {
     }
 
     #[test]
+    fn the_same_failure_with_other_ids_is_a_repeat() {
+      let mut cooldown = Cooldown::default();
+      assert!(cooldown.allows(&ActionFailure::other("history of 1234 at offset 100 failed"), 0));
+      assert!(!cooldown.allows(&ActionFailure::other("history of 5678 at offset 200 failed"), 10));
+      assert!(cooldown.allows(&ActionFailure::other("search segment 3 failed"), 10));
+    }
+
+    #[test]
     fn a_clock_that_went_backwards_ends_the_cooldown() {
       let mut cooldown = Cooldown::default();
       let failure = ActionFailure::other("refused");
@@ -470,7 +502,10 @@ mod tests {
     fn memory_stays_bounded_with_many_distinct_failures() {
       let mut cooldown = Cooldown::default();
       for index in 0..100 {
-        assert!(cooldown.allows(&ActionFailure::other(format!("failure {index}")), index));
+        assert!(cooldown.allows(
+          &ActionFailure::other(format!("failure {}", "x".repeat(index as usize + 1))),
+          index
+        ));
       }
       assert_eq!(cooldown.shown.len(), COOLDOWN_CAPACITY);
     }
