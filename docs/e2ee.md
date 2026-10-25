@@ -231,8 +231,12 @@ Result:
   message). The other members see that keys went to the new member, not which: a member who joined
   from the join on (a guest) never gets earlier history this way, and ignores history keys in a
   bundle sent to the whole group, which clients before this version send; only a device that just
-  joined and waits for its first current key takes them, as the new member of such a client. A new
-  member on a client before this version gets only the current key from an updated adder. With
+  joined and waits for its first current key takes them, as the new member of such a client, and
+  only from the member whose commit made its welcome, in the epoch it joined. A new member on a
+  client before this version gets only the current key from an updated adder. A history share
+  still waiting to be sent (the adder was offline) goes out only if the adder saw the member stay
+  in the group since the addition: after a removal (and maybe an addition from the join on) it is
+  dropped. With
   history from the join on, the adder sends only the new epoch key, which the other members derive
   themselves.
 - The choice is part of the signed change and settled before signing (guests: always from the join

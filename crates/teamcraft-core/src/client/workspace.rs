@@ -222,7 +222,10 @@ pub(crate) enum SharedKeys {
   FullHistory,
   /// "Share history": the current key to the group, every key sealed to the new member's
   /// devices only (e2ee.md §4.3).
-  HistoryFor { user_id: UserId },
+  /// `added_epoch`: the epoch the addition made; the history goes only to devices of a user that
+  /// stayed a member since (a share still pending after a removal and a new addition must not
+  /// hand over the keys of the time between).
+  HistoryFor { user_id: UserId, added_epoch: u64 },
   /// The current key only (history from the join on).
   CurrentKey,
   /// To a device added back, sealed to it: the keys of the epochs it was a member in (e2ee.md

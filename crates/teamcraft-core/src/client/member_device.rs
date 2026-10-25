@@ -52,6 +52,38 @@ pub(crate) enum MemberDeviceJoin {
   NotAMember,
 }
 
+/// That this device waits for a member's current key, and from whose welcome.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct CurrentKeyWait {
+  #[serde(rename = "welcome", default, skip_serializing_if = "Option::is_none")]
+  maybe_origin: Option<WelcomeOrigin>,
+}
+
+/// The member whose commit made this device's welcome, and the epoch the welcome joined.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct WelcomeOrigin {
+  user_id: UserId,
+  device_id: DeviceId,
+  epoch: u64,
+}
+
+impl WelcomeOrigin {
+  pub(crate) fn new(sender: GroupMember, epoch: u64) -> Result<Self, CoreError> {
+    Ok(Self {
+      user_id: convert::user_from_crypto(sender.user_id)?,
+      device_id: convert::device_from_crypto(sender.device_id)?,
+      epoch,
+    })
+  }
+
+  /// Whether a message from `sender` in `epoch` comes from the welcome's maker in the joined epoch.
+  pub(crate) fn is(&self, sender: GroupMember, epoch: u64) -> bool {
+    sender.user_id == convert::user(self.user_id)
+      && sender.device_id == convert::device(self.device_id)
+      && epoch == self.epoch
+  }
+}
+
 /// That this device asked the members to add it, and when.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct DeviceAddRecord {
@@ -171,7 +203,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         // Waiting first: a crash right after must not leave the device writing with the key
         // bag's current key.
         self.forget_key_history(conversation)?;
-        self.wait_for_current_key(conversation)?;
+        self.wait_for_current_key(conversation, None)?;
         self.persist_group(conversation)?;
         self.advance_cursor(conversation, &response.commit)?;
         self.remember_member_keys(
@@ -205,12 +237,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// before a key switch the user's other devices hadn't uploaded yet, one a removed member knows
   /// (#178). It stays for reading; new messages wait until a member sends the current key or the
   /// next epoch key switch, and the conversation shows that this device waits.
-  pub(crate) fn wait_for_current_key(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+  /// `maybe_origin`: for a welcome, who made it and in which epoch (an adder on an earlier version
+  /// sends this device its history in a plain bundle then).
+  pub(crate) fn wait_for_current_key(
+    &mut self,
+    conversation: ConversationId,
+    maybe_origin: Option<WelcomeOrigin>,
+  ) -> Result<(), CoreError> {
     records::put_json(
       &self.store,
       Table::AppliedChanges,
       &current_key_wait_key(conversation),
-      &true,
+      &CurrentKeyWait { maybe_origin },
     )?;
     let ring = self.account.key_bag.ring_mut(convert::conversation(conversation));
     if let Some(current) = ring.current().map(|key| key.id()) {
@@ -662,6 +700,19 @@ pub(crate) fn is_waiting_for_current_key(
       .get(Table::AppliedChanges, &current_key_wait_key(conversation))?
       .is_some(),
   )
+}
+
+/// Who made the welcome this device joined from, and the epoch it joined in, while it waits for
+/// a current key ([`Client::wait_for_current_key`]).
+pub(crate) fn welcome_origin(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+) -> Result<Option<WelcomeOrigin>, CoreError> {
+  // A record of an earlier version (`true`) has no origin.
+  let maybe_wait: Option<CurrentKeyWait> = store
+    .get(Table::AppliedChanges, &current_key_wait_key(conversation))?
+    .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+  Ok(maybe_wait.and_then(|wait| wait.maybe_origin))
 }
 
 /// Where this device notes that it waits for a member's current key.
