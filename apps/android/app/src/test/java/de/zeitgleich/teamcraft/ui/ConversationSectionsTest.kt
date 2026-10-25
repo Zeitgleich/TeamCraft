@@ -93,6 +93,15 @@ class ConversationSectionsTest {
     assertEquals(TabBadge(mentions = 1, unread = 2), badge)
   }
 
+  @Test
+  fun badgeIsRedForMentionsAndUnreadDirectMessagesOnly() {
+    assertEquals(BadgeTone.Mention, item("1", "Amy", ConversationKind.DIRECT, unread = 1u).badgeTone())
+    assertEquals(BadgeTone.Mention, item("2", "Team", ConversationKind.GROUP, unread = 3u).badgeTone())
+    assertEquals(BadgeTone.Mention, item("3", "dev", ConversationKind.PUBLIC, unread = 3u, mentions = 1u).badgeTone())
+    assertEquals(BadgeTone.Unread, item("4", "dev", ConversationKind.PUBLIC, unread = 3u).badgeTone())
+    assertEquals(BadgeTone.Unread, item("5", "Amy", ConversationKind.DIRECT, unread = 3u, isMuted = true).badgeTone())
+  }
+
   private fun item(
     id: String,
     name: String,
