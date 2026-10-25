@@ -108,6 +108,14 @@ pub enum CoreError {
   CallEncryptionPending(ConversationId),
   #[error("conversation {0} is not a meeting chat")]
   NotAMeetingChat(ConversationId),
+  /// The call of `from` should move into `to`, but that doesn't check out: no member of `from`'s
+  /// group announced it, or `to`'s group holds people the announcement didn't name.
+  #[error("moving the call of {from} into {to} refused: {reason}")]
+  CallMoveRefused {
+    from: ConversationId,
+    to: ConversationId,
+    reason: &'static str,
+  },
   #[error("conversation {0} has no content key on this device yet")]
   NoContentKey(ConversationId),
   #[error("gave up after {attempts} attempts: {reason}")]
@@ -188,6 +196,7 @@ impl CoreError {
         .error_code()
         .map_or(FailureKind::Other, |code| FailureKind::Server(code.clone())),
       Self::CallEncryptionPending(_) => FailureKind::Call(CallFailure::EncryptionPending),
+      Self::CallMoveRefused { .. } => FailureKind::Call(CallFailure::MoveRefused),
       _ => FailureKind::Other,
     };
     ActionFailure::new(kind, self.to_string())

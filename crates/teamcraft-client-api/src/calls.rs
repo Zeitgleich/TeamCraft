@@ -438,6 +438,14 @@ pub struct HuddleInfo {
   pub participants: Vec<UserId>,
 }
 
+/// A move of the user's DM call into a meeting room, as a member of the DM's encryption group
+/// announced it (docs/meetings.md, "A call becomes a meeting"): who moved it and whom they added.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallMoveOffer {
+  pub by: UserId,
+  pub added: Vec<UserId>,
+}
+
 /// A call someone started that the user can accept or decline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IncomingCall {

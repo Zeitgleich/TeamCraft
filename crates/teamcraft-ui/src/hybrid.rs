@@ -11,7 +11,7 @@
 use leptos::prelude::{Get, GetUntracked, RwSignal, Set};
 use std::rc::Rc;
 use teamcraft_client_api::calls::{
-  CallStatusSounds, CallsUnavailableReason, OrgBackgroundRule, RemoteVideoTrack,
+  CallMoveOffer, CallStatusSounds, CallsUnavailableReason, OrgBackgroundRule, RemoteVideoTrack,
 };
 use teamcraft_proto::OrgBackgroundId;
 
@@ -630,6 +630,14 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
 
   fn add_space_members(&self, space: SpaceId, users: Vec<UserId>, is_guest: bool) {
     self.chat.add_space_members(space, users, is_guest);
+  }
+
+  fn call_move_offer(&self, from: ConversationId, to: ConversationId) -> Option<CallMoveOffer> {
+    self.chat.call_move_offer(from, to)
+  }
+
+  fn accept_call_move(&self, from: ConversationId, to: ConversationId) {
+    self.chat.accept_call_move(from, to);
   }
 
   fn has_external_people(&self, conversation: ConversationId) -> bool {

@@ -15,8 +15,8 @@ use crate::activity::ActivityFeed;
 use crate::admin::DeviceInfo;
 use crate::backend::{ChatBackend, SearchBackend};
 use crate::calls::{
-  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallEndReason, CallHistoryItem, CallRequest,
-  CallStatusSounds, IncomingCall, MediaDevices, OrgBackgroundRule, OrgBackgrounds, PushToTalk,
+  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallEndReason, CallHistoryItem, CallMoveOffer,
+  CallRequest, CallStatusSounds, IncomingCall, MediaDevices, OrgBackgroundRule, OrgBackgrounds, PushToTalk,
   RemoteVideoTrack, RunningCall,
 };
 use crate::live::LiveSnapshot;
@@ -654,6 +654,10 @@ pub enum ChatAction {
     in_call: Vec<UserId>,
     added: Vec<UserId>,
   },
+  AcceptCallMove {
+    from: ConversationId,
+    to: ConversationId,
+  },
   LetIntoMeetingChat {
     conversation: ConversationId,
     user: UserId,
@@ -857,6 +861,7 @@ impl ChatAction {
         in_call,
         added,
       } => backend.move_call_to_meeting(from, meeting, in_call, added),
+      Self::AcceptCallMove { from, to } => backend.accept_call_move(from, to),
       Self::LetIntoMeetingChat { conversation, user } => backend.let_into_meeting_chat(conversation, user),
       Self::SetBookmarks {
         conversation,
@@ -985,6 +990,10 @@ pub enum ChatQuery {
   HasExternalPeople {
     conversation: ConversationId,
   },
+  CallMoveOffer {
+    from: ConversationId,
+    to: ConversationId,
+  },
   Activity,
   LastSeen {
     user: UserId,
@@ -1004,6 +1013,9 @@ pub enum ChatQuery {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "answer", rename_all = "snake_case")]
 pub enum ChatAnswer {
+  CallMoveOffer {
+    maybe_offer: Option<CallMoveOffer>,
+  },
   MessageExtras {
     extras: Vec<MessageExtras>,
   },
@@ -1209,6 +1221,9 @@ impl ChatQuery {
       },
       Self::HasExternalPeople { conversation } => ChatAnswer::Flag {
         value: backend.has_external_people(conversation),
+      },
+      Self::CallMoveOffer { from, to } => ChatAnswer::CallMoveOffer {
+        maybe_offer: backend.call_move_offer(from, to),
       },
       Self::Thread { conversation, thread } => ChatAnswer::Messages {
         messages: backend.thread(conversation, thread),

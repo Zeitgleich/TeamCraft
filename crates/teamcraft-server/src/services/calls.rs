@@ -75,6 +75,8 @@ struct ActiveCall {
   /// Set when a DM call moved into this meeting chat: the people added there ring when the call
   /// starts (or at once if it runs), and only they.
   maybe_added_ring: Option<AddedRing>,
+  /// Set when this DM call moved into a meeting chat: a second move goes nowhere else.
+  maybe_moved_to: Option<ConversationId>,
 }
 
 /// The people added to a call that moved into a meeting (`move_call`), rung on behalf of `by`.
@@ -316,6 +318,7 @@ impl CallService {
         participants: Vec::new(),
         is_ringing: false,
         maybe_added_ring: None,
+        maybe_moved_to: None,
       },
     );
     Ok(call_id)
@@ -441,6 +444,23 @@ impl CallService {
       .lock()
       .get(&conversation_id)
       .and_then(|call| call.maybe_added_ring.clone())
+  }
+
+  /// Notes that the conversation's running call moves into `to`. Two people adding at the same time
+  /// would split the call into two rooms: the second move into another room is refused with the
+  /// first one's chat; the same move again (a retry) is fine.
+  fn mark_moved(&self, conversation_id: ConversationId, to: ConversationId) -> Result<(), ConversationId> {
+    let mut active = self.lock();
+    let Some(call) = active.get_mut(&conversation_id) else {
+      return Ok(());
+    };
+    match call.maybe_moved_to {
+      Some(existing) if existing != to => Err(existing),
+      _ => {
+        call.maybe_moved_to = Some(to);
+        Ok(())
+      },
+    }
   }
 
   /// Whether a device of the user is in the conversation's call.
@@ -789,6 +809,11 @@ pub async fn move_call(
   if request.ring_user_ids.len() > max_rung {
     return Err(ApiError::InvalidRequest(format!(
       "at most {max_rung} people to ring"
+    )));
+  }
+  if let Err(existing) = calls.mark_moved(conversation_id, request.to_conversation_id) {
+    return Err(ApiError::Conflict(format!(
+      "the call moved into {existing} already"
     )));
   }
   let target_members = state
@@ -1190,6 +1215,16 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
         .unwrap();
       let started = service.participant_joined(id(1), entry(4, 40), true, UnixMillis(0));
       assert!(matches!(started, JoinChange::Started(snapshot) if !snapshot.is_ringing));
+    }
+
+    #[test]
+    fn a_call_moves_into_one_room_only() {
+      let service = service();
+      service.call_for(id(1), Instant::now(), || Ok(id(100))).unwrap();
+      service.participant_joined(id(1), entry(4, 40), false, UnixMillis(0));
+      assert_eq!(service.mark_moved(id(1), id(2)), Ok(()));
+      assert_eq!(service.mark_moved(id(1), id(2)), Ok(()), "a retry");
+      assert_eq!(service.mark_moved(id(1), id(3)), Err(id(2)));
     }
 
     #[test]

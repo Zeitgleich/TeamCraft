@@ -4,6 +4,7 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
 use teamcraft_crypto::identity::{DeviceKeyPair, VerifiedDevice};
 use teamcraft_proto::{
@@ -14,8 +15,12 @@ use teamcraft_proto::{
 use super::Client;
 use crate::api::ServerApi;
 use crate::error::CoreError;
-use crate::store::LocalStore;
+use crate::records;
+use crate::store::{ConversationEvent, LocalStore, MessageContent, Table};
 use crate::trust::PinnedDirectory;
+
+/// Prefix of the call move announcements in [`Table::SyncState`], per DM and meeting chat.
+const CALL_MOVE_PREFIX: &str = "call_move/";
 
 /// Receives the gateway's call events (start, update, end, ring) for the app's call handling.
 pub type CallEventSink = Box<dyn FnMut(&GatewayEvent)>;
@@ -24,6 +29,14 @@ pub type CallEventSink = Box<dyn FnMut(&GatewayEvent)>;
 /// the length of a call; it can be moved to the thread that runs the media.
 pub struct CallKeySigner {
   device: DeviceKeyPair,
+}
+
+/// A move of a DM's call into a meeting chat, as a member of the DM's group announced it in an
+/// encrypted `CallMoved` event (docs/meetings.md, "A call becomes a meeting").
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallMoveRecord {
+  pub by: UserId,
+  pub added: Vec<UserId>,
 }
 
 /// Everything joining a conversation's call needs from the core (e2ee.md §8).
@@ -144,9 +157,45 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     let request = MoveCallRequest {
       to_conversation_id: meeting,
-      ring_user_ids: rung,
+      ring_user_ids: rung.clone(),
     };
+    // A second move of the same call (somebody else added people at the same time) is refused
+    // with a conflict: everybody follows the first one.
     self.api.move_call(from, &request).await?;
+    // The others follow only this encrypted announcement, never the server's `call_move` alone.
+    let event = ConversationEvent::CallMoved {
+      meeting,
+      added: rung.clone(),
+    };
+    note_call_move(&self.store, from, meeting, me, &rung)?;
+    self.enqueue(from, None, MessageContent::Event { event })?;
+    self.flush_outbox().await?;
+    Ok(())
+  }
+
+  /// Checks the move of `from`'s call into `to` before this device follows it (docs/meetings.md):
+  /// a member of `from`'s group announced it, and `to`'s group, once this device is in it, holds
+  /// nobody but `from`'s members and the people the announcement added. A server that points the
+  /// call somewhere else gets nobody's audio or video there.
+  pub async fn accept_call_move(
+    &mut self,
+    from: ConversationId,
+    to: ConversationId,
+  ) -> Result<(), CoreError> {
+    let refused = |reason| CoreError::CallMoveRefused { from, to, reason };
+    let Some(record) = call_move_announcement(&self.store, from, to)? else {
+      return Err(refused("nobody in the conversation announced it"));
+    };
+    let in_dm = self.group_users(from)?;
+    if !in_dm.contains(&record.by) {
+      return Err(refused("announced by somebody outside the conversation's group"));
+    }
+    self.ensure_call_group(to).await?;
+    let me = self.user_id();
+    let is_expected = |user: &UserId| *user == me || in_dm.contains(user) || record.added.contains(user);
+    if !self.group_users(to)?.iter().all(is_expected) {
+      return Err(refused("the meeting room holds somebody the move didn't name"));
+    }
     Ok(())
   }
 
@@ -186,4 +235,33 @@ impl fmt::Debug for CallKeySigner {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.debug_struct("CallKeySigner").finish_non_exhaustive()
   }
+}
+
+/// Notes an announced move of `from`'s call into `meeting` (an own one or a member's, received in
+/// `from`'s group).
+pub(crate) fn note_call_move(
+  store: &impl LocalStore,
+  from: ConversationId,
+  meeting: ConversationId,
+  by: UserId,
+  added: &[UserId],
+) -> Result<(), CoreError> {
+  let record = CallMoveRecord {
+    by,
+    added: added.to_vec(),
+  };
+  records::put_json(store, Table::SyncState, &call_move_key(from, meeting), &record)
+}
+
+/// The announced move of `from`'s call into `meeting`, if any.
+pub fn call_move_announcement(
+  store: &impl LocalStore,
+  from: ConversationId,
+  meeting: ConversationId,
+) -> Result<Option<CallMoveRecord>, CoreError> {
+  records::get_json(store, Table::SyncState, &call_move_key(from, meeting))
+}
+
+fn call_move_key(from: ConversationId, meeting: ConversationId) -> String {
+  format!("{CALL_MOVE_PREFIX}{from}/{meeting}")
 }

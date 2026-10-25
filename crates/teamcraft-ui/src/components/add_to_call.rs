@@ -8,6 +8,7 @@ use leptos::prelude::*;
 use teamcraft_proto::IdempotencyKey;
 
 use crate::clock::now_ms;
+use crate::components::pending_button::PendingButton;
 use crate::components::people_picker::PeoplePicker;
 use crate::components::workspace_dialogs::{Dialog, FailureNote};
 use crate::feedback::PendingAction;
@@ -24,7 +25,8 @@ pub fn AddToCallDialog(conversation: ConversationId) -> impl IntoView {
   let chosen = RwSignal::new(Vec::<User>::new());
   // One key per dialog: a retry after a lost answer gets the same meeting room, not a second one.
   let key = IdempotencyKey::random();
-  // Who is in the call, as the call shows them (the core keeps only those in the DM's group).
+  // Who is in the call as the media layer shows them (devices verified against the DM's group);
+  // the core keeps only members of that group.
   let in_call = Signal::derive(move || {
     let me = state.me().id;
     let mut people: HashSet<UserId> = state.read(|backend| {
@@ -37,8 +39,21 @@ pub fn AddToCallDialog(conversation: ConversationId) -> impl IntoView {
     people.insert(me);
     people
   });
-  let pending = PendingAction::new();
-  // The dialog stays open until the meeting room exists; the switch itself shows in the call.
+  // Two steps, each with its failure in the dialog: the meeting room (REST), then the move (the
+  // core founds the room's group, the server moves the call, the DM's group hears of it). A retry
+  // after a failed move reuses the room.
+  let creating = PendingAction::new();
+  let moving = PendingAction::new();
+  let maybe_room = RwSignal::new(None::<ConversationId>);
+  let is_pending = move || creating.is_pending() || moving.is_pending();
+  let move_into = move |room: ConversationId, in_call: Vec<UserId>, added: Vec<UserId>| {
+    moving.run_and_then(
+      || state.write(|backend| backend.move_call_to_meeting(conversation, room, in_call, added)),
+      move || {
+        let _ = state.overlay.try_set(crate::state::Overlay::None);
+      },
+    );
+  };
   let add = move || {
     let Some(hub) = maybe_hub else { return };
     let picked: Vec<UserId> = chosen.with_untracked(|list| list.iter().map(|user| user.id).collect());
@@ -51,17 +66,22 @@ pub fn AddToCallDialog(conversation: ConversationId) -> impl IntoView {
     else {
       return;
     };
+    if let Some(room) = maybe_room.get_untracked() {
+      move_into(room, in_call, added);
+      return;
+    }
     let title = i18n.t("call-meeting-title");
     let client = hub.client();
-    pending.spawn(async move {
+    creating.spawn(async move {
       let meeting = client
         .start_instant(Some(title), invitees, Some(key))
         .await
         .map_err(|error| error.to_failure())?;
-      state.try_write(|backend| {
-        backend.move_call_to_meeting(conversation, meeting.conversation_id, in_call, added)
-      });
-      let _ = state.overlay.try_set(crate::state::Overlay::None);
+      if maybe_room.try_set(Some(meeting.conversation_id)).is_some() {
+        // The dialog is gone (closed meanwhile): nothing is moved without it.
+        return Ok(());
+      }
+      move_into(meeting.conversation_id, in_call, added);
       // The call screen shows the host controls of the new meeting.
       hub.refresh(me, now_ms()).await;
       Ok(())
@@ -79,24 +99,66 @@ pub fn AddToCallDialog(conversation: ConversationId) -> impl IntoView {
           on_submit=Callback::new(move |()| add())
         />
         <p class="hint">{move || i18n.t("call-add-hint")}</p>
-        <FailureNote pending=pending />
+        <FailureNote pending=creating />
+        <FailureNote pending=moving />
         <footer class="modal-foot">
           <span class="grow"></span>
           <button type="button" class="btn" on:click=move |_| state.close_overlay()>{move || i18n.t("cancel")}</button>
           <button
             type="submit"
             class="btn btn-primary"
-            prop:disabled=move || pending.is_pending() || chosen.with(Vec::is_empty)
-            aria-busy=move || pending.is_pending().then_some("true")
+            prop:disabled=move || is_pending() || chosen.with(Vec::is_empty)
+            aria-busy=move || is_pending().then_some("true")
           >
-            <Show when=move || pending.is_pending() fallback=|| ()>
+            <Show when=is_pending fallback=|| ()>
               <span class="spinner" role="status" aria-label=move || i18n.t("action-running")></span>
             </Show>
-            {move || if pending.maybe_failure().is_some() { i18n.t("data-retry") } else { i18n.t("call-add") }}
+            {move || {
+              let has_failed = creating.maybe_failure().is_some() || moving.maybe_failure().is_some();
+              if has_failed { i18n.t("data-retry") } else { i18n.t("call-add") }
+            }}
           </button>
         </footer>
       </form>
     </Dialog>
+  }
+}
+
+/// Somebody else moved the DM call this device is in into a meeting room: who did it and whom they
+/// added, from their encrypted announcement, and a tap to follow. Nothing moves before the tap.
+#[component]
+pub fn CallMoveBanner() -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let call = state.call;
+  let pending = PendingAction::new();
+  let me = state.me().id;
+  let name_of = move |user: UserId| {
+    state
+      .read(|backend| backend.user(user))
+      .map_or_else(|| i18n.t("left-in-group-unknown"), |user| user.display_name)
+  };
+  move || {
+    let offer = call.move_offer.get().filter(|offer| offer.by != me)?;
+    let added = offer
+      .added
+      .iter()
+      .map(|user| name_of(*user))
+      .collect::<Vec<_>>()
+      .join(", ");
+    let text = i18n.t_with(
+      "call-move-offer",
+      &[("name", &name_of(offer.by)), ("added", &added)],
+    );
+    let (from, to) = (offer.from, offer.to);
+    Some(view! {
+      <div class="call-move-banner" role="status">
+        <span>{text}</span>
+        <PendingButton pending=pending class="btn btn-primary btn-small" on_click=move |_| state.follow_call_move(from, to, pending)>
+          {move || i18n.t("call-move-join")}
+        </PendingButton>
+      </div>
+    })
   }
 }
 

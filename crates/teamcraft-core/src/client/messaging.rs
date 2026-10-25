@@ -585,6 +585,13 @@ fn apply_control_with(
   if let MessageContent::Bookmarks { items } = content {
     return records::put_json(store, Table::Account, &bookmarks_key(conversation), items);
   }
+  if let MessageContent::Event {
+    event: crate::store::ConversationEvent::CallMoved { meeting, added },
+  } = content
+  {
+    // Decrypted in the conversation's group, so `sender` is a member of it.
+    return super::calls::note_call_move(store, conversation, *meeting, sender, added);
+  }
   let target = match content {
     MessageContent::Edit { target, .. }
     | MessageContent::Delete { target }

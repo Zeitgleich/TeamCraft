@@ -981,37 +981,42 @@ fn connect_calls(state: AppState) {
   });
 }
 
-/// Somebody added people to the DM call this device is in: the call moved into a meeting room, and
-/// this device follows into the meeting's call with its microphone and camera as they were
-/// (docs/meetings.md, "A call becomes a meeting"). The DM stays open in the list as it was.
+/// Somebody added people to the DM call this device is in, and the server says the call moved into
+/// a meeting room (docs/meetings.md, "A call becomes a meeting"). The server's word alone moves
+/// nothing: the move shows only once a member of the DM's encryption group announced it, with who
+/// moved it and whom they added. A move the user made follows at once (after the core's check);
+/// anybody else's waits for the user's tap in the call screen.
 fn follow_moved_calls(state: AppState) {
   let call = state.call;
-  let i18n = crate::i18n::use_i18n();
+  let me = untrack(|| state.me().id);
+  let pending = crate::feedback::PendingAction::new();
   Effect::new(move |_| {
-    let Some((from, to)) = state.read(|backend| {
-      backend
-        .active_call()
-        .and_then(|active| active.maybe_moved_to.map(|to| (active.conversation, to)))
-    }) else {
-      return;
-    };
-    let is_in_that_call = call.phase.get_untracked() == CallPhase::Active
-      && call
-        .maybe_request
-        .get_untracked()
-        .is_some_and(|request| request.conversation == from);
-    if !is_in_that_call {
-      return;
-    }
-    if untrack(|| state.current_conversation_id()) == Some(from) {
-      state.open_conversation(to);
-    }
-    state.show_toast(i18n.t("call-moved-to-meeting"));
-    // Joining leaves the DM's call first.
-    call.join(CallRequest {
-      conversation: to,
-      kind: crate::calls::CallKind::Group,
+    let maybe_offer = state.read(|backend| {
+      let active = backend.active_call()?;
+      let to = active.maybe_moved_to?;
+      let offer = backend.call_move_offer(active.conversation, to)?;
+      Some(crate::calls::MoveOffer {
+        from: active.conversation,
+        to,
+        by: offer.by,
+        added: offer.added,
+      })
     });
+    let is_in_that_call = maybe_offer.as_ref().is_some_and(|offer| {
+      call.phase.get_untracked() == CallPhase::Active
+        && call
+          .maybe_request
+          .get_untracked()
+          .is_some_and(|request| request.conversation == offer.from)
+    });
+    let maybe_offer = maybe_offer.filter(|_| is_in_that_call);
+    if call.move_offer.get_untracked() == maybe_offer {
+      return;
+    }
+    call.move_offer.set(maybe_offer.clone());
+    if let Some(offer) = maybe_offer.filter(|offer| offer.by == me) {
+      state.follow_call_move(offer.from, offer.to, pending);
+    }
   });
 }
 

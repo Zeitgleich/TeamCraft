@@ -25,8 +25,9 @@ use crate::admin::{
   AdminChannel, AdminSpace, AdminUser, AuditEntry, AuditFilter, Retention, SelfJoinOutcome, SettingsTestKind,
 };
 use crate::calls::{
-  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallHistoryItem, CallRequest, CallStatusSounds,
-  CallsUnavailableReason, HuddleInfo, IncomingCall, MediaDevices, Participant, RemoteVideoTrack,
+  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallHistoryItem, CallMoveOffer, CallRequest,
+  CallStatusSounds, CallsUnavailableReason, HuddleInfo, IncomingCall, MediaDevices, Participant,
+  RemoteVideoTrack,
 };
 use crate::calls::{OrgBackgroundRule, OrgBackgrounds};
 use crate::model::{
@@ -281,6 +282,14 @@ pub trait ChatBackend {
     _added: Vec<UserId>,
   ) {
   }
+  /// The announced move of the call of `from` into `to`, if a member of `from`'s encryption group
+  /// announced one; the server's `call_move` alone shows nothing.
+  fn call_move_offer(&self, _from: ConversationId, _to: ConversationId) -> Option<CallMoveOffer> {
+    None
+  }
+  /// Checks a move before this device follows it: announced in `from`'s group, and `to`'s group
+  /// holds nobody but `from`'s members and the people the announcement named. Fails otherwise.
+  fn accept_call_move(&self, _from: ConversationId, _to: ConversationId) {}
   /// A host admitted `user` from a meeting's lobby: lets them into the chat's encryption, on this
   /// host's own decision (never because the server made them a member).
   fn let_into_meeting_chat(&self, _conversation: ConversationId, _user: UserId) {}

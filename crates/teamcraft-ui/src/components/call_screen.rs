@@ -371,6 +371,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           </div>
         })
       }}
+      <crate::components::add_to_call::CallMoveBanner />
       <div class="call-stage-wrap">{stage}</div>
       <Show when=move || share_open.get() fallback=|| ()>
         <div class="effects-popover share-popover" role="dialog" aria-label=move || i18n.t("share-options")>

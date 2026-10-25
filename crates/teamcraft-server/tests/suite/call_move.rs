@@ -146,6 +146,59 @@ async fn a_move_into_a_running_meeting_call_rings_at_once() {
 }
 
 #[tokio::test]
+async fn a_second_move_into_another_room_is_refused() {
+  let Some(scene) = dm_call().await else { return };
+  let Scene {
+    app,
+    alice,
+    ids: [_, bob_id, carol_id],
+    dm,
+    ..
+  } = &scene;
+  let mut rooms = Vec::new();
+  for _ in 0..2 {
+    let room = app
+      .post(
+        alice,
+        "/meetings/instant",
+        json!({"invitees": [bob_id, carol_id]}),
+      )
+      .await
+      .body["conversation_id"]
+      .as_str()
+      .unwrap()
+      .to_owned();
+    rooms.push(room);
+  }
+  let first = app
+    .post(
+      alice,
+      &format!("/conversations/{dm}/call/move"),
+      json!({"to_conversation_id": rooms[0]}),
+    )
+    .await;
+  let again = app
+    .post(
+      alice,
+      &format!("/conversations/{dm}/call/move"),
+      json!({"to_conversation_id": rooms[0]}),
+    )
+    .await;
+  let other = app
+    .post(
+      alice,
+      &format!("/conversations/{dm}/call/move"),
+      json!({"to_conversation_id": rooms[1]}),
+    )
+    .await;
+
+  assert_eq!(first.status, StatusCode::NO_CONTENT, "{}", first.body);
+  assert_eq!(again.status, StatusCode::NO_CONTENT, "a retry: {}", again.body);
+  assert_eq!(other.status, StatusCode::CONFLICT, "{}", other.body);
+  scene.app.stop().await;
+}
+
+#[tokio::test]
 async fn only_people_in_the_call_move_it_and_only_into_their_own_meeting() {
   let Some(scene) = dm_call().await else { return };
   let Scene {

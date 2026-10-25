@@ -6,7 +6,17 @@ use std::rc::Rc;
 use leptos::prelude::*;
 
 pub use teamcraft_client_api::calls::*;
-use teamcraft_client_api::model::ConversationId;
+use teamcraft_client_api::model::{ConversationId, UserId};
+
+/// The DM call this device is in moved into a meeting room, announced by `by` in the DM's
+/// encryption group with the people they added.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MoveOffer {
+  pub from: ConversationId,
+  pub to: ConversationId,
+  pub by: UserId,
+  pub added: Vec<UserId>,
+}
 
 /// What the user did that the call backend has to carry out.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +66,8 @@ pub struct CallState {
   pub share_sound: RwSignal<bool>,
   pub has_hand_raised: RwSignal<bool>,
   pub is_deafened: RwSignal<bool>,
+  /// An announced move of this call into a meeting room the user hasn't followed yet.
+  pub move_offer: RwSignal<Option<MoveOffer>>,
   /// Carries the user's actions to the call backend; set once by the shell.
   handler: StoredValue<Option<CallHandler>, LocalStorage>,
 }
@@ -80,6 +92,7 @@ impl CallState {
       share_sound: RwSignal::new(false),
       has_hand_raised: RwSignal::new(false),
       is_deafened: RwSignal::new(false),
+      move_offer: RwSignal::new(None),
       handler: StoredValue::new_local(None),
     }
   }

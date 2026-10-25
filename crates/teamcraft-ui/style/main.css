@@ -10963,3 +10963,5 @@ ol.md-list {
   gap: 8px;
   margin-top: 12px;
 }
+
+.call-move-banner { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; justify-content: center; margin: .5rem 1rem 0; padding: .6rem 1rem; border-radius: var(--radius); background: var(--surface-2); color: var(--text); }

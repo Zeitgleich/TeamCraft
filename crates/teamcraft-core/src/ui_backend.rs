@@ -251,6 +251,11 @@ pub enum CoreCommand {
     in_call: Vec<UserId>,
     added: Vec<UserId>,
   },
+  /// The user follows an announced move of their call into a meeting room.
+  AcceptCallMove {
+    from: ConversationId,
+    to: ConversationId,
+  },
   /// A host admitted a user from a meeting's lobby.
   LetIntoMeetingChat {
     conversation: ConversationId,
@@ -1291,6 +1296,23 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     });
   }
 
+  fn call_move_offer(
+    &self,
+    from: ConversationId,
+    to: ConversationId,
+  ) -> Option<teamcraft_client_api::calls::CallMoveOffer> {
+    self
+      .read(crate::client::call_move_announcement(&self.store, from, to))
+      .map(|record| teamcraft_client_api::calls::CallMoveOffer {
+        by: record.by,
+        added: record.added,
+      })
+  }
+
+  fn accept_call_move(&self, from: ConversationId, to: ConversationId) {
+    self.command(CoreCommand::AcceptCallMove { from, to });
+  }
+
   fn let_into_meeting_chat(&self, conversation: ConversationId, user: UserId) {
     self.command(CoreCommand::LetIntoMeetingChat { conversation, user });
   }
@@ -1628,6 +1650,7 @@ fn system_view(event: &ConversationEvent, sender: UserId) -> (MessageKind, UserI
     | ConversationEvent::MadePrivate
     | ConversationEvent::MadePublic
     | ConversationEvent::Moved { .. }
+    | ConversationEvent::CallMoved { .. }
     | ConversationEvent::Unknown => (MessageKind::User, sender),
   }
 }

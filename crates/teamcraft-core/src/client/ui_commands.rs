@@ -215,6 +215,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         in_call,
         added,
       } => self.move_call_to_meeting(from, meeting, &in_call, &added).await,
+      CoreCommand::AcceptCallMove { from, to } => self.accept_call_move(from, to).await,
       CoreCommand::LetIntoMeetingChat { conversation, user } => {
         self.let_into_meeting_chat(conversation, user).await
       },

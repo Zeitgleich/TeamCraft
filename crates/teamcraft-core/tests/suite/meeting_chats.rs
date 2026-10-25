@@ -366,6 +366,76 @@ mod call_moves {
     assert_eq!(carol.client.prepare_call(meeting).await.unwrap().devices.len(), 3);
   }
 
+  #[tokio::test]
+  async fn the_others_follow_only_a_move_announced_in_the_dms_group() {
+    let (server, mut alice, mut bob, carol, _) = dm_call().await;
+    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
+    bob.client.full_sync().await.unwrap();
+    let (alice_id, bob_id, carol_id) = (
+      alice.client.user_id(),
+      bob.client.user_id(),
+      carol.client.user_id(),
+    );
+    let meeting = server.create_meeting_chat(alice_id, &[bob_id, carol_id]);
+    alice
+      .client
+      .move_call_to_meeting(dm, meeting, &[alice_id, bob_id], &[carol_id])
+      .await
+      .unwrap();
+
+    bob.client.full_sync().await.unwrap();
+    bob.client.accept_call_move(dm, meeting).await.unwrap();
+    assert!(bob.client.has_group(meeting).unwrap());
+  }
+
+  #[tokio::test]
+  async fn a_move_the_server_made_up_is_refused() {
+    let (server, mut alice, mut bob, _, mallory) = dm_call().await;
+    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
+    bob.client.full_sync().await.unwrap();
+    // A room Mallory organizes, which nobody in the DM announced.
+    let elsewhere = server.create_meeting_chat(mallory, &[bob.client.user_id()]);
+
+    let Err(error) = bob.client.accept_call_move(dm, elsewhere).await else {
+      panic!("followed a move nobody announced");
+    };
+    assert!(matches!(error, CoreError::CallMoveRefused { .. }), "{error}");
+    #[cfg(feature = "ui")]
+    assert_eq!(
+      error.to_failure().kind,
+      FailureKind::Call(CallFailure::MoveRefused)
+    );
+  }
+
+  #[tokio::test]
+  async fn a_room_holding_somebody_the_move_didnt_name_is_refused() {
+    let (server, mut alice, mut bob, mut carol, _) = dm_call().await;
+    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
+    bob.client.full_sync().await.unwrap();
+    let dave = Peer::enroll(&server, "Dave").await;
+    let (alice_id, bob_id, carol_id, dave_id) = (
+      alice.client.user_id(),
+      bob.client.user_id(),
+      carol.client.user_id(),
+      dave.client.user_id(),
+    );
+    let meeting = server.create_meeting_chat(alice_id, &[bob_id, carol_id, dave_id]);
+    alice
+      .client
+      .move_call_to_meeting(dm, meeting, &[alice_id, bob_id], &[carol_id])
+      .await
+      .unwrap();
+    // Somebody the announcement didn't name is in the room by the time Bob follows.
+    alice.client.let_into_meeting_chat(meeting, dave_id).await.unwrap();
+    carol.client.full_sync().await.unwrap();
+
+    bob.client.full_sync().await.unwrap();
+    let Err(error) = bob.client.accept_call_move(dm, meeting).await else {
+      panic!("followed into a room with somebody unnamed");
+    };
+    assert!(matches!(error, CoreError::CallMoveRefused { .. }), "{error}");
+  }
+
   async fn dm_call() -> (FakeServer, Peer, Peer, Peer, UserId) {
     let server = FakeServer::new();
     let alice = Peer::enroll(&server, "Alice").await;
