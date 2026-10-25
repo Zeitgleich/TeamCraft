@@ -1,0 +1,54 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT l.user_id, l.meeting_id, m.ends_at\n         FROM meeting_lobby l\n         JOIN meetings m ON m.id = l.meeting_id\n         JOIN users u ON u.id = l.user_id\n         WHERE u.kind = 'guest' AND u.deactivated_at IS NULL\n           AND (m.status <> 'scheduled' OR m.ends_at + make_interval(secs => $2) < $1)\n         ORDER BY m.ends_at, l.user_id\n         LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "meeting_lobby",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "meeting_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "meeting_lobby",
+            "name": "meeting_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "ends_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "meetings",
+            "name": "ends_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Float8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e02656b9cd7d32631f27077bf79467641962772e885bbb65c1d3c11513e23bc1"
+}
