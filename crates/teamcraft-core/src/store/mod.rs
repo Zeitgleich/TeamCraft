@@ -458,6 +458,12 @@ pub trait LocalStore {
     )
   }
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError>;
+  /// Removes one message, e.g. an own one that was never sent and the user dropped.
+  fn delete_message(
+    &self,
+    conversation: ConversationId,
+    client_message_id: ClientMessageId,
+  ) -> Result<(), StoreError>;
 
   /// Overwrites what deleted or replaced records left behind in the store's files (free pages, a
   /// write-ahead log), so a secret that was deleted can't be read back from them, also not by
@@ -559,6 +565,14 @@ macro_rules! forward_local_store {
 
       fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {
         (**self).delete_messages(conversation)
+      }
+
+      fn delete_message(
+        &self,
+        conversation: ConversationId,
+        client_message_id: ClientMessageId,
+      ) -> Result<(), StoreError> {
+        (**self).delete_message(conversation, client_message_id)
       }
 
       fn purge_freed(&self) -> Result<(), StoreError> {

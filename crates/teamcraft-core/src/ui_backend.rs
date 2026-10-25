@@ -1917,7 +1917,10 @@ mod tests {
     records::put_json(store.as_ref(), Table::Outbox, &key, &entry).unwrap();
     backend.discard_unsent(conversation, posted.id);
     assert!(records::outbox(&store).unwrap().is_empty());
-    assert!(backend.message_extras(conversation, &[posted.id])[0].is_deleted);
+    assert!(
+      backend.messages(conversation, 0, 10).is_empty(),
+      "never sent, so nothing of it is left"
+    );
   }
 
   #[cfg(not(target_arch = "wasm32"))]

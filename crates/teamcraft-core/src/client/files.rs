@@ -822,10 +822,8 @@ pub fn cancel_pending_file(
     let key = records::outbox_key(conversation, message);
     store.delete(Table::PendingUploads, &key)?;
     store.delete(Table::Outbox, &key)?;
-    if let Some(mut stored) = store.message(conversation, message)? {
-      stored.content = MessageContent::Deleted;
-      store.upsert_message(&stored)?;
-    }
+    // Never sent: nobody else has it, so nothing of it is left in the conversation.
+    store.delete_message(conversation, message)?;
     Ok::<_, CoreError>(())
   })?;
   Ok(true)

@@ -134,6 +134,20 @@ impl LocalStore for MemoryStore {
       .retain(|(entry_conversation, _), _| *entry_conversation != conversation);
     Ok(())
   }
+
+  fn delete_message(
+    &self,
+    conversation: ConversationId,
+    client_message_id: ClientMessageId,
+  ) -> Result<(), StoreError> {
+    let mut inner = self.lock();
+    let key = *client_message_id.as_bytes();
+    inner.messages.remove(&(conversation, key));
+    inner
+      .by_server_id
+      .retain(|(entry_conversation, _), entry| *entry_conversation != conversation || *entry != key);
+    Ok(())
+  }
 }
 
 #[cfg(test)]

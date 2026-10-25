@@ -73,10 +73,10 @@ async fn a_message_the_server_refuses_shows_as_not_sent_until_deleted() {
   run_commands(&mut alice, &alice_ui).await;
   assert!(alice_ui.message_extras(channel, &[refused.id])[0].is_send_failed);
 
+  let count = alice_ui.message_count(channel);
   alice_ui.discard_unsent(channel, refused.id);
-  let discarded = last(&alice_ui, channel);
-  assert!(!alice_ui.message_extras(channel, &[discarded.id])[0].is_send_failed);
-  assert_ne!(discarded.body, "too late");
+  assert_eq!(alice_ui.message_count(channel), count - 1, "gone, no placeholder");
+  assert_ne!(last(&alice_ui, channel).body, "too late");
   settle(&mut [&mut alice, &mut bob]).await;
   assert!(
     bob_ui_bodies(&bob, channel).iter().all(|body| body != "too late"),
@@ -124,12 +124,9 @@ mod cancel {
     let alice_ui = backend_of(&alice);
     alice_ui.send_message(with_files(channel, "", vec![file("photo.jpg", b"pixels")]));
     let pending = last(&alice_ui, channel);
+    let count = alice_ui.message_count(channel);
     alice_ui.cancel_upload(channel, pending.id, "pending-0");
-    assert!(
-      alice_ui.message_extras(channel, &[pending.id])[0]
-        .files
-        .is_empty()
-    );
+    assert_eq!(alice_ui.message_count(channel), count - 1, "gone, no placeholder");
 
     run_commands(&mut alice, &alice_ui).await;
     alice.client.upload_pending().await.unwrap();
