@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
@@ -58,6 +59,23 @@ pub fn PeoplePicker(
       &filter.get(),
     )
   });
+  // The row the arrow keys are on; `None` until they are used (then Enter acts on the first match).
+  let maybe_active = RwSignal::new(None::<UserId>);
+  let highlighted = Memo::new(move |_| {
+    let list = candidates.get();
+    let selectable =
+      |user: &User, kind: &Candidate| *kind != Candidate::AlreadyIn && Some(user.id) == maybe_active.get();
+    if let Some((user, _)) = list.iter().find(|(user, kind)| selectable(user, kind)) {
+      return Some(user.id);
+    }
+    if filter.with(|text| text.trim().is_empty()) {
+      return None;
+    }
+    list
+      .iter()
+      .find(|(_, kind)| *kind == Candidate::Pickable)
+      .map(|(user, _)| user.id)
+  });
   let toggle = move |user: User| {
     chosen.update(|list| {
       if let Some(index) = list.iter().position(|picked| picked.id == user.id) {
@@ -67,27 +85,64 @@ pub fn PeoplePicker(
       }
     });
   };
-  let pick = move |user: User| {
-    chosen.update(|list| list.push(user));
-    filter.set(String::new());
+  let focus_input = move || {
     if let Some(element) = input.get_untracked() {
       drop(element.focus());
     }
   };
+  // Picking from the keyboard starts the next search; the row stays in the list, checked.
+  let toggle_active = move |user: User| {
+    toggle(user);
+    filter.set(String::new());
+    maybe_active.set(None);
+  };
+  let step = move |forward: bool| {
+    let ids: Vec<UserId> = candidates.with_untracked(|list| {
+      list
+        .iter()
+        .filter(|(_, kind)| *kind != Candidate::AlreadyIn)
+        .map(|(user, _)| user.id)
+        .collect()
+    });
+    if ids.is_empty() {
+      return;
+    }
+    let current = highlighted
+      .get_untracked()
+      .and_then(|id| ids.iter().position(|other| *other == id));
+    let next = match (current, forward) {
+      (None, true) => 0,
+      (None, false) => ids.len() - 1,
+      (Some(index), true) => (index + 1) % ids.len(),
+      (Some(index), false) => (index + ids.len() - 1) % ids.len(),
+    };
+    maybe_active.set(Some(ids[next]));
+  };
   let on_keydown = move |ev: leptos::ev::KeyboardEvent| {
     let is_filter_empty = filter.get_untracked().trim().is_empty();
     match ev.key().as_str() {
-      // Enter picks the first match while searching, and runs the dialog's action otherwise.
+      "ArrowDown" => {
+        ev.prevent_default();
+        step(true);
+      },
+      "ArrowUp" => {
+        ev.prevent_default();
+        step(false);
+      },
+      // Enter toggles the highlighted match, and runs the dialog's action when there is none.
       "Enter" => {
         ev.prevent_default();
-        let maybe_first = candidates
-          .get_untracked()
-          .into_iter()
-          .find(|(_, kind)| *kind == Candidate::Pickable)
-          .map(|(user, _)| user);
-        match (is_filter_empty, maybe_first, on_submit) {
-          (false, Some(first), _) => pick(first),
-          (true, _, Some(submit)) => submit.run(()),
+        let maybe_user = highlighted.get_untracked().and_then(|id| {
+          candidates.with_untracked(|list| {
+            list
+              .iter()
+              .find(|(user, _)| user.id == id)
+              .map(|(user, _)| user.clone())
+          })
+        });
+        match (maybe_user, on_submit) {
+          (Some(user), _) => toggle_active(user),
+          (None, Some(submit)) if is_filter_empty => submit.run(()),
           _ => {},
         }
       },
@@ -98,8 +153,15 @@ pub fn PeoplePicker(
       _ => {},
     }
   };
+  // The scrolled list follows the highlight.
+  Effect::new(move |_| {
+    if let Some(id) = highlighted.get() {
+      scroll_option_into_view(id);
+    }
+  });
   view! {
-    <ul class="chip-list" aria-label=move || i18n.t(chosen_label_key)>
+    // One field: the picked people as pills in front of the search input, wrapping as it grows.
+    <ul class="token-field" aria-label=move || i18n.t(chosen_label_key) on:click=move |_| focus_input()>
       <For each=move || chosen.get() key=|user| user.id let:user>
         {
           let id = user.id;
@@ -108,14 +170,19 @@ pub fn PeoplePicker(
             move || i18n.t_with("dm-new-remove", &[("name", &name)])
           };
           view! {
-            <li class="chip">
-              <span translate="no">{user.display_name.clone()}</span>
+            <li class="token">
+              <Avatar user=user.clone() size=AvatarSize::Small />
+              <span class="token-name" translate="no">{user.display_name.clone()}</span>
               <button
                 type="button"
-                class="icon-btn icon-btn-small"
+                class="token-remove"
                 aria-label=remove_label.clone()
                 title=remove_label
-                on:click=move |_| chosen.update(|list| list.retain(|user| user.id != id))
+                on:click=move |ev| {
+                  ev.stop_propagation();
+                  chosen.update(|list| list.retain(|user| user.id != id));
+                  focus_input();
+                }
               >
                 <Icon name=IconName::Close />
               </button>
@@ -123,49 +190,62 @@ pub fn PeoplePicker(
           }
         }
       </For>
+      <li class="token-entry">
+        <label class="visually-hidden" for="people-picker-filter">{move || i18n.t("dm-new-filter")}</label>
+        <input
+          id="people-picker-filter"
+          node_ref=input
+          class="token-input"
+          role="combobox"
+          aria-expanded="true"
+          aria-controls="people-picker-list"
+          aria-activedescendant=move || highlighted.get().map(option_id)
+          data-autofocus
+          autocomplete="off"
+          placeholder=move || if chosen.with(Vec::is_empty) { i18n.t("dm-new-filter") } else { String::new() }
+          prop:value=move || filter.get()
+          on:input=move |ev| {
+            filter.set(event_target_value(&ev));
+            maybe_active.set(None);
+          }
+          on:keydown=on_keydown
+        />
+      </li>
     </ul>
-    <label class="visually-hidden" for="people-picker-filter">{move || i18n.t("dm-new-filter")}</label>
-    <input
-      id="people-picker-filter"
-      node_ref=input
-      class="input"
-      data-autofocus
-      autocomplete="off"
-      placeholder=move || i18n.t("dm-new-filter")
-      prop:value=move || filter.get()
-      on:input=move |ev| filter.set(event_target_value(&ev))
-      on:keydown=on_keydown
-    />
-    // A list of checkboxes: each person is a toggle button (role "checkbox", Space or Enter
-    // toggles, Tab moves on), which assistive technology announces with its state.
-    <ul class="forward-list people-picker" aria-label=move || i18n.t("dm-new-people")>
+    // A multi-select list: the search field drives it (↑/↓ move, Enter toggles); a click toggles too.
+    <ul id="people-picker-list" class="forward-list people-picker" role="listbox" aria-multiselectable="true" aria-label=move || i18n.t("dm-new-people")>
       <For each=move || candidates.get() key=|(user, kind)| (user.id, *kind) let:candidate>
         {
           let (user, kind) = candidate;
           let clicked = user.clone();
+          let id = user.id;
           let is_already_in = kind == Candidate::AlreadyIn;
           let is_checked = kind != Candidate::Pickable;
           view! {
-            <li>
-              <button
-                type="button"
-                role="checkbox"
-                aria-checked=is_checked.to_string()
-                aria-disabled=is_already_in.then_some("true")
-                class="forward-item person-item"
-                class:is-member=is_already_in
-                class:is-picked=kind == Candidate::Picked
-                prop:disabled=is_already_in
-                on:click=move |_| toggle(clicked.clone())
-              >
-                <span class="pick-box" aria-hidden="true">{is_checked.then(|| view! { <Icon name=IconName::Check /> })}</span>
-                <Avatar user=user.clone() size=AvatarSize::Small show_presence=true />
-                <span translate="no">{user.display_name.clone()}</span>
-                {(!user.username.is_empty()).then(|| view! { <span class="muted-text" translate="no">{format!("@{}", user.username)}</span> })}
-                {user.is_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
-                {(user.device_setup == DeviceSetup::NoDevices).then(|| view! { <span class="muted-text">{move || i18n.t("directory-no-devices")}</span> })}
-                {is_already_in.then(|| view! { <span class="muted-text person-note">{move || i18n.t(already_in_key)}</span> })}
-              </button>
+            <li
+              id=option_id(id)
+              role="option"
+              aria-selected=is_checked.to_string()
+              aria-disabled=is_already_in.then_some("true")
+              class="person-item"
+              class:is-member=is_already_in
+              class:is-picked=kind == Candidate::Picked
+              class:is-active=move || highlighted.get() == Some(id)
+              on:mousedown=|ev| ev.prevent_default()
+              on:click=move |_| {
+                if !is_already_in {
+                  toggle(clicked.clone());
+                  focus_input();
+                }
+              }
+            >
+              <Avatar user=user.clone() size=AvatarSize::Small show_presence=true />
+              <span class="person-name" translate="no">{user.display_name.clone()}</span>
+              {(!user.username.is_empty()).then(|| view! { <span class="muted-text person-handle" translate="no">{format!("@{}", user.username)}</span> })}
+              {user.is_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
+              {(user.device_setup == DeviceSetup::NoDevices).then(|| view! { <span class="muted-text">{move || i18n.t("directory-no-devices")}</span> })}
+              {is_already_in.then(|| view! { <span class="muted-text person-note">{move || i18n.t(already_in_key)}</span> })}
+              <span class="person-check" aria-hidden="true">{is_checked.then(|| view! { <Icon name=IconName::Check /> })}</span>
             </li>
           }
         }
@@ -174,6 +254,31 @@ pub fn PeoplePicker(
         <li class="empty-state">{move || i18n.t("invite-nobody-found")}</li>
       </Show>
     </ul>
+  }
+}
+
+fn option_id(id: UserId) -> String {
+  format!("people-picker-option-{id}")
+}
+
+/// Scrolls the list (not the page) just enough to show the option.
+fn scroll_option_into_view(id: UserId) {
+  let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+    return;
+  };
+  let maybe_option = document
+    .get_element_by_id(&option_id(id))
+    .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok());
+  let maybe_list = document.get_element_by_id("people-picker-list");
+  let (Some(option), Some(list)) = (maybe_option, maybe_list) else {
+    return;
+  };
+  let top = option.offset_top();
+  let bottom = top + option.offset_height();
+  if top < list.scroll_top() {
+    list.set_scroll_top(top);
+  } else if bottom > list.scroll_top() + list.client_height() {
+    list.set_scroll_top(bottom - list.client_height());
   }
 }
 
