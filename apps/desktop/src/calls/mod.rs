@@ -663,10 +663,8 @@ impl JoinTicketSource for CoreJoinTickets {
         .call_join_token(conversation)
         .await
         .map_err(|reason| JoinTicketError { reason })?;
-      Ok(JoinTicket {
-        sfu_url: join.sfu_url,
-        token: join.token,
-      })
+      // With this token's certificate hashes: a restarted SFU may have a new self-signed one.
+      Ok(JoinTicket::from(join))
     })
   }
 }
@@ -784,20 +782,12 @@ fn native_config(
   let authenticator =
     DeviceCallKeyAuthenticator::from_verified(Arc::new(CoreSigner(preparation.signer)), preparation.devices)
       .map_err(|error| error.to_string())?;
-  // The native driver pins one certificate: the first the server names.
-  let maybe_server_hash = preparation
-    .join
-    .sfu_certificate_sha256
-    .first()
-    .and_then(|hash| certificate_hash_from_hex(hash));
-  let mut config = NativeCallConfig::device_bound(
-    preparation.join.sfu_url,
-    preparation.join.token,
-    engine,
-    authenticator,
-  );
-  // A development SFU's certificate: pinned here, or announced by the server with the token.
-  config.maybe_certificate_hash = certificate_hash_from_env()?.or(maybe_server_hash);
+  let ticket = JoinTicket::from(preparation.join);
+  let mut config = NativeCallConfig::device_bound(ticket.sfu_url, ticket.token, engine, authenticator);
+  // A development SFU's certificate: announced by the server with each token (rejoins use the
+  // fresh token's), and one pinned here for every connection.
+  config.certificate_hashes = ticket.certificate_hashes;
+  config.maybe_certificate_hash = certificate_hash_from_env()?;
   config.source = AudioSource::Microphone(microphone);
   config.sink = AudioSink::Speakers(speakers);
   config.maybe_processing = Some(AudioProcessingConfig::default());

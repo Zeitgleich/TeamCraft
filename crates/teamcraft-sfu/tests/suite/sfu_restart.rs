@@ -2,7 +2,8 @@
 //! address: it forwards to the running SFU process and switches to the restarted one, as a
 //! container restart or rolling deploy behind the same address would. A graceful shutdown closes
 //! every connection as "going away" and the clients rejoin at once; after a crash they notice the
-//! dead path. Either way the call never ends on their side and the server hears no leave.
+//! dead path. Either way the call never ends on their side and the server hears no leave. A
+//! restarted SFU with a new self-signed certificate is reached with the hash its fresh tokens name.
 
 // clippy.toml only relaxes these lints inside #[test] functions; the helpers below are test code too.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -35,11 +36,12 @@ const BOB: u64 = 2;
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn graceful_restart_brings_everyone_back_into_the_call() {
   let identity = identity();
+  let announced = announce(&identity);
   let reports = Reports::default();
   let first = SfuProcess::start(&identity, &reports);
   let front = SfuFront::start(first.port).await;
-  let mut alice = join(&front, &identity, ALICE).await;
-  let mut bob = join(&front, &identity, BOB).await;
+  let mut alice = join(&front, &announced, ALICE).await;
+  let mut bob = join(&front, &announced, BOB).await;
   wait_for_secured(&mut alice).await;
   wait_for_secured(&mut bob).await;
 
@@ -57,15 +59,44 @@ async fn graceful_restart_brings_everyone_back_into_the_call() {
   assert_back_together(alice, bob, &reports).await;
 }
 
+/// Issue #452: the restarted SFU has a new self-signed certificate. The server names its hash with
+/// the tokens from then on; the rejoins must use it, not the first join's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_with_a_new_certificate_is_rejoined_with_the_fresh_tokens_hash() {
+  let original = identity();
+  let announced = announce(&original);
+  let reports = Reports::default();
+  let first = SfuProcess::start(&original, &reports);
+  let front = SfuFront::start(first.port).await;
+  let mut alice = join(&front, &announced, ALICE).await;
+  let mut bob = join(&front, &announced, BOB).await;
+  wait_for_secured(&mut alice).await;
+  wait_for_secured(&mut bob).await;
+
+  let renewed = identity();
+  let second = SfuProcess::start(&renewed, &reports);
+  *announced.lock().unwrap() = certificate_hash(&renewed);
+  first.shut_down().await;
+  front.switch_to(second.port);
+
+  for call in [&mut alice, &mut bob] {
+    wait_for(call, |event| *event == CallEngineEvent::Reconnected).await;
+  }
+  wait_for_secured(&mut alice).await;
+  wait_for_secured(&mut bob).await;
+  assert_back_together(alice, bob, &reports).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn crash_is_noticed_and_everyone_rejoins_the_restarted_sfu() {
   let identity = identity();
+  let announced = announce(&identity);
   let reports = Reports::default();
   // A crashed process reports nothing; this one lives on unreachable, so its reports don't count.
   let first = SfuProcess::start(&identity, &Reports::default());
   let front = SfuFront::start(first.port).await;
-  let mut alice = join(&front, &identity, ALICE).await;
-  let mut bob = join(&front, &identity, BOB).await;
+  let mut alice = join(&front, &announced, ALICE).await;
+  let mut bob = join(&front, &announced, BOB).await;
   wait_for_secured(&mut alice).await;
   wait_for_secured(&mut bob).await;
 
@@ -115,6 +146,10 @@ async fn assert_back_together(mut alice: NativeCall, mut bob: NativeCall, report
 }
 
 type Reports = Arc<Mutex<Vec<(ReportKind, JoinGrant)>>>;
+
+/// The SFU certificate's hash that `teamcraft-server` names with its tokens
+/// (`[calls] sfu_certificate_sha256`).
+type AnnouncedHash = Arc<Mutex<[u8; 32]>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReportKind {
@@ -269,6 +304,7 @@ fn mapping(front: &Arc<UdpSocket>, state: &Arc<FrontState>, client: SocketAddr) 
 struct FrontTickets {
   url: String,
   device: u64,
+  announced: AnnouncedHash,
 }
 
 impl JoinTicketSource for FrontTickets {
@@ -276,12 +312,13 @@ impl JoinTicketSource for FrontTickets {
     let ticket = JoinTicket {
       sfu_url: self.url.clone(),
       token: token(self.device),
+      certificate_hashes: vec![*self.announced.lock().unwrap()],
     };
     Box::pin(async move { Ok(ticket) })
   }
 }
 
-async fn join(front: &SfuFront, identity: &Identity, device: u64) -> NativeCall {
+async fn join(front: &SfuFront, announced: &AnnouncedHash, device: u64) -> NativeCall {
   let engine = CallEngineConfig {
     user_id: id_of(device),
     device_id: id_of(device),
@@ -290,7 +327,7 @@ async fn join(front: &SfuFront, identity: &Identity, device: u64) -> NativeCall 
   };
   let url = sfu_url(front.port());
   let mut config = NativeCallConfig::new(url.clone(), token(device), engine);
-  config.maybe_certificate_hash = Some(*identity.certificate_chain().as_slice()[0].hash().as_ref());
+  config.certificate_hashes = vec![*announced.lock().unwrap()];
   config.source = AudioSource::Tone {
     frequency_hz: 300.0 + 100.0 * device as f32,
     amplitude: 0.3,
@@ -304,7 +341,11 @@ async fn join(front: &SfuFront, identity: &Identity, device: u64) -> NativeCall 
     going_away_spread: Duration::from_millis(200),
     ..ResilienceConfig::default()
   };
-  config.maybe_ticket_source = Some(Arc::new(FrontTickets { url, device }));
+  config.maybe_ticket_source = Some(Arc::new(FrontTickets {
+    url,
+    device,
+    announced: Arc::clone(announced),
+  }));
   NativeCall::join(config).await.unwrap()
 }
 
@@ -340,6 +381,14 @@ async fn collect(call: &mut NativeCall, duration: Duration) -> Vec<CallEngineEve
 
 fn identity() -> Identity {
   Identity::self_signed(["localhost", "127.0.0.1", "::1"]).unwrap()
+}
+
+fn announce(identity: &Identity) -> AnnouncedHash {
+  Arc::new(Mutex::new(certificate_hash(identity)))
+}
+
+fn certificate_hash(identity: &Identity) -> [u8; 32] {
+  *identity.certificate_chain().as_slice()[0].hash().as_ref()
 }
 
 fn backend(port: u16) -> SocketAddr {

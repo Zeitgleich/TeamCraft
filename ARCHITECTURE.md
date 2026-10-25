@@ -424,7 +424,17 @@ the SFU (locks, removals) start fresh; the server's meeting admission still appl
 ticket.
 
 **Browsers** can't migrate a WebTransport session to another network; when it closes, the
-browser driver rejoins as above.
+browser driver rejoins as above, spreading the first attempt when the session's close code
+(`closed`'s `closeCode`) is `SFU_GOING_AWAY_CLOSE_CODE`. Where the browser reports the session's
+received packets (`getStats()`), the SFU's keep-alives (every 2 s) prove the path alive: silence for
+the stall timeout, or for 3 s after the page reported a network change (the core's `online` /
+`visibilitychange` / `pageshow` signal), counts as lost without waiting for QUIC's idle timeout,
+and a network change while rejoining makes the next attempt due at once. Closing or reloading the
+tab closes the sessions in the `pagehide` handler: a leave, not a lost connection.
+
+Every rejoin connects with what its own fresh join ticket names: the SFU's URL and, for a
+self-signed certificate, its SHA-256s (`[calls] sfu_certificate_sha256`), so an SFU that restarts
+with a new certificate is reached again once the server names it.
 
 **Status sounds.** The user hears the state, like in phone calls: while this device rejoins, a soft
 falling two-tone "du-dun" repeats every two seconds; a short rising two-tone says it is back, three
@@ -456,7 +466,7 @@ Settings → Chats).
 | Android  | core signal (`NetworkCallback`)            | yes       | yes, engine token | "Connection lost, reconnecting…" |
 | iOS      | core signal (`NWPathMonitor`)              | yes       | yes, engine token | "Connection lost, reconnecting…" |
 | Desktop  | core signal (wake, webview) + route lookup | yes       | yes, core token   | header status, tiles dimmed      |
-| Browser  | session closes (browsers can't migrate)    | no        | yes, page's token | header status, tiles dimmed      |
+| Browser  | core signal (`online`, visibility) + stats | no        | yes, page's token | header status, tiles dimmed      |
 
 Tests: deterministic ones drive the SFU's rooms and real call engines in memory (lost connection,
 grace expiry, takeover, a lossy uplink) and the native client over loopback through a UDP relay

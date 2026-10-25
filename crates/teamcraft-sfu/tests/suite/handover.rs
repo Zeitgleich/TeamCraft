@@ -295,6 +295,8 @@ impl JoinTicketSource for DirectTickets {
     let ticket = JoinTicket {
       sfu_url: sfu_url(self.sfu_port),
       token: format!("dev:{CALL_ID}:{ALICE}:{ALICE}"),
+      // The pinned certificate (`maybe_certificate_hash`) applies to every connection.
+      certificate_hashes: Vec::new(),
     };
     Box::pin(async move { Ok(ticket) })
   }

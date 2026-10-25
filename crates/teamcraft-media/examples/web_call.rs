@@ -91,7 +91,7 @@ pub async fn join_dev_call(
     maybe_trusted_roster: None,
     maybe_authenticator: None,
     jitter: JitterBufferConfig::default(),
-    resilience: ResilienceConfig::default(),
+    resilience: ResilienceConfig::browser(),
     // The test page has one dev token; it is reused for a rejoin while still valid.
     maybe_ticket_source: None,
     status_cues: StatusCues::default(),
