@@ -926,6 +926,7 @@ notif-enforcement-note = These settings are saved on this device. Notifications 
 
 ## Settings: display, sidebar, language, privacy, devices, calls
 settings-density = Message density
+settings-density-bubbles = Bubbles
 settings-density-comfortable = Comfortable
 settings-density-compact = Compact
 settings-image-size = Image size in conversations
@@ -2515,6 +2516,8 @@ settings-messages-look-hint = The preview shows your choices.
 settings-messages-show = In conversations
 settings-preview-name = Sam Example
 settings-preview-text = The new layout is ready. Have a look before Friday?
+settings-preview-own-name = You
+settings-preview-own-text = Looks good, I will check it tomorrow.
 settings-text-size = Text size
 settings-text-size-hint = Makes text larger or smaller without zooming everything.
 settings-join-leave-hint = Shows a line when someone joins or leaves a channel.

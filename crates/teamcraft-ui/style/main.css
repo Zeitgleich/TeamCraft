@@ -6107,25 +6107,177 @@ ol.md-list {
   gap: 6px;
 }
 
-/* Compact density: tighter rows and avatars. */
-:root[data-density="compact"] .msg-user {
-  padding-top: 3px;
-  padding-bottom: 3px;
+/* Message layouts (issue #576). The base rules above are Compact; Comfortable is roomier with one
+   step larger text (avatars stay); Bubbles is a chat-app layout. */
+.bubble-time {
+  display: none;
 }
 
-:root[data-density="compact"] .msg-gutter {
-  width: 30px;
+:root[data-density="comfortable"] .msg-user {
+  gap: 12px;
+  padding-top: 10px;
+  padding-bottom: 10px;
 }
 
-:root[data-density="compact"] .msg-gutter .avatar-lg {
-  width: 30px;
-  height: 30px;
+:root[data-density="comfortable"] .msg-grouped {
+  padding-top: 2px;
+  padding-bottom: 2px;
+}
+
+:root[data-density="comfortable"] .msg-body {
+  font-size: var(--text-lg);
+  line-height: 1.6;
+  letter-spacing: var(--tracking-lg);
+}
+
+:root[data-density="comfortable"] .md-p + .md-p {
+  margin-top: 8px;
+}
+
+:root[data-density="bubbles"] .msg-user {
+  padding: 1px 16px;
+  gap: 8px;
+}
+
+:root[data-density="bubbles"] .msg-user:not(.msg-grouped) {
+  padding-top: 8px;
+}
+
+/* The bubble carries the state; the row itself stays flat. */
+:root[data-density="bubbles"] .msg-user:focus-within,
+:root[data-density="bubbles"] .msg-user:focus,
+:root[data-density="bubbles"] .msg-user.msg-active,
+:root[data-density="bubbles"] .msg-user.is-pressing {
+  background: transparent;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  :root[data-density="bubbles"] .msg-user:hover {
+    background: transparent;
+  }
+}
+
+:root[data-density="bubbles"] .msg-user.msg-active .msg-bubble,
+:root[data-density="bubbles"] .msg-user.is-pressing .msg-bubble {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+:root[data-density="bubbles"] .msg-user:focus-visible .msg-bubble {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+:root[data-density="bubbles"] .msg-user:focus-visible {
+  outline: none;
+}
+
+:root[data-density="bubbles"] .msg-user.msg-mine {
+  justify-content: flex-end;
+}
+
+/* Own messages show neither avatar nor name; a conversation of two shows no avatars at all. */
+:root[data-density="bubbles"] .msg-mine .msg-gutter,
+:root[data-density="bubbles"] .is-dm .msg-gutter,
+:root[data-density="bubbles"] .msg-mine .msg-header {
+  display: none;
+}
+
+:root[data-density="bubbles"] .hover-time {
+  display: none;
+}
+
+:root[data-density="bubbles"] .msg-main {
+  flex: 0 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  max-width: min(70%, 40rem);
+}
+
+:root[data-density="bubbles"] .msg-mine .msg-main {
+  align-items: flex-end;
+}
+
+:root[data-density="bubbles"] .msg-bubble {
+  max-width: 100%;
+  padding: 6px 12px;
+  border-radius: 18px;
+  background: var(--surface-2);
+}
+
+:root[data-density="bubbles"] .msg-mine .msg-bubble {
+  background: var(--accent-soft);
+}
+
+:root[data-density="bubbles"] .msg-grouped .msg-bubble {
+  border-start-start-radius: 6px;
+}
+
+:root[data-density="bubbles"] .msg-mine.msg-grouped .msg-bubble {
+  border-start-start-radius: 18px;
+  border-start-end-radius: 6px;
+}
+
+:root[data-density="bubbles"] .row:has(+ .row > .msg-grouped) > .msg-user:not(.msg-mine) .msg-bubble {
+  border-end-start-radius: 6px;
+}
+
+:root[data-density="bubbles"] .row:has(+ .row > .msg-grouped) > .msg-mine .msg-bubble {
+  border-end-end-radius: 6px;
+}
+
+:root[data-density="bubbles"] .msg-header {
+  margin-bottom: 2px;
+  font-size: var(--text-sm);
+}
+
+:root[data-density="bubbles"] .msg-header .msg-time {
+  display: none;
+}
+
+/* Time (and the delivery state) sit in the bottom corner of the bubble. */
+:root[data-density="bubbles"] .bubble-time,
+:root[data-density="bubbles"] .msg-delivery:not(.msg-failed) {
+  float: inline-end;
+  margin: 8px 0 -3px;
+  margin-inline-start: 8px;
+  color: var(--text-muted);
   font-size: var(--text-2xs);
   letter-spacing: var(--tracking-2xs);
+  font-variant-numeric: tabular-nums;
 }
 
-:root[data-density="compact"] .md-p + .md-p {
+:root[data-density="bubbles"] .bubble-time {
+  display: inline;
+}
+
+:root[data-density="bubbles"] .msg-delivery:not(.msg-failed) {
+  margin-inline-start: 4px;
+}
+
+:root[data-density="bubbles"] .msg-body::after {
+  content: "";
+  display: table;
+  clear: both;
+}
+
+:root[data-density="bubbles"] .msg-files,
+:root[data-density="bubbles"] .msg-bubble .link-card {
+  max-width: 100%;
+}
+
+:root[data-density="bubbles"] .reactions {
   margin-top: 2px;
+}
+
+:root[data-density="bubbles"] .reply-count {
+  margin-left: 0;
+  margin-inline-start: 4px;
+}
+
+@media (max-width: 600px) {
+  :root[data-density="bubbles"] .msg-main {
+    max-width: 85%;
+  }
 }
 
 .auth-form {
@@ -10733,16 +10885,18 @@ ol.md-list {
 /* Appearance: a message drawn with the chosen density and image size; the text size scales it
    with the rest of the app. */
 .set-preview {
-  display: flex;
-  gap: var(--space-3);
   padding: var(--space-4);
   background: var(--bg);
   font-size: var(--text-base);
 }
 
-.set-preview.is-compact {
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-4);
+.set-preview-msg {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.set-preview-msg + .set-preview-msg {
+  margin-top: var(--space-3);
 }
 
 .set-preview-avatar {
@@ -10753,7 +10907,61 @@ ol.md-list {
   background: color-mix(in srgb, var(--accent) 55%, var(--surface-3));
 }
 
-.set-preview.is-compact .set-preview-avatar {
+.set-preview[data-density="comfortable"] .set-preview-text {
+  font-size: var(--text-lg);
+  line-height: 1.6;
+}
+
+.set-preview[data-density="comfortable"] .set-preview-msg + .set-preview-msg {
+  margin-top: var(--space-4);
+}
+
+.set-preview[data-density="compact"] {
+  padding: var(--space-2) var(--space-4);
+}
+
+.set-preview[data-density="compact"] .set-preview-msg {
+  gap: var(--space-2);
+}
+
+.set-preview[data-density="compact"] .set-preview-msg + .set-preview-msg {
+  margin-top: var(--space-1);
+}
+
+.set-preview[data-density="bubbles"] .set-preview-msg {
+  gap: var(--space-2);
+}
+
+.set-preview[data-density="bubbles"] .set-preview-msg + .set-preview-msg {
+  margin-top: var(--space-1);
+}
+
+.set-preview[data-density="bubbles"] .set-preview-msg.is-own {
+  justify-content: flex-end;
+}
+
+.set-preview[data-density="bubbles"] .set-preview-msg.is-own .set-preview-body {
+  flex: 0 1 auto;
+}
+
+.set-preview[data-density="bubbles"] .set-preview-body {
+  flex: 0 1 auto;
+  max-width: 70%;
+  padding: 6px 12px;
+  border-radius: 18px;
+  background: var(--surface-2);
+}
+
+.set-preview[data-density="bubbles"] .is-own .set-preview-body {
+  background: var(--accent-soft);
+}
+
+.set-preview[data-density="bubbles"] .is-own .set-preview-head strong,
+.set-preview[data-density="bubbles"] .set-preview-avatar {
+  display: none;
+}
+
+.set-preview[data-density="compact"] .set-preview-avatar {
   width: 30px;
   height: 30px;
 }

@@ -40,7 +40,7 @@ pub fn AppearanceSection() -> impl IntoView {
       <MessagePreview />
       <SegmentedRow
         label="settings-density"
-        options=slug_options(&["comfortable", "compact"], "settings-density-")
+        options=slug_options(&["bubbles", "comfortable", "compact"], "settings-density-")
         value=Signal::derive(move || display.get().density.slug().to_owned())
         on_change=Callback::new(move |slug: String| {
           if let Some(density) = Density::from_slug(&slug) {
@@ -155,8 +155,9 @@ fn ThemeTiles() -> impl IntoView {
   }
 }
 
-/// A message as the conversation would show it with the chosen density and image size, so the
-/// choices can be seen before going back. The text size scales the whole app, this preview too.
+/// Two messages as the conversation would show them with the chosen layout and image size (one
+/// from someone else, one of the user's own, so bubbles make sense), to see the choices before
+/// going back. The text size scales the whole app, this preview too.
 #[component]
 fn MessagePreview() -> impl IntoView {
   let state = use_app_state();
@@ -165,18 +166,29 @@ fn MessagePreview() -> impl IntoView {
   view! {
     <div
       class="set-preview"
-      class:is-compact=move || display.get().density == Density::Compact
+      data-density=move || display.get().density.slug()
       class:is-large-image=move || display.get().image_size == ImageSize::Large
       aria-hidden="true"
     >
-      <span class="set-preview-avatar"></span>
-      <div class="set-preview-body">
-        <div class="set-preview-head">
-          <strong>{move || i18n.t("settings-preview-name")}</strong>
-          <span class="set-preview-time">"9:41"</span>
+      <div class="set-preview-msg">
+        <span class="set-preview-avatar"></span>
+        <div class="set-preview-body">
+          <div class="set-preview-head">
+            <strong>{move || i18n.t("settings-preview-name")}</strong>
+            <span class="set-preview-time">"9:41"</span>
+          </div>
+          <p class="set-preview-text">{move || i18n.t("settings-preview-text")}</p>
+          <span class="set-preview-image"></span>
         </div>
-        <p class="set-preview-text">{move || i18n.t("settings-preview-text")}</p>
-        <span class="set-preview-image"></span>
+      </div>
+      <div class="set-preview-msg is-own">
+        <div class="set-preview-body">
+          <div class="set-preview-head">
+            <strong>{move || i18n.t("settings-preview-own-name")}</strong>
+            <span class="set-preview-time">"9:42"</span>
+          </div>
+          <p class="set-preview-text">{move || i18n.t("settings-preview-own-text")}</p>
+        </div>
       </div>
     </div>
   }

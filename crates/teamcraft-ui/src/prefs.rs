@@ -399,15 +399,21 @@ impl Default for CallPrefs {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Density {
+  /// Chat-app style: own messages right in accent bubbles, others left in neutral bubbles.
+  Bubbles,
+  /// A roomy list with larger text. Stored as `comfortable` since before the layouts were
+  /// renamed, so saved preferences keep their name.
   Comfortable,
+  /// The dense list (the look `Comfortable` had before the roomier layout, issue #576).
   Compact,
 }
 
 impl Density {
-  pub const ALL: [Density; 2] = [Self::Comfortable, Self::Compact];
+  pub const ALL: [Density; 3] = [Self::Bubbles, Self::Comfortable, Self::Compact];
 
   pub fn slug(self) -> &'static str {
     match self {
+      Self::Bubbles => "bubbles",
       Self::Comfortable => "comfortable",
       Self::Compact => "compact",
     }

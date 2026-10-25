@@ -926,6 +926,7 @@ notif-enforcement-note = Diese Einstellungen werden auf diesem Gerät gespeicher
 
 ## Einstellungen: Darstellung, Seitenleiste, Sprache, Datenschutz, Geräte, Anrufe
 settings-density = Nachrichtendichte
+settings-density-bubbles = Blasen
 settings-density-comfortable = Komfortabel
 settings-density-compact = Kompakt
 settings-image-size = Bildgröße im Verlauf
@@ -2515,6 +2516,8 @@ settings-messages-look-hint = Die Vorschau zeigt deine Auswahl.
 settings-messages-show = In Unterhaltungen
 settings-preview-name = Sam Beispiel
 settings-preview-text = Das neue Layout ist fertig. Schaust du es dir vor Freitag an?
+settings-preview-own-name = Du
+settings-preview-own-text = Sieht gut aus, ich schaue es morgen an.
 settings-text-size = Textgröße
 settings-text-size-hint = Macht Text größer oder kleiner, ohne alles zu zoomen.
 settings-join-leave-hint = Zeigt eine Zeile, wenn jemand einem Kanal beitritt oder ihn verlässt.
