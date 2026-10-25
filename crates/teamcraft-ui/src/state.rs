@@ -776,7 +776,8 @@ impl AppState {
   }
 
   /// Sending in a conversation reads everything before the sent message: the user answers what they
-  /// saw. Nothing to send to the server when nothing is unread.
+  /// saw. The read marker goes to the newest message already in the store, before the send is
+  /// confirmed, so the sent message itself plays no part. Nothing to send when nothing is unread.
   pub fn mark_read_on_send(&self, conversation: ConversationId) {
     let has_unread = self
       .read(|backend| backend.conversation(conversation))

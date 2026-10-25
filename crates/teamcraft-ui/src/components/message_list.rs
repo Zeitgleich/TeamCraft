@@ -21,7 +21,7 @@ use crate::feed_motion::{FeedMotion, Shown, newest_confirmed};
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, ConversationKind, Message, as_chat_message};
 use crate::state::{Overlay, use_app_state};
-use crate::unread_divider::{DividerEvent, DwellClock, is_reading_latest};
+use crate::unread_divider::{DividerEvent, DwellClock, ReadMarkerGate};
 
 /// Extra pixels rendered above and below the viewport.
 const OVERSCAN_PX: f64 = 700.0;
@@ -618,22 +618,32 @@ fn track_unread_divider(conversation: ConversationId, count: Memo<usize>, is_at_
 /// Marks the conversation read whenever something in it is unread while the user watches its newest
 /// message: at the bottom of the focused, visible window. Covers messages that arrive while it is
 /// open, coming back to the window and scrolling down to the end; opening it marks it read in
-/// `AppState::open_conversation`. The core only moves the read marker forward, and the unread count
-/// drops to zero right away, so this runs once per unread message, not in a loop. A count the
-/// server raises again (a message the read marker didn't cover yet) is caught by the next run.
+/// `AppState::open_conversation`. Each newest confirmed message is sent once ([`ReadMarkerGate`]):
+/// an `unread_update` the server sent before it applied the new position raises the count again,
+/// and that must not queue another read position for the same message. A new message does.
 fn mark_read_while_watched(
   conversation: ConversationId,
   is_at_bottom: RwSignal<bool>,
   is_focused: RwSignal<bool>,
 ) {
   let state = use_app_state();
-  let has_unread = Memo::new(move |_| {
-    state
+  // The newest confirmed message while something is unread; looked up only then.
+  let maybe_unread_through = Memo::new(move |_| {
+    let has_unread = state
       .read(|backend| backend.conversation(conversation))
-      .is_some_and(|conversation| conversation.has_unread())
+      .is_some_and(|conversation| conversation.has_unread());
+    has_unread
+      .then(|| newest_confirmed_of(state, conversation))
+      .flatten()
   });
+  let gate = StoredValue::new(ReadMarkerGate::default());
   Effect::new(move |_| {
-    if is_reading_latest(has_unread.get(), is_at_bottom.get(), is_focused.get()) {
+    let (maybe_through, at_bottom, focused) =
+      (maybe_unread_through.get(), is_at_bottom.get(), is_focused.get());
+    let should_mark = gate
+      .try_update_value(|gate| gate.should_mark(maybe_through, at_bottom, focused))
+      .unwrap_or(false);
+    if should_mark {
       state.write(|backend| backend.mark_read(conversation));
     }
   });
