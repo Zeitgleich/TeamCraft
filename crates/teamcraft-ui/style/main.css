@@ -8416,6 +8416,27 @@ ol.md-list {
   padding: var(--space-1) var(--space-4) var(--space-4);
 }
 
+/* What a card holds besides rows gets the rows' inner spacing. */
+.set-rows > .set-themes,
+.set-rows > .set-card-actions,
+.set-rows > .set-progress,
+.set-rows > .set-empty,
+.set-rows > .set-note,
+.set-rows > p,
+.set-rows > .effect-grid {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+}
+
+.set-rows > .set-themes {
+  padding: var(--space-4);
+}
+
+.set-rows > .set-subform {
+  border: 0;
+  border-radius: 0;
+}
+
 .set-row {
   display: flex;
   align-items: center;
@@ -8864,14 +8885,7 @@ ol.md-list {
   border-top: 1px solid var(--border);
 }
 
-.set-card > .set-devices {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--surface);
-  overflow: hidden;
-}
-
-.set-card > .set-devices:empty {
+.set-rows > .set-devices:empty {
   display: none;
 }
 
@@ -8883,14 +8897,7 @@ ol.md-list {
   padding: var(--space-3) var(--space-4);
 }
 
-.set-card > .set-device {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--surface);
-}
-
 .set-device.is-current {
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   background: color-mix(in srgb, var(--accent-soft) 55%, var(--surface));
 }
 
@@ -9200,7 +9207,7 @@ ol.md-list {
 }
 
 .set-preview-image {
-  width: min(160px, 70%);
+  width: min(120px, 60%);
   aspect-ratio: 4 / 3;
   margin-top: var(--space-1);
   border-radius: var(--radius);
@@ -9209,7 +9216,7 @@ ol.md-list {
 }
 
 .set-preview.is-large-image .set-preview-image {
-  width: min(280px, 100%);
+  width: min(200px, 100%);
 }
 
 /* The text size slider. */

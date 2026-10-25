@@ -188,18 +188,20 @@ fn sync_address_bar(state: AppState, bar: AddressBar, next: Route, is_waiting: b
     is_redirect = true;
   }
   let shown = bar.shown.get_value();
-  if matches!(shown, Route::Settings(_)) && !matches!(next, Route::Settings(_)) {
-    if let Some((below, below_depth)) = bar.maybe_below_settings.get_value()
-      && below == next
-    {
-      bar.maybe_below_settings.set_value(None);
-      bar.shown.set_value(next);
-      go_back(depth_of_current_entry().saturating_sub(below_depth).max(1));
-      return;
-    }
+  let is_leaving_settings = matches!(shown, Route::Settings(_)) && !matches!(next, Route::Settings(_));
+  if is_leaving_settings
+    && let Some((below, below_depth)) = bar.maybe_below_settings.get_value()
+    && below == next
+  {
+    // Back over every entry the settings added (the phones' section list and a section).
+    bar.maybe_below_settings.set_value(None);
+    bar.shown.set_value(next);
+    go_back(depth_of_current_entry().saturating_sub(below_depth).max(1));
+    return;
   }
   let step = HistoryStep::between(&shown, &next, is_redirect);
-  if step == HistoryStep::Push && matches!(next, Route::Settings(_)) && !matches!(shown, Route::Settings(_)) {
+  let is_entering_settings = matches!(next, Route::Settings(_)) && !matches!(shown, Route::Settings(_));
+  if step == HistoryStep::Push && is_entering_settings {
     bar
       .maybe_below_settings
       .set_value(Some((shown, depth_of_current_entry())));
