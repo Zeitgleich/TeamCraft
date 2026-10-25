@@ -107,9 +107,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   ) -> Result<GatewayStart<A::Gateway>, CoreError> {
     let handshake_timeout = timing.handshake_timeout;
     // Events may have been missed while disconnected: every group is caught up again before the
-    // outbox sends into it.
+    // outbox sends into it, and the welcomes are read again before a spent key package goes
+    // (issue #395).
     self.mls_current.clear();
-    // The welcomes are read again before a spent key package goes (issue #395).
     self.are_welcomes_synced = false;
     // A replay cut short by the drop is not waited for; this connection brings its own.
     self.maybe_replay_left = None;

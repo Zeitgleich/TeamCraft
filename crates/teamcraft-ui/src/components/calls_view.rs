@@ -8,6 +8,7 @@ use crate::clock::format_date_time;
 use crate::components::compact_back::CompactBack;
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
+use crate::components::sliding_indicator::SlidingIndicator;
 use crate::i18n::use_i18n;
 use crate::model::ConversationKind;
 use crate::state::use_app_state;
@@ -47,6 +48,7 @@ pub fn CallsView() -> impl IntoView {
           <h1>{move || i18n.t("calls-title")}</h1>
         </div>
         <div class="segmented" role="group" aria-label=move || i18n.t("calls-filter")>
+          <SlidingIndicator />
           {filter_button(CallFilter::All, "calls-all")}
           {filter_button(CallFilter::Missed, "calls-missed")}
         </div>

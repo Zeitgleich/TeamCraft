@@ -210,6 +210,7 @@ struct State {
   /// Space roles other than member, and people removed from a space (the demo has everyone in
   /// every space otherwise).
   space_roles: HashMap<(SpaceId, UserId), SpaceRole>,
+  channel_roles: HashMap<(ConversationId, UserId), teamcraft_client_api::model::ChannelRole>,
   space_leavers: HashSet<(SpaceId, UserId)>,
   invites: Vec<(SpaceId, PendingInvite)>,
 }
@@ -268,6 +269,7 @@ impl MockBackend {
         member_count: 12,
       }],
       space_roles: HashMap::new(),
+      channel_roles: HashMap::new(),
       space_leavers: HashSet::new(),
       invites: vec![(
         space_a(),
@@ -521,6 +523,43 @@ impl ChatBackend for MockBackend {
       .filter(|(of, _)| *of == space)
       .map(|(_, invite)| invite.clone())
       .collect()
+  }
+
+  fn channel_roles(&self, conversation: ConversationId) -> Vec<teamcraft_client_api::model::ChannelMember> {
+    use teamcraft_client_api::model::{ChannelMember, ChannelRole};
+    let state = self.state.borrow();
+    let Some(found) = state.conversations.iter().find(|conv| conv.id == conversation) else {
+      return Vec::new();
+    };
+    found
+      .member_ids
+      .iter()
+      .map(|user| ChannelMember {
+        user: *user,
+        role: state
+          .channel_roles
+          .get(&(conversation, *user))
+          .cloned()
+          .unwrap_or(if *user == me() {
+            ChannelRole::Admin
+          } else {
+            ChannelRole::Member
+          }),
+      })
+      .collect()
+  }
+
+  fn set_channel_role(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    role: teamcraft_client_api::model::ChannelRole,
+  ) {
+    self
+      .state
+      .borrow_mut()
+      .channel_roles
+      .insert((conversation, user), role);
   }
 
   fn set_space_role(&self, space: SpaceId, user: UserId, role: SpaceRole) {
@@ -1223,6 +1262,7 @@ fn demo_conversations() -> Vec<Conversation> {
     can_post: true,
     bookmarks: Vec::new(),
     is_catching_up: false,
+    maybe_image_version: None,
   };
   use ConversationKind::{Integration, Private, Public};
   use SidebarCategory::{Channels, Integrations};
@@ -1398,6 +1438,7 @@ fn demo_conversations() -> Vec<Conversation> {
       can_post: true,
       bookmarks: Vec::new(),
       is_catching_up: false,
+      maybe_image_version: None,
     });
   }
   list

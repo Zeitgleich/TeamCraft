@@ -367,8 +367,9 @@ async function showPush(event) {
 }
 
 // The browser rotated or dropped the subscription. Where it handed no new one, subscribe again with
-// the old one's key; the page that owns the store registers it with the server (e2ee.md §7), now if
-// one is open, otherwise when the app is opened next.
+// the old one's key, then tell the server about the current subscription (the push code proves it
+// with the device's push key, e2ee.md §7), so pushes don't go to the old one while no page is open.
+// Open pages are told too; the page that owns the store registers it as usual.
 self.addEventListener('pushsubscriptionchange', (event) => {
   event.waitUntil(renewSubscription(event));
 });
@@ -382,6 +383,16 @@ async function renewSubscription(event) {
     }
   } catch (error) {
     console.warn('push subscription not renewed', error);
+  }
+  try {
+    const name = await databaseName();
+    if (name && hasPushCode()) {
+      await loadPush();
+      const old = event.oldSubscription ? JSON.stringify(event.oldSubscription.toJSON()) : null;
+      await wasm_bindgen.handleSubscriptionChange(name, old);
+    }
+  } catch (error) {
+    console.warn('renewed push subscription not sent to the server', error);
   }
   for (const client of await self.clients.matchAll({ type: 'window', includeUncontrolled: true })) {
     client.postMessage({ type: 'push_subscription_changed' });

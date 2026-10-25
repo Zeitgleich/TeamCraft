@@ -38,6 +38,11 @@ pub trait RecordBackend {
   fn put_record(&self, id: &LookupId, sealed: &[u8]) -> Result<(), StoreError>;
   fn delete_record(&self, id: &LookupId) -> Result<(), StoreError>;
 
+  /// See [`LocalStore::purge_freed`]; backends without such files do nothing.
+  fn purge_freed(&self) -> Result<(), StoreError> {
+    Ok(())
+  }
+
   /// Puts the record `seal` makes, about `size_hint` bytes. A backend that collects writes may
   /// call `seal` only when it writes the record, and not at all when a newer write of the same
   /// record comes first. Writes keep their order either way.
@@ -206,6 +211,10 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
         .delete_record(&self.message_id(conversation, message.client_message_id))?;
     }
     self.cache.delete_messages(conversation)
+  }
+
+  fn purge_freed(&self) -> Result<(), StoreError> {
+    self.backend.purge_freed()
   }
 }
 

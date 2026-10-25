@@ -20,6 +20,7 @@ use wasm_bindgen_futures::JsFuture;
 use crate::clock::format_date_time;
 use crate::components::icons::{Icon, IconName};
 use crate::components::lightbox::{FullMedia, sizes};
+use crate::components::lightbox_motion::StageMotion;
 use crate::components::message_actions::copy_to_clipboard;
 use crate::i18n::{I18n, use_i18n};
 use crate::lightbox::{
@@ -56,6 +57,8 @@ pub struct MediaActions {
   pub video: NodeRef<html::Video>,
   pub stage: NodeRef<html::Div>,
   pub viewport: RwSignal<Viewport>,
+  /// Owns the zoom while a gesture settles; a button or key takes it over.
+  pub motion: StageMotion,
   pub is_paused: RwSignal<bool>,
   pub is_thread_shown: RwSignal<bool>,
   pub notice: Notice,
@@ -100,6 +103,12 @@ impl MediaActions {
   /// lightbox itself.
   pub fn run(self, command: Command) {
     let can_transform = self.kind.get_untracked().is_some_and(MediaKind::can_transform);
+    if matches!(
+      command,
+      Command::ZoomIn | Command::ZoomOut | Command::ZoomReset | Command::Rotate
+    ) {
+      self.motion.stop_view();
+    }
     match command {
       Command::ZoomIn | Command::ZoomOut if can_transform => {
         let factor = match command {
@@ -206,6 +215,7 @@ pub fn Controls(
       return;
     };
     let (image, stage) = sizes(actions.image, actions.stage);
+    actions.motion.stop_view();
     viewport.update(|viewport| viewport.zoom_to_slider(value / SLIDER_STEPS, image, stage));
   };
   let thread_label = Signal::derive(move || match actions.is_thread_shown.get() {
@@ -491,7 +501,7 @@ fn MoreMenu(
       </button>
       <Show when=move || is_open.get() fallback=|| ()>
         <div class="popover-backdrop" on:mousedown=move |_| is_open.set(false)></div>
-        <div class="popover lightbox-menu" role="menu" node_ref=menu aria-label=move || i18n.t("lightbox-more") on:keydown=on_menu_keydown>
+        <div class="popover lightbox-menu opens-up" role="menu" node_ref=menu aria-label=move || i18n.t("lightbox-more") on:keydown=on_menu_keydown>
           <button class="menu-item" role="menuitem" on:click=view_thread>
             <Icon name=IconName::Threads />
             <span class="menu-label">{move || i18n.t("lightbox-view-thread")}</span>
@@ -800,21 +810,30 @@ fn open_in_window(url: Rc<ObjectUrl>, title: &str, kind: MediaKind) -> bool {
   let Ok(element) = document.create_element(tag) else {
     return false;
   };
-  let attributes = [
-    ("src", url.as_str()),
-    ("alt", title),
-    ("style", "max-width: 100%; max-height: 100vh; object-fit: contain"),
-  ];
-  for (name, value) in attributes {
+  for (name, value) in [("src", url.as_str()), ("alt", title)] {
     drop(element.set_attribute(name, value));
   }
   if kind == MediaKind::Video {
     drop(element.set_attribute("controls", ""));
   }
-  drop(body.set_attribute(
-    "style",
-    "margin: 0; min-height: 100vh; display: grid; place-items: center; background: #111",
-  ));
+  // CSSOM properties, not `style` attributes: the popup inherits the CSP (`style-src 'self'`),
+  // which blocks those.
+  let element_style = [
+    ("max-width", "100%"),
+    ("max-height", "100vh"),
+    ("object-fit", "contain"),
+  ];
+  if let Some(element) = element.dyn_ref::<web_sys::HtmlElement>() {
+    set_style(element, &element_style);
+  }
+  let body_style = [
+    ("margin", "0"),
+    ("min-height", "100vh"),
+    ("display", "grid"),
+    ("place-items", "center"),
+    ("background", "#111"),
+  ];
+  set_style(&body, &body_style);
   if body.append_child(&element).is_err() {
     return false;
   }
@@ -822,6 +841,13 @@ fn open_in_window(url: Rc<ObjectUrl>, title: &str, kind: MediaKind) -> bool {
   let release = Closure::once_into_js(move || drop(url));
   drop(popup.add_event_listener_with_callback("pagehide", release.unchecked_ref()));
   true
+}
+
+fn set_style(element: &web_sys::HtmlElement, properties: &[(&str, &str)]) {
+  let style = element.style();
+  for (property, value) in properties {
+    drop(style.set_property(property, value));
+  }
 }
 
 fn focus_selector(selector: &str) {

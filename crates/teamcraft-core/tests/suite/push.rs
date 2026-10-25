@@ -9,12 +9,80 @@ use common::{Peer, settings, settle};
 use teamcraft_core::ClientSettings;
 use teamcraft_core::api::fake::{FakeServer, FakeServerApi};
 use teamcraft_core::push_preview::{
-  PreviewContent, PreviewGap, device_push_content, push_preview, save_device_push_content,
+  PreviewContent, PreviewGap, PushSession, device_push_content, push_preview, save_device_push_content,
+  save_push_session,
 };
+use teamcraft_core::push_subscription::{subscription_change, subscription_change_from};
 use teamcraft_core::store::{LocalStore, MessageFilter};
-use teamcraft_crypto::push::seal_wakeup;
+use teamcraft_crypto::ids::DeviceId as DeviceIdCrypto;
+use teamcraft_crypto::push::{seal_wakeup, verify_subscription_change};
 use teamcraft_crypto::secret::SymmetricKey;
-use teamcraft_proto::{ConversationId, MessageId, PushContentMode, PushKind, PushProvider, PushWakeUp};
+use teamcraft_proto::{ConversationId, Id, MessageId, PushContentMode, PushKind, PushProvider, PushWakeUp};
+
+/// The service worker's `pushsubscriptionchange` handler (issue #145): from the store alone, with an
+/// expired session token, it proves the change with the push key the server holds.
+#[tokio::test]
+async fn the_service_worker_proves_a_rotated_subscription_with_the_push_key() {
+  let (server, _alice, bob, _channel) = channel_with_two().await;
+  let device = bob.client.device_id();
+  let rotated = r#"{"endpoint":"https://push.example.com/rotated"}"#;
+  // Nothing to send while the worker doesn't know the server.
+  assert!(
+    subscription_change(bob.store.as_ref(), rotated)
+      .unwrap()
+      .is_none()
+  );
+  let session = PushSession {
+    server_url: "https://chat.example.com".into(),
+    access_token: "expired-token".into(),
+    expires_at_ms: 0,
+  };
+  save_push_session(bob.store.as_ref(), &session).unwrap();
+  assert!(
+    subscription_change(bob.store.as_ref(), "{}").unwrap().is_none(),
+    "unchanged"
+  );
+
+  let change = subscription_change(bob.store.as_ref(), rotated).unwrap().unwrap();
+  assert_eq!(change.server_url, "https://chat.example.com");
+  assert_eq!(change.request.device_id, device);
+  assert_eq!(change.request.previous_token, "{}");
+  assert_eq!(change.request.token, rotated);
+  let push_key = server.push_registration(device).unwrap().push_key;
+  let push_key = SymmetricKey::from_slice(push_key.as_slice()).unwrap();
+  let raw = u64::try_from(device.snowflake().get()).unwrap();
+  verify_subscription_change(
+    &push_key,
+    DeviceIdCrypto::new(raw),
+    "{}",
+    rotated,
+    change.request.mac.as_slice(),
+  )
+  .unwrap();
+  // Nothing in the request is the access token or the push key.
+  let wire = serde_json::to_string(&change.request).unwrap();
+  assert!(!wire.contains("expired-token"));
+
+  // A second rotation before a page opened: the server holds what the worker sent last time.
+  let again = r#"{"endpoint":"https://push.example.com/again"}"#;
+  let second = subscription_change_from(bob.store.as_ref(), rotated, again)
+    .unwrap()
+    .unwrap();
+  assert_eq!(second.request.previous_token, rotated);
+  verify_subscription_change(
+    &push_key,
+    DeviceIdCrypto::new(raw),
+    rotated,
+    again,
+    second.request.mac.as_slice(),
+  )
+  .unwrap();
+  assert!(
+    subscription_change_from(bob.store.as_ref(), again, again)
+      .unwrap()
+      .is_none()
+  );
+}
 
 #[tokio::test]
 async fn preview_fetches_and_decrypts_a_message_the_app_has_not_seen() {

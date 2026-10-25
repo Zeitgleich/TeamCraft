@@ -105,6 +105,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.Dp
 import de.zeitgleich.teamcraft.ui.Section
+import de.zeitgleich.teamcraft.ui.BadgeTone
 import de.zeitgleich.teamcraft.ui.TabBadge
 import de.zeitgleich.teamcraft.ui.activityConversations
 import de.zeitgleich.teamcraft.ui.theme.Spacing
@@ -121,6 +122,7 @@ import de.zeitgleich.teamcraft.ui.HomeFilter
 import de.zeitgleich.teamcraft.ui.channelSections
 import de.zeitgleich.teamcraft.ui.directSections
 import de.zeitgleich.teamcraft.ui.isDirect
+import de.zeitgleich.teamcraft.ui.badgeTone
 import de.zeitgleich.teamcraft.ui.tabBadge
 import de.zeitgleich.teamcraft.ui.toggled
 import de.zeitgleich.teamcraft.ui.selectionActions
@@ -443,7 +445,7 @@ private fun MainNavigation(selected: ChatTab, conversations: List<ConversationIt
                   containerColor = LocalTeamCraftColors.current.badge,
                   contentColor = LocalTeamCraftColors.current.chromeText,
                 ) { Text(count.toString()) }
-                badge.unread > 0 -> Badge(containerColor = MaterialTheme.colorScheme.primary)
+                badge.unread > 0 -> Badge(containerColor = MaterialTheme.colorScheme.outline)
               }
             },
           ) { NavigationIcon(tab) }
@@ -828,14 +830,14 @@ private fun PreviewLine(conversation: ConversationItem, maybeEntry: ChatListEntr
       val count = conversation.mentionCount.toInt()
       CountPill(
         "@${count}",
-        LocalTeamCraftColors.current.badge,
+        BadgeTone.Mention,
         pluralStringResource(R.plurals.chat_mentions, count, count),
       )
     } else if (isUnread) {
       val count = conversation.unreadCount.toInt()
       CountPill(
         count.toString(),
-        if (conversation.isMuted) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary,
+        conversation.badgeTone(),
         pluralStringResource(R.plurals.chat_unread, count, count),
       )
     }
@@ -920,16 +922,18 @@ private fun presenceLabel(presence: Presence): Int = when (presence) {
 private fun avatarColor(name: String): Color = Color.hsl(((name.hashCode() % 360 + 360) % 360).toFloat(), 0.45f, 0.45f)
 
 @Composable
-private fun CountPill(text: String, color: Color, description: String) {
-  // On the accent (unread) the accent's own text color: white on the dark theme's light teal fails contrast.
-  val textColor = if (color == MaterialTheme.colorScheme.primary) MaterialTheme.colorScheme.onPrimary else LocalTeamCraftColors.current.chromeText
+private fun CountPill(text: String, tone: BadgeTone, description: String) {
+  val (background, textColor) = when (tone) {
+    BadgeTone.Mention -> LocalTeamCraftColors.current.badge to LocalTeamCraftColors.current.chromeText
+    BadgeTone.Unread -> MaterialTheme.colorScheme.surfaceContainerHighest to MaterialTheme.colorScheme.onSurfaceVariant
+  }
   Text(
     text,
     color = textColor,
     style = MaterialTheme.typography.labelSmall,
     modifier = Modifier
       .padding(start = 8.dp)
-      .background(color, RoundedCornerShape(10.dp))
+      .background(background, RoundedCornerShape(10.dp))
       .padding(horizontal = 7.dp, vertical = 2.dp)
       .semantics { contentDescription = description },
   )

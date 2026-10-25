@@ -6,6 +6,7 @@ use crate::clock::{format_date_time, format_relative, now_ms};
 use crate::components::admin_console::SectionHeader;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
+use crate::components::sliding_indicator::SlidingIndicator;
 use crate::i18n::use_i18n;
 use crate::model::{DeviceId, UserId};
 use crate::state::use_app_state;
@@ -46,6 +47,7 @@ pub fn UsersSection() -> impl IntoView {
     />
     <div class="admin-toolbar">
       <div class="segmented" role="group" aria-label=move || i18n.t("admin-users-tabs")>
+        <SlidingIndicator />
         <button aria-pressed=move || (tab.get() == UserTab::Users).to_string() on:click=move |_| tab.set(UserTab::Users)>
           {move || i18n.t("admin-tab-users")}
         </button>

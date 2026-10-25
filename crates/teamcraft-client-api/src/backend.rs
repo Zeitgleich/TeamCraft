@@ -378,6 +378,15 @@ pub trait ChatBackend {
     _joins_space: bool,
   ) {
   }
+  /// The channel's members with their roles; empty until the member list is loaded.
+  fn channel_roles(&self, _conversation: ConversationId) -> Vec<crate::model::ChannelMember> {
+    Vec::new()
+  }
+  /// Gives a channel member another role. The UI offers only what [`crate::role_rules`] allows;
+  /// the server enforces the permission and its invariants, and a refusal shows as a failed
+  /// action. The role is the server's record, not yet a signed assignment (issue #380).
+  fn set_channel_role(&self, _conversation: ConversationId, _user: UserId, _role: crate::model::ChannelRole) {
+  }
   /// The members of a space with their roles, as far as the user may see them.
   fn space_members(&self, _space: SpaceId) -> crate::model::SpaceRoster {
     crate::model::SpaceRoster::Loading

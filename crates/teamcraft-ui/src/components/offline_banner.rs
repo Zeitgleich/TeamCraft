@@ -10,7 +10,7 @@
 use leptos::ev;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use teamcraft_client_api::remote::{CORE_CHANGED_EVENT, CoreConnection};
+use teamcraft_client_api::remote::{CORE_CHANGED_EVENT, CoreConnection, NetworkInterception};
 
 use crate::auth::tauri;
 use crate::clock::now_ms;
@@ -32,9 +32,11 @@ enum Notice {
   /// The device itself has no network.
   DeviceOffline,
   Connecting,
-  /// Online, but the server isn't reachable; the next attempt is in this many seconds.
+  /// Online, but the server isn't reachable; the next attempt is in this many seconds. Names what
+  /// answered instead, if the core found out (a captive portal, a TLS-intercepting proxy).
   Unreachable {
     retry_in_secs: i64,
+    maybe_interception: Option<NetworkInterception>,
   },
   SignInRequired,
 }
@@ -99,8 +101,15 @@ pub fn OfflineBanner() -> impl IntoView {
       let text = match notice {
         Notice::DeviceOffline => i18n.t("offline-banner"),
         Notice::Connecting => i18n.t("connection-banner-connecting"),
-        Notice::Unreachable { retry_in_secs } => i18n.t_with(
-          "connection-banner-unreachable",
+        Notice::Unreachable {
+          retry_in_secs,
+          maybe_interception,
+        } => i18n.t_with(
+          match maybe_interception {
+            None => "connection-banner-unreachable",
+            Some(NetworkInterception::CaptivePortal) => "connection-banner-captive-portal",
+            Some(NetworkInterception::UntrustedCertificate) => "connection-banner-untrusted-certificate",
+          },
           &[("seconds", &retry_in_secs.to_string())],
         ),
         Notice::SignInRequired => i18n.t("connection-banner-sign-in"),
@@ -189,8 +198,12 @@ fn notice_for(
     CoreConnection::Connecting => maybe_connecting_since
       .filter(|since| now.saturating_sub(*since) >= CONNECTING_GRACE_MS)
       .map(|_| Notice::Connecting),
-    CoreConnection::Offline { retry_at_ms } => Some(Notice::Unreachable {
+    CoreConnection::Offline {
+      retry_at_ms,
+      maybe_interception,
+    } => Some(Notice::Unreachable {
       retry_in_secs: retry_at_ms.saturating_sub(now).max(0).saturating_add(999) / 1000,
+      maybe_interception,
     }),
     CoreConnection::SignInRequired => Some(Notice::SignInRequired),
   }
@@ -230,14 +243,38 @@ mod tests {
 
   #[test]
   fn online_but_unreachable_counts_down_to_the_next_attempt() {
-    let offline = Some(CoreConnection::Offline { retry_at_ms: 10_500 });
+    let offline = Some(CoreConnection::Offline {
+      retry_at_ms: 10_500,
+      maybe_interception: None,
+    });
     assert_eq!(
       notice_for(true, offline, None, 1_000),
-      Some(Notice::Unreachable { retry_in_secs: 10 })
+      Some(Notice::Unreachable {
+        retry_in_secs: 10,
+        maybe_interception: None
+      })
     );
     assert_eq!(
       notice_for(true, offline, None, 20_000),
-      Some(Notice::Unreachable { retry_in_secs: 0 })
+      Some(Notice::Unreachable {
+        retry_in_secs: 0,
+        maybe_interception: None
+      })
+    );
+  }
+
+  #[test]
+  fn a_captive_portal_is_named_in_the_banner() {
+    let portal = Some(CoreConnection::Offline {
+      retry_at_ms: 5_000,
+      maybe_interception: Some(NetworkInterception::CaptivePortal),
+    });
+    assert_eq!(
+      notice_for(true, portal, None, 0),
+      Some(Notice::Unreachable {
+        retry_in_secs: 5,
+        maybe_interception: Some(NetworkInterception::CaptivePortal)
+      })
     );
   }
 

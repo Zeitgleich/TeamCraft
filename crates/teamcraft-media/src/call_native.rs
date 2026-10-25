@@ -5,13 +5,13 @@
 //! `Send` everywhere, so they live on a dedicated audio thread that exchanges samples with the call
 //! task over channels.
 //!
-//! Network changes (ARCHITECTURE.md §6.5): the socket is bound to the wildcard address, so when
-//! the device switches networks its packets leave through the new route and the SFU migrates the
-//! QUIC connection to the new path; nothing else changes. Mobile apps report network changes with
+//! Network changes (ARCHITECTURE.md §6.5): mobile apps report them with
 //! [`NativeCall::network_changed`], on desktops the driver notices a new route to the SFU itself.
-//! If the path then stays silent, or it breaks in any other way,
-//! the driver gets a fresh join ticket and rejoins on a new connection within the SFU's grace
-//! period; devices, mute state and tracks carry over.
+//! The driver then moves the QUIC connection to a fresh wildcard socket (`rebind`): quinn switches
+//! to a new connection ID and probes, the SFU validates the new path, and the call continues;
+//! nothing else changes. If the path then stays silent, or it breaks in any other way, or the SFU
+//! goes away (a restart, a deploy), the driver gets a fresh join ticket and rejoins on a new
+//! connection within the SFU's grace period; devices, mute state and tracks carry over.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -22,8 +22,10 @@ use std::sync::mpsc as std_mpsc;
 use std::thread::JoinHandle as ThreadHandle;
 use std::time::{Duration, Instant};
 
+use socket2::{Domain, Protocol, Socket, Type};
 use teamcraft_proto::{
-  CallClientMessage, CallServerMessage, DeviceId, MediaStreamId, VideoCodec, VideoLayerInfo, VideoTrackKind,
+  CallClientMessage, CallServerMessage, DeviceId, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, VideoCodec,
+  VideoLayerInfo, VideoTrackKind,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -32,6 +34,7 @@ use tracing::{debug, info, warn};
 use wtransport::config::ClientConfigBuilder;
 use wtransport::config::states::{WantsRootStore, WantsTransportConfigClient};
 use wtransport::datagram::Datagram;
+use wtransport::endpoint::endpoint_side::Client;
 use wtransport::error::{ConnectionError, StreamReadExactError};
 use wtransport::tls::Sha256Digest;
 use wtransport::{ClientConfig, Connection, Endpoint, RecvStream, SendStream};
@@ -471,6 +474,9 @@ async fn run_call(
         },
         ConnectionEvent::Input(LinkInput::Ended(LinkEnd::Closed)) => break Ok(()),
         ConnectionEvent::Input(LinkInput::Ended(LinkEnd::Lost)) => connection.lose(&mut engine, Instant::now()),
+        ConnectionEvent::Input(LinkInput::Ended(LinkEnd::GoingAway)) => {
+          connection.lose_to_going_away(&mut engine, Instant::now());
+        },
         ConnectionEvent::AttemptDue => connection.start_attempt(),
         ConnectionEvent::AttemptFinished(Ok((link, ticket))) => {
           connection.resume(&mut engine, link, ticket, Instant::now());
@@ -631,6 +637,8 @@ struct RouteWatch {
 
 /// One QUIC connection with its signaling stream; reader tasks feed [`LinkInput`]s.
 struct Link {
+  /// The connection's own endpoint, for moving it to a new socket.
+  endpoint: Endpoint<Client>,
   connection: Connection,
   signal_out: mpsc::UnboundedSender<CallClientMessage>,
   inputs: mpsc::UnboundedReceiver<LinkInput>,
@@ -659,6 +667,9 @@ enum LinkEnd {
   Closed,
   /// It broke (timeout, reset, silent path): rejoin.
   Lost,
+  /// The SFU is shutting down (a restart, a deploy): rejoin, after a random part of a short
+  /// spread so the restarted SFU doesn't get every client at once.
+  GoingAway,
 }
 
 impl CallConnection {
@@ -722,6 +733,15 @@ impl CallConnection {
     }
   }
 
+  /// The SFU is going away: rejoin like after a loss, the first attempt spread a little.
+  fn lose_to_going_away(&mut self, engine: &mut CallEngine, now: Instant) {
+    info!("the SFU is going away, rejoining");
+    self.lose(engine, now);
+    if let Some(schedule) = &mut self.maybe_schedule {
+      schedule.spread_first_attempt(now, &self.resilience);
+    }
+  }
+
   /// Reads the path's packet count; a path silent for too long (or after a network change) is
   /// lost.
   fn watch_path(&mut self, engine: &mut CallEngine, now: Instant) {
@@ -734,7 +754,7 @@ impl CallConnection {
       let maybe_local_ip = local_route_to(link.connection.remote_address());
       if self.route.on_route(maybe_local_ip, now) {
         debug!("the route to the SFU changed");
-        self.monitor.on_network_changed(now, &self.resilience);
+        self.migrate(now);
       }
     }
     if self.monitor.check(now, &self.resilience) == PathState::Dead {
@@ -745,7 +765,7 @@ impl CallConnection {
   fn on_network_changed(&mut self, now: Instant) {
     debug!("network changed");
     if self.maybe_link.is_some() {
-      self.monitor.on_network_changed(now, &self.resilience);
+      self.migrate(now);
     } else if let Some(schedule) = &mut self.maybe_schedule {
       // A network is back: an attempt still waiting on the old one starts over on it, without
       // waiting for the back-off.
@@ -754,6 +774,19 @@ impl CallConnection {
       }
       schedule.hurry(now);
     }
+  }
+
+  /// Moves the connection to a fresh socket for the new network; the path then has to show it
+  /// works within the handover timeout. A socket that can't be bound (no network at all right
+  /// now) leaves the old one in place: the handover check decides.
+  fn migrate(&mut self, now: Instant) {
+    if let Some(link) = &self.maybe_link {
+      match link.rebind() {
+        Ok(local_addr) => debug!(%local_addr, "moved the call connection to a new socket"),
+        Err(error) => warn!(%error, "could not move the call connection to a new socket"),
+      }
+    }
+    self.monitor.on_network_changed(now, &self.resilience);
   }
 
   fn start_attempt(&mut self) {
@@ -871,7 +904,7 @@ impl Link {
     maybe_certificate_hash: Option<[u8; 32]>,
     resilience: &ResilienceConfig,
   ) -> Result<Self, NativeCallError> {
-    let connection = connect(sfu_url, maybe_certificate_hash, resilience).await?;
+    let (endpoint, connection) = connect(sfu_url, maybe_certificate_hash, resilience).await?;
     let (send, recv) = connection
       .open_bi()
       .await
@@ -886,11 +919,22 @@ impl Link {
       tokio::spawn(read_datagrams(connection.clone(), input_tx)),
     ];
     Ok(Self {
+      endpoint,
       connection,
       signal_out,
       inputs,
       tasks,
     })
+  }
+
+  /// Switches the connection to a fresh wildcard socket of the current one's family (dual-stack
+  /// for IPv6, as the first one); returns its local address.
+  fn rebind(&self) -> std::io::Result<SocketAddr> {
+    let current = self.endpoint.local_addr()?;
+    let socket = bind_wildcard(current.is_ipv6())?;
+    let local_addr = socket.local_addr()?;
+    self.endpoint.rebind(socket)?;
+    Ok(local_addr)
   }
 
   fn stop_reading(&self) {
@@ -906,7 +950,7 @@ async fn connect(
   sfu_url: &str,
   maybe_certificate_hash: Option<[u8; 32]>,
   resilience: &ResilienceConfig,
-) -> Result<Connection, NativeCallError> {
+) -> Result<(Endpoint<Client>, Connection), NativeCallError> {
   let builder = ClientConfig::builder().with_bind_default();
   let builder = match maybe_certificate_hash {
     Some(hash) => builder.with_server_certificate_hashes([Sha256Digest::new(hash)]),
@@ -919,22 +963,48 @@ async fn connect(
     .build();
   let endpoint =
     Endpoint::client(client_config).map_err(|error| NativeCallError::Connect(error.to_string()))?;
-  endpoint
+  let connection = endpoint
     .connect(sfu_url)
     .await
-    .map_err(|error| NativeCallError::Connect(error.to_string()))
+    .map_err(|error| NativeCallError::Connect(error.to_string()))?;
+  Ok((endpoint, connection))
 }
 
-/// A deliberate close by the SFU ends the call; anything else is a loss to recover from.
+/// An unspecified-address UDP socket on a free port, like wtransport's default client binding:
+/// IPv6 with dual-stack on (Windows defaults to IPv6-only), or IPv4.
+fn bind_wildcard(is_ipv6: bool) -> std::io::Result<UdpSocket> {
+  let (domain, address) = if is_ipv6 {
+    (Domain::IPV6, SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0))
+  } else {
+    (Domain::IPV4, SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0))
+  };
+  let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+  if is_ipv6 {
+    socket.set_only_v6(false)?;
+  }
+  socket.bind(&address.into())?;
+  Ok(socket.into())
+}
+
+/// A deliberate close by the SFU ends the call, unless the SFU is going away; anything else is a
+/// loss to recover from.
 fn link_end(error: &ConnectionError) -> LinkEnd {
   match error {
-    ConnectionError::ApplicationClosed(_)
-    | ConnectionError::LocallyClosed
-    | ConnectionError::LocalH3Error(_) => LinkEnd::Closed,
+    ConnectionError::ApplicationClosed(close) => application_close_end(close.code().into_inner()),
+    ConnectionError::LocallyClosed | ConnectionError::LocalH3Error(_) => LinkEnd::Closed,
     ConnectionError::ConnectionClosed(_)
     | ConnectionError::TimedOut
     | ConnectionError::QuicProto(_)
     | ConnectionError::CidsExhausted => LinkEnd::Lost,
+  }
+}
+
+/// How a close by the SFU with this application code ends the link.
+fn application_close_end(code: u64) -> LinkEnd {
+  if code == u64::from(SFU_GOING_AWAY_CLOSE_CODE) {
+    LinkEnd::GoingAway
+  } else {
+    LinkEnd::Closed
   }
 }
 
@@ -1373,6 +1443,27 @@ mod tests {
       route.on_route(None, start + 3 * ROUTE_CHECK_INTERVAL),
       "no route at all"
     );
+  }
+
+  #[test]
+  fn only_the_sfu_going_away_is_a_close_to_rejoin_after() {
+    assert_eq!(
+      application_close_end(u64::from(SFU_GOING_AWAY_CLOSE_CODE)),
+      LinkEnd::GoingAway
+    );
+    // A leave, a host's removal or end, a replaced connection: final.
+    for code in [0, 0x4801, 0x4802, 0x4804] {
+      assert_eq!(application_close_end(code), LinkEnd::Closed, "{code:#x}");
+    }
+  }
+
+  #[test]
+  fn fresh_sockets_keep_the_family_and_ipv6_is_dual_stack() {
+    let v6 = bind_wildcard(true).unwrap();
+    assert!(v6.local_addr().unwrap().is_ipv6());
+    assert!(!Socket::from(v6).only_v6().unwrap());
+    let v4 = bind_wildcard(false).unwrap();
+    assert!(v4.local_addr().unwrap().is_ipv4());
   }
 
   #[test]

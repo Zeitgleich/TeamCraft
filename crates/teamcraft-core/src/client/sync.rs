@@ -77,6 +77,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self
       .catch_up_conversations(&ids, &members_order(&conversations))
       .await?;
+    // With the queues read, the newest server time is known (issues #186, #391).
+    self.prune_removed_senders()?;
+    self.prune_readded_records()?;
     self.refresh_read_state().await?;
     self.refresh_notification_settings().await?;
     // A `device_add` missed while offline beyond the resume window would leave them waiting.
@@ -250,13 +253,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// has passed since the last check (the runner calls this on its ticks), so packages are renewed
   /// on a long-running device too, not only after a full sync. Returns whether it checked.
   ///
+  /// The welcomes are read first: the tick may come right after the device woke from a long sleep,
+  /// before the gateway noticed, and a welcome that came meanwhile may wait for a package the
+  /// cleanup would delete (issue #395). One request per check. A welcome sync that fails doesn't
+  /// stop the renewal (the device must stay addable, and the check must not repeat on every tick);
+  /// it only leaves the cleanup for later. Re-add records past their cooldown go too, for a device
+  /// that only ever resumes its gateway session (issue #391).
+  ///
   /// [`ClientSettings::key_package_check_interval`]: super::ClientSettings::key_package_check_interval
   pub async fn renew_key_packages_if_due(&mut self) -> Result<bool, CoreError> {
     let interval_ms = i64::try_from(self.settings.key_package_check_interval.as_millis()).unwrap_or(i64::MAX);
     if self.now_ms().saturating_sub(self.last_key_package_check_ms) < interval_ms {
       return Ok(false);
     }
+    if let Err(error) = self.sync_welcomes().await {
+      tracing::warn!(%error, "could not read the welcomes before the key package check");
+    }
     self.top_up_key_packages().await?;
+    self.prune_readded_records()?;
     Ok(true)
   }
 
@@ -272,12 +286,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     } else {
       0
     };
+    // openmls checks lifetimes against the system clock, so they are made from it too (not from
+    // the injectable clock, which tests move freely), and so is the cleanup that compares them.
+    let now_unix_secs = u64::try_from(SystemClock.now_ms().div_euclid(1000)).unwrap_or(0);
     if missing == 0 && status.has_last_resort {
+      self.clean_up_key_packages(None, now_unix_secs);
       return Ok(());
     }
-    // openmls checks lifetimes against the system clock, so they are made from it too (not from
-    // the injectable clock, which tests move freely).
-    let now_unix_secs = u64::try_from(SystemClock.now_ms().div_euclid(1000)).unwrap_or(0);
     let mut key_packages = Vec::new();
     for _ in 0..missing {
       key_packages.push(Base64Bytes::new(create_key_package(
@@ -301,16 +316,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     // The private parts must be stored before the public parts become claimable.
     records::save_mls_storage(&self.store, &self.provider)?;
+    let request = UploadKeyPackagesRequest {
+      key_packages,
+      maybe_last_resort,
+    };
     self
       .api
-      .upload_key_packages(
-        self.account.device_id,
-        &UploadKeyPackagesRequest {
-          key_packages,
-          maybe_last_resort,
-        },
-      )
+      .upload_key_packages(self.account.device_id, &request)
       .await?;
+    self.clean_up_key_packages(request.maybe_last_resort.as_ref(), now_unix_secs);
     tracing::info!(
       uploaded = missing,
       expiring_soon = status.expiring_soon,
@@ -389,7 +403,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
-  async fn refresh_members(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+  pub(crate) async fn refresh_members(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
     let read = self.api.list_members(conversation).await;
     self.store_members(conversation, read)
   }
@@ -483,6 +497,7 @@ mod tests {
       contains_guests: false,
       maybe_my_membership: None,
       participants: Vec::new(),
+      maybe_image: None,
     }
   }
 }

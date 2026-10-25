@@ -269,9 +269,9 @@ struct ConversationRow: View {
             .lineLimit(1)
           Spacer()
           if conversation.mentionCount > 0 {
-            CountBadge(count: conversation.mentionCount, isMention: true)
+            CountBadge(count: conversation.mentionCount, tone: .mention)
           } else if isUnread {
-            CountBadge(count: conversation.unreadCount)
+            CountBadge(count: conversation.unreadCount, tone: conversation.badgeTone)
           }
         }
       }

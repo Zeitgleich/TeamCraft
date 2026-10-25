@@ -17,7 +17,7 @@ use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{GatewayClientMessage, GatewayServerMessage};
 
-use crate::api::{ApiError, GatewayConnection, ServerApi};
+use crate::api::{ApiError, GatewayConnection, Interception, ServerApi};
 use crate::client::{Client, GatewayOutcome, GatewayTiming, HeldFrames, HeldLimits, keep_alive};
 use crate::error::CoreError;
 use crate::store::LocalStore;
@@ -32,9 +32,12 @@ pub enum ConnectionState {
   Connecting,
   Connected,
   /// The last attempt failed or the connection was lost; the next attempt starts at `retry_at_ms`
-  /// (Unix milliseconds), or at once when the network changes.
+  /// (Unix milliseconds), or at once when the network changes. `maybe_interception` names what
+  /// answered instead of the server, if the last attempt found out (a captive portal, a TLS proxy).
   Offline {
     retry_at_ms: i64,
+    #[serde(rename = "interception", default, skip_serializing_if = "Option::is_none")]
+    maybe_interception: Option<Interception>,
   },
   /// The server refused the access token. Tried again when the app has another token, or when the
   /// network changes.
@@ -279,7 +282,11 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
       },
       Err(error) => {
         tracing::warn!(%error, "gateway connection failed");
-        self.schedule_attempt(now);
+        let maybe_interception = match &error {
+          CoreError::Api(api) => api.interception(),
+          _ => None,
+        };
+        self.schedule_attempt(now, maybe_interception);
         None
       },
     }
@@ -421,7 +428,10 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     self.maybe_refused_token = None;
     self.next_attempt_ms = now_ms;
     if self.state() == ConnectionState::SignInRequired {
-      self.set_state(ConnectionState::Offline { retry_at_ms: now_ms });
+      self.set_state(ConnectionState::Offline {
+        retry_at_ms: now_ms,
+        maybe_interception: None,
+      });
     }
   }
 
@@ -464,12 +474,12 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     if now_ms.saturating_sub(self.connected_at_ms) >= millis(self.settings.stable_after) {
       self.failures = 0;
     }
-    self.schedule_attempt(now_ms);
+    self.schedule_attempt(now_ms, None);
   }
 
   /// Equal jitter: half the backoff plus a random part of the other half, so clients that lost
   /// the server at the same moment (a restart) don't come back in lock-step.
-  fn schedule_attempt(&mut self, now_ms: i64) {
+  fn schedule_attempt(&mut self, now_ms: i64, maybe_interception: Option<Interception>) {
     let exponent = self.failures.min(16);
     let base = self
       .settings
@@ -482,6 +492,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     self.next_attempt_ms = now_ms.saturating_add(delay_ms);
     self.set_state(ConnectionState::Offline {
       retry_at_ms: self.next_attempt_ms,
+      maybe_interception,
     });
   }
 
@@ -510,7 +521,18 @@ impl From<ConnectionState> for teamcraft_client_api::remote::CoreConnection {
     match state {
       ConnectionState::Connecting => Self::Connecting,
       ConnectionState::Connected => Self::Connected,
-      ConnectionState::Offline { retry_at_ms } => Self::Offline { retry_at_ms },
+      ConnectionState::Offline {
+        retry_at_ms,
+        maybe_interception,
+      } => Self::Offline {
+        retry_at_ms,
+        maybe_interception: maybe_interception.map(|kind| match kind {
+          Interception::CaptivePortal => teamcraft_client_api::remote::NetworkInterception::CaptivePortal,
+          Interception::UntrustedCertificate => {
+            teamcraft_client_api::remote::NetworkInterception::UntrustedCertificate
+          },
+        }),
+      },
       ConnectionState::SignInRequired => Self::SignInRequired,
     }
   }
@@ -577,10 +599,23 @@ mod tests {
 
   #[test]
   fn the_state_serializes_with_a_tag() {
-    let offline = serde_json::to_value(ConnectionState::Offline { retry_at_ms: 5 }).ok();
+    let offline = serde_json::to_value(ConnectionState::Offline {
+      retry_at_ms: 5,
+      maybe_interception: None,
+    })
+    .ok();
     assert_eq!(
       offline,
       Some(serde_json::json!({ "state": "offline", "retry_at_ms": 5 }))
+    );
+    let portal = serde_json::to_value(ConnectionState::Offline {
+      retry_at_ms: 5,
+      maybe_interception: Some(Interception::CaptivePortal),
+    })
+    .ok();
+    assert_eq!(
+      portal,
+      Some(serde_json::json!({ "state": "offline", "retry_at_ms": 5, "interception": "captive_portal" }))
     );
     let sign_in = serde_json::to_value(ConnectionState::SignInRequired).ok();
     assert_eq!(sign_in, Some(serde_json::json!({ "state": "sign_in_required" })));

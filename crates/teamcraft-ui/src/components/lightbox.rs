@@ -11,6 +11,11 @@
 //! Every control has a tooltip naming its key and is reachable by keyboard
 //! ([`crate::lightbox::Command`]).
 //!
+//! Pictures follow the finger ([`crate::components::lightbox_motion`]): a sideways drag (or a
+//! trackpad's two-finger swipe) pages, a drag up or down closes, and a zoomed picture pans and
+//! pinches with soft edges. The picture grows out of the tile it was opened from and closes back
+//! into it.
+//!
 //! It opens at once with the thumbnail scaled up and a small progress indicator, and swaps in the
 //! full file when it is there. Memory stays bounded: files are opened only up to
 //! [`MAX_VIEWER_BYTES`], and their decrypted bytes live in `blob:` URLs in the session's cache
@@ -34,6 +39,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::lightbox_controls::{
   Controls, MediaActions, Notice, ThumbnailStrip, still_frame, tooltip,
 };
+use crate::components::lightbox_motion::{MotionHooks, MotionNodes, StageMotion};
 use crate::components::modal::Modal;
 use crate::components::thread_panel::ThreadPanel;
 use crate::i18n::use_i18n;
@@ -128,7 +134,10 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
   let notice = Notice::default();
   let retries = RwSignal::new(0_u32);
   let ticket = StoredValue::new(0_u64);
+  let root = NodeRef::<html::Div>::new();
+  let backdrop_node = NodeRef::<html::Div>::new();
   let stage = NodeRef::<html::Div>::new();
+  let track = NodeRef::<html::Div>::new();
   let image = NodeRef::<html::Img>::new();
   let video = NodeRef::<html::Video>::new();
   let is_thread_shown = RwSignal::new(IS_THREAD_SHOWN.get().unwrap_or_else(is_wide_window));
@@ -154,6 +163,34 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
       current.set(key);
     }
   };
+  let motion = StageMotion::new(
+    MotionNodes {
+      root,
+      backdrop: backdrop_node,
+      stage,
+      track,
+      image,
+    },
+    MotionHooks {
+      go: Callback::new(go),
+      close: Callback::new(move |()| state.close_overlay()),
+      neighbours: Signal::derive(move || {
+        at.get()
+          .map_or((false, false), |at| (at.has_previous(), at.has_next()))
+      }),
+      current: current.into(),
+    },
+    viewport,
+  );
+  Effect::new(move |_| motion.enter());
+  // A button, a key or the strip changed the picture: whatever moved is done.
+  Effect::new(move |previous: Option<MediaKey>| {
+    let key = current.get();
+    if previous.is_some_and(|previous| previous != key) {
+      motion.reset();
+    }
+    key
+  });
   let toggle_thread = move || {
     let shown = !is_thread_shown.get_untracked();
     is_thread_shown.set(shown);
@@ -171,6 +208,7 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
     video,
     stage,
     viewport,
+    motion,
     is_paused,
     is_thread_shown,
     notice,
@@ -183,6 +221,13 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
   };
   let on_keydown = move |ev: web_sys::KeyboardEvent| {
     if is_typing_target(&ev) {
+      return;
+    }
+    if ev.key() == "Escape" {
+      // Before the dialog closes itself: the picture goes back into its tile.
+      ev.prevent_default();
+      ev.stop_propagation();
+      motion.close();
       return;
     }
     let Some(command) = Command::for_key(&ev.key(), ev.ctrl_key() || ev.meta_key(), ev.alt_key()) else {
@@ -252,8 +297,14 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
     <Modal labelled_by="lightbox-title" class="modal-lightbox">
       // tabindex: a click on the picture focuses the lightbox itself, not the dialog around it, so
       // the keys keep working.
-      <div class="lightbox" tabindex="-1" class:with-thread=move || is_thread_shown.get() on:keydown=on_keydown>
-        <div class="lightbox-backdrop" aria-hidden="true" style:background-image=backdrop></div>
+      <div
+        class="lightbox"
+        tabindex="-1"
+        class:with-thread=move || is_thread_shown.get()
+        node_ref=root
+        on:keydown=on_keydown
+      >
+        <div class="lightbox-backdrop" aria-hidden="true" node_ref=backdrop_node style:background-image=backdrop></div>
         <div class="lightbox-main">
           <header class="lightbox-top">
             <div class="lightbox-origin">
@@ -300,7 +351,7 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
                 aria-label=move || i18n.t("close")
                 data-tip=move || i18n.t("lightbox-close-tip")
                 aria-keyshortcuts="Escape"
-                on:click=move |_| state.close_overlay()
+                on:click=move |_| motion.close()
               >
                 <Icon name=IconName::Close />
               </button>
@@ -309,15 +360,18 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
           <div class="lightbox-body">
             <Stage
               stage=stage
+              track=track
               image=image
               video=video
               viewport=viewport
               full=full
               thumbnail=thumbnail
               current_file=current_file
+              images=images
+              current=current
               kind=kind
               is_paused=is_paused
-              go=go
+              motion=motion
             />
             <button
               class="lightbox-nav lightbox-previous"
@@ -457,20 +511,26 @@ fn load_current(inputs: LoadInputs) {
 /// Where the file is shown and the pointer and wheel gestures happen. A tap beside the picture
 /// closes the lightbox, like a click outside a dialog. Videos keep their own controls: the stage
 /// leaves their pointer events alone.
+///
+/// The stage holds a track of three slots, the previous, current and next file, so a page drag
+/// shows the neighbour coming in. The neighbours show what is already in memory (the full file seen
+/// before, the inline rendition, or the thumbnail), never a new download.
 #[component]
 fn Stage(
   stage: NodeRef<html::Div>,
+  track: NodeRef<html::Div>,
   image: NodeRef<html::Img>,
   video: NodeRef<html::Video>,
   viewport: RwSignal<Viewport>,
   full: RwSignal<FullMedia, LocalStorage>,
   thumbnail: RwSignal<Option<Rc<ObjectUrl>>, LocalStorage>,
   current_file: Memo<Option<FileInfo>>,
+  images: Memo<Vec<FileInfo>>,
+  current: RwSignal<MediaKey>,
   kind: Memo<Option<MediaKind>>,
   is_paused: RwSignal<bool>,
-  go: impl Fn(Direction) + Copy + 'static,
+  motion: StageMotion,
 ) -> impl IntoView {
-  let state = use_app_state();
   let pointers = StoredValue::new(Pointers::default());
   // A double-tap is recognised from pointer events; the browser's own dblclick is for mice only.
   let is_mouse = StoredValue::new(true);
@@ -482,6 +542,8 @@ fn Stage(
   let layout = RwSignal::new(0_u32);
   let resize = window_event_listener(leptos::ev::resize, move |_| layout.update(|tick| *tick += 1));
   on_cleanup(move || resize.remove());
+  let previous_peer = peer_of(images, current, Direction::Previous);
+  let next_peer = peer_of(images, current, Direction::Next);
   let can_transform = move || kind.get_untracked().is_some_and(MediaKind::can_transform);
   let anchor_of = move |client_x: f64, client_y: f64| {
     stage
@@ -497,10 +559,12 @@ fn Stage(
   };
   let zoom_at = move |factor: f64, anchor: Point| {
     let (image_size, stage_size) = sizes(image, stage);
+    motion.stop_view();
     viewport.update(|viewport| viewport.zoom_by(factor, anchor, image_size, stage_size));
   };
   let toggle_at = move |anchor: Point| {
     let (image_size, stage_size) = sizes(image, stage);
+    motion.stop_view();
     viewport.update(|viewport| viewport.toggle_zoom(anchor, image_size, stage_size));
   };
   let on_wheel = move |ev: web_sys::WheelEvent| {
@@ -508,32 +572,47 @@ fn Stage(
       return;
     }
     ev.prevent_default();
-    let delta = match ev.delta_mode() {
-      web_sys::WheelEvent::DOM_DELTA_LINE => ev.delta_y() * WHEEL_LINE_PX,
-      web_sys::WheelEvent::DOM_DELTA_PAGE => ev.delta_y() * sizes(image, stage).1.height,
-      _ => ev.delta_y(),
+    let to_px = |delta: f64| match ev.delta_mode() {
+      web_sys::WheelEvent::DOM_DELTA_LINE => delta * WHEEL_LINE_PX,
+      web_sys::WheelEvent::DOM_DELTA_PAGE => delta * sizes(image, stage).1.height,
+      _ => delta,
     };
-    // Trackpad pinches arrive as wheel events with the control key set.
+    let delta = Point::new(to_px(ev.delta_x()), to_px(ev.delta_y()));
+    // A trackpad's two-finger swipe sideways pages; trackpad pinches arrive with the control key.
+    if !ev.ctrl_key() && motion.wheel(delta, ev.time_stamp()) {
+      return;
+    }
     zoom_at(
-      wheel_zoom_factor(delta, ev.ctrl_key()),
+      wheel_zoom_factor(delta.y, ev.ctrl_key()),
       anchor_of(f64::from(ev.client_x()), f64::from(ev.client_y())),
     );
   };
   listen_to_wheel(stage, on_wheel);
   let on_pointerdown = move |ev: web_sys::PointerEvent| {
-    let is_on_stage = ev.target() == ev.current_target();
+    let is_on_picture = ev
+      .target()
+      .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+      .and_then(|target| target.closest(".lightbox-image, .lightbox-video").ok().flatten())
+      .is_some();
     // A video's own controls get their presses; capturing them would break seeking.
-    if ev.button() > 0 || (!can_transform() && !is_on_stage) {
+    if ev.button() > 0 || (!can_transform() && is_on_picture) {
       return;
     }
     is_mouse.set_value(ev.pointer_type() == "mouse");
-    is_press_beside_image.set_value(is_on_stage);
+    is_press_beside_image.set_value(!is_on_picture);
     if let Some(stage) = stage.get_untracked() {
       // Without capture a drag that leaves the stage would never end.
       drop(stage.set_pointer_capture(ev.pointer_id()));
     }
     let at = anchor_of(f64::from(ev.client_x()), f64::from(ev.client_y()));
-    pointers.update_value(|pointers| pointers.down(ev.pointer_id(), at));
+    let mut count = 0;
+    pointers.update_value(|pointers| {
+      pointers.down(ev.pointer_id(), at);
+      count = pointers.count();
+    });
+    if can_transform() {
+      motion.press(at, ev.time_stamp(), count);
+    }
   };
   let on_pointermove = move |ev: web_sys::PointerEvent| {
     if !can_transform() {
@@ -542,28 +621,30 @@ fn Stage(
     let at = anchor_of(f64::from(ev.client_x()), f64::from(ev.client_y()));
     let mut gesture = Gesture::None;
     pointers.update_value(|pointers| gesture = pointers.moved(ev.pointer_id(), at));
-    let (image_size, stage_size) = sizes(image, stage);
-    match gesture {
-      Gesture::None => {},
-      Gesture::Pan(delta) => viewport.update(|viewport| viewport.pan_by(delta, image_size, stage_size)),
-      Gesture::Pinch { factor, center } => {
-        viewport.update(|viewport| viewport.zoom_by(factor, center, image_size, stage_size));
-      },
+    if gesture != Gesture::None {
+      motion.drag(gesture, at, ev.time_stamp());
     }
   };
   let on_pointerup = move |ev: web_sys::PointerEvent| {
     let at = anchor_of(f64::from(ev.client_x()), f64::from(ev.client_y()));
-    let is_zoomed = viewport.get_untracked().is_zoomed();
     let mut release = Release::None;
+    let mut count = 0;
     pointers.update_value(|pointers| {
-      release = pointers.up(ev.pointer_id(), at, ev.time_stamp(), is_zoomed);
+      release = pointers.up(ev.pointer_id(), at, ev.time_stamp());
+      count = pointers.count();
     });
+    let was_gesture = can_transform() && motion.release(ev.time_stamp(), count);
     match release {
-      Release::Tap(_) if is_press_beside_image.get_value() => state.close_overlay(),
+      _ if was_gesture => {},
+      Release::Tap(_) if is_press_beside_image.get_value() => motion.close(),
       Release::DoubleTap(anchor) if !is_mouse.get_value() && can_transform() => toggle_at(anchor),
-      // A mouse drag on a fitted image is no swipe; it selects nothing and pages nowhere.
-      Release::Swipe(direction) if !is_mouse.get_value() => go(direction),
       _ => {},
+    }
+  };
+  let on_pointercancel = move |ev: web_sys::PointerEvent| {
+    pointers.update_value(|pointers| pointers.cancel(ev.pointer_id()));
+    if can_transform() {
+      motion.cancel();
     }
   };
   let on_dblclick = move |ev: web_sys::MouseEvent| {
@@ -592,68 +673,147 @@ fn Stage(
       class="lightbox-stage"
       class:zoomed=move || viewport.get().is_zoomed()
       class:is-video=move || kind.get() == Some(MediaKind::Video)
+      class:is-live=motion.is_live()
       node_ref=stage
       on:pointerdown=on_pointerdown
       on:pointermove=on_pointermove
       on:pointerup=on_pointerup
-      on:pointercancel=move |ev: web_sys::PointerEvent| pointers.update_value(|pointers| pointers.cancel(ev.pointer_id()))
+      on:pointercancel=on_pointercancel
       on:dblclick=on_dblclick
     >
-      {move || match (full.get(), kind.get()) {
-        (FullMedia::Ready(url), Some(MediaKind::Video)) => view! {
-          <video
-            class="lightbox-video"
-            src=url.as_str().to_owned()
-            controls
-            playsinline
-            preload="metadata"
-            aria-label=name
-            node_ref=video
-            on:error=move |_| full.set(FullMedia::Failed)
-          ></video>
-        }
-        .into_any(),
-        (FullMedia::Ready(url), _) => {
-          // Paused: the still frame once it is made, the thumbnail until then.
-          let file_src = url.as_str().to_owned();
-          let src = move || {
-            if !is_paused.get() {
-              return file_src.clone();
+      // Hidden until the first picture is there, which then grows out of its tile.
+      <div class="lightbox-track is-pending" node_ref=track>
+        <div class="lightbox-slot is-previous" aria-hidden="true">
+          <Peer peer=previous_peer />
+        </div>
+        <div class="lightbox-slot is-current">
+          {move || match (full.get(), kind.get()) {
+            (FullMedia::Ready(url), Some(MediaKind::Video)) => view! {
+              <video
+                class="lightbox-video"
+                src=url.as_str().to_owned()
+                controls
+                playsinline
+                preload="metadata"
+                aria-label=name
+                node_ref=video
+                on:loadedmetadata=move |_| motion.shown()
+                on:error=move |_| full.set(FullMedia::Failed)
+              ></video>
             }
-            still
-              .get()
-              .or_else(|| thumbnail.get())
-              .map(|frame| frame.as_str().to_owned())
-              .unwrap_or_default()
-          };
-          view! {
-            <img
-              class="lightbox-image"
-              src=src
-              alt=name
-              decoding="async"
-              draggable="false"
-              node_ref=image
-              style:transform=transform
-              on:load=move |_| layout.update(|tick| *tick += 1)
-              on:error=move |_| {
-                // The still frame is made from the file; only the file itself failing counts.
-                if !is_paused.get_untracked() {
-                  full.set(FullMedia::Failed);
+            .into_any(),
+            (FullMedia::Ready(url), _) => {
+              // Paused: the still frame once it is made, the thumbnail until then.
+              let file_src = url.as_str().to_owned();
+              let src = move || {
+                if !is_paused.get() {
+                  return file_src.clone();
                 }
+                still
+                  .get()
+                  .or_else(|| thumbnail.get())
+                  .map(|frame| frame.as_str().to_owned())
+                  .unwrap_or_default()
+              };
+              view! {
+                <img
+                  class="lightbox-image"
+                  src=src
+                  alt=name
+                  decoding="async"
+                  draggable="false"
+                  node_ref=image
+                  style:transform=transform
+                  on:load=move |_| {
+                    layout.update(|tick| *tick += 1);
+                    motion.shown();
+                  }
+                  on:error=move |_| {
+                    // The still frame is made from the file; only the file itself failing counts.
+                    if !is_paused.get_untracked() {
+                      full.set(FullMedia::Failed);
+                    }
+                  }
+                />
               }
-            />
-          }
-          .into_any()
-        },
-        _ => thumbnail
-          .get()
-          .map(|url| {
-            view! { <img class="lightbox-image lightbox-placeholder" src=url.as_str().to_owned() alt="" draggable="false" /> }
-          })
-          .into_any(),
-      }}
+              .into_any()
+            },
+            _ => thumbnail
+              .get()
+              .map(|url| {
+                view! {
+                  <img
+                    class="lightbox-image lightbox-placeholder"
+                    src=url.as_str().to_owned()
+                    alt=""
+                    draggable="false"
+                    on:load=move |_| motion.shown()
+                  />
+                }
+              })
+              .into_any(),
+          }}
+        </div>
+        <div class="lightbox-slot is-next" aria-hidden="true">
+          <Peer peer=next_peer />
+        </div>
+      </div>
     </div>
+  }
+}
+
+/// What a neighbour's slot shows: the best rendition already in memory.
+#[derive(Clone)]
+struct PeerImage {
+  url: Rc<ObjectUrl>,
+  /// The full file, laid out like the current picture; else a placeholder like the current one
+  /// before its file arrives, so the hand-over at the end of a page turn doesn't jump.
+  is_full: bool,
+}
+
+/// The neighbour in `direction` of the current file, kept up to date as the lightbox pages.
+fn peer_of(
+  images: Memo<Vec<FileInfo>>,
+  current: RwSignal<MediaKey>,
+  direction: Direction,
+) -> RwSignal<Option<PeerImage>, LocalStorage> {
+  let peer = RwSignal::new_local(None::<PeerImage>);
+  Effect::new(move |_| {
+    let maybe_file = images.with(|images| {
+      let key = neighbor(images, current.get(), direction)?;
+      images.iter().find(|file| key.matches(file)).cloned()
+    });
+    peer.set(maybe_file.and_then(|file| peer_image(&file)));
+  });
+  peer
+}
+
+fn peer_image(file: &FileInfo) -> Option<PeerImage> {
+  let key = MediaKey::of(file)?;
+  let is_picture = MediaKind::of(&file.media_type).is_some_and(MediaKind::can_transform);
+  if is_picture && let Some(url) = media_cache::cached(key, Rendition::Full) {
+    return Some(PeerImage { url, is_full: true });
+  }
+  media_cache::cached(key, Rendition::Inline)
+    .or_else(|| thumbnail_url(file))
+    .map(|url| PeerImage { url, is_full: false })
+}
+
+#[component]
+fn Peer(peer: RwSignal<Option<PeerImage>, LocalStorage>) -> impl IntoView {
+  move || {
+    peer.get().map(|peer| {
+      view! {
+        <img
+          class="lightbox-image"
+          class:lightbox-placeholder=!peer.is_full
+          src=peer.url.as_str().to_owned()
+          alt=""
+          decoding="async"
+          draggable="false"
+        />
+      }
+    })
   }
 }
 

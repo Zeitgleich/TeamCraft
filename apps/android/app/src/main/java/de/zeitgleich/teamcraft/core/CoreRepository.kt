@@ -60,6 +60,7 @@ class CoreRepository(
       it.close()
       onAccountClosed()
     }
+    NetworkTrust.awaitTrustedCertificates()
     val core = withContext(Dispatchers.IO) {
       TeamCraft(
         AppConfig(

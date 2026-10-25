@@ -6,6 +6,7 @@ use crate::components::compact_back::CompactBack;
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::components::rich_text::RichText;
+use crate::components::sliding_indicator::SlidingIndicator;
 use crate::components::thread_panel::ThreadPanel;
 use crate::i18n::use_i18n;
 use crate::model::{ThreadSummary, thread_id_of};
@@ -34,6 +35,7 @@ pub fn ThreadsInbox() -> impl IntoView {
             <h1>{move || i18n.t("threads-title")}</h1>
           </div>
           <div class="segmented" role="group" aria-label=move || i18n.t("threads-filter")>
+            <SlidingIndicator />
             <button aria-pressed=move || (!only_unread.get()).to_string() on:click=move |_| only_unread.set(false)>
               {move || i18n.t("threads-all")}
             </button>
@@ -59,7 +61,7 @@ pub fn ThreadsInbox() -> impl IntoView {
           _ => {
             view! {
               <div class="empty-detail">
-                <Icon name=IconName::Threads class="empty-icon" />
+                <Icon name=IconName::Threads class="threads-empty-icon" />
                 <p>{move || i18n.t("threads-select")}</p>
               </div>
             }

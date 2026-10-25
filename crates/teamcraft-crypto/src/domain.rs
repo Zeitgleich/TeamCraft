@@ -21,6 +21,8 @@ pub(crate) const RECOVERY_REQUEST_FINGERPRINT: &str = "TeamCraft-v1 recovery req
 pub(crate) const MEMBERSHIP_CHANGE: &str = "TeamCraft-v1 membership change";
 pub(crate) const REJOIN_REQUEST: &str = "TeamCraft-v1 rejoin request";
 pub(crate) const PUSH_WAKEUP_AAD: &str = "TeamCraft-v1 push wake-up";
+pub(crate) const PUSH_SUBSCRIPTION_CHANGE: &str = "TeamCraft-v1 push subscription change";
+pub(crate) const PUSH_SUBSCRIPTION_CHANGE_KEY: &str = "TeamCraft-v1 push subscription change key";
 pub(crate) const PUSH_GATEWAY_REQUEST: &str = "TeamCraft-v1 push gateway request";
 pub(crate) const PUSH_GATEWAY_SERVER_ID: &str = "TeamCraft-v1 push gateway server id";
 pub(crate) const PUSH_GATEWAY_BOUND_TOKEN: &str = "TeamCraft-v1 push gateway bound token";
@@ -43,6 +45,8 @@ pub(crate) const SERVER_SETTING_AAD: &str = "TeamCraft-v1 server setting";
 /// MLS exporter label (RFC 9420 §8.5) for the content key of an epoch.
 pub(crate) const EPOCH_CONTENT_KEY: &str = "TeamCraft-v1 epoch content key";
 pub(crate) const DEVICE_LIST: &str = "TeamCraft-v1 device list";
+/// HPKE info of content keys sealed to one member device.
+pub(crate) const SEALED_CONTENT_KEYS: &str = "TeamCraft-v1 sealed content keys";
 pub(crate) const WORKSPACE_LOG_HASH: &str = "TeamCraft-v1 workspace log entry hash";
 
 /// Returns `len(label) || label || body`.
@@ -60,7 +64,7 @@ pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
 mod tests {
   use super::*;
 
-  const ALL_LABELS: [&str; 33] = [
+  const ALL_LABELS: [&str; 36] = [
     DEVICE_CERTIFICATE,
     IDENTITY_FINGERPRINT,
     MESSAGE_AAD,
@@ -72,6 +76,8 @@ mod tests {
     MEMBERSHIP_CHANGE,
     REJOIN_REQUEST,
     PUSH_WAKEUP_AAD,
+    PUSH_SUBSCRIPTION_CHANGE,
+    PUSH_SUBSCRIPTION_CHANGE_KEY,
     PUSH_GATEWAY_REQUEST,
     PUSH_GATEWAY_SERVER_ID,
     PUSH_GATEWAY_BOUND_TOKEN,
@@ -94,6 +100,7 @@ mod tests {
     SHARE_LINK_NAME,
     SERVER_SETTING_KEY,
     SERVER_SETTING_AAD,
+    SEALED_CONTENT_KEYS,
   ];
 
   #[test]

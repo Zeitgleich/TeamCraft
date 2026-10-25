@@ -404,6 +404,28 @@ The desktop and Android apps are measured against the same harness (`PERF_MOBILE
 session. Slack, Teams and Element were not measured: that needs their apps installed and accounts
 on their services.
 
+### Desktop on Linux: idle (issue #399)
+
+The 1.0.2 desktop app on Linux (WebKitGTK 2.54) grew while nobody touched it. Measured on the
+released binary and on the fix, signed in to a real workspace, window visible, untouched; memory
+and CPU of the `WebKitWebProcess` from `/proc` every 30 s:
+
+| What                                        | 1.0.2                       | Fixed            | Budget   |
+|---------------------------------------------|-----------------------------|------------------|----------|
+| Webview RSS at start / after 8 min          | 552 MiB / 3.76 GiB          | 302 / 303 MiB    | 400 MiB  |
+| Webview anonymous memory after 8 min        | 3.59 GiB                    | 136 MiB          | -        |
+| Webview CPU while idle                      | about 100 % of one core     | 0.1 %            | ≤ 0.5 %  |
+| Shell calls from the webview while idle     | about 770 per second        | none             | -        |
+
+The cause was a loop between the call state and the backend: effects in the desktop call setup emit
+call events, the handler read the backend, which subscribed the effect to every backend change, and
+each call action ends with a change notification. `CallState::emit` now runs the handler untracked
+and the call mirror only notifies when its snapshot changed (unit tests in `calls.rs` and
+`remote_calls.rs`). The web client does not wire these effects and idled cleanly before and after:
+a phone (Android, Chromium 152) over 10 minutes stayed at about 300 MiB renderer RSS, a 4 to 5 MiB
+JS heap and under 1 % CPU. `perf.rs` now also fails when the PSS or the JS heap grows over the idle
+period.
+
 ### Android (first numbers)
 
 Release Rust core, debug Kotlin build (`assembleLibreDebug`), API 35 emulator (the Pixel 10 / API 37
