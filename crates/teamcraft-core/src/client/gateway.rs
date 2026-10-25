@@ -54,9 +54,17 @@ pub struct GatewayTiming {
   pub handshake_timeout: Duration,
   /// Longest heartbeat interval, also when the server's `hello` allows more.
   pub max_heartbeat: Duration,
-  /// Frames held while long work runs ([`HeldFrames`]); beyond this the connection isn't read until
-  /// the work is done (the server then drops it as too slow, and the client resumes).
-  pub max_held_frames: usize,
+  /// How much is held while long work runs ([`HeldFrames`]).
+  pub held_limits: HeldLimits,
+}
+
+/// Bounds of [`HeldFrames`]: beyond either the connection isn't read until the work is done (the
+/// server then drops it as too slow, and the client resumes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeldLimits {
+  pub max_frames: usize,
+  /// The frames' size as JSON, as they came over the wire.
+  pub max_bytes: usize,
 }
 
 /// Frames that arrived while [`keep_alive`] ran other work, in their order, to be applied once it is
@@ -64,6 +72,7 @@ pub struct GatewayTiming {
 #[derive(Debug, Default)]
 pub struct HeldFrames {
   frames: VecDeque<Option<Result<GatewayServerMessage, ApiError>>>,
+  bytes: usize,
   is_closed: bool,
   heartbeats_sent: u32,
   /// Whether the server answered meanwhile (a heartbeat answer or any other frame).
@@ -100,6 +109,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // Events may have been missed while disconnected: every group is caught up again before the
     // outbox sends into it.
     self.mls_current.clear();
+    // The welcomes are read again before a spent key package goes (issue #395).
+    self.are_welcomes_synced = false;
     // A replay cut short by the drop is not waited for; this connection brings its own.
     self.maybe_replay_left = None;
     let (mut connection, mut heartbeat_interval) = self.open_gateway(handshake_timeout).await?;
@@ -123,7 +134,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
               &mut connection,
               heartbeat,
               heartbeat,
-              timing.max_held_frames,
+              timing.held_limits,
               &mut held,
               self.resync_live_state(),
             )
@@ -175,7 +186,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       &mut connection,
       heartbeat,
       heartbeat,
-      timing.max_held_frames,
+      timing.held_limits,
       &mut held,
       self.sync_fresh_session(session_id),
     )
@@ -500,7 +511,16 @@ impl Default for GatewayTiming {
     Self {
       handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
       max_heartbeat: Duration::from_secs(25),
-      max_held_frames: 10_000,
+      held_limits: HeldLimits::default(),
+    }
+  }
+}
+
+impl Default for HeldLimits {
+  fn default() -> Self {
+    Self {
+      max_frames: 10_000,
+      max_bytes: 16 * 1024 * 1024,
     }
   }
 }
@@ -508,7 +528,11 @@ impl Default for GatewayTiming {
 impl HeldFrames {
   /// The oldest held frame, if any.
   pub fn pop(&mut self) -> Option<Option<Result<GatewayServerMessage, ApiError>>> {
-    self.frames.pop_front()
+    let maybe_frame = self.frames.pop_front();
+    if self.frames.is_empty() {
+      self.bytes = 0;
+    }
+    maybe_frame
   }
 
   pub fn is_empty(&self) -> bool {
@@ -533,20 +557,25 @@ impl HeldFrames {
         self.was_heard = true;
         return;
       },
-      Some(Ok(_)) => self.was_heard = true,
+      Some(Ok(frame)) => {
+        self.was_heard = true;
+        // Only while long work runs; a frame is a few hundred bytes, an MLS message more.
+        let size = serde_json::to_vec(frame).map_or(0, |json| json.len());
+        self.bytes = self.bytes.saturating_add(size);
+      },
       Some(Err(_)) | None => self.is_closed = true,
     }
     self.frames.push_back(maybe_frame);
   }
 
-  fn is_reading(&self, max_frames: usize) -> bool {
-    !self.is_closed && self.frames.len() < max_frames
+  fn is_reading(&self, limits: HeldLimits) -> bool {
+    !self.is_closed && self.frames.len() < limits.max_frames && self.bytes < limits.max_bytes
   }
 }
 
 /// Runs `work` while keeping `connection` alive (issue #325): a heartbeat after `first_heartbeat_in`
 /// and then every `heartbeat`, and
-/// what arrives meanwhile is read into `held` (up to `max_held` frames), so neither the server's
+/// what arrives meanwhile is read into `held` (within `limits`), so neither the server's
 /// heartbeat timeout nor its slow-reader limit drops the connection while a long sync or command
 /// holds the loop. Frames are only held, never applied: they come after what `work` does, in their
 /// order, once the caller takes them.
@@ -554,7 +583,7 @@ pub async fn keep_alive<G: GatewayConnection, T>(
   connection: &mut G,
   first_heartbeat_in: Duration,
   heartbeat: Duration,
-  max_held: usize,
+  limits: HeldLimits,
   held: &mut HeldFrames,
   work: impl Future<Output = T>,
 ) -> T {
@@ -562,7 +591,7 @@ pub async fn keep_alive<G: GatewayConnection, T>(
   let mut timer = Box::pin(platform::sleep(first_heartbeat_in));
   loop {
     let step = {
-      let is_reading = held.is_reading(max_held);
+      let is_reading = held.is_reading(limits);
       let read = async {
         if is_reading {
           connection.receive().await
@@ -658,7 +687,7 @@ mod tests {
     let mut held = HeldFrames::default();
     held.hold(Some(Ok(GatewayServerMessage::SessionInvalid)));
     held.hold(None);
-    assert!(!held.is_reading(10));
+    assert!(!held.is_reading(HeldLimits::default()));
     assert!(matches!(
       held.pop(),
       Some(Some(Ok(GatewayServerMessage::SessionInvalid)))
@@ -668,11 +697,33 @@ mod tests {
   }
 
   #[test]
-  fn reading_stops_at_the_bound() {
+  fn reading_stops_at_the_bound_of_frames() {
+    let limits = HeldLimits {
+      max_frames: 2,
+      max_bytes: usize::MAX,
+    };
     let mut held = HeldFrames::default();
     held.hold(Some(Ok(GatewayServerMessage::SessionInvalid)));
-    assert!(held.is_reading(2));
+    assert!(held.is_reading(limits));
     held.hold(Some(Ok(GatewayServerMessage::SessionInvalid)));
-    assert!(!held.is_reading(2));
+    assert!(!held.is_reading(limits));
+  }
+
+  #[test]
+  fn reading_stops_at_the_bound_of_bytes_and_starts_over_when_drained() {
+    let frame = GatewayServerMessage::SessionInvalid;
+    let size = serde_json::to_vec(&frame).unwrap().len();
+    let limits = HeldLimits {
+      max_frames: usize::MAX,
+      max_bytes: size * 2,
+    };
+    let mut held = HeldFrames::default();
+    held.hold(Some(Ok(frame.clone())));
+    assert!(held.is_reading(limits));
+    held.hold(Some(Ok(frame)));
+    assert!(!held.is_reading(limits));
+    held.pop();
+    held.pop();
+    assert!(held.is_reading(limits));
   }
 }

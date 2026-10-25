@@ -671,6 +671,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Fetches welcomes for this device and joins those groups.
   pub async fn sync_welcomes(&mut self) -> Result<(), CoreError> {
+    self.are_welcomes_synced = false;
+    self.is_welcome_cursor_held = false;
     loop {
       let query = ListMlsMessagesQuery {
         maybe_after: self.sync.maybe_welcome_cursor,
@@ -681,6 +683,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.join_from_welcome(welcome).await?;
       }
       if !page.has_more || page.messages.is_empty() {
+        self.are_welcomes_synced = true;
         return Ok(());
       }
     }

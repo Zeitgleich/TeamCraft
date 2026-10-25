@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use futures_util::future::join_all;
+use futures_util::task::AtomicWaker;
 use teamcraft_proto::{
   ConversationId, Id, ListConversationMembersResponse, ListMessagesQuery, ListMessagesResponse,
   ListMlsMessagesQuery, ListMlsMessagesResponse, MlsMessageResponse, Snowflake,
@@ -39,6 +40,8 @@ pub(crate) const CATCHING_UP_PREFIX: &str = "catching_up/";
 pub struct CatchUpFocus {
   conversation: Arc<AtomicI64>,
   caught_up: Arc<AtomicU64>,
+  /// The host waiting in [`CatchUpFocus::caught_up_since`] (one waiter).
+  waker: Arc<AtomicWaker>,
 }
 
 /// Welcomes a catch-up keeps after the focus first read them, for the next focus; with more waiting,
@@ -72,6 +75,7 @@ impl Default for CatchUpFocus {
     Self {
       conversation: Arc::new(AtomicI64::new(NO_FOCUS)),
       caught_up: Arc::new(AtomicU64::new(0)),
+      waker: Arc::new(AtomicWaker::new()),
     }
   }
 }
@@ -94,8 +98,20 @@ impl CatchUpFocus {
     self.caught_up.load(Ordering::Relaxed)
   }
 
+  /// Completes with the count once it differs from `seen`: no timer, the catch-up wakes the host.
+  pub fn caught_up_since(&self, seen: u64) -> impl std::future::Future<Output = u64> + '_ {
+    std::future::poll_fn(move |context| {
+      self.waker.register(context.waker());
+      match self.caught_up_count() {
+        count if count != seen => std::task::Poll::Ready(count),
+        _ => std::task::Poll::Pending,
+      }
+    })
+  }
+
   fn note_caught_up(&self) {
     self.caught_up.fetch_add(1, Ordering::Relaxed);
+    self.waker.wake();
   }
 }
 
@@ -247,6 +263,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     ahead: &mut AheadOfTheRest,
     phases: &PhaseTimer,
   ) -> Result<(), CoreError> {
+    // As in `sync_welcomes`: spent key packages wait until every welcome was read (#395).
+    self.are_welcomes_synced = false;
     loop {
       let query = ListMlsMessagesQuery {
         maybe_after: self.sync.maybe_welcome_cursor,
@@ -258,6 +276,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.join_from_welcome(welcome).await?;
       }
       if !page.has_more || page.messages.is_empty() {
+        self.are_welcomes_synced = true;
         return Ok(());
       }
     }
@@ -523,6 +542,16 @@ mod tests {
     assert_eq!(focus.get(), None);
     focus.clone().set(id(42));
     assert_eq!(focus.get(), Some(id(42)));
+  }
+
+  #[test]
+  fn the_host_is_woken_when_the_focus_is_caught_up() {
+    use futures_util::FutureExt;
+    let focus = CatchUpFocus::default();
+    assert_eq!(focus.caught_up_since(0).now_or_never(), None);
+    focus.clone().note_caught_up();
+    assert_eq!(focus.caught_up_since(0).now_or_never(), Some(1));
+    assert_eq!(focus.caught_up_since(1).now_or_never(), None);
   }
 
   #[test]

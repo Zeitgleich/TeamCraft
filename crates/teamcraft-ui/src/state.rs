@@ -744,7 +744,10 @@ impl AppState {
     }
     self.view.set(MainView::Conversation(id));
     self.overlay.set(Overlay::None);
-    self.read(|backend| backend.focus_conversation(id));
+    if conversation.is_catching_up {
+      // Only a catch-up has a use for it; settled switches cost no extra request.
+      self.read(|backend| backend.focus_conversation(id));
+    }
     if conversation.unread_count > 0 || conversation.mention_count > 0 {
       self.write(|backend| backend.mark_read(id));
     }

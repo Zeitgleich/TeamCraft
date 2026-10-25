@@ -37,6 +37,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// outbox, key packages and the key bag.
   pub async fn full_sync(&mut self) -> Result<(), CoreError> {
     let started_ms = self.now_ms();
+    // Welcomes may have come in while this device was away: no spent key package goes before they
+    // are read again (issue #395).
+    self.are_welcomes_synced = false;
     // Removal records of the user's devices count before anything is decrypted, and this device's
     // own (also from older versions) reach the others.
     self.apply_shared_removals()?;

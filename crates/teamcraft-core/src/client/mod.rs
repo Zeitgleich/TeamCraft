@@ -51,7 +51,8 @@ pub(crate) use catch_up::CATCHING_UP_PREFIX;
 pub use catch_up::{CatchUpFocus, is_catching_up};
 pub use enroll::{EnrollmentOptions, EnrollmentSecret, OrgRecoveryUnlock, PendingEnrollment};
 pub use gateway::{
-  DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart, GatewayTiming, HeldFrames, KeptAlive, keep_alive,
+  DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart, GatewayTiming, HeldFrames, HeldLimits, KeptAlive,
+  keep_alive,
 };
 pub use group_health::{
   RemovalStatus, group_leftovers, is_queue_refused, pending_removals, unconfirmed_removals,
@@ -206,7 +207,16 @@ pub struct Client<A, S> {
   catch_up_focus: CatchUpFocus,
   /// Set while a catch-up joins the focused conversation's welcomes ahead of the others: the
   /// welcome cursor then stays where it is, so the welcomes before them are still read in order.
+  /// Cleared right after each such join; a catch-up future dropped in between leaves it set until
+  /// the next catch-up, which clears it before anything else (only welcomes are affected).
   is_welcome_cursor_held: bool,
+  /// Whether all welcomes were read since the last reset: only then may spent key packages go, so a
+  /// welcome that waited for one is opened first (e2ee.md §4.3.1). Reset when a gateway connection
+  /// starts (fresh or resumed), when a full sync starts and when a welcome sync starts; set when a
+  /// welcome sync read the last page.
+  // Read by the key package cleanup of #401 on main; this branch only keeps it current.
+  #[allow(dead_code)]
+  are_welcomes_synced: bool,
 }
 
 impl Default for ClientSettings {
@@ -285,6 +295,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_waiting_checked_at_ms: None,
       catch_up_focus: CatchUpFocus::default(),
       is_welcome_cursor_held: false,
+      are_welcomes_synced: false,
     };
     // A catch-up the app was closed during left its marks; the next one sets them again.
     catch_up::clear_marks(&client.store)?;

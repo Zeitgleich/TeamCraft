@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use teamcraft_proto::{GatewayClientMessage, GatewayServerMessage};
 
 use crate::api::{ApiError, GatewayConnection, ServerApi};
-use crate::client::{Client, GatewayOutcome, GatewayTiming, HeldFrames, keep_alive};
+use crate::client::{Client, GatewayOutcome, GatewayTiming, HeldFrames, HeldLimits, keep_alive};
 use crate::error::CoreError;
 use crate::store::LocalStore;
 
@@ -59,9 +59,9 @@ pub struct ConnectionSettings {
   pub probe_timeout: Duration,
   /// A gap this long between two ticks means the device slept or the tab was frozen.
   pub wake_gap: Duration,
-  /// Frames kept while a long sync or command runs ([`ConnectionSupervisor::keep_alive`]); beyond
-  /// this the connection isn't read until the work is done.
-  pub max_held_frames: usize,
+  /// What is kept while a long sync or command runs ([`ConnectionSupervisor::keep_alive`]); beyond
+  /// it the connection isn't read until the work is done.
+  pub held_limits: HeldLimits,
 }
 
 /// The current [`ConnectionState`], readable from other threads and while the shell's loop is busy
@@ -115,7 +115,7 @@ impl Default for ConnectionSettings {
       stable_after: Duration::from_secs(30),
       probe_timeout: Duration::from_secs(3),
       wake_gap: Duration::from_secs(30),
-      max_held_frames: GatewayTiming::default().max_held_frames,
+      held_limits: HeldLimits::default(),
     }
   }
 }
@@ -249,7 +249,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     let timing = GatewayTiming {
       handshake_timeout: self.settings.handshake_timeout,
       max_heartbeat: self.settings.max_heartbeat,
-      max_held_frames: self.settings.max_held_frames,
+      held_limits: self.settings.held_limits,
     };
     let result = client.start_gateway(timing).await;
     let now = client.now_ms();
@@ -386,7 +386,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
       connection,
       first_in,
       self.heartbeat,
-      self.settings.max_held_frames,
+      self.settings.held_limits,
       &mut self.held,
       work,
     )
