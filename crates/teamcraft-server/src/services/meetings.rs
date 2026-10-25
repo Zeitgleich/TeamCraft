@@ -184,7 +184,14 @@ pub async fn get_meeting(
 ) -> Result<MeetingResponse, ApiError> {
   let service = service_of(state)?;
   let meeting = visible_meeting(state, caller, id).await?;
-  respond(state, service, &meeting, Vec::new()).await
+  let mut response = respond(state, service, &meeting, Vec::new()).await?;
+  // A guest sees who is in the meeting, not the addresses the invitations went to.
+  if is_guest(caller) {
+    for attendee in &mut response.attendees {
+      attendee.maybe_email = None;
+    }
+  }
+  Ok(response)
 }
 
 /// The caller's meetings in a time range, soonest first.

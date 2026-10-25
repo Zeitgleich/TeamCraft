@@ -32,6 +32,7 @@ use crate::media_layout::{EmbedImage, fit_picture, inline_size, loads_inline, th
 use crate::model::{ConversationId, MessageId};
 use crate::object_url::{FetchError, ObjectUrl};
 use crate::prefs::ImageSize;
+use crate::preview::{self, PreviewKind};
 use crate::state::{AppState, Overlay, use_app_state};
 
 /// Most tiles a grid shows; the last one counts the pictures it doesn't show ("+3").
@@ -616,6 +617,12 @@ pub fn FileCard(file: FileInfo) -> impl IntoView {
     },
   };
   let status = transfer_status(&file.transfer, actions);
+  // Markdown, HTML and PDF files open in the app (#557) unless they are too large.
+  let maybe_document_key = MediaKey::for_file(&file).filter(|_| {
+    is_on_server
+      && PreviewKind::of(&file.media_type, &file.file_name).is_some()
+      && preview::is_within_limit(file.size_bytes)
+  });
   let show_download = is_on_server
     && !matches!(
       file.transfer,
@@ -629,6 +636,16 @@ pub fn FileCard(file: FileInfo) -> impl IntoView {
         <span class="file-size">{format_bytes(file.size_bytes)}</span>
         {status}
       </div>
+      {maybe_document_key.map(|key| view! {
+        <button
+          class="icon-btn file-action"
+          aria-label=move || i18n.t("file-preview")
+          data-tip=move || i18n.t("file-preview")
+          on:click=move |_| state.overlay.set(Overlay::FilePreview(conversation, key))
+        >
+          <Icon name=IconName::Eye />
+        </button>
+      })}
       {show_download.then(|| view! {
         <button
           class="icon-btn file-action"

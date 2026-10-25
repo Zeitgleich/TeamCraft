@@ -704,27 +704,13 @@ pub struct WebConfig {
   pub content_security_policy: String,
   /// Further origins (`https://...`, `wss://...`) the web client may connect to.
   pub connect_origins: Vec<String>,
-  /// Directory with the small static download page for share links: `download.html` and the
-  /// assets it references. `{{sri:<file>}}` in the page becomes the Subresource Integrity value
-  /// (`sha384-...`) of that file in this directory, computed at startup. Without it `/f/<id>`
-  /// serves the app shell.
-  #[serde(rename = "share_page_dir")]
-  pub maybe_share_page_dir: Option<PathBuf>,
-  /// `Content-Security-Policy` of the download page: no inline script, nothing but its own files.
-  pub share_page_content_security_policy: String,
 }
 
 impl Default for WebConfig {
   fn default() -> Self {
     Self {
       maybe_static_dir: None,
-      maybe_share_page_dir: None,
       connect_origins: Vec::new(),
-      share_page_content_security_policy:
-        "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; \
-        img-src 'self' data:; connect-src 'self' https:; base-uri 'none'; form-action 'none'; \
-        frame-ancestors 'none'"
-          .into(),
       content_security_policy: "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; \
         img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src {connect_src}; \
         worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
@@ -776,16 +762,9 @@ impl WebConfig {
 
   /// Rejects a configuration that would send no policy or a broken one.
   pub fn validate(&self) -> Result<(), String> {
-    for (name, policy) in [
-      ("content_security_policy", self.resolved_content_security_policy()),
-      (
-        "share_page_content_security_policy",
-        self.share_page_content_security_policy.clone(),
-      ),
-    ] {
-      if policy.trim().is_empty() || axum::http::HeaderValue::from_str(&policy).is_err() {
-        return Err(format!("web.{name} is empty or not a valid header value"));
-      }
+    let policy = self.resolved_content_security_policy();
+    if policy.trim().is_empty() || axum::http::HeaderValue::from_str(&policy).is_err() {
+      return Err("web.content_security_policy is empty or not a valid header value".to_owned());
     }
     for origin in &self.connect_origins {
       let is_plain = origin
@@ -1135,6 +1114,9 @@ pub struct SharesConfig {
   pub public_base_url: String,
   /// Most live (not revoked, not expired) links per person.
   pub max_links_per_user: usize,
+  /// A download that failed after it was counted can be retried this long without counting again
+  /// (the download page keeps the grant it was given). `0` counts every request.
+  pub download_retry_minutes: u32,
 }
 
 impl Default for SharesConfig {
@@ -1146,6 +1128,7 @@ impl Default for SharesConfig {
       max_downloads_cap: 0,
       public_base_url: String::new(),
       max_links_per_user: 500,
+      download_retry_minutes: 10,
     }
   }
 }

@@ -734,6 +734,72 @@ impl Database {
     }))
   }
 
+  /// Active guests of meetings whose access has ended: the meeting is over for longer than
+  /// `grace_secs`, or it was cancelled. At most `limit`, oldest meeting first; the caller
+  /// deactivates them and asks again.
+  pub async fn list_guests_past_access(
+    &self,
+    now: OffsetDateTime,
+    grace_secs: f64,
+    limit: i64,
+  ) -> Result<Vec<(MeetingId, UserId)>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT DISTINCT l.user_id, l.meeting_id, m.ends_at
+         FROM meeting_lobby l
+         JOIN meetings m ON m.id = l.meeting_id
+         JOIN users u ON u.id = l.user_id
+         WHERE u.kind = 'guest' AND u.deactivated_at IS NULL
+           AND (m.status <> 'scheduled' OR m.ends_at + make_interval(secs => $2) < $1)
+         ORDER BY m.ends_at, l.user_id
+         LIMIT $3"#,
+      now,
+      grace_secs,
+      limit,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| Ok((from_db(row.meeting_id)?, from_db(row.user_id)?)))
+      .collect()
+  }
+
+  /// Stores a guest's proof of the link secret, once. `false` when there is none to set (the guest
+  /// has no lobby place) or one is stored already.
+  pub async fn set_guest_proof(
+    &self,
+    meeting: MeetingId,
+    user: UserId,
+    proof: &[u8],
+  ) -> Result<bool, DbError> {
+    let result = sqlx::query!(
+      "UPDATE meeting_lobby SET guest_proof = $3 WHERE meeting_id = $1 AND user_id = $2 AND guest_proof IS NULL",
+      to_db(meeting),
+      to_db(user),
+      proof,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() == 1)
+  }
+
+  /// The proofs guests of the meeting stored, by guest.
+  pub async fn guest_proofs(&self, meeting: MeetingId) -> Result<HashMap<UserId, Vec<u8>>, DbError> {
+    let rows = sqlx::query!(
+      "SELECT user_id, guest_proof FROM meeting_lobby WHERE meeting_id = $1 AND guest_proof IS NOT NULL",
+      to_db(meeting),
+    )
+    .fetch_all(self.pool())
+    .await?;
+    let mut proofs = HashMap::new();
+    for row in rows {
+      if let Some(proof) = row.guest_proof {
+        proofs.insert(from_db(row.user_id)?, proof);
+      }
+    }
+    Ok(proofs)
+  }
+
   /// Guests waiting for a decision, longest waiting first.
   pub async fn list_waiting(&self, meeting: MeetingId) -> Result<Vec<LobbyRow>, DbError> {
     let rows = sqlx::query!(
