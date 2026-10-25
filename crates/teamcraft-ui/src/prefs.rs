@@ -445,6 +445,8 @@ pub struct DisplayPrefs {
   pub show_status_in_messages: bool,
   /// Size of the whole interface, Ctrl/Cmd + `+` / `-` / `0`.
   pub zoom: Zoom,
+  /// Size of the text only (issue #370); spacing next to text grows with it, the layout does not.
+  pub text_size: TextSize,
   /// Seconds at the bottom of the focused conversation before the "New messages" divider goes;
   /// `None` keeps it until the user sends, presses Esc or leaves (#321).
   pub maybe_divider_dwell_secs: Option<u16>,
@@ -457,6 +459,7 @@ impl Default for DisplayPrefs {
       image_size: ImageSize::Large,
       show_status_in_messages: true,
       zoom: Zoom::DEFAULT,
+      text_size: TextSize::DEFAULT,
       maybe_divider_dwell_secs: Some(DEFAULT_DIVIDER_DWELL_SECS),
     }
   }
@@ -516,6 +519,47 @@ impl Zoom {
         .find(|step| *step < self.0)
         .unwrap_or(self.0),
     )
+  }
+}
+
+/// Text size in percent of the browser's (or system's) default, one of [`TextSize::STEPS`]. The
+/// stylesheet's type scale is in rem, so it follows `--text-scale` on the root.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "u16", into = "u16")]
+pub struct TextSize(u16);
+
+impl From<u16> for TextSize {
+  fn from(percent: u16) -> Self {
+    Self::from_percent(percent)
+  }
+}
+
+impl From<TextSize> for u16 {
+  fn from(size: TextSize) -> Self {
+    size.0
+  }
+}
+
+impl TextSize {
+  pub const STEPS: [u16; 5] = [90, 100, 110, 125, 150];
+  pub const DEFAULT: TextSize = TextSize(100);
+
+  /// The nearest step to a stored or chosen value.
+  pub fn from_percent(percent: u16) -> Self {
+    let nearest = Self::STEPS
+      .into_iter()
+      .min_by_key(|step| step.abs_diff(percent))
+      .unwrap_or(100);
+    Self(nearest)
+  }
+
+  pub fn percent(self) -> u16 {
+    self.0
+  }
+
+  /// The value of the `--text-scale` CSS variable: `1.25` for 125 %.
+  pub fn css_scale(self) -> String {
+    format!("{}", f64::from(self.0) / 100.0)
   }
 }
 
@@ -646,6 +690,24 @@ mod tests {
     assert_eq!(Zoom::from_percent(10).percent(), 67);
     assert_eq!(Zoom::from_percent(67).smaller().percent(), 67);
     assert_eq!(Zoom::from_percent(104).percent(), 100);
+  }
+
+  #[test]
+  fn text_size_snaps_to_a_step_and_has_a_css_scale() {
+    assert_eq!(TextSize::from_percent(130).percent(), 125);
+    assert_eq!(TextSize::from_percent(10).percent(), 90);
+    assert_eq!(TextSize::from_percent(400).percent(), 150);
+    assert_eq!(TextSize::DEFAULT.css_scale(), "1");
+    assert_eq!(TextSize::from_percent(125).css_scale(), "1.25");
+    assert_eq!(TextSize::from_percent(90).css_scale(), "0.9");
+  }
+
+  #[test]
+  fn text_size_is_stored_as_a_number_and_defaults_for_old_prefs() {
+    let prefs = Preferences::from_json(r#"{"display":{"text_size":110}}"#);
+    assert_eq!(prefs.display.text_size.percent(), 110);
+    let old = Preferences::from_json(r#"{"display":{"zoom":125}}"#);
+    assert_eq!(old.display.text_size, TextSize::DEFAULT);
   }
 
   #[test]
