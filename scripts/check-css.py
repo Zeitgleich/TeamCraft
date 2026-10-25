@@ -65,6 +65,8 @@ WILL_CHANGE = {
     ".lightbox-image": "zoomed and panned per pointer move while the lightbox is open",
     ".lightbox-track": "swiped between pictures while the lightbox is open",
     ".crop-image": "dragged and zoomed while the crop dialog is open",
+    ":is(.popover, .emoji-picker, .modal, .toast, .sheet, .motion-ghost)": "short-lived overlays keep their layer while up, so the end of their motion doesn't snap (#514)",
+    ".tab-indicator.is-live": "only while the indicator slides; the class goes when it stops (#514)",
 }
 # Font sizes that are not on the scale on purpose, with the reason.
 ALLOWED_FONT_SIZES = {
