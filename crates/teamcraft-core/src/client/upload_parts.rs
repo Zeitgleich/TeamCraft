@@ -395,7 +395,9 @@ async fn read_segment(
     UploadSource::Path { path } => read_file_segment(path, start, length, expected_len),
     #[cfg(target_arch = "wasm32")]
     UploadSource::Path { .. } => Err(()),
-    UploadSource::Picked { handle } => crate::picked_files::read(handle, start, end, expected_len).await,
+    UploadSource::Picked { handle } => crate::picked_files::read(handle, start, end, expected_len)
+      .await
+      .ok_or(()),
   }
 }
 

@@ -43,6 +43,7 @@
     "allow-core-action",
     "allow-core-query",
     "allow-core-attachment",
+    "allow-core-stage-file",
     "allow-core-focus",
     "allow-core-stop",
     "allow-core-reset-store",

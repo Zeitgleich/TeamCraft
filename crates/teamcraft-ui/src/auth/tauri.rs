@@ -225,6 +225,31 @@ pub(crate) async fn invoke(command: &str, args: JsValue) -> Result<JsValue, Auth
   JsFuture::from(promise).await.map_err(error_from_js)
 }
 
+/// Calls a desktop command with a raw body (no JSON) and string headers; for bulk bytes such as the
+/// chunks of a staged file. The answer is the command's JSON result.
+pub(crate) async fn invoke_raw(
+  command: &str,
+  body: &js_sys::Uint8Array,
+  headers: &[(&str, String)],
+) -> Result<JsValue, String> {
+  let function = invoke_function().ok_or_else(|| "not running in the desktop app".to_owned())?;
+  let header_map = js_sys::Object::new();
+  for (name, value) in headers {
+    js_sys::Reflect::set(&header_map, &JsValue::from_str(name), &JsValue::from_str(value))
+      .map_err(|_| "could not encode the headers".to_owned())?;
+  }
+  let options = js_sys::Object::new();
+  js_sys::Reflect::set(&options, &JsValue::from_str("headers"), &header_map)
+    .map_err(|_| "could not encode the headers".to_owned())?;
+  let promise = function
+    .call3(&JsValue::NULL, &command.into(), body, &options)
+    .map_err(|_| "the desktop bridge rejected the call".to_owned())?;
+  let promise: js_sys::Promise = promise.dyn_into().map_err(|_| "no promise".to_owned())?;
+  JsFuture::from(promise)
+    .await
+    .map_err(|error| error_from_js(error).to_string())
+}
+
 fn error_from_js(value: JsValue) -> AuthError {
   match serde_wasm_json::<CommandError>(&value) {
     Ok(error) => map_kind(&error.kind, error.message),

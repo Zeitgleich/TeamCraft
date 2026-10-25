@@ -79,7 +79,7 @@ pub struct BlobUpload {
   client_message_id: ClientMessageId,
   target: UploadTarget,
   /// `None` when nothing goes to the storage (the parts of a file are only joined).
-  maybe_request: Option<Pin<Box<dyn Future<Output = Result<Option<String>, ApiError>>>>>,
+  maybe_request: Option<BlobRequest>,
   /// What storage answered once [`Self::sent`] resolved successfully: a part's `ETag`.
   maybe_etag: Option<String>,
   /// Lists the upload's progress until it is finished or dropped (kept across a file's parts).
@@ -1201,7 +1201,8 @@ async fn read_source(source: &UploadSource, size_bytes: u64) -> Result<Vec<u8>, 
     UploadSource::Path { .. } => Err(()),
     UploadSource::Picked { handle } => crate::picked_files::read(handle, 0, size_bytes, size_bytes)
       .await
-      .map(|bytes| bytes.to_vec()),
+      .map(|bytes| bytes.to_vec())
+      .ok_or(()),
   }
 }
 

@@ -21,6 +21,7 @@ use crate::editor_doc::{BlockFormat, InlineStyle};
 use crate::groups::use_groups;
 use crate::i18n::use_i18n;
 use crate::keys::t_with_shortcuts;
+use crate::large_files;
 use crate::markdown;
 use crate::media_formats::{displayable_type, essence, is_svg, media_type_for, needs_app_thumbnail};
 use crate::media_layout::{APP_THUMBNAIL_SIDE, thumbnail_type};
@@ -56,17 +57,28 @@ const INLINE_STYLES: [InlineStyle; 5] = [
   InlineStyle::Code,
 ];
 
-/// A file chosen, dropped or pasted that is read into memory and waits for the send.
+/// A file chosen, dropped or pasted that waits for the send.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingFile {
   name: String,
   media_type: String,
-  bytes: Vec<u8>,
+  content: FileContent,
   /// Object URL of an image for the thumbnail in the chip; revoked when the file leaves the list.
   maybe_preview_url: Option<String>,
   /// A thumbnail the browser drew for a format the core can't decode (`OutgoingFile`).
   maybe_thumbnail: Option<Vec<u8>>,
 }
+
+/// A small file is read into memory at once; a large one stays the browser's `File` until it is sent
+/// (`large_files`), so it never sits in memory whole.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FileContent {
+  Read(Vec<u8>),
+  Large(web_sys::File),
+}
+
+/// Largest picture read whole only for the chip's thumbnail; bigger ones go without.
+const MAX_THUMBNAIL_READ_BYTES: u64 = 32 * 1024 * 1024;
 
 /// One line in the picker under the input.
 #[derive(Clone, Debug, PartialEq)]
@@ -389,16 +401,19 @@ pub fn Composer(
       }
     }
     pending_confirm.set(None);
-    let files: Vec<OutgoingFile> = attachments
-      .get_untracked()
-      .into_iter()
-      .map(|file| OutgoingFile {
-        file_name: file.name,
-        media_type: file.media_type,
-        source: FileSource::Bytes { bytes: file.bytes },
-        maybe_thumbnail: file.maybe_thumbnail,
-      })
-      .collect();
+    let mut files = Vec::new();
+    let mut large = Vec::new();
+    for file in attachments.get_untracked() {
+      match file.content {
+        FileContent::Read(bytes) => files.push(OutgoingFile {
+          file_name: file.name,
+          media_type: file.media_type,
+          source: FileSource::Bytes { bytes },
+          maybe_thumbnail: file.maybe_thumbnail,
+        }),
+        FileContent::Large(picked) => large.push((file.name, file.media_type, picked, file.maybe_thumbnail)),
+      }
+    }
     let body = text;
     let maybe_reply_to = state
       .reply_target
@@ -406,21 +421,44 @@ pub fn Composer(
       .filter(|target| target.conversation == conversation)
       .map(|target| target.message);
     state.reply_target.set(None);
-    state.write(|backend| {
-      backend.send_message(OutgoingMessage {
-        conversation,
-        maybe_thread,
-        body,
-        maybe_reply_to,
-        priority: priority.get_untracked(),
-        wants_acknowledgement: wants_acknowledgement.get_untracked(),
-        is_silent: is_silent.get_untracked(),
-        also_send_to_channel: maybe_thread.is_some()
-          && maybe_channel_name().is_some()
-          && also_send_to_channel.get_untracked(),
-        files,
+    let mut message = OutgoingMessage {
+      conversation,
+      maybe_thread,
+      body,
+      maybe_reply_to,
+      priority: priority.get_untracked(),
+      wants_acknowledgement: wants_acknowledgement.get_untracked(),
+      is_silent: is_silent.get_untracked(),
+      also_send_to_channel: maybe_thread.is_some()
+        && maybe_channel_name().is_some()
+        && also_send_to_channel.get_untracked(),
+      files,
+    };
+    if large.is_empty() {
+      state.write(|backend| backend.send_message(message));
+    } else {
+      // Large files are handed to the core first (staged or registered); the message follows.
+      leptos::task::spawn_local(async move {
+        for (file_name, media_type, picked, maybe_thumbnail) in large {
+          match large_files::source_of(&picked).await {
+            Ok(source) => message.files.push(OutgoingFile {
+              file_name,
+              media_type,
+              source,
+              maybe_thumbnail,
+            }),
+            Err(error) => {
+              tracing::warn!(%error, "a large file could not be handed to the core");
+              let text = i18n.t_with("composer-file-unstaged", &[("name", &file_name)]);
+              upload_error.set_if_alive(Some(text));
+            },
+          }
+        }
+        if !message.files.is_empty() || !message.body.trim().is_empty() {
+          state.try_write(|backend| backend.send_message(message));
+        }
       });
-    });
+    }
     clear_editor();
     also_send_to_channel.set(false);
     priority.set(MessagePriority::Normal);
@@ -740,7 +778,7 @@ pub fn Composer(
     refresh_formats();
   };
 
-  // Reads the files into memory; the core encrypts and uploads them when the message is sent.
+  // Reads small files into memory; large ones stay `File`s until the send (`large_files`).
   let add_files = move |files: Vec<web_sys::File>| {
     let limit = state.read(|backend| backend.max_upload_bytes());
     for file in files {
@@ -757,24 +795,35 @@ pub fn Composer(
       }
       upload_error.set(None);
       leptos::task::spawn_local(async move {
-        match JsFuture::from(file.array_buffer()).await {
-          Ok(buffer) => {
-            let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
-            let media_type = media_type_for(&file.name(), &file.type_());
-            // SVG, AVIF, HEIC: the browser draws the thumbnail the core in the page can't make.
-            // Other pictures get one too: the message shows it while the picture goes up (the
-            // core makes the one the message carries).
-            let wants_thumbnail = needs_app_thumbnail(&media_type)
-              || displayable_type(&media_type).is_some_and(|shown| shown.starts_with("image/"));
-            let maybe_thumbnail = match wants_thumbnail {
-              true => raster::app_thumbnail(&bytes, &media_type, APP_THUMBNAIL_SIDE).await,
-              false => None,
+        let media_type = media_type_for(&file.name(), &file.type_());
+        // SVG, AVIF, HEIC: the browser draws the thumbnail the core in the page can't make.
+        // Other pictures get one too: the message shows it while the picture goes up (the
+        // core makes the one the message carries).
+        let wants_thumbnail = needs_app_thumbnail(&media_type)
+          || displayable_type(&media_type).is_some_and(|shown| shown.starts_with("image/"));
+        let is_large = size > large_files::READ_WHOLE_MAX_BYTES;
+        let is_read = !is_large || (wants_thumbnail && size <= MAX_THUMBNAIL_READ_BYTES);
+        let read = match is_read {
+          true => JsFuture::from(file.array_buffer())
+            .await
+            .map(|buffer| Some(js_sys::Uint8Array::new(&buffer).to_vec())),
+          false => Ok(None),
+        };
+        match read {
+          Ok(maybe_bytes) => {
+            let maybe_thumbnail = match (&maybe_bytes, wants_thumbnail) {
+              (Some(bytes), true) => raster::app_thumbnail(bytes, &media_type, APP_THUMBNAIL_SIDE).await,
+              _ => None,
             };
             let maybe_preview_url = chip_preview_url(&file, &media_type, maybe_thumbnail.as_deref());
+            let content = match (is_large, maybe_bytes) {
+              (false, Some(bytes)) => FileContent::Read(bytes),
+              _ => FileContent::Large(file.clone()),
+            };
             let read = PendingFile {
               name: file.name(),
               media_type,
-              bytes,
+              content,
               maybe_preview_url,
               maybe_thumbnail,
             };
@@ -1404,7 +1453,7 @@ mod tests {
     PendingFile {
       name: name.into(),
       media_type: "text/plain".into(),
-      bytes: b"x".to_vec(),
+      content: FileContent::Read(b"x".to_vec()),
       maybe_preview_url: None,
       maybe_thumbnail: None,
     }
