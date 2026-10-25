@@ -1906,6 +1906,8 @@ space-unmute = Unmute { $name }
 sidebar-all-spaces = All spaces
 settings-sidebar-grouped = Show all spaces in one sidebar
 settings-sidebar-grouped-hint = Lists the channels of every space, grouped by space, instead of using the space switcher.
+settings-reopen-last = Reopen the last conversation
+settings-reopen-last-hint = When you switch back to Home or a space, open the conversation you had open there. Off: Home shows its overview, and a space opens its first channel.
 
 ## Daily-use improvements (docs/ux-backlog.md)
 new-messages = New messages

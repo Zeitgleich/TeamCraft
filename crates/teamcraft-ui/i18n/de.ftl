@@ -1906,6 +1906,8 @@ space-unmute = Stummschaltung von { $name } aufheben
 sidebar-all-spaces = Alle Bereiche
 settings-sidebar-grouped = Alle Bereiche in einer Seitenleiste zeigen
 settings-sidebar-grouped-hint = Listet die Kanäle aller Bereiche nach Bereich gruppiert, statt den Bereichswechsler zu verwenden.
+settings-reopen-last = Zuletzt geöffnete Unterhaltung wieder öffnen
+settings-reopen-last-hint = Wenn du zu Start oder einem Space zurückkehrst, öffnet sich die Unterhaltung, die dort zuletzt offen war. Aus: Start zeigt die Übersicht, ein Space öffnet seinen ersten Kanal.
 
 ## Daily-use improvements (docs/ux-backlog.md)
 new-messages = Neue Nachrichten
