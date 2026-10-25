@@ -14,7 +14,7 @@ use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::error::CoreError;
-use teamcraft_proto::{AddConversationMemberRequest, ConversationId, UserId};
+use teamcraft_proto::{AddConversationMemberRequest, ConversationId, IdempotencyKey, UserId};
 
 const NOW_MS: i64 = 1_800_000_000_000;
 
@@ -438,6 +438,36 @@ mod call_moves {
       panic!("followed into a room with somebody unnamed");
     };
     assert!(matches!(error, CoreError::CallMoveRefused { .. }), "{error}");
+  }
+
+  #[tokio::test]
+  async fn adding_people_starts_one_room_also_when_retried() {
+    let (_server, mut alice, mut bob, mut carol, _) = dm_call().await;
+    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
+    bob.client.full_sync().await.unwrap();
+    let (alice_id, bob_id, carol_id) = (
+      alice.client.user_id(),
+      bob.client.user_id(),
+      carol.client.user_id(),
+    );
+    let key = IdempotencyKey::random();
+
+    let room = alice
+      .client
+      .add_people_to_call(dm, &[alice_id, bob_id], &[carol_id], None, key)
+      .await
+      .unwrap();
+    let again = alice
+      .client
+      .add_people_to_call(dm, &[alice_id, bob_id], &[carol_id], None, key)
+      .await
+      .unwrap();
+
+    assert_eq!(room, again, "a retry gets the same room");
+    carol.client.full_sync().await.unwrap();
+    assert_eq!(carol.client.prepare_call(room).await.unwrap().devices.len(), 3);
+    bob.client.full_sync().await.unwrap();
+    bob.client.accept_call_move(dm, room).await.unwrap();
   }
 
   async fn dm_call() -> (FakeServer, Peer, Peer, Peer, UserId) {

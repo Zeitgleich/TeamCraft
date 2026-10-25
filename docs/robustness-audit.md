@@ -49,7 +49,7 @@ is the current plan.
 | B15   | Local store integrity: transactions, schema versions, recovery                                    | medium      | v1.0.3, #160, done |
 | F1    | A new device of an existing member reads nothing until another device is online; announces a join | high        | v1.1, #161         |
 | F2    | Only the adding device can add someone who had no device yet; if it is gone, nobody adds them     | medium      | v1.1, open         |
-| F3    | A device that misses `call_move` (resume gone, mobile app, older client) stays in the DM's call   | low         | v1.1, open         |
+| F3    | A device that misses `call_move` (resume gone, older client) stays in the DM's call               | low         | v1.1, open         |
 
 B1 (one owner per store) and B9 (web release lifecycle, web push, browser storage) are fixed
 (docs/e2ee.md §7, §9.3, §9.4); their rows below describe the state before, marked `fixed (B1)` /

@@ -80,19 +80,28 @@ users the organizer invited, and a host's "admit" lets an admitted person in (e2
    `invitees`; no calendar entry, no e-mail), founds the meeting chat's encryption group with exactly
    those users (e2ee.md §4.6, "Meeting chats"), and only then calls
    `POST /conversations/{dm}/call/move` with the meeting chat and the added people. The server checks
-   that the caller is in the DM's call and organizes the meeting, tells the DM's members
-   (`call_move`), and rings the added people in the meeting chat: when its call starts, or at once
-   if it runs. Only one of them answering, or the ring timeout, ends that ringing; the people moving
-   over don't. Every device in the DM's call switches to the meeting's call with its microphone and
-   camera as they were; the DM keeps its members and history, and the added people never see it.
+   that the caller is in the DM's call and organizes the meeting, refuses a second move of the same
+   call into another room (409: two people adding at once don't split the call), tells the DM's
+   members (`call_move`), and rings the added people in the meeting chat: when its call starts, or
+   at once if it runs. Only one of them answering, or the ring timeout, ends that ringing; the people
+   moving over don't. The adding app then announces the move in the DM's encryption group (an
+   encrypted `call_moved` event with the room and the added people, not shown in the history).
+   `call_move` alone moves nobody: a device in the DM's call shows "X moved the call into a meeting
+   room and added Y" once the announcement is in, and on the user's tap checks it (announced by a
+   member of the DM's group, the room's group holds nobody but the DM's members and the named
+   people) before it joins the room's call with its microphone and camera as they were; the adding
+   user's own device follows without the tap. The DM keeps its members and history, and the added
+   people never see it. Web, desktop, iOS and Android all do this.
 
-   | Condition                  | What happens                                                                                                                                                                                                                 |
-   |----------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-   | The added person declines  | Their ring stops on that device; the others go on in the meeting room. A missed call is noted only if nobody answered at all.                                                                                                |
-   | Network loss while adding  | Nothing changes before the meeting room's group is set up and the move is accepted: the DM call goes on, the dialog shows the failure and retries with the same idempotency key (the same meeting room, nobody added twice). |
-   | Network loss while moving  | A device that misses `call_move` (resume window gone) stays in the DM's call, alone once the others moved; the meeting room is in its list and its call can be joined from there.                                            |
-   | A participant's old client | It ignores `call_move` and stays in the DM's call; it is a member of the meeting room (and in its group) and joins its call from there.                                                                                      |
-   | Server restart mid-move    | Calls and rings live in memory: the ring of the added people is lost, they find the running call in the meeting room.                                                                                                        |
+   | Condition                   | What happens                                                                                                                                                                                                                 |
+   |-----------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+   | The added person declines   | Their ring stops on that device; the others go on in the meeting room. A missed call is noted only if nobody answered at all.                                                                                                |
+   | Network loss while adding   | Nothing changes before the meeting room's group is set up and the move is accepted: the DM call goes on, the dialog shows the failure and retries with the same idempotency key (the same meeting room, nobody added twice). |
+   | Network loss while moving   | A device that misses `call_move` (resume window gone) stays in the DM's call, alone once the others moved; the meeting room is in its list and its call can be joined from there.                                            |
+   | A participant's old client  | It ignores `call_move` and stays in the DM's call; it is a member of the meeting room (and in its group) and joins its call from there.                                                                                      |
+   | A forged or redirected move | The server's `call_move` without a matching announcement shows nothing; a room holding somebody the announcement didn't name is refused.                                                                                     |
+   | Two people add at once      | The second move into another room gets 409; that user's app says so and both follow the first room.                                                                                                                          |
+   | Server restart mid-move     | Calls and rings live in memory: the ring of the added people is lost, they find the running call in the meeting room.                                                                                                        |
 
 ## Links
 
