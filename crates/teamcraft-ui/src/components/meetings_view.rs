@@ -10,7 +10,9 @@ use teamcraft_proto::{
 
 use crate::calls::{CallKind, CallRequest};
 use crate::clock::{format_date, format_local_datetime_input, format_time, local_day, now_ms};
+use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::compact_back::CompactBack;
+use crate::components::empty_state::{EmptyAction, EmptyState};
 use crate::components::icons::{Icon, IconName};
 use crate::components::meeting_controls::{HostControls, RsvpList};
 use crate::components::message_actions::copy_text;
@@ -37,6 +39,10 @@ const KNOCK_POLL_MS: u64 = 3_000;
 /// A first meeting suggestion starts at the next full hour, at least this far ahead.
 const MIN_LEAD_MS: i64 = 10 * 60_000;
 const MS_PER_HOUR: i64 = 3_600_000;
+/// Join is the main action from this long before a meeting starts.
+const JOIN_LEAD_MS: i64 = 15 * 60_000;
+/// Attendee pictures shown on a meeting; the names follow in text.
+const MAX_FACES: usize = 4;
 const DURATIONS: [u32; 6] = [15, 30, 45, 60, 90, 120];
 
 #[component]
@@ -95,7 +101,7 @@ pub fn MeetingsView() -> impl IntoView {
   });
 
   view! {
-    <section class="meetings-view" aria-label=move || i18n.t("meetings-title")>
+    <section class="meetings-view page-view" aria-label=move || i18n.t("meetings-title")>
       <header class="panel-header">
         <CompactBack />
         <div class="panel-title">
@@ -128,7 +134,15 @@ pub fn MeetingsView() -> impl IntoView {
           </ul>
         </For>
         <Show when=move || hub.is_loaded.get() && hub.meetings.get().is_empty() fallback=|| ()>
-          <p class="empty-state">{move || i18n.t("meetings-empty")}</p>
+          <EmptyState
+            icon=IconName::Calendar
+            title_key="meetings-empty-title"
+            body_key="meetings-empty"
+            maybe_action=Some(EmptyAction {
+              label_key: "meetings-schedule",
+              on_click: Callback::new(move |()| state.overlay.set(Overlay::ScheduleMeeting)),
+            })
+          />
         </Show>
       </div>
     </section>
@@ -180,11 +194,20 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
   let is_cancelled = meeting.status == MeetingStatus::Cancelled;
   let over = is_over(&meeting, now_ms());
   let rsvp = my_rsvp(&meeting, me);
-  let time_range = format!(
-    "{} – {}",
-    format_time(meeting.starts_at.0, locale),
-    format_time(meeting.ends_at.0, locale)
-  );
+  let start_time = format_time(meeting.starts_at.0, locale);
+  let end_time = format_time(meeting.ends_at.0, locale);
+  let now = now_ms();
+  let is_live = !over && meeting.starts_at.0 <= now;
+  // Dialling in a little early is normal, so Join leads from a quarter of an hour before.
+  let is_joinable = !over && meeting.starts_at.0 - JOIN_LEAD_MS <= now;
+  let users = state.read(|backend| backend.users());
+  let faces: Vec<crate::model::User> = meeting
+    .attendees
+    .iter()
+    .filter_map(|attendee| attendee.maybe_user_id)
+    .filter_map(|id| users.iter().find(|user| user.id == id).cloned())
+    .take(MAX_FACES)
+    .collect();
   let organizer = state
     .read(|backend| backend.user(meeting.organizer_user_id))
     .map(|user| user.display_name)
@@ -197,7 +220,7 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
   let attendees_for_list = meeting.attendees.clone();
   let conversation = meeting.conversation_id;
   // Host controls matter while the meeting runs (a little before the start counts, people dial in early).
-  let is_live_host = is_host && !over && meeting.starts_at.0 - 15 * 60_000 <= now_ms();
+  let is_live_host = is_host && is_joinable;
   let meeting_for_join = meeting.clone();
   let has_recurrence = meeting.maybe_recurrence.is_some();
   let has_lobby = hosts_lobby(&meeting, me);
@@ -214,25 +237,33 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
   };
 
   view! {
-    <li class="meeting-card" class:meeting-over=over>
+    <li class="meeting-card" class:meeting-over=over class:meeting-live=is_live class:meeting-cancelled=is_cancelled>
       <div class="meeting-time">
-        <Icon name=IconName::Clock />
-        <span>{time_range}</span>
-        {has_recurrence.then(|| view! { <span class="badge">{move || i18n.t("meetings-recurring")}</span> })}
-        {is_cancelled.then(|| view! { <span class="badge badge-guest">{move || i18n.t("meetings-cancelled")}</span> })}
+        <span class="meeting-start">{start_time}</span>
+        <span class="meeting-end">{end_time}</span>
       </div>
-      <h3 class="meeting-title" translate="no">{meeting.title.clone()}</h3>
-      <p class="meeting-meta muted-text" translate="no">
+      <div class="meeting-main">
+      <div class="meeting-head">
+        <h3 class="meeting-title" translate="no">{meeting.title.clone()}</h3>
+        {is_live.then(|| view! { <span class="badge badge-live">{move || i18n.t("meetings-live")}</span> })}
+        {has_recurrence.then(|| view! { <span class="meeting-flag" title=move || i18n.t("meetings-recurring")><Icon name=IconName::Rotate /></span> })}
+        {is_cancelled.then(|| view! { <span class="badge badge-cancelled">{move || i18n.t("meetings-cancelled")}</span> })}
+      </div>
+      <p class="meeting-meta" translate="no">
         {move || i18n.t_with("meetings-organizer", &[("name", &organizer)])}
-        {" · "}
-        {attendees.clone()}
       </p>
+      <div class="meeting-people">
+        <span class="avatar-stack">
+          {faces.into_iter().map(|user| view! { <Avatar user=user size=AvatarSize::Small /> }).collect_view()}
+        </span>
+        <span class="meeting-attendees" translate="no">{attendees.clone()}</span>
+      </div>
       <div class="meeting-actions">
         {(!over)
           .then(|| {
             let meeting = meeting_for_join.clone();
             view! {
-              <button class="btn btn-primary" on:click=move |_| {
+              <button class="btn" class:btn-primary=is_joinable on:click=move |_| {
                 if is_host {
                   // A meeting from before 1.0.3 has a chat without encryption: the organizer's
                   // device founds its group the first time it opens the meeting (nothing happens
@@ -285,7 +316,7 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
       <Show when=move || shows_guest_links.get() fallback=|| ()>
         <GuestLinks meeting=id />
       </Show>
-      <button class="btn btn-quiet btn-small" aria-expanded=move || show_responses.get().to_string() on:click=move |_| show_responses.update(|open| *open = !*open)>
+      <button class="btn btn-quiet btn-small meeting-responses" aria-expanded=move || show_responses.get().to_string() on:click=move |_| show_responses.update(|open| *open = !*open)>
         {move || i18n.t_with("meetings-responses", &[("count", &response_total.to_string())])}
       </button>
       <Show when=move || show_responses.get() fallback=|| ()>
@@ -293,6 +324,7 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
       </Show>
       {is_live_host.then(|| view! { <HostControls meeting=id conversation=conversation /> })}
       {has_lobby.then(|| view! { <Lobby meeting=id /> })}
+      </div>
     </li>
   }
 }

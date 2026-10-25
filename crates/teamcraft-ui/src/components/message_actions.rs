@@ -482,43 +482,48 @@ pub fn SavedView() -> impl IntoView {
     items
   });
   view! {
-    <section class="saved-view" aria-label=move || i18n.t("saved-title")>
+    <section class="saved-view page-view" aria-label=move || i18n.t("saved-title")>
       <header class="panel-header">
         <CompactBack />
         <div class="panel-title">
           <h1>{move || i18n.t("saved-title")}</h1>
+          <span class="panel-subtitle">{move || i18n.t_count("saved-count", items.with(Vec::len))}</span>
         </div>
       </header>
-      <ul class="saved-list panel-scroll">
-        <For each=move || items.get() key=|item| (item.message.id, item.saved_at) let:item>
-          {
-            let message = item.message.clone();
-            let (conversation, id, maybe_thread) = (message.conversation, message.id, message.maybe_thread);
-            let author: Option<User> = state.read(|backend| backend.user(message.author));
-            view! {
-              <li class="saved-item">
-                <div class="saved-meta">
-                  {author.map(|user| view! { <Avatar user=user size=AvatarSize::Small /> })}
-                  <span translate="no">{item.conversation_name.clone()}</span>
-                  <time>{format_date_time(message.sent_at, locale)}</time>
-                </div>
-                <div class="saved-body"><RichText body=message.body.clone() me=state.me().username /></div>
-                <div class="saved-actions">
-                  <button class="btn btn-small" on:click=move |_| state.open_message(conversation, id, maybe_thread)>
-                    {move || i18n.t("saved-open")}
-                  </button>
-                  <button class="btn btn-small" on:click=move |_| state.write(|backend| backend.set_saved(conversation, id, false))>
-                    {move || i18n.t("action-unsave")}
-                  </button>
-                </div>
-              </li>
+      <div class="saved-list panel-scroll">
+        <ul class="page-cards">
+          <For each=move || items.get() key=|item| (item.message.id, item.saved_at) let:item>
+            {
+              let message = item.message.clone();
+              let (conversation, id, maybe_thread) = (message.conversation, message.id, message.maybe_thread);
+              let author: Option<User> = state.read(|backend| backend.user(message.author));
+              let author_name = author.as_ref().map(|user| user.display_name.clone()).unwrap_or_default();
+              view! {
+                <li class="page-card saved-card">
+                  <div class="saved-meta">
+                    {author.map(|user| view! { <Avatar user=user size=AvatarSize::Small /> })}
+                    <span class="saved-author" translate="no">{author_name}</span>
+                    <span class="saved-where" translate="no">{item.conversation_name.clone()}</span>
+                    <time class="saved-time">{format_date_time(message.sent_at, locale)}</time>
+                  </div>
+                  <div class="saved-body"><RichText body=message.body.clone() me=state.me().username /></div>
+                  <div class="saved-actions">
+                    <button class="btn btn-small" on:click=move |_| state.open_message(conversation, id, maybe_thread)>
+                      {move || i18n.t("saved-open")}
+                    </button>
+                    <button class="btn btn-small btn-quiet" on:click=move |_| state.write(|backend| backend.set_saved(conversation, id, false))>
+                      {move || i18n.t("action-unsave")}
+                    </button>
+                  </div>
+                </li>
+              }
             }
-          }
-        </For>
+          </For>
+        </ul>
         <Show when=move || items.get().is_empty() fallback=|| ()>
-          <EmptyState icon=IconName::Bookmark title_key="saved-empty-title" body_key="saved-empty" as_item=true />
+          <EmptyState icon=IconName::Bookmark title_key="saved-empty-title" body_key="saved-empty" />
         </Show>
-      </ul>
+      </div>
     </section>
   }
 }

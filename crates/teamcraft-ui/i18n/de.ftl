@@ -1066,7 +1066,7 @@ sidebar-meetings = Meetings
 meetings-title = Meetings
 meetings-start-now = Jetzt starten
 meetings-schedule = Planen
-meetings-empty = Keine anstehenden Meetings. Plane eines oder starte jetzt eines.
+meetings-empty = Plane eines für später oder starte gleich eins.
 meetings-today = Heute
 meetings-tomorrow = Morgen
 meetings-join = Beitreten
@@ -1551,7 +1551,7 @@ directory-title = Personen
 directory-people = Personen
 directory-groups = Gruppen
 directory-filter = Person suchen
-directory-empty = Niemand gefunden.
+directory-empty = Versuche einen anderen Namen, Titel oder eine andere Abteilung.
 directory-no-devices = hat TeamCraft noch nicht fertig eingerichtet
 directory-organization = Organisation
 directory-all-organizations = Alle Organisationen
@@ -1561,7 +1561,7 @@ groups-members = { $count ->
    *[other] { $count } Mitglieder
 }
 groups-synced = Vom Identitätsanbieter
-groups-empty = Noch keine Benutzergruppen.
+groups-empty = Gruppen bündeln Personen, damit du sie gemeinsam mit einem Handle erwähnen kannst.
 groups-loading = Gruppen werden geladen…
 groups-handle = Kürzel (was auf @ folgt)
 groups-name = Name
@@ -2571,3 +2571,16 @@ security-verified-count = { $verified } von { $total } Personen verifiziert
 security-advanced = Erweitert
 settings-list-limited = { $shown } von { $total } angezeigt. Filtern, um die anderen zu finden.
 security-verify-filter = Personen filtern
+
+# Startseiten (Issue #585)
+page-today = Heute
+page-yesterday = Gestern
+directory-you = Du
+directory-empty-title = Niemand gefunden
+groups-empty-title = Noch keine Benutzergruppen
+saved-count = { $count ->
+    [one] { $count } gespeicherte Nachricht
+   *[other] { $count } gespeicherte Nachrichten
+  }
+meetings-live = Läuft
+meetings-empty-title = Keine Meetings geplant

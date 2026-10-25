@@ -7,9 +7,13 @@ use teamcraft_proto::{
 };
 
 use crate::auth::ApiMethod;
+use crate::calls::{CallKind, CallPhase, CallRequest};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::compact_back::CompactBack;
+use crate::components::empty_state::EmptyState;
+use crate::components::icons::{Icon, IconName};
 use crate::components::skeleton::ListSkeleton;
+use crate::components::sliding_indicator::SlidingIndicator;
 use crate::components::tab_list::{on_tab_keys, roving_tabindex};
 use crate::i18n::use_i18n;
 use crate::model::{DeviceSetup, User, UserId};
@@ -57,11 +61,12 @@ pub fn DirectoryView() -> impl IntoView {
   let on_keydown =
     move |ev: web_sys::KeyboardEvent| on_tab_keys(&ev, &DirectoryTab::ALL, tab, DirectoryTab::tab_id);
   view! {
-    <section class="directory" aria-label=move || i18n.t("directory-title")>
+    <section class="directory page-view" aria-label=move || i18n.t("directory-title")>
       <header class="panel-header">
         <CompactBack />
         <div class="panel-title"><h1>{move || i18n.t("directory-title")}</h1></div>
-        <div class="tabs" role="tablist" aria-label=move || i18n.t("directory-title") on:keydown=on_keydown>
+        <div class="segmented" role="tablist" aria-label=move || i18n.t("directory-title") on:keydown=on_keydown>
+          <SlidingIndicator />
           {DirectoryTab::ALL
             .into_iter()
             .map(|value| {
@@ -147,23 +152,36 @@ fn PeopleList() -> impl IntoView {
       .collect::<Vec<_>>()
   });
   view! {
-    <label class="visually-hidden" for="directory-filter">{move || i18n.t("directory-filter")}</label>
-    <input id="directory-filter" class="input" placeholder=move || i18n.t("directory-filter") prop:value=move || filter.get() on:input=move |ev| filter.set(event_target_value(&ev)) />
-    <Show when=move || !organizations.get().is_empty() fallback=|| ()>
-      <label class="visually-hidden" for="directory-organization">{move || i18n.t("directory-organization")}</label>
-      <select id="directory-organization" class="input" prop:value=move || organization.get() on:change=move |ev| organization.set(event_target_value(&ev))>
-        <option value="">{move || i18n.t("directory-all-organizations")}</option>
-        <For each=move || organizations.get() key=|name| name.clone() let:name>
-          <option value=name.clone() translate="no">{name.clone()}</option>
-        </For>
-      </select>
-    </Show>
-    <ul class="person-list">
+    <div class="page-tools">
+      <label class="page-search">
+        <span class="visually-hidden">{move || i18n.t("directory-filter")}</span>
+        <Icon name=IconName::Search />
+        <input
+          id="directory-filter"
+          class="input"
+          type="search"
+          autocomplete="off"
+          placeholder=move || i18n.t("directory-filter")
+          prop:value=move || filter.get()
+          on:input=move |ev| filter.set(event_target_value(&ev))
+        />
+      </label>
+      <Show when=move || !organizations.get().is_empty() fallback=|| ()>
+        <label class="visually-hidden" for="directory-organization">{move || i18n.t("directory-organization")}</label>
+        <select id="directory-organization" class="input page-select" prop:value=move || organization.get() on:change=move |ev| organization.set(event_target_value(&ev))>
+          <option value="">{move || i18n.t("directory-all-organizations")}</option>
+          <For each=move || organizations.get() key=|name| name.clone() let:name>
+            <option value=name.clone() translate="no">{name.clone()}</option>
+          </For>
+        </select>
+      </Show>
+    </div>
+    <ul class="person-list page-rows">
       <For each=move || people.get() key=|user| (user.id, user.presence) let:user>
         <PersonRow user=user />
       </For>
       <Show when=move || people.get().is_empty() fallback=|| ()>
-        <li class="empty-state">{move || i18n.t("directory-empty")}</li>
+        <EmptyState icon=IconName::Users title_key="directory-empty-title" body_key="directory-empty" as_item=true />
       </Show>
     </ul>
   }
@@ -185,20 +203,41 @@ fn PersonRow(user: User) -> impl IntoView {
   };
   let is_me = id == state.me().id;
   let no_devices = user.device_setup == DeviceSetup::NoDevices;
+  let direct = (!is_me).then(|| state.direct_with(&[id])).flatten();
   view! {
-    <li class="person-row">
-      <button class="person-main" on:click=move |_| state.overlay.set(Overlay::UserProfile(id))>
-        <Avatar user=user.clone() size=AvatarSize::Medium show_presence=true />
-        <span class="person-text">
-          <span class="person-name" translate="no">{user.display_name.clone()}</span>
-          <span class="person-facts" translate="no">{facts}</span>
-          {no_devices.then(|| view! { <span class="person-facts">{move || i18n.t("directory-no-devices")}</span> })}
+    <li class="page-row person-row">
+      <button class="page-row-main person-main" on:click=move |_| state.overlay.set(Overlay::UserProfile(id))>
+        <Avatar user=user.clone() size=AvatarSize::Large show_presence=true />
+        <span class="page-row-text person-text">
+          <span class="page-row-title person-name" translate="no">
+            {user.display_name.clone()}
+            {is_me.then(|| view! { " " <span class="badge">{move || i18n.t("directory-you")}</span> })}
+          </span>
+          <span class="page-row-detail person-facts" translate="no">{facts}</span>
+          {no_devices.then(|| view! { <span class="page-row-detail">{move || i18n.t("directory-no-devices")}</span> })}
         </span>
         <crate::components::profile_views::InMeetingBadge user=id />
         {user.is_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
         <crate::components::org_badge::OrgBadge organization=user.maybe_organization.clone() />
       </button>
-      {(!is_me).then(|| view! { <button class="btn btn-small" on:click=move |_| state.open_direct(id)>{move || i18n.t("profile-message")}</button> })}
+      {(!is_me).then(|| view! {
+        <span class="page-row-actions">
+          <button class="icon-btn" aria-label=move || i18n.t("profile-message") title=move || i18n.t("profile-message") on:click=move |_| state.open_direct(id)>
+            <Icon name=IconName::Chat />
+          </button>
+          {direct.map(|conversation| view! {
+            <button
+              class="icon-btn"
+              aria-label=move || i18n.t("profile-call")
+              title=move || i18n.t("profile-call")
+              disabled=move || state.call.phase.get() != CallPhase::Idle || !state.read(|backend| backend.has_calls())
+              on:click=move |_| state.call.prepare(CallRequest { conversation, kind: CallKind::Direct }, false)
+            >
+              <Icon name=IconName::Phone />
+            </button>
+          })}
+        </span>
+      })}
     </li>
   }
 }
@@ -267,7 +306,7 @@ fn UserGroups() -> impl IntoView {
 
   view! {
     {move || error.get().map(|message| view! { <p class="field-error" role="alert">{message}</p> })}
-    <ul class="group-list">
+    <ul class="group-list page-rows">
       <For each=move || groups.get() key=|group| (group.id, group.member_count, group.name.clone()) let:group>
         {
           let id = group.id;
@@ -291,7 +330,7 @@ fn UserGroups() -> impl IntoView {
         <ListSkeleton rows=GROUP_SKELETON_ROWS label=Signal::derive(move || i18n.t("groups-loading")) />
       </Show>
       <Show when=move || is_loaded.get() && groups.get().is_empty() fallback=|| ()>
-        <li class="empty-state">{move || i18n.t("groups-empty")}</li>
+        <EmptyState icon=IconName::Users title_key="groups-empty-title" body_key="groups-empty" as_item=true />
       </Show>
     </ul>
     <Show when=move || is_admin.get() fallback=|| ()>
