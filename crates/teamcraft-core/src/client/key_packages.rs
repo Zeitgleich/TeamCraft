@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 
-use teamcraft_crypto::mls::{StoredKeyPackage, delete_key_package, stored_key_packages};
+use teamcraft_crypto::mls::{StoredKeyPackage, delete_key_package, key_package_ref, stored_key_packages};
 use teamcraft_proto::Base64Bytes;
 
 use super::Client;
@@ -33,14 +33,35 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(stored_key_packages(&self.provider)?)
   }
 
+  /// Housekeeping after a key package check: notes the replaced last-resort packages when the
+  /// server took `maybe_new_last_resort`, then deletes spent private parts, once this session read
+  /// all welcomes (one waiting for a package is opened first). Failures are logged, never fatal: a
+  /// sync must not stop over cleanup.
+  pub(super) fn clean_up_key_packages(
+    &mut self,
+    maybe_new_last_resort: Option<&Base64Bytes>,
+    now_unix_secs: u64,
+  ) {
+    if let Some(last_resort) = maybe_new_last_resort {
+      let noted = key_package_ref(last_resort.as_slice())
+        .map_err(CoreError::from)
+        .and_then(|current| self.note_last_resort_replaced(&current, now_unix_secs));
+      if let Err(error) = noted {
+        tracing::warn!(%error, "could not note the replaced last-resort key package");
+      }
+    }
+    if !self.are_welcomes_synced {
+      return;
+    }
+    if let Err(error) = self.forget_spent_key_packages(now_unix_secs) {
+      tracing::warn!(%error, "could not delete spent key packages");
+    }
+  }
+
   /// Notes, after the server took the new last-resort package `current`, that every other
   /// last-resort package this device holds is replaced from `now_unix_secs` on. Only after the
   /// server's yes: a lost answer leaves the old one counted as live, never the other way round.
-  pub(super) fn note_last_resort_replaced(
-    &mut self,
-    current: &[u8],
-    now_unix_secs: u64,
-  ) -> Result<(), CoreError> {
+  fn note_last_resort_replaced(&mut self, current: &[u8], now_unix_secs: u64) -> Result<(), CoreError> {
     let mut replaced = self.replaced_last_resort()?;
     let known: BTreeSet<Vec<u8>> = replaced
       .iter()
@@ -59,7 +80,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Deletes the private parts of key packages nobody can add this device with any more; returns
   /// how many. `now_unix_secs` is the clock the packages' lifetimes were made from.
-  pub(super) fn forget_spent_key_packages(&mut self, now_unix_secs: u64) -> Result<usize, CoreError> {
+  fn forget_spent_key_packages(&mut self, now_unix_secs: u64) -> Result<usize, CoreError> {
     let stored = self.stored_key_packages()?;
     let replaced = self.replaced_last_resort()?;
     let retention_secs = self.settings.key_package_retention.as_secs();

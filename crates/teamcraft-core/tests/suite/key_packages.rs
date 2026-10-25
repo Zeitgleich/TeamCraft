@@ -128,6 +128,7 @@ async fn a_lost_rotation_answer_keeps_the_old_last_resort_package() {
     ..settings()
   };
   let mut bob = Peer::enroll_with_settings(&server, "Bob", no_retention).await;
+  bob.client.sync_welcomes().await.unwrap();
   server.advance_clock(30 * DAY);
   server.lose_next_key_package_answer();
   assert!(bob.client.top_up_key_packages().await.is_err());
@@ -135,6 +136,75 @@ async fn a_lost_rotation_answer_keeps_the_old_last_resort_package() {
   // The server may still hand out the old package: both private parts stay.
   let stored = bob.client.stored_key_packages().unwrap();
   assert_eq!(last_resort_refs(&stored).len(), 2);
+}
+
+/// After a start, spent packages go only once the welcomes were read: one may wait for a package
+/// the device would otherwise delete first (the key package check runs before any sync).
+#[tokio::test]
+async fn spent_packages_wait_for_the_welcomes_after_a_start() {
+  let server = FakeServer::new();
+  let no_retention = ClientSettings {
+    key_package_retention: Duration::ZERO,
+    ..settings()
+  };
+  let bob = Peer::enroll_with_settings(&server, "Bob", no_retention.clone()).await;
+  let mut client =
+    teamcraft_core::Client::open(bob.api.clone(), bob.store.clone(), common::clock(), no_retention)
+      .unwrap()
+      .unwrap();
+  server.advance_clock(30 * DAY);
+  client.top_up_key_packages().await.unwrap();
+  assert_eq!(last_resort_refs(&client.stored_key_packages().unwrap()).len(), 2);
+
+  client.sync_welcomes().await.unwrap();
+  client.top_up_key_packages().await.unwrap();
+  assert_eq!(last_resort_refs(&client.stored_key_packages().unwrap()).len(), 1);
+}
+
+/// A welcome that comes after its key package was deleted (here a replaced last-resort package)
+/// can't be opened: the device asks to be added back and is, instead of losing the conversation.
+#[tokio::test]
+async fn a_welcome_for_a_deleted_key_package_ends_in_an_add_back() {
+  let server = FakeServer::new();
+  let no_retention = ClientSettings {
+    key_package_retention: Duration::ZERO,
+    ..settings()
+  };
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll_with_settings(&server, "Bob", no_retention).await;
+  let bob_id = bob.client.user_id();
+  let space = alice.space().await;
+  // Bob's regular packages are used up in another channel, so the next add takes his last-resort
+  // package.
+  let lobby = alice.client.create_channel(space, "lobby").await.unwrap();
+  alice.client.add_member(lobby, bob_id).await.unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+  for _ in 1..settings().key_package_target {
+    alice
+      .api
+      .claim_key_packages(bob_id, &ClaimKeyPackagesRequest::new(lobby))
+      .await
+      .unwrap();
+  }
+  bob.client.sync_welcomes().await.unwrap();
+  let channel = alice.client.create_channel(space, "general").await.unwrap();
+  alice.client.add_member(channel, bob_id).await.unwrap();
+
+  // Before Bob reads that welcome, his last-resort package is rotated and the old one deleted.
+  server.advance_clock(30 * DAY);
+  let before = last_resort_refs(&bob.client.stored_key_packages().unwrap());
+  bob.client.top_up_key_packages().await.unwrap();
+  let after = last_resort_refs(&bob.client.stored_key_packages().unwrap());
+  assert!(
+    before.iter().all(|package| !after.contains(package)),
+    "the used one is gone"
+  );
+
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert!(bob.client.has_group(channel).unwrap());
+  alice.client.send_text(channel, None, "hi Bob").await.unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert_eq!(bob.texts(channel), ["hi Bob"]);
 }
 
 fn last_resort_refs(packages: &[teamcraft_crypto::mls::StoredKeyPackage]) -> Vec<Vec<u8>> {

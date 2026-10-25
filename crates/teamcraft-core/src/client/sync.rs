@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use teamcraft_crypto::mls::{create_key_package, create_last_resort_key_package, key_package_ref};
+use teamcraft_crypto::mls::{create_key_package, create_last_resort_key_package};
 use teamcraft_proto::{
   Base64Bytes, ConversationId, ConversationKind, ConversationResponse, ListConversationMembersResponse,
   ListThreadsQuery, SpaceId, UploadKeyPackagesRequest, UserSummary,
@@ -269,7 +269,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // the injectable clock, which tests move freely), and so is the cleanup that compares them.
     let now_unix_secs = u64::try_from(SystemClock.now_ms().div_euclid(1000)).unwrap_or(0);
     if missing == 0 && status.has_last_resort {
-      self.forget_spent_key_packages(now_unix_secs)?;
+      self.clean_up_key_packages(None, now_unix_secs);
       return Ok(());
     }
     let mut key_packages = Vec::new();
@@ -303,10 +303,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .api
       .upload_key_packages(self.account.device_id, &request)
       .await?;
-    if let Some(last_resort) = &request.maybe_last_resort {
-      self.note_last_resort_replaced(&key_package_ref(last_resort.as_slice())?, now_unix_secs)?;
-    }
-    self.forget_spent_key_packages(now_unix_secs)?;
+    self.clean_up_key_packages(request.maybe_last_resort.as_ref(), now_unix_secs);
     tracing::info!(
       uploaded = missing,
       expiring_soon = status.expiring_soon,

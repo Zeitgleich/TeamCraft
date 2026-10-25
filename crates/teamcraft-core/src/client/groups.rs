@@ -687,6 +687,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.join_from_welcome(welcome).await?;
       }
       if !page.has_more || page.messages.is_empty() {
+        self.are_welcomes_synced = true;
         return Ok(());
       }
     }
@@ -1649,6 +1650,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       convert::conversation(conversation),
     ) {
       Ok(staged) => staged,
+      // The key package is gone (deleted after it expired or was replaced, e2ee.md §4.3.1): the
+      // members' tree holds this device's leaf, so it asks to be added back.
+      Err(MlsError::NoMatchingKeyPackage) => {
+        tracing::warn!(conversation_id = %conversation, "welcome for a key package this device no longer holds; asking to be added back");
+        return Ok(WelcomeJoin::KeyPackageSpent);
+      },
       Err(error) => return Ok(WelcomeJoin::Rejected(error)),
     };
     let mut users = Vec::new();
