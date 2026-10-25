@@ -87,7 +87,8 @@ pub fn to_json<T: Serialize + ?Sized>(value: &T) -> Result<String, RestError> {
   serde_json::to_string(value).map_err(|error| RestError::Unreadable(error.to_string()))
 }
 
-fn check(response: ApiResponse) -> Result<ApiResponse, RestError> {
+/// The response if it succeeded, otherwise the refusal with the server's `error_code`.
+pub(crate) fn check(response: ApiResponse) -> Result<ApiResponse, RestError> {
   if response.status < 300 {
     return Ok(response);
   }

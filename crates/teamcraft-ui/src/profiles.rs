@@ -3,7 +3,8 @@
 //! The server owns them (they are directory data, not message content). The hub loads a profile the
 //! first time a screen asks for it and keeps it for the session; avatars are fetched from their
 //! presigned URL (the page's CSP only lets images come from `blob:` and `data:`) and shown from a
-//! `blob:` URL.
+//! `blob:` URL. In the desktop app the shell moves the bytes to and from object storage: the
+//! webview's CSP only lets it reach the shell.
 
 use std::collections::{HashMap, HashSet};
 
@@ -16,9 +17,10 @@ use teamcraft_proto::{
 
 use crate::auth::ApiMethod;
 use crate::auth::fetch::fetch;
+use crate::auth::tauri;
 use crate::components::file_views::blob_url;
 use crate::reactive::UpdateIfAlive;
-use crate::rest::{RestClient, RestError};
+use crate::rest::{RestClient, RestError, check};
 
 /// Largest avatar the picker accepts (the server has its own limit).
 pub const MAX_AVATAR_BYTES: u64 = 2 * 1024 * 1024;
@@ -83,6 +85,25 @@ impl ProfileHub {
     content_type: AvatarContentType,
     bytes: Vec<u8>,
   ) -> Result<(), RestError> {
+    let profile = if tauri::is_available() {
+      let answer = check(tauri::avatar_upload(&content_type, &bytes).await?)?;
+      serde_json::from_str(&answer.body).map_err(|error| RestError::Unreadable(error.to_string()))?
+    } else {
+      self.upload_avatar_from_page(content_type, bytes).await?
+    };
+    self.forget_avatar(me);
+    self.profiles.update_if_alive(|all| {
+      all.insert(profile.user_id, profile);
+    });
+    Ok(())
+  }
+
+  /// The browser's way: the page reaches object storage itself.
+  async fn upload_avatar_from_page(
+    &self,
+    content_type: AvatarContentType,
+    bytes: Vec<u8>,
+  ) -> Result<ProfileResponse, RestError> {
     let client = self.client.get_value();
     let announce = CreateAvatarUploadRequest {
       content_type: content_type.clone(),
@@ -99,14 +120,9 @@ impl ProfileHub {
         code: "avatar_upload_failed".to_owned(),
       });
     }
-    let profile: ProfileResponse = client
+    client
       .post("/api/v1/me/avatar/complete", &serde_json::json!({}))
-      .await?;
-    self.forget_avatar(me);
-    self.profiles.update_if_alive(|all| {
-      all.insert(profile.user_id, profile);
-    });
-    Ok(())
+      .await
   }
 
   pub async fn remove_avatar(&self, me: UserId) -> Result<(), RestError> {
@@ -149,21 +165,34 @@ impl ProfileHub {
   fn load_avatar(&self, user: UserId) {
     let hub = *self;
     spawn_local(async move {
-      let path = format!("/api/v1/users/{user}/avatar");
-      let Ok(location) = hub.client.get_value().get::<AvatarResponse>(&path).await else {
+      // A picture that doesn't load leaves the initials; nothing for the user to act on.
+      let Some((bytes, content_type)) = hub.download_avatar(user).await else {
+        tracing::debug!("avatar not downloaded");
         return;
       };
-      match fetch("GET", &location.download_url, &[], None).await {
-        Ok(image) if image.status < 300 => {
-          if let Some(url) = blob_url(&image.body, location.content_type.as_str()) {
-            hub.avatars.update_if_alive(|all| {
-              all.insert(user, url);
-            });
-          }
-        },
-        Ok(_) | Err(_) => tracing::debug!("avatar not downloaded"),
+      if let Some(url) = blob_url(&bytes, &content_type) {
+        hub.avatars.update_if_alive(|all| {
+          all.insert(user, url);
+        });
       }
     });
+  }
+
+  /// The picture's bytes and type: through the desktop shell, or the page's own fetch.
+  async fn download_avatar(&self, user: UserId) -> Option<(Vec<u8>, String)> {
+    if tauri::is_available() {
+      let image = tauri::avatar_download(user).await.ok()?;
+      return (image.status < 300).then_some((image.body, image.maybe_content_type?));
+    }
+    let path = format!("/api/v1/users/{user}/avatar");
+    let location = self
+      .client
+      .try_get_value()?
+      .get::<AvatarResponse>(&path)
+      .await
+      .ok()?;
+    let image = fetch("GET", &location.download_url, &[], None).await.ok()?;
+    (image.status < 300).then(|| (image.body, location.content_type.as_str().to_owned()))
   }
 }
 
