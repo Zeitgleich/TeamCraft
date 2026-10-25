@@ -150,6 +150,9 @@ pub struct CallStateInfo {
   pub is_secured: bool,
   /// Other devices in the call.
   pub participant_count: u32,
+  /// The people of those devices, each once (verified against the conversation's group): who is
+  /// in the call, e.g. for "Add people" (`add_people_to_call`).
+  pub participant_user_ids: Vec<String>,
   /// Of those, the ones whose connection was lost and who are rejoining.
   pub reconnecting_count: u32,
   /// The code participants compare to rule out a man in the middle (once secured).
@@ -412,7 +415,12 @@ impl CallHub {
   fn report(&self, state: CallStateInfo) {
     let maybe_listener = {
       let mut hub = lock(&self.inner);
-      if state.phase == CallPhase::Ended {
+      // Only the end of the call this device is in: switching calls (a call moving into a
+      // meeting room) ends the previous one after the next one was set.
+      let is_active = hub
+        .maybe_active
+        .is_some_and(|active| active.to_string() == state.conversation_id);
+      if state.phase == CallPhase::Ended && is_active {
         hub.maybe_active = None;
       }
       hub.maybe_listener.clone()
@@ -448,6 +456,7 @@ pub(crate) async fn join(
     is_camera_on: false,
     is_secured: false,
     participant_count: 0,
+    participant_user_ids: Vec::new(),
     reconnecting_count: 0,
     maybe_privacy_code: None,
     maybe_end_reason: None,
@@ -515,6 +524,7 @@ async fn run_call(
 ) {
   let mut reason = CallEndReason::Left;
   let mut reconnecting = BTreeSet::new();
+  let mut roster = BTreeMap::new();
   let mut video = RemoteVideo::default();
   let mut encoded = EncodedVideoBridge::default();
   let mut audio = AudioControls::default();
@@ -549,7 +559,7 @@ async fn run_call(
           if !encoded.is_active() {
             watch_video(&call, &event, context.own_device, &mut video);
           }
-          if let Some(end) = apply_event(state, &mut reconnecting, event) {
+          if let Some(end) = apply_event(state, &mut reconnecting, &mut roster, event) {
             reason = end;
             break;
           }
@@ -827,20 +837,24 @@ fn upright(width: u16, height: u16) -> VideoResolution {
 }
 
 /// Updates the call's state; returns why the call ends if the event ends it. `reconnecting`:
-/// other devices that are rejoining.
+/// other devices that are rejoining; `roster`: other devices in the call and their users.
 fn apply_event(
   state: &mut CallStateInfo,
   reconnecting: &mut BTreeSet<DeviceId>,
+  roster: &mut BTreeMap<DeviceId, UserId>,
   event: CallEngineEvent,
 ) -> Option<CallEndReason> {
   match event {
     CallEngineEvent::Joined { participants, .. } => {
       state.phase = CallPhase::Connected;
-      state.participant_count = count(participants.len());
+      roster.clear();
+      roster.extend(participants.iter().map(|entry| (entry.device_id, entry.user_id)));
     },
-    CallEngineEvent::ParticipantJoined(_) => state.participant_count += 1,
+    CallEngineEvent::ParticipantJoined(participant) => {
+      roster.insert(participant.device_id, participant.user_id);
+    },
     CallEngineEvent::ParticipantLeft(device_id) => {
-      state.participant_count = state.participant_count.saturating_sub(1);
+      roster.remove(&device_id);
       reconnecting.remove(&device_id);
     },
     CallEngineEvent::Reconnecting => {
@@ -869,6 +883,9 @@ fn apply_event(
     _ => {},
   }
   state.reconnecting_count = count(reconnecting.len());
+  state.participant_count = count(roster.len());
+  let users: BTreeSet<UserId> = roster.values().copied().collect();
+  state.participant_user_ids = users.iter().map(ToString::to_string).collect();
   None
 }
 
@@ -881,6 +898,7 @@ fn ended(conversation: ConversationId, reason: CallEndReason) -> CallStateInfo {
     is_camera_on: false,
     is_secured: false,
     participant_count: 0,
+    participant_user_ids: Vec::new(),
     reconnecting_count: 0,
     maybe_privacy_code: None,
     maybe_end_reason: Some(reason),
@@ -1031,9 +1049,15 @@ mod tests {
   fn engine_events_update_the_state() {
     let mut state = ended(conversation(5), CallEndReason::Left);
     let mut reconnecting = BTreeSet::new();
+    let mut roster = BTreeMap::new();
     state.phase = CallPhase::Connecting;
     assert_eq!(
-      apply_event(&mut state, &mut reconnecting, CallEngineEvent::MuteChanged(true)),
+      apply_event(
+        &mut state,
+        &mut reconnecting,
+        &mut roster,
+        CallEngineEvent::MuteChanged(true)
+      ),
       None
     );
     assert!(state.is_muted);
@@ -1041,6 +1065,7 @@ mod tests {
       apply_event(
         &mut state,
         &mut reconnecting,
+        &mut roster,
         CallEngineEvent::EndedByHost { by_user_id: user(1) }
       ),
       Some(CallEndReason::EndedByHost)
@@ -1048,25 +1073,71 @@ mod tests {
   }
 
   #[test]
+  fn the_state_names_the_people_in_the_call_once_each() {
+    let mut state = ended(conversation(5), CallEndReason::Left);
+    let (mut reconnecting, mut roster) = (BTreeSet::new(), BTreeMap::new());
+    let participant = |user_raw: i64, device_raw: i64| teamcraft_proto::CallParticipant {
+      user_id: user(user_raw),
+      device_id: device(device_raw),
+      audio_stream_id: MediaStreamId(1),
+    };
+    let events = [
+      CallEngineEvent::ParticipantJoined(participant(2, 20)),
+      CallEngineEvent::ParticipantJoined(participant(2, 21)),
+      CallEngineEvent::ParticipantJoined(participant(3, 30)),
+      CallEngineEvent::ParticipantLeft(device(30)),
+    ];
+    for event in events {
+      apply_event(&mut state, &mut reconnecting, &mut roster, event);
+    }
+    assert_eq!(state.participant_count, 2);
+    assert_eq!(state.participant_user_ids, vec!["2".to_owned()]);
+  }
+
+  #[test]
+  fn the_end_of_another_call_leaves_the_active_one() {
+    let hub = CallHub::default();
+    lock(&hub.inner).maybe_active = Some(conversation(6));
+    hub.report(ended(conversation(5), CallEndReason::Left));
+    assert_eq!(lock(&hub.inner).maybe_active, Some(conversation(6)));
+    hub.report(ended(conversation(6), CallEndReason::Left));
+    assert_eq!(lock(&hub.inner).maybe_active, None);
+  }
+
+  #[test]
   fn reconnecting_is_a_phase_not_an_end() {
     let mut state = ended(conversation(5), CallEndReason::Left);
     let mut reconnecting = BTreeSet::new();
+    let mut roster = BTreeMap::new();
     state.phase = CallPhase::Connected;
     for event in [
       CallEngineEvent::ParticipantReconnecting(device(2)),
       CallEngineEvent::ParticipantReconnecting(device(3)),
       CallEngineEvent::ParticipantReconnected(device(2)),
     ] {
-      assert_eq!(apply_event(&mut state, &mut reconnecting, event), None);
+      assert_eq!(
+        apply_event(&mut state, &mut reconnecting, &mut roster, event),
+        None
+      );
     }
     assert_eq!(state.reconnecting_count, 1);
     assert_eq!(
-      apply_event(&mut state, &mut reconnecting, CallEngineEvent::Reconnecting),
+      apply_event(
+        &mut state,
+        &mut reconnecting,
+        &mut roster,
+        CallEngineEvent::Reconnecting
+      ),
       None
     );
     assert_eq!(state.phase, CallPhase::Reconnecting);
     assert_eq!(state.reconnecting_count, 0);
-    apply_event(&mut state, &mut reconnecting, CallEngineEvent::Reconnected);
+    apply_event(
+      &mut state,
+      &mut reconnecting,
+      &mut roster,
+      CallEngineEvent::Reconnected,
+    );
     assert_eq!(state.phase, CallPhase::Connected);
   }
 
