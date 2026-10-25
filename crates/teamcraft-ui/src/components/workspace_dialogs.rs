@@ -8,7 +8,7 @@ use leptos::task::spawn_local;
 use teamcraft_client_api::actions::{
   BrowsableChannel, CategoryChoice, CategoryInfo, ChannelChanges, NewChannel, NewSpace, SpaceChanges,
 };
-use teamcraft_proto::{CategoryId, HistoryPolicy, IdempotencyKey, SpaceResponse};
+use teamcraft_proto::{CategoryId, HistoryPolicy, IdempotencyKey};
 use wasm_bindgen::JsCast;
 
 use crate::channel_policy::{ChannelPolicyHub, parse_retention};
@@ -28,7 +28,7 @@ use crate::model::{
   ConversationId, JoinPolicy, Space, SpaceId, SpaceMember, SpaceRole, SpaceRoster, User, hue_from_hex,
 };
 use crate::reactive::SetIfAlive;
-use crate::space_images::use_space_images;
+use crate::space_images::{ImageOwner, use_space_images};
 use crate::state::{Overlay, use_app_state};
 
 /// What the color picker shows for a space without a color of its own.
@@ -99,8 +99,8 @@ impl ColorChoice {
 }
 
 impl ShownImage {
-  fn after(updated: &SpaceResponse) -> Self {
-    match &updated.maybe_image {
+  fn after(maybe_image: &Option<teamcraft_proto::SpaceImage>) -> Self {
+    match maybe_image {
       Some(image) => Self::Uploaded(image.version.clone()),
       None => Self::Removed,
     }
@@ -408,6 +408,7 @@ fn ChannelGeneral(conversation: ConversationId, name: String, topic: String) -> 
       <input id="cs-topic" class="input" maxlength="250" prop:value=move || topic.get() on:input=move |ev| { has_saved.set(false); topic.set(event_target_value(&ev)) } />
       <SaveFooter pending=pending has_saved=has_saved />
     </form>
+    <ChannelImageSection conversation=conversation />
   }
 }
 
@@ -1355,33 +1356,89 @@ fn SpaceAdvanced(space: Space) -> impl IntoView {
   }
 }
 
-/// The space's picture: preview, upload (cropped to a 256×256 square in the crop dialog first) and
-/// remove.
+/// The space's picture, see [`PictureSection`].
 #[component]
 fn SpaceImageSection(space: SpaceId) -> impl IntoView {
   let state = use_app_state();
+  let current = Signal::derive(move || {
+    state
+      .read(|backend| backend.spaces())
+      .into_iter()
+      .find(|candidate| candidate.id == space)
+  });
+  view! {
+    <PictureSection
+      owner=ImageOwner::Space(space)
+      target=CropTarget::SpacePicture
+      heading_key="space-image"
+      hint_key="space-image-hint"
+      stored_version=Signal::derive(move || current.get().and_then(|space| space.maybe_image_version))
+      preview=Callback::new(move |maybe_version: Option<String>| {
+        current
+          .get()
+          .map(|mut space| {
+            space.maybe_image_version = maybe_version;
+            view! { <span class="space-image-preview"><SpaceTile space=space /></span> }.into_any()
+          })
+          .unwrap_or_else(|| ().into_any())
+      })
+    />
+  }
+}
+
+/// The channel's picture in the General section, see [`PictureSection`].
+#[component]
+fn ChannelImageSection(conversation: ConversationId) -> impl IntoView {
+  let state = use_app_state();
+  let maybe_hub = use_space_images();
+  let stored_version = Signal::derive(move || {
+    state
+      .read(|backend| backend.conversation(conversation))
+      .and_then(|info| info.maybe_image_version)
+  });
+  view! {
+    <PictureSection
+      owner=ImageOwner::Channel(conversation)
+      target=CropTarget::ChannelPicture
+      heading_key="channel-image"
+      hint_key="channel-image-hint"
+      stored_version=stored_version
+      preview=Callback::new(move |maybe_version: Option<String>| {
+        let maybe_url = maybe_hub.and_then(|hub| hub.image_url(ImageOwner::Channel(conversation), maybe_version.as_deref()));
+        view! {
+          <span class="space-image-preview channel-image-preview" aria-hidden="true">
+            {match maybe_url {
+              Some(src) => view! { <img class="space-image" src=src alt="" draggable="false" /> }.into_any(),
+              None => view! { <Icon name=IconName::Hash /> }.into_any(),
+            }}
+          </span>
+        }
+        .into_any()
+      })
+    />
+  }
+}
+
+/// A picture of a space or channel: preview, upload (cropped to a 256×256 square in the crop dialog
+/// first) and remove.
+#[component]
+fn PictureSection(
+  owner: ImageOwner,
+  target: CropTarget,
+  heading_key: &'static str,
+  hint_key: &'static str,
+  /// The version the store knows; the preview follows an upload until the store catches up.
+  stored_version: Signal<Option<String>>,
+  /// Draws the preview for a picture version (`None`: no picture).
+  preview: Callback<Option<String>, AnyView>,
+) -> impl IntoView {
   let i18n = use_i18n();
   // The demo backend has no server to keep pictures: the crop dialog still works, nothing is saved.
   let maybe_hub = use_space_images();
   let shown = RwSignal::new(ShownImage::FromStore);
   let status = RwSignal::new(ImageStatus::Idle);
-  let preview = Memo::new(move |_| {
-    state
-      .read(|backend| backend.spaces())
-      .into_iter()
-      .find(|candidate| candidate.id == space)
-      .map(|mut current| {
-        current.maybe_image_version = shown.get().version(current.maybe_image_version.as_deref());
-        current
-      })
-  });
-  let has_image = move || {
-    preview.with(|maybe| {
-      maybe
-        .as_ref()
-        .is_some_and(|space| space.maybe_image_version.is_some())
-    })
-  };
+  let version = Memo::new(move |_| shown.get().version(stored_version.get().as_deref()));
+  let has_image = move || version.with(Option::is_some);
 
   let picked = RwSignal::new_local(None::<web_sys::File>);
   let open_crop = move |file: web_sys::File| {
@@ -1413,7 +1470,7 @@ fn SpaceImageSection(space: SpaceId) -> impl IntoView {
         return Ok(());
       };
       let updated = hub
-        .upload(space, png)
+        .upload(owner, png)
         .await
         .map_err(|failure| failure.to_failure())?;
       shown.set_if_alive(ShownImage::after(&updated));
@@ -1426,7 +1483,7 @@ fn SpaceImageSection(space: SpaceId) -> impl IntoView {
     let Some(hub) = maybe_hub else { return };
     status.set(ImageStatus::Busy);
     spawn_local(async move {
-      match hub.remove(space).await {
+      match hub.remove(owner).await {
         Ok(updated) => {
           shown.set_if_alive(ShownImage::after(&updated));
           status.set_if_alive(ImageStatus::Idle);
@@ -1437,13 +1494,13 @@ fn SpaceImageSection(space: SpaceId) -> impl IntoView {
   };
 
   view! {
-    <h3>{move || i18n.t("space-image")}</h3>
+    <h3>{move || i18n.t(heading_key)}</h3>
     <div class="space-image-row" on:dragover=allow_image_drop on:drop=move |ev| {
       if let Some(file) = dropped_file(&ev) {
         open_crop(file);
       }
     }>
-      {move || preview.get().map(|space| view! { <span class="space-image-preview"><SpaceTile space=space /></span> })}
+      {move || preview.run(version.get())}
       <div class="space-image-actions">
         <label class="btn btn-small" class:disabled=move || status.get() == ImageStatus::Busy>
           {move || if has_image() { i18n.t("space-image-change") } else { i18n.t("space-image-upload") }}
@@ -1462,7 +1519,7 @@ fn SpaceImageSection(space: SpaceId) -> impl IntoView {
         </Show>
       </div>
     </div>
-    <p class="hint">{move || i18n.t("space-image-hint")}</p>
+    <p class="hint">{move || i18n.t(hint_key)}</p>
     {move || match status.get() {
       ImageStatus::Idle => ().into_any(),
       ImageStatus::Busy => view! { <p class="hint" role="status">{move || i18n.t("space-image-uploading")}</p> }.into_any(),
@@ -1472,7 +1529,7 @@ fn SpaceImageSection(space: SpaceId) -> impl IntoView {
     {move || picked.get().map(|file| view! {
       <ImageCropDialog
         file=file
-        target=CropTarget::SpacePicture
+        target=target
         on_apply=apply
         on_cancel=cancel_crop
       />
@@ -1505,6 +1562,8 @@ fn CategoryRow(space: SpaceId, category: CategoryInfo) -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
+  use teamcraft_proto::SpaceResponse;
+
   use super::*;
 
   #[test]
@@ -1547,12 +1606,12 @@ mod tests {
       version: "new".into(),
       size_bytes: 10,
     });
-    let uploaded = ShownImage::after(&response);
+    let uploaded = ShownImage::after(&response.maybe_image);
     assert_eq!(uploaded, ShownImage::Uploaded("new".into()));
     assert_eq!(uploaded.version(Some("old")), Some("new".into()));
 
     response.maybe_image = None;
-    let removed = ShownImage::after(&response);
+    let removed = ShownImage::after(&response.maybe_image);
     assert_eq!(removed, ShownImage::Removed);
     assert_eq!(removed.version(Some("old")), None);
   }

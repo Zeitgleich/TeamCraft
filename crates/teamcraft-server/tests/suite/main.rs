@@ -19,6 +19,7 @@ mod call_e2e;
 mod call_features;
 mod call_roster;
 mod calls;
+mod channel_images;
 mod conversations;
 mod device_gaps;
 mod directory;

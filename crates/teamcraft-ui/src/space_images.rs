@@ -1,6 +1,7 @@
-//! Space pictures: directory data the server owns, like the space's name (e2ee.md §4.4).
+//! Space and channel pictures: directory data the server owns, like the name (e2ee.md §4.4).
 //!
-//! The hub downloads a picture once per version from `GET /api/v1/spaces/{id}/image` and shows it
+//! The hub downloads a picture once per version from `GET /api/v1/spaces/{id}/image` (channels:
+//! `/api/v1/conversations/{id}/image`) and shows it
 //! from a `blob:` URL (the page's CSP only lets images come from `blob:` and `data:`). Uploads are
 //! cropped and scaled to 256×256 in the crop dialog first (`image_crop`); the server checks and
 //! re-encodes them again.
@@ -10,12 +11,13 @@ use std::rc::Rc;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use teamcraft_proto::{ErrorBody, ErrorCode, SpaceResponse};
+use serde::Deserialize;
+use teamcraft_proto::{ErrorBody, ErrorCode, SpaceImage};
 
 use crate::auth::{ApiMethod, Authenticator, BinaryBody};
 use crate::components::file_views::blob_url;
 use crate::feedback::{ActionFailure, FailureKind};
-use crate::model::SpaceId;
+use crate::model::{ConversationId, SpaceId};
 
 /// What the client uploads after scaling.
 const UPLOAD_CONTENT_TYPE: &str = "image/png";
@@ -24,13 +26,27 @@ const UPLOAD_CONTENT_TYPE: &str = "image/png";
 pub struct SpaceImageHub {
   auth: StoredValue<Rc<dyn Authenticator>, LocalStorage>,
   cache: RwSignal<ImageCache>,
-  asked: StoredValue<HashSet<(SpaceId, String)>>,
+  asked: StoredValue<HashSet<(ImageOwner, String)>>,
 }
 
-/// The loaded pictures: one `blob:` URL per space, for the version it shows.
+/// Whose picture it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ImageOwner {
+  Space(SpaceId),
+  Channel(ConversationId),
+}
+
+/// The loaded pictures: one `blob:` URL per owner, for the version it shows.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ImageCache {
-  entries: HashMap<SpaceId, (String, String)>,
+  entries: HashMap<ImageOwner, (String, String)>,
+}
+
+/// What the server answers to an upload or removal: the space or channel with its new picture.
+#[derive(Deserialize)]
+struct PictureAnswer {
+  #[serde(rename = "image", default)]
+  maybe_image: Option<SpaceImage>,
 }
 
 /// A failed upload or removal, for the dialog's message.
@@ -50,51 +66,55 @@ impl SpaceImageHub {
     }
   }
 
-  /// A `blob:` URL of the space's picture in `maybe_version`, once it has loaded; the first call
+  /// A `blob:` URL of the owner's picture in `maybe_version`, once it has loaded; the first call
   /// for a version starts the download. Reactive.
-  pub fn image_url(&self, space: SpaceId, maybe_version: Option<&str>) -> Option<String> {
+  pub fn image_url(&self, owner: ImageOwner, maybe_version: Option<&str>) -> Option<String> {
     let version = maybe_version?;
     let maybe_url = self
       .cache
-      .with(|cache| cache.url(space, version).map(str::to_owned));
+      .with(|cache| cache.url(owner, version).map(str::to_owned));
     if maybe_url.is_none()
       && self
         .asked
-        .try_update_value(|asked| asked.insert((space, version.to_owned())))
+        .try_update_value(|asked| asked.insert((owner, version.to_owned())))
         == Some(true)
     {
-      self.load(space, version.to_owned());
+      self.load(owner, version.to_owned());
     }
     maybe_url
   }
 
-  /// Uploads an already scaled PNG; the answer carries the new version.
-  pub async fn upload(&self, space: SpaceId, png: Vec<u8>) -> Result<SpaceResponse, SpaceImageFailure> {
+  /// Uploads an already scaled PNG; the answer carries the new picture.
+  pub async fn upload(
+    &self,
+    owner: ImageOwner,
+    png: Vec<u8>,
+  ) -> Result<Option<SpaceImage>, SpaceImageFailure> {
     let body = BinaryBody {
       content_type: UPLOAD_CONTENT_TYPE.to_owned(),
       bytes: png.clone(),
     };
-    let updated = self.request(ApiMethod::Put, space, Some(body)).await?;
-    // Shown right away; the space list follows with the gateway's space update.
-    if let Some(image) = &updated.maybe_image
+    let updated = self.request(ApiMethod::Put, owner, Some(body)).await?;
+    // Shown right away; the lists follow with the gateway's update.
+    if let Some(image) = &updated
       && let Some(url) = blob_url(&png, UPLOAD_CONTENT_TYPE)
     {
-      self.remember(space, image.version.clone(), url);
+      self.remember(owner, image.version.clone(), url);
     }
     Ok(updated)
   }
 
-  pub async fn remove(&self, space: SpaceId) -> Result<SpaceResponse, SpaceImageFailure> {
-    self.request(ApiMethod::Delete, space, None).await
+  pub async fn remove(&self, owner: ImageOwner) -> Result<Option<SpaceImage>, SpaceImageFailure> {
+    self.request(ApiMethod::Delete, owner, None).await
   }
 
   async fn request(
     &self,
     method: ApiMethod,
-    space: SpaceId,
+    owner: ImageOwner,
     maybe_body: Option<BinaryBody>,
-  ) -> Result<SpaceResponse, SpaceImageFailure> {
-    let path = image_path(space);
+  ) -> Result<Option<SpaceImage>, SpaceImageFailure> {
+    let path = owner.path();
     let response = self
       .auth
       .get_value()
@@ -108,13 +128,15 @@ impl SpaceImageHub {
         .unwrap_or_else(|_| "unknown".to_owned());
       return Err(SpaceImageFailure::Refused(code));
     }
-    serde_json::from_str(&text).map_err(|_| SpaceImageFailure::Refused("unreadable".to_owned()))
+    serde_json::from_str::<PictureAnswer>(&text)
+      .map(|answer| answer.maybe_image)
+      .map_err(|_| SpaceImageFailure::Refused("unreadable".to_owned()))
   }
 
-  fn load(&self, space: SpaceId, version: String) {
+  fn load(&self, owner: ImageOwner, version: String) {
     let hub = *self;
     spawn_local(async move {
-      let path = image_path(space);
+      let path = owner.path();
       let result = hub
         .auth
         .get_value()
@@ -123,20 +145,20 @@ impl SpaceImageHub {
       match result {
         Ok(image) if image.status == 200 => {
           if let Some(url) = blob_url(&image.body, UPLOAD_CONTENT_TYPE) {
-            hub.remember(space, version, url);
+            hub.remember(owner, version, url);
           }
         },
         // The letter tile stays; the next version (or session) asks again.
-        Ok(_) | Err(_) => tracing::debug!(space_id = %space, "space picture not downloaded"),
+        Ok(_) | Err(_) => tracing::debug!(?owner, "picture not downloaded"),
       }
     });
   }
 
-  fn remember(&self, space: SpaceId, version: String, url: String) {
+  fn remember(&self, owner: ImageOwner, version: String, url: String) {
     let mut maybe_replaced = None;
     self
       .cache
-      .update(|cache| maybe_replaced = cache.insert(space, version, url));
+      .update(|cache| maybe_replaced = cache.insert(owner, version, url));
     if let Some(replaced) = maybe_replaced {
       revoke(&replaced);
     }
@@ -144,20 +166,20 @@ impl SpaceImageHub {
 }
 
 impl ImageCache {
-  /// The URL for `space` if it shows `version`; an older picture doesn't count.
-  pub fn url(&self, space: SpaceId, version: &str) -> Option<&str> {
+  /// The URL for `owner` if it shows `version`; an older picture doesn't count.
+  pub fn url(&self, owner: ImageOwner, version: &str) -> Option<&str> {
     self
       .entries
-      .get(&space)
+      .get(&owner)
       .filter(|(cached, _)| cached == version)
       .map(|(_, url)| url.as_str())
   }
 
   /// Keeps `url` for `space`; returns the URL it replaced, which the caller releases.
-  pub fn insert(&mut self, space: SpaceId, version: String, url: String) -> Option<String> {
+  pub fn insert(&mut self, owner: ImageOwner, version: String, url: String) -> Option<String> {
     self
       .entries
-      .insert(space, (version, url.clone()))
+      .insert(owner, (version, url.clone()))
       .map(|(_, previous)| previous)
       .filter(|previous| *previous != url)
   }
@@ -190,8 +212,13 @@ impl SpaceImageFailure {
   }
 }
 
-fn image_path(space: SpaceId) -> String {
-  format!("/api/v1/spaces/{space}/image")
+impl ImageOwner {
+  fn path(self) -> String {
+    match self {
+      Self::Space(space) => format!("/api/v1/spaces/{space}/image"),
+      Self::Channel(channel) => format!("/api/v1/conversations/{channel}/image"),
+    }
+  }
 }
 
 fn revoke(url: &str) {
@@ -210,7 +237,10 @@ mod tests {
 
   #[test]
   fn the_cache_only_serves_the_current_version() {
-    let (a, b) = (id_from_raw(1), id_from_raw(2));
+    let (a, b) = (
+      ImageOwner::Space(id_from_raw(1)),
+      ImageOwner::Space(id_from_raw(2)),
+    );
     let mut cache = ImageCache::default();
     assert_eq!(cache.url(a, "v1"), None);
     assert_eq!(cache.insert(a, "v1".into(), "blob:1".into()), None);
@@ -223,6 +253,22 @@ mod tests {
     );
     assert_eq!(cache.url(a, "v2"), Some("blob:2"));
     assert_eq!(cache.url(b, "v2"), None);
+  }
+
+  #[test]
+  fn a_space_and_a_channel_with_the_same_id_keep_their_own_pictures() {
+    let (space, channel) = (
+      ImageOwner::Space(id_from_raw(1)),
+      ImageOwner::Channel(id_from_raw(1)),
+    );
+    let mut cache = ImageCache::default();
+    cache.insert(space, "v1".into(), "blob:space".into());
+    assert_eq!(cache.url(channel, "v1"), None);
+    cache.insert(channel, "v1".into(), "blob:channel".into());
+    assert_eq!(cache.url(space, "v1"), Some("blob:space"));
+    assert_eq!(cache.url(channel, "v1"), Some("blob:channel"));
+    assert_eq!(space.path(), "/api/v1/spaces/1/image");
+    assert_eq!(channel.path(), "/api/v1/conversations/1/image");
   }
 
   #[test]

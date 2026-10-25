@@ -212,7 +212,7 @@ mod validation {
   }
 }
 
-async fn put_image(
+pub(crate) async fn put_image(
   app: &TestApp,
   user: &TestUser,
   path: &str,
@@ -232,7 +232,12 @@ async fn put_image(
   (status, response.json().await.unwrap_or(Value::Null))
 }
 
-async fn raw_get(app: &TestApp, user: &TestUser, path: &str, maybe_etag: Option<&str>) -> reqwest::Response {
+pub(crate) async fn raw_get(
+  app: &TestApp,
+  user: &TestUser,
+  path: &str,
+  maybe_etag: Option<&str>,
+) -> reqwest::Response {
   let mut request = app
     .http
     .get(format!("{}/api/v1{path}", app.base_url))
@@ -243,7 +248,7 @@ async fn raw_get(app: &TestApp, user: &TestUser, path: &str, maybe_etag: Option<
   request.send().await.unwrap()
 }
 
-fn picture(width: u32, height: u32, format: ImageFormat) -> Vec<u8> {
+pub(crate) fn picture(width: u32, height: u32, format: ImageFormat) -> Vec<u8> {
   let mut out = Cursor::new(Vec::new());
   let buffer = ImageBuffer::from_fn(width, height, |x, y| {
     Rgba([(x % 256) as u8, (y % 256) as u8, 80, 255])

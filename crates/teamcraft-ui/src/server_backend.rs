@@ -284,6 +284,10 @@ fn to_conversation(conversation: &ConversationResponse, member_ids: Vec<UserId>,
     can_post: !conversation.is_archived,
     bookmarks: Vec::new(),
     is_catching_up: false,
+    maybe_image_version: conversation
+      .maybe_image
+      .as_ref()
+      .map(|image| image.version.clone()),
   }
 }
 

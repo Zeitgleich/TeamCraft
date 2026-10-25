@@ -174,6 +174,10 @@ pub fn conversation_response(
     is_archived: conversation.is_archived,
     moderation: conversation.moderation.clone(),
     is_integration: conversation.is_integration,
+    maybe_image: conversation.maybe_image.as_ref().map(|image| SpaceImage {
+      version: image.version.clone(),
+      size_bytes: image.size_bytes,
+    }),
     contains_guests: extras.with_guests.contains(&conversation.id),
     maybe_my_membership: view.maybe_membership.as_ref().map(my_membership),
     participants: extras

@@ -11,6 +11,7 @@ use crate::database::Database;
 use crate::error::DbError;
 use crate::idempotency::{Created, IdempotentKind, claim_key};
 use crate::ids::{from_db, from_db_opt, to_db, to_db_all};
+use crate::space::{StoredSpaceImage, stored_image};
 use crate::user::User;
 
 #[derive(Debug, Clone)]
@@ -27,6 +28,8 @@ pub struct Conversation {
   pub is_archived: bool,
   pub moderation: ChannelModeration,
   pub is_integration: bool,
+  /// The channel's picture (channels in spaces only use it).
+  pub maybe_image: Option<StoredSpaceImage>,
 }
 
 #[derive(Debug, Clone)]
@@ -182,6 +185,7 @@ impl Database {
     let rows = sqlx::query!(
       r#"SELECT c.id, c.space_id, c.kind, c.name, c.topic, c.description, c.visibility, c.history_policy,
                 c.category_id, c.archived_at IS NOT NULL AS "is_archived!", c.is_integration, c.member_denied, c.guest_denied,
+                c.image_key, c.image_version, c.image_size_bytes,
                 m.role AS "role?", m.notification_level AS "notification_level?",
                 m.is_favorite AS "is_favorite?", m.last_read_message_id, m.muted_until,
                 NOT m.notification_overridden AS "is_inherited?",
@@ -236,6 +240,7 @@ impl Database {
             maybe_category_id: from_db_opt(row.category_id)?,
             is_archived: row.is_archived,
             is_integration: row.is_integration,
+            maybe_image: stored_image(row.image_key, row.image_version, row.image_size_bytes)?,
             moderation: ChannelModeration {
               member_denied: permissions(row.member_denied),
               guest_denied: permissions(row.guest_denied),
@@ -245,6 +250,38 @@ impl Database {
         })
       })
       .collect()
+  }
+
+  /// Makes `image` the channel's picture (`None` removes it). Returns the blob key of the picture it
+  /// replaced, which nothing refers to any more; `Ok(None)` also when the channel doesn't exist.
+  pub async fn set_conversation_image(
+    &self,
+    conversation: ConversationId,
+    maybe_image: Option<&StoredSpaceImage>,
+  ) -> Result<Option<String>, DbError> {
+    let mut tx = self.pool().begin().await?;
+    let maybe_previous = sqlx::query_scalar!(
+      "SELECT image_key FROM conversations WHERE id = $1 FOR UPDATE",
+      to_db(conversation),
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    .flatten();
+    let maybe_size = maybe_image
+      .map(|image| i64::try_from(image.size_bytes))
+      .transpose()
+      .map_err(|_| DbError::InvalidStoredValue("channel image size".into()))?;
+    sqlx::query!(
+      "UPDATE conversations SET image_key = $2, image_version = $3, image_size_bytes = $4 WHERE id = $1",
+      to_db(conversation),
+      maybe_image.map(|image| image.key.as_str()),
+      maybe_image.map(|image| image.version.as_str()),
+      maybe_size,
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(maybe_previous.filter(|previous| maybe_image.is_none_or(|image| image.key != *previous)))
   }
 
   pub async fn update_conversation(
