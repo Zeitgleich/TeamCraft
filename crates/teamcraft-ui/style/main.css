@@ -1104,7 +1104,11 @@ select.input {
 .sb-muted-icon {
   display: inline-grid;
   place-items: center;
+}
+
+.sb-muted-icon .icon {
   width: 14px;
+  height: 14px;
 }
 
 .sb-item.current {

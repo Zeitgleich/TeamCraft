@@ -45,9 +45,11 @@ MAX_TINY_FONT_SIZES = 6
 VAR_USE = re.compile(r"var\(\s*(--[\w-]+)")
 FONT_SIZE_PX = re.compile(r"(?:^|\s)(\d+(?:\.\d+)?)px\b")
 BLOCK_AT_RULES = ("@media", "@supports", "@layer", "@container", "@document")
-# `<tag … style=`: an element's attribute when the tag is lower case (`<Component style=…>` is a
-# component property). `style:prop=` directives don't match.
-STYLE_ATTRIBUTE = re.compile(r"<([A-Za-z][\w-]*)\b[^<>;]*?\bstyle\s*=", re.S)
+# `style=` as an attribute: not `style:prop=`, `x.style =`, `let style =` or `style ==`. Which tag
+# it belongs to is found by walking back from it (see enclosing_tag).
+STYLE_ATTRIBUTE = re.compile(r"(?<![\w:.-])style\s*=(?!=)")
+TAG_NAME = re.compile(r"<([A-Za-z][\w-]*)")
+CLOSERS = {")": "(", "]": "[", "}": "{"}
 SET_STYLE_ATTRIBUTE = re.compile(r"set_attribute\(\s*\"style\"")
 INLINE_STYLE_MARKER = "inline-style-ok:"
 
@@ -88,16 +90,53 @@ def rust_files_in(path):
 def inline_styles(path, source):
     """Finds `style=` attributes and `set_attribute("style", …)` in one Rust file."""
     lines = source.splitlines()
-    code = blank_line_comments(source)
+    # Strings blanked for the bracket walk; `set_attribute("style"` needs its string.
+    code = blank_line_comments(blank_string_contents(source))
+    with_strings = blank_line_comments(source)
     findings = []
-    for match in [*STYLE_ATTRIBUTE.finditer(code), *SET_STYLE_ATTRIBUTE.finditer(code)]:
-        if match.re is STYLE_ATTRIBUTE and not match.group(1)[0].islower():
-            continue
+    for match in [*STYLE_ATTRIBUTE.finditer(code), *SET_STYLE_ATTRIBUTE.finditer(with_strings)]:
+        if match.re is STYLE_ATTRIBUTE:
+            tag = enclosing_tag(code, match.start())
+            # No tag: a plain assignment. Upper case: a component's `style` property.
+            if tag is None or not tag[0].islower():
+                continue
         line = line_of(code, match.end())
         if INLINE_STYLE_MARKER in lines[line - 1] or (line > 1 and INLINE_STYLE_MARKER in lines[line - 2]):
             continue
         findings.append(f"{path}:{line}: inline style, blocked by the CSP: {lines[line - 1].strip()}")
     return sorted(findings, key=lambda finding: int(finding.split(":")[1]))
+
+
+def enclosing_tag(code, offset):
+    """The name of the tag whose attribute list contains `offset`, or None.
+
+    Walks back over balanced brackets, so `;` and `>` inside earlier attribute values
+    (`on:click=move |_| { a; b }`, `class=move || if n > 0 { … }`) don't end the search. Leaving
+    the enclosing block or meeting a `;` at the same depth means `offset` is not in a tag.
+    """
+    depth = []
+    for index in range(offset - 1, -1, -1):
+        char = code[index]
+        if char in CLOSERS:
+            depth.append(CLOSERS[char])
+        elif char in "([{":
+            if not depth:
+                return None
+            depth.pop()
+        elif depth:
+            continue
+        elif char == ";":
+            return None
+        elif char == "<":
+            match = TAG_NAME.match(code, index)
+            if match:
+                return match.group(1)
+    return None
+
+
+def blank_string_contents(code):
+    """Blanks the inside of string literals, keeping the quotes, so brackets in text don't count."""
+    return re.sub(r'"(?:\\.|[^"\\])*"', lambda match: '"' + re.sub(r"[^\n]", " ", match.group(0)[1:-1]) + '"', code)
 
 
 def blank_line_comments(source):

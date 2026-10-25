@@ -75,6 +75,19 @@ class InlineStylesTest(unittest.TestCase):
         source = 'view! {\n  <div class="x"\n    style=move || style.get()>\n  </div>\n}\n'
         self.assertEqual(check.inline_styles("x.rs", source), ["x.rs:3: inline style, blocked by the CSP: style=move || style.get()>"])
 
+    def test_semicolons_and_comparisons_in_earlier_attributes_do_not_hide_it(self):
+        source = (
+            'view! {\n'
+            '  <div on:click=move |_| { x.set(1); } style="top: 0"></div>\n'
+            '  <div class=move || if n.get() > 0 { "a" } else { "b" } style="top: 0"></div>\n'
+            '}\n'
+        )
+        self.assertEqual([finding.split(":")[1] for finding in check.inline_styles("x.rs", source)], ["2", "3"])
+
+    def test_assignments_named_style_pass(self):
+        source = 'let style = format!("{}", 1);\nif style == x {}\nelement.style = 1;\nlet maybe_style = 2;\n'
+        self.assertEqual(check.inline_styles("x.rs", source), [])
+
     def test_set_attribute_style_is_found(self):
         source = 'element.set_attribute(\n  "style",\n  "top: 0",\n);\n'
         self.assertEqual(len(check.inline_styles("x.rs", source)), 1)

@@ -253,13 +253,18 @@ fn DirectItem(conversation: Conversation) -> impl IntoView {
   let is_muted = conversation.is_muted;
   let aria_name = name.clone();
   let label = move || {
-    if count > 0 {
+    let label = if count > 0 {
       i18n.t_with(
         "dm-item-unread",
         &[("name", &aria_name), ("count", &count.to_string())],
       )
     } else {
       aria_name.clone()
+    };
+    if is_muted {
+      i18n.t_with("sidebar-item-muted-label", &[("label", &label)])
+    } else {
+      label
     }
   };
 

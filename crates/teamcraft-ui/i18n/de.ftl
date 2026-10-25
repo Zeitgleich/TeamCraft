@@ -108,6 +108,7 @@ sidebar-direct-messages = Direktnachrichten
 sidebar-item-mentions = { $name }, { $count } Erwähnungen
 sidebar-item-unread = { $name }, ungelesene Nachrichten
 sidebar-item-muted = Benachrichtigungen stummgeschaltet
+sidebar-item-muted-label = { $label }, Benachrichtigungen stummgeschaltet
 sidebar-item-catching-up = { $name }, wird nachgeladen
 catching-up = Wird nachgeladen…
 catching-up-detail = Nachrichten aus der Zeit, in der du weg warst, werden noch geladen.

@@ -521,7 +521,7 @@ pub fn SidebarItem(conversation: Conversation) -> impl IntoView {
   let is_muted = conversation.is_muted;
   let is_catching_up = conversation.is_catching_up;
   let label = move || {
-    if is_catching_up {
+    let label = if is_catching_up {
       i18n.t_with("sidebar-item-catching-up", &[("name", &aria_name)])
     } else if mentions > 0 {
       i18n.t_with(
@@ -532,6 +532,11 @@ pub fn SidebarItem(conversation: Conversation) -> impl IntoView {
       i18n.t_with("sidebar-item-unread", &[("name", &aria_name)])
     } else {
       aria_name.clone()
+    };
+    if is_muted {
+      i18n.t_with("sidebar-item-muted-label", &[("label", &label)])
+    } else {
+      label
     }
   };
 
