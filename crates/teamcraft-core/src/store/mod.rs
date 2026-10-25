@@ -16,6 +16,8 @@ mod sealed_sqlite;
 #[cfg(all(feature = "sqlcipher", not(target_arch = "wasm32")))]
 mod sqlite;
 mod tracked;
+#[cfg(any(test, target_arch = "wasm32"))]
+mod write_queue;
 
 #[cfg(target_arch = "wasm32")]
 pub use browser::{IndexedDbRecords, IndexedDbStore, browser_database_key};

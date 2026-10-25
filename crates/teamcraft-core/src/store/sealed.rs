@@ -113,12 +113,20 @@ impl<B: RecordBackend> SealedStore<B> {
     }
   }
 
-  fn write(&self, id: &LookupId, record: Record) -> Result<(), StoreError> {
-    let size_hint = record.size_hint();
+  /// Seals an entry when the backend writes it. Until then the seal holds the value; it is wiped
+  /// when the seal is dropped (sealed, or replaced by a newer write): entries hold the MLS state,
+  /// with key package private keys and epoch secrets.
+  fn write_entry(&self, table: Table, key: &str, value: &[u8]) -> Result<(), StoreError> {
+    let id = self.entry_id(table, key);
+    let pending = PendingEntry {
+      table: table.name().to_string(),
+      key: key.to_string(),
+      value: zeroize::Zeroizing::new(value.to_vec()),
+    };
+    let size_hint = pending.size_hint();
     let keys = Arc::clone(&self.keys);
-    let record_id = *id;
-    let seal = Box::new(move || seal_record(&keys, &record_id, &record));
-    self.backend.put_lazy(id, size_hint, seal)
+    let seal = Box::new(move || pending.seal(&keys, &id));
+    self.backend.put_lazy(&id, size_hint, seal)
   }
 
   fn entry_id(&self, table: Table, key: &str) -> LookupId {
@@ -143,14 +151,7 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
 
   fn put(&self, table: Table, key: &str, value: &[u8]) -> Result<(), StoreError> {
     self.cache.put(table, key, value)?;
-    self.write(
-      &self.entry_id(table, key),
-      Record::Entry {
-        table: table.name().to_string(),
-        key: key.to_string(),
-        value: Base64Bytes::new(value.to_vec()),
-      },
-    )
+    self.write_entry(table, key, value)
   }
 
   fn delete(&self, table: Table, key: &str) -> Result<(), StoreError> {
@@ -164,12 +165,14 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
 
   fn upsert_message(&self, message: &StoredMessage) -> Result<(), StoreError> {
     self.cache.upsert_message(message)?;
-    self.write(
-      &self.message_id(message.conversation_id, message.client_message_id),
-      Record::Message {
-        message: Box::new(message.clone()),
-      },
-    )
+    // Sealed at once: a message is written about once, so there is nothing to save by waiting.
+    let id = self.message_id(message.conversation_id, message.client_message_id);
+    let record = Record::Message {
+      message: Box::new(message.clone()),
+    };
+    self
+      .backend
+      .put_record(&id, &seal_record(&self.keys, &id, &record)?)
   }
 
   fn message(
@@ -206,13 +209,31 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
   }
 }
 
-impl Record {
+/// An entry waiting to be sealed ([`SealedStore::write_entry`]); the value is wiped on drop.
+struct PendingEntry {
+  table: String,
+  key: String,
+  value: zeroize::Zeroizing<Vec<u8>>,
+}
+
+impl PendingEntry {
   /// About the sealed size (the value travels as base64), for a backend's batch accounting.
   fn size_hint(&self) -> usize {
-    match self {
-      Self::Entry { key, value, .. } => value.len().saturating_mul(4) / 3 + key.len() + 64,
-      Self::Message { .. } => 1024,
+    self.value.len().saturating_mul(4) / 3 + self.key.len() + 64
+  }
+
+  fn seal(&self, keys: &LocalStoreKeys, id: &LookupId) -> Result<Vec<u8>, StoreError> {
+    let record = Record::Entry {
+      table: self.table.clone(),
+      key: self.key.clone(),
+      value: Base64Bytes::new(self.value.to_vec()),
+    };
+    let sealed = seal_record(keys, id, &record);
+    // The record's copy of the value doesn't wipe itself.
+    if let Record::Entry { value, .. } = record {
+      zeroize::Zeroize::zeroize(&mut value.into_vec());
     }
+    sealed
   }
 }
 
