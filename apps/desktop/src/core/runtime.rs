@@ -23,6 +23,7 @@ use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::connection::{
   ConnectionSettings, ConnectionState, ConnectionStatus, ConnectionSupervisor,
 };
+use teamcraft_core::downloads::Downloads;
 use teamcraft_core::records;
 use teamcraft_core::store::{
   DatabaseKeySource, KeySourceError, KeyringKeySource, SqlCipherStore, StoreError, StoreLock, TrackedStore,
@@ -648,6 +649,8 @@ struct Core {
   is_upload_due: bool,
   /// The bytes the transfers in flight had moved when the UI was last told.
   maybe_reported_bytes: Option<u64>,
+  /// Attachment downloads, running beside the loop (issue #491).
+  downloads: Downloads,
 }
 
 /// Why the client could not be opened.
@@ -732,6 +735,7 @@ impl Core {
       maybe_upload: None,
       is_upload_due: true,
       maybe_reported_bytes: None,
+      downloads: Downloads::default(),
     }
   }
 
@@ -756,6 +760,13 @@ impl Core {
         sent = upload_sent(&mut self.maybe_upload), if self.maybe_upload.is_some() => {
           self.on_uploaded(sent).await;
         },
+        finished = self.downloads.next_finished(), if self.downloads.is_running() => {
+          if let Some(client) = self.client.as_mut()
+            && Downloads::finish(client, finished)
+          {
+            self.changed();
+          }
+        },
         // While a file goes up, the UI reads its progress again every so often.
         () = tokio::time::sleep(TRANSFER_PROGRESS), if self.maybe_reported_bytes.is_some() => {},
         () = sleep_for(maybe_deadline), if maybe_deadline.is_some() => {
@@ -771,6 +782,7 @@ impl Core {
         self.send_queued().await;
       }
       self.start_upload().await;
+      self.start_downloads().await;
       self.report_progress();
       self.report_background_failures();
     }
@@ -1093,24 +1105,45 @@ impl Core {
         message,
         file_id,
         reply,
-      } => drop(reply.send(self.attachment(conversation, message, &file_id).await)),
+      } => self.queue_attachment(conversation, message, &file_id, reply),
       Request::OrgBackgroundPicture(id, reply) => drop(reply.send(self.org_background_picture(id).await)),
     }
   }
 
-  async fn attachment(
+  /// Queues one file, decrypted, for the image viewer or an inline picture; it downloads beside
+  /// the loop and is answered when it arrived.
+  fn queue_attachment(
     &mut self,
     conversation: ConversationId,
     message: MessageId,
     file_id: &str,
-  ) -> Result<SecretBytes, String> {
-    let (Some(client), Some(backend)) = (self.client.as_ref(), self.backend.as_ref()) else {
-      return Err("this device is not set up yet".to_owned());
+    reply: oneshot::Sender<Result<SecretBytes, String>>,
+  ) {
+    let maybe_reference = self
+      .backend
+      .as_ref()
+      .and_then(|backend| backend.attachment_ref(conversation, message, file_id));
+    let Some(reference) = maybe_reference else {
+      drop(reply.send(Err("no such file in this conversation".to_owned())));
+      return;
     };
-    let reference = backend
-      .attachment_ref(conversation, message, file_id)
-      .ok_or("no such file in this conversation")?;
-    client.open_attachment(&reference).await.map_err(describe)
+    // A closed reply channel (the caller gave up) needs nothing.
+    let deliver = move |opened: Result<SecretBytes, CoreError>| drop(reply.send(opened.map_err(describe)));
+    self.downloads.view(reference, Box::new(deliver));
+  }
+
+  /// Starts the downloads that may run now.
+  async fn start_downloads(&mut self) {
+    let Some(client) = self.client.as_mut() else {
+      return;
+    };
+    if self
+      .connection
+      .keep_alive(SystemClock.now_ms(), self.downloads.start_due(client))
+      .await
+    {
+      self.changed();
+    }
   }
 
   async fn background_picture(&mut self, id: BackgroundId) -> Result<Vec<u8>, String> {
@@ -1445,6 +1478,19 @@ impl Core {
       .partition(|command| matches!(command, CoreCommand::UploadFiles));
     self.is_upload_due |= !uploads.is_empty();
     commands
+      .into_iter()
+      .filter(|command| match command {
+        // Saved beside the loop, like uploads.
+        CoreCommand::DownloadFile {
+          conversation,
+          attachment,
+        } => {
+          self.downloads.save(*conversation, *attachment);
+          false
+        },
+        _ => true,
+      })
+      .collect()
   }
 
   /// Sends what [`Request::Action`] put into the outbox (link previews first). A failure was not

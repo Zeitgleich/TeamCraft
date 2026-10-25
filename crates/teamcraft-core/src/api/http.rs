@@ -58,8 +58,8 @@ use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversa
 #[cfg(target_arch = "wasm32")]
 use super::web_socket::{BrowserSocket, SocketFrame};
 use super::{
-  ApiError, DetachedRequest, GatewayConnection, Interception, RendezvousConnection, RendezvousFrame,
-  ServerApi,
+  ApiError, DetachedDownload, DetachedRequest, GatewayConnection, Interception, RendezvousConnection,
+  RendezvousFrame, ServerApi,
 };
 use crate::clock::{Clock, SystemClock};
 use crate::transfers::ByteCounter;
@@ -952,40 +952,44 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   }
 
   #[cfg(not(target_arch = "wasm32"))]
-  async fn get_blob_counted(
+  fn get_blob_detached(
     &self,
     url: &str,
     maybe_max_bytes: Option<u64>,
     received: ByteCounter,
-  ) -> Result<Vec<u8>, ApiError> {
-    let mut response = send(self.client.get(url)).await?;
-    let max_bytes = maybe_max_bytes.unwrap_or(u64::MAX);
-    if response.content_length().is_some_and(|length| length > max_bytes) {
-      return Err(ApiError::BlobTooLarge { max_bytes });
-    }
-    let mut blob = Vec::new();
-    while let Some(chunk) = response
-      .chunk()
-      .await
-      .map_err(|error| ApiError::Network(error.to_string()))?
-    {
-      if blob.len() as u64 + chunk.len() as u64 > max_bytes {
+  ) -> DetachedDownload {
+    let request = self.client.get(url);
+    Box::pin(async move {
+      let mut response = send(request).await?;
+      let max_bytes = maybe_max_bytes.unwrap_or(u64::MAX);
+      if response.content_length().is_some_and(|length| length > max_bytes) {
         return Err(ApiError::BlobTooLarge { max_bytes });
       }
-      blob.extend_from_slice(&chunk);
-      received.add(chunk.len() as u64);
-    }
-    Ok(blob)
+      let mut blob = Vec::new();
+      while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| ApiError::Network(error.to_string()))?
+      {
+        if blob.len() as u64 + chunk.len() as u64 > max_bytes {
+          return Err(ApiError::BlobTooLarge { max_bytes });
+        }
+        blob.extend_from_slice(&chunk);
+        received.add(chunk.len() as u64);
+      }
+      Ok(blob)
+    })
   }
 
   #[cfg(target_arch = "wasm32")]
-  async fn get_blob_counted(
+  fn get_blob_detached(
     &self,
     url: &str,
     maybe_max_bytes: Option<u64>,
     received: ByteCounter,
-  ) -> Result<Vec<u8>, ApiError> {
-    super::xhr::get(url, maybe_max_bytes, received).await
+  ) -> DetachedDownload {
+    let url = url.to_owned();
+    Box::pin(async move { super::xhr::get(&url, maybe_max_bytes, received).await })
   }
 
   async fn get_blob(&self, url: &str) -> Result<Vec<u8>, ApiError> {

@@ -3187,18 +3187,21 @@ impl ServerApi for FakeServerApi {
     })
   }
 
-  async fn get_blob_counted(
+  fn get_blob_detached(
     &self,
     url: &str,
     maybe_max_bytes: Option<u64>,
     received: crate::transfers::ByteCounter,
-  ) -> Result<Vec<u8>, ApiError> {
-    let blob = match maybe_max_bytes {
-      Some(max_bytes) => self.get_blob_capped(url, max_bytes).await?,
-      None => self.get_blob(url).await?,
-    };
-    received.add(blob.len() as u64);
-    Ok(blob)
+  ) -> super::DetachedDownload {
+    let (api, url) = (self.clone(), url.to_owned());
+    Box::pin(async move {
+      let blob = match maybe_max_bytes {
+        Some(max_bytes) => api.get_blob_capped(&url, max_bytes).await?,
+        None => api.get_blob(&url).await?,
+      };
+      received.add(blob.len() as u64);
+      Ok(blob)
+    })
   }
 
   async fn put_blob(&self, url: &str, bytes: Vec<u8>) -> Result<(), ApiError> {

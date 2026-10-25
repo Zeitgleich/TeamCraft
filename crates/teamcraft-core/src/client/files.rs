@@ -13,7 +13,7 @@ use teamcraft_proto::{
 };
 
 use super::Client;
-use super::attachments::OutgoingFile;
+use super::attachments::{BlobDownload, OutgoingFile};
 use crate::api::{ApiError, DetachedRequest, ServerApi};
 use crate::error::CoreError;
 use crate::records;
@@ -386,6 +386,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     attachment: AttachmentId,
   ) -> Result<String, CoreError> {
+    let download = self.start_download_to_disk(conversation, attachment).await?;
+    let saved = download.save().await;
+    self.finish_download_to_disk(attachment, saved)
+  }
+
+  /// [`Self::download_attachment_to_disk`] for a host that runs the transfer beside its loop: marks
+  /// the file as downloading and hands the transfer back ([`DiskDownload::save`], then
+  /// [`Self::finish_download_to_disk`]).
+  pub async fn start_download_to_disk(
+    &mut self,
+    conversation: ConversationId,
+    attachment: AttachmentId,
+  ) -> Result<DiskDownload, CoreError> {
     let reference = find_attachment(&self.store, conversation, attachment)?
       .ok_or_else(|| CoreError::Corrupt("no such file in this conversation".into()))?;
     if exceeds_download_limit(reference.size_bytes, MAX_DOWNLOAD_BYTES) {
@@ -407,15 +420,36 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         total_bytes: reference.size_bytes,
       },
     )?;
-    let result = self.download_to_disk(&reference).await;
-    let state = match &result {
+    // The cap is enforced on the bytes actually received, not on the sender-declared size.
+    match self.start_download(&reference, MAX_DOWNLOAD_BYTES).await {
+      Ok(download) => Ok(DiskDownload {
+        download,
+        maybe_directory: self.settings.maybe_download_dir.clone(),
+      }),
+      Err(error) => {
+        let failed = TransferState::Failed {
+          reason: failure_of(&error),
+        };
+        set_transfer(&self.store, attachment, &failed)?;
+        Err(error)
+      },
+    }
+  }
+
+  /// Records where a download to disk ended up, or why it failed.
+  pub fn finish_download_to_disk(
+    &mut self,
+    attachment: AttachmentId,
+    saved: Result<String, CoreError>,
+  ) -> Result<String, CoreError> {
+    let state = match &saved {
       Ok(path) => TransferState::Local { path: path.clone() },
       Err(error) => TransferState::Failed {
         reason: failure_of(error),
       },
     };
     set_transfer(&self.store, attachment, &state)?;
-    result
+    saved
   }
 
   /// Creates a public download link for a file of the conversation (e2ee.md §4.5.1).
@@ -654,17 +688,26 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.store.delete(Table::PendingUploads, &key)?;
     Ok(())
   }
+}
 
+impl DiskDownload {
+  pub fn attachment_id(&self) -> AttachmentId {
+    self.download.attachment_id()
+  }
+
+  /// Receives and decrypts the file and writes it into the download directory.
   #[cfg(not(target_arch = "wasm32"))]
-  async fn download_to_disk(&self, reference: &AttachmentRef) -> Result<String, CoreError> {
-    let directory = self
-      .settings
-      .maybe_download_dir
-      .clone()
-      .ok_or_else(|| CoreError::Corrupt("no download directory configured".into()))?;
-    let plaintext = self.download_decrypted(reference).await?;
+  pub async fn save(self) -> Result<String, CoreError> {
+    let Self {
+      download,
+      maybe_directory,
+    } = self;
+    let directory =
+      maybe_directory.ok_or_else(|| CoreError::Corrupt("no download directory configured".into()))?;
+    let file_name = download.reference().file_name.clone();
+    let plaintext = download.open().await?;
     std::fs::create_dir_all(&directory).map_err(|error| CoreError::Corrupt(error.to_string()))?;
-    let path = unique_path(&directory, &reference.file_name);
+    let path = unique_path(&directory, &file_name);
     std::fs::write(&path, plaintext.expose_secret())
       .map_err(|error| CoreError::Corrupt(error.to_string()))?;
     Ok(path.to_string_lossy().into_owned())
@@ -673,12 +716,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// The browser has no download directory: the decrypted file is handed to the browser through a
   /// temporary `<a download>` link, which saves it into the browser's download folder.
   #[cfg(target_arch = "wasm32")]
-  async fn download_to_disk(&self, reference: &AttachmentRef) -> Result<String, CoreError> {
-    // The cap is enforced on the bytes actually received, not on the sender-declared size.
-    let plaintext = self
-      .download_decrypted_capped(reference, MAX_DOWNLOAD_BYTES)
-      .await?;
-    let file_name = sanitize_file_name(&reference.file_name);
+  pub async fn save(self) -> Result<String, CoreError> {
+    let file_name = sanitize_file_name(&self.download.reference().file_name);
+    let plaintext = self.download.open().await?;
     save_in_browser(plaintext.expose_secret(), &file_name)?;
     Ok(file_name)
   }
@@ -701,6 +741,14 @@ fn slot_failure(file: &mut PendingFile, error: ApiError) -> UploadError {
 /// captive portal or proxy answered instead.
 fn is_unreachable(error: &ApiError) -> bool {
   error.is_unreachable()
+}
+
+/// A file on its way to disk (or, in the browser, to its download folder), detached from the client
+/// like a [`BlobDownload`].
+pub struct DiskDownload {
+  download: BlobDownload,
+  #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+  maybe_directory: Option<std::path::PathBuf>,
 }
 
 /// What became of a finished blob upload.

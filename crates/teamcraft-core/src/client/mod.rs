@@ -47,7 +47,7 @@ pub use account::stored_account_data;
 /// Where the engine records its upload limit for the UI.
 pub const MAX_UPLOAD_KEY: &str = "max_upload_bytes";
 pub use actions::{OutgoingText, REPLY_EXCERPT_CHARS, forward_content, reply_ref};
-pub use attachments::{MAX_VIEWER_BYTES, OutgoingFile};
+pub use attachments::{BlobDownload, MAX_VIEWER_BYTES, OutgoingFile};
 pub use attested::{AttestationSettings, JwksSource};
 pub use calls::{CallEventSink, CallKeySigner, CallMoveRecord, CallPreparation, call_move_announcement};
 pub(crate) use catch_up::CATCHING_UP_PREFIX;

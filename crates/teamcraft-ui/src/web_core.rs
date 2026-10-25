@@ -38,6 +38,7 @@ use teamcraft_core::client::files::BlobUpload;
 use teamcraft_core::client::{CatchUpFocus, LinkApproval, LinkedSecrets, NewDeviceLink};
 use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor};
+use teamcraft_core::downloads::{Downloads, Finished};
 use teamcraft_core::push_preview::{PushSession, save_push_session};
 use teamcraft_core::records;
 use teamcraft_core::store::{IndexedDbStore, StoreError, TrackedStore, browser_database_key};
@@ -630,6 +631,8 @@ enum Wake {
   Linked(Result<LinkedSecrets, String>),
   /// Storage answered the running blob upload.
   Uploaded(Result<(), ApiError>),
+  /// A download beside the loop finished.
+  Downloaded(Finished),
   Tick,
 }
 
@@ -687,6 +690,8 @@ struct Core {
   is_upload_due: bool,
   /// The bytes the transfers in flight had moved when the UI was last told.
   maybe_reported_bytes: Option<u64>,
+  /// Attachment downloads, running beside the loop (issue #491).
+  downloads: Downloads,
 }
 
 /// A link in progress on this (new) device.
@@ -737,6 +742,7 @@ impl Core {
       maybe_upload: None,
       is_upload_due: true,
       maybe_reported_bytes: None,
+      downloads: Downloads::default(),
     }
   }
 
@@ -755,24 +761,27 @@ impl Core {
         self.send_queued(&mut requests).await;
       }
       self.start_upload(&mut requests).await;
+      self.start_downloads().await;
       match self.next_wake(&mut requests).await {
         Wake::Request(None) => return,
-        // A large file must not hold up the UI's reads while it downloads.
+        // A large file must not hold up the loop while it downloads.
         Wake::Request(Some(Request::Attachment {
           conversation,
           message,
           file_id,
           reply,
-        })) => {
-          let result = self
-            .attachment_during(conversation, message, &file_id, &mut requests)
-            .await;
-          drop(reply.send(result));
-        },
+        })) => self.queue_attachment(conversation, message, &file_id, reply),
         Wake::Request(Some(request)) => self.handle(request).await,
         Wake::Frame(frame) => self.on_frame(frame).await,
         Wake::Linked(result) => self.on_linked(result).await,
         Wake::Uploaded(sent) => self.on_uploaded(sent, &mut requests).await,
+        Wake::Downloaded(finished) => {
+          if let Some(client) = self.client.as_mut()
+            && Downloads::finish(client, finished)
+          {
+            notify_changed();
+          }
+        },
         Wake::Tick => self.on_tick().await,
       }
       self.report_progress();
@@ -865,6 +874,7 @@ impl Core {
       connection,
       link,
       maybe_upload,
+      downloads,
       ..
     } = self;
     let frame = Box::pin(connection.receive());
@@ -883,12 +893,19 @@ impl Core {
     let tick = Box::pin(platform::sleep(Duration::from_millis(
       until_tick_ms.unsigned_abs(),
     )));
-    let other = select(select(frame, linked), select(uploaded, tick));
+    let downloaded = Box::pin(downloads.next_finished());
+    let transfers = select(uploaded, downloaded);
+    let other = select(select(frame, linked), select(transfers, tick));
     match select(requests.next(), other).await {
       Either::Left((request, _)) => Wake::Request(request),
       Either::Right((Either::Left((Either::Left((frame, _)), _)), _)) => Wake::Frame(frame),
       Either::Right((Either::Left((Either::Right((linked, _)), _)), _)) => Wake::Linked(linked),
-      Either::Right((Either::Right((Either::Left((sent, _)), _)), _)) => Wake::Uploaded(sent),
+      Either::Right((Either::Right((Either::Left((Either::Left((sent, _)), _)), _)), _)) => {
+        Wake::Uploaded(sent)
+      },
+      Either::Right((Either::Right((Either::Left((Either::Right((finished, _)), _)), _)), _)) => {
+        Wake::Downloaded(finished)
+      },
       Either::Right((Either::Right((Either::Right(((), _)), _)), _)) => Wake::Tick,
     }
   }
@@ -1144,7 +1161,7 @@ impl Core {
         message,
         file_id,
         reply,
-      } => drop(reply.send(self.attachment(conversation, message, &file_id).await)),
+      } => self.queue_attachment(conversation, message, &file_id, reply),
       Request::Thread {
         conversation,
         thread,
@@ -1408,21 +1425,6 @@ impl Core {
     Ok(MessageWindow::read(backend, conversation, start, len))
   }
 
-  async fn attachment(
-    &self,
-    conversation: ConversationId,
-    message: MessageId,
-    file_id: &str,
-  ) -> Result<SecretBytes, String> {
-    let (Some(client), Some(backend)) = (self.client.as_ref(), self.backend.as_ref()) else {
-      return Err(not_set_up());
-    };
-    let reference = backend
-      .attachment_ref(conversation, message, file_id)
-      .ok_or("no such file in this conversation")?;
-    client.open_attachment(&reference).await.map_err(describe)
-  }
-
   async fn action(&mut self, action: ChatAction) -> Result<(), String> {
     let client = self.client.as_mut().ok_or_else(not_set_up)?;
     // Structure changes are engine operations (they found or change encryption groups).
@@ -1589,6 +1591,19 @@ impl Core {
       .partition(|command| matches!(command, CoreCommand::UploadFiles));
     self.is_upload_due |= !uploads.is_empty();
     commands
+      .into_iter()
+      .filter(|command| match command {
+        // Saved beside the loop, like uploads.
+        CoreCommand::DownloadFile {
+          conversation,
+          attachment,
+        } => {
+          self.downloads.save(*conversation, *attachment);
+          false
+        },
+        _ => true,
+      })
+      .collect()
   }
 
   async fn flush(&mut self) {
@@ -1684,28 +1699,40 @@ impl Core {
     notify_changed();
   }
 
-  /// One file, decrypted, for the image viewer or an inline picture; the UI's reads are answered
-  /// while it downloads, and its progress shows.
-  async fn attachment_during(
+  /// Queues one file, decrypted, for the image viewer or an inline picture; it downloads beside
+  /// the loop and is answered when it arrived.
+  fn queue_attachment(
     &mut self,
     conversation: ConversationId,
     message: MessageId,
     file_id: &str,
-    requests: &mut mpsc::UnboundedReceiver<Request>,
-  ) -> Result<SecretBytes, String> {
-    let reference = self
+    reply: oneshot::Sender<Result<SecretBytes, String>>,
+  ) {
+    let maybe_reference = self
       .backend
       .as_ref()
-      .ok_or_else(not_set_up)?
-      .attachment_ref(conversation, message, file_id)
-      .ok_or("no such file in this conversation")?;
-    let opened = self
-      .serve_during(requests, async |client: &mut Client<Api, Store>| {
-        client.open_attachment(&reference).await
-      })
+      .and_then(|backend| backend.attachment_ref(conversation, message, file_id));
+    let Some(reference) = maybe_reference else {
+      drop(reply.send(Err("no such file in this conversation".to_owned())));
+      return;
+    };
+    // A closed reply channel (the caller gave up) needs nothing.
+    let deliver = move |opened: Result<SecretBytes, CoreError>| drop(reply.send(opened.map_err(describe)));
+    self.downloads.view(reference, Box::new(deliver));
+  }
+
+  /// Starts the downloads that may run now.
+  async fn start_downloads(&mut self) {
+    let Some(client) = self.client.as_mut() else {
+      return;
+    };
+    if self
+      .connection
+      .keep_alive(now_ms(), self.downloads.start_due(client))
       .await
-      .ok_or_else(not_set_up)?;
-    opened.map_err(describe)
+    {
+      notify_changed();
+    }
   }
 
   /// Tells the UI to read again when the transfers in flight moved on, at most every
