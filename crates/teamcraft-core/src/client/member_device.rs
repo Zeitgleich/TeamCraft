@@ -90,6 +90,15 @@ struct DeviceAddRecord {
   requested_at_ms: i64,
 }
 
+/// What [`Client::publish_group_info_if_missing`] left the server with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum GroupInfoOutcome {
+  /// The server holds group information for the group (already, or published now).
+  OnServer,
+  /// Nothing published: no group, a commit still pending, too large, or the epoch moved on.
+  NotPublished,
+}
+
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Whether this device is in the conversation's encryption group, or waiting to be let in.
   pub fn group_access(&mut self, conversation: ConversationId) -> Result<GroupAccess, CoreError> {
@@ -558,25 +567,25 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub(super) async fn publish_group_info_if_missing(
     &mut self,
     conversation: ConversationId,
-  ) -> Result<(), CoreError> {
+  ) -> Result<GroupInfoOutcome, CoreError> {
     match self.api.mls_group_info(conversation).await {
-      Ok(_) => return Ok(()),
+      Ok(_) => return Ok(GroupInfoOutcome::OnServer),
       Err(error) if error.is_not_found() => {},
       Err(error) => return Err(error.into()),
     }
     if !self.has_group(conversation)? {
-      return Ok(());
+      return Ok(GroupInfoOutcome::NotPublished);
     }
     let Some(group) = self.groups.get(&conversation) else {
-      return Ok(());
+      return Ok(GroupInfoOutcome::NotPublished);
     };
     if group.has_pending_commit() {
-      return Ok(());
+      return Ok(GroupInfoOutcome::NotPublished);
     }
     let epoch = group.epoch();
     let group_info = group.export_group_info(&self.provider, &self.account.device)?;
     if group_info.len() > self.settings.max_group_info_bytes {
-      return Ok(());
+      return Ok(GroupInfoOutcome::NotPublished);
     }
     let request = PutMlsGroupInfoRequest {
       device_id: self.account.device_id,
@@ -584,9 +593,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       group_info: Base64Bytes::new(group_info),
     };
     match self.api.put_mls_group_info(conversation, &request).await {
+      Ok(()) => Ok(GroupInfoOutcome::OnServer),
       // The group moved on: the next commit carries newer information anyway.
-      Err(error) if error.is_epoch_conflict() => Ok(()),
-      other => other.map_err(CoreError::from),
+      Err(error) if error.is_epoch_conflict() => Ok(GroupInfoOutcome::NotPublished),
+      Err(error) => Err(error.into()),
     }
   }
 

@@ -52,6 +52,9 @@ pub(crate) const CREATE_ATTEMPTS: u32 = 3;
 const DM_SETUP_PREFIX: &str = "dm-setup/";
 /// Key prefix of [`ReaddedRecord`]s in the applied changes.
 const READDED_PREFIX: &str = "readded/";
+/// Key prefix of the notes in [`Table::SyncState`] that the server holds a meeting chat's group
+/// information (#494).
+const GROUP_INFO_PUBLISHED_PREFIX: &str = "group-info-published/";
 
 /// This device's commit, merged: what it did and when the server stored it.
 struct OwnCommit {
@@ -105,6 +108,11 @@ struct DmSetupRecord {
   /// shown as "setting up encryption", and as failed afterwards, with a retry (#278).
   #[serde(default)]
   maybe_welcome_deadline_ms: Option<i64>,
+  /// Noted by `set_up_meeting_chat`: the repair checks that the conversation still is a meeting
+  /// chat before it founds anything, so a record for another kind of conversation never founds a
+  /// group there.
+  #[serde(default)]
+  is_meeting_chat: bool,
 }
 
 /// Where the setup of a DM this device created stands, for the UI (#278).
@@ -269,7 +277,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let others = conversation_members(invitees, me);
     // Noted before anything can fail: a setup cut short here (no network, the app closed) is
     // finished on a later sync (`repair_dm_setups`).
-    self.note_participants_setup(id, &others)?;
+    self.note_participants_setup(id, &others, true)?;
     let conversation = self.api.conversation(id).await?;
     if conversation.kind != ConversationKind::Meeting {
       self.store.delete(Table::SyncState, &dm_setup_key(id))?;
@@ -321,6 +329,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
+  pub(super) fn has_published_meeting_group_info(&self, id: ConversationId) -> Result<bool, CoreError> {
+    Ok(records::get_json::<bool>(&self.store, Table::SyncState, &group_info_published_key(id))?.is_some())
+  }
+
+  pub(super) fn note_meeting_group_info_published(&self, id: ConversationId) -> Result<(), CoreError> {
+    records::put_json(
+      &self.store,
+      Table::SyncState,
+      &group_info_published_key(id),
+      &true,
+    )
+  }
+
   async fn server_has_group_info(&mut self, id: ConversationId) -> Result<bool, CoreError> {
     match self.api.mls_group_info(id).await {
       Ok(_) => Ok(true),
@@ -347,12 +368,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     id: ConversationId,
     others: &[UserId],
   ) -> Result<bool, CoreError> {
-    self.note_participants_setup(id, others)?;
+    self.note_participants_setup(id, others, false)?;
     self.finish_dm_setup(id, others).await
   }
 
   /// Notes (or renews) the setup record of a DM, group DM or meeting chat with `others`.
-  fn note_participants_setup(&mut self, id: ConversationId, others: &[UserId]) -> Result<(), CoreError> {
+  fn note_participants_setup(
+    &mut self,
+    id: ConversationId,
+    others: &[UserId],
+    is_meeting_chat: bool,
+  ) -> Result<(), CoreError> {
     let maybe_setup = self.dm_setup(id)?;
     // Asked for by the user: tried now, whatever the backoff of an earlier attempt says.
     let setup = DmSetupRecord {
@@ -365,6 +391,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_founding_key_id: maybe_setup.and_then(|record| record.maybe_founding_key_id),
       is_waiting_for_device: false,
       maybe_welcome_deadline_ms: None,
+      is_meeting_chat,
     };
     records::put_json(&self.store, Table::SyncState, &dm_setup_key(id), &setup)
   }
@@ -385,22 +412,27 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       else {
         continue;
       };
-      let is_member = match conversations.get(&id) {
-        Some(response) => response.maybe_my_membership.is_some(),
+      let (is_member, kind) = match conversations.get(&id) {
+        Some(response) => (response.maybe_my_membership.is_some(), response.kind.clone()),
         // Noted before the conversation was known here (a meeting chat whose setup was cut off
         // right away): asked once more instead of dropped.
         None => match self.api.conversation(id).await {
           Ok(response) => {
             records::put_json(&self.store, Table::Conversations, &id.to_string(), &response)?;
-            response.maybe_my_membership.is_some()
+            (response.maybe_my_membership.is_some(), response.kind)
           },
-          Err(error) if error.is_not_found() || error.is_forbidden() => false,
+          Err(error) if error.is_not_found() || error.is_forbidden() => (false, ConversationKind::Dm),
           Err(error) => {
             maybe_first_error.get_or_insert(error.into());
             continue;
           },
         },
       };
+      // A meeting chat's record never founds a group in a conversation of another kind.
+      if setup.is_meeting_chat && kind != ConversationKind::Meeting {
+        self.store.delete(Table::SyncState, &key)?;
+        continue;
+      }
       if !is_member {
         // Gone or left: nothing to set up any more.
         self.store.delete(Table::SyncState, &key)?;
@@ -2723,6 +2755,10 @@ fn left_members(update: &MembershipUpdate) -> Vec<GroupMember> {
 }
 
 /// Where this device notes a DM setup it hasn't finished.
+pub(super) fn group_info_published_key(conversation: ConversationId) -> String {
+  format!("{GROUP_INFO_PUBLISHED_PREFIX}{conversation}")
+}
+
 fn dm_setup_key(conversation: ConversationId) -> String {
   format!("{DM_SETUP_PREFIX}{conversation}")
 }

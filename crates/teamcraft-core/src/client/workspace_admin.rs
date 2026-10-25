@@ -12,6 +12,7 @@ use teamcraft_proto::{
 };
 
 use super::Client;
+use super::member_device::GroupInfoOutcome;
 use crate::api::{ApiError, ServerApi};
 use crate::client::groups::CREATE_ATTEMPTS;
 use crate::convert;
@@ -200,12 +201,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         // (#179); one this device set up is finished by its setup (`repair_dm_setups`), and
         // nobody self-adds.
         if response.kind == ConversationKind::Meeting
+          && response.maybe_my_membership.is_some()
+          && !response.is_archived
           && self.mls_epoch(response.id)? == Some(0)
-          && let Err(error) = self.publish_group_info_if_missing(response.id).await
+          && !self.has_published_meeting_group_info(response.id)?
         {
           // A group of one (an instant meeting) carries no commit with its information yet; the
-          // organizer's other devices need it to join. Tried again on the next sync.
-          tracing::debug!(conversation_id = %response.id, %error, "could not publish a meeting chat's group information");
+          // organizer's other devices need it to join. Asked for once: after the server has it,
+          // a meeting nobody joins costs no request per sync (#494).
+          match self.publish_group_info_if_missing(response.id).await {
+            Ok(GroupInfoOutcome::OnServer) => self.note_meeting_group_info_published(response.id)?,
+            Ok(GroupInfoOutcome::NotPublished) => {},
+            Err(error) => {
+              tracing::debug!(conversation_id = %response.id, %error, "could not publish a meeting chat's group information");
+            },
+          }
         }
         if response.maybe_my_membership.is_none()
           || response.is_archived
