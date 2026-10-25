@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT meeting_id, created_by FROM meeting_invites\n         WHERE id = $1 AND is_shared AND revoked_at IS NULL FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "meeting_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "meeting_invites",
+            "name": "meeting_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "created_by",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "meeting_invites",
+            "name": "created_by"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "4262f04c53a369043bb75de0869e05d538ab0a613ba1d62a33cd82caca002293"
+}

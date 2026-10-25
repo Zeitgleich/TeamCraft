@@ -1,19 +1,21 @@
-//! Guests of meetings: personal one-time join links, guest sessions and the lobby
-//! (ARCHITECTURE.md §6.4; PLAN.md §9, §12).
+//! Guests of meetings: personal one-time join links, the shared guest link, guest sessions and the
+//! lobby (ARCHITECTURE.md §6.4; PLAN.md §9, §12; docs/meetings.md).
 //!
 //! A guest has no account at the identity provider. The link's token is traded for a session token
 //! signed by this server; the guest then exists as an ordinary guest user (kind `guest`) and waits
 //! in the lobby until a host admits them into the meeting chat. Until then they are a member of
-//! nothing and can see nothing.
+//! nothing and can see nothing. Members who open the meeting's link without being in its chat knock
+//! the same way and wait in the same lobby.
 
-use teamcraft_db::{LobbyRow, StoredMeeting};
+use teamcraft_db::{LobbyRow, SharedInviteClaim, StoredMeeting, StoredMeetingInvite};
 use teamcraft_proto::{
   CreateGuestLinkRequest, GatewayEvent, GuestLinkResponse, JoinMeetingRequest, JoinMeetingResponse,
   ListLobbyResponse, LobbyEntry, LobbyState, LobbyStateResponse, MeetingId, MeetingInviteId, MeetingStatus,
-  UserId,
+  UserId, UserKind,
 };
 use time::OffsetDateTime;
 
+use super::access::is_guest;
 use super::accounts;
 use super::convert::{unix_millis, user_summary};
 use super::validate_name;
@@ -25,21 +27,22 @@ use crate::state::AppState;
 const MAX_NAME_CHARS: usize = 100;
 const MAX_LABEL_CHARS: usize = 100;
 
-/// Trades a personal join link for a guest session and puts the guest into the lobby (or straight
-/// into the meeting if it has no lobby). Needs no authentication: the token is the credential.
+/// Trades a join link (personal or shared) for a guest session and puts the guest into the lobby
+/// (or straight into the meeting if it has no lobby and the link is personal). Needs no
+/// authentication: the token is the credential.
 pub async fn join_meeting(
   state: &AppState,
   request: JoinMeetingRequest,
 ) -> Result<JoinMeetingResponse, ApiError> {
   let service = service_of(state)?;
   let display_name = validate_name(&request.display_name, "display_name", MAX_NAME_CHARS)?;
-  let (invite_id, meeting_id) = service
+  let (link_id, meeting_id) = service
     .tokens()
     .verify_invite(&request.invite_token)
     .map_err(|_| AuthError::InvalidToken("invalid join link".into()))?;
-  let invite = state
+  let link = state
     .database
-    .get_meeting_invite(invite_id)
+    .get_meeting_invite(link_id)
     .await?
     .filter(|invite| invite.meeting == meeting_id)
     .ok_or_else(|| AuthError::InvalidToken("invalid join link".into()))?;
@@ -56,6 +59,10 @@ pub async fn join_meeting(
   if now >= expires_at {
     return Err(AuthError::InvalidToken("the meeting is over".into()).into());
   }
+  // A shared link hands every guest a one-time invite of their own; from here on both kinds of
+  // link take the same path. Guests of a shared link always wait in the lobby.
+  let invite_id = invite_for_guest(state, service, &link, &display_name).await?;
+  let has_lobby = meeting.has_lobby || link.is_shared;
 
   // The account exists from the first request on; make it now so the invite can name it.
   let guest = accounts::authenticate(
@@ -65,7 +72,7 @@ pub async fn join_meeting(
   .await?;
   if !state
     .database
-    .redeem_meeting_invite(invite.id, guest.user.id)
+    .redeem_meeting_invite(invite_id, guest.user.id)
     .await?
   {
     return Err(AuthError::InvalidToken("the join link was already used".into()).into());
@@ -82,7 +89,7 @@ pub async fn join_meeting(
     .map_err(|error| ApiError::Internal(error.to_string()))?;
 
   let entry = state.database.enter_lobby(meeting_id, guest.user.id).await?;
-  let lobby_state = if meeting.has_lobby {
+  let lobby_state = if has_lobby {
     announce_waiting(state, &meeting, &guest).await?;
     LobbyState::from(entry.state)
   } else {
@@ -127,6 +134,83 @@ pub async fn create_guest_link(
     join_url: service.guest_join_url(id, &token),
     expires_at: unix_millis(access_ends_at(service, &meeting)),
   })
+}
+
+/// The meeting's shared guest link, made on first use (host only). One link for many guests: each
+/// guest who opens it still waits in the lobby, and the link ends with the meeting or when a host
+/// revokes it. Asking again returns the same link.
+pub async fn shared_guest_link(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: MeetingId,
+) -> Result<GuestLinkResponse, ApiError> {
+  let service = service_of(state)?;
+  let meeting = host_meeting(state, caller, id).await?;
+  let new_id: MeetingInviteId = state.next_id()?;
+  let link = state
+    .database
+    .ensure_shared_invite(id, new_id, caller.user.id)
+    .await?;
+  let token = service
+    .tokens()
+    .sign_invite(link, id)
+    .map_err(|error| ApiError::Internal(error.to_string()))?;
+  Ok(GuestLinkResponse {
+    join_url: service.guest_join_url(id, &token),
+    expires_at: unix_millis(access_ends_at(service, &meeting)),
+  })
+}
+
+/// Revokes the meeting's shared guest link (host only): nobody new gets in with it; guests already
+/// waiting or admitted stay. A link asked for afterwards is a new one. Revoking twice is fine.
+pub async fn revoke_shared_guest_link(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: MeetingId,
+) -> Result<(), ApiError> {
+  host_meeting(state, caller, id).await?;
+  state.database.revoke_shared_invite(id).await?;
+  Ok(())
+}
+
+/// A member with the meeting's link who is not in its chat asks to be let in and waits in the
+/// lobby like a guest; members already in the chat are in. Members always wait for a host, also in
+/// meetings without a lobby: meeting IDs are not secret, guest links are.
+pub async fn knock(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: MeetingId,
+) -> Result<LobbyStateResponse, ApiError> {
+  service_of(state)?;
+  if is_guest(caller) {
+    return Err(ApiError::Forbidden("guests join with a guest link".into()));
+  }
+  let meeting = state
+    .database
+    .get_meeting(id)
+    .await?
+    .ok_or_else(ApiError::meeting_not_found)?;
+  if meeting.status != MeetingStatus::Scheduled.as_str() {
+    return Err(ApiError::Conflict("the meeting is not scheduled".into()));
+  }
+  if OffsetDateTime::now_utc() >= meeting.ends_at {
+    return Err(ApiError::Conflict("the meeting is over".into()));
+  }
+  let members = state
+    .database
+    .conversation_member_ids(meeting.conversation)
+    .await?;
+  if members.contains(&caller.user.id) {
+    return Ok(LobbyStateResponse {
+      state: LobbyState::Admitted,
+    });
+  }
+  let entry = state.database.enter_lobby(id, caller.user.id).await?;
+  let lobby_state = LobbyState::from(entry.state);
+  if lobby_state == LobbyState::Waiting {
+    announce_waiting(state, &meeting, caller).await?;
+  }
+  Ok(LobbyStateResponse { state: lobby_state })
 }
 
 /// The guests waiting for a decision (hosts only).
@@ -203,6 +287,15 @@ pub async fn deny(
       state: LobbyState::Denied,
     },
   );
+  // A member who knocked keeps their account; they are just not let in.
+  let is_member_account = state
+    .database
+    .get_user(guest)
+    .await?
+    .is_some_and(|user| user.kind != UserKind::Guest);
+  if is_member_account {
+    return Ok(());
+  }
   // The guest's session token would otherwise stay valid until the meeting ends: the account is
   // deactivated, which also ends their connections.
   super::admin::deactivate_user(
@@ -267,6 +360,33 @@ async fn announce_waiting(
     },
   );
   Ok(())
+}
+
+/// The one-time invite a guest redeems: a personal link is its own invite, a shared link makes a
+/// new one for every guest (refused once revoked or full).
+async fn invite_for_guest(
+  state: &AppState,
+  service: &MeetingService,
+  link: &StoredMeetingInvite,
+  display_name: &str,
+) -> Result<MeetingInviteId, ApiError> {
+  if !link.is_shared {
+    return Ok(link.id);
+  }
+  let revoked = || ApiError::from(AuthError::InvalidToken("the join link was revoked".into()));
+  if link.is_revoked {
+    return Err(revoked());
+  }
+  let invite: MeetingInviteId = state.next_id()?;
+  match state
+    .database
+    .claim_shared_invite(link.id, invite, display_name, service.max_shared_link_guests())
+    .await?
+  {
+    SharedInviteClaim::Claimed => Ok(invite),
+    SharedInviteClaim::Revoked => Err(revoked()),
+    SharedInviteClaim::Full => Err(ApiError::Conflict("the join link admits no more guests".into())),
+  }
 }
 
 /// The meeting, if the caller hosts it (organizer or chat admin); other members get "forbidden",

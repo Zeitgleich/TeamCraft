@@ -79,7 +79,7 @@ pub struct MeetingChanges<'a> {
   pub maybe_has_lobby: Option<bool>,
 }
 
-/// A personal join link of a meeting.
+/// A join link of a meeting: a personal one-time link, or the meeting's shared guest link.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredMeetingInvite {
   pub id: MeetingInviteId,
@@ -88,6 +88,19 @@ pub struct StoredMeetingInvite {
   pub maybe_label: Option<String>,
   pub is_redeemed: bool,
   pub maybe_guest_user: Option<UserId>,
+  /// The shared link of the meeting: many guests, each gets an invite of their own.
+  pub is_shared: bool,
+  pub is_revoked: bool,
+}
+
+/// Why a guest could not get an invite from a shared link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedInviteClaim {
+  Claimed,
+  /// The link was revoked (or is not a shared link).
+  Revoked,
+  /// The link has admitted as many guests as it may.
+  Full,
 }
 
 /// A guest waiting in (or let out of) the lobby.
@@ -531,7 +544,8 @@ impl Database {
     id: MeetingInviteId,
   ) -> Result<Option<StoredMeetingInvite>, DbError> {
     let row = sqlx::query!(
-      r#"SELECT id, meeting_id, email, label, redeemed_at IS NOT NULL AS "is_redeemed!", guest_user_id
+      r#"SELECT id, meeting_id, email, label, redeemed_at IS NOT NULL AS "is_redeemed!", guest_user_id,
+                is_shared, revoked_at IS NOT NULL AS "is_revoked!"
          FROM meeting_invites WHERE id = $1"#,
       to_db(id),
     )
@@ -546,9 +560,88 @@ impl Database {
           maybe_label: row.label,
           is_redeemed: row.is_redeemed,
           maybe_guest_user: from_db_opt(row.guest_user_id)?,
+          is_shared: row.is_shared,
+          is_revoked: row.is_revoked,
         })
       })
       .transpose()
+  }
+
+  /// The live shared guest link of the meeting, or a new one with `new_id`.
+  pub async fn ensure_shared_invite(
+    &self,
+    meeting: MeetingId,
+    new_id: MeetingInviteId,
+    created_by: UserId,
+  ) -> Result<MeetingInviteId, DbError> {
+    let id = sqlx::query_scalar!(
+      r#"INSERT INTO meeting_invites (id, meeting_id, created_by, is_shared) VALUES ($1, $2, $3, true)
+         ON CONFLICT (meeting_id) WHERE is_shared AND revoked_at IS NULL
+         DO UPDATE SET is_shared = EXCLUDED.is_shared
+         RETURNING id"#,
+      to_db(new_id),
+      to_db(meeting),
+      to_db(created_by),
+    )
+    .fetch_one(self.pool())
+    .await?;
+    from_db(id)
+  }
+
+  /// Revokes the meeting's live shared guest link; `false` if it has none.
+  pub async fn revoke_shared_invite(&self, meeting: MeetingId) -> Result<bool, DbError> {
+    let result = sqlx::query!(
+      "UPDATE meeting_invites SET revoked_at = now() WHERE meeting_id = $1 AND is_shared AND revoked_at IS NULL",
+      to_db(meeting),
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() > 0)
+  }
+
+  /// Makes a one-time invite `id` for one guest of the shared link `shared`, if the link is live and
+  /// has handed out fewer than `max_guests` invites. The link's row is locked while counting, so
+  /// concurrent guests can't exceed the limit.
+  pub async fn claim_shared_invite(
+    &self,
+    shared: MeetingInviteId,
+    id: MeetingInviteId,
+    label: &str,
+    max_guests: u32,
+  ) -> Result<SharedInviteClaim, DbError> {
+    let mut tx = self.pool().begin().await?;
+    let Some(link) = sqlx::query!(
+      r#"SELECT meeting_id, created_by FROM meeting_invites
+         WHERE id = $1 AND is_shared AND revoked_at IS NULL FOR UPDATE"#,
+      to_db(shared),
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+      return Ok(SharedInviteClaim::Revoked);
+    };
+    let handed_out = sqlx::query_scalar!(
+      r#"SELECT count(*) AS "count!" FROM meeting_invites WHERE shared_invite_id = $1"#,
+      to_db(shared),
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if handed_out >= i64::from(max_guests) {
+      return Ok(SharedInviteClaim::Full);
+    }
+    sqlx::query!(
+      r#"INSERT INTO meeting_invites (id, meeting_id, label, created_by, shared_invite_id)
+         VALUES ($1, $2, $3, $4, $5)"#,
+      to_db(id),
+      link.meeting_id,
+      label,
+      link.created_by,
+      to_db(shared),
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(SharedInviteClaim::Claimed)
   }
 
   /// Marks the invite redeemed by `guest`; `false` if it was redeemed before.

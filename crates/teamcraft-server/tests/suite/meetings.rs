@@ -30,6 +30,7 @@ fn config() -> MeetingsConfig {
     max_invitees: 5,
     guest_token_secret: GUEST_SECRET.to_owned().into(),
     guest_grace_secs: 7200,
+    max_shared_link_guests: 50,
     maybe_inbox_token: Some(INBOX_TOKEN.to_owned().into()),
     smtp: None,
     mail_texts: MailTexts::default(),

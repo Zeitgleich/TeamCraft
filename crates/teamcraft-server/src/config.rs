@@ -974,6 +974,9 @@ pub struct MeetingsConfig {
   /// Guests may use their link until this long after the meeting's end.
   #[serde(default = "default_guest_grace_secs")]
   pub guest_grace_secs: u64,
+  /// Most guests one shared guest link of a meeting lets into the lobby (docs/meetings.md).
+  #[serde(default = "default_max_shared_link_guests")]
+  pub max_shared_link_guests: u32,
   /// Shared secret of the inbox handler that forwards received RSVP e-mail (iMIP REPLY) to
   /// `POST /api/internal/v1/meetings/replies` as `Authorization: Bearer <token>`. Without it that
   /// endpoint answers 503. Prefer `TEAMCRAFT_MEETINGS__INBOX_TOKEN`.
@@ -1521,6 +1524,10 @@ fn default_join_token_ttl_secs() -> u64 {
 
 fn default_guest_grace_secs() -> u64 {
   2 * 3600
+}
+
+fn default_max_shared_link_guests() -> u32 {
+  50
 }
 
 fn default_smtp_port() -> u16 {
