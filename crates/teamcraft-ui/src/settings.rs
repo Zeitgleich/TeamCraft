@@ -328,5 +328,9 @@ pub fn store_string(key: &str, value: &str) {
 }
 
 fn local_storage() -> Option<web_sys::Storage> {
+  // Native unit tests have no browser: web-sys would panic, so they run without storage.
+  if cfg!(not(target_arch = "wasm32")) {
+    return None;
+  }
   web_sys::window()?.local_storage().ok().flatten()
 }
