@@ -125,7 +125,9 @@ pub fn install(app: &tauri::App) -> tauri::Result<()> {
   // macOS draws the menu bar icon as a template in the bar's own colour.
   #[cfg(target_os = "macos")]
   {
-    builder = builder.icon(tauri::include_image!("icons/tray-template.png")).icon_as_template(true);
+    builder = builder
+      .icon(tauri::include_image!("icons/tray-template.png"))
+      .icon_as_template(true);
   }
   #[cfg(not(target_os = "macos"))]
   {
