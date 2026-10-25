@@ -53,6 +53,8 @@ pub enum CallFailure {
   CameraDenied,
   CameraMissing,
   CameraInUse,
+  /// The camera offers no picture format this app can use.
+  CameraUnsupported,
   /// The screen could not be shared (not offered by the browser, or refused by a policy).
   ScreenUnavailable,
   /// The browser lacks what calls need (WebTransport, WebCodecs, AudioWorklet).
@@ -79,13 +81,14 @@ pub enum CallFailure {
 }
 
 impl CallFailure {
-  const ALL: [Self; 15] = [
+  const ALL: [Self; 16] = [
     Self::MicrophoneDenied,
     Self::MicrophoneMissing,
     Self::MicrophoneInUse,
     Self::CameraDenied,
     Self::CameraMissing,
     Self::CameraInUse,
+    Self::CameraUnsupported,
     Self::ScreenUnavailable,
     Self::Unsupported,
     Self::ServerUnreachable,
@@ -106,6 +109,7 @@ impl CallFailure {
       Self::CameraDenied => "camera_denied",
       Self::CameraMissing => "camera_missing",
       Self::CameraInUse => "camera_in_use",
+      Self::CameraUnsupported => "camera_unsupported",
       Self::ScreenUnavailable => "screen_unavailable",
       Self::Unsupported => "unsupported",
       Self::ServerUnreachable => "server_unreachable",

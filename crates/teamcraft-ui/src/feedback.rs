@@ -105,6 +105,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       CallFailure::CameraDenied => "error-call-camera-denied",
       CallFailure::CameraMissing => "error-call-camera-missing",
       CallFailure::CameraInUse => "error-call-camera-in-use",
+      CallFailure::CameraUnsupported => "error-call-camera-unsupported",
       CallFailure::ScreenUnavailable => "error-call-screen-unavailable",
       CallFailure::Unsupported => "error-call-unsupported",
       CallFailure::ServerUnreachable => "error-call-server-unreachable",

@@ -171,20 +171,21 @@ fn open_negotiated(index: CameraIndex, wanted: CaptureFormat) -> Result<Camera, 
       })
     })
     .collect();
-  let chosen = choose_mode(&offered, wanted)
-    .ok_or_else(|| CaptureError::Device("the camera offers no format we can use".into()))?;
-  let exact = CameraFormat::new(
-    Resolution::new(chosen.width, chosen.height),
-    frame_format_of(chosen.pixel_format),
-    chosen.framerate,
-  );
-  info!(width = chosen.width, height = chosen.height, framerate = chosen.framerate, format = ?chosen.pixel_format, "camera mode chosen");
-  camera
-    .set_camera_requset(RequestedFormat::with_formats(
+  // No mode we can name: keep the one the device opened with, which is one we convert.
+  if let Some(chosen) = choose_mode(&offered, wanted) {
+    let exact = CameraFormat::new(
+      Resolution::new(chosen.width, chosen.height),
+      frame_format_of(chosen.pixel_format),
+      chosen.framerate,
+    );
+    info!(width = chosen.width, height = chosen.height, framerate = chosen.framerate, format = ?chosen.pixel_format, "camera mode chosen");
+    if let Err(error) = camera.set_camera_requset(RequestedFormat::with_formats(
       RequestedFormatType::Exact(exact),
       SUPPORTED_FORMATS,
-    ))
-    .map_err(device)?;
+    )) {
+      warn!(%error, "camera refused the chosen mode; using its own");
+    }
+  }
   camera.open_stream().map_err(device)?;
   Ok(camera)
 }

@@ -20,7 +20,8 @@ use web_sys::{
 };
 
 use super::{
-  Input, Interval, MediaInput, WebCallError, browser, dictionary, js_message, media_access, window,
+  Input, Interval, MediaAccessReason, MediaInput, WebCallError, browser, dictionary, js_message,
+  media_access, window,
 };
 use crate::call_video::ReceivedVideoFrame;
 use crate::video::{VideoResolution, simulcast_layers};
@@ -418,23 +419,40 @@ pub(super) fn screen_plan() -> TrackPlan {
   }
 }
 
-/// Asks for the camera (`getUserMedia`); `maybe_device` is a `MediaDeviceInfo.deviceId`.
+/// Asks for the camera (`getUserMedia`); `maybe_device` is a `MediaDeviceInfo.deviceId`. Every
+/// constraint is `ideal`, so no device is turned away for its size or rate (`OverconstrainedError`);
+/// if the browser still fails (the chosen device is gone, or refuses the size), it is asked once
+/// more for any camera with no constraints.
 pub(super) async fn capture_camera(maybe_device: Option<&str>) -> Result<MediaStream, WebCallError> {
   let video = MediaTrackConstraints::new();
   video.set_width(&ideal(CAMERA_WIDTH)?);
   video.set_height(&ideal(CAMERA_HEIGHT)?);
   video.set_frame_rate(&ideal(u32::from(CAMERA_FRAMERATE))?);
   if let Some(device) = maybe_device {
-    let exact = dictionary(&[("exact", JsValue::from_str(device))]).map_err(browser("getUserMedia"))?;
-    video.set_device_id(&exact.into());
+    let preferred = dictionary(&[("ideal", JsValue::from_str(device))]).map_err(browser("getUserMedia"))?;
+    video.set_device_id(&preferred.into());
   }
   let constraints = MediaStreamConstraints::new();
   constraints.set_video(&video);
+  match request_camera(&constraints).await {
+    Err(WebCallError::MediaAccess {
+      reason: MediaAccessReason::NotFound | MediaAccessReason::InUse | MediaAccessReason::Other,
+      ..
+    }) => {
+      let any = MediaStreamConstraints::new();
+      any.set_video(&JsValue::TRUE);
+      request_camera(&any).await
+    },
+    result => result,
+  }
+}
+
+async fn request_camera(constraints: &MediaStreamConstraints) -> Result<MediaStream, WebCallError> {
   let promise = window()?
     .navigator()
     .media_devices()
     .map_err(|_| WebCallError::Unsupported(super::SECURE_CONTEXT))?
-    .get_user_media_with_constraints(&constraints)
+    .get_user_media_with_constraints(constraints)
     .map_err(media_access(MediaInput::Camera))?;
   Ok(
     JsFuture::from(promise)

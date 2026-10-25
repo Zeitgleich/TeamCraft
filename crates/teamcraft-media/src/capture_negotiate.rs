@@ -5,9 +5,17 @@
 use crate::capture_convert::PixelFormat;
 use crate::video_capture::CaptureFormat;
 
-/// Pixel formats [`crate::capture_convert::RawPicture::to_i420`] converts, best first. Planar and
-/// semi-planar formats need the least work; MJPEG costs a decode.
-const PIXEL_FORMAT_PREFERENCE: [PixelFormat; 3] = [PixelFormat::Nv12, PixelFormat::Yuyv, PixelFormat::Mjpeg];
+/// Pixel formats [`crate::capture_convert::RawPicture::to_i420`] converts, cheapest first. Planar
+/// and semi-planar YUV need the least work, packed YUV a repack, RGB a colour conversion, MJPEG a
+/// decode. (UYVY is not converted yet.)
+const PIXEL_FORMAT_PREFERENCE: [PixelFormat; 6] = [
+  PixelFormat::Nv12,
+  PixelFormat::I420,
+  PixelFormat::Yuyv,
+  PixelFormat::Bgrx,
+  PixelFormat::Rgbx,
+  PixelFormat::Mjpeg,
+];
 
 /// One mode a camera reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,10 +102,44 @@ mod tests {
   }
 
   #[test]
-  fn ignores_formats_we_cannot_convert() {
-    let offered = [mode(PixelFormat::Bgrx, 1280, 720, 30)];
-    assert_eq!(choose_mode(&offered, WANTED), None);
+  fn empty_list_gives_nothing() {
     assert_eq!(choose_mode(&[], WANTED), None);
+  }
+
+  #[test]
+  fn only_mjpeg() {
+    let offered = [
+      mode(PixelFormat::Mjpeg, 1280, 720, 30),
+      mode(PixelFormat::Mjpeg, 640, 480, 30),
+    ];
+    assert_eq!(choose_mode(&offered, WANTED), Some(offered[0]));
+  }
+
+  #[test]
+  fn only_vga_at_15() {
+    let offered = [mode(PixelFormat::Yuyv, 640, 480, 15)];
+    assert_eq!(choose_mode(&offered, WANTED), Some(offered[0]));
+  }
+
+  #[test]
+  fn only_4k() {
+    let offered = [mode(PixelFormat::Nv12, 3840, 2160, 30)];
+    assert_eq!(choose_mode(&offered, WANTED), Some(offered[0]));
+  }
+
+  #[test]
+  fn only_1080p_at_60() {
+    let offered = [mode(PixelFormat::Mjpeg, 1920, 1080, 60)];
+    assert_eq!(choose_mode(&offered, WANTED), Some(offered[0]));
+  }
+
+  #[test]
+  fn raw_rgb_is_chosen_when_nothing_cheaper_exists() {
+    let offered = [
+      mode(PixelFormat::Mjpeg, 1280, 720, 30),
+      mode(PixelFormat::Bgrx, 1280, 720, 30),
+    ];
+    assert_eq!(choose_mode(&offered, WANTED), Some(offered[1]));
   }
 
   fn mode(pixel_format: PixelFormat, width: u32, height: u32, framerate: u32) -> OfferedMode {
