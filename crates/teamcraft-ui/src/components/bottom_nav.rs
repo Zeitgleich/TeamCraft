@@ -1,4 +1,4 @@
-//! The bottom navigation of the compact layout (phones): Home, Activity, Spaces and You, as in the
+//! The bottom navigation of the compact layout (phones): Chats, Activity, Spaces and You, as in the
 //! Android app. It shows on the top-level pages; a conversation, thread or other page has a back
 //! button instead.
 
@@ -37,7 +37,7 @@ pub fn BottomNav() -> impl IntoView {
   let is_list = move || state.compact_pane() == CompactPane::List;
   let is_home = Signal::derive(move || {
     state.overlay.get() != Overlay::StatusMenu
-      && state.rail.get() == RailEntry::Home
+      && state.rail.get() == RailEntry::Chats
       && (is_list() || state.view.get() == MainView::GettingStarted)
   });
   let is_activity = Signal::derive(move || {
@@ -52,15 +52,15 @@ pub fn BottomNav() -> impl IntoView {
     <nav class="bottom-nav" aria-label=move || i18n.t("bottom-nav-label")>
       <SlidingIndicator maybe_target=".bottom-nav-icon" />
       <NavTab
-        label_key="rail-home"
+        label_key="rail-chats"
         is_current=is_home
         count=Signal::derive(move || home_count.get())
         on_open=Callback::new(move |()| {
           state.close_overlay();
-          state.open_home();
+          state.open_chats();
         })
       >
-        <Icon name=IconName::Home />
+        <Icon name=IconName::Chat />
       </NavTab>
       <NavTab
         label_key="rail-activity"

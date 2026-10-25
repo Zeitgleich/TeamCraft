@@ -234,7 +234,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       class="app"
       data-pane=move || state.compact_pane().slug()
       data-nav=move || pane_step.get().2.slug()
-      data-rail=move || if state.rail.get() == RailEntry::Home { "home" } else { "space" }
+      data-rail=move || if state.rail.get() == RailEntry::Chats { "home" } else { "space" }
       class:has-bottom-nav=move || has_bottom_nav(state)
     >
       // One grid row for all banners, so the top bar and the body keep their own rows.
@@ -259,7 +259,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         // The administration console takes the whole window, like a system console.
         <Show when=move || !matches!(state.view.get(), MainView::Admin(_)) fallback=|| ()>
           <SpaceRail />
-          <Show when=move || state.rail.get() == RailEntry::Home fallback=|| view! { <Sidebar /> }>
+          <Show when=move || state.rail.get() == RailEntry::Chats fallback=|| view! { <Sidebar /> }>
             <HomeSidebar />
           </Show>
         </Show>

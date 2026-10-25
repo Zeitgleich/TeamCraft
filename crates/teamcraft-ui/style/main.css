@@ -11247,3 +11247,11 @@ ol.md-list {
 .person-item:not(.is-member):active {
   background: color-mix(in srgb, var(--accent) 18%, var(--surface-2));
 }
+
+.chats-filter {
+  margin: 0 12px 6px;
+}
+
+.chats-filter .input {
+  width: 100%;
+}

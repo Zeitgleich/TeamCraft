@@ -12,7 +12,7 @@ use crate::state::{Overlay, use_app_state};
 
 /// Global header: search, help and the account/status menu. In the desktop app it is also the
 /// window's title bar: a press on its empty parts moves the window, and so does dragging the brand, which a click
-/// sends Home.
+/// sends to Chats.
 #[component]
 pub fn TopBar() -> impl IntoView {
   let state = use_app_state();
@@ -41,7 +41,7 @@ pub fn TopBar() -> impl IntoView {
           }
           event.prevent_default();
           if !press.take_was_drag() {
-            state.open_home();
+            state.open_chats();
           }
         }
       >
