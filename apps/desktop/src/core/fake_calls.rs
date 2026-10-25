@@ -64,7 +64,7 @@ impl FakeCalls {
   pub fn act(&self, action: CallAction) {
     let mut snapshot = self.lock();
     match action {
-      CallAction::Join { request } => {
+      CallAction::Join { request, .. } => {
         snapshot.incoming.clear();
         snapshot.running = vec![RunningCall {
           conversation: request.conversation,

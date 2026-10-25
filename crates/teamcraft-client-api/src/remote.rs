@@ -65,6 +65,9 @@ pub struct CallSnapshot {
 pub enum CallAction {
   Join {
     request: CallRequest,
+    /// Join with the microphone muted from the first frame (the pre-join choice).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    is_muted: bool,
   },
   Leave,
   Decline {
@@ -1387,11 +1390,17 @@ mod tests {
         conversation: id_from_raw(5),
         kind: crate::calls::CallKind::Direct,
       },
+      is_muted: false,
     };
     assert_eq!(
       serde_json::to_string(&join).expect("serialize"),
       r#"{"action":"join","request":{"conversation":"5","kind":"direct"}}"#
     );
+    let muted: CallAction = serde_json::from_str(
+      r#"{"action":"join","request":{"conversation":"5","kind":"direct"},"is_muted":true}"#,
+    )
+    .expect("parse");
+    assert!(matches!(muted, CallAction::Join { is_muted: true, .. }));
   }
 
   #[test]

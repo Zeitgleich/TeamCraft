@@ -143,6 +143,8 @@ pub struct WebCallConfig {
   pub maybe_ticket_source: Option<Rc<dyn WebJoinTicketSource>>,
   /// Which call status sounds (reconnecting, reconnected, connection lost) play.
   pub status_cues: StatusCues,
+  /// The microphone is muted from the first frame: nothing of it is sent before a later unmute.
+  pub is_muted_at_start: bool,
   /// Where the page serves the AudioWorklet module (`call_web/teamcraft-call-worklet.js`). Pages
   /// whose Content-Security-Policy allows scripts only from their own origin need it; `None` loads
   /// the module from a blob URL.
@@ -642,6 +644,9 @@ async fn run_call(
   if let Some(authenticator) = &config.maybe_authenticator {
     engine.set_authenticator(Arc::clone(authenticator));
   }
+  if config.is_muted_at_start {
+    engine.set_muted(true);
+  }
   let _page_exit = PageExit::watch(&sessions, &inputs);
   let mut state = CallState {
     maybe_transport: Some(transport),
@@ -667,7 +672,7 @@ async fn run_call(
     remotes: BTreeMap::new(),
     source: config.source.clone(),
     tone_position: 0,
-    is_muted: false,
+    is_muted: config.is_muted_at_start,
     is_deafened: false,
     stats: CallStats::default(),
     own_device: config.engine.device_id,

@@ -434,6 +434,7 @@ impl CallHub {
 /// Joins the prepared call on a new call thread; returns once connected.
 pub(crate) async fn join(
   preparation: CallPreparation,
+  is_muted: bool,
   hub: CallHub,
   jobs: mpsc::UnboundedSender<Job>,
   network: &NetworkChanges,
@@ -442,6 +443,7 @@ pub(crate) async fn join(
   let conversation = preparation.conversation;
   let own_device = preparation.device_id;
   let mut config = native_config(preparation)?;
+  config.is_muted_at_start = is_muted;
   config.maybe_ticket_source = Some(Arc::new(EngineJoinTickets { jobs, conversation }));
   let camera = CameraSlot::default();
   let thread_camera = camera.clone();
@@ -451,7 +453,7 @@ pub(crate) async fn join(
   let mut state = CallStateInfo {
     conversation_id: conversation.to_string(),
     phase: CallPhase::Connecting,
-    is_muted: false,
+    is_muted,
     is_deafened: false,
     is_camera_on: false,
     is_secured: false,

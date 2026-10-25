@@ -327,7 +327,8 @@ class CallController(
     // Receiving video needs Cisco's OpenH264; without it the call is audio-only for this device.
     VideoCodecInstaller.ensure(context)
     val session = try {
-      core.core().joinCall(conversationId)
+      // Muted from the first frame (a muted call moving into a meeting room): no audio slips out.
+      core.core().joinCall(conversationId, options.isMuted)
     } catch (error: Exception) {
       Log.w(TAG, "joining the call failed", error)
       return false
@@ -335,7 +336,6 @@ class CallController(
     maybeSession = session
     session.setStatusSounds(CallSoundPrefs.prefs(context).statusSounds)
     session.setVideoListener(Video())
-    if (options.isMuted) session.setMuted(true)
     wantsCamera.value = options.isCameraOn
     options = CallOptions()
     CallService.start(context, hasCamera = false)

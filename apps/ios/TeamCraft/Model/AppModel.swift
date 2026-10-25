@@ -718,8 +718,9 @@ final class AppModel {
   // MARK: Calls
 
   /// Joins the conversation's call (CallKit asked: answered, or started by the user).
-  func joinCall(conversationId: String) async throws -> CallSession {
-    try await core().joinCall(conversationId: conversationId)
+  /// `isMuted`: the microphone stays muted from the first frame.
+  func joinCall(conversationId: String, isMuted: Bool = false) async throws -> CallSession {
+    try await core().joinCall(conversationId: conversationId, isMuted: isMuted)
   }
 
   /// "Add people" in a DM or group DM call: the meeting room the call moves into

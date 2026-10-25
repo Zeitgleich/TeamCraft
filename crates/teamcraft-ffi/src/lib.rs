@@ -513,8 +513,15 @@ impl TeamCraft {
       .await
   }
 
-  /// Joins (or starts) the conversation's call; returns once connected.
-  pub async fn join_call(&self, conversation_id: String) -> Result<Arc<CallSession>, TeamCraftError> {
+  /// Joins (or starts) the conversation's call; returns once connected. `is_muted`: the
+  /// microphone stays muted from the first frame (a muted call moving into a meeting room), so
+  /// nothing is sent before an unmute.
+  #[uniffi::method(default(is_muted = false))]
+  pub async fn join_call(
+    &self,
+    conversation_id: String,
+    is_muted: bool,
+  ) -> Result<Arc<CallSession>, TeamCraftError> {
     let (preparation, hub) = self
       .call(move |engine| {
         Box::pin(async move {
@@ -523,7 +530,7 @@ impl TeamCraft {
         })
       })
       .await?;
-    calls::join(preparation, hub, self.jobs.clone(), &self.network).await
+    calls::join(preparation, is_muted, hub, self.jobs.clone(), &self.network).await
   }
 }
 

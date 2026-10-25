@@ -21,7 +21,11 @@ pub struct MoveOffer {
 /// What the user did that the call backend has to carry out.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallEvent {
-  Join(CallRequest),
+  /// `is_muted`: the microphone is muted from the first frame.
+  Join {
+    request: CallRequest,
+    is_muted: bool,
+  },
   Leave,
   Decline(ConversationId),
   Muted(bool),
@@ -180,13 +184,14 @@ impl CallState {
     self.is_deafened.set(false);
     self.phase.set(CallPhase::Active);
     if let Some(request) = self.maybe_request.get_untracked() {
-      self.emit(CallEvent::Join(request));
-      // The choices of the pre-join screen (or the settings), applied once joined: the backend
-      // carries out actions in order. The phone button joins with the camera off and never asks
-      // for it.
-      if !self.is_mic_on.get_untracked() {
-        self.emit(CallEvent::Muted(true));
-      }
+      // A muted microphone stays muted from the first frame, also when a call moves on into a
+      // meeting room: no audio slips out before the mute is applied.
+      self.emit(CallEvent::Join {
+        request,
+        is_muted: !self.is_mic_on.get_untracked(),
+      });
+      // The camera choice of the pre-join screen, applied once joined: the backend carries out
+      // actions in order. The phone button joins with the camera off and never asks for it.
       if self.is_camera_on.get_untracked() {
         self.emit(CallEvent::Camera(true));
       }

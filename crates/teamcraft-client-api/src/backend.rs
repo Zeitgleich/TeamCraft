@@ -542,7 +542,8 @@ pub trait CallBackend {
     Vec::new()
   }
   /// Joins (or starts) the conversation's call, leaving any other call first.
-  fn join_call(&self, _request: CallRequest) {}
+  /// `is_muted`: the microphone stays muted from the first frame (nothing is sent before an unmute).
+  fn join_call(&self, _request: CallRequest, _is_muted: bool) {}
   fn leave_call(&self) {}
   /// Stops ringing for this call on this device; the call goes on for the others.
   fn decline_call(&self, _conversation: ConversationId) {}

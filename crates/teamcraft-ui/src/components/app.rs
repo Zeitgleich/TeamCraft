@@ -884,13 +884,17 @@ fn connect_calls(state: AppState) {
     // Answered or declined here: the ring that ends now was not missed.
     if let (
       Some(alerts),
-      CallEvent::Join(CallRequest { conversation, .. }) | CallEvent::Decline(conversation),
+      CallEvent::Join {
+        request: CallRequest { conversation, .. },
+        ..
+      }
+      | CallEvent::Decline(conversation),
     ) = (maybe_alerts, &event)
     {
       alerts.handled_here(*conversation);
     }
     state.read(|backend| match event {
-      CallEvent::Join(request) => backend.join_call(request),
+      CallEvent::Join { request, is_muted } => backend.join_call(request, is_muted),
       CallEvent::Leave => backend.leave_call(),
       CallEvent::Decline(conversation) => backend.decline_call(conversation),
       CallEvent::Muted(is_muted) => backend.set_call_muted(is_muted),

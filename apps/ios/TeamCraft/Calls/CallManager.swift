@@ -297,7 +297,8 @@ final class CallManager: NSObject, @unchecked Sendable {
       await leave(previous, conversationId: previousConversationId)
     }
     do {
-      let session = try await AppModel.shared.joinCall(conversationId: conversationId)
+      // Muted from the first frame: no audio slips out before the mute is applied.
+      let session = try await AppModel.shared.joinCall(conversationId: conversationId, isMuted: wasMuted)
       guard activeCall?.id == call.id else {
         // Hung up while joining.
         session.leave()
@@ -305,7 +306,6 @@ final class CallManager: NSObject, @unchecked Sendable {
       }
       maybeSession = session
       configure(session)
-      if wasMuted { session.setMuted(isMuted: true) }
       if call.isOnHold { session.setHeld(isHeld: true) }
       if var current = activeCall {
         current.phase = .connected

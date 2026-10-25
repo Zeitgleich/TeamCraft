@@ -841,9 +841,9 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
       .map_or_else(Vec::new, RemoteCalls::incoming)
   }
 
-  fn join_call(&self, request: CallRequest) {
+  fn join_call(&self, request: CallRequest, is_muted: bool) {
     if let Some(calls) = &self.maybe_calls {
-      calls.join(request);
+      calls.join(request, is_muted);
     }
   }
 
