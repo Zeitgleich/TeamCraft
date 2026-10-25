@@ -21,7 +21,7 @@ use crate::feed_motion::{FeedMotion, Shown, newest_confirmed};
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, ConversationKind, Message, as_chat_message};
 use crate::state::{Overlay, use_app_state};
-use crate::unread_divider::{DividerEvent, DwellClock};
+use crate::unread_divider::{DividerEvent, DwellClock, is_reading_latest};
 
 /// Extra pixels rendered above and below the viewport.
 const OVERSCAN_PX: f64 = 700.0;
@@ -525,10 +525,12 @@ pub fn MessageList(
 /// arrive while the window is blurred or hidden move it to the first one from somebody else.
 /// Leaving the conversation is handled where it happens (`AppState::open_conversation`), so a
 /// remount of this list (layout change, thread pane) keeps it. One timer, only while the user sits
-/// at the bottom with a divider shown; it is cancelled when that ends or the list goes away.
+/// at the bottom with a divider shown; it is cancelled when that ends or the list goes away. The
+/// read marker doesn't wait for the divider: see [`mark_read_while_watched`].
 fn track_unread_divider(conversation: ConversationId, count: Memo<usize>, is_at_bottom: RwSignal<bool>) {
   let state = use_app_state();
   let is_focused = RwSignal::new(is_window_focused());
+  mark_read_while_watched(conversation, is_at_bottom, is_focused);
   // Whether the user was at the bottom (had seen the divider) when they looked away.
   let was_at_bottom_when_away = StoredValue::new(false);
   let on_focus_change = move || {
@@ -609,6 +611,30 @@ fn track_unread_divider(conversation: ConversationId, count: Memo<usize>, is_at_
     match set_timeout_with_handle(fire, remaining) {
       Ok(handle) => timer.set_value(Some(handle)),
       Err(error) => tracing::debug!(?error, "no timer for the divider"),
+    }
+  });
+}
+
+/// Marks the conversation read whenever something in it is unread while the user watches its newest
+/// message: at the bottom of the focused, visible window. Covers messages that arrive while it is
+/// open, coming back to the window and scrolling down to the end; opening it marks it read in
+/// `AppState::open_conversation`. The core only moves the read marker forward, and the unread count
+/// drops to zero right away, so this runs once per unread message, not in a loop. A count the
+/// server raises again (a message the read marker didn't cover yet) is caught by the next run.
+fn mark_read_while_watched(
+  conversation: ConversationId,
+  is_at_bottom: RwSignal<bool>,
+  is_focused: RwSignal<bool>,
+) {
+  let state = use_app_state();
+  let has_unread = Memo::new(move |_| {
+    state
+      .read(|backend| backend.conversation(conversation))
+      .is_some_and(|conversation| conversation.has_unread())
+  });
+  Effect::new(move |_| {
+    if is_reading_latest(has_unread.get(), is_at_bottom.get(), is_focused.get()) {
+      state.write(|backend| backend.mark_read(conversation));
     }
   });
 }

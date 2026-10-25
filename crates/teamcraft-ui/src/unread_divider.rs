@@ -4,6 +4,9 @@
 //! conversation, marks it read (Esc), leaves it, or has stayed at the bottom of the focused window
 //! for a while; new messages that arrive while the user looks elsewhere move it to the first of
 //! them. Pure: the wiring lives in the message list, the composer and `AppState`.
+//!
+//! The read marker and the unread badge don't wait for the divider: whatever is unread while the
+//! user watches the newest message is read at once ([`is_reading_latest`]).
 
 use std::time::Duration;
 
@@ -63,6 +66,13 @@ pub fn next_divider(
       })
     },
   }
+}
+
+/// Whether the open conversation's unread messages are read right now: something is unread and the
+/// user sees its newest message, at the bottom of the focused, visible window. The divider stays
+/// until the dwell (it shows where the news began); the badge and the read marker don't wait.
+pub fn is_reading_latest(has_unread: bool, is_at_bottom: bool, is_focused: bool) -> bool {
+  has_unread && is_at_bottom && is_focused
 }
 
 /// How long the user has sat at the bottom of the focused conversation with a divider shown,
@@ -144,6 +154,29 @@ mod tests {
       has_seen_divider: true,
     };
     assert_eq!(next_divider(None, here(), own), None);
+  }
+
+  mod reading_latest {
+    use super::*;
+
+    #[test]
+    fn unread_messages_in_view_of_the_focused_window_are_read() {
+      assert!(is_reading_latest(true, true, true));
+    }
+
+    #[test]
+    fn nothing_is_read_while_scrolled_up_or_looking_elsewhere() {
+      assert!(!is_reading_latest(true, false, true), "scrolled up");
+      assert!(!is_reading_latest(true, true, false), "window blurred or hidden");
+      assert!(!is_reading_latest(true, false, false));
+    }
+
+    #[test]
+    fn nothing_unread_sends_no_read_marker() {
+      for (is_at_bottom, is_focused) in [(true, true), (true, false), (false, true), (false, false)] {
+        assert!(!is_reading_latest(false, is_at_bottom, is_focused));
+      }
+    }
   }
 
   mod dwell {
