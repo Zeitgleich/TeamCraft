@@ -9531,6 +9531,20 @@ ol.md-list {
   width: min(280px, calc(100vw - var(--space-4)));
 }
 
+/* The header's bell: the menu hangs from it; a muted conversation shows it dimmed. On a phone the
+   "…" menu has the mute toggle instead. */
+.conversation-bell {
+  position: relative;
+}
+
+.conversation-bell > .header-btn.is-muted {
+  opacity: 0.6;
+}
+
+:root[data-layout="compact"] .conversation-bell {
+  display: none;
+}
+
 :root[data-layout="compact"] .switcher-input {
   padding: 0 var(--space-2) 0 var(--space-1);
 }
