@@ -22,8 +22,8 @@ android {
     targetSdk = 37
     // docs/release.md: versionCode = MAJOR*1000000 + MINOR*10000 + PATCH*100 + stage, where stage is
     // beta.N -> N, rc.N -> 50+N and the final release -> 99, so every release sorts above the last.
-    versionCode = 1000299
-    versionName = "1.0.2"
+    versionCode = 1000399
+    versionName = "1.0.3"
     // The ABIs scripts/build.sh builds the Rust library for (phones and the x86_64 emulator).
     ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
