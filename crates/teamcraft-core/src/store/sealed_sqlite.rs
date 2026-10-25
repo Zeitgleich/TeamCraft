@@ -7,6 +7,7 @@
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, params};
 use teamcraft_crypto::local_store::{LOOKUP_ID_LEN, LookupId};
@@ -30,6 +31,12 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     kind: MigrationKind::Maintenance(wipe_free_pages),
   },
 ];
+/// How long a write waits for another connection's lock (a checkpoint of the log runs into one).
+const BUSY_TIMEOUT: Duration = Duration::from_secs(1);
+/// The most often a debounced purge ([`LocalStore::purge_freed_soon`]) truncates the log: a
+/// checkpoint costs two or three syncs, and the MLS storage is saved for every processed message.
+/// Old snapshots can stay in the log this long while the app runs (docs/e2ee.md §4.3.1).
+const PURGE_INTERVAL: Duration = Duration::from_secs(30);
 const SCHEMA_V1: &str = "
   CREATE TABLE IF NOT EXISTS sealed_records (
     id BLOB PRIMARY KEY,
@@ -49,6 +56,36 @@ pub struct SqliteRecords {
 struct Inner {
   connection: Connection,
   group: WriteGroup,
+  purge: PurgeState,
+}
+
+/// What the write-ahead log still owes a purge.
+struct PurgeState {
+  /// Something was written since the log was last truncated, and a purge was asked for.
+  is_due: bool,
+  /// The caller wants it now (key deletion), not when the interval has passed.
+  is_forced: bool,
+  maybe_last_attempt: Option<Instant>,
+  min_interval: Duration,
+}
+
+impl PurgeState {
+  fn new() -> Self {
+    Self {
+      is_due: false,
+      is_forced: false,
+      maybe_last_attempt: None,
+      min_interval: PURGE_INTERVAL,
+    }
+  }
+
+  fn should_run(&self, now: Instant) -> bool {
+    self.is_due
+      && (self.is_forced
+        || self
+          .maybe_last_attempt
+          .is_none_or(|last| now.saturating_duration_since(last) >= self.min_interval))
+  }
 }
 
 impl SealedStore<SqliteRecords> {
@@ -71,12 +108,14 @@ impl SealedStore<SqliteRecords> {
     connection
       .execute_batch("PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;")
       .map_err(database_error)?;
+    connection.busy_timeout(BUSY_TIMEOUT).map_err(database_error)?;
     run_migrations(&connection, MIGRATIONS)?;
     let records = read_all(&connection)?;
     let backend = SqliteRecords {
       inner: Mutex::new(Inner {
         connection,
         group: WriteGroup::default(),
+        purge: PurgeState::new(),
       }),
     };
     Self::load(backend, &key_source.database_key()?, records)
@@ -105,16 +144,24 @@ impl RecordBackend for SqliteRecords {
 
   fn begin_writes(&self) -> Result<(), StoreError> {
     let mut inner = self.lock();
-    let Inner { connection, group } = &mut *inner;
+    let Inner {
+      connection, group, ..
+    } = &mut *inner;
     group.begin(connection)
   }
 
   fn end_writes(&self) -> Result<(), StoreError> {
     let mut inner = self.lock();
-    let Inner { connection, group } = &mut *inner;
+    let Inner {
+      connection,
+      group,
+      purge,
+    } = &mut *inner;
     group.end(connection)?;
-    if group.take_due_purge() {
-      checkpoint_truncate(connection)?;
+    // The group is committed whatever happens to the purge: a failed one stays due and must not
+    // make the committed writes look failed.
+    if !group.is_open() {
+      run_purge_if_due(connection, purge);
     }
     Ok(())
   }
@@ -124,18 +171,76 @@ impl RecordBackend for SqliteRecords {
   /// for the group's commit: a checkpoint before would write half of the group to the database.
   fn purge_freed(&self) -> Result<(), StoreError> {
     let mut inner = self.lock();
-    let Inner { connection, group } = &mut *inner;
-    if group.defer_purge() {
-      checkpoint_truncate(connection)?;
+    let Inner {
+      connection,
+      group,
+      purge,
+    } = &mut *inner;
+    purge.is_due = true;
+    purge.is_forced = true;
+    if !group.is_open() {
+      run_purge_if_due(connection, purge);
     }
     Ok(())
   }
+
+  fn purge_freed_soon(&self) {
+    let mut inner = self.lock();
+    let Inner {
+      connection,
+      group,
+      purge,
+    } = &mut *inner;
+    purge.is_due = true;
+    if !group.is_open() {
+      run_purge_if_due(connection, purge);
+    }
+  }
 }
 
-fn checkpoint_truncate(connection: &Connection) -> Result<(), StoreError> {
-  connection
-    .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-    .map_err(database_error)
+impl Drop for SqliteRecords {
+  fn drop(&mut self) {
+    // Closing the app is the last chance to clear what the interval kept back.
+    let mut inner = self.lock();
+    let Inner {
+      connection, purge, ..
+    } = &mut *inner;
+    if purge.is_due {
+      purge.is_forced = true;
+      run_purge_if_due(connection, purge);
+    }
+  }
+}
+
+/// Truncates the log if a purge is due and its time has come. A checkpoint that did not complete
+/// (another connection holds the log, the disk failed) leaves the purge due; it is retried by the
+/// next write, purge or drop, never reported as a failure of the write that asked for it.
+fn run_purge_if_due(connection: &Connection, purge: &mut PurgeState) {
+  let now = Instant::now();
+  if !purge.should_run(now) {
+    return;
+  }
+  purge.maybe_last_attempt = Some(now);
+  match checkpoint_truncate(connection) {
+    Ok(true) => {
+      purge.is_due = false;
+      purge.is_forced = false;
+    },
+    Ok(false) => tracing::warn!("the write-ahead log could not be truncated yet; trying again later"),
+    Err(error) => tracing::warn!(%error, "could not truncate the write-ahead log; trying again later"),
+  }
+}
+
+/// `PRAGMA wal_checkpoint(TRUNCATE)`; `true` only if it ran to the end: not blocked by a reader
+/// or writer (`busy`) and every frame of the log written back.
+fn checkpoint_truncate(connection: &Connection) -> Result<bool, StoreError> {
+  let (busy, log_frames, checkpointed_frames): (i64, i64, i64) = connection
+    .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+      Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    })
+    .map_err(database_error)?;
+  // Without a log (a database that is not in WAL mode) SQLite answers -1 for both counts.
+  Ok(busy == 0 && log_frames == checkpointed_frames)
 }
 
 impl SqliteRecords {
@@ -147,7 +252,9 @@ impl SqliteRecords {
   /// Runs a write; a failure inside a group of writes undoes the whole group when it ends.
   fn write(&self, statement: impl FnOnce(&Connection) -> rusqlite::Result<usize>) -> Result<(), StoreError> {
     let mut inner = self.lock();
-    let Inner { connection, group } = &mut *inner;
+    let Inner {
+      connection, group, ..
+    } = &mut *inner;
     group.check_open(connection)?;
     let result = statement(&inner.connection);
     result.map(|_| ()).map_err(|error| {
@@ -274,6 +381,82 @@ mod tests {
     for bytes in [&raw, &wal] {
       assert!(!bytes.windows(needle.len()).any(|window| window == needle));
     }
+    drop(store);
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  fn is_purge_due(store: &SealedSqliteStore) -> bool {
+    store.backend().lock().purge.is_due
+  }
+
+  /// Issue #417: the MLS storage is saved for every message, so those purges are merged; an
+  /// explicit purge, and closing the store, still clear the log.
+  #[test]
+  fn debounced_purges_are_merged_and_an_explicit_one_clears_what_is_left() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let store =
+      SealedSqliteStore::open(&path, &StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
+    store.put(Table::MlsStorage, "state", &[1; 64]).unwrap();
+    store.purge_freed_soon();
+    assert!(!is_purge_due(&store), "the first one runs at once");
+    store.put(Table::MlsStorage, "state", &[2; 64]).unwrap();
+    store.purge_freed_soon();
+    assert!(is_purge_due(&store), "the next one within the interval waits");
+    store.purge_freed().unwrap();
+    assert!(!is_purge_due(&store));
+    drop(store);
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  #[test]
+  fn closing_the_store_clears_the_log_of_a_waiting_purge() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let store =
+      SealedSqliteStore::open(&path, &StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
+    store.put(Table::MlsStorage, "state", &[7; 4096]).unwrap();
+    let sealed: Vec<u8> = Connection::open(&path)
+      .unwrap()
+      .query_row("SELECT value FROM sealed_records", [], |row| row.get(0))
+      .unwrap();
+    let needle = sealed[sealed.len() / 2..sealed.len() / 2 + 32].to_vec();
+    store.purge_freed_soon();
+    store.put(Table::MlsStorage, "state", &[9; 4096]).unwrap();
+    store.purge_freed_soon();
+    assert!(is_purge_due(&store));
+    drop(store);
+    let raw = std::fs::read(&path).unwrap();
+    let wal = std::fs::read(path.with_extension("db-wal")).unwrap_or_default();
+    for bytes in [&raw, &wal] {
+      assert!(!bytes.windows(needle.len()).any(|window| window == needle));
+    }
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  /// A reader that holds the log keeps the checkpoint from finishing; the purge stays due and the
+  /// write that asked for it is not reported as failed.
+  #[test]
+  fn a_checkpoint_that_cannot_finish_stays_due_without_failing_the_write() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let store =
+      SealedSqliteStore::open(&path, &StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
+    store.put(Table::MlsStorage, "state", &[1; 64]).unwrap();
+    // A second connection in the middle of a read transaction pins the log.
+    let reader = Connection::open(&path).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    reader
+      .query_row("SELECT count(*) FROM sealed_records", [], |row| {
+        row.get::<_, i64>(0)
+      })
+      .unwrap();
+    store.put(Table::MlsStorage, "state", &[2; 64]).unwrap();
+    store.purge_freed().unwrap();
+    assert!(is_purge_due(&store), "an unfinished checkpoint is retried");
+    reader.execute_batch("COMMIT").unwrap();
+    store.purge_freed().unwrap();
+    assert!(!is_purge_due(&store));
     drop(store);
     std::fs::remove_dir_all(&directory).unwrap();
   }

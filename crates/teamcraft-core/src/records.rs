@@ -479,7 +479,7 @@ pub fn save_mls_storage(store: &impl LocalStore, provider: &OpenMlsRustCrypto) -
   store.put(Table::MlsStorage, MLS_STORAGE_KEY, &encoded)?;
   // The snapshot is rewritten whole, so the previous one (old epoch secrets, spent key package
   // private keys) sits in free pages and the write-ahead log until the store clears them (#417).
-  store.purge_freed()?;
+  store.purge_freed_soon();
   Ok(())
 }
 

@@ -46,6 +46,9 @@ pub trait RecordBackend {
     Ok(())
   }
 
+  /// See [`LocalStore::purge_freed_soon`].
+  fn purge_freed_soon(&self) {}
+
   /// Puts the record `seal` makes, about `size_hint` bytes. A backend that collects writes may
   /// call `seal` only when it writes the record, and not at all when a newer write of the same
   /// record comes first. Writes keep their order either way.
@@ -120,7 +123,7 @@ impl<B: RecordBackend> SealedStore<B> {
     }
   }
 
-  #[cfg(target_arch = "wasm32")]
+  #[cfg(any(target_arch = "wasm32", all(test, feature = "sealed-sqlite")))]
   pub(crate) fn backend(&self) -> &B {
     &self.backend
   }
@@ -252,6 +255,10 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
 
   fn purge_freed(&self) -> Result<(), StoreError> {
     self.backend.purge_freed()
+  }
+
+  fn purge_freed_soon(&self) {
+    self.backend.purge_freed_soon();
   }
 
   fn begin_writes(&self) -> Result<(), StoreError> {
