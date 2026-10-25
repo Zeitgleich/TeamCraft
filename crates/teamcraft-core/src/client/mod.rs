@@ -516,6 +516,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Table::AppliedChanges,
       &group_health::queue_refused_key(conversation),
     )?;
+    self
+      .store
+      .delete(Table::SyncState, &groups::group_info_published_key(conversation))?;
     self.mls_current.remove(&conversation);
     records::save_mls_storage(&self.store, &self.provider)
   }

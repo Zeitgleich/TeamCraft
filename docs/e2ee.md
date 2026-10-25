@@ -727,8 +727,9 @@ never by the server's member list:
   the server created it (`set_up_meeting_chat`), like a group DM's: a setup record holding the users
   invited in that request (noted before the first request, so a setup cut short by a lost network
   or a closed app is finished on a later sync), founded only when the server shows no group and has
-  no group information for it. It publishes the group's information at once (and again on a sync
-  while the group is still at epoch 0), so the organizer's other devices join by external commit
+  no group information for it. It publishes the group's information at once (and once more on a sync
+  while the group is still at epoch 0, until the server is known to hold it; an archived meeting
+  asks no more), so the organizer's other devices join by external commit
   even while the group holds nobody else (an instant meeting). Any other device, the organizer's
   included, only joins: as a further device, from a welcome, or by a device-add request. It never
   founds, so a server that hides a group can't make a second device fork it.

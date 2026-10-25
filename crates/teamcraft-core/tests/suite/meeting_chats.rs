@@ -160,6 +160,23 @@ mod organizer_devices {
   }
 }
 
+/// An instant meeting nobody joins stays at epoch 0: its group information is looked up until the
+/// server has it, then not again on every sync (#494).
+#[tokio::test]
+async fn a_meeting_nobody_joins_costs_no_group_info_request_per_sync() {
+  let (server, mut alice, _bob) = two().await;
+  let chat = server.create_meeting_chat(alice.client.user_id(), &[]);
+  alice.client.set_up_meeting_chat(chat, &[]).await.unwrap();
+  alice.client.full_sync().await.unwrap();
+
+  // The server lost the information; a device that remembers it was published doesn't ask again.
+  server.forget_group_infos();
+  alice.client.full_sync().await.unwrap();
+
+  let missing = alice.api.mls_group_info(chat).await;
+  assert!(missing.is_err_and(|error| error.is_not_found()));
+}
+
 #[tokio::test]
 async fn the_hosts_admit_lets_somebody_into_the_chat() {
   let (server, mut alice, mut bob) = two().await;
