@@ -84,6 +84,9 @@ pub struct SignInPageInfo {
   pub maybe_help_link: Option<String>,
   /// The local form's one-time code field is required; else optional ("if you set one up").
   pub local_requires_code: bool,
+  /// Sign-ins show the identity provider's login page, as the server says now (issue #448);
+  /// `None` while unknown (then `StoredServer::is_login_page_always_shown` decides).
+  pub maybe_login_page_always_shown: Option<bool>,
 }
 
 /// A way to sign in on the sign-in page.
@@ -205,6 +208,7 @@ fn page_info(page: SignInPage) -> SignInPageInfo {
     maybe_help_text: page.maybe_help_text,
     maybe_help_link: page.maybe_help_link,
     local_requires_code: page.local_requires_code,
+    maybe_login_page_always_shown: page.maybe_login_page_always_shown,
   }
 }
 

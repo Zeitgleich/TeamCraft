@@ -26,6 +26,14 @@ pub struct SignInLook {
   /// (the name stays its alternative text). False for an icon.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub is_wordmark: bool,
+  /// Whether the sign-in shows the identity provider's login page, as the sign-in screen's fresh
+  /// server answer says (issue #448); absent: the shell uses the server profile it stored.
+  #[serde(
+    rename = "login_page_always_shown",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_login_page_always_shown: Option<bool>,
 }
 
 /// The theme the user picked in the app.

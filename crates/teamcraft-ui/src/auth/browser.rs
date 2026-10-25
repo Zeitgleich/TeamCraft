@@ -159,14 +159,13 @@ impl BrowserAuth {
     let client = self.client(&discovery, &redirect_uri, &sign_in)?;
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
     let maybe_hint = stored_login_hint(&sign_in);
-    let request = match maybe_look {
-      Some(look) => LoginRequest {
-        is_login_page_shown: sign_in.is_login_page_always_shown,
-        maybe_login_hint: maybe_hint.as_deref(),
-        maybe_locale: look.maybe_locale.as_deref(),
-      },
-      None => LoginRequest::default(),
-    };
+    let page_language = document_language();
+    let request = login_request(
+      &sign_in,
+      maybe_look,
+      maybe_hint.as_deref(),
+      page_language.as_deref(),
+    );
     let (url, state) = authorization_url(&client, &sign_in.scopes, challenge, &request);
     let pending = Pending {
       state: state.secret().clone(),
@@ -699,6 +698,39 @@ fn session_remove(key: &str) {
   }
 }
 
+/// The extra parameters of a sign-in: one the user started (`maybe_look`) asks for the login page
+/// if the server says so (its fresh answer on the sign-in screen first); a silent renewal after a
+/// reload never does, but still prefills the account and the language should the provider ask.
+fn login_request<'a>(
+  sign_in: &SignIn,
+  maybe_look: Option<&'a SignInLook>,
+  maybe_hint: Option<&'a str>,
+  maybe_page_language: Option<&'a str>,
+) -> LoginRequest<'a> {
+  let is_login_page_shown = maybe_look.is_some_and(|look| {
+    look
+      .maybe_login_page_always_shown
+      .unwrap_or(sign_in.is_login_page_always_shown)
+  });
+  let maybe_locale = maybe_look
+    .and_then(|look| look.maybe_locale.as_deref())
+    .or(maybe_page_language);
+  LoginRequest {
+    is_login_page_shown,
+    maybe_login_hint: maybe_hint,
+    maybe_locale,
+  }
+}
+
+/// The app's language as the page declares it (`<html lang>`).
+fn document_language() -> Option<String> {
+  web_sys::window()
+    .and_then(|window| window.document())
+    .and_then(|document| document.document_element())
+    .and_then(|root| root.get_attribute("lang"))
+    .filter(|lang| !lang.is_empty())
+}
+
 /// The account last signed in with at `sign_in`'s provider, if this browser knows it.
 fn stored_login_hint(sign_in: &SignIn) -> Option<String> {
   let stored: StoredLoginHint = serde_json::from_str(&local_get(LOGIN_HINT_KEY)?).ok()?;
@@ -789,6 +821,39 @@ mod tests {
     let (challenge, _) = PkceCodeChallenge::new_random_sha256();
     let (url, _) = authorization_url(&client, &scopes, challenge, &LoginRequest::default());
     assert!(!url.as_str().contains("prompt=") && !url.as_str().contains("login_hint="));
+  }
+
+  /// Issue #448: the user's sign-in asks for the login page (the sign-in screen's fresh answer
+  /// first), a silent renewal never does but keeps the hint and the language.
+  #[test]
+  fn begin_login_asks_for_the_login_page_only_when_the_user_signs_in() {
+    let sign_in = SignIn {
+      issuer: "https://auth.example.com".into(),
+      client_id: "teamcraft".into(),
+      scopes: vec![OPENID_SCOPE.to_owned()],
+      is_login_page_always_shown: true,
+    };
+    let look = SignInLook {
+      maybe_locale: Some("de".into()),
+      ..SignInLook::default()
+    };
+    let interactive = login_request(&sign_in, Some(&look), Some("alice"), Some("en"));
+    assert!(interactive.is_login_page_shown);
+    assert_eq!(interactive.maybe_locale, Some("de"));
+    let silent = login_request(&sign_in, None, Some("alice"), Some("en"));
+    assert_eq!(
+      silent,
+      LoginRequest {
+        is_login_page_shown: false,
+        maybe_login_hint: Some("alice"),
+        maybe_locale: Some("en"),
+      }
+    );
+    let turned_off = SignInLook {
+      maybe_login_page_always_shown: Some(false),
+      ..look
+    };
+    assert!(!login_request(&sign_in, Some(&turned_off), None, None).is_login_page_shown);
   }
 
   /// A pending sign-in stored before the return path existed still reads.

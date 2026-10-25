@@ -965,11 +965,19 @@ impl<S: TokenStore> AuthService<S> {
   }
 }
 
-/// What a finished browser sign-in leaves for the next one.
-#[derive(Debug, Default, PartialEq, Eq)]
+/// What a finished browser sign-in leaves for the next one. No `Debug` with the account name.
+#[derive(Default, PartialEq, Eq)]
 pub struct SignedIn {
   /// The account the ID token names (`preferred_username` or `email`).
   pub maybe_login_hint: Option<String>,
+}
+
+impl std::fmt::Debug for SignedIn {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("SignedIn")
+      .field("has_login_hint", &self.maybe_login_hint.is_some())
+      .finish()
+  }
 }
 
 /// What the browser tab says about a finished sign-in.

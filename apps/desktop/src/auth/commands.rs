@@ -208,9 +208,10 @@ pub async fn server_confirm(
         "this server was not checked".to_owned(),
       )
     })?;
-  // A stored token of this server with other sign-in settings must not be used any more.
+  // A stored token of this server with other sign-in settings must not be used any more (the
+  // settings that sign-in uses: origin, issuer, client and scopes; not the login hint).
   if let Some(previous) = servers.directory.profile(&profile.origin)
-    && previous != profile
+    && DesktopConfig::from_profile(&previous) != DesktopConfig::from_profile(&profile)
   {
     service
       .forget_tokens(&DesktopConfig::from_profile(&previous))
@@ -270,10 +271,14 @@ pub async fn auth_login(
 ) -> Result<(), CommandError> {
   let look = look.unwrap_or_default();
   let maybe_profile = servers.directory.active();
+  // The sign-in screen's fresh answer wins over the profile saved at the last server check, so a
+  // changed admin setting applies to installed apps too.
   let request = LoginRequest {
-    is_login_page_shown: maybe_profile
-      .as_ref()
-      .is_none_or(|profile| profile.is_login_page_always_shown),
+    is_login_page_shown: look.maybe_login_page_always_shown.unwrap_or_else(|| {
+      maybe_profile
+        .as_ref()
+        .is_none_or(|profile| profile.is_login_page_always_shown)
+    }),
     maybe_login_hint: maybe_profile
       .as_ref()
       .and_then(|profile| profile.maybe_login_hint.as_deref()),

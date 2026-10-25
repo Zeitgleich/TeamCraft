@@ -7,6 +7,7 @@ import androidx.browser.customtabs.ExperimentalEphemeralBrowsing
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -30,6 +31,7 @@ import net.openid.appauth.ResponseTypeValues
 import net.openid.appauth.connectivity.ConnectionBuilder
 import net.openid.appauth.connectivity.DefaultConnectionBuilder
 import de.zeitgleich.teamcraft.BuildConfig
+import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.security.KeystoreBox
 import de.zeitgleich.teamcraft.security.SealedFile
 import de.zeitgleich.teamcraft.server.ServerStore
@@ -105,20 +107,22 @@ class AuthRepository(private val context: Context, private val servers: ServerSt
   }
 
   /**
-   * The intent that opens the browser for login (PKCE is added by AppAuth). It asks for the
-   * identity provider's login page with the last account and the app's language (issue #448), in an
-   * ephemeral Custom Tab where the browser supports one, so the browser's provider session isn't
-   * reused; `prompt=login` covers browsers without it.
+   * The intent that opens the browser for login (PKCE is added by AppAuth), with the last account
+   * and the app's language (issue #448). Where the server asks for the identity provider's login
+   * page ([maybeLoginPageAlwaysShown], the sign-in screen's fresh answer; else the stored server's
+   * setting), it sends `prompt=login` and opens an ephemeral Custom Tab where the browser supports
+   * one, so the browser's provider session isn't reused. Otherwise silent single sign-on works.
    */
   @OptIn(ExperimentalEphemeralBrowsing::class)
-  suspend fun loginIntent(): Intent {
+  suspend fun loginIntent(maybeLoginPageAlwaysShown: Boolean?): Intent {
     val session = session() ?: throw IllegalStateException("no server")
     val configuration = discover(session)
     val server = synchronized(this) { session.server }
+    val isLoginPageShown = maybeLoginPageAlwaysShown ?: server.isLoginPageAlwaysShown
     val parameters = loginParameters(
-      server.isLoginPageAlwaysShown,
+      isLoginPageShown,
       server.maybeLoginHint,
-      context.resources.configuration.locales[0],
+      Locale.forLanguageTag(context.getString(R.string.app_language)),
     )
     val request = AuthorizationRequest.Builder(
       configuration,
@@ -132,7 +136,7 @@ class AuthRepository(private val context: Context, private val servers: ServerSt
       .setUiLocales(parameters.maybeUiLocales)
       .build()
     val tab = session.service.createCustomTabsIntentBuilder(request.toUri())
-      .setEphemeralBrowsingEnabled(true)
+      .setEphemeralBrowsingEnabled(isLoginPageShown)
       .build()
     return session.service.getAuthorizationRequestIntent(request, tab)
   }
@@ -312,7 +316,7 @@ class AuthRepository(private val context: Context, private val servers: ServerSt
    * [state] (identity provider) and [maybeLocal] (local account) is signed in.
    */
   private class Session(
-    var server: StoredServer,
+    @Volatile var server: StoredServer,
     val file: SealedFile,
     val localFile: SealedFile,
     val service: AuthorizationService,

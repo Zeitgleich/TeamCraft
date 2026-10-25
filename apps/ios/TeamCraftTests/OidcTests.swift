@@ -43,6 +43,25 @@ final class OidcTests: XCTestCase {
     XCTAssertNil(value("login_hint"))
   }
 
+  /// Issue #448: the server's profile and the app's language become the parameters.
+  func testLoginParametersComeFromTheServerAndTheAppLanguage() throws {
+    let address = ServerAddress(
+      origin: "https://team.example.com", host: "team.example.com", storageKey: "team.example.com",
+      serverInfoUrl: "https://team.example.com/api/v1/server-info")
+    let server = StoredServer(
+      address: address, issuer: "https://id.example.com/realms/team", clientId: "teamcraft",
+      scopes: ["openid"], displayName: "Example", serverVersion: "1.0.3",
+      isLoginPageAlwaysShown: true, maybeLoginHint: " alice ", profileJson: "{}")
+    XCTAssertEqual(
+      LoginParameters(server: server, isLoginPageShown: true, locale: "de_DE"),
+      LoginParameters(prompt: "login", loginHint: "alice", uiLocales: "de-DE"))
+    XCTAssertEqual(
+      LoginParameters(server: server, isLoginPageShown: false, locale: "not a tag!"),
+      LoginParameters(prompt: nil, loginHint: "alice", uiLocales: nil))
+    XCTAssertNil(LoginParameters.languageTag(""))
+    XCTAssertEqual(LoginParameters.languageTag("en"), "en")
+  }
+
   /// Issue #448: the login page with the last account and the app's language.
   @MainActor
   func testAuthorizationURLAsksForTheLoginPageWithHintAndLanguage() throws {
