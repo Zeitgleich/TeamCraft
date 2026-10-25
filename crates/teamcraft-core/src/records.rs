@@ -403,6 +403,16 @@ pub fn save_mls_storage(store: &impl LocalStore, provider: &OpenMlsRustCrypto) -
   Ok(())
 }
 
+/// Roughly how many bytes [`save_mls_storage`] writes (diagnostics; 0 if the lock is poisoned).
+pub fn mls_storage_len(provider: &OpenMlsRustCrypto) -> usize {
+  provider.storage().values.read().map_or(0, |values| {
+    values
+      .iter()
+      .map(|(key, value)| key.len().saturating_add(value.len()))
+      .sum()
+  })
+}
+
 pub fn load_mls_storage(store: &impl LocalStore) -> Result<OpenMlsRustCrypto, CoreError> {
   let provider = OpenMlsRustCrypto::default();
   let Some(encoded) = store.get(Table::MlsStorage, MLS_STORAGE_KEY)? else {

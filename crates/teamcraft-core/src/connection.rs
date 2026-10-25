@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use teamcraft_proto::{GatewayClientMessage, GatewayServerMessage};
 
 use crate::api::{ApiError, GatewayConnection, Interception, ServerApi};
-use crate::client::{Client, GatewayOutcome};
+use crate::client::{Client, GatewayOutcome, GatewayTiming, HeldFrames, HeldLimits, keep_alive};
 use crate::error::CoreError;
 use crate::store::LocalStore;
 
@@ -62,6 +62,9 @@ pub struct ConnectionSettings {
   pub probe_timeout: Duration,
   /// A gap this long between two ticks means the device slept or the tab was frozen.
   pub wake_gap: Duration,
+  /// What is kept while a long sync or command runs ([`ConnectionSupervisor::keep_alive`]); beyond
+  /// it the connection isn't read until the work is done.
+  pub held_limits: HeldLimits,
 }
 
 /// The current [`ConnectionState`], readable from other threads and while the shell's loop is busy
@@ -96,6 +99,8 @@ pub struct ConnectionSupervisor<G> {
   /// A fingerprint of the token the server refused, so it isn't offered again and again (each
   /// refusal counts against the address on the server).
   maybe_refused_token: Option<u64>,
+  /// What arrived while long work kept the connection alive; [`Self::receive`] hands it out first.
+  held: HeldFrames,
   jitter: Jitter,
 }
 
@@ -113,6 +118,7 @@ impl Default for ConnectionSettings {
       stable_after: Duration::from_secs(30),
       probe_timeout: Duration::from_secs(3),
       wake_gap: Duration::from_secs(30),
+      held_limits: HeldLimits::default(),
     }
   }
 }
@@ -180,6 +186,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
       maybe_probe_deadline_ms: None,
       maybe_last_tick_ms: None,
       maybe_refused_token: None,
+      held: HeldFrames::default(),
       jitter: Jitter::new(OsRng.next_u64()),
     }
   }
@@ -242,16 +249,26 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
       return None;
     }
     self.set_state(ConnectionState::Connecting);
-    let result = client.start_gateway(self.settings.handshake_timeout).await;
+    let timing = GatewayTiming {
+      handshake_timeout: self.settings.handshake_timeout,
+      max_heartbeat: self.settings.max_heartbeat,
+      held_limits: self.settings.held_limits,
+    };
+    let result = client.start_gateway(timing).await;
     let now = client.now_ms();
     match result {
       Ok(start) => {
         tracing::info!(outcome = ?start.outcome, "gateway connected");
         self.heartbeat = start.heartbeat_interval.min(self.settings.max_heartbeat);
         self.maybe_gateway = Some(start.connection);
+        self.held = start.held;
+        // The heartbeats went on during the sync: the next one is due an interval from now at the
+        // latest, and the loop was busy, not asleep.
+        self.held.take_kept_alive();
         self.connected_at_ms = now;
         self.last_heard_ms = now;
         self.last_heartbeat_ms = now;
+        self.maybe_last_tick_ms = Some(now);
         self.maybe_probe_deadline_ms = None;
         self.maybe_refused_token = None;
         self.set_state(ConnectionState::Connected);
@@ -275,8 +292,12 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     }
   }
 
-  /// The next frame of the open connection; never completes while there is none.
+  /// The next frame of the open connection, frames held during long work first; never completes
+  /// while there is none.
   pub async fn receive(&mut self) -> Option<Result<GatewayServerMessage, ApiError>> {
+    if let Some(held) = self.held.pop() {
+      return held;
+    }
     match self.maybe_gateway.as_mut() {
       Some(connection) => connection.receive().await,
       None => std::future::pending().await,
@@ -302,7 +323,10 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
         self.last_heard_ms = now;
         self.maybe_probe_deadline_ms = None;
         let is_heartbeat_ack = matches!(frame, GatewayServerMessage::HeartbeatAck);
-        client.handle_frame(frame).await.map(|()| !is_heartbeat_ack)
+        // An event can start a long catch-up (a welcome, a membership change).
+        let handled = self.keep_alive(now, client.handle_frame(frame)).await;
+        self.note_kept_alive(client.now_ms());
+        handled.map(|()| !is_heartbeat_ack)
       },
       Some(Err(error)) => Err(CoreError::Api(error)),
       None => Err(CoreError::Gateway("connection closed".into())),
@@ -319,6 +343,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
   /// Heartbeats, dead-connection detection and wake-up detection. Call it at least every few
   /// seconds and at [`Self::next_deadline_ms`].
   pub async fn on_tick(&mut self, now_ms: i64) {
+    self.note_kept_alive(now_ms);
     let has_slept = self
       .maybe_last_tick_ms
       .is_some_and(|last| now_ms.saturating_sub(last) >= millis(self.settings.wake_gap));
@@ -352,6 +377,27 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     if now_ms.saturating_sub(self.last_heartbeat_ms) >= millis(self.heartbeat) {
       self.heartbeat_now(now_ms).await;
     }
+  }
+
+  /// Runs `work` (a UI command, the upkeep, the outbox) while the connection keeps its heartbeats
+  /// and reads what arrives (issue #325): a long command can't get the connection dropped. `now_ms`
+  /// is the time the work starts; what arrived is handed out by [`Self::receive`] afterwards, and
+  /// the next [`Self::on_tick`] or [`Self::on_frame`] counts the heartbeats sent meanwhile.
+  pub async fn keep_alive<T>(&mut self, now_ms: i64, work: impl std::future::Future<Output = T>) -> T {
+    let Some(connection) = self.maybe_gateway.as_mut() else {
+      return work.await;
+    };
+    let heartbeat_due = self.last_heartbeat_ms.saturating_add(millis(self.heartbeat));
+    let first_in = Duration::from_millis(heartbeat_due.saturating_sub(now_ms).max(0).unsigned_abs());
+    keep_alive(
+      connection,
+      first_in,
+      self.heartbeat,
+      self.settings.held_limits,
+      &mut self.held,
+      work,
+    )
+    .await
   }
 
   /// Sends a frame on the open connection; `false` if there is none or the send failed (the
@@ -389,6 +435,20 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     }
   }
 
+  /// Counts what [`Self::keep_alive`] did: heartbeats sent and answers heard move the timers, and a
+  /// long work isn't mistaken for a device that slept.
+  fn note_kept_alive(&mut self, now_ms: i64) {
+    let kept = self.held.take_kept_alive();
+    if kept.heartbeats_sent > 0 {
+      self.last_heartbeat_ms = now_ms;
+      self.maybe_last_tick_ms = Some(now_ms);
+    }
+    if kept.was_heard {
+      self.last_heard_ms = now_ms;
+      self.maybe_probe_deadline_ms = None;
+    }
+  }
+
   fn is_attempt_due<A: ServerApi, S: LocalStore>(&self, client: &Client<A, S>) -> bool {
     match self.state() {
       // Only another token can change the answer.
@@ -408,6 +468,8 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
   fn lose(&mut self, now_ms: i64, reason: &dyn std::fmt::Display) {
     tracing::warn!(%reason, "gateway connection lost");
     self.maybe_gateway = None;
+    // Frames of the old connection: a resume replays them, a fresh session syncs.
+    self.held = HeldFrames::default();
     self.maybe_probe_deadline_ms = None;
     if now_ms.saturating_sub(self.connected_at_ms) >= millis(self.settings.stable_after) {
       self.failures = 0;

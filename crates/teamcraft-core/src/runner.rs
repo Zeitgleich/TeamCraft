@@ -200,7 +200,13 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       },
       #[cfg(feature = "ui")]
       RunnerCommand::Ui(command) => {
-        if let Err(error) = self.client.run_ui_command(command).await {
+        let now = self.client.now_ms();
+        // A command can take long (an upload, a big history page); heartbeats go on meanwhile.
+        let result = self
+          .connection
+          .keep_alive(now, self.client.run_ui_command(command))
+          .await;
+        if let Err(error) = result {
           tracing::warn!(%error, "UI command failed");
         }
       },
@@ -224,13 +230,23 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       return;
     }
     self.next_tick_ms = now.saturating_add(millis(self.settings.tick));
-    if self.upkeep.tick(&mut self.client).await {
+    // The upkeep may resync many conversations; heartbeats go on meanwhile.
+    let is_changed = self
+      .connection
+      .keep_alive(now, self.upkeep.tick(&mut self.client))
+      .await;
+    if is_changed {
       self.changed();
     }
   }
 
   async fn flush(&mut self) {
-    if upkeep::flush(&mut self.client).await {
+    let now = self.client.now_ms();
+    let is_changed = self
+      .connection
+      .keep_alive(now, upkeep::flush(&mut self.client))
+      .await;
+    if is_changed {
       self.changed();
     }
   }

@@ -197,6 +197,15 @@ pub fn core_network_changed(host: State<'_, CoreHost>, calls: State<'_, Arc<Call
   calls.network_changed();
 }
 
+/// The user opened a conversation (issue #247: a running catch-up takes it next).
+#[tauri::command]
+pub fn core_focus(host: State<'_, CoreHost>, conversation: ConversationId) {
+  // No running core: nothing is catching up that the focus could steer.
+  if let Ok(runtime) = host.current() {
+    runtime.focus(conversation);
+  }
+}
+
 #[tauri::command]
 pub async fn core_enroll(host: State<'_, CoreHost>, request: EnrollRequest) -> Result<(), CommandError> {
   Ok(host.current()?.enroll(request).await?)

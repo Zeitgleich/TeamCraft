@@ -193,6 +193,16 @@ struct State {
   hidden_last_seen: HashSet<UserId>,
   /// How far the server's clock runs ahead of the system clock ([`FakeServer::advance_clock`]).
   clock_offset_ms: i64,
+  /// Users whose conversation list answers only after this long (a slow server in a big sync).
+  conversation_list_delays: HashMap<UserId, std::time::Duration>,
+  /// Users whose member lists answer only after this long.
+  member_list_delays: HashMap<UserId, std::time::Duration>,
+  /// The gateway's heartbeat timeout on a clock of the test's ([`FakeServer::enforce_heartbeat_timeout`]).
+  maybe_heartbeat_timeout: Option<(Arc<dyn Clock + Send + Sync>, i64)>,
+  /// When each gateway connection last sent a frame, while the timeout is enforced.
+  last_client_frames: HashMap<u64, i64>,
+  /// Gateway connections closed because the client went silent for longer than the timeout.
+  heartbeat_timeouts: u64,
   /// Revoked devices stay listed with their key packages, as a stale or malicious server would.
   is_ignoring_revocations: bool,
   /// The next commit of these users is stored and fanned out, but the answer is lost.
@@ -445,6 +455,29 @@ impl FakeServer {
   /// How many gateway connections were opened so far.
   pub fn gateway_connect_count(&self) -> u64 {
     self.lock().gateway_connects
+  }
+
+  /// Like the server, closes a gateway connection whose client sent nothing for longer than
+  /// `timeout` on `clock`. Checked when the next frame arrives: that frame is lost and the
+  /// connection closes.
+  pub fn enforce_heartbeat_timeout(&self, clock: Arc<dyn Clock + Send + Sync>, timeout: std::time::Duration) {
+    let timeout_ms = i64::try_from(timeout.as_millis()).unwrap_or(i64::MAX);
+    self.lock().maybe_heartbeat_timeout = Some((clock, timeout_ms));
+  }
+
+  /// How many connections [`Self::enforce_heartbeat_timeout`] closed.
+  pub fn heartbeat_timeout_count(&self) -> u64 {
+    self.lock().heartbeat_timeouts
+  }
+
+  /// The user's member lists answer only after `delay` (a catch-up of many conversations).
+  pub fn delay_member_lists(&self, user: UserId, delay: std::time::Duration) {
+    self.lock().member_list_delays.insert(user, delay);
+  }
+
+  /// The user's `GET /conversations` answers only after `delay` (a long full sync).
+  pub fn delay_conversation_list(&self, user: UserId, delay: std::time::Duration) {
+    self.lock().conversation_list_delays.insert(user, delay);
   }
 
   /// How many gateway heartbeats arrived so far.
@@ -1406,6 +1439,15 @@ impl ServerApi for FakeServerApi {
   }
 
   async fn list_conversations(&self) -> Result<ListConversationsResponse, ApiError> {
+    let maybe_delay = self
+      .server
+      .lock()
+      .conversation_list_delays
+      .get(&self.user)
+      .copied();
+    if let Some(delay) = maybe_delay {
+      crate::platform::sleep(delay).await;
+    }
     self.with(|state, me| {
       let conversations = state
         .conversations
@@ -1425,6 +1467,10 @@ impl ServerApi for FakeServerApi {
     &self,
     conversation: ConversationId,
   ) -> Result<ListConversationMembersResponse, ApiError> {
+    let maybe_delay = self.server.lock().member_list_delays.get(&self.user).copied();
+    if let Some(delay) = maybe_delay {
+      crate::platform::sleep(delay).await;
+    }
     self.with(|state, me| {
       if state.broken_member_lists.contains(&conversation) {
         return Err(ApiError::Decode("fake server: unreadable member list".into()));
@@ -3171,6 +3217,19 @@ impl GatewayConnection for FakeGateway {
     {
       return Ok(());
     }
+    if state.is_heartbeat_late(self.connection) {
+      state.heartbeat_timeouts += 1;
+      for session in state.sessions.values_mut() {
+        if session
+          .maybe_live
+          .as_ref()
+          .is_some_and(|(live, _)| *live == self.connection)
+        {
+          session.maybe_live = None;
+        }
+      }
+      return Ok(());
+    }
     let is_handshake = matches!(
       message,
       GatewayClientMessage::Identify { .. } | GatewayClientMessage::Resume { .. }
@@ -3395,6 +3454,19 @@ impl State {
     self.network_cuts.remove(&user);
     self.offline_users.insert(user);
     Some(cut)
+  }
+
+  /// Notes a frame from `connection`; `true` if it came later than the enforced heartbeat timeout.
+  fn is_heartbeat_late(&mut self, connection: u64) -> bool {
+    let Some((clock, timeout_ms)) = &self.maybe_heartbeat_timeout else {
+      return false;
+    };
+    let now = clock.now_ms();
+    let timeout_ms = *timeout_ms;
+    self
+      .last_client_frames
+      .insert(connection, now)
+      .is_some_and(|last| now.saturating_sub(last) > timeout_ms)
   }
 
   /// The server's clock: the system clock plus [`FakeServer::advance_clock`].
