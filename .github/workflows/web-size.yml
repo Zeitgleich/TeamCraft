@@ -24,6 +24,7 @@ on:
       - "scripts/check-web-size.py"
       - ".github/workflows/web-size.yml"
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
     paths:
       - "crates/teamcraft-ui/**"
       - "crates/teamcraft-web-sw/**"
@@ -57,6 +58,10 @@ env:
 
 jobs:
   web-size:
+    # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
+    # before merging, and main gets one run per batch. This keeps the runner budget for main and
+    # releases.
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
     name: Web wasm size
     runs-on: ubuntu-latest
     # Rust, the wasm32 target and trunk are in the CI image (containers/ci.Containerfile).
