@@ -8,7 +8,9 @@ use crate::components::admin_policy::{
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 
-const AWAY_MINUTES: [u32; 5] = [0, 5, 10, 15, 30];
+/// Away timeouts an admin can pick, from the server's minimum up; `0` lets the devices decide
+/// (kept so workspaces without a timeout show and keep their choice).
+const AWAY_MINUTES: [u32; 6] = [5, 10, 15, 30, 60, 0];
 const PRESET_DURATIONS: [u32; 6] = [0, 30, 60, 240, 480, 1440];
 const MAX_PRESETS: usize = 20;
 

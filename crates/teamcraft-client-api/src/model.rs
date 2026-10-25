@@ -389,6 +389,13 @@ pub struct Conversation {
   pub maybe_image_version: Option<String>,
 }
 
+impl Conversation {
+  /// Whether anything in it waits to be read: the read marker has something to move past.
+  pub fn has_unread(&self) -> bool {
+    self.unread_count > 0 || self.mention_count > 0
+  }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bookmark {
   pub emoji: String,

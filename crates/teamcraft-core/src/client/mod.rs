@@ -76,7 +76,7 @@ pub use pending_add::{UserAddWait, pending_user_additions};
 pub use segments::SegmentPrefetch;
 use teamcraft_crypto::membership::ChangeId;
 use teamcraft_crypto::mls::{ChangeHistory, ConversationGroup, PendingCommit};
-use teamcraft_proto::{Base64Bytes, ConversationId, ConversationResponse, UserId};
+use teamcraft_proto::{Base64Bytes, ConversationId, ConversationResponse, DeviceActivity, UserId};
 
 use crate::api::ServerApi;
 use crate::clock::Clock;
@@ -228,6 +228,8 @@ pub struct Client<A, S> {
   /// Events of a resume replay still to come: the counters are read once it has drained, because
   /// `GET /unread` already counts the missed messages the replay delivers (issue #183).
   maybe_replay_left: Option<u64>,
+  /// What the device last said about its activity; a new gateway session identifies with it.
+  device_activity: DeviceActivity,
   /// The conversation the user looks at; a catch-up takes it first (issue #247).
   catch_up_focus: CatchUpFocus,
   /// Set while a catch-up joins the focused conversation's welcomes ahead of the others: the
@@ -313,6 +315,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       last_key_package_check_ms: i64::MIN,
       mls_current: Default::default(),
       maybe_replay_left: None,
+      device_activity: DeviceActivity::Active,
       member_join_attempts: HashMap::new(),
       device_add_requests_handled: HashMap::new(),
       are_welcomes_synced: false,
