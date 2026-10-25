@@ -129,6 +129,13 @@ pub struct EmojiSuggestion {
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct LoginBrand {
   pub display_name: String,
+  /// The server serves its built-in brand (no brand configured): the screens show TeamCraft's own
+  /// look, not a second tile beside it.
+  pub is_product: bool,
+  /// The brand's square icon, for its tile beside TeamCraft's (issue #463).
+  pub maybe_icon_url: Option<String>,
+  /// The dark theme's icon (the light one when the brand has no dark variant).
+  pub maybe_icon_dark_url: Option<String>,
   pub maybe_logo_url: Option<String>,
   /// The dark theme's logo (the light one when the brand has no dark variant).
   pub maybe_logo_dark_url: Option<String>,

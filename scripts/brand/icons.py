@@ -128,17 +128,15 @@ def web() -> list[Path]:
   (WEB / "favicon.svg").write_text(glyph("rounded"))
   write_ico({size: png_bytes(glyph("rounded"), size) for size in (16, 32, 48)}, WEB / "favicon.ico")
   shutil.copy(BRAND / "mark.svg", WEB / "mark.svg")
-  # The loading screen animates the dots itself (style/loader.css).
-  (WEB / "loader-mark.svg").write_text(mark.svg(with_dots=False))
+  # The loading screen inlines the mark in index.html (its parts animate); update it there too.
   shutil.copy(BRAND / "wordmark.svg", WEB / "wordmark.svg")
   shutil.copy(BRAND / "wordmark-dark.svg", WEB / "wordmark-dark.svg")
-  names = ("favicon.svg", "favicon.ico", "mark.svg", "loader-mark.svg", "wordmark.svg",
-           "wordmark-dark.svg")
+  names = ("favicon.svg", "favicon.ico", "mark.svg", "wordmark.svg", "wordmark-dark.svg")
   return out + [WEB / name for name in names]
 
 
 def ios() -> list[Path]:
-  """The single-size app icon with its dark and tinted appearances, and the launch screen logo."""
+  """The single-size app icon with its dark and tinted appearances."""
   icons = IOS / "AppIcon.appiconset"
   out = [
     render(tile(LIGHT_BACKPLATE, "full", width=0.76), 1024, icons / "icon-1024.png", opaque=True),
@@ -159,9 +157,7 @@ def ios() -> list[Path]:
     "info": {"author": "xcode", "version": 1},
   }
   (icons / "Contents.json").write_text(json.dumps(contents, indent=2) + "\n")
-  launch = IOS / "LaunchLogo.imageset"
-  for scale in (1, 2, 3):
-    out.append(render(mark_only(), 120 * scale, launch / f"logo@{scale}x.png"))
+  # The launch screen is the background only; the app's loading screen draws the mark (#463).
   return out
 
 

@@ -18,7 +18,7 @@ use crate::backend::Backend;
 use crate::brand::{Brand, image_src};
 use crate::clock::now_ms;
 use crate::components::app::Shell;
-use crate::components::brand_logo::BrandLogo;
+use crate::components::brand_logo::{BrandImage, BrandLogo};
 use crate::components::bundle_banner::BundleBanner;
 use crate::components::icons::{Icon, IconName};
 use crate::components::pending_button::PendingButton;
@@ -134,11 +134,12 @@ pub(crate) fn AuthFrame(
   }
 }
 
-/// The top of the card: no server brand yet → the product mark and wordmark; a logo (a
-/// wordmark) → the logo alone; an icon → the icon with the name beside it; nothing → the name.
+/// The top of the card: no server brand → the product mark and wordmark. A server brand → the
+/// product's tile and the brand's beside it, like two app icons (issue #463), then the brand's logo
+/// (a wordmark) or its name.
 fn brand_mark(brand: RwSignal<BrandView>) -> AnyView {
   let name = move || brand.with(|view| view.display_name.clone());
-  let (is_product, has_wordmark) = brand.with(|view| (view.is_fallback(), view.has_wordmark()));
+  let (is_product, has_wordmark) = brand.with(|view| (view.is_product(), view.has_wordmark()));
   if is_product {
     // Each wordmark carries the name: only the theme's one is displayed (and so read), and it
     // still reads "TeamCraft" if the image fails.
@@ -149,15 +150,36 @@ fn brand_mark(brand: RwSignal<BrandView>) -> AnyView {
     }
     .into_any();
   }
+  let initial = move || {
+    name()
+      .chars()
+      .next()
+      .map(|first| first.to_uppercase().collect::<String>())
+  };
+  let tiles = view! {
+    <div class="auth-tiles" aria-hidden="true">
+      <span class="auth-tile auth-tile-product">
+        <img class="auth-tile-img auth-product-icon" src=crate::brand::product_icon() alt="" />
+      </span>
+      <span class="auth-tile auth-tile-brand">
+        <BrandLogo
+          class="auth-tile-img"
+          image=BrandImage::Icon
+          fallback=move || view! { <span class="auth-tile-initial">{initial}</span> }
+        />
+      </span>
+    </div>
+  };
   if has_wordmark {
     // Until the logo is there, or when it fails, the name stands in for it.
     return view! {
+      {tiles}
       <BrandLogo class="auth-logo-img" fallback=move || view! { <span class="auth-brand-name">{name}</span> } />
     }
     .into_any();
   }
   view! {
-    <BrandLogo class="auth-logo-img auth-icon-img" fallback=|| () />
+    {tiles}
     <span class="auth-brand-name">{name}</span>
   }
   .into_any()
