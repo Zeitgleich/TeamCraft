@@ -19,6 +19,7 @@ pub mod admin_policy;
 pub mod admin_retention;
 pub mod admin_security;
 pub mod admin_settings;
+pub mod admin_spaces;
 pub mod admin_updates;
 pub mod admin_users;
 pub mod announcement_banner;

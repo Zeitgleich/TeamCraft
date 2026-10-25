@@ -31,8 +31,8 @@ use teamcraft_client_api::actions::{
 use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, PresencePolicy};
 
 use crate::admin::{
-  AdminChannel, AdminSpace, AdminUser, AuditEntry, AuditFilter, DeviceInfo, PolicyBlocker, Retention,
-  SelfJoinOutcome, SettingsTestKind,
+  AdminChannel, AdminLoad, AdminSpace, AdminSpaceChanges, AdminUser, AuditEntry, AuditFilter, DeviceInfo,
+  PolicyBlocker, Retention, SelfJoinOutcome, SettingsTestKind,
 };
 use crate::admin_live::AdminLive;
 use crate::auth::Authenticator;
@@ -1021,6 +1021,19 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     match &self.maybe_admin {
       Some(admin) => admin.spaces(),
       None => Vec::new(),
+    }
+  }
+
+  fn admin_load(&self) -> AdminLoad {
+    self
+      .maybe_admin
+      .as_ref()
+      .map_or(AdminLoad::Loaded, AdminLive::list_load)
+  }
+
+  fn change_admin_space(&self, space: SpaceId, changes: AdminSpaceChanges) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.change_space(space, changes);
     }
   }
 

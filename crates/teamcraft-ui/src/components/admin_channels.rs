@@ -2,9 +2,10 @@ use leptos::prelude::*;
 
 use teamcraft_proto::{ChannelModeration, HistoryPolicy, Permission};
 
-use crate::admin::{AdminChannel, SelfJoinOutcome, format_bytes};
+use crate::admin::{AdminChannel, AdminLoad, SelfJoinOutcome, format_bytes};
 use crate::clock::{format_relative, now_ms};
 use crate::components::admin_console::SectionHeader;
+use crate::components::admin_spaces::{LoadNotice, SpacesPanel};
 use crate::components::channel_view::UnconfirmedRemovalActions;
 use crate::components::icons::{Icon, IconName};
 use crate::components::sliding_indicator::SlidingIndicator;
@@ -50,6 +51,24 @@ impl ChannelFilter {
       Self::WithGuests => channel.guest_count > 0,
       Self::Inactive => now - channel.last_activity > INACTIVE_AFTER_DAYS * DAY_MS,
       Self::Orphaned => channel.maybe_owner.is_none(),
+    }
+  }
+}
+
+/// What the section lists: spaces (with their admin actions) or channels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ListTab {
+  Channels,
+  Spaces,
+}
+
+impl ListTab {
+  const ALL: [ListTab; 2] = [Self::Channels, Self::Spaces];
+
+  fn slug(self) -> &'static str {
+    match self {
+      Self::Channels => "channels",
+      Self::Spaces => "spaces",
     }
   }
 }
@@ -100,8 +119,10 @@ pub fn ChannelsSection() -> impl IntoView {
   let query = RwSignal::new(String::new());
   let filter = RwSignal::new(ChannelFilter::All);
   let selected = RwSignal::new(None::<ConversationId>);
+  let tab = RwSignal::new(ListTab::Channels);
   let now = now_ms();
 
+  let load = Memo::new(move |_| state.read(|backend| backend.admin_load()));
   let channels = Memo::new(move |_| state.read(|backend| backend.admin_channels()));
   let visible = Memo::new(move |_| {
     let needle = query.get().trim().to_lowercase();
@@ -142,6 +163,20 @@ pub fn ChannelsSection() -> impl IntoView {
         prop:value=move || query.get()
         on:input=move |ev| query.set(event_target_value(&ev))
       />
+      <div class="segmented" role="group" aria-label=move || i18n.t("admin-list-tab")>
+        <SlidingIndicator />
+        {ListTab::ALL
+          .into_iter()
+          .map(|option| {
+            view! {
+              <button aria-pressed=move || (tab.get() == option).to_string() on:click=move |_| tab.set(option)>
+                {move || i18n.t(&format!("admin-tab-{}", option.slug()))}
+              </button>
+            }
+          })
+          .collect_view()}
+      </div>
+      <Show when=move || tab.get() == ListTab::Channels fallback=|| ()>
       <div class="segmented" role="group" aria-label=move || i18n.t("admin-filter")>
         <SlidingIndicator />
         {ChannelFilter::ALL
@@ -155,9 +190,15 @@ pub fn ChannelsSection() -> impl IntoView {
           })
           .collect_view()}
       </div>
+      </Show>
     </div>
+    <Show when=move || tab.get() == ListTab::Spaces fallback=|| ()>
+      <SpacesPanel query=query />
+    </Show>
+    <Show when=move || tab.get() == ListTab::Channels fallback=|| ()>
     <div class="admin-split">
       <div class="table-wrap">
+        <Show when=move || load.get() == AdminLoad::Loaded fallback=move || view! { <LoadNotice load=load /> }>
         <table class="data-table">
           <caption class="visually-hidden">{move || i18n.t("admin-channels-title")}</caption>
           <thead>
@@ -179,6 +220,7 @@ pub fn ChannelsSection() -> impl IntoView {
         <Show when=move || visible.get().is_empty() fallback=|| ()>
           <p class="empty-state">{move || i18n.t("admin-empty")}</p>
         </Show>
+        </Show>
       </div>
       <aside class="detail-pane" aria-label=move || i18n.t("admin-detail-label")>
         {move || match selected_channel.get() {
@@ -187,6 +229,7 @@ pub fn ChannelsSection() -> impl IntoView {
         }}
       </aside>
     </div>
+    </Show>
   }
 }
 
