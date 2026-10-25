@@ -1,7 +1,7 @@
 //! Native [`LocalStore`] on SQLCipher (e2ee.md §9). The whole file is encrypted with a raw 256-bit
 //! key from a [`DatabaseKeySource`]; nothing readable touches the disk.
 //!
-//! The layout has a version (`PRAGMA user_version`, [`SCHEMA_VERSION`]); opening upgrades an older
+//! The layout has a version (`PRAGMA user_version`, [`MIGRATIONS`]); opening upgrades an older
 //! database step by step and refuses a newer one instead of misreading it (issue #160).
 
 use std::path::Path;
@@ -11,12 +11,19 @@ use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use teamcraft_proto::{ClientMessageId, ConversationId, Id, MessageId};
 use zeroize::Zeroizing;
 
-use super::sql_group::{WriteGroup, sqlite_error as database_error};
+use super::sql_group::{Migration, WriteGroup, run_migrations, sqlite_error as database_error};
 use super::{DatabaseKeySource, LocalStore, MessageFilter, StoreError, StoredMessage, Table};
 
-/// The layout this version writes. Released 1.0 databases carry version 0 (no version was set) and
-/// have the layout of version 1, apart from databases older than the `in_channel` column.
-pub(crate) const SCHEMA_VERSION: i64 = 1;
+/// The layout steps of this store, in order ([`run_migrations`]). Released 1.0 databases carry
+/// version 0 (no version was set) and the tables of version 1, apart from databases older than the
+/// `in_channel` column; step 1 is written to accept both.
+pub(crate) const MIGRATIONS: &[Migration] = &[Migration {
+  version: 1,
+  apply: migrate_to_v1,
+}];
+/// The layout this version writes.
+#[cfg(test)]
+const SCHEMA_VERSION: i64 = super::sql_group::latest_version(MIGRATIONS);
 
 /// The tables of version 1.
 const SCHEMA_V1: &str = "
@@ -80,7 +87,7 @@ impl SqlCipherStore {
         row.get::<_, i64>(0)
       })
       .map_err(|_| StoreError::WrongKey)?;
-    migrate(&connection)?;
+    run_migrations(&connection, MIGRATIONS)?;
     Ok(Self {
       inner: Mutex::new(Inner {
         connection,
@@ -97,6 +104,8 @@ impl SqlCipherStore {
   /// Runs a write; a failure inside a group of writes undoes the whole group when it ends.
   fn write(&self, statement: impl FnOnce(&Connection) -> rusqlite::Result<usize>) -> Result<(), StoreError> {
     let mut inner = self.lock();
+    let Inner { connection, group } = &mut *inner;
+    group.check_open(connection)?;
     let result = statement(&inner.connection);
     match result {
       Ok(_) => Ok(()),
@@ -282,33 +291,6 @@ fn decode_message(record: &[u8]) -> Result<StoredMessage, StoreError> {
   serde_json::from_slice(record).map_err(|error| StoreError::Corrupt(error.to_string()))
 }
 
-/// Brings the layout to [`SCHEMA_VERSION`], one step per version, all in one transaction: a crash
-/// halfway leaves the old layout. A newer layout is refused, never written to.
-fn migrate(connection: &Connection) -> Result<(), StoreError> {
-  let found: i64 = connection
-    .query_row("PRAGMA user_version", [], |row| row.get(0))
-    .map_err(database_error)?;
-  if found > SCHEMA_VERSION {
-    return Err(StoreError::NewerSchema {
-      found,
-      supported: SCHEMA_VERSION,
-    });
-  }
-  if found == SCHEMA_VERSION {
-    return Ok(());
-  }
-  let transaction = connection.unchecked_transaction().map_err(database_error)?;
-  if found < 1 {
-    migrate_to_v1(&transaction)?;
-  }
-  // Forward-only: a later layout adds its step here (`if found < 2 { … }`) and a fixture database
-  // (store/fixtures.rs); released steps are never edited.
-  transaction
-    .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
-    .map_err(database_error)?;
-  transaction.commit().map_err(database_error)
-}
-
 /// Version 1: the tables, and the `in_channel` column that early 1.0 previews lacked (thread
 /// replies also sent to the conversation, `MessageMeta::is_also_in_channel`).
 fn migrate_to_v1(connection: &Connection) -> Result<(), StoreError> {
@@ -371,6 +353,11 @@ mod tests {
   }
 
   #[test]
+  fn migration_steps_are_numbered() {
+    crate::store::sql_group::tests::assert_numbered(MIGRATIONS);
+  }
+
+  #[test]
   fn an_interrupted_group_of_writes_leaves_none_of_them() {
     let directory = scratch_dir();
     let path = directory.join("store.db");
@@ -416,6 +403,29 @@ mod tests {
       .unwrap();
     assert!(matches!(store.end_writes(), Err(StoreError::GroupFailed(_))));
     assert_eq!(store.get(Table::Outbox, "1").unwrap(), None);
+  }
+
+  #[test]
+  fn writes_after_sqlite_rolled_the_group_back_are_refused() {
+    let store =
+      SqlCipherStore::open_in_memory(&StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
+    store.begin_writes().unwrap();
+    store.put(Table::Outbox, "1", b"entry").unwrap();
+    // What SQLite does on a full disk: the transaction is gone.
+    store.lock().connection.execute_batch("ROLLBACK").unwrap();
+    assert!(matches!(
+      store.put(Table::SyncState, "sync", b"cursor"),
+      Err(StoreError::GroupFailed(_))
+    ));
+    assert!(store.end_writes().is_err());
+    assert_eq!(
+      store.get(Table::SyncState, "sync").unwrap(),
+      None,
+      "not committed on its own"
+    );
+    // The next group works again.
+    crate::store::write_group(&store, || store.put(Table::Outbox, "2", b"entry")).unwrap();
+    assert!(store.get(Table::Outbox, "2").unwrap().is_some());
   }
 
   #[test]

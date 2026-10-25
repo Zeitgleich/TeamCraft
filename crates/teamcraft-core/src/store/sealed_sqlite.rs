@@ -12,11 +12,15 @@ use rusqlite::{Connection, params};
 use teamcraft_crypto::local_store::{LOOKUP_ID_LEN, LookupId};
 
 use super::sealed::{RecordBackend, SealedStore};
-use super::sql_group::{WriteGroup, sqlite_error as database_error};
+use super::sql_group::{Migration, WriteGroup, run_migrations, sqlite_error as database_error};
 use super::{DatabaseKeySource, StoreError};
 
-/// The layout this version writes; released 1.0 databases carry version 0 and this layout.
-const SCHEMA_VERSION: i64 = 1;
+/// The layout steps of this store, in order ([`run_migrations`]); released 1.0 databases carry
+/// version 0 and the table of version 1.
+pub(crate) const MIGRATIONS: &[Migration] = &[Migration {
+  version: 1,
+  apply: |connection| connection.execute_batch(SCHEMA_V1).map_err(database_error),
+}];
 const SCHEMA_V1: &str = "
   CREATE TABLE IF NOT EXISTS sealed_records (
     id BLOB PRIMARY KEY,
@@ -56,7 +60,7 @@ impl SealedStore<SqliteRecords> {
     connection
       .execute_batch("PRAGMA journal_mode = WAL;")
       .map_err(database_error)?;
-    migrate(&connection)?;
+    run_migrations(&connection, MIGRATIONS)?;
     let records = read_all(&connection)?;
     let backend = SqliteRecords {
       inner: Mutex::new(Inner {
@@ -110,37 +114,14 @@ impl SqliteRecords {
   /// Runs a write; a failure inside a group of writes undoes the whole group when it ends.
   fn write(&self, statement: impl FnOnce(&Connection) -> rusqlite::Result<usize>) -> Result<(), StoreError> {
     let mut inner = self.lock();
+    let Inner { connection, group } = &mut *inner;
+    group.check_open(connection)?;
     let result = statement(&inner.connection);
     result.map(|_| ()).map_err(|error| {
       inner.group.note_failure();
       database_error(error)
     })
   }
-}
-
-/// Brings the layout to [`SCHEMA_VERSION`] in one transaction; refuses a newer one.
-fn migrate(connection: &Connection) -> Result<(), StoreError> {
-  let found: i64 = connection
-    .query_row("PRAGMA user_version", [], |row| row.get(0))
-    .map_err(database_error)?;
-  if found > SCHEMA_VERSION {
-    return Err(StoreError::NewerSchema {
-      found,
-      supported: SCHEMA_VERSION,
-    });
-  }
-  if found == SCHEMA_VERSION {
-    return Ok(());
-  }
-  let transaction = connection.unchecked_transaction().map_err(database_error)?;
-  if found < 1 {
-    transaction.execute_batch(SCHEMA_V1).map_err(database_error)?;
-  }
-  // Forward-only: a later layout adds its step here and a fixture database (store/fixtures.rs).
-  transaction
-    .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
-    .map_err(database_error)?;
-  transaction.commit().map_err(database_error)
 }
 
 fn read_all(connection: &Connection) -> Result<Vec<(LookupId, Vec<u8>)>, StoreError> {
@@ -206,6 +187,11 @@ mod tests {
       Some(b"very recognizable plaintext".to_vec())
     );
     std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  #[test]
+  fn migration_steps_are_numbered() {
+    crate::store::sql_group::tests::assert_numbered(MIGRATIONS);
   }
 
   #[test]

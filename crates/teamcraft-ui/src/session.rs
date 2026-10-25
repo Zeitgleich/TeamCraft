@@ -378,19 +378,20 @@ impl SessionControl {
     spawn_local(async move { control.load_account().await });
   }
 
-  /// The user chose to set this device up again after its local data turned out unreadable: the
-  /// core sets the data aside (desktop) or deletes it (browser) and asks for setup (issue #160).
-  pub fn reset_store(&self) {
-    let control = *self;
-    control.state.set(SessionState::SigningIn);
-    spawn_local(async move {
-      match remote_backend::reset_store().await {
-        Ok(()) => control.load_account().await,
-        Err(error) => control
-          .state
-          .set_if_alive(SessionState::SignedOut(Some(LoginProblem::CoreFailed(error)))),
-      }
-    });
+  /// The user confirmed setting this device up again after its local data turned out unreadable:
+  /// the core sets the data aside (desktop) or deletes it (browser) and asks for setup (issue
+  /// #160). A failure (another tab holds the database) shows as the core failure card with the
+  /// reason, never as nothing.
+  pub async fn reset_store(&self) {
+    match remote_backend::reset_store().await {
+      Ok(()) => {
+        self.state.set_if_alive(SessionState::SigningIn);
+        self.load_account().await;
+      },
+      Err(error) => self
+        .state
+        .set_if_alive(SessionState::SignedOut(Some(LoginProblem::CoreFailed(error)))),
+    }
   }
 
   /// Creates this device's keys (or recovers them) with the passphrase, then enters the app.

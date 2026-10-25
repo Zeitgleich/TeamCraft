@@ -181,6 +181,11 @@ pub async fn call(command: &str, args: Value) -> Result<Value, String> {
       to_value(start(user).await?)
     },
     "core_stop" => {
+      // Signing out of a tab that isn't set up yet leaves no keys of the attempt behind (#168).
+      if current_follower().is_none() {
+        // An error means the core isn't running here: nothing to forget.
+        let _ = ask(Request::ForgetUnfinishedSetup).await;
+      }
       stop();
       Ok(Value::Null)
     },
@@ -568,6 +573,8 @@ enum Request {
   LinkCancel,
   /// The local database is unreadable: delete it and start this device afresh (issue #160).
   ResetStore(oneshot::Sender<Result<(), String>>),
+  /// The user signs out: drop what an unfinished enrollment kept (issue #168).
+  ForgetUnfinishedSetup(oneshot::Sender<()>),
   ApprovalStart {
     code: String,
     reply: oneshot::Sender<Result<(), String>>,
@@ -979,6 +986,22 @@ impl Core {
         }
       },
       Request::ResetStore(reply) => drop(reply.send(self.reset_store().await)),
+      Request::ForgetUnfinishedSetup(reply) => {
+        if self.client.is_none()
+          && let Some(store) = &self.store
+        {
+          // Flushed: the core stops right after, and queued writes would be lost with it.
+          let forgotten = match records::forget_unfinished_enrollment(store) {
+            Ok(()) => store.inner().flush().await.map_err(CoreError::from),
+            Err(error) => Err(error),
+          };
+          if let Err(error) = forgotten {
+            tracing::warn!(%error, "could not drop the keys of an unfinished setup");
+          }
+        }
+        // Deliberately ignored: the caller may have stopped waiting; nothing is left to tell.
+        let _ = reply.send(());
+      },
       Request::ApprovalStart { code, reply } => drop(reply.send(self.approval_start(&code).await)),
       Request::ApprovalConfirm { short_code, reply } => {
         drop(reply.send(self.approval_confirm(&short_code).await));

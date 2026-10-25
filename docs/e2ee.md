@@ -723,8 +723,9 @@ Implemented as (`teamcraft-crypto::rendezvous`, `teamcraft-core` linking):
   app stops before the account is stored, the next start finishes the enrollment with them, so the
   existing device's success is never a lie the user has to undo by linking again. The record goes
   with the account write that completes enrollment (one group of writes, §9.5), when the user
-  cancels linking, or when it can't work any more (the key bag no longer opens, another account
-  signed in). The new device then enrolls (§3.2) and joins the user's
+  cancels linking or signs out before the device is set up (with the pending device key pair), or
+  when it can't work any more (the key bag no longer opens, the record is unreadable, another
+  account signed in). The new device then enrolls (§3.2) and joins the user's
   groups on its own (§4.6, "A further device joins on its own"); where it can't yet, an existing
   member adds it when it comes online. It reads the history the key bag opens at once.
 
@@ -1221,14 +1222,18 @@ fails, the store holds all of them or none. SQLite stores (SQLCipher, sealed SQL
 one transaction; IndexedDB never splits a group between two batches, and a batch is one
 transaction (§9.4). Groups are synchronous, so none stays open across a network request. Grouped:
 a new message and its outbox entry, a sent message and the removal of its outbox entry, the MLS
-state after a processed entry together with the cursor past it, the applied changes and pending
-commit next to the MLS state, the key bag and its "upload me" flag, the account with its key bag
-and the end of a pending enrollment. Where order alone is enough (content keys are written before
+state after a processed entry, a merged own commit, a joined welcome or a join as a further device
+together with the cursor past it, the applied changes and pending commit next to the MLS state, the
+key bag and its "upload me" flag, the account with its key bag and the end of a pending enrollment.
+If SQLite rolls a group's transaction back by itself (a full disk), the group's later writes are
+refused instead of being committed one by one. Where order alone is enough (content keys are written before
 the MLS state that consumed the epoch), reprocessing an entry after a crash is idempotent.
 
-**Layout versions.** The SQLite stores keep their layout version in `PRAGMA user_version`. Opening
-upgrades an older layout step by step in one transaction (forward-only migrations; released 1.0
-databases carry version 0 and the layout of version 1) and refuses a newer one without touching it.
+**Layout versions.** The SQLite stores keep their layout version in `PRAGMA user_version`. Each store
+has a list of numbered steps (forward-only, never edited once released); opening runs the missing
+ones, each in its own transaction together with setting its version, so a crash or a failed step
+leaves the database at the last step that completed. Released 1.0 databases carry version 0 and
+the layout of version 1. A newer layout is refused without touching it.
 IndexedDB versions its object stores itself and refuses a newer database (`VersionError`). Databases
 written by every release are kept as fixtures (`crates/teamcraft-core/tests/fixtures/store/`) and
 opened by every later version in CI. Records inside the store stay JSON with defaults for new
@@ -1237,9 +1242,11 @@ fields and an `Unknown` catch-all, so newer records are read or skipped, not mis
 **Unreadable data.** A store that is damaged (SQLite's corruption codes; a sealed store whose records
 only partly open), whose key no longer opens it (the keystore lost or replaced the key), or whose
 layout is newer is not a generic failure: the app says what happened and offers to set the device
-up again (recovery passphrase or linking, §5, §6). The desktop sets the old file aside
-(`<user>.db.unreadable-<time>`, never deleted); the browser deletes the database, because its key
-wrapping lives in the same database. A keystore that is just unavailable (locked, no keyring
+up again (recovery passphrase or linking, §5, §6), after a confirmation. The desktop sets the old
+file aside (`<user>.db.unreadable-<time>`, never deleted); the browser deletes the database,
+because its key wrapping lives in the same database (if another tab doesn't let go of it within
+seconds, the reset fails with that reason). Data from a newer version is never reset in the
+browser: a newer bundle reads it, so the page offers to reload; an old cached page must not wipe it. A keystore that is just unavailable (locked, no keyring
 service) stays a "try again" failure, since the data is intact.
 
 **Concurrent edits.** Two devices editing the same message converge: the edit with the highest

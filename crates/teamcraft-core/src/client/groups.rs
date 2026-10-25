@@ -1240,14 +1240,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .get_mut(&conversation)
       .ok_or(CoreError::NoGroup(conversation))?;
     let update = group.confirm_commit(&self.provider)?;
-    self.persist_group(conversation)?;
-    self
-      .store
-      .delete(Table::AppliedChanges, &pending_post_key(conversation))?;
-    if let Some(device) = update.maybe_rejoined {
-      self.forget_rejoin_request(conversation, device)?;
-    }
-    self.advance_cursor(conversation, entry)?;
+    // The merged state and the cursor past the commit go to the store together (issue #160).
+    self.atomically(|client| {
+      client.persist_group(conversation)?;
+      client
+        .store
+        .delete(Table::AppliedChanges, &pending_post_key(conversation))?;
+      if let Some(device) = update.maybe_rejoined {
+        client.forget_rejoin_request(conversation, device)?;
+      }
+      client.advance_cursor(conversation, entry)
+    })?;
     Ok(update)
   }
 
@@ -1549,20 +1552,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           // only members of the epoch can derive it (security review A5).
           ring.set_current(key_id)?;
         }
-        self.persist_keys()?;
-        self.groups.insert(conversation, group);
-        self.persist_group(conversation)?;
-        self
-          .store
-          .delete(Table::AppliedChanges, &rejoin_key(conversation))?;
-        self.store.delete(
-          Table::AppliedChanges,
-          &super::member_device::device_add_key(conversation),
-        )?;
-        self.welcome_handled(welcome)?;
-        self.remember_member_keys(conversation, &directory, welcome.id.snowflake().unix_millis())?;
-        // Everything up to the welcome belongs to epochs before we joined.
-        self.advance_cursor(conversation, welcome)?;
+        // The key, the joined group, the welcome cursor and the MLS cursor go to the store
+        // together (issue #160): a crash never leaves a group whose welcome counts as unhandled.
+        self.atomically(|client| {
+          client.persist_keys()?;
+          client.groups.insert(conversation, group);
+          client.persist_group(conversation)?;
+          client
+            .store
+            .delete(Table::AppliedChanges, &rejoin_key(conversation))?;
+          client.store.delete(
+            Table::AppliedChanges,
+            &super::member_device::device_add_key(conversation),
+          )?;
+          client.welcome_handled(welcome)?;
+          client.remember_member_keys(conversation, &directory, welcome.id.snowflake().unix_millis())?;
+          // Everything up to the welcome belongs to epochs before we joined.
+          client.advance_cursor(conversation, welcome)
+        })?;
         self.note_dm_welcome_joined(conversation)?;
         if let Ok(response) = self.api.conversation(conversation).await {
           records::put_json(

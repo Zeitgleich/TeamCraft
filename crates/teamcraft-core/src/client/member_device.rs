@@ -157,8 +157,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     match self.api.post_mls_commit(conversation, &request).await {
       Ok(response) => {
-        self.persist_group(conversation)?;
-        self.advance_cursor(conversation, &response.commit)?;
+        self.persist_group_at(conversation, &response.commit)?;
         self.remember_member_keys(
           conversation,
           &directory,

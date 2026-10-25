@@ -272,6 +272,8 @@ enum Request {
   LinkCancel,
   /// The local database is unreadable: set it aside and start this device afresh (issue #160).
   ResetStore(oneshot::Sender<Result<(), String>>),
+  /// The user signs out: drop what an unfinished enrollment kept (issue #168).
+  ForgetUnfinishedSetup(oneshot::Sender<()>),
   ApprovalStart {
     code: String,
     reply: oneshot::Sender<Result<(), String>>,
@@ -454,6 +456,13 @@ impl CoreRuntime {
 
   pub fn link_cancel(&self) {
     drop(self.requests.send(Request::LinkCancel));
+  }
+
+  /// The user signs out: drops the keys of an unfinished link and the pending device key, if this
+  /// device isn't set up yet.
+  pub async fn forget_unfinished_setup(&self) {
+    // `None`: the core already stopped, so there is nothing to forget in it.
+    let _ = self.ask(Request::ForgetUnfinishedSetup).await;
   }
 
   /// Sets an unreadable local database aside (renamed, not deleted) and opens a new one, so the
@@ -934,6 +943,16 @@ impl Core {
         }
       },
       Request::ResetStore(reply) => drop(reply.send(self.reset_store().await)),
+      Request::ForgetUnfinishedSetup(reply) => {
+        if self.client.is_none()
+          && let Some(store) = &self.store
+          && let Err(error) = records::forget_unfinished_enrollment(store)
+        {
+          tracing::warn!(%error, "could not drop the keys of an unfinished setup");
+        }
+        // Deliberately ignored: the caller may have stopped waiting; nothing is left to tell.
+        let _ = reply.send(());
+      },
       Request::ApprovalStart { code, reply } => drop(reply.send(self.approval_start(&code).await)),
       Request::ApprovalConfirm { short_code, reply } => {
         drop(reply.send(self.approval_confirm(&short_code).await))

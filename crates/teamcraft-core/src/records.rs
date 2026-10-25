@@ -295,6 +295,20 @@ pub fn delete_pending_link(store: &impl LocalStore) -> Result<(), CoreError> {
   Ok(store.delete(Table::Account, PENDING_LINK_KEY)?)
 }
 
+/// Drops what an unfinished enrollment kept, the secrets of a link and the pending device key pair:
+/// the user signed out instead of finishing it (issue #168). Does nothing once the account is
+/// stored. A device the pending key registered stays on the server unused; its key was never
+/// trusted anywhere (no signed device list names it).
+pub fn forget_unfinished_enrollment(store: &impl LocalStore) -> Result<(), CoreError> {
+  if store.get(Table::Account, ACCOUNT_KEY)?.is_some() {
+    return Ok(());
+  }
+  write_group(store, || {
+    delete_pending_link(store)?;
+    delete_pending_device(store)
+  })
+}
+
 pub fn load_sync_state(store: &impl LocalStore) -> Result<SyncState, CoreError> {
   Ok(get_json(store, Table::SyncState, SYNC_KEY)?.unwrap_or_default())
 }
@@ -640,6 +654,32 @@ mod tests {
     assert_eq!(loaded.device.public_keys(), account.device.public_keys());
     assert_eq!(loaded.identity_public_key(), account.identity_public_key());
     assert_eq!(loaded.certificate, account.certificate);
+  }
+
+  #[test]
+  fn signing_out_of_an_unfinished_enrollment_forgets_its_secrets_only() {
+    let store = MemoryStore::new();
+    let account = sample_account();
+    let pending = PendingDevice {
+      user_id: account.user_id,
+      identity_public_key: [1; 32],
+      device: DeviceKeyPair::generate(
+        convert::user(account.user_id),
+        convert::device(account.device_id),
+        &mut OsRng,
+      ),
+    };
+    save_pending_device(&store, &pending).unwrap();
+    store.put(Table::Account, PENDING_LINK_KEY, b"{}").unwrap();
+    forget_unfinished_enrollment(&store).unwrap();
+    assert_eq!(store.get(Table::Account, PENDING_DEVICE_KEY).unwrap(), None);
+    assert_eq!(store.get(Table::Account, PENDING_LINK_KEY).unwrap(), None);
+
+    // An enrolled device keeps everything.
+    save_account(&store, &account).unwrap();
+    save_pending_device(&store, &pending).unwrap();
+    forget_unfinished_enrollment(&store).unwrap();
+    assert!(store.get(Table::Account, PENDING_DEVICE_KEY).unwrap().is_some());
   }
 
   #[test]

@@ -21,7 +21,9 @@ use crate::components::app::Shell;
 use crate::components::brand_logo::BrandLogo;
 use crate::components::bundle_banner::BundleBanner;
 use crate::components::icons::{Icon, IconName};
+use crate::components::pending_button::PendingButton;
 use crate::components::security_ui::QrImage;
+use crate::feedback::PendingAction;
 use crate::hybrid::Hybrid;
 use crate::i18n::use_i18n;
 use crate::meetings::{MeetingsClient, MeetingsHub};
@@ -266,7 +268,6 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
     problem,
     Some(LoginProblem::CoreFailed(_) | LoginProblem::CoreStopped | LoginProblem::CoreNotSignedIn)
   );
-  let is_store_problem = matches!(problem, Some(LoginProblem::StoreUnreadable(_)));
   let detail = match &problem {
     Some(LoginProblem::Failed(text) | LoginProblem::CoreFailed(text)) => Some(text.clone()),
     _ => None,
@@ -325,25 +326,8 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
           </div>
         }
         .into_any()
-      } else if is_store_problem {
-        // Setting up again is the way out; retrying helps after an update, signing out switches
-        // accounts. Nothing is deleted on the desktop: the old file is kept aside.
-        view! {
-          <div class="auth-actions">
-            <button class="btn btn-primary auth-wide" data-autofocus on:click=move |_| control.reset_store()>
-              {move || i18n.t("login-store-reset")}
-            </button>
-          </div>
-          <div class="auth-actions auth-actions-split">
-            <button class="btn" on:click=move |_| control.retry_core()>
-              {move || i18n.t("login-core-retry")}
-            </button>
-            <button class="btn" on:click=move |_| control.sign_out()>
-              {move || i18n.t("login-core-sign-out")}
-            </button>
-          </div>
-        }
-        .into_any()
+      } else if let Some(LoginProblem::StoreUnreadable(store_problem)) = problem.clone() {
+        view! { <StoreProblemActions problem=store_problem control=control /> }.into_any()
       } else if is_core_problem {
         // Still signed in: retry the core, or sign out (which also unlocks changing the server).
         view! {
@@ -1462,6 +1446,107 @@ fn default_device_name(i18n: crate::i18n::I18n) -> String {
     kind
   } else {
     format!("{kind} ({platform})")
+  }
+}
+
+/// What the user can do about a local database this version can't read (issue #160). Setting the
+/// device up again needs a confirmation: the browser deletes the data for good. Data from a newer
+/// version is only ever reset on the desktop: in the browser a newer tab or bundle can read it, so
+/// reloading is the way out, and an old cached page must not wipe it.
+#[component]
+fn StoreProblemActions(problem: StoreProblem, control: SessionControl) -> impl IntoView {
+  let i18n = use_i18n();
+  let is_desktop = tauri::is_available();
+  let is_newer = problem == StoreProblem::NewerVersion;
+  let can_reset = is_desktop || !is_newer;
+  let is_confirming = RwSignal::new(false);
+  let pending = PendingAction::new();
+  let confirm_key = if is_desktop {
+    "login-store-reset-confirm-desktop"
+  } else {
+    "login-store-reset-confirm-web"
+  };
+  let try_again = move |_| {
+    if is_newer && !is_desktop {
+      crate::bundle::reload();
+    } else {
+      control.retry_core();
+    }
+  };
+  let try_again_key = if is_newer && !is_desktop {
+    "login-store-reload"
+  } else {
+    "login-core-retry"
+  };
+  view! {
+    <Show
+      when=move || is_confirming.get()
+      fallback=move || {
+        view! {
+          <div class="auth-actions auth-actions-split">
+            {if is_newer {
+              view! {
+                <button class="btn btn-primary" data-autofocus on:click=try_again>
+                  {move || i18n.t(try_again_key)}
+                </button>
+              }
+                .into_any()
+            } else {
+              view! {
+                <button class="btn btn-primary" data-autofocus on:click=move |_| is_confirming.set(true)>
+                  {move || i18n.t("login-store-reset")}
+                </button>
+              }
+                .into_any()
+            }}
+            {(is_newer && can_reset)
+              .then(|| {
+                view! {
+                  <button class="btn" on:click=move |_| is_confirming.set(true)>
+                    {move || i18n.t("login-store-reset")}
+                  </button>
+                }
+              })}
+            {(!is_newer)
+              .then(|| {
+                view! {
+                  <button class="btn" on:click=try_again>
+                    {move || i18n.t(try_again_key)}
+                  </button>
+                }
+              })}
+            <button class="btn" on:click=move |_| control.sign_out()>
+              {move || i18n.t("login-core-sign-out")}
+            </button>
+          </div>
+        }
+      }
+    >
+      <p class="auth-confirm-text" role="alert">{move || i18n.t(confirm_key)}</p>
+      <div class="auth-actions auth-actions-split">
+        <PendingButton
+          pending=pending
+          class="btn btn-danger"
+          on_click=move |_| {
+            pending
+              .spawn(async move {
+                control.reset_store().await;
+                Ok(())
+              })
+          }
+        >
+          {move || i18n.t("login-store-reset-confirm-button")}
+        </PendingButton>
+        <button
+          class="btn"
+          data-autofocus
+          prop:disabled=move || pending.is_pending()
+          on:click=move |_| is_confirming.set(false)
+        >
+          {move || i18n.t("login-store-reset-cancel")}
+        </button>
+      </div>
+    </Show>
   }
 }
 

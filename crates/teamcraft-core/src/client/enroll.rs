@@ -224,8 +224,16 @@ impl PendingEnrollment {
     settings: ClientSettings,
     argon2: Argon2Settings,
   ) -> Result<Option<Client<A, S>>, CoreError> {
-    let Some(pending) = records::load_pending_link(&store)? else {
-      return Ok(None);
+    let pending = match records::load_pending_link(&store) {
+      Ok(Some(pending)) => pending,
+      Ok(None) => return Ok(None),
+      // An unreadable record would fail the same way on every start.
+      Err(CoreError::Corrupt(error)) => {
+        tracing::warn!(%error, "dropping the unreadable keys of an interrupted device link");
+        records::delete_pending_link(&store)?;
+        return Ok(None);
+      },
+      Err(error) => return Err(error),
     };
     let me = api.me().await?;
     if me.id != pending.user_id {
@@ -261,6 +269,7 @@ fn is_link_failure_final(error: &CoreError) -> bool {
   matches!(
     error,
     CoreError::KeyBag(_)
+      | CoreError::Corrupt(_)
       | CoreError::Backup(_)
       | CoreError::IdentityMismatch
       | CoreError::IdentityMissing
