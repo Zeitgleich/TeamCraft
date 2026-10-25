@@ -93,7 +93,8 @@ users the organizer invited, and a host's "admit" lets an admitted person in (e2
    people, and the announcement is for the call this device is in now) before it joins the room's
    call with its microphone and camera as they were. Only the device that added the people follows
    without the tap; the user's other devices ask too. A followed announcement is forgotten, so it
-   never moves the device again. The DM keeps its members and history, and the added people never
+   never moves the device again, and the end of the call clears the announcements made for it (also
+   those a failed follow left behind) and the device's note of the call's ID. The DM keeps its members and history, and the added people never
    see it. If the server refuses the move (409), the adding app cancels the room it just made.
    Web, desktop, iOS and Android all do this.
 

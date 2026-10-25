@@ -15,7 +15,7 @@ use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::client::call_move_announcement;
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::error::CoreError;
-use teamcraft_proto::{AddConversationMemberRequest, ConversationId, IdempotencyKey, UserId};
+use teamcraft_proto::{AddConversationMemberRequest, ConversationId, GatewayEvent, IdempotencyKey, UserId};
 
 const NOW_MS: i64 = 1_800_000_000_000;
 
@@ -511,6 +511,50 @@ mod call_moves {
         "{replayed:?}"
       );
     }
+  }
+
+  /// A follow that failed halfway leaves the record behind; the call's end clears it and the call id.
+  #[tokio::test]
+  async fn the_end_of_the_call_clears_its_move_records() {
+    let (server, mut alice, mut bob, _, _) = dm_call().await;
+    let dm = in_dm_call(&mut alice, &mut bob).await;
+    let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+    let meeting = server.create_meeting_chat(alice_id, &[bob_id]);
+    let (mut gateway, _) = alice.client.connect_gateway().await.unwrap();
+    let call = alice.client.prepare_call(dm).await.unwrap().join.call_id;
+    alice
+      .client
+      .move_call_to_meeting(dm, meeting, &[alice_id, bob_id], &[])
+      .await
+      .unwrap();
+    assert!(
+      call_move_announcement(alice.client.store(), dm, meeting)
+        .unwrap()
+        .is_some()
+    );
+
+    server.publish_event(
+      &[alice_id],
+      &GatewayEvent::CallEnd {
+        conversation_id: dm,
+        call_id: call,
+      },
+    );
+    alice.client.pump(&mut gateway).await.unwrap();
+
+    assert!(
+      call_move_announcement(alice.client.store(), dm, meeting)
+        .unwrap()
+        .is_none()
+    );
+    let refused = alice
+      .client
+      .move_call_to_meeting(dm, meeting, &[alice_id], &[])
+      .await;
+    assert!(
+      matches!(refused, Err(CoreError::CallMoveRefused { .. })),
+      "{refused:?}"
+    );
   }
 
   #[tokio::test]
