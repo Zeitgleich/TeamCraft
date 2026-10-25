@@ -42,6 +42,9 @@ const PUBLIC: &[(&str, &str)] = &[
   // The link's ID is the credential (256 random bits); both answer 410 for anything not usable.
   ("get", "/api/v1/shares/{share_id}"),
   ("post", "/api/v1/shares/{share_id}/download"),
+  // The service worker replaces a rotated Web Push subscription without a session; the device's
+  // push key authenticates it (public since #406).
+  ("post", "/api/v1/push/web/subscription-change"),
   // Authenticated by the logout token's signature.
   ("post", "/api/v1/auth/backchannel-logout"),
   // Authenticated by the SFU's / inbox handler's own bearer token (checked below).

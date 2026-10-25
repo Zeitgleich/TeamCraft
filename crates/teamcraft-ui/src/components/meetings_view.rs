@@ -31,7 +31,8 @@ use crate::state::{AppState, Overlay, use_app_state};
 /// waiting in a lobby show up without a reload; `meeting_update` events cover the rest).
 const REFRESH_MS: u64 = 10_000;
 /// How often a member who knocked asks whether a host let them in, while they wait and the screen
-/// is visible. The lobby decision is not delivered to members' clients as an event.
+/// is visible. The server also sends them `lobby_decision`, but the client core doesn't hand that
+/// event to the UI yet, so asking is how the screen learns it.
 const KNOCK_POLL_MS: u64 = 3_000;
 /// A first meeting suggestion starts at the next full hour, at least this far ahead.
 const MIN_LEAD_MS: i64 = 10 * 60_000;

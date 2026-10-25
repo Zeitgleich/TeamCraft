@@ -55,14 +55,22 @@ other conversation (e2ee.md). Guests get an ephemeral device and show up as "Gue
    also when the meeting has none. The link admits at most `max_shared_link_guests` guests (default
    50), ends with the meeting (its end plus `guest_grace_secs`, or its cancellation) and a host can
    revoke it (`DELETE`, idempotent): nobody new gets in with it, guests already waiting or admitted
-   stay. A link asked for after a revocation is a new one with a new URL.
+   stay. A link asked for after a revocation is a new one with a new URL. A guest's place is
+   taken before their account is made and given back if the account or the redemption fails, so
+   failed joins don't use up the link; a retried join after a lost answer does take a second place.
+   Anyone with the link can use it, so a link that got around can use up all places until a host
+   revokes it (the app says so next to the link).
 6. **Knocking** (`POST /meetings/{id}/lobby/me`): a member who opens the meeting link without being
-   in the meeting chat asks to be let in and waits in the lobby; the hosts get `lobby_join` and
-   admit or deny as for guests. Members in the chat are answered `admitted` right away. Members
-   always wait for a host, also without `has_lobby`: meeting IDs are not secret. Denying a member
-   only refuses them (the decision is final for that meeting); their account stays. The member's
-   web client asks `GET .../lobby/me` every few seconds while it waits and the page is visible
-   (the client core does not act on `lobby_decision` yet).
+   in the meeting chat asks to be let in and waits in the lobby; the hosts get `lobby_join` (once
+   per knock: knocking again while waiting is no news) and admit or deny as for guests. Members in
+   the chat are answered `admitted` right away; a member admitted before who has left the chat
+   waits again. Members always wait for a host, also without `has_lobby`: meeting IDs are not
+   secret. For meetings that are over or cancelled, outsiders get the same 404 as for a meeting
+   that doesn't exist, so knocking doesn't tell them which IDs are meetings; members of the chat
+   get 409. Denying a member only refuses them (the decision is final for that meeting); their
+   account stays. The server sends `lobby_decision` to the knocking member too; the web client
+   doesn't act on it yet and asks `GET .../lobby/me` every few seconds while it waits and the page
+   is visible.
 
 ## Links
 

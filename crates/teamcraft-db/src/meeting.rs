@@ -674,6 +674,50 @@ impl Database {
     })
   }
 
+  /// A member who is not in the meeting chat knocks: they wait in the lobby. Returns the row and
+  /// whether the knock is news for the hosts: a first knock, or a member admitted before who is no
+  /// longer in the chat (waiting again). Knocking again while waiting, or after being denied,
+  /// changes nothing.
+  pub async fn knock_lobby(&self, meeting: MeetingId, user: UserId) -> Result<(LobbyRow, bool), DbError> {
+    let maybe_changed = sqlx::query!(
+      r#"INSERT INTO meeting_lobby (meeting_id, user_id) VALUES ($1, $2)
+         ON CONFLICT (meeting_id, user_id) DO UPDATE
+           SET state = 'waiting', requested_at = now(), decided_at = NULL, decided_by = NULL
+           WHERE meeting_lobby.state = 'admitted'
+         RETURNING state, requested_at"#,
+      to_db(meeting),
+      to_db(user),
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    if let Some(row) = maybe_changed {
+      let entry = LobbyRow {
+        user,
+        state: row.state,
+        requested_at: row.requested_at,
+      };
+      return Ok((entry, true));
+    }
+    let existing = self
+      .get_lobby_entry(meeting, user)
+      .await?
+      // Only gone if the meeting was deleted in between.
+      .ok_or(DbError::Query(sqlx::Error::RowNotFound))?;
+    Ok((existing, false))
+  }
+
+  /// Gives back the place a shared link handed out when the guest never got in with it (their
+  /// account or the redemption failed), so failures don't use up the link.
+  pub async fn release_shared_invite_claim(&self, id: MeetingInviteId) -> Result<(), DbError> {
+    sqlx::query!(
+      "DELETE FROM meeting_invites WHERE id = $1 AND shared_invite_id IS NOT NULL AND redeemed_at IS NULL",
+      to_db(id),
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
+  }
+
   pub async fn get_lobby_entry(&self, meeting: MeetingId, user: UserId) -> Result<Option<LobbyRow>, DbError> {
     let row = sqlx::query!(
       "SELECT state, requested_at FROM meeting_lobby WHERE meeting_id = $1 AND user_id = $2",

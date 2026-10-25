@@ -669,10 +669,19 @@ mod knocking {
     );
 
     let knock = app.post(&eve, &knock_path, json!({})).await;
+    let again = app.post(&eve, &knock_path, json!({})).await;
 
     assert_eq!(knock.status, StatusCode::OK, "{}", knock.body);
-    assert_eq!(knock.body["state"], "waiting");
+    assert_eq!(
+      (knock.body["state"].as_str(), again.body["state"].as_str()),
+      (Some("waiting"), Some("waiting"))
+    );
     let heard = events_of(&ws::events(&mut alice_socket, QUIET).await, "lobby_join");
+    assert_eq!(
+      heard.len(),
+      1,
+      "knocking again while waiting is no news: {heard:?}"
+    );
     assert_eq!(heard[0]["user"]["id"], eve_id.as_str());
     let lobby = app.get(&alice, &format!("/meetings/{meeting}/lobby")).await;
     assert_eq!(lobby.body["entries"][0]["user"]["id"], eve_id.as_str());
@@ -693,6 +702,46 @@ mod knocking {
       app.post(&eve, &knock_path, json!({})).await.body["state"],
       "admitted"
     );
+    rig.app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_member_who_left_after_being_admitted_waits_again() {
+    let rig = rig!();
+    let app = &rig.app;
+    let (alice, eve) = (owner(), member("eve"));
+    let alice_device = register_device(app, &alice).await;
+    let eve_id = user_id(app, &eve).await;
+    let created = app.post(&alice, "/meetings/instant", json!({})).await;
+    let (meeting, chat) = (
+      created.id(),
+      created.body["conversation_id"].as_str().unwrap().to_owned(),
+    );
+    let knock_path = format!("/meetings/{meeting}/lobby/me");
+    app.post(&eve, &knock_path, json!({})).await;
+    app
+      .post(
+        &alice,
+        &format!("/meetings/{meeting}/lobby/{eve_id}/admit"),
+        json!({}),
+      )
+      .await;
+    // Meeting chats have no "leave" yet; the membership ends as it would through an admin.
+    let left = app
+      .state
+      .database
+      .remove_conversation_member(chat.parse().unwrap(), eve_id.parse().unwrap())
+      .await
+      .unwrap();
+    assert!(left);
+    let mut alice_socket = ws::connect(app, &alice, &alice_device).await;
+    ws::events(&mut alice_socket, Duration::from_millis(300)).await;
+
+    let knock = app.post(&eve, &knock_path, json!({})).await;
+
+    assert_eq!(knock.body["state"], "waiting", "{}", knock.body);
+    let heard = events_of(&ws::events(&mut alice_socket, QUIET).await, "lobby_join");
+    assert_eq!(heard.len(), 1);
     rig.app.stop().await;
   }
 
@@ -754,12 +803,15 @@ mod knocking {
       .await;
     let unknown = app.post(&eve, "/meetings/1234567/lobby/me", json!({})).await;
     app.delete(&alice, &format!("/meetings/{meeting}")).await;
-    let cancelled = app.post(&eve, &knock_path, json!({})).await;
+    let cancelled_outsider = app.post(&eve, &knock_path, json!({})).await;
+    let cancelled_member = app.post(&bob, &knock_path, json!({})).await;
 
     assert_eq!(invited.body["state"], "admitted", "{}", invited.body);
     assert_eq!(guest.0, StatusCode::FORBIDDEN);
     assert_eq!(unknown.status, StatusCode::NOT_FOUND);
-    assert_eq!(cancelled.status, StatusCode::CONFLICT);
+    // An outsider can't tell a cancelled meeting from none; a member learns that it is over.
+    assert_eq!(cancelled_outsider.status, StatusCode::NOT_FOUND);
+    assert_eq!(cancelled_member.status, StatusCode::CONFLICT);
     rig.app.stop().await;
   }
 }
