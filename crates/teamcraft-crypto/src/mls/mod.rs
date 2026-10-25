@@ -12,6 +12,7 @@ mod content_keys;
 mod credential;
 mod group;
 mod rejoin;
+mod stored_key_packages;
 
 use std::fmt;
 
@@ -27,6 +28,7 @@ pub use group::{
   PendingCommit, StagedJoin, VerifiedWelcome,
 };
 pub use rejoin::{RejoinRequest, SignedRejoinRequest, VerifiedRejoinRequest};
+pub use stored_key_packages::{StoredKeyPackage, delete_key_package, key_package_ref, stored_key_packages};
 
 use crate::identity::{DeviceKeyPair, IdentityError, SignedDeviceCertificate, VerifiedDevice};
 use crate::ids::{ConversationId, DeviceId, UserId};

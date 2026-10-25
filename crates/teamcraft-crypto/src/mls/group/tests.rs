@@ -1565,3 +1565,43 @@ fn last_resort_key_package_can_be_used_twice() {
   )
   .unwrap();
 }
+
+#[test]
+fn group_keeps_working_after_its_key_package_is_deleted() {
+  let mut world = World::new();
+  let last_resort = crate::mls::create_last_resort_key_package(
+    &world.bob.provider,
+    &world.bob.user.device,
+    &world.bob.user.certificate,
+    now_secs(),
+  )
+  .unwrap();
+  let add_bob = world.signed_change(ALICE, add(BOB, HistoryShare::Full));
+  let output = world.commit_change(&add_bob, std::slice::from_ref(&last_resort));
+  let mut bob_group = world.bob_joins(&output);
+
+  // e2ee.md §4.3.1: a replaced last-resort package's private part goes; the group keeps its own
+  // leaf key.
+  let hash_ref = crate::mls::key_package_ref(&last_resort).unwrap();
+  crate::mls::delete_key_package(&world.bob.provider, &hash_ref).unwrap();
+  assert!(
+    crate::mls::stored_key_packages(&world.bob.provider)
+      .unwrap()
+      .is_empty()
+  );
+
+  let bundle = ContentKeyBundle::full_history(&mut world.alice_ring, &mut OsRng);
+  let key_message = world
+    .alice_group
+    .send_content_keys(&world.alice.provider, &world.alice.user.device, &bundle)
+    .unwrap();
+  let mut bob_ring = ContentKeyRing::new(CONVERSATION);
+  apply_keys(
+    &mut bob_group,
+    &world.bob,
+    &key_message,
+    &world.directory,
+    &world.authority,
+    &mut bob_ring,
+  );
+}
