@@ -310,10 +310,17 @@ for months must keep fresh ones on the server:
   times use the system clock openmls checks against.
 - **Wiping.** A deleted package's stored bundle (private init and leaf keys) is overwritten in
   memory before it goes, and so is every old copy of the MLS storage in the store's cache. The
-  local database zeroes freed pages (SQLite `secure_delete`), and the Android store truncates its
-  write-ahead log after a deletion, so the old storage record isn't left in the files for somebody
-  who later gets the database key (#391). The first start after this change rebuilds each
-  database once (`VACUUM`), wiping free pages left from before. Copies the file system or the flash controller keep are
+  local database zeroes freed pages (SQLite `secure_delete`), and the native store truncates its
+  write-ahead log after a deletion, and after saves of the MLS storage at most every 30 seconds
+  (a checkpoint costs two or three syncs and the snapshot is saved for every processed message;
+  measured with the snapshot's own write: about 20 ms per save at 64 KiB, 320 ms at 1 MiB). What the
+  interval keeps back is cleared when the app stops (goes to the background) or closes the store;
+  a checkpoint that cannot finish (another reader holds the log) stays due and is retried, and never
+  fails the write. Inside a group of writes (§9.5) the purge waits for the commit. So old storage
+  records can stay in the log for up to 30 seconds while the app runs, and are not left in the files
+  for somebody who later gets the database key (#391, #417). The first start after #391 rebuilt each
+  database once (`VACUUM`), wiping free pages left from before; a rebuild that fails (full disk) is
+  tried again on the next start. Copies the file system or the flash controller keep are
   out of reach; the browser's IndexedDB gives no such control. The listing and the wiping rely on
   how `openmls_memory_storage` 0.6 keys bundles; a test fails when a new version changes it.
 - **History of a first add-back (known gap).** A user whose first device can't open the welcome
@@ -423,6 +430,37 @@ shows only the resulting PNG. Thumbnails of SVG are drawn by the sender's browse
 `resvg` on native platforms, with no DTD, no resources loaded and limits on size, element count and
 `<use>` expansion (`teamcraft-core` `svg_thumbnail`).
 
+#### 4.5.0 Previews of Markdown, HTML and PDF files
+
+A received `.md`, `.html` or `.pdf` file (by media type, or by extension when the type is generic) can be
+opened as a formatted preview in the app, up to 10 MiB (larger files are only downloaded). The preview works
+from the file the client core already downloaded and decrypted; nothing leaves the client. The file is
+untrusted, so each kind is shown in a way that can't run its code or reach the app:
+
+| Kind     | Shown as                                                                                       |
+|----------|------------------------------------------------------------------------------------------------|
+| Markdown | the app's own renderer (the message subset: a tree of elements, no HTML string); "show source" |
+| HTML     | a sandboxed frame, see below; "show source"                                                    |
+| PDF      | the vendored PDF.js, see below                                                                 |
+
+**HTML.** An `<iframe sandbox="" srcdoc="…">` with the strictest sandbox (no `allow-scripts`, no
+`allow-same-origin`: an opaque origin that reaches nothing of the app, its storage or its tokens; no forms,
+popups, top navigation or downloads). The document starts with its own policy,
+`default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'`
+(also set as the frame's `csp` attribute): no script, no connection, no remote image or font, so opening a
+file tells no one that it was opened. The page's own policy applies to the frame too (`srcdoc` inherits it),
+which is stricter still: inline `<style>` blocks are blocked by `style-src 'self'`, so a previewed file shows
+with the browser's default styles. Links in the frame do nothing; the file's `http(s)` links are listed under
+the preview and open in the system browser (desktop) or a new tab (web), with the address as the label.
+The list is read from an inert parsed copy of the file (`DOMParser`).
+
+**PDF.** PDF.js, vendored and pinned (`crates/teamcraft-ui/vendor/pdfjs-<version>`, the npm package's
+`pdf.min.mjs`, worker and the decoders' WebAssembly, unmodified, no CDN), loaded as a separate module when the first PDF opens, so the
+first-visit bundle is untouched. It runs with `isEvalSupported: false`, no
+scripting (the scripting sandbox is not shipped) and no annotation, form or link layer: pages are canvases
+plus a text layer for selecting text and searching. Memory stays bounded: only pages near the viewport are
+drawn.
+
 #### 4.5.1 Share links for external download
 
 A file shared in a chat can get a link that anyone can open in a browser, without an account:
@@ -451,8 +489,28 @@ encrypted name`, base64url. Without a password the key material is the file key;
 using lighter parameters than the backup passphrase (32 MiB, 3 passes) because the download page
 runs them in WebAssembly, and refusing parameters outside the backup's limits when opening, so a
 hostile link can't make the browser allocate absurd memory. The file name is encrypted with the
-file key. The server endpoint for creating links (`POST /attachments/{id}/share-links`) and the
-download page are not built yet.
+file key. The server serves the links (`/api/v1/shares`); the download page is the web app's
+`/f/<share-id>#<fragment>` route (`share_download.rs`), which needs no session: it reads the
+fragment in the browser, asks `GET /api/v1/shares/{id}` for size and password need, asks for the
+password if the link has one (a wrong one is told apart from a damaged link and doesn't count as a
+download), counts the download with `POST /api/v1/shares/{id}/download`, and streams the ciphertext
+through `AttachmentStreamDecryptor` into a `Blob` it offers to save. Neither the whole ciphertext
+nor the whole plaintext is one buffer, the file is only offered once the end of the stream
+authenticated, and files above 1 GiB are refused with a hint. The blob is always
+`application/octet-stream` (a shared `.html` never renders in the page's origin), and the sender's
+file name is shown and saved without bidirectional controls, control characters and path
+separators. The signed-in app's chunks are not loaded for the page.
+
+*A failure on the way doesn't burn a limited link.* The server counts when it hands out the URL and
+returns a random **grant**; its hash is stored with a deadline (`shares.download_retry_minutes`,
+default 10). A retry that presents the grant gets a fresh URL without counting; a second
+downloader replaces the stored grant, whose retry then counts again (fail safe). Revoking or
+expiry end a grant too. The page keeps the grant in memory only.
+
+*The fragment stays in the address bar* so a reload still works; the trade-off is that it is in
+the browser history and in what a person copies from the bar. The page sends no referrer
+(`Referrer-Policy: no-referrer`, never cached) and the fragment never reaches the server or the
+logs. Revoking links and the options dialog are separate (#501).
 
 **Thumbnails:** the sender's client makes a preview of image attachments (decoding capped at
 40 megapixels) and puts it next to the file key inside the encrypted message. It is turned upright
@@ -792,8 +850,82 @@ never by the server's member list:
   move in a later call, or a member who points it at an old room with other people in it, gets
   nobody's audio or video there.
 
-Not covered yet: users invited later by editing the meeting (#475); guests have no device that can
-join a group until #446, so admitting a guest lets nobody into the encryption yet.
+- **Meeting guests** (#446). A guest has no account at the identity provider, but is a user of the
+  server (kind `guest`) with a session token for one meeting (docs/meetings.md). Their browser page
+  runs a normal client core with an **ephemeral device**:
+  - *Identity and credential.* The page enrolls like any device (§3, §3.2): a fresh identity key,
+    a device key, the signed device certificate (the MLS `BasicCredential`), key packages and a
+    signed device list. The key bag the server requires with a new identity is wrapped with a random
+    passphrase that is never shown or stored: there is no backup and no recovery, a guest who loses
+    the device (cleared site data) loses the guest's place, and the host admits the same link-holder
+    again as a new guest. The store is encrypted like the web client's (§9) with a key that lives in
+    the page's session only, and is wiped when the guest leaves, is turned away or the meeting's
+    access ends. No push, no search index, no account data sync.
+  - *Link secrets.* The server signs the session tokens and decides admission, so by itself it
+    could admit a guest of its own and hand members that guest's key. A guest link therefore carries
+    two values in the `#fragment`, which no server sees: a random 256-bit **link secret** made by the
+    host's device that makes the link (kept in its sync state; the shared guest link keeps its secret
+    for as long as the link lives), and the **organizer's identity key fingerprint** as that host's
+    device has it pinned (`#invite=<token>&k=<secret>&o=<fingerprint>`). The server never gets either.
+  - *How members verify a guest without a directory account.* Nothing attests the guest's identity
+    key (§3.1 needs the identity provider), so the guest proves it holds the link instead: after
+    enrolling, the page sends `PUT /meetings/{id}/lobby/me/proof` with `HMAC-SHA256(link secret,
+    "TeamCraft-v1 guest link proof" ‖ meeting ID ‖ user ID ‖ identity public key ‖ display name)`.
+    The host's device that made the link fetches the guest's lobby entry
+    (`GET /meetings/{id}/lobby/{user}`) and the guest's identity key, recomputes the MAC and adds the
+    guest's device only if it matches, so the server can neither invent a guest nor swap a real
+    guest's key or name: it never learns the secret. The same holds in meetings without a lobby
+    (the server admits at once, but the device adds nobody without a valid proof). A host device
+    that doesn't hold the secret (another device of a co-host) adds a guest only after the host
+    compared the guest's **key code** (the first 8 hex digits of the identity key fingerprint, shown
+    on the lobby entry and on the guest's screen) and confirmed it. A valid proof is a bearer proof of
+    the link: anybody with the link can be the guest, which is what a link is; the shared link's guest
+    limit and the lobby bound that. Members pin the identity key on first use, mark the user "Guest
+    (unverified)" in the chat, the member list and the call, and verify the certificate chain
+    (identity key → device key → MLS leaf) exactly as for members. An identity key change for a
+    pinned guest is refused like for anybody else (the server also refuses `replace` for guests).
+  - *How the guest verifies members.* The guest's client treats the members' identity keys like a
+    member's client does: attested ones (§3.1; the issuer and client come from the server info, the
+    JWKS from the identity provider directly) are pinned as attested, the rest on first use. The
+    guest joins a group only if its first member (the founder's leaf) carries the identity key whose
+    fingerprint is the organizer's in the link, so neither a hostile server nor a member can found a
+    group the guest then joins ("Whose group", above, plus a trust anchor the server doesn't hold).
+    A guest link made without the fingerprint (an older client) gives the guest nothing to check
+    against: the guest page then shows the organizer's key code and says the room is unverified.
+  - *Admission.* The host's "admit" makes the guest a member on the server, and the host's device
+    then adds the guest's device as above (`let_into_meeting_chat`), always with history from the
+    join on. The guest's device was enrolled and had key packages published while it waited in the
+    lobby, so the add finds it; the welcome reaches it through its normal welcome queue. A guest
+    admitted without a device yet (page still loading) is added when it appears: the host's device
+    that admitted keeps the admitted guests of that meeting in its sync state and adds a guest
+    device that shows up, only if the guest's proof of the link secret verifies, the guest's signed
+    device list names the device and the guest is still admitted on the server's lobby; it adds nothing for guests that were turned away.
+  - *Removal.* A guest's session ends when the guest leaves (`POST /meetings/{id}/leave`), is
+    turned away, or the meeting's access ends: the server then deactivates the guest and reports
+    the removal (`membership_remove`, `device_remove`). The sweep that ends sessions of guests whose
+    meeting is over or cancelled runs on the server at least every ten minutes and acts at `ends_at`
+    plus `guest_grace_secs`, so no guest stays a member on the server. Clients still sign removals
+    themselves (§3): a report is only a hint. Every online device of a group member that sees
+    `membership_remove` for a user it knows as a guest of that meeting (admitted by a host's
+    device, which is recorded in the group's signed adds as the guest's add) commits the signed
+    removal of the guest's leaves, ranked as for device removals so normally one commits; a device
+    that was offline does it on its next sync, and any member's device does it once the meeting is
+    over (`ends_at` plus `guest_grace_secs`) for every guest leaf still in the group. The guest's
+    page removes itself first where it can (a signed leave before wiping the store). Until the
+    commit, a guest device that is gone for good stays a leaf and could decrypt what the group sends
+    in that time; the commit moves the group to an epoch it has no keys for.
+  - *What a guest may commit.* Members merge a commit made by a guest's device only if its signed
+    change and its proposals concern that guest's own devices (updating its own leaf keys, adding
+    or removing its own devices). A guest can't add or remove anybody else, whatever role the
+    server shows.
+  - *Calls.* The guest's call key binding (§8) is signed by the guest's device key; members verify
+    it like any other and show the guest as unverified.
+  - *Scope.* A guest session token is accepted only on the routes a guest needs (chat, key
+    material for the guest's own device, the meeting's lobby state and leave, calls). Everything else
+    answers 403, so a guest can't search the directory, open DMs, join spaces or schedule
+    meetings, whatever the roles say.
+
+Not covered yet: users invited later by editing the meeting (#475).
 
 **Server time for merge decisions.** Whether every member merges a commit must not depend on its own
 clock, or a skewed clock would split the group. The roster freshness (admin.md §2.3) is judged at the
@@ -1237,8 +1369,9 @@ token signed by the server in the URL fragment, which browsers never send, so it
 and proxy logs. A guest link only gets its holder into the lobby; the chat and the call are
 encrypted to them only after a host admitted them, like to any member added to a conversation
 (guests always from the join on, §4.3).
-Since the server signs the tokens and decides admission, it could let in a guest of its own; that is
-why guests stay "Guest (unverified)" and the hosts see who they admit.
+Since the server signs the tokens and decides admission, it could let in a guest of its own; a host's
+device therefore adds a guest only with the proof of the link secret from the link's fragment (§4.6,
+"Meeting guests"), and guests stay "Guest (unverified)" for everybody.
 
 **Who signs in the browser.** The web client's call engine is a wasm module of its own
 (`teamcraft-web-calls`, loaded by the page; `teamcraft_client_api::page_calls`). It never holds the

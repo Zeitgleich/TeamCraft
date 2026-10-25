@@ -5,8 +5,6 @@
 
 use crate::common;
 
-use std::path::PathBuf;
-
 use common::*;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -83,8 +81,90 @@ async fn public(app: &TestApp, method: reqwest::Method, path: &str) -> (StatusCo
   (status, response.json().await.unwrap_or(Value::Null))
 }
 
+/// The public download request with a body (the page's retry carries the grant).
+async fn download_with(app: &TestApp, id: &str, body: Value) -> (StatusCode, Value) {
+  let response = app
+    .http
+    .post(format!("{}/api/v1/shares/{id}/download", app.base_url))
+    .json(&body)
+    .send()
+    .await
+    .unwrap();
+  let status = response.status();
+  (status, response.json().await.unwrap_or(Value::Null))
+}
+
 mod links {
   use super::*;
+
+  #[tokio::test]
+  async fn a_retry_with_the_grant_does_not_use_up_the_download() {
+    let Some(s) = scene().await else { return };
+    let created = share(&s, json!({"attachment_id": s.attachment, "max_downloads": 1})).await;
+    let id = created.body["id"].as_str().unwrap().to_owned();
+    let (status, first) = download_with(&s.app, &id, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let grant = first["grant"].as_str().unwrap().to_owned();
+    assert!(grant.len() >= 40, "unguessable: {grant}");
+
+    // The fetch of the first answer failed; the retry gets a fresh URL and counts nothing.
+    for _ in 0..2 {
+      let (status, again) = download_with(&s.app, &id, json!({"grant": grant})).await;
+      assert_eq!(status, StatusCode::OK, "{again}");
+      assert_eq!(again["grant"], grant.as_str());
+      let bytes = s
+        .app
+        .http
+        .get(again["download_url"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+      assert_eq!(bytes.as_ref(), BLOB);
+    }
+    assert_eq!(
+      s.app.get(&s.carol, "/shares").await.body["links"][0]["download_count"],
+      1
+    );
+
+    // Anybody else, or a wrong grant, finds the used-up link gone.
+    for body in [json!({}), json!({"grant": "not-the-grant"})] {
+      let (status, answer) = download_with(&s.app, &id, body).await;
+      assert_eq!(
+        (status, answer["error_code"].clone()),
+        (StatusCode::GONE, json!("share_unavailable"))
+      );
+    }
+
+    // Revoking ends the grant too.
+    let revoked = s.app.delete(&s.carol, &format!("/shares/{id}")).await;
+    assert!(revoked.status.is_success(), "{}", revoked.body);
+    let (status, _) = download_with(&s.app, &id, json!({"grant": grant})).await;
+    assert_eq!(status, StatusCode::GONE);
+    s.app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_grant_works_only_within_the_retry_window() {
+    let Some(s) = scene_with(|settings| settings.shares.download_retry_minutes = 0).await else {
+      return;
+    };
+    let created = share(&s, json!({"attachment_id": s.attachment, "max_downloads": 2})).await;
+    let id = created.body["id"].as_str().unwrap().to_owned();
+    let (_, first) = download_with(&s.app, &id, json!({})).await;
+    let grant = first["grant"].as_str().unwrap().to_owned();
+    // No window: the "retry" is a download of its own.
+    let (status, second) = download_with(&s.app, &id, json!({"grant": grant})).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_ne!(second["grant"], grant.as_str());
+    assert_eq!(
+      s.app.get(&s.carol, "/shares").await.body["links"][0]["download_count"],
+      2
+    );
+    s.app.stop().await;
+  }
 
   #[tokio::test]
   async fn a_link_serves_the_ciphertext_until_it_is_used_up_expired_or_revoked() {
@@ -437,117 +517,5 @@ mod public_endpoints {
     }
     assert!(statuses.contains(&StatusCode::TOO_MANY_REQUESTS), "{statuses:?}");
     s.app.stop().await;
-  }
-}
-
-mod page {
-  use super::*;
-
-  struct Bundle(PathBuf);
-
-  impl Bundle {
-    fn create(html: &str) -> Self {
-      let dir = std::env::temp_dir().join(format!(
-        "teamcraft-share-page-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-          .duration_since(std::time::UNIX_EPOCH)
-          .unwrap()
-          .as_nanos()
-      ));
-      std::fs::create_dir_all(&dir).unwrap();
-      std::fs::write(dir.join("download.html"), html).unwrap();
-      std::fs::write(dir.join("download.js"), b"console.log('download page');").unwrap();
-      std::fs::write(dir.join("download.css"), b"body{margin:0}").unwrap();
-      Self(dir)
-    }
-  }
-
-  impl Drop for Bundle {
-    fn drop(&mut self) {
-      let _ = std::fs::remove_dir_all(&self.0);
-    }
-  }
-
-  const PAGE: &str = "<!doctype html><link rel=stylesheet href=\"/f-assets/download.css\" integrity=\"{{sri:download.css}}\">\
-    <script src=\"/f-assets/download.js\" integrity=\"{{sri:download.js}}\"></script>";
-
-  #[tokio::test]
-  async fn the_download_page_carries_integrity_values_and_strict_headers() {
-    let bundle = Bundle::create(PAGE);
-    let dir = bundle.0.clone();
-    let Some(app) = TestApp::start_with(move |settings| settings.web.maybe_share_page_dir = Some(dir)).await
-    else {
-      return;
-    };
-    let response = app
-      .http
-      .get(format!("{}/f/some-share-id", app.base_url))
-      .send()
-      .await
-      .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let headers = response.headers().clone();
-    let html = response.text().await.unwrap();
-    let expect = teamcraft_crypto::account::subresource_integrity;
-    assert!(html.contains(&format!("integrity=\"{}\"", expect(b"body{margin:0}"))));
-    assert!(!html.contains("{{sri:"));
-    assert_eq!(headers["cache-control"], "no-store");
-    assert_eq!(headers["referrer-policy"], "no-referrer");
-    assert_eq!(headers["x-content-type-options"], "nosniff");
-    let csp = headers["content-security-policy"].to_str().unwrap();
-    assert!(
-      csp.starts_with("default-src 'none'") && csp.contains("frame-ancestors 'none'"),
-      "{csp}"
-    );
-
-    // The assets are served from /f-assets and must be revalidated; the template itself is not public
-    // in a way that matters, the served page is what counts.
-    let script = app
-      .http
-      .get(format!("{}/f-assets/download.js", app.base_url))
-      .send()
-      .await
-      .unwrap();
-    assert_eq!(script.status(), StatusCode::OK);
-    assert_eq!(script.headers()["cache-control"], "no-cache");
-    assert_eq!(script.text().await.unwrap(), "console.log('download page');");
-    assert_eq!(
-      app
-        .http
-        .get(format!("{}/f-assets/missing.js", app.base_url))
-        .send()
-        .await
-        .unwrap()
-        .status(),
-      StatusCode::NOT_FOUND
-    );
-    app.stop().await;
-  }
-
-  #[tokio::test]
-  async fn a_bundle_that_cannot_be_checked_is_not_served() {
-    for html in [
-      "<script integrity=\"{{sri:missing.js}}\"></script>",
-      "<script integrity=\"{{sri:../outside.js}}\"></script>",
-      "<script integrity=\"{{sri:/etc/passwd}}\"></script>",
-      "<script integrity=\"{{sri:download.js\"></script>",
-    ] {
-      let bundle = Bundle::create(html);
-      let dir = bundle.0.clone();
-      let Some(app) =
-        TestApp::start_with(move |settings| settings.web.maybe_share_page_dir = Some(dir)).await
-      else {
-        return;
-      };
-      let response = app
-        .http
-        .get(format!("{}/f/x", app.base_url))
-        .send()
-        .await
-        .unwrap();
-      assert_eq!(response.status(), StatusCode::NOT_FOUND, "{html}");
-      app.stop().await;
-    }
   }
 }

@@ -38,9 +38,10 @@ const FILES_KEY = '/.release-files';
 // The lazily loaded files are fetched this long after a page loaded, so they don't compete with what
 // the page itself loads first.
 const WARM_DELAY_MS = 15 * 1000;
-// Guests' meeting pages (`/meeting/<id>`, meetings.rs) never use the signed-in app: no background
+// Guests' meeting pages (`/meeting/<id>`, meetings.rs) and share-link download pages (`/f/<id>`,
+// share_link.rs) never use the signed-in app: no background
 // fetch for them. A member who opens one gets the files with the next other page.
-const GUEST_PATH_PREFIX = '/meeting/';
+const GUEST_PATH_PREFIXES = ['/meeting/', '/f/'];
 
 const STATE_CACHE = 'teamcraft-sw-state';
 // The verified status of a release that is installed but not active yet; it becomes `/state` on
@@ -197,7 +198,8 @@ async function fetchLazyFile(cache, pathname) {
 
 function isGuestPage(client) {
   try {
-    return !!client && new URL(client.url).pathname.startsWith(GUEST_PATH_PREFIX);
+    const { pathname } = new URL(client.url);
+    return GUEST_PATH_PREFIXES.some((prefix) => pathname.startsWith(prefix));
   } catch (error) {
     return false;
   }

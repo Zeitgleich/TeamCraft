@@ -29,7 +29,7 @@ use teamcraft_core::push_preview::{
   PreviewGap, PushPreview, device_push_content, push_content_mode, push_preview, save_device_push_content,
 };
 use teamcraft_core::runner::{RunnerCommand, RunnerHandle, RunnerSettings, SyncRunner};
-use teamcraft_core::store::{SealedSqliteStore, StaticKeySource};
+use teamcraft_core::store::{LocalStore as _, SealedSqliteStore, StaticKeySource};
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
 use teamcraft_core::{
   Client, ClientSettings, EnrollmentOptions, EnrollmentSecret, LinkOffer, PendingEnrollment,
@@ -436,6 +436,10 @@ impl Engine {
 
   pub(crate) async fn stop(&mut self) -> Result<(), TeamCraftError> {
     self.stop_runner().await;
+    // The app goes to the background: clear what the debounce kept in the write-ahead log (#417).
+    if let Err(error) = self.store.purge_freed() {
+      tracing::warn!(%error, "could not clear the local database log");
+    }
     Ok(())
   }
 

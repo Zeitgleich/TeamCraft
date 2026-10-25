@@ -116,7 +116,10 @@ async fn the_web_client_offers_the_v1_chat_features() {
         .await
         .unwrap();
       shot(&page, "v1-profile-form").await;
-      click_selector(&page, ".modal-foot button[type=submit]").await;
+      // Settings is a page of its own now (no modal footer): save, then close it.
+      click_text(&page, "Save profile").await;
+      wait_for_text(&page, "Saved").await;
+      click_selector(&page, ".set-page-head button[aria-label=Close]").await;
       click_text(&page, "People").await;
       wait_for_text(&page, "Release engineer").await;
       shot(&page, "v1-people").await;
@@ -440,6 +443,7 @@ impl Rig {
 
 /// Signs in through Keycloak's login page and unlocks the account's keys on this new browser.
 pub(crate) async fn sign_in_as_alice(page: &Page) {
+  teamcraft_e2e::browser::prefer_mouse(page).await;
   // The UI follows the browser language; pin English before the app loads (same origin).
   page.goto(format!("{WEB_ORIGIN}/healthz")).await.unwrap();
   page
@@ -467,15 +471,38 @@ pub(crate) async fn sign_in_as_alice(page: &Page) {
 
   // The account already has keys (the test enrolled it): this browser is a new device and unlocks
   // them with the recovery passphrase.
-  let passphrase = wait_for_element(page, "#enroll-passphrase").await;
-  passphrase
-    .click()
-    .await
-    .unwrap()
-    .type_str(PASSPHRASE)
-    .await
-    .unwrap();
+  type_until_kept(page, "#enroll-passphrase", PASSPHRASE).await;
   click_text(page, "Unlock").await;
+}
+
+/// Types into a field and checks that the text stayed. The app re-renders the screen while the core
+/// settles, which replaces the field and loses what was typed into the old one (issue #444); a
+/// person would type again, so the test does too.
+pub(crate) async fn type_until_kept(page: &Page, selector: &str, text: &str) {
+  let deadline = Instant::now() + WAIT;
+  let probe = format!("(document.querySelector('{selector}') || {{}}).value");
+  loop {
+    if let Ok(field) = page.find_element(selector).await
+      && field.click().await.is_ok()
+      && field.type_str(text).await.is_ok()
+    {
+      // The page needs a moment to apply the input event before the value can be read back.
+      tokio::time::sleep(Duration::from_millis(300)).await;
+      let kept = page
+        .evaluate(probe.as_str())
+        .await
+        .ok()
+        .and_then(|value| value.into_value::<String>().ok());
+      if kept.as_deref() == Some(text) {
+        return;
+      }
+    }
+    assert!(
+      Instant::now() < deadline,
+      "{selector} did not keep the typed text"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+  }
 }
 
 /// Signs in again in another tab, if the tab did not restore the session itself; Keycloak still has

@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (\n           SELECT 1 FROM share_links\n           WHERE id = $1 AND revoked_at IS NULL AND expires_at > $3\n             AND grant_sha256 = $2 AND grant_until > $3\n         ) AS \"is_granted!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "is_granted!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2efc82c3d53ecd33859714da13f922a7010fd3d017190bc0a8d0e5c5d289ea79"
+}
