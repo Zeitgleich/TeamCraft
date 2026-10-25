@@ -33,14 +33,15 @@ openh264-source = ["native", "openh264/source"]
 # Browser clients: the WebTransport + WebCodecs + Web Audio call driver (wasm32).
 web = [
   "dave",
+  "web-api",
   "dep:serde_json",
   "dep:futures",
-  "dep:wasm-bindgen",
   "dep:wasm-bindgen-futures",
-  "dep:js-sys",
-  "dep:web-sys",
   "dep:zune-jpeg",
 ]
+# Only the bindings of the browser APIs (`web_api`: WebCodecs, WebTransport) without the call
+# engine: the desktop webview decodes the shell's video with them.
+web-api = ["dep:wasm-bindgen", "dep:js-sys", "dep:web-sys"]
 
 # Cameras and screens through the xdg-desktop-portal and PipeWire (Linux; needs libpipewire
 # headers and libclang at build time). The portal asks the user and works in sandboxes.

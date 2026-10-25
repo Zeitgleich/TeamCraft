@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-call-watch-camera"
+description = "Enables the call_watch_camera command without any pre-configured scope."
+commands.allow = ["call_watch_camera"]
+
+[[permission]]
+identifier = "deny-call-watch-camera"
+description = "Denies the call_watch_camera command without any pre-configured scope."
+commands.deny = ["call_watch_camera"]
