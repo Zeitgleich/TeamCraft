@@ -1803,6 +1803,8 @@ select.input {
   overflow-anchor: none;
   overscroll-behavior: contain;
   outline-offset: -2px;
+  /* Breathing room between the newest message and the composer. */
+  padding-bottom: var(--space-3);
 }
 
 .row {
