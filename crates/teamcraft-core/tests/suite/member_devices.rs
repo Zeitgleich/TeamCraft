@@ -10,9 +10,15 @@ use std::sync::Arc;
 use common::{Peer, linked_options, settings, settle};
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
-use teamcraft_core::store::{ConversationEvent, LocalStore, MemoryStore, MessageContent, MessageFilter};
+use teamcraft_core::store::{
+  ConversationEvent, LocalStore, MemoryStore, MessageContent, MessageFilter, Table,
+};
+use teamcraft_core::workspace::RosterRole;
 use teamcraft_core::{GroupAccess, LinkOffer, PendingEnrollment};
-use teamcraft_proto::{AddConversationMemberRequest, ConversationId, ListMlsMessagesQuery};
+use teamcraft_proto::{
+  AddConversationMemberRequest, Base64Bytes, ConversationId, Id, ListMlsMessagesQuery, MlsMessageKind,
+  PostMlsMessageRequest, WorkspacePolicy,
+};
 
 #[tokio::test]
 async fn a_linked_device_joins_on_its_own_and_reads_while_everybody_else_is_offline() {
@@ -91,6 +97,33 @@ async fn without_group_information_a_linked_device_waits_and_a_member_publishes_
   // Bob sees the request and publishes the group information (and queues the addition).
   bob.client.sync_mls(channel).await.unwrap();
   assert!(bob.api.mls_group_info(channel).await.is_ok());
+}
+
+/// Issue #187: a member handles a device's request to be added once per `rejoin_retry`; repeats
+/// (a device asking too often, a server replaying entries) cost it no requests.
+#[tokio::test]
+async fn a_repeated_device_add_request_costs_no_requests() {
+  let server = FakeServer::new();
+  let (mut phone, mut bob, channel) = channel_with_history(&server).await;
+  server.forget_group_infos();
+  let mut laptop = link_laptop(&mut phone).await;
+  laptop.client.full_sync().await.unwrap();
+  bob.client.sync_mls(channel).await.unwrap();
+  assert!(bob.api.mls_group_info(channel).await.is_ok());
+  let bob_id = bob.client.user_id();
+
+  // What reading the queue costs when nothing new is in it.
+  let before = server.rest_call_count(bob_id);
+  bob.client.sync_mls(channel).await.unwrap();
+  let idle_cost = server.rest_call_count(bob_id) - before;
+
+  server.forget_group_infos();
+  for _ in 0..3 {
+    post_device_add_request(&laptop, channel).await;
+  }
+  let before = server.rest_call_count(bob_id);
+  bob.client.sync_mls(channel).await.unwrap();
+  assert_eq!(server.rest_call_count(bob_id) - before, idle_cost);
 }
 
 #[tokio::test]
@@ -198,6 +231,125 @@ async fn a_new_device_refuses_what_a_removed_member_signs_after_the_removal() {
   assert!(!laptop.texts(channel).contains(&"forged again".to_string()));
 }
 
+/// Issue #186: leaving a conversation drops none of its removal records. A re-join may share the
+/// history again, and a removed member's messages from its time out must still be refused.
+#[tokio::test]
+async fn removal_records_survive_leaving_and_rejoining_a_conversation() {
+  let server = FakeServer::new();
+  let mut phone = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let mut carol = Peer::enroll(&server, "Carol").await;
+  let space = phone.space().await;
+  let channel = phone.client.create_channel(space, "general").await.unwrap();
+  for user in [bob.client.user_id(), carol.client.user_id()] {
+    phone.client.add_member(channel, user).await.unwrap();
+  }
+  settle(&mut [&mut phone, &mut bob, &mut carol]).await;
+  phone
+    .client
+    .remove_member(channel, carol.client.user_id())
+    .await
+    .unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut carol]).await;
+  let key = format!(
+    "{channel}/{}/{}",
+    carol.client.user_id(),
+    carol.client.device_id()
+  );
+  let absence = phone.client.account_data().removed_senders[&key];
+
+  server.remove_member_as_admin(channel, phone.client.user_id());
+  phone.client.full_sync().await.unwrap();
+  bob
+    .client
+    .add_member(channel, phone.client.user_id())
+    .await
+    .unwrap();
+  settle(&mut [&mut phone, &mut bob]).await;
+  phone.client.full_sync().await.unwrap();
+  let data = phone.client.account_data();
+  assert_eq!(data.removed_senders.get(&key), Some(&absence));
+  assert!(data.pruned_senders.is_empty());
+  assert!(phone.store.get(Table::RemovedSenders, &key).unwrap().is_some());
+}
+
+/// Issue #186: an absence that ended before anything the workspace's retention limit keeps can't
+/// matter any more; a device that is still out keeps its record. Time counts by the server.
+#[tokio::test]
+async fn removal_records_that_ended_before_the_retention_limit_are_dropped() {
+  let server = FakeServer::new();
+  let mut phone = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let mut carol = Peer::enroll(&server, "Carol").await;
+  let mut dave = Peer::enroll(&server, "Dave").await;
+  let alice_id = phone.client.user_id();
+  phone
+    .client
+    .publish_roster(&[(alice_id, RosterRole::Owner)])
+    .await
+    .unwrap();
+  let space = phone.space().await;
+  let channel = phone.client.create_channel(space, "general").await.unwrap();
+  for user in [
+    bob.client.user_id(),
+    carol.client.user_id(),
+    dave.client.user_id(),
+  ] {
+    phone.client.add_member(channel, user).await.unwrap();
+  }
+  settle(&mut [&mut phone, &mut bob, &mut carol, &mut dave]).await;
+  // Carol leaves and comes back; three days later (server time) Dave leaves for good.
+  phone
+    .client
+    .remove_member(channel, carol.client.user_id())
+    .await
+    .unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut carol, &mut dave]).await;
+  phone
+    .client
+    .add_member(channel, carol.client.user_id())
+    .await
+    .unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut carol, &mut dave]).await;
+  server.advance_clock(std::time::Duration::from_secs(3 * 24 * 60 * 60));
+  phone
+    .client
+    .remove_member(channel, dave.client.user_id())
+    .await
+    .unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut carol, &mut dave]).await;
+  let key_of = |peer: &Peer| format!("{channel}/{}/{}", peer.client.user_id(), peer.client.device_id());
+  let (carol_key, dave_key) = (key_of(&carol), key_of(&dave));
+  let data = phone.client.account_data();
+  assert!(data.removed_senders[&carol_key].maybe_back_at_ms.is_some());
+  assert!(data.removed_senders.contains_key(&dave_key));
+
+  // Pinned messages survive retention: nothing can go yet.
+  let mut policy = WorkspacePolicy::default();
+  policy.retention.limit.maybe_max_age_days = Some(1);
+  policy.retention.keep_pinned = true;
+  phone.client.publish_policy(policy.clone()).await.unwrap();
+  phone.client.full_sync().await.unwrap();
+  assert!(
+    phone
+      .client
+      .account_data()
+      .removed_senders
+      .contains_key(&carol_key)
+  );
+
+  // One day of retention and one of leeway: Carol's return three days ago is past both.
+  policy.retention.keep_pinned = false;
+  phone.client.publish_policy(policy).await.unwrap();
+  phone.client.full_sync().await.unwrap();
+  let data = phone.client.account_data();
+  assert!(
+    !data.removed_senders.contains_key(&carol_key),
+    "ended before the horizon"
+  );
+  assert!(data.removed_senders.contains_key(&dave_key), "still out");
+}
+
 #[tokio::test]
 async fn messages_after_a_re_add_stay_visible_however_many_commits_follow() {
   let server = FakeServer::new();
@@ -302,6 +454,29 @@ async fn channel_with_history(server: &FakeServer) -> (Peer, Peer, ConversationI
   settle(&mut [&mut phone, &mut bob]).await;
   phone.client.upload_key_bag().await.unwrap();
   (phone, bob, channel)
+}
+
+/// Posts the device's request to be added straight to the queue, past its client's own limit.
+async fn post_device_add_request(device: &Peer, channel: ConversationId) {
+  let query = ListMlsMessagesQuery {
+    maybe_after: None,
+    maybe_limit: Some(1),
+  };
+  let epoch = device
+    .api
+    .list_mls_messages(channel, &query)
+    .await
+    .unwrap()
+    .current_epoch;
+  let mut payload = b"TCDA".to_vec();
+  payload.extend_from_slice(&device.client.user_id().snowflake().get().to_be_bytes());
+  let request = PostMlsMessageRequest {
+    device_id: device.client.device_id(),
+    epoch,
+    kind: MlsMessageKind::Proposal,
+    payload: Base64Bytes::new(payload),
+  };
+  device.api.post_mls_message(channel, &request).await.unwrap();
 }
 
 /// Links a laptop of the phone's user (the phone approves) and connects it.

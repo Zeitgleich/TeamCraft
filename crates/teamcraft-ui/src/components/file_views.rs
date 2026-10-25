@@ -168,19 +168,27 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
   let file = StoredValue::new(file);
   let name = file.with_value(|file| file.file_name.clone());
   let label = name.clone();
-  // Follows the "Image size" setting.
-  let style = move || {
+  // Follows the "Image size" setting. Set as CSSOM properties, not a `style` attribute: the CSP
+  // (`style-src 'self'`) blocks those.
+  let maybe_size = move || {
     if layout != TileLayout::Single {
-      return String::new();
+      return None;
     }
     let image_size = state.settings.prefs.with(|prefs| prefs.display.image_size);
-    let maybe_size = match (maybe_dimensions, maybe_thumbnail_size) {
+    match (maybe_dimensions, maybe_thumbnail_size) {
       (Some(picture), _) => Some(fit_picture(picture.width, picture.height, image_size)),
       (None, Some((width, height))) => Some(inline_size(width, height, image_size)),
       (None, None) => None,
-    };
-    maybe_size
-      .map(|(width, height)| format!("--media-w: {width}px; --media-h: {height}px"))
+    }
+  };
+  let media_width = move || {
+    maybe_size()
+      .map(|(width, _)| format!("{width}px"))
+      .unwrap_or_default()
+  };
+  let media_height = move || {
+    maybe_size()
+      .map(|(_, height)| format!("{height}px"))
       .unwrap_or_default()
   };
   let maybe_hidden = match layout {
@@ -207,7 +215,8 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
         class:media-single=is_single
         class:has-size=has_size
         class:actions-pinned=move || is_pinned.get()
-        style=style
+        style:--media-w=media_width
+        style:--media-h=media_height
         on:pointerdown=move |ev: web_sys::PointerEvent| is_touch.set_value(ev.pointer_type() == "touch")
         on:contextmenu=move |ev: web_sys::MouseEvent| {
           // A long-press shows the actions; a right click keeps the browser's menu ("Save image as").

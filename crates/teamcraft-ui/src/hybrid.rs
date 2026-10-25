@@ -637,7 +637,9 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
       self
         .chat
         .thread(conversation, thread)
-        .last()
+        .iter()
+        // The root opens the list but isn't a reply; the server only accepts replies.
+        .rfind(|message| message.maybe_thread == Some(thread))
         .map(|message| message.id),
     ) else {
       return;

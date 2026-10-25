@@ -68,6 +68,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self
       .catch_up_conversations(&ids, &members_order(&conversations))
       .await?;
+    // With the queues read, the newest server time is known (issue #186).
+    self.prune_removed_senders()?;
     self.refresh_read_state().await?;
     self.refresh_notification_settings().await?;
     // A `device_add` missed while offline beyond the resume window would leave them waiting.
@@ -263,12 +265,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     } else {
       0
     };
+    // openmls checks lifetimes against the system clock, so they are made from it too (not from
+    // the injectable clock, which tests move freely), and so is the cleanup that compares them.
+    let now_unix_secs = u64::try_from(SystemClock.now_ms().div_euclid(1000)).unwrap_or(0);
     if missing == 0 && status.has_last_resort {
+      self.clean_up_key_packages(None, now_unix_secs);
       return Ok(());
     }
-    // openmls checks lifetimes against the system clock, so they are made from it too (not from
-    // the injectable clock, which tests move freely).
-    let now_unix_secs = u64::try_from(SystemClock.now_ms().div_euclid(1000)).unwrap_or(0);
     let mut key_packages = Vec::new();
     for _ in 0..missing {
       key_packages.push(Base64Bytes::new(create_key_package(
@@ -292,16 +295,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     // The private parts must be stored before the public parts become claimable.
     records::save_mls_storage(&self.store, &self.provider)?;
+    let request = UploadKeyPackagesRequest {
+      key_packages,
+      maybe_last_resort,
+    };
     self
       .api
-      .upload_key_packages(
-        self.account.device_id,
-        &UploadKeyPackagesRequest {
-          key_packages,
-          maybe_last_resort,
-        },
-      )
+      .upload_key_packages(self.account.device_id, &request)
       .await?;
+    self.clean_up_key_packages(request.maybe_last_resort.as_ref(), now_unix_secs);
     tracing::info!(
       uploaded = missing,
       expiring_soon = status.expiring_soon,

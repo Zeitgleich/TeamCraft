@@ -1135,8 +1135,10 @@ pub fn Composer(
             }
             on:focus=move |_| refresh_formats()
             on:blur=move |_| {
-              if let Some(element) = editor.get_untracked() {
-                saved_selection.set_value(composer_editor::save_selection(&element));
+              // Also runs when the focused editor is removed with its view (#378): the composer may
+              // already be disposed.
+              if let Some(element) = editor.try_get_untracked().flatten() {
+                saved_selection.try_set_value(composer_editor::save_selection(&element));
               }
             }
             on:paste=on_paste
@@ -1164,7 +1166,7 @@ pub fn Composer(
               <Show when=move || is_attach_menu_open.get() fallback=|| ()>
                 <div class="popover-backdrop" on:mousedown=move |_| is_attach_menu_open.set(false)></div>
                 <div
-                  class="popover composer-attach-menu"
+                  class="popover composer-attach-menu opens-up align-start"
                   role="menu"
                   node_ref=attach_menu
                   aria-label=move || i18n.t("composer-attach")

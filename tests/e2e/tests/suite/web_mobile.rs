@@ -1,7 +1,8 @@
 //! The web client on phones (issue #307): one pane at a time with the bottom navigation, back
 //! through the browser history, a composer where Enter is a newline, and nothing that scrolls
-//! sideways, in portrait and landscape. Screenshots of the main views in light and dark land in
-//! `target/e2e-artifacts/mobile-*.png`.
+//! sideways, in portrait and landscape. On a tablet the wide layout keeps finger-sized targets (#364)
+//! and a channel header whose controls don't overlap (#365). Screenshots of the main views in light
+//! and dark land in `target/e2e-artifacts/mobile-*.png`.
 
 use std::time::{Duration, Instant};
 
@@ -16,6 +17,8 @@ use crate::web::{
 
 /// Phones the layout is checked on: an iPhone 15 and a Pixel 8 Pro class device, both ways round.
 const PHONES: [(i64, i64); 4] = [(390, 844), (844, 390), (412, 915), (915, 412)];
+/// A tablet in landscape and in portrait: wide enough for the sidebar, but a finger is the pointer.
+const TABLETS: [(i64, i64); 2] = [(1024, 768), (820, 1180)];
 const WAIT: Duration = Duration::from_secs(30);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -75,6 +78,23 @@ async fn on_a_phone_enter_is_a_newline_and_the_send_button_sends() {
         eval_string(&page, "document.querySelector('textarea').value").await,
         ""
       );
+    })
+    .await;
+  rig.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn on_a_tablet_targets_follow_the_finger_not_the_width() {
+  let Some(rig) = Rig::start().await else { return };
+  rig
+    .browser
+    .screenshot_on_failure("web-tablet", |page| async move {
+      emulate_phone(&page, TABLETS[0]).await;
+      sign_in_as_alice(&page).await;
+      for tablet in TABLETS {
+        emulate_phone(&page, tablet).await;
+        check_tablet(&page, tablet).await;
+      }
     })
     .await;
   rig.finish().await;
@@ -152,6 +172,40 @@ async fn check_phone(page: &Page, (width, height): (i64, i64)) {
     .await
     .unwrap();
   wait_for_gone(page, ".modal-switcher").await;
+}
+
+/// A conversation on a tablet: not the phone layout, yet 44px targets because the pointer is coarse.
+async fn check_tablet(page: &Page, (width, height): (i64, i64)) {
+  let size = format!("{width}x{height}");
+  assert_ne!(
+    eval_string(page, "document.documentElement.dataset.layout").await,
+    "compact",
+    "{size}"
+  );
+  assert!(
+    eval_f64(page, "matchMedia('(pointer: coarse)').matches ? 1 : 0").await > 0.0,
+    "touch emulation gives a coarse pointer ({size})"
+  );
+  wait_for_text(page, "browser-channel").await;
+  let opened = page
+    .evaluate(
+      "(() => { const row = [...document.querySelectorAll('.sidebar button')].find(e => e.innerText.includes('browser-channel')); if (!row) return false; row.click(); return true; })()",
+    )
+    .await
+    .unwrap()
+    .into_value::<bool>()
+    .unwrap_or(false);
+  assert!(opened, "no sidebar row for the test channel");
+  wait_for_element(page, ".channel-header").await;
+  assert_touch_targets(
+    page,
+    ".channel-header .icon-btn, .channel-header .header-btn, .composer .icon-btn, .send-btn, .sb-item",
+    &size,
+  )
+  .await;
+  assert_header_fits(page, &size).await;
+  assert_no_sideways_scroll(page, &format!("conversation at {size}")).await;
+  shots(page, &format!("tablet-conversation-{size}"), (width, height)).await;
 }
 
 /// Goes to the test channel through the Spaces tab.
@@ -276,6 +330,19 @@ async fn assert_touch_targets(page: &Page, selector: &str, size: &str) {
   );
   let small = eval_string(page, &script).await;
   assert!(small.is_empty(), "touch targets under 44px at {size}: {small}");
+}
+
+/// Nothing in the channel header overlaps or sticks out of it (#365).
+async fn assert_header_fits(page: &Page, size: &str) {
+  let problems = eval_string(
+    page,
+    "(() => { const h = document.querySelector('.channel-header'); const hr = h.getBoundingClientRect(); const items = [...h.querySelectorAll('.header-title, .header-btn, .icon-btn, [role=tab], .conversation-more')].filter(e => e.getClientRects().length > 0 && getComputedStyle(e).display !== 'none'); const found = []; items.forEach((a, i) => { const ra = a.getBoundingClientRect(); if (ra.left < hr.left - 0.5 || ra.right > hr.right + 0.5) found.push('outside: ' + a.className); items.slice(i + 1).forEach(b => { if (a.contains(b) || b.contains(a)) return; const rb = b.getBoundingClientRect(); if (ra.left < rb.right - 0.5 && rb.left < ra.right - 0.5 && ra.top < rb.bottom && rb.top < ra.bottom) found.push(a.className + ' over ' + b.className); }); }); return found.join('; '); })()",
+  )
+  .await;
+  assert!(
+    problems.is_empty(),
+    "the channel header overlaps at {size}: {problems}"
+  );
 }
 
 async fn is_shown(page: &Page, selector: &str) -> bool {

@@ -40,6 +40,10 @@ env:
 
 jobs:
   check:
+    # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
+    # before merging, and main gets one run per batch. This keeps the runner budget for main and
+    # releases.
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
     name: check (${{ matrix.arch }})
     # Both Linux architectures the desktop ships for, each on a native runner; they run in
     # parallel, so arm64 adds no wall-clock time. Format and the wasm build are
@@ -93,6 +97,10 @@ jobs:
   # test binary links the whole dependency tree). cargo-nextest runs every test in its own process
   # and in parallel across binaries; it does not run doctests, so those run separately.
   test:
+    # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
+    # before merging, and main gets one run per batch. This keeps the runner budget for main and
+    # releases.
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
     name: test (${{ matrix.arch }})
     strategy:
       fail-fast: false
@@ -134,6 +142,10 @@ jobs:
   # WebRTC audio processing (echo cancellation) is opt-in at build time, see
   # crates/teamcraft-media/README.md. Built from source here (version 2 isn't packaged).
   audio-processing:
+    # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
+    # before merging, and main gets one run per batch. This keeps the runner budget for main and
+    # releases.
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/zeitgleich/teamcraft-ci@sha256:24fe71e069885c93b38cc6997f8005fb06b94e501dde7a07ce39c04c46d03e40
@@ -161,6 +173,10 @@ jobs:
   # runtime and `pipewire`/`v4l2` are Linux-only. WebRTC audio processing is not built on Windows
   # (see apps/desktop/packaging/windows/README.md).
   windows:
+    # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
+    # before merging, and main gets one run per batch. This keeps the runner budget for main and
+    # releases.
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
     runs-on: windows-latest
     env:
       SQLX_OFFLINE: "true"
@@ -194,6 +210,10 @@ jobs:
   # bridge builds with the runner's Xcode). Without GStreamer, which only the release build bundles
   # (desktop-release.yml builds the whole app).
   macos:
+    # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
+    # before merging, and main gets one run per batch. This keeps the runner budget for main and
+    # releases.
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
     runs-on: macos-26
     env:
       # Current macOS and the two releases before it (26 Tahoe, 15 Sequoia, 14 Sonoma).
@@ -237,6 +257,10 @@ jobs:
         run: cargo test -p teamcraft-media --features native,avfoundation,screencapturekit,effects,openh264-source
 
   deny:
+    # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
+    # before merging, and main gets one run per batch. This keeps the runner budget for main and
+    # releases.
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -244,6 +268,10 @@ jobs:
 
   # The release version must agree everywhere (docs/release.md); the release notes must still render.
   versions:
+    # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
+    # before merging, and main gets one run per batch. This keeps the runner budget for main and
+    # releases.
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -253,6 +281,8 @@ jobs:
         run: python3 -m unittest discover -s scripts/tests -v
       - name: UI tasks touch signals only with try_ after an await (issue #322)
         run: scripts/check-async-signals.py
+      - name: Stylesheet has no undefined tokens or colliding rules, UI has no inline styles (issues #363, #376)
+        run: scripts/check-css.py
       - name: Release notes render
         run: |
           version="$(scripts/check-versions.sh)"

@@ -49,6 +49,14 @@ final class ChatModelTests: XCTestCase {
     XCTAssertEqual(names(.groups), ["Amy, Bob"])
   }
 
+  func testBadgeIsRedForMentionsAndUnreadDirectMessagesOnly() {
+    XCTAssertEqual(item("1", "Amy", kind: .direct, unread: 1).badgeTone, .mention)
+    XCTAssertEqual(item("2", "Team", kind: .group, unread: 3).badgeTone, .mention)
+    XCTAssertEqual(item("3", "dev", unread: 3, mentions: 1).badgeTone, .mention)
+    XCTAssertEqual(item("4", "dev", unread: 3).badgeTone, .unread)
+    XCTAssertEqual(item("5", "Amy", kind: .direct, unread: 3, muted: true).badgeTone, .unread)
+  }
+
   func testEmptySectionsAreLeftOut() {
     XCTAssertTrue(channelSections([]).isEmpty)
     XCTAssertTrue(directSections([]).isEmpty)

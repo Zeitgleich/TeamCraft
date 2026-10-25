@@ -525,9 +525,10 @@ pub fn SidebarItem(conversation: Conversation) -> impl IntoView {
     .map(|status| status.emoji);
   let name = conversation.name.clone();
   let aria_name = name.clone();
+  let is_muted = conversation.is_muted;
   let is_catching_up = conversation.is_catching_up;
   let label = move || {
-    if is_catching_up {
+    let label = if is_catching_up {
       i18n.t_with("sidebar-item-catching-up", &[("name", &aria_name)])
     } else if mentions > 0 {
       i18n.t_with(
@@ -538,6 +539,11 @@ pub fn SidebarItem(conversation: Conversation) -> impl IntoView {
       i18n.t_with("sidebar-item-unread", &[("name", &aria_name)])
     } else {
       aria_name.clone()
+    };
+    if is_muted {
+      i18n.t_with("sidebar-item-muted-label", &[("label", &label)])
+    } else {
+      label
     }
   };
 
@@ -566,6 +572,7 @@ pub fn SidebarItem(conversation: Conversation) -> impl IntoView {
           .filter(|peer| state.read(|backend| backend.is_in_call(*peer)))
           .map(|_| view! { <span class="sb-call" title=i18n.t("presence-in-call")><Icon name=IconName::Phone /></span> })
       }}
+      {is_muted.then(|| view! { <span class="sb-muted-icon" title=i18n.t("sidebar-item-muted")><Icon name=IconName::BellOff /></span> })}
       {is_catching_up.then(|| view! { <span class="sb-catching-up" aria-hidden="true" title=i18n.t("catching-up")><Icon name=IconName::Clock /></span> })}
       {(mentions > 0).then(|| view! { <span class="badge-count" aria-hidden="true">{mentions}</span> })}
     </button>
