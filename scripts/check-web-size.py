@@ -59,7 +59,11 @@ def main(argv=None):
     parser.add_argument("--baseline", type=pathlib.Path, help="sizes of an earlier build (JSON)")
     parser.add_argument("--write", type=pathlib.Path, help="write this build's sizes (JSON)")
     args = parser.parse_args(argv)
-    sizes = measure(args.dist)
+    try:
+        sizes = measure(args.dist)
+    except SessionListMissing as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
     if sizes is None:
         return 2
     maybe_baseline = load_baseline(args.baseline)
@@ -118,8 +122,13 @@ def session_files(dist):
         return []
     match = SESSION_LIST.search(init.read_text(encoding="utf-8"))
     if not match:
-        return []
+        # Else the signed-in app would silently drop out of the budget.
+        raise SessionListMissing("init.js has no list of the signed-in app's files")
     return [dist / name for name in re.findall(r"'/([^'/]+)'", match.group(1))]
+
+
+class SessionListMissing(Exception):
+    pass
 
 
 def measure_lazy(dist, session):

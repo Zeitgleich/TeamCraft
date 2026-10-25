@@ -18,7 +18,7 @@ use std::future::Future;
 use std::rc::Rc;
 
 use leptos::prelude::*;
-use leptos::task::spawn_local_scoped;
+use leptos::task::spawn_local_scoped_with_cancellation;
 use leptos::wasm_split::{SplitLoaderError, wasm_split};
 
 use crate::admin::AdminSection;
@@ -111,23 +111,33 @@ where
   let i18n = use_i18n();
   let phase = RwSignal::new(Phase::Loading);
   let ready: StoredValue<Option<AnyView>, LocalStorage> = StoredValue::new_local(None);
+  // The area's owner, also for a retry from the error view (whose own owner goes as soon as the
+  // phase changes): the view is built under it, and loading stops when the area goes, so a view
+  // never comes up under a disposed owner (whose cleanups, like a call screen releasing the
+  // camera, would never run).
+  let owner = Owner::current();
   let start: Rc<dyn Fn()> = Rc::new(move || {
-    phase.set(Phase::Loading);
-    let loading = load();
-    // Scoped: the area's view belongs to this place in the page and goes when it goes.
-    spawn_local_scoped(async move {
-      match loading.await {
-        Ok(view) => {
-          // The area may be gone by now; then the view goes with the task.
-          let _ = ready.try_update_value(|slot| *slot = Some(view));
-          phase.set_if_alive(Phase::Ready);
-        },
-        Err(error) => {
-          tracing::warn!(%error, "a part of the app did not load");
-          phase.set_if_alive(Phase::Failed);
-        },
-      }
-    });
+    let run = || {
+      phase.set(Phase::Loading);
+      let loading = load();
+      spawn_local_scoped_with_cancellation(async move {
+        match loading.await {
+          Ok(view) => {
+            // Fails only when the area is gone; the view then goes with this task.
+            let _ = ready.try_update_value(|slot| *slot = Some(view));
+            phase.set_if_alive(Phase::Ready);
+          },
+          Err(error) => {
+            tracing::warn!(%error, "a part of the app did not load");
+            phase.set_if_alive(Phase::Failed);
+          },
+        }
+      });
+    };
+    match &owner {
+      Some(owner) => owner.with(run),
+      None => run(),
+    }
   });
   start();
   // Views are `Send`; the loader stays on this thread.
@@ -163,6 +173,8 @@ where
               <p>{move || i18n.t("area-load-failed")}</p>
               <div class="lazy-area-actions">
                 {maybe_close}
+                // After a deploy the chunk is gone and only a reload (into the new release) helps.
+                <button class="btn" on:click=move |_| crate::bundle::reload()>{move || i18n.t("area-reload")}</button>
                 <button class="btn btn-primary" on:click=retry>{move || i18n.t("loader-retry")}</button>
               </div>
             </div>

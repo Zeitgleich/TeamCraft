@@ -2279,7 +2279,8 @@ media-open = Open { $name }
 
 error-details = Details
 error-generic = That didn't work. Try again; if it keeps failing, copy the details for your admin.
-area-load-failed = This part of the app could not be loaded. Check your connection, then try again.
+area-load-failed = This part of the app could not be loaded. Check your connection, then try again. If it still fails, reload the app: a new version may have come out.
+area-reload = Reload app
 error-network = The server can't be reached. Check your connection and try again.
 error-captive-portal = This network wants you to sign in first. Open a web page to sign in, then try again.
 error-untrusted-certificate = The server's certificate isn't trusted. On a network that inspects encrypted traffic, use another network or ask your IT to install the company certificate on this device; if it happens everywhere, the server's certificate may be broken: tell your administrator.

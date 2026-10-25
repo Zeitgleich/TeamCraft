@@ -347,7 +347,8 @@ fn has_controller() -> bool {
   web_sys::window().is_some_and(|window| window.navigator().service_worker().controller().is_some())
 }
 
-fn reload() {
+/// Reloads the page (into the newest release).
+pub(crate) fn reload() {
   if let Some(window) = web_sys::window()
     && let Err(error) = window.location().reload()
   {

@@ -40,7 +40,7 @@ fn main() -> Result<()> {
   tracing_subscriber::fmt().with_target(false).without_time().init();
   let args = Args::parse(std::env::args().skip(1))?;
   let input = std::fs::read(&args.input).with_context(|| format!("reading {}", args.input.display()))?;
-  let id = build_id(&input);
+  let id = build_id(&input, &optimizer_settings(&args)?);
   let work = args.staging.join(format!(".split-{id}"));
   std::fs::create_dir_all(&work)?;
   let names = Names::new(&args.name, &id);
@@ -141,10 +141,30 @@ impl Names {
   }
 }
 
-/// 16 hex digits of the input's SHA-256: every file of a build carries it, so a changed build gets
-/// new names (the server caches hashed names for good; `teamcraft-server` `web.rs`).
-fn build_id(input: &[u8]) -> String {
-  hex(&Sha256::digest(input)[..8])
+/// 16 hex digits of the SHA-256 of the input and of how it is optimized: every file of a build
+/// carries it, so a changed build gets new names (the server caches hashed names for good;
+/// `teamcraft-server` `web.rs`), also when only wasm-opt or its flags changed.
+fn build_id(input: &[u8], optimizer_settings: &str) -> String {
+  let mut hasher = Sha256::new();
+  hasher.update(input);
+  hasher.update(optimizer_settings.as_bytes());
+  hex(&hasher.finalize()[..8])
+}
+
+/// wasm-opt's version and flags (empty without wasm-opt).
+fn optimizer_settings(args: &Args) -> Result<String> {
+  let Some(wasm_opt) = &args.maybe_wasm_opt else {
+    return Ok(String::new());
+  };
+  let output = std::process::Command::new(wasm_opt)
+    .arg("--version")
+    .output()
+    .with_context(|| format!("running {}", wasm_opt.display()))?;
+  Ok(format!(
+    "{}\n{}",
+    String::from_utf8_lossy(&output.stdout).trim(),
+    args.wasm_opt_args.join(" ")
+  ))
 }
 
 /// Splits the module; the main part is `work/main.wasm`, the chunks `work/<stem>.wasm`.
@@ -313,6 +333,10 @@ fn write_init(staging: &Path, names: &Names, initializer: &str, session_files: &
     .replace("__MAIN_JS__", &format!("{PUBLIC_URL}{}", names.main_js))
     .replace("__MAIN_WASM__", &format!("{PUBLIC_URL}{}", names.main_wasm))
     .replace("__WASM_SIZE__", &wasm_size.to_string())
+    .replace(
+      "__MAIN_WASM_INTEGRITY__",
+      &integrity(&staging.join(&names.main_wasm))?,
+    )
     .replace("__INITIALIZER__", &format!("{PUBLIC_URL}{initializer}"));
   std::fs::write(staging.join("init.js"), init)?;
 
@@ -394,7 +418,8 @@ if (!isGuestLink) {
 const hooks = initializer();
 hooks.onStart?.();
 const total = __WASM_SIZE__;
-const response = fetch('__MAIN_WASM__').then((response) => {
+// With the preload link's integrity, so the browser uses the preloaded response.
+const response = fetch('__MAIN_WASM__', { integrity: '__MAIN_WASM_INTEGRITY__' }).then((response) => {
   const reader = response.body.getReader();
   let current = 0;
   const stream = new ReadableStream({
@@ -438,7 +463,11 @@ mod tests {
       names.chunk("split_admin"),
       "teamcraft-ui-split-admin-0123456789abcdef.wasm"
     );
-    assert_eq!(build_id(b"a").len(), 16);
+    assert_eq!(build_id(b"a", "").len(), 16);
+    assert_ne!(
+      build_id(b"a", "wasm-opt 131\n-Oz"),
+      build_id(b"a", "wasm-opt 132\n-Oz")
+    );
   }
 
   #[test]

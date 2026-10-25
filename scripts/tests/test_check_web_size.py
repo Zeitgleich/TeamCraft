@@ -88,6 +88,14 @@ class BudgetTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("gone.wasm", err)
 
+    def test_an_init_js_without_the_session_list_is_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = dist_with(tmp, app_bytes=10, service_worker_bytes=10)
+            (dist / "init.js").write_text("import init from '/app.js';\n")
+            code, _, err = run(str(dist))
+        self.assertEqual(code, 2)
+        self.assertIn("signed-in app", err)
+
     def test_a_missing_file_is_an_error_not_a_pass(self):
         with tempfile.TemporaryDirectory() as tmp:
             (pathlib.Path(tmp) / APP).write_bytes(b"\0" * 10)
