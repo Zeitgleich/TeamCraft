@@ -555,7 +555,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Publishes this device's group information for the current epoch when the server has none
   /// (the last commit came from an older client).
-  async fn publish_group_info_if_missing(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+  pub(super) async fn publish_group_info_if_missing(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<(), CoreError> {
     match self.api.mls_group_info(conversation).await {
       Ok(_) => return Ok(()),
       Err(error) if error.is_not_found() => {},

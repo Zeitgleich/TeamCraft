@@ -191,10 +191,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         }
         continue;
       }
-      let is_direct = matches!(response.kind, ConversationKind::Dm | ConversationKind::Group);
+      let is_direct = matches!(
+        response.kind,
+        ConversationKind::Dm | ConversationKind::Group | ConversationKind::Meeting
+      );
       if is_direct {
-        // A further device joins the user's DMs and group DMs on its own too (#179); a DM this
-        // device opened is finished by its setup (`repair_dm_setups`), and nobody self-adds.
+        // A further device joins the user's DMs, group DMs and meeting chats on its own too
+        // (#179); one this device set up is finished by its setup (`repair_dm_setups`), and
+        // nobody self-adds.
+        if response.kind == ConversationKind::Meeting
+          && self.mls_epoch(response.id)? == Some(0)
+          && let Err(error) = self.publish_group_info_if_missing(response.id).await
+        {
+          // A group of one (an instant meeting) carries no commit with its information yet; the
+          // organizer's other devices need it to join. Tried again on the next sync.
+          tracing::debug!(conversation_id = %response.id, %error, "could not publish a meeting chat's group information");
+        }
         if response.maybe_my_membership.is_none()
           || response.is_archived
           || self.has_group(response.id)?

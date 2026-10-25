@@ -10,7 +10,7 @@ use teamcraft_crypto::mls::MlsError;
 use teamcraft_proto::{ConversationId, DeviceId, UserId};
 
 #[cfg(feature = "ui")]
-use teamcraft_client_api::failure::{ActionFailure, FailureKind};
+use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
 
 use crate::api::ApiError;
 #[cfg(feature = "ui")]
@@ -101,6 +101,13 @@ pub enum CoreError {
   UnknownIdentity(UserId),
   #[error("conversation {0} has no MLS group on this device")]
   NoGroup(ConversationId),
+  /// A call needs this device in the conversation's MLS group (e2ee.md §8), and it isn't yet:
+  /// the welcome hasn't come, or another device of the user or a member has to let it in. Its
+  /// failure kind is `CallFailure::EncryptionPending` ([`CoreError::to_failure`]).
+  #[error("this device is not in the encryption group of conversation {0} yet")]
+  CallEncryptionPending(ConversationId),
+  #[error("conversation {0} is not a meeting chat")]
+  NotAMeetingChat(ConversationId),
   #[error("conversation {0} has no content key on this device yet")]
   NoContentKey(ConversationId),
   #[error("gave up after {attempts} attempts: {reason}")]
@@ -180,6 +187,7 @@ impl CoreError {
       Self::Api(error) => error
         .error_code()
         .map_or(FailureKind::Other, |code| FailureKind::Server(code.clone())),
+      Self::CallEncryptionPending(_) => FailureKind::Call(CallFailure::EncryptionPending),
       _ => FailureKind::Other,
     };
     ActionFailure::new(kind, self.to_string())

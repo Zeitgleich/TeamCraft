@@ -644,6 +644,14 @@ pub enum ChatAction {
   RetryDmSetup {
     conversation: ConversationId,
   },
+  SetUpMeetingChat {
+    conversation: ConversationId,
+    invitees: Vec<UserId>,
+  },
+  LetIntoMeetingChat {
+    conversation: ConversationId,
+    user: UserId,
+  },
   SetBookmarks {
     conversation: ConversationId,
     bookmarks: Vec<crate::model::Bookmark>,
@@ -833,6 +841,11 @@ impl ChatAction {
       Self::RetryRemoval { conversation, user } => backend.retry_removal(conversation, user),
       Self::DiscardRemoval { conversation, user } => backend.discard_removal(conversation, user),
       Self::RetryDmSetup { conversation } => backend.retry_dm_setup(conversation),
+      Self::SetUpMeetingChat {
+        conversation,
+        invitees,
+      } => backend.set_up_meeting_chat(conversation, invitees),
+      Self::LetIntoMeetingChat { conversation, user } => backend.let_into_meeting_chat(conversation, user),
       Self::SetBookmarks {
         conversation,
         bookmarks,

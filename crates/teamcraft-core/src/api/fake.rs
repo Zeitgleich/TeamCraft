@@ -634,6 +634,28 @@ impl FakeServer {
     self.lock().key_package_answers_to_lose += 1;
   }
 
+  /// A meeting's chat as the server creates it with the meeting (docs/meetings.md): the organizer
+  /// is admin, the invitees are members, and no client has founded its encryption group.
+  pub fn create_meeting_chat(&self, organizer: UserId, invitees: &[UserId]) -> ConversationId {
+    let mut state = self.lock();
+    let mut members = invitees.to_vec();
+    members.push(organizer);
+    let id = state.create_conversation(
+      ConversationKind::Meeting,
+      None,
+      Some("Meeting".to_owned()),
+      HistoryPolicy::Full,
+      &members,
+    );
+    if let Some(conversation) = state.conversations.get_mut(&id)
+      && let Some(entry) = conversation.members.get_mut(&organizer)
+    {
+      entry.0 = ChannelRole::Admin;
+    }
+    state.publish(members, &GatewayEvent::ConversationUpdate { conversation_id: id });
+    id
+  }
+
   /// How many channels have this name.
   pub fn channel_count(&self, name: &str) -> usize {
     let state = self.lock();

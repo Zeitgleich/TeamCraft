@@ -1089,7 +1089,8 @@ impl Core {
 
   async fn prepare_call(&mut self, conversation: ConversationId) -> Result<CallPreparation, String> {
     let client = self.client.as_mut().ok_or("this device is not set up yet")?;
-    client.prepare_call(conversation).await.map_err(describe)
+    // With its failure kind: "not in the encryption group yet" is worded and offers a retry.
+    client.prepare_call(conversation).await.map_err(describe_failure)
   }
 
   async fn enroll(&mut self, request: EnrollRequest) -> Result<(), String> {
