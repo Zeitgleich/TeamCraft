@@ -3861,6 +3861,35 @@ ol.md-list {
   transform: translateX(-50%) scaleX(-1);
 }
 
+/* Real call video (browser): fills the tile; a shared screen keeps its whole picture. */
+.live-video {
+  position: absolute;
+  inset: 0;
+  background: #05070b;
+}
+
+.live-video > canvas,
+.live-video > video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.live-video.mirrored {
+  transform: scaleX(-1);
+}
+
+.shared-screen .live-video {
+  position: static;
+  width: 100%;
+  height: 100%;
+}
+
+.shared-screen .live-video > canvas {
+  object-fit: contain;
+}
+
 .silhouette::before,
 .silhouette::after {
   content: "";

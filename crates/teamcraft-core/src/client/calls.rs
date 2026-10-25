@@ -6,7 +6,9 @@ use std::fmt;
 
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
 use teamcraft_crypto::identity::{DeviceKeyPair, VerifiedDevice};
-use teamcraft_proto::{CallJoinTokenResponse, ConversationId, CreateCallJoinTokenRequest, GatewayEvent};
+use teamcraft_proto::{
+  CallJoinTokenResponse, ConversationId, CreateCallJoinTokenRequest, DeviceId, GatewayEvent, UserId,
+};
 
 use super::Client;
 use crate::api::ServerApi;
@@ -21,6 +23,17 @@ pub type CallEventSink = Box<dyn FnMut(&GatewayEvent)>;
 /// the length of a call; it can be moved to the thread that runs the media.
 pub struct CallKeySigner {
   device: DeviceKeyPair,
+}
+
+/// Everything joining a conversation's call needs from the core (e2ee.md §8).
+pub struct CallPreparation {
+  pub join: CallJoinTokenResponse,
+  pub user_id: UserId,
+  pub device_id: DeviceId,
+  /// Signs this device's per-call DAVE key; the device key itself stays in the core.
+  pub signer: CallKeySigner,
+  /// The conversation's devices (this one included) whose certificates verified.
+  pub devices: Vec<VerifiedDevice>,
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
@@ -38,6 +51,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       device_id: self.account.device_id,
     };
     Ok(self.api.create_call_join_token(conversation, &request).await?)
+  }
+
+  /// A join token, the signer and the verified devices for joining the conversation's call.
+  pub async fn prepare_call(&mut self, conversation: ConversationId) -> Result<CallPreparation, CoreError> {
+    let join = self.call_join_token(conversation).await?;
+    let devices = self.verified_call_devices(conversation).await?;
+    Ok(CallPreparation {
+      join,
+      user_id: self.user_id(),
+      device_id: self.device_id(),
+      signer: self.call_key_signer(),
+      devices,
+    })
   }
 
   pub fn call_key_signer(&self) -> CallKeySigner {

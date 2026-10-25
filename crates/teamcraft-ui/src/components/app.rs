@@ -12,7 +12,7 @@ use crate::attention::{AttentionReporter, AttentionSignals, is_attentive};
 use crate::auth::tauri;
 use crate::backend::Backend;
 use crate::calls::CallPhase;
-use crate::calls::{CallEvent, CallRequest};
+use crate::calls::{BackgroundEffect, CallEvent, CallRequest, CallStatusSounds};
 use crate::clock::now_ms;
 use crate::components::activity_view::ActivityView;
 use crate::components::admin_console::AdminConsole;
@@ -186,7 +186,9 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       leptos::task::spawn_local(async move { tauri::show_notification(&shown).await });
     }
   });
-  if tauri::is_available() {
+  // Real calls (desktop shell or the page's call module); the demo's simulated ones need no wiring.
+  // Untracked: the shell must not render again on every backend change.
+  if untrack(|| state.read(|backend| backend.has_calls() && !backend.has_simulated_calls())) {
     connect_calls(state);
   }
   watch_activity(state);
@@ -824,7 +826,6 @@ fn guest_link_from_location() -> Option<(teamcraft_proto::MeetingId, String)> {
   parse_guest_link(&location.pathname().ok()?, &location.hash().ok()?)
 }
 
-/// Desktop: the user's call actions go to the shell, and calls that ring there show the dialog.
 /// Keeps `--banners-h` on the root element at the height of the banner row: overlays that are fixed
 /// below the top bar (call screens, side panels on narrow windows) start below the banners too.
 fn track_banner_height(banners: NodeRef<leptos::html::Div>) {
@@ -862,6 +863,8 @@ fn track_banner_height(banners: NodeRef<leptos::html::Div>) {
   });
 }
 
+/// The user's call actions go to the call backend (the desktop shell or the page's call module), and
+/// calls that ring there show the dialog.
 fn connect_calls(state: AppState) {
   let call = state.call;
   let maybe_alerts = use_context::<crate::os_alerts::CallAlertsCell>();
@@ -890,17 +893,22 @@ fn connect_calls(state: AppState) {
       CallEvent::StatusSounds(sounds) => backend.set_call_status_sounds(sounds),
     });
   });
-  // The status sounds setting reaches the shell at start and on every change.
-  Effect::new(move |_| {
+  // The status sounds setting reaches the call backend at start and on every change (not on
+  // every settings write: the same value again is no change).
+  Effect::new(move |previous: Option<CallStatusSounds>| {
     let sounds = state.settings.prefs.with(|prefs| prefs.calls.status_sounds);
-    call.emit(CallEvent::StatusSounds(sounds));
+    if previous != Some(sounds) {
+      call.emit(CallEvent::StatusSounds(sounds));
+    }
+    sounds
   });
   // The effect picker writes the signal; the media layer applies it to the camera image.
-  Effect::new(move |previous: Option<()>| {
+  Effect::new(move |previous: Option<BackgroundEffect>| {
     let effect = call.effect.get();
-    if previous.is_some() {
+    if previous.is_some_and(|previous| previous != effect) {
       call.emit(CallEvent::Effect(effect));
     }
+    effect
   });
   // The shell ended the call (the other side hung up, the connection dropped): leave the screen.
   let was_connected = std::cell::Cell::new(false);
@@ -909,6 +917,34 @@ fn connect_calls(state: AppState) {
     if was_connected.replace(is_connected) && !is_connected && call.phase.get_untracked() == CallPhase::Active
     {
       call.leave();
+    }
+  });
+  // A join that failed (a refused microphone, an unreachable call server) already told the user
+  // why: the call screen it opened closes. Once the user's actions are carried out, the camera and
+  // screen share buttons show what the media layer did (a camera the browser refused, a share
+  // ended from the system's indicator).
+  let seen_join_failures = Cell::new(untrack(|| state.read(|backend| backend.call_join_failures())));
+  Effect::new(move |_| {
+    let (failures, maybe_media) = state.read(|backend| {
+      let maybe_media = (!backend.has_pending_call_actions())
+        .then(|| backend.active_call())
+        .flatten()
+        .map(|active| (active.is_camera_on, active.is_sharing_screen));
+      (backend.call_join_failures(), maybe_media)
+    });
+    if call.phase.get_untracked() != CallPhase::Active {
+      seen_join_failures.set(failures);
+      return;
+    }
+    if seen_join_failures.replace(failures) < failures {
+      call.leave();
+    } else if let Some((is_camera_on, is_sharing_screen)) = maybe_media {
+      if call.is_camera_on.get_untracked() != is_camera_on {
+        call.is_camera_on.set(is_camera_on);
+      }
+      if call.is_sharing_screen.get_untracked() != is_sharing_screen {
+        call.is_sharing_screen.set(is_sharing_screen);
+      }
     }
   });
   Effect::new(move |_| {

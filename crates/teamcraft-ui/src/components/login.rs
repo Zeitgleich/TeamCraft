@@ -1104,13 +1104,29 @@ async fn load_backend(
         },
       }
     } else {
-      // Media runs in the desktop shell; the browser has no calls yet.
-      hybrid
+      browser_calls(hybrid)
     };
     return Ok(Rc::new(hybrid));
   }
   let chat = RestChat::load(auth.as_ref(), me, now_ms()).await?;
   Ok(Rc::new(Hybrid::with_live(chat, me.role.clone(), auth)))
+}
+
+/// The browser runs call media in the page (#330), where the browser can and this tab runs the core.
+#[cfg(target_arch = "wasm32")]
+fn browser_calls<C: crate::backend::ChatBackend + 'static>(hybrid: Hybrid<C>) -> Hybrid<C> {
+  match crate::web_calls::support() {
+    Ok(()) => hybrid.with_calls(RemoteCalls::in_page(crate::web_calls::WebCallHost::new())),
+    Err(reason) => {
+      tracing::info!(?reason, "no calls in this tab");
+      hybrid.without_calls(reason)
+    },
+  }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn browser_calls<C: crate::backend::ChatBackend + 'static>(hybrid: Hybrid<C>) -> Hybrid<C> {
+  hybrid
 }
 
 /// Loads spaces, conversations and members from the server, then shows the shell. A failed load

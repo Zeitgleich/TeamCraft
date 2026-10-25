@@ -10430,14 +10430,17 @@ dependencies = [
  "chromiumoxide",
  "futures-util",
  "rand_core 0.6.4",
+ "rcgen",
  "reqwest",
  "serde_json",
+ "sha2 0.11.1",
  "sqlx",
  "teamcraft-client-api",
  "teamcraft-core",
  "teamcraft-crypto",
  "teamcraft-media",
  "teamcraft-proto",
+ "time",
  "tokio",
  "tokio-tungstenite 0.30.0",
 ]
@@ -10495,6 +10498,7 @@ dependencies = [
  "screencapturekit",
  "serde_json",
  "socket2",
+ "teamcraft-client-api",
  "teamcraft-crypto",
  "teamcraft-net",
  "teamcraft-proto",
@@ -10637,6 +10641,7 @@ dependencies = [
  "teamcraft-client-api",
  "teamcraft-core",
  "teamcraft-crypto",
+ "teamcraft-media",
  "teamcraft-proto",
  "thiserror 2.0.21",
  "tracing",
@@ -10653,6 +10658,26 @@ name = "teamcraft-uniffi-bindgen"
 version = "1.0.2"
 dependencies = [
  "uniffi",
+]
+
+[[package]]
+name = "teamcraft-web-calls"
+version = "1.0.2"
+dependencies = [
+ "console_error_panic_hook",
+ "futures",
+ "js-sys",
+ "serde",
+ "serde_json",
+ "teamcraft-client-api",
+ "teamcraft-media",
+ "teamcraft-proto",
+ "tracing",
+ "tracing-subscriber",
+ "tracing-web",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

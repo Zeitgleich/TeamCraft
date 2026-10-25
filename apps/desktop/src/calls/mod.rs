@@ -15,14 +15,14 @@ pub mod commands;
 pub(crate) mod push_to_talk;
 pub(crate) mod video;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use teamcraft_client_api::call_view::CallView;
 use teamcraft_client_api::calls::{
   ActiveCall, BackgroundEffect as UiBackgroundEffect, CallEndReason, CallRequest, CallStatusSounds,
-  IncomingCall, MediaDevice, MediaDevices, Participant, PushToTalk, RemoteVideoTrack, RunningCall,
-  ScreenShareSound,
+  MediaDevice, MediaDevices, PushToTalk, ScreenShareSound,
 };
 use teamcraft_client_api::remote::CallSnapshot;
 use teamcraft_core::CallKeySigner;
@@ -32,19 +32,19 @@ use teamcraft_media::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInf
 use teamcraft_media::audio_processing::AudioProcessingConfig;
 use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{CallBindingSigner, DeviceCallKeyAuthenticator};
-use teamcraft_media::call_cues::StatusCues;
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
 use teamcraft_media::call_native::{
   JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError, TicketFuture,
 };
-use teamcraft_media::call_resilience::{JoinTicket, JoinTicketError};
+use teamcraft_media::call_resilience::{JoinTicket, JoinTicketError, certificate_hash_from_hex};
 use teamcraft_media::call_video::ReceivedVideoFrame;
+use teamcraft_media::call_view::{CallRoster, status_cues};
 use teamcraft_media::effects::{BackgroundImage, EffectHandle};
 use teamcraft_media::system_audio::SystemAudioCapture;
 use teamcraft_media::video_pipeline::{VideoSendConfig, preferred_encoders};
 use teamcraft_proto::{
-  AudioCodec, CallRosterEntry, ConversationId, DeviceId, GatewayEvent, MediaCapabilities, MediaStreamId,
-  UserId, VideoCodec, VideoTrackKind,
+  AudioCodec, ConversationId, DeviceId, GatewayEvent, MediaCapabilities, MediaStreamId, VideoCodec,
+  VideoTrackKind,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -79,9 +79,8 @@ pub struct MediaFiles {
 
 #[derive(Default)]
 struct CallState {
-  running: BTreeMap<ConversationId, RunningCall>,
-  incoming: BTreeMap<ConversationId, IncomingCall>,
-  maybe_active: Option<ActiveCall>,
+  /// Calls, ringing and the active call as the UI shows them.
+  view: CallView,
   devices: MediaDevices,
   microphone: AudioDeviceChoice,
   speakers: AudioDeviceChoice,
@@ -96,10 +95,7 @@ struct CallState {
   maybe_effect_handle: Option<EffectHandle>,
   /// Lets the screen picker remember the last choice.
   maybe_screen_token: Option<String>,
-  /// Others' video in the active call.
-  video_tracks: BTreeMap<MediaStreamId, RemoteVideoTrack>,
   push_to_talk: PushToTalk,
-  maybe_end_reason: Option<CallEndReason>,
   /// Which call status sounds play (the user's setting).
   status_sounds: CallStatusSounds,
 }
@@ -130,19 +126,6 @@ enum Control {
     maybe_max_layer: Option<u8>,
   },
   Leave,
-}
-
-/// Who is who in the call: the engine reports devices, the UI shows people.
-#[derive(Default)]
-struct Roster {
-  own_device: Option<DeviceId>,
-  users_by_device: HashMap<DeviceId, UserId>,
-  sharing_screen: BTreeSet<DeviceId>,
-  video_devices: HashMap<MediaStreamId, DeviceId>,
-  /// This device's published screen track.
-  maybe_own_screen: Option<MediaStreamId>,
-  /// Others' devices whose connection was lost and who are rejoining.
-  reconnecting: BTreeSet<DeviceId>,
 }
 
 /// Gets a watched track's decrypted frames (see `video::h264_sink` and `video::jpeg_sink`).
@@ -185,13 +168,13 @@ impl CallHost {
   pub fn snapshot(&self) -> CallSnapshot {
     let state = lock(&self.state);
     CallSnapshot {
-      maybe_active: state.maybe_active.clone(),
-      incoming: state.incoming.values().copied().collect(),
-      running: state.running.values().cloned().collect(),
+      maybe_active: state.view.maybe_active.clone(),
+      incoming: state.view.incoming.values().copied().collect(),
+      running: state.view.running.values().cloned().collect(),
       devices: state.devices.clone(),
-      video_tracks: state.video_tracks.values().cloned().collect(),
+      video_tracks: state.view.video_tracks.values().cloned().collect(),
       push_to_talk: state.push_to_talk.clone(),
-      maybe_end_reason: state.maybe_end_reason,
+      maybe_end_reason: state.view.maybe_end_reason,
     }
   }
 
@@ -255,25 +238,8 @@ impl CallHost {
     }
     {
       let mut state = lock(&self.state);
-      state.incoming.remove(&request.conversation);
-      state.maybe_active = Some(ActiveCall {
-        conversation: request.conversation,
-        kind: request.kind,
-        is_muted: false,
-        is_deafened: false,
-        is_secured: false,
-        maybe_privacy_code: None,
-        participants: Vec::new(),
-        active_speakers: Vec::new(),
-        is_camera_on: false,
-        is_sharing_screen: false,
-        background: state.background,
-        maybe_muted_by_host: None,
-        screen_sound: ScreenShareSound::Off,
-        is_reconnecting: false,
-        reconnecting: Vec::new(),
-      });
-      state.maybe_end_reason = None;
+      let background = state.background;
+      state.view.start_active(request, background);
     }
     let (controls, control_rx) = mpsc::unbounded_channel();
     lock(&self.video_sinks).clear();
@@ -296,11 +262,7 @@ impl CallHost {
     if let Some(call) = self.media.lock().await.take() {
       call.leave().await;
     }
-    {
-      let mut state = lock(&self.state);
-      state.maybe_active = None;
-      state.video_tracks.clear();
-    }
+    lock(&self.state).view.end_active();
     lock(&self.video_sinks).clear();
     self.changed();
   }
@@ -362,7 +324,7 @@ impl CallHost {
 
   /// Stops ringing on this device; the call goes on for the others.
   pub fn decline(&self, conversation: ConversationId) {
-    lock(&self.state).incoming.remove(&conversation);
+    lock(&self.state).view.decline(conversation);
     self.changed();
   }
 
@@ -604,14 +566,11 @@ impl CallHost {
   }
 
   fn is_camera_on(&self) -> bool {
-    lock(&self.state)
-      .maybe_active
-      .as_ref()
-      .is_some_and(|active| active.is_camera_on)
+    lock(&self.state).view.is_camera_on()
   }
 
   fn update_active(&self, change: impl FnOnce(&mut ActiveCall)) {
-    if let Some(active) = lock(&self.state).maybe_active.as_mut() {
+    if let Some(active) = lock(&self.state).view.maybe_active.as_mut() {
       change(active);
     }
     self.changed();
@@ -625,61 +584,9 @@ impl CallHost {
   }
 
   fn on_gateway_event(&self, event: GatewayEvent) {
-    {
-      let mut state = lock(&self.state);
-      match event {
-        GatewayEvent::CallStart {
-          conversation_id,
-          is_ringing,
-          participants,
-          ..
-        }
-        | GatewayEvent::CallUpdate {
-          conversation_id,
-          is_ringing,
-          participants,
-          ..
-        } => {
-          if !is_ringing {
-            state.incoming.remove(&conversation_id);
-          }
-          state.running.insert(
-            conversation_id,
-            RunningCall {
-              conversation: conversation_id,
-              participants: users_of(&participants),
-              is_ringing,
-            },
-          );
-        },
-        GatewayEvent::CallEnd { conversation_id, .. } => {
-          state.running.remove(&conversation_id);
-          state.incoming.remove(&conversation_id);
-        },
-        GatewayEvent::CallRing {
-          conversation_id,
-          from_user_id,
-          ..
-        } => {
-          let is_in_it = state
-            .maybe_active
-            .as_ref()
-            .is_some_and(|active| active.conversation == conversation_id);
-          if !is_in_it {
-            state.incoming.insert(
-              conversation_id,
-              IncomingCall {
-                caller: from_user_id,
-                conversation: conversation_id,
-                with_video: false,
-              },
-            );
-          }
-        },
-        _ => return,
-      }
+    if lock(&self.state).view.apply_gateway_event(&event) {
+      self.changed();
     }
-    self.changed();
   }
 
   fn changed(&self) {
@@ -752,10 +659,7 @@ async fn run_media(
     notify,
     video_sinks,
   } = shared;
-  let mut roster = Roster {
-    own_device: Some(own_device),
-    ..Roster::default()
-  };
+  let mut roster = CallRoster::new(own_device);
   loop {
     tokio::select! {
       maybe_control = controls.recv() => match maybe_control {
@@ -788,7 +692,7 @@ async fn run_media(
           }
         },
         Some(event) => {
-          if apply_event(&mut roster, &state, event) {
+          if roster.apply(&mut lock(&state).view, event) {
             notify();
           }
         },
@@ -805,223 +709,13 @@ async fn run_media(
     ),
     Err(NativeCallError::ConnectionLost) => {
       tracing::warn!("the connection to the call was lost");
-      lock(&state).maybe_end_reason = Some(CallEndReason::ConnectionLost);
+      lock(&state).view.maybe_end_reason = Some(CallEndReason::ConnectionLost);
     },
     Err(error) => tracing::warn!(%error, "call ended with an error"),
   }
-  {
-    let mut state = lock(&state);
-    state.maybe_active = None;
-    state.video_tracks.clear();
-  }
+  lock(&state).view.end_active();
   lock(&video_sinks).clear();
   notify();
-}
-
-/// Updates the active call from one engine event; `true` if the UI should re-read.
-fn apply_event(roster: &mut Roster, state: &Mutex<CallState>, event: CallEngineEvent) -> bool {
-  let mut state = lock(state);
-  if state.maybe_active.is_none() {
-    return false;
-  }
-  update_video_tracks(roster, &mut state.video_tracks, &event);
-  let Some(active) = state.maybe_active.as_mut() else {
-    return false;
-  };
-  match event {
-    CallEngineEvent::Joined { participants, .. } => {
-      for participant in participants {
-        roster
-          .users_by_device
-          .insert(participant.device_id, participant.user_id);
-      }
-    },
-    CallEngineEvent::ParticipantJoined(participant) => {
-      roster
-        .users_by_device
-        .insert(participant.device_id, participant.user_id);
-    },
-    CallEngineEvent::ParticipantLeft(device_id) => {
-      roster.users_by_device.remove(&device_id);
-      roster.sharing_screen.remove(&device_id);
-      roster.reconnecting.remove(&device_id);
-      active.reconnecting = reconnecting_users(roster);
-    },
-    CallEngineEvent::Reconnecting => {
-      active.is_reconnecting = true;
-      // Who else is away comes again with the SFU's answer to the rejoin.
-      roster.reconnecting.clear();
-      active.reconnecting.clear();
-      return true;
-    },
-    CallEngineEvent::Reconnected => {
-      active.is_reconnecting = false;
-      return true;
-    },
-    CallEngineEvent::ParticipantReconnecting(device_id) => {
-      roster.reconnecting.insert(device_id);
-      active.reconnecting = reconnecting_users(roster);
-      return true;
-    },
-    CallEngineEvent::ParticipantReconnected(device_id) => {
-      roster.reconnecting.remove(&device_id);
-      active.reconnecting = reconnecting_users(roster);
-      return true;
-    },
-    CallEngineEvent::ActiveSpeakers(devices) => {
-      let mut speakers = Vec::new();
-      for user in devices
-        .iter()
-        .filter_map(|device| roster.users_by_device.get(device))
-      {
-        if !speakers.contains(user) {
-          speakers.push(*user);
-        }
-      }
-      active.active_speakers = speakers;
-    },
-    CallEngineEvent::Secured { privacy_code, .. } => {
-      active.is_secured = true;
-      active.maybe_privacy_code = Some(privacy_code);
-    },
-    CallEngineEvent::MuteChanged(is_muted) => {
-      active.is_muted = is_muted;
-      if !is_muted {
-        active.maybe_muted_by_host = None;
-      }
-    },
-    CallEngineEvent::MutedByHost { by_user_id } => active.maybe_muted_by_host = Some(by_user_id),
-    // Our shared sound stopped without us (a host's "mute all"): the share goes on without it.
-    CallEngineEvent::ScreenAudioChanged {
-      device_id,
-      is_shared: false,
-    } if Some(device_id) == roster.own_device => active.screen_sound = ScreenShareSound::Off,
-    CallEngineEvent::RemovedByHost { by_user_id } => {
-      state.maybe_end_reason = Some(CallEndReason::RemovedByHost { by: by_user_id });
-      return true;
-    },
-    CallEngineEvent::EndedByHost { by_user_id } => {
-      state.maybe_end_reason = Some(CallEndReason::EndedByHost { by: by_user_id });
-      return true;
-    },
-    CallEngineEvent::DeafenChanged(is_deafened) => active.is_deafened = is_deafened,
-    CallEngineEvent::VideoPublished(track) if track.kind == VideoTrackKind::Screen => {
-      roster.sharing_screen.insert(track.device_id);
-      if Some(track.device_id) == roster.own_device {
-        roster.maybe_own_screen = Some(track.stream_id);
-      }
-    },
-    // Our share ended without the stop button (from the system's indicator): its sound stopped
-    // with it (call_native), and the UI must not show a share that isn't there.
-    CallEngineEvent::VideoUnpublished(stream_id) if roster.maybe_own_screen == Some(stream_id) => {
-      roster.maybe_own_screen = None;
-      if let Some(device) = roster.own_device {
-        roster.sharing_screen.remove(&device);
-      }
-      active.is_sharing_screen = false;
-      active.screen_sound = ScreenShareSound::Off;
-    },
-    // Remote tracks changed (see update_video_tracks); the snapshot lists them.
-    CallEngineEvent::VideoPublished(_) | CallEngineEvent::VideoUnpublished(_) => {},
-    CallEngineEvent::Error(error) => {
-      tracing::warn!(error_code = ?error.error_code, "the SFU rejected a call request");
-      return false;
-    },
-    CallEngineEvent::UntrustedRoster | CallEngineEvent::UnauthenticatedKeys => {
-      // The desktop always passes a roster and an authenticator; seeing these is a bug.
-      tracing::warn!(?event, "call runs without full verification");
-      return false;
-    },
-    _ => return false,
-  }
-  active.participants = participants(roster);
-  true
-}
-
-/// Keeps the list of others' video tracks (and which device sends each) current.
-fn update_video_tracks(
-  roster: &mut Roster,
-  tracks: &mut BTreeMap<MediaStreamId, RemoteVideoTrack>,
-  event: &CallEngineEvent,
-) {
-  match event {
-    CallEngineEvent::VideoPublished(track) if Some(track.device_id) != roster.own_device => {
-      roster.video_devices.insert(track.stream_id, track.device_id);
-      if let Some(user) = roster.users_by_device.get(&track.device_id) {
-        tracks.insert(
-          track.stream_id,
-          RemoteVideoTrack {
-            stream_id: track.stream_id,
-            user: *user,
-            kind: track.kind.clone(),
-            layers: track
-              .layers
-              .iter()
-              .map(|layer| (layer.width, layer.height))
-              .collect(),
-          },
-        );
-      }
-    },
-    CallEngineEvent::VideoUnpublished(stream_id) => {
-      if let (Some(track), Some(device)) = (tracks.remove(stream_id), roster.video_devices.remove(stream_id))
-        && track.kind == VideoTrackKind::Screen
-      {
-        roster.sharing_screen.remove(&device);
-      }
-    },
-    CallEngineEvent::ParticipantLeft(device_id) => {
-      roster.video_devices.retain(|stream_id, device| {
-        let keeps = device != device_id;
-        if !keeps {
-          tracks.remove(stream_id);
-        }
-        keeps
-      });
-    },
-    _ => {},
-  }
-}
-
-fn status_cues(sounds: CallStatusSounds) -> StatusCues {
-  match sounds {
-    CallStatusSounds::All | CallStatusSounds::Unknown => StatusCues::All,
-    CallStatusSounds::OwnOnly => StatusCues::OwnOnly,
-    CallStatusSounds::Off => StatusCues::Off,
-  }
-}
-
-/// People all of whose devices in the call are reconnecting.
-fn reconnecting_users(roster: &Roster) -> Vec<UserId> {
-  let mut users: BTreeSet<UserId> = roster
-    .reconnecting
-    .iter()
-    .filter_map(|device| roster.users_by_device.get(device).copied())
-    .collect();
-  users.retain(|user| {
-    roster
-      .users_by_device
-      .iter()
-      .filter(|(_, owner)| *owner == user)
-      .all(|(device, _)| roster.reconnecting.contains(device))
-  });
-  users.into_iter().collect()
-}
-
-fn participants(roster: &Roster) -> Vec<Participant> {
-  let mut by_user: BTreeMap<UserId, Participant> = BTreeMap::new();
-  for (device, user) in &roster.users_by_device {
-    let participant = by_user.entry(*user).or_insert(Participant {
-      user: *user,
-      // The SFU doesn't report others' mute state yet; silence shows as not speaking.
-      is_muted: false,
-      is_camera_on: false,
-      has_hand_raised: false,
-      is_sharing_screen: false,
-    });
-    participant.is_sharing_screen |= roster.sharing_screen.contains(device);
-  }
-  by_user.into_values().collect()
 }
 
 /// The native call for a prepared join: device-bound DAVE keys, and only the conversation's
@@ -1045,13 +739,20 @@ fn native_config(
   let authenticator =
     DeviceCallKeyAuthenticator::from_verified(Arc::new(CoreSigner(preparation.signer)), preparation.devices)
       .map_err(|error| error.to_string())?;
+  // The native driver pins one certificate: the first the server names.
+  let maybe_server_hash = preparation
+    .join
+    .sfu_certificate_sha256
+    .first()
+    .and_then(|hash| certificate_hash_from_hex(hash));
   let mut config = NativeCallConfig::device_bound(
     preparation.join.sfu_url,
     preparation.join.token,
     engine,
     authenticator,
   );
-  config.maybe_certificate_hash = certificate_hash_from_env()?;
+  // A development SFU's certificate: pinned here, or announced by the server with the token.
+  config.maybe_certificate_hash = certificate_hash_from_env()?.or(maybe_server_hash);
   config.source = AudioSource::Microphone(microphone);
   config.sink = AudioSink::Speakers(speakers);
   config.maybe_processing = Some(AudioProcessingConfig::default());
@@ -1062,23 +763,9 @@ fn certificate_hash_from_env() -> Result<Option<[u8; 32]>, String> {
   let Ok(value) = std::env::var(CERT_HASH_VARIABLE) else {
     return Ok(None);
   };
-  let hex: String = value.chars().filter(|c| *c != ':').collect();
-  if hex.len() != 64 {
-    return Err(format!("{CERT_HASH_VARIABLE} needs 32 bytes as hex"));
-  }
-  let mut hash = [0u8; 32];
-  for (index, byte) in hash.iter_mut().enumerate() {
-    *byte = u8::from_str_radix(&hex[2 * index..2 * index + 2], 16)
-      .map_err(|_| format!("{CERT_HASH_VARIABLE} is not hex"))?;
-  }
-  Ok(Some(hash))
-}
-
-fn users_of(entries: &[CallRosterEntry]) -> Vec<UserId> {
-  let mut users: Vec<UserId> = entries.iter().map(|entry| entry.user_id).collect();
-  users.sort_unstable();
-  users.dedup();
-  users
+  certificate_hash_from_hex(&value)
+    .map(Some)
+    .ok_or_else(|| format!("{CERT_HASH_VARIABLE} needs 32 bytes as hex"))
 }
 
 fn media_device(info: &AudioDeviceInfo) -> MediaDevice {
@@ -1102,253 +789,21 @@ fn lock<T>(state: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-  use teamcraft_proto::{
-    CallId, CallParticipant, Id, MediaStreamId, Snowflake, UnixMillis, VideoCodec, VideoTrack,
-  };
+  use teamcraft_proto::{CallId, Id, Snowflake, UserId};
 
   use super::*;
 
-  mod ringing {
-    use super::*;
-
-    #[test]
-    fn ring_shows_until_the_call_stops_ringing() {
-      let host = host();
-      host.on_gateway_event(GatewayEvent::CallRing {
-        conversation_id: conversation(5),
-        call_id: call(),
-        from_user_id: user(1),
-      });
-      assert_eq!(host.snapshot().incoming.len(), 1);
-      host.on_gateway_event(GatewayEvent::CallUpdate {
-        conversation_id: conversation(5),
-        call_id: call(),
-        is_ringing: false,
-        participants: vec![entry(1, 10), entry(2, 20), entry(2, 21)],
-      });
-      let snapshot = host.snapshot();
-      assert!(snapshot.incoming.is_empty());
-      assert_eq!(snapshot.running[0].participants, vec![user(1), user(2)]);
-      host.on_gateway_event(GatewayEvent::CallEnd {
-        conversation_id: conversation(5),
-        call_id: call(),
-      });
-      assert!(host.snapshot().running.is_empty());
-    }
-
-    #[test]
-    fn declined_ring_disappears_but_the_call_stays_listed() {
-      let host = host();
-      host.on_gateway_event(GatewayEvent::CallStart {
-        conversation_id: conversation(5),
-        call_id: call(),
-        started_by: user(1),
-        started_at: UnixMillis(0),
-        is_ringing: true,
-        participants: vec![entry(1, 10)],
-      });
-      host.on_gateway_event(GatewayEvent::CallRing {
-        conversation_id: conversation(5),
-        call_id: call(),
-        from_user_id: user(1),
-      });
-      host.decline(conversation(5));
-      let snapshot = host.snapshot();
-      assert!(snapshot.incoming.is_empty());
-      assert_eq!(snapshot.running.len(), 1);
-    }
-  }
-
-  mod media_events {
-    use super::*;
-
-    #[test]
-    fn devices_become_people_and_speakers() {
-      let state = Mutex::new(CallState {
-        maybe_active: Some(active()),
-        ..CallState::default()
-      });
-      let mut roster = Roster::default();
-      apply_event(
-        &mut roster,
-        &state,
-        CallEngineEvent::Joined {
-          call_id: call(),
-          participants: vec![participant(1, 10), participant(1, 11)],
-        },
-      );
-      apply_event(
-        &mut roster,
-        &state,
-        CallEngineEvent::ParticipantJoined(participant(2, 20)),
-      );
-      apply_event(
-        &mut roster,
-        &state,
-        CallEngineEvent::ActiveSpeakers(vec![device(11), device(10), device(20)]),
-      );
-      apply_event(
-        &mut roster,
-        &state,
-        CallEngineEvent::VideoPublished(VideoTrack {
-          stream_id: MediaStreamId(9),
-          device_id: device(20),
-          kind: VideoTrackKind::Screen,
-          codec: VideoCodec::Vp9,
-          layers: Vec::new(),
-        }),
-      );
-      assert!(apply_event(
-        &mut roster,
-        &state,
-        CallEngineEvent::Secured {
-          epoch: 1,
-          privacy_code: "123".into(),
-        },
-      ));
-      let active = lock(&state).maybe_active.clone().unwrap();
-      assert_eq!(active.active_speakers, vec![user(1), user(2)]);
-      assert_eq!(active.participants.len(), 2, "one entry per person");
-      assert!(
-        active
-          .participants
-          .iter()
-          .any(|p| p.user == user(2) && p.is_sharing_screen)
-      );
-      assert!(active.is_secured);
-      assert_eq!(active.maybe_privacy_code.as_deref(), Some("123"));
-    }
-
-    #[test]
-    fn others_video_tracks_are_listed_until_unpublished() {
-      let state = Mutex::new(CallState {
-        maybe_active: Some(active()),
-        ..CallState::default()
-      });
-      let mut roster = Roster {
-        own_device: Some(device(10)),
-        ..Roster::default()
-      };
-      apply_event(
-        &mut roster,
-        &state,
-        CallEngineEvent::ParticipantJoined(participant(2, 20)),
-      );
-      for (owner, stream) in [(20, 7), (10, 8)] {
-        apply_event(
-          &mut roster,
-          &state,
-          CallEngineEvent::VideoPublished(VideoTrack {
-            stream_id: MediaStreamId(stream),
-            device_id: device(owner),
-            kind: VideoTrackKind::Camera,
-            codec: VideoCodec::H264,
-            layers: Vec::new(),
-          }),
-        );
-      }
-      let tracks: Vec<MediaStreamId> = lock(&state).video_tracks.keys().copied().collect();
-      assert_eq!(tracks, vec![MediaStreamId(7)], "own track not listed");
-      assert_eq!(lock(&state).video_tracks[&MediaStreamId(7)].user, user(2));
-      apply_event(
-        &mut roster,
-        &state,
-        CallEngineEvent::VideoUnpublished(MediaStreamId(7)),
-      );
-      assert!(lock(&state).video_tracks.is_empty());
-    }
-
-    #[test]
-    fn a_share_ended_from_the_system_ends_in_the_ui_with_its_sound() {
-      let mut sharing = active();
-      sharing.is_sharing_screen = true;
-      sharing.screen_sound = ScreenShareSound::Shared;
-      let state = Mutex::new(CallState {
-        maybe_active: Some(sharing),
-        ..CallState::default()
-      });
-      let mut roster = Roster {
-        own_device: Some(device(10)),
-        ..Roster::default()
-      };
-      apply_event(
-        &mut roster,
-        &state,
-        CallEngineEvent::VideoPublished(VideoTrack {
-          stream_id: MediaStreamId(8),
-          device_id: device(10),
-          kind: VideoTrackKind::Screen,
-          codec: VideoCodec::H264,
-          layers: Vec::new(),
-        }),
-      );
-      // The capture ended without the stop button; the media driver unpublished the track.
-      apply_event(
-        &mut roster,
-        &state,
-        CallEngineEvent::VideoUnpublished(MediaStreamId(8)),
-      );
-      let state = lock(&state);
-      let active = state.maybe_active.as_ref().unwrap();
-      assert!(!active.is_sharing_screen);
-      assert_eq!(active.screen_sound, ScreenShareSound::Off);
-    }
-
-    #[test]
-    fn reconnecting_shows_for_this_device_and_for_people_whose_devices_are_all_away() {
-      let state = Mutex::new(CallState {
-        maybe_active: Some(active()),
-        ..CallState::default()
-      });
-      let mut roster = Roster::default();
-      let joined = CallEngineEvent::Joined {
-        call_id: call(),
-        participants: vec![participant(2, 20), participant(2, 21), participant(3, 30)],
-      };
-      apply_event(&mut roster, &state, joined);
-      let reconnecting = |roster: &mut Roster, device_id: i64| {
-        apply_event(
-          roster,
-          &state,
-          CallEngineEvent::ParticipantReconnecting(device(device_id)),
-        );
-        lock(&state).maybe_active.as_ref().unwrap().reconnecting.clone()
-      };
-      assert_eq!(reconnecting(&mut roster, 30), vec![user(3)]);
-      // One of two devices away: the person is still there.
-      assert_eq!(reconnecting(&mut roster, 20), vec![user(3)]);
-      apply_event(
-        &mut roster,
-        &state,
-        CallEngineEvent::ParticipantReconnected(device(30)),
-      );
-      assert!(
-        lock(&state)
-          .maybe_active
-          .as_ref()
-          .unwrap()
-          .reconnecting
-          .is_empty()
-      );
-
-      assert!(apply_event(&mut roster, &state, CallEngineEvent::Reconnecting));
-      assert!(lock(&state).maybe_active.as_ref().unwrap().is_reconnecting);
-      apply_event(&mut roster, &state, CallEngineEvent::Reconnected);
-      assert!(!lock(&state).maybe_active.as_ref().unwrap().is_reconnecting);
-    }
-
-    #[test]
-    fn audio_frames_do_not_wake_the_ui() {
-      let state = Mutex::new(CallState {
-        maybe_active: Some(active()),
-        ..CallState::default()
-      });
-      let event = CallEngineEvent::UplinkEstimate {
-        bps: 1,
-        loss_percent: 0,
-      };
-      assert!(!apply_event(&mut Roster::default(), &state, event));
-    }
+  #[test]
+  fn gateway_ring_reaches_the_snapshot_until_declined() {
+    let host = host();
+    host.on_gateway_event(GatewayEvent::CallRing {
+      conversation_id: conversation(5),
+      call_id: CallId::from_snowflake(Snowflake::new(99).unwrap()),
+      from_user_id: UserId::from_snowflake(Snowflake::new(1).unwrap()),
+    });
+    assert_eq!(host.snapshot().incoming.len(), 1);
+    host.decline(conversation(5));
+    assert!(host.snapshot().incoming.is_empty());
   }
 
   #[tokio::test]
@@ -1396,54 +851,7 @@ mod tests {
     )
   }
 
-  fn active() -> ActiveCall {
-    ActiveCall {
-      conversation: conversation(5),
-      kind: teamcraft_client_api::calls::CallKind::Group,
-      is_muted: false,
-      is_deafened: false,
-      is_secured: false,
-      maybe_privacy_code: None,
-      participants: Vec::new(),
-      active_speakers: Vec::new(),
-      is_camera_on: false,
-      is_sharing_screen: false,
-      background: UiBackgroundEffect::None,
-      maybe_muted_by_host: None,
-      screen_sound: ScreenShareSound::Off,
-      is_reconnecting: false,
-      reconnecting: Vec::new(),
-    }
-  }
-
-  fn participant(user_id: i64, device_id: i64) -> CallParticipant {
-    CallParticipant {
-      user_id: user(user_id),
-      device_id: device(device_id),
-      audio_stream_id: MediaStreamId(1),
-    }
-  }
-
-  fn entry(user_id: i64, device_id: i64) -> CallRosterEntry {
-    CallRosterEntry {
-      user_id: user(user_id),
-      device_id: device(device_id),
-    }
-  }
-
-  fn call() -> CallId {
-    CallId::from_snowflake(Snowflake::new(99).unwrap())
-  }
-
   fn conversation(raw: i64) -> ConversationId {
     ConversationId::from_snowflake(Snowflake::new(raw).unwrap())
-  }
-
-  fn user(raw: i64) -> UserId {
-    UserId::from_snowflake(Snowflake::new(raw).unwrap())
-  }
-
-  fn device(raw: i64) -> DeviceId {
-    DeviceId::from_snowflake(Snowflake::new(raw).unwrap())
   }
 }

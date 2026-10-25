@@ -50,8 +50,8 @@ mod convert;
 mod trust;
 
 pub use client::{
-  AttestationSettings, CallEventSink, CallKeySigner, Client, ClientSettings, EnrollmentOptions,
-  EnrollmentSecret, FlushReport, GatewayOutcome, GroupAccess, JwksSource, LinkOffer, MAX_VIEWER_BYTES,
-  OrgRecoveryUnlock, PendingEnrollment, TypingState,
+  AttestationSettings, CallEventSink, CallKeySigner, CallPreparation, Client, ClientSettings,
+  EnrollmentOptions, EnrollmentSecret, FlushReport, GatewayOutcome, GroupAccess, JwksSource, LinkOffer,
+  MAX_VIEWER_BYTES, OrgRecoveryUnlock, PendingEnrollment, TypingState,
 };
 pub use error::CoreError;

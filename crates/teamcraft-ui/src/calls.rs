@@ -92,21 +92,28 @@ impl CallState {
     }
   }
 
-  /// Microphone on or off, in the UI and in the call.
+  /// Microphone on or off, in the UI and in the call. Before joining (the pre-join screen) it is
+  /// only the choice the call starts with.
   pub fn set_muted(&self, is_muted: bool) {
     self.is_mic_on.set(!is_muted);
-    self.emit(CallEvent::Muted(is_muted));
+    self.emit_in_call(CallEvent::Muted(is_muted));
   }
 
   pub fn set_deafened(&self, is_deafened: bool) {
     self.is_deafened.set(is_deafened);
-    self.emit(CallEvent::Deafened(is_deafened));
+    self.emit_in_call(CallEvent::Deafened(is_deafened));
   }
 
-  /// Camera on or off, in the UI and in the call.
+  /// Camera on or off, in the UI and in the call (or the choice the call starts with).
   pub fn set_camera(&self, is_on: bool) {
     self.is_camera_on.set(is_on);
-    self.emit(CallEvent::Camera(is_on));
+    self.emit_in_call(CallEvent::Camera(is_on));
+  }
+
+  fn emit_in_call(&self, event: CallEvent) {
+    if self.phase.get_untracked() == CallPhase::Active {
+      self.emit(event);
+    }
   }
 
   /// Starts sharing (with the sound if the user chose so) or stops.
@@ -151,9 +158,19 @@ impl CallState {
     self.is_minimized.set(is_huddle);
     self.is_sharing_screen.set(false);
     self.has_hand_raised.set(false);
+    self.is_deafened.set(false);
     self.phase.set(CallPhase::Active);
     if let Some(request) = self.maybe_request.get_untracked() {
       self.emit(CallEvent::Join(request));
+      // The choices of the pre-join screen (or the settings), applied once joined: the backend
+      // carries out actions in order. The phone button joins with the camera off and never asks
+      // for it.
+      if !self.is_mic_on.get_untracked() {
+        self.emit(CallEvent::Muted(true));
+      }
+      if self.is_camera_on.get_untracked() {
+        self.emit(CallEvent::Camera(true));
+      }
     }
   }
 

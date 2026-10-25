@@ -238,6 +238,7 @@ mod calls {
       maybe_sfu_registration_token: Some(SFU_TOKEN.to_owned().into()),
       ring_timeout_secs: 30,
       maybe_sfu_control_url: None,
+      maybe_sfu_certificate_sha256: None,
     }
   }
 

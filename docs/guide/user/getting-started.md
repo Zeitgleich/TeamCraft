@@ -11,7 +11,7 @@ How to sign in and set up your first device. Pages say which features come with 
 | Windows | In preparation                                                                                    |
 | Android | Chat, threads, files, search, meetings, calls, push; admin screens stay on desktop and web        |
 | iOS     | In preparation                                                                                    |
-| Web     | Served by your server. Runs the same encrypted client in the page; push works with the tab closed |
+| Web     | Served by your server. The encrypted client in the page, calls included; push with the tab closed |
 
 Your admin gives you the server address and tells you which client to install. The web app checks
 a signed release before it updates itself; the desktop and mobile apps carry their own code, which

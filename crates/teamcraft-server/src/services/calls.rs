@@ -36,6 +36,8 @@ pub struct CallService {
   signing_key: EncodingKey,
   issuer: String,
   sfu_url: String,
+  /// The SFU certificates' SHA-256s (lowercase hex) for browsers, when they are self-signed.
+  sfu_certificate_sha256: Vec<String>,
   token_ttl: Duration,
   call_idle_timeout: Duration,
   ring_timeout: Duration,
@@ -117,6 +119,8 @@ pub enum CallsSetupError {
   InvalidKey(#[from] jsonwebtoken::errors::Error),
   #[error("setting up the SFU control client failed: {0}")]
   Control(String),
+  #[error("sfu_certificate_sha256 must be 32 bytes as hex: {0:?}")]
+  InvalidCertificateHash(String),
 }
 
 impl ActiveCall {
@@ -151,6 +155,15 @@ impl CallService {
       signing_key: EncodingKey::from_ed_pem(signing_key_pem)?,
       issuer: config.issuer.clone(),
       sfu_url: config.sfu_url.clone(),
+      sfu_certificate_sha256: config
+        .maybe_sfu_certificate_sha256
+        .as_deref()
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|hash| !hash.is_empty())
+        .map(normalized_sha256)
+        .collect::<Result<_, _>>()?,
       token_ttl: Duration::from_secs(config.join_token_ttl_secs),
       call_idle_timeout: Duration::from_secs(config.call_idle_secs),
       ring_timeout: Duration::from_secs(config.ring_timeout_secs),
@@ -488,7 +501,22 @@ pub async fn create_join_token(
     token: calls.sign(&claims)?,
     sfu_url: calls.sfu_url.clone(),
     expires_at: UnixMillis(i64::try_from(claims.exp).unwrap_or(i64::MAX).saturating_mul(1000)),
+    sfu_certificate_sha256: calls.sfu_certificate_sha256.clone(),
   })
+}
+
+/// A SHA-256 written as hex, with or without colons, as 64 lowercase hex digits.
+fn normalized_sha256(text: &str) -> Result<String, CallsSetupError> {
+  let hex: String = text
+    .chars()
+    .filter(|c| *c != ':')
+    .map(|c| c.to_ascii_lowercase())
+    .collect();
+  if hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+    Ok(hex)
+  } else {
+    Err(CallsSetupError::InvalidCertificateHash(text.to_owned()))
+  }
 }
 
 /// A meeting that is over, a lock and removals by the host keep people out of its call. A lock
@@ -858,6 +886,23 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
 ";
   const NOW_UNIX_SECS: u64 = 1_800_000_000;
 
+  #[test]
+  fn the_sfu_certificate_hash_is_normalized_or_refused() {
+    let dotted = vec!["AB"; 32].join(":");
+    let mut config = config();
+    config.maybe_sfu_certificate_sha256 = Some(format!("{dotted}, {}", "cd".repeat(32)));
+    let service = CallService::new(&config, TEST_SIGNING_KEY_PEM.as_bytes()).unwrap();
+    assert_eq!(
+      service.sfu_certificate_sha256,
+      vec!["ab".repeat(32), "cd".repeat(32)]
+    );
+    config.maybe_sfu_certificate_sha256 = Some("abc".into());
+    assert!(matches!(
+      CallService::new(&config, TEST_SIGNING_KEY_PEM.as_bytes()),
+      Err(CallsSetupError::InvalidCertificateHash(_))
+    ));
+  }
+
   mod tokens {
     use super::*;
 
@@ -954,6 +999,7 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
       maybe_sfu_registration_token: None,
       ring_timeout_secs: 30,
       maybe_sfu_control_url: None,
+      maybe_sfu_certificate_sha256: None,
     }
   }
 

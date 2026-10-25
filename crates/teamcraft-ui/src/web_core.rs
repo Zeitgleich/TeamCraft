@@ -44,8 +44,8 @@ use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
 use teamcraft_core::ui_snapshot::SnapshotCache;
 use teamcraft_core::upkeep::{self, Upkeep};
 use teamcraft_core::{
-  Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer, PendingEnrollment,
-  platform,
+  CallPreparation, Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer,
+  PendingEnrollment, platform,
 };
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::identity::IdentityPublicKey;
@@ -171,6 +171,27 @@ pub fn is_notifying_tab() -> bool {
 /// Calls `callback` whenever the core's data changed.
 pub fn listen(callback: impl FnMut() + 'static) {
   LISTENERS.with(|listeners| listeners.borrow_mut().push(Rc::new(RefCell::new(callback))));
+}
+
+/// Whether the core runs in this tab (not in another tab this one follows). Calls need it: the
+/// device key that signs a call's keys stays with the core.
+pub fn runs_here() -> bool {
+  RUNNING.with(|running| matches!(running.borrow().as_ref(), Some(Running::Owner { .. })))
+}
+
+/// A join token, the signer and the verified devices for the conversation's call (e2ee.md §8).
+/// Only in the tab that runs the core.
+pub async fn prepare_call(conversation: ConversationId) -> Result<CallPreparation, String> {
+  ask(|reply| Request::PrepareCall(conversation, reply)).await?
+}
+
+/// Whether the workspace requires an organization background behind the camera image for this
+/// user (admin.md §3.5). Unknown restricts nothing, as on desktop.
+pub async fn requires_org_background() -> bool {
+  match ask(|reply| Request::Query(ChatQuery::OrgBackgrounds, reply)).await {
+    Ok(Ok(ChatAnswer::OrgBackgrounds { backgrounds })) => backgrounds.is_required(),
+    _ => false,
+  }
 }
 
 /// Answers one `core_*` command the way the desktop shell does.
@@ -577,6 +598,8 @@ enum Request {
   ApprovalCancel,
   /// The browser went online, the tab became visible or was resumed: check the connection now.
   NetworkChanged,
+  /// What joining a conversation's call needs (`web_calls`).
+  PrepareCall(ConversationId, oneshot::Sender<Result<CallPreparation, String>>),
   /// The user opened a conversation; a running catch-up takes it next (issue #247).
   Focus(ConversationId),
 }
@@ -858,6 +881,9 @@ impl Core {
       Box::new(SystemClock),
     ));
     self.catch_up_focus = client.catch_up_focus();
+    let mut client = client;
+    // Calls ring and show their roster in the tab that runs the core.
+    client.set_call_event_sink(Box::new(crate::web_calls::on_gateway_event));
     self.client = Some(client);
     self.maybe_push_check_at_ms = Some(i64::MIN);
     store_string(&self.store_ready_key(), "1");
@@ -928,6 +954,13 @@ impl Core {
       },
       Request::ApprovalCancel => self.approval = None,
       Request::NetworkChanged => self.connection.network_changed(now_ms()).await,
+      Request::PrepareCall(conversation, reply) => {
+        let result = match self.client.as_mut() {
+          Some(client) => client.prepare_call(conversation).await.map_err(describe_failure),
+          None => Err(not_set_up()),
+        };
+        drop(reply.send(result));
+      },
       // async-ok: the core's catch-up focus (a shared cell), not a signal.
       Request::Focus(conversation) => self.catch_up_focus.set(conversation),
       Request::Snapshot(reply) => drop(reply.send(self.snapshot())),

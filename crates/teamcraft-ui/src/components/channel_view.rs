@@ -775,7 +775,7 @@ fn CallButtons(conversation: ConversationId, info: Memo<Option<Conversation>>) -
     Some(ConversationKind::Direct) => CallKind::Direct,
     _ => CallKind::Group,
   };
-  // Without call support (the browser until #330) the buttons still show and say where calls are.
+  // Without call support (an old browser, a second tab) the buttons still show and say why.
   let has_calls = state.read(|backend| backend.has_calls());
   let is_callable = move || kind().is_some_and(|kind| kind != ConversationKind::Integration);
   let is_channel =

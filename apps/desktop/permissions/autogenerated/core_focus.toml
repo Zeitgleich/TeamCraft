@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-core-focus"
+description = "Enables the core_focus command without any pre-configured scope."
+commands.allow = ["core_focus"]
+
+[[permission]]
+identifier = "deny-core-focus"
+description = "Denies the core_focus command without any pre-configured scope."
+commands.deny = ["core_focus"]

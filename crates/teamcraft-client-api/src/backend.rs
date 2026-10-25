@@ -26,7 +26,7 @@ use crate::admin::{
 };
 use crate::calls::{
   ActiveCall, BackgroundEffect, BackgroundImageInfo, CallHistoryItem, CallRequest, CallStatusSounds,
-  HuddleInfo, IncomingCall, MediaDevices, Participant,
+  CallsUnavailableReason, HuddleInfo, IncomingCall, MediaDevices, Participant, RemoteVideoTrack,
 };
 use crate::calls::{OrgBackgroundRule, OrgBackgrounds};
 use crate::model::{
@@ -467,6 +467,38 @@ pub trait CallBackend {
   /// buttons instead of a call screen that connects nowhere.
   fn has_calls(&self) -> bool {
     false
+  }
+
+  /// Why [`CallBackend::has_calls`] is `false`, for the dialog the call buttons open then.
+  fn calls_unavailable_reason(&self) -> CallsUnavailableReason {
+    CallsUnavailableReason::NotInThisApp
+  }
+
+  /// Calls are a simulation (the development demo): speaking, levels and codes are made up.
+  fn has_simulated_calls(&self) -> bool {
+    false
+  }
+
+  /// Whether the camera image can get a background effect here. Without, the UI offers none.
+  fn has_background_effects(&self) -> bool {
+    true
+  }
+
+  /// Counts joins that failed since the app started (a refused microphone, an unreachable call
+  /// server), so the UI can leave the call screen it opened for them.
+  fn call_join_failures(&self) -> u64 {
+    0
+  }
+
+  /// Whether call actions the user took are still being carried out. Until they are, the UI keeps
+  /// its own idea of the camera and screen share instead of the media layer's.
+  fn has_pending_call_actions(&self) -> bool {
+    false
+  }
+
+  /// Others' video in the active call.
+  fn call_video_tracks(&self) -> Vec<RemoteVideoTrack> {
+    Vec::new()
   }
 
   /// The call this device is in.
