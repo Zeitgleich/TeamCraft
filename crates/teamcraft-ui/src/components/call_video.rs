@@ -126,6 +126,31 @@ pub fn can_show_video() -> bool {
   }
 }
 
+/// Whether this page can share the screen: the desktop app always, a browser only with
+/// `getDisplayMedia` (phones' browsers have none, so the button is hidden there).
+pub fn can_share_screen() -> bool {
+  #[cfg(target_arch = "wasm32")]
+  {
+    crate::auth::tauri::is_available() || has_display_media()
+  }
+  #[cfg(not(target_arch = "wasm32"))]
+  {
+    true
+  }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn has_display_media() -> bool {
+  use js_sys::Reflect;
+  let Some(window) = web_sys::window() else {
+    return false;
+  };
+  // Looked up by name: `mediaDevices` is missing outside secure contexts, `getDisplayMedia` on phones.
+  Reflect::get(&window.navigator(), &"mediaDevices".into())
+    .and_then(|devices| Reflect::get(&devices, &"getDisplayMedia".into()))
+    .is_ok_and(|function| function.is_function())
+}
+
 /// Real call video: another device's track drawn into a canvas, or the own camera; the call
 /// module (browser) or the shell's video (desktop) makes the element. A track is watched only
 /// while its tile is on screen and the window is visible, so tracks nobody looks at aren't

@@ -301,6 +301,7 @@ control-mic-mute = Mikrofon stummschalten
 control-mic-unmute = Mikrofon einschalten
 control-camera-off = Kamera ausschalten
 control-camera-on = Kamera einschalten
+control-camera-flip = Kamera wechseln
 share-start = Bildschirm teilen
 share-stop = Teilen beenden
 share-options = Bildschirm teilen
