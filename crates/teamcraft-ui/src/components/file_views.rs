@@ -26,7 +26,7 @@ use crate::i18n::{I18n, use_i18n};
 use crate::lightbox::{MediaKey, MediaKind};
 use crate::media_cache::{self, Rendition};
 use crate::media_formats::animation_label;
-use crate::media_layout::{fit_picture, inline_size, loads_inline, thumbnail_size, thumbnail_type};
+use crate::media_layout::{EmbedImage, fit_picture, inline_size, loads_inline, thumbnail_size};
 use crate::model::{ConversationId, MessageId};
 use crate::object_url::{FetchError, ObjectUrl};
 use crate::state::{AppState, Overlay, use_app_state};
@@ -226,6 +226,7 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
       >
         <button
           class="media-open"
+          data-media-key=key.dom_key()
           aria-label=move || i18n.t_with("media-open", &[("name", &label)])
           on:click=move |_| state.overlay.set(Overlay::Lightbox(conversation, key))
         >
@@ -392,6 +393,7 @@ pub fn FileCard(file: FileInfo) -> impl IntoView {
     (Some(src), Some(key)) => view! {
       <button
         class="file-thumb"
+        data-media-key=key.dom_key()
         aria-label=move || i18n.t("file-preview")
         on:click=move |_| state.overlay.set(Overlay::Lightbox(conversation, key))
       >
@@ -695,30 +697,47 @@ impl FileActions {
 #[component]
 pub fn LinkPreviewCard(preview: LinkPreview) -> impl IntoView {
   let i18n = use_i18n();
-  let image = preview
-    .maybe_image
-    .as_deref()
-    .and_then(|bytes| blob_url(bytes, thumbnail_type(bytes)));
+  let layout = EmbedImage::of(preview.maybe_image.as_deref().and_then(thumbnail_size));
+  let picture = preview.maybe_image.as_deref().and_then(ObjectUrl::from_thumbnail);
+  let image = picture.as_ref().map(|url| url.as_str().to_owned());
+  // Revoked when the card leaves the screen; every render of a row made a new one (issue #399).
+  StoredValue::new_local(picture);
   let title = preview.maybe_title.clone().unwrap_or_else(|| preview.url.clone());
   // Only web links open from here; anything else would be a way to run a script.
   let is_web_link = preview.url.starts_with("https://") || preview.url.starts_with("http://");
+  // The box is reserved from the header's ratio, so the card doesn't move when the picture loads.
+  let wide_image = image.clone().zip(match layout {
+    EmbedImage::Wide { aspect_ratio } => Some(aspect_ratio),
+    EmbedImage::Thumbnail => None,
+  });
+  let has_wide_image = wide_image.is_some();
+  let thumbnail = match layout {
+    EmbedImage::Thumbnail => image,
+    EmbedImage::Wide { .. } => None,
+  };
   view! {
-    <div class="link-preview">
-      {image.map(|url| view! { <img class="preview-image" src=url alt="" loading="lazy" /> })}
-      <div class="preview-text">
-        {preview.maybe_site_name.map(|site| view! { <span class="preview-site" translate="no">{site}</span> })}
+    <div class="embed-card" class:has-wide-image=has_wide_image>
+      <div class="embed-text">
+        {preview.maybe_site_name.map(|site| view! { <span class="embed-site" translate="no">{site}</span> })}
         {if is_web_link {
           view! {
-            <a href=preview.url.clone() target="_blank" rel="noopener noreferrer nofollow" translate="no" aria-label=move || i18n.t("link-open-new")>
+            <a class="embed-title" href=preview.url.clone() target="_blank" rel="noopener noreferrer nofollow" translate="no" aria-label=move || i18n.t("link-open-new")>
               {title}
             </a>
           }
           .into_any()
         } else {
-          view! { <span translate="no">{title}</span> }.into_any()
+          view! { <span class="embed-title" translate="no">{title}</span> }.into_any()
         }}
-        {preview.maybe_description.map(|text| view! { <span class="preview-description" translate="no">{text}</span> })}
+        {preview.maybe_description.map(|text| view! { <span class="embed-description" translate="no">{text}</span> })}
       </div>
+      {thumbnail.map(|url| view! { <img class="embed-thumb" src=url alt="" loading="lazy" /> })}
+      {wide_image
+        .map(|(url, ratio)| {
+          view! {
+            <img class="embed-wide" src=url alt="" loading="lazy" style:aspect-ratio=ratio.to_string() />
+          }
+        })}
     </div>
   }
 }

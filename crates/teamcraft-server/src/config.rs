@@ -236,7 +236,8 @@ pub struct LimitsConfig {
   pub max_directory_results: u32,
   /// Largest avatar image.
   pub max_avatar_bytes: u64,
-  /// Largest space picture, after the server re-encoded the upload as PNG.
+  /// Largest space or channel picture (the one limit for both), after the server re-encoded the
+  /// upload as PNG.
   pub max_space_image_bytes: u64,
   /// Space pictures decoded at the same time; more uploads are answered 503 with `Retry-After`.
   /// Read at start.

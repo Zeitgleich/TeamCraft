@@ -5,8 +5,10 @@
 use leptos::prelude::*;
 
 use crate::components::avatar::{Avatar, AvatarSize};
-use crate::components::count_badge::CountBadge;
+use crate::components::count_badge::{BadgeTone, CountBadge};
 use crate::components::icons::{Icon, IconName};
+use crate::components::rail::activity_tone;
+use crate::components::sliding_indicator::SlidingIndicator;
 use crate::i18n::use_i18n;
 use crate::sections::badge_count;
 use crate::state::{AppState, MainView, Overlay, RailEntry, use_app_state};
@@ -48,6 +50,7 @@ pub fn BottomNav() -> impl IntoView {
 
   view! {
     <nav class="bottom-nav" aria-label=move || i18n.t("bottom-nav-label")>
+      <SlidingIndicator maybe_target=".bottom-nav-icon" />
       <NavTab
         label_key="rail-home"
         is_current=is_home
@@ -63,6 +66,7 @@ pub fn BottomNav() -> impl IntoView {
         label_key="rail-activity"
         is_current=is_activity
         count=Signal::derive(move || activity_count.get())
+        tone=activity_tone(state)
         on_open=Callback::new(move |()| state.open_activity())
       >
         <Icon name=IconName::Bell />
@@ -116,6 +120,7 @@ fn NavTab(
   label_key: &'static str,
   is_current: Signal<bool>,
   count: Signal<u32>,
+  #[prop(into, optional)] tone: Signal<BadgeTone>,
   on_open: Callback<()>,
   children: Children,
 ) -> impl IntoView {
@@ -130,7 +135,7 @@ fn NavTab(
     >
       <span class="bottom-nav-icon">
         {children()}
-        <CountBadge count=count />
+        <CountBadge count=count tone=tone />
       </span>
       <span class="bottom-nav-label">{move || i18n.t(label_key)}</span>
     </button>

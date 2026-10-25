@@ -9,4 +9,5 @@ mod host_controls;
 mod native_client;
 mod reconnect;
 mod reporting;
+mod sfu_restart;
 mod video_call;

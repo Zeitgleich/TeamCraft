@@ -17,6 +17,8 @@ pub mod files;
 mod gateway;
 mod group_health;
 mod groups;
+mod key_history;
+mod key_packages;
 mod linking;
 mod member_device;
 mod messaging;
@@ -90,6 +92,10 @@ pub struct ClientSettings {
   pub key_package_low_water: u32,
   /// How often a running client asks the server whether its key packages need renewing.
   pub key_package_check_interval: std::time::Duration,
+  /// How long the private part of one of this device's key packages stays after the package
+  /// expired or, for a last-resort package, after a newer one replaced it on the server: welcomes
+  /// for it may still be on the way (e2ee.md §4.3.1). Then it is deleted.
+  pub key_package_retention: std::time::Duration,
   /// Messages per history page.
   pub history_page_size: u32,
   /// Attempts to land a commit when other members' commits win the epoch.
@@ -121,6 +127,13 @@ pub struct ClientSettings {
   /// A device without a group (a welcome it couldn't join) waits twice as long after each rejoin
   /// request, up to this.
   pub rejoin_retry_max: std::time::Duration,
+  /// Members ignore a device's rejoin request for this long after it was added back (server
+  /// times): each answer costs a commit, and a broken or malicious device could ask far more often
+  /// than `rejoin_retry` (issue #149).
+  pub rejoin_cooldown: std::time::Duration,
+  /// Removal records whose absence ended before the workspace's retention limit are dropped
+  /// (issue #186); this much later, to spare messages still on the way.
+  pub removed_sender_retention_leeway: std::time::Duration,
   /// A DM device that waits for the welcome of a group someone else founded shows "setting up
   /// encryption" this long, then that it failed, with a retry (#278).
   pub dm_welcome_timeout: std::time::Duration,
@@ -146,6 +159,9 @@ pub struct ClientSettings {
   /// Larger MLS group information is not sent with a commit (it would push the commit over the
   /// server's payload limit); a further device then waits for a member instead.
   pub max_group_info_bytes: usize,
+  /// At most this many content keys are sent to a device added back, the newest first (e2ee.md
+  /// §4.6): bounds the size of that one message.
+  pub max_missed_keys: usize,
   /// Ranks beyond this commit together at `device_add_max_rank × device_add_stagger`: bounds how
   /// long a new device waits when the first-ranked members are away (presence isn't per device).
   pub device_add_max_rank: u32,
@@ -192,6 +208,14 @@ pub struct Client<A, S> {
   /// When this device last tried to join each conversation's group as a further device (backs
   /// off while waiting for a member).
   member_join_attempts: HashMap<ConversationId, i64>,
+  /// When this device last handled a further device's request to be added, per conversation and
+  /// device: repeats within `rejoin_retry` cost no requests (issue #187).
+  device_add_requests_handled: HashMap<(ConversationId, teamcraft_proto::DeviceId), i64>,
+  /// Whether all welcomes were read since the last reset: only then may spent key packages go, so a
+  /// welcome that waited for one is opened first (e2ee.md §4.3.1). Reset when a gateway connection
+  /// starts (fresh or resumed), when a full sync starts and when a welcome sync starts; set when a
+  /// welcome sync read the last page.
+  are_welcomes_synced: bool,
   /// When people waiting for a first device were last checked after a full sync
   /// ([`Client::recheck_waiting_additions`]).
   maybe_waiting_checked_at_ms: Option<i64>,
@@ -211,12 +235,15 @@ impl Default for ClientSettings {
       key_package_target: 30,
       key_package_low_water: 10,
       key_package_check_interval: std::time::Duration::from_secs(6 * 60 * 60),
+      key_package_retention: std::time::Duration::from_secs(30 * 24 * 60 * 60),
       history_page_size: 50,
       max_commit_attempts: 3,
       device_add_stagger: std::time::Duration::from_secs(10),
       device_add_attempts: 6,
       rejoin_retry: std::time::Duration::from_secs(10 * 60),
       rejoin_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
+      rejoin_cooldown: std::time::Duration::from_secs(30 * 60),
+      removed_sender_retention_leeway: std::time::Duration::from_secs(24 * 60 * 60),
       dm_welcome_timeout: std::time::Duration::from_secs(2 * 60),
       removal_retry: std::time::Duration::from_secs(60 * 60),
       removal_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
@@ -225,6 +252,7 @@ impl Default for ClientSettings {
       max_pending_revocation_checks: 16,
       removal_watch: std::time::Duration::from_secs(30 * 24 * 60 * 60),
       max_group_info_bytes: 256 * 1024,
+      max_missed_keys: 512,
       max_upload_bytes: 100 * 1024 * 1024,
       maybe_download_dir: None,
       maybe_push_gateway_url: None,
@@ -278,6 +306,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       mls_current: Default::default(),
       maybe_replay_left: None,
       member_join_attempts: HashMap::new(),
+      device_add_requests_handled: HashMap::new(),
+      are_welcomes_synced: false,
       maybe_waiting_checked_at_ms: None,
       catch_up_focus: CatchUpFocus::default(),
     };
@@ -329,6 +359,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// The epoch of the conversation's MLS group on this device; `None` without a group.
   pub fn mls_epoch(&mut self, conversation: ConversationId) -> Result<Option<u64>, CoreError> {
     Ok(self.group(conversation)?.map(|group| group.epoch()))
+  }
+
+  /// Whether this device holds the content key a message names (`content_key_id`). For tests.
+  #[doc(hidden)]
+  pub fn has_content_key(&self, conversation: ConversationId, content_key_id: &[u8]) -> bool {
+    let Ok(id) = <[u8; 16]>::try_from(content_key_id) else {
+      return false;
+    };
+    self
+      .account
+      .key_bag
+      .ring(convert::conversation(conversation))
+      .is_some_and(|ring| {
+        ring
+          .get(teamcraft_crypto::content_key::ContentKeyId::from_bytes(id))
+          .is_some()
+      })
   }
 
   /// Users whose identity key changed since it was pinned (e2ee.md §1: "security key changed").
@@ -414,6 +461,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self
       .store
       .delete(Table::AppliedChanges, &groups::rejoin_key(conversation))?;
+    self
+      .store
+      .delete(Table::AppliedChanges, &key_history::key_history_key(conversation))?;
+    self.store.delete(
+      Table::AppliedChanges,
+      &member_device::current_key_wait_key(conversation),
+    )?;
     self
       .store
       .delete(Table::AppliedChanges, &group_health::leftovers_key(conversation))?;

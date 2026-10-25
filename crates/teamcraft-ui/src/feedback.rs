@@ -22,6 +22,13 @@ use teamcraft_proto::ErrorCode;
 pub use teamcraft_client_api::failure::{ActionFailure, FailureKind};
 
 use crate::i18n::I18n;
+use crate::model::TimestampMs;
+
+/// How long a background failure stays quiet after its toast was raised (#344): a read that keeps
+/// failing shows at most this often, also after the user closed the toast.
+const BACKGROUND_COOLDOWN_MS: TimestampMs = 30_000;
+/// Distinct background failures remembered for the cooldown; the oldest is forgotten beyond this.
+const COOLDOWN_CAPACITY: usize = 16;
 
 /// Where failures go, see [`set_failure_sink`].
 type FailureSink = Rc<dyn Fn(ActionFailure)>;
@@ -33,6 +40,7 @@ thread_local! {
   static SINK: RefCell<Option<(u64, FailureSink)>> = RefCell::new(None);
   static NEXT_SINK: Cell<u64> = const { Cell::new(0) };
   static CURRENT_TICKET: RefCell<Option<Rc<ActionTicket>>> = const { RefCell::new(None) };
+  static BACKGROUND_COOLDOWN: RefCell<Cooldown> = RefCell::new(Cooldown::default());
 }
 
 /// Shows a failed user action. Before the shell is up (or after it is gone) the failure is only
@@ -48,10 +56,16 @@ pub fn report_failure(failure: ActionFailure) {
 
 /// Shows a failure of work the core does in the background for a read (loading history, a search
 /// segment), which no button waits for. Network failures stay quiet: the offline banner already
-/// says so, and scrolling while offline must not stack up toasts.
+/// says so, and scrolling while offline must not stack up toasts. The same failure again within
+/// [`BACKGROUND_COOLDOWN_MS`] stays quiet too (#344).
 pub fn report_background_failure(failure: ActionFailure) {
   if failure.is_unreachable() {
     tracing::debug!(detail = %failure.detail, "background command failed offline");
+    return;
+  }
+  let now = crate::clock::now_ms();
+  if !BACKGROUND_COOLDOWN.with(|cooldown| cooldown.borrow_mut().allows(&failure, now)) {
+    tracing::debug!(detail = %failure.detail, "background command failed again");
     return;
   }
   report_failure(failure);
@@ -115,6 +129,20 @@ pub struct PendingAction {
 pub struct ActionTicket {
   maybe_failure: RefCell<Option<ActionFailure>>,
   on_done: RefCell<Option<OnDone>>,
+}
+
+/// When each recent background failure was last shown, for the per-failure rate limit.
+#[derive(Default)]
+struct Cooldown {
+  shown: Vec<(CooldownKey, TimestampMs)>,
+}
+
+/// What makes two failures "the same" for the cooldown: the kind and the detail without the parts
+/// that change from one try to the next (IDs, counts, offsets).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CooldownKey {
+  kind: FailureKind,
+  stable_detail: String,
 }
 
 impl PendingAction {
@@ -250,6 +278,40 @@ impl Drop for ActionTicket {
   fn drop(&mut self) {
     if let Some(on_done) = self.on_done.get_mut().take() {
       on_done(self.maybe_failure.get_mut().take());
+    }
+  }
+}
+
+impl Cooldown {
+  /// Whether `failure` may show at `now`; if so, it is quiet for the cooldown from then on. A clock
+  /// that went backwards ends the cooldown rather than stretching it.
+  fn allows(&mut self, failure: &ActionFailure, now: TimestampMs) -> bool {
+    self
+      .shown
+      .retain(|(_, at)| (0..BACKGROUND_COOLDOWN_MS).contains(&(now - at)));
+    let key = CooldownKey::of(failure);
+    if self.shown.iter().any(|(shown, _)| *shown == key) {
+      return false;
+    }
+    if self.shown.len() >= COOLDOWN_CAPACITY {
+      self.shown.remove(0);
+    }
+    self.shown.push((key, now));
+    true
+  }
+}
+
+impl CooldownKey {
+  fn of(failure: &ActionFailure) -> Self {
+    let first_line = failure.detail.lines().next().unwrap_or_default();
+    let stable_detail = first_line
+      .split_whitespace()
+      .filter(|word| !word.chars().any(|char| char.is_ascii_digit()))
+      .collect::<Vec<_>>()
+      .join(" ");
+    Self {
+      kind: failure.kind.clone(),
+      stable_detail,
     }
   }
 }
@@ -395,6 +457,59 @@ mod tests {
         PendingAction::new().run(|| {});
         assert!(ActionTicket::current().is_none());
       });
+    }
+  }
+
+  mod background_cooldown {
+    use super::*;
+
+    #[test]
+    fn a_repeat_within_the_cooldown_stays_quiet_and_shows_again_after_it() {
+      let mut cooldown = Cooldown::default();
+      let failure = ActionFailure::other("history page failed");
+      assert!(cooldown.allows(&failure, 1_000));
+      assert!(!cooldown.allows(&failure, 1_000 + BACKGROUND_COOLDOWN_MS - 1));
+      assert!(cooldown.allows(&failure, 1_000 + BACKGROUND_COOLDOWN_MS));
+    }
+
+    #[test]
+    fn distinct_failures_have_their_own_cooldown() {
+      let mut cooldown = Cooldown::default();
+      assert!(cooldown.allows(&ActionFailure::other("one"), 0));
+      assert!(cooldown.allows(&ActionFailure::other("two"), 0));
+      assert!(cooldown.allows(
+        &ActionFailure::new(FailureKind::Server(ErrorCode::Forbidden), "one"),
+        0
+      ));
+      assert!(!cooldown.allows(&ActionFailure::other("one"), 10));
+    }
+
+    #[test]
+    fn the_same_failure_with_other_ids_is_a_repeat() {
+      let mut cooldown = Cooldown::default();
+      assert!(cooldown.allows(&ActionFailure::other("history of 1234 at offset 100 failed"), 0));
+      assert!(!cooldown.allows(&ActionFailure::other("history of 5678 at offset 200 failed"), 10));
+      assert!(cooldown.allows(&ActionFailure::other("search segment 3 failed"), 10));
+    }
+
+    #[test]
+    fn a_clock_that_went_backwards_ends_the_cooldown() {
+      let mut cooldown = Cooldown::default();
+      let failure = ActionFailure::other("refused");
+      assert!(cooldown.allows(&failure, 100_000));
+      assert!(cooldown.allows(&failure, 50_000));
+    }
+
+    #[test]
+    fn memory_stays_bounded_with_many_distinct_failures() {
+      let mut cooldown = Cooldown::default();
+      for index in 0..100 {
+        assert!(cooldown.allows(
+          &ActionFailure::other(format!("failure {}", "x".repeat(index as usize + 1))),
+          index
+        ));
+      }
+      assert_eq!(cooldown.shown.len(), COOLDOWN_CAPACITY);
     }
   }
 

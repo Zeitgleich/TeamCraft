@@ -543,7 +543,7 @@ impl Database {
 }
 
 /// The three image columns, set together (a table constraint).
-fn stored_image(
+pub(crate) fn stored_image(
   maybe_key: Option<String>,
   maybe_version: Option<String>,
   maybe_size: Option<i64>,

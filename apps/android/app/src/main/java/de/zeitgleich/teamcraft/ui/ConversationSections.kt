@@ -111,3 +111,13 @@ fun tabBadge(conversations: List<ConversationItem>): TabBadge {
     unread = audible.sumOf { it.unreadCount.toInt() },
   )
 }
+
+/** How loud a badge is: red means someone needs you, plain unread is quiet. Mirrors the shared UI's tone. */
+enum class BadgeTone { Mention, Unread }
+
+/**
+ * Red for a mention and for unread messages in a direct or group conversation (they are addressed to
+ * the user, unless it is muted); quiet for plain unread in channels.
+ */
+fun ConversationItem.badgeTone(): BadgeTone =
+  if (mentionCount > 0u || (isDirect && !isMuted && unreadCount > 0u)) BadgeTone.Mention else BadgeTone.Unread
