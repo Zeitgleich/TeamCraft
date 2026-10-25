@@ -21,6 +21,8 @@ pub(crate) const RECOVERY_REQUEST_FINGERPRINT: &str = "TeamCraft-v1 recovery req
 pub(crate) const MEMBERSHIP_CHANGE: &str = "TeamCraft-v1 membership change";
 pub(crate) const REJOIN_REQUEST: &str = "TeamCraft-v1 rejoin request";
 pub(crate) const PUSH_WAKEUP_AAD: &str = "TeamCraft-v1 push wake-up";
+pub(crate) const PUSH_SUBSCRIPTION_CHANGE: &str = "TeamCraft-v1 push subscription change";
+pub(crate) const PUSH_SUBSCRIPTION_CHANGE_KEY: &str = "TeamCraft-v1 push subscription change key";
 pub(crate) const PUSH_GATEWAY_REQUEST: &str = "TeamCraft-v1 push gateway request";
 pub(crate) const PUSH_GATEWAY_SERVER_ID: &str = "TeamCraft-v1 push gateway server id";
 pub(crate) const PUSH_GATEWAY_BOUND_TOKEN: &str = "TeamCraft-v1 push gateway bound token";
@@ -60,7 +62,7 @@ pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
 mod tests {
   use super::*;
 
-  const ALL_LABELS: [&str; 33] = [
+  const ALL_LABELS: [&str; 35] = [
     DEVICE_CERTIFICATE,
     IDENTITY_FINGERPRINT,
     MESSAGE_AAD,
@@ -72,6 +74,8 @@ mod tests {
     MEMBERSHIP_CHANGE,
     REJOIN_REQUEST,
     PUSH_WAKEUP_AAD,
+    PUSH_SUBSCRIPTION_CHANGE,
+    PUSH_SUBSCRIPTION_CHANGE_KEY,
     PUSH_GATEWAY_REQUEST,
     PUSH_GATEWAY_SERVER_ID,
     PUSH_GATEWAY_BOUND_TOKEN,

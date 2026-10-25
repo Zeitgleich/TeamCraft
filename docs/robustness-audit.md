@@ -52,8 +52,9 @@ is the current plan.
 
 B1 (one owner per store) and B9 (web release lifecycle, web push, browser storage) are fixed
 (docs/e2ee.md §7, §9.3, §9.4); their rows below describe the state before, marked `fixed (B1)` /
-`fixed (B9)`. Follow-ups: issues #145 (rotated subscription while no page is open) and #146 (browser
-test of the update lifecycle with two signed releases).
+`fixed (B9)`. Follow-ups: #145 (rotated subscription while no page is open) is fixed: the service
+worker registers it itself, authenticated by the push key (e2ee.md §7); #146 (browser test of the
+update lifecycle with two signed releases) is open.
 
 Fixed in this change (one commit each, with a test where the condition can be simulated):
 

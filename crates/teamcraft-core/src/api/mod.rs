@@ -13,7 +13,9 @@ mod web_socket;
 
 use std::future::Future;
 
-pub use http::{AccessTokenSource, HttpGateway, HttpRendezvous, HttpServerApi, StaticToken};
+pub use http::{
+  AccessTokenSource, HttpGateway, HttpRendezvous, HttpServerApi, StaticToken, change_web_push_subscription,
+};
 use teamcraft_proto::{
   AddConversationMemberRequest, AddSpaceMemberRequest, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse,
   ConversationId, ConversationMemberResponse, ConversationResponse, CreateChannelRequest, CreateDmRequest,

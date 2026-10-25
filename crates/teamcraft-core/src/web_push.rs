@@ -116,7 +116,7 @@ fn subscription_json(subscription: &web_sys::PushSubscription) -> Result<String,
 }
 
 #[cfg(feature = "service-worker")]
-pub use service_worker::{handle_notification_click, handle_push};
+pub use service_worker::{handle_notification_click, handle_push, handle_subscription_change};
 
 #[cfg(feature = "service-worker")]
 mod service_worker {
@@ -126,10 +126,11 @@ mod service_worker {
   use wasm_bindgen_futures::JsFuture;
   use web_sys::{NotificationOptions, ServiceWorkerGlobalScope};
 
-  use crate::api::{HttpServerApi, StaticToken};
+  use crate::api::{HttpServerApi, StaticToken, change_web_push_subscription};
   use crate::clock::{Clock, SystemClock};
   use crate::error::CoreError;
   use crate::push_preview::{PreviewContent, PushPreview, push_preview, push_session};
+  use crate::push_subscription::subscription_change;
   use crate::store::{IndexedDbStore, browser_database_key};
 
   /// Shown when nothing else is known: the product name, which isn't translated.
@@ -222,6 +223,43 @@ mod service_worker {
     }
     JsFuture::from(clients.open_window(&url)).await?;
     Ok(())
+  }
+
+  /// The service worker's `pushsubscriptionchange` handler, after it subscribed again where the
+  /// browser handed no new subscription: tells the server about the browser's current subscription
+  /// right away, so pushes don't go to the old one until a page opens (issue #145). Reads the store
+  /// only; the page registers the subscription itself when it starts next. Failures are logged and
+  /// leave that page as the fallback.
+  #[wasm_bindgen(js_name = handleSubscriptionChange)]
+  pub async fn handle_subscription_change(database_name: String) -> Result<(), JsValue> {
+    let scope: ServiceWorkerGlobalScope = js_sys::global().unchecked_into();
+    let request = scope.registration().push_manager()?.get_subscription()?;
+    let subscription = JsFuture::from(request).await?;
+    if subscription.is_null() || subscription.is_undefined() {
+      tracing::info!("no push subscription after the change; the page subscribes again when it opens");
+      return Ok(());
+    }
+    let token = super::subscription_json(&subscription.unchecked_into()).map_err(core_error)?;
+    match register_change(&database_name, &token).await {
+      Ok(true) => tracing::info!("registered the rotated push subscription"),
+      Ok(false) => tracing::debug!("push subscription unchanged or not registered"),
+      Err(error) => tracing::warn!(%error, "rotated push subscription not registered"),
+    }
+    Ok(())
+  }
+
+  async fn register_change(database_name: &str, token: &str) -> Result<bool, CoreError> {
+    let key = browser_database_key(database_name).await?;
+    let store = IndexedDbStore::open(database_name, &key).await?;
+    let Some(change) = subscription_change(&store, token)? else {
+      return Ok(false);
+    };
+    change_web_push_subscription(&change.server_url, &change.request).await?;
+    Ok(true)
+  }
+
+  fn core_error(error: CoreError) -> JsValue {
+    JsValue::from_str(&error.to_string())
   }
 
   async fn preview(database_name: &str, payload: &[u8]) -> Result<PushPreview, CoreError> {

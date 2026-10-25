@@ -38,7 +38,7 @@ use teamcraft_proto::{
 use teamcraft_proto::{
   Base64Bytes, GatewayInfoResponse, GatewayRevokeRequest, PushGatewayResponse, WebPushKeyResponse,
 };
-use teamcraft_proto::{CallJoinTokenResponse, CreateCallJoinTokenRequest};
+use teamcraft_proto::{CallJoinTokenResponse, ChangeWebPushSubscriptionRequest, CreateCallJoinTokenRequest};
 use teamcraft_proto::{
   CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest,
   InviteResponse, ListCategoriesResponse, SpaceResponse, UpdateCategoryRequest, UpdateConversationRequest,
@@ -979,6 +979,24 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   fn gateway_token(&self) -> Result<String, ApiError> {
     self.tokens.access_token()
   }
+}
+
+/// Sends the service worker's proof for a rotated Web Push subscription (e2ee.md §7). No access
+/// token: the request authenticates itself (`ChangeWebPushSubscriptionRequest::mac`).
+pub async fn change_web_push_subscription(
+  server_url: &str,
+  request: &ChangeWebPushSubscriptionRequest,
+) -> Result<(), ApiError> {
+  let base_url = server_url.trim_end_matches('/');
+  if let Some(reason) = insecure_reason(base_url) {
+    return Err(ApiError::InsecureServerUrl(reason));
+  }
+  let builder = http_client()
+    .post(format!("{base_url}/api/v1/push/web/subscription-change"))
+    .json(request);
+  #[cfg(not(target_arch = "wasm32"))]
+  let builder = builder.timeout(API_REQUEST_TIMEOUT);
+  send(builder).await.map(drop)
 }
 
 /// The push gateway's base URL without trailing slash; device tokens go to it, so it must be

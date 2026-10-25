@@ -148,6 +148,47 @@ impl Database {
     Ok(result.rows_affected() > 0)
   }
 
+  /// The push token and key of an active device registered with `provider`, for a request that
+  /// proves knowledge of the key instead of carrying an access token.
+  pub async fn push_registration_of(
+    &self,
+    device: DeviceId,
+    provider: &str,
+  ) -> Result<Option<(String, Vec<u8>)>, DbError> {
+    let row = sqlx::query!(
+      r#"SELECT push_token AS "push_token!", push_key AS "push_key!" FROM devices
+         WHERE id = $1 AND push_provider = $2 AND push_token IS NOT NULL AND push_key IS NOT NULL
+           AND revoked_at IS NULL"#,
+      to_db(device),
+      provider,
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    Ok(row.map(|row| (row.push_token, row.push_key)))
+  }
+
+  /// Swaps the push token of an active device if it still is `previous_token` (compare-and-swap;
+  /// provider and push key stay). `false` if the device registered something else meanwhile.
+  pub async fn replace_push_token(
+    &self,
+    device: DeviceId,
+    provider: &str,
+    previous_token: &str,
+    token: &str,
+  ) -> Result<bool, DbError> {
+    let result = sqlx::query!(
+      r#"UPDATE devices SET push_token = $4
+         WHERE id = $1 AND push_provider = $2 AND push_token = $3 AND revoked_at IS NULL"#,
+      to_db(device),
+      provider,
+      previous_token,
+      token,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() > 0)
+  }
+
   pub async fn clear_push_registration(&self, user: UserId, device: DeviceId) -> Result<bool, DbError> {
     let result = sqlx::query!(
       r#"UPDATE devices SET push_provider = NULL, push_token = NULL, push_key = NULL
