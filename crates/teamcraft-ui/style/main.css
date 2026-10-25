@@ -7820,9 +7820,19 @@ ol.md-list {
   height: 14px;
 }
 
-.msg-delivery.is-pending .icon {
+.msg-delivery.is-pending .icon,
+.msg-delivery.is-sent .icon {
   width: 12px;
   height: 12px;
+}
+
+/* Ticks: one when the server has it, two blue ones when everyone read it. */
+.msg-delivery.is-sent {
+  margin-left: 4px;
+}
+
+.msg-delivery.is-read {
+  color: var(--accent);
 }
 
 /* Not confirmed after a while: still retried by itself, so muted, not an error. */

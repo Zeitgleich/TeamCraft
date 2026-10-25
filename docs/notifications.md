@@ -407,6 +407,21 @@ Moving the read position in a DM or group DM sends `read_receipt` to the other m
 `GET /conversations/{id}/read-receipts` lists the positions. Receipts are reciprocal: whoever turned
 them off neither sends nor sees them. Channels have none.
 
+### Message status indicator
+
+Own messages show one indicator next to the time (issue #568), drawn with the app's SVG icons:
+
+| State          | Indicator        | Source                                                           |
+|----------------|------------------|------------------------------------------------------------------|
+| Sending        | clock            | message still in the local outbox                                |
+| On the server  | one grey tick    | the server confirmed the send                                    |
+| Read           | two blue ticks   | every other member's read receipt reaches the message (DMs, group DMs) |
+| Failed         | alert, retry     | the server refused the send                                      |
+
+Because the blue ticks come from read receipts, they are reciprocal: someone with receipts off
+neither sends nor sees blue ticks, and the message stays at one tick. Channels show one tick only.
+"Delivered" (two grey ticks, derived from device sync cursors on the server) is not built yet.
+
 ## Urgent messages
 
 A sender marks a message urgent (`is_urgent`). Recipients acknowledge with
