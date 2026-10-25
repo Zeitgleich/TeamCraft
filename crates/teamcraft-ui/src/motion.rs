@@ -69,6 +69,15 @@ pub fn leave_pane_ghost() {
   let Some(document) = web_sys::window().and_then(|window| window.document()) else {
     return;
   };
+  // An edge swipe already slid the page out under the finger (components/edge_swipe.rs).
+  if document
+    .query_selector(".app.is-swiping-back")
+    .ok()
+    .flatten()
+    .is_some()
+  {
+    return;
+  }
   let maybe_pane = [".app-body > .side-panel", ".app-body > .main"]
     .into_iter()
     .filter_map(|selector| document.query_selector(selector).ok().flatten())

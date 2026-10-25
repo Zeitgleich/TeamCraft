@@ -2079,11 +2079,25 @@ select.input {
   user-select: none;
 }
 
+/* The handle: a 36x5 bar in a full-width strip a finger can grab; the strip never scrolls. */
 .sheet-handle {
   flex: none;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  height: 24px;
+  background: var(--surface);
+  touch-action: none;
+}
+
+.sheet-handle::before {
+  content: "";
+  position: absolute;
+  top: 8px;
+  left: 50%;
   width: 36px;
   height: 5px;
-  margin: 8px auto;
+  margin-left: -18px;
   border-radius: 3px;
   background: var(--border);
 }
@@ -8288,8 +8302,8 @@ ol.md-list {
   }
 }
 
-/* Swiping back from the leading edge (components/edge_swipe.rs): the page follows the finger
-   (`--swipe-x`), its parent shows underneath and peeks out from -30 % (`--swipe-parent-x`). */
+/* Swiping back from the leading edge (components/edge_swipe.rs): the page follows the finger, its
+   parent shows underneath and peeks out from -30 % (the component sets their `translate`). */
 :root[data-layout="compact"] .app.is-swiping-back > .app-body {
   position: relative;
   overflow: hidden;
@@ -8305,7 +8319,6 @@ ol.md-list {
   position: absolute;
   inset: 0;
   z-index: 2;
-  translate: var(--swipe-x, 0) 0;
   box-shadow: -8px 0 24px rgba(8, 12, 20, 0.18);
 }
 
@@ -8313,7 +8326,16 @@ ol.md-list {
 :root[data-layout="compact"] .app.is-swiping-back[data-pane="main"][data-rail="space"] > .app-body > .space-rail,
 :root[data-layout="compact"] .app.is-swiping-back[data-pane="panel"] > .app-body > .main {
   display: flex;
-  translate: var(--swipe-parent-x, 0) 0;
+}
+
+/* A sideways touch on a page is the swipe's, not the browser's: pages pan vertically only. What
+   scrolls sideways itself (code, tables, tabs, the picture strip) and text input keep their own
+   gestures. */
+@media (pointer: coarse) {
+  :root[data-layout="compact"] .app-body > :is(.main, .side-panel),
+  :root[data-layout="compact"] .app-body > :is(.main, .side-panel) :not(:is(pre, .md-code, table, .table-wrap, .bookmarks-bar, .filmstrip, .section-tabs, .view-tabs, .composer, .sheet, input, textarea, [contenteditable]), :is(pre, .md-code, table, .table-wrap, .bookmarks-bar, .filmstrip, .section-tabs, .view-tabs, .composer, .sheet, [contenteditable]) *) {
+    touch-action: pan-y pinch-zoom;
+  }
 }
 
 :root[data-layout="compact"] .app.is-swipe-settling > .app-body > * {

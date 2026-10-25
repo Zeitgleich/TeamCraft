@@ -64,13 +64,19 @@ pub fn Sheet(
   });
   let drag = StoredValue::new(None::<SheetDrag>);
   let was_dragged = StoredValue::new(false);
+  hold_touches_while_pulled(sheet, drag);
 
   let on_pointerdown = move |ev: web_sys::PointerEvent| {
     let Some(element) = sheet.get_untracked() else {
       return;
     };
-    // Scrolled content scrolls first; at its top a pull down moves the sheet.
-    if !ev.is_primary() || element.scroll_top() > 0 || is_in_text_field(&ev) {
+    // Scrolled content scrolls first; at its top a pull down moves the sheet. The handle always
+    // moves it (it stays on top while the content scrolls).
+    let is_on_handle = ev
+      .target()
+      .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+      .is_some_and(|element| element.class_list().contains("sheet-handle"));
+    if !ev.is_primary() || (element.scroll_top() > 0 && !is_on_handle) || is_in_text_field(&ev) {
       return;
     }
     was_dragged.set_value(false);
@@ -152,7 +158,8 @@ pub fn Sheet(
     <div
       class=format!("sheet {class}")
       role=role
-      aria-modal="true"
+      // A dialog keeps the page out of reach; a plain menu is no dialog.
+      aria-modal=(role == "dialog").then_some("true")
       aria-label=move || label.get()
       tabindex="-1"
       node_ref=sheet
@@ -220,6 +227,46 @@ pub fn MenuSurface(
     </div>
   }
   .into_any()
+}
+
+/// A sheet whose content scrolls is dragged from the top of its content: once the finger pulls it
+/// down there, its touches must not become a scroll (which would cancel the pointer). Only a
+/// non-passive `touchmove` can say so; `touch-action` is fixed when the touch starts.
+fn hold_touches_while_pulled(sheet: NodeRef<html::Div>, drag: StoredValue<Option<SheetDrag>>) {
+  let listener =
+    StoredValue::new_local(None::<wasm_bindgen::closure::Closure<dyn FnMut(web_sys::TouchEvent)>>);
+  Effect::new(move |_| {
+    let Some(element) = sheet.get() else {
+      return;
+    };
+    let on_touchmove = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::TouchEvent)>::new(
+      move |ev: web_sys::TouchEvent| {
+        let Some(touch) = ev.touches().get(0) else {
+          return;
+        };
+        let y = f64::from(touch.client_y());
+        let holds = drag
+          .try_with_value(|maybe_drag| maybe_drag.as_ref().is_some_and(|drag| drag.holds_the_finger(y)))
+          .unwrap_or(false);
+        if holds && ev.cancelable() {
+          ev.prevent_default();
+        }
+      },
+    );
+    let options = web_sys::AddEventListenerOptions::new();
+    options.set_passive(false);
+    if element
+      .add_event_listener_with_callback_and_add_event_listener_options(
+        "touchmove",
+        on_touchmove.as_ref().unchecked_ref(),
+        &options,
+      )
+      .is_ok()
+    {
+      // Kept with the sheet; the element and its listener go together.
+      listener.set_value(Some(on_touchmove));
+    }
+  });
 }
 
 /// Moves the sheet by `offset` pixels while dragged; `None` lets it spring back to its place.

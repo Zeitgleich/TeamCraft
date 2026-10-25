@@ -139,6 +139,12 @@ impl SheetDrag {
     self.is_dragging
   }
 
+  /// Whether the finger at `y` pulls the sheet down (rather than scrolling its content up), so the
+  /// browser must not take the movement for a scroll.
+  pub fn holds_the_finger(&self, y: f64) -> bool {
+    self.is_dragging || y > self.start_y
+  }
+
   /// The finger lifted at `y`; `height` is the sheet's own height.
   pub fn released(&self, y: f64, height: f64) -> SheetRelease {
     if !self.is_dragging {
@@ -222,6 +228,13 @@ mod tests {
 
   mod sheet {
     use super::*;
+
+    #[test]
+    fn a_pull_down_holds_the_finger_a_scroll_up_does_not() {
+      let drag = SheetDrag::start(100.0, 500.0, 0.0);
+      assert!(drag.holds_the_finger(501.0));
+      assert!(!drag.holds_the_finger(480.0));
+    }
 
     #[test]
     fn a_tap_and_a_jitter_are_no_drag() {
