@@ -184,6 +184,8 @@ pub enum Overlay {
   InvitePeople(SpaceId),
   /// Add people to a channel (through its encryption group).
   AddToChannel(ConversationId),
+  /// Add people to the DM or group DM call of this conversation: the call moves into a meeting.
+  AddToCall(ConversationId),
   NewChannel(SpaceId),
   BrowseChannels(SpaceId),
   ChannelSettings(ConversationId),

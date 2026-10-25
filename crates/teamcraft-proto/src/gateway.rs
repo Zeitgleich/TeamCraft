@@ -212,6 +212,15 @@ pub enum GatewayEvent {
     conversation_id: ConversationId,
     call_id: CallId,
   },
+  /// Somebody added people to the DM or group DM call `call_id`: the call moves into the meeting
+  /// chat `to_conversation_id`. Devices in the call leave it and join the meeting's call; the DM
+  /// itself stays as it was. Sent to the members of `conversation_id`.
+  CallMove {
+    conversation_id: ConversationId,
+    call_id: CallId,
+    to_conversation_id: ConversationId,
+    moved_by: UserId,
+  },
   /// Sent to all devices of the other members of a DM or group DM when a call starts there. Stop
   /// ringing when a `call_update` with `is_ringing: false` or `call_end` arrives.
   CallRing {
@@ -388,6 +397,22 @@ mod tests {
     );
     let future_frame: GatewayServerMessage = serde_json::from_str(r#"{"type":"maintenance"}"#).unwrap();
     assert_eq!(future_frame, GatewayServerMessage::Unknown);
+  }
+
+  #[test]
+  fn call_move_has_a_stable_wire_format() {
+    let event = GatewayEvent::CallMove {
+      conversation_id: conversation(),
+      call_id: CallId::from_snowflake(Snowflake::new(8).unwrap()),
+      to_conversation_id: ConversationId::from_snowflake(Snowflake::new(10).unwrap()),
+      moved_by: UserId::from_snowflake(Snowflake::new(9).unwrap()),
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"call_move","conversation_id":"7","call_id":"8","to_conversation_id":"10","moved_by":"9"}"#
+    );
+    assert_eq!(serde_json::from_str::<GatewayEvent>(&json).unwrap(), event);
   }
 
   #[test]

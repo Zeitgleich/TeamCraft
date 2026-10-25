@@ -316,6 +316,7 @@ mod tests {
         screen_sound: Default::default(),
         is_reconnecting: false,
         reconnecting: Vec::new(),
+        maybe_moved_to: None,
       }),
       incoming: Vec::new(),
       running: vec![RunningCall {

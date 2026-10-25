@@ -57,7 +57,7 @@ use crate::handlers::{
   list_policy_log_handler, list_presence_handler, list_recovery_requests_handler, list_roster_handler,
   list_share_links_handler, list_space_members_handler, list_spaces_handler, list_system_events_handler,
   list_threads_handler, list_user_devices_handler, list_user_groups_handler, list_welcomes_handler,
-  local_activate_handler, local_login_handler, local_logout_handler, move_channel_handler,
+  local_activate_handler, local_login_handler, local_logout_handler, move_call_handler, move_channel_handler,
   pin_message_handler, post_mls_commit_handler, post_mls_message_handler, put_channel_image_handler,
   put_conversation_notification_settings_handler, put_email_digest_handler, put_identity_key_handler,
   put_key_bag_handler, put_mls_group_info_handler, put_my_device_list_handler, put_my_privacy_handler,
@@ -483,6 +483,10 @@ pub fn router(state: AppState) -> Router {
     .route(
       "/conversations/{conversation_id}/call/join-token",
       post(create_call_join_token_handler),
+    )
+    .route(
+      "/conversations/{conversation_id}/call/move",
+      post(move_call_handler),
     )
     .route(
       "/me/status",

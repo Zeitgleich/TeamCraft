@@ -118,6 +118,10 @@ pub struct UpdateMeetingRequest {
 pub struct CreateInstantMeetingRequest {
   #[serde(rename = "title", default, skip_serializing_if = "Option::is_none")]
   pub maybe_title: Option<String>,
+  /// TeamCraft users who become members of the meeting chat right away, e.g. the people of a call
+  /// that moves into the meeting (docs/meetings.md). No calendar entry and no e-mail.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub invitees: Vec<UserId>,
   /// Client-generated key that makes a retry of this request return the original result instead
   /// of creating a second one. Optional so older clients keep working.
   #[serde(rename = "idempotency_key", default, skip_serializing_if = "Option::is_none")]
@@ -310,6 +314,15 @@ mod tests {
     assert!(request.has_lobby && request.invitees.is_empty());
   }
 
+  #[test]
+  fn instant_meetings_invite_nobody_unless_asked() {
+    let old: CreateInstantMeetingRequest = serde_json::from_str("{}").unwrap();
+    assert!(old.invitees.is_empty());
+    assert_eq!(serde_json::to_string(&old).unwrap(), "{}");
+    let from_call: CreateInstantMeetingRequest = serde_json::from_str(r#"{"invitees":["5"]}"#).unwrap();
+    assert_eq!(from_call.invitees.len(), 1);
+  }
+
   const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
 
   #[test]
@@ -338,6 +351,7 @@ mod tests {
 
     let instant = CreateInstantMeetingRequest {
       maybe_title: None,
+      invitees: Vec::new(),
       maybe_idempotency_key: Some(key),
     };
     assert_eq!(

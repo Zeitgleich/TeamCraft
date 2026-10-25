@@ -503,7 +503,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       GatewayEvent::CallStart { .. }
       | GatewayEvent::CallUpdate { .. }
       | GatewayEvent::CallEnd { .. }
-      | GatewayEvent::CallRing { .. } => {
+      | GatewayEvent::CallRing { .. }
+      | GatewayEvent::CallMove { .. } => {
         self.emit_call_event(&event);
         Ok(())
       },

@@ -14,7 +14,7 @@ use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::error::CoreError;
-use teamcraft_proto::{AddConversationMemberRequest, ConversationId};
+use teamcraft_proto::{AddConversationMemberRequest, ConversationId, UserId};
 
 const NOW_MS: i64 = 1_800_000_000_000;
 
@@ -235,6 +235,145 @@ async fn an_admitted_user_without_a_device_is_not_let_in_later_unattended() {
     "a device that came later isn't added"
   );
   assert_eq!(alice.client.verified_call_devices(chat).await.unwrap().len(), 1);
+}
+
+/// A DM call that grows moves into a meeting: its group has the people in the call and the added
+/// ones, from the user's own action and the DM's group, never the server's lists (docs/meetings.md,
+/// "A call becomes a meeting").
+mod call_moves {
+  use super::*;
+
+  #[tokio::test]
+  async fn the_meeting_has_exactly_the_people_in_the_call_and_the_added_ones() {
+    let (server, mut alice, mut bob, mut carol, mallory) = dm_call().await;
+    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
+    bob.client.full_sync().await.unwrap();
+    let (alice_id, bob_id, carol_id) = (
+      alice.client.user_id(),
+      bob.client.user_id(),
+      carol.client.user_id(),
+    );
+    // The server lists Mallory in the meeting chat, too.
+    let meeting = server.create_meeting_chat(alice_id, &[bob_id, carol_id, mallory]);
+
+    alice
+      .client
+      .move_call_to_meeting(dm, meeting, &[alice_id, bob_id], &[carol_id])
+      .await
+      .unwrap();
+
+    bob.client.full_sync().await.unwrap();
+    carol.client.full_sync().await.unwrap();
+    for peer in [&mut bob, &mut carol] {
+      let prepared = peer.client.prepare_call(meeting).await.unwrap();
+      assert_eq!(prepared.devices.len(), 3, "Alice, Bob and Carol only");
+    }
+    let moves = server.call_moves();
+    assert_eq!(moves.len(), 1);
+    assert_eq!(moves[0].0, dm);
+    assert_eq!(moves[0].1.to_conversation_id, meeting);
+    assert_eq!(
+      moves[0].1.ring_user_ids,
+      vec![carol_id],
+      "only the added person rings"
+    );
+  }
+
+  #[tokio::test]
+  async fn the_dm_stays_as_it_was() {
+    let (server, mut alice, mut bob, mut carol, _) = dm_call().await;
+    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
+    bob.client.full_sync().await.unwrap();
+    alice.client.send_text(dm, None, "before the call").await.unwrap();
+    let epoch = alice.client.mls_epoch(dm).unwrap();
+    let (alice_id, bob_id, carol_id) = (
+      alice.client.user_id(),
+      bob.client.user_id(),
+      carol.client.user_id(),
+    );
+    let meeting = server.create_meeting_chat(alice_id, &[bob_id, carol_id]);
+
+    alice
+      .client
+      .move_call_to_meeting(dm, meeting, &[alice_id, bob_id], &[carol_id])
+      .await
+      .unwrap();
+
+    carol.client.full_sync().await.unwrap();
+    assert_eq!(alice.client.mls_epoch(dm).unwrap(), epoch, "no commit in the DM");
+    assert!(
+      !carol.client.has_group(dm).unwrap(),
+      "the DM's history isn't shared"
+    );
+    assert!(carol.texts(meeting).is_empty());
+  }
+
+  #[tokio::test]
+  async fn people_the_call_lists_outside_the_dms_group_are_left_out() {
+    let (server, mut alice, mut bob, mut carol, mallory) = dm_call().await;
+    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
+    bob.client.full_sync().await.unwrap();
+    let (alice_id, bob_id, carol_id) = (
+      alice.client.user_id(),
+      bob.client.user_id(),
+      carol.client.user_id(),
+    );
+    let meeting = server.create_meeting_chat(alice_id, &[bob_id, carol_id, mallory]);
+
+    // A roster that names Mallory in the call doesn't get her into the meeting's group.
+    alice
+      .client
+      .move_call_to_meeting(dm, meeting, &[alice_id, bob_id, mallory], &[carol_id])
+      .await
+      .unwrap();
+
+    carol.client.full_sync().await.unwrap();
+    let prepared = carol.client.prepare_call(meeting).await.unwrap();
+    assert_eq!(prepared.devices.len(), 3, "Alice, Bob and Carol only");
+  }
+
+  #[tokio::test]
+  async fn a_lost_answer_is_retried_into_the_same_group() {
+    let (server, mut alice, mut bob, mut carol, _) = dm_call().await;
+    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
+    bob.client.full_sync().await.unwrap();
+    let (alice_id, bob_id, carol_id) = (
+      alice.client.user_id(),
+      bob.client.user_id(),
+      carol.client.user_id(),
+    );
+    let meeting = server.create_meeting_chat(alice_id, &[bob_id, carol_id]);
+    alice
+      .client
+      .move_call_to_meeting(dm, meeting, &[alice_id, bob_id], &[carol_id])
+      .await
+      .unwrap();
+    let epoch = alice.client.mls_epoch(meeting).unwrap();
+
+    alice
+      .client
+      .move_call_to_meeting(dm, meeting, &[alice_id, bob_id], &[carol_id])
+      .await
+      .unwrap();
+
+    assert_eq!(
+      alice.client.mls_epoch(meeting).unwrap(),
+      epoch,
+      "nobody added twice"
+    );
+    assert_eq!(server.call_moves().len(), 2, "everybody is told again");
+    carol.client.full_sync().await.unwrap();
+    assert_eq!(carol.client.prepare_call(meeting).await.unwrap().devices.len(), 3);
+  }
+
+  async fn dm_call() -> (FakeServer, Peer, Peer, Peer, UserId) {
+    let server = FakeServer::new();
+    let alice = Peer::enroll(&server, "Alice").await;
+    let bob = Peer::enroll(&server, "Bob").await;
+    let carol = Peer::enroll(&server, "Carol").await;
+    let mallory = Peer::enroll(&server, "Mallory").await.client.user_id();
+    (server, alice, bob, carol, mallory)
+  }
 }
 
 async fn two() -> (FakeServer, Peer, Peer) {

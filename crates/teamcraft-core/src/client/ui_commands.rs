@@ -209,6 +209,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .set_up_meeting_chat(conversation, &invitees)
         .await
         .map(|_| ()),
+      CoreCommand::MoveCallToMeeting {
+        from,
+        meeting,
+        in_call,
+        added,
+      } => self.move_call_to_meeting(from, meeting, &in_call, &added).await,
       CoreCommand::LetIntoMeetingChat { conversation, user } => {
         self.let_into_meeting_chat(conversation, user).await
       },

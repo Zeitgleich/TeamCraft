@@ -375,6 +375,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::BrowseSpaces(maybe_highlight) => lazy_area(Place::Overlay, move || areas::browse_spaces(maybe_highlight)),
         Overlay::InvitePeople(space) => lazy_area(Place::Overlay, move || areas::invite_people(space)),
         Overlay::AddToChannel(conversation) => lazy_area(Place::Overlay, move || areas::add_to_channel(conversation)),
+        Overlay::AddToCall(conversation) => lazy_area(Place::Overlay, move || areas::add_to_call(conversation)),
         Overlay::NewChannel(space) => lazy_area(Place::Overlay, move || areas::new_channel(space)),
         Overlay::BrowseChannels(space) => lazy_area(Place::Overlay, move || areas::browse_channels(space)),
         Overlay::ChannelSettings(id) => lazy_area(Place::Overlay, move || areas::channel_settings(id)),
@@ -924,10 +925,21 @@ fn connect_calls(state: AppState) {
     effect
   });
   // The shell ended the call (the other side hung up, the connection dropped): leave the screen.
-  let was_connected = std::cell::Cell::new(false);
+  // Only the end of the call the screen is for: switching to another one (a call that moved into a
+  // meeting) ends the previous call first.
+  let was_connected_to = Cell::new(None);
   Effect::new(move |_| {
-    let is_connected = state.read(|backend| backend.active_call().is_some());
-    if was_connected.replace(is_connected) && !is_connected && call.phase.get_untracked() == CallPhase::Active
+    let maybe_connected_to = state.read(|backend| backend.active_call().map(|active| active.conversation));
+    let maybe_was_connected_to = was_connected_to.replace(maybe_connected_to);
+    let is_requested = |conversation| {
+      call
+        .maybe_request
+        .get_untracked()
+        .is_some_and(|request| request.conversation == conversation)
+    };
+    if maybe_connected_to.is_none()
+      && maybe_was_connected_to.is_some_and(is_requested)
+      && call.phase.get_untracked() == CallPhase::Active
     {
       call.leave();
     }
@@ -960,11 +972,46 @@ fn connect_calls(state: AppState) {
       }
     }
   });
+  follow_moved_calls(state);
   Effect::new(move |_| {
     let ringing = state.read(|backend| backend.incoming_calls().first().copied());
     if call.phase.get_untracked() == CallPhase::Idle && call.incoming.get_untracked() != ringing {
       call.incoming.set(ringing);
     }
+  });
+}
+
+/// Somebody added people to the DM call this device is in: the call moved into a meeting room, and
+/// this device follows into the meeting's call with its microphone and camera as they were
+/// (docs/meetings.md, "A call becomes a meeting"). The DM stays open in the list as it was.
+fn follow_moved_calls(state: AppState) {
+  let call = state.call;
+  let i18n = crate::i18n::use_i18n();
+  Effect::new(move |_| {
+    let Some((from, to)) = state.read(|backend| {
+      backend
+        .active_call()
+        .and_then(|active| active.maybe_moved_to.map(|to| (active.conversation, to)))
+    }) else {
+      return;
+    };
+    let is_in_that_call = call.phase.get_untracked() == CallPhase::Active
+      && call
+        .maybe_request
+        .get_untracked()
+        .is_some_and(|request| request.conversation == from);
+    if !is_in_that_call {
+      return;
+    }
+    if untrack(|| state.current_conversation_id()) == Some(from) {
+      state.open_conversation(to);
+    }
+    state.show_toast(i18n.t("call-moved-to-meeting"));
+    // Joining leaves the DM's call first.
+    call.join(CallRequest {
+      conversation: to,
+      kind: crate::calls::CallKind::Group,
+    });
   });
 }
 

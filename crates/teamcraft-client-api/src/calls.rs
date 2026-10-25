@@ -497,6 +497,10 @@ pub struct ActiveCall {
   /// Others whose connection was lost and who are rejoining.
   #[serde(default)]
   pub reconnecting: Vec<UserId>,
+  /// Somebody added people to this DM call: it moved into this meeting chat, and the UI switches
+  /// over to its call (docs/meetings.md, "A call becomes a meeting").
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_moved_to: Option<ConversationId>,
 }
 
 /// The sound of a screen share (the computer's playback without the call itself).

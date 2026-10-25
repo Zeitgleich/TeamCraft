@@ -831,6 +831,21 @@ impl ChatBackend for RemoteChat {
     });
   }
 
+  fn move_call_to_meeting(
+    &self,
+    from: ConversationId,
+    meeting: ConversationId,
+    in_call: Vec<UserId>,
+    added: Vec<UserId>,
+  ) {
+    self.act(ChatAction::MoveCallToMeeting {
+      from,
+      meeting,
+      in_call,
+      added,
+    });
+  }
+
   fn let_into_meeting_chat(&self, conversation: ConversationId, user: UserId) {
     self.act(ChatAction::LetIntoMeetingChat { conversation, user });
   }

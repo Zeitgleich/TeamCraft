@@ -38,7 +38,9 @@ use teamcraft_proto::{
 use teamcraft_proto::{
   Base64Bytes, GatewayInfoResponse, GatewayRevokeRequest, PushGatewayResponse, WebPushKeyResponse,
 };
-use teamcraft_proto::{CallJoinTokenResponse, ChangeWebPushSubscriptionRequest, CreateCallJoinTokenRequest};
+use teamcraft_proto::{
+  CallJoinTokenResponse, ChangeWebPushSubscriptionRequest, CreateCallJoinTokenRequest, MoveCallRequest,
+};
 use teamcraft_proto::{
   CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest,
   InviteResponse, ListCategoriesResponse, SpaceResponse, UpdateCategoryRequest, UpdateConversationRequest,
@@ -499,6 +501,13 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
         &format!("/conversations/{conversation}/call/join-token"),
         request,
       )
+      .await
+  }
+
+  async fn move_call(&self, conversation: ConversationId, request: &MoveCallRequest) -> Result<(), ApiError> {
+    let path = format!("/conversations/{conversation}/call/move");
+    self
+      .send_without_response(Method::POST, &path, Some(request))
       .await
   }
 

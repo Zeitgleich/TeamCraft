@@ -270,6 +270,17 @@ pub trait ChatBackend {
   /// they invited (the organizer's own request: the group is never founded from the server's
   /// member list).
   fn set_up_meeting_chat(&self, _conversation: ConversationId, _invitees: Vec<UserId>) {}
+  /// "Add people" in a DM or group DM call: the call moves into the meeting chat `meeting` the user
+  /// just started, whose encryption group gets the people in the call (`in_call`, as the call shows
+  /// them) and `added`; everybody in the call is then told to switch over (docs/meetings.md).
+  fn move_call_to_meeting(
+    &self,
+    _from: ConversationId,
+    _meeting: ConversationId,
+    _in_call: Vec<UserId>,
+    _added: Vec<UserId>,
+  ) {
+  }
   /// A host admitted `user` from a meeting's lobby: lets them into the chat's encryption, on this
   /// host's own decision (never because the server made them a member).
   fn let_into_meeting_chat(&self, _conversation: ConversationId, _user: UserId) {}

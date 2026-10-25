@@ -39,7 +39,7 @@ use teamcraft_proto::{
   CreateOrgBackgroundUploadRequest, CreateOrgBackgroundUploadResponse, OrgBackgroundDownloadResponse,
   OrgBackgroundId,
 };
-use teamcraft_proto::{CallId, CallJoinTokenResponse, CreateCallJoinTokenRequest};
+use teamcraft_proto::{CallId, CallJoinTokenResponse, CreateCallJoinTokenRequest, MoveCallRequest};
 use teamcraft_proto::{
   CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest,
   InviteResponse, ListCategoriesResponse, UpdateCategoryRequest, UpdateConversationRequest,
@@ -107,6 +107,8 @@ struct State {
   failing_read_positions: HashSet<ConversationId>,
   /// `PUT read-position` requests that arrived, to check that queued ones are sent once.
   read_position_writes: u64,
+  /// Calls moved into a meeting (`move_call`), in order.
+  call_moves: Vec<(ConversationId, MoveCallRequest)>,
   /// REST calls per user, also those that failed (tests about idle traffic).
   rest_calls: HashMap<UserId, u64>,
   users: BTreeMap<UserId, UserSummary>,
@@ -654,6 +656,11 @@ impl FakeServer {
     }
     state.publish(members, &GatewayEvent::ConversationUpdate { conversation_id: id });
     id
+  }
+
+  /// The calls moved into a meeting so far, in order.
+  pub fn call_moves(&self) -> Vec<(ConversationId, MoveCallRequest)> {
+    self.lock().call_moves.clone()
   }
 
   /// How many channels have this name.
@@ -1933,6 +1940,33 @@ impl ServerApi for FakeServerApi {
         expires_at: UnixMillis(0),
         sfu_certificate_sha256: Vec::new(),
       })
+    })
+  }
+
+  /// Tells the conversation's members that its call moved, like the server; the fake has no call
+  /// roster, so being a member is enough.
+  async fn move_call(&self, conversation: ConversationId, request: &MoveCallRequest) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      let members: Vec<UserId> = state
+        .conversation(conversation)?
+        .members
+        .keys()
+        .copied()
+        .collect();
+      if !members.contains(&me) {
+        return Err(ApiError::status(403, ErrorCode::Forbidden, "not a member"));
+      }
+      state.call_moves.push((conversation, request.clone()));
+      state.publish(
+        members,
+        &GatewayEvent::CallMove {
+          conversation_id: conversation,
+          call_id: CallId::from_snowflake(conversation.snowflake()),
+          to_conversation_id: request.to_conversation_id,
+          moved_by: me,
+        },
+      );
+      Ok(())
     })
   }
 

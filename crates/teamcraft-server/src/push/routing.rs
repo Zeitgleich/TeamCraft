@@ -265,8 +265,15 @@ async fn push_to_recipient(
 }
 
 /// Rings the members of a DM or group DM (except the caller) on every device without a live
-/// connection; devices with one get the gateway's `call_ring`.
-pub async fn notify_ring(state: AppState, conversation: ConversationId, call: CallId, caller: UserId) {
+/// connection; devices with one get the gateway's `call_ring`. With `maybe_only`, just those members
+/// ring (the people added to a call that moved into a meeting).
+pub async fn notify_ring(
+  state: AppState,
+  conversation: ConversationId,
+  call: CallId,
+  caller: UserId,
+  maybe_only: Option<HashSet<UserId>>,
+) {
   if !state
     .push_tracker
     .try_start_ring(caller, state.settings.get().push.max_rings_per_minute)
@@ -287,6 +294,11 @@ pub async fn notify_ring(state: AppState, conversation: ConversationId, call: Ca
   };
   let now = OffsetDateTime::now_utc();
   let mut targets = Vec::new();
+  let recipients = recipients.into_iter().filter(|recipient| {
+    maybe_only
+      .as_ref()
+      .is_none_or(|only| only.contains(&recipient.user))
+  });
   for recipient in recipients {
     let verdict = decide_ring(
       is_muted(&recipient, now),

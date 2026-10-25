@@ -47,6 +47,19 @@ pub struct CallRosterEntry {
   pub device_id: DeviceId,
 }
 
+/// Body of `POST /api/v1/conversations/{conversation_id}/call/move`: a DM or group DM call moves
+/// into a meeting room because somebody added people to it (docs/meetings.md, "A call becomes a
+/// meeting"). The caller is in the call and organizes the meeting; everybody in the call is told to
+/// switch over (`call_move`), and the added people are rung in the meeting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct MoveCallRequest {
+  /// The meeting chat the call moves into.
+  pub to_conversation_id: ConversationId,
+  /// The added people: they ring in the meeting chat (members of it only).
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub ring_user_ids: Vec<UserId>,
+}
+
 /// `GET /api/v1/conversations/{id}/call`: the call that is running in the conversation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct CallStateResponse {
@@ -121,5 +134,18 @@ mod tests {
     assert_eq!(serde_json::from_str::<SfuControlRequest>(&json).unwrap(), request);
     let unknown: SfuControlAction = serde_json::from_str(r#"{"action":"spotlight"}"#).unwrap();
     assert_eq!(unknown, SfuControlAction::Unknown);
+  }
+
+  #[test]
+  fn move_requests_have_a_stable_wire_format() {
+    let request = MoveCallRequest {
+      to_conversation_id: ConversationId::from_snowflake(Snowflake::new(3).unwrap()),
+      ring_user_ids: vec![UserId::from_snowflake(Snowflake::new(4).unwrap())],
+    };
+    let json = serde_json::to_string(&request).unwrap();
+    assert_eq!(json, r#"{"to_conversation_id":"3","ring_user_ids":["4"]}"#);
+    assert_eq!(serde_json::from_str::<MoveCallRequest>(&json).unwrap(), request);
+    let nobody_rung: MoveCallRequest = serde_json::from_str(r#"{"to_conversation_id":"3"}"#).unwrap();
+    assert!(nobody_rung.ring_user_ids.is_empty());
   }
 }

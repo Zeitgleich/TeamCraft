@@ -244,6 +244,13 @@ pub enum CoreCommand {
     conversation: ConversationId,
     invitees: Vec<UserId>,
   },
+  /// The user added people to their DM call: it moves into the meeting chat they just started.
+  MoveCallToMeeting {
+    from: ConversationId,
+    meeting: ConversationId,
+    in_call: Vec<UserId>,
+    added: Vec<UserId>,
+  },
   /// A host admitted a user from a meeting's lobby.
   LetIntoMeetingChat {
     conversation: ConversationId,
@@ -1266,6 +1273,21 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.command(CoreCommand::SetUpMeetingChat {
       conversation,
       invitees,
+    });
+  }
+
+  fn move_call_to_meeting(
+    &self,
+    from: ConversationId,
+    meeting: ConversationId,
+    in_call: Vec<UserId>,
+    added: Vec<UserId>,
+  ) {
+    self.command(CoreCommand::MoveCallToMeeting {
+      from,
+      meeting,
+      in_call,
+      added,
     });
   }
 

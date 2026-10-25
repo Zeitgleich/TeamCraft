@@ -7,7 +7,8 @@ use std::fmt;
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
 use teamcraft_crypto::identity::{DeviceKeyPair, VerifiedDevice};
 use teamcraft_proto::{
-  CallJoinTokenResponse, ConversationId, CreateCallJoinTokenRequest, DeviceId, GatewayEvent, UserId,
+  CallJoinTokenResponse, ConversationId, CreateCallJoinTokenRequest, DeviceId, GatewayEvent, MoveCallRequest,
+  UserId,
 };
 
 use super::Client;
@@ -108,18 +109,54 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Err(CoreError::CallEncryptionPending(conversation))
   }
 
+  /// Moves this user's DM or group DM call into the meeting chat `meeting` they just started for it,
+  /// because they added people to the call (docs/meetings.md, "A call becomes a meeting"). The
+  /// meeting's encryption group is founded with the people in the call (`in_call`, as the call
+  /// shows them) who are in the conversation's own group, plus `added`: the user's own choice and
+  /// the call's verified group, never the server's member list of either conversation. Only then
+  /// does the server tell everybody in the call to switch over (`call_move`) and ring the added
+  /// people, so they find the group when they join. The DM itself doesn't change.
+  pub async fn move_call_to_meeting(
+    &mut self,
+    from: ConversationId,
+    meeting: ConversationId,
+    in_call: &[UserId],
+    added: &[UserId],
+  ) -> Result<(), CoreError> {
+    let me = self.user_id();
+    // The DM's group is what its members agreed on in signed commits, not what the server lists.
+    let in_group = self.group_users(from)?;
+    let mut invitees: Vec<UserId> = in_call
+      .iter()
+      .copied()
+      .filter(|user| *user != me && in_group.contains(user))
+      .collect();
+    let mut rung = Vec::new();
+    for user in added.iter().copied() {
+      if user != me && !invitees.contains(&user) {
+        invitees.push(user);
+        rung.push(user);
+      }
+    }
+    self.set_up_meeting_chat(meeting, &invitees).await?;
+    if !self.has_group(meeting)? {
+      return Err(CoreError::CallEncryptionPending(meeting));
+    }
+    let request = MoveCallRequest {
+      to_conversation_id: meeting,
+      ring_user_ids: rung,
+    };
+    self.api.move_call(from, &request).await?;
+    Ok(())
+  }
+
   /// The devices of the conversation's MLS group, their certificates verified against the pinned
   /// identities: who may be in its call. This device included.
   pub async fn verified_call_devices(
     &mut self,
     conversation: ConversationId,
   ) -> Result<Vec<VerifiedDevice>, CoreError> {
-    let users: Vec<_> = self
-      .group_or_error(conversation)?
-      .members()?
-      .into_iter()
-      .map(|member| crate::convert::user_from_crypto(member.user_id))
-      .collect::<Result<_, _>>()?;
+    let users = self.group_users(conversation)?;
     let directory: PinnedDirectory = self.pin_identities(users).await?;
     Ok(self.group_or_error(conversation)?.verified_members(&directory)?)
   }

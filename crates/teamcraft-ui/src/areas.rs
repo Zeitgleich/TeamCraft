@@ -23,6 +23,7 @@ use leptos::wasm_split::{SplitLoaderError, wasm_split};
 
 use crate::admin::AdminSection;
 use crate::calls::CallRequest;
+use crate::components::add_to_call::AddToCallDialog;
 use crate::components::admin_console::AdminConsole;
 use crate::components::call_prejoin::PreJoinScreen;
 use crate::components::call_screen::CallScreen;
@@ -95,6 +96,7 @@ areas! {
   /// The call screens (the incoming call card stays in the app, so a call rings at once).
   call_prejoin(request: CallRequest) => calls: view! { <PreJoinScreen request=request /> };
   call_screen(request: CallRequest) => calls: view! { <CallScreen request=request /> };
+  add_to_call(conversation: ConversationId) => calls: view! { <AddToCallDialog conversation=conversation /> };
   meetings(_unit: ()) => meetings: view! { <MeetingsView /> };
   schedule_meeting(_unit: ()) => meetings: view! { <ScheduleMeetingDialog /> };
   meeting_created(_unit: ()) => meetings: view! { <MeetingCreatedDialog /> };

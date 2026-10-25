@@ -648,6 +648,12 @@ pub enum ChatAction {
     conversation: ConversationId,
     invitees: Vec<UserId>,
   },
+  MoveCallToMeeting {
+    from: ConversationId,
+    meeting: ConversationId,
+    in_call: Vec<UserId>,
+    added: Vec<UserId>,
+  },
   LetIntoMeetingChat {
     conversation: ConversationId,
     user: UserId,
@@ -845,6 +851,12 @@ impl ChatAction {
         conversation,
         invitees,
       } => backend.set_up_meeting_chat(conversation, invitees),
+      Self::MoveCallToMeeting {
+        from,
+        meeting,
+        in_call,
+        added,
+      } => backend.move_call_to_meeting(from, meeting, in_call, added),
       Self::LetIntoMeetingChat { conversation, user } => backend.let_into_meeting_chat(conversation, user),
       Self::SetBookmarks {
         conversation,

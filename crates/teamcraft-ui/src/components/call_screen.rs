@@ -4,14 +4,14 @@ use leptos::prelude::*;
 
 use teamcraft_proto::VideoTrackKind;
 
-use crate::calls::{CallLayout, CallRequest, Participant, ScreenShareSound};
+use crate::calls::{CallKind, CallLayout, CallRequest, Participant, ScreenShareSound};
 use crate::components::call_prejoin::call_heading;
 use crate::components::call_video::{BackgroundPicker, LiveVideo, VideoSource, VideoTile, can_show_video};
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 use crate::model::{User, UserId};
 use crate::reactive::use_interval;
-use crate::state::use_app_state;
+use crate::state::{Overlay, use_app_state};
 
 const SPEAKER_ROTATE_MS: u64 = 2400;
 const CLOCK_TICK_MS: u64 = 1000;
@@ -51,6 +51,15 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
       .find(|tile| tile.participant.as_ref().is_some_and(|p| p.is_sharing_screen))
   });
   let host_open = RwSignal::new(false);
+  let has_meetings = use_context::<crate::meetings::MeetingsHub>().is_some();
+  let can_add_people = Memo::new(move |_| {
+    has_meetings
+      && request.kind != CallKind::Huddle
+      && conversation
+        .get()
+        .is_some_and(|conversation| conversation.kind.is_direct_like())
+      && state.read(|backend| !backend.has_simulated_calls())
+  });
   let is_share_layout = move || call.is_sharing_screen.get() || remote_sharer.get().is_some();
 
   // Real calls report who is speaking; the demo rotates the active speaker among people who are not
@@ -462,6 +471,14 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
               })
           }
         />
+        // A DM doesn't take more people: they go into a meeting room the call moves to.
+        <Show when=move || can_add_people.get() fallback=|| ()>
+          <ControlButton
+            icon=IconName::UserPlus
+            label=Signal::derive(move || i18n.t("call-add-people"))
+            on_press=move || state.overlay.set(Overlay::AddToCall(request.conversation))
+          />
+        </Show>
         <ControlButton
           icon=IconName::Minimize
           label=Signal::derive(move || i18n.t("call-minimize"))

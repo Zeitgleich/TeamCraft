@@ -47,7 +47,7 @@ use teamcraft_proto::{
   CreateOrgBackgroundUploadRequest, CreateOrgBackgroundUploadResponse, OrgBackgroundDownloadResponse,
   OrgBackgroundId,
 };
-use teamcraft_proto::{CallJoinTokenResponse, CreateCallJoinTokenRequest};
+use teamcraft_proto::{CallJoinTokenResponse, CreateCallJoinTokenRequest, MoveCallRequest};
 use teamcraft_proto::{
   CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest, InviteId,
   InviteResponse, ListCategoriesResponse, ListInvitesResponse, SpaceResponse, UpdateCategoryRequest,
@@ -269,6 +269,13 @@ pub trait ServerApi {
     conversation: ConversationId,
     request: &CreateCallJoinTokenRequest,
   ) -> impl Future<Output = Result<CallJoinTokenResponse, ApiError>>;
+
+  /// Moves the conversation's DM call into a meeting the user started for it (docs/meetings.md).
+  fn move_call(
+    &self,
+    conversation: ConversationId,
+    request: &MoveCallRequest,
+  ) -> impl Future<Output = Result<(), ApiError>>;
 
   fn send_message(
     &self,

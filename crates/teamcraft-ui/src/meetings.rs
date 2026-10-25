@@ -90,13 +90,16 @@ impl MeetingsClient {
       .await
   }
 
+  /// "Meet now"; `invitees` become members of its chat right away (a call moving into it).
   pub async fn start_instant(
     &self,
     maybe_title: Option<String>,
+    invitees: Vec<UserId>,
     maybe_idempotency_key: Option<IdempotencyKey>,
   ) -> Result<MeetingResponse, MeetingError> {
     let body = to_json(&CreateInstantMeetingRequest {
       maybe_title,
+      invitees,
       maybe_idempotency_key,
     })?;
     self

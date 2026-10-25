@@ -146,6 +146,7 @@ fn active_call(request: CallRequest, carol: UserId) -> ActiveCall {
     screen_sound: ScreenShareSound::Off,
     is_reconnecting: false,
     reconnecting: Vec::new(),
+    maybe_moved_to: None,
     is_deafened: false,
     is_secured: true,
     maybe_privacy_code: Some("31 07 58".to_owned()),
