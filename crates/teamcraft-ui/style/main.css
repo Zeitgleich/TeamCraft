@@ -6404,12 +6404,15 @@ ol.md-list {
    the conversation behind. */
 .modal-backdrop:has(> .modal-lightbox) { padding: 0; background: transparent; }
 .modal.modal-lightbox { width: 100%; height: 100%; max-height: none; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: var(--lightbox-text); overflow: hidden; }
-.lightbox { display: flex; height: 100%; position: relative; isolation: isolate; }
+/* Two columns: the picture takes what is left, the thread panel a clamped width. Nothing is wider
+   than its column, so nothing reaches past the window. */
+.lightbox { display: grid; grid-template-columns: minmax(0, 1fr); height: 100%; position: relative; isolation: isolate; }
+.lightbox.with-thread { grid-template-columns: minmax(0, 1fr) clamp(320px, 28vw, 420px); }
 /* Takes focus only from code for the arrow keys; its controls show the (white) ring. */
 .lightbox:focus { outline: none; }
 .lightbox-backdrop { position: absolute; inset: -10%; z-index: -1; background-color: var(--lightbox-bg); background-position: center; background-size: cover; filter: blur(48px) saturate(1.3) brightness(.4); transform: translateZ(0); }
 .lightbox-backdrop::after { content: ""; position: absolute; inset: 0; background: rgba(8, 10, 16, .55); }
-.lightbox-main { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
+.lightbox-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; position: relative; }
 .lightbox-top { display: flex; align-items: center; gap: 12px; padding: 10px 14px; }
 .lightbox-origin { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; }
 .lightbox-origin-text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
@@ -6443,7 +6446,12 @@ ol.md-list {
 .lightbox.is-flying .lightbox-slot:not(.is-current) { visibility: hidden; }
 .lightbox.is-flying .lightbox-stage { overflow: visible; }
 .lightbox-track.is-fading-in { animation: motion-fade-in var(--dur-base) var(--ease-standard); }
-.lightbox-slot { position: absolute; inset: 0; box-sizing: border-box; padding: inherit; display: flex; align-items: center; justify-content: center; }
+/* One cell: the current file lies over its placeholder until it is decoded, then they cross-fade. */
+.lightbox-slot { position: absolute; inset: 0; box-sizing: border-box; padding: inherit; display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); place-items: center; }
+.lightbox-slot > * { grid-area: 1 / 1; }
+.lightbox-stage:not(.zoomed, .is-live) .lightbox-slot.is-current > .lightbox-image:not(.lightbox-placeholder) { transition: transform var(--dur-fast) var(--ease-out), opacity var(--dur-base) var(--ease-standard); }
+.lightbox-slot.is-current > .lightbox-image.is-arriving { opacity: 0; }
+.lightbox-slot.is-current > .lightbox-placeholder.is-hidden { opacity: 0; visibility: hidden; transition: opacity var(--dur-base) var(--ease-standard), visibility 0s linear var(--dur-base); }
 .lightbox-slot.is-previous { transform: translateX(calc(-100% - 24px)); }
 .lightbox-slot.is-next { transform: translateX(calc(100% + 24px)); }
 .lightbox-video { max-width: 100%; max-height: 100%; background: #000; box-shadow: 0 8px 40px rgba(0, 0, 0, .45); }
@@ -6495,8 +6503,12 @@ ol.md-list {
 .lightbox-facts dt { color: rgba(255, 255, 255, .6); }
 .lightbox-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 /* The conversation's thread beside the picture */
-.lightbox-thread { flex: none; width: min(380px, 40vw); display: flex; min-height: 0; color: var(--text); }
-.lightbox-thread .side-panel { flex: 1; border-left: 1px solid var(--border); }
+/* The panel shrinks to its column (a flex item defaults to its content's width, and a wide image
+   in the thread would push it past the window) and long words wrap; menus inside may still overlap
+   the picture, so nothing clips them. */
+.lightbox-thread { min-width: 0; min-height: 0; display: flex; color: var(--text); }
+.lightbox-thread .side-panel { flex: 1; min-width: 0; border-left: 1px solid var(--border); overflow-wrap: anywhere; }
+.lightbox-thread .side-panel > * { max-width: 100%; }
 /* Tooltips that name the key: shown on hover and on keyboard focus */
 .lightbox-main [data-tip]:focus-visible::after {
   content: attr(data-tip);
@@ -6549,7 +6561,9 @@ ol.md-list {
 @media (hover: hover) and (pointer: fine) { .lightbox-previous[data-tip]:hover::after { left: 0; transform: none; } }
 .lightbox-next[data-tip]:focus-visible::after { left: auto; right: 0; transform: none; }
 @media (hover: hover) and (pointer: fine) { .lightbox-next[data-tip]:hover::after { left: auto; right: 0; transform: none; } }
+/* Narrow windows: the picture keeps the whole width, the panel slides over it as a sheet. */
 @media (max-width: 900px) {
+  .lightbox.with-thread { grid-template-columns: minmax(0, 1fr); }
   .lightbox-thread { position: absolute; inset: 0 0 0 auto; z-index: 4; width: min(380px, 100%); }
 }
 @media (max-width: 640px) {
@@ -8386,6 +8400,12 @@ ol.md-list {
   .lightbox-slot.is-current .lightbox-image,
   .lightbox-track.is-fading-in {
     animation: motion-fade-in 150ms var(--ease-standard);
+  }
+
+  /* The full file replaces its placeholder at once. */
+  .lightbox-stage:not(.zoomed, .is-live) .lightbox-slot.is-current > .lightbox-image:not(.lightbox-placeholder),
+  .lightbox-slot.is-current > .lightbox-placeholder.is-hidden {
+    transition: none;
   }
 }
 

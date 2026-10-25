@@ -8,16 +8,22 @@
 //!   the download when their row left the screen while they waited. They keep a rendition of at
 //!   most [`INLINE_RENDITION_SIDE`] pixels, not the decoded original. The lightbox loads the full
 //!   file at once.
+//! - A file is downloaded and decrypted once at a time ([`InFlight`]): the lightbox opened while the
+//!   inline preview still loads, or the same picture asked for twice, waits for the load under way
+//!   instead of starting another one.
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::future::Future;
+use std::hash::Hash;
 use std::rc::Rc;
+use std::thread::LocalKey;
 
 use futures_channel::oneshot;
 
 use crate::lightbox::MediaKey;
 use crate::model::ConversationId;
-use crate::object_url::{FetchError, ObjectUrl, fetch_attachment};
+use crate::object_url::{FetchError, ObjectUrl, fetch_decrypted, url_for};
 
 /// Decrypted bytes the cache keeps at most. A large workspace stays within the memory budget of
 /// docs/performance.md with this on top; one image bigger than this is shown but not kept.
@@ -31,10 +37,17 @@ const MAX_BACKGROUND_LOADS: usize = 3;
 thread_local! {
   static CACHE: RefCell<Lru<(MediaKey, Rendition), Rc<ObjectUrl>>> = RefCell::new(Lru::new(MEDIA_CACHE_BUDGET_BYTES));
   static PERMITS: RefCell<Permits> = RefCell::new(Permits::new(MAX_BACKGROUND_LOADS));
+  /// Renditions being made, so a second ask for one gets the same URL.
+  static LOADING_URLS: RefCell<InFlight<(MediaKey, Rendition), UrlResult>> = RefCell::new(InFlight::default());
+  /// Files being downloaded and decrypted, shared by the renditions made from them.
+  static LOADING_BYTES: RefCell<InFlight<MediaKey, BytesResult>> = RefCell::new(InFlight::default());
 }
 
+type UrlResult = Result<Rc<ObjectUrl>, FetchError>;
+type BytesResult = Result<js_sys::Uint8Array, FetchError>;
+
 /// Which version of a picture is wanted.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Rendition {
   /// The conversation: scaled down to [`INLINE_RENDITION_SIDE`], loaded in the background behind
   /// other previews. Animations stay as they are.
@@ -50,6 +63,29 @@ pub struct Lru<K, V> {
   entries: VecDeque<(K, V, u64)>,
   used_bytes: u64,
   budget_bytes: u64,
+}
+
+/// Loads under way by key, with whoever waits for each. The first to ask leads the load; later ones
+/// get its result.
+#[derive(Debug)]
+pub struct InFlight<K, V> {
+  waiting: HashMap<K, Vec<oneshot::Sender<V>>>,
+}
+
+/// What asking for a load under way gives.
+#[derive(Debug)]
+pub enum Joined<V> {
+  /// Nothing under way: this caller loads and [`InFlight::finish`]es (or [`InFlight::abandon`]s).
+  Lead,
+  /// Another caller loads; its result arrives here, or a cancellation when it gave up.
+  Wait(oneshot::Receiver<V>),
+}
+
+/// Takes a led load off the table if its future is dropped before it finished, so waiters don't
+/// wait forever: they are cancelled and load themselves.
+struct Leading<K: Eq + Hash + 'static, V: Clone + 'static> {
+  table: &'static LocalKey<RefCell<InFlight<K, V>>>,
+  maybe_key: Option<K>,
 }
 
 /// Waiting background loads and the free slots.
@@ -83,10 +119,47 @@ pub async fn load(
   if !is_wanted() {
     return Ok(None);
   }
-  let file_id = key.attachment.to_string();
-  let url = Rc::new(fetch_attachment(conversation, key.message, file_id, media_type, maybe_max_side).await?);
-  CACHE.with_borrow_mut(|cache| cache.insert((key, rendition), url.clone(), url.byte_len()));
+  let url = shared(&LOADING_URLS, (key, rendition), || async move {
+    let bytes = shared(&LOADING_BYTES, key, || {
+      fetch_decrypted(conversation, key.message, key.attachment.to_string())
+    })
+    .await?;
+    let url = Rc::new(url_for(&bytes, media_type, maybe_max_side).await?);
+    CACHE.with_borrow_mut(|cache| cache.insert((key, rendition), url.clone(), url.byte_len()));
+    Ok(url)
+  })
+  .await?;
   Ok(Some(url))
+}
+
+/// The result of the load of `key` under way in `table`, or of `load` when none is.
+async fn shared<K, V, F, Fut>(table: &'static LocalKey<RefCell<InFlight<K, V>>>, key: K, load: F) -> V
+where
+  K: Clone + Eq + Hash + 'static,
+  V: Clone + 'static,
+  F: FnOnce() -> Fut,
+  Fut: Future<Output = V>,
+{
+  loop {
+    match table.with_borrow_mut(|loads| loads.join(key.clone())) {
+      Joined::Wait(receiver) => {
+        if let Ok(value) = receiver.await {
+          return value;
+        }
+        // The leader gave up before it finished: ask again, and lead if nobody else does.
+      },
+      Joined::Lead => {
+        let mut leading = Leading {
+          table,
+          maybe_key: Some(key.clone()),
+        };
+        let value = load().await;
+        leading.maybe_key = None;
+        table.with_borrow_mut(|loads| loads.finish(&key, &value));
+        return value;
+      },
+    }
+  }
 }
 
 /// The image if it is in the cache (and marks it as just used).
@@ -146,6 +219,58 @@ impl<K: PartialEq, V: Clone> Lru<K, V> {
   }
 }
 
+impl<K: Eq + Hash, V: Clone> InFlight<K, V> {
+  /// Leads the load of `key`, or waits for the one under way.
+  pub fn join(&mut self, key: K) -> Joined<V> {
+    match self.waiting.get_mut(&key) {
+      Some(waiters) => {
+        let (sender, receiver) = oneshot::channel();
+        waiters.push(sender);
+        Joined::Wait(receiver)
+      },
+      None => {
+        self.waiting.insert(key, Vec::new());
+        Joined::Lead
+      },
+    }
+  }
+
+  /// The led load is done: everyone waiting for it gets `value`.
+  pub fn finish(&mut self, key: &K, value: &V) {
+    for waiter in self.waiting.remove(key).into_iter().flatten() {
+      // A waiter that went away no longer needs it.
+      drop(waiter.send(value.clone()));
+    }
+  }
+
+  /// The led load stopped without a result: the waiters are cancelled.
+  pub fn abandon(&mut self, key: &K) {
+    self.waiting.remove(key);
+  }
+
+  pub fn is_loading(&self, key: &K) -> bool {
+    self.waiting.contains_key(key)
+  }
+}
+
+impl<K, V> Default for InFlight<K, V> {
+  fn default() -> Self {
+    Self {
+      waiting: HashMap::new(),
+    }
+  }
+}
+
+impl<K: Eq + Hash + 'static, V: Clone + 'static> Drop for Leading<K, V> {
+  fn drop(&mut self) {
+    let Some(key) = self.maybe_key.take() else {
+      return;
+    };
+    // The thread-local may already be gone while the page unloads; nobody waits then.
+    self.table.try_with(|loads| loads.borrow_mut().abandon(&key)).ok();
+  }
+}
+
 impl Permits {
   fn new(available: usize) -> Self {
     Self {
@@ -193,7 +318,17 @@ impl Drop for Permit {
 
 #[cfg(test)]
 mod tests {
+  use std::cell::Cell;
+  use std::pin::pin;
+  use std::task::{Context, Poll, Waker};
+
+  use futures_util::future::join;
+
   use super::*;
+
+  thread_local! {
+    static TEST_LOADS: RefCell<InFlight<u32, u32>> = RefCell::new(InFlight::default());
+  }
 
   #[test]
   fn the_least_recently_used_entries_go_first_when_over_budget() {
@@ -222,6 +357,93 @@ mod tests {
     lru.insert("huge", 2, 101);
     assert_eq!(lru.get(&"huge"), None);
     assert_eq!(lru.get(&"small"), Some(1), "nothing was evicted for it");
+  }
+
+  mod in_flight {
+    use super::*;
+
+    #[test]
+    fn a_second_ask_waits_for_the_load_under_way() {
+      let mut loads = InFlight::<&str, u32>::default();
+      assert!(matches!(loads.join("a"), Joined::Lead));
+      let Joined::Wait(mut second) = loads.join("a") else {
+        panic!("the second ask must wait");
+      };
+      let Joined::Wait(mut third) = loads.join("a") else {
+        panic!("the third ask must wait");
+      };
+      assert!(
+        matches!(loads.join("b"), Joined::Lead),
+        "another key loads by itself"
+      );
+      loads.finish(&"a", &7);
+      assert_eq!((second.try_recv(), third.try_recv()), (Ok(Some(7)), Ok(Some(7))));
+      assert!(!loads.is_loading(&"a"));
+      assert!(
+        matches!(loads.join("a"), Joined::Lead),
+        "a finished load is not joined again"
+      );
+    }
+
+    #[test]
+    fn an_abandoned_load_cancels_its_waiters() {
+      let mut loads = InFlight::<&str, u32>::default();
+      assert!(matches!(loads.join("a"), Joined::Lead));
+      let Joined::Wait(mut waiter) = loads.join("a") else {
+        panic!("the second ask must wait");
+      };
+      loads.abandon(&"a");
+      assert!(waiter.try_recv().is_err(), "cancelled, so it loads itself");
+      assert!(matches!(loads.join("a"), Joined::Lead));
+    }
+
+    #[test]
+    fn two_asks_for_the_same_file_load_it_once() {
+      let loads = Cell::new(0);
+      let (release, gate) = oneshot::channel::<u32>();
+      let first = shared(&TEST_LOADS, 1, || async {
+        loads.set(loads.get() + 1);
+        gate.await.unwrap_or(0)
+      });
+      let second = shared(&TEST_LOADS, 1, || async {
+        loads.set(loads.get() + 1);
+        99
+      });
+      let mut both = pin!(join(first, second));
+      let mut cx = Context::from_waker(Waker::noop());
+      assert!(both.as_mut().poll(&mut cx).is_pending());
+      release.send(7).expect("the load waits for it");
+      assert_eq!(both.as_mut().poll(&mut cx), Poll::Ready((7, 7)));
+      assert_eq!(loads.get(), 1, "the second ask waited for the first load");
+      assert!(!TEST_LOADS.with_borrow(|loads| loads.is_loading(&1)));
+    }
+
+    #[test]
+    fn a_waiter_loads_itself_when_the_leader_is_dropped() {
+      let (_never, gate) = oneshot::channel::<u32>();
+      let mut first = Box::pin(shared(&TEST_LOADS, 2, || async { gate.await.unwrap_or(0) }));
+      let mut second = Box::pin(shared(&TEST_LOADS, 2, || async { 5 }));
+      let mut cx = Context::from_waker(Waker::noop());
+      assert!(first.as_mut().poll(&mut cx).is_pending());
+      assert!(second.as_mut().poll(&mut cx).is_pending(), "waits for the first");
+      drop(first);
+      assert_eq!(second.as_mut().poll(&mut cx), Poll::Ready(5));
+    }
+
+    #[test]
+    fn a_waiter_that_went_away_does_not_stop_the_others() {
+      let mut loads = InFlight::<&str, u32>::default();
+      assert!(matches!(loads.join("a"), Joined::Lead));
+      let Joined::Wait(gone) = loads.join("a") else {
+        panic!("must wait");
+      };
+      let Joined::Wait(mut waiting) = loads.join("a") else {
+        panic!("must wait");
+      };
+      drop(gone);
+      loads.finish(&"a", &1);
+      assert_eq!(waiting.try_recv(), Ok(Some(1)));
+    }
   }
 
   #[test]

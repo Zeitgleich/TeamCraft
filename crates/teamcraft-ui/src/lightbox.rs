@@ -54,6 +54,15 @@ pub enum MediaKind {
   Video,
 }
 
+/// Which file the current slot is bringing in, and whether its full picture is on screen yet. Until it
+/// is, that file's own placeholder (its thumbnail or inline rendition) stays in front; then the two
+/// cross-fade. Keyed by the file, so a late `load` of a file paged away from changes nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Arrival {
+  maybe_key: Option<MediaKey>,
+  is_full_shown: bool,
+}
+
 /// A quarter-turn rotation of the view (the file is not changed).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Rotation {
@@ -187,6 +196,32 @@ impl MediaKey {
 
   pub fn matches(&self, file: &FileInfo) -> bool {
     file.message == self.message && file.file_id == self.attachment.to_string()
+  }
+}
+
+impl Arrival {
+  /// `key` is now the current file; its full picture is not on screen yet.
+  pub fn start(key: MediaKey) -> Self {
+    Self {
+      maybe_key: Some(key),
+      is_full_shown: false,
+    }
+  }
+
+  /// The full picture of `key` is decoded and on screen (its `load`, or it was already complete).
+  pub fn full_shown(&mut self, key: MediaKey) {
+    if self.maybe_key == Some(key) {
+      self.is_full_shown = true;
+    }
+  }
+
+  pub fn key(&self) -> Option<MediaKey> {
+    self.maybe_key
+  }
+
+  /// Whether `key`'s full picture is on screen, so its placeholder fades out.
+  pub fn is_full_shown(&self, key: MediaKey) -> bool {
+    self.maybe_key == Some(key) && self.is_full_shown
   }
 }
 
@@ -928,6 +963,48 @@ mod tests {
       assert!(wheel_zoom_factor(100.0, false) < 1.0);
       assert!(wheel_zoom_factor(-100.0, false) > 1.0);
       assert!(wheel_zoom_factor(-10.0, true) > wheel_zoom_factor(-10.0, false));
+    }
+  }
+
+  mod arrival {
+    use super::*;
+
+    #[test]
+    fn the_placeholder_stays_until_the_full_picture_of_the_same_file_is_shown() {
+      let mut arrival = Arrival::start(key(1, 10));
+      assert!(!arrival.is_full_shown(key(1, 10)));
+      arrival.full_shown(key(1, 10));
+      assert!(arrival.is_full_shown(key(1, 10)));
+      assert!(
+        !arrival.is_full_shown(key(1, 11)),
+        "another file is not shown by it"
+      );
+    }
+
+    #[test]
+    fn a_late_load_of_the_previous_file_does_not_hide_the_new_placeholder() {
+      // Paged from 10 to 11; 10's image fires its `load` afterwards.
+      let mut arrival = Arrival::start(key(1, 11));
+      arrival.full_shown(key(1, 10));
+      assert!(!arrival.is_full_shown(key(1, 11)));
+      assert_eq!(arrival.key(), Some(key(1, 11)));
+    }
+
+    #[test]
+    fn paging_back_to_a_file_brings_its_placeholder_back_until_it_loads_again() {
+      let mut arrival = Arrival::start(key(1, 10));
+      arrival.full_shown(key(1, 10));
+      assert!(arrival.is_full_shown(key(1, 10)));
+      arrival = Arrival::start(key(1, 10));
+      assert!(!arrival.is_full_shown(key(1, 10)), "its new image loads again");
+    }
+
+    #[test]
+    fn nothing_is_shown_before_a_file_starts() {
+      let mut arrival = Arrival::default();
+      arrival.full_shown(key(1, 10));
+      assert!(!arrival.is_full_shown(key(1, 10)));
+      assert_eq!(arrival.key(), None);
     }
   }
 
