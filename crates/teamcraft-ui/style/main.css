@@ -5403,6 +5403,13 @@ ol.md-list {
   text-align: center;
 }
 
+/* The shared file's name on its download page. */
+.share-page-name {
+  margin: var(--space-3) 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
 .auth-status-quiet {
   margin: var(--space-4) 0;
 }

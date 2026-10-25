@@ -311,11 +311,6 @@ auth_failures_per_minute = 30
 # from their sections) and connect_origins; the web client cannot send data anywhere else. For a
 # stricter policy add e.g. "require-trusted-types-for 'script'" after testing the web client with it.
 # connect_origins = ["https://other.example.com"]
-# The small static download page of share links (/f/<id>): download.html plus the files it uses, served
-# under /f-assets/. {{sri:<file>}} in download.html becomes that file's Subresource Integrity value.
-# Without it /f/<id> serves the app shell.
-# share_page_dir = "/srv/teamcraft/share-page"
-# share_page_content_security_policy = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; ..."
 
 # What the sign-in page offers; the admin console changes it at runtime (Settings -> Sign-in page).
 # The provider name and icon of the SSO button are brand settings (`sso_label`, `sso_icon`).
@@ -588,6 +583,9 @@ max_downloads_cap = 0
 # Public URL of this server without trailing slash; shown as <base>/f/<id> in the API.
 public_base_url = ""
 max_links_per_user = 500
+# A download that failed after it was counted (storage hiccup, lost connection) can be retried this
+# long without counting again; 0 counts every request.
+download_retry_minutes = 10
 
 # The key that encrypts the passwords admins enter in the console (mail server, calendar) before they are
 # stored in the database (docs/admin.md §6.2). Without it those passwords can only be set in this file.

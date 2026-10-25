@@ -14,7 +14,7 @@ use crate::model::{ConversationId, MessageId};
 use crate::raster::{Encoding, SVG_DISPLAY_SIDE, rasterize};
 
 /// Media type of a blob whose file doesn't claim to be an image: the browser shows nothing for it.
-const OPAQUE_TYPE: &str = "application/octet-stream";
+pub(crate) const OPAQUE_TYPE: &str = "application/octet-stream";
 
 /// Why a file couldn't be shown.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]

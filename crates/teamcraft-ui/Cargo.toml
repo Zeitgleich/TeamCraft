@@ -29,7 +29,7 @@ web-sys = { version = "0.3", features = [
   "Document", "Element", "Event", "EventTarget", "HtmlElement", "HtmlInputElement", "HtmlTextAreaElement",
   "HtmlCollection", "KeyboardEvent", "MediaQueryList", "CssStyleDeclaration", "Node", "NodeList", "Storage", "Window",
   "DomTokenList", "ScrollToOptions", "ScrollBehavior", "File", "FileList", "Navigator", "ServiceWorkerContainer", "ServiceWorker", "MessageEvent", "ServiceWorkerRegistration", "Location", "History",
-  "Blob", "BlobPropertyBag", "Url", "DragEvent", "DataTransfer", "DataTransferItemList", "DataTransferItem", "ClipboardEvent", "Request", "RequestInit", "RequestMode", "RequestRedirect", "RequestCache", "Response", "Headers", "UrlSearchParams", "ResizeObserver", "DomRect",
+  "Blob", "BlobPropertyBag", "ReadableStream", "Url", "DragEvent", "DataTransfer", "DataTransferItemList", "DataTransferItem", "ClipboardEvent", "Request", "RequestInit", "RequestMode", "RequestRedirect", "RequestCache", "Response", "Headers", "UrlSearchParams", "ResizeObserver", "DomRect",
   "BroadcastChannel", "MouseEvent", "StorageManager", "ServiceWorkerState", "VisibilityState", "NotificationOptions",
   "PointerEvent", "WheelEvent", "HtmlAnchorElement", "HtmlImageElement", "AddEventListenerOptions",
   "HtmlCanvasElement", "CanvasRenderingContext2d", "HtmlMediaElement", "HtmlVideoElement", "Selection", "MediaStream",
