@@ -70,13 +70,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sent a file: %@"
+            "value": "📎 %@"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Hat eine Datei gesendet: %@"
+            "value": "📎 %@"
           }
         }
       }
@@ -125,6 +125,70 @@
           "stringUnit": {
             "state": "translated",
             "value": "Testbenachrichtigung: Push-Benachrichtigungen erreichen dieses Gerät."
+          }
+        }
+      }
+    },
+    "notification_photo": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "📷 Photo"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "📷 Foto"
+          }
+        }
+      }
+    },
+    "notification_video": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "🎬 Video"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "🎬 Video"
+          }
+        }
+      }
+    },
+    "notification_audio": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "🎤 Audio"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "🎤 Audio"
+          }
+        }
+      }
+    },
+    "notification_new_message_from %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New message from %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Neue Nachricht von %@"
           }
         }
       }

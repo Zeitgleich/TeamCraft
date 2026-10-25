@@ -3862,13 +3862,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sent a file: %@"
+            "value": "📎 %@"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Hat eine Datei gesendet: %@"
+            "value": "📎 %@"
           }
         }
       }
@@ -6901,6 +6901,166 @@
           "stringUnit": {
             "state": "translated",
             "value": "Nur die Personen in diesem Anruf können ihn hören und sehen, nicht einmal der Server. Damit sicher niemand dazwischensitzt, vergleiche den Code mit den anderen."
+          }
+        }
+      }
+    },
+    "notification_photo": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Photo"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Foto"
+          }
+        }
+      }
+    },
+    "notification_video": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Video"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Video"
+          }
+        }
+      }
+    },
+    "notification_audio": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Audio"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Audio"
+          }
+        }
+      }
+    },
+    "notification_new_message_from %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New message from %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Neue Nachricht von %@"
+          }
+        }
+      }
+    },
+    "notification_content_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notification content"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Inhalt von Benachrichtigungen"
+          }
+        }
+      }
+    },
+    "notification_content_full": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sender and message"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Absender und Nachricht"
+          }
+        }
+      }
+    },
+    "notification_content_sender_only": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sender only"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nur Absender"
+          }
+        }
+      }
+    },
+    "notification_content_nothing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nothing"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nichts"
+          }
+        }
+      }
+    },
+    "notification_content_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "What notifications show on this device. Your workspace can limit it further."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Was Benachrichtigungen auf diesem Gerät zeigen. Dein Arbeitsbereich kann es weiter einschränken."
+          }
+        }
+      }
+    },
+    "notification_content_limit %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your workspace limits this to: %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dein Arbeitsbereich begrenzt das auf: %@"
           }
         }
       }
