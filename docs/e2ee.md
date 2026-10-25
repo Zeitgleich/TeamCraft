@@ -448,8 +448,8 @@ the preview and open in the system browser (desktop) or a new tab (web), with th
 The list is read from an inert parsed copy of the file (`DOMParser`).
 
 **PDF.** PDF.js, vendored and pinned (`crates/teamcraft-ui/vendor/pdfjs-<version>`, the npm package's
-`pdf.min.mjs`, worker and the decoders' WebAssembly, unmodified, no CDN), loaded as files of their own when the first PDF opens
-so the first-visit bundle is untouched. It runs with `isEvalSupported: false`, no
+`pdf.min.mjs`, worker and the decoders' WebAssembly, unmodified, no CDN), loaded as a separate module when the first PDF opens, so the
+first-visit bundle is untouched. It runs with `isEvalSupported: false`, no
 scripting (the scripting sandbox is not shipped) and no annotation, form or link layer: pages are canvases
 plus a text layer for selecting text and searching. Memory stays bounded: only pages near the viewport are
 drawn.
