@@ -6,11 +6,13 @@
 use teamcraft_client_api::remote::{
   ChatAction, ChatQuery, ChatSnapshot, ContactKeys, MessageWindow, SecuritySnapshot,
 };
+use teamcraft_core::api::ServerApi as _;
 use teamcraft_core::records;
 use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::org_recovery::RecoveryRequestKey;
 use teamcraft_proto::{
-  Base64Bytes, CreateRecoveryRequest, RecoveryRequestId, RecoveryRequestResponse, RecoveryResultPayload,
+  AvatarContentType, AvatarResponse, Base64Bytes, CreateRecoveryRequest, ErrorCode, RecoveryRequestId,
+  RecoveryRequestResponse, RecoveryResultPayload,
 };
 
 use crate::engine::{ClientSlot, Engine, parse_id};
@@ -127,6 +129,32 @@ impl Engine {
     )
   }
 
+  /// The profile picture of `user` as image bytes (JPEG, PNG or WebP); `None` if the person has
+  /// none. The API names a presigned URL (profile pictures are not secret from members) and the
+  /// download is capped at `max_bytes`, so a hostile answer can't make the phone buffer a huge body.
+  pub(crate) async fn avatar_picture(
+    &self,
+    user: &str,
+    max_bytes: u64,
+  ) -> Result<Option<Vec<u8>>, TeamCraftError> {
+    let user: teamcraft_proto::UserId = parse_id(user)?;
+    let api = self.api();
+    let answer = match api
+      .raw_request("GET", &format!("/users/{user}/avatar"), None)
+      .await
+    {
+      Ok(answer) => answer,
+      Err(error) if error.error_code() == Some(&ErrorCode::AvatarNotFound) => return Ok(None),
+      Err(error) => return Err(teamcraft_core::CoreError::from(error).into()),
+    };
+    let (url, size_bytes) = avatar_location(&answer)?;
+    let picture = api
+      .get_blob_capped(&url, size_bytes.min(max_bytes))
+      .await
+      .map_err(teamcraft_core::CoreError::from)?;
+    Ok(Some(picture))
+  }
+
   /// New device without the passphrase: asks the organization's admins to recover the account.
   /// Returns the code the user reads to an admin.
   pub(crate) async fn start_org_recovery(&mut self) -> Result<OrgRecoveryStart, TeamCraftError> {
@@ -237,4 +265,49 @@ fn to_json(value: &impl serde::Serialize) -> Result<String, TeamCraftError> {
 
 fn from_json<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, TeamCraftError> {
   serde_json::from_str(text).map_err(|error| TeamCraftError::InvalidInput(error.to_string()))
+}
+
+/// The download URL and size of `GET /users/{id}/avatar`'s answer; refuses a type that is not a
+/// picture and a URL that is not http(s).
+fn avatar_location(answer: &str) -> Result<(String, u64), TeamCraftError> {
+  let location: AvatarResponse =
+    serde_json::from_str(answer).map_err(|error| TeamCraftError::Core(error.to_string()))?;
+  if let AvatarContentType::Unknown(other) = &location.content_type {
+    return Err(TeamCraftError::Core(format!("{other:?} is not a picture type")));
+  }
+  if !location.download_url.starts_with("https://") && !location.download_url.starts_with("http://") {
+    return Err(TeamCraftError::Core("the picture is not at a web address".into()));
+  }
+  Ok((location.download_url, location.size_bytes))
+}
+
+#[cfg(test)]
+mod avatar_tests {
+  use super::*;
+
+  const ANSWER: &str = r#"{"download_url":"https://files.example.com/a?sig=1","content_type":"image/jpeg","size_bytes":1234,"expires_at":0}"#;
+
+  #[test]
+  fn reads_the_location_of_a_picture() {
+    let (url, size) = avatar_location(ANSWER).unwrap();
+    assert_eq!(url, "https://files.example.com/a?sig=1");
+    assert_eq!(size, 1234);
+  }
+
+  #[test]
+  fn refuses_other_content_types() {
+    let answer = ANSWER.replace("image/jpeg", "text/html");
+    assert!(avatar_location(&answer).is_err());
+  }
+
+  #[test]
+  fn refuses_other_schemes() {
+    let answer = ANSWER.replace("https://files.example.com/a?sig=1", "file:///etc/passwd");
+    assert!(avatar_location(&answer).is_err());
+  }
+
+  #[test]
+  fn refuses_garbage() {
+    assert!(avatar_location("<html>login</html>").is_err());
+  }
 }

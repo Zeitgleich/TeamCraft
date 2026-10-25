@@ -412,6 +412,20 @@ impl TeamCraft {
       .await
   }
 
+  /// The profile picture of a person (image bytes, at most `max_bytes`), or `None` without one.
+  /// Fetched on demand; the app keeps its own cache.
+  pub async fn avatar_picture(
+    &self,
+    user_id: String,
+    max_bytes: u32,
+  ) -> Result<Option<Vec<u8>>, TeamCraftError> {
+    self
+      .call(move |engine| {
+        Box::pin(async move { engine.avatar_picture(&user_id, u64::from(max_bytes)).await })
+      })
+      .await
+  }
+
   /// New device without the passphrase: asks the organization's admins to recover the account
   /// (e2ee.md §6.3.1). Show the code; the user reads it to an admin.
   pub async fn start_org_recovery(&self) -> Result<OrgRecoveryStart, TeamCraftError> {
