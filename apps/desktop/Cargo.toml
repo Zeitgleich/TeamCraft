@@ -70,6 +70,9 @@ zbus = { version = "5.13", default-features = false, features = ["tokio"] }
 # The desktop's window button layout (gtk-decoration-layout) for the custom title bar (MIT; the
 # same version Tauri uses on Linux, so already in the tree).
 gtk = "0.18"
+# The webview's cache model and page cache (webview_memory.rs; MIT, the version wry uses, so already in
+# the tree).
+webkit2gtk = "2.0.2"
 
 # macOS cameras (AVFoundation) and hardware H.264 through GStreamer's VideoToolbox encoder
 # (`vtenc_h264`); untested. The dmg bundles GStreamer.framework (packaging/macos/bundle-gstreamer.sh);
