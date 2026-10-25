@@ -26,7 +26,7 @@ use crate::i18n::{I18n, use_i18n};
 use crate::lightbox::{MediaKey, MediaKind};
 use crate::media_cache::{self, Rendition};
 use crate::media_formats::animation_label;
-use crate::media_layout::{fit_picture, inline_size, loads_inline, thumbnail_size, thumbnail_type};
+use crate::media_layout::{fit_picture, inline_size, loads_inline, thumbnail_size};
 use crate::model::{ConversationId, MessageId};
 use crate::object_url::{FetchError, ObjectUrl};
 use crate::state::{AppState, Overlay, use_app_state};
@@ -695,10 +695,10 @@ impl FileActions {
 #[component]
 pub fn LinkPreviewCard(preview: LinkPreview) -> impl IntoView {
   let i18n = use_i18n();
-  let image = preview
-    .maybe_image
-    .as_deref()
-    .and_then(|bytes| blob_url(bytes, thumbnail_type(bytes)));
+  let picture = preview.maybe_image.as_deref().and_then(ObjectUrl::from_thumbnail);
+  let image = picture.as_ref().map(|url| url.as_str().to_owned());
+  // Revoked when the card leaves the screen; every render of a row made a new one (issue #399).
+  StoredValue::new_local(picture);
   let title = preview.maybe_title.clone().unwrap_or_else(|| preview.url.clone());
   // Only web links open from here; anything else would be a way to run a script.
   let is_web_link = preview.url.starts_with("https://") || preview.url.starts_with("http://");
