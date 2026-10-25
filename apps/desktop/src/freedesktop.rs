@@ -35,6 +35,11 @@ const STATUS_NOTIFIER_HOST_SIGNALS: [&str; 2] =
   ["StatusNotifierHostRegistered", "StatusNotifierHostUnregistered"];
 const BUS_DAEMON: &str = "org.freedesktop.DBus";
 
+/// The launcher badge API that began with Ubuntu's Unity and that KDE Plasma's task manager, Dash to
+/// Dock and others listen to: a broadcast signal, from any object path, naming the app's `.desktop`.
+const LAUNCHER_ENTRY: &str = "com.canonical.Unity.LauncherEntry";
+const LAUNCHER_ENTRY_PATH: &str = "/de/zeitgleich/teamcraft/LauncherEntry";
+
 /// Session and system bus, connected on first use.
 #[derive(Default)]
 pub struct Buses {
@@ -70,6 +75,15 @@ pub struct DesktopNotification<'a> {
   pub category: &'a str,
   /// A ringing call: critical urgency (stays until withdrawn), no server sound (the app rings).
   pub is_ringing: bool,
+}
+
+/// What the notification server reports about a notification.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ServerEvent {
+  /// The user clicked it, a button or sent an inline reply.
+  Action(ServerAction),
+  /// It is gone: expired, dismissed or closed by the app.
+  Closed { id: u32 },
 }
 
 /// What the user did with a notification, as the server reports it.
@@ -157,9 +171,9 @@ impl Buses {
     .await
   }
 
-  /// Calls `on_action` for every click, button and inline reply on a notification, for as long as
-  /// the session bus lives. Returns at once when there is no session bus.
-  pub async fn watch_actions(&self, on_action: impl Fn(ServerAction) + Send + 'static) {
+  /// Calls `on_event` for every click, button, inline reply and closed notification, for as long
+  /// as the session bus lives. Returns at once when there is no session bus.
+  pub async fn watch_notifications(&self, on_event: impl Fn(ServerEvent) + Send + 'static) {
     let Some(session) = self.session().await else {
       return;
     };
@@ -171,7 +185,7 @@ impl Buses {
       return;
     };
     let Ok(mut stream) = zbus::MessageStream::for_match_rule(rule, session, None).await else {
-      tracing::debug!("cannot watch notification actions");
+      tracing::debug!("cannot watch notifications");
       return;
     };
     while let Some(Ok(message)) = stream.next().await {
@@ -179,23 +193,31 @@ impl Buses {
       let Some(member) = header.member() else {
         continue;
       };
-      let Ok((id, value)) = message.body().deserialize::<(u32, String)>() else {
-        continue;
-      };
-      let action = match member.as_str() {
-        "ActionInvoked" => ServerAction {
-          id,
-          key: value,
-          maybe_text: None,
-        },
-        "NotificationReplied" => ServerAction {
-          id,
-          key: INLINE_REPLY.to_owned(),
-          maybe_text: Some(value),
-        },
+      let body = message.body();
+      let event = match member.as_str() {
+        "ActionInvoked" => body.deserialize::<(u32, String)>().map(|(id, key)| {
+          ServerEvent::Action(ServerAction {
+            id,
+            key,
+            maybe_text: None,
+          })
+        }),
+        "NotificationReplied" => body.deserialize::<(u32, String)>().map(|(id, text)| {
+          ServerEvent::Action(ServerAction {
+            id,
+            key: INLINE_REPLY.to_owned(),
+            maybe_text: Some(text),
+          })
+        }),
+        // The second value is the reason, which doesn't matter here.
+        "NotificationClosed" => body
+          .deserialize::<(u32, u32)>()
+          .map(|(id, _reason)| ServerEvent::Closed { id }),
         _ => continue,
       };
-      on_action(action);
+      if let Ok(event) = event {
+        on_event(event);
+      }
     }
   }
 
@@ -311,6 +333,29 @@ impl Buses {
     }
   }
 
+  /// Shows `count` on the app's launcher icon in the task manager or dock (0 hides it).
+  /// `desktop_entry` is the installed entry's file name (`TeamCraft.desktop`). Tauri's own badge
+  /// needs `libunity` and a running Unity, which KDE Plasma and most distributions don't have.
+  pub async fn set_launcher_count(&self, desktop_entry: &str, count: u32) {
+    let Some(session) = self.session().await else {
+      return;
+    };
+    let app_uri = launcher_app_uri(desktop_entry);
+    let properties = launcher_properties(count);
+    if let Err(error) = session
+      .emit_signal(
+        None::<&str>,
+        LAUNCHER_ENTRY_PATH,
+        LAUNCHER_ENTRY,
+        "Update",
+        &(app_uri.as_str(), properties),
+      )
+      .await
+    {
+      tracing::debug!(%error, "could not update the launcher badge");
+    }
+  }
+
   /// Closes a notification shown earlier (already closed ones are ignored by the server).
   pub async fn close(&self, id: u32) {
     if let Some(session) = self.session().await {
@@ -387,6 +432,19 @@ fn server_actions<'a>(notification: &DesktopNotification<'a>, has_inline_reply: 
     actions.extend([INLINE_REPLY, placeholder]);
   }
   actions
+}
+
+/// The `app_uri` of a LauncherEntry update.
+fn launcher_app_uri(desktop_entry: &str) -> String {
+  format!("application://{desktop_entry}")
+}
+
+/// The properties of a LauncherEntry update: the count, shown only when there is one.
+fn launcher_properties(count: u32) -> HashMap<&'static str, Value<'static>> {
+  HashMap::from([
+    ("count", Value::from(i64::from(count))),
+    ("count-visible", Value::from(count > 0)),
+  ])
 }
 
 /// GNOME's do-not-disturb: `show-banners` off in `org.gnome.desktop.notifications`. Other desktops
@@ -502,6 +560,18 @@ mod tests {
       server_actions(&self::notification(&[], None), true),
       ["default", ""]
     );
+  }
+
+  #[test]
+  fn the_launcher_badge_names_the_desktop_entry_and_hides_at_zero() {
+    assert_eq!(
+      launcher_app_uri("TeamCraft.desktop"),
+      "application://TeamCraft.desktop"
+    );
+    let shown = launcher_properties(3);
+    assert_eq!(shown["count"], Value::from(3_i64));
+    assert_eq!(shown["count-visible"], Value::from(true));
+    assert_eq!(launcher_properties(0)["count-visible"], Value::from(false));
   }
 
   /// Against the session's real notification server: `dbus-run-session` with a server running (CI

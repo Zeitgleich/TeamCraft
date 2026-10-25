@@ -13,6 +13,8 @@ mod autostart;
 mod calls;
 mod core;
 #[cfg(target_os = "linux")]
+mod desktop_entry;
+#[cfg(target_os = "linux")]
 mod file_portal;
 #[cfg(target_os = "linux")]
 mod freedesktop;
@@ -134,7 +136,7 @@ fn main() -> anyhow::Result<()> {
       create_main_window(app)?;
       notifications::prepare();
       #[cfg(target_os = "linux")]
-      notifications::watch_actions(app.handle());
+      notifications::watch_notifications(app.handle());
       #[cfg(target_os = "linux")]
       watch_wake(app.handle());
       #[cfg(windows)]

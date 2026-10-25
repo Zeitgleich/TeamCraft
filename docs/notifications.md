@@ -320,6 +320,12 @@ conversation ID for messages (as the service worker's push notifications), `call
 older one; a conversation that becomes read anywhere, or is opened, withdraws its message and
 missed-call notifications.
 
+On Linux a message following one of the same conversation with the same title (same sender) is
+added below the earlier ones (up to five lines), as messaging apps do, until the user dismisses the
+notification. Except for a ringing call, a newer notification closes its predecessor and is shown
+as a new one instead of replacing it: KDE Plasma doesn't report a popup that timed out into its
+history, and replacing that one only updates the history entry, without a popup (#531).
+
 | Platform | Shown through                          | Replace, withdraw | Buttons | Reply field                     | Ringtone, attention                       |
 |----------|----------------------------------------|-------------------|---------|---------------------------------|-------------------------------------------|
 | Linux    | freedesktop notification service       | yes               | yes     | servers with `inline-reply`     | yes; quiet in GNOME/KDE do-not-disturb    |
