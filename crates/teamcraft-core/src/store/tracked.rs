@@ -174,6 +174,14 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     self.note(Change::Conversation(conversation));
     Ok(())
   }
+
+  fn begin_writes(&self) -> Result<(), StoreError> {
+    self.inner.begin_writes()
+  }
+
+  fn end_writes(&self) -> Result<(), StoreError> {
+    self.inner.end_writes()
+  }
 }
 
 /// What a write to `table` under `key` may change in the snapshot.

@@ -3,7 +3,9 @@
 //! For platforms without SQLCipher: the browser (IndexedDB) and Android (plain SQLite; the NDK has
 //! no libcrypto for SQLCipher). Every record is sealed by `teamcraft-crypto::local_store` under a
 //! pseudorandom lookup ID. Opening decrypts all records into a [`MemoryStore`], which answers every
-//! read; writes update the cache and go to the backend right away.
+//! read; writes update the cache and go to the backend right away. A group of writes that the
+//! backend rolls back stays in the cache: the running app goes on with it (as with any failed
+//! write), the next start reads what the backend kept.
 
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
@@ -29,6 +31,14 @@ pub struct SealedStore<B> {
 pub trait RecordBackend {
   fn put_record(&self, id: &LookupId, sealed: &[u8]) -> Result<(), StoreError>;
   fn delete_record(&self, id: &LookupId) -> Result<(), StoreError>;
+  /// [`LocalStore::begin_writes`] for the records.
+  fn begin_writes(&self) -> Result<(), StoreError> {
+    Ok(())
+  }
+  /// [`LocalStore::end_writes`] for the records.
+  fn end_writes(&self) -> Result<(), StoreError> {
+    Ok(())
+  }
 }
 
 /// What a sealed record holds: the plaintext name next to the value, so loading can rebuild the
@@ -52,8 +62,8 @@ enum Record {
   allow(dead_code)
 )]
 impl<B: RecordBackend> SealedStore<B> {
-  /// Decrypts `records` (everything the backend holds) into the cache. A record that doesn't open
-  /// means the key is wrong.
+  /// Decrypts `records` (everything the backend holds) into the cache. If no record opens, the key
+  /// is wrong; if only some don't, the database is damaged.
   // Only the IndexedDB (wasm) and sealed-SQLite (Android) backends open a sealed store.
   #[cfg_attr(not(any(target_arch = "wasm32", feature = "sealed-sqlite")), allow(dead_code))]
   pub(crate) fn load(
@@ -66,10 +76,22 @@ impl<B: RecordBackend> SealedStore<B> {
       keys: LocalStoreKeys::derive(database_key),
       cache: MemoryStore::new(),
     };
+    let (mut opened, mut maybe_failure) = (0usize, None);
     for (id, sealed) in records {
-      store.load_record(&id, &sealed)?;
+      match store.load_record(&id, &sealed) {
+        Ok(()) => opened += 1,
+        Err(error) => {
+          maybe_failure.get_or_insert(error);
+        },
+      }
     }
-    Ok(store)
+    match maybe_failure {
+      None => Ok(store),
+      Some(StoreError::WrongKey) if opened > 0 => Err(StoreError::Corrupt(
+        "some records of the local database don't open".into(),
+      )),
+      Some(error) => Err(error),
+    }
   }
 
   #[cfg(target_arch = "wasm32")]
@@ -189,6 +211,14 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
         .delete_record(&self.message_id(conversation, message.client_message_id))?;
     }
     self.cache.delete_messages(conversation)
+  }
+
+  fn begin_writes(&self) -> Result<(), StoreError> {
+    self.backend.begin_writes()
+  }
+
+  fn end_writes(&self) -> Result<(), StoreError> {
+    self.backend.end_writes()
   }
 }
 

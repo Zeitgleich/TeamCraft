@@ -26,6 +26,19 @@ pub(super) async fn open_database(name: &str) -> Result<IdbDatabase, StoreError>
   request.set_onupgradeneeded(Some(on_upgrade.as_ref().unchecked_ref()));
   let result = request_result(&request).await;
   request.set_onupgradeneeded(None);
+  // A newer version of the app upgraded the database (issue #160): refused by the browser itself.
+  if result.is_err()
+    && request
+      .error()
+      .ok()
+      .flatten()
+      .is_some_and(|error| error.name() == "VersionError")
+  {
+    return Err(StoreError::NewerSchema {
+      found: i64::from(SCHEMA_VERSION) + 1,
+      supported: i64::from(SCHEMA_VERSION),
+    });
+  }
   result?
     .dyn_into::<IdbDatabase>()
     .map_err(|_| StoreError::Database("open did not return a database".into()))

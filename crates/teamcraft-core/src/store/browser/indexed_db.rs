@@ -17,6 +17,10 @@
 //! it is hidden, frozen or unloaded ([`IndexedDbStore::write_now`]). A write lost anyway is one the
 //! server never heard of; the next start catches up from the last persisted cursor.
 //!
+//! A group of writes ([`crate::store::LocalStore::begin_writes`]) is never split between two
+//! transactions: it runs synchronously, so the batch timer and the page's lifecycle events can't
+//! issue in the middle of it, and the size limit waits until the group ended.
+//!
 //! A write that fails (quota exceeded, the database closed for a newer version) is kept and written
 //! again on the next flush, so the database catches up with the cache once space is free again
 //! instead of silently rolling back on the next reload (e2ee.md §9.4). The flush reports the
@@ -80,6 +84,8 @@ struct Writes {
   maybe_last_failure: Option<WriteFailure>,
   /// Another page (a newer version) asked for the database; it was closed, writes wait for a reload.
   is_closed: bool,
+  /// Depth of the open group of writes; nothing is issued while it is above zero.
+  group_depth: u32,
 }
 
 /// The latest write of one record. Its value is kept until it committed, to write it again.
@@ -156,6 +162,25 @@ impl RecordBackend for IndexedDbRecords {
     self.write(format_id(id), None);
     Ok(())
   }
+
+  fn begin_writes(&self) -> Result<(), StoreError> {
+    let mut writes = self.inner.writes.borrow_mut();
+    writes.group_depth = writes.group_depth.saturating_add(1);
+    Ok(())
+  }
+
+  /// The group is complete: what it queued goes out with the next batch (now, if much is queued).
+  fn end_writes(&self) -> Result<(), StoreError> {
+    let is_due = {
+      let mut writes = self.inner.writes.borrow_mut();
+      writes.group_depth = writes.group_depth.saturating_sub(1);
+      writes.group_depth == 0 && writes.queued_bytes >= MAX_QUEUED_BYTES
+    };
+    if is_due {
+      self.inner.issue_queued();
+    }
+    Ok(())
+  }
 }
 
 impl IndexedDbRecords {
@@ -216,7 +241,7 @@ impl IndexedDbRecords {
     let is_due = {
       let mut writes = self.inner.writes.borrow_mut();
       writes.queue(key, maybe_value);
-      if writes.queued_bytes >= MAX_QUEUED_BYTES {
+      if writes.queued_bytes >= MAX_QUEUED_BYTES && writes.group_depth == 0 {
         true
       } else {
         if !writes.is_scheduled {

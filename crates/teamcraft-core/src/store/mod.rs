@@ -6,6 +6,13 @@
 
 #[cfg(target_arch = "wasm32")]
 mod browser;
+#[cfg(all(
+  test,
+  feature = "sqlcipher",
+  feature = "sealed-sqlite",
+  not(target_arch = "wasm32")
+))]
+mod fixtures;
 mod key_source;
 #[cfg(not(target_arch = "wasm32"))]
 mod lock;
@@ -13,6 +20,11 @@ mod memory;
 pub mod sealed;
 #[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
 mod sealed_sqlite;
+#[cfg(all(
+  any(feature = "sqlcipher", feature = "sealed-sqlite"),
+  not(target_arch = "wasm32")
+))]
+mod sql_group;
 #[cfg(all(feature = "sqlcipher", not(target_arch = "wasm32")))]
 mod sqlite;
 mod tracked;
@@ -370,6 +382,22 @@ pub enum StoreError {
   /// Another process (a second app instance) holds the store.
   #[error("the local data is in use by another instance of the app")]
   InUse,
+  /// A newer version of the app changed the database layout; this one can't read it (issue #160).
+  #[error(
+    "the local database is from a newer version of the app (layout {found}, this version reads up to {supported})"
+  )]
+  NewerSchema { found: i64, supported: i64 },
+  /// A write of a group failed, so none of the group's writes was kept.
+  #[error("the local database did not save a group of changes: {0}")]
+  GroupFailed(String),
+}
+
+impl StoreError {
+  /// The database can't be read with this version, now or after a restart: a damaged file, a key
+  /// that doesn't open it, or a newer layout. The user decides what happens to it (issue #160).
+  pub fn is_unreadable(&self) -> bool {
+    matches!(self, Self::WrongKey | Self::Corrupt(_) | Self::NewerSchema { .. })
+  }
 }
 
 /// Persistent client state. Implementations are internally synchronized.
@@ -408,6 +436,41 @@ pub trait LocalStore {
     )
   }
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError>;
+
+  /// Starts a group of writes that reaches the disk together: after a crash, or a write of the
+  /// group that failed, either all of them are kept or none (issue #160). Groups nest; the
+  /// outermost [`Self::end_writes`] commits. Reads see the group's writes at once, also from other
+  /// threads, and their writes join the group. Use [`write_group`] (or `Client::atomically`)
+  /// instead of calling this directly. Stores without a disk keep the default.
+  fn begin_writes(&self) -> Result<(), StoreError> {
+    Ok(())
+  }
+
+  /// Ends the group started by the matching [`Self::begin_writes`].
+  fn end_writes(&self) -> Result<(), StoreError> {
+    Ok(())
+  }
+}
+
+/// Runs `writes` as one group of writes ([`LocalStore::begin_writes`]). An error of `writes` doesn't
+/// undo what it wrote before; only a crash or a failed write of the group does.
+pub fn write_group<S, T, E>(store: &S, writes: impl FnOnce() -> Result<T, E>) -> Result<T, E>
+where
+  S: LocalStore + ?Sized,
+  E: From<StoreError>,
+{
+  store.begin_writes()?;
+  // A panic must not leave the group open: nothing would ever be committed again.
+  let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(writes));
+  let ended = store.end_writes();
+  match result {
+    Ok(result) => {
+      let value = result?;
+      ended?;
+      Ok(value)
+    },
+    Err(panic) => std::panic::resume_unwind(panic),
+  }
 }
 
 /// A store shared between the engine and readers (UI adapters, tests).
@@ -460,6 +523,14 @@ macro_rules! forward_local_store {
 
       fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {
         (**self).delete_messages(conversation)
+      }
+
+      fn begin_writes(&self) -> Result<(), StoreError> {
+        (**self).begin_writes()
+      }
+
+      fn end_writes(&self) -> Result<(), StoreError> {
+        (**self).end_writes()
       }
     }
   };
@@ -642,6 +713,32 @@ pub(crate) mod tests {
     key_value_round_trip(store);
     messages_are_ordered_and_filtered(store);
     replies_also_sent_to_the_conversation_are_listed_in_both(store);
+    groups_of_writes_nest_and_are_read_at_once(store);
+  }
+
+  fn groups_of_writes_nest_and_are_read_at_once(store: &impl LocalStore) {
+    let written = write_group(store, || -> Result<_, StoreError> {
+      store.put(Table::Spaces, "outer", b"1")?;
+      write_group(store, || store.put(Table::Spaces, "inner", b"2"))?;
+      // Inside the group, its writes are already visible.
+      store.get(Table::Spaces, "inner")
+    })
+    .unwrap();
+    assert_eq!(written, Some(b"2".to_vec()));
+    assert_eq!(store.get(Table::Spaces, "outer").unwrap(), Some(b"1".to_vec()));
+    // An error of the group's code keeps what it wrote before (only a failed write undoes it).
+    let failed: Result<(), StoreError> = write_group(store, || {
+      store.put(Table::Spaces, "before_error", b"3")?;
+      Err(StoreError::Database("caller gave up".into()))
+    });
+    assert!(failed.is_err());
+    assert_eq!(
+      store.get(Table::Spaces, "before_error").unwrap(),
+      Some(b"3".to_vec())
+    );
+    // The store takes new groups after that.
+    write_group(store, || store.put(Table::Spaces, "after", b"4")).unwrap();
+    assert_eq!(store.get(Table::Spaces, "after").unwrap(), Some(b"4".to_vec()));
   }
 
   fn replies_also_sent_to_the_conversation_are_listed_in_both(store: &impl LocalStore) {
