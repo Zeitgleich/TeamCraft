@@ -1292,7 +1292,17 @@ everything (§9.1). Signing the releases narrows this to what the operator contr
   changed; the hash check is the same for every source, and a mismatch is fetched once more from the
   network before the update is dropped. Precompressed responses (`.br`/`.gz` next to the files) arrive
   decoded, so the hashes are those of the files as built; the variants are not part of the manifest.
-  The app is served from that cache, never from the network. An update that does not verify is dropped: the previous verified version keeps
+  The app is served from that cache, never from the network.
+- **Parts loaded when first used.** The app is split into wasm chunks that load when their part of
+  the app first opens (#334). `release.json` lists them in `lazy` (the wasm files `index.html`,
+  `init.js` and `sw.js` don't name), outside the signature so that older workers still verify the
+  manifest. The worker installs without them, and fetches a chunk the first time a page asks for it,
+  or in the background about 15 s after a page loaded, checks it against the signed hash in the
+  version's verified file list and only then stores and serves it. A server that edits `lazy` only
+  changes when a file is downloaded, never what runs. A page of a release whose chunks the server no
+  longer has (a deploy since it loaded, before the background fetch) gets an error for that part of
+  the app with a retry, and the next reload brings the new release.
+- **Failed updates.** An update that does not verify is dropped: the previous verified version keeps
   running and the pages are told, so the UI warns (and shows the key's fingerprint on the About
   screen). A worker the browser stopped restores what it verified from a cache before answering.
 - **Updates.** A verified update installs in the background but does not take over open pages: it

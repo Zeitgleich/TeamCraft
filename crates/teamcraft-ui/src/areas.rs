@@ -4,6 +4,10 @@
 //! size"). Code several areas share goes into shared chunks; what the first screen needs stays in
 //! the app.
 //!
+//! The signed-in app itself is one (`session`): a guest who opens a meeting link loads only the
+//! guest pages, and `init.js` fetches the session's chunks next to the app for every other page, so
+//! signed-in users don't wait for them one after the other.
+//!
 //! Each split point is a `wasm_split` function that builds the area's view; [`lazy_area`] calls it,
 //! shows a placeholder while the chunk loads and, when it can't load (offline, a deploy in between),
 //! says so with a retry instead of an empty view. The split itself is done by
@@ -24,6 +28,7 @@ use crate::components::call_prejoin::PreJoinScreen;
 use crate::components::call_screen::CallScreen;
 use crate::components::directory_view::DirectoryView;
 use crate::components::lightbox::Lightbox;
+use crate::components::login::SessionGate;
 use crate::components::meetings_view::{MeetingsView, ScheduleMeetingDialog};
 use crate::components::search_view::SearchView;
 use crate::components::settings_modal::SettingsModal;
@@ -35,6 +40,20 @@ use crate::i18n::use_i18n;
 use crate::lightbox::MediaKey;
 use crate::model::{ConversationId, SpaceId};
 use crate::reactive::SetIfAlive;
+use crate::settings::Settings;
+use crate::state::AppState;
+
+/// Where an area shows: how its placeholder and its error sit in the page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place {
+  /// The main pane: the placeholder fills it.
+  Pane,
+  /// A dialog or a screen above the app: the placeholder floats, the error is a dialog that closes
+  /// the overlay.
+  Overlay,
+  /// The whole window (the signed-in app, the call screens).
+  Screen,
+}
 
 /// Where an area stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +77,8 @@ macro_rules! areas {
 }
 
 areas! {
+  /// Sign-in and the signed-in app: everything but the guest pages.
+  session(settings: Settings) => session: view! { <SessionGate settings=settings /> };
   /// The administration console: the largest part of the app, for admins only.
   admin_console(section: AdminSection) => admin: view! { <AdminConsole section=section /> };
   settings(_unit: ()) => settings: view! { <SettingsModal /> };
@@ -82,7 +103,7 @@ areas! {
 
 /// Shows the view `load` builds once its chunk is there: a placeholder until then, and a message
 /// with a retry when the chunk can't be loaded.
-pub fn lazy_area<F, Fut>(load: F) -> AnyView
+pub fn lazy_area<F, Fut>(place: Place, load: F) -> AnyView
 where
   F: Fn() -> Fut + 'static,
   Fut: Future<Output = Result<AnyView, SplitLoaderError>> + 'static,
@@ -111,18 +132,40 @@ where
   start();
   // Views are `Send`; the loader stays on this thread.
   let start = StoredValue::new_local(start);
+  let class = place.class();
   view! {
     {move || match phase.get() {
-      Phase::Loading => view! { <div class="lazy-area" role="status" aria-busy="true"></div> }.into_any(),
+      Phase::Loading => {
+        view! {
+          <div class=format!("lazy-area {class}") role="status" aria-busy="true">
+            <span class="spinner" aria-hidden="true"></span>
+          </div>
+        }
+        .into_any()
+      },
       Phase::Ready => ready
         .try_update_value(Option::take)
         .flatten()
         .unwrap_or_else(|| ().into_any()),
       Phase::Failed => {
+        let retry = move |_| start.with_value(|start| start());
+        let maybe_close = (place == Place::Overlay).then(|| {
+          let maybe_state = use_context::<AppState>();
+          view! {
+            <button class="btn" on:click=move |_| maybe_state.iter().for_each(AppState::close_overlay)>
+              {move || i18n.t("close")}
+            </button>
+          }
+        });
         view! {
-          <div class="lazy-area lazy-area-failed" role="alert">
-            <p>{move || i18n.t("area-load-failed")}</p>
-            <button class="btn" on:click=move |_| start.with_value(|start| start())>{move || i18n.t("loader-retry")}</button>
+          <div class=format!("lazy-area lazy-area-failed {class}") role="alert">
+            <div class="lazy-area-card">
+              <p>{move || i18n.t("area-load-failed")}</p>
+              <div class="lazy-area-actions">
+                {maybe_close}
+                <button class="btn btn-primary" on:click=retry>{move || i18n.t("loader-retry")}</button>
+              </div>
+            </div>
           </div>
         }
         .into_any()
@@ -130,4 +173,14 @@ where
     }}
   }
   .into_any()
+}
+
+impl Place {
+  fn class(self) -> &'static str {
+    match self {
+      Self::Pane => "lazy-area-pane",
+      Self::Overlay => "lazy-area-overlay",
+      Self::Screen => "lazy-area-screen",
+    }
+  }
 }

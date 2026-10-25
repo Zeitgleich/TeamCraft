@@ -8,7 +8,7 @@ use teamcraft_client_api::os_notify::{NotificationTag, OsNotification, OsNotific
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
-use crate::areas::{self, lazy_area};
+use crate::areas::{self, Place, lazy_area};
 use crate::attention::{AttentionReporter, AttentionSignals, is_attentive};
 use crate::auth::tauri;
 use crate::backend::Backend;
@@ -30,7 +30,6 @@ use crate::components::guest_join::GuestJoinPage;
 use crate::components::home::{HomeSidebar, HomeStart, NewMessageDialog};
 use crate::components::icons::{Icon, IconName};
 use crate::components::incoming_call::IncomingCallDialog;
-use crate::components::login::SessionGate;
 use crate::components::members_panel::MembersPanel;
 use crate::components::message_actions::{EditHistoryDialog, ForwardDialog, PinsPanel, SavedView};
 use crate::components::offline_banner::OfflineBanner;
@@ -114,7 +113,7 @@ fn screen(settings: Settings) -> AnyView {
     let backend: Rc<dyn Backend> = Rc::new(crate::mock::MockBackend::new(now_ms()));
     return view! { <Shell backend=backend settings=settings /> }.into_any();
   }
-  view! { <SessionGate settings=settings /> }.into_any()
+  lazy_area(Place::Screen, move || areas::session(settings))
 }
 
 /// Everything after sign-in: the chat shell on top of a backend.
@@ -251,13 +250,13 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
           {move || match state.view.get() {
             MainView::Conversation(id) => view! { <ChannelView conversation=id /> }.into_any(),
             MainView::Threads => view! { <ThreadsInbox /> }.into_any(),
-            MainView::Admin(section) => lazy_area(move || areas::admin_console(section)),
-            MainView::Search => lazy_area(|| areas::search(())),
-            MainView::Meetings => lazy_area(|| areas::meetings(())),
+            MainView::Admin(section) => lazy_area(Place::Pane, move || areas::admin_console(section)),
+            MainView::Search => lazy_area(Place::Pane, || areas::search(())),
+            MainView::Meetings => lazy_area(Place::Pane, || areas::meetings(())),
             MainView::Saved => view! { <SavedView /> }.into_any(),
             MainView::Activity => view! { <ActivityView /> }.into_any(),
             MainView::Calls => view! { <CallsView /> }.into_any(),
-            MainView::Directory => lazy_area(|| areas::directory(())),
+            MainView::Directory => lazy_area(Place::Pane, || areas::directory(())),
             MainView::GettingStarted => view! { <GettingStarted /> }.into_any(),
             MainView::Home => view! { <HomeStart /> }.into_any(),
             // Only the compact layout shows a space without a channel; its list is the sidebar.
@@ -291,10 +290,10 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       </Show>
       {move || match state.call.phase.get() {
         CallPhase::PreJoin => {
-          state.call.maybe_request.get().map(|request| lazy_area(move || areas::call_prejoin(request)))
+          state.call.maybe_request.get().map(|request| lazy_area(Place::Screen, move || areas::call_prejoin(request)))
         },
         CallPhase::Active if !state.call.is_minimized.get() => {
-          state.call.maybe_request.get().map(|request| lazy_area(move || areas::call_screen(request)))
+          state.call.maybe_request.get().map(|request| lazy_area(Place::Screen, move || areas::call_screen(request)))
         },
         _ => None,
       }}
@@ -359,24 +358,24 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       {move || match state.overlay.get() {
         Overlay::QuickSwitcher => view! { <QuickSwitcher /> }.into_any(),
         Overlay::CustomStatus => view! { <CustomStatusDialog /> }.into_any(),
-        Overlay::Settings => lazy_area(|| areas::settings(())),
+        Overlay::Settings => lazy_area(Place::Overlay, || areas::settings(())),
         Overlay::Shortcuts => view! { <ShortcutsModal /> }.into_any(),
         Overlay::DeviceApproval => view! { <DeviceApprovalDialog /> }.into_any(),
         Overlay::LinkDevice => view! { <LinkDeviceDialog /> }.into_any(),
         Overlay::VerifyContact(user) => view! { <VerifyContactDialog user=user /> }.into_any(),
         Overlay::VerifyKey(conversation) => view! { <VerifyKeyDialog conversation=conversation /> }.into_any(),
-        Overlay::ScheduleMeeting => lazy_area(|| areas::schedule_meeting(())),
+        Overlay::ScheduleMeeting => lazy_area(Place::Overlay, || areas::schedule_meeting(())),
         Overlay::Forward(from, message) => view! { <ForwardDialog from=from message=message /> }.into_any(),
-        Overlay::Lightbox(conversation, start) => lazy_area(move || areas::lightbox(conversation, start)),
-        Overlay::NewSpace => lazy_area(|| areas::new_space(())),
+        Overlay::Lightbox(conversation, start) => lazy_area(Place::Overlay, move || areas::lightbox(conversation, start)),
+        Overlay::NewSpace => lazy_area(Place::Overlay, || areas::new_space(())),
         Overlay::NewMessage => view! { <NewMessageDialog /> }.into_any(),
-        Overlay::BrowseSpaces(maybe_highlight) => lazy_area(move || areas::browse_spaces(maybe_highlight)),
-        Overlay::InvitePeople(space) => lazy_area(move || areas::invite_people(space)),
-        Overlay::AddToChannel(conversation) => lazy_area(move || areas::add_to_channel(conversation)),
-        Overlay::NewChannel(space) => lazy_area(move || areas::new_channel(space)),
-        Overlay::BrowseChannels(space) => lazy_area(move || areas::browse_channels(space)),
-        Overlay::ChannelSettings(id) => lazy_area(move || areas::channel_settings(id)),
-        Overlay::SpaceSettings(space) => lazy_area(move || areas::space_settings(space)),
+        Overlay::BrowseSpaces(maybe_highlight) => lazy_area(Place::Overlay, move || areas::browse_spaces(maybe_highlight)),
+        Overlay::InvitePeople(space) => lazy_area(Place::Overlay, move || areas::invite_people(space)),
+        Overlay::AddToChannel(conversation) => lazy_area(Place::Overlay, move || areas::add_to_channel(conversation)),
+        Overlay::NewChannel(space) => lazy_area(Place::Overlay, move || areas::new_channel(space)),
+        Overlay::BrowseChannels(space) => lazy_area(Place::Overlay, move || areas::browse_channels(space)),
+        Overlay::ChannelSettings(id) => lazy_area(Place::Overlay, move || areas::channel_settings(id)),
+        Overlay::SpaceSettings(space) => lazy_area(Place::Overlay, move || areas::space_settings(space)),
         Overlay::EditHistory(conversation, message) => view! { <EditHistoryDialog conversation=conversation message=message /> }.into_any(),
         Overlay::Bookmarks(conversation) => view! { <BookmarksDialog conversation=conversation /> }.into_any(),
         Overlay::UserProfile(user) => view! { <UserProfileDialog user=user /> }.into_any(),

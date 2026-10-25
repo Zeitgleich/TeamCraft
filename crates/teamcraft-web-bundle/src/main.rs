@@ -10,8 +10,9 @@
 //! 2. runs wasm-bindgen on the main part (`--target web --keep-lld-exports`),
 //! 3. optimizes every part with wasm-opt (release),
 //! 4. names every file after the build (`<name>-<id>…`, so the server caches them for good),
-//! 5. writes `init.js`, which loads the app with the loading screen's progress (`loader.js`), and the
-//!    preload links with subresource integrity into `index.html`.
+//! 5. writes `init.js`, which loads the app with the loading screen's progress (`loader.js`) and,
+//!    unless the page is a guest's meeting link, fetches the signed-in app's chunks (`session`) at
+//!    the same time; and the preload links with subresource integrity into `index.html`.
 //!
 //! ```text
 //! teamcraft-web-bundle --input <app.wasm> --staging <dir> --name teamcraft-ui --initializer <loader.js>
@@ -31,6 +32,9 @@ use sha2::{Digest, Sha256, Sha384};
 const PUBLIC_URL: &str = "/";
 /// Marks where the preload links and the start script go in `index.html`.
 const HEAD_END: &str = "</head>";
+/// The split module every page but a guest's needs at once (teamcraft-ui `areas.rs`): `init.js`
+/// fetches its files next to the app's.
+const SESSION_MODULE: &str = "session";
 
 fn main() -> Result<()> {
   tracing_subscriber::fmt().with_target(false).without_time().init();
@@ -48,7 +52,7 @@ fn main() -> Result<()> {
     std::fs::rename(work.join(&chunk.original), args.staging.join(&chunk.named))?;
     wasm_files.push(args.staging.join(&chunk.named));
   }
-  write_link_module(&work, &args.staging, &names, &chunks)?;
+  let link_script = write_link_module(&work, &args.staging, &names, &chunks)?;
   if let Some(wasm_opt) = &args.maybe_wasm_opt {
     for file in &wasm_files {
       optimize(wasm_opt, &args.wasm_opt_args, file)?;
@@ -56,7 +60,8 @@ fn main() -> Result<()> {
   }
   std::fs::remove_dir_all(&work)?;
   let initializer = copy_hashed(&args.initializer, &args.staging)?;
-  write_init(&args.staging, &names, &initializer)?;
+  let session_files = module_files(&link_script, SESSION_MODULE)?;
+  write_init(&args.staging, &names, &initializer, &session_files)?;
   report(&args.staging, &wasm_files)?;
   Ok(())
 }
@@ -186,8 +191,8 @@ fn bind(main: &Path, staging: &Path, names: &Names) -> Result<()> {
   Ok(())
 }
 
-/// The loader of the chunks, which wasm-split wrote for the original chunk names.
-fn write_link_module(work: &Path, staging: &Path, names: &Names, chunks: &[Chunk]) -> Result<()> {
+/// The loader of the chunks, which wasm-split wrote for the original chunk names; returns it.
+fn write_link_module(work: &Path, staging: &Path, names: &Names, chunks: &[Chunk]) -> Result<String> {
   let mut script = std::fs::read_to_string(work.join(&names.link_js))?;
   for chunk in chunks {
     let (from, to) = (
@@ -199,8 +204,72 @@ fn write_link_module(work: &Path, staging: &Path, names: &Names, chunks: &[Chunk
     }
     script = script.replace(&from, &to);
   }
-  std::fs::write(staging.join(&names.link_js), script)?;
-  Ok(())
+  std::fs::write(staging.join(&names.link_js), &script)?;
+  Ok(script)
+}
+
+/// The files a split module loads, its own and the shared chunks it needs, read from the loader
+/// wasm-split writes: each chunk is `const __chunk_<n> = makeLoad(…fetch(new URL("./<file>"…), [deps])`,
+/// each module `export const __wasm_split_load_<module> = …` of the same shape.
+fn module_files(link_script: &str, module: &str) -> Result<Vec<String>> {
+  let mut loaders = BTreeMap::new();
+  for part in loader_definitions(link_script) {
+    let Some((name, rest)) = part.split_once(" = ") else {
+      continue;
+    };
+    let Some((_, after_url)) = rest.split_once("new URL(\"./") else {
+      continue;
+    };
+    let Some((file, _)) = after_url.split_once('"') else {
+      continue;
+    };
+    let deps = rest
+      .rsplit_once(", [")
+      .and_then(|(_, list)| list.split_once(']'))
+      .map(|(list, _)| {
+        list
+          .split(',')
+          .map(str::trim)
+          .filter(|dep| !dep.is_empty())
+          .map(str::to_owned)
+          .collect::<Vec<_>>()
+      })
+      .unwrap_or_default();
+    loaders.insert(name.trim().to_owned(), (file.to_owned(), deps));
+  }
+  let loader = format!("__wasm_split_load_{module}");
+  let (file, deps) = loaders
+    .get(&loader)
+    .with_context(|| format!("the chunk loader has no module {module}"))?;
+  let mut files = vec![file.clone()];
+  for dep in deps {
+    let (file, _) = loaders
+      .get(dep)
+      .with_context(|| format!("the chunk loader has no {dep}"))?;
+    files.push(file.clone());
+  }
+  Ok(files)
+}
+
+/// The top-level loader definitions of the chunk loader, each from its name (`__chunk_<n>`,
+/// `__wasm_split_load_<module>`) to the next one.
+fn loader_definitions(link_script: &str) -> Vec<&str> {
+  const STARTS: [&str; 2] = ["\nconst ", "\nexport const "];
+  let mut starts = STARTS
+    .iter()
+    .flat_map(|start| {
+      link_script
+        .match_indices(start)
+        .map(|(at, matched)| at + matched.len())
+    })
+    .filter(|&at| link_script[at..].starts_with("__"))
+    .collect::<Vec<_>>();
+  starts.sort_unstable();
+  starts
+    .iter()
+    .enumerate()
+    .map(|(index, &at)| &link_script[at..starts.get(index + 1).copied().unwrap_or(link_script.len())])
+    .collect()
 }
 
 fn optimize(wasm_opt: &Path, args: &[String], file: &Path) -> Result<()> {
@@ -232,9 +301,15 @@ fn copy_hashed(source: &Path, staging: &Path) -> Result<String> {
 
 /// `init.js` (it starts the app; the server's Content-Security-Policy allows no inline scripts) and
 /// the preload links in `index.html`.
-fn write_init(staging: &Path, names: &Names, initializer: &str) -> Result<()> {
+fn write_init(staging: &Path, names: &Names, initializer: &str, session_files: &[String]) -> Result<()> {
   let wasm_size = std::fs::metadata(staging.join(&names.main_wasm))?.len();
+  let session_urls = session_files
+    .iter()
+    .map(|file| format!("'{PUBLIC_URL}{file}'"))
+    .collect::<Vec<_>>()
+    .join(", ");
   let init = INIT_TEMPLATE
+    .replace("__SESSION_FILES__", &session_urls)
     .replace("__MAIN_JS__", &format!("{PUBLIC_URL}{}", names.main_js))
     .replace("__MAIN_WASM__", &format!("{PUBLIC_URL}{}", names.main_wasm))
     .replace("__WASM_SIZE__", &wasm_size.to_string())
@@ -301,6 +376,21 @@ fn hex(bytes: &[u8]) -> String {
 const INIT_TEMPLATE: &str = r#"import init from '__MAIN_JS__';
 import initializer from '__INITIALIZER__';
 
+// The signed-in app is a chunk of its own (areas.rs): fetched at once, next to the app, unless this
+// is a guest's meeting link (`/meeting/<id>#invite=…`, meetings.rs `parse_guest_link`), which never
+// needs it. The chunk loader's own requests then come from these.
+const isGuestLink = /^\/meeting\/[^/]+\/?$/.test(location.pathname) && /(^#|&)invite=[^&]/.test(location.hash);
+if (!isGuestLink) {
+  for (const href of [__SESSION_FILES__]) {
+    const link = document.createElement('link');
+    link.rel = 'preload';
+    link.as = 'fetch';
+    link.crossOrigin = 'anonymous';
+    link.href = href;
+    document.head.append(link);
+  }
+}
+
 const hooks = initializer();
 hooks.onStart?.();
 const total = __WASM_SIZE__;
@@ -349,6 +439,34 @@ mod tests {
       "teamcraft-ui-split-admin-0123456789abcdef.wasm"
     );
     assert_eq!(build_id(b"a").len(), 16);
+  }
+
+  #[test]
+  fn a_module_needs_its_own_file_and_its_shared_chunks() {
+    let script = r#"
+const __chunk_1 = makeLoad(() => {
+    const src = fetch(new URL("./app-chunk-1-id.wasm", import.meta.url));
+}
+, []);
+const __chunk_2 = makeLoad(() => {
+    const src = fetch(new URL("./app-chunk-2-id.wasm", import.meta.url));
+}
+, []);
+export const __wasm_split_load_session = wrapAsyncCb(makeLoad(() => {
+    const src = fetch(new URL("./app-split-session-id.wasm", import.meta.url));
+}
+, [__chunk_2]));
+export const __wasm_split_load_admin = wrapAsyncCb(makeLoad(() => {
+    const src = fetch(new URL("./app-split-admin-id.wasm", import.meta.url));
+}
+, [__chunk_1, __chunk_2]));
+"#;
+    assert_eq!(
+      module_files(script, "session").unwrap(),
+      ["app-split-session-id.wasm", "app-chunk-2-id.wasm"]
+    );
+    assert_eq!(module_files(script, "admin").unwrap().len(), 3);
+    assert!(module_files(script, "missing").is_err());
   }
 
   #[test]
