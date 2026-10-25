@@ -6,6 +6,9 @@
 //! read; writes update the cache and go to the backend right away. A backend that collects writes
 //! may seal a record only when it writes it ([`RecordBackend::put_lazy`]), so a record rewritten
 //! before then is sealed once (issue #326: the MLS state, megabytes, after every group joined).
+//!
+//! A group of writes that the backend rolls back stays in the cache: the running app goes on
+//! with it (as with any failed write), the next start reads what the backend kept.
 
 use std::sync::Arc;
 
@@ -51,6 +54,17 @@ pub trait RecordBackend {
     let sealed = seal()?;
     self.put_record(id, &sealed)
   }
+
+  /// [`LocalStore::begin_writes`] for the records.
+  fn begin_writes(&self) -> Result<(), StoreError> {
+    Ok(())
+  }
+  /// [`LocalStore::end_writes`] for the records.
+  fn end_writes(&self) -> Result<(), StoreError> {
+    Ok(())
+  }
+  /// [`LocalStore::write_soon`] for the records.
+  fn write_soon(&self) {}
 }
 
 /// What a sealed record holds: the plaintext name next to the value, so loading can rebuild the
@@ -74,8 +88,8 @@ enum Record {
   allow(dead_code)
 )]
 impl<B: RecordBackend> SealedStore<B> {
-  /// Decrypts `records` (everything the backend holds) into the cache. A record that doesn't open
-  /// means the key is wrong.
+  /// Decrypts `records` (everything the backend holds) into the cache. If no record opens, the key
+  /// is wrong; if only some don't, the database is damaged.
   // Only the IndexedDB (wasm) and sealed-SQLite (Android) backends open a sealed store.
   #[cfg_attr(not(any(target_arch = "wasm32", feature = "sealed-sqlite")), allow(dead_code))]
   pub(crate) fn load(
@@ -88,10 +102,22 @@ impl<B: RecordBackend> SealedStore<B> {
       keys: Arc::new(LocalStoreKeys::derive(database_key)),
       cache: MemoryStore::new(),
     };
+    let (mut opened, mut maybe_failure) = (0usize, None);
     for (id, sealed) in records {
-      store.load_record(&id, &sealed)?;
+      match store.load_record(&id, &sealed) {
+        Ok(()) => opened += 1,
+        Err(error) => {
+          maybe_failure.get_or_insert(error);
+        },
+      }
     }
-    Ok(store)
+    match maybe_failure {
+      None => Ok(store),
+      Some(StoreError::WrongKey) if opened > 0 => Err(StoreError::Corrupt(
+        "some records of the local database don't open".into(),
+      )),
+      Some(error) => Err(error),
+    }
   }
 
   #[cfg(target_arch = "wasm32")]
@@ -215,6 +241,18 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
 
   fn purge_freed(&self) -> Result<(), StoreError> {
     self.backend.purge_freed()
+  }
+
+  fn begin_writes(&self) -> Result<(), StoreError> {
+    self.backend.begin_writes()
+  }
+
+  fn end_writes(&self) -> Result<(), StoreError> {
+    self.backend.end_writes()
+  }
+
+  fn write_soon(&self) {
+    self.backend.write_soon();
   }
 }
 

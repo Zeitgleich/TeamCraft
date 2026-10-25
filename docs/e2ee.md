@@ -819,7 +819,15 @@ Implemented as (`teamcraft-crypto::rendezvous`, `teamcraft-core` linking):
   transfer frame, a closed relay or 60 seconds without a receipt fail on the existing device, and the
   new device fails because the transfer never arrives (the relay closes when the existing device
   gives up). A lost receipt makes the existing device report a failure although the new device has
-  the keys; linking again is harmless. The new device then enrolls (§3.2) and joins the user's
+  the keys; linking again is harmless. Before it sends `received`, the new device stores the backup
+  key and the encrypted key bag in its local store, as a record next to the account protected the
+  same way (§9; on the web the write is issued at once instead of after the batching delay). If the
+  app stops before the account is stored, the next start finishes the enrollment with them, so the
+  existing device's success is never a lie the user has to undo by linking again. The record goes
+  with the account write that completes enrollment (one group of writes, §9.5), when the user
+  cancels linking or signs out before the device is set up (with the pending device key pair), or
+  when it can't work any more (the key bag no longer opens, the record is unreadable, another
+  account signed in). The new device then enrolls (§3.2) and joins the user's
   groups on its own (§4.6, "A further device joins on its own"); where it can't yet, an existing
   member adds it when it comes online. It reads the history the key bag opens at once.
 
@@ -1131,6 +1139,23 @@ calls are verified with no extra prompts, and the DAVE privacy code and per-memb
 remain available for out-of-band comparison. Meeting guests without an account get an ephemeral
 key and are shown as "Guest (unverified)".
 
+**Who signs in the browser.** The web client's call engine is a wasm module of its own
+(`teamcraft-web-calls`, loaded by the page; `teamcraft_client_api::page_calls`). It never holds the
+device key: the page prepares the join with its client core and keeps a `DeviceCallKeyAuthenticator`
+(the core's signer and the conversation's verified devices); the module asks the page through
+JavaScript callbacks to sign its fresh DAVE key (step 2) and to verify the others' bindings (step 3),
+and gets back only the signed binding or the verified DAVE key. Both run in the same page and origin,
+so this adds no party: whoever can run script in the page could use the core's signer anyway (§9.3).
+A rejoin prepares again, so the trusted roster follows membership changes.
+
+**The SFU's certificate.** Clients reach the SFU over TLS (QUIC). Normally its certificate chains to
+a trusted root. For test and development setups with a short-lived self-signed certificate, the
+server can hand out its SHA-256 with the join token (`[calls] sfu_certificate_sha256`, several while
+one replaces another): browsers pass them as `serverCertificateHashes`, the desktop app pins the
+first. A compromised server could point clients at an SFU of its choosing this way, but it can do
+that through `sfu_url` already, and the SFU only ever sees DAVE-encrypted media and verified
+bindings: the hash decides reachability, not confidentiality.
+
 **Lost connections** (ARCHITECTURE.md §6.5). A QUIC connection that migrates to another network
 keeps its DAVE state; nothing changes for the keys. A connection the SFU loses (idle timeout) keeps
 the device's call slot for a grace period, but not its DAVE leaf: the SFU proposes removing the leaf
@@ -1285,6 +1310,11 @@ everything (§9.1). Signing the releases narrows this to what the operator contr
   releases. Pages call `registration.update()` when they become visible, come back online and
   hourly, at most every 15 minutes, and ask `GET /api/v1/client-compatibility`; a version the server
   no longer supports asks for the reload too.
+- **Call module.** The browser's call engine (`teamcraft-web-calls`, §8) is a separate ES module and
+  wasm the page imports after sign-in. Its files are part of the release like any other (listed in
+  the manifest, served from the verified cache); the build gives them content-hashed names and writes
+  them into `index.html` (`<meta name="teamcraft-calls">`), so a page never imports another build's
+  module, also without a service worker.
 - **Push code.** The service worker needs Rust for push (§7: open the sealed wake-up, read the store,
   build the notification). A worker cannot verify scripts it loads with `importScripts`, so
   `scripts/finish-sw.sh` (a Trunk hook) inlines the JS glue into `sw.js`, and the worker reads the wasm
@@ -1332,6 +1362,49 @@ can: the enrollment screen comes up again, and when this browser had the account
 marker in local storage), it says that the browser deleted the data and offers the recovery
 passphrase or linking from another device. If the browser deleted the marker as well, it looks like a
 first visit, which offers the same two ways.
+
+### 9.5 Integrity: groups of writes, layout versions, recovery (implemented)
+
+**Groups of writes.** Records that must agree are written as one group (`LocalStore::begin_writes` /
+`end_writes`, `write_group`, `Client::atomically`): after a crash, or when one of the group's writes
+fails, the store holds all of them or none. SQLite stores (SQLCipher, sealed SQLite) run a group as
+one transaction; IndexedDB never splits a group between two batches, and a batch is one
+transaction (§9.4). Groups are synchronous, so none stays open across a network request. Grouped:
+a new message and its outbox entry, a sent message and the removal of its outbox entry, the MLS
+state after a processed entry, a merged own commit, a joined welcome or a join as a further device
+together with the cursor past it, the applied changes and pending commit next to the MLS state, the
+key bag and its "upload me" flag, the account with its key bag and the end of a pending enrollment.
+If SQLite rolls a group's transaction back by itself (a full disk), the group's later writes are
+refused instead of being committed one by one. Where order alone is enough (content keys are written before
+the MLS state that consumed the epoch), reprocessing an entry after a crash is idempotent.
+
+**Layout versions.** The SQLite stores keep their layout version in `PRAGMA user_version`. Each store
+has a list of numbered steps (forward-only, never edited once released); opening runs the missing
+ones, each in its own transaction together with setting its version, so a crash or a failed step
+leaves the database at the last step that completed. Upkeep that can't run in a transaction (the
+one-time wipe of free pages, version 2, issue #391) runs after the earlier steps committed and
+counts as done only once it succeeded; a failure (a full disk) is tried again on the next start.
+Released 1.0 databases carry version 0 and the layout of version 1. A newer layout is refused
+without touching it.
+IndexedDB versions its object stores itself and refuses a newer database (`VersionError`). Databases
+written by every release are kept as fixtures (`crates/teamcraft-core/tests/fixtures/store/`) and
+opened by every later version in CI. Records inside the store stay JSON with defaults for new
+fields and an `Unknown` catch-all, so newer records are read or skipped, not misread.
+
+**Unreadable data.** A store that is damaged (SQLite's corruption codes; a sealed store whose records
+only partly open), whose key no longer opens it (the keystore lost or replaced the key), or whose
+layout is newer is not a generic failure: the app says what happened and offers to set the device
+up again (recovery passphrase or linking, §5, §6), after a confirmation. The desktop sets the old
+file aside (`<user>.db.unreadable-<time>`, never deleted); the browser deletes the database,
+because its key wrapping lives in the same database (if another tab doesn't let go of it within
+seconds, the reset fails with that reason). Data from a newer version is never reset in the
+browser: a newer bundle reads it, so the page offers to reload; an old cached page must not wipe
+it. A keystore that is just unavailable (locked, no keyring service) stays a "try again" failure,
+since the data is intact.
+
+**Concurrent edits.** Two devices editing the same message converge: the edit with the highest
+server ID wins on every device, whatever order the edits arrive in (history loads newest first). An
+own edit shows at once and competes with the others once the server numbered it.
 
 ## 10. Search
 

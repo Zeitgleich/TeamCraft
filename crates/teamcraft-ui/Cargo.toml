@@ -32,7 +32,7 @@ web-sys = { version = "0.3", features = [
   "Blob", "BlobPropertyBag", "Url", "DragEvent", "DataTransfer", "ClipboardEvent", "Request", "RequestInit", "RequestMode", "RequestRedirect", "RequestCache", "Response", "Headers", "UrlSearchParams", "ResizeObserver", "DomRect",
   "BroadcastChannel", "MouseEvent", "StorageManager", "ServiceWorkerState", "VisibilityState", "NotificationOptions",
   "PointerEvent", "WheelEvent", "HtmlAnchorElement", "HtmlImageElement", "AddEventListenerOptions",
-  "HtmlCanvasElement", "CanvasRenderingContext2d", "HtmlMediaElement", "HtmlVideoElement", "Selection",
+  "HtmlCanvasElement", "CanvasRenderingContext2d", "HtmlMediaElement", "HtmlVideoElement", "Selection", "MediaStream",
   "VisualViewport", "MutationObserver", "MutationObserverInit", "Performance", "TouchEvent", "TouchList", "Touch",
   "HtmlDocument", "DomParser", "SupportedType", "Range", "Text", "CharacterData", "InputEvent", "TreeWalker",
 ] }
@@ -66,3 +66,6 @@ tracing-web = "0.1"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 teamcraft-core = { path = "../teamcraft-core", default-features = false, features = ["ui"] }
 teamcraft-crypto = { path = "../teamcraft-crypto" }
+# Signs and verifies call key bindings for the call module (web_calls); the call engine itself is
+# in that module, which the page loads only for a call.
+teamcraft-media = { path = "../teamcraft-media", default-features = false, features = ["call-auth"] }

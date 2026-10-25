@@ -247,9 +247,34 @@ impl fmt::Debug for JoinTicket {
   }
 }
 
+/// A certificate hash written as hex (colons allowed), as `serverCertificateHashes` and the
+/// native driver take it; `None` unless it is exactly 32 bytes.
+pub fn certificate_hash_from_hex(text: &str) -> Option<[u8; 32]> {
+  let hex: Vec<u8> = text.bytes().filter(|byte| *byte != b':').collect();
+  if hex.len() != 64 {
+    return None;
+  }
+  let mut hash = [0u8; 32];
+  for (byte, pair) in hash.iter_mut().zip(hex.chunks(2)) {
+    *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+  }
+  Some(hash)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn certificate_hashes_read_from_hex_with_or_without_colons() {
+    let plain = "ab".repeat(32);
+    let dotted = vec!["AB"; 32].join(":");
+    assert_eq!(certificate_hash_from_hex(&plain), Some([0xab; 32]));
+    assert_eq!(certificate_hash_from_hex(&dotted), Some([0xab; 32]));
+    for bad in ["", "ab", &"zz".repeat(32), &"ab".repeat(33)] {
+      assert_eq!(certificate_hash_from_hex(bad), None, "{bad}");
+    }
+  }
 
   mod path {
     use super::*;

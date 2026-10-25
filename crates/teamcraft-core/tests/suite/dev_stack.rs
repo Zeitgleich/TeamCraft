@@ -169,9 +169,10 @@ async fn a_second_device_is_linked_through_the_relay() {
   );
   let (laptop_side, phone_side) = (laptop_side.unwrap(), phone_side.unwrap());
   assert_eq!(laptop_side.short_code(), phone_side.short_code());
+  let new_store = Arc::new(MemoryStore::new());
   let (approved, received) = tokio::join!(
     phone.complete_link_approval(phone_side),
-    laptop_side.receive_secrets()
+    laptop_side.receive_secrets(&new_store, "Test device")
   );
   approved.unwrap();
   let secrets = received.unwrap();
@@ -189,7 +190,7 @@ async fn a_second_device_is_linked_through_the_relay() {
   let laptop = PendingEnrollment::new()
     .complete(
       laptop_api,
-      Arc::new(MemoryStore::new()),
+      new_store,
       Box::new(SystemClock),
       ClientSettings::default(),
       options,
@@ -260,9 +261,10 @@ async fn thread_updates_and_new_devices_follow_server_events() {
     NewDeviceLink::connect(&laptop_api, &offer),
     bob.start_link_approval(&code)
   );
+  let new_store = Arc::new(MemoryStore::new());
   let (approved, received) = tokio::join!(
     bob.complete_link_approval(phone_side.unwrap()),
-    laptop_side.unwrap().receive_secrets()
+    laptop_side.unwrap().receive_secrets(&new_store, "Test device")
   );
   approved.unwrap();
   let options = EnrollmentOptions {
@@ -272,7 +274,7 @@ async fn thread_updates_and_new_devices_follow_server_events() {
   let mut laptop = PendingEnrollment::new()
     .complete(
       laptop_api,
-      Arc::new(MemoryStore::new()),
+      new_store,
       Box::new(SystemClock),
       ClientSettings::default(),
       options,

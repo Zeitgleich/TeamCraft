@@ -34,6 +34,7 @@ Postgres, dropped afterwards), so tests are independent and run in parallel (abo
 | `bridge.rs`            | `teamcraft-bridge` process: Slack-style webhook and log lines land decrypted in an integration channel, bad input is refused                |
 | `meetings.rs`          | Scheduling sends iMIP invitations (caught by Mailpit), RSVP, an external guest joins with the one-time link, lobby, admission, cancellation |
 | `calls.rs`             | 1:1 DM call through the server's join tokens and the SFU: device-bound DAVE keys, both sides decode audio, equal privacy codes              |
+| `web_calls.rs`         | Browser and native client in one channel call: call module, DAVE keys signed by the page, audio and camera                                  |
 | `moderator.rs`         | Channel moderator role: removes members (keys rotate), can't manage roles, properties or the admin                                          |
 | `conversion.rs`        | Public/private conversion: who may, who can join afterwards, newcomers' history, system event, audit                                        |
 | `threads_policy.rs`    | Signed policy: auto-follow default for people who never chose, threaded view switch the server enforces                                     |
@@ -115,6 +116,7 @@ cargo test -p teamcraft-e2e --features browser --test suite -- --include-ignored
 | `E2E_WEB_DIR`    | The `trunk build` output (default `target/e2e-web`)                                        |
 | `E2E_ARTIFACTS`  | Where failure screenshots go (default `target/e2e-artifacts`)                              |
 | `CHROME`         | Chrome or Chromium executable (default: first of `google-chrome`, `chromium`, ... on PATH) |
+| `E2E_CONSOLE`    | Browser tests print the page's console as it happens (`web_calls.rs`)                      |
 
 The harness removes every inherited `TEAMCRAFT_*` variable from the processes it starts (the server reads
 them all as configuration), which is also why none of these variables carries that prefix.

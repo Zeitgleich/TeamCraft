@@ -1,15 +1,18 @@
-//! Composes the chat backend with the server's live state, the admin API and the desktop calls.
+//! Composes the chat backend with the server's live state, the admin API and the calls.
 //!
 //! The chat (spaces, conversations, messages, search, own devices, keys) comes from `C`: the client
 //! core over the desktop bridge or in the page, or the REST reader without a core. Live state
 //! (unread counts, threads, presence, receipts, announcements) comes from the server, the
-//! administration console from the admin API (admins and owners only), calls from the desktop shell.
+//! administration console from the admin API (admins and owners only), calls from the desktop shell
+//! or, in the browser, from the page (`web_calls`).
 //! Whatever is missing answers empty: there is no demo data here (it only exists in development
 //! builds with the `demo` feature).
 
 use leptos::prelude::{Get, GetUntracked, RwSignal, Set};
 use std::rc::Rc;
-use teamcraft_client_api::calls::{CallStatusSounds, OrgBackgroundRule};
+use teamcraft_client_api::calls::{
+  CallStatusSounds, CallsUnavailableReason, OrgBackgroundRule, RemoteVideoTrack,
+};
 use teamcraft_proto::OrgBackgroundId;
 
 use teamcraft_proto::{
@@ -57,15 +60,25 @@ pub struct Hybrid<C> {
   maybe_live: Option<LiveServer>,
   /// The administration console on the admin API; only for admins and owners.
   maybe_admin: Option<AdminLive>,
-  /// Calls of the desktop shell; without them the app offers no calls.
+  /// Calls (media in the desktop shell or in the page); without them the app offers no calls.
   maybe_calls: Option<RemoteCalls>,
+  /// Why there are no calls, when there are none.
+  calls_unavailable: CallsUnavailableReason,
 }
 
 impl<C: ChatBackend + 'static> Hybrid<C> {
-  /// Calls through the desktop shell.
+  /// Calls, with the media in the desktop shell or in the page.
   #[must_use]
   pub fn with_calls(mut self, calls: RemoteCalls) -> Self {
     self.maybe_calls = Some(calls);
+    self
+  }
+
+  /// No calls, for this reason.
+  #[must_use]
+  pub fn without_calls(mut self, reason: CallsUnavailableReason) -> Self {
+    self.maybe_calls = None;
+    self.calls_unavailable = reason;
     self
   }
 
@@ -83,6 +96,7 @@ impl<C: ChatBackend + 'static> Hybrid<C> {
       maybe_live: Some(LiveServer::new(auth, scope)),
       maybe_admin,
       maybe_calls: None,
+      calls_unavailable: CallsUnavailableReason::NotInThisApp,
     }
   }
 }
@@ -736,6 +750,32 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
 
   fn has_calls(&self) -> bool {
     self.maybe_calls.is_some()
+  }
+
+  fn calls_unavailable_reason(&self) -> CallsUnavailableReason {
+    self.calls_unavailable
+  }
+
+  fn has_background_effects(&self) -> bool {
+    self.maybe_calls.as_ref().is_none_or(|calls| !calls.is_in_page())
+  }
+
+  fn call_join_failures(&self) -> u64 {
+    self.maybe_calls.as_ref().map_or(0, RemoteCalls::join_failures)
+  }
+
+  fn has_pending_call_actions(&self) -> bool {
+    self
+      .maybe_calls
+      .as_ref()
+      .is_some_and(RemoteCalls::has_pending_actions)
+  }
+
+  fn call_video_tracks(&self) -> Vec<RemoteVideoTrack> {
+    self
+      .maybe_calls
+      .as_ref()
+      .map_or_else(Vec::new, RemoteCalls::video_tracks)
   }
 
   fn huddle(&self, conversation: ConversationId) -> Option<HuddleInfo> {

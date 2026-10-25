@@ -50,6 +50,7 @@ teamcraft-proto = { path = "crates/teamcraft-proto" }
 teamcraft-db = { path = "crates/teamcraft-db" }
 teamcraft-crypto = { path = "crates/teamcraft-crypto" }
 teamcraft-ops = { path = "crates/teamcraft-ops" }
+teamcraft-net = { path = "crates/teamcraft-net" }
 
 # Serialization and schemas
 serde = { version = "1", features = ["derive"] }

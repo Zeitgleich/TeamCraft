@@ -20,6 +20,10 @@
 //! it is hidden, frozen or unloaded ([`IndexedDbStore::write_now`]). A write lost anyway is one the
 //! server never heard of; the next start catches up from the last persisted cursor.
 //!
+//! A group of writes ([`crate::store::LocalStore::begin_writes`]) is never split between two
+//! transactions: it runs synchronously, so the batch timer and the page's lifecycle events can't
+//! issue in the middle of it, and the size limit waits until the group ended.
+//!
 //! A write that fails (quota exceeded, the database closed for a newer version) is kept and written
 //! again on the next flush, so the database catches up with the cache once space is free again
 //! instead of silently rolling back on the next reload (e2ee.md §9.4). The flush reports the
@@ -71,9 +75,22 @@ impl SealedStore<IndexedDbRecords> {
   /// Opens the database `name` and decrypts it into memory with `database_key`.
   pub async fn open(name: &str, database_key: &SymmetricKey) -> Result<Self, StoreError> {
     let database = idb::open_database(name).await?;
-    let records = read_all(&database).await?;
+    let records = match read_all(&database).await {
+      Ok(records) => records,
+      Err(error) => {
+        // Closed, so a reset can delete the database (issue #160) instead of being blocked by it.
+        database.close();
+        return Err(error);
+      },
+    };
     let backend = IndexedDbRecords::new(database);
     Self::load(backend, database_key, records)
+  }
+
+  /// Deletes the database `name` (records and key wrapping): the user chose to set up a device
+  /// whose data can't be read again (issue #160). The store must be closed first.
+  pub async fn delete(name: &str) -> Result<(), StoreError> {
+    idb::delete_database(name).await
   }
 
   /// Issues what is queued and waits until every write issued so far is committed. Writes that
@@ -124,6 +141,31 @@ impl RecordBackend for IndexedDbRecords {
   fn put_lazy(&self, id: &LookupId, size_hint: usize, seal: LazySeal) -> Result<(), StoreError> {
     self.write(format_id(id), Some(RecordValue::Unsealed(seal)), size_hint);
     Ok(())
+  }
+
+  fn begin_writes(&self) -> Result<(), StoreError> {
+    let mut writes = self.inner.writes.borrow_mut();
+    writes.group_depth = writes.group_depth.saturating_add(1);
+    Ok(())
+  }
+
+  /// The group is complete: what it queued goes out with the next batch (now, if much is queued).
+  fn end_writes(&self) -> Result<(), StoreError> {
+    let is_due = {
+      let mut writes = self.inner.writes.borrow_mut();
+      writes.group_depth = writes.group_depth.saturating_sub(1);
+      writes.group_depth == 0 && writes.is_over_limit()
+    };
+    if is_due {
+      self.inner.issue_queued();
+    }
+    Ok(())
+  }
+
+  fn write_soon(&self) {
+    if self.inner.writes.borrow().group_depth == 0 {
+      self.inner.issue_queued();
+    }
   }
 }
 

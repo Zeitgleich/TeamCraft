@@ -10,7 +10,8 @@
 pub mod commands;
 mod runtime;
 
-pub use runtime::{CallPreparation, CoreRuntime, TokenCache};
+pub use runtime::{CoreRuntime, TokenCache};
+pub use teamcraft_core::CallPreparation;
 
 #[cfg(all(test, feature = "integration"))]
 mod dev_bridge;

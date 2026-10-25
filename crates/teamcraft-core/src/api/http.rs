@@ -1320,6 +1320,21 @@ impl fmt::Debug for HttpRendezvous {
 /// progress (robustness.md, "Network loss and change").
 #[cfg(not(target_arch = "wasm32"))]
 fn http_client() -> reqwest::Client {
+  match http_client_builder().build() {
+    Ok(client) => client,
+    // Only a reqwest/rustls version mismatch can cause this; the default client still works for
+    // plain HTTP (development) and reports TLS errors per request.
+    Err(error) => {
+      tracing::error!(%error, "HTTP client configuration rejected, using the default client");
+      reqwest::Client::new()
+    },
+  }
+}
+
+/// reqwest races IPv6 and IPv4 itself (hyper-util's Happy Eyeballs, 300 ms; issue #420), with the
+/// connect timeout split across a family's addresses.
+#[cfg(not(target_arch = "wasm32"))]
+fn http_client_builder() -> reqwest::ClientBuilder {
   let builder = reqwest::Client::builder()
     .connect_timeout(CONNECT_TIMEOUT)
     .tcp_keepalive(KEEPALIVE_INTERVAL)
@@ -1335,16 +1350,7 @@ fn http_client() -> reqwest::Client {
   #[cfg(target_os = "android")]
   let builder = builder.tls_backend_preconfigured((*super::tls::client_config()).clone());
   // The same proxy as the WebSockets, also one the mobile app set (api/proxy.rs).
-  let builder = builder.proxy(reqwest::Proxy::custom(super::proxy::proxy_for));
-  match builder.build() {
-    Ok(client) => client,
-    // Only a reqwest/rustls version mismatch can cause this; the default client still works for
-    // plain HTTP (development) and reports TLS errors per request.
-    Err(error) => {
-      tracing::error!(%error, "HTTP client configuration rejected, using the default client");
-      reqwest::Client::new()
-    },
-  }
+  builder.proxy(reqwest::Proxy::custom(super::proxy::proxy_for))
 }
 
 /// The browser's `fetch` has its own timeouts and connection handling.
@@ -1787,6 +1793,56 @@ mod tests {
         }
       });
       format!("https://localhost:{port}")
+    }
+
+    /// The 1.0.2 failure (issue #420) for REST: the server's name resolves to an IPv6 address that
+    /// swallows the SYN and an IPv4 address that works. The request goes out over IPv4.
+    #[tokio::test]
+    async fn rest_falls_back_to_ipv4_when_ipv6_is_black_holed() {
+      let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+      let v4 = listener.local_addr().unwrap();
+      tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+          let mut request = [0u8; 4096];
+          let _ = socket.read(&mut request).await;
+          let body = r#"{"ok":true}"#;
+          let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+          );
+          let _ = socket.write_all(response.as_bytes()).await;
+        }
+      });
+      let Some(black_hole) = crate::api::connect::black_hole::BlackHole::ipv6(v4.port()).await else {
+        return;
+      };
+      let client = http_client_builder()
+        .dns_resolver(Arc::new(FixedResolver(vec![black_hole.address, v4])))
+        .build()
+        .unwrap();
+      let started = std::time::Instant::now();
+      let request = client
+        .get(format!("http://chat.example.com:{}/api/v1/me", v4.port()))
+        .send();
+      let response = tokio::time::timeout(std::time::Duration::from_secs(5), request)
+        .await
+        .expect("fell back to IPv4 within the timeout")
+        .unwrap();
+      assert!(response.status().is_success());
+      // IPv6 was tried first and swallowed the attempt.
+      assert!(started.elapsed() >= std::time::Duration::from_millis(250));
+    }
+
+    /// Resolves every name to the same addresses, in this order.
+    struct FixedResolver(Vec<std::net::SocketAddr>);
+
+    impl reqwest::dns::Resolve for FixedResolver {
+      fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let addresses = self.0.clone();
+        Box::pin(async move { Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs) })
+      }
     }
 
     /// A local `CONNECT` proxy: tunnels one connection and hands back the request head it got.

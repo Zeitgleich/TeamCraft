@@ -1,8 +1,10 @@
 //! Building blocks shared by the pre-join screen and the call screen: self preview, participant tiles
-//! and the background effect picker. No real video here: tiles show a stylised camera image so the
-//! layouts and effects can be reviewed without media.
+//! and the background effect picker. Where the media runs in the page (the browser), tiles show the
+//! real video ([`LiveVideo`]); elsewhere a stylised camera image, so the layouts and effects can be
+//! reviewed without media.
 
 use leptos::prelude::*;
+use teamcraft_proto::MediaStreamId;
 
 use crate::calls::BackgroundEffect;
 use crate::components::icons::{Icon, IconName};
@@ -24,6 +26,9 @@ pub fn VideoTile(
   #[prop(into, default = Signal::stored(BackgroundEffect::None))] effect: Signal<BackgroundEffect>,
   #[prop(into, default = Signal::stored(false))] is_mirrored: Signal<bool>,
   #[prop(default = false)] is_large: bool,
+  /// The real video of the tile, where the page shows call video.
+  #[prop(into, default = Signal::stored(None))]
+  video: Signal<Option<VideoSource>>,
 ) -> impl IntoView {
   let i18n = use_i18n();
   let name = if is_self {
@@ -68,8 +73,14 @@ pub fn VideoTile(
             move || view! { <span class="tile-initials" aria-hidden="true">{initials.clone()}</span> }
           }
         >
-          <div class="scene" aria-hidden="true"></div>
-          <div class="silhouette" class:mirrored=move || is_mirrored.get() aria-hidden="true"></div>
+          {move || match video.get() {
+            Some(source) => view! { <LiveVideo source=source is_mirrored=is_mirrored /> }.into_any(),
+            None => view! {
+              <div class="scene" aria-hidden="true"></div>
+              <div class="silhouette" class:mirrored=move || is_mirrored.get() aria-hidden="true"></div>
+            }
+            .into_any(),
+          }}
         </Show>
       </div>
       <div class="tile-label">
@@ -90,5 +101,73 @@ pub fn VideoTile(
     </div>
   }
 }
+
+/// Where a tile's real video comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VideoSource {
+  /// Another device's track in the call.
+  Remote(MediaStreamId),
+  /// The camera this device sends.
+  OwnCamera,
+}
+
+/// Whether this page shows real call video (the browser, once the call module runs).
+pub fn can_show_video() -> bool {
+  #[cfg(target_arch = "wasm32")]
+  {
+    crate::web_calls::can_show_video()
+  }
+  #[cfg(not(target_arch = "wasm32"))]
+  {
+    false
+  }
+}
+
+/// Real call video: another device's track drawn into a canvas, or the own camera in a muted
+/// `<video>`; the call module makes the element. Watching starts when it is shown and stops when it
+/// goes away, so tracks nobody looks at aren't received (robustness.md, "Performance and resources").
+#[component]
+pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -> impl IntoView {
+  let host = NodeRef::<leptos::html::Div>::new();
+  // Once: the call module keeps the element current (another camera is a new stream in the same
+  // `<video>`, a watched track keeps drawing into its canvas).
+  Effect::new(move |_| {
+    if let Some(element) = host.get() {
+      show(&element, source);
+    }
+  });
+  on_cleanup(move || {
+    if let VideoSource::Remote(stream_id) = source {
+      unwatch(stream_id);
+    }
+  });
+  view! { <div class="live-video" class:mirrored=move || is_mirrored.get() node_ref=host aria-hidden="true"></div> }
+}
+
+/// Puts the call module's element for `source` into `host`.
+#[cfg(target_arch = "wasm32")]
+fn show(host: &web_sys::HtmlDivElement, source: VideoSource) {
+  if host.child_element_count() > 0 {
+    return;
+  }
+  let maybe_element = match source {
+    VideoSource::Remote(stream_id) => crate::web_calls::watch_video(stream_id),
+    VideoSource::OwnCamera => crate::web_calls::camera_view(),
+  };
+  if let Some(element) = maybe_element {
+    host.replace_children_with_node_1(&element);
+  }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn unwatch(stream_id: MediaStreamId) {
+  crate::web_calls::unwatch_video(stream_id);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn show(_host: &web_sys::HtmlDivElement, _source: VideoSource) {}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn unwatch(_stream_id: MediaStreamId) {}
 
 pub use crate::components::background_picker::BackgroundPicker;

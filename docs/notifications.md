@@ -320,7 +320,10 @@ missed-call notifications.
 | Linux    | freedesktop notification service       | yes               | yes     | servers with `inline-reply`     | yes; quiet in GNOME/KDE do-not-disturb    |
 | Windows  | WinRT toasts (tag, group `teamcraft`)  | yes               | yes     | yes                             | yes; taskbar flash                        |
 | macOS    | `UNUserNotificationCenter` (bundled)   | yes               | no      | no                              | yes; dock bounce                          |
-| Web      | service worker registration, else page | yes               | yes     | no (browsers have none)         | no calls in the browser                   |
+| Web      | service worker registration, else page | yes               | yes     | no (browsers have none)         | yes, in the tab that runs the calls¹      |
+
+¹ Browsers play sound only in a tab the user has interacted with; a tab untouched since it loaded
+shows the incoming call card and the notification without the ringtone.
 
 macOS buttons need a notification center delegate, an Objective-C class the shell cannot define
 without `unsafe`; a click brings the app to the front, where the conversation or the call card is

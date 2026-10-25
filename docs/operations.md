@@ -141,8 +141,11 @@ How the apps behave on networks between the user and the server (issue #157):
   redirect to another site, HTTP 511) and a refused certificate are shown in the connection banner
   as such ("sign in to this network", "this network may inspect encrypted traffic"); queued messages
   and uploads wait and are sent once the server answers.
-- WebSocket connects use Happy Eyeballs (RFC 8305): an IPv6 route that swallows packets costs 250 ms
-  before IPv4 is tried, not the 15 s connect timeout.
+- Happy Eyeballs (RFC 8305, issue #420): when the host's IPv6 route swallows packets, the apps fall
+  back to IPv4 instead of staying "unreachable". REST (hyper-util, 300 ms), the gateway and relay
+  WebSockets and the QUIC handshake to the SFU for calls (250 ms) race the address families. The
+  Android app's own few requests (sign-in, token refresh, server check) use the platform's
+  `HttpURLConnection`, which tries the next address only after the connect timeout (15 s, #433).
 
 ## Backup and restore
 

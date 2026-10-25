@@ -30,7 +30,7 @@ e2e = [
   "dep:futures-util",
 ]
 # Drives the web client in headless Chromium (needs a trunk build of teamcraft-ui, see README.md).
-browser = ["e2e", "dep:chromiumoxide"]
+browser = ["e2e", "dep:chromiumoxide", "dep:rcgen", "dep:sha2", "dep:time"]
 
 [dependencies]
 teamcraft-client-api = { path = "../../crates/teamcraft-client-api", optional = true }
@@ -47,6 +47,11 @@ sqlx = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "process", "io-util", "fs", "net", "time", "macros", "sync"] }
 # Headless Chromium over the DevTools protocol: no driver binary, no Node, Rust like the rest of the tests.
 chromiumoxide = { version = "0.9", optional = true, default-features = false }
+# The SFU's certificate for browser calls, so the browser can be told to accept it (Chromium pins its
+# public key by SHA-256); both already in the tree (wtransport, teamcraft-crypto).
+rcgen = { version = "0.14.10", optional = true }
+sha2 = { version = "0.11.0", optional = true }
+time = { version = "0.3", optional = true }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["std", "sink"] }
 # Raw gateway connections (resume with a chosen sequence number, a consumer that stops reading); the
 # same version the core and the server use.

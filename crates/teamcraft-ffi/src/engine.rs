@@ -287,6 +287,26 @@ impl Engine {
         identity_fingerprint: self.identity_fingerprint.clone(),
       });
     }
+    // A device link whose keys arrived before the app was stopped finishes enrolling now (#168).
+    match PendingEnrollment::resume_link(
+      self.api(),
+      self.store.clone(),
+      Box::new(SystemClock),
+      self.client_settings(),
+      Argon2Settings::default(),
+    )
+    .await
+    {
+      Ok(Some(client)) => {
+        self.adopt(client);
+        self.listener.on_change();
+        return Box::pin(self.account_state()).await;
+      },
+      Ok(None) => {},
+      Err(error) if error.is_transient() || error.is_sign_in_required() => return Err(error.into()),
+      // Dropped if they can't work; the user links again.
+      Err(error) => tracing::warn!(%error, "could not finish the enrollment of an interrupted device link"),
+    }
     let api = self.api();
     let me = api.me().await.map_err(teamcraft_core::CoreError::from)?;
     let has_existing_identity = api
@@ -339,10 +359,8 @@ impl Engine {
       .take()
       .ok_or(TeamCraftError::NoLinkInProgress)?;
     self.maybe_link_offer = None;
-    let options = enrollment_options(
-      device_name,
-      EnrollmentSecret::Linked(link.receive_secrets().await?),
-    );
+    let secrets = link.receive_secrets(&self.store, &device_name).await?;
+    let options = enrollment_options(device_name, EnrollmentSecret::Linked(secrets));
     self.complete_enrollment(options).await
   }
 

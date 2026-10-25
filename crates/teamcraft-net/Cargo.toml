@@ -1,0 +1,21 @@
+[package]
+name = "teamcraft-net"
+description = "Connection racing for the native clients: Happy Eyeballs (RFC 8305) over any transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Native only (TCP for the core's WebSockets, QUIC for calls); the browser does this itself.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time", "macros"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }

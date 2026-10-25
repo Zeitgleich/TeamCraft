@@ -21,6 +21,11 @@ impl BrowserSession {
   /// Launches headless Chromium. `None` (with a skip message) when no browser is installed, unless
   /// `E2E_REQUIRED=1` demands one.
   pub async fn launch() -> Option<Self> {
+    Self::launch_with(&[]).await
+  }
+
+  /// [`Self::launch`] with more command line switches (fake camera and microphone for calls).
+  pub async fn launch_with(extra_args: &[&str]) -> Option<Self> {
     let is_required = std::env::var("E2E_REQUIRED").is_ok_and(|value| value == "1");
     let Some(executable) = find_chrome() else {
       assert!(
@@ -32,14 +37,19 @@ impl BrowserSession {
     };
     // A fresh profile per launch: the default one is shared and would keep Keycloak's session cookie.
     let profile = std::env::temp_dir().join(format!("teamcraft-e2e-chrome-{:016x}", random_u64()));
-    let config = BrowserConfig::builder()
+    let mut builder = BrowserConfig::builder();
+    // chromiumoxide adds the leading `--` itself.
+    for arg in extra_args {
+      builder = builder.arg(arg.trim_start_matches('-'));
+    }
+    let config = builder
       .chrome_executable(executable)
       .user_data_dir(profile.clone())
       // CI containers run as root without user namespaces.
       .no_sandbox()
       // The UI follows the browser language; the tests look for English texts.
-      .arg("--lang=en-US")
-      .arg("--accept-lang=en-US")
+      .arg("lang=en-US")
+      .arg("accept-lang=en-US")
       .window_size(1360, 840)
       // Page scripts that wait for the app (perf.rs) may take longer than the 30 s default.
       .request_timeout(std::time::Duration::from_secs(300))

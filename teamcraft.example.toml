@@ -540,6 +540,9 @@ is_enabled = true
 # Where the SFU takes host controls (mute all, remove, lock, end for everyone) on its internal listener;
 # the registration token above authenticates this server. Without it those controls answer 503.
 # sfu_control_url = "http://sfu.internal:8081"
+# SHA-256 of the SFU's certificate (hex) when it is a short-lived self-signed one (tests, development):
+# join tokens carry it so browsers can connect. Leave unset with a certificate browsers trust.
+# sfu_certificate_sha256 = "ab:cd:..."
 
 # E-mail the server sends on its own: invitations, activations, digests and meeting invitations. The mail
 # server and the texts are the seed of Administration → Mail and → Settings; what an admin sets there

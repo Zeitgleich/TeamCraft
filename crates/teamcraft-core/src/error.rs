@@ -125,7 +125,29 @@ pub enum CoreError {
   Corrupt(String),
 }
 
+/// Why the local data can't be opened with this version, now or after a restart (issue #160).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnreadableStore {
+  /// The file is damaged, or its key doesn't open it (the keystore lost or replaced it).
+  Damaged,
+  /// A newer version of the app changed its layout.
+  NewerVersion,
+}
+
 impl CoreError {
+  /// Whether opening the local data failed in a way a retry won't fix: the app asks the user to
+  /// set the device up again (or to update), never just "failed" (issue #160). Only meaningful
+  /// for errors of opening the store and the client on it.
+  pub fn unreadable_store(&self) -> Option<UnreadableStore> {
+    match self {
+      Self::Store(StoreError::NewerSchema { .. }) => Some(UnreadableStore::NewerVersion),
+      Self::Store(error) if error.is_unreadable() => Some(UnreadableStore::Damaged),
+      // Records that don't decode, or an account whose key bag doesn't open with its own key.
+      Self::Corrupt(_) | Self::KeyBag(_) | Self::Identity(_) => Some(UnreadableStore::Damaged),
+      _ => None,
+    }
+  }
+
   /// Worth retrying later without changes (offline, server overloaded).
   pub fn is_transient(&self) -> bool {
     match self {

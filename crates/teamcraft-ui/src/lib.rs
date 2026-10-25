@@ -81,6 +81,8 @@ pub mod toast_timer;
 pub mod unread_divider;
 pub mod viewport;
 #[cfg(target_arch = "wasm32")]
+pub mod web_calls;
+#[cfg(target_arch = "wasm32")]
 pub mod web_core;
 #[cfg(target_arch = "wasm32")]
 mod web_tabs;

@@ -38,6 +38,9 @@ pub(crate) struct Writes {
   unsealable: usize,
   /// Another page (a newer version) asked for the database; it was closed, writes wait for a reload.
   pub(crate) is_closed: bool,
+  /// Depth of the open group of writes ([`crate::store::LocalStore::begin_writes`]): the size limit
+  /// doesn't issue a batch in the middle of one.
+  pub(crate) group_depth: u32,
 }
 
 /// A record's bytes, sealed when its batch is issued.
@@ -100,6 +103,11 @@ impl Writes {
       Some(replaced) => self.queued_bytes = self.queued_bytes.saturating_sub(replaced.bytes),
       None => self.queued.push(key),
     }
+    self.group_depth == 0 && self.is_over_limit()
+  }
+
+  /// Whether so much is queued that it should be issued now ([`MAX_QUEUED_BYTES`]).
+  pub(crate) fn is_over_limit(&self) -> bool {
     self.queued_bytes >= MAX_QUEUED_BYTES
   }
 
@@ -286,6 +294,20 @@ mod tests {
     assert!(writes.queue("b".into(), Some(sealed(b"b")), MAX_QUEUED_BYTES / 2));
     writes.take_queued();
     assert!(!writes.is_large());
+  }
+
+  #[test]
+  fn a_group_of_writes_is_not_split_by_the_size_limit() {
+    let mut writes = Writes {
+      group_depth: 1,
+      ..Writes::default()
+    };
+    assert!(!writes.queue("a".into(), Some(sealed(b"a")), MAX_QUEUED_BYTES));
+    assert!(!writes.queue("b".into(), Some(sealed(b"b")), 1));
+    // The group ended: its writes go out together.
+    writes.group_depth = 0;
+    assert!(writes.is_over_limit());
+    assert_eq!(writes.take_queued().len(), 2);
   }
 
   #[test]
