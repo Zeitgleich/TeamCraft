@@ -6103,7 +6103,8 @@ ol.md-list {
 .settings-subject { margin: 0 0 var(--space-2); }
 .section-tabs { padding: 0; margin: 0 0 var(--space-3); overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
 .section-panel > h3:first-child { margin-top: 0; }
-.settings-form { display: flex; flex-direction: column; gap: 6px; margin-bottom: var(--space-3); }
+/* `.modal form` is `display: contents`; a settings form keeps its own column. */
+.settings-form, .modal form.settings-form { display: flex; flex-direction: column; gap: 6px; margin-bottom: var(--space-3); }
 .settings-form label { font-weight: var(--weight-semibold); font-size: var(--text-sm); }
 .settings-row { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2); }
 .settings-member-list { list-style: none; margin: 0; padding: 0; }
