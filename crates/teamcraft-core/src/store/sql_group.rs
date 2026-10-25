@@ -70,7 +70,6 @@ impl WriteGroup {
   }
 
   /// Whether a group of writes is open on the connection.
-  // Only the sealed store purges its write-ahead log.
   #[cfg_attr(not(feature = "sealed-sqlite"), allow(dead_code))]
   pub(crate) fn is_open(&self) -> bool {
     self.depth > 0
