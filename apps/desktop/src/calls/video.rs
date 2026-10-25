@@ -240,13 +240,17 @@ const CODEC_VP9: u8 = 2;
 const CODEC_JPEG: u8 = 3;
 
 /// Sends a watched track's frames as they arrive, for the webview's WebCodecs decoder.
-pub(super) fn h264_sink(send: impl Fn(Vec<u8>) + Send + Sync + 'static) -> VideoSink {
-  Arc::new(move |frame| send(video_message(frame)))
+pub(super) fn h264_sink(send: impl Fn(Vec<u8>) -> bool + Send + Sync + 'static) -> VideoSink {
+  // An undelivered frame costs nothing further here: no thread runs for this sink.
+  Arc::new(move |frame| {
+    let _ = send(video_message(frame));
+  })
 }
 
 /// Decodes a watched track on a thread of its own and sends JPEG images at a reduced rate, for
-/// webviews without WebCodecs. The thread ends when the sink is dropped (unwatch, call end).
-pub(super) fn jpeg_sink(send: impl Fn(Vec<u8>) + Send + 'static) -> VideoSink {
+/// webviews without WebCodecs. The thread ends when the sink is dropped (unwatch, call end) or
+/// an image can't be delivered (the webview is gone).
+pub(super) fn jpeg_sink(send: impl Fn(Vec<u8>) -> bool + Send + 'static) -> VideoSink {
   let (frames, queue) = std_mpsc::channel::<ReceivedVideoFrame>();
   let spawned = std::thread::Builder::new()
     .name("teamcraft-video-jpeg".into())
@@ -259,7 +263,7 @@ pub(super) fn jpeg_sink(send: impl Fn(Vec<u8>) + Send + 'static) -> VideoSink {
   Arc::new(move |frame| drop(frames.send(frame.clone())))
 }
 
-fn transcode_to_jpeg(queue: &std_mpsc::Receiver<ReceivedVideoFrame>, send: &dyn Fn(Vec<u8>)) {
+fn transcode_to_jpeg(queue: &std_mpsc::Receiver<ReceivedVideoFrame>, send: &dyn Fn(Vec<u8>) -> bool) {
   let decoder = match OpenH264Decoder::new() {
     Ok(decoder) => decoder,
     Err(error) => {
@@ -271,7 +275,12 @@ fn transcode_to_jpeg(queue: &std_mpsc::Receiver<ReceivedVideoFrame>, send: &dyn 
   while let Ok(frame) = queue.recv() {
     let timestamp_us = timestamp_us(&frame);
     match transcoder.push(&frame.data, timestamp_us) {
-      Ok(Some(jpeg)) => send(jpeg_message(frame.stream_id, timestamp_us, &jpeg)),
+      Ok(Some(jpeg)) => {
+        if !send(jpeg_message(frame.stream_id, timestamp_us, &jpeg)) {
+          debug!("the webview takes no more images; JPEG video stops");
+          return;
+        }
+      },
       Ok(None) => {},
       // A broken frame: later ones recover with the next keyframe.
       Err(error) => debug!(%error, "frame not decodable"),
@@ -461,7 +470,7 @@ mod tests {
       .unwrap()
       .unwrap();
     let (images, received) = std_mpsc::channel();
-    let sink = jpeg_sink(move |message| drop(images.send(message)));
+    let sink = jpeg_sink(move |message| images.send(message).is_ok());
     sink(&ReceivedVideoFrame {
       sender: DeviceId::from_snowflake(Snowflake::new(2).unwrap()),
       stream_id: MediaStreamId(7),

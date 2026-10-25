@@ -215,19 +215,10 @@ impl OnScreenObserver {
   fn disconnect(&self) {}
 }
 
-/// Puts the element for `source` into `host`: from the shell on the desktop, from the call module
-/// in the browser.
+/// Puts the element for `source` into `host`.
 #[cfg(target_arch = "wasm32")]
 fn show(host: &web_sys::HtmlDivElement, source: VideoSource) {
-  let maybe_element = if crate::shell_video::can_show_video() {
-    crate::shell_video::show(source)
-  } else {
-    match source {
-      VideoSource::Remote(stream_id) => crate::web_calls::watch_video(stream_id),
-      VideoSource::OwnCamera => crate::web_calls::camera_view(),
-    }
-  };
-  if let Some(element) = maybe_element {
+  if let Some(element) = shown::show(source) {
     host.replace_children_with_node_1(&element);
   }
 }
@@ -241,10 +232,114 @@ fn hide(host: &web_sys::HtmlDivElement, source: VideoSource) {
 
 #[cfg(target_arch = "wasm32")]
 fn stop_watching(source: VideoSource) {
-  if crate::shell_video::can_show_video() {
-    crate::shell_video::hide(source);
-  } else if let VideoSource::Remote(stream_id) = source {
-    crate::web_calls::unwatch_video(stream_id);
+  shown::hide(source);
+}
+
+/// The video elements tiles show, one per source, from the shell on the desktop and from the call
+/// module in the browser. A source no tile shows any more keeps running for [`shown::LINGER`], so
+/// a re-layout (the speaker changed, a tile scrolled back in, the first visibility report) reuses
+/// the running stream instead of restarting it and waiting for a keyframe. Two tiles showing the
+/// same source at once share the element: it moves to the newer one.
+#[cfg(target_arch = "wasm32")]
+mod shown {
+  use std::cell::RefCell;
+  use std::collections::HashMap;
+  use std::time::Duration;
+
+  use leptos::task::spawn_local;
+  use web_sys::Element;
+
+  use super::VideoSource;
+
+  pub const LINGER: Duration = Duration::from_millis(500);
+
+  thread_local! {
+    static SHOWN: RefCell<HashMap<VideoSource, Shown>> = RefCell::default();
+  }
+
+  struct Shown {
+    element: Element,
+    tiles: u32,
+    /// Changes with every show and hide, so a linger timer of an earlier hide sees that the
+    /// source was shown again meanwhile.
+    generation: u64,
+  }
+
+  pub fn show(source: VideoSource) -> Option<Element> {
+    let maybe_element = SHOWN.with(|shown| {
+      shown.borrow_mut().get_mut(&source).map(|entry| {
+        entry.tiles += 1;
+        entry.generation += 1;
+        entry.element.clone()
+      })
+    });
+    if maybe_element.is_some() {
+      return maybe_element;
+    }
+    let element = start(source)?;
+    SHOWN.with(|shown| {
+      shown.borrow_mut().insert(
+        source,
+        Shown {
+          element: element.clone(),
+          tiles: 1,
+          generation: 0,
+        },
+      )
+    });
+    Some(element)
+  }
+
+  pub fn hide(source: VideoSource) {
+    let maybe_generation = SHOWN.with(|shown| {
+      let mut shown = shown.borrow_mut();
+      let entry = shown.get_mut(&source)?;
+      entry.tiles = entry.tiles.saturating_sub(1);
+      entry.generation += 1;
+      (entry.tiles == 0).then_some(entry.generation)
+    });
+    let Some(generation) = maybe_generation else {
+      return;
+    };
+    spawn_local(async move {
+      teamcraft_core::platform::sleep(LINGER).await;
+      stop_if_unshown(source, generation);
+    });
+  }
+
+  /// Stops `source` unless it was shown again since the hide of `generation`.
+  fn stop_if_unshown(source: VideoSource, generation: u64) {
+    let is_unshown = SHOWN.with(|shown| {
+      let mut shown = shown.borrow_mut();
+      let is_unshown = shown
+        .get(&source)
+        .is_some_and(|entry| entry.tiles == 0 && entry.generation == generation);
+      if is_unshown {
+        shown.remove(&source);
+      }
+      is_unshown
+    });
+    if is_unshown {
+      stop(source);
+    }
+  }
+
+  fn start(source: VideoSource) -> Option<Element> {
+    if crate::shell_video::can_show_video() {
+      return crate::shell_video::show(source);
+    }
+    match source {
+      VideoSource::Remote(stream_id) => crate::web_calls::watch_video(stream_id),
+      VideoSource::OwnCamera => crate::web_calls::camera_view(),
+    }
+  }
+
+  fn stop(source: VideoSource) {
+    if crate::shell_video::can_show_video() {
+      crate::shell_video::hide(source);
+    } else if let VideoSource::Remote(stream_id) = source {
+      crate::web_calls::unwatch_video(stream_id);
+    }
   }
 }
 

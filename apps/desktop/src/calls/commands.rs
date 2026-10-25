@@ -10,7 +10,7 @@ use teamcraft_client_api::remote::{ChatAnswer, ChatQuery};
 use teamcraft_media::effects::BackgroundImage;
 use teamcraft_proto::MediaStreamId;
 
-use super::{CallHost, CoreJoinTickets, push_to_talk, video};
+use super::{CallHost, ChannelId, CoreJoinTickets, push_to_talk, video};
 use crate::core::commands::{CommandError, CoreHost};
 
 #[tauri::command(rename_all = "snake_case")]
@@ -35,10 +35,13 @@ pub async fn call_watch_video(
   prefer_jpeg: bool,
   frames: Channel,
 ) -> Result<(), CommandError> {
-  let send = move |message| {
-    if let Err(error) = frames.send(InvokeResponseBody::Raw(message)) {
+  let channel = ChannelId(frames.id());
+  let send = move |message| match frames.send(InvokeResponseBody::Raw(message)) {
+    Ok(()) => true,
+    Err(error) => {
       tracing::debug!(%error, "video frame not delivered to the webview");
-    }
+      false
+    },
   };
   let sink = if prefer_jpeg {
     calls.ensure_video_codec().await?;
@@ -46,7 +49,7 @@ pub async fn call_watch_video(
   } else {
     video::h264_sink(send)
   };
-  calls.watch_video(stream_id, maybe_max_layer, sink).await;
+  calls.watch_video(stream_id, channel, maybe_max_layer, sink).await;
   Ok(())
 }
 
@@ -54,24 +57,31 @@ pub async fn call_watch_video(
 /// view through `frames`: JPEG images in the format of `call_watch_video`.
 #[tauri::command(rename_all = "snake_case")]
 pub fn call_watch_camera(calls: State<'_, Arc<CallHost>>, frames: Channel) {
-  calls.watch_camera(move |message| {
-    if let Err(error) = frames.send(InvokeResponseBody::Raw(message)) {
-      tracing::debug!(%error, "self view image not delivered to the webview");
+  let channel = ChannelId(frames.id());
+  calls.watch_camera(channel, move |message| {
+    match frames.send(InvokeResponseBody::Raw(message)) {
+      Ok(()) => true,
+      Err(error) => {
+        tracing::debug!(%error, "self view image not delivered to the webview");
+        false
+      },
     }
   });
 }
 
+/// Stops the self view; `channel` is the id of the `frames` channel it was started with.
 #[tauri::command(rename_all = "snake_case")]
-pub fn call_unwatch_camera(calls: State<'_, Arc<CallHost>>) {
-  calls.unwatch_camera();
+pub fn call_unwatch_camera(calls: State<'_, Arc<CallHost>>, channel: u32) {
+  calls.unwatch_camera(ChannelId(channel));
 }
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn call_unwatch_video(
   calls: State<'_, Arc<CallHost>>,
   stream_id: MediaStreamId,
+  channel: u32,
 ) -> Result<(), CommandError> {
-  calls.unwatch_video(stream_id).await;
+  calls.unwatch_video(stream_id, ChannelId(channel)).await;
   Ok(())
 }
 

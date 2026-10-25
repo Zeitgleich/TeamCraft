@@ -134,7 +134,19 @@ enum Control {
 
 /// Gets a watched track's decrypted frames (see `video::h264_sink` and `video::jpeg_sink`).
 pub type VideoSink = Arc<dyn Fn(&ReceivedVideoFrame) + Send + Sync>;
-type VideoSinks = Arc<Mutex<HashMap<MediaStreamId, VideoSink>>>;
+type VideoSinks = Arc<Mutex<HashMap<MediaStreamId, WatchedVideo>>>;
+
+/// The webview channel a watch sends through (`tauri::ipc::Channel::id`). An unwatch names it,
+/// so a late unwatch of a replaced channel leaves the newer watch of the same track alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChannelId(pub u32);
+
+/// One watched track: where its frames go.
+#[derive(Clone)]
+struct WatchedVideo {
+  channel: ChannelId,
+  sink: VideoSink,
+}
 
 /// Lets the media layer sign with the core's signer (the device key stays in the core).
 struct CoreSigner(CallKeySigner);
@@ -305,9 +317,16 @@ impl CallHost {
     lock(&self.state).push_to_talk.clone()
   }
 
-  /// Receives another device's track and hands each frame to `sink` (the webview decodes it).
-  pub async fn watch_video(&self, stream_id: MediaStreamId, maybe_max_layer: Option<u8>, sink: VideoSink) {
-    lock(&self.video_sinks).insert(stream_id, sink);
+  /// Receives another device's track and hands each frame to `sink` (the webview decodes it),
+  /// replacing an earlier watch of the track.
+  pub async fn watch_video(
+    &self,
+    stream_id: MediaStreamId,
+    channel: ChannelId,
+    maybe_max_layer: Option<u8>,
+    sink: VideoSink,
+  ) {
+    lock(&self.video_sinks).insert(stream_id, WatchedVideo { channel, sink });
     self
       .control(Control::Subscribe {
         stream_id,
@@ -316,17 +335,27 @@ impl CallHost {
       .await;
   }
 
-  /// Sends the own camera, as the call sends it, to `send` as JPEG images (see `self_view`).
-  pub fn watch_camera(&self, send: impl Fn(Vec<u8>) + Send + 'static) {
-    self.self_view.watch(send);
+  /// Sends the own camera, as the call sends it, to `send` as JPEG images (see `self_view`);
+  /// `send` answers whether the image was delivered.
+  pub fn watch_camera(&self, channel: ChannelId, send: impl Fn(Vec<u8>) -> bool + Send + 'static) {
+    self.self_view.watch(channel, send);
   }
 
-  pub fn unwatch_camera(&self) {
-    self.self_view.unwatch();
+  /// Stops the self view, if `channel` is the one it sends through.
+  pub fn unwatch_camera(&self, channel: ChannelId) {
+    self.self_view.unwatch(channel);
   }
 
-  pub async fn unwatch_video(&self, stream_id: MediaStreamId) {
-    if lock(&self.video_sinks).remove(&stream_id).is_some() {
+  /// Stops receiving a track, if `channel` is the one it is sent through.
+  pub async fn unwatch_video(&self, stream_id: MediaStreamId, channel: ChannelId) {
+    let is_removed = {
+      let mut sinks = lock(&self.video_sinks);
+      let is_current = sinks
+        .get(&stream_id)
+        .is_some_and(|watched| watched.channel == channel);
+      is_current && sinks.remove(&stream_id).is_some()
+    };
+    if is_removed {
       self
         .control(Control::Subscribe {
           stream_id,
@@ -700,7 +729,9 @@ async fn run_media(
       },
       maybe_event = call.next_event() => match maybe_event {
         Some(CallEngineEvent::VideoFrame(frame)) => {
-          let maybe_sink = lock(&video_sinks).get(&frame.stream_id).cloned();
+          let maybe_sink = lock(&video_sinks)
+            .get(&frame.stream_id)
+            .map(|watched| Arc::clone(&watched.sink));
           if let Some(sink) = maybe_sink {
             sink(&frame);
           }

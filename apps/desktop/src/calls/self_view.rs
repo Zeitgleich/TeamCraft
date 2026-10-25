@@ -16,6 +16,7 @@ use teamcraft_media::video_pipeline::FrameFilter;
 use teamcraft_proto::MediaStreamId;
 use tracing::{debug, warn};
 
+use super::ChannelId;
 use super::video::jpeg_message;
 
 /// About 15 images per second: enough for a preview, a fraction of the camera's 30.
@@ -35,29 +36,43 @@ pub(crate) struct SelfView {
   maybe_viewer: Arc<Mutex<Option<Viewer>>>,
 }
 
-/// The encoding thread of one watcher; it ends when this is dropped.
+/// The encoding thread of one watcher; it ends when this is dropped or an image can't be
+/// delivered.
 struct Viewer {
+  channel: ChannelId,
   frames: std_mpsc::SyncSender<VideoFrame>,
 }
 
 impl SelfView {
   /// Sends the own camera to `send` (one message per image, format of `video::video_message`)
-  /// until [`Self::unwatch`] or another watcher.
-  pub(crate) fn watch(&self, send: impl Fn(Vec<u8>) + Send + 'static) {
+  /// until [`Self::unwatch`], another watcher, or `send` answering that it could not deliver.
+  pub(crate) fn watch(&self, channel: ChannelId, send: impl Fn(Vec<u8>) -> bool + Send + 'static) {
     // One frame in the queue: the encoder thread never blocks on a busy self view.
     let (frames, queue) = std_mpsc::sync_channel::<VideoFrame>(1);
     let spawned = std::thread::Builder::new()
       .name("teamcraft-self-view".into())
-      .spawn(move || encode_images(&queue, &send));
+      .spawn(move || {
+        encode_images(&queue, &send);
+        // The queue first: once `send` is gone (what a test waits for), offers already fail.
+        drop(queue);
+        drop(send);
+      });
     if let Err(error) = spawned {
       warn!(%error, "no thread for the self view; it stays blank");
       return;
     }
-    *self.lock() = Some(Viewer { frames });
+    *self.lock() = Some(Viewer { channel, frames });
   }
 
-  pub(crate) fn unwatch(&self) {
-    *self.lock() = None;
+  /// Stops the watcher of `channel`; a newer watcher (another channel) stays.
+  pub(crate) fn unwatch(&self, channel: ChannelId) {
+    let mut maybe_viewer = self.lock();
+    if maybe_viewer
+      .as_ref()
+      .is_some_and(|viewer| viewer.channel == channel)
+    {
+      *maybe_viewer = None;
+    }
   }
 
   /// The camera's frame filter: `maybe_inner` (background effects) first, then a copy for the
@@ -91,7 +106,7 @@ impl SelfView {
     match viewer.frames.try_send(frame.clone()) {
       Ok(()) => true,
       Err(std_mpsc::TrySendError::Full(_)) => false,
-      // The thread is gone (it could not decode or send); nobody is left to watch.
+      // The thread ended: the webview took no more images (it was reloaded or closed).
       Err(std_mpsc::TrySendError::Disconnected(_)) => {
         *maybe_viewer = None;
         false
@@ -104,7 +119,7 @@ impl SelfView {
   }
 }
 
-fn encode_images(queue: &std_mpsc::Receiver<VideoFrame>, send: &dyn Fn(Vec<u8>)) {
+fn encode_images(queue: &std_mpsc::Receiver<VideoFrame>, send: &dyn Fn(Vec<u8>) -> bool) {
   while let Ok(frame) = queue.recv() {
     let small = match frame.scaled(fit_within(frame.resolution(), MAX_SIZE)) {
       Ok(small) => small,
@@ -114,7 +129,12 @@ fn encode_images(queue: &std_mpsc::Receiver<VideoFrame>, send: &dyn Fn(Vec<u8>))
       },
     };
     match encode_jpeg(&small, JPEG_QUALITY) {
-      Ok(jpeg) => send(jpeg_message(SELF_VIEW_STREAM, frame.timestamp_us(), &jpeg)),
+      Ok(jpeg) => {
+        if !send(jpeg_message(SELF_VIEW_STREAM, frame.timestamp_us(), &jpeg)) {
+          debug!("the webview takes no more self view images");
+          return;
+        }
+      },
       Err(error) => debug!(%error, "self view image not encoded"),
     }
   }
@@ -178,7 +198,7 @@ mod tests {
     assert_eq!(unwatched.timestamp_us(), 0);
 
     let (sent, received) = std_mpsc::channel();
-    self_view.watch(move |message| drop(sent.send(message)));
+    self_view.watch(ChannelId(1), move |message| sent.send(message).is_ok());
     filter(gray_frame(1_000_000));
     let message = received.recv_timeout(Duration::from_secs(10)).unwrap();
     // Header: version 1, keyframe + JPEG, codec JPEG, stream 0, then the JPEG's start marker.
@@ -186,9 +206,41 @@ mod tests {
     assert_eq!(&message[16..18], &[0xff, 0xd8]);
 
     // After unwatching nothing more arrives: the thread ends, and with it the sender.
-    self_view.unwatch();
+    self_view.unwatch(ChannelId(1));
     filter(gray_frame(2_000_000));
     assert!(received.recv().is_err());
+  }
+
+  #[test]
+  fn a_late_unwatch_of_a_replaced_channel_keeps_the_newer_watcher() {
+    let self_view = SelfView::default();
+    let mut filter = self_view.filter(None);
+    let (old, _old_received) = std_mpsc::channel::<Vec<u8>>();
+    self_view.watch(ChannelId(1), move |message| old.send(message).is_ok());
+    let (sent, received) = std_mpsc::channel();
+    self_view.watch(ChannelId(2), move |message| sent.send(message).is_ok());
+    self_view.unwatch(ChannelId(1));
+    filter(gray_frame(1_000_000));
+    assert!(received.recv_timeout(Duration::from_secs(10)).is_ok());
+  }
+
+  #[test]
+  fn the_thread_ends_when_the_webview_takes_no_more_images() {
+    let self_view = SelfView::default();
+    let mut filter = self_view.filter(None);
+    let (attempts, attempted) = std_mpsc::channel();
+    // The webview is gone: every send fails.
+    self_view.watch(ChannelId(1), move |_message| {
+      let _ = attempts.send(());
+      false
+    });
+    filter(gray_frame(1_000_000));
+    attempted.recv_timeout(Duration::from_secs(10)).unwrap();
+    // The thread ended after the failed send and dropped its sender.
+    assert!(attempted.recv().is_err());
+    // The next offer notices and forgets the watcher.
+    filter(gray_frame(2_000_000));
+    assert!(self_view.lock().is_none());
   }
 
   fn gray_frame(timestamp_us: u64) -> VideoFrame {

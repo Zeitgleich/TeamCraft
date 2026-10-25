@@ -150,6 +150,9 @@ extern "C" {
   #[wasm_bindgen(method, catch)]
   pub fn close(this: &VideoDecoder) -> Result<(), JsValue>;
 
+  #[wasm_bindgen(method, getter, js_name = decodeQueueSize)]
+  pub fn decode_queue_size(this: &VideoDecoder) -> u32;
+
   /// Resolves to `{ supported, config }`.
   #[wasm_bindgen(static_method_of = VideoDecoder, js_name = isConfigSupported, catch)]
   pub fn is_config_supported(config: &Object) -> Result<Promise, JsValue>;

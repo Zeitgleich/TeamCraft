@@ -5,7 +5,7 @@
 //! without the codec). The own camera comes as JPEG images, as the call sends it (with effects).
 //!
 //! [`LiveVideo`](crate::components::call_video::LiveVideo) shows the canvases made here, the same
-//! way it shows the browser's call module's; a track is watched only while a tile shows it.
+//! way it shows the browser's call module's, and decides when a track is watched.
 
 use std::collections::BTreeMap;
 
@@ -133,7 +133,6 @@ mod view {
   use std::cell::{Cell, RefCell};
   use std::collections::HashMap;
   use std::rc::{Rc, Weak};
-  use std::time::Duration;
 
   use js_sys::{Array, Reflect, Uint8Array};
   use leptos::task::spawn_local;
@@ -150,18 +149,22 @@ mod view {
   use crate::auth::tauri::{call, close_channel, open_channel};
   use crate::components::call_video::VideoSource;
 
-  /// A track a tile stops showing keeps running this long, so a re-layout (the speaker changed,
-  /// the window was resized) doesn't restart it and wait for a keyframe.
-  const STOP_DELAY: Duration = Duration::from_millis(500);
   /// JPEG images being decoded at once; more are dropped (each image stands alone).
   const MAX_IMAGES_IN_FLIGHT: u32 = 2;
+  /// Frames waiting in the decoder above this (a slow machine, a hidden webview catching up):
+  /// deltas are dropped until the next keyframe instead of queueing without bound.
+  const MAX_DECODE_QUEUE: u32 = 3;
+  /// Decoder errors in a row (without a frame decoded between them) before a track falls back to
+  /// JPEG images; a single error only rebuilds the decoder.
+  const MAX_DECODER_ERRORS: u32 = 3;
   /// WebCodecs codec strings, as the browser's call module uses them (`call_web/video.rs`).
   const H264_CODEC: &str = "avc1.42e028";
   const VP9_CODEC: &str = "vp09.00.10.08";
 
   thread_local! {
     static VIEWS: RefCell<HashMap<VideoSource, Rc<StreamView>>> = RefCell::default();
-    /// Whether this webview decodes H.264 with WebCodecs; asked once.
+    /// Whether this webview decodes H.264 with WebCodecs: asked once, and `false` once a
+    /// decoder for it could not be configured.
     static CAN_DECODE_H264: Cell<Option<bool>> = const { Cell::new(None) };
   }
 
@@ -170,34 +173,21 @@ mod view {
     crate::auth::tauri::is_available()
   }
 
-  /// The canvas showing `source` until [`hide`]; the shell starts sending it.
+  /// The canvas showing `source` until [`hide`]; the shell starts sending it. One canvas per
+  /// source: `LiveVideo` shares it between tiles and keeps it a moment after the last one.
   pub fn show(source: VideoSource) -> Option<Element> {
-    let maybe_running = VIEWS.with(|views| views.borrow().get(&source).cloned());
-    let view = match maybe_running {
-      Some(view) => view,
-      None => {
-        let view = StreamView::start(source)?;
-        VIEWS.with(|views| views.borrow_mut().insert(source, Rc::clone(&view)));
-        view
-      },
-    };
-    view.watchers.set(view.watchers.get() + 1);
+    if let Some(view) = VIEWS.with(|views| views.borrow().get(&source).cloned()) {
+      return Some(view.canvas.clone().into());
+    }
+    let view = StreamView::start(source)?;
+    VIEWS.with(|views| views.borrow_mut().insert(source, Rc::clone(&view)));
     Some(view.canvas.clone().into())
   }
 
-  /// A tile stopped showing `source`; the shell stops sending it shortly after, unless a tile
-  /// shows it again.
+  /// No tile shows `source` any more: the shell stops sending it.
   pub fn hide(source: VideoSource) {
-    let Some(view) = VIEWS.with(|views| views.borrow().get(&source).cloned()) else {
-      return;
-    };
-    let watchers = view.watchers.get().saturating_sub(1);
-    view.watchers.set(watchers);
-    if watchers == 0 {
-      spawn_local(async move {
-        teamcraft_core::platform::sleep(STOP_DELAY).await;
-        view.stop_if_unwatched();
-      });
+    if let Some(view) = VIEWS.with(|views| views.borrow_mut().remove(&source)) {
+      view.stop();
     }
   }
 
@@ -206,13 +196,17 @@ mod view {
     source: VideoSource,
     canvas: HtmlCanvasElement,
     context: CanvasRenderingContext2d,
-    watchers: Cell<u32>,
     is_stopped: Cell<bool>,
     maybe_channel: RefCell<Option<FrameChannel>>,
     /// Counts channels, so a callback of a replaced one is recognised.
     channel_generation: Cell<u64>,
     maybe_decoder: RefCell<Option<Decoder>>,
     is_waiting_for_keyframe: Cell<bool>,
+    /// The decoder reported an error; the next keyframe gets a new one.
+    is_decoder_broken: Cell<bool>,
+    decoder_errors: Cell<u32>,
+    /// A VP9 decoder could not be configured; the shell can't make images of VP9 either.
+    is_vp9_unsupported: Cell<bool>,
     /// The shell was asked for JPEG images instead of H.264.
     is_sending_images: Cell<bool>,
     images_in_flight: Cell<u32>,
@@ -244,12 +238,14 @@ mod view {
         source,
         canvas,
         context,
-        watchers: Cell::new(0),
         is_stopped: Cell::new(false),
         maybe_channel: RefCell::new(None),
         channel_generation: Cell::new(0),
         maybe_decoder: RefCell::new(None),
         is_waiting_for_keyframe: Cell::new(true),
+        is_decoder_broken: Cell::new(false),
+        decoder_errors: Cell::new(0),
+        is_vp9_unsupported: Cell::new(false),
         is_sending_images: Cell::new(false),
         images_in_flight: Cell::new(0),
         image_sequence: Cell::new(0),
@@ -313,10 +309,11 @@ mod view {
       Some(argument)
     }
 
-    fn close_frame_channel(&self) {
-      if let Some(channel) = self.maybe_channel.borrow_mut().take() {
-        close_channel(channel.callback_id);
-      }
+    /// Closes the current channel; returns its id (what an unwatch names).
+    fn close_frame_channel(&self) -> Option<u32> {
+      let channel = self.maybe_channel.borrow_mut().take()?;
+      close_channel(channel.callback_id);
+      Some(channel.callback_id)
     }
 
     /// `{ message, index }` or `{ end: true, index }` from the bridge.
@@ -362,6 +359,7 @@ mod view {
       };
       let payload = bytes.subarray(HEADER_BYTES as u32, bytes.length());
       if is_after_gap {
+        // The SFU sends keyframes regularly; there is no receiver-side request to ask sooner.
         self.is_waiting_for_keyframe.set(true);
       }
       match header.codec {
@@ -410,9 +408,17 @@ mod view {
       bitmap.close();
     }
 
-    /// Decodes a frame; deltas before the first keyframe (or after a lost frame) can't be decoded
-    /// and are skipped.
+    /// Decodes a frame. Deltas are skipped before the first keyframe, after a lost frame or a
+    /// decoder error, and while the decoder is behind.
     fn decode(self: &Rc<Self>, header: FrameHeader, payload: &Uint8Array) {
+      if header.codec == FrameCodec::Vp9 && self.is_vp9_unsupported.get() {
+        return;
+      }
+      if self.is_decoder_broken.replace(false) {
+        // Dropped here, not in its own error callback.
+        self.maybe_decoder.borrow_mut().take();
+        self.is_waiting_for_keyframe.set(true);
+      }
       if self.is_waiting_for_keyframe.get() && !header.is_keyframe {
         return;
       }
@@ -424,9 +430,15 @@ mod view {
         *maybe_decoder = Decoder::new(header.codec, self);
       }
       let Some(decoder) = maybe_decoder.as_ref() else {
-        self.decoding_failed();
+        drop(maybe_decoder);
+        self.configure_failed(header.codec);
         return;
       };
+      if !header.is_keyframe && decoder.decoder.decode_queue_size() > MAX_DECODE_QUEUE {
+        tracing::debug!("the video decoder is behind; waiting for a keyframe");
+        self.is_waiting_for_keyframe.set(true);
+        return;
+      }
       self.is_waiting_for_keyframe.set(false);
       let chunk = dictionary(&[
         (
@@ -439,50 +451,70 @@ mod view {
       ])
       .and_then(|init| EncodedVideoChunk::new(&init));
       if chunk.and_then(|chunk| decoder.decoder.decode(&chunk)).is_err() {
-        self.decoding_failed();
+        drop(maybe_decoder);
+        self.decoder_error(header.codec);
       }
     }
 
-    /// WebCodecs can't decode this track here after all: the shell sends JPEG images instead,
-    /// for this track and the ones shown later.
-    fn decoding_failed(self: &Rc<Self>) {
-      if self.is_sending_images.get() {
+    /// A decoder failed on a frame: the next keyframe gets a new one. Errors that repeat without
+    /// a frame decoded in between switch an H.264 track to JPEG images.
+    fn decoder_error(self: &Rc<Self>, codec: FrameCodec) {
+      self.is_decoder_broken.set(true);
+      self.is_waiting_for_keyframe.set(true);
+      let errors = self.decoder_errors.get() + 1;
+      self.decoder_errors.set(errors);
+      tracing::debug!(errors, "video decoder error; rebuilding it");
+      if errors >= MAX_DECODER_ERRORS && codec == FrameCodec::H264 {
+        self.fall_back_to_images();
+      }
+    }
+
+    /// No decoder for `codec` here: H.264 comes as JPEG images from now on (for this track and
+    /// later ones); VP9 the shell can't turn into images, so such a track stays blank.
+    fn configure_failed(self: &Rc<Self>, codec: FrameCodec) {
+      match codec {
+        FrameCodec::H264 => {
+          CAN_DECODE_H264.set(Some(false));
+          self.fall_back_to_images();
+        },
+        FrameCodec::Vp9 => {
+          tracing::warn!("the webview does not decode VP9; this video stays blank");
+          self.is_vp9_unsupported.set(true);
+        },
+        FrameCodec::Jpeg => {},
+      }
+    }
+
+    fn fall_back_to_images(self: &Rc<Self>) {
+      if self.is_sending_images.replace(true) {
         return;
       }
-      self.is_sending_images.set(true);
-      tracing::warn!("the webview does not decode the call video; using images");
-      CAN_DECODE_H264.set(Some(false));
-      // Not right here: the failing decoder may be the caller (its error callback).
+      tracing::warn!("the webview does not decode this call video; using images");
+      // Not right here: the failing decoder's error callback may be the caller.
       let view = Rc::clone(self);
       spawn_local(async move {
-        view.restart_with_images();
+        view.maybe_decoder.borrow_mut().take();
+        view.watch(true);
       });
     }
 
-    fn restart_with_images(self: &Rc<Self>) {
-      self.maybe_decoder.borrow_mut().take();
-      self.watch(true);
-    }
-
-    fn stop_if_unwatched(self: &Rc<Self>) {
-      if self.watchers.get() > 0 || self.is_stopped.get() {
+    /// Releases the channel and the decoder and tells the shell to stop sending.
+    fn stop(&self) {
+      if self.is_stopped.replace(true) {
         return;
       }
-      self.is_stopped.set(true);
-      VIEWS.with(|views| {
-        let mut views = views.borrow_mut();
-        if views
-          .get(&self.source)
-          .is_some_and(|current| Rc::ptr_eq(current, self))
-        {
-          views.remove(&self.source);
-        }
-      });
-      self.close_frame_channel();
+      let maybe_channel = self.close_frame_channel();
       self.maybe_decoder.borrow_mut().take();
+      // Never asked (the bridge had no channel): nothing to stop.
+      let Some(channel) = maybe_channel else {
+        return;
+      };
       let (command, args) = match self.source {
-        VideoSource::Remote(stream_id) => ("call_unwatch_video", json!({ "stream_id": stream_id })),
-        VideoSource::OwnCamera => ("call_unwatch_camera", json!({})),
+        VideoSource::Remote(stream_id) => (
+          "call_unwatch_video",
+          json!({ "stream_id": stream_id, "channel": channel }),
+        ),
+        VideoSource::OwnCamera => ("call_unwatch_camera", json!({ "channel": channel })),
       };
       spawn_local(async move {
         if let Err(error) = call::<()>(command, &args).await {
@@ -502,17 +534,22 @@ mod view {
       };
       let canvas = view.canvas.clone();
       let context: Canvas2d = view.context.clone().unchecked_into();
+      let drawn = Rc::downgrade(view);
       let output = Closure::<dyn FnMut(WebVideoFrame)>::new(move |frame: WebVideoFrame| {
         fit_canvas(&canvas, frame.display_width(), frame.display_height());
         if context.draw_video_frame(&frame, 0.0, 0.0).is_err() {
           tracing::debug!("video frame not drawn");
         }
         frame.close();
+        if let Some(view) = drawn.upgrade() {
+          // async-ok: a Cell of the view, not a signal.
+          view.decoder_errors.set(0);
+        }
       });
-      let weak = Rc::downgrade(view);
+      let failed = Rc::downgrade(view);
       let error = Closure::<dyn FnMut(JsValue)>::new(move |_error: JsValue| {
-        if let Some(view) = weak.upgrade() {
-          view.decoding_failed();
+        if let Some(view) = failed.upgrade() {
+          view.decoder_error(codec);
         }
       });
       let init = dictionary(&[
