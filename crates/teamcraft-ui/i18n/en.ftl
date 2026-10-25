@@ -2315,6 +2315,7 @@ error-call-screen-unavailable = Your screen can't be shared from here.
 error-call-unsupported = This browser can't make calls. Use a current Chrome, Edge, Firefox or Safari, or the TeamCraft app.
 error-call-server-unreachable = The call server can't be reached. The network may block calls (UDP); try another network or ask your admin.
 error-call-background-required = Your organization requires a background behind your camera, which the browser can't add yet. Turn your camera on in the TeamCraft app.
+error-call-encryption-pending = This device can't join the call yet: it is still being let into the conversation's encryption. Keep TeamCraft open on another of your devices, or wait for a member to come online, then join again.
 action-running = Working…
 panic-title = Something went wrong
 panic-body = The app ran into an error and has to be reloaded. What you were typing just now may be lost.

@@ -7,7 +7,8 @@ use std::fmt;
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
 use teamcraft_crypto::identity::{DeviceKeyPair, VerifiedDevice};
 use teamcraft_proto::{
-  CallJoinTokenResponse, ConversationId, CreateCallJoinTokenRequest, DeviceId, GatewayEvent, UserId,
+  CallJoinTokenResponse, ChannelRole, ConversationId, ConversationKind, CreateCallJoinTokenRequest, DeviceId,
+  GatewayEvent, UserId,
 };
 
 use super::Client;
@@ -55,6 +56,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// A join token, the signer and the verified devices for joining the conversation's call.
   pub async fn prepare_call(&mut self, conversation: ConversationId) -> Result<CallPreparation, CoreError> {
+    self.ensure_call_group(conversation).await?;
     let join = self.call_join_token(conversation).await?;
     let devices = self.verified_call_devices(conversation).await?;
     Ok(CallPreparation {
@@ -76,6 +78,49 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         &agreement,
       ),
     }
+  }
+
+  /// A call needs this device in the conversation's group (e2ee.md §8). Without one, it tries now
+  /// what would get it in: the setup this device started (a meeting chat it scheduled, a DM it
+  /// opened), a welcome that is waiting, or joining as a further device of a user who is in; the
+  /// organizer of a meeting chat nobody set up founds it with just themselves (an instant
+  /// meeting's call starts before its setup arrives; invitees are only ever added from the
+  /// organizer's own request). A group still missing after that (the organizer's app hasn't set
+  /// the chat up, nobody has let this device in) is a clear failure the user can retry, instead of
+  /// a call that waits for keys it can't get.
+  pub async fn ensure_call_group(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    if self.has_group(conversation)? {
+      return Ok(());
+    }
+    if !self.continue_participants_setup(conversation).await? {
+      self.sync_welcomes().await?;
+      if !self.has_group(conversation)?
+        && let Err(error) = self.join_as_member_device(conversation).await
+      {
+        if error.is_transient() {
+          return Err(error);
+        }
+        tracing::debug!(conversation_id = %conversation, %error, "not joined as a further device");
+      }
+      if !self.has_group(conversation)? && self.organizes_meeting_chat(conversation).await? {
+        self.set_up_meeting_chat(conversation, &[]).await?;
+      }
+    }
+    if self.has_group(conversation)? {
+      return Ok(());
+    }
+    Err(CoreError::CallEncryptionPending(conversation))
+  }
+
+  /// Whether the conversation is a meeting chat this user organizes (its admin, docs/meetings.md).
+  async fn organizes_meeting_chat(&mut self, conversation: ConversationId) -> Result<bool, CoreError> {
+    let response = self.api.conversation(conversation).await?;
+    Ok(
+      response.kind == ConversationKind::Meeting
+        && response
+          .maybe_my_membership
+          .is_some_and(|membership| membership.role == ChannelRole::Admin),
+    )
   }
 
   /// The devices of the conversation's MLS group, their certificates verified against the pinned

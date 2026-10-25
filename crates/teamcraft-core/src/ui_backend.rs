@@ -239,6 +239,11 @@ pub enum CoreCommand {
   RetryDmSetup {
     conversation: ConversationId,
   },
+  /// A meeting chat the user scheduled or started, with the users they invited.
+  SetUpMeetingChat {
+    conversation: ConversationId,
+    invitees: Vec<UserId>,
+  },
   InviteToSpace {
     space: SpaceId,
     email: String,
@@ -1230,6 +1235,13 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn retry_dm_setup(&self, conversation: ConversationId) {
     self.command(CoreCommand::RetryDmSetup { conversation });
+  }
+
+  fn set_up_meeting_chat(&self, conversation: ConversationId, invitees: Vec<UserId>) {
+    self.command(CoreCommand::SetUpMeetingChat {
+      conversation,
+      invitees,
+    });
   }
 
   fn unconfirmed_removals(&self) -> Vec<(ConversationId, UserId)> {

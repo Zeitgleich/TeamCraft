@@ -707,6 +707,19 @@ runs the setup again and, if the welcome is still missing, posts a signed rejoin
 adds this device (§4.6, rejoin), and the wait starts anew. Retrying never founds or gives up a group
 by itself; the rules above still decide.
 
+**Meeting chats.** The server creates a meeting's chat together with the meeting (docs/meetings.md),
+so no client founded its group. The organizer's device sets it up like a group DM's: with a setup
+record holding the users the organizer invited, taken from the organizer's own request (the
+scheduling form, never the server's member list, so the server can't slip anybody in), founded only
+when the server shows no group, finished later when cut short. Further devices of the organizer
+join as further devices; invitees join from the welcome and never found the group, so they don't
+race to. A call needs the device in the group (§8): starting one first takes the next step of this
+device's setup, picks up a waiting welcome or joins as a further device; the organizer of a chat
+nobody set up founds it with just themselves (an instant meeting's call starts before its setup);
+anybody else gets a clear "not let into the encryption yet" with a retry instead of a call that
+waits for keys. Users invited to the meeting later (#475) and guests admitted from the lobby (#446)
+aren't added to the group yet.
+
 **Server time for merge decisions.** Whether every member merges a commit must not depend on its own
 clock, or a skewed clock would split the group. The roster freshness (admin.md §2.3) is judged at the
 server's time of the commit (its queue ID), and a device's removal time for refusing its later

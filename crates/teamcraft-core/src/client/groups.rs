@@ -14,10 +14,10 @@ use teamcraft_crypto::mls::{
   RejoinRequest, SignedRejoinRequest, VerifiedWelcome,
 };
 use teamcraft_proto::{
-  AddConversationMemberRequest, Base64Bytes, ClaimKeyPackagesRequest, ConversationId, CreateChannelRequest,
-  CreateDmRequest, CreateGroupDmRequest, DeviceId, HistoryPolicy, Id, IdempotencyKey, ListMlsMessagesQuery,
-  ListMlsMessagesResponse, MlsMessageKind, MlsMessageResponse, MlsWelcome, PostMlsCommitRequest,
-  PostMlsMessageRequest, SpaceId, UserId,
+  AddConversationMemberRequest, Base64Bytes, ClaimKeyPackagesRequest, ConversationId, ConversationKind,
+  CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, DeviceId, HistoryPolicy, Id, IdempotencyKey,
+  ListMlsMessagesQuery, ListMlsMessagesResponse, MlsMessageKind, MlsMessageResponse, MlsWelcome,
+  PostMlsCommitRequest, PostMlsMessageRequest, SpaceId, UserId,
 };
 
 use super::workspace::{PendingChange, SharedKeys};
@@ -248,7 +248,50 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if self.has_group(id)? && maybe_setup.is_none() {
       return Ok(id);
     }
-    // Opened by the user: tried now, whatever the backoff of an earlier attempt says.
+    self.start_participants_setup(id, others).await?;
+    Ok(id)
+  }
+
+  /// Sets up the encryption group of a meeting chat this user just scheduled or started (the
+  /// server creates the chat with the meeting, without a group): founded like a group DM's with
+  /// the users the organizer invited, from the organizer's own request and never the server's
+  /// member list, joined instead if somebody founded it first, and finished later if cut short
+  /// (e2ee.md §4.6, "Meeting chats"). `Ok(true)` once everybody invited is in.
+  pub async fn set_up_meeting_chat(
+    &mut self,
+    id: ConversationId,
+    invitees: &[UserId],
+  ) -> Result<bool, CoreError> {
+    let conversation = self.api.conversation(id).await?;
+    if conversation.kind != ConversationKind::Meeting {
+      return Err(CoreError::NotAMeetingChat(id));
+    }
+    records::put_json(&self.store, Table::Conversations, &id.to_string(), &conversation)?;
+    let me = self.user_id();
+    let others = conversation_members(invitees, me);
+    self.start_participants_setup(id, &others).await
+  }
+
+  /// Takes the next step of this device's setup of the conversation's group, if it set one up.
+  /// `Ok(false)` without a setup.
+  pub(super) async fn continue_participants_setup(&mut self, id: ConversationId) -> Result<bool, CoreError> {
+    let Some(setup) = self.dm_setup(id)? else {
+      return Ok(false);
+    };
+    self.finish_dm_setup(id, &setup.others).await?;
+    Ok(true)
+  }
+
+  /// Notes (or renews) the setup record of a DM, group DM or meeting chat with `others` and takes
+  /// the first step of [`Self::finish_dm_setup`]: founds the group when nobody has one, joins
+  /// one somebody else founded, and adds whoever of `others` is missing.
+  pub(super) async fn start_participants_setup(
+    &mut self,
+    id: ConversationId,
+    others: &[UserId],
+  ) -> Result<bool, CoreError> {
+    let maybe_setup = self.dm_setup(id)?;
+    // Asked for by the user: tried now, whatever the backoff of an earlier attempt says.
     let setup = DmSetupRecord {
       others: others.to_vec(),
       tried_at_ms: self.now_ms(),
@@ -261,8 +304,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_welcome_deadline_ms: None,
     };
     records::put_json(&self.store, Table::SyncState, &dm_setup_key(id), &setup)?;
-    self.finish_dm_setup(id, others).await?;
-    Ok(id)
+    self.finish_dm_setup(id, others).await
   }
 
   /// Finishes the MLS setup of DMs this device created whose setup was cut short, at a growing
@@ -2135,7 +2177,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let maybe_response: Option<teamcraft_proto::ConversationResponse> =
       records::get_json(&self.store, Table::Conversations, &conversation.to_string())?;
     let is_public_channel = maybe_response.is_some_and(|response| {
-      response.kind == teamcraft_proto::ConversationKind::Channel
+      response.kind == ConversationKind::Channel
         && response.visibility == teamcraft_proto::ConversationVisibility::Public
         && !response.is_archived
     });

@@ -261,6 +261,10 @@ pub trait ChatBackend {
   fn discard_removal(&self, _conversation: ConversationId, _user: UserId) {}
   /// "Retry" on a DM whose encryption setup waits for a welcome or failed.
   fn retry_dm_setup(&self, _conversation: ConversationId) {}
+  /// Sets up the encryption of a meeting chat this user just scheduled or started, with the users
+  /// they invited (the organizer's own request: the group is never founded from the server's
+  /// member list).
+  fn set_up_meeting_chat(&self, _conversation: ConversationId, _invitees: Vec<UserId>) {}
   /// Unconfirmed removals in every conversation, for the admin console: an admin outside the
   /// group doesn't see the conversation.
   fn unconfirmed_removals(&self) -> Vec<(ConversationId, UserId)> {
