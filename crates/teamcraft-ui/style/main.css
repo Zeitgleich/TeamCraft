@@ -605,8 +605,8 @@ select.input {
 }
 
 .badge-count {
-  min-width: 18px;
-  height: 18px;
+  min-width: 1.125rem;
+  height: 1.125rem;
   padding: 0 5px;
   border-radius: var(--radius-pill);
   background: var(--badge-bg);
@@ -614,7 +614,7 @@ select.input {
   font-size: var(--text-2xs);
   letter-spacing: var(--tracking-2xs);
   font-weight: var(--weight-bold);
-  line-height: 18px;
+  line-height: 1.125rem;
   text-align: center;
   font-variant-numeric: tabular-nums;
 }
@@ -979,7 +979,7 @@ select.input {
   font-size: var(--text-2xs);
   letter-spacing: var(--tracking-2xs);
   font-weight: var(--weight-semibold);
-  line-height: 14px;
+  line-height: var(--leading-2xs);
 }
 
 .rail-dest .badge-count {
@@ -1571,7 +1571,7 @@ select.input {
   align-items: center;
   gap: 5px;
   flex: none;
-  height: 24px;
+  min-height: 24px;
   max-width: 220px;
   padding: 0 8px;
   border: 0;
@@ -1791,7 +1791,7 @@ select.input {
   padding: 1px 5px;
   border-radius: var(--radius-xs);
   background: var(--code-bg);
-  font: var(--text-sm) var(--font-mono);
+  font: 0.9em var(--font-mono);
 }
 
 .md-link {
@@ -2133,7 +2133,7 @@ select.input {
   padding: 1px 5px;
   border-radius: 4px;
   background: var(--code-bg);
-  font: var(--text-sm) var(--font-mono);
+  font: 0.9em var(--font-mono);
 }
 
 .composer-editor pre {
@@ -2728,7 +2728,7 @@ ol.md-list {
   right: 0;
   top: calc(100% + 8px);
   z-index: 41;
-  width: 290px;
+  width: 18.125rem;
   padding: 6px 0;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -2926,7 +2926,7 @@ ol.md-list {
 }
 
 .settings-tabs [role="tab"] {
-  height: 34px;
+  min-height: 34px;
   padding: 0 10px;
   border: 0;
   border-radius: var(--radius-sm);
@@ -3188,7 +3188,7 @@ ol.md-list {
 /* ---- Calls ---- */
 
 .btn-small {
-  height: 28px;
+  min-height: 28px;
   padding: 0 10px;
   font-size: var(--text-sm);
 }
@@ -4113,7 +4113,7 @@ ol.md-list {
   align-items: center;
   gap: 10px;
   width: 100%;
-  height: 34px;
+  min-height: 34px;
   padding: 0 10px;
   border: 0;
   border-radius: var(--radius-sm);
@@ -5432,7 +5432,7 @@ ol.md-list {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 26px;
+  min-height: 26px;
   padding: 0 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
@@ -5455,7 +5455,7 @@ ol.md-list {
   align-items: center;
   gap: 6px;
   padding: 0 4px 0 10px;
-  height: 26px;
+  min-height: 26px;
   border-radius: var(--radius-pill);
   background: var(--accent-soft);
   color: var(--accent-strong);
@@ -5616,7 +5616,7 @@ ol.md-list {
 }
 
 .conversation-notify .input {
-  height: 28px;
+  min-height: 28px;
   min-width: 0;
 }
 
@@ -6114,7 +6114,7 @@ ol.md-list {
 .plain-fieldset:disabled { opacity: .7; }
 .radio-explained { align-items: flex-start; }
 .radio-explained > span { display: flex; flex-direction: column; gap: 2px; }
-.input-small { width: auto; min-height: 30px; padding: 2px 8px; font-size: var(--text-sm); }
+.input-small { width: auto; padding: 2px 8px; font-size: var(--text-sm); }
 .settings-row .grow { flex: 1; min-width: 0; }
 .inline-actions { display: flex; gap: var(--space-2); margin: 6px 0; }
 .switch-row { display: flex; align-items: flex-start; gap: 10px; margin: var(--space-3) 0; cursor: pointer; }
@@ -6781,8 +6781,9 @@ ol.md-list {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  width: 324px;
-  height: 300px;
+  /* rem: grows with the text size; emoji_picker.rs places it with the same size. */
+  width: 20.25rem;
+  height: 18.75rem;
   padding: 8px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -7449,7 +7450,7 @@ ol.md-list {
 
 .home-chip {
   flex: none;
-  height: 22px;
+  min-height: 22px;
   padding: 0 8px;
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: var(--radius-pill);

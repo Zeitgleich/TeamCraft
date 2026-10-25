@@ -75,6 +75,10 @@ class TypeScaleTest(unittest.TestCase):
         css = ":root { --text-xs: 1rem; --f: x; }\n.a { font: 700 var(--text-xs)/16px var(--f); }\n.b { font: 12px/1.5 var(--f); }\n"
         self.assertEqual([f.split(":")[1] for f in findings(css)], ["3"])
 
+    def test_dot_leading_and_unitless_values_in_the_font_shorthand(self):
+        css = ":root { --f: x; }\n.a { font: .85rem/1.4 var(--f); }\n.b { font: 700 0.9em var(--f); }\n.c { font: italic 600 13px var(--f); }\n"
+        self.assertEqual([f.split(":")[1] for f in findings(css)], ["2", "4"])
+
     def test_fixed_glyphs_pass_but_not_below_11px(self):
         self.assertEqual(findings(".avatar-sm { font-size: 11px; }"), [])
         self.assertEqual(findings(".avatar-sm { font-size: 9px; }"), ["x.css:1: font-size: 9px is below 11px"])

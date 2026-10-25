@@ -581,8 +581,10 @@ fn apply_zoom(settings: Settings) {
 /// Every platform: the text size setting sets `--text-scale` on the root (CSSOM, the CSP blocks
 /// style attributes); the stylesheet's rem type scale follows it.
 fn apply_text_size(settings: Settings) {
+  // Only a change of the text size touches the root, not every other preference change.
+  let text_size = Memo::new(move |_| settings.prefs.with(|prefs| prefs.display.text_size));
   Effect::new(move |_| {
-    let scale = settings.prefs.get().display.text_size.css_scale();
+    let scale = text_size.get().css_scale();
     let Some(root) = web_sys::window()
       .and_then(|window| window.document())
       .and_then(|doc| doc.document_element())

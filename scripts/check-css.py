@@ -59,11 +59,15 @@ FIXED_FONT_SIZES = {
 # Font sizes that are not on the scale on purpose, with the reason.
 ALLOWED_FONT_SIZES = {
     "inherit": "takes the parent's size",
+    "0.9em": "inline code follows the heading or text it sits in",
     "max(16px, 1em)": "iOS zooms into fields with text below 16 px",
     "calc(100% * var(--text-scale))": "the root size the scale is built on",
 }
 TINY_FONT_PX = 11
 MAX_RAW_HEX_COLOURS = 65
+# A length in the `font` shorthand (`.85rem`, `12px`, `0.9em`); a bare number is the weight.
+LENGTH = re.compile(r"\d*\.?\d+(?:px|rem|em|%|pt|vw|vh)")
+SIZE_FUNCTIONS = ("var(--text-", "calc(", "max(", "min(", "clamp(")
 HEX_COLOUR = re.compile(r"#[0-9a-fA-F]{3,8}\b")
 VAR_USE = re.compile(r"var\(\s*(--[\w-]+)")
 FONT_SIZE_PX = re.compile(r"(\d+(?:\.\d+)?)px\b")
@@ -239,7 +243,7 @@ def font_size_of(decl):
     if decl.value in ("inherit", "initial", "unset"):
         return None
     for part in decl.value.split("/")[0].split():
-        if part[0].isdigit() and not part.isdigit() or part.startswith(("var(--text-", "calc(", "max(", "min(", "clamp(")):
+        if LENGTH.fullmatch(part) or part.startswith(SIZE_FUNCTIONS):
             return part
     return None
 
