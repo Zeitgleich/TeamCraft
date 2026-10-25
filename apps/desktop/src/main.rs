@@ -13,6 +13,8 @@ mod autostart;
 mod calls;
 mod core;
 #[cfg(target_os = "linux")]
+mod file_portal;
+#[cfg(target_os = "linux")]
 mod freedesktop;
 mod notifications;
 mod ringtone;
@@ -52,6 +54,9 @@ use crate::window_chrome::WindowChromeState;
 const TOKEN_REFRESH: Duration = Duration::from_secs(2);
 
 fn main() -> anyhow::Result<()> {
+  // Before GTK starts: file pickers go through xdg-desktop-portal (the desktop's own dialog).
+  #[cfg(target_os = "linux")]
+  file_portal::ensure_portal_choosers();
   tracing_subscriber::fmt()
     .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
     .init();
