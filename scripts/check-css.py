@@ -36,7 +36,6 @@ DEFAULT_RUST_DIR = pathlib.Path("crates/teamcraft-ui/src")
 RUNTIME_VARIABLES = re.compile(r"^--(vv-.*|hue|media-.*|cols|banners-h|window-controls-.*|tok-.*|tc-loader-.*)$")
 # Keyframes that are known duplicates, each with the issue that removes it.
 KNOWN_DUPLICATE_KEYFRAMES = {
-    "sheet-in": "#359",
 }
 # (selector, property) pairs that are set twice at top level on purpose, with the reason.
 ALLOWED_OVERRIDES = {}
