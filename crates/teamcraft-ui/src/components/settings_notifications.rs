@@ -9,13 +9,14 @@ use teamcraft_proto::DndWindow;
 use crate::auth::tauri;
 use crate::clock::local_time_zone;
 use crate::components::icons::{Icon, IconName};
+use crate::components::notification_prompt;
 use crate::components::pending_button::PendingButton;
 use crate::components::settings_account::WeekdayChips;
 use crate::components::settings_rows::{
   ListFilter, MAX_LIST_ENTRIES, SelectRow, SettingRow, SettingsCard, SwitchRow, matches_filter, row_id,
   slug_options,
 };
-use crate::feedback::{ActionFailure, FailureKind, PendingAction};
+use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
 use crate::model::{Conversation, User, UserId};
 use crate::notify_sync::{
@@ -25,7 +26,6 @@ use crate::prefs::{
   DndSchedule, MuteFor, NotificationPrefs, NotifyLevel, PushWhen, ThreadReplies, default_dnd_window,
 };
 use crate::reactive::SetIfAlive;
-use crate::settings::{load_string, store_string};
 use crate::state::use_app_state;
 
 /// The tag of the test notification; a newer test replaces the last one.
@@ -243,8 +243,8 @@ fn ThisDeviceCard() -> impl IntoView {
   let i18n = use_i18n();
   let is_desktop = tauri::is_available();
   let page_permission = RwSignal::new(tauri::notification_permission());
-  let push_key = StoredValue::new(format!("teamcraft.web_push.{}", state.me().id));
-  let is_push_on = RwSignal::new(load_string(&push_key.get_value()).is_some());
+  let me = state.me().id;
+  let is_push_on = RwSignal::new(notification_prompt::is_push_on(me));
   let allowing = PendingAction::new();
   let testing = PendingAction::new();
   let has_tested = RwSignal::new(false);
@@ -254,27 +254,12 @@ fn ThisDeviceCard() -> impl IntoView {
   let maybe_session = crate::session::use_session();
   // Allowing notifications also subscribes to Web Push, so they arrive with no page open.
   let allow = move |_| {
-    let push_key = push_key.get_value();
     allowing.spawn(async move {
-      if page_permission.try_get_untracked().flatten().as_deref() != Some("granted") {
-        let answer = tauri::request_notification_permission().await;
-        page_permission.set_if_alive(answer);
+      let result = notification_prompt::allow_notifications(me, maybe_session).await;
+      page_permission.set_if_alive(tauri::notification_permission());
+      if result? {
+        is_push_on.set_if_alive(true);
       }
-      if page_permission.try_get_untracked().flatten().as_deref() != Some("granted") {
-        // The user said no in the browser's own prompt; the hint says how to change that.
-        return Ok(());
-      }
-      let Some(session) = maybe_session else {
-        return Err(ActionFailure::new(
-          FailureKind::Other,
-          "no session to subscribe to push with",
-        ));
-      };
-      crate::remote_backend::enable_web_push(session.authenticator().as_ref())
-        .await
-        .map_err(|error| ActionFailure::new(FailureKind::Other, error))?;
-      store_string(&push_key, "1");
-      is_push_on.set_if_alive(true);
       Ok(())
     });
   };

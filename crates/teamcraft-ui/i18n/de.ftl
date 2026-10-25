@@ -1446,6 +1446,9 @@ notif-browser-granted = Benachrichtigungen sind in diesem Browser erlaubt.
 notif-browser-denied = Benachrichtigungen sind blockiert. Erlaube sie in den Website-Einstellungen des Browsers.
 notif-browser-allow = Benachrichtigungen erlauben
 notif-browser-background = Benachrichtigungen kommen auch an, wenn TeamCraft geschlossen ist.
+notif-prompt-text = Aktiviere Benachrichtigungen, damit du keine Nachricht verpasst.
+notif-prompt-allow = Aktivieren
+notif-prompt-later = Nicht jetzt
 
 log-toolbar-label = Optionen der Protokollansicht
 log-mode-log = Protokoll

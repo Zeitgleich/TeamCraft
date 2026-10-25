@@ -33,6 +33,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::incoming_call::IncomingCallDialog;
 use crate::components::members_panel::MembersPanel;
 use crate::components::message_actions::{EditHistoryDialog, ForwardDialog, PinsPanel, SavedView};
+use crate::components::notification_prompt::NotificationPrompt;
 use crate::components::offline_banner::OfflineBanner;
 use crate::components::profile_views::UserProfileDialog;
 use crate::components::quick_switcher::QuickSwitcher;
@@ -242,6 +243,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         <ReleaseBanner />
         <OfflineBanner />
         <StorageBanner />
+        <NotificationPrompt />
         <AnnouncementBanner />
         <UpdateNotice />
       </div>

@@ -70,6 +70,7 @@ pub mod message_list;
 pub mod message_row;
 pub mod message_toolbar;
 pub mod modal;
+pub mod notification_prompt;
 pub mod offline_banner;
 pub mod org_badge;
 pub mod pending_button;
