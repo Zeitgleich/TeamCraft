@@ -378,6 +378,11 @@ async fn invoke(bridge: &Arc<Bridge>, body: &str) -> Value {
         .await
         .map(|changes| serde_json::to_value(changes).expect("snapshot changes"))
     },
+    "core_focus" => {
+      let conversation = serde_json::from_value(args["conversation"].clone()).expect("conversation");
+      bridge.alice.runtime.focus(conversation);
+      Ok(Value::Null)
+    },
     "core_messages" => {
       let conversation = serde_json::from_value(args["conversation"].clone()).expect("conversation");
       let (start, len) = (

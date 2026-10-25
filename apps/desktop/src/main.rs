@@ -172,6 +172,7 @@ fn main() -> anyhow::Result<()> {
       core::commands::core_status,
       core::commands::core_connection,
       core::commands::core_network_changed,
+      core::commands::core_focus,
       core::commands::core_enroll,
       core::commands::core_snapshot,
       core::commands::core_snapshot_changes,

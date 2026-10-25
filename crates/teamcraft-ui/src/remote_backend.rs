@@ -597,6 +597,15 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::SetAttention { is_attentive });
   }
 
+  fn focus_conversation(&self, conversation: ConversationId) {
+    spawn_local(async move {
+      // A hint for the catch-up order; nothing for the user to act on if it is lost.
+      if let Err(error) = call::<()>("core_focus", &json!({ "conversation": conversation })).await {
+        tracing::debug!(%error, "the core did not take the focus");
+      }
+    });
+  }
+
   fn search_backend(&self) -> Option<&dyn SearchBackend> {
     Some(self)
   }

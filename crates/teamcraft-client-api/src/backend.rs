@@ -160,6 +160,10 @@ pub trait ChatBackend {
   }
   /// Trusts the contact's new identity key after the user compared it.
   fn accept_key_change(&self, _user: UserId) {}
+  /// The user opened this conversation: a catch-up still running takes it next (issue #247). Only a
+  /// hint; a conversation with nothing stored yet asks the core for no messages, so this is the
+  /// only way the core learns it.
+  fn focus_conversation(&self, _conversation: ConversationId) {}
   /// The device became idle or active; the server derives "away" from it.
   fn set_activity(&self, _is_idle: bool) {}
   /// Whether the user is looking at this desktop or web session right now (notifications.md,

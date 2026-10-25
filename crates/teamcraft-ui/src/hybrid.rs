@@ -300,6 +300,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.set_activity(is_idle);
   }
 
+  fn focus_conversation(&self, conversation: ConversationId) {
+    self.chat.focus_conversation(conversation);
+  }
+
   fn set_attention(&self, is_attentive: bool) {
     self.chat.set_attention(is_attentive);
   }

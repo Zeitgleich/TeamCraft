@@ -95,6 +95,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.catch_up_focus.clone()
   }
 
+  /// Takes the host's handle instead of its own, so the host can name the focus without the client
+  /// (a desktop command while the core thread is busy syncing).
+  pub fn share_catch_up_focus(&mut self, focus: CatchUpFocus) {
+    self.catch_up_focus = focus;
+  }
+
   /// Catches up the stored conversations: member lists (in `members_order`), welcomes, groups to
   /// join, then each one's MLS queue and messages, the focused one first, the round trips of up to
   /// `catch_up_concurrency` at once. Every conversation is marked from the start until it is done;

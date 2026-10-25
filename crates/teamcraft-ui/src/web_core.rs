@@ -210,6 +210,10 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
       send(Request::NetworkChanged)?;
       Ok(Value::Null)
     },
+    "core_focus" => {
+      send(Request::Focus(field(&args, "conversation")?))?;
+      Ok(Value::Null)
+    },
     "core_store_health" => to_value(ask(Request::StoreHealth).await?),
     "core_enroll" => {
       let request: EnrollRequest = field(&args, "request")?;
@@ -573,6 +577,8 @@ enum Request {
   ApprovalCancel,
   /// The browser went online, the tab became visible or was resumed: check the connection now.
   NetworkChanged,
+  /// The user opened a conversation; a running catch-up takes it next (issue #247).
+  Focus(ConversationId),
 }
 
 /// What woke the loop.
@@ -922,6 +928,8 @@ impl Core {
       },
       Request::ApprovalCancel => self.approval = None,
       Request::NetworkChanged => self.connection.network_changed(now_ms()).await,
+      // async-ok: the core's catch-up focus (a shared cell), not a signal.
+      Request::Focus(conversation) => self.catch_up_focus.set(conversation),
       Request::Snapshot(reply) => drop(reply.send(self.snapshot())),
       Request::SnapshotChanges(maybe_since, reply) => drop(reply.send(self.snapshot_changes(maybe_since))),
       Request::Messages {
@@ -1555,6 +1563,11 @@ impl SyncReads<'_> {
   fn answer(&self, request: Request) -> Option<Request> {
     let request = match request {
       Request::Snapshot(_) | Request::SnapshotChanges(..) => return self.answer_snapshot(request),
+      Request::Focus(conversation) => {
+        // The sync holding the client takes it between two steps.
+        self.focus.set(conversation);
+        return None;
+      },
       other => other,
     };
     let read = match &request {

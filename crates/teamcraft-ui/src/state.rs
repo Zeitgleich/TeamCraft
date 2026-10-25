@@ -744,6 +744,7 @@ impl AppState {
     }
     self.view.set(MainView::Conversation(id));
     self.overlay.set(Overlay::None);
+    self.read(|backend| backend.focus_conversation(id));
     if conversation.unread_count > 0 || conversation.mention_count > 0 {
       self.write(|backend| backend.mark_read(id));
     }

@@ -17,7 +17,7 @@ use teamcraft_client_api::remote::{
 };
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
-use teamcraft_core::client::{LinkApproval, LinkedSecrets, NewDeviceLink};
+use teamcraft_core::client::{CatchUpFocus, LinkApproval, LinkedSecrets, NewDeviceLink};
 use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::connection::{
   ConnectionSettings, ConnectionState, ConnectionStatus, ConnectionSupervisor,
@@ -290,6 +290,8 @@ pub struct CoreRuntime {
   requests: mpsc::UnboundedSender<Request>,
   /// Read without asking the core thread, which may be busy connecting.
   connection: ConnectionStatus,
+  /// Shared with the client: the conversation the user opened, set while the core thread syncs.
+  focus: CatchUpFocus,
   /// Taken by [`CoreRuntime::shutdown`] or on drop.
   thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
@@ -310,6 +312,8 @@ impl CoreRuntime {
     let (requests, receiver) = mpsc::unbounded_channel();
     let connection = ConnectionStatus::new();
     let status = connection.clone();
+    let focus = CatchUpFocus::default();
+    let shared_focus = focus.clone();
     let thread = std::thread::Builder::new()
       .name("teamcraft-core".to_owned())
       .spawn(move || {
@@ -325,7 +329,7 @@ impl CoreRuntime {
           on_failure,
           on_call_event,
         };
-        let core = Core::new(config, user, key, tokens, hooks, status);
+        let core = Core::new(config, user, key, tokens, hooks, status, shared_focus);
         // A panic ends the core for good: logged here, and `status` then answers `Stopped`, so the
         // UI shows an internal error instead of a keystore problem.
         let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| runtime.block_on(core.run(receiver))));
@@ -337,8 +341,15 @@ impl CoreRuntime {
     Self {
       requests,
       connection,
+      focus,
       thread: Mutex::new(thread),
     }
+  }
+
+  /// The user opened `conversation`: a catch-up still running takes it next (issue #247). Set
+  /// without the core thread, which doesn't serve requests while it syncs.
+  pub fn focus(&self, conversation: ConversationId) {
+    self.focus.set(conversation);
   }
 
   /// Stops the core thread and waits until it closed the database and released the store lock,
@@ -596,6 +607,8 @@ struct Core {
   client: Option<Client<Api, Store>>,
   backend: Option<CoreChatBackend<Store>>,
   connection: ConnectionSupervisor<Gateway>,
+  /// Handed to every client this core adopts ([`CoreRuntime::focus`]).
+  catch_up_focus: CatchUpFocus,
   status: CoreStatus,
   upkeep: Upkeep,
   link: Option<LinkRun>,
@@ -653,6 +666,7 @@ impl Core {
     tokens: TokenCache,
     hooks: Hooks,
     status: ConnectionStatus,
+    catch_up_focus: CatchUpFocus,
   ) -> Self {
     let Hooks {
       on_change,
@@ -675,6 +689,7 @@ impl Core {
       client: None,
       backend: None,
       connection,
+      catch_up_focus,
       status: CoreStatus::NotStarted,
       upkeep: Upkeep::new(UPKEEP_INTERVAL),
       link: None,
@@ -797,6 +812,7 @@ impl Core {
   fn adopt(&mut self, mut client: Client<Api, Store>) -> CoreStatus {
     let on_call_event = self.on_call_event.clone();
     client.set_call_event_sink(Box::new(move |event| on_call_event(event.clone())));
+    client.share_catch_up_focus(self.catch_up_focus.clone());
     let status = CoreStatus::Ready {
       identity_fingerprint: client.identity_fingerprint(),
     };
