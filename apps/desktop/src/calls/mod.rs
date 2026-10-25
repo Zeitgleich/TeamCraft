@@ -46,7 +46,8 @@ use teamcraft_media::ringtone;
 use teamcraft_media::system_audio::SystemAudioCapture;
 use teamcraft_media::video_pipeline::{VideoSendConfig, preferred_encoders};
 use teamcraft_proto::{
-  AudioCodec, ConversationId, DeviceId, GatewayEvent, MediaCapabilities, MediaStreamId, VideoCodec,
+  AudioCodec, ConversationId, DeviceId, GatewayEvent, MediaCapabilities, MediaStreamId, ScreenContentMode,
+  VideoCodec,
   VideoTrackKind,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -556,16 +557,16 @@ impl CallHost {
   /// Shows the system's screen/window picker and shares the choice as its own stream, with the
   /// computer's sound when `has_sound`. Sound that can't be captured here doesn't stop the share;
   /// the call state says so.
-  pub async fn start_screen_share(&self, has_sound: bool) -> Result<(), String> {
+  pub async fn start_screen_share(&self, has_sound: bool, mode: ScreenContentMode) -> Result<(), String> {
     self.ensure_video_codec().await?;
     let maybe_token = lock(&self.state).maybe_screen_token.clone();
     let (capture, maybe_new_token) =
-      tokio::task::spawn_blocking(move || video::open_screen(maybe_token.as_deref()))
+      tokio::task::spawn_blocking(move || video::open_screen(maybe_token.as_deref(), mode))
         .await
         .map_err(|error| error.to_string())??;
     let config = VideoSendConfig {
       kind: VideoTrackKind::Screen,
-      layers: video::screen_layers(capture.format()),
+      layers: video::screen_layers(capture.format(), mode),
       capture,
       encoders: preferred_encoders(),
       maybe_filter: None,

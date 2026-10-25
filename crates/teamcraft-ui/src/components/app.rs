@@ -929,7 +929,7 @@ fn connect_calls(state: AppState) {
       CallEvent::Camera(is_on) => backend.set_call_camera(is_on),
       CallEvent::CameraDevice(device) => backend.select_camera(Some(device)),
       CallEvent::Effect(effect) => backend.set_background_effect(effect),
-      CallEvent::StartScreenShare { has_sound } => backend.start_screen_share(has_sound),
+      CallEvent::StartScreenShare { has_sound, mode } => backend.start_screen_share(has_sound, mode),
       CallEvent::StopScreenShare => backend.stop_screen_share(),
       CallEvent::StatusSounds(sounds) => backend.set_call_status_sounds(sounds),
     });

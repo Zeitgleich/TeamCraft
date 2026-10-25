@@ -43,6 +43,7 @@ pub enum CallEvent {
   Effect(BackgroundEffect),
   StartScreenShare {
     has_sound: bool,
+    mode: ScreenContentMode,
   },
   StopScreenShare,
   StatusSounds(CallStatusSounds),
@@ -70,6 +71,8 @@ pub struct CallState {
   pub is_sharing_screen: RwSignal<bool>,
   /// Screen shares include the computer's sound (the user's choice, remembered in the settings).
   pub share_sound: RwSignal<bool>,
+  /// What a screen share keeps under pressure: resolution (detail) or frame rate (motion).
+  pub screen_mode: RwSignal<ScreenContentMode>,
   pub has_hand_raised: RwSignal<bool>,
   pub is_deafened: RwSignal<bool>,
   /// An announced move of this call into a meeting room the user hasn't followed yet.
@@ -96,6 +99,7 @@ impl CallState {
       is_minimized: RwSignal::new(false),
       is_sharing_screen: RwSignal::new(false),
       share_sound: RwSignal::new(false),
+      screen_mode: RwSignal::new(ScreenContentMode::default()),
       has_hand_raised: RwSignal::new(false),
       is_deafened: RwSignal::new(false),
       move_offer: RwSignal::new(None),
@@ -156,6 +160,7 @@ impl CallState {
     if is_sharing {
       self.emit(CallEvent::StartScreenShare {
         has_sound: self.share_sound.get_untracked(),
+        mode: self.screen_mode.get_untracked(),
       });
     } else {
       self.emit(CallEvent::StopScreenShare);

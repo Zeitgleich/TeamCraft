@@ -44,8 +44,8 @@ use futures::channel::{mpsc, oneshot};
 use futures::future::{Either, select};
 use js_sys::{Array, Float32Array, Function, Object, Promise, Reflect, Uint8Array};
 use teamcraft_proto::{
-  CallClientMessage, CallServerMessage, DeviceId, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, VideoCodec,
-  VideoTrackKind,
+  CallClientMessage, CallServerMessage, DeviceId, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE,
+  ScreenContentMode, VideoCodec, VideoTrackKind,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -490,15 +490,17 @@ impl WebCall {
 
   /// Asks the user for a screen or window and shares it (one H.264 layer, no simulcast). Call it
   /// from a user gesture, like `join`.
-  pub async fn start_screen_share(&self) -> Result<(), WebCallError> {
-    let stream = video::capture_screen().await?;
-    self.share_video_stream(stream).await
+  pub async fn start_screen_share(&self, mode: ScreenContentMode) -> Result<(), WebCallError> {
+    let stream = video::capture_screen(mode).await?;
+    self.start_video(stream, video::screen_plan(mode)).await
   }
 
   /// Shares any video stream as the screen share (e.g. a canvas' `captureStream()`), replacing a
   /// running one.
   pub async fn share_video_stream(&self, stream: MediaStream) -> Result<(), WebCallError> {
-    self.start_video(stream, video::screen_plan()).await
+    self
+      .start_video(stream, video::screen_plan(ScreenContentMode::default()))
+      .await
   }
 
   pub fn stop_screen_share(&self) {

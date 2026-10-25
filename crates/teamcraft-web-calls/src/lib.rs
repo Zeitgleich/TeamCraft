@@ -42,7 +42,9 @@ use teamcraft_media::call_web::{
   WebJoinTicketSource,
 };
 use teamcraft_media::jitter::JitterBufferConfig;
-use teamcraft_proto::{AudioCodec, CallId, DeviceId, MediaCapabilities, MediaStreamId, VideoCodec};
+use teamcraft_proto::{
+  AudioCodec, CallId, DeviceId, MediaCapabilities, MediaStreamId, ScreenContentMode, VideoCodec,
+};
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -127,6 +129,7 @@ enum Control {
   },
   StopCamera,
   Screen {
+    mode: ScreenContentMode,
     done: Done,
   },
   StopScreen,
@@ -408,7 +411,10 @@ impl Host {
           self.start_camera().await?;
         }
       },
-      CallAction::StartScreenShare { has_sound } => self.start_screen_share(has_sound).await?,
+      CallAction::StartScreenShare {
+        has_sound,
+        content_mode,
+      } => self.start_screen_share(has_sound, content_mode).await?,
       CallAction::StopScreenShare => {
         self.control(Control::StopScreen);
         self.update_active(|active| {
@@ -544,8 +550,8 @@ impl Host {
 
   /// Asks for a screen or window and shares it. Closing the browser's picker is not a failure.
   /// Browsers share no system sound with a call yet, so asked-for sound is reported unavailable.
-  async fn start_screen_share(&self, has_sound: bool) -> Result<(), ActionFailure> {
-    match self.ask_media(|done| Control::Screen { done }).await {
+  async fn start_screen_share(&self, has_sound: bool, mode: ScreenContentMode) -> Result<(), ActionFailure> {
+    match self.ask_media(|done| Control::Screen { mode, done }).await {
       Ok(()) => {},
       // The user closed the picker. A refusal by the system or a policy ("Permission denied by
       // system" in Chromium) is reported.
@@ -706,7 +712,7 @@ async fn apply(call: &WebCall, control: Control) {
     Control::Audio { source, sink, done } => drop(done.send(call.set_audio(source, sink).await)),
     Control::Camera { stream, done } => drop(done.send(call.share_camera_stream(stream).await)),
     Control::StopCamera => call.stop_camera(),
-    Control::Screen { done } => drop(done.send(call.start_screen_share().await)),
+    Control::Screen { mode, done } => drop(done.send(call.start_screen_share(mode).await)),
     Control::StopScreen => call.stop_screen_share(),
     Control::Watch { stream_id, canvas } => call.watch_video(stream_id, canvas),
     Control::Unwatch(stream_id) => call.unwatch_video(stream_id),

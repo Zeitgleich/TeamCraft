@@ -10,7 +10,7 @@
 
 use futures::channel::mpsc;
 use js_sys::Uint8Array;
-use teamcraft_proto::{MediaStreamId, VideoCodec, VideoLayerInfo, VideoTrackKind};
+use teamcraft_proto::{MediaStreamId, ScreenContentMode, VideoCodec, VideoLayerInfo, VideoTrackKind};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -24,7 +24,7 @@ use super::{
   media_access, window,
 };
 use crate::call_video::ReceivedVideoFrame;
-use crate::video::{VideoResolution, fit_within, simulcast_layers};
+use crate::video::{VideoResolution, fit_within, screen_bitrate_bps, screen_limits, simulcast_layers};
 use crate::web_api::{Canvas2d, EncodedVideoChunk, VideoDecoder, VideoEncoder, VideoFrame as WebVideoFrame};
 
 /// WebCodecs codec string: H.264 Constrained Baseline, level 4.0 (up to 1080p).
@@ -35,10 +35,6 @@ const CAMERA_WIDTH: u32 = 1280;
 const CAMERA_HEIGHT: u32 = 720;
 const CAMERA_FRAMERATE: u8 = 30;
 const CAMERA_BITRATE_BPS: u32 = 1_500_000;
-const SCREEN_FRAMERATE: u8 = 15;
-const SCREEN_MAX_WIDTH: u32 = 1920;
-const SCREEN_MAX_HEIGHT: u32 = 1080;
-const SCREEN_BITRATE_BPS: u32 = 2_000_000;
 /// A keyframe at least this often (seconds), so a lost frame doesn't freeze the picture for long.
 const KEYFRAME_INTERVAL_SECONDS: u32 = 4;
 /// Frames waiting in an encoder above this are skipped (slow machine or encoder).
@@ -417,14 +413,16 @@ pub(super) fn camera_plan() -> TrackPlan {
   }
 }
 
-/// The plan for a screen share: one layer (text must stay readable), 15 fps.
-pub(super) fn screen_plan() -> TrackPlan {
+/// The plan for a screen share: the mode's largest picture and rate (1440p30 for detail, 1080p60
+/// for motion) plus a half-size layer for weak links; a smaller source is sent as it is.
+pub(super) fn screen_plan(mode: ScreenContentMode) -> TrackPlan {
+  let (limit, framerate) = screen_limits(mode);
   TrackPlan {
     kind: VideoTrackKind::Screen,
-    framerate: SCREEN_FRAMERATE,
-    bitrate_bps: SCREEN_BITRATE_BPS,
-    max_layers: 1,
-    maybe_max_resolution: None,
+    framerate,
+    bitrate_bps: screen_bitrate_bps(limit, framerate),
+    max_layers: 2,
+    maybe_max_resolution: Some(limit),
     #[cfg(feature = "effects")]
     maybe_effects: None,
   }
@@ -474,11 +472,12 @@ async fn request_camera(constraints: &MediaStreamConstraints) -> Result<MediaStr
 }
 
 /// Asks the user what to share (`getDisplayMedia`). Needs a recent user gesture.
-pub(super) async fn capture_screen() -> Result<MediaStream, WebCallError> {
+pub(super) async fn capture_screen(mode: ScreenContentMode) -> Result<MediaStream, WebCallError> {
+  let (limit, framerate) = screen_limits(mode);
   let video = dictionary(&[
-    ("frameRate", maximum(u32::from(SCREEN_FRAMERATE))?),
-    ("width", maximum(SCREEN_MAX_WIDTH)?),
-    ("height", maximum(SCREEN_MAX_HEIGHT)?),
+    ("frameRate", maximum(u32::from(framerate))?),
+    ("width", maximum(u32::from(limit.width))?),
+    ("height", maximum(u32::from(limit.height))?),
   ])
   .map_err(browser("getDisplayMedia"))?;
   let constraints = DisplayMediaStreamConstraints::new();
