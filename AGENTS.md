@@ -34,6 +34,7 @@ teamcraft/
 │   ├── teamcraft-crypto/    # All cryptography: MLS, keys, key bag, rendezvous (wasm-compatible)
 │   ├── teamcraft-media/     # RTP, jitter buffer, codecs, DAVE, video effects shaders
 │   ├── teamcraft-core/      # Client logic shared by desktop, web and mobile
+│   ├── teamcraft-desktop-native/ # The only crate with `unsafe`: native OS calls of the desktop shell
 │   ├── teamcraft-server/    # REST API + gateway (binary)
 │   └── teamcraft-sfu/       # Media forwarding (binary)
 ├── docs/                    # Design documents
@@ -50,7 +51,8 @@ Details: [.claude/rules/](.claude/rules/). The short version:
   `Option<Option<T>>`, no stringly-typed state. Shared logic goes into a library crate, not copied.
 - **Errors:** `thiserror` enums in libraries, `anyhow` only at the top of binaries. No `unwrap()` /
   `expect()` outside tests (except for documented invariants with a reason).
-- **No `unsafe`** (`unsafe_code = "forbid"` workspace-wide).
+- **No `unsafe`** (`unsafe_code = "forbid"` workspace-wide). One exception: `teamcraft-desktop-native`
+  holds the few OS calls with no safe crate API, behind a safe API (code-style.md, "Native FFI").
 - **Logging:** `tracing` macros only, never `println!` / `eprintln!` / `dbg!` outside tests.
   **Never log plaintext message content, keys, tokens or passwords.**
 - **Crypto lives only in `teamcraft-crypto`.** No hand-rolled primitives; use audited crates.

@@ -136,6 +136,8 @@ fn main() -> anyhow::Result<()> {
       notifications::watch_notifications(app.handle());
       #[cfg(target_os = "linux")]
       watch_wake(app.handle());
+      #[cfg(any(target_os = "macos", windows))]
+      watch_native_wake(app.handle());
       #[cfg(windows)]
       windows_shell::forward_deep_links(app.handle());
       Ok(())
@@ -308,9 +310,9 @@ fn is_allowed_new_window(url: &tauri::Url) -> bool {
 
 /// The client core reads its access token synchronously; this keeps a copy current (the login code
 /// refreshes it before it expires) and clears it on sign-out.
-/// Resuming from suspend reconnects the gateway at once (logind). macOS and Windows have no such
-/// hook without native code; there the core notices the wall-clock jump at its next check (within
-/// seconds) and the webview reports the network coming back.
+/// Resuming from suspend reconnects the gateway at once (logind). macOS and Windows use
+/// `watch_native_wake`; should that hook fail, the core notices the wall-clock jump at its next
+/// check (within seconds) and the webview reports the network coming back.
 #[cfg(target_os = "linux")]
 fn watch_wake(app: &tauri::AppHandle) {
   let app = app.clone();
@@ -325,6 +327,20 @@ fn watch_wake(app: &tauri::AppHandle) {
       })
       .await;
   });
+}
+
+/// macOS (`NSWorkspaceDidWakeNotification`) and Windows (`PBT_APMRESUMEAUTOMATIC`) resume hook.
+#[cfg(any(target_os = "macos", windows))]
+fn watch_native_wake(app: &tauri::AppHandle) {
+  let handle = app.clone();
+  let result = teamcraft_desktop_native::watch_resume(move || {
+    tracing::info!("resumed from suspend");
+    handle.state::<CoreHost>().network_changed();
+    handle.state::<Arc<CallHost>>().network_changed();
+  });
+  if let Err(error) = result {
+    tracing::warn!(%error, "no resume notification; reconnecting at the next check");
+  }
 }
 
 fn keep_tokens_fresh(service: Arc<AuthService<KeyringStore>>) {

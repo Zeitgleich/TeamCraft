@@ -1,0 +1,59 @@
+[package]
+name = "teamcraft-desktop-native"
+description = "The desktop shell's few native OS calls that need unsafe code, behind a safe API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Not `workspace = true`: this crate may contain audited `unsafe` (see code-style.md), so it carries
+# the workspace lints itself with `unsafe_code` relaxed from `forbid` to `deny`.
+[lints.rust]
+# The one exception to the workspace rule (code-style.md, "Native FFI"): `deny`, so every `unsafe`
+# item needs an explicit `#[allow(unsafe_code)]` next to its SAFETY comment.
+unsafe_code = "deny"
+non_fmt_panics = "deny"
+unused_imports = "deny"
+unused_mut = "deny"
+unused_variables = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+# Correctness / safety (from ArtCraft's Cranky.toml)
+await_holding_lock = "deny"
+borrow_interior_mutable_const = "deny"
+# Typed, readable code
+option_option = "deny"
+zero_sized_map_values = "deny"
+clone_on_copy = "deny"
+implicit_clone = "deny"
+needless_return = "deny"
+redundant_field_names = "deny"
+empty_structs_with_brackets = "deny"
+# No debugging leftovers, no panics in production paths (allowed in tests via clippy.toml)
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+todo = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+# Explicitly allowed
+if_same_then_else = "allow"
+undocumented_unsafe_blocks = "deny"
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+
+# macOS: NSWorkspaceDidWakeNotification through the safe-ish objc2 bindings (Zlib/Apache-2.0/MIT;
+# already in the tree through Tauri's macOS stack).
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWorkspace"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSNotification", "NSOperation", "NSString"] }
+
+# Windows: PowerRegisterSuspendResumeNotification (MIT/Apache-2.0; the version the shell uses).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Power", "Win32_UI_WindowsAndMessaging"] }

@@ -27,6 +27,8 @@ teamcraft-media = { path = "../../crates/teamcraft-media", features = ["native",
 # Blocks on the effects pipeline's GPU setup on a blocking thread.
 pollster = "1.0.1"
 teamcraft-proto.workspace = true
+# The few native OS calls that need unsafe code, behind a safe API (macOS and Windows resume hooks).
+teamcraft-desktop-native = { path = "../../crates/teamcraft-desktop-native" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 anyhow = "1"
