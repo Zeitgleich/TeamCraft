@@ -403,6 +403,9 @@ served_hostnames = []
 # guest_token_secret = "..."
 # Guests may use their link until this long after the meeting's end.
 # guest_grace_secs = 7200
+# Most guests one shared guest link of a meeting lets into the lobby; every one of them still waits
+# for a host.
+# max_shared_link_guests = 50
 # Shared secret of the inbox handler that forwards RSVP e-mail (iMIP REPLY) to
 # POST /api/internal/v1/meetings/replies with `Authorization: Bearer <token>`. The handler vouches for
 # the sender (DKIM/SPF). Without it that endpoint answers 503. Prefer TEAMCRAFT_MEETINGS__INBOX_TOKEN.

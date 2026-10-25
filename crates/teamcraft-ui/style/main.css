@@ -6136,6 +6136,44 @@ ol.md-list {
   gap: 4px;
 }
 
+.meeting-link-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.meeting-link-row .input {
+  min-width: 0;
+}
+
+.meeting-guest-links {
+  margin-top: 10px;
+  display: grid;
+  gap: 4px;
+}
+
+.meeting-created {
+  display: grid;
+  gap: 8px;
+}
+
+.meeting-created-guests {
+  margin: 8px 0 0;
+  font-size: var(--text-sm);
+}
+
+.meetings-visit {
+  margin: 8px 16px 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.meetings-visit p {
+  margin: 2px 0 0;
+}
+
 .lobby {
   margin-top: 10px;
   padding: 10px 12px;
