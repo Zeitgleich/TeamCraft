@@ -2729,23 +2729,28 @@ ol.md-list {
 /* Always at the toolbar's right end, also where nothing grows in front of it (the hint is hidden on
    phones). */
 .send-group {
+  display: flex;
   margin-left: auto;
 }
 
+/* Send is the rightmost control (muscle memory: the thumb and the pointer go to the corner); the
+   send options sit on its left. */
 .send-group .send-btn {
-  border-start-end-radius: 0;
-  border-end-end-radius: 0;
+  order: 2;
+  border-start-start-radius: 0;
+  border-end-start-radius: 0;
 }
 
 .send-menu-btn {
+  order: 1;
   display: grid;
   place-items: center;
   width: 22px;
   height: 30px;
   border: 0;
-  border-inline-start: 1px solid color-mix(in srgb, var(--on-accent) 35%, transparent);
-  border-start-end-radius: var(--radius-sm);
-  border-end-end-radius: var(--radius-sm);
+  border-inline-end: 1px solid color-mix(in srgb, var(--on-accent) 35%, transparent);
+  border-start-start-radius: var(--radius-sm);
+  border-end-start-radius: var(--radius-sm);
   background: var(--accent);
   color: var(--on-accent);
 }
