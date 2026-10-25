@@ -292,7 +292,9 @@ What the numbers say:
   announcement, the account data.
 - **Change notifications cost what changed** (#246): on the large workspace main-thread work while
   idle went from 3.7 s to 0.8 s per minute; a new message re-reads one conversation and
-  sends one entry, a presence event one person's entry.
+  sends one entry, a presence event one person's entry. A write that leaves the entry as it was
+  (a reply that stays in its thread, an edit, a reaction) sends only the conversation's ID, so the
+  UI re-reads the feed and threads it shows of it.
 - **Coming back** (#247): the list shows as soon as the conversation list arrived (1.6 s instead of
   four minutes), the channel the user opens is caught up first, the rest in the background with up
   to six conversations' round trips at once. Before any conversation's messages, the sync still

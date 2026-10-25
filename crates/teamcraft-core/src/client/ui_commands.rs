@@ -69,7 +69,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         maybe_until,
       } => {
         let manual = match presence {
-          PresenceStatus::Online | PresenceStatus::Away => ManualPresence::Auto,
+          PresenceStatus::Online => ManualPresence::Auto,
+          PresenceStatus::Away => ManualPresence::Away,
           PresenceStatus::DoNotDisturb => ManualPresence::DoNotDisturb,
           PresenceStatus::Offline => ManualPresence::Invisible,
         };

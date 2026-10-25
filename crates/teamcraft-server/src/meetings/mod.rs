@@ -30,6 +30,7 @@ pub struct MeetingService {
   mailer: Arc<Slot<dyn Mailer>>,
   tokens: GuestTokens,
   guest_grace: Duration,
+  max_shared_link_guests: u32,
   /// Token of the inbox handler that forwards RSVP e-mail; `None` disables that endpoint.
   maybe_inbox_token: Option<Vec<u8>>,
 }
@@ -80,6 +81,7 @@ impl MeetingService {
       mailer: backends.mailer,
       tokens: GuestTokens::new(&config.guest_token_secret)?,
       guest_grace: Duration::from_secs(config.guest_grace_secs),
+      max_shared_link_guests: config.max_shared_link_guests,
       maybe_inbox_token: config
         .maybe_inbox_token
         .as_ref()
@@ -124,7 +126,12 @@ impl MeetingService {
     self.guest_grace
   }
 
-  /// A personal join link: the token is in the fragment, which browsers never send to servers.
+  /// Most guests one shared guest link lets into the lobby.
+  pub fn max_shared_link_guests(&self) -> u32 {
+    self.max_shared_link_guests
+  }
+
+  /// A guest join link (personal or shared): the token is in the fragment, which browsers never send to servers.
   pub fn guest_join_url(&self, meeting: MeetingId, token: &str) -> String {
     format!("{}#invite={token}", self.join_url(meeting))
   }

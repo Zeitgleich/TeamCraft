@@ -1,20 +1,27 @@
-//! The meetings screen: upcoming meetings, the schedule dialog, RSVP, guest links and the lobby of
-//! meetings the user hosts. The server owns all state (docs/meetings.md); [`MeetingsHub`] mirrors it.
+//! The meetings screen: upcoming meetings, the schedule dialog, RSVP, the meeting's links and the
+//! lobby of meetings the user hosts, and opening a meeting from its link. The server owns all state
+//! (docs/meetings.md); [`MeetingsHub`] mirrors it.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use teamcraft_proto::{IdempotencyKey, LobbyEntry, MeetingId, MeetingResponse, MeetingStatus, RsvpStatus};
+use teamcraft_proto::{
+  IdempotencyKey, LobbyEntry, LobbyState, MeetingId, MeetingResponse, MeetingStatus, RsvpStatus,
+};
 
 use crate::calls::{CallKind, CallRequest};
 use crate::clock::{format_date, format_local_datetime_input, format_time, local_day, now_ms};
 use crate::components::compact_back::CompactBack;
 use crate::components::icons::{Icon, IconName};
 use crate::components::meeting_controls::{HostControls, RsvpList};
+use crate::components::message_actions::copy_text;
 use crate::components::modal::Modal;
+use crate::components::pending_button::PendingButton;
 use crate::components::sliding_indicator::SlidingIndicator;
+use crate::feedback::PendingAction;
 use crate::i18n::{I18n, use_i18n};
 use crate::meetings::{
-  ExternalInvitee, FormError, MeetingsHub, Repeat, ScheduleForm, hosts_lobby, is_over, my_rsvp,
+  ExternalInvitee, FormError, MeetingError, MeetingsHub, Repeat, STATUS_CONFLICT, STATUS_NOT_FOUND,
+  ScheduleForm, hosts_lobby, is_over, my_rsvp,
 };
 use crate::model::{ConversationId, UserId};
 use crate::reactive::{SetIfAlive, use_interval_while_visible};
@@ -23,6 +30,10 @@ use crate::state::{AppState, Overlay, use_app_state};
 /// How often the list and the lobbies are reloaded while the screen is open and visible (guests
 /// waiting in a lobby show up without a reload; `meeting_update` events cover the rest).
 const REFRESH_MS: u64 = 10_000;
+/// How often a member who knocked asks whether a host let them in, while they wait and the screen
+/// is visible. The server also sends them `lobby_decision`, but the client core doesn't hand that
+/// event to the UI yet, so asking is how the screen learns it.
+const KNOCK_POLL_MS: u64 = 3_000;
 /// A first meeting suggestion starts at the next full hour, at least this far ahead.
 const MIN_LEAD_MS: i64 = 10 * 60_000;
 const MS_PER_HOUR: i64 = 3_600_000;
@@ -51,11 +62,34 @@ pub fn MeetingsView() -> impl IntoView {
         // The server makes the chat without encryption; an instant meeting invites nobody.
         // Gone only with the app; then the chat stays without encryption (nobody else founds it).
         state.try_write(|backend| backend.set_up_meeting_chat(meeting.conversation_id, Vec::new()));
-        join_meeting(state, i18n, meeting.conversation_id);
+        show_created(state, hub, meeting);
       }
       is_starting.set_if_alive(false);
     });
   };
+
+  // A meeting link (`/meeting/{id}`) the app was opened with, or that was followed later.
+  let visit = RwSignal::new(LinkVisit::Idle);
+  Effect::new(move |_| {
+    if let Some(meeting) = state.maybe_meeting_link.get() {
+      state.maybe_meeting_link.set(None);
+      open_meeting_link(hub, visit, meeting);
+    }
+  });
+  // Once the meeting's chat has loaded, the member is in: on to the pre-join screen.
+  Effect::new(move |_| {
+    if let LinkVisit::Entering(conversation) = visit.get()
+      && state.read(|backend| backend.conversation(conversation)).is_some()
+    {
+      visit.set(LinkVisit::Idle);
+      join_meeting(state, i18n, conversation);
+    }
+  });
+  use_interval_while_visible(KNOCK_POLL_MS, move || {
+    if let LinkVisit::Waiting(meeting) = visit.get_untracked() {
+      spawn_local(async move { poll_knock(hub, visit, meeting).await });
+    }
+  });
 
   view! {
     <section class="meetings-view" aria-label=move || i18n.t("meetings-title")>
@@ -78,6 +112,7 @@ pub fn MeetingsView() -> impl IntoView {
           view! { <div class="auth-alert meetings-error" role="alert">{move || i18n.t_with("meetings-error", &[("detail", &message)])}</div> }
         })
       }}
+      <LinkVisitBanner visit=visit />
       <div class="meetings-list panel-scroll">
         <For
           each=move || meeting_days(&hub.meetings.get(), now_ms())
@@ -152,7 +187,8 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
     .map(|user| user.display_name)
     .unwrap_or_default();
   let attendees = attendee_summary(&meeting, state.read(|backend| backend.users()));
-  let guest_link = RwSignal::new(None::<String>);
+  let join_url = meeting.join_url.clone();
+  let shows_guest_links = RwSignal::new(false);
   let show_responses = RwSignal::new(false);
   let response_total = meeting.attendees.len();
   let attendees_for_list = meeting.attendees.clone();
@@ -163,14 +199,6 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
   let has_recurrence = meeting.maybe_recurrence.is_some();
   let has_lobby = hosts_lobby(&meeting, me);
 
-  let make_guest_link = move |_| {
-    spawn_local(async move {
-      match hub.client().guest_link(id, None).await {
-        Ok(link) => guest_link.set_if_alive(Some(link.join_url)),
-        Err(error) => hub.maybe_error.set_if_alive(Some(error.to_string())),
-      }
-    });
-  };
   let cancel = move |_| {
     spawn_local(async move {
       hub.run(me, now_ms(), hub.client().cancel(id)).await;
@@ -206,6 +234,7 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
               </button>
             }
           })}
+        {(!over).then(|| view! { <CopyButton text=join_url.clone() label_key="meetings-copy-link" /> })}
         {(!over && !is_host && rsvp.is_some())
           .then(|| {
             view! {
@@ -230,21 +259,20 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
         {(!over && is_host)
           .then(|| {
             view! {
-              <button class="btn" on:click=make_guest_link>{move || i18n.t("meetings-guest-link")}</button>
+              <button
+                class="btn"
+                aria-expanded=move || shows_guest_links.get().to_string()
+                on:click=move |_| shows_guest_links.update(|open| *open = !*open)
+              >
+                {move || i18n.t("meetings-invite-guests")}
+              </button>
               <button class="btn btn-quiet" on:click=cancel>{move || i18n.t("meetings-cancel")}</button>
             }
           })}
       </div>
-      {move || {
-        guest_link.get().map(|link| {
-          view! {
-            <div class="meeting-link">
-              <label class="muted-text" for=format!("guest-link-{id}")>{move || i18n.t("meetings-guest-link-hint")}</label>
-              <input id=format!("guest-link-{id}") class="input mono" readonly prop:value=link />
-            </div>
-          }
-        })
-      }}
+      <Show when=move || shows_guest_links.get() fallback=|| ()>
+        <GuestLinks meeting=id />
+      </Show>
       <button class="btn btn-quiet btn-small" aria-expanded=move || show_responses.get().to_string() on:click=move |_| show_responses.update(|open| *open = !*open)>
         {move || i18n.t_with("meetings-responses", &[("count", &response_total.to_string())])}
       </button>
@@ -329,6 +357,317 @@ fn Lobby(meeting: MeetingId) -> impl IntoView {
         </ul>
       </div>
     </Show>
+  }
+}
+
+// ---- The meeting's links ----------------------------------------------------------------------------
+
+/// Copies `text` when clicked and then says "Copied"; a refused write shows an error.
+#[component]
+fn CopyButton(text: String, label_key: &'static str, #[prop(optional)] is_primary: bool) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let is_copied = RwSignal::new(false);
+  let copy = move |_| {
+    let failed = i18n.t("action-copy-failed");
+    // Started inside the click: browsers only allow clipboard writes from a user action.
+    let copying = copy_text(&text);
+    spawn_local(async move {
+      if copying.await {
+        is_copied.set_if_alive(true);
+      } else {
+        state.show_error(failed, String::new());
+      }
+    });
+  };
+  view! {
+    <button type="button" class="btn" class:btn-primary=is_primary on:click=copy>
+      <Icon name=IconName::Copy />
+      <span aria-live="polite">{move || i18n.t(if is_copied.get() { "meetings-link-copied" } else { label_key })}</span>
+    </button>
+  }
+}
+
+/// A link in a read-only field (focus selects it, for copying by hand) with a copy button.
+#[component]
+fn LinkField(link: String, field_id: String, label_key: &'static str) -> impl IntoView {
+  let i18n = use_i18n();
+  let select_all = |ev: leptos::ev::FocusEvent| event_target::<web_sys::HtmlInputElement>(&ev).select();
+  view! {
+    <div class="meeting-link-row">
+      <label class="visually-hidden" for=field_id.clone()>{move || i18n.t(label_key)}</label>
+      <input id=field_id class="input mono grow" readonly translate="no" prop:value=link.clone() on:focus=select_all />
+      <CopyButton text=link label_key="meetings-copy-link" />
+    </div>
+  }
+}
+
+/// The links a host hands to people without an account: the meeting's shared guest link (many
+/// guests, each waits in the lobby, revocable) and personal one-time links. Each button makes the
+/// link and copies it in one click; the link stays in a field in case the browser refused the copy.
+#[component]
+fn GuestLinks(meeting: MeetingId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let hub = expect_context::<MeetingsHub>();
+  let maybe_shared = RwSignal::new(None::<String>);
+  let maybe_one_time = RwSignal::new(None::<String>);
+  let (sharing, revoking, making) = (PendingAction::new(), PendingAction::new(), PendingAction::new());
+
+  let copy_shared = move |_| {
+    sharing.spawn(async move {
+      let link = hub
+        .client()
+        .shared_guest_link(meeting)
+        .await
+        .map_err(|error| error.to_failure())?;
+      copy_fetched(state, i18n, link.join_url.clone()).await;
+      maybe_shared.set_if_alive(Some(link.join_url));
+      Ok(())
+    });
+  };
+  let revoke_shared = move |_| {
+    let revoked = i18n.t("meetings-guest-link-revoked");
+    revoking.spawn(async move {
+      hub
+        .client()
+        .revoke_shared_guest_link(meeting)
+        .await
+        .map_err(|error| error.to_failure())?;
+      maybe_shared.set_if_alive(None);
+      if state.is_alive() {
+        state.show_toast(revoked);
+      }
+      Ok(())
+    });
+  };
+  let copy_one_time = move |_| {
+    making.spawn(async move {
+      let link = hub
+        .client()
+        .guest_link(meeting, None)
+        .await
+        .map_err(|error| error.to_failure())?;
+      copy_fetched(state, i18n, link.join_url.clone()).await;
+      maybe_one_time.set_if_alive(Some(link.join_url));
+      Ok(())
+    });
+  };
+
+  view! {
+    <div class="meeting-guest-links" role="group" aria-label=move || i18n.t("meetings-invite-guests")>
+      <div class="meeting-actions">
+        <PendingButton pending=sharing class="btn" on_click=copy_shared>
+          <Icon name=IconName::Copy />
+          <span>{move || i18n.t("meetings-shared-guest-link")}</span>
+        </PendingButton>
+        <PendingButton pending=making class="btn" on_click=copy_one_time>
+          <Icon name=IconName::Copy />
+          <span>{move || i18n.t("meetings-guest-link")}</span>
+        </PendingButton>
+      </div>
+      {move || {
+        maybe_shared.get().map(|link| {
+          view! {
+            <div class="meeting-link">
+              <LinkField link=link field_id=format!("shared-guest-link-{meeting}") label_key="meetings-shared-guest-link-label" />
+              <p class="muted-text small">{move || i18n.t("meetings-shared-guest-link-hint")}</p>
+              <div>
+                <PendingButton pending=revoking class="btn btn-quiet btn-small" on_click=revoke_shared>
+                  {move || i18n.t("meetings-revoke-guest-link")}
+                </PendingButton>
+              </div>
+            </div>
+          }
+        })
+      }}
+      {move || {
+        maybe_one_time.get().map(|link| {
+          view! {
+            <div class="meeting-link">
+              <LinkField link=link field_id=format!("one-time-link-{meeting}") label_key="meetings-one-time-link-label" />
+              <p class="muted-text small">{move || i18n.t("meetings-guest-link-hint")}</p>
+            </div>
+          }
+        })
+      }}
+    </div>
+  }
+}
+
+/// Copies a link that had to be fetched first and says so. The click that asked for it may be too
+/// long ago for the browser to allow the write; the link is then in its field to copy by hand.
+async fn copy_fetched(state: AppState, i18n: I18n, link: String) {
+  let copied = i18n.t("meetings-link-copied");
+  if copy_text(&link).await && state.is_alive() {
+    state.show_brief_toast(copied);
+  }
+}
+
+/// Opens the dialog with the link of a meeting that was just scheduled or started.
+fn show_created(state: AppState, hub: MeetingsHub, meeting: MeetingResponse) {
+  hub.maybe_created.set_if_alive(Some(meeting));
+  if state.is_alive() {
+    state.overlay.set_if_alive(Overlay::MeetingCreated);
+  }
+}
+
+/// Right after scheduling or "Meet now": the meeting's link to copy and send, the guest links for
+/// its host, and joining it.
+#[component]
+pub fn MeetingCreatedDialog() -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let hub = expect_context::<MeetingsHub>();
+  let Some(meeting) = hub.maybe_created.get_untracked() else {
+    state.close_overlay();
+    return ().into_any();
+  };
+  let conversation = meeting.conversation_id;
+  let join = move |_| {
+    state.close_overlay();
+    join_meeting(state, i18n, conversation);
+  };
+  view! {
+    <Modal labelled_by="meeting-created-title">
+      <header class="modal-head">
+        <h2 id="meeting-created-title">{move || i18n.t("meetings-created-title")}</h2>
+        <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+          <Icon name=IconName::Close />
+        </button>
+      </header>
+      <div class="modal-body meeting-created">
+        <h3 class="meeting-title" translate="no">{meeting.title.clone()}</h3>
+        <p class="muted-text">{move || i18n.t("meetings-created-hint")}</p>
+        <LinkField link=meeting.join_url.clone() field_id="meeting-created-link".to_owned() label_key="meetings-link" />
+        <p class="muted-text small">{move || i18n.t("meetings-link-hint")}</p>
+        <h4 class="meeting-created-guests">{move || i18n.t("meetings-invite-guests")}</h4>
+        <GuestLinks meeting=meeting.id />
+      </div>
+      <footer class="modal-foot">
+        <span class="grow"></span>
+        <button type="button" class="btn" on:click=move |_| state.close_overlay()>{move || i18n.t("close")}</button>
+        <button type="button" class="btn btn-primary" data-autofocus on:click=join>{move || i18n.t("meetings-join")}</button>
+      </footer>
+    </Modal>
+  }
+  .into_any()
+}
+
+// ---- Opening a meeting from its link ----------------------------------------------------------------
+
+/// Where opening a meeting's link (`/meeting/{id}`) stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinkVisit {
+  Idle,
+  Opening,
+  /// Not in the meeting yet: knocked, waits for a host.
+  Waiting(MeetingId),
+  /// In the meeting; joins once its chat has loaded.
+  Entering(ConversationId),
+  Denied,
+  /// Over or cancelled.
+  Ended,
+  Failed,
+}
+
+/// Opens the meeting a link names: straight in for its members, a knock for everybody else.
+fn open_meeting_link(hub: MeetingsHub, visit: RwSignal<LinkVisit>, meeting: MeetingId) {
+  visit.set(LinkVisit::Opening);
+  spawn_local(async move {
+    let client = hub.client();
+    let next = match client.get(meeting).await {
+      Ok(found) if is_over(&found, now_ms()) => LinkVisit::Ended,
+      Ok(found) => LinkVisit::Entering(found.conversation_id),
+      Err(error) if error.is_status(STATUS_NOT_FOUND) => match client.knock(meeting).await {
+        Ok(lobby_state) => after_knock(hub, meeting, lobby_state).await,
+        Err(error) => visit_failure(&error),
+      },
+      Err(error) => visit_failure(&error),
+    };
+    visit.set_if_alive(next);
+  });
+}
+
+/// Asks again whether a host decided about the knock.
+async fn poll_knock(hub: MeetingsHub, visit: RwSignal<LinkVisit>, meeting: MeetingId) {
+  let next = match hub.client().my_lobby_state(meeting).await {
+    Ok(lobby_state) => after_knock(hub, meeting, lobby_state).await,
+    // Offline for a moment: keep waiting, the next tick asks again.
+    Err(error) if error.to_failure().is_unreachable() => LinkVisit::Waiting(meeting),
+    Err(error) => visit_failure(&error),
+  };
+  // The member may have stopped waiting in the meantime.
+  if visit.try_get_untracked() == Some(LinkVisit::Waiting(meeting)) {
+    visit.set_if_alive(next);
+  }
+}
+
+async fn after_knock(hub: MeetingsHub, meeting: MeetingId, lobby_state: LobbyState) -> LinkVisit {
+  match lobby_state {
+    LobbyState::Waiting => LinkVisit::Waiting(meeting),
+    LobbyState::Admitted => match hub.client().get(meeting).await {
+      Ok(found) => LinkVisit::Entering(found.conversation_id),
+      Err(error) => visit_failure(&error),
+    },
+    LobbyState::Denied => LinkVisit::Denied,
+    LobbyState::Unknown(_) => LinkVisit::Failed,
+  }
+}
+
+fn visit_failure(error: &MeetingError) -> LinkVisit {
+  tracing::warn!(%error, "could not open the meeting link");
+  if error.is_status(STATUS_CONFLICT) {
+    LinkVisit::Ended
+  } else {
+    LinkVisit::Failed
+  }
+}
+
+/// What opening a meeting link is doing, above the list.
+#[component]
+fn LinkVisitBanner(visit: RwSignal<LinkVisit>) -> impl IntoView {
+  let i18n = use_i18n();
+  let stop = move |_| visit.set(LinkVisit::Idle);
+  move || {
+    match visit.get() {
+    LinkVisit::Idle => ().into_any(),
+    LinkVisit::Opening | LinkVisit::Entering(_) => view! {
+      <div class="meetings-visit" role="status">
+        <span class="spinner"></span>
+        <span>{move || i18n.t("meetings-visit-opening")}</span>
+        <button type="button" class="btn btn-quiet btn-small" on:click=stop>{move || i18n.t("cancel")}</button>
+      </div>
+    }
+    .into_any(),
+    LinkVisit::Waiting(_) => view! {
+      <div class="meetings-visit lobby" role="status">
+        <span class="spinner"></span>
+        <div class="grow">
+          <strong>{move || i18n.t("meetings-visit-waiting-title")}</strong>
+          <p>{move || i18n.t("meetings-visit-waiting")}</p>
+        </div>
+        <button type="button" class="btn" on:click=stop>{move || i18n.t("meetings-visit-cancel")}</button>
+      </div>
+    }
+    .into_any(),
+    outcome => {
+      let key = match outcome {
+        LinkVisit::Denied => "meetings-visit-denied",
+        LinkVisit::Ended => "meetings-visit-ended",
+        _ => "meetings-visit-failed",
+      };
+      view! {
+        <div class="auth-alert meetings-visit" role="alert">
+          <span class="grow">{move || i18n.t(key)}</span>
+          <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=stop>
+            <Icon name=IconName::Close />
+          </button>
+        </div>
+      }
+      .into_any()
+    },
+  }
   }
 }
 
@@ -425,7 +764,7 @@ pub fn ScheduleMeetingDialog() -> impl IntoView {
             let invitees = crate::meetings::invited_users(&request);
             // Gone only with the app; then the chat stays without encryption (nobody else founds it).
             state.try_write(|backend| backend.set_up_meeting_chat(meeting.conversation_id, invitees));
-            state.close_overlay();
+            show_created(state, hub, meeting);
           }
           is_saving.set_if_alive(false);
         });

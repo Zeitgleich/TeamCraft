@@ -266,6 +266,18 @@ pub(crate) fn copy_and_confirm(text: String) {
   });
 }
 
+/// Starts copying `text` at once (inside the click, where browsers allow it) and resolves to
+/// whether the browser took it.
+pub(crate) fn copy_text(text: &str) -> impl std::future::Future<Output = bool> + 'static {
+  let maybe_promise = clipboard_write(text);
+  async move {
+    match maybe_promise {
+      Some(promise) => wasm_bindgen_futures::JsFuture::from(promise).await.is_ok(),
+      None => false,
+    }
+  }
+}
+
 /// Writes to the clipboard through the page's `navigator.clipboard` (web-sys keeps that API unstable).
 pub(crate) fn copy_to_clipboard(text: &str) {
   // A refused write (no permission, insecure context) leaves the clipboard as it was.

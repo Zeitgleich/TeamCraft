@@ -76,8 +76,8 @@ pub use key_package::{AddPackagesOutcome, ClaimedPackage, KeyPackageCounts, NewK
 pub use last_seen::StoredLastSeen;
 pub use local_account::{LOCAL_ISSUER, LocalAccount, SessionLimits, SessionState};
 pub use meeting::{
-  AttendeeDiff, AttendeeKey, LobbyRow, MeetingChanges, NewAttendee, NewMeeting, StoredAttendee,
-  StoredMeeting, StoredMeetingInvite,
+  AttendeeDiff, AttendeeKey, LobbyRow, MeetingChanges, NewAttendee, NewMeeting, SharedInviteClaim,
+  StoredAttendee, StoredMeeting, StoredMeetingInvite,
 };
 pub use message::{HistoryQuery, NewMessage, StoreOutcome, StoredMessage};
 pub use mls::{CommitOutcome, MlsBacklogQuery, NewMlsMessage, PostOutcome, StoredMlsMessage};

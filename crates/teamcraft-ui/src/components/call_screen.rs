@@ -4,7 +4,8 @@ use leptos::prelude::*;
 
 use teamcraft_proto::VideoTrackKind;
 
-use crate::calls::{CallKind, CallLayout, CallRequest, Participant, ScreenShareSound};
+use crate::calls::{CallLayout, CallRequest, Participant, ScreenShareSound};
+use crate::components::call_prejoin::call_heading;
 use crate::components::call_video::{BackgroundPicker, LiveVideo, VideoSource, VideoTile, can_show_video};
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
@@ -141,13 +142,11 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
       .update(|prefs| prefs.calls.share_sound = has_sound);
   };
 
+  let maybe_meetings = use_context::<crate::meetings::MeetingsHub>();
   let title = move || {
+    let maybe_meeting_title = maybe_meetings.and_then(|hub| hub.title_for(request.conversation));
     let name = conversation.get().map(|conv| conv.name).unwrap_or_default();
-    match request.kind {
-      CallKind::Direct => i18n.t_with("call-title-direct", &[("name", &name)]),
-      CallKind::Group => i18n.t_with("call-title-group", &[("name", &name)]),
-      CallKind::Huddle => i18n.t_with("call-title-huddle", &[("name", &name)]),
-    }
+    call_heading(i18n, request.kind, maybe_meeting_title.as_deref(), &name)
   };
   let participant_count = move || remote.get().len() + 1;
 

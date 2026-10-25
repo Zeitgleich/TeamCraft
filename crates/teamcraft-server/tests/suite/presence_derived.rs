@@ -34,6 +34,7 @@ fn meetings_config() -> MeetingsConfig {
     max_invitees: 5,
     guest_token_secret: "0123456789abcdef0123456789abcdef".to_owned().into(),
     guest_grace_secs: 7200,
+    max_shared_link_guests: 50,
     maybe_inbox_token: None,
     smtp: None,
     mail_texts: MailTexts::default(),
@@ -394,6 +395,7 @@ mod switches {
     let device = register_device(&app, &alice).await;
     for presence in [
       json!({"statuses_enabled": true, "custom_status_enabled": true, "away_timeout_minutes": 0}),
+      json!({"statuses_enabled": true, "custom_status_enabled": true, "away_timeout_minutes": 4}),
       json!({"statuses_enabled": true, "custom_status_enabled": true, "presets": [{"text": "  "}]}),
       json!({"statuses_enabled": true, "custom_status_enabled": true, "presets": [{"text": "x", "duration_minutes": 0}]}),
       json!({"statuses_enabled": true, "custom_status_enabled": true, "presets": (0..21).map(|n| json!({"text": format!("s{n}")})).collect::<Vec<_>>()}),

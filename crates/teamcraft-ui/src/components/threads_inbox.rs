@@ -80,7 +80,7 @@ fn ThreadCard(thread: ThreadSummary) -> impl IntoView {
   let author = state.read(|backend| backend.user(thread.root.author));
   let conv_name = state
     .read(|backend| backend.conversation(thread.conversation))
-    .map(|c| c.name)
+    .map(|c| crate::components::thread_panel::conversation_label(&c))
     .unwrap_or_default();
   let (conversation, thread_id) = (thread.conversation, thread_id_of(thread.root.id));
   let is_selected = move || {
@@ -110,7 +110,7 @@ fn ThreadCard(thread: ThreadSummary) -> impl IntoView {
       >
         <span class="thread-card-top">
           {author.map(|user| view! { <span class="thread-author" translate="no">{user.display_name}</span> })}
-          <span class="thread-channel" translate="no">{format!("# {conv_name}")}</span>
+          <span class="thread-channel" translate="no">{conv_name}</span>
           <time class="thread-time">{time}</time>
         </span>
         <span class="thread-preview"><RichText body=thread.root.body.clone() /></span>

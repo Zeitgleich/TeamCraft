@@ -66,10 +66,17 @@ pub enum CallFailure {
   /// This device isn't in the conversation's encryption group yet (the welcome hasn't come, or
   /// another device has to let it in), so it can't check who is in the call.
   EncryptionPending,
+  /// The chosen speakers can't be used; the sound played on the default output instead.
+  SpeakersUnavailable,
+  /// No speakers or other audio output to play on.
+  SpeakersMissing,
+  /// The browser didn't let the page play sound (no interaction with the page yet, or a site
+  /// setting).
+  SoundBlocked,
 }
 
 impl CallFailure {
-  const ALL: [Self; 11] = [
+  const ALL: [Self; 14] = [
     Self::MicrophoneDenied,
     Self::MicrophoneMissing,
     Self::MicrophoneInUse,
@@ -81,6 +88,9 @@ impl CallFailure {
     Self::ServerUnreachable,
     Self::BackgroundRequired,
     Self::EncryptionPending,
+    Self::SpeakersUnavailable,
+    Self::SpeakersMissing,
+    Self::SoundBlocked,
   ];
 
   /// Stable name on the wire, after [`CALL_PREFIX`].
@@ -97,6 +107,9 @@ impl CallFailure {
       Self::ServerUnreachable => "server_unreachable",
       Self::BackgroundRequired => "background_required",
       Self::EncryptionPending => "encryption_pending",
+      Self::SpeakersUnavailable => "speakers_unavailable",
+      Self::SpeakersMissing => "speakers_missing",
+      Self::SoundBlocked => "sound_blocked",
     }
   }
 

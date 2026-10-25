@@ -23,12 +23,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 use teamcraft_client_api::call_view::CallView;
 use teamcraft_client_api::calls::{
   ActiveCall, BackgroundEffect as UiBackgroundEffect, CallEndReason, CallRequest, CallStatusSounds,
-  MediaDevice, MediaDevices, PushToTalk, ScreenShareSound,
+  DevicePresence, MediaDevice, MediaDevices, PushToTalk, ScreenShareSound,
 };
+use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
 use teamcraft_client_api::remote::CallSnapshot;
 use teamcraft_core::CallKeySigner;
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
-use teamcraft_media::audio_device::{list_input_devices, list_output_devices};
+use teamcraft_media::audio_device::{AudioDeviceError, list_input_devices, list_output_devices};
 use teamcraft_media::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInfo, AudioSink, AudioSource};
 use teamcraft_media::audio_processing::AudioProcessingConfig;
 use teamcraft_media::bwe::BweConfig;
@@ -41,6 +42,7 @@ use teamcraft_media::call_resilience::{JoinTicket, JoinTicketError, certificate_
 use teamcraft_media::call_video::ReceivedVideoFrame;
 use teamcraft_media::call_view::{CallRoster, status_cues};
 use teamcraft_media::effects::{BackgroundImage, EffectHandle};
+use teamcraft_media::ringtone;
 use teamcraft_media::system_audio::SystemAudioCapture;
 use teamcraft_media::video_pipeline::{VideoSendConfig, preferred_encoders};
 use teamcraft_proto::{
@@ -203,28 +205,44 @@ impl CallHost {
     let cameras = tokio::task::spawn_blocking(video::list_cameras)
       .await
       .map_err(|error| error.to_string())?;
-    let devices = MediaDevices {
-      cameras: cameras
+    let mut devices = MediaDevices::listed(
+      cameras
         .into_iter()
         .map(|camera| MediaDevice {
           id: camera.id,
           label: camera.name,
         })
         .collect(),
-      microphones: inputs
+      inputs
         .map_err(|error| error.to_string())?
         .iter()
         .map(media_device)
         .collect(),
-      speakers: outputs
+      outputs
         .map_err(|error| error.to_string())?
         .iter()
         .map(media_device)
         .collect(),
-    };
+    );
+    // A sandbox (Flatpak) may hide the V4L2 devices while the camera portal still offers a
+    // camera, so an empty list doesn't mean there is none.
+    if cfg!(target_os = "linux") && devices.cameras.is_empty() {
+      devices.camera_presence = DevicePresence::Unknown;
+    }
     lock(&self.state).devices = devices.clone();
     self.changed();
     Ok(devices)
+  }
+
+  /// Plays the test sound on the speakers (`None` or empty: the default). When the chosen ones
+  /// can't be opened it plays on the default and still fails, so the user learns why; the error is
+  /// `ActionFailure` wire text.
+  pub async fn test_speakers(&self, maybe_device: Option<String>) -> Result<(), String> {
+    let choice = device_choice(maybe_device.filter(|id| !id.is_empty()));
+    tokio::task::spawn_blocking(move || play_test_sound(&choice))
+      .await
+      .map_err(|error| error.to_string())?
+      .map_err(|failure| failure.to_wire())
   }
 
   /// Joins the conversation's call with what the core prepared, leaving any other call first.
@@ -807,6 +825,25 @@ fn media_device(info: &AudioDeviceInfo) -> MediaDevice {
   MediaDevice {
     id: info.id.to_string(),
     label: info.name.clone(),
+  }
+}
+
+fn play_test_sound(choice: &AudioDeviceChoice) -> Result<(), ActionFailure> {
+  let samples = ringtone::test_sound();
+  let missing = |error: AudioDeviceError| {
+    ActionFailure::new(FailureKind::Call(CallFailure::SpeakersMissing), error.to_string())
+  };
+  match ringtone::play_once(choice, &samples) {
+    Ok(()) => Ok(()),
+    Err(error) if *choice != AudioDeviceChoice::Default => {
+      tracing::warn!(%error, "the chosen speakers can't be opened; testing the default");
+      ringtone::play_once(&AudioDeviceChoice::Default, &samples).map_err(missing)?;
+      Err(ActionFailure::new(
+        FailureKind::Call(CallFailure::SpeakersUnavailable),
+        error.to_string(),
+      ))
+    },
+    Err(error) => Err(missing(error)),
   }
 }
 

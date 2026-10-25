@@ -1164,6 +1164,17 @@ calls are verified with no extra prompts, and the DAVE privacy code and per-memb
 remain available for out-of-band comparison. Meeting guests without an account get an ephemeral
 key and are shown as "Guest (unverified)".
 
+**Meeting links** (docs/meetings.md, "Links"). The meeting link `<base>/meeting/<id>` is no
+credential: meeting IDs are not secret. It lets in members already in the meeting chat; any other
+member who opens it knocks and waits in the lobby until a host admits them, also in meetings
+without a lobby. Guest links (personal one-time links and the meeting's shared guest link) carry a
+token signed by the server in the URL fragment, which browsers never send, so it stays out of server
+and proxy logs. A guest link only gets its holder into the lobby; the chat and the call are
+encrypted to them only after a host admitted them, like to any member added to a conversation
+(guests always from the join on, §4.3).
+Since the server signs the tokens and decides admission, it could let in a guest of its own; that is
+why guests stay "Guest (unverified)" and the hosts see who they admit.
+
 **Who signs in the browser.** The web client's call engine is a wasm module of its own
 (`teamcraft-web-calls`, loaded by the page; `teamcraft_client_api::page_calls`). It never holds the
 device key: the page prepares the join with its client core and keeps a `DeviceCallKeyAuthenticator`
