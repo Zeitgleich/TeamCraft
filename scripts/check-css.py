@@ -10,8 +10,12 @@ warning. This check fails on:
 - the same selector at top level twice with different values for one property (the later one wins).
   A rule that refines a group it was part of (`.a, .b { flex: 1 }` then `.b { flex: none }`) is a
   deliberate split and passes; other deliberate splits are allow-listed in ALLOWED_OVERRIDES,
-- more `font-size` values below 11 px than MAX_TINY_FONT_SIZES (a ratchet: the count may only go
-  down),
+- a font size off the type scale (issue #370): `font-size` and the size in `font` are a
+  `var(--text-*)` token, so the text size setting scales them. Glyphs sized to a fixed box
+  (initials in avatars and tiles, emoji cells) are listed in FIXED_FONT_SIZES and never below
+  11 px,
+- more raw hex colours outside custom property definitions than MAX_RAW_HEX_COLOURS (a ratchet:
+  the count may only go down; new colours become tokens),
 - inline styles in the UI's Rust code (issue #376): a `style=` attribute on an HTML element in
   `view!` markup or `set_attribute("style", …)`. The web CSP is `style-src 'self'`, which blocks
   them at runtime with only a console error. Dynamic styles use `style:prop=` / `style:--var=` or
@@ -40,10 +44,29 @@ KNOWN_DUPLICATE_KEYFRAMES = {
 }
 # (selector, property) pairs that are set twice at top level on purpose, with the reason.
 ALLOWED_OVERRIDES = {}
+# Selectors whose glyph follows a box of fixed size, not the text size, with the reason.
+FIXED_FONT_SIZES = {
+    ".avatar-sm": "initials in a 20 px avatar",
+    ".space-tile": "initials in a 20 px tile",
+    ".switcher-space .space-tile": "initials in an 18 px tile",
+    ".space-image-preview .space-tile": "initials in a 64 px tile",
+    ".space-row .space-tile": "initials in a 36 px tile",
+    ".tile-initials": "initials sized to the call tile",
+    ".sheet-reaction": "an emoji in a 44 px button",
+    ".emoji-grid li": "an emoji in a 34 px cell",
+    ".approval-code": "a verification code sized to its card",
+}
+# Font sizes that are not on the scale on purpose, with the reason.
+ALLOWED_FONT_SIZES = {
+    "inherit": "takes the parent's size",
+    "max(16px, 1em)": "iOS zooms into fields with text below 16 px",
+    "calc(100% * var(--text-scale))": "the root size the scale is built on",
+}
 TINY_FONT_PX = 11
-MAX_TINY_FONT_SIZES = 6
+MAX_RAW_HEX_COLOURS = 65
+HEX_COLOUR = re.compile(r"#[0-9a-fA-F]{3,8}\b")
 VAR_USE = re.compile(r"var\(\s*(--[\w-]+)")
-FONT_SIZE_PX = re.compile(r"(?:^|\s)(\d+(?:\.\d+)?)px\b")
+FONT_SIZE_PX = re.compile(r"(\d+(?:\.\d+)?)px\b")
 BLOCK_AT_RULES = ("@media", "@supports", "@layer", "@container", "@document")
 # `style=` as an attribute: not `style:prop=`, `x.style =`, `let style =` or `style ==`. Which tag
 # it belongs to is found by walking back from it (see enclosing_tag).
@@ -79,7 +102,8 @@ def check_sources(sources):
     findings += undefined_variables(parsed)
     findings += duplicate_keyframes(parsed)
     findings += conflicting_overrides(parsed)
-    findings += tiny_font_sizes(parsed)
+    findings += off_scale_font_sizes(parsed)
+    findings += raw_hex_colours(parsed)
     return findings
 
 
@@ -189,19 +213,46 @@ def conflicting_overrides(parsed):
     return findings
 
 
-def tiny_font_sizes(parsed):
-    tiny = []
+def off_scale_font_sizes(parsed):
+    findings = []
     for path, sheet in parsed.items():
         for decl in sheet.declarations:
             if decl.name not in ("font-size", "font"):
                 continue
-            # In the `font` shorthand the size is the first length; `/16px` after it is the line height.
-            value = decl.value.split("/")[0]
-            sizes = [float(px) for px in FONT_SIZE_PX.findall(value)]
-            if sizes and sizes[0] < TINY_FONT_PX:
-                tiny.append(f"{path}:{decl.line}: {decl.name}: {decl.value}")
-    if len(tiny) > MAX_TINY_FONT_SIZES:
-        return [f"{len(tiny)} font sizes below {TINY_FONT_PX}px (at most {MAX_TINY_FONT_SIZES}):"] + tiny
+            size = font_size_of(decl)
+            if size is None or size.startswith("var(--text-") or size in ALLOWED_FONT_SIZES:
+                continue
+            if any(selector in FIXED_FONT_SIZES for selector in decl.selectors):
+                px = FONT_SIZE_PX.match(size)
+                if px is None or float(px.group(1)) >= TINY_FONT_PX:
+                    continue
+                findings.append(f"{path}:{decl.line}: {decl.name}: {decl.value} is below {TINY_FONT_PX}px")
+                continue
+            findings.append(f"{path}:{decl.line}: {decl.name}: {decl.value} is off the type scale; use var(--text-*)")
+    return findings
+
+
+def font_size_of(decl):
+    """The size in `font-size`, or in the `font` shorthand (after style and weight, before `/`)."""
+    if decl.name == "font-size":
+        return decl.value
+    if decl.value in ("inherit", "initial", "unset"):
+        return None
+    for part in decl.value.split("/")[0].split():
+        if part[0].isdigit() and not part.isdigit() or part.startswith(("var(--text-", "calc(", "max(", "min(", "clamp(")):
+            return part
+    return None
+
+
+def raw_hex_colours(parsed):
+    raw = [
+        f"{path}:{decl.line}: {decl.name}: {decl.value}"
+        for path, sheet in parsed.items()
+        for decl in sheet.declarations
+        if not decl.name.startswith("--") and HEX_COLOUR.search(decl.value)
+    ]
+    if len(raw) > MAX_RAW_HEX_COLOURS:
+        return [f"{len(raw)} declarations with a raw hex colour (at most {MAX_RAW_HEX_COLOURS}); add a token:"] + raw
     return []
 
 
