@@ -1235,6 +1235,27 @@ impl AppState {
     self.overlay.set(Overlay::QuickSwitcher);
   }
 
+  /// The `in:` token of the open conversation (`in:#channel`, `in:@person`); `None` when no
+  /// conversation is open. The search is scoped to it by default (issue #579).
+  pub fn conversation_scope(&self) -> Option<String> {
+    let id = self.current_conversation_id()?;
+    let conversation = self.read(|backend| backend.conversation(id))?;
+    Some(crate::search_scope::scope_token(
+      conversation.kind,
+      &conversation.name,
+    ))
+  }
+
+  /// Opens the search limited to the open conversation (a removable chip), or the plain search
+  /// when no conversation is open.
+  pub fn open_scoped_switcher(&self) {
+    let query = self
+      .conversation_scope()
+      .map(|token| format!("{token} "))
+      .unwrap_or_default();
+    self.open_switcher(&query);
+  }
+
   pub fn open_search(&self, maybe_query: Option<&str>) {
     if let Some(query) = maybe_query {
       self.search_query.set(query.to_owned());

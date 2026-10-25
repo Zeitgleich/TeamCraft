@@ -4,6 +4,7 @@
 //! encrypted: nothing in plain text goes to the server); people also come from the server's
 //! directory, so a colleague who shares nothing with the user yet is found.
 
+use leptos::html;
 use leptos::prelude::*;
 
 use crate::components::avatar::{Avatar, AvatarSize};
@@ -19,6 +20,9 @@ use crate::model::{
 use crate::navigation::fuzzy_score;
 use crate::reactive::use_debounced;
 use crate::search::{SearchHit, parse_query};
+use crate::search_scope::{
+  chip_label, full_query, has_chip, is_date_chip, recent_days_token, split_filters, toggle_chip,
+};
 use crate::state::{AppState, use_app_state};
 
 /// Most entries per group.
@@ -118,16 +122,23 @@ impl Sources {
 pub fn QuickSwitcher() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let query = RwSignal::new(state.switcher_query.get_untracked());
+  let input = NodeRef::<html::Input>::new();
+  // What is typed is `query`; finished filter operators move out of it into `chips` (the removable
+  // pills before the field), and the search is chips plus text (search_scope.rs).
+  let (first_chips, first_text) = split_filters(&state.switcher_query.get_untracked());
+  let query = RwSignal::new(first_text);
+  let chips = RwSignal::new(first_chips);
   state.switcher_query.set(String::new());
-  let debounced_query = use_debounced(query, DEBOUNCE_MS);
+  let full = Memo::new(move |_| chips.with(|chips| full_query(chips, &query.get())));
+  let has_filters = Memo::new(move |_| chips.with(|chips| !chips.is_empty()));
+  let debounced_query = use_debounced(full, DEBOUNCE_MS);
   let selected = RwSignal::new(0_usize);
 
   // The directory (a server request) and the message index (a scan of the local messages in the
   // browser) only see the text once typing paused; names of what is on screen match on every key.
   let found_people = Memo::new(move |_| {
     let slow_needle = debounced_query.get().trim().to_owned();
-    if slow_needle.is_empty() {
+    if slow_needle.is_empty() || has_filters.get() {
       return Vec::new();
     }
     state.read(|backend| backend.search_people(&slow_needle))
@@ -141,6 +152,9 @@ pub fn QuickSwitcher() -> impl IntoView {
   });
   let groups = Memo::new(move |_| {
     let needle = query.get().trim().to_owned();
+    if has_filters.get() {
+      return filtered_groups(&full.get(), message_hits.get());
+    }
     let sources = read_sources(state, &needle, found_people.get(), message_hits.get());
     build_groups(&needle, sources)
   });
@@ -153,9 +167,31 @@ pub fn QuickSwitcher() -> impl IntoView {
   });
 
   Effect::new(move |_| {
-    query.track();
+    full.track();
     selected.set(0);
   });
+
+  let focus_field = move || {
+    if let Some(element) = input.get_untracked() {
+      drop(element.focus());
+    }
+  };
+  let on_input = move |ev: web_sys::Event| {
+    let value = event_target_value(&ev);
+    let (found, rest) = split_filters(&value);
+    if found.is_empty() {
+      query.set(value);
+      return;
+    }
+    chips.update(|chips| {
+      for chip in found {
+        if !has_chip(chips, &chip) {
+          chips.push(chip);
+        }
+      }
+    });
+    query.set(rest);
+  };
 
   let on_keydown = move |ev: web_sys::KeyboardEvent| {
     let count = items.with_untracked(Vec::len);
@@ -172,11 +208,16 @@ pub fn QuickSwitcher() -> impl IntoView {
           selected.update(|index| *index = (*index + count - 1) % count);
         }
       },
+      // Backspace in the empty field takes the last chip back (the scope first of all).
+      "Backspace" if query.with_untracked(|text| text.is_empty()) && has_filters.get_untracked() => {
+        ev.prevent_default();
+        chips.update(|chips| drop(chips.pop()));
+      },
       "Enter" => {
         ev.prevent_default();
         // Ctrl/Cmd+Enter opens the message search for the text instead.
         if ev.ctrl_key() || ev.meta_key() {
-          state.open_search(Some(query.get_untracked().trim()));
+          state.open_search(Some(&full.get_untracked()));
         } else if let Some(item) = items.with_untracked(|list| list.get(selected.get_untracked()).cloned()) {
           open_item(state, &item);
         }
@@ -202,6 +243,31 @@ pub fn QuickSwitcher() -> impl IntoView {
           <Icon name=IconName::ChevronLeft />
         </button>
         <Icon name=IconName::Search class="switcher-search-icon" />
+        <ul class="switcher-chips" aria-label=move || i18n.t("switcher-active-filters")>
+          <For each=move || chips.get() key=|chip| chip.clone() let:chip>
+            {
+              let label = chip_label(&chip);
+              let remove_label = label.clone();
+              let removed = chip.clone();
+              view! {
+                <li class="token-chip">
+                  <span class="mono" translate="no">{label}</span>
+                  <button
+                    type="button"
+                    class="icon-btn icon-btn-small"
+                    aria-label=move || i18n.t_with("search-remove-filter", &[("filter", &remove_label)])
+                    on:click=move |_| {
+                      chips.update(|chips| chips.retain(|existing| *existing != removed));
+                      focus_field();
+                    }
+                  >
+                    <Icon name=IconName::Close />
+                  </button>
+                </li>
+              }
+            }
+          </For>
+        </ul>
         <input
           type="text"
           role="combobox"
@@ -210,16 +276,20 @@ pub fn QuickSwitcher() -> impl IntoView {
           aria-autocomplete="list"
           aria-activedescendant=move || format!("switcher-opt-{}", selected.get())
           aria-label=move || i18n.t("switcher-input-label")
-          placeholder=move || i18n.t("switcher-placeholder")
+          placeholder=move || {
+            if has_filters.get() { i18n.t("switcher-placeholder-filtered") } else { i18n.t("switcher-placeholder") }
+          }
           autocomplete="off"
           spellcheck="false"
           name="switcher"
           data-autofocus
+          node_ref=input
           prop:value=move || query.get()
-          on:input=move |ev| query.set(event_target_value(&ev))
+          on:input=on_input
           on:keydown=on_keydown
         />
       </div>
+      <FilterChips chips=chips query=query input=input />
       <ul id="switcher-results" class="switcher-results" role="listbox" aria-label=move || i18n.t("switcher-results")>
         {move || {
           let list = groups.get();
@@ -256,7 +326,7 @@ pub fn QuickSwitcher() -> impl IntoView {
         <button
           type="button"
           class="switcher-hint switcher-hint-action"
-          on:click=move |_| state.open_search(Some(query.get_untracked().trim()))
+          on:click=move |_| state.open_search(Some(&full.get_untracked()))
         >
           <ShortcutKeys shortcut=SEARCH_MESSAGES />
           {move || i18n.t("switcher-search-messages")}
@@ -264,6 +334,145 @@ pub fn QuickSwitcher() -> impl IntoView {
         <span class="switcher-hint"><ShortcutKeys shortcut=ESCAPE />{move || i18n.t("switcher-hint-close")}</span>
       </footer>
     </Modal>
+  }
+}
+
+/// With filters set only messages are searched: "show results for …" first, then the hits.
+fn filtered_groups(full: &str, hits: Vec<SearchHit>) -> Vec<Group> {
+  if full.trim().is_empty() {
+    return Vec::new();
+  }
+  let mut items = vec![SwitcherItem::AllMessages(full.to_owned())];
+  items.extend(hits.into_iter().take(MAX_MESSAGES).map(SwitcherItem::Message));
+  vec![Group {
+    kind: GroupKind::Messages,
+    items,
+  }]
+}
+
+/// The row of filter buttons under the field (Slack's chips): each toggles its operator as a chip
+/// of the field, so the buttons and typed operators describe the same filters.
+#[component]
+fn FilterChips(
+  chips: RwSignal<Vec<String>>,
+  query: RwSignal<String>,
+  input: NodeRef<html::Input>,
+) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let is_extended = RwSignal::new(false);
+  let username = state.me().username;
+  // The open conversation's scope, as shown in the placeholder of the top bar.
+  let scope = Memo::new(move |_| state.conversation_scope());
+  let toggles: Vec<(&'static str, IconName, Signal<Option<String>>)> = vec![
+    ("search-chip-in-channel", IconName::Hash, scope.into()),
+    (
+      "search-chip-from-me",
+      IconName::User,
+      Signal::stored(Some(format!("from:{username}"))),
+    ),
+    (
+      "search-chip-mentions-me",
+      IconName::AtSign,
+      Signal::stored(Some(format!("@{username}"))),
+    ),
+    (
+      "search-chip-link",
+      IconName::Link,
+      Signal::stored(Some("has:link".to_owned())),
+    ),
+    (
+      "search-chip-threads",
+      IconName::Threads,
+      Signal::stored(Some("in-thread".to_owned())),
+    ),
+  ];
+  let focus_field = move || {
+    if let Some(element) = input.get_untracked() {
+      drop(element.focus());
+    }
+  };
+  // An operator that needs a value goes into the text, with the cursor behind it.
+  let insert_operator = move |operator: &'static str| {
+    query.update(|text| {
+      if !text.is_empty() && !text.ends_with(' ') {
+        text.push(' ');
+      }
+      text.push_str(operator);
+    });
+    focus_field();
+  };
+  let toggle_date = move || {
+    chips.update(|chips| {
+      if chips.iter().any(|chip| is_date_chip(chip)) {
+        chips.retain(|chip| !is_date_chip(chip));
+      } else {
+        chips.push(recent_days_token(crate::clock::now_ms()));
+      }
+    });
+    focus_field();
+  };
+  view! {
+    <div class="switcher-filters" role="group" aria-label=move || i18n.t("search-filters-label")>
+      {toggles
+        .into_iter()
+        .map(|(label, icon, token)| {
+          view! {
+            <Show when=move || token.get().is_some() fallback=|| ()>
+              <button
+                type="button"
+                class="chip-btn"
+                aria-pressed=move || {
+                  token.get().is_some_and(|token| chips.with(|chips| has_chip(chips, &token))).to_string()
+                }
+                on:click=move |_| {
+                  if let Some(token) = token.get_untracked() {
+                    chips.update(|chips| toggle_chip(chips, &token));
+                    focus_field();
+                  }
+                }
+              >
+                <Icon name=icon />
+                <span>{move || i18n.t(label)}</span>
+              </button>
+            </Show>
+          }
+        })
+        .collect_view()}
+      <button
+        type="button"
+        class="chip-btn"
+        aria-pressed=move || chips.with(|chips| chips.iter().any(|chip| is_date_chip(chip))).to_string()
+        on:click=move |_| toggle_date()
+      >
+        <Icon name=IconName::Calendar />
+        <span>{move || i18n.t("search-chip-last-week")}</span>
+      </button>
+      <button
+        type="button"
+        class="chip-btn chip-btn-icon"
+        aria-expanded=move || is_extended.get().to_string()
+        aria-label=move || i18n.t("search-chip-more")
+        title=move || i18n.t("search-chip-more")
+        on:click=move |_| is_extended.update(|open| *open = !*open)
+      >
+        <Icon name=IconName::Plus />
+      </button>
+      <Show when=move || is_extended.get() fallback=|| ()>
+        <button type="button" class="chip-btn" on:click=move |_| insert_operator("from:")>
+          <Icon name=IconName::User />
+          <span>{move || i18n.t("search-filter-from")}</span>
+        </button>
+        <button type="button" class="chip-btn" on:click=move |_| chips.update(|chips| toggle_chip(chips, "has:file"))>
+          <Icon name=IconName::File />
+          <span>{move || i18n.t("search-filter-file")}</span>
+        </button>
+        <button type="button" class="chip-btn" on:click=move |_| insert_operator("space:")>
+          <Icon name=IconName::Layers />
+          <span>{move || i18n.t("search-filter-space")}</span>
+        </button>
+      </Show>
+    </div>
   }
 }
 

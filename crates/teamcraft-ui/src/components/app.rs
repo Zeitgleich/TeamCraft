@@ -530,8 +530,16 @@ fn handle_global_shortcut(ev: &web_sys::KeyboardEvent, state: AppState) {
   let key = ev.key().to_lowercase();
 
   if modifier && !ev.alt_key() && !ev.shift_key() {
+    if key == "k" {
+      ev.prevent_default();
+      if state.overlay.get_untracked() == Overlay::QuickSwitcher {
+        state.overlay.set(Overlay::None);
+      } else {
+        state.open_scoped_switcher();
+      }
+      return;
+    }
     let overlay = match key.as_str() {
-      "k" => Some(Overlay::QuickSwitcher),
       "," => Some(Overlay::Settings),
       "/" => Some(Overlay::Shortcuts),
       _ => None,
@@ -569,13 +577,7 @@ fn handle_global_shortcut(ev: &web_sys::KeyboardEvent, state: AppState) {
   // (as in Slack and Teams), Ctrl/Cmd+Shift+F unscoped.
   if modifier && !ev.shift_key() && !ev.alt_key() && key == "f" {
     ev.prevent_default();
-    let scope = state
-      .current_conversation_id()
-      .and_then(|id| state.read(|backend| backend.conversation(id)))
-      .filter(|conversation| !conversation.name.contains(char::is_whitespace))
-      .map(|conversation| format!("in:#{} ", conversation.name))
-      .unwrap_or_default();
-    state.open_switcher(&scope);
+    state.open_scoped_switcher();
     return;
   }
   if modifier && ev.shift_key() && !ev.alt_key() && key == "f" {

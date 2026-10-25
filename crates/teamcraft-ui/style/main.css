@@ -3422,6 +3422,7 @@ ol.md-list {
 
 .switcher-input {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   padding: 0 16px;
@@ -3429,9 +3430,21 @@ ol.md-list {
   color: var(--text-muted);
 }
 
+/* The search's chips: the scope and other filters in front of the field, removable. */
+.switcher-chips {
+  display: contents;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.switcher-chips .token-chip {
+  flex: none;
+}
+
 .switcher-input input {
   flex: 1;
-  min-width: 0;
+  min-width: 8rem;
   height: 50px;
   border: 0;
   background: transparent;
@@ -3441,6 +3454,37 @@ ol.md-list {
   /* The switcher's only field, focused whenever it is open: the caret marks it, a ring would only
      frame the whole dialog. */
   outline: none;
+}
+
+/* Filter buttons under the field; on a narrow screen they scroll sideways instead of wrapping. */
+.switcher-filters {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  border-bottom: 1px solid var(--border);
+}
+
+.switcher-filters::-webkit-scrollbar {
+  display: none;
+}
+
+.switcher-filters .chip-btn {
+  flex: none;
+  white-space: nowrap;
+}
+
+.chip-btn[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.chip-btn-icon {
+  padding: 0 8px;
 }
 
 .switcher-results {
@@ -9608,6 +9652,20 @@ ol.md-list {
 
 .conversation-menu {
   width: min(280px, calc(100vw - var(--space-4)));
+}
+
+/* The header's bell: the menu hangs from it; a muted conversation shows it dimmed. On a phone the
+   "…" menu has the mute toggle instead. */
+.conversation-bell {
+  position: relative;
+}
+
+.conversation-bell > .header-btn.is-muted {
+  opacity: 0.6;
+}
+
+:root[data-layout="compact"] .conversation-bell {
+  display: none;
 }
 
 :root[data-layout="compact"] .switcher-input {

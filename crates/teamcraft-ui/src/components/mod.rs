@@ -43,6 +43,7 @@ pub mod composer;
 pub mod composer_commands;
 pub mod composer_editor;
 pub mod composer_toolbar;
+pub mod conversation_notify;
 pub mod count_badge;
 pub mod directory_view;
 pub mod edge_swipe;

@@ -134,7 +134,8 @@ pub fn use_interval_while(
 
 /// A copy of `source` that follows it once it stopped changing for `delay_ms`: a search box asks
 /// the server when the user paused typing, not on every key.
-pub fn use_debounced(source: RwSignal<String>, delay_ms: u64) -> ReadSignal<String> {
+pub fn use_debounced(source: impl Into<Signal<String>>, delay_ms: u64) -> ReadSignal<String> {
+  let source = source.into();
   let (value, set_value) = signal(source.get_untracked());
   let generation = StoredValue::new(0_u64);
   Effect::new(move |_| {

@@ -6,6 +6,7 @@ use crate::components::bookmarks::BookmarksBar;
 use crate::components::channel_glyph::ChannelGlyph;
 use crate::components::compact_back::CompactBack;
 use crate::components::composer::Composer;
+use crate::components::conversation_notify::ConversationBell;
 use crate::components::file_drop::{DropStrip, FileDrop};
 use crate::components::file_views::ChannelFiles;
 use crate::components::huddle_bar::HuddleBar;
@@ -16,7 +17,9 @@ use crate::components::sheet::MenuSurface;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::components::tab_list::{on_tab_keys, roving_tabindex};
 use crate::i18n::use_i18n;
+use crate::keys::{SEARCH_IN_CONVERSATION, shortcut_text};
 use crate::model::{Conversation, ConversationId, ConversationKind, MembershipIssue, UserId};
+use crate::prefs::MuteFor;
 use crate::state::{AppState, Overlay, SidePanel, use_app_state};
 
 /// How long after a DM's welcome wait ran out its banner is read again (the backend's clock).
@@ -526,6 +529,10 @@ fn ChannelHeader(
       .is_some_and(|conv| matches!(conv.kind, ConversationKind::Public | ConversationKind::Private))
   };
   let members_open = move || state.panel.get() == SidePanel::Members;
+  let search_label = move || {
+    let shortcut = shortcut_text(&SEARCH_IN_CONVERSATION, i18n.locale());
+    i18n.t_with("conversation-search", &[("shortcut", &shortcut)])
+  };
 
   view! {
     <header class="channel-header">
@@ -601,6 +608,15 @@ fn ChannelHeader(
       </div>
       <div class="header-actions">
         <CallButtons conversation=conversation info=info />
+        <ConversationBell conversation=conversation />
+        <button
+          class="header-btn compact-keep"
+          aria-label=search_label
+          title=search_label
+          on:click=move |_| state.open_scoped_switcher()
+        >
+          <Icon name=IconName::Search />
+        </button>
         <Show when=is_channel fallback=|| ()>
           <button
             class="header-btn"
@@ -759,6 +775,26 @@ fn ConversationMore(
           <button type="button" class="menu-item" role="menuitem" on:click=move |_| choose(|state, _, _| state.panel.set(SidePanel::Pins))>
             <Icon name=IconName::Bookmark />
             {move || i18n.t("pins-title")}
+          </button>
+          <button type="button" class="menu-item" role="menuitem" on:click=move |_| {
+            let id = conversation.to_string();
+            is_open.set(false);
+            state.settings.prefs.update(|prefs| {
+              let mut entry = prefs.notifications.conversation(&id);
+              entry.mute = if entry.mute == MuteFor::Off { MuteFor::Forever } else { MuteFor::Off };
+              prefs.notifications.set_conversation(&id, entry);
+            });
+          }>
+            {move || {
+              let is_muted = state
+                .settings
+                .prefs
+                .with(|prefs| prefs.notifications.conversation(&conversation.to_string()).mute != MuteFor::Off);
+              view! {
+                <Icon name=if is_muted { IconName::Bell } else { IconName::BellOff } />
+                {if is_muted { i18n.t("conversation-unmute") } else { i18n.t("conversation-mute") }}
+              }
+            }}
           </button>
           <button type="button" class="menu-item" role="menuitem" on:click=move |_| {
             let favorite = !is_favorite();

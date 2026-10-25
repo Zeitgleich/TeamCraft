@@ -8,6 +8,7 @@ use crate::components::status_menu::StatusMenu;
 use crate::components::window_controls::{ClickOrDrag, window_drag_handler};
 use crate::i18n::use_i18n;
 use crate::keys::{QUICK_SWITCHER, ShortcutKeys};
+use crate::search_scope::chip_label;
 use crate::state::{Overlay, use_app_state};
 
 /// Global header: search, help and the account/status menu. In the desktop app it is also the
@@ -48,9 +49,14 @@ pub fn TopBar() -> impl IntoView {
         <BrandLogo class="brand-logo" fallback=|| () />
         <span class="brand-name">{move || brand.with(|view| view.display_name.clone())}</span>
       </a>
-      <button class="search-btn" on:click=move |_| state.overlay.set(Overlay::QuickSwitcher)>
+      <button class="search-btn" on:click=move |_| state.open_scoped_switcher()>
         <Icon name=IconName::Search />
-        <span>{move || i18n.t("search-placeholder")}</span>
+        <span>
+          {move || match state.conversation_scope() {
+            Some(token) => i18n.t_with("search-placeholder-scoped", &[("scope", &chip_label(&token))]),
+            None => i18n.t("search-placeholder"),
+          }}
+        </span>
         <ShortcutKeys shortcut=QUICK_SWITCHER />
       </button>
       <div class="top-actions">
