@@ -181,7 +181,7 @@ impl SessionControl {
       control.is_checking_server.set_if_alive(false);
       match outcome {
         Ok(server) => {
-          crate::brand::show_server_brand(check.brand);
+          crate::brand::show_server_brand(check.brand, &check.server.origin);
           control.server.set_if_alive(Some(server));
           control.sign_in(look);
         },
