@@ -8,6 +8,7 @@ use crate::clock::{format_date_time, format_relative, now_ms};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
+use crate::components::sliding_indicator::SlidingIndicator;
 use crate::components::tab_list::{on_tab_keys, roving_tabindex};
 use crate::i18n::use_i18n;
 use crate::state::use_app_state;
@@ -103,6 +104,7 @@ pub fn ActivityView() -> impl IntoView {
         </button>
       </header>
       <div class="view-tabs" role="tablist" aria-label=move || i18n.t("activity-filter") on:keydown=on_keydown>
+        <SlidingIndicator inset_px=8.0 />
         {ActivityTab::ALL
           .into_iter()
           .map(|value| {
