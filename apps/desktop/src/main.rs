@@ -14,10 +14,10 @@ mod calls;
 mod core;
 #[cfg(target_os = "linux")]
 mod desktop_entry;
-#[cfg(target_os = "linux")]
 mod external_links;
 #[cfg(target_os = "linux")]
 mod file_portal;
+#[cfg(target_os = "linux")]
 mod freedesktop;
 mod notifications;
 mod ringtone;
