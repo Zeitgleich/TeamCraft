@@ -87,22 +87,22 @@ impl CallBackend for MockBackend {
       id: id.into(),
       label: label.into(),
     };
-    MediaDevices {
-      cameras: vec![
+    MediaDevices::listed(
+      vec![
         device("cam-0", "Integrated Camera"),
         device("cam-1", "External USB Camera"),
       ],
-      microphones: vec![
+      vec![
         device("mic-0", "Built-in Microphone"),
         device("mic-1", "Headset Microphone"),
         device("mic-2", "Conference Speakerphone"),
       ],
-      speakers: vec![
+      vec![
         device("spk-0", "Built-in Speakers"),
         device("spk-1", "Headset Earphones"),
         device("spk-2", "Conference Speakerphone"),
       ],
-    }
+    )
   }
 
   fn call_participants(&self, conversation: ConversationId) -> Vec<Participant> {

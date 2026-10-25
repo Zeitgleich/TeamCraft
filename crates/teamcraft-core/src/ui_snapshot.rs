@@ -44,6 +44,9 @@ struct Parts {
   user_ids_at: u64,
   spaces: Revised<Vec<Space>>,
   conversations: BTreeMap<ConversationId, Revised<ConversationChange>>,
+  /// When each conversation's messages were last written, entry changed or not: a thread reply
+  /// or an edit leaves the entry as it was but changes what the reader shows of the feed.
+  feeds: BTreeMap<ConversationId, u64>,
   order: Revised<Vec<ConversationId>>,
   security: Revised<SecuritySnapshot>,
   /// When the live state (counts, threads, presence log, receipts) was last written.
@@ -162,6 +165,9 @@ impl SnapshotCache {
         true
       },
     };
+    if let Some(parts) = &mut self.maybe_parts {
+      is_changed |= parts.note_feeds(&changes.conversations, next);
+    }
     if let (Some(parts), Some(security)) = (&mut self.maybe_parts, maybe_security) {
       is_changed |= parts.security.set(security, next);
     }
@@ -205,6 +211,7 @@ impl Parts {
       user_ids_at: revision,
       spaces: Revised::new(spaces, revision),
       conversations,
+      feeds: BTreeMap::new(),
       order: Revised::new(order, revision),
       security: Revised::new(SecuritySnapshot::default(), revision),
       live_at: revision,
@@ -242,6 +249,7 @@ impl Parts {
       conversations.insert(id, part);
     }
     self.conversations = conversations;
+    self.feeds.retain(|id, _| self.conversations.contains_key(id));
     is_changed |= self.order.set(fresh.order.value, revision);
     self.mute_ends = fresh.mute_ends;
     if is_live {
@@ -249,6 +257,19 @@ impl Parts {
       is_changed = true;
     }
     is_changed
+  }
+
+  /// Notes that the messages of `conversations` were written at `revision`; returns whether any of
+  /// them is a known conversation (a reader then has feeds to re-read).
+  fn note_feeds(&mut self, conversations: &BTreeSet<ConversationId>, revision: u64) -> bool {
+    let mut is_noted = false;
+    for conversation in conversations {
+      if self.conversations.contains_key(conversation) {
+        self.feeds.insert(*conversation, revision);
+        is_noted = true;
+      }
+    }
+    is_noted
   }
 
   /// Re-reads only the conversations and people `changes` name.
@@ -366,6 +387,15 @@ impl Parts {
         .filter_map(|id| self.conversations.get(id))
         .filter(|part| is_newer(part.at))
         .map(|part| part.value.clone())
+        .collect(),
+      // Those whose entry is sent anyway are re-read for it.
+      feeds: self
+        .feeds
+        .iter()
+        .filter(|(id, at)| {
+          is_newer(**at) && self.conversations.get(*id).is_none_or(|part| !is_newer(part.at))
+        })
+        .map(|(id, _)| *id)
         .collect(),
       maybe_order: is_newer(self.order.at).then(|| self.order.value.clone()),
       maybe_security: is_newer(self.security.at).then(|| self.security.value.clone()),

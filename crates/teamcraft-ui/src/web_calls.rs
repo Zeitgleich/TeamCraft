@@ -130,6 +130,11 @@ pub fn network_changed() {
   }
 }
 
+/// Whether this page runs the calls itself (the browser, not the desktop shell).
+pub fn is_in_page() -> bool {
+  current().is_some()
+}
+
 /// Whether the page shows real call video (the call module runs).
 pub fn can_show_video() -> bool {
   current().is_some_and(|host| host.loaded_module().is_some())
@@ -503,7 +508,7 @@ fn json_value<T: serde::Serialize>(value: &T) -> JsValue {
   JsValue::from_str(&serde_json::to_string(value).unwrap_or_default())
 }
 
-fn js_text(error: &JsValue) -> String {
+pub(crate) fn js_text(error: &JsValue) -> String {
   error
     .as_string()
     .or_else(|| {

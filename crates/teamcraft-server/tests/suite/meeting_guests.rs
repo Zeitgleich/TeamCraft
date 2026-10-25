@@ -32,6 +32,7 @@ async fn start() -> Option<Rig> {
     max_invitees: 20,
     guest_token_secret: "0123456789abcdef0123456789abcdef".to_owned().into(),
     guest_grace_secs: 7200,
+    max_shared_link_guests: 3,
     maybe_inbox_token: None,
     smtp: None,
     mail_texts: MailTexts::default(),
@@ -76,6 +77,16 @@ impl Rig {
       reply.body["conversation_id"].as_str().unwrap().to_owned(),
       invite_token(&mail.text),
     )
+  }
+
+  /// The meeting's shared guest link, as the host gets it.
+  async fn shared_link(&self, host: &TestUser, meeting: &str) -> String {
+    let reply = self
+      .app
+      .put(host, &format!("/meetings/{meeting}/shared-guest-link"), json!({}))
+      .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    reply.body["join_url"].as_str().unwrap().to_owned()
   }
 
   async fn join(&self, token: &str, name: &str) -> (StatusCode, Value) {
@@ -463,6 +474,344 @@ mod sessions {
     assert_eq!((me.0, me.1["role"].as_str()), (StatusCode::OK, Some("guest")));
     assert_eq!(me.1["display_name"], "Gus");
     assert_eq!(invite_as_session.0, StatusCode::UNAUTHORIZED);
+    rig.app.stop().await;
+  }
+}
+
+mod shared_link {
+  use super::*;
+
+  #[tokio::test]
+  async fn one_link_lets_several_guests_into_the_lobby_even_without_one() {
+    let rig = rig!();
+    let app = &rig.app;
+    let alice = owner();
+    let (meeting, _, _) = rig.meeting_with_guest(&alice, false).await;
+
+    let first = rig.shared_link(&alice, &meeting).await;
+    let again = rig.shared_link(&alice, &meeting).await;
+    assert_eq!(first, again, "asking again returns the same link");
+    assert!(
+      first.starts_with(&format!("{BASE_URL}/meeting/{meeting}#invite=")),
+      "{first}"
+    );
+
+    let (gus_status, gus) = rig.join(&invite_token(&first), "Gus").await;
+    let (ida_status, ida) = rig.join(&invite_token(&first), "Ida").await;
+
+    assert_eq!((gus_status, ida_status), (StatusCode::OK, StatusCode::OK));
+    // The meeting has no lobby, but guests of the shared link always wait for a host.
+    assert_eq!(
+      (gus["lobby_state"].as_str(), ida["lobby_state"].as_str()),
+      (Some("waiting"), Some("waiting"))
+    );
+    assert_ne!(
+      gus["user_id"], ida["user_id"],
+      "every guest is a person of their own"
+    );
+    let lobby = app.get(&alice, &format!("/meetings/{meeting}/lobby")).await;
+    assert_eq!(lobby.body["entries"].as_array().unwrap().len(), 2);
+    rig.app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_revoked_link_admits_nobody_new_and_the_next_one_is_new() {
+    let rig = rig!();
+    let app = &rig.app;
+    let alice = owner();
+    let (meeting, _, _) = rig.meeting_with_guest(&alice, true).await;
+    let old = rig.shared_link(&alice, &meeting).await;
+    let (_, gus) = rig.join(&invite_token(&old), "Gus").await;
+
+    let path = format!("/meetings/{meeting}/shared-guest-link");
+    assert_eq!(app.delete(&alice, &path).await.status, StatusCode::NO_CONTENT);
+    assert_eq!(
+      app.delete(&alice, &path).await.status,
+      StatusCode::NO_CONTENT,
+      "revoking twice is fine"
+    );
+    let late = rig.join(&invite_token(&old), "Ida").await;
+    let new = rig.shared_link(&alice, &meeting).await;
+    let with_new = rig.join(&invite_token(&new), "Ida").await;
+    let old_again = rig.join(&invite_token(&old), "Max").await;
+
+    assert_eq!(late.0, StatusCode::UNAUTHORIZED, "{}", late.1);
+    assert_ne!(old, new);
+    assert_eq!(with_new.0, StatusCode::OK, "{}", with_new.1);
+    assert_eq!(old_again.0, StatusCode::UNAUTHORIZED);
+    // The guest who got in before the revocation is still waiting for a decision.
+    let guest_token = gus["guest_token"].as_str().unwrap();
+    let mine = rig
+      .request(
+        Some(guest_token),
+        Method::GET,
+        &format!("/meetings/{meeting}/lobby/me"),
+        None,
+      )
+      .await;
+    assert_eq!(mine.1["state"], "waiting");
+    rig.app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn the_link_admits_at_most_the_configured_number_of_guests() {
+    let rig = rig!();
+    let alice = owner();
+    let (meeting, _, _) = rig.meeting_with_guest(&alice, true).await;
+    let token = invite_token(&rig.shared_link(&alice, &meeting).await);
+
+    // `max_shared_link_guests` is 3 in this rig.
+    for name in ["One", "Two", "Three"] {
+      assert_eq!(rig.join(&token, name).await.0, StatusCode::OK, "{name}");
+    }
+    let fourth = rig.join(&token, "Four").await;
+
+    assert_eq!(fourth.0, StatusCode::CONFLICT, "{}", fourth.1);
+    rig.app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn the_link_ends_with_a_cancelled_or_finished_meeting() {
+    let rig = rig!();
+    let app = &rig.app;
+    let alice = owner();
+    let (cancelled, _, _) = rig.meeting_with_guest(&alice, true).await;
+    let cancelled_link = rig.shared_link(&alice, &cancelled).await;
+    app.delete(&alice, &format!("/meetings/{cancelled}")).await;
+    let (over, _, _) = rig.meeting_with_guest(&alice, true).await;
+    let over_link = rig.shared_link(&alice, &over).await;
+    let moved = app
+      .patch(
+        &alice,
+        &format!("/meetings/{over}"),
+        json!({"starts_at": 1_000_000_000_000_i64, "ends_at": 1_000_003_600_000_i64}),
+      )
+      .await;
+    assert_eq!(moved.status, StatusCode::OK, "{}", moved.body);
+
+    let cancelled_join = rig.join(&invite_token(&cancelled_link), "Gus").await;
+    let over_join = rig.join(&invite_token(&over_link), "Gus").await;
+    let new_for_cancelled = app
+      .put(
+        &alice,
+        &format!("/meetings/{cancelled}/shared-guest-link"),
+        json!({}),
+      )
+      .await;
+
+    assert_eq!(
+      (cancelled_join.0, over_join.0),
+      (StatusCode::UNAUTHORIZED, StatusCode::UNAUTHORIZED)
+    );
+    assert_eq!(new_for_cancelled.status, StatusCode::CONFLICT);
+    rig.app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn only_hosts_get_and_revoke_the_link() {
+    let rig = rig!();
+    let app = &rig.app;
+    let (alice, bob, eve) = (owner(), member("bob"), member("eve"));
+    let bob_id = user_id(app, &bob).await;
+    let reply = app
+      .post(
+        &alice,
+        "/meetings",
+        json!({"title": "Sync", "starts_at": STARTS_AT, "ends_at": ENDS_AT, "invitees": [{"kind": "user", "user_id": bob_id}]}),
+      )
+      .await;
+    let meeting = reply.id();
+    let link = rig.shared_link(&alice, &meeting).await;
+    let (_, joined) = rig.join(&invite_token(&link), "Gus").await;
+    let guest_token = joined["guest_token"].as_str().unwrap().to_owned();
+    let path = format!("/meetings/{meeting}/shared-guest-link");
+
+    // An invited member is no host, a stranger and a waiting guest don't see the meeting.
+    assert_eq!(
+      app.put(&bob, &path, json!({})).await.status,
+      StatusCode::FORBIDDEN
+    );
+    assert_eq!(app.delete(&bob, &path).await.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+      app.put(&eve, &path, json!({})).await.status,
+      StatusCode::NOT_FOUND
+    );
+    assert_eq!(app.delete(&eve, &path).await.status, StatusCode::NOT_FOUND);
+    for method in [Method::PUT, Method::DELETE] {
+      let (status, _) = rig
+        .request(Some(&guest_token), method.clone(), &path, Some(json!({})))
+        .await;
+      assert_eq!(status, StatusCode::NOT_FOUND, "{method}");
+    }
+    // The link still works: none of that revoked it.
+    assert_eq!(rig.join(&invite_token(&link), "Ida").await.0, StatusCode::OK);
+    rig.app.stop().await;
+  }
+}
+
+mod knocking {
+  use super::*;
+
+  #[tokio::test]
+  async fn a_member_with_the_link_knocks_waits_and_is_admitted() {
+    let rig = rig!();
+    let app = &rig.app;
+    let (alice, eve) = (owner(), member("eve"));
+    let alice_device = register_device(app, &alice).await;
+    let eve_id = user_id(app, &eve).await;
+    let meeting = app.post(&alice, "/meetings/instant", json!({})).await.id();
+    let mut alice_socket = ws::connect(app, &alice, &alice_device).await;
+    ws::events(&mut alice_socket, Duration::from_millis(300)).await;
+    let knock_path = format!("/meetings/{meeting}/lobby/me");
+    assert_eq!(
+      app.get(&eve, &format!("/meetings/{meeting}")).await.status,
+      StatusCode::NOT_FOUND
+    );
+
+    let knock = app.post(&eve, &knock_path, json!({})).await;
+    let again = app.post(&eve, &knock_path, json!({})).await;
+
+    assert_eq!(knock.status, StatusCode::OK, "{}", knock.body);
+    assert_eq!(
+      (knock.body["state"].as_str(), again.body["state"].as_str()),
+      (Some("waiting"), Some("waiting"))
+    );
+    let heard = events_of(&ws::events(&mut alice_socket, QUIET).await, "lobby_join");
+    assert_eq!(
+      heard.len(),
+      1,
+      "knocking again while waiting is no news: {heard:?}"
+    );
+    assert_eq!(heard[0]["user"]["id"], eve_id.as_str());
+    let lobby = app.get(&alice, &format!("/meetings/{meeting}/lobby")).await;
+    assert_eq!(lobby.body["entries"][0]["user"]["id"], eve_id.as_str());
+
+    let admit = app
+      .post(
+        &alice,
+        &format!("/meetings/{meeting}/lobby/{eve_id}/admit"),
+        json!({}),
+      )
+      .await;
+    assert_eq!(admit.status, StatusCode::NO_CONTENT, "{}", admit.body);
+    assert_eq!(
+      app.get(&eve, &format!("/meetings/{meeting}")).await.status,
+      StatusCode::OK
+    );
+    assert_eq!(
+      app.post(&eve, &knock_path, json!({})).await.body["state"],
+      "admitted"
+    );
+    rig.app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_member_who_left_after_being_admitted_waits_again() {
+    let rig = rig!();
+    let app = &rig.app;
+    let (alice, eve) = (owner(), member("eve"));
+    let alice_device = register_device(app, &alice).await;
+    let eve_id = user_id(app, &eve).await;
+    let created = app.post(&alice, "/meetings/instant", json!({})).await;
+    let (meeting, chat) = (
+      created.id(),
+      created.body["conversation_id"].as_str().unwrap().to_owned(),
+    );
+    let knock_path = format!("/meetings/{meeting}/lobby/me");
+    app.post(&eve, &knock_path, json!({})).await;
+    app
+      .post(
+        &alice,
+        &format!("/meetings/{meeting}/lobby/{eve_id}/admit"),
+        json!({}),
+      )
+      .await;
+    // Meeting chats have no "leave" yet; the membership ends as it would through an admin.
+    let left = app
+      .state
+      .database
+      .remove_conversation_member(chat.parse().unwrap(), eve_id.parse().unwrap())
+      .await
+      .unwrap();
+    assert!(left);
+    let mut alice_socket = ws::connect(app, &alice, &alice_device).await;
+    ws::events(&mut alice_socket, Duration::from_millis(300)).await;
+
+    let knock = app.post(&eve, &knock_path, json!({})).await;
+
+    assert_eq!(knock.body["state"], "waiting", "{}", knock.body);
+    let heard = events_of(&ws::events(&mut alice_socket, QUIET).await, "lobby_join");
+    assert_eq!(heard.len(), 1);
+    rig.app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_denied_member_keeps_their_account_and_stays_out() {
+    let rig = rig!();
+    let app = &rig.app;
+    let (alice, eve) = (owner(), member("eve"));
+    let eve_id = user_id(app, &eve).await;
+    let meeting = app.post(&alice, "/meetings/instant", json!({})).await.id();
+    let knock_path = format!("/meetings/{meeting}/lobby/me");
+    app.post(&eve, &knock_path, json!({})).await;
+
+    let denied = app
+      .post(
+        &alice,
+        &format!("/meetings/{meeting}/lobby/{eve_id}/deny"),
+        json!({}),
+      )
+      .await;
+
+    assert_eq!(denied.status, StatusCode::NO_CONTENT, "{}", denied.body);
+    assert_eq!(app.get(&eve, "/me").await.status, StatusCode::OK);
+    assert_eq!(
+      app.post(&eve, &knock_path, json!({})).await.body["state"],
+      "denied",
+      "a decision is final"
+    );
+    assert_eq!(
+      app.get(&eve, &format!("/meetings/{meeting}")).await.status,
+      StatusCode::NOT_FOUND
+    );
+    rig.app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn invited_members_are_in_and_guests_and_ended_meetings_are_refused() {
+    let rig = rig!();
+    let app = &rig.app;
+    let (alice, bob, eve) = (owner(), member("bob"), member("eve"));
+    let bob_id = user_id(app, &bob).await;
+    let reply = app
+      .post(
+        &alice,
+        "/meetings",
+        json!({"title": "Sync", "starts_at": STARTS_AT, "ends_at": ENDS_AT, "invitees": [{"kind": "user", "user_id": bob_id}]}),
+      )
+      .await;
+    let meeting = reply.id();
+    let knock_path = format!("/meetings/{meeting}/lobby/me");
+    let (_, joined) = rig
+      .join(&invite_token(&rig.shared_link(&alice, &meeting).await), "Gus")
+      .await;
+    let guest_token = joined["guest_token"].as_str().unwrap().to_owned();
+
+    let invited = app.post(&bob, &knock_path, json!({})).await;
+    let guest = rig
+      .request(Some(&guest_token), Method::POST, &knock_path, None)
+      .await;
+    let unknown = app.post(&eve, "/meetings/1234567/lobby/me", json!({})).await;
+    app.delete(&alice, &format!("/meetings/{meeting}")).await;
+    let cancelled_outsider = app.post(&eve, &knock_path, json!({})).await;
+    let cancelled_member = app.post(&bob, &knock_path, json!({})).await;
+
+    assert_eq!(invited.body["state"], "admitted", "{}", invited.body);
+    assert_eq!(guest.0, StatusCode::FORBIDDEN);
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+    // An outsider can't tell a cancelled meeting from none; a member learns that it is over.
+    assert_eq!(cancelled_outsider.status, StatusCode::NOT_FOUND);
+    assert_eq!(cancelled_member.status, StatusCode::CONFLICT);
     rig.app.stop().await;
   }
 }

@@ -29,7 +29,12 @@ messages from before the user joined are not counted. The read position is
 `PUT /conversations/{id}/read-position`; the server keeps the larger of the stored and the new
 position, so a late or repeated write never moves it back. Clients queue read positions,
 acknowledgements, pin flags and the manual presence in their store while offline and send them once
-back (issue #159), also after an app restart.
+back (issue #159), also after an app restart. Clients move the read position when the user opens a
+conversation, sends a top-level message in it, and whenever something in the open conversation is
+unread while its newest message is in view of the focused window (a message that arrives while the
+user reads along, coming back to the window, scrolling down to the end), once per newest message.
+Moving the read position also sends the DM read receipt (subject to the read-receipt setting), so a
+DM shows as read as soon as the recipient is at its bottom in a focused, visible window.
 
 Clients keep the counts current from gateway events instead of polling `GET /unread` (issue #183):
 

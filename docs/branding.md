@@ -212,7 +212,8 @@ validated like the global one.
   keys with `#rgb`/`#rrggbb` values, only asset paths of the brand endpoint (made absolute on the
   server URL), only https links (http for localhost), bounded text lengths.
 - **Applying**: CSS custom properties are set through the CSSOM (`style.setProperty`, allowed under the
-  CSP); images through `<img src>`; the document title and favicon follow the brand. The effective
+  CSP); images through `<img src>`; the document title follows the brand ("Brand – TeamCraft"); the favicon stays the product's mark, with
+  a red dot while something is unread, so the tab is recognisable. The effective
   theme (setting, else the system) picks the `*_dark` assets and the `dark` colors.
 
 ## 6. Things that use the brand of the recipient

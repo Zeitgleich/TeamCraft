@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO meeting_invites (id, meeting_id, created_by, is_shared) VALUES ($1, $2, $3, true)\n         ON CONFLICT (meeting_id) WHERE is_shared AND revoked_at IS NULL\n         DO UPDATE SET is_shared = EXCLUDED.is_shared\n         RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "meeting_invites",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3e248e19b1ff0241f53bc6d3d6484e72d8fa9007bc834345633e174a8a3999fe"
+}

@@ -25,17 +25,18 @@ impl FakeCalls {
     Self {
       carol,
       snapshot: Mutex::new(CallSnapshot {
-        devices: MediaDevices {
-          cameras: Vec::new(),
-          microphones: vec![
+        // No camera: the pre-join screen's "no camera found" state.
+        devices: MediaDevices::listed(
+          Vec::new(),
+          vec![
             device("mic-1", "Built-in microphone"),
             device("mic-2", "USB headset"),
           ],
-          speakers: vec![
+          vec![
             device("spk-1", "Built-in speakers"),
             device("spk-2", "USB headset"),
           ],
-        },
+        ),
         ..CallSnapshot::default()
       }),
     }
@@ -122,6 +123,8 @@ impl FakeCalls {
       | CallAction::SetTalking { .. }
       | CallAction::SelectCamera { .. }
       | CallAction::SetStatusSounds { .. }
+      | CallAction::RefreshDevices
+      | CallAction::TestSpeakers { .. }
       | CallAction::Unknown => {},
     }
   }

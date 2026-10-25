@@ -59,6 +59,7 @@ async fn credentials_and_ciphertext_do_not_appear_in_trace_level_logs() {
     max_invitees: 5,
     guest_token_secret: "0123456789abcdef0123456789abcdef".to_owned().into(),
     guest_grace_secs: 7200,
+    max_shared_link_guests: 50,
     maybe_inbox_token: Some("inbox-token-SECRET".to_owned().into()),
     smtp: None,
     mail_texts: MailTexts::default(),

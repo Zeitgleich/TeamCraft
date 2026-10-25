@@ -330,6 +330,9 @@ impl NotificationPrefs {
   }
 }
 
+/// "Away after" of a new install: a real buffer before the user shows as away.
+pub const DEFAULT_AWAY_AFTER_MINUTES: u32 = 15;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PrivacyPrefs {
@@ -344,7 +347,7 @@ impl Default for PrivacyPrefs {
     Self {
       share_read_receipts: true,
       share_typing: true,
-      away_after_minutes: Some(10),
+      away_after_minutes: Some(DEFAULT_AWAY_AFTER_MINUTES),
     }
   }
 }

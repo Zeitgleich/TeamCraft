@@ -35,6 +35,9 @@ const OVERTONE: f32 = 0.15;
 const ECHO_SECONDS: f32 = 0.22;
 const ECHO_FEEDBACK: f32 = 0.35;
 const ECHO_MIX: f32 = 0.4;
+/// The speaker test: all notes and most of their echo, then a fade.
+pub const TEST_SOUND_SECONDS: f32 = 1.4;
+const TEST_FADE_SECONDS: f32 = 0.25;
 
 /// The samples of one pass (mono, 48 kHz); play it in a loop.
 pub fn synthesize() -> Vec<f32> {
@@ -53,6 +56,19 @@ pub fn synthesize() -> Vec<f32> {
   let peak = samples.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
   if peak > 0.0 {
     samples.iter_mut().for_each(|sample| *sample *= PEAK / peak);
+  }
+  samples
+}
+
+/// The speaker test of the pre-join screen: the ringtone's arpeggio once, faded out, so it sounds
+/// like the app and ends well before the button's "playing" state does.
+pub fn test_sound() -> Vec<f32> {
+  let mut samples = synthesize();
+  samples.truncate(seconds_to_samples(TEST_SOUND_SECONDS));
+  let fade = seconds_to_samples(TEST_FADE_SECONDS).min(samples.len());
+  let start = samples.len() - fade;
+  for (index, sample) in samples[start..].iter_mut().enumerate() {
+    *sample *= 1.0 - (index + 1) as f32 / fade as f32;
   }
   samples
 }
@@ -92,7 +108,7 @@ fn seconds_to_samples(seconds: f32) -> usize {
 }
 
 #[cfg(feature = "native")]
-pub use player::RingtonePlayer;
+pub use player::{RingtonePlayer, play_once};
 
 #[cfg(feature = "native")]
 mod player {
@@ -103,7 +119,7 @@ mod player {
 
   use tracing::warn;
 
-  use crate::audio_device::{AudioOutput, PlaybackBuffer};
+  use crate::audio_device::{AudioDeviceError, AudioOutput, PlaybackBuffer};
   use crate::audio_frame::SAMPLE_RATE_HZ;
   use crate::audio_io::AudioDeviceChoice;
 
@@ -111,6 +127,8 @@ mod player {
   const AHEAD_SECONDS: f32 = 0.2;
   /// How often the feeding thread tops the queue up.
   const FEED_INTERVAL: Duration = Duration::from_millis(40);
+  /// How long [`play_once`] keeps the stream open after the samples: the device's buffer.
+  const PLAY_ONCE_TAIL: Duration = Duration::from_millis(150);
 
   /// Plays the ringtone in a loop on its own thread (the audio stream may not move between threads
   /// on every platform) until dropped.
@@ -146,6 +164,18 @@ mod player {
         warn!("the ringtone thread panicked");
       }
     }
+  }
+
+  /// Plays `samples` once on `device` and returns when they have played. Blocking: run it on a
+  /// thread of its own (the audio stream may not move between threads).
+  pub fn play_once(device: &AudioDeviceChoice, samples: &[f32]) -> Result<(), AudioDeviceError> {
+    let buffer = Arc::new(PlaybackBuffer::new(samples.len()));
+    buffer.push(samples);
+    let _output = AudioOutput::open(device, buffer.clone())?;
+    // The stream drains the buffer; a little more for the device's own latency.
+    let length = Duration::from_secs_f32(samples.len() as f32 / SAMPLE_RATE_HZ as f32);
+    std::thread::sleep(length + PLAY_ONCE_TAIL);
+    Ok(())
   }
 
   fn ring(device: &AudioDeviceChoice, is_stopped: &AtomicBool) {
@@ -186,6 +216,15 @@ mod tests {
       .map(|pair| (pair[1] - pair[0]).abs())
       .fold(0.0f32, f32::max);
     assert!(largest_step < 0.1, "jumps by {largest_step}");
+  }
+
+  #[test]
+  fn the_speaker_test_is_short_audible_and_ends_silent() {
+    let samples = test_sound();
+    assert_eq!(samples.len(), seconds_to_samples(TEST_SOUND_SECONDS));
+    let peak = samples.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+    assert!(peak > 0.3, "peaks at {peak}");
+    assert!(samples[samples.len() - 1].abs() < 1e-6);
   }
 
   #[test]
