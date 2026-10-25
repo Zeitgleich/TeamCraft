@@ -3,6 +3,7 @@ use leptos::prelude::*;
 use crate::calls::{CallKind, CallPhase, CallRequest};
 use crate::components::avatar::PresenceDot;
 use crate::components::bookmarks::BookmarksBar;
+use crate::components::channel_glyph::ChannelGlyph;
 use crate::components::compact_back::CompactBack;
 use crate::components::composer::Composer;
 use crate::components::file_views::ChannelFiles;
@@ -429,8 +430,15 @@ fn ChannelHeader(
   let title = move || {
     let conv = info.get()?;
     let icon = match conv.kind {
-      ConversationKind::Public => view! { <Icon name=IconName::Hash class="header-icon" /> }.into_any(),
-      ConversationKind::Private => view! { <Icon name=IconName::Lock class="header-icon" /> }.into_any(),
+      ConversationKind::Public | ConversationKind::Private => {
+        let fallback = if conv.kind == ConversationKind::Public {
+          IconName::Hash
+        } else {
+          IconName::Lock
+        };
+        let version = Signal::derive(move || info.get().and_then(|found| found.maybe_image_version));
+        view! { <ChannelGlyph conversation=conversation maybe_version=version fallback=fallback class="header-icon" /> }.into_any()
+      },
       ConversationKind::Integration => {
         view! { <Icon name=IconName::Terminal class="header-icon" /> }.into_any()
       },
@@ -447,10 +455,11 @@ fn ChannelHeader(
         }
       },
     };
+    let full_name = conv.name.clone();
     Some(view! {
-      <h1 class="header-title" translate="no">
+      <h1 class="header-title" translate="no" title=full_name>
         {icon}
-        {conv.name}
+        <span class="header-name">{conv.name}</span>
       </h1>
     })
   };
@@ -672,8 +681,9 @@ fn ChannelTabs(tab: RwSignal<ChannelTab>) -> impl IntoView {
   }
 }
 
-/// The compact layout's "…" in the conversation header: what the wider header shows as its own
-/// buttons (Files, pins, members, settings, favorite) as a menu.
+/// The "…" of a narrow conversation header (a phone, a half-screen window, a tablet; #365): what
+/// the wider header shows as its own buttons (Files, add people, pins, members, settings,
+/// favorite) as a menu.
 #[component]
 fn ConversationMore(
   conversation: ConversationId,
@@ -685,6 +695,11 @@ fn ConversationMore(
   let is_open = RwSignal::new(false);
   let is_favorite = move || info.get().is_some_and(|conv| conv.is_favorite);
   let member_count = move || info.get().map_or(0, |conv| conv.member_ids.len());
+  let is_channel = move || {
+    info
+      .get()
+      .is_some_and(|conv| matches!(conv.kind, ConversationKind::Public | ConversationKind::Private))
+  };
   let choose = move |action: fn(AppState, ConversationId, RwSignal<ChannelTab>)| {
     is_open.set(false);
     action(state, conversation, tab);
@@ -711,6 +726,12 @@ fn ConversationMore(
             <Icon name=IconName::File />
             {move || if tab.get() == ChannelTab::Files { i18n.t("channel-tab-messages") } else { i18n.t("channel-tab-files") }}
           </button>
+          <Show when=is_channel fallback=|| ()>
+            <button type="button" class="menu-item" role="menuitem" on:click=move |_| choose(|state, conversation, _| state.overlay.set(Overlay::AddToChannel(conversation)))>
+              <Icon name=IconName::UserPlus />
+              {move || i18n.t("channel-add-people")}
+            </button>
+          </Show>
           <button type="button" class="menu-item" role="menuitem" on:click=move |_| choose(|state, _, _| state.panel.set(SidePanel::Members))>
             <Icon name=IconName::Users />
             {move || i18n.t_count("members-button-label", member_count())}

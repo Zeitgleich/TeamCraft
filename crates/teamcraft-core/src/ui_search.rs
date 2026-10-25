@@ -362,6 +362,7 @@ mod tests {
       contains_guests: false,
       maybe_my_membership: None,
       participants: Vec::new(),
+      maybe_image: None,
     };
     records::put_json(&store, Table::Conversations, &channel.to_string(), &conversation).unwrap();
     for (client, sender, body, mentions) in [

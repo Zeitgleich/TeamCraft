@@ -86,6 +86,13 @@ impl ApiError {
     }
   }
 
+  pub fn channel_image_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::ChannelImageNotFound,
+      what: "channel image",
+    }
+  }
+
   pub fn conversation_not_found() -> Self {
     Self::NotFound {
       code: ErrorCode::ChannelNotFound,
@@ -379,6 +386,11 @@ mod tests {
         ApiError::space_image_not_found(),
         StatusCode::NOT_FOUND,
         ErrorCode::SpaceImageNotFound,
+      ),
+      (
+        ApiError::channel_image_not_found(),
+        StatusCode::NOT_FOUND,
+        ErrorCode::ChannelImageNotFound,
       ),
       (
         ApiError::InvalidKeyPackage("expired".into()),

@@ -21,7 +21,7 @@ use crate::i18n::use_i18n;
 use crate::markdown;
 use crate::message_links::{as_permalink, own_hosts};
 use crate::model::{LogLevel, Message, MessageKind, SystemEvent, User, is_pending, thread_id_of};
-use crate::reactive::use_interval;
+use crate::reactive::{SetIfAlive, use_interval};
 use crate::state::{Overlay, use_app_state};
 use crate::viewport::is_touch_primary;
 
@@ -37,6 +37,8 @@ const HOVER_CARD_GRACE: Duration = Duration::from_millis(250);
 const DELIVERY_TICK_MS: u64 = 2_000;
 /// A finger that moves further than this is scrolling, not pressing the message.
 const LONG_PRESS_SLOP_PX: i32 = 10;
+/// The short tick when the action sheet opens, where the device can vibrate (not iOS Safari).
+const LONG_PRESS_HAPTIC_MS: u32 = 10;
 
 /// One message in the channel feed or in a thread. The caller recreates it when the message changes.
 #[component]
@@ -662,6 +664,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
       class:msg-arriving=motion.entrance == Entrance::Arriving
       class:msg-settling=motion.entrance == Entrance::Settling
       class:msg-active=is_toolbar_on
+      class:is-pressing=move || long_press.is_pressing.get()
       class:msg-highlight=move || state.highlighted.get() == Some(message_id)
       hidden=move || state.hidden_messages.with(|hidden| hidden.contains(&message_id))
       tabindex="-1"
@@ -669,14 +672,22 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
       data-msg-id=message_id.to_string()
       aria-label=aria_label
       on:keydown=on_keydown
-      on:mouseenter=move |_| {
-        if !extras.with_untracked(|extras| extras.as_ref().is_some_and(|extras| extras.is_deleted)) {
+      on:pointerenter=move |ev| {
+        // A finger has no hover (#364): tap does nothing, a long press opens the sheet.
+        let is_deleted = extras.with_untracked(|extras| extras.as_ref().is_some_and(|extras| extras.is_deleted));
+        if ev.pointer_type() != "touch" && !is_deleted {
           show_toolbar();
         }
       }
       on:mouseleave=move |_| hide_toolbar()
-      on:focusin=move |_| {
-        if let Some(host) = maybe_host {
+      on:focusin=move |ev| {
+        // A tap focuses the row too; only the keyboard brings the toolbar then.
+        let is_keyboard = event_target::<web_sys::Element>(&ev)
+          .matches(":focus-visible")
+          .unwrap_or(true);
+        if let Some(host) = maybe_host
+          && (!long_press.was_touch() || is_keyboard)
+        {
           host.focus(active.get_value());
         }
       }
@@ -706,13 +717,17 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
 }
 
 /// A finger resting on a message opens its action sheet; moving it (scrolling) or lifting it
-/// early does not.
+/// early does not. The row tints from the first touch, so the press is felt before the sheet
+/// comes (#364).
 #[derive(Clone, Copy)]
 struct LongPress {
   /// Bumped by every new press and cancel, so a timer of an earlier press does nothing.
   generation: StoredValue<u32>,
   maybe_origin: StoredValue<Option<(i32, i32)>>,
   has_fired: StoredValue<bool>,
+  /// The last press on the row was a finger (not a mouse or pen).
+  was_touch: StoredValue<bool>,
+  is_pressing: RwSignal<bool>,
   on_fire: StoredValue<Box<dyn Fn() + Send + Sync>>,
 }
 
@@ -722,12 +737,15 @@ impl LongPress {
       generation: StoredValue::new(0),
       maybe_origin: StoredValue::new(None),
       has_fired: StoredValue::new(false),
+      was_touch: StoredValue::new(false),
+      is_pressing: RwSignal::new(false),
       on_fire: StoredValue::new(Box::new(on_fire)),
     }
   }
 
   fn start(&self, ev: &web_sys::PointerEvent) {
     self.has_fired.set_value(false);
+    self.was_touch.set_value(ev.pointer_type() == "touch");
     // Pictures have their own long-press actions (the media toolbar).
     let is_on_picture = ev
       .target()
@@ -739,13 +757,16 @@ impl LongPress {
     }
     let generation = self.bump();
     self.maybe_origin.set_value(Some((ev.client_x(), ev.client_y())));
+    self.is_pressing.set(true);
     let press = *self;
     set_timeout(
       move || {
         if press.generation.try_get_value() == Some(generation) {
           press.has_fired.try_set_value(true);
           press.maybe_origin.try_set_value(None);
+          press.is_pressing.set_if_alive(false);
           press.on_fire.try_with_value(|fire| fire());
+          tick_haptic();
         }
       },
       LONG_PRESS,
@@ -764,10 +785,15 @@ impl LongPress {
   fn cancel(&self) {
     self.bump();
     self.maybe_origin.set_value(None);
+    self.is_pressing.set(false);
   }
 
   fn has_fired(&self) -> bool {
     self.has_fired.try_get_value().unwrap_or(false)
+  }
+
+  fn was_touch(&self) -> bool {
+    self.was_touch.try_get_value().unwrap_or(false)
   }
 
   fn bump(&self) -> u32 {
@@ -778,6 +804,20 @@ impl LongPress {
     });
     next
   }
+}
+
+/// A short vibration where the device offers one; without it the sheet itself is the feedback.
+fn tick_haptic() {
+  let Some(window) = web_sys::window() else {
+    return;
+  };
+  let navigator = window.navigator();
+  // WebKit (iOS Safari, WKWebView, WebKitGTK) has no `vibrate`; calling it would throw.
+  if !js_sys::Reflect::has(&navigator, &"vibrate".into()).unwrap_or(false) {
+    return;
+  }
+  // Refused (no permission yet, no motor): nothing to tell the user.
+  let _ = navigator.vibrate_with_duration(LONG_PRESS_HAPTIC_MS);
 }
 
 /// The i18n key and arguments that describe a workspace event; `None` for events not worth a line.

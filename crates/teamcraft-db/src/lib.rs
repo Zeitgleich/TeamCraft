@@ -60,8 +60,8 @@ pub use background::UserBackground;
 pub use bot::{BOT_ISSUER, StoredBot};
 pub use call_history::{MissedCall, StoredCall};
 pub use conversation::{
-  Conversation, ConversationChanges, ConversationFilter, ConversationMember, ConversationView, Membership,
-  MembershipChanges, NewConversation, participants_key,
+  Conversation, ConversationChanges, ConversationFilter, ConversationMember, ConversationView, ImageChange,
+  Membership, MembershipChanges, NewConversation, participants_key,
 };
 pub use database::{Database, DatabaseOptions};
 pub use device::{Device, NewDevice};
