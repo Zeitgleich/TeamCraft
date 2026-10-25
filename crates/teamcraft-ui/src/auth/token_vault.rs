@@ -34,7 +34,7 @@ pub(super) struct Tokens {
   pub access: SecretString,
   pub maybe_refresh: Option<SecretString>,
   pub expires_at_ms: i64,
-  /// The access token's `sub`, only to tell whether saved tokens are this tab's account.
+  /// The account's `sub` at the provider, to tell whether saved tokens are this tab's account.
   pub maybe_subject: Option<String>,
 }
 
@@ -45,6 +45,8 @@ pub(super) enum RefreshPlan {
   /// Trade `token` at the provider. `is_shared`: the answer is saved for the other tabs.
   Refresh {
     token: SecretString,
+    /// The account `token` belongs to, kept if the answer names none.
+    maybe_subject: Option<String>,
     is_shared: bool,
   },
   NotSignedIn,
@@ -56,11 +58,12 @@ pub(super) struct RefreshTurn {
   _lock: Option<crate::web_tabs::OwnerLock>,
 }
 
-/// The vault's record: the provider it belongs to and the tokens.
+/// The vault's record: the provider and account it belongs to, and the tokens.
 #[derive(Deserialize)]
 struct Saved {
   issuer: String,
   client_id: String,
+  subject: String,
   access: SecretString,
   refresh: SecretString,
   expires_at_ms: i64,
@@ -70,14 +73,19 @@ struct Saved {
 struct SavedRef<'a> {
   issuer: &'a str,
   client_id: &'a str,
+  subject: &'a str,
   access: &'a str,
   refresh: &'a str,
   expires_at_ms: i64,
 }
 
 impl Tokens {
-  pub fn new(access: SecretString, maybe_refresh: Option<SecretString>, expires_at_ms: i64) -> Self {
-    let maybe_subject = token_subject(access.expose_secret());
+  pub fn new(
+    access: SecretString,
+    maybe_refresh: Option<SecretString>,
+    expires_at_ms: i64,
+    maybe_subject: Option<String>,
+  ) -> Self {
     Self {
       access,
       maybe_refresh,
@@ -92,35 +100,55 @@ impl Tokens {
   }
 }
 
+/// The account a token answer names: the ID token's `sub`, else a JWT access token's. Read
+/// without checking signatures: it came from the token endpoint over TLS and only tells the
+/// accounts of this browser apart.
+pub(super) fn answer_subject(maybe_id_token: Option<&str>, access: &str) -> Option<String> {
+  maybe_id_token
+    .and_then(token_subject)
+    .or_else(|| token_subject(access))
+}
+
 /// Decides a refresh: saved tokens of the same account win over this tab's own (another tab may
-/// have rotated the refresh token this tab still holds); tokens of another account are left alone.
+/// have rotated the refresh token this tab still holds). Tokens of another account, or of an
+/// account this tab can't name, are never taken over nor overwritten. On start (`maybe_memory`
+/// is `None`) the saved tokens are the browser's last sign-in.
 pub(super) fn plan_refresh(
   maybe_memory: Option<&Tokens>,
   maybe_saved: Option<Tokens>,
   now_ms: i64,
 ) -> RefreshPlan {
   let is_shared = match maybe_saved {
-    Some(saved) if maybe_memory.is_none_or(|memory| memory.maybe_subject == saved.maybe_subject) => {
+    Some(saved) if is_same_account(maybe_memory, &saved) => {
       if saved.is_fresh(now_ms) {
         return RefreshPlan::Adopt(saved);
       }
       if let Some(token) = saved.maybe_refresh {
         return RefreshPlan::Refresh {
           token,
+          maybe_subject: saved.maybe_subject,
           is_shared: true,
         };
       }
       true
     },
     Some(_) => false,
-    None => true,
+    None => maybe_memory.is_some_and(|memory| memory.maybe_subject.is_some()),
   };
-  match maybe_memory.and_then(|memory| memory.maybe_refresh.as_ref()) {
-    Some(token) => RefreshPlan::Refresh {
+  match maybe_memory.and_then(|memory| memory.maybe_refresh.as_ref().map(|token| (memory, token))) {
+    Some((memory, token)) => RefreshPlan::Refresh {
       token: token.clone(),
+      maybe_subject: memory.maybe_subject.clone(),
       is_shared,
     },
     None => RefreshPlan::NotSignedIn,
+  }
+}
+
+fn is_same_account(maybe_memory: Option<&Tokens>, saved: &Tokens) -> bool {
+  match maybe_memory {
+    None => saved.maybe_subject.is_some(),
+    Some(memory) => memory.maybe_subject.is_some() && memory.maybe_subject == saved.maybe_subject,
   }
 }
 
@@ -157,19 +185,22 @@ pub(super) async fn load(issuer: &str, client_id: &str) -> Option<Tokens> {
     saved.access,
     Some(saved.refresh),
     saved.expires_at_ms,
+    Some(saved.subject),
   ))
 }
 
 /// Saves `tokens` for the next page load and the other tabs. Tokens without a refresh token can't
-/// outlive the access token, so nothing is saved then.
+/// outlive the access token, and tokens of an account that can't be named could be taken over by
+/// another account's tab, so nothing is saved then.
 pub(super) async fn save(issuer: &str, client_id: &str, tokens: &Tokens) {
-  let Some(refresh) = &tokens.maybe_refresh else {
+  let (Some(refresh), Some(subject)) = (&tokens.maybe_refresh, &tokens.maybe_subject) else {
     forget().await;
     return;
   };
   let saved = SavedRef {
     issuer,
     client_id,
+    subject,
     access: tokens.access.expose_secret(),
     refresh: refresh.expose_secret(),
     expires_at_ms: tokens.expires_at_ms,
@@ -191,8 +222,7 @@ fn decode(bytes: &[u8]) -> Option<Saved> {
     .ok()
 }
 
-/// The `sub` claim of a JWT access token, read without checking the signature: it only tells two
-/// tokens of this browser apart. Opaque tokens have none.
+/// The `sub` claim of a JWT. Opaque tokens have none.
 fn token_subject(access: &str) -> Option<String> {
   let payload = URL_SAFE_NO_PAD.decode(access.split('.').nth(1)?).ok()?;
   let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
@@ -263,6 +293,21 @@ mod tests {
     );
   }
 
+  /// Opaque tokens without an ID token name no account: another account's saved tokens must not
+  /// be taken over, and this tab's must not be shared.
+  #[test]
+  fn tokens_of_an_unnamed_account_are_neither_adopted_nor_shared() {
+    let mut memory = tokens("alice", "access-1", Some("refresh-1"), NOW_MS);
+    memory.maybe_subject = None;
+    let saved = tokens("bob", "access-2", Some("refresh-2"), NOW_MS + 300_000);
+    assert_refresh(
+      plan_refresh(Some(&memory), Some(saved), NOW_MS),
+      "refresh-1",
+      false,
+    );
+    assert_refresh(plan_refresh(Some(&memory), None, NOW_MS), "refresh-1", false);
+  }
+
   #[test]
   fn on_start_the_saved_tokens_are_used() {
     let saved = tokens("alice", "access-2", Some("refresh-2"), NOW_MS);
@@ -299,6 +344,9 @@ mod tests {
   fn the_subject_comes_from_a_jwt_and_opaque_tokens_have_none() {
     let token = jwt("alice");
     assert_eq!(token_subject(&token).as_deref(), Some("alice"));
+    assert_eq!(answer_subject(Some(&jwt("bob")), &token).as_deref(), Some("bob"));
+    assert_eq!(answer_subject(None, &token).as_deref(), Some("alice"));
+    assert_eq!(answer_subject(Some("opaque"), "opaque"), None);
     assert_eq!(token_subject("opaque-token"), None);
     assert_eq!(token_subject("a.!!!.c"), None);
     assert_eq!(token_subject(""), None);
@@ -309,6 +357,7 @@ mod tests {
     let bytes = serde_json::to_vec(&SavedRef {
       issuer: "https://auth.example.com/realms/a",
       client_id: "teamcraft",
+      subject: "alice",
       access: "access",
       refresh: "refresh",
       expires_at_ms: NOW_MS,
@@ -323,7 +372,7 @@ mod tests {
   }
 
   fn assert_refresh(plan: RefreshPlan, expected_token: &str, expected_shared: bool) {
-    let RefreshPlan::Refresh { token, is_shared } = plan else {
+    let RefreshPlan::Refresh { token, is_shared, .. } = plan else {
       panic!("expected a refresh");
     };
     assert_eq!(token.expose_secret(), expected_token);

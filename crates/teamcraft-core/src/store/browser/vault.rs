@@ -41,11 +41,7 @@ async fn put(database: &web_sys::IdbDatabase, slot: &str, plaintext: &[u8]) -> R
   let subtle = browser_key::subtle()?;
   let key = match stored_key(database).await? {
     Some(key) => key,
-    None => {
-      let key = browser_key::generate_wrapping_key(&subtle).await?;
-      write(database, KEYS, WRAPPING_KEY, &key).await?;
-      key
-    },
+    None => create_key(database, &subtle).await?,
   };
   let sealed = browser_key::encrypt(&subtle, &key, plaintext).await?;
   write(
@@ -55,6 +51,29 @@ async fn put(database: &web_sys::IdbDatabase, slot: &str, plaintext: &[u8]) -> R
     &js_sys::Uint8Array::from(sealed.as_slice()),
   )
   .await
+}
+
+/// Stores a new wrapping key unless another page stored one first (`add` refuses an existing
+/// key), and returns the one that is stored: two tabs creating it at once agree on one.
+async fn create_key(
+  database: &web_sys::IdbDatabase,
+  subtle: &web_sys::SubtleCrypto,
+) -> Result<CryptoKey, StoreError> {
+  let key = browser_key::generate_wrapping_key(subtle).await?;
+  let transaction = database
+    .transaction_with_str_and_mode(KEYS, IdbTransactionMode::Readwrite)
+    .map_err(|error| idb::js_error("write vault", &error))?;
+  // Structured clone keeps the CryptoKey non-extractable in storage.
+  transaction
+    .object_store(KEYS)
+    .and_then(|keys| keys.add_with_key(&key, &JsValue::from_str(WRAPPING_KEY)))
+    .map_err(|error| idb::js_error("write vault", &error))?;
+  if idb::transaction_done(&transaction).await.is_err() {
+    tracing::debug!("another page stored the vault key first");
+  }
+  stored_key(database)
+    .await?
+    .ok_or_else(|| StoreError::Database("the vault key was not stored".into()))
 }
 
 async fn get(database: &web_sys::IdbDatabase, slot: &str) -> Result<Option<Zeroizing<Vec<u8>>>, StoreError> {

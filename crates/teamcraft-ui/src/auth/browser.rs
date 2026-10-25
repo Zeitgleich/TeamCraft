@@ -36,6 +36,8 @@ const AUTOLOGIN_TRIED_KEY: &str = "teamcraft.autologin_tried";
 const LOGIN_HINT_KEY: &str = "teamcraft.login_hint";
 /// The bearer token of a local account, for the life of the tab.
 const LOCAL_SESSION_KEY: &str = "teamcraft.local_session";
+/// HTTP status of an API call whose access token the server refused.
+const UNAUTHORIZED: u16 = 401;
 /// The scope every sign-in asks for, also with development overrides.
 const OPENID_SCOPE: &str = "openid";
 
@@ -203,7 +205,7 @@ impl BrowserAuth {
       .request_async(&http_client)
       .await
       .map_err(map_token_error)?;
-    self.tokens.replace(Some(tokens_from(&response, None)));
+    self.tokens.replace(Some(tokens_from(&response, None, None)));
     if let Some(hint) = response.extra_fields().login_hint() {
       remember_login_hint(&sign_in, hint);
     }
@@ -222,12 +224,16 @@ impl BrowserAuth {
     let _turn = token_vault::refresh_turn().await;
     let maybe_saved = token_vault::load(&sign_in.issuer, &sign_in.client_id).await;
     let plan = token_vault::plan_refresh(self.tokens.borrow().as_ref(), maybe_saved, now_ms());
-    let (refresh, is_shared) = match plan {
+    let (refresh, maybe_subject, is_shared) = match plan {
       RefreshPlan::Adopt(tokens) => {
         self.tokens.replace(Some(tokens));
         return Ok(());
       },
-      RefreshPlan::Refresh { token, is_shared } => (token, is_shared),
+      RefreshPlan::Refresh {
+        token,
+        maybe_subject,
+        is_shared,
+      } => (token, maybe_subject, is_shared),
       RefreshPlan::NotSignedIn => return Err(AuthError::NotSignedIn),
     };
     let discovery = self.discovery().await?;
@@ -238,7 +244,9 @@ impl BrowserAuth {
       .await
     {
       Ok(response) => {
-        self.tokens.replace(Some(tokens_from(&response, Some(refresh))));
+        self
+          .tokens
+          .replace(Some(tokens_from(&response, Some(refresh), maybe_subject)));
         if is_shared {
           self.share_tokens(&sign_in).await;
         }
@@ -256,6 +264,20 @@ impl BrowserAuth {
         Err(map_token_error(error))
       },
     }
+  }
+
+  /// The server refused the access token (the session ended, e.g. by a back-channel logout): the
+  /// saved tokens go, so no reload brings them back, and the next call renews the session at the
+  /// provider or ends it. A local account's session has nothing saved.
+  async fn on_unauthorized(&self) {
+    if self.local.borrow().is_some() {
+      return;
+    }
+    if let Some(tokens) = self.tokens.borrow_mut().as_mut() {
+      tokens.expires_at_ms = 0;
+    }
+    let _turn = token_vault::refresh_turn().await;
+    token_vault::forget().await;
   }
 
   /// Saves this tab's tokens for reloads and the other tabs, unless the user signed out meanwhile.
@@ -488,7 +510,12 @@ impl Authenticator for BrowserAuth {
       let maybe_refresh = self.tokens.replace(None).and_then(|tokens| tokens.maybe_refresh);
       local_remove(SIGNED_IN_HINT_KEY);
       session_remove(AUTOLOGIN_TRIED_KEY);
-      token_vault::forget().await;
+      // Under the refresh lock: a refresh another tab runs right now saves its tokens before this
+      // removes them, and every later one sees the hint gone and saves nothing.
+      {
+        let _turn = token_vault::refresh_turn().await;
+        token_vault::forget().await;
+      }
       // Ending the provider session as well is what makes "sign out" mean something on shared
       // machines. A direct request with the refresh token does it without a confirmation page.
       if let (Some(refresh), Ok(discovery), Ok(sign_in)) =
@@ -538,6 +565,9 @@ impl Authenticator for BrowserAuth {
       )
       .await
       .map_err(AuthError::Network)?;
+      if response.status == UNAUTHORIZED {
+        self.on_unauthorized().await;
+      }
       Ok(ApiResponse {
         status: response.status,
         body: String::from_utf8_lossy(&response.body).into_owned(),
@@ -561,6 +591,9 @@ impl Authenticator for BrowserAuth {
       let response = fetch(method.as_str(), &url, &headers, maybe_body.map(|body| body.bytes))
         .await
         .map_err(AuthError::Network)?;
+      if response.status == UNAUTHORIZED {
+        self.on_unauthorized().await;
+      }
       Ok(ApiBytes {
         status: response.status,
         maybe_content_type: response.maybe_content_type,
@@ -571,8 +604,12 @@ impl Authenticator for BrowserAuth {
 }
 
 /// The tokens of a provider answer; a refresh answer without a new refresh token keeps
-/// `maybe_previous_refresh` (no rotation).
-fn tokens_from(response: &OidcTokenResponse, maybe_previous_refresh: Option<SecretString>) -> Tokens {
+/// `maybe_previous_refresh` (no rotation), one that names no account `maybe_previous_subject`.
+fn tokens_from(
+  response: &OidcTokenResponse,
+  maybe_previous_refresh: Option<SecretString>,
+  maybe_previous_subject: Option<String>,
+) -> Tokens {
   let lifetime_ms = response
     .expires_in()
     .map_or(60_000, |duration| duration.as_millis() as i64);
@@ -580,10 +617,14 @@ fn tokens_from(response: &OidcTokenResponse, maybe_previous_refresh: Option<Secr
     .refresh_token()
     .map(|token| SecretString::from(token.secret().clone()))
     .or(maybe_previous_refresh);
+  let access = response.access_token().secret();
+  let maybe_subject = token_vault::answer_subject(response.extra_fields().maybe_id_token.as_deref(), access)
+    .or(maybe_previous_subject);
   Tokens::new(
-    SecretString::from(response.access_token().secret().clone()),
+    SecretString::from(access.clone()),
     maybe_refresh,
     now_ms() + lifetime_ms,
+    maybe_subject,
   )
 }
 
