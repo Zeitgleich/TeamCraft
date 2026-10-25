@@ -1,9 +1,10 @@
 //! OIDC authorization code flow with PKCE in the browser (redirect flow).
 //!
 //! The page navigates to the identity provider and comes back to `<origin>/` with `?code=…&state=…`.
-//! Only the PKCE verifier and the `state` survive the redirect, in `sessionStorage`; tokens live in
-//! memory only, so a reload signs in again through the provider's session (a redirect round trip
-//! without a password prompt) until the server offers a cookie-based refresh.
+//! Only the PKCE verifier and the `state` survive the redirect, in `sessionStorage`. The tokens are
+//! sealed in IndexedDB ([`super::token_vault`]), so a reload restores the session with a
+//! refresh-token grant; only without saved tokens, or when the provider refuses them, does it sign
+//! in again through the provider's session (a redirect round trip without a password prompt).
 
 use std::cell::RefCell;
 
@@ -20,6 +21,7 @@ use teamcraft_client_api::server_entry::{HttpPolicy, SERVER_INFO_PATH, check_dis
 use teamcraft_proto::{SERVER_INFO_PRODUCT, ServerInfoResponse};
 
 use super::fetch::fetch;
+use super::token_vault::{self, RefreshPlan, Tokens};
 use super::{
   ApiBytes, ApiMethod, ApiResponse, AppConfig, AuthError, Authenticator, BinaryBody, LocalFuture, SignInLook,
 };
@@ -34,10 +36,10 @@ const AUTOLOGIN_TRIED_KEY: &str = "teamcraft.autologin_tried";
 const LOGIN_HINT_KEY: &str = "teamcraft.login_hint";
 /// The bearer token of a local account, for the life of the tab.
 const LOCAL_SESSION_KEY: &str = "teamcraft.local_session";
+/// HTTP status of an API call whose access token the server refused.
+const UNAUTHORIZED: u16 = 401;
 /// The scope every sign-in asks for, also with development overrides.
 const OPENID_SCOPE: &str = "openid";
-/// Refresh this long before the access token expires.
-const REFRESH_MARGIN_MS: i64 = 30_000;
 
 pub struct BrowserAuth {
   config: AppConfig,
@@ -71,12 +73,6 @@ struct StoredLoginHint {
 #[derive(Clone, Serialize, Deserialize)]
 struct LocalSession {
   token: String,
-  expires_at_ms: i64,
-}
-
-struct Tokens {
-  access: SecretString,
-  maybe_refresh: Option<SecretString>,
   expires_at_ms: i64,
 }
 
@@ -139,9 +135,22 @@ impl BrowserAuth {
       clean_location_to(maybe_return_path);
       return outcome.map(|_| true);
     }
-    // Signed in before and the tab was reloaded: go through the provider again, once, without asking
-    // (and without its login page: the user stays signed in across reloads).
-    if local_get(SIGNED_IN_HINT_KEY).is_some() && session_get(AUTOLOGIN_TRIED_KEY).is_none() {
+    if local_get(SIGNED_IN_HINT_KEY).is_none() {
+      // Signed out (perhaps in another tab while this one refreshed): nothing may stay behind.
+      token_vault::forget().await;
+      return Ok(false);
+    }
+    // Signed in before and the tab was reloaded: the saved tokens, if the provider still takes them.
+    match self.refresh().await {
+      Ok(()) => return Ok(true),
+      // Nothing saved, or the session was revoked or expired: the provider decides below.
+      Err(AuthError::NotSignedIn) => {},
+      // Offline or the server is down: the saved tokens stay for the next start.
+      Err(error) => return Err(error),
+    }
+    // Go through the provider again, once, without asking (and without its login page: the user
+    // stays signed in as long as the provider's session lasts).
+    if session_get(AUTOLOGIN_TRIED_KEY).is_none() {
       session_set(AUTOLOGIN_TRIED_KEY, "1");
       self.begin_login(None).await?;
       std::future::pending::<()>().await;
@@ -196,48 +205,90 @@ impl BrowserAuth {
       .request_async(&http_client)
       .await
       .map_err(map_token_error)?;
-    self.store(&response);
+    self.tokens.replace(Some(tokens_from(&response, None, None)));
     if let Some(hint) = response.extra_fields().login_hint() {
       remember_login_hint(&sign_in, hint);
     }
     local_set(SIGNED_IN_HINT_KEY, "1");
     session_remove(AUTOLOGIN_TRIED_KEY);
+    let _turn = token_vault::refresh_turn().await;
+    self.share_tokens(&sign_in).await;
     Ok(pending.maybe_return_path.filter(|path| is_return_path(path)))
   }
 
+  /// Renews the access token, one tab of the browser at a time: tokens another tab got meanwhile
+  /// are taken over instead (refresh-token rotation). `NotSignedIn` when there is nothing to renew
+  /// with or the provider refused it (expired or revoked).
   async fn refresh(&self) -> Result<(), AuthError> {
-    let refresh = self
-      .tokens
-      .borrow()
-      .as_ref()
-      .and_then(|tokens| {
-        tokens
-          .maybe_refresh
-          .as_ref()
-          .map(|token| token.expose_secret().to_owned())
-      })
-      .ok_or(AuthError::NotSignedIn)?;
     let sign_in = self.sign_in().await?;
+    let _turn = token_vault::refresh_turn().await;
+    let maybe_saved = token_vault::load(&sign_in.issuer, &sign_in.client_id).await;
+    let plan = token_vault::plan_refresh(self.tokens.borrow().as_ref(), maybe_saved, now_ms());
+    let (refresh, maybe_subject, is_shared) = match plan {
+      RefreshPlan::Adopt(tokens) => {
+        self.tokens.replace(Some(tokens));
+        return Ok(());
+      },
+      RefreshPlan::Refresh {
+        token,
+        maybe_subject,
+        is_shared,
+      } => (token, maybe_subject, is_shared),
+      RefreshPlan::NotSignedIn => return Err(AuthError::NotSignedIn),
+    };
     let discovery = self.discovery().await?;
     let client = self.client(&discovery, &redirect_uri()?, &sign_in)?;
     match client
-      .exchange_refresh_token(&RefreshToken::new(refresh))
+      .exchange_refresh_token(&RefreshToken::new(refresh.expose_secret().to_owned()))
       .request_async(&http_client)
       .await
     {
       Ok(response) => {
-        self.store(&response);
+        self
+          .tokens
+          .replace(Some(tokens_from(&response, Some(refresh), maybe_subject)));
+        if is_shared {
+          self.share_tokens(&sign_in).await;
+        }
         Ok(())
       },
       Err(error) => {
         // An expired or revoked refresh token ends the session; other errors may be transient.
         if matches!(error, RequestTokenError::ServerResponse(_)) {
           self.tokens.replace(None);
+          if is_shared {
+            token_vault::forget().await;
+          }
           return Err(AuthError::NotSignedIn);
         }
         Err(map_token_error(error))
       },
     }
+  }
+
+  /// The server refused the access token (the session ended, e.g. by a back-channel logout): the
+  /// saved tokens go, so no reload brings them back, and the next call renews the session at the
+  /// provider or ends it. A local account's session has nothing saved.
+  async fn on_unauthorized(&self) {
+    if self.local.borrow().is_some() {
+      return;
+    }
+    if let Some(tokens) = self.tokens.borrow_mut().as_mut() {
+      tokens.expires_at_ms = 0;
+    }
+    let _turn = token_vault::refresh_turn().await;
+    token_vault::forget().await;
+  }
+
+  /// Saves this tab's tokens for reloads and the other tabs, unless the user signed out meanwhile.
+  async fn share_tokens(&self, sign_in: &SignIn) {
+    if local_get(SIGNED_IN_HINT_KEY).is_none() {
+      return;
+    }
+    let Some(tokens) = self.tokens.borrow().as_ref().cloned() else {
+      return;
+    };
+    token_vault::save(&sign_in.issuer, &sign_in.client_id, &tokens).await;
   }
 
   async fn login_local_inner(
@@ -294,7 +345,7 @@ impl BrowserAuth {
     }
     let needs_refresh = match self.tokens.borrow().as_ref() {
       None => return Err(AuthError::NotSignedIn),
-      Some(tokens) => tokens.expires_at_ms - REFRESH_MARGIN_MS <= now_ms(),
+      Some(tokens) => !tokens.is_fresh(now_ms()),
     };
     if needs_refresh {
       self.refresh().await?;
@@ -304,26 +355,6 @@ impl BrowserAuth {
       .as_ref()
       .map(|tokens| tokens.access.expose_secret().to_owned())
       .ok_or(AuthError::NotSignedIn)
-  }
-
-  fn store(&self, response: &OidcTokenResponse) {
-    let lifetime_ms = response
-      .expires_in()
-      .map_or(60_000, |duration| duration.as_millis() as i64);
-    let previous_refresh = self
-      .tokens
-      .borrow()
-      .as_ref()
-      .and_then(|tokens| tokens.maybe_refresh.clone());
-    let maybe_refresh = response
-      .refresh_token()
-      .map(|token| SecretString::from(token.secret().clone()))
-      .or(previous_refresh);
-    self.tokens.replace(Some(Tokens {
-      access: SecretString::from(response.access_token().secret().clone()),
-      maybe_refresh,
-      expires_at_ms: now_ms() + lifetime_ms,
-    }));
   }
 
   /// The sign-in settings: the development overrides if both are set, else the server's answer
@@ -479,6 +510,12 @@ impl Authenticator for BrowserAuth {
       let maybe_refresh = self.tokens.replace(None).and_then(|tokens| tokens.maybe_refresh);
       local_remove(SIGNED_IN_HINT_KEY);
       session_remove(AUTOLOGIN_TRIED_KEY);
+      // Under the refresh lock: a refresh another tab runs right now saves its tokens before this
+      // removes them, and every later one sees the hint gone and saves nothing.
+      {
+        let _turn = token_vault::refresh_turn().await;
+        token_vault::forget().await;
+      }
       // Ending the provider session as well is what makes "sign out" mean something on shared
       // machines. A direct request with the refresh token does it without a confirmation page.
       if let (Some(refresh), Ok(discovery), Ok(sign_in)) =
@@ -528,6 +565,9 @@ impl Authenticator for BrowserAuth {
       )
       .await
       .map_err(AuthError::Network)?;
+      if response.status == UNAUTHORIZED {
+        self.on_unauthorized().await;
+      }
       Ok(ApiResponse {
         status: response.status,
         body: String::from_utf8_lossy(&response.body).into_owned(),
@@ -551,6 +591,9 @@ impl Authenticator for BrowserAuth {
       let response = fetch(method.as_str(), &url, &headers, maybe_body.map(|body| body.bytes))
         .await
         .map_err(AuthError::Network)?;
+      if response.status == UNAUTHORIZED {
+        self.on_unauthorized().await;
+      }
       Ok(ApiBytes {
         status: response.status,
         maybe_content_type: response.maybe_content_type,
@@ -558,6 +601,31 @@ impl Authenticator for BrowserAuth {
       })
     })
   }
+}
+
+/// The tokens of a provider answer; a refresh answer without a new refresh token keeps
+/// `maybe_previous_refresh` (no rotation), one that names no account `maybe_previous_subject`.
+fn tokens_from(
+  response: &OidcTokenResponse,
+  maybe_previous_refresh: Option<SecretString>,
+  maybe_previous_subject: Option<String>,
+) -> Tokens {
+  let lifetime_ms = response
+    .expires_in()
+    .map_or(60_000, |duration| duration.as_millis() as i64);
+  let maybe_refresh = response
+    .refresh_token()
+    .map(|token| SecretString::from(token.secret().clone()))
+    .or(maybe_previous_refresh);
+  let access = response.access_token().secret();
+  let maybe_subject = token_vault::answer_subject(response.extra_fields().maybe_id_token.as_deref(), access)
+    .or(maybe_previous_subject);
+  Tokens::new(
+    SecretString::from(access.clone()),
+    maybe_refresh,
+    now_ms() + lifetime_ms,
+    maybe_subject,
+  )
 }
 
 /// HTTP client for the `oauth2` crate on top of `fetch`.

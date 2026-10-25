@@ -1308,6 +1308,22 @@ The design leaves room for a stricter mode: `IndexedDbStore::open` takes any 256
 deployment can derive it from the passkey PRF (§6.2) instead, at the cost of push previews. Choosing
 that per workspace is a policy setting for later (PLAN.md).
 
+**Sign-in tokens across reloads:** the web client keeps its OIDC tokens (access and refresh token)
+in a separate IndexedDB database, `teamcraft-session`, sealed with AES-256-GCM under a
+non-extractable Web Crypto key in the same way as the database key; nothing token-like is written
+to `localStorage` or `sessionStorage`. A reload restores the session with a refresh-token grant
+instead of a redirect round trip to the identity provider. The record names the issuer, client and
+account (`sub` of the ID token) it belongs to (a provider switch discards it) and is deleted at
+sign-out, as soon as the provider refuses the refresh token, and when the server answers 401 (a
+back-channel logout ended the session). Tabs refresh one at a time under the Web Lock
+`teamcraft-auth-refresh` and take over tokens another tab of the same account got meanwhile, so a
+rotated refresh token is never used twice; sign-out deletes under the same lock. Tokens that name
+no account are neither saved nor taken over.
+The protection is the store's (table above): a copy of the profile or script on the origin can use
+the tokens. A server-side session cookie (backend for frontend) was not chosen: it would hand the
+refresh token to the server, which the threat model does not trust (§2 of ARCHITECTURE.md), and
+needs CSRF protection and server endpoints for a gain the client can have alone.
+
 ### 9.2 Android (implemented)
 
 The same sealed-record construction as §9.1, over plain SQLite (`SealedSqliteStore`): the file

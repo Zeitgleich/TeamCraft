@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 use super::idb::{self, KEYS};
 use crate::store::StoreError;
 
-const WRAPPING_KEY: &str = "wrapping_key";
+pub(super) const WRAPPING_KEY: &str = "wrapping_key";
 const WRAPPED_DATABASE_KEY: &str = "wrapped_database_key";
 const AES_GCM: &str = "AES-GCM";
 const IV_LEN: usize = 12;
@@ -45,16 +45,22 @@ async fn load_or_create(database: &web_sys::IdbDatabase) -> Result<SymmetricKey,
       .dyn_into::<js_sys::Uint8Array>()
       .map_err(|_| StoreError::Corrupt("stored database key".into()))?
       .to_vec();
-    return unwrap(&subtle, &wrapping_key, &wrapped).await;
+    let plaintext = decrypt(&subtle, &wrapping_key, &wrapped)
+      .await?
+      .ok_or(StoreError::WrongKey)?;
+    if plaintext.len() != SYMMETRIC_KEY_LEN {
+      return Err(StoreError::Corrupt("wrapped database key length".into()));
+    }
+    return SymmetricKey::from_slice(&plaintext).ok_or_else(|| StoreError::Corrupt("database key".into()));
   }
   let wrapping_key = generate_wrapping_key(&subtle).await?;
   let database_key = SymmetricKey::generate(&mut OsRng);
-  let wrapped = wrap(&subtle, &wrapping_key, &database_key).await?;
+  let wrapped = encrypt(&subtle, &wrapping_key, database_key.expose_secret()).await?;
   write(database, &wrapping_key, &wrapped).await?;
   Ok(database_key)
 }
 
-async fn generate_wrapping_key(subtle: &SubtleCrypto) -> Result<CryptoKey, StoreError> {
+pub(super) async fn generate_wrapping_key(subtle: &SubtleCrypto) -> Result<CryptoKey, StoreError> {
   let algorithm = AesKeyGenParams::new(AES_GCM, 256);
   let usages = js_sys::Array::of2(&JsValue::from_str("encrypt"), &JsValue::from_str("decrypt"));
   // `extractable = false`: the key's bytes never leave the browser's crypto implementation.
@@ -69,16 +75,16 @@ async fn generate_wrapping_key(subtle: &SubtleCrypto) -> Result<CryptoKey, Store
 }
 
 /// `iv (12) || AES-GCM ciphertext and tag`.
-async fn wrap(
+pub(super) async fn encrypt(
   subtle: &SubtleCrypto,
   wrapping_key: &CryptoKey,
-  key: &SymmetricKey,
+  plaintext: &[u8],
 ) -> Result<Vec<u8>, StoreError> {
   let mut iv = [0u8; IV_LEN];
   OsRng.fill_bytes(&mut iv);
   let params = AesGcmParams::new(AES_GCM, &js_sys::Uint8Array::from(iv.as_slice()));
   let promise = subtle
-    .encrypt_with_object_and_u8_array(&params, wrapping_key, key.expose_secret())
+    .encrypt_with_object_and_u8_array(&params, wrapping_key, plaintext)
     .map_err(|error| crypto_error(&error))?;
   let ciphertext = JsFuture::from(promise)
     .await
@@ -88,25 +94,25 @@ async fn wrap(
   Ok(wrapped)
 }
 
-async fn unwrap(
+/// The plaintext of [`encrypt`]'s output; `None` if it was not sealed with `wrapping_key` or was
+/// changed.
+pub(super) async fn decrypt(
   subtle: &SubtleCrypto,
   wrapping_key: &CryptoKey,
-  wrapped: &[u8],
-) -> Result<SymmetricKey, StoreError> {
-  if wrapped.len() <= IV_LEN {
-    return Err(StoreError::Corrupt("wrapped database key".into()));
+  sealed: &[u8],
+) -> Result<Option<Zeroizing<Vec<u8>>>, StoreError> {
+  if sealed.len() <= IV_LEN {
+    return Ok(None);
   }
-  let (iv, ciphertext) = wrapped.split_at(IV_LEN);
+  let (iv, ciphertext) = sealed.split_at(IV_LEN);
   let params = AesGcmParams::new(AES_GCM, &js_sys::Uint8Array::from(iv));
   let promise = subtle
     .decrypt_with_object_and_u8_array(&params, wrapping_key, ciphertext)
     .map_err(|error| crypto_error(&error))?;
-  let plaintext = JsFuture::from(promise).await.map_err(|_| StoreError::WrongKey)?;
-  let plaintext = Zeroizing::new(js_sys::Uint8Array::new(&plaintext).to_vec());
-  if plaintext.len() != SYMMETRIC_KEY_LEN {
-    return Err(StoreError::Corrupt("wrapped database key length".into()));
-  }
-  SymmetricKey::from_slice(&plaintext).ok_or_else(|| StoreError::Corrupt("database key".into()))
+  let Ok(plaintext) = JsFuture::from(promise).await else {
+    return Ok(None);
+  };
+  Ok(Some(Zeroizing::new(js_sys::Uint8Array::new(&plaintext).to_vec())))
 }
 
 async fn read(database: &web_sys::IdbDatabase, key: &str) -> Result<Option<JsValue>, StoreError> {
@@ -146,7 +152,7 @@ async fn write(
 }
 
 /// `crypto.subtle` of the window or worker.
-fn subtle() -> Result<SubtleCrypto, StoreError> {
+pub(super) fn subtle() -> Result<SubtleCrypto, StoreError> {
   let crypto = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("crypto"))
     .ok()
     .and_then(|crypto| crypto.dyn_into::<web_sys::Crypto>().ok())
@@ -154,7 +160,7 @@ fn subtle() -> Result<SubtleCrypto, StoreError> {
   Ok(crypto.subtle())
 }
 
-fn crypto_error(error: &JsValue) -> StoreError {
+pub(super) fn crypto_error(error: &JsValue) -> StoreError {
   StoreError::Database(format!(
     "Web Crypto: {}",
     crate::platform::describe_js_error(error)

@@ -9,6 +9,7 @@ pub mod browser;
 mod config;
 pub(crate) mod fetch;
 pub mod tauri;
+mod token_vault;
 
 use std::future::Future;
 use std::pin::Pin;
