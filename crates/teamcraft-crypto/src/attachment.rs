@@ -13,9 +13,10 @@
 use std::fmt;
 
 use chacha20poly1305::XChaCha20Poly1305;
-use chacha20poly1305::aead::stream::{DecryptorBE32, EncryptorBE32};
+use chacha20poly1305::aead::stream::{DecryptorBE32, EncryptorBE32, NewStream, StreamBE32, StreamPrimitive};
 use chacha20poly1305::aead::{KeyInit, Payload};
 use rand_core::CryptoRngCore;
+use sha2::digest::common::hazmat::SerializableState;
 use sha2::{Digest, Sha256};
 
 use crate::aead::TAG_LEN;
@@ -42,6 +43,20 @@ pub struct AttachmentEncryptor {
   header: [u8; HEADER_LEN],
   chunk_size: usize,
 }
+
+/// Encrypts a file in segments of whole chunks, in any order and from the key and header alone: an
+/// upload in parts (e2ee.md §4.5) can stop after any part and continue after a restart. The blob is
+/// byte for byte what [`AttachmentEncryptor`] makes; only the chunk positions are given explicitly.
+pub struct AttachmentSegmentEncryptor {
+  stream: StreamBE32<XChaCha20Poly1305>,
+  header: [u8; HEADER_LEN],
+  chunk_size: usize,
+}
+
+/// SHA-256 over a blob that is encrypted and uploaded in parts. Its state can be saved after a part
+/// and restored after a restart, so the parts already uploaded aren't read and encrypted again.
+#[derive(Clone)]
+pub struct CiphertextHasher(Sha256);
 
 /// Decrypts one file chunk by chunk.
 pub struct AttachmentDecryptor {
@@ -74,6 +89,8 @@ pub enum AttachmentError {
   TooManyChunks,
   #[error("attachment could not be decrypted (wrong key, tampered, reordered or truncated)")]
   DecryptionFailed,
+  #[error("the saved hash state is malformed")]
+  MalformedHashState,
 }
 
 /// Encrypts a whole file in memory with a fresh key. For large files use [`AttachmentEncryptor`].
@@ -103,6 +120,21 @@ pub fn encrypt_attachment(
     ciphertext,
     ciphertext_sha256,
   })
+}
+
+/// Length of the blob [`encrypt_attachment`] makes from `plaintext_len` bytes: the header, every full
+/// chunk with its tag, and the final chunk (0 to `chunk_size` bytes) with its tag.
+pub fn encrypted_len(plaintext_len: u64, chunk_size: u32) -> u64 {
+  let chunk = u64::from(chunk_size.max(1));
+  let full_chunks = plaintext_len.saturating_sub(1) / chunk;
+  let last = plaintext_len - full_chunks * chunk;
+  HEADER_LEN as u64 + full_chunks * (chunk + TAG_LEN as u64) + last + TAG_LEN as u64
+}
+
+/// How many chunks a file of `plaintext_len` bytes has, the final (possibly short or empty) one
+/// included.
+pub fn chunk_count(plaintext_len: u64, chunk_size: u32) -> u64 {
+  plaintext_len.saturating_sub(1) / u64::from(chunk_size.max(1)) + 1
 }
 
 /// SHA-256 of a public object whose hash a signed document vouches for (e.g. an organization
@@ -221,6 +253,140 @@ impl fmt::Debug for AttachmentEncryptor {
     f.debug_struct("AttachmentEncryptor")
       .field("chunk_size", &self.chunk_size)
       .finish_non_exhaustive()
+  }
+}
+
+impl AttachmentSegmentEncryptor {
+  /// Starts a new encryption with a fresh nonce prefix. The blob begins with [`Self::header`].
+  pub fn new(
+    key: &AttachmentKey,
+    chunk_size: u32,
+    rng: &mut impl CryptoRngCore,
+  ) -> Result<Self, AttachmentError> {
+    validate_chunk_size(chunk_size)?;
+    let mut nonce_prefix = [0u8; NONCE_PREFIX_LEN];
+    rng.fill_bytes(&mut nonce_prefix);
+    Self::resume(key, &encode_header(chunk_size, &nonce_prefix))
+  }
+
+  /// Continues an encryption from its key and the header it started with.
+  pub fn resume(key: &AttachmentKey, header: &[u8]) -> Result<Self, AttachmentError> {
+    let (header, chunk_size, nonce_prefix) = decode_header(header)?;
+    let cipher = XChaCha20Poly1305::new(key.0.expose_secret().into());
+    Ok(Self {
+      stream: StreamBE32::from_aead(cipher, nonce_prefix.as_slice().into()),
+      header,
+      chunk_size: chunk_size as usize,
+    })
+  }
+
+  pub fn header(&self) -> &[u8; HEADER_LEN] {
+    &self.header
+  }
+
+  pub fn chunk_size(&self) -> u32 {
+    // Invariant: validated against MAX_CHUNK_SIZE, which fits a u32.
+    self.chunk_size as u32
+  }
+
+  /// Encrypts `plaintext`, which starts at chunk `first_chunk` of the file. A segment in the middle
+  /// spans whole chunks; the `is_final` one ends the file (its last chunk, 0 to `chunk_size`
+  /// bytes, is marked final, so truncation stays detectable).
+  pub fn encrypt_segment(
+    &self,
+    first_chunk: u32,
+    plaintext: &[u8],
+    is_final: bool,
+  ) -> Result<Vec<u8>, AttachmentError> {
+    let chunk_len = self.chunk_size;
+    let (body, maybe_last) = if is_final {
+      let full_chunks = plaintext.len().saturating_sub(1) / chunk_len;
+      let (body, last) = plaintext.split_at(full_chunks * chunk_len);
+      (body, Some(last))
+    } else {
+      if plaintext.is_empty() || plaintext.len() % chunk_len != 0 {
+        return Err(AttachmentError::WrongChunkLength {
+          expected: chunk_len,
+          actual: plaintext.len() % chunk_len,
+        });
+      }
+      (plaintext, None)
+    };
+    let tags = body.len() / chunk_len + usize::from(maybe_last.is_some());
+    let mut ciphertext = Vec::with_capacity(plaintext.len() + tags * TAG_LEN);
+    let mut position = first_chunk;
+    for chunk in body.chunks(chunk_len) {
+      ciphertext.extend_from_slice(&self.encrypt_at(position, false, chunk)?);
+      position = position.checked_add(1).ok_or(AttachmentError::TooManyChunks)?;
+    }
+    if let Some(last) = maybe_last {
+      ciphertext.extend_from_slice(&self.encrypt_at(position, true, last)?);
+    }
+    Ok(ciphertext)
+  }
+
+  fn encrypt_at(&self, position: u32, is_last: bool, chunk: &[u8]) -> Result<Vec<u8>, AttachmentError> {
+    let aad = chunk_aad(&self.header);
+    self
+      .stream
+      .encrypt(
+        position,
+        is_last,
+        Payload {
+          msg: chunk,
+          aad: &aad,
+        },
+      )
+      .map_err(|_| AttachmentError::TooManyChunks)
+  }
+}
+
+impl fmt::Debug for AttachmentSegmentEncryptor {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.debug_struct("AttachmentSegmentEncryptor")
+      .field("chunk_size", &self.chunk_size)
+      .finish_non_exhaustive()
+  }
+}
+
+impl CiphertextHasher {
+  pub fn new() -> Self {
+    Self(Sha256::new())
+  }
+
+  /// Continues from a state saved with [`Self::state`].
+  pub fn from_state(state: &[u8]) -> Result<Self, AttachmentError> {
+    let serialized = state
+      .try_into()
+      .map_err(|_| AttachmentError::MalformedHashState)?;
+    Sha256::deserialize(serialized)
+      .map(Self)
+      .map_err(|_| AttachmentError::MalformedHashState)
+  }
+
+  pub fn update(&mut self, ciphertext: &[u8]) {
+    self.0.update(ciphertext);
+  }
+
+  /// The state to save; it reveals no more than the ciphertext hashed so far.
+  pub fn state(&self) -> Vec<u8> {
+    self.0.serialize().to_vec()
+  }
+
+  pub fn finish(self) -> [u8; 32] {
+    self.0.finalize().into()
+  }
+}
+
+impl Default for CiphertextHasher {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
+impl fmt::Debug for CiphertextHasher {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.debug_struct("CiphertextHasher").finish_non_exhaustive()
   }
 }
 
@@ -374,6 +540,85 @@ mod tests {
       encrypted.ciphertext_sha256,
       <[u8; 32]>::from(Sha256::digest(&encrypted.ciphertext))
     );
+  }
+
+  mod segments {
+    use super::*;
+
+    #[test]
+    fn segments_in_any_order_make_the_one_shot_blob() {
+      let chunk = CHUNK as usize;
+      for len in [0, 1, chunk, chunk + 1, 4 * chunk, 4 * chunk + 3] {
+        let plaintext = sample(len);
+        let key = AttachmentKey::generate(&mut OsRng);
+        let mut one_shot = AttachmentEncryptor::new(&key, CHUNK, &mut OsRng).unwrap();
+        let header = *one_shot.header();
+        let mut expected = header.to_vec();
+        let full = len.saturating_sub(1) / chunk;
+        for piece in plaintext[..full * chunk].chunks(chunk) {
+          expected.extend(one_shot.encrypt_chunk(piece).unwrap());
+        }
+        expected.extend(one_shot.finish(&plaintext[full * chunk..]).unwrap());
+
+        let segments = AttachmentSegmentEncryptor::resume(&key, &header).unwrap();
+        // Two chunks per segment; the second half first, then a resumed encryptor for the start.
+        let split = (full / 2) * 2 * chunk;
+        let tail = segments
+          .encrypt_segment((split / chunk) as u32, &plaintext[split..], true)
+          .unwrap();
+        let resumed = AttachmentSegmentEncryptor::resume(&key, segments.header()).unwrap();
+        let mut blob = resumed.header().to_vec();
+        for (index, piece) in plaintext[..split].chunks(2 * chunk).enumerate() {
+          blob.extend(resumed.encrypt_segment((index * 2) as u32, piece, false).unwrap());
+        }
+        blob.extend(tail);
+        assert_eq!(blob, expected, "length {len}");
+        assert_eq!(
+          blob.len() as u64,
+          encrypted_len(len as u64, CHUNK),
+          "length {len}"
+        );
+        assert_eq!(
+          decrypt_attachment(&key, &blob).unwrap().expose_secret(),
+          plaintext.as_slice()
+        );
+      }
+    }
+
+    #[test]
+    fn middle_segments_must_span_whole_chunks() {
+      let key = AttachmentKey::generate(&mut OsRng);
+      let segments = AttachmentSegmentEncryptor::new(&key, CHUNK, &mut OsRng).unwrap();
+      for len in [0, 1, CHUNK as usize + 1] {
+        assert!(matches!(
+          segments.encrypt_segment(0, &sample(len), false),
+          Err(AttachmentError::WrongChunkLength { .. })
+        ));
+      }
+      assert!(AttachmentSegmentEncryptor::resume(&key, &[0; 3]).is_err());
+    }
+
+    #[test]
+    fn the_hash_continues_from_a_saved_state() {
+      let blob = sample(5000);
+      let mut first = CiphertextHasher::new();
+      first.update(&blob[..1234]);
+      let mut resumed = CiphertextHasher::from_state(&first.state()).unwrap();
+      resumed.update(&blob[1234..]);
+      assert_eq!(resumed.finish(), <[u8; 32]>::from(Sha256::digest(&blob)));
+      assert!(matches!(
+        CiphertextHasher::from_state(&[1, 2, 3]),
+        Err(AttachmentError::MalformedHashState)
+      ));
+    }
+
+    #[test]
+    fn chunk_counts_include_the_final_chunk() {
+      assert_eq!(chunk_count(0, CHUNK), 1);
+      assert_eq!(chunk_count(1, CHUNK), 1);
+      assert_eq!(chunk_count(u64::from(CHUNK), CHUNK), 1);
+      assert_eq!(chunk_count(u64::from(CHUNK) + 1, CHUNK), 2);
+    }
   }
 
   mod rejection {
