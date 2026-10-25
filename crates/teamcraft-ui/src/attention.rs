@@ -46,6 +46,23 @@ pub fn is_attentive(signals: &AttentionSignals, now: TimestampMs, input_window: 
   signals.is_focused && signals.is_visible && has_recent_input && is_os_active && !signals.is_screen_locked
 }
 
+/// When the user last did anything on this computer, for presence (gateway.md, "Presence"): the
+/// newer of the last input in the app and the input the OS reports. `None` while the screen is
+/// locked, which counts as away at once. Only the idle duration and the lock state leave the OS layer.
+pub fn last_activity_at(
+  now: TimestampMs,
+  last_input_at: TimestampMs,
+  maybe_os_idle: Option<Duration>,
+  is_screen_locked: bool,
+) -> Option<TimestampMs> {
+  if is_screen_locked {
+    return None;
+  }
+  let os_input_at =
+    maybe_os_idle.map(|idle| now.saturating_sub(i64::try_from(idle.as_millis()).unwrap_or(i64::MAX)));
+  Some(os_input_at.map_or(last_input_at, |at| at.max(last_input_at)))
+}
+
 impl AttentionReporter {
   /// The report to send now, if any: the first state, becoming attentive at once, and being away
   /// once it lasted the away delay.
@@ -219,6 +236,35 @@ mod tests {
       assert_eq!(reporter.leave(), Some(false));
       assert_eq!(reporter.leave(), None);
       assert_eq!(reporter.last_report(), Some(false));
+    }
+  }
+
+  mod activity {
+    use super::*;
+
+    #[test]
+    fn os_input_newer_than_the_app_counts() {
+      let idle = Some(Duration::from_secs(10));
+      assert_eq!(
+        last_activity_at(NOW, NOW - 600_000, idle, false),
+        Some(NOW - 10_000)
+      );
+    }
+
+    #[test]
+    fn app_input_newer_than_the_os_counts() {
+      let idle = Some(Duration::from_secs(60));
+      assert_eq!(last_activity_at(NOW, NOW - 1_000, idle, false), Some(NOW - 1_000));
+    }
+
+    #[test]
+    fn unknown_os_idle_falls_back_to_the_app() {
+      assert_eq!(last_activity_at(NOW, NOW - 4_000, None, false), Some(NOW - 4_000));
+    }
+
+    #[test]
+    fn a_locked_screen_has_no_activity() {
+      assert_eq!(last_activity_at(NOW, NOW, Some(Duration::ZERO), true), None);
     }
   }
 

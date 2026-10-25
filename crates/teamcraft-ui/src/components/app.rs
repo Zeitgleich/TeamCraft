@@ -9,7 +9,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
 use crate::areas::{self, Place, lazy_area};
-use crate::attention::{AttentionReporter, AttentionSignals, is_attentive};
+use crate::attention::{AttentionReporter, AttentionSignals, is_attentive, last_activity_at};
 use crate::auth::tauri;
 use crate::backend::Backend;
 use crate::calls::CallPhase;
@@ -1073,6 +1073,8 @@ fn follow_moved_calls(state: AppState) {
 const ACTIVITY_CHECK_MS: u64 = 5_000;
 /// How often `/remind` reminders are checked.
 const REMINDER_CHECK_MS: u64 = 15_000;
+/// Rounding noise in the OS idle time that is not new input.
+const OS_ACTIVITY_TOLERANCE_MS: TimestampMs = 1_000;
 const MS_PER_MINUTE: f64 = 60_000.0;
 /// While the window is in front, input repeats "active" at most this often: half the shortest
 /// away timeout the workspace policy allows (a minute), so a user who only scrolls or reads with
@@ -1083,6 +1085,8 @@ const ACTIVE_REPEAT_MS: TimestampMs = 30_000;
 struct ActivityWatch {
   state: AppState,
   last_input_at: Cell<TimestampMs>,
+  /// The newest input anywhere on the computer the OS reported.
+  last_os_activity_at: Cell<TimestampMs>,
   /// When this device last told the server it is active.
   last_active_report_at: Cell<TimestampMs>,
   is_idle: Cell<bool>,
@@ -1097,6 +1101,7 @@ fn watch_activity(state: AppState) {
   let watch = Rc::new(ActivityWatch {
     state,
     last_input_at: Cell::new(now_ms()),
+    last_os_activity_at: Cell::new(0),
     // The gateway's identify says active.
     last_active_report_at: Cell::new(now_ms()),
     is_idle: Cell::new(false),
@@ -1133,6 +1138,7 @@ fn watch_activity(state: AppState) {
       if let Some(os) = tauri::os_attention().await {
         // async-ok: a Cell the task shares, not a signal.
         watch.maybe_os.set(Some(os));
+        watch.on_os_state();
         watch.check();
       }
     });
@@ -1166,6 +1172,43 @@ impl ActivityWatch {
     self.state.read(|backend| backend.set_activity(false));
   }
 
+  /// System-wide activity (input anywhere on the computer, screen lock) feeds presence like input
+  /// in the window does, so a user working elsewhere stays online and a locked screen is away.
+  fn on_os_state(&self) {
+    let now = now_ms();
+    let maybe_os = self.maybe_os.get();
+    let idle = maybe_os
+      .and_then(|os| os.maybe_idle_ms)
+      .map(Duration::from_millis);
+    let is_locked = maybe_os.is_some_and(|os| os.is_locked);
+    let Some(active_at) = last_activity_at(now, self.last_input_at.get(), idle, is_locked) else {
+      // Away at once, unless the user turned automatic away off.
+      if self
+        .state
+        .settings
+        .prefs
+        .get_untracked()
+        .privacy
+        .away_after_minutes
+        .is_some()
+        && !self.is_idle.replace(true)
+      {
+        self.state.read(|backend| backend.set_activity(true));
+      }
+      return;
+    };
+    // The reported idle time wobbles by a few milliseconds; only a clear step forward is input.
+    let previous_at = self.last_os_activity_at.get();
+    if active_at <= previous_at + OS_ACTIVITY_TOLERANCE_MS {
+      return;
+    }
+    self.last_os_activity_at.set(active_at);
+    let is_repeat_due = now.saturating_sub(self.last_active_report_at.get()) >= ACTIVE_REPEAT_MS;
+    if self.is_idle.replace(false) || is_repeat_due {
+      self.report_active(now);
+    }
+  }
+
   fn check_idle(&self) {
     let Some(minutes) = self
       .state
@@ -1177,7 +1220,8 @@ impl ActivityWatch {
     else {
       return;
     };
-    let idle_for = (now_ms() - self.last_input_at.get()) as f64;
+    let last_activity_at = self.last_input_at.get().max(self.last_os_activity_at.get());
+    let idle_for = (now_ms() - last_activity_at) as f64;
     if idle_for >= f64::from(minutes) * MS_PER_MINUTE && !self.is_idle.replace(true) {
       self.state.read(|backend| backend.set_activity(true));
     }
