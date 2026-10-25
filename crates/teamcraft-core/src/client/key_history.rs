@@ -30,6 +30,11 @@ struct KeyHistory {
   /// "user/device" → the epoch its current leaf was added in, for devices added while this
   /// device was in the group. A device added back keeps its entry: it was a member all along.
   member_since: BTreeMap<String, u64>,
+  /// "user/device" → the epoch it was last added back in, while this device was in the group:
+  /// its own record of keys starts there afresh (#389). Decides whether it may lack older keys,
+  /// not what it may be sent.
+  #[serde(default)]
+  member_restarted: BTreeMap<String, u64>,
 }
 
 /// The current key a bundle hands over ([`Client::hand_over_key`]).
@@ -49,6 +54,15 @@ impl HandOverKey {
 }
 
 impl KeyHistory {
+  /// Whether `member`'s own record of keys starts after `joined` (this device's join): its leaf
+  /// was added later, or it was added back later and started afresh (#389). It may then lack
+  /// keys this device has.
+  fn has_record_starting_after(&self, member: &str, joined: u64) -> bool {
+    let since = self.member_since.get(member).copied();
+    let restarted = self.member_restarted.get(member).copied();
+    since.max(restarted).is_some_and(|start| start > joined)
+  }
+
   /// The keys of `ring_keys` the member device `device` was entitled to: those this device had
   /// from an epoch in which both were in the group (from `joined`, this device's join, and the
   /// device's own addition on, if this device saw it), newest first, at most `max`.
@@ -103,17 +117,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// After a merged commit: devices in the group now and not `before` were added in the current
   /// epoch; devices gone left it. A device added back is in both and keeps its entry.
+  /// `maybe_rejoined`: the device the commit added back, whose own record starts afresh.
   pub(crate) fn note_member_changes(
     &mut self,
     conversation: ConversationId,
     before: &[GroupMember],
+    maybe_rejoined: Option<GroupMember>,
   ) -> Result<(), CoreError> {
     let group = self.group_or_error(conversation)?;
     let epoch = group.epoch();
     let after = group.members()?;
     let added: Vec<&GroupMember> = after.iter().filter(|member| !before.contains(member)).collect();
     let removed: Vec<&GroupMember> = before.iter().filter(|member| !after.contains(member)).collect();
-    if added.is_empty() && removed.is_empty() {
+    if added.is_empty() && removed.is_empty() && maybe_rejoined.is_none() {
       return Ok(());
     }
     let mut history = self.key_history(conversation)?;
@@ -121,7 +137,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       history.member_since.insert(member_key(*member)?, epoch);
     }
     for member in removed {
-      history.member_since.remove(&member_key(*member)?);
+      let key = member_key(*member)?;
+      history.member_since.remove(&key);
+      history.member_restarted.remove(&key);
+    }
+    if let Some(rejoined) = maybe_rejoined {
+      history.member_restarted.insert(member_key(rejoined)?, epoch);
     }
     self.put_key_history(conversation, &history)
   }
@@ -324,12 +345,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   ) -> Result<bool, CoreError> {
     let joined = self.group_or_error(conversation)?.joined_epoch();
     let history = self.key_history(conversation)?;
-    Ok(
-      history
-        .member_since
-        .get(&member_key(member)?)
-        .is_some_and(|since| *since > joined),
-    )
+    Ok(history.has_record_starting_after(&member_key(member)?, joined))
   }
 
   fn key_history(&self, conversation: ConversationId) -> Result<KeyHistory, CoreError> {
@@ -412,6 +428,40 @@ mod tests {
       ids(&[keys[4].duplicate(), keys[3].duplicate()])
     );
     assert!(history.entitled_keys(&keys, 0, DEVICE, 0).is_empty());
+  }
+
+  #[test]
+  fn a_member_added_back_after_this_device_joined_may_lack_older_keys() {
+    // Issue #389: a founder-era member (no entry) fell out and was added back in epoch 50.
+    let mut history = KeyHistory::default();
+    assert!(
+      !history.has_record_starting_after(DEVICE, 4),
+      "there before this device"
+    );
+    history.member_restarted.insert(DEVICE.into(), 50);
+    assert!(history.has_record_starting_after(DEVICE, 4));
+    assert!(
+      !history.has_record_starting_after(DEVICE, 60),
+      "added back before this device joined"
+    );
+    history.member_since.insert(DEVICE.into(), 70);
+    assert!(
+      history.has_record_starting_after(DEVICE, 60),
+      "the later start counts"
+    );
+    // What it may be sent doesn't change: it was a member all along.
+    let keys = generate(1);
+    let mut tagged = history_of(&keys, &[10], None);
+    tagged.member_restarted.insert(DEVICE.into(), 50);
+    assert_eq!(ids(&tagged.entitled_keys(&keys, 0, DEVICE, 10)), ids(&keys));
+  }
+
+  #[test]
+  fn an_entry_from_an_earlier_version_reads_without_restarts() {
+    let decoded: KeyHistory =
+      serde_json::from_str(r#"{"key_epochs":{"00":3},"member_since":{"7/8":2}}"#).unwrap();
+    assert!(decoded.member_restarted.is_empty());
+    assert_eq!(decoded.member_since.get(DEVICE), Some(&2));
   }
 
   #[test]
