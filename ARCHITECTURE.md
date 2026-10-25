@@ -341,6 +341,14 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
 - **Audio:** forward the 3–5 loudest speakers based on the audio-level header extension; in large calls nobody receives dozens of audio streams.
 - **Video:** simulcast (3 layers) from each sender; the SFU picks the layer per receiver from its bandwidth estimate and viewport size ("last-N" for gallery view).
 - **Screen share:** separate session/stream, so a heavy share cannot degrade the call.
+- **Screen share quality** (`teamcraft_media::video::screen_layers`): two content modes, chosen per
+  share (remembered): *detail* (default) keeps text sharp, up to 1440p at 30 fps; *motion* keeps
+  smooth video, up to 1080p at 60 fps. The top layer's bitrate follows the pixel rate (about 0.06
+  bit per pixel, 2 to 8 Mbit/s: 1080p30 about 4, 1440p30 about 6.6); a second layer at half size and
+  a quarter of the bitrate serves weak viewers, and the uplink budget drops the big layer first.
+  A smaller source is never enlarged. Hardware encoders and the screen-content tuning of the encoders
+  apply as for cameras. Not yet: 4K, AV1/VP9 screen-content tools, battery and CPU budgets per
+  mode (to be measured, docs/performance.md).
 - **Screen share sound** (opt-in): the computer's playback without the call itself, as a second
   Opus stream per device (music mode, 64 kbit/s). The SFU forwards it to everyone regardless of
   the speaker selection. It is encrypted with the device's DAVE audio key, like the microphone.

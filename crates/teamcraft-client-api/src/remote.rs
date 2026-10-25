@@ -17,7 +17,7 @@ use crate::backend::{ChatBackend, SearchBackend};
 use crate::calls::{
   ActiveCall, BackgroundEffect, BackgroundImageInfo, CallEndReason, CallHistoryItem, CallMoveOffer,
   CallRequest, CallStatusSounds, IncomingCall, MediaDevices, OrgBackgroundRule, OrgBackgrounds, PushToTalk,
-  RemoteVideoTrack, RunningCall,
+  RemoteVideoTrack, RunningCall, ScreenContentMode,
 };
 use crate::live::LiveSnapshot;
 use crate::model::{
@@ -117,6 +117,9 @@ pub enum CallAction {
   StartScreenShare {
     #[serde(default)]
     has_sound: bool,
+    /// What the share keeps under pressure (older UIs send none: detail).
+    #[serde(default)]
+    content_mode: ScreenContentMode,
   },
   StopScreenShare,
   /// Opens the system's video effects panel (macOS: Portrait, background, Studio Light).
@@ -1474,7 +1477,10 @@ mod tests {
       CallAction::SetBackgroundEffect {
         effect: BackgroundEffect::Preset(BackgroundPreset::Office),
       },
-      CallAction::StartScreenShare { has_sound: true },
+      CallAction::StartScreenShare {
+        has_sound: true,
+        content_mode: ScreenContentMode::Motion,
+      },
       CallAction::OpenSystemVideoEffects,
     ] {
       let json = serde_json::to_string(&action).expect("serialize");
@@ -1511,7 +1517,13 @@ mod tests {
   #[test]
   fn screen_share_without_a_sound_flag_shares_the_picture_only() {
     let older: CallAction = serde_json::from_str(r#"{"action":"start_screen_share"}"#).expect("parse");
-    assert_eq!(older, CallAction::StartScreenShare { has_sound: false });
+    assert_eq!(
+      older,
+      CallAction::StartScreenShare {
+        has_sound: false,
+        content_mode: ScreenContentMode::Detail
+      }
+    );
   }
 
   #[test]

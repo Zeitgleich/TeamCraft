@@ -5,7 +5,8 @@ use leptos::prelude::*;
 use teamcraft_proto::VideoTrackKind;
 
 use crate::calls::{
-  CallKind, CallLayout, CallRequest, Participant, ScreenShareSound, selected_camera_is_rear,
+  CallKind, CallLayout, CallRequest, Participant, ScreenContentMode, ScreenShareSound,
+  selected_camera_is_rear,
 };
 use crate::components::call_prejoin::call_heading;
 use crate::components::call_video::{
@@ -147,6 +148,13 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         .unwrap_or_default()
     })
   });
+  let set_screen_mode = move |mode: ScreenContentMode| {
+    call.screen_mode.set(mode);
+    state
+      .settings
+      .prefs
+      .update(|prefs| prefs.calls.screen_mode = mode);
+  };
   let set_share_sound = move |has_sound: bool| {
     call.share_sound.set(has_sound);
     state
@@ -396,6 +404,19 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
             <span>
               {move || i18n.t("share-sound")}
               <small class="muted-text">{move || i18n.t("share-sound-hint")}</small>
+            </span>
+          </label>
+          <label class="checkbox">
+            <input
+              type="checkbox"
+              prop:checked=move || call.screen_mode.get() == ScreenContentMode::Motion
+              on:change=move |ev| {
+                set_screen_mode(if event_target_checked(&ev) { ScreenContentMode::Motion } else { ScreenContentMode::Detail })
+              }
+            />
+            <span>
+              {move || i18n.t("share-motion")}
+              <small class="muted-text">{move || i18n.t("share-motion-hint")}</small>
             </span>
           </label>
           <button

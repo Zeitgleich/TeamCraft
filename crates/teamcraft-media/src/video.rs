@@ -3,7 +3,9 @@
 //! Capture and the actual encoders/decoders come later (platform specific: WebCodecs, VideoToolbox,
 //! MediaCodec, VA-API); these types are what they plug into.
 
-use teamcraft_proto::{MAX_SIMULCAST_LAYERS, MediaCapabilities, VideoCodec, VideoLayerInfo};
+use teamcraft_proto::{
+  MAX_SIMULCAST_LAYERS, MediaCapabilities, ScreenContentMode, VideoCodec, VideoLayerInfo,
+};
 use thiserror::Error;
 
 use crate::datagram::SimulcastLayer;
@@ -221,6 +223,58 @@ pub fn simulcast_layers(
     .collect()
 }
 
+/// The largest screen share picture of each content mode (#530): detail up to 1440p at 30 fps,
+/// motion up to 1080p at 60 fps.
+pub fn screen_limits(mode: ScreenContentMode) -> (VideoResolution, u8) {
+  match mode {
+    ScreenContentMode::Motion => (
+      VideoResolution {
+        width: 1920,
+        height: 1080,
+      },
+      60,
+    ),
+    ScreenContentMode::Detail | ScreenContentMode::Unknown => (
+      VideoResolution {
+        width: 2560,
+        height: 1440,
+      },
+      30,
+    ),
+  }
+}
+
+/// Bits per pixel of a screen share's top layer: enough for text to stay sharp in H.264.
+const SCREEN_BITS_PER_PIXEL: f64 = 0.06;
+const SCREEN_MIN_BITRATE_BPS: u32 = 2_000_000;
+const SCREEN_MAX_BITRATE_BPS: u32 = 8_000_000;
+
+/// The top layer's bitrate for a screen share of `resolution` at `framerate`: it follows the
+/// pixels per second, between 2 and 8 Mbit/s (1080p30 about 4, 1440p30 about 6.6).
+pub fn screen_bitrate_bps(resolution: VideoResolution, framerate: u8) -> u32 {
+  let pixels_per_second = f64::from(resolution.width) * f64::from(resolution.height) * f64::from(framerate);
+  // Clamped to the u32 range above, so the cast cannot truncate.
+  (pixels_per_second * SCREEN_BITS_PER_PIXEL).clamp(
+    f64::from(SCREEN_MIN_BITRATE_BPS),
+    f64::from(SCREEN_MAX_BITRATE_BPS),
+  ) as u32
+}
+
+/// Layers of a screen share captured at `source`: the picture within the mode's limits, plus a
+/// half-size layer at a quarter of the bitrate for viewers on weak links (the uplink budget drops
+/// the big layer first, so a slow link or viewer doesn't lower the quality for the others).
+pub fn screen_layers(source: VideoResolution, framerate: u8, mode: ScreenContentMode) -> Vec<VideoLayerInfo> {
+  let (limit, max_framerate) = screen_limits(mode);
+  let resolution = fit_within(source, limit);
+  let framerate = framerate.clamp(1, max_framerate);
+  simulcast_layers(
+    resolution,
+    framerate,
+    screen_bitrate_bps(resolution, framerate),
+    2,
+  )
+}
+
 /// The best video codec a sender can use so that every receiver decodes it: encodable by the
 /// sender, decodable by all `receivers`, preferring AV1, then VP9, then H.264.
 pub fn choose_video_codec(
@@ -277,6 +331,36 @@ mod tests {
   }
 
   use super::*;
+
+  #[test]
+  fn screen_bitrate_follows_the_pixel_rate_within_bounds() {
+    let res = |width, height| VideoResolution { width, height };
+    let mbps = |resolution, framerate| screen_bitrate_bps(resolution, framerate) as f64 / 1e6;
+    assert!((3.5..4.0).contains(&mbps(res(1920, 1080), 30)));
+    assert!((6.0..7.0).contains(&mbps(res(2560, 1440), 30)));
+    assert!((7.0..=8.0).contains(&mbps(res(1920, 1080), 60)));
+    assert_eq!(screen_bitrate_bps(res(2560, 1440), 60), 8_000_000);
+    assert_eq!(screen_bitrate_bps(res(640, 360), 15), 2_000_000);
+  }
+
+  #[test]
+  fn screen_layers_keep_text_sharp_or_motion_smooth() {
+    let res = |width, height| VideoResolution { width, height };
+    let detail = screen_layers(res(3840, 2160), 60, ScreenContentMode::Detail);
+    let top = detail.last().unwrap();
+    assert_eq!((top.width, top.height, top.max_framerate), (2560, 1440, 30));
+    assert_eq!(detail.len(), 2);
+    assert_eq!((detail[0].width, detail[0].height), (1280, 720));
+    let motion = screen_layers(res(2560, 1440), 60, ScreenContentMode::Motion);
+    let top = motion.last().unwrap();
+    assert_eq!((top.width, top.height, top.max_framerate), (1920, 1080, 60));
+    // A small window is not enlarged.
+    let small = screen_layers(res(800, 600), 30, ScreenContentMode::Detail);
+    assert_eq!(
+      (small.last().unwrap().width, small.last().unwrap().height),
+      (800, 600)
+    );
+  }
 
   const HD: VideoResolution = VideoResolution {
     width: 1280,

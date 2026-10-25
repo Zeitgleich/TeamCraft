@@ -228,6 +228,19 @@ pub enum CallEvent {
   Unknown,
 }
 
+/// What a screen share keeps when the link or the machine can't carry it all (WebRTC's
+/// `contentHint`): `Detail` keeps the resolution (text, slides, code) and lets the frame rate drop;
+/// `Motion` keeps the frame rate (video, games, scrolling) at a lower resolution.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenContentMode {
+  #[default]
+  Detail,
+  Motion,
+  #[serde(other)]
+  Unknown,
+}
+
 /// A device's signed call key binding (`teamcraft-crypto::call_binding`), relayed by the SFU.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaveKeyBinding {
