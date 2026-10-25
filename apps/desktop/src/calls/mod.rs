@@ -115,6 +115,7 @@ struct MediaCall {
 enum Control {
   Mute(bool),
   Deafen(bool),
+  MoveHere,
   Audio {
     source: AudioSource,
     sink: AudioSink,
@@ -399,6 +400,11 @@ impl CallHost {
 
   pub async fn set_deafened(&self, is_deafened: bool) {
     self.control(Control::Deafen(is_deafened)).await;
+  }
+
+  /// Takes the call over from the account's other devices (#505).
+  pub async fn move_here(&self) {
+    self.control(Control::MoveHere).await;
   }
 
   /// The network changed or the computer woke up (the same signal the gateway reconnects on): a
@@ -731,6 +737,7 @@ async fn run_media(
       maybe_control = controls.recv() => match maybe_control {
         Some(Control::Mute(is_muted)) => call.set_muted(is_muted),
         Some(Control::Deafen(is_deafened)) => call.set_deafened(is_deafened),
+        Some(Control::MoveHere) => call.move_here(),
         Some(Control::Audio { source, sink, done }) => {
           let result = call.set_audio(source, sink).await.map_err(|error| error.to_string());
           let _ = done.send(result);

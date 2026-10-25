@@ -90,6 +90,7 @@ impl FakeCalls {
           active.is_deafened = is_deafened;
         }
       },
+      CallAction::MoveHere => {},
       CallAction::SetCamera { is_on } => {
         if let Some(active) = &mut snapshot.maybe_active {
           active.is_camera_on = is_on;

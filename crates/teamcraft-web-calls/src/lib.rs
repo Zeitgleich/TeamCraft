@@ -116,6 +116,7 @@ type Done = oneshot::Sender<Result<(), WebCallError>>;
 enum Control {
   Mute(bool),
   Deafen(bool),
+  MoveHere,
   Audio {
     source: AudioSource,
     sink: AudioSink,
@@ -391,6 +392,7 @@ impl Host {
       CallAction::Leave => self.leave().await,
       CallAction::SetMuted { is_muted } => self.control(Control::Mute(is_muted)),
       CallAction::SetDeafened { is_deafened } => self.control(Control::Deafen(is_deafened)),
+      CallAction::MoveHere => self.control(Control::MoveHere),
       CallAction::SelectMicrophone { maybe_device } => {
         self.state.borrow_mut().microphone = device_choice(maybe_device);
         self.switch_audio().await?;
@@ -702,6 +704,7 @@ async fn apply(call: &WebCall, control: Control) {
   match control {
     Control::Mute(is_muted) => call.set_muted(is_muted),
     Control::Deafen(is_deafened) => call.set_deafened(is_deafened),
+    Control::MoveHere => call.move_here(),
     // The asker may have given up waiting.
     Control::Audio { source, sink, done } => drop(done.send(call.set_audio(source, sink).await)),
     Control::Camera { stream, done } => drop(done.send(call.share_camera_stream(stream).await)),

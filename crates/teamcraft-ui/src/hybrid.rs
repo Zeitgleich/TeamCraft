@@ -901,6 +901,12 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
     }
   }
 
+  fn move_call_here(&self) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::MoveHere);
+    }
+  }
+
   fn select_microphone(&self, maybe_device: Option<String>) {
     if let Some(calls) = &self.maybe_calls {
       calls.act(CallAction::SelectMicrophone { maybe_device });

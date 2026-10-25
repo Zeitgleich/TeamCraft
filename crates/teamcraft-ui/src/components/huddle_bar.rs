@@ -29,6 +29,24 @@ pub fn HuddleBar(conversation: ConversationId) -> impl IntoView {
       })
       .unwrap_or_default()
   });
+  let is_on_other_device = Memo::new(move |_| {
+    let me = state.me().id;
+    !is_in_call.get() && huddle.get().is_some_and(|info| info.participants.contains(&me))
+  });
+  let join_alongside = move |_| {
+    call.is_camera_on.set(false);
+    call.join_alongside(CallRequest {
+      conversation,
+      kind: CallKind::Huddle,
+    });
+  };
+  let take_over = move |_| {
+    call.is_camera_on.set(false);
+    call.join_and_take_over(CallRequest {
+      conversation,
+      kind: CallKind::Huddle,
+    });
+  };
   let join = move |_| {
     call.is_camera_on.set(false);
     call.join(CallRequest {
@@ -42,7 +60,9 @@ pub fn HuddleBar(conversation: ConversationId) -> impl IntoView {
       <div class="huddle-bar" role="region" aria-label=move || i18n.t("huddle-bar-label")>
         <Icon name=IconName::Headphones class="huddle-icon" />
         <div class="huddle-info">
-          <strong>{move || i18n.t("huddle-in-progress")}</strong>
+          <strong>
+            {move || if is_on_other_device.get() { i18n.t("huddle-on-other-device") } else { i18n.t("huddle-in-progress") }}
+          </strong>
           <span class="avatar-stack">
             {move || {
               members.get().into_iter().map(|user| view! { <Avatar user=user size=AvatarSize::Small /> }).collect_view()
@@ -56,9 +76,23 @@ pub fn HuddleBar(conversation: ConversationId) -> impl IntoView {
           when=move || is_in_call.get()
           fallback=move || {
             view! {
-              <button class="btn btn-primary btn-small" on:click=join>
-                {move || i18n.t("huddle-join")}
-              </button>
+              <Show
+                when=move || is_on_other_device.get()
+                fallback=move || {
+                  view! {
+                    <button class="btn btn-primary btn-small" on:click=join>
+                      {move || i18n.t("huddle-join")}
+                    </button>
+                  }
+                }
+              >
+                <button class="btn btn-small" on:click=join_alongside>
+                  {move || i18n.t("huddle-join-here")}
+                </button>
+                <button class="btn btn-primary btn-small" on:click=take_over>
+                  {move || i18n.t("huddle-move-here")}
+                </button>
+              </Show>
             }
           }
         >

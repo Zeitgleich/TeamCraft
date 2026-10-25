@@ -568,6 +568,8 @@ pub trait CallBackend {
   fn decline_call(&self, _conversation: ConversationId) {}
   fn set_call_muted(&self, _is_muted: bool) {}
   fn set_call_deafened(&self, _is_deafened: bool) {}
+  /// Takes the active call over from the account's other devices, which leave it (#505).
+  fn move_call_here(&self) {}
   /// Which call status sounds play on this device, for this and later calls.
   fn set_call_status_sounds(&self, _sounds: CallStatusSounds) {}
   /// A [`crate::calls::MediaDevice::id`]; `None` follows the system default.

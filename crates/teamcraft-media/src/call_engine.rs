@@ -407,6 +407,11 @@ impl CallEngine {
     }
   }
 
+  /// Takes the call over from the account's other devices: the SFU closes them (#505).
+  pub fn move_here(&mut self) {
+    self.signal(CallClientMessage::MoveHere);
+  }
+
   pub fn set_deafened(&mut self, is_deafened: bool) {
     if self.is_deafened != is_deafened {
       self.is_deafened = is_deafened;
@@ -1202,7 +1207,7 @@ impl CallEngine {
     let Some(&(sender, origin)) = self.audio_streams.get(&datagram.header.stream_id) else {
       return Ok(());
     };
-    if self.is_deafened {
+    if self.is_deafened || self.is_own_other_device(sender, origin) {
       return Ok(());
     }
     let packet = RtpPacket::parse(datagram.rtp).map_err(|_| CallEngineError::Protocol("bad RTP"))?;
@@ -1218,6 +1223,16 @@ impl CallEngine {
       opus,
     });
     Ok(())
+  }
+
+  /// The microphone of another device of this account: the user is in the room with it already,
+  /// so playing it here would only echo the room back (#505).
+  fn is_own_other_device(&self, sender: DeviceId, origin: AudioOrigin) -> bool {
+    origin == AudioOrigin::Microphone
+      && self
+        .participants
+        .get(&sender)
+        .is_some_and(|participant| participant.user_id == self.config.user_id)
   }
 
   fn receive_video(
