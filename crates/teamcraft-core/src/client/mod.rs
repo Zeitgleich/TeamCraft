@@ -36,6 +36,7 @@ mod segments;
 mod sync;
 #[cfg(feature = "ui")]
 mod ui_commands;
+pub mod upload_parts;
 mod workspace;
 pub mod workspace_admin;
 pub(crate) use account::ACCOUNT_DATA_KEY;
@@ -209,6 +210,11 @@ pub struct Client<A, S> {
   background_failures: Vec<CoreError>,
   /// File transfers in flight, with their progress; the UI adapter reads a clone.
   transfers: crate::transfers::Transfers,
+  /// The progress of a large file between two of its parts, so it stays listed.
+  held_upload_progress: Option<crate::transfers::TransferGuard>,
+  /// The browser's picked files may include some no upload needs any more (at start, after an
+  /// upload finished).
+  is_picked_sweep_due: bool,
   maybe_call_sink: Option<CallEventSink>,
   /// The call this device last prepared to join per conversation: a call move is followed only
   /// when announced for that very call (docs/meetings.md, "A call becomes a meeting").
@@ -320,6 +326,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       typing: Default::default(),
       background_failures: Vec::new(),
       transfers: crate::transfers::Transfers::new(),
+      held_upload_progress: None,
+      is_picked_sweep_due: true,
       maybe_call_sink: None,
       call_ids: HashMap::new(),
       maybe_preview_fetcher,

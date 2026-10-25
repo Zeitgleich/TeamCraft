@@ -46,6 +46,10 @@ use teamcraft_proto::{
   CreateAttachmentResponse, CreateShareLinkRequest, RegisterPushRequest, ShareLinkResponse,
 };
 use teamcraft_proto::{
+  AttachmentPartUrlResponse, CompleteMultipartAttachmentRequest, CreateMultipartAttachmentResponse,
+  PresignAttachmentPartRequest,
+};
+use teamcraft_proto::{
   BackgroundDownloadResponse, BackgroundId, CreateBackgroundUploadRequest, CreateBackgroundUploadResponse,
   CreateOrgBackgroundUploadRequest, CreateOrgBackgroundUploadResponse, OrgBackgroundDownloadResponse,
   OrgBackgroundId,
@@ -73,6 +77,9 @@ use crate::transfers::ByteCounter;
 /// A request that doesn't borrow the API: the sync loop keeps serving while it runs (a large blob
 /// upload on a slow link takes minutes).
 pub type DetachedRequest = Pin<Box<dyn Future<Output = Result<(), ApiError>>>>;
+
+/// One part of an upload in parts, like [`DetachedRequest`]; it yields the part's `ETag`.
+pub type DetachedPart = Pin<Box<dyn Future<Output = Result<String, ApiError>>>>;
 
 /// A download that doesn't borrow the API, like [`DetachedRequest`]; it yields the blob.
 pub type DetachedDownload = Pin<Box<dyn Future<Output = Result<Vec<u8>, ApiError>>>>;
@@ -390,6 +397,23 @@ pub trait ServerApi {
     &self,
     attachment: AttachmentId,
   ) -> impl Future<Output = Result<AttachmentResponse, ApiError>>;
+  /// Announces a large upload that goes up in parts ([`Self::presign_attachment_part`]).
+  fn create_multipart_attachment(
+    &self,
+    request: &CreateAttachmentRequest,
+  ) -> impl Future<Output = Result<CreateMultipartAttachmentResponse, ApiError>>;
+  fn presign_attachment_part(
+    &self,
+    attachment: AttachmentId,
+    request: &PresignAttachmentPartRequest,
+  ) -> impl Future<Output = Result<AttachmentPartUrlResponse, ApiError>>;
+  fn complete_multipart_attachment(
+    &self,
+    attachment: AttachmentId,
+    request: &CompleteMultipartAttachmentRequest,
+  ) -> impl Future<Output = Result<AttachmentResponse, ApiError>>;
+  /// Gives up an unfinished upload (cancelled): the server frees its parts or object.
+  fn abandon_attachment(&self, attachment: AttachmentId) -> impl Future<Output = Result<(), ApiError>>;
   fn download_attachment(
     &self,
     attachment: AttachmentId,
@@ -427,6 +451,9 @@ pub trait ServerApi {
   /// [`Self::put_blob`] as a request of its own, for the host to drive beside its loop, counting
   /// the bytes sent into `sent`. Dropping it stops the upload.
   fn put_blob_detached(&self, url: &str, bytes: Vec<u8>, sent: ByteCounter) -> DetachedRequest;
+  /// Uploads one part of an upload in parts to its presigned URL, adding the bytes sent to `sent`;
+  /// resolves to the `ETag` the storage answered with. Dropping it stops the upload.
+  fn put_part_detached(&self, url: &str, bytes: Vec<u8>, sent: ByteCounter) -> DetachedPart;
   /// [`Self::get_blob_capped`] (or uncapped) as a request of its own, counting the bytes received
   /// into `received`. Dropping it stops the download.
   fn get_blob_detached(

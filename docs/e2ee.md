@@ -387,6 +387,18 @@ back, if it was (five minutes of slack for clocks). Messages from before signatu
 Client encrypts each file with a fresh random key (XChaCha20-Poly1305, chunked for streaming), uploads
 the blob to S3 via a presigned URL, puts key + hash + file name + thumbnail into the encrypted message.
 
+Files larger than one part (8 MiB) go up as an S3 multipart upload (issue #153): the blob is the same
+STREAM of 64 KiB chunks, cut into parts of 128 whole chunks (the header goes into the first), and each
+part is encrypted and uploaded on its own through a presigned part URL. Chunk `n` is encrypted with
+nonce counter `n` whichever part it is in (`AttachmentSegmentEncryptor`), so the parts join into
+exactly the blob the one-shot encryptor would have made, and receivers see no difference. To continue
+after a restart, the sender's encrypted local store keeps the file's key, the header (its nonce
+prefix), the parts' `ETag`s, the offset and the SHA-256 state over the uploaded ciphertext; the hash
+in the message is that state finished after the last part. The server sees the same as for a single
+upload: sizes, part numbers and `ETag`s of ciphertext. In the browser, a picked file waiting for its
+upload is kept as a `File` in IndexedDB (plaintext, like the mobile staging copy) and deleted once the
+upload is done or cancelled; the desktop app stages such files in its data directory the same way.
+
 The message list shows the encrypted thumbnail at once. On web and desktop it then loads the full
 picture inline (up to 16 MiB, a few at a time), and the lightbox does for any image or video: the
 client core downloads the blob, checks its hash and decrypts it in memory (desktop: `core_attachment`,

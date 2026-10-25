@@ -11,13 +11,14 @@ use std::time::{Duration, Instant};
 use secrecy::ExposeSecret;
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{Message, ThreadId};
+use teamcraft_client_api::remote::AttachmentPriority;
 use teamcraft_client_api::remote::{
   ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreStatus, EnrollRequest, LinkStatus,
   MessageWindow, SecuritySnapshot, StoreProblem,
 };
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
-use teamcraft_core::client::files::BlobUpload;
+use teamcraft_core::client::files::{BlobUpload, sweep_staged_copies};
 use teamcraft_core::client::{CatchUpFocus, LinkApproval, LinkedSecrets, NewDeviceLink};
 use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::connection::{
@@ -253,6 +254,7 @@ enum Request {
     conversation: ConversationId,
     message: MessageId,
     file_id: String,
+    priority: AttachmentPriority,
     reply: oneshot::Sender<Result<SecretBytes, String>>,
   },
   OrgBackgroundPicture(OrgBackgroundId, oneshot::Sender<Result<Vec<u8>, String>>),
@@ -284,6 +286,8 @@ enum Request {
 /// Handle to the core thread. Dropping it stops the thread.
 pub struct CoreRuntime {
   requests: mpsc::UnboundedSender<Request>,
+  /// Where the webview stages large files for their upload (`super::staging`).
+  staging_dir: PathBuf,
   /// Read without asking the core thread, which may be busy connecting.
   connection: ConnectionStatus,
   /// Shared with the client: the conversation the user opened, set while the core thread syncs.
@@ -306,6 +310,7 @@ impl CoreRuntime {
     on_call_event: CallEventHandler,
   ) -> Self {
     let (requests, receiver) = mpsc::unbounded_channel();
+    let staging_dir = staging_dir(&config, user);
     let connection = ConnectionStatus::new();
     let status = connection.clone();
     let focus = CatchUpFocus::default();
@@ -336,10 +341,15 @@ impl CoreRuntime {
       .ok();
     Self {
       requests,
+      staging_dir,
       connection,
       focus,
       thread: Mutex::new(thread),
     }
+  }
+
+  pub fn staging_dir(&self) -> &std::path::Path {
+    &self.staging_dir
   }
 
   /// The user opened `conversation`: a catch-up still running takes it next (issue #247). Set
@@ -521,12 +531,14 @@ impl CoreRuntime {
     conversation: ConversationId,
     message: MessageId,
     file_id: String,
+    priority: AttachmentPriority,
   ) -> Result<SecretBytes, String> {
     self
       .ask(|reply| Request::Attachment {
         conversation,
         message,
         file_id,
+        priority,
         reply,
       })
       .await
@@ -848,7 +860,7 @@ impl Core {
       self.api(),
       store.clone(),
       Box::new(SystemClock),
-      ClientSettings::default(),
+      self.client_settings(),
     )
     .map_err(open_error)?
     {
@@ -879,7 +891,7 @@ impl Core {
       self.api(),
       store,
       Box::new(SystemClock),
-      ClientSettings::default(),
+      self.client_settings(),
       self.config.argon2,
     )
     .await;
@@ -943,7 +955,21 @@ impl Core {
     }
   }
 
+  /// Uploads read the webview's staged copies and delete them when done.
+  fn client_settings(&self) -> ClientSettings {
+    ClientSettings {
+      maybe_upload_staging_dir: Some(staging_dir(&self.config, self.user)),
+      ..ClientSettings::default()
+    }
+  }
+
   fn adopt(&mut self, mut client: Client<Api, Store>) -> CoreStatus {
+    // Copies left by an app that stopped before their message was sent (or by a cancelled send).
+    match sweep_staged_copies(client.store(), &staging_dir(&self.config, self.user)) {
+      Ok(0) => {},
+      Ok(removed) => tracing::info!(removed, "deleted staged upload copies nobody needs"),
+      Err(error) => tracing::warn!(%error, "could not sweep the staged upload copies"),
+    }
     let on_call_event = self.on_call_event.clone();
     client.set_call_event_sink(Box::new(move |event| on_call_event(event.clone())));
     client.share_catch_up_focus(self.catch_up_focus.clone());
@@ -1104,8 +1130,9 @@ impl Core {
         conversation,
         message,
         file_id,
+        priority,
         reply,
-      } => self.queue_attachment(conversation, message, &file_id, reply),
+      } => self.queue_attachment(conversation, message, &file_id, priority, reply),
       Request::OrgBackgroundPicture(id, reply) => drop(reply.send(self.org_background_picture(id).await)),
     }
   }
@@ -1117,6 +1144,7 @@ impl Core {
     conversation: ConversationId,
     message: MessageId,
     file_id: &str,
+    priority: AttachmentPriority,
     reply: oneshot::Sender<Result<SecretBytes, String>>,
   ) {
     let maybe_reference = self
@@ -1128,8 +1156,8 @@ impl Core {
       return;
     };
     // A closed reply channel (the caller gave up) needs nothing.
-    let deliver = move |opened: Result<SecretBytes, CoreError>| drop(reply.send(opened.map_err(describe)));
-    self.downloads.view(reference, Box::new(deliver));
+    let deliver = move |opened: Result<SecretBytes, String>| drop(reply.send(opened));
+    self.downloads.view(reference, priority.into(), Box::new(deliver));
   }
 
   /// Starts the downloads that may run now.
@@ -1185,7 +1213,7 @@ impl Core {
         self.api(),
         store,
         Box::new(SystemClock),
-        ClientSettings::default(),
+        self.client_settings(),
         options,
       )
       .await
@@ -1248,7 +1276,7 @@ impl Core {
         self.api(),
         store,
         Box::new(SystemClock),
-        ClientSettings::default(),
+        self.client_settings(),
         options,
       )
       .await
@@ -1679,6 +1707,11 @@ async fn sleep_for(maybe_duration: Option<Duration>) {
 }
 
 /// An error of opening the store or the client: unreadable data gets its own status.
+/// The staged copies of one user's large files (`super::staging`).
+fn staging_dir(config: &CoreConfig, user: UserId) -> PathBuf {
+  config.data_dir.join("upload-staging").join(user.to_string())
+}
+
 fn open_error(error: CoreError) -> OpenError {
   match error.unreadable_store() {
     Some(problem) => OpenError::Unreadable(problem, error.to_string()),

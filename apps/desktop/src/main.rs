@@ -192,6 +192,7 @@ fn main() -> anyhow::Result<()> {
       core::commands::core_action,
       core::commands::core_query,
       core::commands::core_attachment,
+      core::commands::core_stage_file,
       core::commands::core_stop,
       core::commands::core_reset_store,
       calls::commands::call_snapshot,

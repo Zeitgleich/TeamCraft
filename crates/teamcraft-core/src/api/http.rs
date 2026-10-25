@@ -27,8 +27,10 @@ use teamcraft_proto::{
   WorkspaceLogKind,
 };
 use teamcraft_proto::{
-  AttachmentDownloadResponse, AttachmentId, AttachmentResponse, CreateAttachmentRequest,
-  CreateAttachmentResponse, CreateShareLinkRequest, RegisterPushRequest, ShareLinkResponse,
+  AttachmentDownloadResponse, AttachmentId, AttachmentPartUrlResponse, AttachmentResponse,
+  CompleteMultipartAttachmentRequest, CreateAttachmentRequest, CreateAttachmentResponse,
+  CreateMultipartAttachmentResponse, CreateShareLinkRequest, PresignAttachmentPartRequest,
+  RegisterPushRequest, ShareLinkResponse,
 };
 use teamcraft_proto::{
   BackgroundDownloadResponse, BackgroundId, CreateBackgroundUploadRequest, CreateBackgroundUploadResponse,
@@ -58,8 +60,8 @@ use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversa
 #[cfg(target_arch = "wasm32")]
 use super::web_socket::{BrowserSocket, SocketFrame};
 use super::{
-  ApiError, DetachedDownload, DetachedRequest, GatewayConnection, Interception, RendezvousConnection,
-  RendezvousFrame, ServerApi,
+  ApiError, DetachedDownload, DetachedPart, DetachedRequest, GatewayConnection, Interception,
+  RendezvousConnection, RendezvousFrame, ServerApi,
 };
 use crate::clock::{Clock, SystemClock};
 use crate::transfers::ByteCounter;
@@ -862,6 +864,45 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     decode(send(self.request(Method::POST, &format!("/attachments/{attachment}/complete"))?).await?).await
   }
 
+  async fn create_multipart_attachment(
+    &self,
+    request: &CreateAttachmentRequest,
+  ) -> Result<CreateMultipartAttachmentResponse, ApiError> {
+    self
+      .send_json(Method::POST, "/attachments/multipart", request)
+      .await
+  }
+
+  async fn presign_attachment_part(
+    &self,
+    attachment: AttachmentId,
+    request: &PresignAttachmentPartRequest,
+  ) -> Result<AttachmentPartUrlResponse, ApiError> {
+    self
+      .send_json(Method::POST, &format!("/attachments/{attachment}/parts"), request)
+      .await
+  }
+
+  async fn complete_multipart_attachment(
+    &self,
+    attachment: AttachmentId,
+    request: &CompleteMultipartAttachmentRequest,
+  ) -> Result<AttachmentResponse, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/attachments/{attachment}/multipart/complete"),
+        request,
+      )
+      .await
+  }
+
+  async fn abandon_attachment(&self, attachment: AttachmentId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/attachments/{attachment}"), None)
+      .await
+  }
+
   async fn download_attachment(
     &self,
     attachment: AttachmentId,
@@ -949,6 +990,30 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   fn put_blob_detached(&self, url: &str, bytes: Vec<u8>, sent: ByteCounter) -> DetachedRequest {
     let url = url.to_owned();
     Box::pin(async move { super::xhr::put(&url, bytes, sent).await })
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  fn put_part_detached(&self, url: &str, bytes: Vec<u8>, sent: ByteCounter) -> DetachedPart {
+    let request = self
+      .client
+      .put(url)
+      .header(reqwest::header::CONTENT_LENGTH, bytes.len())
+      .body(counted_body(bytes, sent));
+    Box::pin(async move {
+      let response = send(request).await?;
+      response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .ok_or_else(|| ApiError::Decode("the storage answered a part without an ETag".into()))
+    })
+  }
+
+  #[cfg(target_arch = "wasm32")]
+  fn put_part_detached(&self, url: &str, bytes: Vec<u8>, sent: ByteCounter) -> DetachedPart {
+    let url = url.to_owned();
+    Box::pin(async move { super::xhr::put_part(&url, bytes, sent).await })
   }
 
   #[cfg(not(target_arch = "wasm32"))]

@@ -31,8 +31,10 @@ use teamcraft_proto::{
   WorkspaceLogKind,
 };
 use teamcraft_proto::{
-  AttachmentDownloadResponse, AttachmentId, AttachmentResponse, CreateAttachmentRequest,
-  CreateAttachmentResponse, CreateShareLinkRequest, RegisterPushRequest, ShareLinkResponse,
+  AttachmentDownloadResponse, AttachmentId, AttachmentPartUrlResponse, AttachmentResponse,
+  CompleteMultipartAttachmentRequest, CreateAttachmentRequest, CreateAttachmentResponse,
+  CreateMultipartAttachmentResponse, CreateShareLinkRequest, PresignAttachmentPartRequest,
+  RegisterPushRequest, ShareLinkResponse,
 };
 use teamcraft_proto::{
   BackgroundDownloadResponse, BackgroundId, CreateBackgroundUploadRequest, CreateBackgroundUploadResponse,
@@ -180,6 +182,12 @@ struct State {
   policy_log: Vec<WorkspaceLogEntryResponse>,
   /// Larger attachments are refused like the server's `max_attachment_bytes`; `None`: no limit.
   maybe_max_attachment_bytes: Option<u64>,
+  /// Parts stored by uploads in parts, counted over the whole run.
+  part_uploads: u64,
+  /// Unfinished uploads the clients gave up (`abandon_attachment`).
+  abandoned_attachments: Vec<AttachmentId>,
+  /// Uploads in parts keep only the parts' sizes, not their bytes (memory tests with large files).
+  is_discarding_parts: bool,
   share_links: HashMap<String, AttachmentId>,
   backgrounds: HashMap<BackgroundId, FakeBackground>,
   org_backgrounds: HashMap<OrgBackgroundId, FakeBackground>,
@@ -290,6 +298,15 @@ struct FakeAttachment {
   size_bytes: u64,
   maybe_blob: Option<Vec<u8>>,
   is_complete: bool,
+  /// An upload in parts: the parts stored so far, by part number.
+  maybe_parts: Option<BTreeMap<u16, FakePart>>,
+}
+
+struct FakePart {
+  etag: String,
+  size_bytes: u64,
+  /// `None` while the server discards parts (`discard_parts`).
+  maybe_bytes: Option<Vec<u8>>,
 }
 
 struct Device {
@@ -979,6 +996,22 @@ impl FakeServer {
   /// Attachments announced so far, finished or not.
   pub fn attachment_count(&self) -> usize {
     self.lock().attachments.len()
+  }
+
+  /// Parts stored by uploads in parts so far (a part sent again counts again).
+  pub fn part_upload_count(&self) -> u64 {
+    self.lock().part_uploads
+  }
+
+  /// Unfinished uploads the clients gave up, in order.
+  pub fn abandoned_attachments(&self) -> Vec<AttachmentId> {
+    self.lock().abandoned_attachments.clone()
+  }
+
+  /// While set, uploads in parts keep only the parts' sizes: a test of a large file then measures
+  /// the client's memory, not the fake storage's.
+  pub fn discard_parts(&self, is_discarding: bool) {
+    self.lock().is_discarding_parts = is_discarding;
   }
 
   pub fn set_max_attachment_bytes(&self, limit: u64) {
@@ -2961,6 +2994,7 @@ impl ServerApi for FakeServerApi {
           size_bytes: request.size_bytes,
           maybe_blob: None,
           is_complete: false,
+          maybe_parts: None,
         },
       );
       Ok(CreateAttachmentResponse {
@@ -3021,6 +3055,93 @@ impl ServerApi for FakeServerApi {
         size_bytes: entry.size_bytes,
         is_complete: true,
       })
+    })
+  }
+
+  async fn create_multipart_attachment(
+    &self,
+    request: &CreateAttachmentRequest,
+  ) -> Result<CreateMultipartAttachmentResponse, ApiError> {
+    let created = self.create_attachment(request).await?;
+    self.with(|state, _| {
+      if let Some(entry) = state.attachments.get_mut(&created.id) {
+        entry.maybe_parts = Some(BTreeMap::new());
+      }
+      Ok(CreateMultipartAttachmentResponse {
+        id: created.id,
+        min_part_size_bytes: FAKE_MIN_PART_BYTES,
+        max_part_size_bytes: 16 * 1024 * 1024,
+        max_parts: 10_000,
+        expires_at: UnixMillis(0),
+      })
+    })
+  }
+
+  async fn presign_attachment_part(
+    &self,
+    attachment: AttachmentId,
+    request: &PresignAttachmentPartRequest,
+  ) -> Result<AttachmentPartUrlResponse, ApiError> {
+    self.with(|state, _| {
+      let entry = state
+        .attachments
+        .get(&attachment)
+        .filter(|entry| entry.maybe_parts.is_some() && !entry.is_complete)
+        .ok_or_else(|| ApiError::status(404, ErrorCode::AttachmentNotFound, "no upload in parts"))?;
+      if request.part_number == 0 || request.size_bytes == 0 || request.size_bytes > entry.size_bytes {
+        return Err(ApiError::status(400, ErrorCode::InvalidRequest, "bad part"));
+      }
+      Ok(AttachmentPartUrlResponse {
+        upload_url: format!(
+          "{PART_SCHEME}{attachment}/{}/{}",
+          request.part_number, request.size_bytes
+        ),
+        expires_at: UnixMillis(0),
+      })
+    })
+  }
+
+  async fn complete_multipart_attachment(
+    &self,
+    attachment: AttachmentId,
+    request: &CompleteMultipartAttachmentRequest,
+  ) -> Result<AttachmentResponse, ApiError> {
+    self.with(|state, _| {
+      let entry = state
+        .attachments
+        .get_mut(&attachment)
+        .ok_or_else(|| ApiError::status(404, ErrorCode::AttachmentNotFound, "unknown"))?;
+      if !entry.is_complete {
+        let parts = entry
+          .maybe_parts
+          .as_ref()
+          .ok_or_else(|| ApiError::status(409, ErrorCode::Conflict, "not an upload in parts"))?;
+        let joined = join_fake_parts(parts, request, entry.size_bytes)?;
+        entry.maybe_blob = joined;
+        entry.maybe_parts = None;
+        entry.is_complete = true;
+      }
+      Ok(AttachmentResponse {
+        id: attachment,
+        conversation_id: entry.conversation,
+        size_bytes: entry.size_bytes,
+        is_complete: true,
+      })
+    })
+  }
+
+  async fn abandon_attachment(&self, attachment: AttachmentId) -> Result<(), ApiError> {
+    self.with(|state, _| {
+      if state
+        .attachments
+        .get(&attachment)
+        .is_some_and(|entry| entry.is_complete)
+      {
+        return Err(ApiError::status(409, ErrorCode::Conflict, "completed"));
+      }
+      state.attachments.remove(&attachment);
+      state.abandoned_attachments.push(attachment);
+      Ok(())
     })
   }
 
@@ -3184,6 +3305,26 @@ impl ServerApi for FakeServerApi {
       api.put_blob(&url, bytes).await?;
       sent.add(length);
       Ok(())
+    })
+  }
+
+  fn put_part_detached(
+    &self,
+    url: &str,
+    bytes: Vec<u8>,
+    sent: crate::transfers::ByteCounter,
+  ) -> super::DetachedPart {
+    let (api, url) = (self.clone(), url.to_owned());
+    Box::pin(async move {
+      let length = bytes.len() as u64;
+      let etag = api.with(|state, me| {
+        if state.blob_refused_users.contains(&me) {
+          return Err(ApiError::Network("fake server: the upload was refused".into()));
+        }
+        store_fake_part(state, &url, bytes)
+      })?;
+      sent.add(length);
+      Ok(etag)
     })
   }
 
@@ -4051,6 +4192,10 @@ fn stored_key_package(
 
 const PENDING_PREFIX: &str = "pending-";
 const BLOB_SCHEME: &str = "fake-blob://";
+/// Presigned part URLs: `fake-part://{attachment}/{part number}/{size}`.
+const PART_SCHEME: &str = "fake-part://";
+/// Like S3's 5 MiB, scaled down so tests stay small.
+pub const FAKE_MIN_PART_BYTES: u64 = 1024;
 const BACKGROUND_SCHEME: &str = "fake-background://";
 const ORG_BACKGROUND_SCHEME: &str = "fake-org-background://";
 
@@ -4092,6 +4237,82 @@ fn background_blob<'a>(state: &'a mut State, raw: &str) -> Result<&'a mut FakeBa
       status: 404,
       maybe_body: None,
     })
+}
+
+/// Stores a part sent to a fake presigned part URL; answers its `ETag`.
+fn store_fake_part(state: &mut State, url: &str, bytes: Vec<u8>) -> Result<String, ApiError> {
+  let refused = || ApiError::Status {
+    status: 404,
+    maybe_body: None,
+  };
+  let mut fields = url.strip_prefix(PART_SCHEME).ok_or_else(refused)?.split('/');
+  let (Some(id), Some(number), Some(size)) = (fields.next(), fields.next(), fields.next()) else {
+    return Err(refused());
+  };
+  let id = id
+    .parse::<i64>()
+    .ok()
+    .and_then(|raw| Snowflake::new(raw).ok())
+    .map(AttachmentId::from_snowflake)
+    .ok_or_else(refused)?;
+  let number: u16 = number.parse().map_err(|_| refused())?;
+  if size.parse::<u64>().ok() != Some(bytes.len() as u64) {
+    return Err(ApiError::Status {
+      status: 403,
+      maybe_body: None,
+    });
+  }
+  let is_discarding = state.is_discarding_parts;
+  let parts = state
+    .attachments
+    .get_mut(&id)
+    .and_then(|entry| entry.maybe_parts.as_mut())
+    .ok_or_else(refused)?;
+  let checksum = bytes.iter().fold(0u64, |sum, &byte| {
+    sum.wrapping_mul(31).wrapping_add(u64::from(byte))
+  });
+  let etag = format!("\"{number}-{checksum:x}\"");
+  parts.insert(
+    number,
+    FakePart {
+      etag: etag.clone(),
+      size_bytes: bytes.len() as u64,
+      maybe_bytes: (!is_discarding).then_some(bytes),
+    },
+  );
+  state.part_uploads += 1;
+  Ok(etag)
+}
+
+/// The blob the listed parts make, like S3's CompleteMultipartUpload: every part listed with its
+/// current `ETag`, numbered from 1 without gaps, of the announced size together. `None` for parts
+/// the server discarded.
+fn join_fake_parts(
+  parts: &BTreeMap<u16, FakePart>,
+  request: &CompleteMultipartAttachmentRequest,
+  size_bytes: u64,
+) -> Result<Option<Vec<u8>>, ApiError> {
+  let invalid = |message: &'static str| ApiError::status(409, ErrorCode::Conflict, message);
+  let mut blob = Some(Vec::new());
+  let mut total = 0;
+  for (index, listed) in request.parts.iter().enumerate() {
+    let part = parts
+      .get(&listed.part_number)
+      .filter(|part| usize::from(listed.part_number) == index + 1 && part.etag == listed.etag)
+      .ok_or_else(|| invalid("a part is missing or out of order"))?;
+    total += part.size_bytes;
+    blob = match (blob, &part.maybe_bytes) {
+      (Some(mut joined), Some(bytes)) => {
+        joined.extend_from_slice(bytes);
+        Some(joined)
+      },
+      _ => None,
+    };
+  }
+  if total != size_bytes {
+    return Err(invalid("the parts don't add up to the announced size"));
+  }
+  Ok(blob)
 }
 
 /// The attachment behind a fake presigned URL.

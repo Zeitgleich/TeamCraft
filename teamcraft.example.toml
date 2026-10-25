@@ -207,6 +207,9 @@ path_style = true
 presign_expiry_secs = 900
 # Largest attachment (as stored, i.e. ciphertext) a client may announce.
 max_attachment_bytes = 104857600
+# Large files go up in parts; an upload that gets no new part for this long is aborted. The storage
+# must expose the `ETag` header to browsers (CORS), see docs/operations.md.
+multipart_expiry_secs = 86400
 
 # Background job that enforces retention: deletes ciphertext, attachments and index segments older
 # than a channel's retention and drops emptied month partitions. The policy (signed by owners) holds

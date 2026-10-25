@@ -39,6 +39,7 @@ const COMMANDS: &[&str] = &[
   "core_action",
   "core_query",
   "core_attachment",
+  "core_stage_file",
   "core_focus",
   "core_stop",
   "core_reset_store",

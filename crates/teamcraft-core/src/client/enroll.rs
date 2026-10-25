@@ -171,6 +171,8 @@ impl PendingEnrollment {
       typing: Default::default(),
       background_failures: Vec::new(),
       transfers: crate::transfers::Transfers::new(),
+      held_upload_progress: None,
+      is_picked_sweep_due: true,
       maybe_call_sink: None,
       call_ids: HashMap::new(),
       maybe_preview_fetcher,

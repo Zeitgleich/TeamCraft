@@ -284,3 +284,253 @@ async fn without_configured_storage_the_endpoints_report_unavailable() {
   );
   app.stop().await;
 }
+
+mod multipart {
+  use super::*;
+
+  /// S3's smallest part (all but the last).
+  const PART: usize = 5 * 1024 * 1024;
+
+  macro_rules! large_app {
+    () => {
+      match TestApp::start_with_storage(|settings| settings.max_attachment_bytes = 64 * 1024 * 1024).await {
+        Some(app) => app,
+        None => return,
+      }
+    };
+  }
+
+  async fn announce_parts(app: &TestApp, user: &TestUser, channel: &str, size: usize) -> serde_json::Value {
+    let reply = app
+      .post(
+        user,
+        "/attachments/multipart",
+        json!({"conversation_id": channel, "size_bytes": size}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    reply.body
+  }
+
+  /// Uploads one part and returns its `ETag`.
+  async fn upload_part(app: &TestApp, user: &TestUser, id: &str, number: u16, bytes: &[u8]) -> String {
+    let url = app
+      .post(
+        user,
+        &format!("/attachments/{id}/parts"),
+        json!({"part_number": number, "size_bytes": bytes.len()}),
+      )
+      .await;
+    assert_eq!(url.status, StatusCode::OK, "{}", url.body);
+    let response = app
+      .http
+      .put(url.body["upload_url"].as_str().unwrap())
+      .body(bytes.to_vec())
+      .send()
+      .await
+      .unwrap();
+    assert!(response.status().is_success(), "{}", response.status());
+    response.headers()["etag"].to_str().unwrap().to_owned()
+  }
+
+  fn blob(len: usize) -> Vec<u8> {
+    (0..len).map(|index| (index % 251) as u8).collect()
+  }
+
+  #[tokio::test]
+  async fn parts_go_up_one_by_one_and_join_into_the_announced_blob() {
+    let app = large_app!();
+    let (carol, dave) = (member("carol"), member("dave"));
+    let channel = channel_with(&app, &[&carol, &dave]).await;
+    let blob = blob(PART + 1000);
+
+    let created = announce_parts(&app, &carol, &channel, blob.len()).await;
+    let id = created["id"].as_str().unwrap().to_owned();
+    assert_eq!(created["min_part_size_bytes"], PART);
+    // A part can be sent again (its answer was lost); the last ETag counts.
+    upload_part(&app, &carol, &id, 1, &blob[..PART]).await;
+    let first = upload_part(&app, &carol, &id, 1, &blob[..PART]).await;
+    let second = upload_part(&app, &carol, &id, 2, &blob[PART..]).await;
+    // The single-blob completion doesn't apply to an upload in parts.
+    assert_eq!(
+      app
+        .post(&carol, &format!("/attachments/{id}/complete"), json!({}))
+        .await
+        .status,
+      StatusCode::CONFLICT
+    );
+
+    let parts = json!({"parts": [{"part_number": 2, "etag": second}, {"part_number": 1, "etag": first}]});
+    let completed = app
+      .post(
+        &carol,
+        &format!("/attachments/{id}/multipart/complete"),
+        parts.clone(),
+      )
+      .await;
+    assert_eq!(completed.status, StatusCode::OK, "{}", completed.body);
+    // Completing again (the answer was lost) is harmless.
+    let again = app
+      .post(&carol, &format!("/attachments/{id}/multipart/complete"), parts)
+      .await;
+    assert_eq!(again.status, StatusCode::OK, "{}", again.body);
+
+    let download = app.get(&dave, &format!("/attachments/{id}/download")).await;
+    assert_eq!(download.status, StatusCode::OK, "{}", download.body);
+    let stored = app
+      .http
+      .get(download.body["download_url"].as_str().unwrap())
+      .send()
+      .await
+      .unwrap()
+      .bytes()
+      .await
+      .unwrap();
+    assert_eq!(stored.as_ref(), blob.as_slice());
+    // A completed upload can't be given up (its message carries it).
+    assert_eq!(
+      app.delete(&carol, &format!("/attachments/{id}")).await.status,
+      StatusCode::CONFLICT
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn parts_are_checked_and_only_the_uploader_uploads_them() {
+    let app = large_app!();
+    let (carol, dave) = (member("carol"), member("dave"));
+    let channel = channel_with(&app, &[&carol, &dave]).await;
+    let created = announce_parts(&app, &carol, &channel, PART + 10).await;
+    let id = created["id"].as_str().unwrap().to_owned();
+    let part = |number: u64, size: u64| json!({"part_number": number, "size_bytes": size});
+    // Two parts at most for this size, and the second gets only what the first leaves.
+    assert_eq!(created["max_parts"], 2);
+
+    for bad in [
+      part(0, 10),
+      part(10_001, 10),
+      part(3, 10),
+      part(2, 11),
+      part(1, 0),
+      part(1, (PART + 11) as u64),
+    ] {
+      let reply = app.post(&carol, &format!("/attachments/{id}/parts"), bad).await;
+      assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    }
+    let last = app
+      .post(&carol, &format!("/attachments/{id}/parts"), part(2, 10))
+      .await;
+    assert_eq!(last.status, StatusCode::OK, "{}", last.body);
+    let foreign = app
+      .post(&dave, &format!("/attachments/{id}/parts"), part(1, 10))
+      .await;
+    assert_eq!(foreign.status, StatusCode::NOT_FOUND);
+    let gap = json!({"parts": [{"part_number": 1, "etag": "\"a\""}, {"part_number": 3, "etag": "\"b\""}]});
+    let reply = app
+      .post(&carol, &format!("/attachments/{id}/multipart/complete"), gap)
+      .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    // Parts the storage doesn't have can't be joined.
+    let missing = json!({"parts": [{"part_number": 1, "etag": "\"0123\""}]});
+    let reply = app
+      .post(&carol, &format!("/attachments/{id}/multipart/complete"), missing)
+      .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_cancelled_upload_is_aborted_and_frees_its_slot() {
+    let Some(app) = TestApp::start_with_storage(|settings| {
+      settings.max_attachment_bytes = 64 * 1024 * 1024;
+      settings.limits.max_pending_attachments_per_user = 1;
+    })
+    .await
+    else {
+      return;
+    };
+    let nanos = time::OffsetDateTime::now_utc().unix_timestamp_nanos();
+    let erin = member(&format!("erin-{nanos}"));
+    let channel = channel_with(&app, &[&erin]).await;
+    let created = announce_parts(&app, &erin, &channel, PART + 10).await;
+    let id = created["id"].as_str().unwrap().to_owned();
+    upload_part(&app, &erin, &id, 1, &blob(PART)).await;
+
+    assert_eq!(
+      app.delete(&erin, &format!("/attachments/{id}")).await.status,
+      StatusCode::NO_CONTENT
+    );
+    // Gone: no more parts, and giving up again is harmless.
+    let reply = app
+      .post(
+        &erin,
+        &format!("/attachments/{id}/parts"),
+        json!({"part_number": 2, "size_bytes": 10}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+      app.delete(&erin, &format!("/attachments/{id}")).await.status,
+      StatusCode::NO_CONTENT
+    );
+    announce_parts(&app, &erin, &channel, PART + 10).await;
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn the_sweeper_aborts_uploads_in_parts_nobody_continues() {
+    let app = large_app!();
+    let nanos = time::OffsetDateTime::now_utc().unix_timestamp_nanos();
+    let erin = member(&format!("erin-{nanos}"));
+    let channel = channel_with(&app, &[&erin]).await;
+    let created = announce_parts(&app, &erin, &channel, PART + 10).await;
+    let id = created["id"].as_str().unwrap().to_owned();
+    upload_part(&app, &erin, &id, 1, &blob(PART)).await;
+    let record = app
+      .state
+      .database
+      .get_attachment(id.parse().unwrap())
+      .await
+      .unwrap()
+      .unwrap();
+    let upload_id = record.maybe_multipart_upload_id.clone().unwrap();
+
+    // The single-upload cut-off doesn't touch an upload in parts that is still continued.
+    let just_after = time::OffsetDateTime::now_utc() + time::Duration::milliseconds(1);
+    teamcraft_server::services::attachments::sweep_unfinished_before(
+      &app.state,
+      just_after,
+      record.created_at,
+    )
+    .await
+    .unwrap();
+    assert!(
+      app
+        .state
+        .database
+        .get_attachment(record.id)
+        .await
+        .unwrap()
+        .is_some()
+    );
+
+    teamcraft_server::services::attachments::sweep_unfinished_before(&app.state, just_after, just_after)
+      .await
+      .unwrap();
+    assert!(
+      app
+        .state
+        .database
+        .get_attachment(record.id)
+        .await
+        .unwrap()
+        .is_none()
+    );
+    // The storage no longer takes parts for it.
+    let store = app.state.maybe_blob_store.clone().unwrap();
+    let url = store.presign_upload_part(&record.s3_key, &upload_id, 2, 10);
+    let late = app.http.put(url).body(vec![0; 10]).send().await.unwrap();
+    assert!(!late.status().is_success(), "{}", late.status());
+    app.stop().await;
+  }
+}

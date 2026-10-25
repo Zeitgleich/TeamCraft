@@ -70,6 +70,12 @@ pub enum FileSource {
   Path {
     path: String,
   },
+  /// A file picked in the browser, registered with the client core in the same page
+  /// (`teamcraft_core::picked_files::register`): read in slices, never whole.
+  Picked {
+    handle: String,
+    size_bytes: u64,
+  },
 }
 
 /// Everything about a message that [`Message`] doesn't carry.

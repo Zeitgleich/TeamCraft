@@ -114,6 +114,10 @@ impl TransferGuard {
   pub fn counter(&self) -> ByteCounter {
     self.counter.clone()
   }
+
+  pub fn attachment_id(&self) -> AttachmentId {
+    self.attachment
+  }
 }
 
 impl Drop for TransferGuard {

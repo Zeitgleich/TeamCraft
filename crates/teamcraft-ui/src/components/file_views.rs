@@ -183,6 +183,8 @@ fn UploadTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
     FileTransfer::UploadFailed { reason } => {
       let key = match reason {
         FileFailure::TooLarge => "file-too-large",
+        // The browser no longer has the picked file (a reload without a kept copy), or it changed.
+        FileFailure::LocalFile => "file-upload-unreadable",
         _ => "file-upload-failed",
       };
       view! {
@@ -693,6 +695,8 @@ fn transfer_status(transfer: &FileTransfer, actions: FileActions) -> AnyView {
     FileTransfer::UploadFailed { reason } => {
       let key = match reason {
         FileFailure::TooLarge => "file-too-large",
+        // The browser no longer has the picked file (a reload without a kept copy), or it changed.
+        FileFailure::LocalFile => "file-upload-unreadable",
         _ => "file-upload-failed",
       };
       view! { <span class="file-error" role="alert">{move || i18n.t(key)}</span> }.into_any()
