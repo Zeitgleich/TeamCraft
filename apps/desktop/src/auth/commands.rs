@@ -14,6 +14,7 @@ use teamcraft_proto::{AvatarContentType, BrandResponse, UserId};
 
 use base64::Engine;
 
+use super::avatars::MAX_AVATAR_BYTES;
 use super::servers::ServerState;
 use super::{
   ApiBytesResponse, ApiResponse, AuthError, AuthService, DesktopConfig, HTTP_POLICY, KeyringStore,
@@ -405,6 +406,13 @@ pub async fn avatar_upload(
   body_base64: String,
   service: State<'_, Arc<Service>>,
 ) -> Result<ApiResponse, CommandError> {
+  // Refused before decoding: base64 is 4 characters per 3 bytes.
+  if body_base64.len() as u64 > MAX_AVATAR_BYTES.div_ceil(3) * 4 {
+    return Err(CommandError::new(
+      "unsupported",
+      "the picture is too large".to_owned(),
+    ));
+  }
   let bytes = base64::engine::general_purpose::STANDARD
     .decode(body_base64)
     .map_err(|_| CommandError::new("invalid_response", "the body is not base64".to_owned()))?;
