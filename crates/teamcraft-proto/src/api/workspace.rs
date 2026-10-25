@@ -179,6 +179,12 @@ impl Default for CallBackgroundPolicy {
   }
 }
 
+/// The shortest away timeout a workspace may set: a real buffer before somebody shows as away.
+/// Stored policies with less are applied as this.
+pub const MIN_AWAY_TIMEOUT_MINUTES: u32 = 5;
+/// The away timeout of a new workspace.
+pub const DEFAULT_AWAY_TIMEOUT_MINUTES: u32 = 15;
+
 /// Which presence features exist (PLAN.md §4, §11).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct PresencePolicy {
@@ -188,7 +194,8 @@ pub struct PresencePolicy {
   /// People may write their own status. Off leaves them the presets.
   pub custom_status_enabled: bool,
   /// A device that reported itself active but has been silent this long counts as idle (clients
-  /// repeat the active report while the user works). Absent: devices decide.
+  /// repeat the active report while the user works). At least [`MIN_AWAY_TIMEOUT_MINUTES`];
+  /// [`DEFAULT_AWAY_TIMEOUT_MINUTES`] for a new workspace. Absent: devices decide.
   #[serde(
     rename = "away_timeout_minutes",
     default,
@@ -207,12 +214,22 @@ fn is_last_seen_enabled_by_default() -> bool {
   true
 }
 
+impl PresencePolicy {
+  /// The away timeout to apply: the stored one, never below the minimum (older policies may hold
+  /// less).
+  pub fn effective_away_timeout_minutes(&self) -> Option<u32> {
+    self
+      .maybe_away_timeout_minutes
+      .map(|minutes| minutes.max(MIN_AWAY_TIMEOUT_MINUTES))
+  }
+}
+
 impl Default for PresencePolicy {
   fn default() -> Self {
     Self {
       statuses_enabled: true,
       custom_status_enabled: true,
-      maybe_away_timeout_minutes: None,
+      maybe_away_timeout_minutes: Some(DEFAULT_AWAY_TIMEOUT_MINUTES),
       presets: Vec::new(),
       is_last_seen_enabled: true,
     }
@@ -522,6 +539,32 @@ mod tests {
     assert_eq!(policy.compliance_archive.mode, ComplianceArchiveMode::Off);
     assert!(json.contains(r#""admin_self_join":"visible""#));
     assert!(policy.org_recovery.is_enabled_for_members && !policy.org_recovery.is_enabled_for_guests);
+  }
+
+  #[test]
+  fn a_new_workspace_has_an_away_timeout_and_short_ones_are_raised_to_the_minimum() {
+    let policy = PresencePolicy::default();
+    assert_eq!(
+      policy.maybe_away_timeout_minutes,
+      Some(DEFAULT_AWAY_TIMEOUT_MINUTES)
+    );
+    assert_eq!(policy.effective_away_timeout_minutes(), Some(15));
+    for (stored, effective) in [
+      (Some(1), Some(5)),
+      (Some(5), Some(5)),
+      (Some(30), Some(30)),
+      (None, None),
+    ] {
+      let policy = PresencePolicy {
+        maybe_away_timeout_minutes: stored,
+        ..PresencePolicy::default()
+      };
+      assert_eq!(policy.effective_away_timeout_minutes(), effective, "{stored:?}");
+    }
+    // A stored policy without the field keeps "devices decide".
+    let older: PresencePolicy =
+      serde_json::from_str(r#"{"statuses_enabled":true,"custom_status_enabled":true}"#).unwrap();
+    assert_eq!(older.maybe_away_timeout_minutes, None);
   }
 
   #[test]

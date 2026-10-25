@@ -342,13 +342,18 @@ impl Hub {
     }
   }
 
-  pub fn set_activity(&self, session_id: &str, activity: DeviceActivity) {
-    if let Some(session) = self.lock().sessions.get_mut(session_id) {
-      if activity == DeviceActivity::Active {
-        session.last_active_at = Instant::now();
-      }
-      session.activity = SessionActivity::reported(&activity);
+  /// Records the device's own activity report; a repeated "active" counts for the away timeout.
+  /// Returns whether the session's activity changed (only then the presence needs a refresh).
+  pub fn set_activity(&self, session_id: &str, activity: DeviceActivity) -> bool {
+    let mut inner = self.lock();
+    let Some(session) = inner.sessions.get_mut(session_id) else {
+      return false;
+    };
+    if activity == DeviceActivity::Active {
+      session.last_active_at = Instant::now();
     }
+    let reported = SessionActivity::reported(&activity);
+    std::mem::replace(&mut session.activity, reported) != reported
   }
 
   /// Whether this report would make an idle or timed-out session active. The gateway lets such a
@@ -1267,6 +1272,29 @@ mod tests {
       hub.set_activity(&web.session_id, DeviceActivity::Idle);
       assert!(hub.is_waking(&web.session_id, &DeviceActivity::Active));
       assert!(!hub.is_waking("unknown", &DeviceActivity::Active));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_a_changing_report_asks_for_a_presence_refresh() {
+      let hub = Hub::new(OPTIONS);
+      let web = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      assert!(!hub.set_activity(&web.session_id, DeviceActivity::Active));
+      assert!(hub.set_activity(&web.session_id, DeviceActivity::Idle));
+      assert!(!hub.set_activity(&web.session_id, DeviceActivity::Idle));
+      assert!(hub.set_activity(&web.session_id, DeviceActivity::Active));
+      time_out(&hub).await;
+      assert!(hub.set_activity(&web.session_id, DeviceActivity::Active));
+      assert!(!hub.set_activity("unknown", DeviceActivity::Active));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_repeated_active_report_keeps_a_device_from_timing_out() {
+      let hub = Hub::new(OPTIONS);
+      let web = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      tokio::time::advance(TIMEOUT - Duration::from_secs(1)).await;
+      hub.set_activity(&web.session_id, DeviceActivity::Active);
+      tokio::time::advance(Duration::from_secs(2)).await;
+      assert!(hub.demote_idle(Instant::now() - TIMEOUT).is_empty());
     }
 
     #[tokio::test(start_paused = true)]

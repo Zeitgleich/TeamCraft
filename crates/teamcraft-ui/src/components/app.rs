@@ -949,10 +949,10 @@ const ACTIVITY_CHECK_MS: u64 = 5_000;
 /// How often `/remind` reminders are checked.
 const REMINDER_CHECK_MS: u64 = 15_000;
 const MS_PER_MINUTE: f64 = 60_000.0;
-/// While the window is in front, input repeats "active" at most this often. The server's away
-/// timeout (workspace policy, a minute at least) ends with any report after it, so the next input
-/// after an automatic away shows the user online again at once.
-const ACTIVE_REPEAT_MS: TimestampMs = 60_000;
+/// While the window is in front, input repeats "active" at most this often: half the shortest
+/// away timeout the workspace policy allows (a minute), so a user who only scrolls or reads with
+/// the mouse never times out, and the next input after an automatic away ends it at once.
+const ACTIVE_REPEAT_MS: TimestampMs = 30_000;
 
 /// What the activity watcher keeps between events.
 struct ActivityWatch {

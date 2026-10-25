@@ -1599,6 +1599,9 @@ impl Core {
     } else {
       DeviceActivity::Active
     };
+    if let Some(client) = self.client.as_mut() {
+      client.set_device_activity(activity.clone());
+    }
     let message = GatewayClientMessage::SetActivity { activity };
     if self.connection.is_connected() && !self.connection.send(now_ms(), &message).await {
       tracing::warn!("could not report the device activity");

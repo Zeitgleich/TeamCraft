@@ -313,7 +313,10 @@ async fn set_activity(
   attached: &Attached,
   activity: DeviceActivity,
 ) {
-  state.hub.set_activity(&attached.session_id, activity);
+  // A repeated report only counts for the away timeout: no presence refresh, no queries.
+  if !state.hub.set_activity(&attached.session_id, activity) {
+    return;
+  }
   if let Err(error) = presence::refresh_presence(state, caller.user.id).await {
     warn!(%error, "presence refresh failed");
   }
