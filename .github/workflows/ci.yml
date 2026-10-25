@@ -253,7 +253,7 @@ jobs:
         run: python3 -m unittest discover -s scripts/tests -v
       - name: UI tasks touch signals only with try_ after an await (issue #322)
         run: scripts/check-async-signals.py
-      - name: Stylesheet has no undefined tokens, duplicate keyframes or colliding rules (issue #363)
+      - name: Stylesheet has no undefined tokens or colliding rules, UI has no inline styles (issues #363, #376)
         run: scripts/check-css.py
       - name: Release notes render
         run: |

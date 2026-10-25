@@ -70,5 +70,27 @@ class TinyFontsTest(unittest.TestCase):
         self.assertEqual(findings(css), [])
 
 
+class InlineStylesTest(unittest.TestCase):
+    def test_a_style_attribute_on_an_element_is_found(self):
+        source = 'view! {\n  <div class="x"\n    style=move || style.get()>\n  </div>\n}\n'
+        self.assertEqual(check.inline_styles("x.rs", source), ["x.rs:3: inline style, blocked by the CSP: style=move || style.get()>"])
+
+    def test_set_attribute_style_is_found(self):
+        source = 'element.set_attribute(\n  "style",\n  "top: 0",\n);\n'
+        self.assertEqual(len(check.inline_styles("x.rs", source)), 1)
+
+    def test_directives_component_properties_and_comments_pass(self):
+        source = (
+            'view! { <div style:top=top style:--hue=hue></div> }\n'
+            'view! { <ControlGroup side="left" style=style /> }\n'
+            '// Docs wrap everything in `<b style="font-weight:normal">`.\n'
+        )
+        self.assertEqual(check.inline_styles("x.rs", source), [])
+
+    def test_the_allow_marker_passes(self):
+        source = '// inline-style-ok: a popup without the app CSP\nview! { <div style="top: 0"></div> }\n'
+        self.assertEqual(check.inline_styles("x.rs", source), [])
+
+
 if __name__ == "__main__":
     unittest.main()

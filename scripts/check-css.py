@@ -11,9 +11,16 @@ warning. This check fails on:
   A rule that refines a group it was part of (`.a, .b { flex: 1 }` then `.b { flex: none }`) is a
   deliberate split and passes; other deliberate splits are allow-listed in ALLOWED_OVERRIDES,
 - more `font-size` values below 11 px than MAX_TINY_FONT_SIZES (a ratchet: the count may only go
-  down).
+  down),
+- inline styles in the UI's Rust code (issue #376): a `style=` attribute on an HTML element in
+  `view!` markup or `set_attribute("style", …)`. The web CSP is `style-src 'self'`, which blocks
+  them at runtime with only a console error. Dynamic styles use `style:prop=` / `style:--var=` or
+  `HtmlElement::style().set_property`. Mark a real exception (or the line above it) with
+  `// inline-style-ok: <reason>`.
 
-    scripts/check-css.py [files ...]   # default: crates/teamcraft-ui/style/*.css
+    scripts/check-css.py [paths ...]   # default: crates/teamcraft-ui/style/*.css and crates/teamcraft-ui/src
+
+Paths ending in `.css` are stylesheets; other files and directories are searched for `.rs` files.
 
 The parser is small and only understands what the stylesheet uses: rules, at-rules with nested
 blocks, comments and strings. It is not a validator.
@@ -24,6 +31,7 @@ import re
 import sys
 
 DEFAULT_DIR = pathlib.Path("crates/teamcraft-ui/style")
+DEFAULT_RUST_DIR = pathlib.Path("crates/teamcraft-ui/src")
 # Set on elements at runtime: from Rust (`style:--x=…`, `style.setProperty`) or loader.js.
 RUNTIME_VARIABLES = re.compile(r"^--(vv-.*|hue|media-.*|cols|banners-h|window-controls-.*|tok-.*|tc-loader-.*)$")
 # Keyframes that are known duplicates, each with the issue that removes it.
@@ -37,19 +45,27 @@ MAX_TINY_FONT_SIZES = 6
 VAR_USE = re.compile(r"var\(\s*(--[\w-]+)")
 FONT_SIZE_PX = re.compile(r"(?:^|\s)(\d+(?:\.\d+)?)px\b")
 BLOCK_AT_RULES = ("@media", "@supports", "@layer", "@container", "@document")
+# `<tag … style=`: an element's attribute when the tag is lower case (`<Component style=…>` is a
+# component property). `style:prop=` directives don't match.
+STYLE_ATTRIBUTE = re.compile(r"<([A-Za-z][\w-]*)\b[^<>;]*?\bstyle\s*=", re.S)
+SET_STYLE_ATTRIBUTE = re.compile(r"set_attribute\(\s*\"style\"")
+INLINE_STYLE_MARKER = "inline-style-ok:"
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("files", nargs="*", type=pathlib.Path)
+    parser.add_argument("paths", nargs="*", type=pathlib.Path)
     args = parser.parse_args(argv)
-    files = args.files or sorted(DEFAULT_DIR.glob("*.css"))
-    sources = {str(path): path.read_text(encoding="utf-8") for path in files}
-    findings = check_sources(sources)
+    paths = args.paths or [*sorted(DEFAULT_DIR.glob("*.css")), DEFAULT_RUST_DIR]
+    stylesheets = [path for path in paths if path.suffix == ".css"]
+    rust_files = [file for path in paths if path.suffix != ".css" for file in rust_files_in(path)]
+    findings = check_sources({str(path): path.read_text(encoding="utf-8") for path in stylesheets})
+    for path in rust_files:
+        findings += inline_styles(str(path), path.read_text(encoding="utf-8"))
     for finding in findings:
         print(finding)
     if findings:
-        print(f"{len(findings)} stylesheet problem(s); see scripts/check-css.py for the rules.", file=sys.stderr)
+        print(f"{len(findings)} style problem(s); see scripts/check-css.py for the rules.", file=sys.stderr)
         return 1
     return 0
 
@@ -63,6 +79,30 @@ def check_sources(sources):
     findings += conflicting_overrides(parsed)
     findings += tiny_font_sizes(parsed)
     return findings
+
+
+def rust_files_in(path):
+    return sorted(path.rglob("*.rs")) if path.is_dir() else [path]
+
+
+def inline_styles(path, source):
+    """Finds `style=` attributes and `set_attribute("style", …)` in one Rust file."""
+    lines = source.splitlines()
+    code = blank_line_comments(source)
+    findings = []
+    for match in [*STYLE_ATTRIBUTE.finditer(code), *SET_STYLE_ATTRIBUTE.finditer(code)]:
+        if match.re is STYLE_ATTRIBUTE and not match.group(1)[0].islower():
+            continue
+        line = line_of(code, match.end())
+        if INLINE_STYLE_MARKER in lines[line - 1] or (line > 1 and INLINE_STYLE_MARKER in lines[line - 2]):
+            continue
+        findings.append(f"{path}:{line}: inline style, blocked by the CSP: {lines[line - 1].strip()}")
+    return sorted(findings, key=lambda finding: int(finding.split(":")[1]))
+
+
+def blank_line_comments(source):
+    """Blanks `//` comments (the allow marker lives there; prose may mention `style=`)."""
+    return re.sub(r"//[^\n]*", lambda match: " " * len(match.group(0)), source)
 
 
 def undefined_variables(parsed):
