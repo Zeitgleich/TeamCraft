@@ -356,6 +356,12 @@ fn apply_labels(_app: &AppHandle, menu: &TrayMenu, labels: &MenuLabels) -> tauri
 }
 
 fn set_badge(app: &AppHandle, unread: u32) {
+  // The notification center owns the badge from macOS 13 on; the window's dock tile label below is
+  // kept for an unbundled development run.
+  #[cfg(target_os = "macos")]
+  if crate::notifications::mac_center::is_available() {
+    crate::notifications::mac_center::set_badge(unread);
+  }
   let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
     return;
   };

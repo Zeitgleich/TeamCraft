@@ -13,7 +13,7 @@
 //! notification plugin shows title and text only.
 
 #[cfg(target_os = "macos")]
-mod mac_center;
+pub(crate) mod mac_center;
 #[cfg(any(windows, test))]
 mod toast_xml;
 #[cfg(windows)]
