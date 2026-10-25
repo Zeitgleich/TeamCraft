@@ -500,9 +500,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       | GatewayEvent::UserGroupUpdate { .. }
       | GatewayEvent::LobbyDecision { .. } => Ok(()),
       // Call roster and ringing go to the app's call handling (media runs outside the core).
+      GatewayEvent::CallEnd {
+        conversation_id,
+        call_id,
+      } => {
+        self.forget_call(conversation_id, call_id)?;
+        self.emit_call_event(&event);
+        Ok(())
+      },
       GatewayEvent::CallStart { .. }
       | GatewayEvent::CallUpdate { .. }
-      | GatewayEvent::CallEnd { .. }
       | GatewayEvent::CallRing { .. }
       | GatewayEvent::CallMove { .. } => {
         self.emit_call_event(&event);

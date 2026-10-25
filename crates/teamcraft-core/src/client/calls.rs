@@ -233,6 +233,29 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
+  /// A call is over: its id and the moves announced for it are gone, so a leftover record (a follow
+  /// that failed halfway) can never make this device follow a later call that reuses the id
+  /// without a tap. A record of another call stays; it belongs to a call still running.
+  pub(super) fn forget_call(&mut self, conversation: ConversationId, call: CallId) -> Result<(), CoreError> {
+    if self.call_ids.get(&conversation) == Some(&call) {
+      self.call_ids.remove(&conversation);
+    }
+    let prefix = format!("{CALL_MOVE_PREFIX}{conversation}/");
+    for (key, value) in self.store.list(Table::SyncState)? {
+      if !key.starts_with(&prefix) {
+        continue;
+      }
+      // An unreadable record can't be followed either; it goes with the call.
+      let is_of_call = serde_json::from_slice::<CallMoveRecord>(&value)
+        .map(|record| record.maybe_call.is_none() || record.maybe_call == Some(call))
+        .unwrap_or(true);
+      if is_of_call {
+        self.store.delete(Table::SyncState, &key)?;
+      }
+    }
+    Ok(())
+  }
+
   /// Checks the move of `from`'s call into `to` before this device follows it (docs/meetings.md):
   /// a member of `from`'s group announced it, and `to`'s group, once this device is in it, holds
   /// nobody but `from`'s members and the people the announcement added. A server that points the
