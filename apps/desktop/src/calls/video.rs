@@ -28,7 +28,7 @@ use teamcraft_media::video_capture::{CameraInfo, CaptureFormat, VideoCapture};
 use teamcraft_media::video_codec::OpenH264Decoder;
 use teamcraft_media::video_jpeg::JpegTranscoder;
 use teamcraft_media::video_pipeline::FrameFilter;
-use teamcraft_proto::{VideoCodec, VideoLayerInfo};
+use teamcraft_proto::{MediaStreamId, VideoCodec, VideoLayerInfo};
 use tracing::{debug, info, warn};
 
 use super::VideoSink;
@@ -271,13 +271,7 @@ fn transcode_to_jpeg(queue: &std_mpsc::Receiver<ReceivedVideoFrame>, send: &dyn 
   while let Ok(frame) = queue.recv() {
     let timestamp_us = timestamp_us(&frame);
     match transcoder.push(&frame.data, timestamp_us) {
-      Ok(Some(jpeg)) => send(message(
-        KEYFRAME_FLAG | JPEG_FLAG,
-        CODEC_JPEG,
-        &frame,
-        timestamp_us,
-        &jpeg,
-      )),
+      Ok(Some(jpeg)) => send(jpeg_message(frame.stream_id, timestamp_us, &jpeg)),
       Ok(None) => {},
       // A broken frame: later ones recover with the next keyframe.
       Err(error) => debug!(%error, "frame not decodable"),
@@ -296,13 +290,24 @@ pub(super) fn video_message(frame: &ReceivedVideoFrame) -> Vec<u8> {
     _ => 0,
   };
   let flags = if frame.is_keyframe { KEYFRAME_FLAG } else { 0 };
-  message(flags, codec, frame, timestamp_us(frame), &frame.data)
+  message(flags, codec, frame.stream_id, timestamp_us(frame), &frame.data)
 }
 
-fn message(flags: u8, codec: u8, frame: &ReceivedVideoFrame, timestamp_us: u64, payload: &[u8]) -> Vec<u8> {
+/// One complete JPEG image in the format of [`video_message`] (a keyframe: it stands alone).
+pub(super) fn jpeg_message(stream_id: MediaStreamId, timestamp_us: u64, jpeg: &[u8]) -> Vec<u8> {
+  message(
+    KEYFRAME_FLAG | JPEG_FLAG,
+    CODEC_JPEG,
+    stream_id,
+    timestamp_us,
+    jpeg,
+  )
+}
+
+fn message(flags: u8, codec: u8, stream_id: MediaStreamId, timestamp_us: u64, payload: &[u8]) -> Vec<u8> {
   let mut message = Vec::with_capacity(16 + payload.len());
   message.extend_from_slice(&[VIDEO_MESSAGE_VERSION, flags, codec, 0]);
-  message.extend_from_slice(&frame.stream_id.0.to_be_bytes());
+  message.extend_from_slice(&stream_id.0.to_be_bytes());
   message.extend_from_slice(&timestamp_us.to_be_bytes());
   message.extend_from_slice(payload);
   message

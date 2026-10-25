@@ -50,6 +50,22 @@ pub async fn call_watch_video(
   Ok(())
 }
 
+/// Streams the own camera, as the call sends it (with background effects), to the webview's self
+/// view through `frames`: JPEG images in the format of `call_watch_video`.
+#[tauri::command(rename_all = "snake_case")]
+pub fn call_watch_camera(calls: State<'_, Arc<CallHost>>, frames: Channel) {
+  calls.watch_camera(move |message| {
+    if let Err(error) = frames.send(InvokeResponseBody::Raw(message)) {
+      tracing::debug!(%error, "self view image not delivered to the webview");
+    }
+  });
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn call_unwatch_camera(calls: State<'_, Arc<CallHost>>) {
+  calls.unwatch_camera();
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn call_unwatch_video(
   calls: State<'_, Arc<CallHost>>,

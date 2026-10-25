@@ -13,6 +13,7 @@
 mod codec_library;
 pub mod commands;
 pub(crate) mod push_to_talk;
+mod self_view;
 pub(crate) mod video;
 
 use std::collections::HashMap;
@@ -49,6 +50,7 @@ use teamcraft_proto::{
 use tokio::sync::{mpsc, oneshot};
 
 use self::codec_library::CodecLibrary;
+use self::self_view::SelfView;
 pub(crate) use self::video::BUNDLED_MODEL;
 use crate::core::{CallPreparation, CoreRuntime};
 
@@ -65,6 +67,8 @@ pub struct CallHost {
   /// The running media call, if any; a mutex across awaits so joins and leaves don't interleave.
   media: tokio::sync::Mutex<Option<MediaCall>>,
   video_sinks: VideoSinks,
+  /// The own camera for the webview's self view.
+  self_view: SelfView,
   codecs: CodecLibrary,
   maybe_segmentation_model: Option<PathBuf>,
 }
@@ -149,6 +153,7 @@ impl CallHost {
       notify,
       media: tokio::sync::Mutex::new(None),
       video_sinks: Arc::default(),
+      self_view: SelfView::default(),
       codecs: CodecLibrary::new(files.codec_directory),
       maybe_segmentation_model: files.maybe_segmentation_model,
     }
@@ -311,6 +316,15 @@ impl CallHost {
       .await;
   }
 
+  /// Sends the own camera, as the call sends it, to `send` as JPEG images (see `self_view`).
+  pub fn watch_camera(&self, send: impl Fn(Vec<u8>) + Send + 'static) {
+    self.self_view.watch(send);
+  }
+
+  pub fn unwatch_camera(&self) {
+    self.self_view.unwatch();
+  }
+
   pub async fn unwatch_video(&self, stream_id: MediaStreamId) {
     if lock(&self.video_sinks).remove(&stream_id).is_some() {
       self
@@ -428,7 +442,7 @@ impl CallHost {
       layers: video::camera_layers(capture.format()),
       capture,
       encoders: preferred_encoders(),
-      maybe_filter,
+      maybe_filter: Some(self.self_view.filter(maybe_filter)),
     };
     self.start_video(config).await?;
     lock(&self.state).maybe_effect_handle = maybe_handle;

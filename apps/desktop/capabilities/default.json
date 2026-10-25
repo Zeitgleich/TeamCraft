@@ -50,6 +50,8 @@
     "allow-call-watch-video",
     "allow-call-background-preview",
     "allow-call-unwatch-video",
+    "allow-call-watch-camera",
+    "allow-call-unwatch-camera",
     "allow-notify-user",
     "allow-withdraw-notifications",
     "allow-request-attention",
