@@ -448,6 +448,21 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn set_custom_status(
+    &self,
+    request: &teamcraft_proto::SetCustomStatusRequest,
+  ) -> Result<(), ApiError> {
+    self
+      .send_without_response(Method::PUT, "/me/status", Some(request))
+      .await
+  }
+
+  async fn clear_custom_status(&self) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, "/me/status", None)
+      .await
+  }
+
   async fn list_presence(&self, users: &[UserId]) -> Result<ListPresenceResponse, ApiError> {
     let ids: Vec<String> = users.iter().map(ToString::to_string).collect();
     let parameters = query_string(&[("user_ids", Some(ids.join(",")))]);

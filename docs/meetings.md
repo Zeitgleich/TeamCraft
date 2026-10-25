@@ -10,6 +10,9 @@ conversation the call belongs to.
 Title, time, description and the invitee list are **not** end-to-end encrypted: they live in the
 calendar and in the invitation e-mails anyway. The meeting **chat and media are encrypted** like any
 other conversation (e2ee.md). Guests get an ephemeral device and show up as "Guest (unverified)".
+The server creates the chat without an encryption group; the organizer's app sets it up with the
+users the organizer invited, and a host's "admit" lets an admitted person in (e2ee.md §4.6,
+"Meeting chats").
 
 ## Model
 

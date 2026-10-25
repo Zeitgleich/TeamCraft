@@ -87,7 +87,45 @@ pub struct UserPresence {
 
 /// `PUT /api/v1/me/status`: sets the caller's custom status (needs an emoji or a text). Replaces the
 /// previous one; `DELETE /api/v1/me/status` clears it.
-pub type SetCustomStatusRequest = CustomStatus;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SetCustomStatusRequest {
+  #[serde(rename = "emoji", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_emoji: Option<String>,
+  #[serde(rename = "text", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_text: Option<String>,
+  /// After this time (the server's clock) the status disappears by itself.
+  #[serde(rename = "expires_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_expires_at: Option<UnixMillis>,
+  /// The status disappears this long after the server took the request. Wins over `expires_at`:
+  /// a device whose clock is off still gets "for 30 minutes", where an end computed on its own
+  /// clock could look past to the server. Older servers ignore it and use `expires_at`.
+  #[serde(
+    rename = "expires_in_seconds",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_expires_in_seconds: Option<u64>,
+}
+
+impl SetCustomStatusRequest {
+  /// The request for `status` sent at `now`, both on the sender's clock. The end goes as a
+  /// duration the server resolves on its own clock (the end itself goes along for servers that
+  /// don't know durations yet). `None` if the status already ended: nothing is left to set.
+  pub fn for_status(status: &CustomStatus, now: UnixMillis) -> Option<Self> {
+    let maybe_expires_in_seconds = match status.maybe_expires_at {
+      Some(at) if at.0 <= now.0 => return None,
+      // Rounded up: the status never ends before the chosen time.
+      Some(at) => Some(u64::try_from((at.0 - now.0 + 999) / 1000).unwrap_or(u64::MAX)),
+      None => None,
+    };
+    Some(Self {
+      maybe_emoji: status.maybe_emoji.clone(),
+      maybe_text: status.maybe_text.clone(),
+      maybe_expires_at: status.maybe_expires_at,
+      maybe_expires_in_seconds,
+    })
+  }
+}
 
 /// `PUT /api/v1/me/presence`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

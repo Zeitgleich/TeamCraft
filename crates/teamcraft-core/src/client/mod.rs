@@ -11,6 +11,7 @@ mod attested;
 mod backgrounds;
 mod calls;
 mod catch_up;
+mod custom_status;
 pub mod devices;
 mod enroll;
 pub mod files;
@@ -70,7 +71,7 @@ pub(crate) use notifications::registered_push_token;
 pub use notifications::{TYPING_TIMEOUT_MS, TypingState};
 use openmls_rust_crypto::OpenMlsRustCrypto;
 pub use org_recovery::{SealedShare, recovery_request};
-pub use pending_actions::{PendingAction, PendingActionSettings};
+pub use pending_actions::{PendingAction, PendingActionSettings, StatusChange};
 pub use pending_add::{UserAddWait, pending_user_additions};
 #[cfg(not(target_arch = "wasm32"))]
 pub use segments::SegmentPrefetch;
@@ -203,6 +204,9 @@ pub struct Client<A, S> {
   groups: HashMap<ConversationId, ConversationGroup>,
   sync: SyncState,
   typing: notifications::TypingState,
+  /// Refusals of earlier user actions found by a background flush, for the host to show
+  /// ([`Client::take_background_failures`]).
+  background_failures: Vec<CoreError>,
   maybe_call_sink: Option<CallEventSink>,
   maybe_preview_fetcher: Option<Box<dyn crate::link_preview::PreviewFetcher>>,
   maybe_jwks_source: Option<Box<dyn JwksSource>>,
@@ -309,6 +313,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       groups: HashMap::new(),
       sync,
       typing: Default::default(),
+      background_failures: Vec::new(),
       maybe_call_sink: None,
       maybe_preview_fetcher,
       maybe_jwks_source,

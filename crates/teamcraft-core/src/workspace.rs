@@ -621,6 +621,16 @@ fn payload_error(log: &'static str, entry: &WorkspaceLogEntryResponse, reason: &
   }
 }
 
+/// Which statuses the verified policy allows, for the UI's status menu and the people it shows.
+/// `None` before a workspace was verified or when the state can't be read; the server enforces
+/// the policy either way, so this only decides what the UI offers.
+pub fn presence_policy(store: &impl LocalStore) -> Option<teamcraft_proto::PresencePolicy> {
+  records::get_json::<WorkspaceState>(store, Table::Workspace, crate::client::WORKSPACE_KEY)
+    .ok()
+    .flatten()
+    .map(|state| state.policy.presence)
+}
+
 /// The owners of the verified roster for the admin console (`None` before one was verified, or
 /// when the state can't be read).
 #[cfg(feature = "ui")]

@@ -28,7 +28,7 @@ use teamcraft_client_api::actions::{
   NewSpace, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges,
   SpaceInvite,
 };
-use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy};
+use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, PresencePolicy};
 
 use crate::admin::{
   AdminChannel, AdminSpace, AdminUser, AuditEntry, AuditFilter, DeviceInfo, PolicyBlocker, Retention,
@@ -42,7 +42,7 @@ use crate::calls::{
   Participant,
 };
 use crate::clock::now_ms;
-use crate::live::{LiveScope, LiveServer, REST_ONLY_POLL_INTERVAL_MS, thread_summary};
+use crate::live::{LiveScope, LiveServer, REST_ONLY_POLL_INTERVAL_MS, thread_summary, with_local_expiry};
 use crate::model::{
   Conversation, ConversationId, ConversationKind, CustomStatus, DeviceId, Message, MessageId, PresenceStatus,
   Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId, as_log_line,
@@ -52,6 +52,7 @@ use crate::remote_calls::RemoteCalls;
 use crate::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
 use crate::security::KeyChange;
 use crate::settings::{load_string, store_string};
+use teamcraft_client_api::custom_status::shown_status;
 use teamcraft_client_api::remote::CallAction;
 
 pub struct Hybrid<C> {
@@ -109,8 +110,9 @@ impl<C: ChatBackend> Hybrid<C> {
     }
   }
 
-  /// The server knows who is online and what status they set; the chat only knows the roster.
-  fn with_live_presence(&self, mut user: User) -> User {
+  /// The server knows who is online and what status they set; the chat only knows the roster. A
+  /// status shows only while the workspace allows statuses and until it ended.
+  fn with_live_presence(&self, mut user: User, policy: &PresencePolicy, now: TimestampMs) -> User {
     if let Some((presence, maybe_status)) = self
       .maybe_live
       .as_ref()
@@ -119,7 +121,18 @@ impl<C: ChatBackend> Hybrid<C> {
       user.presence = presence;
       user.maybe_custom_status = maybe_status;
     }
+    user.maybe_custom_status = shown_status(policy, user.maybe_custom_status.take(), now);
     user
+  }
+
+  /// [`Self::with_live_presence`] for many people: the policy is read once.
+  fn with_live_presences(&self, users: Vec<User>) -> Vec<User> {
+    let policy = self.chat.presence_policy();
+    let now = now_ms();
+    users
+      .into_iter()
+      .map(|user| self.with_live_presence(user, &policy, now))
+      .collect()
   }
 }
 
@@ -167,29 +180,22 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
   }
 
   fn me(&self) -> User {
-    self.with_live_presence(self.chat.me())
+    self.with_live_presence(self.chat.me(), &self.chat.presence_policy(), now_ms())
   }
 
   fn user(&self, id: UserId) -> Option<User> {
-    self.chat.user(id).map(|user| self.with_live_presence(user))
+    self
+      .chat
+      .user(id)
+      .map(|user| self.with_live_presence(user, &self.chat.presence_policy(), now_ms()))
   }
 
   fn users(&self) -> Vec<User> {
-    self
-      .chat
-      .users()
-      .into_iter()
-      .map(|user| self.with_live_presence(user))
-      .collect()
+    self.with_live_presences(self.chat.users())
   }
 
   fn search_people(&self, query: &str) -> Vec<User> {
-    self
-      .chat
-      .search_people(query)
-      .into_iter()
-      .map(|user| self.with_live_presence(user))
-      .collect()
+    self.with_live_presences(self.chat.search_people(query))
   }
 
   fn spaces(&self) -> Vec<Space> {
@@ -303,11 +309,24 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.set_presence_until(presence, maybe_until);
   }
 
+  /// The end is resolved here, where the user's time zone is known. With a client core the core
+  /// queues the change (offline, retries); without one it goes over REST.
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>) {
+    let now = now_ms();
+    let maybe_status = maybe_status.map(|status| with_local_expiry(status, now));
     match &self.maybe_live {
-      Some(live) => live.set_custom_status(self.chat.me().id, maybe_status.as_ref(), now_ms()),
+      Some(live) if live.is_core_fed() => {
+        let me = self.chat.me().id;
+        live.show_own_status(me, maybe_status.as_ref().and_then(|status| status.to_wire(now)));
+        self.chat.set_custom_status(maybe_status);
+      },
+      Some(live) => live.set_custom_status(self.chat.me().id, maybe_status.as_ref(), now),
       None => self.chat.set_custom_status(maybe_status),
     }
+  }
+
+  fn presence_policy(&self) -> PresencePolicy {
+    self.chat.presence_policy()
   }
 
   fn set_activity(&self, is_idle: bool) {
@@ -423,6 +442,14 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
 
   fn retry_dm_setup(&self, conversation: ConversationId) {
     self.chat.retry_dm_setup(conversation);
+  }
+
+  fn set_up_meeting_chat(&self, conversation: ConversationId, invitees: Vec<UserId>) {
+    self.chat.set_up_meeting_chat(conversation, invitees);
+  }
+
+  fn let_into_meeting_chat(&self, conversation: ConversationId, user: UserId) {
+    self.chat.let_into_meeting_chat(conversation, user);
   }
 
   fn discard_removal(&self, conversation: ConversationId, user: UserId) {

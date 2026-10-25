@@ -243,6 +243,13 @@ pub trait ServerApi {
     request: &SetReadPositionRequest,
   ) -> impl Future<Output = Result<(), ApiError>>;
   fn set_presence(&self, request: &SetPresenceRequest) -> impl Future<Output = Result<(), ApiError>>;
+  /// Sets the caller's custom status (`PUT /me/status`); replaces the previous one.
+  fn set_custom_status(
+    &self,
+    request: &teamcraft_proto::SetCustomStatusRequest,
+  ) -> impl Future<Output = Result<(), ApiError>>;
+  /// Clears the caller's custom status (`DELETE /me/status`).
+  fn clear_custom_status(&self) -> impl Future<Output = Result<(), ApiError>>;
   /// Presence and last seen of some people (`GET /presence`, at most 200).
   fn list_presence(&self, users: &[UserId]) -> impl Future<Output = Result<ListPresenceResponse, ApiError>>;
   /// The caller's privacy choices (`GET /me/privacy`).

@@ -7,7 +7,7 @@ pub enum AvatarSize {
   Small,
   Medium,
   Large,
-  /// The user's own tile before a call, without a camera image.
+  /// The largest picture: a profile card's header, and the user's own tile before a call.
   ExtraLarge,
 }
 

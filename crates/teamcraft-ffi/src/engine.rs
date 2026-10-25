@@ -954,6 +954,7 @@ async fn prepare_call(
   client: &mut CoreClient,
   conversation: ConversationId,
 ) -> Result<CallPreparation, TeamCraftError> {
+  client.ensure_call_group(conversation).await?;
   let join = client.call_join_token(conversation).await?;
   let devices = client.verified_call_devices(conversation).await?;
   Ok(CallPreparation {

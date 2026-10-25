@@ -362,6 +362,18 @@ impl MeetingsHub {
   }
 }
 
+/// The TeamCraft users a meeting request invites (externals have no account to add).
+pub fn invited_users(request: &CreateMeetingRequest) -> Vec<UserId> {
+  request
+    .invitees
+    .iter()
+    .filter_map(|invitee| match invitee {
+      MeetingInvitee::User { user_id } => Some(*user_id),
+      MeetingInvitee::External { .. } => None,
+    })
+    .collect()
+}
+
 /// A live meeting where `me` is the host, so guests and members with its link may wait in its
 /// lobby. Also without `has_lobby`: guests of the shared link and members always wait there.
 pub fn hosts_lobby(meeting: &MeetingResponse, me: UserId) -> bool {

@@ -366,10 +366,16 @@ pub async fn set_custom_status(
   if !policy.presence.statuses_enabled {
     return Err(ApiError::Forbidden("statuses are switched off".into()));
   }
-  let maybe_preset =
-    policy.presence.presets.iter().find(|preset| {
-      preset.maybe_emoji.as_deref().map(str::trim) == emoji && Some(preset.text.trim()) == text
-    });
+  let maybe_preset = policy.presence.presets.iter().find(|preset| {
+    // A preset's empty emoji is no emoji, as in the request.
+    preset
+      .maybe_emoji
+      .as_deref()
+      .map(str::trim)
+      .filter(|e| !e.is_empty())
+      == emoji
+      && Some(preset.text.trim()) == text
+  });
   if !policy.presence.custom_status_enabled && maybe_preset.is_none() {
     return Err(ApiError::Forbidden(
       "custom statuses are switched off; choose one of the presets".into(),
@@ -386,11 +392,21 @@ pub async fn set_custom_status(
   if let Some(text) = text {
     super::validate_name(text, "status text", state.settings.get().limits.max_name_length)?;
   }
-  let maybe_expires_at = match request.maybe_expires_at {
-    Some(millis) => {
+  let now = OffsetDateTime::now_utc();
+  let maybe_expires_at = match (request.maybe_expires_in_seconds, request.maybe_expires_at) {
+    // A duration is resolved on this clock, whatever the client's clock says.
+    (Some(seconds), _) => {
+      let at = i64::try_from(seconds)
+        .ok()
+        .filter(|seconds| *seconds > 0)
+        .and_then(|seconds| now.checked_add(time::Duration::seconds(seconds)))
+        .ok_or_else(|| ApiError::InvalidRequest("invalid expires_in_seconds".into()))?;
+      Some(at)
+    },
+    (None, Some(millis)) => {
       let at =
         offset_date_time(millis).ok_or_else(|| ApiError::InvalidRequest("invalid expires_at".into()))?;
-      if at <= OffsetDateTime::now_utc() {
+      if at <= now {
         return Err(ApiError::InvalidRequest(
           "expires_at must be in the future".into(),
         ));
@@ -398,9 +414,9 @@ pub async fn set_custom_status(
       Some(at)
     },
     // A preset can end by itself.
-    None => maybe_preset
+    (None, None) => maybe_preset
       .and_then(|preset| preset.maybe_duration_minutes)
-      .map(|minutes| OffsetDateTime::now_utc() + time::Duration::minutes(i64::from(minutes))),
+      .map(|minutes| now + time::Duration::minutes(i64::from(minutes))),
   };
 
   let stored = StoredStatus {

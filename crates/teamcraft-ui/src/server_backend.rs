@@ -160,6 +160,7 @@ pub fn build_snapshot(
     is_bot: false,
     maybe_organization: summary.maybe_organization.clone(),
     device_setup: crate::model::DeviceSetup::Unknown,
+    maybe_email: summary.maybe_email.clone(),
   };
 
   let me_user = User {
@@ -174,6 +175,7 @@ pub fn build_snapshot(
     is_bot: false,
     maybe_organization: None,
     device_setup: crate::model::DeviceSetup::Unknown,
+    maybe_email: None,
   };
 
   let mut users: Vec<User> = vec![me_user.clone()];

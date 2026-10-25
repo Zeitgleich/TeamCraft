@@ -1008,6 +1008,7 @@ fn user_from_wire(
       is_bot: false,
       maybe_organization: None,
       device_setup: crate::model::DeviceSetup::Unknown,
+      maybe_email: None,
     },
     role,
     devices: devices

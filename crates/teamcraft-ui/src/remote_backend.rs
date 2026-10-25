@@ -824,6 +824,17 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::RetryDmSetup { conversation });
   }
 
+  fn set_up_meeting_chat(&self, conversation: ConversationId, invitees: Vec<UserId>) {
+    self.act(ChatAction::SetUpMeetingChat {
+      conversation,
+      invitees,
+    });
+  }
+
+  fn let_into_meeting_chat(&self, conversation: ConversationId, user: UserId) {
+    self.act(ChatAction::LetIntoMeetingChat { conversation, user });
+  }
+
   fn discard_removal(&self, conversation: ConversationId, user: UserId) {
     self.act(ChatAction::DiscardRemoval { conversation, user });
   }
@@ -1429,6 +1440,17 @@ impl ChatBackend for RemoteChat {
       presence,
       maybe_until,
     });
+  }
+
+  fn presence_policy(&self) -> teamcraft_proto::PresencePolicy {
+    self
+      .mirror
+      .borrow()
+      .snapshot
+      .security
+      .maybe_presence_policy
+      .clone()
+      .unwrap_or_default()
   }
 
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>) {

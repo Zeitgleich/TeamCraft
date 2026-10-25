@@ -191,6 +191,10 @@ struct State {
   /// When people were last active, and who chose to hide it.
   last_seen: HashMap<UserId, i64>,
   hidden_last_seen: HashSet<UserId>,
+  /// Custom statuses set through `PUT /me/status`.
+  custom_statuses: HashMap<UserId, teamcraft_proto::CustomStatus>,
+  /// The workspace allows only presets: `PUT /me/status` answers 403 ([`FakeServer::refuse_custom_statuses`]).
+  refuses_custom_statuses: bool,
   /// How far the server's clock runs ahead of the system clock ([`FakeServer::advance_clock`]).
   clock_offset_ms: i64,
   /// Users whose conversation list answers only after this long (a slow server in a big sync).
@@ -582,6 +586,21 @@ impl FakeServer {
     self.lock().last_seen.insert(user, at);
   }
 
+  /// The custom status the server keeps for the user (set through `PUT /me/status`).
+  pub fn custom_status(&self, user: UserId) -> Option<teamcraft_proto::CustomStatus> {
+    self.lock().custom_statuses.get(&user).cloned()
+  }
+
+  /// The server's clock now (the system clock plus [`FakeServer::advance_clock`]).
+  pub fn server_now_ms(&self) -> i64 {
+    self.lock().now_ms()
+  }
+
+  /// From now on `PUT /me/status` answers 403, as with custom statuses switched off.
+  pub fn refuse_custom_statuses(&self, is_refused: bool) {
+    self.lock().refuses_custom_statuses = is_refused;
+  }
+
   /// What `GET /me/notification-settings` answers for the user from now on.
   pub fn set_notification_settings(&self, user: UserId, settings: NotificationSettings) {
     self.lock().notification_settings.insert(user, settings);
@@ -613,6 +632,28 @@ impl FakeServer {
   /// The next key package upload is stored, but the answer never reaches the client.
   pub fn lose_next_key_package_answer(&self) {
     self.lock().key_package_answers_to_lose += 1;
+  }
+
+  /// A meeting's chat as the server creates it with the meeting (docs/meetings.md): the organizer
+  /// is admin, the invitees are members, and no client has founded its encryption group.
+  pub fn create_meeting_chat(&self, organizer: UserId, invitees: &[UserId]) -> ConversationId {
+    let mut state = self.lock();
+    let mut members = invitees.to_vec();
+    members.push(organizer);
+    let id = state.create_conversation(
+      ConversationKind::Meeting,
+      None,
+      Some("Meeting".to_owned()),
+      HistoryPolicy::Full,
+      &members,
+    );
+    if let Some(conversation) = state.conversations.get_mut(&id)
+      && let Some(entry) = conversation.members.get_mut(&organizer)
+    {
+      entry.0 = ChannelRole::Admin;
+    }
+    state.publish(members, &GatewayEvent::ConversationUpdate { conversation_id: id });
+    id
   }
 
   /// How many channels have this name.
@@ -1767,6 +1808,51 @@ impl ServerApi for FakeServerApi {
     self.with(|_, _| Ok(()))
   }
 
+  async fn set_custom_status(
+    &self,
+    request: &teamcraft_proto::SetCustomStatusRequest,
+  ) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      if state.refuses_custom_statuses {
+        return Err(ApiError::status(
+          403,
+          ErrorCode::Forbidden,
+          "custom statuses are switched off; choose one of the presets",
+        ));
+      }
+      // Like the server: a duration ends on this clock and wins over the client's end.
+      let now = state.now_ms();
+      let maybe_expires_at = match (request.maybe_expires_in_seconds, request.maybe_expires_at) {
+        (Some(seconds), _) => Some(teamcraft_proto::UnixMillis(
+          now.saturating_add(i64::try_from(seconds).unwrap_or(i64::MAX).saturating_mul(1000)),
+        )),
+        (None, Some(at)) if at.0 <= now => {
+          return Err(ApiError::status(
+            400,
+            ErrorCode::InvalidRequest,
+            "expires_at must be in the future",
+          ));
+        },
+        (None, maybe_at) => maybe_at,
+      };
+      let status = teamcraft_proto::CustomStatus {
+        maybe_emoji: request.maybe_emoji.clone(),
+        maybe_text: request.maybe_text.clone(),
+        maybe_expires_at,
+        maybe_activity: None,
+      };
+      state.custom_statuses.insert(me, status);
+      Ok(())
+    })
+  }
+
+  async fn clear_custom_status(&self) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      state.custom_statuses.remove(&me);
+      Ok(())
+    })
+  }
+
   async fn list_presence(&self, users: &[UserId]) -> Result<teamcraft_proto::ListPresenceResponse, ApiError> {
     self.with(|state, _| {
       Ok(teamcraft_proto::ListPresenceResponse {
@@ -1775,7 +1861,7 @@ impl ServerApi for FakeServerApi {
           .map(|user| teamcraft_proto::UserPresence {
             user_id: *user,
             state: teamcraft_proto::PresenceState::Offline,
-            maybe_status: None,
+            maybe_status: state.custom_statuses.get(user).cloned(),
             maybe_last_seen: state
               .last_seen
               .get(user)

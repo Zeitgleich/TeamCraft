@@ -194,6 +194,10 @@ pub struct SecuritySnapshot {
   /// was verified (or from an older shell).
   #[serde(rename = "owners", default, skip_serializing_if = "Option::is_none")]
   pub maybe_owners: Option<crate::admin::OwnerRosterStatus>,
+  /// Which statuses the verified policy allows (custom ones, presets); `None` (not known yet, or an
+  /// older shell) allows them, as the server's default does. The server enforces it either way.
+  #[serde(rename = "presence_policy", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_presence_policy: Option<teamcraft_proto::PresencePolicy>,
 }
 
 /// What this device pinned for one contact, and a different key the server has shown since.
@@ -640,6 +644,14 @@ pub enum ChatAction {
   RetryDmSetup {
     conversation: ConversationId,
   },
+  SetUpMeetingChat {
+    conversation: ConversationId,
+    invitees: Vec<UserId>,
+  },
+  LetIntoMeetingChat {
+    conversation: ConversationId,
+    user: UserId,
+  },
   SetBookmarks {
     conversation: ConversationId,
     bookmarks: Vec<crate::model::Bookmark>,
@@ -829,6 +841,11 @@ impl ChatAction {
       Self::RetryRemoval { conversation, user } => backend.retry_removal(conversation, user),
       Self::DiscardRemoval { conversation, user } => backend.discard_removal(conversation, user),
       Self::RetryDmSetup { conversation } => backend.retry_dm_setup(conversation),
+      Self::SetUpMeetingChat {
+        conversation,
+        invitees,
+      } => backend.set_up_meeting_chat(conversation, invitees),
+      Self::LetIntoMeetingChat { conversation, user } => backend.let_into_meeting_chat(conversation, user),
       Self::SetBookmarks {
         conversation,
         bookmarks,

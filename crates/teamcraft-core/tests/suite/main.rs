@@ -14,6 +14,7 @@ mod chat_actions;
 #[path = "../common/mod.rs"]
 mod common;
 mod connection;
+mod custom_status;
 mod dev_stack;
 mod devices;
 mod dm_setup;
@@ -22,6 +23,7 @@ mod files;
 mod key_packages;
 mod link_previews;
 mod linking;
+mod meeting_chats;
 mod member_devices;
 mod member_removal;
 mod messages;

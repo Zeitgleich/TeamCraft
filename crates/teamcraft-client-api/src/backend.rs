@@ -99,6 +99,11 @@ pub trait ChatBackend {
     self.set_presence(presence);
   }
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>);
+  /// Which statuses the workspace allows (PLAN.md §4): whether there are any, whether people may
+  /// write their own, and the presets. The server enforces it; the UI only offers what it allows.
+  fn presence_policy(&self) -> teamcraft_proto::PresencePolicy {
+    teamcraft_proto::PresencePolicy::default()
+  }
 
   /// Whether the user follows the thread (followed threads feed the threads inbox).
   fn is_thread_followed(&self, _conversation: ConversationId, _thread: ThreadId) -> bool {
@@ -261,6 +266,13 @@ pub trait ChatBackend {
   fn discard_removal(&self, _conversation: ConversationId, _user: UserId) {}
   /// "Retry" on a DM whose encryption setup waits for a welcome or failed.
   fn retry_dm_setup(&self, _conversation: ConversationId) {}
+  /// Sets up the encryption of a meeting chat this user just scheduled or started, with the users
+  /// they invited (the organizer's own request: the group is never founded from the server's
+  /// member list).
+  fn set_up_meeting_chat(&self, _conversation: ConversationId, _invitees: Vec<UserId>) {}
+  /// A host admitted `user` from a meeting's lobby: lets them into the chat's encryption, on this
+  /// host's own decision (never because the server made them a member).
+  fn let_into_meeting_chat(&self, _conversation: ConversationId, _user: UserId) {}
   /// Unconfirmed removals in every conversation, for the admin console: an admin outside the
   /// group doesn't see the conversation.
   fn unconfirmed_removals(&self) -> Vec<(ConversationId, UserId)> {

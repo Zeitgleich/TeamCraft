@@ -13,6 +13,7 @@ pub mod backend;
 pub mod brand;
 pub mod call_view;
 pub mod calls;
+pub mod custom_status;
 pub mod emoji;
 pub mod emoji_catalog;
 pub mod failure;

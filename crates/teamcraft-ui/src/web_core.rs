@@ -741,6 +741,18 @@ impl Core {
       }
       self.check_store();
       self.check_push().await;
+      self.report_background_failures();
+    }
+  }
+
+  /// Refusals the core found while it sent queued actions in the background (a custom status the
+  /// workspace no longer allows): shown, since no button waits for them (issue #322).
+  fn report_background_failures(&mut self) {
+    let Some(client) = self.client.as_mut() else {
+      return;
+    };
+    for error in client.take_background_failures() {
+      crate::feedback::report_background_failure(error.to_failure());
     }
   }
 
@@ -1319,6 +1331,7 @@ impl Core {
       contacts,
       maybe_push_content: Some(teamcraft_core::push_preview::push_content_mode(client.store())),
       maybe_owners: client.owner_roster_status(),
+      maybe_presence_policy: teamcraft_core::workspace::presence_policy(client.store()),
     })
   }
 
