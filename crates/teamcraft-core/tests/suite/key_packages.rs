@@ -294,6 +294,43 @@ async fn a_reconnect_waits_for_the_welcomes_before_deleting_packages() {
   );
 }
 
+/// A welcome that keeps failing doesn't stop the renewal: the device stays addable, and the check
+/// is recorded, so it isn't repeated (with its welcome request) on every tick.
+#[tokio::test]
+async fn a_failing_welcome_does_not_block_the_renewal() {
+  let server = FakeServer::new();
+  let bob_clock = std::sync::Arc::new(teamcraft_core::clock::ManualClock::new(1_800_000_000_000));
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll_on_clock(
+    server.add_user("Bob"),
+    "Bob",
+    settings(),
+    Box::new(bob_clock.clone()),
+  )
+  .await;
+  let space = alice.space().await;
+  let channel = alice.client.create_channel(space, "general").await.unwrap();
+  alice
+    .client
+    .add_member(channel, bob.client.user_id())
+    .await
+    .unwrap();
+  // The welcome can't be processed: its conversation's member list is unreadable.
+  server.break_member_list(channel, true);
+  assert!(bob.client.sync_welcomes().await.is_err());
+
+  // Bob's packages are due for renewal, and his check interval has passed.
+  server.advance_clock(30 * DAY);
+  bob_clock.advance(i64::try_from(settings().key_package_check_interval.as_millis()).unwrap() + 1);
+  assert!(bob.client.renew_key_packages_if_due().await.unwrap());
+  let status = bob.api.key_package_status(bob.client.device_id()).await.unwrap();
+  assert!(status.available >= settings().key_package_target && status.has_last_resort);
+  assert!(
+    !bob.client.renew_key_packages_if_due().await.unwrap(),
+    "checked, not again at once"
+  );
+}
+
 /// Issue #395: a welcome for a deleted package of a conversation the user is no longer in is
 /// dropped, without asking to be added back (the server would refuse the request).
 mod welcome_after_leaving {

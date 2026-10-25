@@ -15,6 +15,11 @@ pub mod sealed;
 mod sealed_sqlite;
 #[cfg(all(feature = "sqlcipher", not(target_arch = "wasm32")))]
 mod sqlite;
+#[cfg(all(
+  any(feature = "sqlcipher", feature = "sealed-sqlite"),
+  not(target_arch = "wasm32")
+))]
+mod sqlite_wipe;
 mod tracked;
 
 #[cfg(target_arch = "wasm32")]
@@ -31,6 +36,11 @@ pub use memory::MemoryStore;
 pub use sealed_sqlite::{SealedSqliteStore, SqliteRecords};
 #[cfg(all(feature = "sqlcipher", not(target_arch = "wasm32")))]
 pub use sqlite::SqlCipherStore;
+#[cfg(all(
+  any(feature = "sqlcipher", feature = "sealed-sqlite"),
+  not(target_arch = "wasm32")
+))]
+use sqlite_wipe::wipe_free_pages_once;
 pub use tracked::{StoreChanges, TrackedStore};
 
 use serde::{Deserialize, Serialize};

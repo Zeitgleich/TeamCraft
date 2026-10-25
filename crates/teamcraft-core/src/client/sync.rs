@@ -249,8 +249,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   ///
   /// The welcomes are read first: the tick may come right after the device woke from a long sleep,
   /// before the gateway noticed, and a welcome that came meanwhile may wait for a package the
-  /// cleanup would delete (issue #395). One request per check. Re-add records past their cooldown
-  /// go too, for a device that only ever resumes its gateway session (issue #391).
+  /// cleanup would delete (issue #395). One request per check. A welcome sync that fails doesn't
+  /// stop the renewal (the device must stay addable, and the check must not repeat on every tick);
+  /// it only leaves the cleanup for later. Re-add records past their cooldown go too, for a device
+  /// that only ever resumes its gateway session (issue #391).
   ///
   /// [`ClientSettings::key_package_check_interval`]: super::ClientSettings::key_package_check_interval
   pub async fn renew_key_packages_if_due(&mut self) -> Result<bool, CoreError> {
@@ -258,7 +260,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if self.now_ms().saturating_sub(self.last_key_package_check_ms) < interval_ms {
       return Ok(false);
     }
-    self.sync_welcomes().await?;
+    if let Err(error) = self.sync_welcomes().await {
+      tracing::warn!(%error, "could not read the welcomes before the key package check");
+    }
     self.top_up_key_packages().await?;
     self.prune_readded_records()?;
     Ok(true)

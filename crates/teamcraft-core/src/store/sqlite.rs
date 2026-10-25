@@ -66,12 +66,14 @@ impl SqlCipherStore {
       .map_err(|_| StoreError::WrongKey)?;
     // Freed pages are zeroed (before encryption), so an old copy of a rewritten or deleted record
     // doesn't stay readable to whoever later gets the key (issue #391). The rollback journal holds
-    // old pages only during a transaction and is deleted after it.
+    // old pages during a transaction; it is unlinked afterwards, not overwritten, so its blocks may
+    // linger on disk until reused (encrypted with the database key).
     connection
       .execute_batch("PRAGMA secure_delete = ON;")
       .map_err(database_error)?;
     connection.execute_batch(SCHEMA).map_err(database_error)?;
     migrate(&connection)?;
+    super::wipe_free_pages_once(&connection);
     Ok(Self {
       connection: Mutex::new(connection),
     })

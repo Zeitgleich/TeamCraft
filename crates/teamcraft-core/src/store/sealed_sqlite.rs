@@ -47,6 +47,7 @@ impl SealedStore<SqliteRecords> {
       .execute_batch("PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;")
       .map_err(database_error)?;
     connection.execute_batch(SCHEMA).map_err(database_error)?;
+    super::wipe_free_pages_once(&connection);
     let records = read_all(&connection)?;
     let backend = SqliteRecords {
       connection: Mutex::new(connection),

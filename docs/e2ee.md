@@ -291,7 +291,8 @@ for months must keep fresh ones on the server:
   memory before it goes, and so is every old copy of the MLS storage in the store's cache. The
   local database zeroes freed pages (SQLite `secure_delete`), and the Android store truncates its
   write-ahead log after a deletion, so the old storage record isn't left in the files for somebody
-  who later gets the database key (#391). Copies the file system or the flash controller keep are
+  who later gets the database key (#391). The first start after this change rebuilds each
+  database once (`VACUUM`), wiping free pages left from before. Copies the file system or the flash controller keep are
   out of reach; the browser's IndexedDB gives no such control. The listing and the wiping rely on
   how `openmls_memory_storage` 0.6 keys bundles; a test fails when a new version changes it.
 - **History of a first add-back (known gap).** A user whose first device can't open the welcome
