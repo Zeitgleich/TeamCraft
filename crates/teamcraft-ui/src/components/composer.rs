@@ -429,6 +429,8 @@ pub fn Composer(
     attachments.set(Vec::new());
     if maybe_thread.is_none() {
       state.jump_to_latest.update(|value| *value += 1);
+      // A thread reply reads the thread (thread_panel.rs), not the conversation's feed.
+      state.mark_read_on_send(conversation);
     }
     state.divider_event(conversation, DividerEvent::Sent);
   };
