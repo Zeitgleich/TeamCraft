@@ -540,7 +540,26 @@ fn ChannelHeader(
     <header class="channel-header">
       <div class="header-main">
         <CompactBack />
-        {title}
+        <div class="header-identity">
+          {title}
+          // A direct conversation: the other person's status under the name, as messengers do.
+          {move || {
+            info.get().and_then(|conv| {
+              (conv.kind == crate::model::ConversationKind::Direct)
+                .then(|| conv.member_ids.iter().copied().find(|id| *id != state.me().id))
+                .flatten()
+                .map(|other| {
+                  view! {
+                    <div class="header-sub">
+                      <crate::components::profile_views::InMeetingBadge user=other />
+                      <crate::components::profile_views::LastSeen user=other is_compact=true />
+                      {move || local_time().map(|label| view! { <span class="header-local-time" title=move || i18n.t("profile-local-time")>{label}</span> })}
+                    </div>
+                  }
+                })
+            })
+          }}
+        </div>
         <button
           class="icon-btn"
           aria-pressed=move || is_favorite().to_string()
@@ -575,20 +594,6 @@ fn ChannelHeader(
             />
           </Show>
         </div>
-        {move || {
-          info.get().and_then(|conv| {
-            (conv.kind == crate::model::ConversationKind::Direct)
-              .then(|| conv.member_ids.iter().copied().find(|id| *id != state.me().id))
-              .flatten()
-              .map(|other| {
-                view! {
-                  <crate::components::profile_views::InMeetingBadge user=other />
-                  <crate::components::profile_views::LastSeen user=other />
-                }
-              })
-          })
-        }}
-        {move || local_time().map(|label| view! { <span class="header-local-time" title=move || i18n.t("profile-local-time")>{label}</span> })}
         <Show when=has_external fallback=|| ()>
           <span class="badge badge-guest" title=move || i18n.t("external-badge-detail")>
             {move || i18n.t("external-badge")}

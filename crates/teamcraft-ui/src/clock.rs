@@ -119,6 +119,16 @@ pub fn format_date(ts: TimestampMs, locale: &str) -> String {
 
 /// "5 minutes ago" / "in 3 days" in the user's locale, relative to `now`.
 pub fn format_relative(ts: TimestampMs, now: TimestampMs, locale: &str) -> String {
+  format_relative_in(ts, now, locale, "long")
+}
+
+/// "5 min. ago" / "in 3 days": the abbreviated form, for tight places like the channel header.
+pub fn format_relative_short(ts: TimestampMs, now: TimestampMs, locale: &str) -> String {
+  format_relative_in(ts, now, locale, "short")
+}
+
+/// `style` is an `Intl.RelativeTimeFormat` style: "long", "short" or "narrow".
+fn format_relative_in(ts: TimestampMs, now: TimestampMs, locale: &str, style: &str) -> String {
   let delta = ts - now;
   let (value, unit) = relative_parts(delta);
   #[cfg(target_arch = "wasm32")]
@@ -126,12 +136,13 @@ pub fn format_relative(ts: TimestampMs, now: TimestampMs, locale: &str) -> Strin
     let options = js_sys::Object::new();
     // Setting a plain data property on a fresh object cannot fail.
     let _ = js_sys::Reflect::set(&options, &"numeric".into(), &"auto".into());
+    let _ = js_sys::Reflect::set(&options, &"style".into(), &style.into());
     let formatter = js_sys::Intl::RelativeTimeFormat::new(&js_sys::Array::of1(&locale.into()), &options);
     formatter.format(value as f64, unit).into()
   }
   #[cfg(not(target_arch = "wasm32"))]
   {
-    let _ = locale;
+    let _ = (locale, style);
     if value < 0 {
       format!("{} {unit}s ago", -value)
     } else {

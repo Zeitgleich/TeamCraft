@@ -1612,6 +1612,38 @@ select.input {
   margin: 0;
 }
 
+/* The name, and in a direct conversation the person's status on a small line under it. */
+.header-main > .header-identity {
+  flex: 0 1 auto;
+  min-width: 3rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.header-identity > .header-title {
+  line-height: 1.2;
+}
+
+.header-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  line-height: 1.3;
+}
+
+.header-sub > .last-seen {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .header-name {
   min-width: 0;
   overflow: hidden;
@@ -1664,9 +1696,7 @@ select.input {
 @container channel-header (max-width: 520px) {
   .header-main > .icon-btn,
   .header-main > .date-jump,
-  .header-main > .header-local-time,
-  .header-main > .last-seen,
-  .header-main > .in-meeting-badge {
+  .header-sub > .header-local-time {
     display: none;
   }
 }
@@ -1693,9 +1723,7 @@ select.input {
   @container channel-header (max-width: 620px) {
     .header-main > .icon-btn,
     .header-main > .date-jump,
-    .header-main > .header-local-time,
-    .header-main > .last-seen,
-    .header-main > .in-meeting-badge {
+    .header-sub > .header-local-time {
       display: none;
     }
   }
