@@ -701,7 +701,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// From the last presence the gateway reported; this device's own user counts as online.
-  fn is_probably_online(&self, user: UserId) -> Result<bool, CoreError> {
+  pub(crate) fn is_probably_online(&self, user: UserId) -> Result<bool, CoreError> {
     if user == self.account.user_id {
       return Ok(true);
     }
