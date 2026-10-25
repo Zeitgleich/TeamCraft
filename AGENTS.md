@@ -75,6 +75,8 @@ Details: [.claude/rules/](.claude/rules/). The short version:
   in code, docs, examples or tests – use neutral placeholders (`Project A`, `example.com`).
 - **Vendor-neutral.** Integrations (SIP trunks, voice AI, push, S3, identity provider) go behind
   interfaces/config; a specific vendor is an implementation, never a hard dependency of the design.
+- **Design:** all UI work uses the `apple-design` skill, and emoji are never icons (user content
+  only) – see [design.md](.claude/rules/design.md).
 - **Markdown tables are space-padded** so columns align in plain text.
 
 ## Before you commit

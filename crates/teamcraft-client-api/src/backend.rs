@@ -28,7 +28,7 @@ use crate::admin::{
 use crate::calls::{
   ActiveCall, BackgroundEffect, BackgroundImageInfo, CallHistoryItem, CallMoveOffer, CallRequest,
   CallStatusSounds, CallsUnavailableReason, HuddleInfo, IncomingCall, MediaDevices, Participant,
-  RemoteVideoTrack,
+  RemoteVideoTrack, ScreenContentMode,
 };
 use crate::calls::{OrgBackgroundRule, OrgBackgrounds};
 use crate::model::{
@@ -586,7 +586,7 @@ pub trait CallBackend {
   /// Opens the system's video effects panel (macOS); nothing elsewhere.
   fn open_system_video_effects(&self) {}
   /// `has_sound`: share the computer's sound too (without the call's own).
-  fn start_screen_share(&self, _has_sound: bool) {}
+  fn start_screen_share(&self, _has_sound: bool, _mode: ScreenContentMode) {}
   fn set_push_to_talk(&self, _is_enabled: bool, _maybe_shortcut: Option<String>) {}
   /// The push-to-talk key inside the window went down (`true`) or up.
   fn set_talking(&self, _is_talking: bool) {}

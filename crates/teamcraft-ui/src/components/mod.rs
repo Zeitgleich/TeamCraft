@@ -49,6 +49,7 @@ pub mod edge_swipe;
 pub mod emoji_picker;
 pub mod empty_state;
 pub mod file_drop;
+pub mod file_preview;
 pub mod file_views;
 pub mod getting_started;
 pub mod guest_join;
@@ -92,6 +93,8 @@ pub mod settings_rows;
 pub mod settings_search;
 pub mod settings_security;
 pub mod settings_tabs;
+#[cfg(target_arch = "wasm32")]
+pub mod share_download;
 pub mod sheet;
 pub mod sidebar;
 pub mod skeleton;

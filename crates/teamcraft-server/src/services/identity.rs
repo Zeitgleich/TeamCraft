@@ -40,6 +40,13 @@ pub async fn put_identity_key(
   {
     return Err(ApiError::InvalidRequest("attestation is too long".into()));
   }
+  // A guest's identity key is pinned by the members on first use; resetting it would make a
+  // second key look like the same guest (e2ee.md §4.6, "Meeting guests").
+  if request.replace && caller.user.kind == teamcraft_proto::UserKind::Guest {
+    return Err(ApiError::Forbidden(
+      "guests can't replace their identity key".into(),
+    ));
+  }
   let key_bag = request
     .maybe_key_bag
     .as_ref()

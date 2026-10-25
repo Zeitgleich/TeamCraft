@@ -414,7 +414,10 @@ mod worker {
                         };
                     }
 
-                    request = self.close_requests.recv() => {
+                    // Held back until the session stream is registered: a close asked right after
+                    // the session was accepted would otherwise find no stream and be dropped
+                    // without sending the capsule.
+                    request = self.close_requests.recv(), if !self.connect_stream.is_empty() => {
                         // The sender lives as long as the `Driver` handle; without it nobody asks.
                         if let Some(request) = request {
                             self.connect_stream

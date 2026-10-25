@@ -2,6 +2,7 @@
 //! `teamcraft-media`; these types only describe what the UI shows and lets the user pick.
 
 use serde::{Deserialize, Serialize};
+pub use teamcraft_proto::ScreenContentMode;
 use teamcraft_proto::{BackgroundId, CallBackgroundMode, OrgBackgroundId};
 
 use crate::model::{ConversationId, TimestampMs, UserId};

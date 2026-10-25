@@ -546,6 +546,7 @@ pub fn apply_call_prefs(call: crate::calls::CallState, calls: &CallPrefs) {
   call.microphone_id.set(calls.microphone_id.clone());
   call.speaker_id.set(calls.speaker_id.clone());
   call.share_sound.set(calls.share_sound);
+  call.screen_mode.set(calls.screen_mode);
 }
 
 /// Help & about: versions, debug info for a support request, updates (desktop) and notices.

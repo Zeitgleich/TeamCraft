@@ -99,6 +99,8 @@ wire_enum! {
     Admin => "admin",
     /// The identity provider disabled the user or removed their TeamCraft roles.
     Oidc => "oidc",
+    /// A meeting guest left the meeting.
+    Left => "left",
   }
 }
 

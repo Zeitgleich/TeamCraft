@@ -25,7 +25,7 @@ pub use call_media::{
 };
 pub use calls::{
   CALL_JOIN_TOKEN_AUDIENCE, CallClientMessage, CallEvent, CallJoinClaims, CallParticipant, CallServerMessage,
-  DaveKeyBinding, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, ScreenAudioTrack,
+  DaveKeyBinding, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, ScreenAudioTrack, ScreenContentMode,
 };
 pub use conversation::{ConversationKind, ConversationVisibility, HistoryPolicy};
 pub use error::{ErrorBody, ErrorCode};

@@ -43,6 +43,8 @@ use crate::components::security_ui::{
 };
 use crate::components::settings_modal::ShortcutsModal;
 use crate::components::settings_tabs::apply_call_prefs;
+#[cfg(target_arch = "wasm32")]
+use crate::components::share_download::ShareDownloadPage;
 use crate::components::sidebar::Sidebar;
 use crate::components::status_menu::CustomStatusDialog;
 use crate::components::status_menu::StatusMenu;
@@ -98,6 +100,12 @@ fn screen(settings: Settings) -> AnyView {
   // A personal meeting link needs no sign-in: it gets its own page before anything else.
   if let Some((meeting, invite_token)) = guest_link_from_location() {
     return view! { <GuestJoinPage meeting=meeting invite_token=invite_token /> }.into_any();
+  }
+
+  // A share link needs no sign-in either: the file's key is in the fragment.
+  #[cfg(target_arch = "wasm32")]
+  if let Some((id, fragment)) = share_link_from_location() {
+    return view! { <ShareDownloadPage id=id fragment=fragment /> }.into_any();
   }
 
   // What the service worker says about the code that is running (docs/e2ee.md §9.3).
@@ -389,6 +397,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::MeetingCreated => lazy_area(Place::Overlay, || areas::meeting_created(())),
         Overlay::Forward(from, message) => view! { <ForwardDialog from=from message=message /> }.into_any(),
         Overlay::Lightbox(conversation, start) => lazy_area(Place::Overlay, move || areas::lightbox(conversation, start)),
+        Overlay::FilePreview(conversation, key) => lazy_area(Place::Overlay, move || areas::file_preview(conversation, key)),
         Overlay::NewSpace => lazy_area(Place::Overlay, || areas::new_space(())),
         Overlay::NewMessage => view! { <NewMessageDialog /> }.into_any(),
         Overlay::BrowseSpaces(maybe_highlight) => lazy_area(Place::Overlay, move || areas::browse_spaces(maybe_highlight)),
@@ -861,6 +870,13 @@ fn guest_link_from_location() -> Option<(teamcraft_proto::MeetingId, String)> {
   parse_guest_link(&location.pathname().ok()?, &location.hash().ok()?)
 }
 
+#[cfg(target_arch = "wasm32")]
+/// The share ID and fragment when the page was opened from a share link (`/f/<id>#<fragment>`).
+fn share_link_from_location() -> Option<(String, String)> {
+  let location = web_sys::window()?.location();
+  crate::share_link::parse_share_link(&location.pathname().ok()?, &location.hash().ok()?)
+}
+
 /// Keeps `--banners-h` on the root element at the height of the banner row: overlays that are fixed
 /// below the top bar (call screens, side panels on narrow windows) start below the banners too.
 fn track_banner_height(banners: NodeRef<leptos::html::Div>) {
@@ -930,7 +946,7 @@ fn connect_calls(state: AppState) {
       CallEvent::Camera(is_on) => backend.set_call_camera(is_on),
       CallEvent::CameraDevice(device) => backend.select_camera(Some(device)),
       CallEvent::Effect(effect) => backend.set_background_effect(effect),
-      CallEvent::StartScreenShare { has_sound } => backend.start_screen_share(has_sound),
+      CallEvent::StartScreenShare { has_sound, mode } => backend.start_screen_share(has_sound, mode),
       CallEvent::StopScreenShare => backend.stop_screen_share(),
       CallEvent::StatusSounds(sounds) => backend.set_call_status_sounds(sounds),
     });

@@ -152,6 +152,20 @@ pub fn ciphertext_matches(ciphertext: &[u8], expected_sha256: &[u8]) -> bool {
 
 /// Decrypts a whole file in memory. For large files use [`AttachmentDecryptor`].
 pub fn decrypt_attachment(key: &AttachmentKey, ciphertext: &[u8]) -> Result<SecretBytes, AttachmentError> {
+  let mut plaintext = Vec::with_capacity(ciphertext.len());
+  decrypt_attachment_chunks(key, ciphertext, |chunk| plaintext.extend_from_slice(chunk))?;
+  Ok(SecretBytes::new(plaintext))
+}
+
+/// Decrypts a blob in memory chunk by chunk, handing every plaintext chunk to `sink` in order, so
+/// the caller never needs the whole plaintext as one buffer (the share download page builds a
+/// browser `Blob` from the chunks). Nothing is trustworthy until this returns `Ok`: a tampered or
+/// truncated blob fails at its end.
+pub fn decrypt_attachment_chunks(
+  key: &AttachmentKey,
+  ciphertext: &[u8],
+  mut sink: impl FnMut(&[u8]),
+) -> Result<(), AttachmentError> {
   let header = ciphertext
     .get(..HEADER_LEN)
     .ok_or(AttachmentError::MalformedHeader)?;
@@ -165,12 +179,11 @@ pub fn decrypt_attachment(key: &AttachmentKey, ciphertext: &[u8]) -> Result<Secr
     (body.len() - 1) / encrypted_chunk_len
   };
   let (chunks, last) = body.split_at(full_chunks * encrypted_chunk_len);
-  let mut plaintext = Vec::with_capacity(body.len());
   for chunk in chunks.chunks(encrypted_chunk_len) {
-    plaintext.extend_from_slice(decryptor.decrypt_chunk(chunk)?.expose_secret());
+    sink(decryptor.decrypt_chunk(chunk)?.expose_secret());
   }
-  plaintext.extend_from_slice(decryptor.finish(last)?.expose_secret());
-  Ok(SecretBytes::new(plaintext))
+  sink(decryptor.finish(last)?.expose_secret());
+  Ok(())
 }
 
 impl AttachmentKey {
@@ -458,6 +471,62 @@ impl AttachmentDecryptor {
   }
 }
 
+/// Decrypts a blob that arrives in pieces of any size (a network stream), handing every plaintext
+/// chunk to a sink as soon as its ciphertext is complete, so neither the whole ciphertext nor the
+/// whole plaintext is ever one buffer. The final chunk is only known at the end of the stream, so
+/// one full chunk of ciphertext is always held back until [`Self::finish`]. Nothing is
+/// trustworthy until `finish` returns `Ok`: a truncated or extended stream fails there.
+pub struct AttachmentStreamDecryptor<'a> {
+  key: &'a AttachmentKey,
+  maybe_decryptor: Option<AttachmentDecryptor>,
+  pending: Vec<u8>,
+}
+
+impl<'a> AttachmentStreamDecryptor<'a> {
+  pub fn new(key: &'a AttachmentKey) -> Self {
+    Self {
+      key,
+      maybe_decryptor: None,
+      pending: Vec::new(),
+    }
+  }
+
+  /// Adds the next piece of the ciphertext; plaintext chunks that are complete go to `sink`.
+  pub fn push(&mut self, ciphertext: &[u8], mut sink: impl FnMut(&[u8])) -> Result<(), AttachmentError> {
+    self.pending.extend_from_slice(ciphertext);
+    if self.maybe_decryptor.is_none() {
+      if self.pending.len() < HEADER_LEN {
+        return Ok(());
+      }
+      let header: Vec<u8> = self.pending.drain(..HEADER_LEN).collect();
+      self.maybe_decryptor = Some(AttachmentDecryptor::new(self.key, &header)?);
+    }
+    let Some(decryptor) = self.maybe_decryptor.as_mut() else {
+      return Ok(());
+    };
+    let chunk_len = decryptor.encrypted_chunk_len();
+    // More than one chunk is pending: the first one is not the last.
+    let mut done = 0;
+    while self.pending.len() - done > chunk_len {
+      sink(
+        decryptor
+          .decrypt_chunk(&self.pending[done..done + chunk_len])?
+          .expose_secret(),
+      );
+      done += chunk_len;
+    }
+    self.pending.drain(..done);
+    Ok(())
+  }
+
+  /// The stream ended: decrypts the final chunk.
+  pub fn finish(self, mut sink: impl FnMut(&[u8])) -> Result<(), AttachmentError> {
+    let decryptor = self.maybe_decryptor.ok_or(AttachmentError::MalformedHeader)?;
+    sink(decryptor.finish(&self.pending)?.expose_secret());
+    Ok(())
+  }
+}
+
 impl fmt::Debug for AttachmentDecryptor {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.debug_struct("AttachmentDecryptor")
@@ -515,6 +584,61 @@ mod tests {
       let decrypted = decrypt_attachment(&encrypted.key, &encrypted.ciphertext).unwrap();
       assert_eq!(decrypted.expose_secret(), plaintext.as_slice(), "length {len}");
     }
+  }
+
+  #[test]
+  fn chunks_arrive_in_order_and_a_truncated_blob_fails() {
+    let plaintext = sample(2 * CHUNK as usize + 10);
+    let encrypted = encrypt_attachment(&plaintext, CHUNK, &mut OsRng).unwrap();
+    let mut joined = Vec::new();
+    let mut count = 0;
+    decrypt_attachment_chunks(&encrypted.key, &encrypted.ciphertext, |chunk| {
+      joined.extend_from_slice(chunk);
+      count += 1;
+    })
+    .unwrap();
+    assert_eq!((joined, count), (plaintext, 3));
+    let truncated = &encrypted.ciphertext[..encrypted.ciphertext.len() - 30];
+    assert!(decrypt_attachment_chunks(&encrypted.key, truncated, |_| {}).is_err());
+  }
+
+  #[test]
+  fn a_stream_in_odd_pieces_decrypts_like_the_whole_blob() {
+    let chunk = CHUNK as usize;
+    for len in [0, 1, chunk, chunk + 1, 3 * chunk, 3 * chunk + 7] {
+      let plaintext = sample(len);
+      let encrypted = encrypt_attachment(&plaintext, CHUNK, &mut OsRng).unwrap();
+      for piece in [1, 7, chunk, 2 * chunk + 3, usize::MAX] {
+        let mut decryptor = AttachmentStreamDecryptor::new(&encrypted.key);
+        let mut joined = Vec::new();
+        for part in encrypted
+          .ciphertext
+          .chunks(piece.min(encrypted.ciphertext.len()).max(1))
+        {
+          decryptor
+            .push(part, |chunk| joined.extend_from_slice(chunk))
+            .unwrap();
+        }
+        decryptor.finish(|chunk| joined.extend_from_slice(chunk)).unwrap();
+        assert_eq!(joined, plaintext, "length {len}, pieces of {piece}");
+      }
+    }
+  }
+
+  #[test]
+  fn a_truncated_or_extended_stream_fails_at_the_end() {
+    let encrypted = encrypt_attachment(&sample(2 * CHUNK as usize + 5), CHUNK, &mut OsRng).unwrap();
+    let run = |bytes: &[u8]| {
+      let mut decryptor = AttachmentStreamDecryptor::new(&encrypted.key);
+      decryptor.push(bytes, |_| {})?;
+      decryptor.finish(|_| {})
+    };
+    assert!(run(&encrypted.ciphertext).is_ok());
+    assert!(run(&encrypted.ciphertext[..encrypted.ciphertext.len() - 20]).is_err());
+    let mut longer = encrypted.ciphertext.clone();
+    longer.extend_from_slice(&[0; 40]);
+    assert!(run(&longer).is_err());
+    assert!(run(&encrypted.ciphertext[..10]).is_err(), "no header yet");
   }
 
   #[test]

@@ -62,6 +62,7 @@ pub mod object_url;
 pub mod os_alerts;
 pub mod panic_overlay;
 pub mod prefs;
+pub mod preview;
 pub mod profiles;
 pub mod raster;
 pub mod reactive;
@@ -74,6 +75,7 @@ pub mod sections;
 pub mod server_backend;
 pub mod session;
 pub mod settings;
+pub mod share_link;
 #[cfg(any(target_arch = "wasm32", test))]
 pub mod shell_video;
 pub mod sign_in_page;
