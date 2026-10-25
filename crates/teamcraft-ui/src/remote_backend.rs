@@ -1420,6 +1420,11 @@ impl ChatBackend for RemoteChat {
     maybe_until: Option<teamcraft_client_api::model::TimestampMs>,
   ) {
     self.mirror.borrow_mut().snapshot.me.presence = presence;
+    // Choosing "Online" is activity on this device: it ends an away timeout the server applied
+    // (the server can't tell which device a presence request came from).
+    if presence == PresenceStatus::Online {
+      self.act(ChatAction::SetActivity { is_idle: false });
+    }
     self.act(ChatAction::SetPresence {
       presence,
       maybe_until,

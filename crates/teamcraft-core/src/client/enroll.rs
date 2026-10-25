@@ -16,8 +16,8 @@ use teamcraft_crypto::key_bag::{EncryptedKeyBag, KeyBag, KeyBagBinding};
 use teamcraft_crypto::org_recovery::{RecoveryRequest, RecoveryRequestKey};
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::{
-  Base64Bytes, DeviceId, InitialKeyBag, PutKeyBagRequest, RegisterDeviceRequest, UploadIdentityKeyRequest,
-  UserId,
+  Base64Bytes, DeviceActivity, DeviceId, InitialKeyBag, PutKeyBagRequest, RegisterDeviceRequest,
+  UploadIdentityKeyRequest, UserId,
 };
 
 use super::{Client, ClientSettings};
@@ -175,6 +175,7 @@ impl PendingEnrollment {
       last_key_package_check_ms: i64::MIN,
       mls_current: Default::default(),
       maybe_replay_left: None,
+      device_activity: DeviceActivity::Active,
       member_join_attempts: HashMap::new(),
       device_add_requests_handled: HashMap::new(),
       are_welcomes_synced: false,

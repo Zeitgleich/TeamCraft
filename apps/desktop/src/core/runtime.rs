@@ -627,6 +627,9 @@ struct Core {
   /// The last attention report, repeated after a reconnect (the server forgets it with the
   /// connection).
   maybe_attention: Option<bool>,
+  /// Whether this device last said it is idle, repeated after a reconnect: a resumed session keeps
+  /// what the server last knew, which may be an away timeout that ended meanwhile.
+  is_idle: bool,
   /// Set while opening waits for an access token.
   maybe_open_retry: Option<OpenRetry>,
   /// The unreadable database was set aside: setup explains why it is asked for again.
@@ -709,6 +712,7 @@ impl Core {
       approval: None,
       approval_misses: 0,
       maybe_attention: None,
+      is_idle: false,
       maybe_open_retry: None,
       was_store_set_aside: false,
       snapshots: SnapshotCache::new(SystemClock.now_ms().unsigned_abs()),
@@ -1396,7 +1400,7 @@ impl Core {
       return;
     };
     if self.connection.connect_if_due(client).await.is_some() {
-      self.repeat_attention().await;
+      self.repeat_reports().await;
       self.changed();
     }
   }
@@ -1419,13 +1423,17 @@ impl Core {
   }
 
   /// Tells the server whether this device is idle (docs/gateway.md); a failure ends the connection
-  /// like a failed heartbeat.
+  /// like a failed heartbeat. Remembered so a new connection repeats it.
   async fn send_activity(&mut self, is_idle: bool) {
+    self.is_idle = is_idle;
     let activity = if is_idle {
       DeviceActivity::Idle
     } else {
       DeviceActivity::Active
     };
+    if let Some(client) = self.client.as_mut() {
+      client.set_device_activity(activity.clone());
+    }
     let message = GatewayClientMessage::SetActivity { activity };
     if self.connection.is_connected() && !self.connection.send(SystemClock.now_ms(), &message).await {
       tracing::warn!("could not report the device activity");
@@ -1442,7 +1450,9 @@ impl Core {
     }
   }
 
-  async fn repeat_attention(&mut self) {
+  /// What a new connection has to hear again: the device's activity and attention.
+  async fn repeat_reports(&mut self) {
+    self.send_activity(self.is_idle).await;
     if let Some(is_attentive) = self.maybe_attention {
       self.send_attention(is_attentive).await;
     }

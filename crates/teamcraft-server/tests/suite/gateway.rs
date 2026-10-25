@@ -664,6 +664,55 @@ mod presence {
   }
 
   #[tokio::test]
+  async fn a_manual_away_sticks_until_another_status_is_chosen() {
+    let app = app!();
+    let s = scene(&app).await;
+    let mut alice = Gateway::connect(&app, &s.alice, &s.alice_device).await;
+    let mut carol = Gateway::connect(&app, &s.carol, &s.carol_device).await;
+    assert_eq!(alice.presence_of(&s.carol_id).await, PresenceState::Online);
+
+    let away = app.put(&s.carol, "/me/presence", json!({"manual": "away"})).await;
+    assert_eq!(away.status, StatusCode::OK, "{}", away.body);
+    assert_eq!(away.body["manual"], "away");
+    assert_eq!(alice.presence_of(&s.carol_id).await, PresenceState::Away);
+
+    // Activity doesn't end a manual away.
+    carol
+      .send(&GatewayClientMessage::SetActivity {
+        activity: DeviceActivity::Active,
+      })
+      .await;
+    assert!(alice.is_silent().await);
+
+    app.put(&s.carol, "/me/presence", json!({"manual": "auto"})).await;
+    assert_eq!(alice.presence_of(&s.carol_id).await, PresenceState::Online);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn becoming_active_again_is_never_throttled() {
+    let app = app!();
+    let s = scene(&app).await;
+    let mut alice = Gateway::connect(&app, &s.alice, &s.alice_device).await;
+    let mut carol = Gateway::connect(&app, &s.carol, &s.carol_device).await;
+    assert_eq!(alice.presence_of(&s.carol_id).await, PresenceState::Online);
+    // Two changes right after one another, well within the throttle interval.
+    carol
+      .send(&GatewayClientMessage::SetActivity {
+        activity: DeviceActivity::Idle,
+      })
+      .await;
+    assert_eq!(alice.presence_of(&s.carol_id).await, PresenceState::Away);
+    carol
+      .send(&GatewayClientMessage::SetActivity {
+        activity: DeviceActivity::Active,
+      })
+      .await;
+    assert_eq!(alice.presence_of(&s.carol_id).await, PresenceState::Online);
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn a_user_with_several_devices_is_online_while_any_is_active() {
     let app = app!();
     let s = scene(&app).await;
