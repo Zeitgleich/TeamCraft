@@ -196,6 +196,9 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
   val name by produceState("", maybeConversationId) {
     value = maybeConversationId?.let { calls.displayName(it) } ?: ""
   }
+  // Names of the people in the call, read again when somebody new is in it.
+  val participantIds = maybeState?.participantUserIds.orEmpty()
+  val names by produceState(emptyMap<String, String>(), participantIds) { value = calls.moves.names() }
   // The dialog stays through a reconnect (it keeps its request key); it opens only when connected.
   val addChoice = maybeAddChoice?.takeIf { it.conversationId == maybeConversationId }
   val canAddPeople = addChoice != null && maybeState?.phase == CallPhase.CONNECTED
@@ -247,6 +250,7 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
       isSpeakerOn = isSpeakerOn,
       elapsedSeconds = maybeElapsed,
       areControlsShown = areControlsShown,
+      names = names,
     ),
     actions = CallUiActions(
       onToggleControls = { areControlsShown = !areControlsShown },

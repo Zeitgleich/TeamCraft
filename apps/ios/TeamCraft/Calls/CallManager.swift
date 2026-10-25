@@ -22,6 +22,12 @@ struct ActiveCall: Identifiable, Equatable {
   var participantCount: UInt32 = 0
   /// The people of the other devices in the call, each once (the call's verified roster).
   var participantUserIds: [String] = []
+  /// Which user each other device in the call belongs to (to name a video tile).
+  var userIdByDevice: [String: String] = [:]
+  /// The users whose audio is forwarded right now, loudest first.
+  var speakingUserIds: [String] = []
+  /// The users all of whose devices are rejoining.
+  var reconnectingUserIds: [String] = []
   /// The code participants compare to rule out a man in the middle (once secured).
   var maybePrivacyCode: String?
   /// Put on hold from the system's call UI: nothing is sent or played.
@@ -53,6 +59,7 @@ private struct LeaveWaiter {
 /// A remote camera or screen track that is shown in the call.
 struct RemoteVideoStream: Identifiable {
   let id: String
+  let deviceId: String
   let isScreen: Bool
   let renderer: RemoteVideoRenderer
 }
@@ -74,6 +81,8 @@ final class CallManager: NSObject, @unchecked Sendable {
   private(set) var maybeEndNote: LocalizedStringResource?
   /// Tracks of other participants that arrived, in the order they were published.
   private(set) var remoteVideo: [RemoteVideoStream] = []
+  /// Display names by user ID, for naming the people in the call.
+  private(set) var names: [String: String] = [:]
   /// This device sends its camera.
   private(set) var isCameraOn = false
   /// The user refused camera access; the screen explains where to change it.
@@ -287,6 +296,9 @@ final class CallManager: NSObject, @unchecked Sendable {
     call.isSecured = false
     call.participantCount = 0
     call.participantUserIds = []
+    call.userIdByDevice = [:]
+    call.speakingUserIds = []
+    call.reconnectingUserIds = []
     call.maybePrivacyCode = nil
     activeCall = call
     camera.stop()
@@ -652,7 +664,13 @@ extension CallManager: CallListener {
       call.isMuted = state.isMuted
       call.isSecured = state.isSecured
       call.participantCount = state.participantCount
+      let hasNewPeople = call.participantUserIds != state.participantUserIds
       call.participantUserIds = state.participantUserIds
+      call.userIdByDevice = Dictionary(
+        state.peers.map { ($0.deviceId, $0.userId) }, uniquingKeysWith: { first, _ in first })
+      call.speakingUserIds = state.speakingUserIds
+      call.reconnectingUserIds = state.reconnectingUserIds
+      if hasNewPeople { Task { @MainActor in self.names = await AppModel.shared.displayNames() } }
       call.maybePrivacyCode = state.maybePrivacyCode
       switch state.phase {
       case .connected: call.phase = .connected
@@ -722,7 +740,9 @@ extension CallManager: EncodedVideoListener {
       guard let renderer, self.maybeSession != nil else { return }
       if !self.remoteVideo.contains(where: { $0.id == track.streamId }) {
         self.remoteVideo.append(
-          RemoteVideoStream(id: track.streamId, isScreen: track.isScreen, renderer: renderer))
+          RemoteVideoStream(
+            id: track.streamId, deviceId: track.deviceId, isScreen: track.isScreen,
+            renderer: renderer))
       }
       self.maybeSession?.watchEncodedVideo(streamId: track.streamId)
     }

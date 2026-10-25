@@ -140,6 +140,13 @@ pub struct VideoTrackInfo {
   pub is_screen: bool,
 }
 
+/// One other device in the call and whose it is (to name a video tile by its device).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CallPeer {
+  pub device_id: String,
+  pub user_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct CallStateInfo {
   pub conversation_id: String,
@@ -156,8 +163,14 @@ pub struct CallStateInfo {
   /// The people of those devices, each once (verified against the conversation's group): who is
   /// in the call, e.g. for "Add people" (`add_people_to_call`).
   pub participant_user_ids: Vec<String>,
+  /// The other devices in the call, with their users.
+  pub peers: Vec<CallPeer>,
+  /// The users whose audio is forwarded right now, loudest first (the speaking ring).
+  pub speaking_user_ids: Vec<String>,
   /// Of those, the ones whose connection was lost and who are rejoining.
   pub reconnecting_count: u32,
+  /// The users all of whose devices are rejoining.
+  pub reconnecting_user_ids: Vec<String>,
   /// The code participants compare to rule out a man in the middle (once secured).
   pub maybe_privacy_code: Option<String>,
   /// Why the call ended (with [`CallPhase::Ended`]).
@@ -468,7 +481,10 @@ pub(crate) async fn join(
     is_secured: false,
     participant_count: 0,
     participant_user_ids: Vec::new(),
+    peers: Vec::new(),
+    speaking_user_ids: Vec::new(),
     reconnecting_count: 0,
+    reconnecting_user_ids: Vec::new(),
     maybe_privacy_code: None,
     maybe_end_reason: None,
   };
@@ -885,6 +901,16 @@ fn apply_event(
       state.is_secured = true;
       state.maybe_privacy_code = Some(privacy_code);
     },
+    CallEngineEvent::ActiveSpeakers(devices) => {
+      let mut speaking: Vec<String> = Vec::new();
+      for user in devices.iter().filter_map(|device| roster.get(device)) {
+        let user = user.to_string();
+        if !speaking.contains(&user) {
+          speaking.push(user);
+        }
+      }
+      state.speaking_user_ids = speaking;
+    },
     CallEngineEvent::MuteChanged(is_muted) => state.is_muted = is_muted,
     CallEngineEvent::DeafenChanged(is_deafened) => state.is_deafened = is_deafened,
     CallEngineEvent::RemovedByHost { .. } => return Some(CallEndReason::RemovedByHost),
@@ -898,6 +924,27 @@ fn apply_event(
   state.participant_count = count(roster.len());
   let users: BTreeSet<UserId> = roster.values().copied().collect();
   state.participant_user_ids = users.iter().map(ToString::to_string).collect();
+  state.peers = roster
+    .iter()
+    .map(|(device, user)| CallPeer {
+      device_id: device.to_string(),
+      user_id: user.to_string(),
+    })
+    .collect();
+  // Someone who left is not speaking any more.
+  state
+    .speaking_user_ids
+    .retain(|speaking| users.iter().any(|user| user.to_string() == *speaking));
+  state.reconnecting_user_ids = users
+    .iter()
+    .filter(|user| {
+      roster
+        .iter()
+        .filter(|(_, owner)| owner == user)
+        .all(|(device, _)| reconnecting.contains(device))
+    })
+    .map(ToString::to_string)
+    .collect();
   None
 }
 
@@ -911,7 +958,10 @@ fn ended(conversation: ConversationId, reason: CallEndReason) -> CallStateInfo {
     is_secured: false,
     participant_count: 0,
     participant_user_ids: Vec::new(),
+    peers: Vec::new(),
+    speaking_user_ids: Vec::new(),
     reconnecting_count: 0,
+    reconnecting_user_ids: Vec::new(),
     maybe_privacy_code: None,
     maybe_end_reason: Some(reason),
   }
@@ -1082,6 +1132,37 @@ mod tests {
       ),
       Some(CallEndReason::EndedByHost)
     );
+  }
+
+  #[test]
+  fn the_state_names_who_speaks_and_who_is_rejoining() {
+    let mut state = ended(conversation(5), CallEndReason::Left);
+    let (mut reconnecting, mut roster) = (BTreeSet::new(), BTreeMap::new());
+    let participant = |user_raw: i64, device_raw: i64| teamcraft_proto::CallParticipant {
+      user_id: user(user_raw),
+      device_id: device(device_raw),
+      audio_stream_id: MediaStreamId(1),
+    };
+    for event in [
+      CallEngineEvent::ParticipantJoined(participant(2, 20)),
+      CallEngineEvent::ParticipantJoined(participant(2, 21)),
+      CallEngineEvent::ParticipantJoined(participant(3, 30)),
+      CallEngineEvent::ActiveSpeakers(vec![device(21), device(30), device(20)]),
+      CallEngineEvent::ParticipantReconnecting(device(30)),
+    ] {
+      apply_event(&mut state, &mut reconnecting, &mut roster, event);
+    }
+    // Loudest first, a person once however many devices they have in the call.
+    assert_eq!(state.speaking_user_ids, vec!["2".to_string(), "3".to_string()]);
+    assert_eq!(state.reconnecting_user_ids, vec!["3".to_string()]);
+    assert_eq!(state.peers.len(), 3);
+    apply_event(
+      &mut state,
+      &mut reconnecting,
+      &mut roster,
+      CallEngineEvent::ParticipantLeft(device(30)),
+    );
+    assert_eq!(state.speaking_user_ids, vec!["2".to_string()]);
   }
 
   #[test]

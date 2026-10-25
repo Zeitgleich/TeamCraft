@@ -89,6 +89,7 @@ struct CallScreen: View {
     if let spotlight {
       ZStack(alignment: .bottom) {
         RemoteVideoView(renderer: spotlight.renderer)
+          .overlay(alignment: .bottomLeading) { nameTag(for: spotlight) }
         if filmstrip.count > 0 { filmstripView }
       }
     } else {
@@ -96,15 +97,50 @@ struct CallScreen: View {
     }
   }
 
+  /// Without video: the people in the call as avatars with their names; whoever speaks has a ring.
   private var avatarStage: some View {
-    VStack(spacing: 20) {
-      AvatarView(name: call.displayName, size: 128)
-      if call.phase == .connected && call.participantCount > 0 {
-        Text("call_participants \(Int(call.participantCount))")
-          .foregroundStyle(.white.opacity(0.7))
-      }
+    let people = call.participantUserIds.map { id in
+      StagePerson(
+        id: id, name: model.calls.names[id] ?? "",
+        isSpeaking: call.speakingUserIds.contains(id),
+        isRejoining: call.reconnectingUserIds.contains(id))
     }
-    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    // Alone in the call (or still connecting): the one being called.
+    let shown =
+      people.isEmpty
+      ? [StagePerson(id: "", name: call.displayName, isSpeaking: false, isRejoining: false)] : people
+    let size: CGFloat = shown.count <= 1 ? 128 : (shown.count <= 4 ? 96 : 72)
+    return ScrollView {
+      LazyVGrid(
+        columns: [GridItem(.adaptive(minimum: size + 24), spacing: 20)], spacing: 20
+      ) {
+        ForEach(shown) { person in
+          VStack(spacing: 8) {
+            AvatarView(name: person.name, size: size)
+              .padding(4)
+              .overlay(
+                Circle().stroke(Theme.accent, lineWidth: person.isSpeaking ? 3 : 0)
+              )
+              .animation(.easeOut(duration: 0.15), value: person.isSpeaking)
+            Text(person.name).font(.footnote.weight(.medium)).foregroundStyle(.white).lineLimit(1)
+          }
+          .opacity(person.isRejoining ? 0.5 : 1)
+          .accessibilityElement(children: .combine)
+        }
+      }
+      .padding(32)
+      .frame(maxWidth: .infinity, minHeight: UIScreen.main.bounds.height * 0.6)
+    }
+    .scrollBounceBehavior(.basedOnSize)
+  }
+
+  /// The name of the person whose device sends `stream`, once known.
+  private func ownerName(of stream: RemoteVideoStream) -> String? {
+    call.userIdByDevice[stream.deviceId].flatMap { model.calls.names[$0] }
+  }
+
+  private func isSpeaking(_ stream: RemoteVideoStream) -> Bool {
+    call.userIdByDevice[stream.deviceId].map { call.speakingUserIds.contains($0) } ?? false
   }
 
   private var filmstripView: some View {
@@ -113,7 +149,11 @@ struct CallScreen: View {
         ForEach(filmstrip) { stream in
           RemoteVideoView(renderer: stream.renderer)
             .frame(width: 104, height: 78)
+            .overlay(alignment: .bottomLeading) { nameTag(for: stream) }
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+              RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Theme.accent, lineWidth: isSpeaking(stream) ? 3 : 0))
             .onTapGesture { withAnimation(spring) { maybeSpotlightId = stream.id } }
             .accessibilityAddTraits(.isButton)
             .accessibilityLabel(Text("call_video_spotlight"))
@@ -123,6 +163,20 @@ struct CallScreen: View {
     }
     .padding(.bottom, 128)
     .frame(height: 78 + 128, alignment: .top)
+  }
+
+  @ViewBuilder
+  private func nameTag(for stream: RemoteVideoStream) -> some View {
+    if let name = ownerName(of: stream) {
+      Text(name)
+        .font(.caption.weight(.medium))
+        .foregroundStyle(.white)
+        .lineLimit(1)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 2)
+        .background(.black.opacity(0.55), in: Capsule())
+        .padding(8)
+    }
   }
 
   /// Shared screens first: they are what people look at.
@@ -353,6 +407,13 @@ struct CallScreen: View {
       ? String(format: "%d:%02d:%02d", hours, minutes, rest)
       : String(format: "%d:%02d", minutes, rest)
   }
+}
+
+private struct StagePerson: Identifiable {
+  let id: String
+  let name: String
+  let isSpeaking: Bool
+  let isRejoining: Bool
 }
 
 private struct AutoHideKey: Hashable {

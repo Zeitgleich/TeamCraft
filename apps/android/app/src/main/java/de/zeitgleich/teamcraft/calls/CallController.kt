@@ -364,7 +364,10 @@ class CallController(
       isSecured = false,
       participantCount = 0u,
       participantUserIds = emptyList(),
+      peers = emptyList(),
+      speakingUserIds = emptyList(),
       reconnectingCount = 0u,
+      reconnectingUserIds = emptyList(),
       maybePrivacyCode = null,
     )
     if (join(to)) return true

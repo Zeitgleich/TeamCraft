@@ -22,6 +22,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -30,6 +32,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -59,6 +62,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
@@ -80,6 +84,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -92,6 +97,7 @@ import uniffi.teamcraft_ffi.CallStateInfo
 import uniffi.teamcraft_ffi.VideoTrackInfo
 
 private val STAGE_COLOR = Color(0xFF0B0D10)
+private val SPEAKING_COLOR = Color(0xFF5C9DFF)
 private val CONTROL_COLOR = Color.White.copy(alpha = 0.14f)
 private val CONTROL_SIZE = 56.dp
 private val SELF_VIEW_WIDTH = 108.dp
@@ -113,7 +119,26 @@ internal class CallUiState(
   val isSpeakerOn: Boolean,
   val elapsedSeconds: Long?,
   val areControlsShown: Boolean,
+  /** Display names by user ID; people not in it show without a name. */
+  val names: Map<String, String> = emptyMap(),
 )
+
+/** Somebody else in the call, as the tiles show them. */
+private class Person(val userId: String, val name: String, val isSpeaking: Boolean, val isRejoining: Boolean)
+
+private fun CallUiState.people(): List<Person> {
+  val state = maybeState ?: return emptyList()
+  val speaking = state.speakingUserIds
+  // Speakers first, loudest first; the rest by name.
+  return state.participantUserIds
+    .map { id -> Person(id, names[id].orEmpty(), id in speaking, id in state.reconnectingUserIds) }
+    .sortedWith(compareBy({ speaking.indexOf(it.userId).let { index -> if (index < 0) Int.MAX_VALUE else index } }, { it.name.lowercase() }))
+}
+
+private fun CallUiState.ownerOf(track: VideoTrackInfo): Person? =
+  maybeState?.peers?.firstOrNull { it.deviceId == track.deviceId }?.let { peer ->
+    people().firstOrNull { it.userId == peer.userId }
+  }
 
 internal class CallUiActions(
   val onToggleControls: () -> Unit,
@@ -178,49 +203,82 @@ private fun Stage(ui: CallUiState, onToggleControls: () -> Unit, modifier: Modif
   val toggleLabel = stringResource(R.string.call_toggle_controls)
   Box(modifier.clickable(onClickLabel = toggleLabel, onClick = onToggleControls)) {
     if (spotlight == null) {
-      AvatarStage(ui.name, ui.maybeState)
+      AvatarStage(ui)
     } else {
-      VideoTile(spotlight, ui.frames[spotlight.streamId], Modifier.fillMaxSize(), ContentScale.Fit, RectangleShape)
+      VideoTile(spotlight, ui.frames[spotlight.streamId], ui.ownerOf(spotlight), Modifier.fillMaxSize(), ContentScale.Fit, RectangleShape)
       if (filmstrip.isNotEmpty()) {
-        Filmstrip(filmstrip, ui.frames, onPick = { maybeSpotlight = it.streamId.toLong() })
+        Filmstrip(filmstrip, ui, onPick = { maybeSpotlight = it.streamId.toLong() })
       }
     }
   }
 }
 
+/** Without video: the people in the call as avatars with their names; whoever speaks has a ring. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun AvatarStage(name: String, maybeState: CallStateInfo?) {
+private fun AvatarStage(ui: CallUiState) {
+  val people = ui.people()
+  // Alone in the call (or still connecting): the one being called.
+  val shown = people.ifEmpty { listOf(Person("", ui.name, isSpeaking = false, isRejoining = false)) }
+  val size = when {
+    shown.size <= 1 -> 128.dp
+    shown.size <= 4 -> 96.dp
+    else -> 72.dp
+  }
   Column(
     Modifier.fillMaxSize().padding(32.dp),
     verticalArrangement = Arrangement.Center,
     horizontalAlignment = Alignment.CenterHorizontally,
   ) {
-    val hue = ((name.hashCode() % 360 + 360) % 360).toFloat()
-    Box(
-      Modifier.size(128.dp).background(Color.hsl(hue, 0.45f, 0.45f), CircleShape),
-      contentAlignment = Alignment.Center,
+    FlowRow(
+      horizontalArrangement = Arrangement.spacedBy(20.dp, Alignment.CenterHorizontally),
+      verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
-      Text(
-        name.firstOrNull()?.uppercase() ?: "?",
-        color = Color.White,
-        fontSize = 56.sp,
-        fontWeight = FontWeight.Medium,
-        modifier = Modifier.semantics { contentDescription = name },
-      )
-    }
-    if (maybeState?.phase == CallPhase.CONNECTED) {
-      val count = maybeState.participantCount.toInt()
-      Text(
-        pluralStringResource(R.plurals.call_participants, count, count),
-        color = Color.White.copy(alpha = 0.7f),
-        modifier = Modifier.padding(top = 20.dp),
-      )
+      shown.forEach { person -> PersonAvatar(person, size) }
     }
   }
 }
 
 @Composable
-private fun Filmstrip(tracks: List<VideoTrackInfo>, frames: Map<UInt, Bitmap>, onPick: (VideoTrackInfo) -> Unit) {
+private fun PersonAvatar(person: Person, size: Dp) {
+  val name = person.name
+  val hue = ((name.hashCode() % 360 + 360) % 360).toFloat()
+  Column(
+    Modifier.width(size + 24.dp).alpha(if (person.isRejoining) 0.5f else 1f),
+    horizontalAlignment = Alignment.CenterHorizontally,
+    verticalArrangement = Arrangement.spacedBy(8.dp),
+  ) {
+    Box(
+      Modifier
+        .size(size)
+        .speakingRing(person.isSpeaking)
+        .background(Color.hsl(hue, 0.45f, 0.45f), CircleShape),
+      contentAlignment = Alignment.Center,
+    ) {
+      Text(
+        name.firstOrNull()?.uppercase() ?: "?",
+        color = Color.White,
+        fontSize = (size.value * 0.42f).sp,
+        fontWeight = FontWeight.Medium,
+      )
+    }
+    Text(
+      name,
+      color = Color.White,
+      style = MaterialTheme.typography.labelLarge,
+      maxLines = 1,
+      overflow = TextOverflow.Ellipsis,
+      textAlign = TextAlign.Center,
+    )
+  }
+}
+
+/** The ring around whoever speaks: visible, and not only through colour (it is a thick border). */
+private fun Modifier.speakingRing(isSpeaking: Boolean): Modifier =
+  if (isSpeaking) padding(3.dp).border(3.dp, SPEAKING_COLOR, CircleShape).padding(3.dp) else padding(6.dp)
+
+@Composable
+private fun Filmstrip(tracks: List<VideoTrackInfo>, ui: CallUiState, onPick: (VideoTrackInfo) -> Unit) {
   Box(Modifier.fillMaxSize().safeDrawingPadding(), contentAlignment = Alignment.BottomCenter) {
     LazyRow(
       modifier = Modifier.fillMaxWidth().padding(bottom = FILMSTRIP_BOTTOM_PADDING),
@@ -231,7 +289,8 @@ private fun Filmstrip(tracks: List<VideoTrackInfo>, frames: Map<UInt, Bitmap>, o
         val label = stringResource(R.string.call_video_spotlight)
         VideoTile(
           track,
-          frames[track.streamId],
+          ui.frames[track.streamId],
+          ui.ownerOf(track),
           Modifier.size(FILMSTRIP_TILE_WIDTH, FILMSTRIP_TILE_HEIGHT).clickable(onClickLabel = label) { onPick(track) },
           ContentScale.Crop,
           RoundedCornerShape(14.dp),
@@ -245,6 +304,7 @@ private fun Filmstrip(tracks: List<VideoTrackInfo>, frames: Map<UInt, Bitmap>, o
 private fun VideoTile(
   track: VideoTrackInfo,
   maybeFrame: Bitmap?,
+  maybeOwner: Person?,
   modifier: Modifier,
   scale: ContentScale,
   shape: Shape,
@@ -253,7 +313,11 @@ private fun VideoTile(
   Box(
     modifier
       .background(Color.Black, shape)
-      .border(1.dp, Color.White.copy(alpha = 0.12f), shape),
+      .border(
+        if (maybeOwner?.isSpeaking == true) 3.dp else 1.dp,
+        if (maybeOwner?.isSpeaking == true) SPEAKING_COLOR else Color.White.copy(alpha = 0.12f),
+        shape,
+      ),
     contentAlignment = Alignment.Center,
   ) {
     if (maybeFrame == null) {
@@ -264,6 +328,20 @@ private fun VideoTile(
         contentDescription = description,
         contentScale = scale,
         modifier = Modifier.fillMaxSize(),
+      )
+    }
+    if (maybeOwner != null && maybeOwner.name.isNotEmpty()) {
+      Text(
+        maybeOwner.name,
+        color = Color.White,
+        style = MaterialTheme.typography.labelMedium,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier
+          .align(Alignment.BottomStart)
+          .padding(8.dp)
+          .background(Color.Black.copy(alpha = 0.55f), CircleShape)
+          .padding(horizontal = 8.dp, vertical = 2.dp),
       )
     }
   }

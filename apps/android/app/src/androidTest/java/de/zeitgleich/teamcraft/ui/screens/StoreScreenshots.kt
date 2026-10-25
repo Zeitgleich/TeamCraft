@@ -48,6 +48,7 @@ import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.PreviewContent
 import de.zeitgleich.teamcraft.ui.PreviewSender
 import de.zeitgleich.teamcraft.ui.theme.TeamCraftTheme
+import uniffi.teamcraft_ffi.CallPeer
 import uniffi.teamcraft_ffi.CallPhase
 import uniffi.teamcraft_ffi.CallStateInfo
 import uniffi.teamcraft_ffi.ConversationItem
@@ -244,7 +245,10 @@ class StoreScreenshots {
       isSecured = true,
       participantCount = 6u,
       participantUserIds = PEOPLE.map { it.first },
+      peers = tracks.zip(PEOPLE).map { (track, person) -> CallPeer(deviceId = track.deviceId, userId = person.first) },
+      speakingUserIds = listOf(PEOPLE[1].first),
       reconnectingCount = 0u,
+      reconnectingUserIds = emptyList(),
       maybePrivacyCode = "4821 9035 1176",
       maybeEndReason = null,
     )
@@ -258,6 +262,7 @@ class StoreScreenshots {
         isSpeakerOn = true,
         elapsedSeconds = 754L,
         areControlsShown = true,
+        names = PEOPLE.associate { (id, name) -> id to name },
       ),
       actions = CallUiActions(
         onToggleControls = {},
