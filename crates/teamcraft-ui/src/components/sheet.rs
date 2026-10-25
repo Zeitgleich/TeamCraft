@@ -233,12 +233,29 @@ pub fn MenuSurface(
 /// down there, its touches must not become a scroll (which would cancel the pointer). Only a
 /// non-passive `touchmove` can say so; `touch-action` is fixed when the touch starts.
 fn hold_touches_while_pulled(sheet: NodeRef<html::Div>, drag: StoredValue<Option<SheetDrag>>) {
-  let listener =
-    StoredValue::new_local(None::<wasm_bindgen::closure::Closure<dyn FnMut(web_sys::TouchEvent)>>);
+  type Listener = (
+    web_sys::HtmlDivElement,
+    wasm_bindgen::closure::Closure<dyn FnMut(web_sys::TouchEvent)>,
+  );
+  let listener = StoredValue::new_local(None::<Listener>);
   Effect::new(move |_| {
     let Some(element) = sheet.get() else {
       return;
     };
+    // Once per element: a rerun for the same sheet keeps its listener, another one replaces it.
+    let is_listening = listener.with_value(|maybe_listener| {
+      maybe_listener
+        .as_ref()
+        .is_some_and(|(listening_on, _)| *listening_on == element)
+    });
+    if is_listening {
+      return;
+    }
+    if let Some((previous, on_touchmove)) = listener.try_update_value(Option::take).flatten() {
+      // Removing a listener that is gone already is a no-op.
+      let _ =
+        previous.remove_event_listener_with_callback("touchmove", on_touchmove.as_ref().unchecked_ref());
+    }
     let on_touchmove = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::TouchEvent)>::new(
       move |ev: web_sys::TouchEvent| {
         let Some(touch) = ev.touches().get(0) else {
@@ -264,7 +281,7 @@ fn hold_touches_while_pulled(sheet: NodeRef<html::Div>, drag: StoredValue<Option
       .is_ok()
     {
       // Kept with the sheet; the element and its listener go together.
-      listener.set_value(Some(on_touchmove));
+      listener.set_value(Some((element, on_touchmove)));
     }
   });
 }

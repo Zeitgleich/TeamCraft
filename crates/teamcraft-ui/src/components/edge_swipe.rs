@@ -32,8 +32,8 @@ const SETTLE: Duration = Duration::from_millis(180);
 const PARENT_PEEK: f64 = 0.3;
 /// Where a touch must not start a swipe: the composer and text fields keep their own gestures, and
 /// sheets, dialogs and menus lie over the page.
-const NO_SWIPE: &str =
-  ".composer, input, textarea, [contenteditable], .sheet, .modal, .popover, [role='dialog']";
+const NO_SWIPE: &str = ".composer, input, textarea, [contenteditable], .sheet, .sheet-backdrop, .modal, \
+                        .popover, .popover-backdrop, [role='dialog']";
 
 /// The gesture of one `.app-body`; its handlers go on that element.
 #[derive(Clone, Copy)]
@@ -93,11 +93,6 @@ impl EdgeSwipeBack {
     ) else {
       return;
     };
-    // A page still settling is grabbed again where it is: its pending step back is off.
-    self.bump();
-    if let Some(body) = self.body.get_untracked() {
-      set_app_class(&body, "is-swipe-settling", false);
-    }
     self.maybe_swipe.set_value(Some(swipe));
   }
 
@@ -186,6 +181,11 @@ impl EdgeSwipeBack {
     let Some(body) = self.body.get_untracked() else {
       return;
     };
+    // A page still settling is grabbed again where it is: its pending step back or reset is off.
+    // Only now, once the touch is a swipe: a tap or a scroll during the settle leaves it running.
+    self.bump();
+    self.is_committed.set(false);
+    set_app_class(&body, "is-swipe-settling", false);
     drop(body.set_pointer_capture(ev.pointer_id()));
     set_app_class(&body, "is-swiping-back", true);
     let maybe_targets = swipe_targets(&body, self.state.compact_pane());
