@@ -9,6 +9,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.TeamCraftApplication
+import de.zeitgleich.teamcraft.core.ChatClient
+import de.zeitgleich.teamcraft.core.ConversationNotificationSettings
 
 /**
  * "Reply" and "mark as read" from a notification, on the phone or in Android Auto, and the
@@ -35,6 +37,17 @@ class NotificationActionReceiver : BroadcastReceiver() {
               graph.notifier.showOwnReply(conversationId, reply)
             }
           }
+          ACTION_MUTE -> {
+            // Quiet for a while through the server's per-conversation setting (all devices follow).
+            val mutedUntil = System.currentTimeMillis() + MUTE_DURATION_MS
+            val chat = ChatClient { graph.core.core() }
+            val current = chat.conversationNotifications(conversationId)
+            chat.setConversationNotifications(
+              conversationId,
+              ConversationNotificationSettings(level = current.level, mutedUntil = mutedUntil),
+            )
+            graph.notifier.dismiss(conversationId)
+          }
           ACTION_MARK_READ -> {
             graph.core.core().markRead(conversationId)
             graph.notifier.dismiss(conversationId)
@@ -51,10 +64,12 @@ class NotificationActionReceiver : BroadcastReceiver() {
   companion object {
     const val ACTION_REPLY = "de.zeitgleich.teamcraft.REPLY"
     const val ACTION_MARK_READ = "de.zeitgleich.teamcraft.MARK_READ"
+    const val ACTION_MUTE = "de.zeitgleich.teamcraft.MUTE"
     const val ACTION_DISMISSED = "de.zeitgleich.teamcraft.DISMISSED"
     const val KEY_REPLY = "reply"
     private const val EXTRA_CONVERSATION_ID = "conversation_id"
     private const val EXTRA_THREAD_ID = "thread_id"
+    private const val MUTE_DURATION_MS = 8L * 60 * 60 * 1000
     private const val TAG = "TeamCraftNotify"
 
     fun intent(context: Context, action: String, conversationId: String, maybeThreadId: String? = null): Intent =

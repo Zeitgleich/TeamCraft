@@ -21,7 +21,6 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.LocusIdCompat
 import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
-import androidx.core.graphics.drawable.IconCompat
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.security.AppLockPrefs
 import de.zeitgleich.teamcraft.ui.MainActivity
@@ -69,7 +68,7 @@ class MessageNotifier(
       text = text.text,
       sentAtMs = sentAtMs,
     )
-    val isMention = notification.isDirect || notification.isMention || notification.isUrgent
+    val isMention = notification.isMention || notification.isUrgent
     synchronized(lock) {
       val shown = shown()
       val previous = shown.conversations[notification.conversationId]
@@ -81,6 +80,7 @@ class MessageNotifier(
         maybeTitle = text.maybeConversationTitle ?: previous?.maybeTitle,
         isVerified = notification.isConversationVerified,
         isMention = isMention,
+        isDirect = notification.isDirect,
         lines = if (isKnown) lines else NotificationLines.merge(lines, line),
       )
       val badge = notification.maybeBadge?.toInt() ?: shown.maybeBadge
@@ -241,7 +241,11 @@ class MessageNotifier(
     if (!canPost()) return
     val newest = entry.lines.lastOrNull { !it.isOwn } ?: return
     val privacy = MessagePrivacy.of(contentPrefs.content.value, isAppLockOn(), entry.isVerified)
-    val channel = if (entry.isMention) NotificationChannels.MENTIONS else NotificationChannels.MESSAGES
+    val channel = when {
+      entry.isMention -> NotificationChannels.MENTIONS
+      entry.isDirect -> NotificationChannels.DIRECT_MESSAGES
+      else -> NotificationChannels.MESSAGES
+    }
     val builder = NotificationCompat.Builder(context, channel)
       .setSmallIcon(R.drawable.ic_notification)
       .setCategory(NotificationCompat.CATEGORY_MESSAGE)
@@ -291,6 +295,7 @@ class MessageNotifier(
       builder
         .addAction(replyAction(entry.conversationId, newest.maybeThreadId))
         .addAction(markReadAction(entry.conversationId))
+        .addAction(muteAction(entry.conversationId))
     }
     postSafely(entry.conversationId, MESSAGE_ID, builder.build())
   }
@@ -365,7 +370,7 @@ class MessageNotifier(
       .setShortLabel(label.ifBlank { context.getString(R.string.app_name) })
       .setLongLived(true)
       .setLocusId(LocusIdCompat(entry.conversationId))
-      .setIcon(IconCompat.createWithResource(context, R.mipmap.ic_launcher))
+      .setIcon(PersonIcons.of(newest.maybeSenderKey.takeIf { entry.maybeTitle == null } ?: entry.conversationId, label))
       .setIntent(openConversationIntent(entry.conversationId).setAction(Intent.ACTION_VIEW))
       .apply { if (entry.maybeTitle == null) person(newest)?.let { setPerson(it) } }
       .build()
@@ -416,6 +421,15 @@ class MessageNotifier(
     val pending = actionIntent(NotificationActionReceiver.ACTION_MARK_READ, conversationId, isMutable = false)
     return NotificationCompat.Action.Builder(R.drawable.ic_notification, context.getString(R.string.notification_mark_read), pending)
       .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_MARK_AS_READ)
+      .setShowsUserInterface(false)
+      .setAuthenticationRequired(true)
+      .build()
+  }
+
+  private fun muteAction(conversationId: String): NotificationCompat.Action {
+    val pending = actionIntent(NotificationActionReceiver.ACTION_MUTE, conversationId, isMutable = false)
+    return NotificationCompat.Action.Builder(R.drawable.ic_notification, context.getString(R.string.notification_mute), pending)
+      .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_MUTE)
       .setShowsUserInterface(false)
       .setAuthenticationRequired(true)
       .build()

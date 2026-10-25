@@ -14,8 +14,10 @@ data class ConversationNotification(
   @SerialName("title") val maybeTitle: String? = null,
   /** Offer reply and mark read (the core verified the conversation of the newest message). */
   @SerialName("is_verified") val isVerified: Boolean = false,
-  /** The newest message was a mention or DM: it goes to the mentions channel. */
+  /** The newest message was a mention or urgent: it goes to the mentions channel. */
   @SerialName("is_mention") val isMention: Boolean = false,
+  /** A one-to-one or group DM: its messages go to the direct messages channel. */
+  @SerialName("is_direct") val isDirect: Boolean = false,
   val lines: List<NotificationLine> = emptyList(),
 )
 

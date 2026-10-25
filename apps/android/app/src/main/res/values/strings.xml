@@ -63,8 +63,13 @@
   <string name="error_wrong_passphrase">That passphrase doesn\'t open your key backup.</string>
   <string name="error_storage">The local data couldn\'t be opened.</string>
   <string name="error_generic">Something went wrong.</string>
-  <string name="notification_channel_messages">Messages</string>
-  <string name="notification_channel_mentions">Mentions and direct messages</string>
+  <string name="notification_channel_messages">Channel messages</string>
+  <string name="notification_channel_mentions">Mentions</string>
+  <string name="notification_channel_direct_messages">Direct messages</string>
+  <string name="notification_channel_direct_messages_description">Messages from people you chat with one to one or in small groups.</string>
+  <string name="notification_channel_meetings">Meeting reminders</string>
+  <string name="notification_channel_meetings_description">Reminders shortly before a meeting starts.</string>
+  <string name="notification_mute">Mute for 8 hours</string>
   <string name="notification_new_message">New message</string>
   <string name="notification_file">📎 %1$s</string>
   <string name="notification_reply">Reply</string>

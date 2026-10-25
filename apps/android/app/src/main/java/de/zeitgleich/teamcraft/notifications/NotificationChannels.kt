@@ -17,20 +17,24 @@ import de.zeitgleich.teamcraft.R
  * gets a new ID: incoming calls ring on [INCOMING_CALLS], the ongoing call stays on [CALLS].
  */
 object NotificationChannels {
+  const val DIRECT_MESSAGES = "direct_messages"
   const val MESSAGES = "messages"
   const val MENTIONS = "mentions"
   const val INCOMING_CALLS = "incoming_calls"
   const val CALLS = "calls"
+  const val MEETINGS = "meetings"
   const val OTHER = "other"
 
   private val RING_VIBRATION = longArrayOf(0, 1_000, 1_000)
 
   /** What the diagnostics list, in the order they show them. */
   val all: List<Channel> = listOf(
+    Channel(DIRECT_MESSAGES, R.string.notification_channel_direct_messages, R.string.notification_channel_direct_messages_description, NotificationManager.IMPORTANCE_HIGH),
     Channel(MESSAGES, R.string.notification_channel_messages, R.string.notification_channel_messages_description, NotificationManager.IMPORTANCE_DEFAULT),
     Channel(MENTIONS, R.string.notification_channel_mentions, R.string.notification_channel_mentions_description, NotificationManager.IMPORTANCE_HIGH),
     Channel(INCOMING_CALLS, R.string.notification_channel_incoming_calls, R.string.notification_channel_incoming_calls_description, NotificationManager.IMPORTANCE_HIGH),
     Channel(CALLS, R.string.call_channel, R.string.notification_channel_calls_description, NotificationManager.IMPORTANCE_DEFAULT),
+    Channel(MEETINGS, R.string.notification_channel_meetings, R.string.notification_channel_meetings_description, NotificationManager.IMPORTANCE_HIGH),
     Channel(OTHER, R.string.notification_channel_other, R.string.notification_channel_other_description, NotificationManager.IMPORTANCE_LOW),
   )
 
