@@ -9,6 +9,9 @@ for. It is measured as gzip -9, which every server and browser supports; brotli 
 printed too when the `brotli` module is installed. CI runs this after the release `trunk build`
 (`.github/workflows/web-size.yml`) on every change to the web client.
 
+Parts of the app that load when first used (the split chunks, #334, and the call module) are listed
+after the table; they are not part of the first visit and not of the budget.
+
 Limits:
 
 - `--budget-bytes`: the gzip -9 total. It warns within 5 % of it and fails above it.
@@ -63,6 +66,7 @@ def main(argv=None):
         return 2
     maybe_baseline = load_baseline(args.baseline)
     report = render(sizes, maybe_baseline, args.budget_bytes, args.max_uncompressed_bytes)
+    report += render_lazy(measure_lazy(args.dist))
     print(report)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
@@ -88,6 +92,29 @@ def measure(dist):
         if brotli is not None:
             sizes[part]["brotli_bytes"] = len(brotli.compress(data, quality=11))
     return sizes
+
+
+def measure_lazy(dist):
+    """[(name, bytes, gzip_bytes)] of every other wasm file: what loads later."""
+    first_visit = {path for pattern in PARTS.values() for path in dist.glob(pattern)}
+    lazy = []
+    for path in sorted(dist.glob("*.wasm")):
+        if path in first_visit:
+            continue
+        data = path.read_bytes()
+        lazy.append((path.name, len(data), len(gzip.compress(data, compresslevel=9))))
+    return lazy
+
+
+def render_lazy(lazy):
+    if not lazy:
+        return ""
+    lines = ["", "", "Loaded when first used (not part of the first visit or the budget):", "",
+             "| Chunk                                            | Uncompressed | gzip -9    |",
+             "|--------------------------------------------------|--------------|------------|"]
+    for name, size, gzip_size in lazy:
+        lines.append(f"| {name:<48} | {mb(size):>12} | {mb(gzip_size):>10} |")
+    return "\n".join(lines)
 
 
 def check_limits(sizes, budget_bytes, maybe_max_uncompressed_bytes):

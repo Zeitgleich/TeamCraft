@@ -1,5 +1,5 @@
 #!/bin/sh
-# Run by externalize-init.sh (Trunk post_build hook): gives the call module (#330) and its AudioWorklet
+# Run by build-app.sh (Trunk post_build hook): gives the call module (#330) and its AudioWorklet
 # content-hashed names, so the server caches them for good and a page never loads another build's
 # module (Trunk names its worker assets without a hash), and tells the page the names in
 # <meta name="teamcraft-calls"> and <meta name="teamcraft-call-worklet"> (web_calls.rs).

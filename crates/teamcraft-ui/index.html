@@ -22,9 +22,10 @@
     <link data-trunk rel="copy-file" href="sw.js" />
     <!-- Thumbnails of the photo backgrounds, loaded lazily by the picker (the full pictures are only in the desktop app). -->
     <link data-trunk rel="copy-dir" href="../../assets/backgrounds/thumbs" data-target-path="backgrounds" />
-    <!-- wasm-opt only runs in release builds; the features are what rustc enables for wasm32 by default.
-         loader.js drives the loading screen below. -->
-    <link data-trunk rel="rust" data-bin="teamcraft-ui" data-cargo-profile-release="web-release" data-wasm-opt="z" data-wasm-opt-params="--converge --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue" data-initializer="loader.js" />
+    <!-- The app's wasm is built, split into lazily loaded chunks and started by scripts/build-app.sh (a
+         Trunk hook, #334): Trunk can't split wasm. loader.js drives the loading screen below. -->
+    <!-- Declared but skipped: without a main Rust asset Trunk would build the crate itself. -->
+    <link data-trunk rel="rust" data-bin="teamcraft-ui" data-trunk-skip />
     <!-- The calls (#330): their own ES module, which the app imports in the background after sign-in (web_calls.rs), so they are not part of the first download. -->
     <link data-trunk rel="copy-file" href="../teamcraft-media/src/call_web/teamcraft-call-worklet.js" />
     <link data-trunk rel="rust" href="../teamcraft-web-calls/Cargo.toml" data-type="worker" data-bindgen-target="web" data-cargo-profile-release="web-release" data-wasm-opt="z" data-wasm-opt-params="--converge --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue" />

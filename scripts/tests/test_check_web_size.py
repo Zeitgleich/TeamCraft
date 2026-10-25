@@ -40,6 +40,15 @@ class BudgetTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("gzip -9, over the budget of 1,000", err)
 
+    def test_lazy_chunks_are_listed_but_not_counted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = dist_with(tmp, app_bytes=600, service_worker_bytes=300)
+            (dist / "teamcraft-ui-split-admin-0123abcd.wasm").write_bytes(os.urandom(5000))
+            code, out, _ = run(str(dist), "--budget-bytes", "2000")
+        self.assertEqual(code, 0)
+        self.assertIn("Loaded when first used", out)
+        self.assertIn("teamcraft-ui-split-admin-0123abcd.wasm", out)
+
     def test_close_to_the_compressed_budget_only_warns(self):
         with tempfile.TemporaryDirectory() as tmp:
             dist = dist_with(tmp, app_bytes=600, service_worker_bytes=500)

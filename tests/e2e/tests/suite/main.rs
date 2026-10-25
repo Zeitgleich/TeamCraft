@@ -43,3 +43,5 @@ mod web;
 mod web_calls;
 #[cfg(feature = "browser")]
 mod web_mobile;
+#[cfg(feature = "browser")]
+mod web_split;
