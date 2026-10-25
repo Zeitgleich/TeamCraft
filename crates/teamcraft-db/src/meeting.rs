@@ -221,7 +221,8 @@ impl Database {
   }
 
   /// Meetings the user organizes or is invited to that end after `from` and start before `to`,
-  /// soonest first. Cancelled meetings are included (clients show them struck through).
+  /// soonest first. Cancelled meetings are included (clients show them struck through). A repeating
+  /// series is included whatever `from` is, as its stored first occurrence; the caller expands it.
   pub async fn list_meetings_of_user(
     &self,
     user: UserId,
@@ -231,7 +232,7 @@ impl Database {
   ) -> Result<Vec<StoredMeeting>, DbError> {
     let ids = sqlx::query_scalar!(
       r#"SELECT m.id FROM meetings m
-         WHERE m.ends_at > $2 AND ($3::timestamptz IS NULL OR m.starts_at < $3)
+         WHERE (m.ends_at > $2 OR m.recurrence_rule IS NOT NULL) AND ($3::timestamptz IS NULL OR m.starts_at < $3)
            AND (m.organizer_user_id = $1
                 OR EXISTS (SELECT 1 FROM meeting_attendees a WHERE a.meeting_id = m.id AND a.user_id = $1))
          ORDER BY m.starts_at, m.id LIMIT $4"#,

@@ -28,6 +28,7 @@ pub mod local_accounts;
 pub mod mail_settings;
 pub mod meeting_controls;
 pub mod meeting_guests;
+pub mod meeting_occurrences;
 pub mod meetings;
 pub mod members;
 pub mod messages;

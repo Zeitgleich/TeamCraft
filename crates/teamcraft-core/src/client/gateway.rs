@@ -239,7 +239,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if let Err(error) = self.refresh_known_presence().await {
       tracing::warn!(%error, "could not read presence after connecting");
     }
-    read_state::update_marks(&self.store, |marks| marks.connections += 1)
+    read_state::update_marks(&self.store, |marks| {
+      marks.connections += 1;
+      // Meeting updates in between may have been lost.
+      marks.meetings += 1;
+    })
   }
 
   /// How many gateway connections this device made (fresh or resumed), counted once each was
@@ -490,9 +494,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.sync_account_data().await
       },
       GatewayEvent::KeyBagUpdate { .. } => Ok(()),
-      // Meetings are not shown by the shell yet.
-      GatewayEvent::MeetingUpdate { .. }
-      | GatewayEvent::LobbyJoin { .. }
+      // The UI reads the meetings itself (reminders, the meetings view); the mark tells it to now.
+      GatewayEvent::MeetingUpdate { .. } => {
+        read_state::update_marks(&self.store, |marks| marks.meetings += 1)
+      },
+      GatewayEvent::LobbyJoin { .. }
       | GatewayEvent::GuestExpired { .. }
       | GatewayEvent::ProfileUpdate { .. }
       | GatewayEvent::OrgRecoveryUpdate { .. }

@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use chrono_tz::Tz;
 use teamcraft_db::{
   AttendeeDiff, AttendeeKey, MeetingChanges, NewAttendee, NewConversation, NewMeeting, StoredAttendee,
   StoredMeeting,
@@ -22,6 +23,7 @@ use tracing::warn;
 
 use super::access::is_guest;
 use super::convert::{offset_date_time, presented_name, unix_millis};
+use super::meeting_occurrences::occurrences_in;
 use super::{validate_name, validate_text};
 use crate::auth::{AuthError, AuthenticatedUser};
 use crate::brand::Brand;
@@ -39,6 +41,8 @@ const MAX_RECURRENCE_INTERVAL: u32 = 100;
 const MAX_RECURRENCE_COUNT: u32 = 1_000;
 const DEFAULT_LIST_LIMIT: i64 = 100;
 const MAX_LIST_LIMIT: i64 = 500;
+/// How far ahead a list without an end shows the occurrences of repeating meetings.
+const SERIES_LIST_HORIZON: Duration = Duration::days(90);
 /// "Meet now" meetings stay open this long.
 const INSTANT_MEETING_DURATION: Duration = Duration::hours(8);
 const DEFAULT_INSTANT_TITLE: &str = "Instant meeting";
@@ -204,9 +208,40 @@ pub async fn list_meetings(
     .list_meetings_of_user(caller.user.id, from, maybe_to, limit)
     .await?;
   let mut meetings = Vec::with_capacity(stored.len());
+  let mut zones: HashMap<UserId, Tz> = HashMap::new();
   for meeting in &stored {
-    meetings.push(respond(state, service, meeting, Vec::new()).await?);
+    let response = respond(state, service, meeting, Vec::new()).await?;
+    let Some(recurrence) = response.maybe_recurrence.clone() else {
+      meetings.push(response);
+      continue;
+    };
+    // A series is stored once; the list shows each occurrence in the range.
+    let zone = match zones.get(&meeting.organizer) {
+      Some(zone) => *zone,
+      None => {
+        let zone = organizer_zone(state, meeting.organizer).await?;
+        zones.insert(meeting.organizer, zone);
+        zone
+      },
+    };
+    let (first, last) = (unix_millis(meeting.starts_at).0, unix_millis(meeting.ends_at).0);
+    let horizon = maybe_to.unwrap_or(from + SERIES_LIST_HORIZON);
+    for occurrence in occurrences_in(
+      first,
+      last - first,
+      &recurrence,
+      zone,
+      unix_millis(from).0,
+      unix_millis(horizon).0,
+    ) {
+      let mut occurrence_response = response.clone();
+      occurrence_response.starts_at = UnixMillis(occurrence.starts_at_ms);
+      occurrence_response.ends_at = UnixMillis(occurrence.ends_at_ms);
+      meetings.push(occurrence_response);
+    }
   }
+  meetings.sort_by_key(|meeting| (meeting.starts_at.0, meeting.id));
+  meetings.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
   Ok(ListMeetingsResponse {
     meetings,
     maybe_server_now: Some(unix_millis(OffsetDateTime::now_utc())),
@@ -898,6 +933,17 @@ fn validated_times(
     return Err(ApiError::InvalidRequest("ends_at must be after starts_at".into()));
   }
   Ok((start, end))
+}
+
+/// The time zone a series repeats in: the organizer's profile zone, UTC without one.
+async fn organizer_zone(state: &AppState, organizer: UserId) -> Result<Tz, ApiError> {
+  let profile = state.database.get_profile(organizer).await?;
+  Ok(
+    profile
+      .maybe_time_zone
+      .and_then(|zone| zone.parse::<Tz>().ok())
+      .unwrap_or(Tz::UTC),
+  )
 }
 
 fn time_from_millis(millis: UnixMillis) -> Result<OffsetDateTime, ApiError> {

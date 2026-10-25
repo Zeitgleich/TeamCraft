@@ -44,6 +44,14 @@ the change, and people taken off the list are removed from the group.
    for the sender by passing the authenticated envelope sender in `X-Envelope-Sender`; the server does
    not authenticate mail itself, but accepts a reply only for exactly that address. A reply answers
    for one attendee (RFC 5546) and is short; anything else is refused.
+   **Listing and reminders** (`GET /meetings`): a repeating series is stored once, with its first
+   occurrence; the list expands it into one entry per occurrence in the range (same meeting ID,
+   shifted start and end; without `to`, 90 days ahead). Occurrences repeat on the organizer's wall
+   clock in the organizer's profile time zone (UTC without one), so "every Monday 09:00" stays at
+   09:00 across a daylight-saving change; a monthly day that a month lacks takes the month's last
+   day, and a wall-clock time the zone skips moves an hour on. The clients remind per occurrence.
+   They read the list again when the gateway sends `meeting_update` (a meeting created, moved or
+   cancelled elsewhere) and after each reconnect, not on a timer.
 4. **Guests**: the personal link is `<base>/meeting/<id>#invite=<token>`; the token is in the
    fragment, which browsers never send to servers. The web client sends it to
    `POST /meetings/join` (no authentication) together with a display name and receives a guest

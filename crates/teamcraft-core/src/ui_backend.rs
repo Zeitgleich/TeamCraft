@@ -1409,6 +1409,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     })
   }
 
+  fn meetings_revision(&self) -> u64 {
+    self.read(crate::read_state::marks(&self.store)).meetings
+  }
+
   fn notify_typing(&self, conversation: ConversationId) {
     self.command(CoreCommand::Typing { conversation });
   }
