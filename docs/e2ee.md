@@ -278,11 +278,29 @@ for months must keep fresh ones on the server:
   a newer one replaced on the server, each `key_package_retention` (client, 30 days) later, for
   welcomes still on the way (#148). A last-resort package counts as replaced only once the server
   confirmed its successor's upload: after a lost answer the server may still hand out either, and
-  both stay. Nothing is deleted before the device read its welcomes once since it started (the
-  check runs before the first sync), and a welcome for a package it no longer holds makes it ask
-  to be added back (§4.6) instead of losing the conversation. A group keeps its own leaf key, so
-  deleting the package it was joined with changes nothing there. Lifetimes and these times use the
-  system clock openmls checks against.
+  both stay. Nothing is deleted before the device read all its welcomes since its gateway last
+  connected (also a resumed session: a desktop that slept for weeks may have welcomes waiting) or
+  a full sync started, nor while it reads them (asking to be added back tops up the packages
+  mid-sync); the 6-hour check reads the welcomes first (#395). A welcome for a package it no
+  longer holds makes it ask to be added back (§4.6) instead of losing the conversation, unless the
+  server no longer lists the user in the conversation (or refuses its member list): such a welcome
+  (replayed, misrouted, or for a conversation left meanwhile) is dropped. A group keeps its own
+  leaf key, so deleting the package it was joined with changes nothing there. Lifetimes and these
+  times use the system clock openmls checks against.
+- **Wiping.** A deleted package's stored bundle (private init and leaf keys) is overwritten in
+  memory before it goes, and so is every old copy of the MLS storage in the store's cache. The
+  local database zeroes freed pages (SQLite `secure_delete`), and the Android store truncates its
+  write-ahead log after a deletion, so the old storage record isn't left in the files for somebody
+  who later gets the database key (#391). Copies the file system or the flash controller keep are
+  out of reach; the browser's IndexedDB gives no such control. The listing and the wiping rely on
+  how `openmls_memory_storage` 0.6 keys bundles; a test fails when a new version changes it.
+- **History of a first add-back (known gap).** A user whose first device can't open the welcome
+  that added them (its package deleted, or opened but not joined) is added back with history from
+  that epoch on: the content keys the adder shared for a full-history add went into the group the
+  device never joined, and the add-back doesn't send them again. The keys of earlier epochs stay
+  unreadable for that user until somebody adds them again with history (#400). This needs a
+  welcome that waited past the package's lifetime plus `key_package_retention` (about 72 days
+  after the server handed it out), or a network error at the exact moment of joining.
 - **One bad device.** The adder checks every claimed package (signature, lifetime, credential, the
   user's signed device list, not revoked from this group, the device and user the server claims)
   and leaves out bad ones with a warning, so a revoked or broken device doesn't keep its user's other

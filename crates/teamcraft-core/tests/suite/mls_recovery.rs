@@ -13,7 +13,7 @@ use teamcraft_core::PendingEnrollment;
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::clock::{Clock, ManualClock, SystemClock};
-use teamcraft_core::store::MemoryStore;
+use teamcraft_core::store::{LocalStore, MemoryStore, Table};
 use teamcraft_proto::{ConversationId, HistoryPolicy, ListMlsMessagesQuery, MlsMessageKind};
 
 const TEN_MINUTES_MS: i64 = 10 * 60 * 1000;
@@ -242,6 +242,50 @@ mod fallen_out {
     bob.client.full_sync().await.unwrap();
     settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
     assert_same_epoch(channel, &mut [&mut alice, &mut bob, &mut carol]);
+  }
+
+  /// Issue #391: a member's note that it saw a device added back goes once the cooldown is over
+  /// by the server's time, not only when another request for the device comes.
+  #[tokio::test]
+  async fn the_note_of_an_add_back_is_dropped_after_the_cooldown() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol) = three(&server).await;
+    let mut dave = Peer::enroll(&server, "Dave").await;
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
+    server.garble_next_commit_for(bob.client.user_id());
+    alice
+      .client
+      .add_member(channel, dave.client.user_id())
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+    assert_same_epoch(channel, &mut [&mut alice, &mut bob, &mut carol, &mut dave]);
+    assert_eq!(readded_notes(&alice), 1);
+
+    // Within the cooldown a full sync keeps it.
+    alice.client.full_sync().await.unwrap();
+    assert_eq!(readded_notes(&alice), 1);
+
+    // Past it, by a queue entry the server stored later, the note goes.
+    server.advance_clock(settings().rejoin_cooldown + std::time::Duration::from_secs(60));
+    alice
+      .client
+      .remove_member(channel, dave.client.user_id())
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+    alice.client.full_sync().await.unwrap();
+    assert_eq!(readded_notes(&alice), 0);
+  }
+
+  fn readded_notes(peer: &Peer) -> usize {
+    peer
+      .store
+      .list(Table::AppliedChanges)
+      .unwrap()
+      .iter()
+      .filter(|(key, _)| key.starts_with("readded/"))
+      .count()
   }
 }
 

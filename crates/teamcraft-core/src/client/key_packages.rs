@@ -34,9 +34,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Housekeeping after a key package check: notes the replaced last-resort packages when the
-  /// server took `maybe_new_last_resort`, then deletes spent private parts, once this session read
-  /// all welcomes (one waiting for a package is opened first). Failures are logged, never fatal: a
-  /// sync must not stop over cleanup.
+  /// server took `maybe_new_last_resort`, then deletes spent private parts, once all welcomes were
+  /// read since the last reset (one waiting for a package is opened first; issue #395): not in the
+  /// middle of a welcome sync, nor on a connection that wasn't caught up yet. Failures are logged,
+  /// never fatal: a sync must not stop over cleanup.
   pub(super) fn clean_up_key_packages(
     &mut self,
     maybe_new_last_resort: Option<&Base64Bytes>,
@@ -104,6 +105,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     if !spent.is_empty() {
       records::save_mls_storage(&self.store, &self.provider)?;
+      // The storage was rewritten without the bundles; the old copy goes from the files too.
+      self.store.purge_freed()?;
       tracing::info!(deleted = spent.len(), "deleted spent key packages");
     }
     Ok(spent.len())

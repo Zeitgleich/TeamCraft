@@ -49,6 +49,8 @@ const PENDING_COMMIT_ROUNDS: u32 = 3;
 pub(crate) const CREATE_ATTEMPTS: u32 = 3;
 /// Key prefix of [`DmSetupRecord`]s in the sync state.
 const DM_SETUP_PREFIX: &str = "dm-setup/";
+/// Key prefix of [`ReaddedRecord`]s in the applied changes.
+const READDED_PREFIX: &str = "readded/";
 
 /// This device's commit, merged: what it did and when the server stored it.
 struct OwnCommit {
@@ -139,7 +141,10 @@ enum WelcomeJoin {
   Joined(Box<(ConversationGroup, PinnedDirectory)>),
   /// Not for this device or not acceptable; the welcome is done with.
   Rejected(MlsError),
-  /// Opened (which spends this device's key package), then a network error stopped the join.
+  /// This device's leaf is in the members' tree, but it has no group and can't open the welcome
+  /// again, so it asks to be added back: the welcome was opened (which spends the key package)
+  /// and a network error stopped the join, or its key package was deleted already (e2ee.md
+  /// §4.3.1) while the server still lists the user in the conversation.
   KeyPackageSpent,
 }
 
@@ -675,8 +680,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(recipients.len())
   }
 
-  /// Fetches welcomes for this device and joins those groups.
+  /// Fetches welcomes for this device and joins those groups. Spent key packages aren't deleted
+  /// while this runs (a welcome later in the queue may need one, issue #395): a rejoin request for
+  /// an unopenable welcome tops up the key packages, whose cleanup waits for the last page.
   pub async fn sync_welcomes(&mut self) -> Result<(), CoreError> {
+    self.are_welcomes_synced = false;
     loop {
       let query = ListMlsMessagesQuery {
         maybe_after: self.sync.maybe_welcome_cursor,
@@ -1629,8 +1637,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     maybe_founded_for: Option<&[UserId]>,
   ) -> Result<WelcomeJoin, CoreError> {
     // Pinned before the welcome is opened, which takes this device's key package: a network error
-    // here leaves the welcome for the next try.
-    let members = self.api.list_members(conversation).await?;
+    // here leaves the welcome for the next try. A conversation the server doesn't let this user
+    // read (left, removed, or a misrouted welcome) has no group to join.
+    let members = match self.api.list_members(conversation).await {
+      Ok(members) => members,
+      Err(error) if error.is_not_found() || error.is_forbidden() => {
+        return Ok(WelcomeJoin::Rejected(MlsError::UnexpectedMessage(
+          "welcome for a conversation this user isn't in",
+        )));
+      },
+      Err(error) => return Err(error.into()),
+    };
+    let me = self.user_id();
+    let is_listed = members.members.iter().any(|member| member.user.id == me);
     self
       .pin_identities(members.members.iter().map(|member| member.user.id))
       .await?;
@@ -1651,7 +1670,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     ) {
       Ok(staged) => staged,
       // The key package is gone (deleted after it expired or was replaced, e2ee.md §4.3.1): the
-      // members' tree holds this device's leaf, so it asks to be added back.
+      // members' tree holds this device's leaf, so it asks to be added back, unless the user is no
+      // longer in the conversation (a welcome replayed or misrouted after leaving): the members
+      // wouldn't answer, and the server would refuse the request (issue #395).
+      Err(MlsError::NoMatchingKeyPackage) if !is_listed => {
+        tracing::info!(conversation_id = %conversation, "welcome for a spent key package of a conversation this user isn't in; dropped");
+        return Ok(WelcomeJoin::Rejected(MlsError::NoMatchingKeyPackage));
+      },
       Err(MlsError::NoMatchingKeyPackage) => {
         tracing::warn!(conversation_id = %conversation, "welcome for a key package this device no longer holds; asking to be added back");
         return Ok(WelcomeJoin::KeyPackageSpent);
@@ -2185,6 +2210,36 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(true)
   }
 
+  /// Drops the re-add records whose cooldown is over by the newest server time this device saw
+  /// (its MLS queue cursors), so they don't pile up (issue #391); [`Self::was_readded_recently`]
+  /// would drop them for the next request anyway. A request older than the re-add (replayed) is
+  /// then answered once more, bounded by the request's own freshness (e2ee.md §4.6).
+  pub(crate) fn prune_readded_records(&mut self) -> Result<(), CoreError> {
+    let Some(server_now_ms) = self
+      .sync
+      .mls_cursors
+      .values()
+      .map(|cursor| cursor.snowflake().unix_millis())
+      .max()
+    else {
+      return Ok(());
+    };
+    let cooldown_ms = i64::try_from(self.settings.rejoin_cooldown.as_millis()).unwrap_or(i64::MAX);
+    let mut pruned = 0_usize;
+    let records =
+      records::list_json_with_prefix::<ReaddedRecord>(&self.store, Table::AppliedChanges, READDED_PREFIX)?;
+    for (key, record) in records {
+      if server_now_ms >= record.at_ms.saturating_add(cooldown_ms) {
+        self.store.delete(Table::AppliedChanges, &key)?;
+        pruned += 1;
+      }
+    }
+    if pruned > 0 {
+      tracing::debug!(pruned, "dropped re-add records past their cooldown");
+    }
+    Ok(())
+  }
+
   pub(crate) fn advance_cursor(
     &mut self,
     conversation: ConversationId,
@@ -2261,7 +2316,7 @@ pub(crate) fn rejoin_key(conversation: ConversationId) -> String {
 
 /// Where a member notes when another device was last added back to the conversation's group.
 fn readded_key(conversation: ConversationId, device: DeviceId) -> String {
-  format!("readded/{conversation}/{device}")
+  format!("{READDED_PREFIX}{conversation}/{device}")
 }
 
 #[cfg(test)]

@@ -41,8 +41,10 @@ impl SealedStore<SqliteRecords> {
     connection: Connection,
     key_source: &impl DatabaseKeySource,
   ) -> Result<Self, StoreError> {
+    // secure_delete: freed pages are zeroed, so a deleted record's ciphertext doesn't linger in
+    // them (issue #391); the write-ahead log is cleared by `purge_freed`.
     connection
-      .execute_batch("PRAGMA journal_mode = WAL;")
+      .execute_batch("PRAGMA journal_mode = WAL; PRAGMA secure_delete = ON;")
       .map_err(database_error)?;
     connection.execute_batch(SCHEMA).map_err(database_error)?;
     let records = read_all(&connection)?;
@@ -75,6 +77,15 @@ impl RecordBackend for SqliteRecords {
       )
       .map_err(database_error)?;
     Ok(())
+  }
+
+  /// Writes the log back into the database (whose freed pages `secure_delete` zeroes) and
+  /// truncates it, so no old page version stays in the log file.
+  fn purge_freed(&self) -> Result<(), StoreError> {
+    self
+      .lock()
+      .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+      .map_err(database_error)
   }
 }
 
@@ -154,6 +165,37 @@ mod tests {
       reopened.get(Table::Users, "1").unwrap(),
       Some(b"very recognizable plaintext".to_vec())
     );
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  /// Issue #391: the old copy of a deleted record (a key package's private part in the MLS
+  /// storage) is neither in a freed page nor in the write-ahead log once the store purged.
+  #[test]
+  fn a_deleted_record_leaves_no_ciphertext_in_the_files() {
+    let directory = std::env::temp_dir().join(format!(
+      "teamcraft-sealed-{}",
+      rand_core::RngCore::next_u64(&mut OsRng)
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("store.db");
+    let store =
+      SealedSqliteStore::open(&path, &StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
+    store.put(Table::MlsStorage, "state", &[7; 4096]).unwrap();
+    let sealed: Vec<u8> = Connection::open(&path)
+      .unwrap()
+      .query_row("SELECT value FROM sealed_records", [], |row| row.get(0))
+      .unwrap();
+    let needle = &sealed[sealed.len() / 2..sealed.len() / 2 + 32];
+
+    store.delete(Table::MlsStorage, "state").unwrap();
+    store.purge_freed().unwrap();
+
+    let raw = std::fs::read(&path).unwrap();
+    let wal = std::fs::read(path.with_extension("db-wal")).unwrap_or_default();
+    for bytes in [&raw, &wal] {
+      assert!(!bytes.windows(needle.len()).any(|window| window == needle));
+    }
+    drop(store);
     std::fs::remove_dir_all(&directory).unwrap();
   }
 }

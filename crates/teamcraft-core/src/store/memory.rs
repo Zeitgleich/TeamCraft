@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard};
 
 use teamcraft_proto::{ClientMessageId, ConversationId, MessageId};
+use zeroize::Zeroize as _;
 
 use super::{LocalStore, MessageFilter, StoreError, StoredMessage, Table};
 
@@ -37,16 +38,23 @@ impl LocalStore for MemoryStore {
     Ok(self.lock().tables.get(&(table, key.to_string())).cloned())
   }
 
+  /// The value replaced is overwritten: the cache of a sealed store holds the MLS storage, whose
+  /// deleted key packages must not stay in freed memory (issue #391).
   fn put(&self, table: Table, key: &str, value: &[u8]) -> Result<(), StoreError> {
-    self
+    if let Some(mut old) = self
       .lock()
       .tables
-      .insert((table, key.to_string()), value.to_vec());
+      .insert((table, key.to_string()), value.to_vec())
+    {
+      old.zeroize();
+    }
     Ok(())
   }
 
   fn delete(&self, table: Table, key: &str) -> Result<(), StoreError> {
-    self.lock().tables.remove(&(table, key.to_string()));
+    if let Some(mut old) = self.lock().tables.remove(&(table, key.to_string())) {
+      old.zeroize();
+    }
     Ok(())
   }
 

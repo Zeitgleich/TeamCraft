@@ -9,9 +9,13 @@ use std::time::Duration;
 
 use common::{Peer, settings, settle};
 use teamcraft_core::ClientSettings;
+use teamcraft_core::GatewayOutcome;
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
-use teamcraft_proto::{AddConversationMemberRequest, ClaimKeyPackagesRequest, ErrorCode};
+use teamcraft_proto::{
+  AddConversationMemberRequest, ClaimKeyPackagesRequest, ConversationId, ErrorCode, ListMlsMessagesQuery,
+  MlsMessageKind, SpaceId, UserId,
+};
 
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -205,6 +209,179 @@ async fn a_welcome_for_a_deleted_key_package_ends_in_an_add_back() {
   alice.client.send_text(channel, None, "hi Bob").await.unwrap();
   settle(&mut [&mut alice, &mut bob]).await;
   assert_eq!(bob.texts(channel), ["hi Bob"]);
+}
+
+/// Issue #395: a welcome sync deletes no key package before it read the last welcome. Here the
+/// first welcome's package is gone, so it asks to be added back, which tops up the packages; the
+/// second welcome waits for a last-resort package that top-up replaces.
+#[tokio::test]
+async fn no_package_is_deleted_in_the_middle_of_a_welcome_sync() {
+  let server = FakeServer::new();
+  let no_retention = ClientSettings {
+    key_package_retention: Duration::ZERO,
+    ..settings()
+  };
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll_with_settings(&server, "Bob", no_retention).await;
+  let bob_id = bob.client.user_id();
+  let space = alice.space().await;
+  let lobby = lobby_with_spent_packages(&mut alice, &mut bob, space).await;
+  bob.client.sync_welcomes().await.unwrap();
+  // The first welcome takes the last-resort package, which is replaced and deleted before Bob
+  // reads it.
+  let first = alice.client.create_channel(space, "first").await.unwrap();
+  alice.client.add_member(first, bob_id).await.unwrap();
+  server.advance_clock(30 * DAY);
+  bob.client.top_up_key_packages().await.unwrap();
+  // The second takes the new last-resort package (the regular ones are claimed elsewhere).
+  claim_regular_packages(&alice, bob_id, lobby).await;
+  let second = alice.client.create_channel(space, "second").await.unwrap();
+  alice.client.add_member(second, bob_id).await.unwrap();
+  // By now that package is due for replacement too.
+  server.advance_clock(30 * DAY);
+
+  bob.client.sync_welcomes().await.unwrap();
+  // Opened at once, no add-back needed; the first one is answered by Alice.
+  assert!(bob.client.has_group(second).unwrap());
+  assert_eq!(proposals_by(&alice, &bob, second).await, 0);
+  assert_eq!(proposals_by(&alice, &bob, first).await, 1);
+  // With all welcomes read, the replaced package goes at the next check.
+  bob.client.top_up_key_packages().await.unwrap();
+  assert_eq!(
+    last_resort_refs(&bob.client.stored_key_packages().unwrap()).len(),
+    1
+  );
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert!(bob.client.has_group(first).unwrap());
+}
+
+/// Issue #395: after a reconnect (here a resumed gateway session) no package is deleted until
+/// the welcomes were read again; the periodic check reads them first.
+#[tokio::test]
+async fn a_reconnect_waits_for_the_welcomes_before_deleting_packages() {
+  let server = FakeServer::new();
+  let settings = ClientSettings {
+    key_package_retention: Duration::ZERO,
+    key_package_check_interval: Duration::ZERO,
+    ..settings()
+  };
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll_with_settings(&server, "Bob", settings).await;
+  let bob_id = bob.client.user_id();
+  let space = alice.space().await;
+  lobby_with_spent_packages(&mut alice, &mut bob, space).await;
+  bob.client.sync_welcomes().await.unwrap();
+  let channel = alice.client.create_channel(space, "general").await.unwrap();
+  alice.client.add_member(channel, bob_id).await.unwrap();
+
+  let (gateway, outcome) = bob.client.connect_gateway().await.unwrap();
+  assert_eq!(outcome, GatewayOutcome::Resumed);
+  bob.gateway = gateway;
+  server.advance_clock(30 * DAY);
+  bob.client.top_up_key_packages().await.unwrap();
+  assert_eq!(
+    last_resort_refs(&bob.client.stored_key_packages().unwrap()).len(),
+    2,
+    "the replaced package waits for the welcomes"
+  );
+
+  assert!(bob.client.renew_key_packages_if_due().await.unwrap());
+  assert!(bob.client.has_group(channel).unwrap());
+  assert_eq!(proposals_by(&alice, &bob, channel).await, 0);
+  assert_eq!(
+    last_resort_refs(&bob.client.stored_key_packages().unwrap()).len(),
+    1
+  );
+}
+
+/// Issue #395: a welcome for a deleted package of a conversation the user is no longer in is
+/// dropped, without asking to be added back (the server would refuse the request).
+mod welcome_after_leaving {
+  use super::*;
+
+  #[tokio::test]
+  async fn listed_to_an_admin_it_is_dropped() {
+    let (server, alice, mut bob, channel) = welcome_for_a_deleted_package_after_leaving().await;
+    // An instance admin may still list the members.
+    server.set_admin(bob.client.user_id());
+    bob.client.sync_welcomes().await.unwrap();
+    assert!(!bob.client.has_group(channel).unwrap());
+    assert_eq!(proposals_by(&alice, &bob, channel).await, 0);
+  }
+
+  #[tokio::test]
+  async fn refused_the_member_list_it_is_dropped() {
+    let (_server, alice, mut bob, channel) = welcome_for_a_deleted_package_after_leaving().await;
+    bob.client.sync_welcomes().await.unwrap();
+    assert!(!bob.client.has_group(channel).unwrap());
+    assert_eq!(proposals_by(&alice, &bob, channel).await, 0);
+    // Done with: the next sync doesn't read it again.
+    bob.client.sync_welcomes().await.unwrap();
+  }
+
+  /// Alice adds Bob with his last-resort package, which Bob deletes before he reads the welcome;
+  /// then the server takes him out of the channel.
+  async fn welcome_for_a_deleted_package_after_leaving() -> (FakeServer, Peer, Peer, ConversationId) {
+    let server = FakeServer::new();
+    let no_retention = ClientSettings {
+      key_package_retention: Duration::ZERO,
+      ..settings()
+    };
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut bob = Peer::enroll_with_settings(&server, "Bob", no_retention).await;
+    let bob_id = bob.client.user_id();
+    let space = alice.space().await;
+    lobby_with_spent_packages(&mut alice, &mut bob, space).await;
+    bob.client.sync_welcomes().await.unwrap();
+    let channel = alice.client.create_channel(space, "general").await.unwrap();
+    alice.client.add_member(channel, bob_id).await.unwrap();
+    server.advance_clock(30 * DAY);
+    bob.client.top_up_key_packages().await.unwrap();
+    server.remove_member_as_admin(channel, bob_id);
+    (server, alice, bob, channel)
+  }
+}
+
+/// A channel Bob is in, with all his regular packages claimed for it: the next add takes his
+/// last-resort package.
+async fn lobby_with_spent_packages(alice: &mut Peer, bob: &mut Peer, space: SpaceId) -> ConversationId {
+  let bob_id = bob.client.user_id();
+  let lobby = alice.client.create_channel(space, "lobby").await.unwrap();
+  alice.client.add_member(lobby, bob_id).await.unwrap();
+  settle(&mut [alice, bob]).await;
+  for _ in 1..settings().key_package_target {
+    alice
+      .api
+      .claim_key_packages(bob_id, &ClaimKeyPackagesRequest::new(lobby))
+      .await
+      .unwrap();
+  }
+  lobby
+}
+
+/// Claims every regular package the server holds for `user`.
+async fn claim_regular_packages(claimer: &Peer, user: UserId, conversation: ConversationId) {
+  for _ in 0..settings().key_package_target {
+    claimer
+      .api
+      .claim_key_packages(user, &ClaimKeyPackagesRequest::new(conversation))
+      .await
+      .unwrap();
+  }
+}
+
+/// How many proposals (rejoin requests) `sender`'s device put into the conversation's queue.
+async fn proposals_by(reader: &Peer, sender: &Peer, conversation: ConversationId) -> usize {
+  let device = sender.client.device_id();
+  reader
+    .api
+    .list_mls_messages(conversation, &ListMlsMessagesQuery::default())
+    .await
+    .unwrap()
+    .messages
+    .iter()
+    .filter(|entry| entry.kind == MlsMessageKind::Proposal && entry.sender_device_id == device)
+    .count()
 }
 
 fn last_resort_refs(packages: &[teamcraft_crypto::mls::StoredKeyPackage]) -> Vec<Vec<u8>> {

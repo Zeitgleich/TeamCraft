@@ -408,6 +408,15 @@ pub trait LocalStore {
     )
   }
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError>;
+
+  /// Overwrites what deleted or replaced records left behind in the store's files (free pages, a
+  /// write-ahead log), so a secret that was deleted can't be read back from them, also not by
+  /// somebody who later gets the database key (issue #391). The store may still hold it until this
+  /// returns; data the file system or flash controller copied elsewhere is out of reach. Stores
+  /// without such files do nothing.
+  fn purge_freed(&self) -> Result<(), StoreError> {
+    Ok(())
+  }
 }
 
 /// A store shared between the engine and readers (UI adapters, tests).
@@ -460,6 +469,10 @@ macro_rules! forward_local_store {
 
       fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {
         (**self).delete_messages(conversation)
+      }
+
+      fn purge_freed(&self) -> Result<(), StoreError> {
+        (**self).purge_freed()
       }
     }
   };
