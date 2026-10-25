@@ -25,7 +25,7 @@ just self-check
 
 What you need first: a Debian 13 VPS (2 vCPU, 4 GB RAM) with public IPv4 and IPv6, A and AAAA records
 for `chat.example.com`, `sfu.chat.example.com` and, when bundled, `id.` and `s3.` below it, and UDP
-port 4433 open for calls. The playbook's documentation covers DNS, configuration, secrets (generated
+port 3478 open for calls. The playbook's documentation covers DNS, configuration, secrets (generated
 or sops + age), updating, backups and every component.
 
 Several brands on one server (`docs/branding.md`) are `teamcraft_brands` in the playbook: it adds
@@ -91,7 +91,7 @@ exists; clients can still read what they have stored locally.
   `X-Forwarded-For` from a private address.
 - Never expose `/api/internal/` to the internet: it is for the SFU and the mail inbox handler, and is
   protected by bearer tokens, but there is no reason to publish it.
-- Everything facing the network is dual stack (IPv4 and IPv6). The SFU needs UDP `4433` reachable
+- Everything facing the network is dual stack (IPv4 and IPv6). The SFU needs UDP `3478` reachable
   from clients (QUIC); its health endpoint (`8081/tcp`) is for the orchestrator only. Calls don't
   work on networks that block outbound UDP (some corporate, hotel and guest networks); there is no
   TCP fallback yet (ARCHITECTURE.md §6.6), so name the port in the instructions for users.

@@ -529,7 +529,7 @@ is_enabled = true
 #   openssl pkey -in call-signing.pem -pubout -out call-signing.pub.pem   # for the SFU
 # [calls]
 # WebTransport URL of the SFU that clients connect to.
-# sfu_url = "https://sfu.example.com:4433/call"
+# sfu_url = "https://sfu.example.com:3478/call"
 # `iss` of join tokens; the SFU is configured with the same value.
 # issuer = "https://chat.example.com"
 # signing_key_path = "/etc/teamcraft/call-signing.pem"

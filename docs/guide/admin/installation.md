@@ -55,5 +55,5 @@ orchestrator works: images are distroless, run as UID 65532 with a read-only roo
 
 ## Dual stack
 
-Everything listens on IPv4 and IPv6 (`[::]`). Publish both families at the proxy, and open `4433/udp`
+Everything listens on IPv4 and IPv6 (`[::]`). Publish both families at the proxy, and open `3478/udp`
 for the SFU.

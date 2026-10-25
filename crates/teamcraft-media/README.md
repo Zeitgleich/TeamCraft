@@ -94,7 +94,7 @@ builds packages with it. `RUSTFLAGS` changes invalidate the build cache, so use 
 
 ```sh
 cargo run -p teamcraft-media --features openh264-source --bin teamcraft-call -- \
-  --sfu https://127.0.0.1:4433/call --token dev:1:1:1 --user 1 --device 1 \
+  --sfu https://127.0.0.1:3478/call --token dev:1:1:1 --user 1 --device 1 \
   --cert-hash <hash from the SFU's startup log> --source tone:440 --seconds 10
 ```
 
