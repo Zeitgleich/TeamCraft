@@ -14,7 +14,7 @@ use std::{
   collections::{HashMap, HashSet},
   sync::{
     Arc, Mutex, MutexGuard, PoisonError,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
   },
   time::{Duration, Instant},
 };
@@ -22,8 +22,8 @@ use std::{
 use teamcraft_media::{datagram::StreamId, dave::DaveEpoch};
 use teamcraft_proto::{
   Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, DeviceId, ErrorBody, ErrorCode,
-  MediaCapabilities, MediaStreamId, SfuControlAction, TransportFeedback, UserId, VideoCodec, VideoLayerInfo,
-  VideoTrackKind,
+  MediaCapabilities, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, SfuControlAction, TransportFeedback, UserId,
+  VideoCodec, VideoLayerInfo, VideoTrackKind,
 };
 use thiserror::Error;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
@@ -53,6 +53,8 @@ pub struct Rooms {
   /// Host controls that outlive a room's participants: locked calls, removed users.
   control: Mutex<ControlState>,
   next_session: AtomicU64,
+  /// The SFU is shutting down; see [`Rooms::go_away`].
+  is_going_away: AtomicBool,
 }
 
 #[derive(Default)]
@@ -160,7 +162,31 @@ impl Rooms {
       rooms: Mutex::new(HashMap::new()),
       control: Mutex::new(ControlState::default()),
       next_session: AtomicU64::new(1),
+      is_going_away: AtomicBool::new(false),
     }
+  }
+
+  /// The SFU is shutting down (a restart, a rolling deploy): closes every participant's
+  /// connection with [`SFU_GOING_AWAY_CLOSE_CODE`], which clients answer with a rejoin – on the
+  /// restarted SFU, into a fresh room with a new DAVE group. From now on leaves are not reported
+  /// to the server ([`Self::is_going_away`]): the participants are on their way back, and the
+  /// server keeps the call meanwhile. Returns how many connections were closed.
+  pub fn go_away(&self) -> usize {
+    self.is_going_away.store(true, Ordering::Relaxed);
+    let rooms: Vec<Arc<Room>> = lock(&self.rooms).values().cloned().collect();
+    let mut closed = 0;
+    for room in rooms {
+      for handle in room.connected_handles() {
+        handle.link.close(SFU_GOING_AWAY_CLOSE_CODE, b"going away");
+        closed += 1;
+      }
+    }
+    info!(closed, "going away: closed every call connection");
+    closed
+  }
+
+  pub fn is_going_away(&self) -> bool {
+    self.is_going_away.load(Ordering::Relaxed)
   }
 
   /// Applies a meeting host's action (already authorized by the server).
@@ -617,6 +643,15 @@ impl Room {
       .map(|(device_id, _)| *device_id)
       .collect();
     self.close(&mut state, &devices, event);
+  }
+
+  fn connected_handles(&self) -> Vec<ParticipantHandle> {
+    let state = lock(&self.state);
+    state
+      .participants
+      .keys()
+      .filter_map(|device_id| state.handle_of(*device_id).cloned())
+      .collect()
   }
 
   fn close_everyone(&self, event: CallEvent) {

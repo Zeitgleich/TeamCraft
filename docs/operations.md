@@ -104,6 +104,15 @@ exists; clients can still read what they have stored locally.
   `TEAMCRAFT_SFU_RECONNECT_GRACE_SECS` (default 30) while their app rejoins; a connection is lost
   after `TEAMCRAFT_SFU_IDLE_TIMEOUT_SECS` (default 10) without packets. Longer grace periods cover
   longer outages (trains, lifts) but keep a departed participant listed as "reconnecting" longer.
+- Restarting or redeploying the SFU doesn't end running calls. On SIGTERM it closes every call
+  connection as "going away", waits up to `TEAMCRAFT_SFU_SHUTDOWN_DRAIN_SECS` (default 2) for the
+  closes to go out, and exits. Apps rejoin with a fresh join token, spread over about a second, and
+  keep trying with back-off for the reconnect grace period they learnt (default 30 s): bring the
+  new SFU up at the same address within that time and the calls continue after a short gap, with a
+  fresh DAVE group. A crash works the same way, only the apps notice the dead connection after
+  about 5 s instead of at once. Rooms, locks and host removals live in the SFU's memory and start
+  fresh; the server's meeting admission still applies to every rejoin. Desktop and mobile apps of
+  version 1.0.2 and older end the call on "going away" (a browser tab rejoins).
 
 ## Backup and restore
 
