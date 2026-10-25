@@ -10513,6 +10513,7 @@ dependencies = [
  "teamcraft-client-api",
  "teamcraft-core",
  "teamcraft-crypto",
+ "teamcraft-desktop-native",
  "teamcraft-media",
  "teamcraft-proto",
  "thiserror 2.0.21",
@@ -10524,6 +10525,18 @@ dependencies = [
  "webkit2gtk",
  "windows",
  "zbus",
+]
+
+[[package]]
+name = "teamcraft-desktop-native"
+version = "1.0.3"
+dependencies = [
+ "block2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "thiserror 2.0.21",
+ "tracing",
+ "windows",
 ]
 
 [[package]]
