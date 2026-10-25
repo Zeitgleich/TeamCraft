@@ -495,7 +495,10 @@ impl CallHost {
       encoders: preferred_encoders(),
       maybe_filter: Some(self.self_view.filter(maybe_filter)),
     };
-    self.start_video(config).await?;
+    self
+      .start_video(config)
+      .await
+      .map_err(video::camera_failure_wire)?;
     lock(&self.state).maybe_effect_handle = maybe_handle;
     self.update_active(|active| active.is_camera_on = true);
     Ok(())

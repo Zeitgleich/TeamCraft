@@ -16,6 +16,7 @@ use std::sync::mpsc as std_mpsc;
 use teamcraft_client_api::calls::{
   BackgroundEffect as UiBackgroundEffect, BackgroundPreset as UiBackgroundPreset,
 };
+use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
 use teamcraft_media::call_video::ReceivedVideoFrame;
 use teamcraft_media::effects::{
   BackgroundEffect, BackgroundImage, BlurStrength, Compositor, EffectHandle, EffectsConfig, EffectsError,
@@ -23,7 +24,7 @@ use teamcraft_media::effects::{
   TractSegmenter,
 };
 use teamcraft_media::system_audio::SystemAudioCapture;
-use teamcraft_media::video::{VideoResolution, simulcast_layers};
+use teamcraft_media::video::{VideoResolution, fit_within, simulcast_layers};
 use teamcraft_media::video_capture::{CameraInfo, CaptureFormat, VideoCapture};
 use teamcraft_media::video_codec::OpenH264Decoder;
 use teamcraft_media::video_jpeg::JpegTranscoder;
@@ -71,6 +72,30 @@ pub(super) fn list_cameras() -> Vec<CameraInfo> {
   Vec::new()
 }
 
+/// A camera error as the UI reads it (`call_<failure>: detail`), so the user gets a message in their
+/// language instead of "something went wrong". Capture errors arrive as text from the video
+/// engine, so they are told apart by what `CaptureError` prints.
+pub(super) fn camera_failure_wire(message: String) -> String {
+  let lowered = message.to_lowercase();
+  let failure = if lowered.contains("unsupported pixel format")
+    || lowered.contains("no mode we can")
+    || lowered.contains("no format we can")
+    || lowered.contains("requested format")
+    || lowered.contains("cannot fulfill")
+  {
+    CallFailure::CameraUnsupported
+  } else if lowered.starts_with("no camera available") {
+    CallFailure::CameraMissing
+  } else if lowered.contains("denied access") {
+    CallFailure::CameraDenied
+  } else if lowered.starts_with("capture:") {
+    CallFailure::CameraInUse
+  } else {
+    return message;
+  };
+  ActionFailure::new(FailureKind::Call(failure), message).to_wire()
+}
+
 /// Opens the camera (blocking: the portal may ask the user). A chosen device is a V4L2 path; the
 /// portal only offers "the camera", so it is tried for the default.
 #[cfg(target_os = "linux")]
@@ -86,14 +111,14 @@ pub(super) fn open_camera(maybe_id: Option<&str>) -> Result<Box<dyn VideoCapture
   }
   V4l2Camera::open(maybe_id, CAMERA_FORMAT)
     .map(|camera| Box::new(camera) as Box<dyn VideoCapture>)
-    .map_err(|error| error.to_string())
+    .map_err(|error| camera_failure_wire(error.to_string()))
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(super) fn open_camera(maybe_id: Option<&str>) -> Result<Box<dyn VideoCapture>, String> {
   teamcraft_media::capture_nokhwa::NokhwaCamera::open(maybe_id, CAMERA_FORMAT)
     .map(|camera| Box::new(camera) as Box<dyn VideoCapture>)
-    .map_err(|error| error.to_string())
+    .map_err(|error| camera_failure_wire(error.to_string()))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -170,7 +195,13 @@ pub(super) fn open_system_audio() -> Box<dyn SystemAudioCapture> {
 
 /// Three simulcast layers for a camera.
 pub(super) fn camera_layers(format: CaptureFormat) -> Vec<VideoLayerInfo> {
-  simulcast_layers(format.resolution, format.framerate, CAMERA_BITRATE_BPS, 3)
+  // The camera may capture more (4K, 60 fps); what is sent stays within the camera preset.
+  simulcast_layers(
+    fit_within(format.resolution, CAMERA_FORMAT.resolution),
+    format.framerate.min(CAMERA_FORMAT.framerate),
+    CAMERA_BITRATE_BPS,
+    3,
+  )
 }
 
 /// One layer for a screen (no simulcast: text must stay readable).
@@ -415,6 +446,33 @@ fn illustration(preset: UiBackgroundPreset) -> PresetBackground {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn camera_errors_reach_the_user_as_call_failures() {
+    assert!(
+      camera_failure_wire("unsupported pixel format Bgra".into()).starts_with("call_camera_unsupported: ")
+    );
+    assert!(camera_failure_wire("no camera available".into()).starts_with("call_camera_missing: "));
+    assert!(camera_failure_wire("capture: device busy".into()).starts_with("call_camera_in_use: "));
+    assert_eq!(camera_failure_wire("the call ended".into()), "the call ended");
+  }
+
+  #[test]
+  fn a_4k_camera_is_sent_as_720p_within_the_bitrate_cap() {
+    let capture = CaptureFormat {
+      resolution: VideoResolution {
+        width: 3840,
+        height: 2160,
+      },
+      framerate: 60,
+    };
+    let layers = camera_layers(capture);
+    assert_eq!(layers.len(), 3);
+    let top = layers.last().unwrap();
+    assert_eq!((top.width, top.height, top.max_framerate), (1280, 720, 30));
+    assert!(layers.iter().map(|layer| layer.max_bitrate_bps).sum::<u32>() <= CAMERA_BITRATE_BPS * 2);
+    assert_eq!(top.max_bitrate_bps, CAMERA_BITRATE_BPS);
+  }
 
   #[test]
   fn cameras_get_three_layers_and_screens_one() {

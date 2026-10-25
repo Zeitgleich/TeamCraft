@@ -20,10 +20,11 @@ use web_sys::{
 };
 
 use super::{
-  Input, Interval, MediaInput, WebCallError, browser, dictionary, js_message, media_access, window,
+  Input, Interval, MediaAccessReason, MediaInput, WebCallError, browser, dictionary, js_message,
+  media_access, window,
 };
 use crate::call_video::ReceivedVideoFrame;
-use crate::video::{VideoResolution, simulcast_layers};
+use crate::video::{VideoResolution, fit_within, simulcast_layers};
 use crate::web_api::{Canvas2d, EncodedVideoChunk, VideoDecoder, VideoEncoder, VideoFrame as WebVideoFrame};
 
 /// WebCodecs codec string: H.264 Constrained Baseline, level 4.0 (up to 1080p).
@@ -89,6 +90,9 @@ pub(super) struct TrackPlan {
   pub framerate: u8,
   pub bitrate_bps: u32,
   pub max_layers: u8,
+  /// What is sent never exceeds this size, whatever the camera delivers (4K cameras); the
+  /// encoders scale. `None`: the source size.
+  pub maybe_max_resolution: Option<VideoResolution>,
   #[cfg(feature = "effects")]
   pub maybe_effects: Option<crate::effects::EffectsPipeline>,
 }
@@ -116,6 +120,9 @@ impl TrackSender {
         .and_then(|height| u16::try_from(height & !1).ok())
         .unwrap_or(720),
     };
+    let resolution = plan
+      .maybe_max_resolution
+      .map_or(resolution, |limit| fit_within(resolution, limit));
     let video = play_hidden(&stream).await?;
     let infos = simulcast_layers(resolution, plan.framerate, plan.bitrate_bps, plan.max_layers);
     let layers = infos
@@ -401,6 +408,10 @@ pub(super) fn camera_plan() -> TrackPlan {
     framerate: CAMERA_FRAMERATE,
     bitrate_bps: CAMERA_BITRATE_BPS,
     max_layers: 3,
+    maybe_max_resolution: Some(VideoResolution {
+      width: CAMERA_WIDTH as u16,
+      height: CAMERA_HEIGHT as u16,
+    }),
     #[cfg(feature = "effects")]
     maybe_effects: None,
   }
@@ -413,28 +424,46 @@ pub(super) fn screen_plan() -> TrackPlan {
     framerate: SCREEN_FRAMERATE,
     bitrate_bps: SCREEN_BITRATE_BPS,
     max_layers: 1,
+    maybe_max_resolution: None,
     #[cfg(feature = "effects")]
     maybe_effects: None,
   }
 }
 
-/// Asks for the camera (`getUserMedia`); `maybe_device` is a `MediaDeviceInfo.deviceId`.
+/// Asks for the camera (`getUserMedia`); `maybe_device` is a `MediaDeviceInfo.deviceId`. Every
+/// constraint is `ideal`, so no device is turned away for its size or rate (`OverconstrainedError`);
+/// if the browser still fails (the chosen device is gone, or refuses the size), it is asked once
+/// more for any camera with no constraints.
 pub(super) async fn capture_camera(maybe_device: Option<&str>) -> Result<MediaStream, WebCallError> {
   let video = MediaTrackConstraints::new();
   video.set_width(&ideal(CAMERA_WIDTH)?);
   video.set_height(&ideal(CAMERA_HEIGHT)?);
   video.set_frame_rate(&ideal(u32::from(CAMERA_FRAMERATE))?);
   if let Some(device) = maybe_device {
-    let exact = dictionary(&[("exact", JsValue::from_str(device))]).map_err(browser("getUserMedia"))?;
-    video.set_device_id(&exact.into());
+    let preferred = dictionary(&[("ideal", JsValue::from_str(device))]).map_err(browser("getUserMedia"))?;
+    video.set_device_id(&preferred.into());
   }
   let constraints = MediaStreamConstraints::new();
   constraints.set_video(&video);
+  match request_camera(&constraints).await {
+    Err(WebCallError::MediaAccess {
+      reason: MediaAccessReason::NotFound | MediaAccessReason::InUse | MediaAccessReason::Other,
+      ..
+    }) => {
+      let any = MediaStreamConstraints::new();
+      any.set_video(&JsValue::TRUE);
+      request_camera(&any).await
+    },
+    result => result,
+  }
+}
+
+async fn request_camera(constraints: &MediaStreamConstraints) -> Result<MediaStream, WebCallError> {
   let promise = window()?
     .navigator()
     .media_devices()
     .map_err(|_| WebCallError::Unsupported(super::SECURE_CONTEXT))?
-    .get_user_media_with_constraints(&constraints)
+    .get_user_media_with_constraints(constraints)
     .map_err(media_access(MediaInput::Camera))?;
   Ok(
     JsFuture::from(promise)

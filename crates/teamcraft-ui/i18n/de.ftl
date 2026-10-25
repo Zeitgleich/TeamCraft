@@ -2385,6 +2385,7 @@ error-call-microphone-in-use = Das Mikrofon lässt sich nicht öffnen. Schließe
 error-call-camera-denied = Der Browser hat die Kamera blockiert. Erlaube sie für diese Seite (Symbol in der Adressleiste) und schalte die Kamera dann erneut ein.
 error-call-camera-missing = Es wurde keine Kamera gefunden. Schließe eine an und schalte die Kamera dann erneut ein.
 error-call-camera-in-use = Die Kamera lässt sich nicht öffnen. Schließe andere Apps, die sie nutzen, und versuche es erneut.
+error-call-camera-unsupported = Das Bildformat dieser Kamera wird nicht unterstützt, dein Video bleibt aus. Probiere eine andere Kamera.
 error-call-screen-unavailable = Dein Bildschirm kann von hier aus nicht geteilt werden.
 error-call-unsupported = Dieser Browser kann keine Anrufe führen. Nutze ein aktuelles Chrome, Edge, Firefox oder Safari oder die TeamCraft-App.
 error-call-server-unreachable = Der Anrufserver ist nicht erreichbar. Das Netzwerk blockiert vielleicht Anrufe (UDP); versuche ein anderes Netzwerk oder frag deinen Admin.

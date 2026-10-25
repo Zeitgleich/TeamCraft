@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::call_video::ReceivedVideoFrame;
-use crate::video::{EncodedVideoFrame, VideoFrame};
+use crate::video::{EncodedVideoFrame, VideoFrame, VideoResolution, fit_within};
 use crate::video_capture::{CaptureError, VideoCapture, frame_queue};
 use crate::video_codec::{
   FallbackEncoder, OpenH264Decoder, OpenH264Encoder, SimulcastEncoder, VideoCodecError, VideoContent,
@@ -31,6 +31,38 @@ pub type FrameFilter = Box<dyn FnMut(VideoFrame) -> VideoFrame + Send>;
 
 /// Gets decoded frames of a watched track, on the decoder thread.
 pub type FrameSink = Box<dyn FnMut(VideoFrame) + Send>;
+
+/// Drops frames that come faster than the send rate. Some slack keeps a 30 fps camera whose
+/// timestamps jitter from losing every other frame.
+struct FrameLimiter {
+  min_interval_us: u64,
+  maybe_last_us: Option<u64>,
+}
+
+impl FrameLimiter {
+  /// `None` or 0: no limit.
+  fn new(maybe_max_framerate: Option<u8>) -> Self {
+    let min_interval_us = match maybe_max_framerate {
+      Some(rate) if rate > 0 => 1_000_000 / u64::from(rate) * 9 / 10,
+      _ => 0,
+    };
+    Self {
+      min_interval_us,
+      maybe_last_us: None,
+    }
+  }
+
+  fn is_due(&mut self, timestamp_us: u64) -> bool {
+    if let Some(last) = self.maybe_last_us
+      && timestamp_us.saturating_sub(last) < self.min_interval_us
+      && timestamp_us >= last
+    {
+      return false;
+    }
+    self.maybe_last_us = Some(timestamp_us);
+    true
+  }
+}
 
 /// One published track's capture and encoder thread.
 pub struct VideoSender {
@@ -126,6 +158,14 @@ impl VideoSender {
             return;
           },
         };
+        let send_resolution = thread_layers
+          .iter()
+          .map(|layer| VideoResolution {
+            width: layer.width,
+            height: layer.height,
+          })
+          .max_by_key(|resolution| u32::from(resolution.width) * u32::from(resolution.height));
+        let mut limiter = FrameLimiter::new(thread_layers.iter().map(|layer| layer.max_framerate).max());
         loop {
           for control in control_rx.try_iter() {
             match control {
@@ -147,6 +187,24 @@ impl VideoSender {
               continue;
             },
             Err(RecvTimeoutError::Disconnected) => break,
+          };
+          // A camera may deliver 60 fps; the call sends at most its layers' rate.
+          if !limiter.is_due(frame.timestamp_us()) {
+            continue;
+          }
+          // Shrink before the filter (background effects) and the encoders: they work per pixel.
+          let target =
+            send_resolution.map_or(frame.resolution(), |limit| fit_within(frame.resolution(), limit));
+          let frame = if target == frame.resolution() {
+            frame
+          } else {
+            match frame.scaled(target) {
+              Ok(scaled) => scaled,
+              Err(error) => {
+                warn!(%error, "video frame not scaled");
+                continue;
+              },
+            }
           };
           let frame = match &mut maybe_filter {
             Some(filter) => filter(frame),
@@ -264,6 +322,17 @@ impl Drop for VideoReceiver {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn the_limiter_drops_a_60_fps_camera_to_30_and_keeps_a_jittery_30() {
+    let mut limiter = FrameLimiter::new(Some(30));
+    let sixty: Vec<bool> = (0..6).map(|i| limiter.is_due(i * 16_667)).collect();
+    assert_eq!(sixty, [true, false, true, false, true, false]);
+    let mut limiter = FrameLimiter::new(Some(30));
+    let jittery = [0, 31_000, 66_000, 98_000].map(|t| limiter.is_due(t));
+    assert_eq!(jittery, [true; 4]);
+    assert!(FrameLimiter::new(None).is_due(5));
+  }
+
   use std::sync::Mutex;
 
   use teamcraft_proto::{DeviceId, Id, MediaStreamId, Snowflake, VideoCodec};

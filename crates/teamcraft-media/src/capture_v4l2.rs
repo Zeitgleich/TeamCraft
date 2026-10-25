@@ -1,8 +1,9 @@
 //! Cameras through V4L2 (`/dev/video*`), the Linux fallback when the camera portal isn't
 //! available (no portal service, or a desktop without camera support in it).
 //!
-//! The format is negotiated once at open: the largest size up to the wanted one, preferring
-//! uncompressed YUYV/NV12 over MJPEG at equal size (no decode cost), then the driver's choice.
+//! The format is negotiated once at open with the shared rule (`capture_negotiate`): the closest
+//! size, preferring uncompressed formats over MJPEG at equal size (no decode cost); when the driver
+//! refuses it, the driver's current format is used if it can be converted.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use v4l::video::capture::Parameters;
 use v4l::{Device, Format, FourCC};
 
 use crate::capture_convert::{PixelFormat, RawPicture};
+use crate::capture_negotiate::{OfferedMode, choose_mode};
 use crate::video::VideoResolution;
 use crate::video_capture::{CameraInfo, CaptureError, CaptureFormat, FrameSender, VideoCapture};
 
@@ -34,14 +36,6 @@ pub struct V4l2Camera {
   pixel_format: PixelFormat,
   fourcc: FourCC,
   maybe_running: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
-}
-
-/// One size a camera offers in one pixel format.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Offer {
-  pixel_format: PixelFormat,
-  width: u32,
-  height: u32,
 }
 
 /// Video capture devices (metadata nodes and other non-capture nodes left out).
@@ -72,14 +66,22 @@ impl V4l2Camera {
         .ok_or(CaptureError::NoDevice("camera"))?,
     };
     let device = Device::with_path(&path).map_err(|error| device_error(&path, &error))?;
-    let offers = offers(&device)?;
-    let chosen = choose(&offers, wanted.resolution).ok_or_else(|| {
-      CaptureError::UnsupportedFormat(format!("{}: no YUYV, NV12 or MJPEG mode", path.display()))
-    })?;
+    let offers = offers(&device, wanted.framerate)?;
+    let (chosen, actual) = match choose_mode(&offers, wanted) {
+      Some(chosen) => {
+        let requested = Format::new(chosen.width, chosen.height, fourcc_of(chosen.pixel_format));
+        match device.set_format(&requested) {
+          Ok(actual) => (chosen, actual),
+          Err(error) => {
+            warn!(path = %path.display(), %error, "camera refused the chosen format");
+            current_format(&device, &path)?
+          },
+        }
+      },
+      // Nothing listed we know: whatever the driver is set to, if we can convert it.
+      None => current_format(&device, &path)?,
+    };
     let fourcc = fourcc_of(chosen.pixel_format);
-    let actual = device
-      .set_format(&Format::new(chosen.width, chosen.height, fourcc))
-      .map_err(|error| device_error(&path, &error))?;
     let resolution = VideoResolution {
       width: u16::try_from(actual.width & !1)
         .map_err(|_| CaptureError::UnsupportedFormat("too wide".into()))?,
@@ -187,7 +189,23 @@ impl Drop for V4l2Camera {
   }
 }
 
-fn offers(device: &Device) -> Result<Vec<Offer>, CaptureError> {
+/// The driver's own format as a fallback; an error if it isn't convertible.
+fn current_format(device: &Device, path: &std::path::Path) -> Result<(OfferedMode, Format), CaptureError> {
+  let format = device.format().map_err(|error| device_error(path, &error))?;
+  let pixel_format = pixel_format_of(format.fourcc)
+    .ok_or_else(|| CaptureError::UnsupportedFormat(format!("{}: no mode we can convert", path.display())))?;
+  let mode = OfferedMode {
+    pixel_format,
+    width: format.width,
+    height: format.height,
+    framerate: 0,
+  };
+  Ok((mode, format))
+}
+
+/// The modes the camera lists in formats we convert. V4L2 frame intervals are not enumerated, so
+/// every mode carries the wanted rate (the rate is set separately when the stream starts).
+fn offers(device: &Device, framerate: u8) -> Result<Vec<OfferedMode>, CaptureError> {
   let mut offers = Vec::new();
   for description in device
     .enum_formats()
@@ -201,42 +219,16 @@ fn offers(device: &Device) -> Result<Vec<Offer>, CaptureError> {
     };
     for size in sizes {
       for discrete in size.size.to_discrete() {
-        offers.push(Offer {
+        offers.push(OfferedMode {
           pixel_format,
           width: discrete.width,
           height: discrete.height,
+          framerate: u32::from(framerate),
         });
       }
     }
   }
   Ok(offers)
-}
-
-/// The largest mode not above `wanted` (or the smallest, if all are larger); at equal size
-/// uncompressed formats win.
-fn choose(offers: &[Offer], wanted: VideoResolution) -> Option<Offer> {
-  let fits =
-    |offer: &&Offer| offer.width <= u32::from(wanted.width) && offer.height <= u32::from(wanted.height);
-  let rank = |offer: &Offer| {
-    let cost = match offer.pixel_format {
-      PixelFormat::Yuyv | PixelFormat::Nv12 | PixelFormat::I420 => 0,
-      _ => 1,
-    };
-    (
-      u64::from(offer.width) * u64::from(offer.height),
-      std::cmp::Reverse(cost),
-    )
-  };
-  offers
-    .iter()
-    .filter(fits)
-    .max_by_key(|offer| rank(offer))
-    .or_else(|| {
-      offers
-        .iter()
-        .min_by_key(|offer| u64::from(offer.width) * u64::from(offer.height))
-    })
-    .copied()
 }
 
 fn pixel_format_of(fourcc: FourCC) -> Option<PixelFormat> {
@@ -254,6 +246,7 @@ fn fourcc_of(format: PixelFormat) -> FourCC {
     PixelFormat::Yuyv => b"YUYV",
     PixelFormat::Nv12 => b"NV12",
     PixelFormat::I420 => b"YU12",
+    // `choose_mode` never returns the packed RGB formats on V4L2 (they aren't listed).
     PixelFormat::Mjpeg | PixelFormat::Bgrx | PixelFormat::Rgbx => b"MJPG",
   })
 }
@@ -270,40 +263,6 @@ fn device_error(path: &std::path::Path, error: &std::io::Error) -> CaptureError 
 mod tests {
   use super::*;
 
-  const HD: VideoResolution = VideoResolution {
-    width: 1280,
-    height: 720,
-  };
-
-  #[test]
-  fn largest_fitting_mode_wins_and_raw_beats_mjpeg_at_equal_size() {
-    let offers = [
-      offer(PixelFormat::Yuyv, 640, 480),
-      offer(PixelFormat::Mjpeg, 1280, 720),
-      offer(PixelFormat::Yuyv, 1280, 720),
-      offer(PixelFormat::Mjpeg, 1920, 1080),
-    ];
-    assert_eq!(choose(&offers, HD), Some(offer(PixelFormat::Yuyv, 1280, 720)));
-    let mjpeg_only_hd = [
-      offer(PixelFormat::Yuyv, 640, 480),
-      offer(PixelFormat::Mjpeg, 1280, 720),
-    ];
-    assert_eq!(
-      choose(&mjpeg_only_hd, HD),
-      Some(offer(PixelFormat::Mjpeg, 1280, 720))
-    );
-  }
-
-  #[test]
-  fn too_large_cameras_give_their_smallest_mode() {
-    let offers = [
-      offer(PixelFormat::Mjpeg, 3840, 2160),
-      offer(PixelFormat::Mjpeg, 1920, 1080),
-    ];
-    assert_eq!(choose(&offers, HD), Some(offer(PixelFormat::Mjpeg, 1920, 1080)));
-    assert_eq!(choose(&[], HD), None);
-  }
-
   #[test]
   fn fourccs_map_both_ways() {
     for format in [
@@ -315,13 +274,5 @@ mod tests {
       assert_eq!(pixel_format_of(fourcc_of(format)), Some(format));
     }
     assert_eq!(pixel_format_of(FourCC::new(b"H264")), None);
-  }
-
-  fn offer(pixel_format: PixelFormat, width: u32, height: u32) -> Offer {
-    Offer {
-      pixel_format,
-      width,
-      height,
-    }
   }
 }

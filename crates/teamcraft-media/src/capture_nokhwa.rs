@@ -12,14 +12,19 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use nokhwa::Camera;
-use nokhwa::pixel_format::RgbAFormat;
+use nokhwa::NokhwaError;
 use nokhwa::utils::{
   ApiBackend, CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType, Resolution,
 };
-use tracing::warn;
+use tracing::{info, warn};
+
+use crate::capture_negotiate::{OfferedMode, choose_mode};
 
 use crate::capture_convert::{PixelFormat, RawPicture};
 use crate::video_capture::{CameraInfo, CaptureError, CaptureFormat, FrameSender, VideoCapture};
+
+/// Frame formats `RawPicture::to_i420` converts.
+const SUPPORTED_FORMATS: &[FrameFormat] = &[FrameFormat::NV12, FrameFormat::YUYV, FrameFormat::MJPEG];
 
 /// A camera opened through nokhwa (AVFoundation on macOS, Media Foundation on Windows).
 pub struct NokhwaCamera {
@@ -74,24 +79,13 @@ impl VideoCapture for NokhwaCamera {
     let thread = std::thread::Builder::new()
       .name("camera".into())
       .spawn(move || {
-        let requested = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::Closest(CameraFormat::new(
-          Resolution::new(
-            u32::from(wanted.resolution.width),
-            u32::from(wanted.resolution.height),
-          ),
-          FrameFormat::NV12,
-          u32::from(wanted.framerate),
-        )));
-        let mut camera = match Camera::new(index, requested).and_then(|mut camera| {
-          camera.open_stream()?;
-          Ok(camera)
-        }) {
+        let mut camera = match open_negotiated(index, wanted) {
           Ok(camera) => {
             let _ = opened.send(Ok(()));
             camera
           },
           Err(error) => {
-            let _ = opened.send(Err(CaptureError::Device(error.to_string())));
+            let _ = opened.send(Err(error));
             return;
           },
         };
@@ -154,6 +148,54 @@ impl VideoCapture for NokhwaCamera {
 impl Drop for NokhwaCamera {
   fn drop(&mut self) {
     self.stop();
+  }
+}
+
+/// Opens the camera in the mode closest to `wanted` among those it offers, instead of demanding one
+/// fixed pixel format (AVFoundation cameras often have no NV12).
+fn open_negotiated(index: CameraIndex, wanted: CaptureFormat) -> Result<Camera, CaptureError> {
+  let device = |error: NokhwaError| CaptureError::Device(error.to_string());
+  // Any mode we can convert gets the device open; the real choice follows once its modes are known.
+  let any_mode = RequestedFormat::with_formats(RequestedFormatType::None, SUPPORTED_FORMATS);
+  let mut camera = Camera::new(index, any_mode).map_err(device)?;
+  let offered: Vec<OfferedMode> = camera
+    .compatible_camera_formats()
+    .map_err(device)?
+    .into_iter()
+    .filter_map(|mode| {
+      Some(OfferedMode {
+        pixel_format: pixel_format_of(mode.format())?,
+        width: mode.width(),
+        height: mode.height(),
+        framerate: mode.frame_rate(),
+      })
+    })
+    .collect();
+  // No mode we can name: keep the one the device opened with, which is one we convert.
+  if let Some(chosen) = choose_mode(&offered, wanted) {
+    let exact = CameraFormat::new(
+      Resolution::new(chosen.width, chosen.height),
+      frame_format_of(chosen.pixel_format),
+      chosen.framerate,
+    );
+    info!(width = chosen.width, height = chosen.height, framerate = chosen.framerate, format = ?chosen.pixel_format, "camera mode chosen");
+    if let Err(error) = camera.set_camera_requset(RequestedFormat::with_formats(
+      RequestedFormatType::Exact(exact),
+      SUPPORTED_FORMATS,
+    )) {
+      warn!(%error, "camera refused the chosen mode; using its own");
+    }
+  }
+  camera.open_stream().map_err(device)?;
+  Ok(camera)
+}
+
+fn frame_format_of(format: PixelFormat) -> FrameFormat {
+  match format {
+    PixelFormat::Yuyv => FrameFormat::YUYV,
+    PixelFormat::Mjpeg => FrameFormat::MJPEG,
+    // `choose_mode` only returns the three formats above.
+    _ => FrameFormat::NV12,
   }
 }
 
