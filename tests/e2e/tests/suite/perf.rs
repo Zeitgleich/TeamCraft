@@ -218,6 +218,12 @@ struct Report {
   idle_running_animations: f64,
   /// Gateway frames in both directions while idle (heartbeats and their answers).
   idle_gateway_frames_per_minute: f64,
+  /// Memory at the start and the end of the idle period, after a full collection (issue #399: an
+  /// idle client must not grow).
+  pss_mib_idle_start: f64,
+  pss_mib_idle_end: f64,
+  js_heap_mib_idle_start: f64,
+  js_heap_mib_idle_end: f64,
   wasm_kib: f64,
 }
 
@@ -547,12 +553,18 @@ async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> R
   // and the switches started is finished first.
   wait_until_done(page).await;
   report.idle_running_animations = running_animations(page).await;
+  collect_garbage(page).await;
+  report.js_heap_mib_idle_start = metric(page, "JSHeapUsedSize").await / MIB;
+  report.pss_mib_idle_start = mib(ProcessUsage::of_matching(profile).pss_bytes);
   let kinds_before = ProcessUsage::by_kind(profile);
   let usage_before = ProcessUsage::of_matching(profile);
   let tasks_before = metric(page, "TaskDuration").await;
   let traffic = count_traffic(page, scale.idle).await;
   let usage_after = ProcessUsage::of_matching(profile);
   let tasks_after = metric(page, "TaskDuration").await;
+  collect_garbage(page).await;
+  report.js_heap_mib_idle_end = metric(page, "JSHeapUsedSize").await / MIB;
+  report.pss_mib_idle_end = mib(ProcessUsage::of_matching(profile).pss_bytes);
   for (kind, after) in ProcessUsage::by_kind(profile) {
     let before = kinds_before.get(&kind).copied().unwrap_or_default();
     eprintln!(
@@ -983,6 +995,10 @@ impl Report {
         "idle_gateway_frames_per_minute",
         self.idle_gateway_frames_per_minute,
       ),
+      ("pss_mib_idle_start", self.pss_mib_idle_start),
+      ("pss_mib_idle_end", self.pss_mib_idle_end),
+      ("js_heap_mib_idle_start", self.js_heap_mib_idle_start),
+      ("js_heap_mib_idle_end", self.js_heap_mib_idle_end),
       ("wasm_kib", self.wasm_kib),
     ]
   }
@@ -1019,6 +1035,15 @@ impl Report {
       "heap grows with channel switches: {self:#?}"
     );
     assert!(self.idle_cpu_percent < 5.0, "busy while idle: {self:#?}");
+    // Issue #399: a loop while idle showed as growth of several MiB per second.
+    assert!(
+      self.pss_mib_idle_end < self.pss_mib_idle_start * 1.1 + 30.0,
+      "memory grows while idle: {self:#?}"
+    );
+    assert!(
+      self.js_heap_mib_idle_end < self.js_heap_mib_idle_start * 1.5 + 5.0,
+      "heap grows while idle: {self:#?}"
+    );
     // Issue #252: nothing is read on a timer while connected.
     assert_eq!(
       self.idle_api_requests_per_minute, 0.0,
