@@ -202,8 +202,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // As stored: with the login hint of an earlier sign-in to this server kept (issue #448).
     val server = graph.servers.active() ?: current.checked.server
     withContext(Dispatchers.IO) { graph.auth.activate(server) }
-    // The server may be the one of the session from before the server entry (#224).
-    graph.scope.launch { graph.legacySignOut.run(server) }
     showServer(server)
     if (!graph.auth.isSignedIn.value) {
       // The page came with the answer just checked; the sign-in screen needn't ask again.

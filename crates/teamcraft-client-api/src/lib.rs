@@ -17,7 +17,6 @@ pub mod custom_status;
 pub mod emoji;
 pub mod emoji_catalog;
 pub mod failure;
-pub mod legacy_session;
 pub mod links;
 pub mod live;
 pub mod log;

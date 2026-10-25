@@ -10,7 +10,6 @@ mod bridge;
 mod calls;
 mod engine;
 mod error;
-mod legacy_session;
 mod server_entry;
 mod types;
 mod video;
@@ -23,10 +22,6 @@ pub use calls::{
   IncomingCallInfo, RemoteVideoFrame, RemoteVideoTrack, VideoListener, VideoTrackInfo,
 };
 pub use error::TeamCraftError;
-pub use legacy_session::{
-  LegacyCleanupAction, LegacyFormField, LegacyProviderInfo, LegacyRevocationRequest, LegacySignOutError,
-  is_legacy_provider, legacy_cleanup_action, legacy_discovery_url, legacy_token_revocation,
-};
 pub use server_entry::{
   CheckedServer, ServerAddress, ServerEntryError, SignInOption, SignInPageInfo, StoredServer,
   check_server_info, normalize_server_address, sign_in_page, sso_only_sign_in_page, stored_server,

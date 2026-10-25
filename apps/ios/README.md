@@ -87,11 +87,7 @@ announced. *Change server* on the sign-in screen leads back to the entry; signin
   one, read back through `storedServer`, which checks it again), so the extension opens the core for the
   same server. Keychain items (`oidc-session.<storage key>`, `database-key.<storage key>.<subject>`),
   the data folder (`servers/<storage key>` in the App Group container) and the cached brand are keyed by
-  server. A session of a build with a built-in server is set aside at start; that user signs in again.
-  `LegacySignOut` unregisters the old device's push and revokes the old refresh token once the user
-  entered the server it belonged to (the identity provider must have the old session's token
-  endpoint), then deletes the old session, key and data; after 14 days without that server it
-  deletes them without the sign-out.
+  server.
 - **Managed app configuration** (MDM): `server_url` (string) and `lock_server` (boolean) in
   `com.apple.configuration.managed`. Without an account, the app checks that server and asks for
   confirmation. With `lock_server`, *Change server* is hidden, other addresses are refused, and an

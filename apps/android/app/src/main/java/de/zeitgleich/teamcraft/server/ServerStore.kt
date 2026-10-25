@@ -1,7 +1,6 @@
 package de.zeitgleich.teamcraft.server
 
 import android.content.Context
-import java.io.File
 import androidx.core.content.edit
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -13,18 +12,6 @@ import uniffi.teamcraft_ffi.storedServerWithLoginHint
 
 private const val PREFS = "servers"
 private const val KEY_ACCOUNTS = "accounts"
-private const val KEY_LAYOUT = "storage_layout"
-
-/** When the old session was moved aside, for the bound on waiting for its server. */
-private const val KEY_LEGACY_MOVED_AT = "legacy_moved_at"
-/** The old session, store and keys waiting for their sign-out; file names inside it. */
-const val LEGACY_DIR = "legacy"
-const val LEGACY_SESSION = "session.bin"
-const val LEGACY_KEYS = "keys"
-const val LEGACY_STORE = "store"
-
-/** Files keyed by server (StoragePaths); 1 was one server baked into the build. */
-private const val LAYOUT_PER_SERVER = 2
 
 private val json = Json { ignoreUnknownKeys = true }
 
@@ -75,49 +62,6 @@ class ServerStore(private val context: Context) {
   fun forget(origin: String) {
     write(accounts().removed(origin))
   }
-
-  /**
-   * Builds before the server entry kept one session, store and key per build-time server. They
-   * are moved aside into [legacyDir], where `LegacySignOut` unregisters push and revokes the
-   * refresh token before deleting them (#224); nothing else reads them again. Runs once; quick on
-   * the calling thread.
-   */
-  @Synchronized
-  fun migrateLegacyLayout() {
-    if (prefs.getInt(KEY_LAYOUT, 1) >= LAYOUT_PER_SERVER) return
-    val files = context.filesDir
-    val legacy = File(files, LEGACY_DIR)
-    legacy.mkdirs()
-    File(files, "auth/session.bin").renameTo(File(legacy, LEGACY_SESSION))
-    val keys = File(legacy, LEGACY_KEYS).apply { mkdirs() }
-    File(files, "keys").listFiles { file -> file.isFile }?.forEach { it.renameTo(File(keys, it.name)) }
-    File(files, "brand").listFiles { file -> file.isFile }?.forEach(File::delete)
-    val store = File(files, "store")
-    if (store.exists()) store.renameTo(File(legacy, LEGACY_STORE))
-    prefs.edit {
-      putLong(KEY_LEGACY_MOVED_AT, System.currentTimeMillis())
-      putInt(KEY_LAYOUT, LAYOUT_PER_SERVER)
-    }
-  }
-
-  /** The old session moved aside by [migrateLegacyLayout], if it is still there. */
-  fun legacyDir(): File? = File(context.filesDir, LEGACY_DIR).takeIf { it.exists() }
-
-  /** When [migrateLegacyLayout] moved the old session aside. */
-  fun legacyMovedAt(): Long = prefs.getLong(KEY_LEGACY_MOVED_AT, 0L)
-
-  /** Deletes the old session after its sign-out (slow, not on the UI thread). */
-  fun removeLegacy() {
-    File(context.filesDir, LEGACY_DIR).deleteRecursively()
-    prefs.edit { remove(KEY_LEGACY_MOVED_AT) }
-  }
-
-  /** Removes the old store an earlier version moved aside without a sign-out (again after a process death); slow, not on the UI thread. */
-  fun removeLegacyTrash() {
-    legacyTrash().deleteRecursively()
-  }
-
-  private fun legacyTrash() = File(context.filesDir, "store-legacy-removed")
 
   private fun accounts(): ServerAccounts = ServerAccounts.decode(prefs.getString(KEY_ACCOUNTS, null))
 
