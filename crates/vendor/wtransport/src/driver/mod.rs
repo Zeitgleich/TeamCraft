@@ -15,6 +15,7 @@ use crate::stream::OpeningBiStream;
 use crate::stream::OpeningUniStream;
 use crate::SessionId;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 use tracing::debug;
 use tracing::debug_span;
@@ -43,6 +44,15 @@ pub struct Driver {
     ready_bi_wt_streams: Mutex<mpsc::Receiver<StreamBiRemoteWT>>,
     ready_datagrams: Mutex<mpsc::Receiver<Datagram>>,
     driver_result: SharedResultGet<DriverError>,
+    close_requests: mpsc::UnboundedSender<CloseSessionRequest>,
+}
+
+/// Asks the worker to end the WebTransport session with a CLOSE_WEBTRANSPORT_SESSION capsule.
+#[derive(Debug)]
+struct CloseSessionRequest {
+    error_code: u32,
+    reason: String,
+    done: oneshot::Sender<()>,
 }
 
 impl Driver {
@@ -53,6 +63,7 @@ impl Driver {
         let ready_bi_wt_streams = mpsc::channel(1);
         let ready_datagrams = mpsc::channel(1);
         let driver_result = shared_result();
+        let close_requests = mpsc::unbounded_channel();
 
         tokio::spawn(
             worker::Worker::new(
@@ -63,6 +74,7 @@ impl Driver {
                 ready_bi_wt_streams.0,
                 ready_datagrams.0,
                 driver_result.0,
+                close_requests.1,
             )
             .run()
             .instrument(debug_span!("Driver", quic_id = quic_connection.stable_id())),
@@ -76,6 +88,22 @@ impl Driver {
             ready_bi_wt_streams: Mutex::new(ready_bi_wt_streams.1),
             ready_datagrams: Mutex::new(ready_datagrams.1),
             driver_result: driver_result.1,
+            close_requests: close_requests.0,
+        }
+    }
+
+    /// Sends the close capsule on the session stream and returns once the peer has it (or the
+    /// connection is gone).
+    pub async fn close_session(&self, error_code: u32, reason: &str) {
+        let (done, wait) = oneshot::channel();
+        let request = CloseSessionRequest {
+            error_code,
+            reason: reason.to_owned(),
+            done,
+        };
+
+        if self.close_requests.send(request).is_ok() {
+            let _ = wait.await;
         }
     }
 
@@ -227,6 +255,15 @@ impl Driver {
         }
     }
 
+    /// How the peer ended the WebTransport session with a close capsule, once the driver has
+    /// stopped.
+    pub async fn session_close(&self) -> Option<ApplicationClose> {
+        match self.result().await {
+            DriverError::ApplicationClosed(close) => Some(close),
+            DriverError::Proto(_) | DriverError::NotConnected => None,
+        }
+    }
+
     async fn result(&self) -> DriverError {
         match self.driver_result.result().await {
             Some(error) => error,
@@ -261,6 +298,7 @@ mod worker {
         ready_bi_wt_streams: mpsc::Sender<StreamBiRemoteWT>,
         ready_datagrams: mpsc::Sender<Datagram>,
         driver_result: SharedResultSet<DriverError>,
+        close_requests: mpsc::UnboundedReceiver<CloseSessionRequest>,
         local_settings_stream: LocalSettingsStream,
         remote_settings_stream: RemoteSettingsStream,
         remote_qpack_enc_stream: RemoteQPackEncStream,
@@ -277,6 +315,7 @@ mod worker {
             ready_bi_wt_streams: mpsc::Sender<StreamBiRemoteWT>,
             ready_datagrams: mpsc::Sender<Datagram>,
             driver_result: SharedResultSet<DriverError>,
+            close_requests: mpsc::UnboundedReceiver<CloseSessionRequest>,
         ) -> Self {
             Self {
                 quic_connection,
@@ -286,6 +325,7 @@ mod worker {
                 ready_bi_wt_streams,
                 ready_datagrams,
                 driver_result,
+                close_requests,
                 local_settings_stream: LocalSettingsStream::empty(),
                 remote_settings_stream: RemoteSettingsStream::empty(),
                 remote_qpack_enc_stream: RemoteQPackEncStream::empty(),
@@ -372,6 +412,16 @@ mod worker {
                             }
                             None => return Err(DriverError::NotConnected),
                         };
+                    }
+
+                    request = self.close_requests.recv() => {
+                        // The sender lives as long as the `Driver` handle; without it nobody asks.
+                        if let Some(request) = request {
+                            self.connect_stream
+                                .send_close(request.error_code, &request.reason)
+                                .await;
+                            let _ = request.done.send(());
+                        }
                     }
 
                     error = Self::run_control_streams(&mut self.local_settings_stream,

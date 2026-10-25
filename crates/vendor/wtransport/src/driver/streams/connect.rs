@@ -1,4 +1,6 @@
+use std::borrow::Cow;
 use tracing::debug;
+use wtransport_proto::frame::Frame;
 use wtransport_proto::bytes::IoReadError;
 use wtransport_proto::capsule::capsules;
 use wtransport_proto::capsule::Capsule;
@@ -28,6 +30,26 @@ impl ConnectStream {
 
     pub fn set_stream(&mut self, stream: StreamSession) {
         self.stream = Some(stream);
+    }
+
+    /// Sends a CLOSE_WEBTRANSPORT_SESSION capsule with `error_code` and `reason`, ends the CONNECT
+    /// stream and waits until the peer has the data. A no-op without a session stream.
+    pub async fn send_close(&mut self, error_code: u32, reason: &str) {
+        let Some(stream) = self.stream.as_mut() else {
+            return;
+        };
+
+        let payload = close_capsule(error_code, reason);
+
+        if stream
+            .write_frame(Frame::new_data(Cow::Owned(payload)))
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        stream.finish().await;
     }
 
     pub async fn run(&mut self) -> DriverError {
@@ -101,5 +123,64 @@ impl ConnectStream {
                 },
             };
         }
+    }
+}
+
+/// Longest reason a CLOSE_WEBTRANSPORT_SESSION capsule carries (draft-ietf-webtrans-http3).
+const MAX_CLOSE_REASON_LEN: usize = 1024;
+
+/// A CLOSE_WEBTRANSPORT_SESSION capsule (type 0x2843): the 32-bit application error code, then
+/// the reason, cut to the maximum at a character boundary.
+fn close_capsule(error_code: u32, reason: &str) -> Vec<u8> {
+    let mut end = reason.len().min(MAX_CLOSE_REASON_LEN);
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    let reason = &reason.as_bytes()[..end];
+
+    let mut capsule = Vec::with_capacity(8 + reason.len());
+    put_varint(&mut capsule, 0x2843);
+    put_varint(&mut capsule, 4 + reason.len() as u64);
+    capsule.extend_from_slice(&error_code.to_be_bytes());
+    capsule.extend_from_slice(reason);
+    capsule
+}
+
+/// Appends `value` (below 2^14) as a QUIC variable-length integer.
+fn put_varint(buffer: &mut Vec<u8>, value: u64) {
+    debug_assert!(value < 1 << 14);
+    if value < 1 << 6 {
+        buffer.push(value as u8);
+    } else {
+        buffer.push(0x40 | (value >> 8) as u8);
+        buffer.push(value as u8);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wtransport_proto::frame::FrameKind;
+
+    #[test]
+    fn the_capsule_parses_back() {
+        let payload = close_capsule(0x4805, "going away");
+        let frame = Frame::new_data(Cow::Owned(payload));
+        assert!(matches!(frame.kind(), FrameKind::Data));
+
+        let capsule = Capsule::with_frame(&frame).expect("a capsule");
+        let close = capsules::CloseWebTransportSession::with_capsule(&capsule).expect("parses");
+        assert_eq!(close.error_code().into_inner(), 0x4805);
+        assert_eq!(close.reason(), "going away");
+    }
+
+    #[test]
+    fn a_long_reason_is_cut_at_a_character_boundary() {
+        let reason = "é".repeat(1000);
+        let payload = close_capsule(1, &reason);
+        let frame = Frame::new_data(Cow::Owned(payload));
+        let capsule = Capsule::with_frame(&frame).expect("a capsule");
+        let close = capsules::CloseWebTransportSession::with_capsule(&capsule).expect("parses");
+        assert_eq!(close.reason().len(), 1024);
     }
 }
