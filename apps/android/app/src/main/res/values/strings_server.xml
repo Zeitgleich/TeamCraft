@@ -31,6 +31,8 @@
   <string name="restriction_server_url_description">The TeamCraft server users sign in to, for example https://team.example.com. The app checks it and asks the user to confirm before signing in.</string>
   <string name="restriction_lock_server_title">Lock server</string>
   <string name="restriction_lock_server_description">Users can\'t change to another server. An account on another server is signed out.</string>
+  <string name="restriction_trust_user_certificates_title">Trust company certificates</string>
+  <string name="restriction_trust_user_certificates_description">Also trust certificate authorities installed by the user or the device management, for example the CA of a proxy that inspects encrypted traffic. Off: only the system\'s CAs.</string>
   <string name="server_confirm_provider">You will sign in at %1$s.</string>
   <string name="server_confirm_provider_elsewhere">This server signs you in through %1$s, which is not part of its own domain. Continue only if your organization uses this sign-in service; otherwise someone could be impersonating your server.</string>
 </resources>

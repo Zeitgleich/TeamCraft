@@ -114,6 +114,36 @@ exists; clients can still read what they have stored locally.
   fresh; the server's meeting admission still applies to every rejoin. Desktop and mobile apps of
   version 1.0.2 and older end the call on "going away" (a browser tab rejoins).
 
+### Company proxies, TLS inspection and captive portals (clients)
+
+How the apps behave on networks between the user and the server (issue #157):
+
+| Platform | Proxy                                                                                    | Certificate authorities                                                                                              |
+|----------|------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------|
+| Desktop  | `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY`, then macOS and Windows settings | The operating system's store (Keychain and MDM profiles, Windows store and group policy, the Linux system store)     |
+| iOS      | The system's HTTP(S) proxy (Wi-Fi settings, MDM profile)                                 | The system's trust settings, including profiles the MDM installed                                                    |
+| Android  | The network's HTTP proxy (`LinkProperties`)                                              | The system CAs; user and MDM-installed CAs only with the managed configuration `trust_user_certificates` set to true |
+| Web      | The browser's                                                                            | The browser's                                                                                                        |
+
+- REST and the WebSockets (gateway, device-link relay) use the same proxy; the WebSockets tunnel with
+  HTTP `CONNECT`, including `user:password@` from a proxy URL. REST also takes `https://` proxies;
+  the WebSockets tunnel through `http://` ones only and connect directly otherwise. SOCKS proxies
+  are not used. PAC scripts are never evaluated: on a network that only has one, the apps connect
+  directly. On Linux desktops only the environment variables count (no GNOME/KDE settings). A proxy
+  change on the desktop applies after a restart of the app; on mobile it applies when the network or
+  its proxy changes, and the iOS notification extension reads it whenever it opens the core.
+- Android ignores CAs that users install themselves, as Android apps do by default, so a CA someone
+  talked the user into installing reads nothing. An organization that inspects TLS on managed
+  devices turns on `trust_user_certificates` in its MDM's managed configuration for the app; it
+  applies at the next app start.
+- Calls (QUIC over UDP to the SFU) never go through an HTTP proxy.
+- A captive portal (a login page answering instead of the server: HTML where the API answers JSON, a
+  redirect to another site, HTTP 511) and a refused certificate are shown in the connection banner
+  as such ("sign in to this network", "this network may inspect encrypted traffic"); queued messages
+  and uploads wait and are sent once the server answers.
+- WebSocket connects use Happy Eyeballs (RFC 8305): an IPv6 route that swallows packets costs 250 ms
+  before IPv4 is tried, not the 15 s connect timeout.
+
 ## Backup and restore
 
 ### PostgreSQL

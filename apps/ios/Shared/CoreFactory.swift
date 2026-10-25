@@ -70,6 +70,9 @@ struct CoreFactory {
     }
     // Created with its protection class before the core writes into it.
     _ = container.downloadsDirectory
+    // The first connection goes through the system proxy too, also in the notification extension,
+    // which has no network monitor (issue #157).
+    SystemProxy.report()
     let config = AppConfig(
       serverUrl: server.address.origin,
       dataDir: container.dataDirectory.path,

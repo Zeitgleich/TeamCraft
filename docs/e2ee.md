@@ -1048,8 +1048,24 @@ Details:
   (subscribing again with the old subscription's key where the browser did not) and tells open pages;
   the page that owns the store (§9.4), at every start and on that message, compares
   `pushManager.getSubscription()` with what it registered and registers a changed or new one under
-  the same push key (`Client::check_web_push`). Until a page opens, pushes to a rotated subscription
-  are lost: registering needs the device's keys, which only the owning page uses.
+  the same push key (`Client::check_web_push`).
+  So that pushes don't go to the old subscription until a page opens, the worker also tells the
+  server itself (`POST /api/v1/push/web/subscription-change`, issue #145). It can't use the page's
+  credentials (the access token in the `PushSession` has usually expired by then, and no long-lived
+  token is kept for it), so the request proves knowledge of the **push key**, which the server holds
+  anyway: `HMAC-SHA-256(HKDF(push key, "TeamCraft-v1 push subscription change key"), label ||
+  device ID || SHA-256(old subscription) || SHA-256(new subscription))`. The server verifies it in
+  constant time and swaps the subscription only if the old one is what it stores (compare-and-swap),
+  so a captured request can't be replayed once the subscription moved on, and it can't change the
+  provider, the push key or anything else. Every refusal is the same 401, counted by the per-address
+  limits like a wrong token. The worker only reads the store (§9.4); the page re-registers as before,
+  which is then a no-op on the server. A second rotation before a page opened finds the server
+  holding the subscription the worker sent before (409); the worker then retries from the browser's
+  `oldSubscription`. Browsers that don't hand one over leave that case to the page.
+  *What the push key now also allows:* whoever holds it (the device's store, the server) can point
+  the device's Web Push at another endpoint. That redirects wake-ups, which the push key opens anyway
+  (conversation, message and sender IDs, never content), and can make the device miss pushes; it
+  gives no access to messages, keys or the account.
 - iOS caveat: an NSE must show every notification it receives, unless the app has Apple's
   `com.apple.developer.usernotifications.filtering` entitlement. Threema has it (its NSE entitlements
   set it to `true`), so getting it for an E2EE messenger is realistic. We request it; until granted,

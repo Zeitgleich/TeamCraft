@@ -83,6 +83,21 @@ pub struct RegisterPushRequest {
   pub push_key: Base64Bytes,
 }
 
+/// `POST /api/v1/push/web/subscription-change`: the service worker replaces a device's Web Push
+/// subscription after the browser rotated it while no page was open (e2ee.md §7). It sends no access
+/// token: `mac` proves knowledge of the device's push key over the device and both subscriptions, and
+/// the server only swaps `previous_token` for `token` if `previous_token` is what it holds.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ChangeWebPushSubscriptionRequest {
+  pub device_id: DeviceId,
+  /// The subscription JSON the device registered last.
+  pub previous_token: String,
+  /// The browser's new subscription JSON.
+  pub token: String,
+  /// HMAC-SHA-256, see `teamcraft_crypto::push::subscription_change_mac`.
+  pub mac: Base64Bytes,
+}
+
 /// `GET /api/v1/push/web-key`: the key a browser subscribes to Web Push with (`applicationServerKey`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct WebPushKeyResponse {
@@ -98,6 +113,18 @@ impl std::fmt::Debug for RegisterPushRequest {
       .field("provider", &self.provider)
       .field("token", &"[redacted]")
       .field("push_key", &"[redacted]")
+      .finish()
+  }
+}
+
+// Subscriptions carry the browser's push secrets (`auth`, `p256dh`).
+impl std::fmt::Debug for ChangeWebPushSubscriptionRequest {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("ChangeWebPushSubscriptionRequest")
+      .field("device_id", &self.device_id)
+      .field("previous_token", &"[redacted]")
+      .field("token", &"[redacted]")
+      .field("mac", &"[redacted]")
       .finish()
   }
 }
@@ -118,6 +145,20 @@ mod push_request_tests {
       "{text}"
     );
     assert!(text.contains("Fcm") || text.contains("fcm"));
+  }
+
+  #[test]
+  fn a_subscription_change_has_a_stable_wire_form_and_hides_the_subscriptions() {
+    let json = r#"{"device_id":"42","previous_token":"{\"endpoint\":\"https://push.example.com/old\"}","token":"{\"endpoint\":\"https://push.example.com/new\"}","mac":"AAEC"}"#;
+    let request: ChangeWebPushSubscriptionRequest = serde_json::from_str(json).unwrap();
+    assert_eq!(request.device_id.to_string(), "42");
+    assert_eq!(request.mac.as_slice(), &[0, 1, 2]);
+    assert_eq!(serde_json::to_string(&request).unwrap(), json);
+    let text = format!("{request:?}");
+    assert!(
+      !text.contains("push.example.com") && !text.contains("AAEC"),
+      "{text}"
+    );
   }
 }
 

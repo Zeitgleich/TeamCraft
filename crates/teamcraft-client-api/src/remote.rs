@@ -326,9 +326,22 @@ pub enum CoreConnection {
   /// Not connected; the next attempt starts at `retry_at_ms` (Unix milliseconds).
   Offline {
     retry_at_ms: i64,
+    /// What answered instead of the server, if the core found out.
+    #[serde(rename = "interception", default, skip_serializing_if = "Option::is_none")]
+    maybe_interception: Option<NetworkInterception>,
   },
   /// The server refused the access token: the user has to sign in again.
   SignInRequired,
+}
+
+/// Something on the network that answered instead of the server (issue #157).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkInterception {
+  /// The network's login page (hotel, train, guest Wi-Fi).
+  CaptivePortal,
+  /// A certificate the device doesn't trust, usually a proxy that inspects encrypted traffic.
+  UntrustedCertificate,
 }
 
 /// Whether the local data keeps up with the core. The browser can refuse writes (quota) or hand

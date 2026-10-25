@@ -25,12 +25,12 @@ use crate::handlers::{
   admin_update_permission_scheme_handler, admin_update_space_permission_scheme_handler, admit_guest_handler,
   append_policy_handler, append_roster_handler, approve_recovery_request_handler, backchannel_logout_handler,
   cancel_meeting_handler, cancel_recovery_request_handler, change_local_password_handler,
-  check_member_removal_handler, claim_key_packages_handler, clear_custom_status_handler,
-  complete_attachment_handler, complete_avatar_upload_handler, complete_background_upload_handler,
-  control_meeting_handler, convert_channel_privacy_handler, create_attachment_handler,
-  create_avatar_upload_handler, create_background_upload_handler, create_call_join_token_handler,
-  create_category_handler, create_channel_handler, create_dm_handler, create_group_dm_handler,
-  create_guest_link_handler, create_instant_meeting_handler, create_invite_handler,
+  change_web_push_subscription_handler, check_member_removal_handler, claim_key_packages_handler,
+  clear_custom_status_handler, complete_attachment_handler, complete_avatar_upload_handler,
+  complete_background_upload_handler, control_meeting_handler, convert_channel_privacy_handler,
+  create_attachment_handler, create_avatar_upload_handler, create_background_upload_handler,
+  create_call_join_token_handler, create_category_handler, create_channel_handler, create_dm_handler,
+  create_group_dm_handler, create_guest_link_handler, create_instant_meeting_handler, create_invite_handler,
   create_local_guest_handler, create_meeting_handler, create_recovery_request_handler,
   create_share_link_handler, create_space_handler, create_user_group_handler, delete_background_handler,
   delete_category_handler, delete_channel_image_handler, delete_invite_handler, delete_my_avatar_handler,
@@ -97,6 +97,10 @@ pub fn router(state: AppState) -> Router {
     .route("/me", get(get_me_handler))
     .route("/push/web-key", get(get_web_push_key_handler))
     .route("/push/gateway", get(get_push_gateway_handler))
+    .route(
+      "/push/web/subscription-change",
+      post(change_web_push_subscription_handler),
+    )
     .route("/gateway", get(gateway_handler))
     .route("/rendezvous", get(rendezvous_handler))
     .route("/auth/backchannel-logout", post(backchannel_logout_handler))
