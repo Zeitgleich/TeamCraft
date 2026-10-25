@@ -35,10 +35,10 @@ pub fn append_chunk(directory: &Path, id: &str, offset: u64, chunk: &[u8]) -> Re
   if chunk.len() > MAX_CHUNK_BYTES {
     return Err(StagingError::ChunkTooLarge);
   }
-  std::fs::create_dir_all(directory)?;
+  create_private_dir(directory)?;
   let path = directory.join(id);
   if offset == 0 {
-    std::fs::write(&path, chunk)?;
+    create_private_file(&path)?.write_all(chunk)?;
     return Ok(path);
   }
   let mut file = OpenOptions::new().append(true).open(&path)?;
@@ -51,6 +51,24 @@ pub fn append_chunk(directory: &Path, id: &str, offset: u64, chunk: &[u8]) -> Re
   }
   file.write_all(chunk)?;
   Ok(path)
+}
+
+/// The staged copies are plaintext: only this user may list the directory (unix: 0700).
+fn create_private_dir(directory: &Path) -> std::io::Result<()> {
+  let mut builder = std::fs::DirBuilder::new();
+  builder.recursive(true);
+  #[cfg(unix)]
+  std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+  builder.create(directory)
+}
+
+/// A new (or emptied) staged copy only this user may read (unix: 0600).
+fn create_private_file(path: &Path) -> std::io::Result<std::fs::File> {
+  let mut options = OpenOptions::new();
+  options.write(true).create(true).truncate(true);
+  #[cfg(unix)]
+  std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+  options.open(path)
 }
 
 #[cfg(test)]
@@ -66,6 +84,13 @@ mod tests {
     append_chunk(&directory, ID, 6, b"world").unwrap();
     append_chunk(&directory, ID, 6, b"world").unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), b"hello world");
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt;
+      let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+      assert_eq!(mode(&path), 0o600);
+      assert_eq!(mode(&directory), 0o700);
+    }
     assert!(matches!(
       append_chunk(&directory, ID, 3, b"x"),
       Err(StagingError::OutOfOrder {

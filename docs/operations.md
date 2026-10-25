@@ -186,8 +186,11 @@ harmless; rows without an object show up as failed downloads.
 Files over 8 MiB go up in parts (S3 multipart). Browsers read each part's `ETag` from the storage's
 answer, so the bucket's CORS rule must expose it (`<ExposeHeader>ETag</ExposeHeader>`, as
 `dev/garage-cors.py` sets); without it web uploads of large files fail. The server aborts uploads in
-parts that got no new part for `multipart_expiry_secs` (`[storage]`, default one day); a bucket
-lifecycle rule that aborts incomplete multipart uploads after a few days is a good second net.
+parts that got no new part for `multipart_expiry_secs` (`[storage]`, default one day). The bucket
+also needs a lifecycle rule that aborts incomplete multipart uploads (`AbortIncompleteMultipartUpload`,
+for example after 3 days): the server can't abort an upload it lost track of (it crashed between
+creating the upload and recording it, or aborting a cancelled one failed), and their parts would
+take space unseen. `dev/garage-cors.py` sets both rules on the dev bucket.
 
 ### Restore order after a total loss
 

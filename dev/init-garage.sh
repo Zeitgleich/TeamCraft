@@ -33,7 +33,8 @@ fi
 garage bucket info "$BUCKET" >/dev/null 2>&1 || garage bucket create "$BUCKET"
 garage key info "$KEY_NAME" >/dev/null 2>&1 || garage key import --yes -n "$KEY_NAME" "$KEY_ID" "$KEY_SECRET"
 garage bucket allow --read --write --owner "$BUCKET" --key "$KEY_NAME"
-# Browsers preflight the presigned uploads; without a CORS rule every web upload fails.
+# Browsers preflight the presigned uploads; without a CORS rule every web upload fails. Also aborts
+# uploads in parts nobody finished (lifecycle rule).
 python3 -I dev/garage-cors.py "$BUCKET" "$KEY_ID" "$KEY_SECRET"
 
 echo "Garage ready: bucket=$BUCKET endpoint=http://127.0.0.1:3900 region=garage"
