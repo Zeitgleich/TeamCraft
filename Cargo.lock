@@ -10311,6 +10311,7 @@ dependencies = [
  "tantivy",
  "teamcraft-client-api",
  "teamcraft-crypto",
+ "teamcraft-net",
  "teamcraft-proto",
  "thiserror 2.0.21",
  "tokio",
@@ -10494,6 +10495,7 @@ dependencies = [
  "screencapturekit",
  "serde_json",
  "teamcraft-crypto",
+ "teamcraft-net",
  "teamcraft-proto",
  "thiserror 2.0.21",
  "tls_codec",
@@ -10515,6 +10517,15 @@ dependencies = [
  "wtransport",
  "zune-jpeg",
  "zune-png",
+]
+
+[[package]]
+name = "teamcraft-net"
+version = "1.0.2"
+dependencies = [
+ "futures-util",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]

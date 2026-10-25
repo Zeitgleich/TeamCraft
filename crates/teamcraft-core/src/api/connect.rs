@@ -1,6 +1,7 @@
-//! TCP connections for the native WebSockets (issue #157): Happy Eyeballs (RFC 8305) so a
+//! TCP connections for the native WebSockets: Happy Eyeballs (RFC 8305, issue #420) so a
 //! black-holed IPv6 route doesn't use up the connect timeout before IPv4 is tried, and an HTTP
-//! `CONNECT` tunnel through the proxy that [`super::proxy`] picks. reqwest does both for REST.
+//! `CONNECT` tunnel through the proxy that [`super::proxy`] picks (issue #157). reqwest does both
+//! for REST (hyper-util races the families after 300 ms).
 
 use std::io;
 use std::net::SocketAddr;
@@ -8,14 +9,11 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use futures_util::StreamExt as _;
-use futures_util::stream::FuturesUnordered;
+use teamcraft_net::{ATTEMPT_DELAY, RaceError, interleave, race};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use url::{Host, Url};
 
-/// RFC 8305 §5: the next address is tried this long after the previous attempt started.
-const ATTEMPT_DELAY: Duration = Duration::from_millis(250);
 /// Longest proxy answer to `CONNECT` that is read; real ones are a status line and a few headers.
 const MAX_PROXY_RESPONSE_BYTES: usize = 8 * 1024;
 
@@ -47,67 +45,20 @@ pub(crate) async fn connect_via(url: &Url, maybe_proxy: Option<&Url>) -> Result<
   }
 }
 
-/// Resolves `host` and races its addresses.
+/// Resolves `host` and races its addresses (Happy Eyeballs, `teamcraft-net`).
 pub(crate) async fn connect_host(host: &str, port: u16) -> io::Result<TcpStream> {
   let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await?.collect();
   connect_first(interleave(addresses), ATTEMPT_DELAY).await
 }
 
-/// Starts one attempt per address, the next after `delay` or as soon as the previous one failed,
-/// and keeps the first that connects (RFC 8305 §5).
+/// The first of `addresses` that accepts a TCP connection, raced as [`teamcraft_net::race`] does.
 pub(crate) async fn connect_first(addresses: Vec<SocketAddr>, delay: Duration) -> io::Result<TcpStream> {
-  let mut pending = addresses.into_iter();
-  let mut attempts = FuturesUnordered::new();
-  let mut maybe_last_error = None;
-  loop {
-    if attempts.is_empty() {
-      match pending.next() {
-        Some(address) => attempts.push(TcpStream::connect(address)),
-        None => {
-          return Err(
-            maybe_last_error.unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no address")),
-          );
-        },
-      }
-    }
-    tokio::select! {
-      Some(result) = attempts.next() => match result {
-        Ok(stream) => return Ok(stream),
-        Err(error) => {
-          maybe_last_error = Some(error);
-          if let Some(address) = pending.next() {
-            attempts.push(TcpStream::connect(address));
-          }
-        },
-      },
-      () = tokio::time::sleep(delay), if pending.len() > 0 => {
-        if let Some(address) = pending.next() {
-          attempts.push(TcpStream::connect(address));
-        }
-      },
-    }
-  }
-}
-
-/// Alternates the address families, starting with the resolver's first choice (RFC 8305 §4), so a
-/// dead family costs one attempt delay and not one connect timeout per address.
-fn interleave(addresses: Vec<SocketAddr>) -> Vec<SocketAddr> {
-  let Some(first) = addresses.first() else {
-    return addresses;
-  };
-  let prefers_v6 = first.is_ipv6();
-  let (mut preferred, mut other): (Vec<SocketAddr>, Vec<SocketAddr>) = addresses
-    .iter()
-    .partition(|address| address.is_ipv6() == prefers_v6);
-  preferred.reverse();
-  other.reverse();
-  let mut ordered = Vec::with_capacity(addresses.len());
-  loop {
-    match (preferred.pop(), other.pop()) {
-      (None, None) => return ordered,
-      (maybe_a, maybe_b) => ordered.extend(maybe_a.into_iter().chain(maybe_b)),
-    }
-  }
+  race(addresses, delay, TcpStream::connect)
+    .await
+    .map_err(|error| match error {
+      RaceError::NoAddress => io::Error::new(io::ErrorKind::NotFound, "the host has no address"),
+      RaceError::Failed(error) => error,
+    })
 }
 
 /// `CONNECT authority` on `stream`; the stream then carries the connection to the target.
@@ -185,24 +136,58 @@ fn percent_decoded(text: &str) -> String {
 }
 
 #[cfg(test)]
+pub(crate) mod black_hole {
+  use std::net::SocketAddr;
+  use std::time::Duration;
+
+  use tokio::net::TcpStream;
+
+  /// An IPv6 address on this machine that swallows connection attempts like a broken route: a
+  /// listener on `[::1]` whose accept queue is full, so the kernel drops further SYNs. `None` where
+  /// the machine has no IPv6 loopback (some CI sandboxes).
+  pub(crate) struct BlackHole {
+    pub(crate) address: SocketAddr,
+    _listener: tokio::net::TcpListener,
+    _queued: Vec<TcpStream>,
+  }
+
+  impl BlackHole {
+    /// Most tries it takes to fill an accept queue of length 0 (Linux keeps one more).
+    const MAX_QUEUED: usize = 8;
+    const HANG_PROBE: Duration = Duration::from_millis(300);
+
+    pub(crate) async fn ipv6(port: u16) -> Option<Self> {
+      let address = SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port));
+      let socket = tokio::net::TcpSocket::new_v6().ok()?;
+      socket.bind(address).ok()?;
+      let listener = socket.listen(0).ok()?;
+      let mut queued = Vec::new();
+      for _ in 0..Self::MAX_QUEUED {
+        match tokio::time::timeout(Self::HANG_PROBE, TcpStream::connect(address)).await {
+          Ok(Ok(stream)) => queued.push(stream),
+          // Timed out: the queue is full and this attempt was swallowed.
+          Err(_) => {
+            return Some(Self {
+              address,
+              _listener: listener,
+              _queued: queued,
+            });
+          },
+          Ok(Err(_)) => return None,
+        }
+      }
+      None
+    }
+  }
+}
+
+#[cfg(test)]
 mod tests {
-  use std::net::{Ipv4Addr, Ipv6Addr};
+  use std::net::Ipv4Addr;
 
   use tokio::net::TcpListener;
 
   use super::*;
-
-  #[test]
-  fn addresses_alternate_families_starting_with_the_first() {
-    let v6 = |n| SocketAddr::from((Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, n), 443));
-    let v4 = |n| SocketAddr::from((Ipv4Addr::new(192, 0, 2, n), 443));
-    assert_eq!(
-      interleave(vec![v6(1), v6(2), v6(3), v4(1)]),
-      vec![v6(1), v4(1), v6(2), v6(3)]
-    );
-    assert_eq!(interleave(vec![v4(1), v6(1), v4(2)]), vec![v4(1), v6(1), v4(2)]);
-    assert!(interleave(Vec::new()).is_empty());
-  }
 
   #[test]
   fn ipv6_authorities_are_bracketed() {
@@ -212,19 +197,26 @@ mod tests {
     assert_eq!(host_and_port(&url), Some(("2001:db8::1".into(), 443)));
   }
 
-  /// A first address that never answers (the discard prefix 100::/64, RFC 6666, is black-holed or
-  /// unreachable) costs one attempt delay, not the connect timeout.
+  /// The 1.0.2 failure (issue #420): IPv6 swallows the SYN, IPv4 works. The WebSocket connects
+  /// over IPv4 an attempt delay later instead of waiting out the connect timeout on IPv6.
   #[tokio::test]
-  async fn a_black_holed_address_falls_back_to_the_next_one() {
+  async fn a_black_holed_ipv6_address_falls_back_to_ipv4() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let working = listener.local_addr().unwrap();
-    let black_hole = SocketAddr::from((Ipv6Addr::new(0x100, 0, 0, 0, 0, 0, 0, 1), working.port()));
-    let connecting = connect_first(vec![black_hole, working], ATTEMPT_DELAY);
+    let Some(black_hole) = super::black_hole::BlackHole::ipv6(working.port()).await else {
+      return;
+    };
+    let started = std::time::Instant::now();
+    let connecting = connect_first(vec![black_hole.address, working], ATTEMPT_DELAY);
     let stream = tokio::time::timeout(Duration::from_secs(5), connecting)
       .await
       .expect("fell back within the timeout")
       .unwrap();
     assert_eq!(stream.peer_addr().unwrap(), working);
+    assert!(
+      started.elapsed() >= ATTEMPT_DELAY,
+      "IPv4 started before the attempt delay"
+    );
   }
 
   #[tokio::test]

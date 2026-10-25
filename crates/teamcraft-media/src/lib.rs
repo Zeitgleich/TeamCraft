@@ -75,6 +75,8 @@ pub mod dave;
 #[cfg(feature = "effects")]
 pub mod effects;
 #[cfg(feature = "native")]
+mod sfu_address;
+#[cfg(feature = "native")]
 pub mod system_audio;
 #[cfg(all(feature = "pipewire", target_os = "linux"))]
 pub mod system_audio_pipewire;
