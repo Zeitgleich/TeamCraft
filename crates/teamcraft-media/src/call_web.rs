@@ -28,6 +28,7 @@
 //! sessions in the `pagehide` handler itself: the SFU frees the slot at once instead of the others
 //! seeing "reconnecting" until the grace period ends.
 
+mod session_watch;
 mod video;
 
 use std::cell::RefCell;
@@ -59,6 +60,7 @@ use web_sys::{
 };
 use web_time::Instant;
 
+use self::session_watch::{NetworkVerdict, PacketCount, PathVerdict, Reading, SessionWatch, may_hurry};
 use self::video::{TrackSender, VideoView};
 
 use crate::audio_frame::{
@@ -72,8 +74,7 @@ use crate::call_engine::{
   AudioOrigin, CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats, EngineOutput,
 };
 use crate::call_resilience::{
-  Jitter, JoinTicket, JoinTicketError, PathMonitor, PathState, ReconnectSchedule, ResilienceConfig,
-  rejoin_attempt,
+  Jitter, JoinTicket, JoinTicketError, ReconnectSchedule, ResilienceConfig, rejoin_attempt,
 };
 use crate::datagram::SimulcastLayer;
 use crate::jitter::{JitterBuffer, JitterBufferConfig, Playout};
@@ -226,15 +227,20 @@ pub enum WebCallError {
 
 /// Everything the call task reacts to.
 enum Input {
-  Signal(CallServerMessage),
+  /// A signaling message of the session with this generation; an older session's are dropped (a
+  /// session taken for lost may still be alive and hear `connection_replaced` for this device).
+  Signal {
+    generation: u64,
+    message: CallServerMessage,
+  },
   /// The session with this generation ended (its signaling stream did).
   SessionEnded {
     generation: u64,
     end: SessionEnd,
   },
-  /// What the browser reported about the packets the session with this generation received.
+  /// What the browser reported about a session's received packets.
   PathPackets {
-    generation: u64,
+    reading: Reading,
     count: PacketCount,
   },
   /// The page saw the network come back or change, or woke up.
@@ -247,7 +253,11 @@ enum Input {
   },
   /// Rejoining took longer than the SFU keeps the slot.
   ReconnectExpired,
-  Datagram(Vec<u8>),
+  /// A datagram of the session with this generation.
+  Datagram {
+    generation: u64,
+    bytes: Vec<u8>,
+  },
   Captured(Vec<f32>),
   Encoded(Vec<u8>),
   Decoded {
@@ -305,27 +315,9 @@ enum SessionEnd {
   GoingAway,
 }
 
-/// A session's received packets, from `getStats()`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PacketCount {
-  Received(u64),
-  /// The browser reports no packet counts: lost sessions show only when they close.
-  Unsupported,
-  /// No reading this time (the session is closing).
-  Unknown,
-}
-
-/// Whether the browser reports packet counts, which prove the session's path alive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PathWatch {
-  Untested,
-  Watching,
-  Unavailable,
-}
-
-/// The sessions the call holds open: the current one, and lost ones until the call is back (closing
-/// one tells the SFU this device left; it keeps the slot only for lost connections). Shared with
-/// [`PageExit`], which closes them all when the page goes away.
+/// The sessions the call holds open: the current one, lost ones until the call is back (closing
+/// one tells the SFU this device left; it keeps the slot only for lost connections) and one still
+/// connecting. Shared with [`PageExit`], which closes them all when the page goes away.
 #[derive(Clone, Default)]
 struct OpenSessions(Rc<RefCell<Vec<WebTransport>>>);
 
@@ -413,12 +405,15 @@ impl WebCall {
       &inputs,
     )
     .await?;
-    let transport = Transport::connect(&config.sfu_url, &config.certificate_hashes, &inputs, 0).await?;
+    let sessions = OpenSessions::default();
+    let transport =
+      Transport::connect(&config.sfu_url, &config.certificate_hashes, &sessions, &inputs, 0).await?;
     let (event_tx, events) = mpsc::unbounded();
     let (finished_tx, finished) = oneshot::channel();
     let task_inputs = inputs.clone();
     spawn_local(async move {
-      let result = run_call(config, transport, audio, task_inputs, input_rx, event_tx).await;
+      let channels = (task_inputs, input_rx, event_tx);
+      let result = run_call(config, transport, sessions, audio, channels).await;
       // The app may have dropped the call without waiting for the result.
       let _ = finished_tx.send(result);
     });
@@ -625,14 +620,20 @@ pub async fn list_media_devices() -> Result<BrowserMediaDevices, WebCallError> {
   Ok(devices)
 }
 
+/// The call task's inputs (sender and receiver) and its events.
+type CallChannels = (
+  mpsc::UnboundedSender<Input>,
+  mpsc::UnboundedReceiver<Input>,
+  mpsc::UnboundedSender<CallEngineEvent>,
+);
+
 /// The call task: drives the engine from everything that arrives on `inputs`.
 async fn run_call(
   config: WebCallConfig,
   transport: Transport,
+  sessions: OpenSessions,
   mut audio: WebAudio,
-  inputs: mpsc::UnboundedSender<Input>,
-  mut input_rx: mpsc::UnboundedReceiver<Input>,
-  events: mpsc::UnboundedSender<CallEngineEvent>,
+  (inputs, mut input_rx, events): CallChannels,
 ) -> Result<CallStats, WebCallError> {
   let mut engine = CallEngine::new(config.engine.clone(), Instant::now());
   if let Some(roster) = &config.maybe_trusted_roster {
@@ -641,19 +642,14 @@ async fn run_call(
   if let Some(authenticator) = &config.maybe_authenticator {
     engine.set_authenticator(Arc::clone(authenticator));
   }
-  let sessions = OpenSessions::default();
-  sessions.track(&transport.transport);
   let _page_exit = PageExit::watch(&sessions, &inputs);
   let mut state = CallState {
     maybe_transport: Some(transport),
     lost_transports: Vec::new(),
     sessions,
-    generation: 0,
+    watch: SessionWatch::new(Instant::now(), config.resilience),
     maybe_lost_at: None,
     maybe_hurry: None,
-    monitor: PathMonitor::new(Instant::now()),
-    path_watch: PathWatch::Untested,
-    is_stats_pending: false,
     timer_ticks: 0,
     ticket: JoinTicket {
       sfu_url: config.sfu_url.clone(),
@@ -730,17 +726,12 @@ struct CallState<'a> {
   /// Lost sessions, kept open until the call is back on a new one (see [`OpenSessions`]).
   lost_transports: Vec<Transport>,
   sessions: OpenSessions,
-  /// Counts sessions, so late news of an old one is not taken for the current one.
-  generation: u64,
+  /// Which session's news counts, and whether the current one's path is alive.
+  watch: SessionWatch,
   /// When the connection was lost, while rejoining.
   maybe_lost_at: Option<Instant>,
-  /// Makes the rejoin task's next attempt due at once, while rejoining.
+  /// Asks the rejoin task to try again early, while rejoining.
   maybe_hurry: Option<mpsc::UnboundedSender<()>>,
-  /// Whether the current session's path is alive, from its packet count.
-  monitor: PathMonitor,
-  path_watch: PathWatch,
-  /// A `getStats()` reading is on its way.
-  is_stats_pending: bool,
   timer_ticks: u32,
   /// The ticket of the current (or last) session.
   ticket: JoinTicket,
@@ -773,18 +764,17 @@ impl CallState<'_> {
     audio: &mut WebAudio,
   ) -> Result<Flow, WebCallError> {
     match input {
-      Input::Signal(message) => engine.handle_signal(message, Instant::now())?,
+      Input::Signal { generation, message } => {
+        if self.watch.is_current(generation) {
+          engine.handle_signal(message, Instant::now())?;
+        }
+      },
       Input::SessionEnded { generation, end } => {
-        if generation == self.generation && self.maybe_transport.is_some() {
+        if self.watch.is_current(generation) {
           return Ok(self.on_session_lost(engine, end));
         }
       },
-      Input::PathPackets { generation, count } => {
-        self.is_stats_pending = false;
-        if generation == self.generation && self.maybe_transport.is_some() {
-          return Ok(self.on_path_packets(engine, count));
-        }
-      },
+      Input::PathPackets { reading, count } => return Ok(self.on_path_packets(engine, reading, count)),
       Input::NetworkChanged => self.on_network_changed(),
       Input::Relinked {
         transport,
@@ -793,11 +783,10 @@ impl CallState<'_> {
       } => {
         info!("connected again, rejoining the call");
         let now = Instant::now();
-        self.sessions.track(&transport.transport);
+        // Tracked in `OpenSessions` since it started connecting.
         self.maybe_transport = Some(transport);
-        self.generation = generation;
+        self.watch.relinked(generation, now);
         self.maybe_hurry = None;
-        self.monitor = PathMonitor::new(now);
         engine.rejoin(ticket.token.clone(), now);
         self.ticket = ticket;
       },
@@ -805,7 +794,11 @@ impl CallState<'_> {
         self.is_ending_lost = true;
         self.cues.play(CallCue::ConnectionLost);
       },
-      Input::Datagram(bytes) => engine.handle_datagram(&bytes, Instant::now()),
+      Input::Datagram { generation, bytes } => {
+        if self.watch.is_current(generation) {
+          engine.handle_datagram(&bytes, Instant::now());
+        }
+      },
       Input::Captured(samples) => {
         if !self.is_muted {
           self.encoder.push(&samples)?;
@@ -956,71 +949,65 @@ impl CallState<'_> {
     let grace = engine
       .maybe_reconnect_grace()
       .unwrap_or(self.resilience.default_reconnect_grace);
-    // From here on, news of the lost session is old.
-    self.generation += 1;
+    // From here on, news of the lost session is stale.
+    let generation = self.watch.lose();
     let schedule = reconnect_schedule(lost_at, grace, end, now, &self.resilience, Jitter::random());
     let (hurry, hurry_rx) = mpsc::unbounded();
     self.maybe_hurry = Some(hurry);
-    self.spawn_reconnect(schedule, hurry_rx, self.generation);
+    self.spawn_reconnect(schedule, hurry_rx, generation);
     Flow::Continue
   }
 
-  /// A packet count of the current session arrived: a path silent for too long, or after a
-  /// network change, is lost.
-  fn on_path_packets(&mut self, engine: &mut CallEngine, count: PacketCount) -> Flow {
-    let now = Instant::now();
-    match count {
-      PacketCount::Received(count) => {
-        self.path_watch = PathWatch::Watching;
-        self.monitor.on_received_packets(count, now);
+  /// A packet count arrived: a path silent for too long, or after a network change, is lost.
+  fn on_path_packets(&mut self, engine: &mut CallEngine, reading: Reading, count: PacketCount) -> Flow {
+    match self.watch.on_reading(reading, count, Instant::now()) {
+      PathVerdict::Unchanged => Flow::Continue,
+      PathVerdict::Unwatchable => {
+        debug!("the browser reports no packet counts: a lost session shows when it closes");
+        Flow::Continue
       },
-      PacketCount::Unsupported => {
-        if self.path_watch == PathWatch::Untested {
-          debug!("the browser reports no packet counts: a lost session shows when it closes");
-        }
-        self.path_watch = PathWatch::Unavailable;
-        return Flow::Continue;
-      },
-      PacketCount::Unknown => return Flow::Continue,
+      PathVerdict::Lost => self.on_session_lost(engine, SessionEnd::Lost),
     }
-    if self.monitor.check(now, &self.resilience) == PathState::Dead {
-      return self.on_session_lost(engine, SessionEnd::Lost);
-    }
-    Flow::Continue
   }
 
   /// The page reported a network change: the session has to show it still works, a rejoin under
-  /// way tries again at once.
+  /// way may try again early.
   fn on_network_changed(&mut self) {
-    if self.maybe_transport.is_some() {
-      if self.path_watch != PathWatch::Unavailable {
+    match self.watch.on_network_changed(Instant::now()) {
+      NetworkVerdict::Check(maybe_reading) => {
         debug!("network changed, checking the call's session");
-        self.monitor.on_network_changed(Instant::now(), &self.resilience);
-        self.request_path_stats();
-      }
-    } else if let Some(hurry) = &self.maybe_hurry {
-      // The rejoin task is gone once it gave up; nothing to hurry then.
-      let _ = hurry.unbounded_send(());
+        if let Some(reading) = maybe_reading {
+          self.read_packets(reading);
+        }
+      },
+      NetworkVerdict::HurryRejoin => {
+        if let Some(hurry) = &self.maybe_hurry {
+          // The rejoin task is gone once it gave up; nothing to hurry then.
+          let _ = hurry.unbounded_send(());
+        }
+      },
+      NetworkVerdict::Nothing => {},
     }
   }
 
-  /// Asks the browser for the current session's packet count; the answer arrives as
-  /// [`Input::PathPackets`].
+  /// Asks the browser for the current session's packet count, unless a reading is on its way.
   fn request_path_stats(&mut self) {
-    if self.path_watch == PathWatch::Unavailable || self.is_stats_pending {
-      return;
+    if let Some(reading) = self.watch.next_reading() {
+      self.read_packets(reading);
     }
+  }
+
+  /// The answer arrives as [`Input::PathPackets`].
+  fn read_packets(&self, reading: Reading) {
     let Some(transport) = &self.maybe_transport else {
       return;
     };
-    self.is_stats_pending = true;
     let session = transport.transport.clone();
     let inputs = self.inputs.clone();
-    let generation = self.generation;
     spawn_local(async move {
       let count = received_packets(&session).await;
       // The call ended meanwhile if nobody reads the inputs.
-      let _ = inputs.unbounded_send(Input::PathPackets { generation, count });
+      let _ = inputs.unbounded_send(Input::PathPackets { reading, count });
     });
   }
 
@@ -1039,10 +1026,12 @@ impl CallState<'_> {
     generation: u64,
   ) {
     let inputs = self.inputs.clone();
+    let sessions = self.sessions.clone();
     let maybe_source = self.maybe_ticket_source.clone();
     let fallback = self.ticket.clone();
     let resilience = self.resilience;
     spawn_local(async move {
+      let mut maybe_last_failure_at = None;
       // The call ended meanwhile when nobody reads the inputs any more.
       while !inputs.is_closed() {
         let now = Instant::now();
@@ -1053,9 +1042,12 @@ impl CallState<'_> {
         let wait = schedule.next_attempt_at().saturating_duration_since(now);
         match select(pin!(sleep(wait)), hurry.next()).await {
           Either::Left(_) => {},
-          // The network came back: no need to wait out the back-off.
+          // The network came back: no need to wait out the whole back-off.
           Either::Right((Some(()), _)) => {
-            schedule.hurry(Instant::now());
+            let now = Instant::now();
+            if may_hurry(&schedule, maybe_last_failure_at, now, &resilience) {
+              schedule.hurry(now);
+            }
             continue;
           },
           // The call task is gone.
@@ -1063,24 +1055,31 @@ impl CallState<'_> {
         }
         let maybe_fetch = maybe_source.as_ref().map(|source| source.fetch());
         let attempt = rejoin_attempt(maybe_fetch, fallback.clone(), |ticket: JoinTicket| {
-          let inputs = inputs.clone();
+          let (inputs, sessions) = (inputs.clone(), sessions.clone());
           async move {
             let hashes = &ticket.certificate_hashes;
-            Transport::connect(&ticket.sfu_url, hashes, &inputs, generation).await
+            Transport::connect(&ticket.sfu_url, hashes, &sessions, &inputs, generation).await
           }
         });
         match attempt.await {
           Ok((transport, ticket)) => {
-            let _ = inputs.unbounded_send(Input::Relinked {
+            let session = transport.transport.clone();
+            let relinked = Input::Relinked {
               transport,
               ticket,
               generation,
-            });
+            };
+            if inputs.unbounded_send(relinked).is_err() {
+              // The call ended while this session connected: it must not linger.
+              sessions.close(&session);
+            }
             return;
           },
           Err(error) => {
             debug!(%error, "rejoin attempt failed");
-            schedule.on_failed_attempt(Instant::now(), &resilience);
+            let now = Instant::now();
+            maybe_last_failure_at = Some(now);
+            schedule.on_failed_attempt(now, &resilience);
           },
         }
       }
@@ -1251,11 +1250,13 @@ impl CallState<'_> {
 }
 
 impl Transport {
-  /// Opens a session; its signaling stream's end arrives as [`Input::SignalingClosed`] with
-  /// `generation`.
+  /// Opens a session, tracked in `sessions` from the start (the page may go away while it
+  /// connects); a session that fails to open is closed again. Its signals and datagrams arrive
+  /// tagged with `generation`, its end as [`Input::SessionEnded`].
   async fn connect(
     sfu_url: &str,
     certificate_hashes: &[[u8; 32]],
+    sessions: &OpenSessions,
     inputs: &mpsc::UnboundedSender<Input>,
     generation: u64,
   ) -> Result<Self, WebCallError> {
@@ -1274,6 +1275,19 @@ impl Transport {
         .map_err(browser("WebTransport options"))?;
     }
     let transport = WebTransport::new(sfu_url, &options).map_err(browser("WebTransport"))?;
+    sessions.track(&transport);
+    let opened = Self::open(transport.clone(), inputs, generation).await;
+    if opened.is_err() {
+      sessions.close(&transport);
+    }
+    opened
+  }
+
+  async fn open(
+    transport: WebTransport,
+    inputs: &mpsc::UnboundedSender<Input>,
+    generation: u64,
+  ) -> Result<Self, WebCallError> {
     JsFuture::from(transport.ready())
       .await
       .map_err(browser("WebTransport connect"))?;
@@ -1296,7 +1310,11 @@ impl Transport {
       inputs.clone(),
       generation,
     ));
-    spawn_local(read_datagrams(datagram_stream.readable(), inputs.clone()));
+    spawn_local(read_datagrams(
+      datagram_stream.readable(),
+      inputs.clone(),
+      generation,
+    ));
     Ok(Self {
       transport,
       signaling,
@@ -1848,7 +1866,10 @@ async fn read_signaling(
     for body in bodies {
       match serde_json::from_slice::<CallServerMessage>(&body) {
         Ok(message) => {
-          if inputs.unbounded_send(Input::Signal(message)).is_err() {
+          if inputs
+            .unbounded_send(Input::Signal { generation, message })
+            .is_err()
+          {
             return false;
           }
         },
@@ -1865,9 +1886,11 @@ async fn read_signaling(
   let _ = inputs.unbounded_send(Input::SessionEnded { generation, end });
 }
 
-async fn read_datagrams(stream: ReadableStream, inputs: mpsc::UnboundedSender<Input>) {
-  let result = read_chunks(stream, |chunk| {
-    inputs.unbounded_send(Input::Datagram(chunk)).is_ok()
+async fn read_datagrams(stream: ReadableStream, inputs: mpsc::UnboundedSender<Input>, generation: u64) {
+  let result = read_chunks(stream, |bytes| {
+    inputs
+      .unbounded_send(Input::Datagram { generation, bytes })
+      .is_ok()
   })
   .await;
   if let Err(error) = result {

@@ -153,6 +153,12 @@ impl PathMonitor {
     }
   }
 
+  /// A count that may include packets from before a network change: it moves the baseline new
+  /// packets are measured against, but proves nothing (browsers read counts asynchronously).
+  pub fn on_baseline_packets(&mut self, count: u64) {
+    self.received_packets = self.received_packets.max(count);
+  }
+
   /// The system reported a network change (another interface, address or route): the path must
   /// show life again soon, packets that arrived before don't count.
   pub fn on_network_changed(&mut self, now: Instant, config: &ResilienceConfig) {
@@ -378,6 +384,17 @@ mod tests {
       // Another change, and nothing comes back: rejoin long before the stall timeout.
       monitor.on_network_changed(at(start, 4_000), &config());
       assert_eq!(monitor.check(at(start, 6_000), &config()), PathState::Dead);
+    }
+
+    #[test]
+    fn a_baseline_count_is_no_sign_of_life() {
+      let start = Instant::now();
+      let mut monitor = PathMonitor::new(start);
+      monitor.on_received_packets(10, start);
+      monitor.on_network_changed(at(start, 1_000), &config());
+      monitor.on_baseline_packets(12);
+      monitor.on_received_packets(12, at(start, 2_000));
+      assert_eq!(monitor.check(at(start, 3_000), &config()), PathState::Dead);
     }
   }
 
