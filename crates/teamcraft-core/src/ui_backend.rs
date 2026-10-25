@@ -263,6 +263,11 @@ pub enum CoreCommand {
     user: UserId,
     role: SpaceRole,
   },
+  SetChannelRole {
+    conversation: ConversationId,
+    user: UserId,
+    role: teamcraft_proto::ChannelRole,
+  },
   RemoveSpaceMember {
     space: SpaceId,
     user: UserId,
@@ -1484,6 +1489,30 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn refresh_space_roster(&self, space: SpaceId) {
     self.command(CoreCommand::RefreshSpaceRoster { space });
+  }
+
+  fn channel_roles(&self, conversation: ConversationId) -> Vec<teamcraft_client_api::model::ChannelMember> {
+    let stored: Option<teamcraft_proto::ListConversationMembersResponse> = self.read(records::get_json(
+      &self.store,
+      Table::Members,
+      &conversation.to_string(),
+    ));
+    stored
+      .into_iter()
+      .flat_map(|list| list.members)
+      .map(|member| teamcraft_client_api::model::ChannelMember {
+        user: member.user.id,
+        role: member.role,
+      })
+      .collect()
+  }
+
+  fn set_channel_role(&self, conversation: ConversationId, user: UserId, role: teamcraft_proto::ChannelRole) {
+    self.command(CoreCommand::SetChannelRole {
+      conversation,
+      user,
+      role,
+    });
   }
 
   fn set_space_role(&self, space: SpaceId, user: UserId, role: SpaceRole) {

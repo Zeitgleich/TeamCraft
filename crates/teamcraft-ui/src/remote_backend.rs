@@ -969,6 +969,26 @@ impl ChatBackend for RemoteChat {
     }
   }
 
+  fn channel_roles(&self, conversation: ConversationId) -> Vec<teamcraft_client_api::model::ChannelMember> {
+    match self.ask(ChatQuery::ChannelRoles { conversation }) {
+      Some(ChatAnswer::ChannelRoles { members }) => members,
+      _ => Vec::new(),
+    }
+  }
+
+  fn set_channel_role(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    role: teamcraft_client_api::model::ChannelRole,
+  ) {
+    self.act(ChatAction::SetChannelRole {
+      conversation,
+      user,
+      role,
+    });
+  }
+
   fn space_invites(&self, space: SpaceId) -> Vec<PendingInvite> {
     match self.ask(ChatQuery::SpaceInvites { space }) {
       Some(ChatAnswer::SpaceInvites { invites }) => invites,
