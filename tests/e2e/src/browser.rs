@@ -92,7 +92,9 @@ impl BrowserSession {
 
   /// Opens another tab of the same browser (same profile and origin storage) at `url`.
   pub async fn new_page(&self, url: &str) -> Page {
-    self.browser.new_page(url).await.expect("opening a page")
+    let page = self.browser.new_page(url).await.expect("opening a page");
+    prefer_mouse(&page).await;
+    page
   }
 
   /// The browser's own profile directory: every process of this browser has it on its command line
@@ -183,4 +185,14 @@ fn find_chrome() -> Option<PathBuf> {
       .map(|dir| dir.join(name))
       .find(|candidate| candidate.is_file())
   })
+}
+
+/// A headless browser has no mouse and, on a machine with a touch screen, reports a coarse primary
+/// pointer: Enter would then insert a newline instead of sending (issue #444). Turns touch off.
+pub async fn prefer_mouse(page: &Page) {
+  use chromiumoxide::cdp::browser_protocol::emulation::SetTouchEmulationEnabledParams;
+  page
+    .execute(SetTouchEmulationEnabledParams::new(false))
+    .await
+    .expect("turning touch emulation off");
 }
