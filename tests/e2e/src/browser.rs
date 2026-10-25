@@ -21,6 +21,11 @@ impl BrowserSession {
   /// Launches headless Chromium. `None` (with a skip message) when no browser is installed, unless
   /// `E2E_REQUIRED=1` demands one.
   pub async fn launch() -> Option<Self> {
+    Self::launch_with(&[]).await
+  }
+
+  /// [`Self::launch`] with more command line switches (fake camera and microphone for calls).
+  pub async fn launch_with(extra_args: &[&str]) -> Option<Self> {
     let is_required = std::env::var("E2E_REQUIRED").is_ok_and(|value| value == "1");
     let Some(executable) = find_chrome() else {
       assert!(
@@ -32,7 +37,11 @@ impl BrowserSession {
     };
     // A fresh profile per launch: the default one is shared and would keep Keycloak's session cookie.
     let profile = std::env::temp_dir().join(format!("teamcraft-e2e-chrome-{:016x}", random_u64()));
-    let config = BrowserConfig::builder()
+    let mut builder = BrowserConfig::builder();
+    for arg in extra_args {
+      builder = builder.arg(*arg);
+    }
+    let config = builder
       .chrome_executable(executable)
       .user_data_dir(profile.clone())
       // CI containers run as root without user namespaces.

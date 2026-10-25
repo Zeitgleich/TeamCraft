@@ -363,9 +363,12 @@ pub async fn withdraw_tags(tags: &[NotificationTag]) {
   close_service_worker_notifications(&tags).await;
 }
 
-/// Desktop: starts or stops the ringtone of an incoming call (the browser plays none).
+/// Starts or stops the ringtone of an incoming call: in the desktop shell, or in the page.
 pub async fn set_ringtone(is_ringing: bool) {
   if !is_available() {
+    // The browser rings in the page, in the tab that runs the calls.
+    #[cfg(target_arch = "wasm32")]
+    crate::web_ringtone::set_ringing(is_ringing);
     return;
   }
   let args = serde_json::json!({ "is_ringing": is_ringing });

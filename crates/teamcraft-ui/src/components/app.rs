@@ -786,6 +786,37 @@ fn connect_calls(state: AppState) {
       call.leave();
     }
   });
+  // A join that failed (a refused microphone, an unreachable call server) already told the user
+  // why; the call screen it opened closes.
+  let seen_join_failures = Cell::new(state.read(|backend| backend.call_join_failures()));
+  Effect::new(move |_| {
+    let failures = state.read(|backend| backend.call_join_failures());
+    if seen_join_failures.replace(failures) < failures && call.phase.get_untracked() == CallPhase::Active {
+      call.leave();
+    }
+  });
+  // Once the user's actions are carried out, the camera and screen share buttons show what the
+  // media layer did: a camera the browser refused, a share ended from the system's indicator.
+  Effect::new(move |_| {
+    let maybe_media = state.read(|backend| {
+      if backend.has_pending_call_actions() {
+        return None;
+      }
+      backend
+        .active_call()
+        .map(|active| (active.is_camera_on, active.is_sharing_screen))
+    });
+    if let Some((is_camera_on, is_sharing_screen)) = maybe_media
+      && call.phase.get_untracked() == CallPhase::Active
+    {
+      if call.is_camera_on.get_untracked() != is_camera_on {
+        call.is_camera_on.set(is_camera_on);
+      }
+      if call.is_sharing_screen.get_untracked() != is_sharing_screen {
+        call.is_sharing_screen.set(is_sharing_screen);
+      }
+    }
+  });
   Effect::new(move |_| {
     let ringing = state.read(|backend| backend.incoming_calls().first().copied());
     if call.phase.get_untracked() == CallPhase::Idle && call.incoming.get_untracked() != ringing {

@@ -43,7 +43,7 @@ pub mod audio_device;
 pub mod audio_pipeline;
 #[cfg(feature = "native")]
 pub mod audio_processing;
-#[cfg(feature = "dave")]
+#[cfg(feature = "call-auth")]
 pub mod call_auth;
 #[cfg(feature = "dave")]
 pub mod call_cues;
@@ -53,6 +53,8 @@ pub mod call_engine;
 pub mod call_native;
 #[cfg(feature = "dave")]
 pub mod call_video;
+#[cfg(feature = "call-view")]
+pub mod call_view;
 #[cfg(feature = "web")]
 pub mod call_web;
 #[cfg(any(feature = "native", feature = "web"))]

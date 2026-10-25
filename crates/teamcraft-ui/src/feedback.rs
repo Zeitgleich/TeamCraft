@@ -19,7 +19,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_proto::ErrorCode;
 
-pub use teamcraft_client_api::failure::{ActionFailure, FailureKind};
+pub use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
 
 use crate::i18n::I18n;
 
@@ -82,6 +82,17 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
   match &failure.kind {
     FailureKind::Network => "error-network",
     FailureKind::Other => "error-generic",
+    FailureKind::Call(failure) => match failure {
+      CallFailure::MicrophoneDenied => "error-call-microphone-denied",
+      CallFailure::MicrophoneMissing => "error-call-microphone-missing",
+      CallFailure::MicrophoneInUse => "error-call-microphone-in-use",
+      CallFailure::CameraDenied => "error-call-camera-denied",
+      CallFailure::CameraMissing => "error-call-camera-missing",
+      CallFailure::CameraInUse => "error-call-camera-in-use",
+      CallFailure::ScreenUnavailable => "error-call-screen-unavailable",
+      CallFailure::Unsupported => "error-call-unsupported",
+      CallFailure::BackgroundRequired => "error-call-background-required",
+    },
     FailureKind::Server(code) => match code {
       ErrorCode::NotSpaceMember => "error-not-space-member",
       ErrorCode::Forbidden | ErrorCode::NoTeamcraftRole => "error-forbidden",

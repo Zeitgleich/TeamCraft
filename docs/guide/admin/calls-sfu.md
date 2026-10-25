@@ -50,6 +50,21 @@ accepted only with `TEAMCRAFT_SFU_INSECURE_DEV_TOKENS=1`, no public key, and loo
 Network: open `4433/udp` from clients (IPv4 and IPv6). The SFU holds no state; scale by running more
 and pointing `sfu_url` at one (single SFU per instance today).
 
+## Calls in the browser
+
+The web client connects to the SFU straight from the page (WebTransport), so:
+
+- The SFU needs a certificate **browsers trust** for the host name in `sfu_url` (a public CA, or your
+  company CA on managed machines). The short-lived self-signed one works for desktop and mobile
+  apps in tests only; browsers refuse it.
+- The page's Content-Security-Policy must allow the SFU in `connect-src`. The default allows any
+  `https:` origin; a stricter custom policy has to list `sfu_url`'s origin.
+- The web root must contain `teamcraft-web-calls.js`, `teamcraft-web-calls_bg.wasm` and
+  `teamcraft-call-worklet.js` (they ship with the web client): the call engine loads only when a
+  call starts, so it doesn't slow down the first visit.
+- Browsers: current Chrome, Edge, Firefox and Safari (26.4 or later). Older ones show why they
+  can't call.
+
 ## Rotating the signing key
 
 See [docs/operations.md](../../operations.md#rotating-the-call-signing-key): new key pair, restart the
@@ -57,7 +72,6 @@ SFU then the server; joins between the restarts fail and succeed on retry.
 
 ## Status
 
-Desktop clients use real call actions (audio, H.264 camera with simulcast, screen share). Background
-blur needs a segmentation model that is not bundled yet. Browser and mobile calls, recording and
-captions are coming soon. Telephony (SIP trunk, AI hotline) is a design draft only
+Desktop, Android and the web client make real calls (audio, H.264 camera with simulcast, screen
+share). Background effects are desktop-only. iOS calls, recording and captions are coming soon. Telephony (SIP trunk, AI hotline) is a design draft only
 ([docs/telephony.md](../../telephony.md)).

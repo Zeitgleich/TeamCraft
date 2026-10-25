@@ -2,9 +2,10 @@ use std::cell::Cell;
 
 use leptos::prelude::*;
 
-use crate::auth::tauri;
+use teamcraft_proto::VideoTrackKind;
+
 use crate::calls::{CallKind, CallLayout, CallRequest, Participant, ScreenShareSound};
-use crate::components::call_video::{BackgroundPicker, VideoTile};
+use crate::components::call_video::{BackgroundPicker, LiveVideo, VideoSource, VideoTile, can_show_video};
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 use crate::model::{User, UserId};
@@ -53,7 +54,26 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
 
   // Real calls report who is speaking; the demo rotates the active speaker among people who are not
   // muted.
-  let is_real = tauri::is_available();
+  let is_real = !state.read(|backend| backend.has_simulated_calls());
+  let has_effects = state.read(|backend| backend.has_background_effects());
+  // Real video where the page shows it: others' tracks by person and kind, and the own camera once
+  // the media layer sends it.
+  let video_tracks = Memo::new(move |_| state.read(|backend| backend.call_video_tracks()));
+  let track_of = move |user: UserId, kind: VideoTrackKind| {
+    can_show_video()
+      .then(|| {
+        video_tracks
+          .get()
+          .into_iter()
+          .find(|track| track.user == user && track.kind == kind)
+          .map(|track| VideoSource::Remote(track.stream_id))
+      })
+      .flatten()
+  };
+  let own_video = Signal::derive(move || {
+    let is_sending = state.read(|backend| backend.active_call().is_some_and(|active| active.is_camera_on));
+    (can_show_video() && is_sending).then_some(VideoSource::OwnCamera)
+  });
   let speaking = RwSignal::new(None::<UserId>);
   Effect::new(move |_| {
     if is_real {
@@ -141,6 +161,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         has_hand_raised=call.has_hand_raised
         effect=call.effect
         is_mirrored=call.mirror_self_view
+        video=own_video
       />
     }
   };
@@ -162,6 +183,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         has_hand_raised=participant.has_hand_raised
         is_speaking=Signal::derive(move || speaking.get() == Some(id))
         is_reconnecting=Signal::derive(move || reconnecting.get().contains(&id))
+        video=Signal::derive(move || track_of(id, VideoTrackKind::Camera))
       />
     }
   };
@@ -169,7 +191,11 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
   let stage = move || {
     let remote_tiles = remote.get();
     if is_share_layout() {
-      let sharer_name = match remote_sharer.get() {
+      let maybe_sharer = remote_sharer.get();
+      let maybe_screen = maybe_sharer
+        .as_ref()
+        .and_then(|tile| track_of(tile.user.id, VideoTrackKind::Screen));
+      let sharer_name = match maybe_sharer {
         Some(tile) => tile.user.display_name,
         None => String::new(),
       };
@@ -215,6 +241,9 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
               </Show>
             </div>
             <div class="shared-screen" role="img" aria-label=label>
+              {match maybe_screen {
+                Some(source) => view! { <LiveVideo source=source is_mirrored=false /> }.into_any(),
+                None => view! {
               <div class="mock-window">
                 <div class="mock-titlebar"><span></span><span></span><span></span></div>
                 <div class="mock-body">
@@ -229,6 +258,9 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
                   </div>
                 </div>
               </div>
+                }
+                .into_any(),
+              }}
             </div>
           </div>
           <div class="filmstrip filmstrip-side">{self_tile(false)} {strip}</div>
@@ -406,15 +438,17 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
             on_press=move || call.has_hand_raised.update(|on| *on = !*on)
           />
         </Show>
-        <ControlButton
-          is_active=Signal::derive(move || effects_open.get())
-          icon=IconName::Image
-          label=Signal::derive(move || i18n.t("call-effects"))
-          on_press=move || {
-            share_open.set(false);
-            effects_open.update(|open| *open = !*open);
-          }
-        />
+        <Show when=move || has_effects fallback=|| ()>
+          <ControlButton
+            is_active=Signal::derive(move || effects_open.get())
+            icon=IconName::Image
+            label=Signal::derive(move || i18n.t("call-effects"))
+            on_press=move || {
+              share_open.set(false);
+              effects_open.update(|open| *open = !*open);
+            }
+          />
+        </Show>
         <ControlButton
           icon=Signal::derive(move || if call.layout.get() == CallLayout::Gallery { IconName::Spotlight } else { IconName::Grid })
           label=Signal::derive(move || {

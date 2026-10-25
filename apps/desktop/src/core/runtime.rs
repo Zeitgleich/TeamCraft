@@ -30,15 +30,14 @@ use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
 use teamcraft_core::ui_snapshot::SnapshotCache;
 use teamcraft_core::upkeep::{self, Upkeep};
 use teamcraft_core::{
-  CallKeySigner, Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer,
+  CallPreparation, Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer,
   PendingEnrollment,
 };
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::identity::IdentityPublicKey;
-use teamcraft_crypto::identity::VerifiedDevice;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::{
-  BackgroundId, CallJoinTokenResponse, ClientUpdatePolicy, ConversationId, DeviceActivity, DeviceId,
+  BackgroundId, CallJoinTokenResponse, ClientUpdatePolicy, ConversationId, DeviceActivity,
   GatewayClientMessage, GatewayEvent, MessageId, OrgBackgroundId, UserId,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -208,17 +207,6 @@ struct Hooks {
   on_change: Arc<dyn Fn() + Send + Sync>,
   on_failure: FailureHandler,
   on_call_event: CallEventHandler,
-}
-
-/// Everything joining a conversation's call needs from the core (e2ee.md §8).
-pub struct CallPreparation {
-  pub join: CallJoinTokenResponse,
-  pub user_id: UserId,
-  pub device_id: DeviceId,
-  /// Signs this device's per-call DAVE key; the device key itself stays in the core.
-  pub signer: CallKeySigner,
-  /// The conversation's devices (this one included) whose certificates verified.
-  pub devices: Vec<VerifiedDevice>,
 }
 
 type Api = HttpServerApi<ServerTokens>;
@@ -960,18 +948,7 @@ impl Core {
 
   async fn prepare_call(&mut self, conversation: ConversationId) -> Result<CallPreparation, String> {
     let client = self.client.as_mut().ok_or("this device is not set up yet")?;
-    let join = client.call_join_token(conversation).await.map_err(describe)?;
-    let devices = client
-      .verified_call_devices(conversation)
-      .await
-      .map_err(describe)?;
-    Ok(CallPreparation {
-      join,
-      user_id: client.user_id(),
-      device_id: client.device_id(),
-      signer: client.call_key_signer(),
-      devices,
-    })
+    client.prepare_call(conversation).await.map_err(describe)
   }
 
   async fn enroll(&mut self, request: EnrollRequest) -> Result<(), String> {

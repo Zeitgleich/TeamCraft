@@ -1,8 +1,10 @@
 //! Building blocks shared by the pre-join screen and the call screen: self preview, participant tiles
-//! and the background effect picker. No real video here: tiles show a stylised camera image so the
-//! layouts and effects can be reviewed without media.
+//! and the background effect picker. Where the media runs in the page (the browser), tiles show the
+//! real video ([`LiveVideo`]); elsewhere a stylised camera image, so the layouts and effects can be
+//! reviewed without media.
 
 use leptos::prelude::*;
+use teamcraft_proto::MediaStreamId;
 
 use crate::calls::BackgroundEffect;
 use crate::components::icons::{Icon, IconName};
@@ -24,6 +26,9 @@ pub fn VideoTile(
   #[prop(into, default = Signal::stored(BackgroundEffect::None))] effect: Signal<BackgroundEffect>,
   #[prop(into, default = Signal::stored(false))] is_mirrored: Signal<bool>,
   #[prop(default = false)] is_large: bool,
+  /// The real video of the tile, where the page shows call video.
+  #[prop(into, default = Signal::stored(None))]
+  video: Signal<Option<VideoSource>>,
 ) -> impl IntoView {
   let i18n = use_i18n();
   let name = if is_self {
@@ -68,8 +73,14 @@ pub fn VideoTile(
             move || view! { <span class="tile-initials" aria-hidden="true">{initials.clone()}</span> }
           }
         >
-          <div class="scene" aria-hidden="true"></div>
-          <div class="silhouette" class:mirrored=move || is_mirrored.get() aria-hidden="true"></div>
+          {move || match video.get() {
+            Some(source) => view! { <LiveVideo source=source is_mirrored=is_mirrored /> }.into_any(),
+            None => view! {
+              <div class="scene" aria-hidden="true"></div>
+              <div class="silhouette" class:mirrored=move || is_mirrored.get() aria-hidden="true"></div>
+            }
+            .into_any(),
+          }}
         </Show>
       </div>
       <div class="tile-label">
@@ -90,5 +101,95 @@ pub fn VideoTile(
     </div>
   }
 }
+
+/// Where a tile's real video comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VideoSource {
+  /// Another device's track in the call.
+  Remote(MediaStreamId),
+  /// The camera this device sends.
+  OwnCamera,
+}
+
+/// Whether this page shows real call video (the browser, once the call module runs).
+pub fn can_show_video() -> bool {
+  #[cfg(target_arch = "wasm32")]
+  {
+    crate::web_calls::can_show_video()
+  }
+  #[cfg(not(target_arch = "wasm32"))]
+  {
+    false
+  }
+}
+
+/// Real call video: another device's track drawn into a canvas, or the own camera in a muted
+/// `<video>`. Watching starts when it is shown and stops when it goes away, so tracks nobody looks
+/// at aren't received (robustness.md, "Performance and resources").
+#[component]
+pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -> impl IntoView {
+  match source {
+    VideoSource::Remote(stream_id) => {
+      let canvas = NodeRef::<leptos::html::Canvas>::new();
+      Effect::new(move |_| {
+        if let Some(element) = canvas.get() {
+          watch(stream_id, &element);
+        }
+      });
+      on_cleanup(move || unwatch(stream_id));
+      view! { <canvas class="live-video" node_ref=canvas aria-hidden="true"></canvas> }.into_any()
+    },
+    VideoSource::OwnCamera => {
+      let video = NodeRef::<leptos::html::Video>::new();
+      let state = crate::state::use_app_state();
+      Effect::new(move |_| {
+        // Again whenever the call changes: a camera switched to another device is a new stream.
+        state.read(|backend| backend.active_call().map(|active| active.is_camera_on));
+        if let Some(element) = video.get() {
+          show_own_camera(&element);
+        }
+      });
+      view! {
+        <video
+          class="live-video"
+          class:mirrored=move || is_mirrored.get()
+          node_ref=video
+          autoplay=true
+          muted=true
+          playsinline=true
+          aria-hidden="true"
+        ></video>
+      }
+      .into_any()
+    },
+  }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn watch(stream_id: MediaStreamId, canvas: &web_sys::HtmlCanvasElement) {
+  crate::web_calls::watch_video(stream_id, canvas);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn unwatch(stream_id: MediaStreamId) {
+  crate::web_calls::unwatch_video(stream_id);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn show_own_camera(video: &web_sys::HtmlVideoElement) {
+  let maybe_stream = crate::web_calls::local_camera();
+  if video.src_object() != maybe_stream {
+    video.set_src_object(maybe_stream.as_ref());
+  }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn watch(_stream_id: MediaStreamId, _canvas: &web_sys::HtmlCanvasElement) {}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn unwatch(_stream_id: MediaStreamId) {}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn show_own_camera(_video: &web_sys::HtmlVideoElement) {}
 
 pub use crate::components::background_picker::BackgroundPicker;

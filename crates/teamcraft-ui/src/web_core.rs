@@ -44,14 +44,15 @@ use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
 use teamcraft_core::ui_snapshot::SnapshotCache;
 use teamcraft_core::upkeep::{self, Upkeep};
 use teamcraft_core::{
-  Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer, PendingEnrollment,
-  platform,
+  CallPreparation, Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer,
+  PendingEnrollment, platform,
 };
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_proto::{
-  ConversationId, DeviceActivity, GatewayClientMessage, GatewayServerMessage, MessageId, UserId,
+  CallJoinTokenResponse, ConversationId, DeviceActivity, GatewayClientMessage, GatewayServerMessage,
+  MessageId, UserId,
 };
 use wasm_bindgen::JsCast;
 
@@ -171,6 +172,23 @@ pub fn is_notifying_tab() -> bool {
 /// Calls `callback` whenever the core's data changed.
 pub fn listen(callback: impl FnMut() + 'static) {
   LISTENERS.with(|listeners| listeners.borrow_mut().push(Rc::new(RefCell::new(callback))));
+}
+
+/// Whether the core runs in this tab (not in another tab this one follows). Calls need it: the
+/// device key that signs a call's keys stays with the core.
+pub fn runs_here() -> bool {
+  RUNNING.with(|running| matches!(running.borrow().as_ref(), Some(Running::Owner { .. })))
+}
+
+/// A join token, the signer and the verified devices for the conversation's call (e2ee.md §8).
+/// Only in the tab that runs the core.
+pub async fn prepare_call(conversation: ConversationId) -> Result<CallPreparation, String> {
+  ask(|reply| Request::PrepareCall(conversation, reply)).await?
+}
+
+/// A fresh join token for the conversation's call.
+pub async fn call_join_token(conversation: ConversationId) -> Result<CallJoinTokenResponse, String> {
+  ask(|reply| Request::CallJoinToken(conversation, reply)).await?
 }
 
 /// Answers one `core_*` command the way the desktop shell does.
@@ -573,6 +591,13 @@ enum Request {
   ApprovalCancel,
   /// The browser went online, the tab became visible or was resumed: check the connection now.
   NetworkChanged,
+  /// What joining a conversation's call needs (`web_calls`).
+  PrepareCall(ConversationId, oneshot::Sender<Result<CallPreparation, String>>),
+  /// A fresh join token for rejoining a call after a lost connection.
+  CallJoinToken(
+    ConversationId,
+    oneshot::Sender<Result<CallJoinTokenResponse, String>>,
+  ),
 }
 
 /// What woke the loop.
@@ -852,6 +877,9 @@ impl Core {
       Box::new(SystemClock),
     ));
     self.catch_up_focus = client.catch_up_focus();
+    let mut client = client;
+    // Calls ring and show their roster in the tab that runs the core.
+    client.set_call_event_sink(Box::new(crate::web_calls::on_gateway_event));
     self.client = Some(client);
     self.maybe_push_check_at_ms = Some(i64::MIN);
     store_string(&self.store_ready_key(), "1");
@@ -922,6 +950,23 @@ impl Core {
       },
       Request::ApprovalCancel => self.approval = None,
       Request::NetworkChanged => self.connection.network_changed(now_ms()).await,
+      Request::PrepareCall(conversation, reply) => {
+        let result = match self.client.as_mut() {
+          Some(client) => client.prepare_call(conversation).await.map_err(describe_failure),
+          None => Err(not_set_up()),
+        };
+        drop(reply.send(result));
+      },
+      Request::CallJoinToken(conversation, reply) => {
+        let result = match self.client.as_ref() {
+          Some(client) => client
+            .call_join_token(conversation)
+            .await
+            .map_err(describe_failure),
+          None => Err(not_set_up()),
+        };
+        drop(reply.send(result));
+      },
       Request::Snapshot(reply) => drop(reply.send(self.snapshot())),
       Request::SnapshotChanges(maybe_since, reply) => drop(reply.send(self.snapshot_changes(maybe_since))),
       Request::Messages {

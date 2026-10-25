@@ -46,7 +46,7 @@ pub const MAX_UPLOAD_KEY: &str = "max_upload_bytes";
 pub use actions::{OutgoingText, REPLY_EXCERPT_CHARS, forward_content, reply_ref};
 pub use attachments::{MAX_VIEWER_BYTES, OutgoingFile};
 pub use attested::{AttestationSettings, JwksSource};
-pub use calls::{CallEventSink, CallKeySigner};
+pub use calls::{CallEventSink, CallKeySigner, CallPreparation};
 pub(crate) use catch_up::CATCHING_UP_PREFIX;
 pub use catch_up::{CatchUpFocus, is_catching_up};
 pub use enroll::{EnrollmentOptions, EnrollmentSecret, OrgRecoveryUnlock, PendingEnrollment};

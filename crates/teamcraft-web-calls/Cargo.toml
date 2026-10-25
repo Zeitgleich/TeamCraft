@@ -1,0 +1,36 @@
+[package]
+publish = false
+name = "teamcraft-web-calls"
+description = "The web client's call media, a wasm module the page loads when a call starts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# No-op: Trunk passes `--features` to every crate of the page, so `trunk serve --features demo` (the
+# UI's development-only demo data) needs this module to accept the name. It has no demo data.
+demo = []
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+teamcraft-media = { path = "../teamcraft-media", features = ["web", "call-view"] }
+teamcraft-client-api = { path = "../teamcraft-client-api" }
+teamcraft-proto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "fmt"] }
+tracing-web = "0.1"
+console_error_panic_hook = "0.1"
+futures = { version = "0.3.34", default-features = false, features = ["std", "async-await"] }
+wasm-bindgen = "0.2.129"
+wasm-bindgen-futures = "0.4.79"
+js-sys = "0.3.106"
+web-sys = { version = "0.3.106", features = ["HtmlCanvasElement", "MediaStream", "MediaStreamTrack"] }

@@ -9,6 +9,8 @@ use teamcraft_proto::ErrorCode;
 
 /// Prefix of a failure that never reached the server.
 const NETWORK_PREFIX: &str = "network";
+/// Prefix of a call failure on this device ([`CallFailure`]): `call_<failure>`.
+const CALL_PREFIX: &str = "call_";
 
 /// What went wrong and the technical detail behind it, for the "Details" of an error message.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,8 +27,64 @@ pub enum FailureKind {
   Server(ErrorCode),
   /// The server could not be reached.
   Network,
+  /// A call could not use this device's microphone, camera or screen, or the browser lacks what
+  /// calls need.
+  Call(CallFailure),
   /// Anything else (local store, encryption, a stopped core).
   Other,
+}
+
+/// Why a call action failed on this device, so the UI can say what to do about it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallFailure {
+  /// The user or a site setting blocked the microphone.
+  MicrophoneDenied,
+  MicrophoneMissing,
+  /// Another app holds the microphone.
+  MicrophoneInUse,
+  CameraDenied,
+  CameraMissing,
+  CameraInUse,
+  /// The screen could not be shared (not offered by the browser, or refused by a policy).
+  ScreenUnavailable,
+  /// The browser lacks what calls need (WebTransport, WebCodecs, AudioWorklet).
+  Unsupported,
+  /// The organization requires a background behind the camera image, which this device can't
+  /// apply.
+  BackgroundRequired,
+}
+
+impl CallFailure {
+  const ALL: [Self; 9] = [
+    Self::MicrophoneDenied,
+    Self::MicrophoneMissing,
+    Self::MicrophoneInUse,
+    Self::CameraDenied,
+    Self::CameraMissing,
+    Self::CameraInUse,
+    Self::ScreenUnavailable,
+    Self::Unsupported,
+    Self::BackgroundRequired,
+  ];
+
+  /// Stable name on the wire, after [`CALL_PREFIX`].
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::MicrophoneDenied => "microphone_denied",
+      Self::MicrophoneMissing => "microphone_missing",
+      Self::MicrophoneInUse => "microphone_in_use",
+      Self::CameraDenied => "camera_denied",
+      Self::CameraMissing => "camera_missing",
+      Self::CameraInUse => "camera_in_use",
+      Self::ScreenUnavailable => "screen_unavailable",
+      Self::Unsupported => "unsupported",
+      Self::BackgroundRequired => "background_required",
+    }
+  }
+
+  fn from_wire(name: &str) -> Option<Self> {
+    Self::ALL.into_iter().find(|failure| failure.as_str() == name)
+  }
 }
 
 impl ActionFailure {
@@ -50,6 +108,9 @@ impl ActionFailure {
     if prefix == NETWORK_PREFIX {
       return Self::new(FailureKind::Network, detail);
     }
+    if let Some(failure) = prefix.strip_prefix(CALL_PREFIX).and_then(CallFailure::from_wire) {
+      return Self::new(FailureKind::Call(failure), detail);
+    }
     match ErrorCode::from(prefix.to_owned()) {
       ErrorCode::Unknown(_) => Self::other(text),
       code => Self::new(FailureKind::Server(code), detail),
@@ -61,6 +122,7 @@ impl ActionFailure {
     match &self.kind {
       FailureKind::Server(code) => format!("{}: {}", code.as_str(), self.detail),
       FailureKind::Network => format!("{NETWORK_PREFIX}: {}", self.detail),
+      FailureKind::Call(failure) => format!("{CALL_PREFIX}{}: {}", failure.as_str(), self.detail),
       FailureKind::Other => self.detail.clone(),
     }
   }
@@ -90,11 +152,24 @@ mod tests {
   }
 
   #[test]
+  fn call_failures_round_trip() {
+    for failure in CallFailure::ALL {
+      let failure = ActionFailure::new(FailureKind::Call(failure), "getUserMedia: Permission denied");
+      assert_eq!(ActionFailure::from_wire(&failure.to_wire()), failure);
+    }
+    assert_eq!(
+      ActionFailure::new(FailureKind::Call(CallFailure::CameraDenied), "x").to_wire(),
+      "call_camera_denied: x"
+    );
+  }
+
+  #[test]
   fn text_without_a_known_kind_is_other_and_kept_whole() {
     for text in [
       "this device is not set up yet",
       "server: server answered 400: invalid request: nope",
       "some_future_code: detail",
+      "call_some_future_failure: detail",
       "",
     ] {
       assert_eq!(

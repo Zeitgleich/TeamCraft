@@ -10478,6 +10478,7 @@ dependencies = [
  "rand_core 0.6.4",
  "screencapturekit",
  "serde_json",
+ "teamcraft-client-api",
  "teamcraft-crypto",
  "teamcraft-proto",
  "thiserror 2.0.21",
@@ -10610,6 +10611,7 @@ dependencies = [
  "teamcraft-client-api",
  "teamcraft-core",
  "teamcraft-crypto",
+ "teamcraft-media",
  "teamcraft-proto",
  "thiserror 2.0.21",
  "tracing",
@@ -10626,6 +10628,26 @@ name = "teamcraft-uniffi-bindgen"
 version = "1.0.2"
 dependencies = [
  "uniffi",
+]
+
+[[package]]
+name = "teamcraft-web-calls"
+version = "1.0.2"
+dependencies = [
+ "console_error_panic_hook",
+ "futures",
+ "js-sys",
+ "serde",
+ "serde_json",
+ "teamcraft-client-api",
+ "teamcraft-media",
+ "teamcraft-proto",
+ "tracing",
+ "tracing-subscriber",
+ "tracing-web",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

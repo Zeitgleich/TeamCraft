@@ -2,7 +2,6 @@ use std::cell::Cell;
 
 use leptos::prelude::*;
 
-use crate::auth::tauri;
 use crate::calls::{CallEvent, CallKind, CallRequest, MediaDevice};
 use crate::components::call_video::{BackgroundPicker, VideoTile};
 use crate::components::icons::{Icon, IconName};
@@ -22,27 +21,32 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
   let call = state.call;
   let me = state.me();
   let conversation = Memo::new(move |_| state.read(|backend| backend.conversation(request.conversation)));
-  let devices = state.read(|backend| backend.media_devices());
+  // Browsers name their devices only once the page may use them, so the lists can fill in later.
+  let devices = Memo::new(move |_| state.read(|backend| backend.media_devices()));
+  let has_effects = state.read(|backend| backend.has_background_effects());
   let participants = Memo::new(move |_| {
     state
       .read(|backend| backend.call_participants(request.conversation))
       .len()
   });
 
-  let is_real = tauri::is_available();
+  let is_real = !state.read(|backend| backend.has_simulated_calls());
 
   // Remember the first device of each kind when nothing was chosen before.
-  for (signal, list) in [
-    (call.camera_id, &devices.cameras),
-    (call.microphone_id, &devices.microphones),
-    (call.speaker_id, &devices.speakers),
-  ] {
-    if signal.get_untracked().is_empty()
-      && let Some(first) = list.first()
-    {
-      signal.set(first.id.clone());
+  Effect::new(move |_| {
+    let devices = devices.get();
+    for (signal, list) in [
+      (call.camera_id, &devices.cameras),
+      (call.microphone_id, &devices.microphones),
+      (call.speaker_id, &devices.speakers),
+    ] {
+      if signal.get_untracked().is_empty()
+        && let Some(first) = list.first()
+      {
+        signal.set(first.id.clone());
+      }
     }
-  }
+  });
 
   let title = move || {
     let name = conversation.get().map(|conv| conv.name).unwrap_or_default();
@@ -130,11 +134,11 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
         </p>
         <div class="field">
           <label for="prejoin-camera">{move || i18n.t("prejoin-camera")}</label>
-          <DeviceSelect id="prejoin-camera" list=devices.cameras.clone() selected=call.camera_id on_pick=Callback::new(move |id: String| call.emit(CallEvent::CameraDevice(id))) />
+          <DeviceSelect id="prejoin-camera" list=Signal::derive(move || devices.get().cameras) selected=call.camera_id on_pick=Callback::new(move |id: String| call.emit(CallEvent::CameraDevice(id))) />
         </div>
         <div class="field">
           <label for="prejoin-mic">{move || i18n.t("prejoin-microphone")}</label>
-          <DeviceSelect id="prejoin-mic" list=devices.microphones.clone() selected=call.microphone_id on_pick=Callback::new(move |id: String| call.emit(CallEvent::Microphone(id))) />
+          <DeviceSelect id="prejoin-mic" list=Signal::derive(move || devices.get().microphones) selected=call.microphone_id on_pick=Callback::new(move |id: String| call.emit(CallEvent::Microphone(id))) />
           <Show when=move || !is_real fallback=|| ()>
           <div
             class="meter"
@@ -153,7 +157,7 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
         <div class="field">
           <label for="prejoin-speaker">{move || i18n.t("prejoin-speaker")}</label>
           <div class="field-row">
-            <DeviceSelect id="prejoin-speaker" list=devices.speakers.clone() selected=call.speaker_id on_pick=Callback::new(move |id: String| call.emit(CallEvent::Speakers(id))) />
+            <DeviceSelect id="prejoin-speaker" list=Signal::derive(move || devices.get().speakers) selected=call.speaker_id on_pick=Callback::new(move |id: String| call.emit(CallEvent::Speakers(id))) />
             <button type="button" class="btn" on:click=test_speaker disabled=move || is_testing_speaker.get()>
               <Icon name=IconName::Volume />
               <span>
@@ -162,11 +166,13 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
             </button>
           </div>
         </div>
-        <div class="field">
-          <span class="field-title" id="prejoin-effects-title">{move || i18n.t("prejoin-effects")}</span>
-          <BackgroundPicker effect=call.effect />
-          <p class="muted-text small">{move || i18n.t("prejoin-effects-hint")}</p>
-        </div>
+        <Show when=move || has_effects fallback=|| ()>
+          <div class="field">
+            <span class="field-title" id="prejoin-effects-title">{move || i18n.t("prejoin-effects")}</span>
+            <BackgroundPicker effect=call.effect />
+            <p class="muted-text small">{move || i18n.t("prejoin-effects-hint")}</p>
+          </div>
+        </Show>
         <label class="checkbox">
           <input
             type="checkbox"
@@ -195,10 +201,11 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
 #[component]
 fn DeviceSelect(
   id: &'static str,
-  list: Vec<MediaDevice>,
+  #[prop(into)] list: Signal<Vec<MediaDevice>>,
   selected: RwSignal<String>,
   on_pick: Callback<String>,
 ) -> impl IntoView {
+  let i18n = use_i18n();
   view! {
     <select
       id=id
@@ -209,17 +216,25 @@ fn DeviceSelect(
         on_pick.run(value);
       }
     >
-      {list
-        .into_iter()
-        .map(|device| {
-          let value = device.id.clone();
-          view! {
-            <option value=device.id selected=move || selected.get() == value>
-              {device.label}
-            </option>
-          }
-        })
-        .collect_view()}
+      {move || {
+        let devices = list.get();
+        if devices.is_empty() {
+          // Nothing listed yet (the browser names devices only with permission): the default.
+          return view! { <option value="" selected=true>{i18n.t("calls-system-default")}</option> }.into_any();
+        }
+        devices
+          .into_iter()
+          .map(|device| {
+            let value = device.id.clone();
+            view! {
+              <option value=device.id selected=move || selected.get() == value>
+                {device.label}
+              </option>
+            }
+          })
+          .collect_view()
+          .into_any()
+      }}
     </select>
   }
 }

@@ -133,6 +133,10 @@ impl CallBackend for MockBackend {
     true
   }
 
+  fn has_simulated_calls(&self) -> bool {
+    true
+  }
+
   fn huddle(&self, conversation: ConversationId) -> Option<HuddleInfo> {
     (conversation == id_from_raw::<ConversationId>(12)).then(|| HuddleInfo {
       participants: vec![id_from_raw(2), id_from_raw(3)],

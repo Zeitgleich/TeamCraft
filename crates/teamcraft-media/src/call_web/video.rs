@@ -19,7 +19,9 @@ use web_sys::{
   MediaStreamTrack, MediaTrackConstraints,
 };
 
-use super::{Input, Interval, WebCallError, browser, dictionary, js_message, window};
+use super::{
+  Input, Interval, MediaInput, WebCallError, browser, dictionary, js_message, media_access, window,
+};
 use crate::call_video::ReceivedVideoFrame;
 use crate::video::{VideoResolution, simulcast_layers};
 use crate::web_api::{Canvas2d, EncodedVideoChunk, VideoDecoder, VideoEncoder, VideoFrame as WebVideoFrame};
@@ -431,13 +433,13 @@ pub(super) async fn capture_camera(maybe_device: Option<&str>) -> Result<MediaSt
   let promise = window()?
     .navigator()
     .media_devices()
-    .map_err(browser("mediaDevices"))?
+    .map_err(media_access(MediaInput::Camera))?
     .get_user_media_with_constraints(&constraints)
-    .map_err(browser("getUserMedia"))?;
+    .map_err(media_access(MediaInput::Camera))?;
   Ok(
     JsFuture::from(promise)
       .await
-      .map_err(browser("getUserMedia"))?
+      .map_err(media_access(MediaInput::Camera))?
       .unchecked_into(),
   )
 }
@@ -455,13 +457,13 @@ pub(super) async fn capture_screen() -> Result<MediaStream, WebCallError> {
   let promise = window()?
     .navigator()
     .media_devices()
-    .map_err(browser("mediaDevices"))?
+    .map_err(media_access(MediaInput::Screen))?
     .get_display_media_with_constraints(&constraints)
-    .map_err(browser("getDisplayMedia"))?;
+    .map_err(media_access(MediaInput::Screen))?;
   Ok(
     JsFuture::from(promise)
       .await
-      .map_err(browser("getDisplayMedia"))?
+      .map_err(media_access(MediaInput::Screen))?
       .unchecked_into(),
   )
 }
