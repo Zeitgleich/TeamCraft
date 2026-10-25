@@ -93,7 +93,7 @@ mod browser {
     }
 
     pub async fn info(&self, id: &str) -> Result<ShareInfoResponse, ShareError> {
-      let response = self.call("GET", &format!("/api/v1/shares/{id}"), None).await?;
+      let response = self.send("GET", &format!("/api/v1/shares/{id}"), None).await?;
       serde_json::from_slice(&response).map_err(|_| ShareError::Network)
     }
 
@@ -108,12 +108,12 @@ mod browser {
       let body =
         serde_json::to_vec(&ShareDownloadRequest { maybe_grant }).map_err(|_| ShareError::Network)?;
       let response = self
-        .call("POST", &format!("/api/v1/shares/{id}/download"), Some(body))
+        .send("POST", &format!("/api/v1/shares/{id}/download"), Some(body))
         .await?;
       serde_json::from_slice(&response).map_err(|_| ShareError::Network)
     }
 
-    async fn call(
+    async fn send(
       &self,
       method: &str,
       path: &str,
