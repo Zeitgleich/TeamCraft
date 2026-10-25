@@ -214,6 +214,13 @@ struct State {
   removal_requests: u64,
   /// The next proposal of these users fails this way ([`FakeServer::cut_next_proposal`]).
   proposal_cuts: HashMap<UserId, NetworkCut>,
+  /// The next application message of these users fails this way
+  /// ([`FakeServer::cut_next_application`]).
+  application_cuts: HashMap<UserId, NetworkCut>,
+  /// The next application message of these users is accepted but published only on
+  /// [`FakeServer::release_held_messages`].
+  holding_application_of: HashSet<UserId>,
+  held_applications: Vec<(UserId, ConversationId, PostMlsMessageRequest)>,
   /// Members refused their groups' queues ([`FakeServer::refuse_queue_to`]).
   queue_refused_to: HashSet<UserId>,
   /// The next identity key lookup of these users fails with a network error.
@@ -611,6 +618,40 @@ impl FakeServer {
   /// The user's next MLS proposal (a signed change, a rejoin request) fails as `cut` says.
   pub fn cut_next_proposal(&self, user: UserId, cut: NetworkCut) {
     self.lock().proposal_cuts.insert(user, cut);
+  }
+
+  /// The user's next MLS application message (content keys) fails as `cut` says.
+  pub fn cut_next_application(&self, user: UserId, cut: NetworkCut) {
+    self.lock().application_cuts.insert(user, cut);
+  }
+
+  /// The user's next MLS application message is accepted but reaches the group's queue only on
+  /// [`Self::release_held_messages`]: two members sending at once, each before seeing the other's.
+  pub fn hold_next_application(&self, user: UserId) {
+    self.lock().holding_application_of.insert(user);
+  }
+
+  /// Publishes the held application messages, after everything posted meanwhile.
+  pub fn release_held_messages(&self) {
+    let held = std::mem::take(&mut self.lock().held_applications);
+    for (user, conversation, request) in held {
+      let mut state = self.lock();
+      let message = MlsMessageResponse {
+        id: state.next_id(),
+        conversation_id: conversation,
+        epoch: request.epoch,
+        kind: request.kind.clone(),
+        sender_device_id: request.device_id,
+        maybe_recipient_device_id: None,
+        payload: request.payload.clone(),
+      };
+      let Ok(entry) = state.actor_conversation_mut(conversation, user) else {
+        continue;
+      };
+      entry.mls.push(message.clone());
+      let members: Vec<UserId> = entry.members.keys().copied().collect();
+      state.publish(members, &GatewayEvent::MlsMessage { message });
+    }
   }
 
   /// From now on the server refuses `user` the queues of their groups (`403`) while still listing
@@ -1935,10 +1976,28 @@ impl ServerApi for FakeServerApi {
     conversation: ConversationId,
     request: &PostMlsMessageRequest,
   ) -> Result<MlsMessageResponse, ApiError> {
-    let maybe_cut = if request.kind == MlsMessageKind::Proposal {
-      self.server.lock().proposal_cuts.remove(&self.user)
-    } else {
-      None
+    let maybe_cut = match request.kind {
+      MlsMessageKind::Proposal => self.server.lock().proposal_cuts.remove(&self.user),
+      MlsMessageKind::Application => {
+        let mut state = self.server.lock();
+        if state.holding_application_of.remove(&self.user) {
+          let id = state.next_id();
+          state
+            .held_applications
+            .push((self.user, conversation, request.clone()));
+          return Ok(MlsMessageResponse {
+            id,
+            conversation_id: conversation,
+            epoch: request.epoch,
+            kind: request.kind.clone(),
+            sender_device_id: request.device_id,
+            maybe_recipient_device_id: None,
+            payload: request.payload.clone(),
+          });
+        }
+        state.application_cuts.remove(&self.user)
+      },
+      _ => None,
     };
     match maybe_cut {
       None => self.post_mls_message_now(conversation, request),

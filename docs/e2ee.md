@@ -210,8 +210,10 @@ Result:
   can't hold it back from some members and leave them on a key the removed person knows; the removed
   device never gets the epoch's secrets. (A member that never receives the removal commit stays in
   the old epoch and keeps using the old key; it can't tell.)
-- Content key bundles (MLS application messages) only carry history for new members. A member takes a
-  bundle's "current" key only if it has none yet, so an old or delayed bundle can't switch it back.
+- Content key bundles (MLS application messages) only carry history for new members, the current
+  key for a further device of a member, and the keys a device added back missed (§4.6). A member
+  takes a bundle's "current" key only if it has none yet, so an old or delayed bundle can't switch it
+  back; the one exception is a device that just joined and waits for its first one (§4.6).
 - Each message header (plaintext) carries `content_key_id`, so clients know which key to use.
 - `content_key_id` is a random 128-bit value, not a sequence number: two members may rotate at the same
   time (e.g. both reach the message limit), and random IDs keep both keys usable without coordination.
@@ -470,13 +472,37 @@ its own. See [admin.md](admin.md) §2.
   online, check that the user's signed device list names the sending device and add it to that
   conversation's group like a colleague's new device. A member handles one device's request once
   per `rejoin_retry` in each conversation; repeats (a device asking too often, a server replaying
-  entries) cost it no requests (#187). Nobody sends content keys after an external
-  join: the device has what the user's key bag holds; if that lacks the current key (the user's
-  other devices hadn't uploaded it yet) it can't read new messages until the key bag arrives
-  (#178). `GroupInfo` larger than
+  entries) cost it no requests (#187). **The current key of a further device.**
+  A further device reads history with what the user's key bag holds, but the bag's current key may
+  be one from before a key switch the user's other devices hadn't uploaded yet, which a removed
+  member knows. So the device doesn't write with it: when it joins (by external commit or from a
+  welcome, unless it was added back) it stops using it (keeping it for reading) and shows that it
+  waits, and the key bag can't make it current again. Every member that merges an unsigned addition
+  of a further device (an external join, or a member's commit, its own included) queues sending the
+  group its current key as a bundle, ranked like an addition (`device_add_stagger` per rank, online
+  users first), so normally one member sends; the others drop theirs once a current key arrives, or
+  when the group switches keys anyway. A member hands over only a current key it had in the group
+  since its own join (derived or received there, see "Keys a device added back missed"). If its
+  current key is one only its key bag knows, which may be stale in the same way (and so is every
+  current key from before devices recorded this), it makes a fresh random key and hands over that
+  one: it is new and reaches only the epoch's members over MLS. It switches to the fresh key only
+  once the bundle went out, so a failed send never leaves it writing with a key nobody has. The
+  same rule holds for the current key in the history it shares with a new member; a device that
+  waits for a key itself makes a fresh one when it shares history (that is safe), never for a
+  hand-over. The waiting device takes the first current key a member sends after its join (the
+  adder's history share for a new user, the hand-over for a further device; only members of the
+  epoch can send it, the server can delay it, not forge it), or the next epoch key it derives
+  itself. So any one member decides which key a waiting device writes with; members that handed
+  over at the same time each keep their own key, and every member has all of them. Members on clients before this version
+  don't send the hand-over: until a member with this version comes online, the device reads but
+  doesn't write.
+  `GroupInfo` larger than
   `max_group_info_bytes` (client, 256 KiB) is not sent, and the server stores a commit without one
-  that exceeds its payload limit; such groups use the request. A further device in a DM or group DM
-  waits for a member as before. The server can still put a user who isn't in a group into a
+  that exceeds its payload limit; such groups use the request. A further device joins DMs and group
+  DMs the same way, but only into a group that already holds every participant the server lists: a
+  DM group of one may still lose its founding race (below), and a device that joined it would be
+  left in a group nobody uses. Otherwise it asks with the request and waits for a member. A DM this
+  device opened itself is finished by its setup. The server can still put a user who isn't in a group into a
   conversation so that the device asks with a signed self-add (as before this change). The app shows "waiting for another device" until
   then. Neither way announces a join: the user was a member all along.
 - **Exception: a device added back.** A device that fell out of the group (see below) can ask to be
@@ -490,6 +516,25 @@ its own. See [admin.md](admin.md) §2.
   but the device can make it give up its leaf. Every member then switches to the new epoch's content
   key, which the device derives from its welcome. Clients before this version refuse such commits;
   all clients have to be updated.
+- **Keys a device added back missed.** Content keys introduced while the device couldn't follow the
+  group (a removal, a "from join" addition in between) would otherwise stay unknown to it. The
+  member that added it back sends it the keys of the epochs it was a member in, as an MLS
+  application message whose keys are sealed to the device alone: HPKE (RFC 9180, base mode,
+  X25519, HKDF-SHA256, ChaCha20-Poly1305) to the agreement key in the device's verified certificate,
+  with the conversation, the epoch, the sending member and the device in the HPKE info
+  (`TeamCraft-v1 sealed content keys`). Other members see that keys went to the device, not which:
+  they may not have been members in those epochs (a guest added from the join on). A sealed bundle
+  never names a current key; the device opens it only if it is for this device, from that member, in
+  that epoch, and only adds its keys to the ring. Which keys: each device notes, per content key,
+  the first epoch it had it in the group (derived as the epoch's key, or received from a member in
+  an application message of that epoch, which every member of the epoch got too), and, per member
+  device, the epoch its leaf was added in, when it saw that. It sends the keys noted for epochs since
+  both its own join and the device's addition, newest first, at most `max_missed_keys` (client, 512).
+  Keys from the user's key bag or sealed to it have no epoch and are never sent on. A member that
+  joined after the device fell out lacks the keys before its join; so when a member added back a
+  device and the committer joined after this member (it saw the committer's leaf added), this member
+  sends its own keys too, ranked like an addition, unless a member that joined no later than itself
+  sent them first. Clients before this version ignore the sealed bundles.
 - Commits with other proposal types (PSK, re-init, external init, group context changes), from
   external senders, or whose update changes a member's user or device are rejected.
 
@@ -600,9 +645,9 @@ the request, by the server times of the commit and the request (#149); a member 
 that commit hasn't seen it and may answer once. A malicious member can thus delay a device's return
 by up to one cooldown (30 minutes): an add-back that doesn't work for the device still starts it.
 The
-cursor stays before the later entries, so nothing after the welcome is lost. Messages encrypted with
-content keys of epochs the device missed stay unreadable unless another device of the user had them
-in the key bag.
+cursor stays before the later entries, so nothing after the welcome is lost. The keys of the epochs
+it missed are sealed to it after the commit (above, "Keys a device added back missed"); the user's
+key bag may hold them too.
 
 **Founding a DM, and finishing it.** A DM or group DM has no creator who must found it: whichever
 participant's device first commits at epoch 0 owns the group, and the server keeps only that commit.

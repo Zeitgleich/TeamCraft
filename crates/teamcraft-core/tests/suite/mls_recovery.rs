@@ -245,6 +245,97 @@ mod fallen_out {
   }
 }
 
+mod missed_keys {
+  use super::*;
+
+  /// Issue #147: Bob's client refuses Carol's removal; Alice writes under the new epoch's key
+  /// while Bob is out. Added back, he gets that key sealed to his device and reads it.
+  #[tokio::test]
+  async fn a_device_added_back_reads_what_was_sent_while_it_was_out() {
+    let server = FakeServer::new();
+    // Ranked hand-overs are due at once (the test's clock stands still).
+    let no_stagger = teamcraft_core::ClientSettings {
+      device_add_stagger: std::time::Duration::ZERO,
+      ..settings()
+    };
+    let mut alice = Peer::enroll_with_settings(&server, "Alice", no_stagger).await;
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    let mut carol = Peer::enroll(&server, "Carol").await;
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
+
+    server.garble_next_commit_for(bob.client.user_id());
+    alice
+      .client
+      .remove_member(channel, carol.client.user_id())
+      .await
+      .unwrap();
+    alice
+      .client
+      .send_text(channel, None, "after Carol")
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    // Bob notices that he fell out with the group's next commit, which adds Dave. Whoever adds
+    // Bob back, Dave (who never had the key) or Alice, Bob gets it from Alice.
+    let mut dave = Peer::enroll(&server, "Dave").await;
+    alice
+      .client
+      .add_member(channel, dave.client.user_id())
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+    alice.client.apply_pending_changes().await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+
+    assert_same_epoch(channel, &mut [&mut alice, &mut bob, &mut dave]);
+    assert_eq!(bob.texts(channel), ["after Carol"]);
+    assert_eq!(bob.client.undecrypted_count().unwrap(), 0);
+    assert!(carol.texts(channel).is_empty(), "Carol never gets the new keys");
+  }
+
+  /// A device added with history from its join on, added back later, gets the keys of the epochs
+  /// since its join (which keys exactly: the unit tests of `key_history`).
+  #[tokio::test]
+  async fn a_device_added_back_gets_no_keys_from_before_it_joined() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol) = three(&server).await;
+    let mut dave = Peer::enroll(&server, "Dave").await;
+    let channel = channel_with(&mut alice, &mut [&mut bob]).await;
+    alice
+      .client
+      .send_text(channel, None, "before Dave")
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    alice
+      .client
+      .add_member_with_history(channel, dave.client.user_id(), Some(HistoryPolicy::FromJoin))
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut dave]).await;
+    alice.client.send_text(channel, None, "hi Dave").await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut dave]).await;
+
+    // Dave's client refuses Carol's addition, which switches to a new key.
+    server.garble_next_commit_for(dave.client.user_id());
+    alice
+      .client
+      .add_member_with_history(channel, carol.client.user_id(), Some(HistoryPolicy::FromJoin))
+      .await
+      .unwrap();
+    alice.client.send_text(channel, None, "hi Carol").await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+
+    assert_same_epoch(channel, &mut [&mut alice, &mut bob, &mut carol, &mut dave]);
+    assert_eq!(dave.texts(channel), ["hi Dave", "hi Carol"]);
+    // Carol, a member when the keys were sealed to Dave, doesn't get the key from before her join.
+    let hi_dave = alice.content_key_of(channel, "hi Dave").await;
+    assert!(dave.client.has_content_key(channel, &hi_dave));
+    assert!(!carol.client.has_content_key(channel, &hi_dave));
+    assert_eq!(carol.texts(channel), ["hi Carol"]);
+  }
+}
+
 mod skewed_clocks {
   use super::*;
 

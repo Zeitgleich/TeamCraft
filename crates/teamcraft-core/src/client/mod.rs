@@ -17,6 +17,7 @@ pub mod files;
 mod gateway;
 mod group_health;
 mod groups;
+mod key_history;
 mod key_packages;
 mod linking;
 mod member_device;
@@ -157,6 +158,9 @@ pub struct ClientSettings {
   /// Larger MLS group information is not sent with a commit (it would push the commit over the
   /// server's payload limit); a further device then waits for a member instead.
   pub max_group_info_bytes: usize,
+  /// At most this many content keys are sent to a device added back, the newest first (e2ee.md
+  /// §4.6): bounds the size of that one message.
+  pub max_missed_keys: usize,
   /// Ranks beyond this commit together at `device_add_max_rank × device_add_stagger`: bounds how
   /// long a new device waits when the first-ranked members are away (presence isn't per device).
   pub device_add_max_rank: u32,
@@ -245,6 +249,7 @@ impl Default for ClientSettings {
       max_pending_revocation_checks: 16,
       removal_watch: std::time::Duration::from_secs(30 * 24 * 60 * 60),
       max_group_info_bytes: 256 * 1024,
+      max_missed_keys: 512,
       max_upload_bytes: 100 * 1024 * 1024,
       maybe_download_dir: None,
       maybe_push_gateway_url: None,
@@ -353,6 +358,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(self.group(conversation)?.map(|group| group.epoch()))
   }
 
+  /// Whether this device holds the content key a message names (`content_key_id`). For tests.
+  #[doc(hidden)]
+  pub fn has_content_key(&self, conversation: ConversationId, content_key_id: &[u8]) -> bool {
+    let Ok(id) = <[u8; 16]>::try_from(content_key_id) else {
+      return false;
+    };
+    self
+      .account
+      .key_bag
+      .ring(convert::conversation(conversation))
+      .is_some_and(|ring| {
+        ring
+          .get(teamcraft_crypto::content_key::ContentKeyId::from_bytes(id))
+          .is_some()
+      })
+  }
+
   /// Users whose identity key changed since it was pinned (e2ee.md §1: "security key changed").
   pub fn changed_identities(&self) -> Result<Vec<UserId>, CoreError> {
     Ok(
@@ -436,6 +458,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self
       .store
       .delete(Table::AppliedChanges, &groups::rejoin_key(conversation))?;
+    self
+      .store
+      .delete(Table::AppliedChanges, &key_history::key_history_key(conversation))?;
+    self.store.delete(
+      Table::AppliedChanges,
+      &member_device::current_key_wait_key(conversation),
+    )?;
     self
       .store
       .delete(Table::AppliedChanges, &group_health::leftovers_key(conversation))?;
