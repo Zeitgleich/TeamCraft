@@ -23,4 +23,9 @@ serde_json.workspace = true
 # The server entry's warning about an identity provider outside the server's registrable domain
 # needs the Public Suffix List; this crate embeds it (no I/O, builds for wasm).
 psl = "2"
+# The OIDC sign-in's shared request parameters and token response (src/oidc_login.rs); the same
+# crate the web client and the desktop shell sign in with.
+oauth2 = { version = "5", default-features = false }
+# The ID token's claims are base64url JSON (login hint, src/oidc_login.rs).
+base64.workspace = true
 

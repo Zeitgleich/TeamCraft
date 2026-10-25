@@ -381,7 +381,7 @@ fn SignInMethods(state: SignInPageState, control: SessionControl, form: LocalFor
             let is_first = index == 0;
             match part {
               SignInBlock::Sso { label, maybe_icon_url } => {
-                view! { <SsoButton label=label maybe_icon_url=maybe_icon_url is_first=is_first control=control /> }.into_any()
+                view! { <SsoButton label=label maybe_icon_url=maybe_icon_url is_first=is_first control=control page=state.page /> }.into_any()
               },
               SignInBlock::Local { requires_code } => {
                 view! { <LocalSignInForm requires_code=requires_code is_first=is_first control=control form=form /> }.into_any()
@@ -409,6 +409,8 @@ fn SsoButton(
   maybe_icon_url: Option<String>,
   is_first: bool,
   control: SessionControl,
+  /// The server's sign-in page, for whether it asks for the provider's login page.
+  page: Memo<SignInPage>,
 ) -> impl IntoView {
   let i18n = use_i18n();
   let text = move || i18n.t_with("login-sso", &[("provider", &label)]);
@@ -431,13 +433,9 @@ fn SsoButton(
   });
   let start = move |_| {
     let (name, maybe_logo, maybe_logo_dark, is_wordmark) = logos.get_untracked();
-    control.sign_in(sign_in_look(
-      i18n,
-      Some(name),
-      maybe_logo,
-      maybe_logo_dark,
-      is_wordmark,
-    ));
+    let mut look = sign_in_look(i18n, Some(name), maybe_logo, maybe_logo_dark, is_wordmark);
+    look.maybe_login_page_always_shown = page.with_untracked(|page| page.maybe_login_page_always_shown);
+    control.sign_in(look);
   };
   view! {
     <button
@@ -1010,6 +1008,7 @@ fn sign_in_look(
     maybe_logo: maybe_logo.filter(|url| is_data_image(url)),
     maybe_logo_dark: maybe_logo_dark.filter(|url| is_data_image(url)),
     is_wordmark,
+    maybe_login_page_always_shown: None,
   }
 }
 

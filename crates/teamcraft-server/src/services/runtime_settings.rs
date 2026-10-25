@@ -231,6 +231,7 @@ fn apply(settings: &mut Settings, section: &RuntimeSettingsSection) {
       page.methods.clone_from(&values.methods);
       page.help_text.clone_from(&values.help_text);
       page.maybe_help_link.clone_from(&values.maybe_help_link);
+      page.is_login_page_always_shown = values.is_login_page_always_shown;
     },
     RuntimeSettingsSection::MailTexts(values) => {
       let mail = &mut settings.mail;
@@ -324,6 +325,7 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
       methods: settings.sign_in_page.methods.clone(),
       help_text: settings.sign_in_page.help_text.clone(),
       maybe_help_link: settings.sign_in_page.maybe_help_link.clone(),
+      is_login_page_always_shown: settings.sign_in_page.is_login_page_always_shown,
     },
     mail_texts: MailTextSettings {
       invite_subject: settings.mail.invite_subject.clone(),
@@ -661,6 +663,7 @@ mod tests {
         methods,
         help_text: std::collections::BTreeMap::from([("en".to_owned(), "Call 1234.".to_owned())]),
         maybe_help_link: maybe_link.map(str::to_owned),
+        is_login_page_always_shown: true,
       }))
     };
     assert!(

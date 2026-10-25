@@ -2154,6 +2154,7 @@ settings-methods-local = Nur E-Mail und Passwort
 settings-f-help_text-en = Hilfetext (Englisch)
 settings-f-help_text-de = Hilfetext (Deutsch)
 settings-f-help_link = Hilfeseite
+settings-f-is_login_page_always_shown = Immer die Anmeldeseite des Identitätsanbieters zeigen (man sieht das Konto und kann es wechseln)
 settings-group-mail_texts = Einladungs- und Aktivierungsmail
 settings-group-mail_texts-hint = Texte der eigenen Mails des Servers. Platzhalter: inviter, space, role, url.
 settings-group-meeting_mail = Besprechungsmails

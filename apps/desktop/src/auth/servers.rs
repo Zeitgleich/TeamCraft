@@ -138,13 +138,40 @@ impl ServerDirectory {
   }
 
   /// Stores `profile` (replacing an older one of the same server) and makes it the active account.
-  pub fn activate(&self, profile: ServerProfile) -> std::io::Result<()> {
+  /// The login hint of the older one stays while the identity provider is the same.
+  pub fn activate(&self, mut profile: ServerProfile) -> std::io::Result<()> {
     let mut accounts = self.lock();
+    if profile.maybe_login_hint.is_none()
+      && let Some(older) = accounts
+        .accounts
+        .iter()
+        .find(|existing| existing.origin == profile.origin && existing.issuer == profile.issuer)
+    {
+      profile.maybe_login_hint.clone_from(&older.maybe_login_hint);
+    }
     accounts
       .accounts
       .retain(|existing| existing.origin != profile.origin);
     accounts.maybe_active = Some(profile.origin.clone());
     accounts.accounts.push(profile);
+    save(&self.path, &accounts)
+  }
+
+  /// Remembers the account last signed in with on the server `origin` of `issuer`, for the next
+  /// sign-in's login page. Nothing changes when the profile meanwhile names another provider.
+  pub fn set_login_hint(&self, origin: &ServerOrigin, issuer: &str, hint: String) -> std::io::Result<()> {
+    let mut accounts = self.lock();
+    let Some(profile) = accounts
+      .accounts
+      .iter_mut()
+      .find(|profile| &profile.origin == origin && profile.issuer == issuer)
+    else {
+      return Ok(());
+    };
+    if profile.maybe_login_hint.as_deref() == Some(hint.as_str()) {
+      return Ok(());
+    }
+    profile.maybe_login_hint = Some(hint);
     save(&self.path, &accounts)
   }
 
@@ -366,6 +393,8 @@ mod tests {
       display_name: name.into(),
       server_version: "1.0.0".into(),
       has_local_accounts: false,
+      is_login_page_always_shown: true,
+      maybe_login_hint: None,
     }
   }
 }

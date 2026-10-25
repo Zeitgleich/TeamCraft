@@ -7,13 +7,15 @@
 
 use std::cell::RefCell;
 
-use oauth2::basic::BasicClient;
 use oauth2::{
-  AuthUrl, AuthorizationCode, ClientId, CsrfToken, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
-  RefreshToken, RequestTokenError, Scope, TokenResponse, TokenUrl,
+  AuthUrl, AuthorizationCode, ClientId, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RefreshToken,
+  RequestTokenError, TokenResponse, TokenUrl,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use teamcraft_client_api::oidc_login::{
+  LoginRequest, OidcClient, OidcTokenResponse, authorization_url, oidc_client,
+};
 use teamcraft_client_api::server_entry::{HttpPolicy, SERVER_INFO_PATH, check_discovery};
 use teamcraft_proto::{SERVER_INFO_PRODUCT, ServerInfoResponse};
 
@@ -27,6 +29,9 @@ use crate::route::Route;
 const PENDING_KEY: &str = "teamcraft.oidc.pending";
 const SIGNED_IN_HINT_KEY: &str = "teamcraft.signed_in";
 const AUTOLOGIN_TRIED_KEY: &str = "teamcraft.autologin_tried";
+/// The account last signed in with in this browser ([`StoredLoginHint`]), prefilled on the
+/// provider's login page (issue #448). The page belongs to one server, so the key needs no origin.
+const LOGIN_HINT_KEY: &str = "teamcraft.login_hint";
 /// The bearer token of a local account, for the life of the tab.
 const LOCAL_SESSION_KEY: &str = "teamcraft.local_session";
 /// The scope every sign-in asks for, also with development overrides.
@@ -49,6 +54,17 @@ struct SignIn {
   issuer: String,
   client_id: String,
   scopes: Vec<String>,
+  /// Interactive sign-ins ask for the provider's login page (the server's setting).
+  is_login_page_always_shown: bool,
+}
+
+/// The login hint with the identity provider it belongs to: a server that switched providers
+/// gets no hint of the old one.
+#[derive(Serialize, Deserialize)]
+struct StoredLoginHint {
+  issuer: String,
+  client_id: String,
+  hint: String,
 }
 
 /// The session of a local account: the server issues the token, there is no refresh.
@@ -123,26 +139,34 @@ impl BrowserAuth {
       clean_location_to(maybe_return_path);
       return outcome.map(|_| true);
     }
-    // Signed in before and the tab was reloaded: go through the provider again, once, without asking.
+    // Signed in before and the tab was reloaded: go through the provider again, once, without asking
+    // (and without its login page: the user stays signed in across reloads).
     if local_get(SIGNED_IN_HINT_KEY).is_some() && session_get(AUTOLOGIN_TRIED_KEY).is_none() {
       session_set(AUTOLOGIN_TRIED_KEY, "1");
-      self.begin_login().await?;
+      self.begin_login(None).await?;
       std::future::pending::<()>().await;
     }
     Ok(false)
   }
 
-  async fn begin_login(&self) -> Result<(), AuthError> {
+  /// Goes to the identity provider. `maybe_look` is set for a sign-in the user started: it then
+  /// asks for the login page with the last account and the app's language (issue #448); a silent
+  /// renewal after a reload (`None`) sends none of that.
+  async fn begin_login(&self, maybe_look: Option<&SignInLook>) -> Result<(), AuthError> {
     let sign_in = self.sign_in().await?;
     let discovery = self.discovery().await?;
     let redirect_uri = redirect_uri()?;
     let client = self.client(&discovery, &redirect_uri, &sign_in)?;
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
-    let (url, state) = client
-      .authorize_url(CsrfToken::new_random)
-      .add_scopes(sign_in.scopes.iter().cloned().map(Scope::new))
-      .set_pkce_challenge(challenge)
-      .url();
+    let maybe_hint = stored_login_hint(&sign_in);
+    let page_language = document_language();
+    let request = login_request(
+      &sign_in,
+      maybe_look,
+      maybe_hint.as_deref(),
+      page_language.as_deref(),
+    );
+    let (url, state) = authorization_url(&client, &sign_in.scopes, challenge, &request);
     let pending = Pending {
       state: state.secret().clone(),
       verifier: verifier.secret().clone(),
@@ -173,6 +197,9 @@ impl BrowserAuth {
       .await
       .map_err(map_token_error)?;
     self.store(&response);
+    if let Some(hint) = response.extra_fields().login_hint() {
+      remember_login_hint(&sign_in, hint);
+    }
     local_set(SIGNED_IN_HINT_KEY, "1");
     session_remove(AUTOLOGIN_TRIED_KEY);
     Ok(pending.maybe_return_path.filter(|path| is_return_path(path)))
@@ -279,7 +306,7 @@ impl BrowserAuth {
       .ok_or(AuthError::NotSignedIn)
   }
 
-  fn store(&self, response: &oauth2::basic::BasicTokenResponse) {
+  fn store(&self, response: &OidcTokenResponse) {
     let lifetime_ms = response
       .expires_in()
       .map_or(60_000, |duration| duration.as_millis() as i64);
@@ -310,6 +337,7 @@ impl BrowserAuth {
         issuer: issuer.clone(),
         client_id: client_id.clone(),
         scopes: vec![OPENID_SCOPE.to_owned()],
+        is_login_page_always_shown: true,
       },
       _ => self.server_sign_in().await?,
     };
@@ -348,6 +376,7 @@ impl BrowserAuth {
       issuer: info.sign_in.issuer,
       client_id: info.sign_in.client_id,
       scopes,
+      is_login_page_always_shown: info.sign_in.is_login_page_always_shown,
     })
   }
 
@@ -392,23 +421,14 @@ impl BrowserAuth {
     discovery: &Discovery,
     redirect_uri: &str,
     sign_in: &SignIn,
-  ) -> Result<
-    BasicClient<
-      oauth2::EndpointSet,
-      oauth2::EndpointNotSet,
-      oauth2::EndpointNotSet,
-      oauth2::EndpointNotSet,
-      oauth2::EndpointSet,
-    >,
-    AuthError,
-  > {
+  ) -> Result<OidcClient, AuthError> {
     let invalid = |error: oauth2::url::ParseError| AuthError::InvalidResponse(error.to_string());
-    Ok(
-      BasicClient::new(ClientId::new(sign_in.client_id.clone()))
-        .set_auth_uri(AuthUrl::new(discovery.authorization_endpoint.clone()).map_err(invalid)?)
-        .set_token_uri(TokenUrl::new(discovery.token_endpoint.clone()).map_err(invalid)?)
-        .set_redirect_uri(RedirectUrl::new(redirect_uri.to_owned()).map_err(invalid)?),
-    )
+    Ok(oidc_client(
+      ClientId::new(sign_in.client_id.clone()),
+      AuthUrl::new(discovery.authorization_endpoint.clone()).map_err(invalid)?,
+      TokenUrl::new(discovery.token_endpoint.clone()).map_err(invalid)?,
+      RedirectUrl::new(redirect_uri.to_owned()).map_err(invalid)?,
+    ))
   }
 }
 
@@ -421,9 +441,9 @@ impl Authenticator for BrowserAuth {
     Box::pin(BrowserAuth::access_token(self))
   }
 
-  fn login(&self, _look: SignInLook) -> LocalFuture<'_, Result<(), AuthError>> {
+  fn login(&self, look: SignInLook) -> LocalFuture<'_, Result<(), AuthError>> {
     Box::pin(async move {
-      self.begin_login().await?;
+      self.begin_login(Some(&look)).await?;
       std::future::pending::<()>().await;
       Ok(())
     })
@@ -678,6 +698,56 @@ fn session_remove(key: &str) {
   }
 }
 
+/// The extra parameters of a sign-in: one the user started (`maybe_look`) asks for the login page
+/// if the server says so (its fresh answer on the sign-in screen first); a silent renewal after a
+/// reload never does, but still prefills the account and the language should the provider ask.
+fn login_request<'a>(
+  sign_in: &SignIn,
+  maybe_look: Option<&'a SignInLook>,
+  maybe_hint: Option<&'a str>,
+  maybe_page_language: Option<&'a str>,
+) -> LoginRequest<'a> {
+  let is_login_page_shown = maybe_look.is_some_and(|look| {
+    look
+      .maybe_login_page_always_shown
+      .unwrap_or(sign_in.is_login_page_always_shown)
+  });
+  let maybe_locale = maybe_look
+    .and_then(|look| look.maybe_locale.as_deref())
+    .or(maybe_page_language);
+  LoginRequest {
+    is_login_page_shown,
+    maybe_login_hint: maybe_hint,
+    maybe_locale,
+  }
+}
+
+/// The app's language as the page declares it (`<html lang>`).
+fn document_language() -> Option<String> {
+  web_sys::window()
+    .and_then(|window| window.document())
+    .and_then(|document| document.document_element())
+    .and_then(|root| root.get_attribute("lang"))
+    .filter(|lang| !lang.is_empty())
+}
+
+/// The account last signed in with at `sign_in`'s provider, if this browser knows it.
+fn stored_login_hint(sign_in: &SignIn) -> Option<String> {
+  let stored: StoredLoginHint = serde_json::from_str(&local_get(LOGIN_HINT_KEY)?).ok()?;
+  (stored.issuer == sign_in.issuer && stored.client_id == sign_in.client_id).then_some(stored.hint)
+}
+
+fn remember_login_hint(sign_in: &SignIn, hint: String) {
+  let stored = StoredLoginHint {
+    issuer: sign_in.issuer.clone(),
+    client_id: sign_in.client_id.clone(),
+    hint,
+  };
+  if let Ok(json) = serde_json::to_string(&stored) {
+    local_set(LOGIN_HINT_KEY, &json);
+  }
+}
+
 fn local_get(key: &str) -> Option<String> {
   crate::settings::load_string(key)
 }
@@ -724,6 +794,66 @@ mod tests {
     ] {
       assert!(!is_return_path(path), "{path:?}");
     }
+  }
+
+  /// Issue #448: a sign-in the user starts asks for the login page with the last account and the
+  /// app's language; a silent renewal after a reload asks for none of that.
+  #[test]
+  fn interactive_sign_ins_ask_for_the_login_page_and_silent_ones_do_not() {
+    let client = oidc_client(
+      ClientId::new("teamcraft".into()),
+      AuthUrl::new("https://auth.example.com/authorize".into()).unwrap(),
+      TokenUrl::new("https://auth.example.com/token".into()).unwrap(),
+      RedirectUrl::new("https://chat.example.com/".into()).unwrap(),
+    );
+    let scopes = vec![OPENID_SCOPE.to_owned()];
+    let interactive = LoginRequest {
+      is_login_page_shown: true,
+      maybe_login_hint: Some("alice"),
+      maybe_locale: Some("en"),
+    };
+    let (challenge, _) = PkceCodeChallenge::new_random_sha256();
+    let (url, _) = authorization_url(&client, &scopes, challenge, &interactive);
+    let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+    assert_eq!(query["prompt"], "login");
+    assert_eq!(query["login_hint"], "alice");
+    assert_eq!(query["ui_locales"], "en");
+    let (challenge, _) = PkceCodeChallenge::new_random_sha256();
+    let (url, _) = authorization_url(&client, &scopes, challenge, &LoginRequest::default());
+    assert!(!url.as_str().contains("prompt=") && !url.as_str().contains("login_hint="));
+  }
+
+  /// Issue #448: the user's sign-in asks for the login page (the sign-in screen's fresh answer
+  /// first), a silent renewal never does but keeps the hint and the language.
+  #[test]
+  fn begin_login_asks_for_the_login_page_only_when_the_user_signs_in() {
+    let sign_in = SignIn {
+      issuer: "https://auth.example.com".into(),
+      client_id: "teamcraft".into(),
+      scopes: vec![OPENID_SCOPE.to_owned()],
+      is_login_page_always_shown: true,
+    };
+    let look = SignInLook {
+      maybe_locale: Some("de".into()),
+      ..SignInLook::default()
+    };
+    let interactive = login_request(&sign_in, Some(&look), Some("alice"), Some("en"));
+    assert!(interactive.is_login_page_shown);
+    assert_eq!(interactive.maybe_locale, Some("de"));
+    let silent = login_request(&sign_in, None, Some("alice"), Some("en"));
+    assert_eq!(
+      silent,
+      LoginRequest {
+        is_login_page_shown: false,
+        maybe_login_hint: Some("alice"),
+        maybe_locale: Some("en"),
+      }
+    );
+    let turned_off = SignInLook {
+      maybe_login_page_always_shown: Some(false),
+      ..look
+    };
+    assert!(!login_request(&sign_in, Some(&turned_off), None, None).is_login_page_shown);
   }
 
   /// A pending sign-in stored before the return path existed still reads.

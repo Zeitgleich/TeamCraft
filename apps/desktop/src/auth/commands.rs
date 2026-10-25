@@ -18,6 +18,7 @@ use super::servers::ServerState;
 use super::{
   ApiBytesResponse, ApiResponse, AuthError, AuthService, DesktopConfig, HTTP_POLICY, KeyringStore,
 };
+use teamcraft_client_api::oidc_login::LoginRequest;
 
 pub type Service = AuthService<KeyringStore>;
 
@@ -207,9 +208,10 @@ pub async fn server_confirm(
         "this server was not checked".to_owned(),
       )
     })?;
-  // A stored token of this server with other sign-in settings must not be used any more.
+  // A stored token of this server with other sign-in settings must not be used any more (the
+  // settings that sign-in uses: origin, issuer, client and scopes; not the login hint).
   if let Some(previous) = servers.directory.profile(&profile.origin)
-    && previous != profile
+    && DesktopConfig::from_profile(&previous) != DesktopConfig::from_profile(&profile)
   {
     service
       .forget_tokens(&DesktopConfig::from_profile(&previous))
@@ -264,9 +266,24 @@ pub async fn auth_restore(service: State<'_, Arc<Service>>) -> Result<bool, Comm
 pub async fn auth_login(
   look: Option<SignInLook>,
   app: AppHandle,
+  servers: State<'_, Arc<ServerState>>,
   service: State<'_, Arc<Service>>,
 ) -> Result<(), CommandError> {
   let look = look.unwrap_or_default();
+  let maybe_profile = servers.directory.active();
+  // The sign-in screen's fresh answer wins over the profile saved at the last server check, so a
+  // changed admin setting applies to installed apps too.
+  let request = LoginRequest {
+    is_login_page_shown: look.maybe_login_page_always_shown.unwrap_or_else(|| {
+      maybe_profile
+        .as_ref()
+        .is_none_or(|profile| profile.is_login_page_always_shown)
+    }),
+    maybe_login_hint: maybe_profile
+      .as_ref()
+      .and_then(|profile| profile.maybe_login_hint.as_deref()),
+    maybe_locale: look.maybe_locale.as_deref(),
+  };
   let open = move |url: &str| {
     // Only web addresses reach the OS opener (never `file:`, `search-ms:` and the like).
     if !is_provider_endpoint(url, HTTP_POLICY) {
@@ -277,7 +294,15 @@ pub async fn auth_login(
       .open_url(url, None::<&str>)
       .map_err(|error| error.to_string())
   };
-  Ok(service.login(&look, open).await?)
+  let signed_in = service.login(&look, &request, open).await?;
+  if let (Some(profile), Some(hint)) = (maybe_profile, signed_in.maybe_login_hint)
+    && let Err(error) = servers
+      .directory
+      .set_login_hint(&profile.origin, &profile.issuer, hint)
+  {
+    tracing::warn!(%error, "could not remember the account for the next sign-in");
+  }
+  Ok(())
 }
 
 /// Signs in a local account. The password goes straight into a secret and is never logged; errors

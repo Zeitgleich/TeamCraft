@@ -177,7 +177,8 @@ final class AppModel {
   func confirmServer() {
     guard case .confirmServer(let checked) = phase else { return }
     servers.activate(checked.server)
-    maybeServer = checked.server
+    // As stored: with the login hint of an earlier sign-in to this server kept (issue #448).
+    maybeServer = servers.activeServer ?? checked.server
     // The server may be the one of the session from before server entry (#224).
     let confirmed = checked.server
     Task { await legacySignOut.run(activeServer: confirmed) }
@@ -221,8 +222,10 @@ final class AppModel {
     }
     await busy {
       do {
-        let session = try await login.login(server: server)
+        let session = try await login.login(
+          server: server, maybeLoginPageAlwaysShown: maybeSignInPage?.maybeLoginPageAlwaysShown)
         try vault.save(session)
+        rememberLoginHint(session.loginHint, for: server)
         container.activeAccount = session.subject
         container.displayName = session.displayName
         await refreshAccountState()
@@ -232,6 +235,15 @@ final class AppModel {
         phase = .signedOut(.signInFailed)
       }
     }
+  }
+
+  /// Prefills the account at this server's next sign-in (issue #448).
+  private func rememberLoginHint(_ maybeHint: String?, for server: StoredServer) {
+    guard let hint = maybeHint, hint != server.maybeLoginHint,
+      let updated = storedServerWithLoginHint(profileJson: server.profileJson, loginHint: hint)
+    else { return }
+    servers.activate(updated)
+    if maybeServer?.address.origin == updated.address.origin { maybeServer = updated }
   }
 
   /// Signs in with a local account's e-mail address, password and optional one-time code. Returns

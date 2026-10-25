@@ -595,6 +595,9 @@ pub struct SignInPageConfig {
   /// A help page (https).
   #[serde(rename = "help_link")]
   pub maybe_help_link: Option<String>,
+  /// Every sign-in shows the identity provider's login page (OIDC `prompt=login`), so users see
+  /// and can switch the account; `false` keeps silent single sign-on.
+  pub is_login_page_always_shown: bool,
 }
 
 impl Default for SignInPageConfig {
@@ -603,6 +606,7 @@ impl Default for SignInPageConfig {
       methods: vec![SignInMethod::Sso, SignInMethod::Local],
       help_text: BTreeMap::new(),
       maybe_help_link: None,
+      is_login_page_always_shown: true,
     }
   }
 }

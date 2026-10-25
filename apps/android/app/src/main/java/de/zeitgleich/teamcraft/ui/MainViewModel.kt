@@ -192,8 +192,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    */
   suspend fun confirmServer(): Boolean {
     val current = state.value as? AppState.ConfirmServer ?: return false
-    val server = current.checked.server
-    graph.servers.save(server)
+    graph.servers.save(current.checked.server)
+    // As stored: with the login hint of an earlier sign-in to this server kept (issue #448).
+    val server = graph.servers.active() ?: current.checked.server
     withContext(Dispatchers.IO) { graph.auth.activate(server) }
     // The server may be the one of the session from before the server entry (#224).
     graph.scope.launch { graph.legacySignOut.run(server) }
@@ -233,7 +234,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    */
   suspend fun loginIntent(): Intent? =
     try {
-      graph.auth.loginIntent()
+      graph.auth.loginIntent(page.value?.maybeLoginPageAlwaysShown)
     } catch (failure: Exception) {
       state.value = AppState.SignedOut(signInError(failure) ?: R.string.sign_in_failed)
       null

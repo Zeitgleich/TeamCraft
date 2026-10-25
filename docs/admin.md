@@ -355,7 +355,7 @@ Groups that are stored and reset as a whole:
 | `limits`         | attachment size and per-user total, avatar and background sizes, backgrounds per user, group DM size, user group size, meeting mails per hour |
 | `integration`    | default retention of integration channels                                                                                                     |
 | `local_accounts` | on/off (off: the form disappears, `/auth/local/*` answers 403 `local_accounts_disabled`, sessions end), second factor required, activation and session lifetime, failed attempts, lockout |
-| `sign_in_page`   | which methods the sign-in page offers (SSO, e-mail and password) and in which order; help text per language; help link                       |
+| `sign_in_page`   | which methods the sign-in page offers (SSO, e-mail and password) and in which order; help text per language; help link; whether every sign-in shows the identity provider's login page |
 | `mail_texts`     | invitation and activation mail                                                                                                                |
 | `meeting_mail`   | most invitees; invitation, update and cancellation mail                                                                                       |
 

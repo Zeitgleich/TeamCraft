@@ -3,9 +3,11 @@ package de.zeitgleich.teamcraft.auth
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.browser.customtabs.ExperimentalEphemeralBrowsing
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -29,12 +31,15 @@ import net.openid.appauth.ResponseTypeValues
 import net.openid.appauth.connectivity.ConnectionBuilder
 import net.openid.appauth.connectivity.DefaultConnectionBuilder
 import de.zeitgleich.teamcraft.BuildConfig
+import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.security.KeystoreBox
 import de.zeitgleich.teamcraft.security.SealedFile
 import de.zeitgleich.teamcraft.server.ServerStore
 import de.zeitgleich.teamcraft.server.StoragePaths
 import de.zeitgleich.teamcraft.server.isPlainHttpAllowed
 import uniffi.teamcraft_ffi.StoredServer
+import uniffi.teamcraft_ffi.loginHintFromIdToken
+import uniffi.teamcraft_ffi.storedServerWithLoginHint
 
 /**
  * OIDC login with AppAuth (authorization code + PKCE) against the active server's identity provider,
@@ -101,19 +106,39 @@ class AuthRepository(private val context: Context, private val servers: ServerSt
     return outcome
   }
 
-  /** The intent that opens the browser for login (PKCE is added by AppAuth). */
-  suspend fun loginIntent(): Intent {
+  /**
+   * The intent that opens the browser for login (PKCE is added by AppAuth), with the last account
+   * and the app's language (issue #448). Where the server asks for the identity provider's login
+   * page ([maybeLoginPageAlwaysShown], the sign-in screen's fresh answer; else the stored server's
+   * setting), it sends `prompt=login` and opens an ephemeral Custom Tab where the browser supports
+   * one, so the browser's provider session isn't reused. Otherwise silent single sign-on works.
+   */
+  @OptIn(ExperimentalEphemeralBrowsing::class)
+  suspend fun loginIntent(maybeLoginPageAlwaysShown: Boolean?): Intent {
     val session = session() ?: throw IllegalStateException("no server")
     val configuration = discover(session)
+    val server = synchronized(this) { session.server }
+    val isLoginPageShown = maybeLoginPageAlwaysShown ?: server.isLoginPageAlwaysShown
+    val parameters = loginParameters(
+      isLoginPageShown,
+      server.maybeLoginHint,
+      Locale.forLanguageTag(context.getString(R.string.app_language)),
+    )
     val request = AuthorizationRequest.Builder(
       configuration,
-      session.server.clientId,
+      server.clientId,
       ResponseTypeValues.CODE,
       Uri.parse(BuildConfig.OIDC_REDIRECT_URI),
     )
-      .setScopes(session.server.scopes)
+      .setScopes(server.scopes)
+      .setPrompt(parameters.maybePrompt)
+      .setLoginHint(parameters.maybeLoginHint)
+      .setUiLocales(parameters.maybeUiLocales)
       .build()
-    return session.service.getAuthorizationRequestIntent(request)
+    val tab = session.service.createCustomTabsIntentBuilder(request.toUri())
+      .setEphemeralBrowsingEnabled(isLoginPageShown)
+      .build()
+    return session.service.getAuthorizationRequestIntent(request, tab)
   }
 
   /** Completes the login with the browser's answer. */
@@ -141,7 +166,18 @@ class AuthRepository(private val context: Context, private val servers: ServerSt
     }
     session.localFile.delete()
     persist(session)
+    rememberLoginHint(session, tokens.idToken)
     signedIn.value = true
+  }
+
+  /** The account the ID token names, prefilled at this server's next sign-in (issue #448). */
+  private fun rememberLoginHint(session: Session, maybeIdToken: String?) {
+    val hint = maybeIdToken?.let(::loginHintFromIdToken) ?: return
+    val server = synchronized(this) { session.server }
+    if (server.maybeLoginHint == hint) return
+    val updated = storedServerWithLoginHint(server.profileJson, hint) ?: return
+    synchronized(this) { session.server = updated }
+    servers.save(updated)
   }
 
   /**
@@ -280,7 +316,7 @@ class AuthRepository(private val context: Context, private val servers: ServerSt
    * [state] (identity provider) and [maybeLocal] (local account) is signed in.
    */
   private class Session(
-    val server: StoredServer,
+    @Volatile var server: StoredServer,
     val file: SealedFile,
     val localFile: SealedFile,
     val service: AuthorizationService,

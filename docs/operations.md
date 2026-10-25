@@ -260,6 +260,15 @@ only once the tokens are in, so it says whether the sign-in really worked; it is
 (content security policy `default-src 'none'`, no scripts) and never shows the redirect's
 parameters.
 
+Every sign-in the user starts shows the identity provider's login page, also when the browser still
+has a session there (OIDC `prompt=login`, issue #448), so people with several accounts see which one
+they sign in with and can switch. The page is prefilled with the account last used on that device
+for that server (`login_hint`, from the ID token's `preferred_username` or `email`) and shown in the
+app's language (`ui_locales`). The mobile apps also use an ephemeral browser session. Staying signed
+in is unaffected: the apps renew their tokens without the browser, and the web client's silent
+renewal after a reload never asks for the login page. Operators who prefer silent single sign-on
+turn it off (Admin → Settings → Sign-in page, `is_login_page_always_shown`).
+
 What the server announces, public and cacheable, at `GET /api/v1/server-info`:
 
 | Field                            | Source                                                                    |

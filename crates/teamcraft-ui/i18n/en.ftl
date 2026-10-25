@@ -2154,6 +2154,7 @@ settings-methods-local = E-mail and password only
 settings-f-help_text-en = Help text (English)
 settings-f-help_text-de = Help text (German)
 settings-f-help_link = Help page
+settings-f-is_login_page_always_shown = Always show the identity provider's login page (users see and can switch the account)
 settings-group-mail_texts = Invitation and activation mail
 settings-group-mail_texts-hint = Texts of the server's own mail. Placeholders: inviter, space, role, url.
 settings-group-meeting_mail = Meeting mail

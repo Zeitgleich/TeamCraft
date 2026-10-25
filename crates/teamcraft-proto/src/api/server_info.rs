@@ -81,6 +81,15 @@ pub struct SignInInfo {
   /// A help page (https) linked below the form.
   #[serde(rename = "help_link", default, skip_serializing_if = "Option::is_none")]
   pub maybe_help_link: Option<String>,
+  /// Interactive sign-ins ask the identity provider for its login page (OIDC `prompt=login`), so
+  /// users see which account they sign in with and can switch, also with an existing provider
+  /// session. Absent (older servers): on.
+  #[serde(default = "shown")]
+  pub is_login_page_always_shown: bool,
+}
+
+fn shown() -> bool {
+  true
 }
 
 fn default_methods() -> Vec<SignInMethod> {
@@ -105,6 +114,7 @@ mod tests {
         "has_local_accounts": false,
         "local_requires_code": false,
         "methods": ["sso"],
+        "is_login_page_always_shown": true,
       })
     );
     assert_eq!(json["brand"]["display_name"], "TeamCraft");
@@ -114,8 +124,16 @@ mod tests {
   fn older_answers_without_methods_offer_sso_and_unknown_methods_survive() {
     let mut json = serde_json::to_value(sample()).unwrap();
     json["sign_in"].as_object_mut().unwrap().remove("methods");
+    json["sign_in"]
+      .as_object_mut()
+      .unwrap()
+      .remove("is_login_page_always_shown");
     let back: ServerInfoResponse = serde_json::from_value(json.clone()).unwrap();
     assert_eq!(back.sign_in.methods, [SignInMethod::Sso]);
+    assert!(
+      back.sign_in.is_login_page_always_shown,
+      "older servers: the login page shows"
+    );
     json["sign_in"]["methods"] = serde_json::json!(["passkey", "local", "sso"]);
     let back: ServerInfoResponse = serde_json::from_value(json).unwrap();
     assert_eq!(
@@ -171,6 +189,7 @@ mod tests {
         maybe_sso_icon: None,
         help_text: BTreeMap::new(),
         maybe_help_link: None,
+        is_login_page_always_shown: true,
       },
     }
   }
