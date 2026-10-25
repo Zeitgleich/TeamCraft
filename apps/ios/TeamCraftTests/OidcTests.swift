@@ -38,6 +38,28 @@ final class OidcTests: XCTestCase {
     XCTAssertEqual(value("scope"), "openid profile email offline_access")
     XCTAssertEqual(value("code_challenge_method"), "S256")
     XCTAssertEqual(value("state"), "s1")
+    // Without login parameters (a default call) none of them is sent.
+    XCTAssertNil(value("prompt"))
+    XCTAssertNil(value("login_hint"))
+  }
+
+  /// Issue #448: the login page with the last account and the app's language.
+  @MainActor
+  func testAuthorizationURLAsksForTheLoginPageWithHintAndLanguage() throws {
+    let endpoints = OidcClient.Endpoints(
+      authorizationEndpoint: URL(string: "https://id.example.com/auth")!,
+      tokenEndpoint: URL(string: "https://id.example.com/token")!)
+    let client = OidcClient(
+      issuer: URL(string: "https://id.example.com/realms/team")!, clientId: "teamcraft",
+      scopes: ["openid"], redirectURI: environment.oidcRedirectURI)
+    let login = LoginParameters(prompt: "login", loginHint: "alice@example.com", uiLocales: "de")
+    let url = WebLogin.authorizationURL(
+      endpoints: endpoints, client: client, pkce: Pkce(verifier: "v"), state: "s1", login: login)
+    let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+    func value(_ name: String) -> String? { items.first { $0.name == name }?.value }
+    XCTAssertEqual(value("prompt"), "login")
+    XCTAssertEqual(value("login_hint"), "alice@example.com")
+    XCTAssertEqual(value("ui_locales"), "de")
   }
 
   @MainActor

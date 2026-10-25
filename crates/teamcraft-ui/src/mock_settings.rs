@@ -369,6 +369,7 @@ fn default_runtime() -> RuntimeSettingsResponse {
       methods: vec![SignInMethod::Sso, SignInMethod::Local],
       help_text: BTreeMap::new(),
       maybe_help_link: None,
+      is_login_page_always_shown: true,
     },
     mail_texts: MailTextSettings {
       invite_subject,

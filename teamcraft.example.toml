@@ -322,6 +322,9 @@ methods = ["sso", "local"]
 # Optional: help below the form per language, and an https help page.
 # help_text = { en = "Problems signing in? Call 1234.", de = "Probleme bei der Anmeldung? Ruf 1234 an." }
 # help_link = "https://help.example.com/sign-in"
+# Every sign-in shows the identity provider's login page (OIDC prompt=login), also with an existing
+# session there, so users see and can switch the account. false: silent single sign-on.
+is_login_page_always_shown = true
 
 # Brands (docs/branding.md): one server under several host names, each with its own name, logo, colors,
 # login text, links and e-mail identity. Without [[brands]] the server has one built-in brand "TeamCraft".

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use teamcraft_client_api::model::ConversationKind;
+use teamcraft_client_api::oidc_login::LoginRequest;
 use teamcraft_client_api::remote::{ChatAction, ChatSnapshot, CoreStatus, EnrollRequest, LinkStatus};
 use teamcraft_client_api::sign_in_look::SignInLook;
 use teamcraft_crypto::backup::Argon2Settings;
@@ -144,7 +145,9 @@ async fn a_core_started_right_after_login_reads_the_live_session() {
   let service =
     Arc::new(AuthService::new(Some(config.clone()), SharedStore::default()).expect("auth service"));
   service
-    .login(&SignInLook::default(), |url| spawn_fake_browser(url, "alice"))
+    .login(&SignInLook::default(), &LoginRequest::default(), |url| {
+      spawn_fake_browser(url, "alice")
+    })
     .await
     .expect("login");
   let me = service.api_get("/api/v1/me").await.expect("me");
@@ -180,7 +183,9 @@ pub(super) async fn person(name: &'static str, config: &DesktopConfig) -> Person
   let service =
     Arc::new(AuthService::new(Some(config.clone()), SharedStore::default()).expect("auth service"));
   service
-    .login(&SignInLook::default(), |url| spawn_fake_browser(url, name))
+    .login(&SignInLook::default(), &LoginRequest::default(), |url| {
+      spawn_fake_browser(url, name)
+    })
     .await
     .expect("login");
   let me = service.api_get("/api/v1/me").await.expect("me");

@@ -153,6 +153,7 @@ mod tests {
       maybe_sso_icon: None,
       help_text: BTreeMap::new(),
       maybe_help_link: None,
+      is_login_page_always_shown: true,
     }
   }
 }

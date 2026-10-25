@@ -27,15 +27,18 @@ use std::sync::{PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
-use oauth2::basic::{BasicClient, BasicErrorResponseType, BasicTokenResponse};
+use oauth2::basic::BasicErrorResponseType;
 use oauth2::{
-  AuthUrl, AuthorizationCode, ClientId, CsrfToken, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
-  RefreshToken, RequestTokenError, Scope, StandardErrorResponse, TokenResponse, TokenUrl,
+  AuthUrl, AuthorizationCode, ClientId, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RefreshToken,
+  RequestTokenError, StandardErrorResponse, TokenResponse, TokenUrl,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify};
 
+use teamcraft_client_api::oidc_login::{
+  LoginRequest, OidcClient, OidcTokenResponse, authorization_url, oidc_client,
+};
 use teamcraft_client_api::remote::ApiMethod;
 use teamcraft_client_api::server_entry::{
   self, CheckedServer, HttpPolicy, ServerAnswer, ServerCheckError, ServerOrigin, ServerProfile,
@@ -356,22 +359,20 @@ impl<S: TokenStore> AuthService<S> {
   }
 
   /// Runs the browser login. `open_browser` receives the authorization URL; `look` styles the
-  /// page the browser shows when it comes back.
+  /// page the browser shows when it comes back; `request` adds the login page, hint and language
+  /// (issue #448). Returns what the next sign-in can prefill.
   pub async fn login(
     &self,
     look: &SignInLook,
+    request: &LoginRequest<'_>,
     open_browser: impl FnOnce(&str) -> Result<(), String>,
-  ) -> Result<(), AuthError> {
+  ) -> Result<SignedIn, AuthError> {
     let server = self.server()?;
     let discovery = self.discovery(&server).await?;
     let (listener, redirect_uri) = loopback::bind().await?;
     let client = self.client(&discovery, &redirect_uri, &server)?;
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
-    let (url, state) = client
-      .authorize_url(CsrfToken::new_random)
-      .add_scopes(server.scopes.iter().cloned().map(Scope::new))
-      .set_pkce_challenge(challenge)
-      .url();
+    let (url, state) = authorization_url(&client, &server.scopes, challenge, request);
     // The discovery was checked; check the final URL again right before the OS opens it.
     if !is_provider_endpoint(url.as_str(), HTTP_POLICY) {
       return Err(AuthError::InvalidResponse(
@@ -391,12 +392,12 @@ impl<S: TokenStore> AuthService<S> {
       .finish_login(&client, &server, redirect.params.code(), verifier)
       .await;
     redirect.answer(callback_outcome(&outcome), look).await;
-    outcome?;
+    let signed_in = outcome?;
     // A local session of an earlier sign-in must not come back at the next start.
     if let Err(error) = self.store.clear_local_session(&server.server_url).await {
       tracing::warn!(%error, "could not forget the earlier local session");
     }
-    Ok(())
+    Ok(signed_in)
   }
 
   /// Exchanges the redirect's code for tokens and keeps them.
@@ -406,7 +407,7 @@ impl<S: TokenStore> AuthService<S> {
     server: &DesktopConfig,
     code: Result<String, AuthError>,
     verifier: PkceCodeVerifier,
-  ) -> Result<(), AuthError> {
+  ) -> Result<SignedIn, AuthError> {
     let http = self.oauth_http();
     let response = client
       .exchange_code(AuthorizationCode::new(code?))
@@ -416,7 +417,10 @@ impl<S: TokenStore> AuthService<S> {
       .map_err(map_token_error)?;
     let mut session = self.session.lock().await;
     session.maybe_local = None;
-    self.adopt(&mut session, server, &response).await
+    self.adopt(&mut session, server, &response).await?;
+    Ok(SignedIn {
+      maybe_login_hint: response.extra_fields().login_hint(),
+    })
   }
 
   /// Signs in a local account with e-mail, password and, when given, the one-time code. The token
@@ -792,7 +796,7 @@ impl<S: TokenStore> AuthService<S> {
     &self,
     session: &mut Session,
     server: &DesktopConfig,
-    response: &BasicTokenResponse,
+    response: &OidcTokenResponse,
   ) -> Result<(), AuthError> {
     if self.active_server().as_ref() != Some(server) {
       return Err(AuthError::Cancelled);
@@ -947,12 +951,12 @@ impl<S: TokenStore> AuthService<S> {
     server: &DesktopConfig,
   ) -> Result<OidcClient, AuthError> {
     let invalid = |error: url::ParseError| AuthError::InvalidResponse(error.to_string());
-    Ok(
-      BasicClient::new(ClientId::new(server.client_id.clone()))
-        .set_auth_uri(AuthUrl::new(discovery.authorization_endpoint.clone()).map_err(invalid)?)
-        .set_token_uri(TokenUrl::new(discovery.token_endpoint.clone()).map_err(invalid)?)
-        .set_redirect_uri(RedirectUrl::new(redirect_uri.to_owned()).map_err(invalid)?),
-    )
+    Ok(oidc_client(
+      ClientId::new(server.client_id.clone()),
+      AuthUrl::new(discovery.authorization_endpoint.clone()).map_err(invalid)?,
+      TokenUrl::new(discovery.token_endpoint.clone()).map_err(invalid)?,
+      RedirectUrl::new(redirect_uri.to_owned()).map_err(invalid)?,
+    ))
   }
 
   /// HTTP client of the `oauth2` crate on top of our `reqwest` client.
@@ -961,19 +965,17 @@ impl<S: TokenStore> AuthService<S> {
   }
 }
 
-/// The `oauth2` client of a sign-in: authorization and token endpoints set.
-type OidcClient = BasicClient<
-  oauth2::EndpointSet,
-  oauth2::EndpointNotSet,
-  oauth2::EndpointNotSet,
-  oauth2::EndpointNotSet,
-  oauth2::EndpointSet,
->;
+/// What a finished browser sign-in leaves for the next one.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SignedIn {
+  /// The account the ID token names (`preferred_username` or `email`).
+  pub maybe_login_hint: Option<String>,
+}
 
 /// What the browser tab says about a finished sign-in.
-fn callback_outcome(outcome: &Result<(), AuthError>) -> CallbackOutcome {
+fn callback_outcome<T>(outcome: &Result<T, AuthError>) -> CallbackOutcome {
   match outcome {
-    Ok(()) => CallbackOutcome::SignedIn,
+    Ok(_) => CallbackOutcome::SignedIn,
     Err(AuthError::Denied(_) | AuthError::Cancelled) => CallbackOutcome::Refused,
     Err(AuthError::StateMismatch) => CallbackOutcome::StateMismatch,
     Err(_) => CallbackOutcome::Failed,
@@ -1272,19 +1274,54 @@ mod tests {
     }
   }
 
+  /// Issue #448: an interactive sign-in asks for the login page, prefills the last account and
+  /// matches the app's language; with the instance setting off and nothing known, none of that.
+  #[test]
+  fn the_authorization_url_asks_for_the_login_page_with_hint_and_language() {
+    let client = oidc_client(
+      ClientId::new("teamcraft".into()),
+      AuthUrl::new("https://auth.example.com/authorize".into()).unwrap(),
+      TokenUrl::new("https://auth.example.com/token".into()).unwrap(),
+      RedirectUrl::new("http://127.0.0.1:4711/callback".into()).unwrap(),
+    );
+    let scopes = vec!["openid".to_owned()];
+    let request = LoginRequest {
+      is_login_page_shown: true,
+      maybe_login_hint: Some("alice@example.com"),
+      maybe_locale: Some("de"),
+    };
+    let (challenge, _) = PkceCodeChallenge::new_random_sha256();
+    let (url, _) = authorization_url(&client, &scopes, challenge, &request);
+    let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+    assert_eq!(query["prompt"], "login");
+    assert_eq!(query["login_hint"], "alice@example.com");
+    assert_eq!(query["ui_locales"], "de");
+    assert_eq!(query["code_challenge_method"], "S256");
+
+    let (challenge, _) = PkceCodeChallenge::new_random_sha256();
+    let (url, _) = authorization_url(&client, &scopes, challenge, &LoginRequest::default());
+    let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+    assert!(
+      !query.contains_key("prompt") && !query.contains_key("login_hint") && !query.contains_key("ui_locales")
+    );
+  }
+
   #[test]
   fn sign_in_outcomes_map_to_the_browser_page() {
-    assert_eq!(callback_outcome(&Ok(())), CallbackOutcome::SignedIn);
     assert_eq!(
-      callback_outcome(&Err(AuthError::Denied("access_denied".into()))),
+      callback_outcome(&Ok(SignedIn::default())),
+      CallbackOutcome::SignedIn
+    );
+    assert_eq!(
+      callback_outcome::<()>(&Err(AuthError::Denied("access_denied".into()))),
       CallbackOutcome::Refused
     );
     assert_eq!(
-      callback_outcome(&Err(AuthError::StateMismatch)),
+      callback_outcome::<()>(&Err(AuthError::StateMismatch)),
       CallbackOutcome::StateMismatch
     );
     assert_eq!(
-      callback_outcome(&Err(AuthError::Network("down".into()))),
+      callback_outcome::<()>(&Err(AuthError::Network("down".into()))),
       CallbackOutcome::Failed
     );
   }

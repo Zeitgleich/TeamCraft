@@ -223,6 +223,7 @@ final class AppModel {
       do {
         let session = try await login.login(server: server)
         try vault.save(session)
+        rememberLoginHint(session.loginHint, for: server)
         container.activeAccount = session.subject
         container.displayName = session.displayName
         await refreshAccountState()
@@ -232,6 +233,15 @@ final class AppModel {
         phase = .signedOut(.signInFailed)
       }
     }
+  }
+
+  /// Prefills the account at this server's next sign-in (issue #448).
+  private func rememberLoginHint(_ maybeHint: String?, for server: StoredServer) {
+    guard let hint = maybeHint, hint != server.maybeLoginHint,
+      let updated = storedServerWithLoginHint(profileJson: server.profileJson, loginHint: hint)
+    else { return }
+    servers.activate(updated)
+    if maybeServer?.address.origin == updated.address.origin { maybeServer = updated }
   }
 
   /// Signs in with a local account's e-mail address, password and optional one-time code. Returns

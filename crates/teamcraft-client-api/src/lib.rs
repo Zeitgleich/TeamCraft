@@ -21,6 +21,7 @@ pub mod live;
 pub mod log;
 pub mod model;
 pub mod notify;
+pub mod oidc_login;
 pub mod os_notify;
 pub mod privacy;
 pub mod remote;

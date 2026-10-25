@@ -38,9 +38,20 @@ struct ServerStore {
     return server
   }
 
-  /// Stores `server` (replacing an older entry of the same server) and makes it the active one.
+  /// Stores `server` (replacing an older entry of the same server) and makes it the active one. A
+  /// freshly checked profile keeps the stored one's login hint while the identity provider is the
+  /// same (issue #448).
   func activate(_ server: StoredServer) {
-    activate(ServerAccount(server))
+    let older = accounts.first { $0.origin == server.address.origin }
+      .flatMap { storedServer(profileJson: $0.profileJson) }
+    if server.maybeLoginHint == nil, let older, older.issuer == server.issuer,
+      let hint = older.maybeLoginHint,
+      let kept = storedServerWithLoginHint(profileJson: server.profileJson, loginHint: hint)
+    {
+      activate(ServerAccount(kept))
+    } else {
+      activate(ServerAccount(server))
+    }
   }
 
   func activate(_ account: ServerAccount) {

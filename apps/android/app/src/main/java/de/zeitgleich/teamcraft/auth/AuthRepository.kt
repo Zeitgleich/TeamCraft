@@ -3,6 +3,7 @@ package de.zeitgleich.teamcraft.auth
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.browser.customtabs.ExperimentalEphemeralBrowsing
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -35,6 +36,8 @@ import de.zeitgleich.teamcraft.server.ServerStore
 import de.zeitgleich.teamcraft.server.StoragePaths
 import de.zeitgleich.teamcraft.server.isPlainHttpAllowed
 import uniffi.teamcraft_ffi.StoredServer
+import uniffi.teamcraft_ffi.loginHintFromIdToken
+import uniffi.teamcraft_ffi.storedServerWithLoginHint
 
 /**
  * OIDC login with AppAuth (authorization code + PKCE) against the active server's identity provider,
@@ -101,19 +104,37 @@ class AuthRepository(private val context: Context, private val servers: ServerSt
     return outcome
   }
 
-  /** The intent that opens the browser for login (PKCE is added by AppAuth). */
+  /**
+   * The intent that opens the browser for login (PKCE is added by AppAuth). It asks for the
+   * identity provider's login page with the last account and the app's language (issue #448), in an
+   * ephemeral Custom Tab where the browser supports one, so the browser's provider session isn't
+   * reused; `prompt=login` covers browsers without it.
+   */
+  @OptIn(ExperimentalEphemeralBrowsing::class)
   suspend fun loginIntent(): Intent {
     val session = session() ?: throw IllegalStateException("no server")
     val configuration = discover(session)
+    val server = synchronized(this) { session.server }
+    val parameters = loginParameters(
+      server.isLoginPageAlwaysShown,
+      server.maybeLoginHint,
+      context.resources.configuration.locales[0],
+    )
     val request = AuthorizationRequest.Builder(
       configuration,
-      session.server.clientId,
+      server.clientId,
       ResponseTypeValues.CODE,
       Uri.parse(BuildConfig.OIDC_REDIRECT_URI),
     )
-      .setScopes(session.server.scopes)
+      .setScopes(server.scopes)
+      .setPrompt(parameters.maybePrompt)
+      .setLoginHint(parameters.maybeLoginHint)
+      .setUiLocales(parameters.maybeUiLocales)
       .build()
-    return session.service.getAuthorizationRequestIntent(request)
+    val tab = session.service.createCustomTabsIntentBuilder(request.toUri())
+      .setEphemeralBrowsingEnabled(true)
+      .build()
+    return session.service.getAuthorizationRequestIntent(request, tab)
   }
 
   /** Completes the login with the browser's answer. */
@@ -141,7 +162,18 @@ class AuthRepository(private val context: Context, private val servers: ServerSt
     }
     session.localFile.delete()
     persist(session)
+    rememberLoginHint(session, tokens.idToken)
     signedIn.value = true
+  }
+
+  /** The account the ID token names, prefilled at this server's next sign-in (issue #448). */
+  private fun rememberLoginHint(session: Session, maybeIdToken: String?) {
+    val hint = maybeIdToken?.let(::loginHintFromIdToken) ?: return
+    val server = synchronized(this) { session.server }
+    if (server.maybeLoginHint == hint) return
+    val updated = storedServerWithLoginHint(server.profileJson, hint) ?: return
+    synchronized(this) { session.server = updated }
+    servers.save(updated)
   }
 
   /**
@@ -280,7 +312,7 @@ class AuthRepository(private val context: Context, private val servers: ServerSt
    * [state] (identity provider) and [maybeLocal] (local account) is signed in.
    */
   private class Session(
-    val server: StoredServer,
+    var server: StoredServer,
     val file: SealedFile,
     val localFile: SealedFile,
     val service: AuthorizationService,

@@ -41,6 +41,7 @@ pub async fn get_server_info_handler(State(state): State<AppState>, resolved: Re
         .cloned(),
       help_text: settings.sign_in_page.help_text.clone(),
       maybe_help_link: settings.sign_in_page.maybe_help_link.clone(),
+      is_login_page_always_shown: settings.sign_in_page.is_login_page_always_shown,
     },
   };
   let mut response = Json(body).into_response();
