@@ -560,7 +560,7 @@ impl AppState {
     }
   }
 
-  fn direct_with(&self, users: &[UserId]) -> Option<ConversationId> {
+  pub(crate) fn direct_with(&self, users: &[UserId]) -> Option<ConversationId> {
     let me = self.me().id;
     let kind = if users.len() == 1 {
       crate::model::ConversationKind::Direct

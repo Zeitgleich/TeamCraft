@@ -185,6 +185,10 @@ pub struct SecuritySnapshot {
   /// was verified (or from an older shell).
   #[serde(rename = "owners", default, skip_serializing_if = "Option::is_none")]
   pub maybe_owners: Option<crate::admin::OwnerRosterStatus>,
+  /// Which statuses the verified policy allows (custom ones, presets); `None` (not known yet, or an
+  /// older shell) allows them, as the server's default does. The server enforces it either way.
+  #[serde(rename = "presence_policy", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_presence_policy: Option<teamcraft_proto::PresencePolicy>,
 }
 
 /// What this device pinned for one contact, and a different key the server has shown since.

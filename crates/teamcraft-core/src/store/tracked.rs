@@ -35,7 +35,7 @@ pub struct TrackedStore<S> {
 pub struct StoreChanges {
   /// Conversations whose entry or feed may differ: messages, members, bookmarks, acknowledgements.
   pub conversations: BTreeSet<ConversationId>,
-  /// People whose entry may differ (their presence state).
+  /// People whose entry may differ (their presence state or custom status).
   pub users: BTreeSet<UserId>,
   /// People whose record in the presence log was written or dropped (also counts as live), so a
   /// reader's index of the log follows without reading all of it (issue #259).
@@ -93,6 +93,8 @@ impl<S: LocalStore> TrackedStore<S> {
       },
       Change::Announced(user) => {
         changes.announced.insert(user);
+        // The person's entry shows the custom status the log carries.
+        changes.users.insert(user);
         changes.is_live = true;
       },
       Change::Live => changes.is_live = true,
@@ -269,7 +271,7 @@ mod tests {
       store.take_changes(),
       StoreChanges {
         conversations: [id(7), id(8), id(9)].into(),
-        users: [id(3)].into(),
+        users: [id(3), id(4)].into(),
         announced: [id(4)].into(),
         is_live: true,
         ..StoreChanges::default()

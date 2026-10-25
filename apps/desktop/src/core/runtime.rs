@@ -585,6 +585,7 @@ fn security_of(client: &Client<Api, Store>) -> Result<SecuritySnapshot, String> 
     contacts,
     maybe_push_content: Some(teamcraft_core::push_preview::push_content_mode(client.store())),
     maybe_owners: client.owner_roster_status(),
+    maybe_presence_policy: teamcraft_core::workspace::presence_policy(client.store()),
   })
 }
 

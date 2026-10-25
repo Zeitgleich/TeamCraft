@@ -1,12 +1,13 @@
 //! Small actions that must reach the server even if the device is offline when the user takes them
-//! (issue #159): read positions, acknowledgements, the server's pin flag and the manual presence.
+//! (issue #159): read positions, acknowledgements, the server's pin flag, the manual presence and
+//! the custom status.
 //!
 //! Each action is stored first and sent afterwards: right away, on every upkeep tick, and at the
 //! end of a full sync, until the server took it. The queue survives a restart (it lives in the
 //! store) and coalesces: one entry per target, so marking a busy channel read a hundred times while
 //! offline sends one request. The entry's key is the action's idempotency key; every action is a
 //! "set to" on the server (`GREATEST` for read positions, `ON CONFLICT DO NOTHING` for
-//! acknowledgements, a flag for pins, a value for presence), so a retry after a lost response
+//! acknowledgements, a flag for pins, a value for presence and status), so a retry after a lost response
 //! changes nothing. A read position in the queue only ever moves forward.
 //!
 //! Every entry is its own record in [`Table::PendingActions`]: an entry this version can't read
@@ -26,7 +27,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{
-  ClientMessageId, ConversationId, MessageId, SetPresenceRequest, SetReadPositionRequest,
+  ClientMessageId, ConversationId, MessageId, SetCustomStatusRequest, SetPresenceRequest,
+  SetReadPositionRequest,
 };
 
 use super::Client;
@@ -58,10 +60,20 @@ pub enum PendingAction {
   },
   /// The user's manual presence (do not disturb, invisible, automatic).
   Presence { request: SetPresenceRequest },
+  /// The user's custom status (PLAN.md §4).
+  CustomStatus { change: StatusChange },
   /// An action a newer version queued (another tab, or before a downgrade). This version leaves
   /// the entry alone for the version that knows it.
   #[serde(other)]
   Unknown,
+}
+
+/// A custom status to set, or none.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "change", rename_all = "snake_case")]
+pub enum StatusChange {
+  Set { status: SetCustomStatusRequest },
+  Clear,
 }
 
 /// Limits of the queue. Configurable; the defaults keep a busy device's queue small and retry a
@@ -96,6 +108,14 @@ struct QueuedAction {
   /// Not tried again before this (after server trouble).
   #[serde(default)]
   maybe_retry_at_ms: Option<i64>,
+}
+
+/// What one flush did.
+#[derive(Debug, Default)]
+pub(super) struct FlushOutcome {
+  pub(super) sent: usize,
+  /// Actions the server refused for good (dropped), with its answer.
+  pub(super) refused: Vec<(PendingAction, ApiError)>,
 }
 
 /// What became of one attempt.
@@ -141,9 +161,38 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// retry time, drops those the server refuses for good or that ran out of attempts or age, and
   /// stops when the server can't be reached. Returns how many were sent.
   pub async fn flush_pending_actions(&mut self) -> Result<usize, CoreError> {
+    Ok(self.flush_queue().await?.sent)
+  }
+
+  /// How many actions wait for the server (those of a newer version not counted).
+  pub fn pending_action_count(&self) -> Result<usize, CoreError> {
+    Ok(
+      load_entries(&self.store)?
+        .iter()
+        .filter(|(_, queued)| queued.action != PendingAction::Unknown)
+        .count(),
+    )
+  }
+
+  /// The custom status change still waiting for the server, if one is.
+  pub(super) fn queued_status_change(&self) -> Result<Option<StatusChange>, CoreError> {
+    let key = PendingAction::CustomStatus {
+      change: StatusChange::Clear,
+    }
+    .key();
+    Ok(
+      load_entry(&self.store, &key)?.and_then(|queued| match queued.action {
+        PendingAction::CustomStatus { change } => Some(change),
+        _ => None,
+      }),
+    )
+  }
+
+  /// [`Self::flush_pending_actions`], also telling which actions the server refused.
+  pub(super) async fn flush_queue(&mut self) -> Result<FlushOutcome, CoreError> {
     let entries = load_entries(&self.store)?;
     let now_ms = self.now_ms();
-    let mut sent = 0;
+    let mut outcome = FlushOutcome::default();
     for (key, queued) in entries {
       if queued.action == PendingAction::Unknown {
         continue;
@@ -166,13 +215,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         Attempt::Sent => {
           // A newer action for the same target queued meanwhile stays and goes out next time.
           replace_if_unchanged(&self.store, &key, &queued, None)?;
-          sent += 1;
+          outcome.sent += 1;
           self.after_sent(&queued.action).await;
         },
         Attempt::Waiting => {},
         Attempt::Refused(error) => {
           tracing::warn!(%error, kind = queued.action.kind(), "the server refused a queued action; dropped");
           replace_if_unchanged(&self.store, &key, &queued, None)?;
+          self.after_refused(&queued.action).await;
+          outcome.refused.push((queued.action, error));
         },
         Attempt::ServerTrouble(error) => self.back_off(&key, &queued, &error, now_ms)?,
         Attempt::Unreachable(error) => {
@@ -181,20 +232,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         },
       }
     }
-    Ok(sent)
+    Ok(outcome)
   }
 
-  /// How many actions wait for the server (those of a newer version not counted).
-  pub fn pending_action_count(&self) -> Result<usize, CoreError> {
-    Ok(
-      load_entries(&self.store)?
-        .iter()
-        .filter(|(_, queued)| queued.action != PendingAction::Unknown)
-        .count(),
-    )
-  }
-
-  fn store_action(&self, action: PendingAction) -> Result<(), CoreError> {
+  pub(super) fn store_action(&self, action: PendingAction) -> Result<(), CoreError> {
     let key = action.key();
     let maybe_queued = load_entry(&self.store, &key)?;
     let action = match (maybe_queued.as_ref().map(|queued| &queued.action), action) {
@@ -307,6 +348,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         Err(error) => return Attempt::Unreachable(error.into()),
       },
       PendingAction::Presence { request } => self.api.set_presence(request).await,
+      PendingAction::CustomStatus { change } => match change {
+        // A status that ended while it waited (offline) is nothing to show any more.
+        StatusChange::Set { status } if status.maybe_expires_at.is_none_or(|at| at.0 > self.now_ms()) => {
+          self.api.set_custom_status(status).await
+        },
+        StatusChange::Set { .. } | StatusChange::Clear => self.api.clear_custom_status().await,
+      },
       // Never attempted (the flush skips them); nothing this version could send.
       PendingAction::Unknown => return Attempt::Waiting,
     };
@@ -315,6 +363,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Err(error @ ApiError::Status { .. }) if error.is_transient() => Attempt::ServerTrouble(error),
       Err(error) if error.is_retry_later() => Attempt::Unreachable(CoreError::Api(error)),
       Err(error) => Attempt::Refused(error),
+    }
+  }
+
+  /// What follows a refused action: the custom status shown at once goes back to the server's.
+  /// Failures here are not the action's: logged only.
+  async fn after_refused(&mut self, action: &PendingAction) {
+    if let PendingAction::CustomStatus { .. } = action {
+      let me = self.account.user_id;
+      if let Err(error) = self.refresh_presence(&[me]).await {
+        tracing::debug!(%error, "own status not read again after the server refused it");
+      }
     }
   }
 
@@ -342,6 +401,7 @@ impl PendingAction {
         conversation, target, ..
       } => format!("pin/{conversation}/{target}"),
       Self::Presence { .. } => "presence".to_owned(),
+      Self::CustomStatus { .. } => "custom_status".to_owned(),
       Self::Unknown => "unknown".to_owned(),
     }
   }
@@ -353,6 +413,7 @@ impl PendingAction {
       Self::Acknowledge { .. } => "acknowledge",
       Self::ServerPin { .. } => "server_pin",
       Self::Presence { .. } => "presence",
+      Self::CustomStatus { .. } => "custom_status",
       Self::Unknown => "unknown",
     }
   }

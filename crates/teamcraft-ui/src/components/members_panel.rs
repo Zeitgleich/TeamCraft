@@ -56,14 +56,27 @@ pub fn MembersPanel(conversation: ConversationId) -> impl IntoView {
       <ul class="member-list panel-scroll">
         <For each=move || members.get() key=|user| (user.id, user.presence, user.maybe_custom_status.as_ref().map(|status| status.text.clone())) let:user>
           <li class="member">
-            <Avatar user=user.clone() size=AvatarSize::Medium show_presence=true />
-            <span class="member-name" translate="no">
-              {user.display_name.clone()}
-            </span>
+            <button
+              type="button"
+              class="member-person"
+              aria-label={
+                let name = user.display_name.clone();
+                move || i18n.t_with("profile-open", &[("name", &name)])
+              }
+              on:click={
+                let id = user.id;
+                move |_| state.overlay.set(Overlay::UserProfile(id))
+              }
+            >
+              <Avatar user=user.clone() size=AvatarSize::Medium show_presence=true />
+              <span class="member-name" translate="no">
+                {user.display_name.clone()}
+              </span>
+            </button>
             <crate::components::profile_views::InMeetingBadge user=user.id />
             {user.is_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
             <OrgBadge organization=user.maybe_organization.clone() />
-            {user.maybe_custom_status.clone().map(|status| view! { <span title=status.text.clone()>{status.emoji}</span> })}
+            {user.maybe_custom_status.clone().map(|status| view! { <span class="member-status" title=status.text.clone()>{status.emoji}</span> })}
           </li>
         </For>
       </ul>

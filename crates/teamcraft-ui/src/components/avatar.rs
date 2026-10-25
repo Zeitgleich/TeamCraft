@@ -7,6 +7,8 @@ pub enum AvatarSize {
   Small,
   Medium,
   Large,
+  /// The picture at the top of a profile card.
+  ExtraLarge,
 }
 
 impl AvatarSize {
@@ -15,6 +17,7 @@ impl AvatarSize {
       Self::Small => "avatar avatar-sm",
       Self::Medium => "avatar avatar-md",
       Self::Large => "avatar avatar-lg",
+      Self::ExtraLarge => "avatar avatar-xl",
     }
   }
 }

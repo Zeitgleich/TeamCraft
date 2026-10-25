@@ -226,6 +226,7 @@ impl Engine {
           settings.workspace_expiry_warning,
         )
       },
+      maybe_presence_policy: teamcraft_core::workspace::presence_policy(self.store.as_ref()),
     })
   }
 }

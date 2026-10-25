@@ -241,10 +241,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         users,
         is_guest,
       } => self.add_space_members(space, &users, is_guest).await,
-      CoreCommand::SetCustomStatus { .. } => {
-        // The server has no custom status yet (crate README: server gaps).
-        tracing::debug!("custom status is not stored on the server yet");
-        Ok(())
+      CoreCommand::SetCustomStatus { maybe_status } => {
+        let now = self.now_ms();
+        self
+          .set_custom_status(maybe_status.and_then(|status| status.to_request(now)))
+          .await
       },
     }
   }

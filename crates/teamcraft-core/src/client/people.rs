@@ -123,10 +123,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // The log carries state and status; last seen is read on its own (`ui_last_seen`).
       read_state::note_announced_presence(
         &self.store,
-        UserPresence {
+        self.with_queued_own_status(UserPresence {
           maybe_last_seen: None,
           ..presence.clone()
-        },
+        })?,
         self.settings.max_announced_presence,
       )?;
       let state = presence.state.clone();

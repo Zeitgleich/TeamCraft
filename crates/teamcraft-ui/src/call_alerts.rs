@@ -428,6 +428,7 @@ mod tests {
       is_bot: false,
       maybe_organization: None,
       device_setup: crate::model::DeviceSetup::Unknown,
+      maybe_email: None,
     }
   }
 
