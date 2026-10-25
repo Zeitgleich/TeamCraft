@@ -8,6 +8,10 @@ use leptos::task::spawn_local;
 use teamcraft_client_api::actions::{
   BrowsableChannel, CategoryChoice, CategoryInfo, ChannelChanges, NewChannel, NewSpace, SpaceChanges,
 };
+use teamcraft_client_api::model::{ChannelMember, ChannelRole};
+use teamcraft_client_api::role_rules::{
+  RoleTarget, SpaceStanding, assignable_roles, can_manage_channel_roles,
+};
 use teamcraft_proto::{CategoryId, HistoryPolicy, IdempotencyKey, Permission};
 use wasm_bindgen::JsCast;
 
@@ -26,7 +30,7 @@ use crate::feedback::{PendingAction, failure_message};
 use crate::i18n::use_i18n;
 use crate::image_crop::check_pick;
 use crate::model::{
-  ConversationId, JoinPolicy, Space, SpaceId, SpaceMember, SpaceRole, SpaceRoster, User, hue_from_hex,
+  ConversationId, JoinPolicy, Space, SpaceId, SpaceMember, SpaceRole, SpaceRoster, User, UserId, hue_from_hex,
 };
 use crate::reactive::SetIfAlive;
 use crate::space_images::{ImageOwner, use_space_images};
@@ -443,7 +447,8 @@ pub(crate) fn SaveFooter(pending: PendingAction, has_saved: RwSignal<bool>) -> i
   }
 }
 
-/// The channel's members with "Add people" on top and a removal (confirmed first) per person.
+/// The channel's members with "Add people" on top, a role per person and a removal (confirmed
+/// first).
 #[component]
 fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
   let state = use_app_state();
@@ -458,6 +463,35 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
     users.sort_by_key(|user| user.display_name.to_lowercase());
     users
   });
+  let roles = Memo::new(move |_| state.read(|backend| backend.channel_roles(conversation)));
+  let admin_count = Memo::new(move |_| {
+    roles.with(|list| {
+      list
+        .iter()
+        .filter(|member| member.role == ChannelRole::Admin)
+        .count()
+    })
+  });
+  let access = ChannelAccess::new(state, conversation);
+  let actor = access.actor;
+  let scheme = access.scheme;
+  // Who is in the channel's space decides who can be given a role; the list loads in the background.
+  let maybe_space = Memo::new(move |_| {
+    state
+      .read(|backend| backend.conversation(conversation))
+      .and_then(|info| info.maybe_space)
+  });
+  Effect::new(move |_| {
+    if let Some(space) = maybe_space.get() {
+      state.write(|backend| backend.refresh_space_roster(space));
+    }
+  });
+  let space_roster = Memo::new(move |_| match maybe_space.get() {
+    Some(space) => state.read(|backend| backend.space_members(space)),
+    None => SpaceRoster::Loading,
+  });
+  let can_manage_roles =
+    Memo::new(move |_| scheme.with(|scheme| actor.with(|actor| can_manage_channel_roles(scheme, actor))));
   view! {
     <div class="settings-row">
       <span class="muted-text">{move || i18n.t_count("members-count", members.with(Vec::len))}</span>
@@ -467,16 +501,24 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
         {move || i18n.t("channel-add-people")}
       </button>
     </div>
+    <p class="hint">{move || if can_manage_roles.get() { i18n.t("channel-roles-hint") } else { i18n.t("channel-roles-read-only") }}</p>
     <ul class="settings-member-list">
       <For each=move || members.get() key=|user| user.id let:user>
-        <ChannelMemberRow conversation=conversation user=user />
+        <ChannelMemberRow conversation=conversation user=user roles=roles access=access space_roster=space_roster admin_count=admin_count />
       </For>
     </ul>
   }
 }
 
 #[component]
-fn ChannelMemberRow(conversation: ConversationId, user: User) -> impl IntoView {
+fn ChannelMemberRow(
+  conversation: ConversationId,
+  user: User,
+  roles: Memo<Vec<ChannelMember>>,
+  access: ChannelAccess,
+  space_roster: Memo<SpaceRoster>,
+  admin_count: Memo<usize>,
+) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let id = user.id;
@@ -484,6 +526,34 @@ fn ChannelMemberRow(conversation: ConversationId, user: User) -> impl IntoView {
   let is_confirming = RwSignal::new(false);
   let pending = PendingAction::new();
   let name = user.display_name.clone();
+  let is_guest = user.is_guest;
+  // Until the member list is loaded the role is unknown: nothing is offered.
+  let role = Memo::new(move |_| {
+    roles.with(|list| {
+      list
+        .iter()
+        .find(|member| member.user == id)
+        .map(|member| member.role.clone())
+    })
+  });
+  let options = Memo::new(move |_| match role.get() {
+    Some(current) => access.scheme.with(|scheme| {
+      access.actor.with(|actor| {
+        assignable_roles(
+          scheme,
+          actor,
+          &RoleTarget {
+            is_guest,
+            space: space_standing(&space_roster.get(), id),
+            is_self: is_me,
+            current,
+          },
+          admin_count.get(),
+        )
+      })
+    }),
+    None => Vec::new(),
+  });
   view! {
     <li class="settings-member">
       <Avatar user=user.clone() size=AvatarSize::Small show_presence=true />
@@ -491,6 +561,31 @@ fn ChannelMemberRow(conversation: ConversationId, user: User) -> impl IntoView {
       {user.is_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
       {is_me.then(|| view! { <span class="muted-text">{move || i18n.t("settings-member-you")}</span> })}
       <span class="grow"></span>
+      {move || match (role.get(), options.get()) {
+        (Some(current), options) if !options.is_empty() => {
+          let name = name.clone();
+          view! {
+            <RoleSelect
+              id=format!("cs-role-{id}")
+              label_key="channel-role"
+              name=name
+              current=(channel_role_value(&current), channel_role_key(&current))
+              options=options.iter().map(|option| (channel_role_value(option), channel_role_key(option))).collect()
+              pending=pending
+              on_confirm=Callback::new(move |value: String| {
+                let role = channel_role_from_value(&value);
+                state.write(|backend| backend.set_channel_role(conversation, id, role));
+              })
+            />
+          }
+          .into_any()
+        },
+        // Others' roles are shown as a plain badge; "member" is the default and says nothing.
+        (Some(current), _) if current != ChannelRole::Member => {
+          view! { <span class="badge">{move || i18n.t(channel_role_key(&current))}</span> }.into_any()
+        },
+        _ => ().into_any(),
+      }}
       {(!is_me).then(|| view! {
         <Show
           when=move || is_confirming.get()
@@ -501,7 +596,7 @@ fn ChannelMemberRow(conversation: ConversationId, user: User) -> impl IntoView {
           }
         >
           <span role="alert" class="muted-text">{
-            let name = name.clone();
+            let name = user.display_name.clone();
             move || i18n.t_with("settings-member-remove-confirm", &[("name", &name)])
           }</span>
           <button
@@ -520,6 +615,146 @@ fn ChannelMemberRow(conversation: ConversationId, user: User) -> impl IntoView {
       })}
       <FailureNote pending=pending />
     </li>
+  }
+}
+
+/// A role select that asks before it changes anything: picking a role shows "Change X to Y?" with
+/// confirm and cancel, the select is disabled while the change runs, and a refusal puts the old role
+/// back (and shows the error through `pending`).
+#[component]
+fn RoleSelect(
+  id: String,
+  label_key: &'static str,
+  /// The person's name, for the confirmation.
+  name: String,
+  /// The `<option>` value and i18n key of the current role.
+  current: (String, &'static str),
+  /// `(value, i18n key)` of every role on offer, the current one included.
+  options: Vec<(String, &'static str)>,
+  pending: PendingAction,
+  /// Starts the change for the confirmed value; runs inside `pending`.
+  on_confirm: Callback<String>,
+) -> impl IntoView {
+  let i18n = use_i18n();
+  let (current, current_key) = current;
+  let shown = RwSignal::new(current.clone());
+  let maybe_proposed = RwSignal::new(None::<String>);
+  // The current role is always selectable, so the select shows it even if it can't be chosen again.
+  let mut all_options = options.clone();
+  if !all_options.iter().any(|(value, _)| *value == current) {
+    all_options.push((current.clone(), current_key));
+  }
+  let keys = StoredValue::new(all_options.clone());
+  let label_of = move |value: &str| {
+    keys
+      .with_value(|list| {
+        list
+          .iter()
+          .find(|(candidate, _)| candidate == value)
+          .map(|(_, key)| *key)
+      })
+      .map(|key| i18n.t(key))
+      .unwrap_or_default()
+  };
+  // Also runs when a refusal arrives after the row is gone, so it only touches live signals.
+  let cancel = {
+    let current = current.clone();
+    move || {
+      let _ = maybe_proposed.try_set(None);
+      let _ = shown.try_set(current.clone());
+    }
+  };
+  view! {
+    <label class="visually-hidden" for=id.clone()>{move || i18n.t(label_key)}</label>
+    <select
+      id=id
+      class="input input-small"
+      prop:value=move || shown.get()
+      prop:disabled=move || pending.is_pending()
+      on:change={
+        let current = current.clone();
+        move |ev| {
+          let value = event_target_value(&ev);
+          shown.set(value.clone());
+          maybe_proposed.set((value != current).then_some(value));
+        }
+      }
+    >
+      {all_options
+        .into_iter()
+        .map(|(value, key)| view! { <option value=value>{move || i18n.t(key)}</option> })
+        .collect_view()}
+    </select>
+    {move || {
+      maybe_proposed
+        .get()
+        .map(|proposed| {
+          let name = name.clone();
+          let role_name = label_of(&proposed);
+          let revert = cancel.clone();
+          let revert_on_failure = cancel.clone();
+          view! {
+            <span role="alert" class="muted-text">{i18n.t_with("role-change-confirm", &[("name", &name), ("role", &role_name)])}</span>
+            <button
+              type="button"
+              class="btn btn-small btn-primary"
+              prop:disabled=move || pending.is_pending()
+              on:click=move |_| {
+                maybe_proposed.set(None);
+                let value = proposed.clone();
+                let revert_on_failure = revert_on_failure.clone();
+                // A refusal (the last admin, a missing permission) puts the old role back.
+                pending.run_or_else(
+                  || on_confirm.run(value),
+                  move |_| revert_on_failure(),
+                );
+              }
+            >
+              {move || i18n.t("confirm")}
+            </button>
+            <button type="button" class="btn btn-small" on:click=move |_| revert()>{move || i18n.t("cancel")}</button>
+          }
+        })
+    }}
+  }
+}
+
+/// Where a person stands in the channel's space according to the space's member list.
+fn space_standing(roster: &SpaceRoster, user: UserId) -> SpaceStanding {
+  match roster {
+    SpaceRoster::Loaded(members) => match members.iter().find(|member| member.user == user) {
+      Some(member) if member.is_guest || member.role == SpaceRole::Guest => SpaceStanding::Guest,
+      Some(_) => SpaceStanding::Member,
+      None => SpaceStanding::NotMember,
+    },
+    SpaceRoster::Loading | SpaceRoster::Hidden => SpaceStanding::Unknown,
+  }
+}
+
+/// The `<option>` value of a channel role.
+fn channel_role_value(role: &ChannelRole) -> String {
+  match role {
+    ChannelRole::Admin => "admin",
+    ChannelRole::Moderator => "moderator",
+    ChannelRole::Member | ChannelRole::Unknown(_) => "member",
+  }
+  .to_owned()
+}
+
+fn channel_role_from_value(value: &str) -> ChannelRole {
+  match value {
+    "admin" => ChannelRole::Admin,
+    "moderator" => ChannelRole::Moderator,
+    _ => ChannelRole::Member,
+  }
+}
+
+/// The i18n key of a channel role.
+fn channel_role_key(role: &ChannelRole) -> &'static str {
+  match role {
+    ChannelRole::Admin => "channel-role-admin",
+    ChannelRole::Moderator => "channel-role-moderator",
+    ChannelRole::Member | ChannelRole::Unknown(_) => "channel-role-member",
   }
 }
 
@@ -1137,7 +1372,6 @@ fn SpaceMemberRow(space: SpaceId, member: SpaceMember, can_manage: bool) -> impl
   let role = member.role.clone();
   // Guest accounts stay guests; members and space admins can be switched.
   let can_change_role = can_manage && !is_me && !member.is_guest;
-  let shown_role = RwSignal::new(role_value(&role));
   view! {
     <li class="settings-member">
       {maybe_avatar.map(|user| view! { <Avatar user=user size=AvatarSize::Small show_presence=true /> })}
@@ -1146,29 +1380,21 @@ fn SpaceMemberRow(space: SpaceId, member: SpaceMember, can_manage: bool) -> impl
       <span class="grow"></span>
       {if can_change_role {
         view! {
-          <label class="visually-hidden" for=format!("ss-role-{user}")>{move || i18n.t("space-role")}</label>
-          <select
+          <RoleSelect
             id=format!("ss-role-{user}")
-            class="input input-small"
-            prop:value=move || shown_role.get()
-            prop:disabled=move || pending.is_pending()
-            on:change=move |ev| {
-              let previous = shown_role.get_untracked();
-              let value = event_target_value(&ev);
+            label_key="space-role"
+            name=name.clone()
+            current=(role_value(&role), role_key(&role))
+            options=vec![
+              ("member".to_owned(), "space-role-member"),
+              ("space_admin".to_owned(), "space-role-admin"),
+            ]
+            pending=pending
+            on_confirm=Callback::new(move |value: String| {
               let role = if value == "space_admin" { SpaceRole::SpaceAdmin } else { SpaceRole::Member };
-              shown_role.set(value);
-              // A refusal (the last space admin) puts the old role back.
-              pending.run_or_else(
-                || state.write(|backend| backend.set_space_role(space, user, role)),
-                move |_| {
-                  let _ = shown_role.try_set(previous);
-                },
-              );
-            }
-          >
-            <option value="member">{move || i18n.t("space-role-member")}</option>
-            <option value="space_admin">{move || i18n.t("space-role-admin")}</option>
-          </select>
+              state.write(|backend| backend.set_space_role(space, user, role));
+            })
+          />
         }.into_any()
       } else {
         let role = role.clone();
@@ -1587,6 +1813,35 @@ mod tests {
     assert_eq!(
       HistoryChoice::from_value("from_join").policy(),
       Some(HistoryPolicy::FromJoin)
+    );
+  }
+
+  #[test]
+  fn a_persons_space_standing_follows_the_space_member_list() {
+    let member = |user: u64, role: SpaceRole, is_guest: bool| SpaceMember {
+      user: crate::model::id_from_raw(user),
+      display_name: String::new(),
+      is_guest,
+      role,
+    };
+    let roster = SpaceRoster::Loaded(vec![
+      member(1, SpaceRole::Member, false),
+      member(2, SpaceRole::Guest, true),
+      member(3, SpaceRole::SpaceAdmin, false),
+    ]);
+    let standing = |user: u64| space_standing(&roster, crate::model::id_from_raw(user));
+    assert_eq!(standing(1), SpaceStanding::Member);
+    assert_eq!(standing(2), SpaceStanding::Guest);
+    assert_eq!(standing(3), SpaceStanding::Member);
+    assert_eq!(standing(4), SpaceStanding::NotMember);
+    let unknown = crate::model::id_from_raw(1);
+    assert_eq!(
+      space_standing(&SpaceRoster::Loading, unknown),
+      SpaceStanding::Unknown
+    );
+    assert_eq!(
+      space_standing(&SpaceRoster::Hidden, unknown),
+      SpaceStanding::Unknown
     );
   }
 

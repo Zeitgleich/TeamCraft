@@ -3,10 +3,27 @@
 
 use leptos::prelude::*;
 
+/// How loud a badge is. Red means "someone needs you" (a mention or a direct message); plain unread
+/// is quiet, so red keeps its meaning.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BadgeTone {
+  #[default]
+  Mention,
+  Unread,
+}
+
+impl BadgeTone {
+  /// Red when `has_mention`, quiet otherwise.
+  pub fn of(has_mention: bool) -> Self {
+    if has_mention { Self::Mention } else { Self::Unread }
+  }
+}
+
 /// A number badge (`.badge-count`) that is absent at zero.
 #[component]
 pub fn CountBadge(
   #[prop(into)] count: Signal<u32>,
+  #[prop(into, optional)] tone: Signal<BadgeTone>,
   /// Hidden from screen readers when the surrounding control already says the number.
   #[prop(optional)]
   is_decorative: bool,
@@ -24,6 +41,7 @@ pub fn CountBadge(
     <Show when=move || { count.get() > 0 } fallback=|| ()>
       <span
         class="badge-count"
+        class:is-quiet=move || tone.get() == BadgeTone::Unread
         class:is-bumped=move || is_bumped.get()
         aria-hidden=is_decorative.then_some("true")
         on:animationend=move |_| is_bumped.set(false)

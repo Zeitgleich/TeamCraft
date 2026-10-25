@@ -12,7 +12,7 @@ use crate::i18n::use_i18n;
 use crate::meetings::MeetingsHub;
 use crate::model::{Conversation, ConversationId, ConversationKind, PresenceStatus, SpaceId};
 use crate::sections::{
-  GroupedSidebar, SectionKind, SpaceGroup, build_grouped, build_sections, move_favorite,
+  GroupedSidebar, SectionKind, SpaceGroup, badge_count, build_grouped, build_sections, move_favorite,
 };
 use crate::settings::{load_json, store_json};
 use crate::state::{MainView, Overlay, use_app_state};
@@ -352,7 +352,14 @@ fn SidebarSection(
 ) -> impl IntoView {
   let i18n = use_i18n();
   let is_collapsed = move || collapsed.with(|set| set.contains(&kind));
-  let unread_hidden: u32 = conversations.iter().map(|conv| conv.mention_count).sum();
+  // Hidden mentions and unread DMs stay red (like every other badge); plain unread messages in
+  // channels that aren't muted are quiet.
+  let mentions_hidden = badge_count(&conversations);
+  let unread_hidden: u32 = conversations
+    .iter()
+    .filter(|conv| !conv.is_muted && !matches!(conv.kind, ConversationKind::Direct | ConversationKind::Group))
+    .map(|conv| conv.unread_count.saturating_sub(conv.mention_count))
+    .sum();
   let list_id = format!("sb-{}", kind.slug());
   // Only a click that opens the section animates its rows, not a re-render with new counts.
   let is_opening = RwSignal::new(false);
@@ -377,7 +384,8 @@ fn SidebarSection(
         >
           <Icon name=IconName::ChevronDown class="chevron" />
           <span>{move || i18n.t(kind.title_key())}</span>
-          {move || (is_collapsed() && unread_hidden > 0).then(|| view! { <span class="badge-count">{unread_hidden}</span> })}
+          {move || (is_collapsed() && mentions_hidden > 0).then(|| view! { <span class="badge-count">{mentions_hidden}</span> })}
+          {move || (is_collapsed() && unread_hidden > 0).then(|| view! { <span class="badge-count is-quiet">{unread_hidden}</span> })}
         </button>
         {(kind == SectionKind::Unreads)
           .then(|| {
@@ -526,9 +534,10 @@ pub fn SidebarItem(conversation: Conversation) -> impl IntoView {
     .map(|status| status.emoji);
   let name = conversation.name.clone();
   let aria_name = name.clone();
+  let is_muted = conversation.is_muted;
   let is_catching_up = conversation.is_catching_up;
   let label = move || {
-    if is_catching_up {
+    let label = if is_catching_up {
       i18n.t_with("sidebar-item-catching-up", &[("name", &aria_name)])
     } else if mentions > 0 {
       i18n.t_with(
@@ -539,6 +548,11 @@ pub fn SidebarItem(conversation: Conversation) -> impl IntoView {
       i18n.t_with("sidebar-item-unread", &[("name", &aria_name)])
     } else {
       aria_name.clone()
+    };
+    if is_muted {
+      i18n.t_with("sidebar-item-muted-label", &[("label", &label)])
+    } else {
+      label
     }
   };
 
@@ -567,6 +581,7 @@ pub fn SidebarItem(conversation: Conversation) -> impl IntoView {
           .filter(|peer| state.read(|backend| backend.is_in_call(*peer)))
           .map(|_| view! { <span class="sb-call" title=i18n.t("presence-in-call")><Icon name=IconName::Phone /></span> })
       }}
+      {is_muted.then(|| view! { <span class="sb-muted-icon" title=i18n.t("sidebar-item-muted")><Icon name=IconName::BellOff /></span> })}
       {is_catching_up.then(|| view! { <span class="sb-catching-up" aria-hidden="true" title=i18n.t("catching-up")><Icon name=IconName::Clock /></span> })}
       {(mentions > 0).then(|| view! { <span class="badge-count" aria-hidden="true">{mentions}</span> })}
     </button>
