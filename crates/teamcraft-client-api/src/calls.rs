@@ -332,6 +332,29 @@ pub enum DevicePresence {
   Unknown,
 }
 
+/// A browser's permission for the camera or the microphone (`navigator.permissions.query`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrowserPermission {
+  Granted,
+  Denied,
+  /// The user hasn't been asked yet (or dismissed the question).
+  Prompt,
+  /// The browser can't say (no Permissions API, or it doesn't know the name).
+  Unknown,
+}
+
+impl BrowserPermission {
+  /// From `PermissionStatus.state`.
+  pub fn from_state(state: &str) -> Self {
+    match state {
+      "granted" => Self::Granted,
+      "denied" => Self::Denied,
+      "prompt" => Self::Prompt,
+      _ => Self::Unknown,
+    }
+  }
+}
+
 impl MediaDevices {
   /// Devices from a platform that names every device it lists (the desktop app).
   pub fn listed(
@@ -350,6 +373,28 @@ impl MediaDevices {
 }
 
 impl DevicePresence {
+  /// From a browser's listing of one kind of input (`enumerateDevices`), its permission for that
+  /// kind, and whether the listing had any device at all.
+  ///
+  /// Browsers name devices only once the page may use them; until then they list one unnamed
+  /// device per kind that exists. A browser that lists nothing at all before permission tells
+  /// nothing, so an empty kind counts as missing only when the permission is granted or the
+  /// browser listed other devices.
+  pub fn in_browser<'a>(
+    ids: impl IntoIterator<Item = &'a str>,
+    permission: BrowserPermission,
+    has_listed_any: bool,
+  ) -> Self {
+    match (Self::from_ids(ids), permission) {
+      (Self::Present, _) => Self::Present,
+      (_, BrowserPermission::Denied) => Self::Blocked,
+      (Self::Missing, BrowserPermission::Granted) => Self::Missing,
+      (Self::Missing, _) if has_listed_any => Self::Missing,
+      (Self::Missing, _) => Self::Unknown,
+      (other, _) => other,
+    }
+  }
+
   /// From a listing's device ids. Browsers list a device with an empty id (one per kind) until
   /// the page may use that kind.
   pub fn from_ids<'a>(ids: impl IntoIterator<Item = &'a str>) -> Self {
@@ -723,6 +768,52 @@ mod device_tests {
       DevicePresence::from_ids(["default", "mic-1"]),
       DevicePresence::Present
     );
+  }
+
+  #[test]
+  fn an_empty_kind_is_missing_only_when_the_browser_would_have_listed_it() {
+    use BrowserPermission::{Granted, Prompt, Unknown};
+    // Allowed, or the browser listed other devices (unnamed ones per kind before permission).
+    assert_eq!(
+      DevicePresence::in_browser([], Granted, false),
+      DevicePresence::Missing
+    );
+    assert_eq!(
+      DevicePresence::in_browser([], Prompt, true),
+      DevicePresence::Missing
+    );
+    // A browser that lists nothing before permission tells nothing.
+    assert_eq!(
+      DevicePresence::in_browser([], Prompt, false),
+      DevicePresence::Unknown
+    );
+    assert_eq!(
+      DevicePresence::in_browser([], Unknown, false),
+      DevicePresence::Unknown
+    );
+  }
+
+  #[test]
+  fn a_refused_permission_blocks_unless_devices_are_named() {
+    use BrowserPermission::{Denied, Prompt};
+    assert_eq!(
+      DevicePresence::in_browser([""], Denied, true),
+      DevicePresence::Blocked
+    );
+    assert_eq!(
+      DevicePresence::in_browser([], Denied, false),
+      DevicePresence::Blocked
+    );
+    assert_eq!(
+      DevicePresence::in_browser([""], Prompt, true),
+      DevicePresence::Hidden
+    );
+    assert_eq!(
+      DevicePresence::in_browser(["cam-1"], Denied, true),
+      DevicePresence::Present
+    );
+    assert_eq!(BrowserPermission::from_state("denied"), Denied);
+    assert_eq!(BrowserPermission::from_state("later"), BrowserPermission::Unknown);
   }
 
   #[test]

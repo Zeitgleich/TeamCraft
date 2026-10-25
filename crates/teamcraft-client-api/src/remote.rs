@@ -123,7 +123,8 @@ pub enum CallAction {
   /// Lists the cameras, microphones and speakers again (the pre-join screen opened).
   RefreshDevices,
   /// Plays a short test sound on the speakers (`None`: the system default); finishes when it
-  /// has played, fails when it can't play.
+  /// has played, fails when it can't play. The desktop shell's: the browser page plays it itself,
+  /// since it has to start inside the click.
   TestSpeakers {
     #[serde(default)]
     maybe_device: Option<String>,

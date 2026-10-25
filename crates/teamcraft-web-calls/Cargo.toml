@@ -37,5 +37,5 @@ web-sys = { version = "0.3.106", features = [
   "HtmlCanvasElement", "MediaStream", "MediaStreamTrack", "Window", "Navigator", "Document", "Element",
   "HtmlElement", "HtmlMediaElement", "HtmlVideoElement",
   "AudioContext", "AudioBuffer", "AudioBufferSourceNode", "AudioDestinationNode", "AudioNode", "BaseAudioContext",
-  "AudioScheduledSourceNode", "AudioContextState",
+  "AudioScheduledSourceNode",
 ] }

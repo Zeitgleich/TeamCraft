@@ -846,7 +846,7 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
 
   fn test_speakers(&self, maybe_device: Option<String>) {
     if let Some(calls) = &self.maybe_calls {
-      calls.act(CallAction::TestSpeakers { maybe_device });
+      calls.test_speakers(maybe_device);
     }
   }
 

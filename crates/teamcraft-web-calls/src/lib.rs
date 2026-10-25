@@ -11,7 +11,6 @@
 #![cfg(target_arch = "wasm32")]
 
 mod ringtone;
-mod speaker_test;
 
 use std::cell::{Cell, RefCell};
 use std::pin::pin;
@@ -24,8 +23,8 @@ use futures::future::{Either, select};
 use js_sys::{Function, Promise, Reflect, Uint8Array};
 use teamcraft_client_api::call_view::{CallSignal, CallView};
 use teamcraft_client_api::calls::{
-  ActiveCall, BackgroundEffect, CallEndReason, CallRequest, CallStatusSounds, DevicePresence, MediaDevice,
-  MediaDevices, PushToTalk, ScreenShareSound,
+  ActiveCall, BackgroundEffect, BrowserPermission, CallEndReason, CallRequest, CallStatusSounds,
+  DevicePresence, MediaDevice, MediaDevices, PushToTalk, ScreenShareSound,
 };
 use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
 use teamcraft_client_api::page_calls::PreparedCall;
@@ -55,6 +54,9 @@ use web_sys::{HtmlCanvasElement, HtmlVideoElement, MediaStream, MediaStreamTrack
 
 /// Simulcast layers the camera sends (as on desktop).
 const MAX_SIMULCAST_LAYERS: u8 = 3;
+/// Permission names for `navigator.permissions.query`.
+const CAMERA_PERMISSION: &str = "camera";
+const MICROPHONE_PERMISSION: &str = "microphone";
 
 thread_local! {
   static HOST: RefCell<Option<Rc<Host>>> = const { RefCell::new(None) };
@@ -67,8 +69,11 @@ struct Host {
   state: RefCell<State>,
   /// The running call, if any.
   maybe_media: RefCell<Option<Media>>,
-  /// Lists the devices again when the browser says they changed (kept for as long as the host).
+  /// Lists the devices again when the browser says they changed (kept for as long as the host):
+  /// `devicechange`, and a camera or microphone permission that changed.
   _on_device_change: Closure<dyn FnMut()>,
+  /// The `PermissionStatus` objects that call `_on_device_change`, kept so they stay alive.
+  permission_statuses: RefCell<Vec<JsValue>>,
   /// Where the page serves the AudioWorklet module.
   worklet_url: String,
   /// The last state handed to the page: an unchanged one isn't handed again.
@@ -166,10 +171,12 @@ pub fn start(callbacks: JsValue) -> Result<(), JsValue> {
     state: RefCell::new(State::default()),
     maybe_media: RefCell::new(None),
     _on_device_change: on_device_change,
+    permission_statuses: RefCell::new(Vec::new()),
     worklet_url,
     last_sent: RefCell::new(String::new()),
   });
   HOST.with(|slot| *slot.borrow_mut() = Some(host.clone()));
+  spawn_local(watch_permissions(Rc::downgrade(&host)));
   host.refresh_devices();
   host.changed();
   Ok(())
@@ -362,12 +369,14 @@ impl Host {
           return;
         },
       };
+      let has_listed_any =
+        !(listed.cameras.is_empty() && listed.inputs.is_empty() && listed.outputs.is_empty());
       let devices = MediaDevices {
         cameras: media_devices(&listed.cameras),
         microphones: media_devices(&listed.inputs),
         speakers: media_devices(&listed.outputs),
-        camera_presence: presence(&listed.cameras, "camera").await,
-        microphone_presence: presence(&listed.inputs, "microphone").await,
+        camera_presence: presence(&listed.cameras, CAMERA_PERMISSION, has_listed_any).await,
+        microphone_presence: presence(&listed.inputs, MICROPHONE_PERMISSION, has_listed_any).await,
       };
       if let Some(host) = host.upgrade() {
         host.state.borrow_mut().devices = devices;
@@ -447,7 +456,10 @@ impl Host {
       CallAction::SetBackgroundEffect { .. } | CallAction::OpenSystemVideoEffects => {},
       CallAction::Join { request } => self.join(request).await?,
       CallAction::RefreshDevices => self.refresh_devices(),
-      CallAction::TestSpeakers { maybe_device } => speaker_test::play(maybe_device.as_deref()).await?,
+      // The page plays the test itself: it has to start inside the click (teamcraft-ui speaker_test).
+      CallAction::TestSpeakers { .. } => {
+        return Err(ActionFailure::other("the page plays the speaker test itself"));
+      },
       CallAction::Unknown => return Err(ActionFailure::other("unknown call action")),
     }
     Ok(())
@@ -831,19 +843,49 @@ fn media_devices(devices: &[AudioDeviceInfo]) -> Vec<MediaDevice> {
     .collect()
 }
 
-/// What the listing says about one kind of input. Browsers list an unnamed device both before
-/// the user was asked and after they refused; the permission state tells the two apart.
-async fn presence(devices: &[AudioDeviceInfo], permission: &str) -> DevicePresence {
-  let presence = DevicePresence::from_ids(devices.iter().map(|device| device.id.as_str()));
-  if presence == DevicePresence::Hidden && permission_state(permission).await.as_deref() == Some("denied") {
-    return DevicePresence::Blocked;
-  }
-  presence
+/// What the listing says about one kind of input (`DevicePresence::in_browser`). Browsers list an
+/// unnamed device both before the user was asked and after they refused; the permission tells
+/// the two apart.
+async fn presence(devices: &[AudioDeviceInfo], permission: &str, has_listed_any: bool) -> DevicePresence {
+  let state = match permission_status(permission).await {
+    Some(status) => Reflect::get(&status, &JsValue::from_str("state"))
+      .ok()
+      .and_then(|state| state.as_string())
+      .map_or(BrowserPermission::Unknown, |state| {
+        BrowserPermission::from_state(&state)
+      }),
+    None => BrowserPermission::Unknown,
+  };
+  DevicePresence::in_browser(
+    devices.iter().map(|device| device.id.as_str()),
+    state,
+    has_listed_any,
+  )
 }
 
-/// `navigator.permissions.query({ name })`'s state; `None` where the browser can't say (not
-/// every browser knows the camera and microphone permissions).
-async fn permission_state(name: &str) -> Option<String> {
+/// Lists the devices again when the user allows or blocks the camera or microphone (in the
+/// address bar, say): browsers fire no `devicechange` for that.
+async fn watch_permissions(host: Weak<Host>) {
+  for name in [CAMERA_PERMISSION, MICROPHONE_PERMISSION] {
+    let Some(status) = permission_status(name).await else {
+      continue;
+    };
+    let Some(host) = host.upgrade() else {
+      return;
+    };
+    // A browser whose status has no `onchange` just doesn't tell.
+    let _ = Reflect::set(
+      &status,
+      &JsValue::from_str("onchange"),
+      host._on_device_change.as_ref(),
+    );
+    host.permission_statuses.borrow_mut().push(status);
+  }
+}
+
+/// `navigator.permissions.query({ name })`: the `PermissionStatus`; `None` where the browser
+/// can't say (not every browser knows the camera and microphone permissions).
+async fn permission_status(name: &str) -> Option<JsValue> {
   let navigator = web_sys::window()?.navigator();
   let permissions = Reflect::get(&navigator, &JsValue::from_str("permissions"))
     .ok()
@@ -855,10 +897,7 @@ async fn permission_state(name: &str) -> Option<String> {
   let descriptor = js_sys::Object::new();
   Reflect::set(&descriptor, &JsValue::from_str("name"), &JsValue::from_str(name)).ok()?;
   let promise: Promise = query.call1(&permissions, &descriptor).ok()?.dyn_into().ok()?;
-  let status = JsFuture::from(promise).await.ok()?;
-  Reflect::get(&status, &JsValue::from_str("state"))
-    .ok()?
-    .as_string()
+  JsFuture::from(promise).await.ok()
 }
 
 fn device_choice(maybe_id: Option<String>) -> AudioDeviceChoice {
@@ -891,7 +930,7 @@ fn remote_error(text: &str) -> CallKeyError {
   CallKeyError::Remote(text.to_owned())
 }
 
-pub(crate) fn js_text(error: &JsValue) -> String {
+fn js_text(error: &JsValue) -> String {
   error
     .as_string()
     .or_else(|| {

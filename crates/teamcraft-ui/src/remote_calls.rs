@@ -187,6 +187,28 @@ impl RemoteCalls {
     });
   }
 
+  /// Plays the speaker test, outside the action queue: a join right after it doesn't wait for the
+  /// sound. A failure reaches the user.
+  pub fn test_speakers(&self, maybe_device: Option<String>) {
+    let link = self.link.clone();
+    spawn_local(async move {
+      let result = match link {
+        CallLink::Shell => {
+          let action = CallAction::TestSpeakers { maybe_device };
+          call::<()>("call_action", &json!({ "action": action }))
+            .await
+            .map_err(|error| ActionFailure::from_wire(&error))
+        },
+        // The page plays it itself, with the context the click started (speaker_test.rs).
+        #[cfg(target_arch = "wasm32")]
+        CallLink::Page(_) => crate::speaker_test::play(maybe_device).await,
+      };
+      if let Err(failure) = result {
+        crate::feedback::report_failure(failure);
+      }
+    });
+  }
+
   pub fn join(&self, request: CallRequest) {
     self.act(CallAction::Join { request });
   }

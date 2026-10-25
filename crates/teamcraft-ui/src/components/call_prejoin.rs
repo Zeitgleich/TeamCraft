@@ -1,5 +1,6 @@
 use std::cell::Cell;
 
+use leptos::ev;
 use leptos::prelude::*;
 
 use crate::calls::{CallEvent, CallKind, CallRequest, DevicePresence, MediaDevice};
@@ -9,7 +10,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::i18n::{I18n, use_i18n};
 use crate::meetings::MeetingsHub;
 use crate::model::User;
-use crate::reactive::use_interval;
+use crate::reactive::{is_document_visible, use_interval};
 use crate::state::use_app_state;
 
 const METER_BARS: usize = 14;
@@ -49,6 +50,17 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
   // The lists may be old: the desktop app lists on request, and a camera may have been plugged in
   // or a permission changed since. Browsers also report changes themselves (`devicechange`).
   call.emit(CallEvent::RefreshDevices);
+  // Coming back to the window (after allowing the camera in the address bar or the system
+  // settings, which fires no `devicechange`) lists them again, while this screen is open.
+  let refresh_on_return = [
+    window_event_listener(ev::focus, move |_| call.emit(CallEvent::RefreshDevices)),
+    window_event_listener_untyped("visibilitychange", move |_| {
+      if is_document_visible() {
+        call.emit(CallEvent::RefreshDevices);
+      }
+    }),
+  ];
+  on_cleanup(move || refresh_on_return.into_iter().for_each(|handle| handle.remove()));
 
   // Remember the first device of each kind when nothing was chosen before.
   Effect::new(move |_| {
@@ -93,6 +105,11 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
   let is_testing_speaker = RwSignal::new(false);
   let test_speaker = move |_| {
     is_testing_speaker.set(true);
+    // Browsers start sound only inside the click: the context is made here, before any `await`.
+    #[cfg(target_arch = "wasm32")]
+    if crate::web_calls::is_in_page() {
+      crate::speaker_test::prime();
+    }
     // The backend plays the sound and reports a failure (`feedback::report_failure`).
     call.emit(CallEvent::TestSpeakers(call.speaker_id.get_untracked()));
     set_timeout(
