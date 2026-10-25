@@ -120,6 +120,15 @@ pub enum CallAction {
   SetStatusSounds {
     sounds: CallStatusSounds,
   },
+  /// Lists the cameras, microphones and speakers again (the pre-join screen opened).
+  RefreshDevices,
+  /// Plays a short test sound on the speakers (`None`: the system default); finishes when it
+  /// has played, fails when it can't play. The desktop shell's: the browser page plays it itself,
+  /// since it has to start inside the click.
+  TestSpeakers {
+    #[serde(default)]
+    maybe_device: Option<String>,
+  },
   #[serde(other)]
   Unknown,
 }
@@ -1362,6 +1371,25 @@ mod tests {
       })
       .expect("serialize"),
       r#"{"action":"set_background_effect","effect":"blur_light"}"#
+    );
+  }
+
+  #[test]
+  fn device_actions_have_stable_wire_names() {
+    assert_eq!(
+      serde_json::to_string(&CallAction::RefreshDevices).expect("serialize"),
+      r#"{"action":"refresh_devices"}"#
+    );
+    assert_eq!(
+      serde_json::to_string(&CallAction::TestSpeakers {
+        maybe_device: Some("spk-1".into())
+      })
+      .expect("serialize"),
+      r#"{"action":"test_speakers","maybe_device":"spk-1"}"#
+    );
+    assert_eq!(
+      serde_json::from_str::<CallAction>(r#"{"action":"test_speakers"}"#).expect("parse"),
+      CallAction::TestSpeakers { maybe_device: None }
     );
   }
 

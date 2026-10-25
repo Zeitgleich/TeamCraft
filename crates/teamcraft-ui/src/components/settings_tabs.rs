@@ -404,7 +404,9 @@ pub fn AudioVideoSection() -> impl IntoView {
   let state = use_app_state();
   let prefs = state.settings.prefs;
   let calls = Memo::new(move |_| prefs.get().calls);
-  let devices = state.read(|backend| backend.media_devices());
+  let devices = Memo::new(move |_| state.read(|backend| backend.media_devices()));
+  // The desktop app lists its devices on request; the lists come in after a change notification.
+  state.call.emit(crate::calls::CallEvent::RefreshDevices);
   let device_options = |list: &[crate::calls::MediaDevice]| -> Vec<(String, String)> {
     std::iter::once((String::new(), String::new()))
       .chain(
@@ -425,24 +427,29 @@ pub fn AudioVideoSection() -> impl IntoView {
 
   view! {
     <SettingsCard heading="calls-devices" hint="calls-devices-hint">
-      <DeviceRow
-        label="prejoin-camera"
-        options=device_options(&devices.cameras)
-        value=Signal::derive(move || calls.get().camera_id)
-        on_change=Callback::new(move |id: String| prefs.update(|all| all.calls.camera_id = id))
-      />
-      <DeviceRow
-        label="prejoin-microphone"
-        options=device_options(&devices.microphones)
-        value=Signal::derive(move || calls.get().microphone_id)
-        on_change=Callback::new(move |id: String| prefs.update(|all| all.calls.microphone_id = id))
-      />
-      <DeviceRow
-        label="prejoin-speaker"
-        options=device_options(&devices.speakers)
-        value=Signal::derive(move || calls.get().speaker_id)
-        on_change=Callback::new(move |id: String| prefs.update(|all| all.calls.speaker_id = id))
-      />
+      {move || {
+        let devices = devices.get();
+        view! {
+          <DeviceRow
+            label="prejoin-camera"
+            options=device_options(&devices.cameras)
+            value=Signal::derive(move || calls.get().camera_id)
+            on_change=Callback::new(move |id: String| prefs.update(|all| all.calls.camera_id = id))
+          />
+          <DeviceRow
+            label="prejoin-microphone"
+            options=device_options(&devices.microphones)
+            value=Signal::derive(move || calls.get().microphone_id)
+            on_change=Callback::new(move |id: String| prefs.update(|all| all.calls.microphone_id = id))
+          />
+          <DeviceRow
+            label="prejoin-speaker"
+            options=device_options(&devices.speakers)
+            value=Signal::derive(move || calls.get().speaker_id)
+            on_change=Callback::new(move |id: String| prefs.update(|all| all.calls.speaker_id = id))
+          />
+        }
+      }}
     </SettingsCard>
     <SettingsCard heading="calls-joining">
       <SwitchRow

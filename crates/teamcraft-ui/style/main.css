@@ -903,6 +903,12 @@ select.input {
   border-radius: var(--radius);
 }
 
+.avatar-xl {
+  width: clamp(72px, 22vmin, 128px);
+  height: clamp(72px, 22vmin, 128px);
+  font-size: clamp(26px, 7vmin, 44px);
+}
+
 .avatar .presence {
   position: absolute;
   right: -2px;
@@ -3610,6 +3616,30 @@ ol.md-list {
 
 .prejoin-preview .tile {
   aspect-ratio: 16 / 10;
+}
+
+/* The own tile without a camera image: a calm surface with the user's picture, like a muted
+   participant in a call, and what the camera does. */
+.tile.prejoin-self {
+  background: var(--call-surface-solid);
+  outline-color: var(--call-border);
+  outline-width: 1px;
+  outline-offset: -1px;
+}
+
+.prejoin-self-body {
+  position: absolute;
+  inset: 0 0 56px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+}
+
+.prejoin-self-status {
+  color: var(--call-muted);
+  font-size: var(--text-sm);
 }
 
 .preview-controls {
