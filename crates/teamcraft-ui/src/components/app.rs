@@ -38,7 +38,7 @@ use crate::components::meetings_view::{MeetingsView, ScheduleMeetingDialog};
 use crate::components::members_panel::MembersPanel;
 use crate::components::message_actions::{EditHistoryDialog, ForwardDialog, PinsPanel, SavedView};
 use crate::components::offline_banner::OfflineBanner;
-use crate::components::profile_views::{EditProfileDialog, UserProfileDialog};
+use crate::components::profile_views::UserProfileDialog;
 use crate::components::quick_switcher::QuickSwitcher;
 use crate::components::rail::SpaceRail;
 use crate::components::search_view::SearchView;
@@ -334,7 +334,6 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::SpaceSettings(space) => view! { <SpaceSettingsDialog space=space /> }.into_any(),
         Overlay::EditHistory(conversation, message) => view! { <EditHistoryDialog conversation=conversation message=message /> }.into_any(),
         Overlay::Bookmarks(conversation) => view! { <BookmarksDialog conversation=conversation /> }.into_any(),
-        Overlay::EditProfile => view! { <EditProfileDialog /> }.into_any(),
         Overlay::UserProfile(user) => view! { <UserProfileDialog user=user /> }.into_any(),
         Overlay::CallsUnavailable => view! { <CallsUnavailableDialog /> }.into_any(),
         Overlay::None | Overlay::StatusMenu => ().into_any(),
@@ -543,22 +542,28 @@ fn apply_theme(theme: RwSignal<Theme>) {
 }
 
 /// Mirrors the message density and the image size into `data-density` and `data-image-size` on
-/// `<html>` for the CSS.
+/// `<html>` for the CSS, and the text size into `--text-scale` (CSSOM: the web CSP blocks style
+/// attributes).
 fn apply_density(settings: Settings) {
   Effect::new(move |_| {
     let display = settings.prefs.get().display;
     let Some(root) = web_sys::window()
       .and_then(|window| window.document())
       .and_then(|doc| doc.document_element())
+      .and_then(|root| root.dyn_into::<web_sys::HtmlElement>().ok())
     else {
       return;
     };
+    // TODO(#370): the type scale is in pixels and doesn't read `--text-scale` yet; only the
+    // Appearance preview does. #370 moves it to rem multiplied by this factor.
+    let scale = display.text_size.scale().to_string();
     if root
       .set_attribute("data-density", display.density.slug())
       .is_err()
       || root
         .set_attribute("data-image-size", display.image_size.slug())
         .is_err()
+      || root.style().set_property("--text-scale", &scale).is_err()
     {
       tracing::debug!("could not apply density attributes");
     }

@@ -191,25 +191,32 @@ pub enum Overlay {
   EditHistory(ConversationId, MessageId),
   /// Edit the bookmarks bar of a conversation.
   Bookmarks(ConversationId),
-  /// The signed-in user's profile form.
-  EditProfile,
   /// Another person's profile card.
   UserProfile(UserId),
   /// Calls aren't available in this client (the browser, for now): where the apps are.
   CallsUnavailable,
 }
 
-/// The tabs of the settings dialog (PLAN.md §4 and §5).
+/// The sections of the settings dialog (PLAN.md §4 and §5, issue #327).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsTab {
+  Account,
+  Appearance,
   Notifications,
-  Display,
-  Sidebar,
-  Language,
-  Privacy,
+  Preferences,
+  Keyboard,
+  AudioVideo,
   Devices,
-  Calls,
-  Advanced,
+  Security,
+  About,
+}
+
+/// What the settings dialog shows: on phones the list of sections is a page of its own
+/// (`/settings`); wider layouts always show a section beside the list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsPage {
+  Sections,
+  Section(SettingsTab),
 }
 
 /// What became of a route the app was asked to show.
@@ -271,8 +278,8 @@ pub struct AppState {
   pub highlighted: RwSignal<Option<MessageId>>,
   /// A message the composer asked to edit (↑ in the empty composer); its row opens the editor.
   pub edit_request: RwSignal<Option<MessageId>>,
-  /// The tab the settings dialog shows.
-  pub settings_tab: RwSignal<SettingsTab>,
+  /// The page the settings dialog shows.
+  pub settings_page: RwSignal<SettingsPage>,
   /// The message a link or jump opened in the current conversation: the URL names it until the
   /// user goes somewhere else.
   linked_message: RwSignal<Option<PermalinkTarget>>,
@@ -348,7 +355,7 @@ impl AppState {
       edit_request: RwSignal::new(None),
       highlighted: RwSignal::new(None),
       scroll_anchors: StoredValue::new(HashMap::new()),
-      settings_tab: RwSignal::new(SettingsTab::DEFAULT),
+      settings_page: RwSignal::new(SettingsPage::Section(SettingsTab::DEFAULT)),
       linked_message: RwSignal::new(None),
       pending_route: RwSignal::new(None),
       unavailable_routes: RwSignal::new(0),
@@ -1168,9 +1175,26 @@ impl AppState {
     self.panel.set(SidePanel::Closed);
   }
 
-  /// Opens the settings dialog on its first tab.
+  /// Opens the settings dialog: on phones its list of sections, otherwise the first section.
   pub fn open_settings(&self) {
-    self.settings_tab.set(SettingsTab::DEFAULT);
+    self.show_settings(SettingsPage::Sections);
+  }
+
+  /// Opens the settings dialog on one section.
+  pub fn open_settings_at(&self, tab: SettingsTab) {
+    self.show_settings(SettingsPage::Section(tab));
+  }
+
+  /// The list of sections is a page of its own only on phones; elsewhere it stands beside the
+  /// first section.
+  fn show_settings(&self, page: SettingsPage) {
+    let page = match page {
+      SettingsPage::Sections if !self.layout.get_untracked().is_compact() => {
+        SettingsPage::Section(SettingsTab::DEFAULT)
+      },
+      other => other,
+    };
+    self.settings_page.set(page);
     self.overlay.set(Overlay::Settings);
   }
 
@@ -1225,7 +1249,7 @@ impl AppState {
   /// The route of what the app shows now; the address bar follows it (`history.rs`).
   pub fn route(&self) -> Route {
     if self.overlay.get() == Overlay::Settings {
-      return Route::Settings(self.settings_tab.get());
+      return Route::Settings(self.settings_page.get());
     }
     match self.view.get() {
       MainView::Conversation(id) => self.conversation_route(id),
@@ -1414,10 +1438,7 @@ impl AppState {
       Route::People => self.open_directory(),
       Route::Saved => self.open_saved(),
       Route::Search => self.open_search(None),
-      Route::Settings(tab) => {
-        self.settings_tab.set(tab);
-        self.overlay.set(Overlay::Settings);
-      },
+      Route::Settings(page) => self.show_settings(page),
       Route::Admin(section) => {
         if !self.read(|backend| backend.my_role()).includes(&Role::Admin) {
           return RouteOutcome::Unavailable;
@@ -1471,34 +1492,46 @@ pub fn use_app_state() -> AppState {
 }
 
 impl SettingsTab {
-  pub const ALL: [SettingsTab; 8] = [
+  /// In the order of the section list.
+  pub const ALL: [SettingsTab; 9] = [
+    Self::Account,
+    Self::Appearance,
     Self::Notifications,
-    Self::Display,
-    Self::Sidebar,
-    Self::Language,
-    Self::Privacy,
+    Self::Preferences,
+    Self::Keyboard,
+    Self::AudioVideo,
     Self::Devices,
-    Self::Calls,
-    Self::Advanced,
+    Self::Security,
+    Self::About,
   ];
-  /// The tab the dialog opens with.
-  pub const DEFAULT: SettingsTab = Self::Notifications;
+  /// The section the dialog opens with beside the list.
+  pub const DEFAULT: SettingsTab = Self::Account;
 
   pub fn slug(self) -> &'static str {
     match self {
+      Self::Account => "account",
+      Self::Appearance => "appearance",
       Self::Notifications => "notifications",
-      Self::Display => "display",
-      Self::Sidebar => "sidebar",
-      Self::Language => "language",
-      Self::Privacy => "privacy",
+      Self::Preferences => "preferences",
+      Self::Keyboard => "keyboard",
+      Self::AudioVideo => "audio-video",
       Self::Devices => "devices",
-      Self::Calls => "calls",
-      Self::Advanced => "advanced",
+      Self::Security => "security",
+      Self::About => "about",
     }
   }
 
+  /// The section of a path segment, including the tabs before #327, so old links keep working.
   pub fn from_slug(slug: &str) -> Option<Self> {
-    Self::ALL.into_iter().find(|tab| tab.slug() == slug)
+    let legacy = match slug {
+      "display" => Some(Self::Appearance),
+      "sidebar" | "language" => Some(Self::Preferences),
+      "privacy" => Some(Self::Security),
+      "calls" => Some(Self::AudioVideo),
+      "advanced" => Some(Self::About),
+      _ => None,
+    };
+    legacy.or_else(|| Self::ALL.into_iter().find(|tab| tab.slug() == slug))
   }
 }
 
@@ -1599,9 +1632,17 @@ mod tests {
       state.open_admin(AdminSection::Audit);
       assert_eq!(state.route(), Route::Admin(AdminSection::Audit));
       state.open_settings();
-      assert_eq!(state.route(), Route::Settings(SettingsTab::DEFAULT));
-      state.settings_tab.set(SettingsTab::Calls);
-      assert_eq!(state.route(), Route::Settings(SettingsTab::Calls));
+      assert_eq!(
+        state.route(),
+        Route::Settings(SettingsPage::Section(SettingsTab::DEFAULT))
+      );
+      state
+        .settings_page
+        .set(SettingsPage::Section(SettingsTab::AudioVideo));
+      assert_eq!(
+        state.route(),
+        Route::Settings(SettingsPage::Section(SettingsTab::AudioVideo))
+      );
       state.close_overlay();
       assert_eq!(state.route(), Route::Admin(AdminSection::Audit));
     }
@@ -1629,7 +1670,7 @@ mod tests {
         Route::People,
         Route::Saved,
         Route::Search,
-        Route::Settings(SettingsTab::Privacy),
+        Route::Settings(SettingsPage::Section(SettingsTab::Security)),
         Route::Admin(AdminSection::Users),
       ] {
         assert_eq!(state.follow_route(route), RouteOutcome::Shown, "{route:?}");
@@ -1667,7 +1708,7 @@ mod tests {
     fn leaving_settings_by_route_closes_the_dialog() {
       let state = test_state();
       let dm = first_dm(&state);
-      state.follow_route(Route::Settings(SettingsTab::Display));
+      state.follow_route(Route::Settings(SettingsPage::Section(SettingsTab::Appearance)));
       assert_eq!(state.overlay.get(), Overlay::Settings);
       state.follow_route(Route::Direct(dm));
       assert_eq!(state.overlay.get(), Overlay::None);
@@ -1953,6 +1994,25 @@ mod tests {
       state.layout.set(Layout::Compact);
       state.backend_changed();
       assert_eq!(state.route(), Route::Home);
+    }
+
+    #[test]
+    fn settings_open_on_their_section_list_on_phones_only() {
+      let state = compact_state();
+      state.open_settings();
+      assert_eq!(state.route(), Route::Settings(SettingsPage::Sections));
+      state.close_overlay();
+      state.layout.set(Layout::Medium);
+      state.open_settings();
+      assert_eq!(
+        state.route(),
+        Route::Settings(SettingsPage::Section(SettingsTab::DEFAULT))
+      );
+      state.follow_route(Route::Settings(SettingsPage::Sections));
+      assert_eq!(
+        state.settings_page.get(),
+        SettingsPage::Section(SettingsTab::DEFAULT)
+      );
     }
 
     fn compact_state() -> AppState {

@@ -445,6 +445,8 @@ pub struct DisplayPrefs {
   pub show_status_in_messages: bool,
   /// Size of the whole interface, Ctrl/Cmd + `+` / `-` / `0`.
   pub zoom: Zoom,
+  /// Size of text only, independent of the zoom (Settings > Appearance).
+  pub text_size: TextSize,
   /// Seconds at the bottom of the focused conversation before the "New messages" divider goes;
   /// `None` keeps it until the user sends, presses Esc or leaves (#321).
   pub maybe_divider_dwell_secs: Option<u16>,
@@ -457,6 +459,7 @@ impl Default for DisplayPrefs {
       image_size: ImageSize::Large,
       show_status_in_messages: true,
       zoom: Zoom::DEFAULT,
+      text_size: TextSize::DEFAULT,
       maybe_divider_dwell_secs: Some(DEFAULT_DIVIDER_DWELL_SECS),
     }
   }
@@ -516,6 +519,56 @@ impl Zoom {
         .find(|step| *step < self.0)
         .unwrap_or(self.0),
     )
+  }
+}
+
+/// Text size in percent of the default, one of [`TextSize::STEPS`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "u16", into = "u16")]
+pub struct TextSize(u16);
+
+impl From<u16> for TextSize {
+  fn from(percent: u16) -> Self {
+    Self::from_percent(percent)
+  }
+}
+
+impl From<TextSize> for u16 {
+  fn from(size: TextSize) -> Self {
+    size.0
+  }
+}
+
+impl TextSize {
+  pub const STEPS: [u16; 6] = [90, 100, 110, 120, 135, 150];
+  pub const DEFAULT: TextSize = TextSize(100);
+
+  /// The nearest step to a stored value.
+  pub fn from_percent(percent: u16) -> Self {
+    let nearest = Self::STEPS
+      .into_iter()
+      .min_by_key(|step| step.abs_diff(percent))
+      .unwrap_or(100);
+    Self(nearest)
+  }
+
+  /// The step at a slider position; positions past the end are the largest step.
+  pub fn from_step(index: usize) -> Self {
+    Self(Self::STEPS[index.min(Self::STEPS.len() - 1)])
+  }
+
+  pub fn percent(self) -> u16 {
+    self.0
+  }
+
+  /// The slider position of this size.
+  pub fn step(self) -> usize {
+    Self::STEPS.iter().position(|step| *step == self.0).unwrap_or(1)
+  }
+
+  /// The factor the type scale is multiplied with.
+  pub fn scale(self) -> f64 {
+    f64::from(self.0) / 100.0
   }
 }
 
@@ -646,6 +699,17 @@ mod tests {
     assert_eq!(Zoom::from_percent(10).percent(), 67);
     assert_eq!(Zoom::from_percent(67).smaller().percent(), 67);
     assert_eq!(Zoom::from_percent(104).percent(), 100);
+  }
+
+  #[test]
+  fn text_size_snaps_to_its_steps() {
+    assert_eq!(TextSize::from_percent(104).percent(), 100);
+    assert_eq!(TextSize::from_percent(400).percent(), 150);
+    assert_eq!(TextSize::from_step(99).percent(), 150);
+    assert_eq!(TextSize::from_step(TextSize::DEFAULT.step()), TextSize::DEFAULT);
+    assert!(Preferences::default().to_json().contains(r#""text_size":100"#));
+    let prefs = Preferences::from_json(r#"{"display":{"text_size":121}}"#);
+    assert_eq!(prefs.display.text_size.percent(), 120);
   }
 
   #[test]
