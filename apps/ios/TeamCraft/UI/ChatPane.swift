@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 /// A conversation, or one thread of it (`threadId`): messages, reactions and the composer.
 struct ChatPane: View {
   @Environment(AppModel.self) private var model
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   let conversation: ConversationItem
   let threadId: String?
   let account: Account
@@ -160,7 +161,7 @@ struct ChatPane: View {
       .overlay(alignment: .bottomTrailing) {
         if !isAtBottom {
           JumpDownButton(count: newBelowCount) {
-            withAnimation { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
+            withAnimation(scrollAnimation) { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
           }
           .padding()
         }
@@ -172,7 +173,7 @@ struct ChatPane: View {
         guard last != nil, model.focusMessageId == nil, maybeHighlighted == nil else { return }
         // Own messages always come into view; others' only while reading at the bottom.
         if isAtBottom || messages.last?.authorId == account.userId {
-          withAnimation { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
+          withAnimation(scrollAnimation) { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
         } else {
           newBelowCount += 1
         }
@@ -382,12 +383,15 @@ struct ChatPane: View {
     }
   }
 
+  /// Scrolling to a message eases out and quickly; with Reduce Motion it jumps.
+  private var scrollAnimation: Animation? { reduceMotion ? nil : .easeOut(duration: 0.2) }
+
   /// Scrolls to the message a link pointed at, once it is loaded, and highlights it for a moment.
   private func focusLinkedMessage(_ proxy: ScrollViewProxy) {
     guard let focus = model.focusMessageId, messages.contains(where: { $0.id == focus }) else { return }
     model.focusMessageId = nil
     maybeHighlighted = focus
-    withAnimation { proxy.scrollTo(focus, anchor: .center) }
+    withAnimation(scrollAnimation) { proxy.scrollTo(focus, anchor: .center) }
     Task {
       try? await Task.sleep(for: .seconds(2.5))
       withAnimation { maybeHighlighted = nil }
