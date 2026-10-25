@@ -2347,6 +2347,7 @@ error-call-screen-unavailable = Dein Bildschirm kann von hier aus nicht geteilt 
 error-call-unsupported = Dieser Browser kann keine Anrufe führen. Nutze ein aktuelles Chrome, Edge, Firefox oder Safari oder die TeamCraft-App.
 error-call-server-unreachable = Der Anrufserver ist nicht erreichbar. Das Netzwerk blockiert vielleicht Anrufe (UDP); versuche ein anderes Netzwerk oder frag deinen Admin.
 error-call-background-required = Deine Organisation verlangt einen Hintergrund hinter deinem Kamerabild, den der Browser noch nicht einfügen kann. Schalte deine Kamera in der TeamCraft-App ein.
+error-call-encryption-pending = Dieses Gerät kann dem Anruf noch nicht beitreten: Es wird gerade in die Verschlüsselung der Unterhaltung aufgenommen. Lass TeamCraft auf einem anderen deiner Geräte geöffnet oder warte, bis ein Mitglied online ist, und tritt dann erneut bei.
 error-call-speakers-unavailable = Die gewählten Lautsprecher lassen sich hier nicht nutzen. Der Testton lief über die Standardausgabe.
 error-call-speakers-missing = Es wurden keine Lautsprecher gefunden. Schließe Lautsprecher oder Kopfhörer an und versuche es erneut.
 error-call-sound-blocked = Der Browser hat der Seite keinen Ton erlaubt. Klicke irgendwo auf die Seite und versuche es erneut.

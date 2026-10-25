@@ -824,6 +824,17 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::RetryDmSetup { conversation });
   }
 
+  fn set_up_meeting_chat(&self, conversation: ConversationId, invitees: Vec<UserId>) {
+    self.act(ChatAction::SetUpMeetingChat {
+      conversation,
+      invitees,
+    });
+  }
+
+  fn let_into_meeting_chat(&self, conversation: ConversationId, user: UserId) {
+    self.act(ChatAction::LetIntoMeetingChat { conversation, user });
+  }
+
   fn discard_removal(&self, conversation: ConversationId, user: UserId) {
     self.act(ChatAction::DiscardRemoval { conversation, user });
   }

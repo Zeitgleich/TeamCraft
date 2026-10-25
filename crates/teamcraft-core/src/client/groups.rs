@@ -14,10 +14,10 @@ use teamcraft_crypto::mls::{
   RejoinRequest, SignedRejoinRequest, VerifiedWelcome,
 };
 use teamcraft_proto::{
-  AddConversationMemberRequest, Base64Bytes, ClaimKeyPackagesRequest, ConversationId, CreateChannelRequest,
-  CreateDmRequest, CreateGroupDmRequest, DeviceId, HistoryPolicy, Id, IdempotencyKey, ListMlsMessagesQuery,
-  ListMlsMessagesResponse, MlsMessageKind, MlsMessageResponse, MlsWelcome, PostMlsCommitRequest,
-  PostMlsMessageRequest, SpaceId, UserId,
+  AddConversationMemberRequest, Base64Bytes, ClaimKeyPackagesRequest, ConversationId, ConversationKind,
+  CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, DeviceId, HistoryPolicy, Id, IdempotencyKey,
+  ListMlsMessagesQuery, ListMlsMessagesResponse, MlsMessageKind, MlsMessageResponse, MlsWelcome,
+  PostMlsCommitRequest, PostMlsMessageRequest, SpaceId, UserId,
 };
 
 use super::workspace::{PendingChange, SharedKeys};
@@ -248,7 +248,113 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if self.has_group(id)? && maybe_setup.is_none() {
       return Ok(id);
     }
-    // Opened by the user: tried now, whatever the backoff of an earlier attempt says.
+    self.start_participants_setup(id, others).await?;
+    Ok(id)
+  }
+
+  /// Sets up the encryption group of a meeting chat this device just scheduled or started (the
+  /// server creates the chat with the meeting, without a group; e2ee.md §4.6, "Meeting chats"):
+  /// founded like a group DM's with the users the organizer invited, from the organizer's own
+  /// request and never the server's member list, and finished later if cut short. The group's
+  /// information is published right away, so the organizer's other devices join it even while
+  /// it holds nobody else. A group the server already has (information published, or epochs
+  /// past 0) is joined, never founded again. `Ok(true)` once everybody invited is in.
+  pub async fn set_up_meeting_chat(
+    &mut self,
+    id: ConversationId,
+    invitees: &[UserId],
+  ) -> Result<bool, CoreError> {
+    let had_setup = self.dm_setup(id)?.is_some();
+    let me = self.user_id();
+    let others = conversation_members(invitees, me);
+    // Noted before anything can fail: a setup cut short here (no network, the app closed) is
+    // finished on a later sync (`repair_dm_setups`).
+    self.note_participants_setup(id, &others)?;
+    let conversation = self.api.conversation(id).await?;
+    if conversation.kind != ConversationKind::Meeting {
+      self.store.delete(Table::SyncState, &dm_setup_key(id))?;
+      return Err(CoreError::NotAMeetingChat(id));
+    }
+    records::put_json(&self.store, Table::Conversations, &id.to_string(), &conversation)?;
+    if !self.has_group(id)? && !had_setup && self.server_has_group_info(id).await? {
+      // Founded already (by this user's other device): this device joins it, never founds.
+      self.store.delete(Table::SyncState, &dm_setup_key(id))?;
+      self.join_as_member_device(id).await?;
+      return self.has_group(id);
+    }
+    let is_complete = self.finish_dm_setup(id, &others).await?;
+    if self.has_group(id)? {
+      self.publish_group_info_if_missing(id).await?;
+    }
+    Ok(is_complete)
+  }
+
+  /// "Admit" by a host of a meeting: lets the admitted user's devices into the chat's encryption
+  /// group with history from now on, signed by this host's device. Only ever on the host's own
+  /// decision, never because the server made somebody a member (e2ee.md §4.6, "Meeting chats").
+  /// Only the devices the user has now go in: nothing waits for a device that appears later,
+  /// unattended (the server could register one of its own).
+  pub async fn let_into_meeting_chat(&mut self, id: ConversationId, user: UserId) -> Result<(), CoreError> {
+    if !self.has_group(id)? {
+      return Err(CoreError::NoGroup(id));
+    }
+    let is_meeting_chat = self
+      .cached_conversations()?
+      .get(&id)
+      .is_some_and(|response| response.kind == ConversationKind::Meeting);
+    if !is_meeting_chat {
+      return Err(CoreError::NotAMeetingChat(id));
+    }
+    let history = self.effective_history(user, HistoryShare::FromJoin).await?;
+    self
+      .commit_change(
+        id,
+        ChangeSource::Own(MembershipAction::AddUser {
+          user_id: convert::user(user),
+          history,
+        }),
+      )
+      .await?;
+    if !self.group_users(id)?.contains(&user) {
+      tracing::info!(conversation_id = %id, "the admitted user has no device to let in yet");
+    }
+    Ok(())
+  }
+
+  async fn server_has_group_info(&mut self, id: ConversationId) -> Result<bool, CoreError> {
+    match self.api.mls_group_info(id).await {
+      Ok(_) => Ok(true),
+      Err(error) if error.is_not_found() => Ok(false),
+      Err(error) => Err(error.into()),
+    }
+  }
+
+  /// Takes the next step of this device's setup of the conversation's group, if it set one up.
+  /// `Ok(false)` without a setup.
+  pub(super) async fn continue_participants_setup(&mut self, id: ConversationId) -> Result<bool, CoreError> {
+    let Some(setup) = self.dm_setup(id)? else {
+      return Ok(false);
+    };
+    self.finish_dm_setup(id, &setup.others).await?;
+    Ok(true)
+  }
+
+  /// Notes (or renews) the setup record of a DM, group DM or meeting chat with `others` and takes
+  /// the first step of [`Self::finish_dm_setup`]: founds the group when nobody has one, joins
+  /// one somebody else founded, and adds whoever of `others` is missing.
+  pub(super) async fn start_participants_setup(
+    &mut self,
+    id: ConversationId,
+    others: &[UserId],
+  ) -> Result<bool, CoreError> {
+    self.note_participants_setup(id, others)?;
+    self.finish_dm_setup(id, others).await
+  }
+
+  /// Notes (or renews) the setup record of a DM, group DM or meeting chat with `others`.
+  fn note_participants_setup(&mut self, id: ConversationId, others: &[UserId]) -> Result<(), CoreError> {
+    let maybe_setup = self.dm_setup(id)?;
+    // Asked for by the user: tried now, whatever the backoff of an earlier attempt says.
     let setup = DmSetupRecord {
       others: others.to_vec(),
       tried_at_ms: self.now_ms(),
@@ -260,9 +366,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       is_waiting_for_device: false,
       maybe_welcome_deadline_ms: None,
     };
-    records::put_json(&self.store, Table::SyncState, &dm_setup_key(id), &setup)?;
-    self.finish_dm_setup(id, others).await?;
-    Ok(id)
+    records::put_json(&self.store, Table::SyncState, &dm_setup_key(id), &setup)
   }
 
   /// Finishes the MLS setup of DMs this device created whose setup was cut short, at a growing
@@ -281,9 +385,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       else {
         continue;
       };
-      let is_member = conversations
-        .get(&id)
-        .is_some_and(|response| response.maybe_my_membership.is_some());
+      let is_member = match conversations.get(&id) {
+        Some(response) => response.maybe_my_membership.is_some(),
+        // Noted before the conversation was known here (a meeting chat whose setup was cut off
+        // right away): asked once more instead of dropped.
+        None => match self.api.conversation(id).await {
+          Ok(response) => {
+            records::put_json(&self.store, Table::Conversations, &id.to_string(), &response)?;
+            response.maybe_my_membership.is_some()
+          },
+          Err(error) if error.is_not_found() || error.is_forbidden() => false,
+          Err(error) => {
+            maybe_first_error.get_or_insert(error.into());
+            continue;
+          },
+        },
+      };
       if !is_member {
         // Gone or left: nothing to set up any more.
         self.store.delete(Table::SyncState, &key)?;
@@ -2135,7 +2252,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let maybe_response: Option<teamcraft_proto::ConversationResponse> =
       records::get_json(&self.store, Table::Conversations, &conversation.to_string())?;
     let is_public_channel = maybe_response.is_some_and(|response| {
-      response.kind == teamcraft_proto::ConversationKind::Channel
+      response.kind == ConversationKind::Channel
         && response.visibility == teamcraft_proto::ConversationVisibility::Public
         && !response.is_archived
     });

@@ -22,6 +22,7 @@ mod files;
 mod key_packages;
 mod link_previews;
 mod linking;
+mod meeting_chats;
 mod member_devices;
 mod member_removal;
 mod messages;

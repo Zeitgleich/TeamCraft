@@ -202,6 +202,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       CoreCommand::RemoveMember { conversation, user } => self.remove_member(conversation, user).await,
       CoreCommand::RetryRemoval { conversation, user } => self.retry_removal(conversation, user).await,
       CoreCommand::RetryDmSetup { conversation } => self.retry_dm_setup(conversation).await,
+      CoreCommand::SetUpMeetingChat {
+        conversation,
+        invitees,
+      } => self
+        .set_up_meeting_chat(conversation, &invitees)
+        .await
+        .map(|_| ()),
+      CoreCommand::LetIntoMeetingChat { conversation, user } => {
+        self.let_into_meeting_chat(conversation, user).await
+      },
       CoreCommand::DiscardRemoval { conversation, user } => self.discard_removal(conversation, user).await,
       CoreCommand::InviteToSpace {
         space,

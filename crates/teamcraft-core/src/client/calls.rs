@@ -55,6 +55,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// A join token, the signer and the verified devices for joining the conversation's call.
   pub async fn prepare_call(&mut self, conversation: ConversationId) -> Result<CallPreparation, CoreError> {
+    self.ensure_call_group(conversation).await?;
     let join = self.call_join_token(conversation).await?;
     let devices = self.verified_call_devices(conversation).await?;
     Ok(CallPreparation {
@@ -76,6 +77,35 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         &agreement,
       ),
     }
+  }
+
+  /// A call needs this device in the conversation's group (e2ee.md §8). Without one, it tries now
+  /// what would get it in: the setup this device started (a meeting chat it scheduled, a DM it
+  /// opened), a welcome that is waiting, or joining as a further device of a user who is in. It
+  /// never founds a group here: only the device that scheduled a meeting founds its chat's group
+  /// (`set_up_meeting_chat`), so a server that hides a group can't make another device fork it. A
+  /// group still missing after that (the organizer's app hasn't set the chat up, nobody has let
+  /// this device in) is a clear failure the user can retry, instead of a call that waits for keys
+  /// it can't get.
+  pub async fn ensure_call_group(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    if self.has_group(conversation)? {
+      return Ok(());
+    }
+    if !self.continue_participants_setup(conversation).await? {
+      self.sync_welcomes().await?;
+      if !self.has_group(conversation)?
+        && let Err(error) = self.join_as_member_device(conversation).await
+      {
+        if error.is_transient() {
+          return Err(error);
+        }
+        tracing::debug!(conversation_id = %conversation, %error, "not joined as a further device");
+      }
+    }
+    if self.has_group(conversation)? {
+      return Ok(());
+    }
+    Err(CoreError::CallEncryptionPending(conversation))
   }
 
   /// The devices of the conversation's MLS group, their certificates verified against the pinned
