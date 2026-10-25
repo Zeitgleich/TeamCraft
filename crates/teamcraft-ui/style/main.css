@@ -16,11 +16,11 @@
   --border-strong: #848ea0;
   --text: #1b2230;
   --text-muted: #566175;
-  --accent: #0b7f78;
-  --accent-strong: #096c66;
+  --accent: #005dfc;
+  --accent-strong: #004bd3;
   --on-accent: #ffffff;
-  --accent-soft: #dff3f1;
-  --focus: #0b7f78;
+  --accent-soft: #e3edff;
+  --focus: #005dfc;
   --danger: #c0392b;
   --on-danger: #ffffff;
   --mention-bg: #fff2cc;
@@ -33,7 +33,8 @@
   --chrome-strong: #ffffff;
   --sb-bg: #1a2434;
   --sb-hover: rgba(255, 255, 255, 0.07);
-  --sb-current: #0b7f78;
+  /* 3:1 against --sb-bg in both themes and 4.5:1 with white text. */
+  --sb-current: #0064fc;
   --sb-muted: #8793a8;
   /* Muted channels: dimmer than --sb-muted but still 4.5:1 on --sb-bg; the bell-off icon says why. */
   --sb-dim: #808ca1;
@@ -164,11 +165,11 @@
     --border-strong: #626d86;
     --text: #e4e9f2;
     --text-muted: #9aa6ba;
-    --accent: #35c6ba;
-    --accent-strong: #5fd8ce;
-    --on-accent: #04211e;
-    --accent-soft: #123a38;
-    --focus: #5fd8ce;
+    --accent: #5c9dff;
+    --accent-strong: #8ab8ff;
+    --on-accent: #04122e;
+    --accent-soft: #13284a;
+    --focus: #8ab8ff;
     --danger: #ff7a6b;
     --warn-soft: #4a2a14;
     --warn-text: #ffb27a;
@@ -181,7 +182,7 @@
     --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 16px 40px rgba(0, 0, 0, 0.45);
     --chrome: #0a0e15;
     --sb-bg: #0f1520;
-    --sb-current: #1d6f69;
+    --sb-current: #0064fc;
     --lvl-debug: #8591a4;
     --lvl-info: #6db3f2;
     --lvl-warn: #f0b04a;
@@ -199,11 +200,11 @@
   --border-strong: #626d86;
   --text: #e4e9f2;
   --text-muted: #9aa6ba;
-  --accent: #35c6ba;
-  --accent-strong: #5fd8ce;
-  --on-accent: #04211e;
-  --accent-soft: #123a38;
-  --focus: #5fd8ce;
+  --accent: #5c9dff;
+  --accent-strong: #8ab8ff;
+  --on-accent: #04122e;
+  --accent-soft: #13284a;
+  --focus: #8ab8ff;
   --danger: #ff7a6b;
   --warn-soft: #4a2a14;
   --warn-text: #ffb27a;
@@ -216,7 +217,7 @@
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 16px 40px rgba(0, 0, 0, 0.45);
   --chrome: #0a0e15;
   --sb-bg: #0f1520;
-  --sb-current: #1d6f69;
+  --sb-current: #0064fc;
   --lvl-debug: #8591a4;
   --lvl-info: #6db3f2;
   --lvl-warn: #f0b04a;
@@ -4149,7 +4150,7 @@ ol.md-list {
   flex: 1;
   min-height: 40px;
   border-radius: var(--radius-sm);
-  background: linear-gradient(135deg, #cfe9e6, #9fd3cd);
+  background: linear-gradient(135deg, #d6e4ff, #a8c6ff);
 }
 
 .call-controls {
@@ -4934,12 +4935,24 @@ ol.md-list {
   letter-spacing: -0.01em;
 }
 
-/* The product mark (no server brand yet) and a brand icon: a square beside the name. */
-.auth-product-icon,
+/* A brand icon: a square beside the name. */
 .auth-icon-img {
   width: 48px;
   height: 48px;
   border-radius: var(--radius-md);
+}
+
+/* The product mark (no server brand yet) above the wordmark (assets/brand). */
+.auth-logo-img.auth-product-icon {
+  width: 64px;
+  height: 64px;
+  max-height: none;
+}
+
+.auth-product-wordmark {
+  display: block;
+  height: 26px;
+  width: auto;
 }
 
 .auth-logo-img {
@@ -5125,6 +5138,12 @@ ol.md-list {
 
 .auth-card .auth-actions-split {
   flex-wrap: wrap;
+}
+
+/* The question before an action that can't be undone (setting a device up again). */
+.auth-card .auth-confirm-text {
+  margin: 0 0 var(--space-3);
+  font-weight: 600;
 }
 
 /* Side by side while both labels fit on one line, stacked (full width) when not. */

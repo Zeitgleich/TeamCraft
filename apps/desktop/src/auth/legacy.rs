@@ -603,6 +603,8 @@ mod tests {
       display_name: "Example".to_owned(),
       server_version: "1.0.0".to_owned(),
       has_local_accounts: false,
+      is_login_page_always_shown: true,
+      maybe_login_hint: None,
     }
   }
 }

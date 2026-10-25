@@ -16,7 +16,9 @@ pub const WORKLET_SOURCE: &str = include_str!("call_web/teamcraft-call-worklet.j
 
 #[wasm_bindgen]
 extern "C" {
-  /// <https://www.w3.org/TR/webtransport/#web-transport>
+  /// <https://www.w3.org/TR/webtransport/#web-transport>; clones and equality are of the same
+  /// JavaScript object.
+  #[derive(Clone, PartialEq)]
   pub type WebTransport;
 
   #[wasm_bindgen(constructor, catch)]
@@ -34,8 +36,13 @@ extern "C" {
   #[wasm_bindgen(method, js_name = createBidirectionalStream)]
   pub fn create_bidirectional_stream(this: &WebTransport) -> Promise;
 
-  #[wasm_bindgen(method)]
-  pub fn close(this: &WebTransport);
+  /// `close({closeCode, reason})`; closing a closed session does nothing.
+  #[wasm_bindgen(method, catch)]
+  pub fn close(this: &WebTransport, close_info: &Object) -> Result<(), JsValue>;
+
+  /// `getStats()`: throws where the browser lacks it.
+  #[wasm_bindgen(method, catch, js_name = getStats)]
+  pub fn get_stats(this: &WebTransport) -> Result<Promise, JsValue>;
 
   pub type WebTransportDatagramDuplexStream;
 
@@ -149,6 +156,13 @@ extern "C" {
 
   #[wasm_bindgen(method, catch)]
   pub fn close(this: &VideoDecoder) -> Result<(), JsValue>;
+
+  #[wasm_bindgen(method, getter, js_name = decodeQueueSize)]
+  pub fn decode_queue_size(this: &VideoDecoder) -> u32;
+
+  /// Resolves to `{ supported, config }`.
+  #[wasm_bindgen(static_method_of = VideoDecoder, js_name = isConfigSupported, catch)]
+  pub fn is_config_supported(config: &Object) -> Result<Promise, JsValue>;
 
   /// <https://www.w3.org/TR/webcodecs/#videoframe-interface>
   pub type VideoFrame;

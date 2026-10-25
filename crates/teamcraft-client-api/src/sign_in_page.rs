@@ -24,6 +24,9 @@ pub struct SignInPage {
   pub maybe_help_link: Option<String>,
   /// The one-time code field of the local form is required (else optional, "if set up").
   pub local_requires_code: bool,
+  /// Whether sign-ins show the identity provider's login page (`prompt=login`, issue #448), as the
+  /// server says now; `None` while its answer isn't known (then the stored profile decides).
+  pub maybe_login_page_always_shown: Option<bool>,
 }
 
 impl SignInPage {
@@ -62,6 +65,7 @@ impl SignInPage {
       maybe_help_text,
       maybe_help_link: safe_link(info.maybe_help_link.clone()),
       local_requires_code: info.local_requires_code,
+      maybe_login_page_always_shown: Some(info.is_login_page_always_shown),
     }
   }
 
@@ -75,6 +79,7 @@ impl SignInPage {
       maybe_help_text: None,
       maybe_help_link: None,
       local_requires_code: false,
+      maybe_login_page_always_shown: None,
     }
   }
 
@@ -153,6 +158,7 @@ mod tests {
       maybe_sso_icon: None,
       help_text: BTreeMap::new(),
       maybe_help_link: None,
+      is_login_page_always_shown: true,
     }
   }
 }

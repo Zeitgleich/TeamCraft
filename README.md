@@ -1,3 +1,11 @@
+<p align="center">
+  <img src="assets/brand/mark.svg" alt="" width="112"><br>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/wordmark-dark.svg">
+    <img src="assets/brand/wordmark.svg" alt="TeamCraft" width="300">
+  </picture>
+</p>
+
 # TeamCraft
 
 Self-hosted, end-to-end encrypted business team chat with calls, meetings and an AI phone hotline,

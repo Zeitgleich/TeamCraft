@@ -9,6 +9,7 @@ import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import uniffi.teamcraft_ffi.StoredServer
 import uniffi.teamcraft_ffi.storedServer
+import uniffi.teamcraft_ffi.storedServerWithLoginHint
 
 private const val PREFS = "servers"
 private const val KEY_ACCOUNTS = "accounts"
@@ -49,10 +50,24 @@ class ServerStore(private val context: Context) {
     return maybeServer
   }
 
-  /** Stores the server and makes it the active account's. */
+  /**
+   * Stores the server and makes it the active account's. A freshly checked profile keeps the
+   * login hint of the stored one while the identity provider is the same (issue #448).
+   */
   @Synchronized
   fun save(server: StoredServer) {
-    write(accounts().saved(ServerAccount(server.address.origin, server.profileJson)))
+    val accounts = accounts()
+    val maybeOlder = accounts.accounts
+      .firstOrNull { it.origin == server.address.origin }
+      ?.let { storedServer(it.profileJson) }
+      ?.takeIf { it.issuer == server.issuer }
+    val olderHint = maybeOlder?.maybeLoginHint
+    val kept = if (server.maybeLoginHint == null && olderHint != null) {
+      storedServerWithLoginHint(server.profileJson, olderHint) ?: server
+    } else {
+      server
+    }
+    write(accounts.saved(ServerAccount(kept.address.origin, kept.profileJson)))
   }
 
   /** Forgets the server's profile; the account's local data stays, keyed by the server. */

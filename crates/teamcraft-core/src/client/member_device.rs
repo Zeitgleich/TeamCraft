@@ -201,11 +201,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     match self.api.post_mls_commit(conversation, &request).await {
       Ok(response) => {
         // Waiting first: a crash right after must not leave the device writing with the key
-        // bag's current key.
-        self.forget_key_history(conversation)?;
-        self.wait_for_current_key(conversation, None)?;
-        self.persist_group(conversation)?;
-        self.advance_cursor(conversation, &response.commit)?;
+        // bag's current key. One group of writes with the state and the cursor (issue #160).
+        self.atomically(|client| {
+          client.forget_key_history(conversation)?;
+          client.wait_for_current_key(conversation, None)?;
+          client.persist_group_at(conversation, &response.commit)
+        })?;
         self.remember_member_keys(
           conversation,
           &directory,

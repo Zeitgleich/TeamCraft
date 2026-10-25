@@ -13,6 +13,7 @@
 mod codec_library;
 pub mod commands;
 pub(crate) mod push_to_talk;
+mod self_view;
 pub(crate) mod video;
 
 use std::collections::HashMap;
@@ -49,6 +50,7 @@ use teamcraft_proto::{
 use tokio::sync::{mpsc, oneshot};
 
 use self::codec_library::CodecLibrary;
+use self::self_view::SelfView;
 pub(crate) use self::video::BUNDLED_MODEL;
 use crate::core::{CallPreparation, CoreRuntime};
 
@@ -65,6 +67,8 @@ pub struct CallHost {
   /// The running media call, if any; a mutex across awaits so joins and leaves don't interleave.
   media: tokio::sync::Mutex<Option<MediaCall>>,
   video_sinks: VideoSinks,
+  /// The own camera for the webview's self view.
+  self_view: SelfView,
   codecs: CodecLibrary,
   maybe_segmentation_model: Option<PathBuf>,
 }
@@ -130,7 +134,19 @@ enum Control {
 
 /// Gets a watched track's decrypted frames (see `video::h264_sink` and `video::jpeg_sink`).
 pub type VideoSink = Arc<dyn Fn(&ReceivedVideoFrame) + Send + Sync>;
-type VideoSinks = Arc<Mutex<HashMap<MediaStreamId, VideoSink>>>;
+type VideoSinks = Arc<Mutex<HashMap<MediaStreamId, WatchedVideo>>>;
+
+/// The webview channel a watch sends through (`tauri::ipc::Channel::id`). An unwatch names it,
+/// so a late unwatch of a replaced channel leaves the newer watch of the same track alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChannelId(pub u32);
+
+/// One watched track: where its frames go.
+#[derive(Clone)]
+struct WatchedVideo {
+  channel: ChannelId,
+  sink: VideoSink,
+}
 
 /// Lets the media layer sign with the core's signer (the device key stays in the core).
 struct CoreSigner(CallKeySigner);
@@ -149,6 +165,7 @@ impl CallHost {
       notify,
       media: tokio::sync::Mutex::new(None),
       video_sinks: Arc::default(),
+      self_view: SelfView::default(),
       codecs: CodecLibrary::new(files.codec_directory),
       maybe_segmentation_model: files.maybe_segmentation_model,
     }
@@ -300,9 +317,16 @@ impl CallHost {
     lock(&self.state).push_to_talk.clone()
   }
 
-  /// Receives another device's track and hands each frame to `sink` (the webview decodes it).
-  pub async fn watch_video(&self, stream_id: MediaStreamId, maybe_max_layer: Option<u8>, sink: VideoSink) {
-    lock(&self.video_sinks).insert(stream_id, sink);
+  /// Receives another device's track and hands each frame to `sink` (the webview decodes it),
+  /// replacing an earlier watch of the track.
+  pub async fn watch_video(
+    &self,
+    stream_id: MediaStreamId,
+    channel: ChannelId,
+    maybe_max_layer: Option<u8>,
+    sink: VideoSink,
+  ) {
+    lock(&self.video_sinks).insert(stream_id, WatchedVideo { channel, sink });
     self
       .control(Control::Subscribe {
         stream_id,
@@ -311,8 +335,27 @@ impl CallHost {
       .await;
   }
 
-  pub async fn unwatch_video(&self, stream_id: MediaStreamId) {
-    if lock(&self.video_sinks).remove(&stream_id).is_some() {
+  /// Sends the own camera, as the call sends it, to `send` as JPEG images (see `self_view`);
+  /// `send` answers whether the image was delivered.
+  pub fn watch_camera(&self, channel: ChannelId, send: impl Fn(Vec<u8>) -> bool + Send + 'static) {
+    self.self_view.watch(channel, send);
+  }
+
+  /// Stops the self view, if `channel` is the one it sends through.
+  pub fn unwatch_camera(&self, channel: ChannelId) {
+    self.self_view.unwatch(channel);
+  }
+
+  /// Stops receiving a track, if `channel` is the one it is sent through.
+  pub async fn unwatch_video(&self, stream_id: MediaStreamId, channel: ChannelId) {
+    let is_removed = {
+      let mut sinks = lock(&self.video_sinks);
+      let is_current = sinks
+        .get(&stream_id)
+        .is_some_and(|watched| watched.channel == channel);
+      is_current && sinks.remove(&stream_id).is_some()
+    };
+    if is_removed {
       self
         .control(Control::Subscribe {
           stream_id,
@@ -428,7 +471,7 @@ impl CallHost {
       layers: video::camera_layers(capture.format()),
       capture,
       encoders: preferred_encoders(),
-      maybe_filter,
+      maybe_filter: Some(self.self_view.filter(maybe_filter)),
     };
     self.start_video(config).await?;
     lock(&self.state).maybe_effect_handle = maybe_handle;
@@ -620,10 +663,8 @@ impl JoinTicketSource for CoreJoinTickets {
         .call_join_token(conversation)
         .await
         .map_err(|reason| JoinTicketError { reason })?;
-      Ok(JoinTicket {
-        sfu_url: join.sfu_url,
-        token: join.token,
-      })
+      // With this token's certificate hashes: a restarted SFU may have a new self-signed one.
+      Ok(JoinTicket::from(join))
     })
   }
 }
@@ -686,7 +727,9 @@ async fn run_media(
       },
       maybe_event = call.next_event() => match maybe_event {
         Some(CallEngineEvent::VideoFrame(frame)) => {
-          let maybe_sink = lock(&video_sinks).get(&frame.stream_id).cloned();
+          let maybe_sink = lock(&video_sinks)
+            .get(&frame.stream_id)
+            .map(|watched| Arc::clone(&watched.sink));
           if let Some(sink) = maybe_sink {
             sink(&frame);
           }
@@ -739,20 +782,12 @@ fn native_config(
   let authenticator =
     DeviceCallKeyAuthenticator::from_verified(Arc::new(CoreSigner(preparation.signer)), preparation.devices)
       .map_err(|error| error.to_string())?;
-  // The native driver pins one certificate: the first the server names.
-  let maybe_server_hash = preparation
-    .join
-    .sfu_certificate_sha256
-    .first()
-    .and_then(|hash| certificate_hash_from_hex(hash));
-  let mut config = NativeCallConfig::device_bound(
-    preparation.join.sfu_url,
-    preparation.join.token,
-    engine,
-    authenticator,
-  );
-  // A development SFU's certificate: pinned here, or announced by the server with the token.
-  config.maybe_certificate_hash = certificate_hash_from_env()?.or(maybe_server_hash);
+  let ticket = JoinTicket::from(preparation.join);
+  let mut config = NativeCallConfig::device_bound(ticket.sfu_url, ticket.token, engine, authenticator);
+  // A development SFU's certificate: announced by the server with each token (rejoins use the
+  // fresh token's), and one pinned here for every connection.
+  config.certificate_hashes = ticket.certificate_hashes;
+  config.maybe_certificate_hash = certificate_hash_from_env()?;
   config.source = AudioSource::Microphone(microphone);
   config.sink = AudioSink::Speakers(speakers);
   config.maybe_processing = Some(AudioProcessingConfig::default());

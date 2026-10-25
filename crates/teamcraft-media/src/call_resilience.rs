@@ -16,13 +16,19 @@
 //!    device's slot for a grace period, a restarted SFU starts a fresh room. [`ReconnectSchedule`]
 //!    paces the attempts with back-off and jitter, and gives up when the grace period is over.
 //!
+//! Every attempt connects with what its own join ticket says: the SFU's URL, and the SHA-256s of
+//! its certificate where that is self-signed. A restarted SFU may come back with a new certificate,
+//! which the fresh token's response names ([`rejoin_attempt`]).
+//!
 //! Pure state: time is passed in, so all of it is tested without a network.
 
 use std::collections::hash_map::RandomState;
 use std::fmt;
+use std::future::Future;
 use std::hash::{BuildHasher, Hasher};
 use std::time::Duration;
 
+use teamcraft_proto::CallJoinTokenResponse;
 use thiserror::Error;
 // `std::time` on native; the browser clock on wasm, where `std` has none.
 use web_time::{Instant, SystemTime, UNIX_EPOCH};
@@ -91,6 +97,9 @@ pub struct JoinTicket {
   /// WebTransport URL of the SFU, e.g. `https://sfu.example.com:4433/call`.
   pub sfu_url: String,
   pub token: String,
+  /// SHA-256s of the SFU's self-signed certificates the connection accepts (development and test
+  /// setups, `[calls] sfu_certificate_sha256`); empty uses the trusted roots.
+  pub certificate_hashes: Vec<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -114,6 +123,18 @@ impl Default for ResilienceConfig {
   }
 }
 
+impl ResilienceConfig {
+  /// The timing for browsers. The page sees no answers to the browser's own keep-alives: what
+  /// proves a session alive are the SFU's keep-alives, every 2 s. After a network change one of
+  /// them must arrive, so the window is a little longer than that interval.
+  pub fn browser() -> Self {
+    Self {
+      handover_timeout: Duration::from_secs(3),
+      ..Self::default()
+    }
+  }
+}
+
 impl PathMonitor {
   pub fn new(now: Instant) -> Self {
     Self {
@@ -130,6 +151,12 @@ impl PathMonitor {
       self.last_activity_at = now;
       self.maybe_handover_deadline = None;
     }
+  }
+
+  /// A count that may include packets from before a network change: it moves the baseline new
+  /// packets are measured against, but proves nothing (browsers read counts asynchronously).
+  pub fn on_baseline_packets(&mut self, count: u64) {
+    self.received_packets = self.received_packets.max(count);
   }
 
   /// The system reported a network change (another interface, address or route): the path must
@@ -237,14 +264,57 @@ impl Jitter {
   }
 }
 
+/// The token response of `teamcraft-server` as a ticket; certificate hashes that aren't 32 bytes of
+/// hex are left out (the server checks its configuration at start).
+impl From<CallJoinTokenResponse> for JoinTicket {
+  fn from(response: CallJoinTokenResponse) -> Self {
+    Self {
+      certificate_hashes: certificate_hashes_from_hex(&response.sfu_certificate_sha256),
+      sfu_url: response.sfu_url,
+      token: response.token,
+    }
+  }
+}
+
 // Join tokens don't belong in logs.
 impl fmt::Debug for JoinTicket {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.debug_struct("JoinTicket")
       .field("sfu_url", &self.sfu_url)
       .field("token", &"[redacted]")
+      .field("certificate_hashes", &self.certificate_hashes.len())
       .finish()
   }
+}
+
+/// One rejoin attempt: a fresh ticket from `maybe_fetch` (or `fallback`, the last one, without a
+/// ticket source), then a connection made by `connect` with that ticket's URL and certificate
+/// hashes. Returns the connection and the ticket it used, which becomes the call's current one.
+pub async fn rejoin_attempt<T, E, Fetch, Connect, Connecting>(
+  maybe_fetch: Option<Fetch>,
+  fallback: JoinTicket,
+  connect: Connect,
+) -> Result<(T, JoinTicket), E>
+where
+  Fetch: Future<Output = Result<JoinTicket, JoinTicketError>>,
+  Connect: FnOnce(JoinTicket) -> Connecting,
+  Connecting: Future<Output = Result<T, E>>,
+  E: From<JoinTicketError>,
+{
+  let ticket = match maybe_fetch {
+    Some(fetch) => fetch.await?,
+    None => fallback,
+  };
+  let connection = connect(ticket.clone()).await?;
+  Ok((connection, ticket))
+}
+
+/// [`certificate_hash_from_hex`] for every entry; malformed ones are left out.
+pub fn certificate_hashes_from_hex(texts: &[String]) -> Vec<[u8; 32]> {
+  texts
+    .iter()
+    .filter_map(|text| certificate_hash_from_hex(text))
+    .collect()
 }
 
 /// A certificate hash written as hex (colons allowed), as `serverCertificateHashes` and the
@@ -314,6 +384,17 @@ mod tests {
       // Another change, and nothing comes back: rejoin long before the stall timeout.
       monitor.on_network_changed(at(start, 4_000), &config());
       assert_eq!(monitor.check(at(start, 6_000), &config()), PathState::Dead);
+    }
+
+    #[test]
+    fn a_baseline_count_is_no_sign_of_life() {
+      let start = Instant::now();
+      let mut monitor = PathMonitor::new(start);
+      monitor.on_received_packets(10, start);
+      monitor.on_network_changed(at(start, 1_000), &config());
+      monitor.on_baseline_packets(12);
+      monitor.on_received_packets(12, at(start, 2_000));
+      assert_eq!(monitor.check(at(start, 3_000), &config()), PathState::Dead);
     }
   }
 
@@ -424,11 +505,95 @@ mod tests {
 
   #[test]
   fn ticket_debug_output_hides_the_token() {
-    let ticket = JoinTicket {
-      sfu_url: "https://sfu.example.com:4433/call".into(),
-      token: "secret-token".into(),
-    };
+    let ticket = ticket("secret-token", [0xab; 32]);
     assert!(!format!("{ticket:?}").contains("secret-token"));
+  }
+
+  #[test]
+  fn browsers_wait_for_one_sfu_keep_alive_after_a_network_change() {
+    let browser = ResilienceConfig::browser();
+    assert!(browser.handover_timeout > Duration::from_secs(2));
+    assert!(browser.handover_timeout < browser.stall_timeout);
+  }
+
+  mod tickets {
+    use teamcraft_proto::{CallId, Id, Snowflake, UnixMillis};
+
+    use super::*;
+
+    #[test]
+    fn a_token_response_carries_its_certificate_hashes() {
+      let response = CallJoinTokenResponse {
+        call_id: CallId::from_snowflake(Snowflake::ZERO),
+        token: "token".into(),
+        sfu_url: "https://sfu.example.com:4433/call".into(),
+        expires_at: UnixMillis(0),
+        sfu_certificate_sha256: vec!["ab".repeat(32), "not hex".into(), vec!["CD"; 32].join(":")],
+      };
+      let ticket = JoinTicket::from(response);
+      assert_eq!(ticket.certificate_hashes, vec![[0xab; 32], [0xcd; 32]]);
+      assert_eq!(ticket.sfu_url, "https://sfu.example.com:4433/call");
+    }
+
+    #[test]
+    fn a_rejoin_connects_with_the_fresh_tickets_hashes() {
+      // The SFU restarted with a new self-signed certificate: the first join's hash is stale.
+      let first = ticket("first", [1; 32]);
+      let fresh = ticket("fresh", [2; 32]);
+      let fetch = std::future::ready(Ok(fresh.clone()));
+      let result: Result<(Vec<[u8; 32]>, JoinTicket), JoinTicketError> =
+        ready(rejoin_attempt(Some(fetch), first, |ticket: JoinTicket| {
+          std::future::ready(Ok(ticket.certificate_hashes))
+        }));
+      let (connected_with, used) = result.unwrap();
+      assert_eq!(connected_with, vec![[2; 32]]);
+      assert_eq!(used, fresh);
+    }
+
+    #[test]
+    fn without_a_ticket_source_the_last_ticket_is_used_again() {
+      let last = ticket("last", [3; 32]);
+      let result: Result<(Vec<[u8; 32]>, JoinTicket), JoinTicketError> = ready(rejoin_attempt(
+        None::<std::future::Ready<Result<JoinTicket, JoinTicketError>>>,
+        last.clone(),
+        |ticket: JoinTicket| std::future::ready(Ok(ticket.certificate_hashes)),
+      ));
+      assert_eq!(result.unwrap(), (vec![[3; 32]], last));
+    }
+
+    #[test]
+    fn a_refused_ticket_fails_the_attempt_without_connecting() {
+      let refused = JoinTicketError {
+        reason: "offline".into(),
+      };
+      let fetch = std::future::ready(Err(refused.clone()));
+      let result: Result<((), JoinTicket), JoinTicketError> = ready(rejoin_attempt(
+        Some(fetch),
+        ticket("last", [3; 32]),
+        |_: JoinTicket| -> std::future::Ready<Result<(), JoinTicketError>> {
+          panic!("must not connect without a ticket")
+        },
+      ));
+      assert_eq!(result.unwrap_err(), refused);
+    }
+
+    /// Runs a future that completes without waiting (every future in these tests does).
+    fn ready<F: Future>(future: F) -> F::Output {
+      let mut future = std::pin::pin!(future);
+      let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+      match future.as_mut().poll(&mut context) {
+        std::task::Poll::Ready(output) => output,
+        std::task::Poll::Pending => panic!("the future waited"),
+      }
+    }
+  }
+
+  fn ticket(token: &str, hash: [u8; 32]) -> JoinTicket {
+    JoinTicket {
+      sfu_url: "https://sfu.example.com:4433/call".into(),
+      token: token.into(),
+      certificate_hashes: vec![hash],
+    }
   }
 
   fn config() -> ResilienceConfig {

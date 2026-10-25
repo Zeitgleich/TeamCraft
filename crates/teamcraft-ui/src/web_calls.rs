@@ -22,8 +22,8 @@ use teamcraft_client_api::call_view::CallSignal;
 use teamcraft_client_api::calls::CallsUnavailableReason;
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::page_calls::{
-  EXPORT_ACT, EXPORT_CAMERA_VIEW, EXPORT_RING, EXPORT_SIGNAL, EXPORT_START, EXPORT_STOP,
-  EXPORT_UNWATCH_VIDEO, EXPORT_WATCH_VIDEO, MODULE_META, PreparedCall, WORKLET_META,
+  EXPORT_ACT, EXPORT_CAMERA_VIEW, EXPORT_NETWORK_CHANGED, EXPORT_RING, EXPORT_SIGNAL, EXPORT_START,
+  EXPORT_STOP, EXPORT_UNWATCH_VIDEO, EXPORT_WATCH_VIDEO, MODULE_META, PreparedCall, WORKLET_META,
 };
 use teamcraft_client_api::remote::{CallAction, CallSnapshot};
 use teamcraft_core::CallKeySigner;
@@ -119,6 +119,14 @@ pub fn set_ringing(is_ringing: bool) {
     if let Some(module) = host.loaded_module() {
       module.call_sync(EXPORT_RING, &[JsValue::from_bool(is_ringing)]);
     }
+  }
+}
+
+/// The core's network-change signal, for a running call: it checks its session at once instead of
+/// waiting for QUIC's idle timeout, or retries a rejoin. Without the module there is no call.
+pub fn network_changed() {
+  if let Some(module) = current().and_then(|host| host.loaded_module()) {
+    module.call_sync(EXPORT_NETWORK_CHANGED, &[]);
   }
 }
 

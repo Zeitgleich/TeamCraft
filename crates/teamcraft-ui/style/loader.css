@@ -3,6 +3,8 @@
    the fallbacks only matter if main.css is still missing. Nothing here may depend on JS. */
 
 .tc-loader {
+  /* The mark's dot keeps the logo's own blue whatever the accent. */
+  --tc-loader-mark-dot: #0063ee;
   position: fixed;
   inset: 0;
   z-index: 2147483647;
@@ -30,7 +32,8 @@
   pointer-events: none;
 }
 
-/* The mark: three chat dots on the accent colour, or the brand's icon once loader.js knows it. */
+/* The mark: three chat dots on the accent colour while the brand is unknown or is a server's own
+   (whose colours theme.css sets), the brand's icon once loader.js knows it. */
 .tc-loader-mark {
   position: relative;
   display: flex;
@@ -40,7 +43,7 @@
   width: 64px;
   height: 64px;
   border-radius: 18px;
-  background: var(--accent, #0b7f78);
+  background: var(--accent, #005dfc);
   box-shadow: 0 6px 20px rgba(16, 24, 40, 0.16);
 }
 
@@ -58,6 +61,35 @@
 
 .tc-loader-dot:nth-child(3) {
   animation-delay: 0.3s;
+}
+
+/* The built-in brand (loader.js): the TeamCraft mark, whose speech bubble types. The dots sit where
+   the mark draws them (icons/loader-mark.svg is the mark without them; positions in % of its
+   square, scripts/brand/mark.py). */
+.tc-loader.is-product .tc-loader-mark {
+  display: block;
+  width: 88px;
+  height: 88px;
+  border-radius: 0;
+  background: url("/icons/loader-mark.svg") center / contain no-repeat;
+  box-shadow: none;
+}
+
+.tc-loader.is-product .tc-loader-dot {
+  position: absolute;
+  top: 56.85%;
+  left: 38.04%;
+  width: 6.4%;
+  height: 6.4%;
+  background: var(--tc-loader-mark-dot);
+}
+
+.tc-loader.is-product .tc-loader-dot:nth-child(2) {
+  left: 46.7%;
+}
+
+.tc-loader.is-product .tc-loader-dot:nth-child(3) {
+  left: 55.36%;
 }
 
 .tc-loader.has-logo .tc-loader-mark {
@@ -94,7 +126,7 @@
 .tc-loader-progress {
   position: absolute;
   inset: 0;
-  background: var(--accent, #0b7f78);
+  background: var(--accent, #005dfc);
   transform-origin: left center;
   transform: translateX(-100%) scaleX(0.4);
   animation: tc-loader-sweep 1.4s ease-in-out infinite;
@@ -142,7 +174,7 @@
   padding: 7px 16px;
   border: 0;
   border-radius: var(--radius-sm, 5px);
-  background: var(--accent, #0b7f78);
+  background: var(--accent, #005dfc);
   color: var(--on-accent, #ffffff);
   font: inherit;
   font-weight: 600;
@@ -150,11 +182,11 @@
 }
 
 .tc-loader-retry:hover {
-  background: var(--accent-strong, #096c66);
+  background: var(--accent-strong, #004bd3);
 }
 
 .tc-loader-retry:focus-visible {
-  outline: 2px solid var(--focus, #0b7f78);
+  outline: 2px solid var(--focus, #005dfc);
   outline-offset: 2px;
 }
 
@@ -178,7 +210,7 @@
 }
 
 .tc-loader-reload:focus-visible {
-  outline: 2px solid var(--focus, #0b7f78);
+  outline: 2px solid var(--focus, #005dfc);
   outline-offset: 2px;
 }
 
@@ -194,6 +226,24 @@
   to {
     opacity: 1;
     visibility: visible;
+  }
+}
+
+/* The mark's dots are small: a smaller hop. */
+.tc-loader.is-product .tc-loader-dot {
+  animation-name: tc-loader-hop;
+}
+
+@keyframes tc-loader-hop {
+  0%,
+  80%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.55;
+  }
+  40% {
+    transform: translateY(-3px);
+    opacity: 1;
   }
 }
 

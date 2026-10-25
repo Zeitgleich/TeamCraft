@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use teamcraft_client_api::oidc_login::LoginRequest;
 use teamcraft_client_api::sign_in_look::SignInLook;
 
 use super::store::{KeyringStore, MemoryStore, TokenStore};
@@ -51,7 +52,9 @@ async fn login_restore_api_and_logout_against_keycloak() {
   );
 
   service
-    .login(&SignInLook::default(), |url| spawn_fake_browser(url, "alice"))
+    .login(&SignInLook::default(), &LoginRequest::default(), |url| {
+      spawn_fake_browser(url, "alice")
+    })
     .await
     .expect("login");
   let me = service.api_get("/api/v1/me").await.expect("api call");
@@ -95,7 +98,9 @@ async fn login_restore_api_and_logout_against_keycloak() {
 async fn account_without_role_signs_in_but_the_server_says_so() {
   let service = AuthService::new(Some(DesktopConfig::from_env()), SharedStore::default()).expect("service");
   service
-    .login(&SignInLook::default(), |url| spawn_fake_browser(url, "frank"))
+    .login(&SignInLook::default(), &LoginRequest::default(), |url| {
+      spawn_fake_browser(url, "frank")
+    })
     .await
     .expect("login works for any realm user");
   let me = service.api_get("/api/v1/me").await.expect("api call");
@@ -110,7 +115,11 @@ async fn cancelling_stops_the_wait() {
     Arc::new(AuthService::new(Some(DesktopConfig::from_env()), SharedStore::default()).expect("service"));
   let waiting = tokio::spawn({
     let service = service.clone();
-    async move { service.login(&SignInLook::default(), |_| Ok(())).await }
+    async move {
+      service
+        .login(&SignInLook::default(), &LoginRequest::default(), |_| Ok(()))
+        .await
+    }
   });
   tokio::time::sleep(std::time::Duration::from_millis(800)).await;
   service.cancel_login();

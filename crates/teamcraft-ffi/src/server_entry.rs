@@ -84,6 +84,9 @@ pub struct SignInPageInfo {
   pub maybe_help_link: Option<String>,
   /// The local form's one-time code field is required; else optional ("if you set one up").
   pub local_requires_code: bool,
+  /// Sign-ins show the identity provider's login page, as the server says now (issue #448);
+  /// `None` while unknown (then `StoredServer::is_login_page_always_shown` decides).
+  pub maybe_login_page_always_shown: Option<bool>,
 }
 
 /// A way to sign in on the sign-in page.
@@ -105,6 +108,10 @@ pub struct StoredServer {
   pub scopes: Vec<String>,
   pub display_name: String,
   pub server_version: String,
+  /// Interactive sign-ins send `prompt=login` (the server's setting, issue #448).
+  pub is_login_page_always_shown: bool,
+  /// The account last signed in with on this device for this server (`login_hint`).
+  pub maybe_login_hint: Option<String>,
   pub profile_json: String,
 }
 
@@ -201,6 +208,7 @@ fn page_info(page: SignInPage) -> SignInPageInfo {
     maybe_help_text: page.maybe_help_text,
     maybe_help_link: page.maybe_help_link,
     local_requires_code: page.local_requires_code,
+    maybe_login_page_always_shown: page.maybe_login_page_always_shown,
   }
 }
 
@@ -210,6 +218,22 @@ fn page_info(page: SignInPage) -> SignInPageInfo {
 pub fn stored_server(profile_json: String) -> Option<StoredServer> {
   let profile: ServerProfile = serde_json::from_str(&profile_json).ok()?;
   stored(&profile).ok()
+}
+
+/// `profile_json` with `login_hint` as the account to prefill at the next sign-in (store the
+/// returned server's `profile_json`). `None` like [`stored_server`].
+#[uniffi::export]
+pub fn stored_server_with_login_hint(profile_json: String, login_hint: String) -> Option<StoredServer> {
+  let mut profile: ServerProfile = serde_json::from_str(&profile_json).ok()?;
+  profile.maybe_login_hint = Some(login_hint);
+  stored(&profile).ok()
+}
+
+/// The account an ID token names (`preferred_username`, else `email`), as the next sign-in's
+/// login hint. Not a verification: the app got the token from the token endpoint.
+#[uniffi::export]
+pub fn login_hint_from_id_token(id_token: String) -> Option<String> {
+  teamcraft_client_api::oidc_login::login_hint_from_id_token(&id_token)
 }
 
 fn stored(profile: &ServerProfile) -> Result<StoredServer, ServerEntryError> {
@@ -222,6 +246,8 @@ fn stored(profile: &ServerProfile) -> Result<StoredServer, ServerEntryError> {
     scopes: profile.scopes.clone(),
     display_name: profile.display_name.clone(),
     server_version: profile.server_version.clone(),
+    is_login_page_always_shown: profile.is_login_page_always_shown,
+    maybe_login_hint: profile.maybe_login_hint.clone(),
     profile_json,
   })
 }
@@ -309,6 +335,17 @@ mod tests {
       sso_only_sign_in_page("Example Chat".into()).methods,
       [SignInOption::Sso]
     );
+  }
+
+  #[test]
+  fn the_login_hint_is_kept_with_the_profile() {
+    let checked = check(200, &answer_json()).unwrap();
+    assert!(checked.server.is_login_page_always_shown);
+    assert_eq!(checked.server.maybe_login_hint, None);
+    let hinted = stored_server_with_login_hint(checked.server.profile_json, "alice".into()).unwrap();
+    assert_eq!(hinted.maybe_login_hint.as_deref(), Some("alice"));
+    let back = stored_server(hinted.profile_json.clone()).unwrap();
+    assert_eq!(back, hinted);
   }
 
   #[test]

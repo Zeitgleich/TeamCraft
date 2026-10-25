@@ -178,6 +178,7 @@ const SIGN_IN_PAGE: &[FieldDef] = &[
     id: "help_link",
     kind: Kind::Link,
   },
+  flag("is_login_page_always_shown"),
 ];
 const MAIL_TEXTS: &[FieldDef] = &[
   text("invite_subject"),

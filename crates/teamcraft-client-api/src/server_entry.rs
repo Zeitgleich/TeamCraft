@@ -63,6 +63,18 @@ pub struct ServerProfile {
   pub server_version: String,
   #[serde(default)]
   pub has_local_accounts: bool,
+  /// Interactive sign-ins ask for the identity provider's login page (`prompt=login`, issue #448);
+  /// the server's setting at the last check. Absent in older records: on.
+  #[serde(default = "is_shown")]
+  pub is_login_page_always_shown: bool,
+  /// The account last signed in with on this device for this server, prefilled on the provider's
+  /// login page (`login_hint`). Kept with the profile, so it never goes to another server.
+  #[serde(rename = "login_hint", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_login_hint: Option<String>,
+}
+
+fn is_shown() -> bool {
+  true
 }
 
 /// A checked answer: the profile to store, the brand to show for confirmation and the sign-in
@@ -358,6 +370,8 @@ pub fn check_server_info(
       },
       server_version: info.server_version.clone(),
       has_local_accounts: info.sign_in.has_local_accounts,
+      is_login_page_always_shown: info.sign_in.is_login_page_always_shown,
+      maybe_login_hint: None,
     },
     brand: info.brand,
     sign_in: info.sign_in,

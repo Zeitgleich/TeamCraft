@@ -35,6 +35,7 @@ web-sys = { version = "0.3", features = [
   "HtmlCanvasElement", "CanvasRenderingContext2d", "HtmlMediaElement", "HtmlVideoElement", "Selection", "MediaStream",
   "VisualViewport", "MutationObserver", "MutationObserverInit", "Performance", "TouchEvent", "TouchList", "Touch",
   "HtmlDocument", "DomParser", "SupportedType", "Range", "Text", "CharacterData", "InputEvent", "TreeWalker",
+  "ImageBitmap", "IntersectionObserver", "IntersectionObserverEntry",
 ] }
 # Fluent: the i18n format mandated by the project rules (English source + translations).
 fluent-bundle = "0.16"
@@ -67,5 +68,6 @@ tracing-web = "0.1"
 teamcraft-core = { path = "../teamcraft-core", default-features = false, features = ["ui"] }
 teamcraft-crypto = { path = "../teamcraft-crypto" }
 # Signs and verifies call key bindings for the call module (web_calls); the call engine itself is
-# in that module, which the page loads only for a call.
-teamcraft-media = { path = "../teamcraft-media", default-features = false, features = ["call-auth"] }
+# in that module, which the page loads only for a call. `web-api`: the WebCodecs bindings with
+# which the desktop webview decodes the shell's call video (shell_video).
+teamcraft-media = { path = "../teamcraft-media", default-features = false, features = ["call-auth", "web-api"] }

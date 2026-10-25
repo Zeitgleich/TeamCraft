@@ -442,6 +442,10 @@ pub struct SignInPageSettings {
   /// A help page (https).
   #[serde(rename = "help_link", default, skip_serializing_if = "Option::is_none")]
   pub maybe_help_link: Option<String>,
+  /// Every sign-in shows the identity provider's login page (`prompt=login`), also with an
+  /// existing provider session; off for operators who prefer silent single sign-on.
+  #[serde(default = "enabled")]
+  pub is_login_page_always_shown: bool,
 }
 
 fn enabled() -> bool {

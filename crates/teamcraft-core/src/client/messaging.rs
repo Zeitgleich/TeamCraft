@@ -346,14 +346,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           content: content.clone(),
           is_edited: false,
           edits: Vec::new(),
+          maybe_edit_id: None,
           is_pinned: false,
         })?;
-        apply_control(
+        apply_control_with(
           &self.store,
           conversation,
           message.sender_user_id,
           &content,
           message.id.snowflake().unix_millis(),
+          Some(message.id),
         )?;
         apply_early_controls(&self.store, conversation, message.client_message_id)?;
         self
@@ -452,8 +454,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let response = self.api.send_message(entry.conversation_id, &request).await?;
     stored.maybe_server_id = Some(response.id);
     stored.sent_at_ms = response.id.snowflake().unix_millis();
-    self.store.upsert_message(&stored)?;
-    self.store.delete(Table::Outbox, &key)?;
+    crate::store::write_group(&self.store, || -> Result<(), CoreError> {
+      self.store.upsert_message(&stored)?;
+      self.store.delete(Table::Outbox, &key)?;
+      // An own edit showed at once; with its server ID it now competes with other devices' edits
+      // like theirs do (issue #160).
+      if matches!(stored.content, MessageContent::Edit { .. }) {
+        apply_control_with(
+          &self.store,
+          entry.conversation_id,
+          self.account.user_id,
+          &stored.content,
+          stored.sent_at_ms,
+          Some(response.id),
+        )?;
+      }
+      Ok(())
+    })?;
     Ok(true)
   }
 
@@ -542,13 +559,28 @@ pub(crate) fn decrypt_content(
 
 /// Applies a message that acts on another one: an edit (keeping the earlier text as history), a
 /// delete or a pin. Edits and deletes count only from the original sender; pins from any member
-/// (the server checks who may pin).
+/// (the server checks who may pin). For an own change not sent yet; received ones go through
+/// [`apply_control_with`] with their server ID.
 pub(crate) fn apply_control(
   store: &impl LocalStore,
   conversation: ConversationId,
   sender: UserId,
   content: &MessageContent,
   at_ms: i64,
+) -> Result<(), CoreError> {
+  apply_control_with(store, conversation, sender, content, at_ms, None)
+}
+
+/// [`apply_control`] for a control the server numbered (`maybe_server_id`). Edits converge on
+/// every device (issue #160): the one with the highest server ID wins, whatever order they arrive
+/// in; an own edit without an ID yet shows at once and is settled once it was sent.
+fn apply_control_with(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  sender: UserId,
+  content: &MessageContent,
+  at_ms: i64,
+  maybe_server_id: Option<MessageId>,
 ) -> Result<(), CoreError> {
   if let MessageContent::Bookmarks { items } = content {
     return records::put_json(store, Table::Account, &bookmarks_key(conversation), items);
@@ -561,7 +593,15 @@ pub(crate) fn apply_control(
   };
   let Some(mut stored) = store.message(conversation, target)? else {
     // History loads newest first, so edits, deletions and pins arrive before their target there.
-    return keep_early_control(store, conversation, target, sender, content, at_ms);
+    return keep_early_control(
+      store,
+      conversation,
+      target,
+      sender,
+      content,
+      at_ms,
+      maybe_server_id,
+    );
   };
   if matches!(stored.content, MessageContent::Deleted) {
     return Ok(());
@@ -569,18 +609,26 @@ pub(crate) fn apply_control(
   let is_own = stored.sender_user_id == sender;
   match content {
     MessageContent::Edit { body, .. } if is_own => {
+      if let Some(edit_id) = maybe_server_id {
+        if stored.maybe_edit_id.is_some_and(|applied| applied >= edit_id) {
+          // A later edit is already applied: this one lost.
+          return Ok(());
+        }
+        stored.maybe_edit_id = Some(edit_id);
+      }
       let MessageContent::Text { body: old, .. } = &mut stored.content else {
         return Ok(());
       };
-      if old == body {
+      if old != body {
+        let previous = std::mem::replace(old, body.clone());
+        stored.edits.push(EditRecord {
+          body: previous,
+          replaced_at_ms: at_ms,
+        });
+        stored.is_edited = true;
+      } else if maybe_server_id.is_none() {
         return Ok(());
       }
-      let previous = std::mem::replace(old, body.clone());
-      stored.edits.push(EditRecord {
-        body: previous,
-        replaced_at_ms: at_ms,
-      });
-      stored.is_edited = true;
     },
     MessageContent::Delete { .. } if is_own => {
       stored.content = MessageContent::Deleted;
@@ -600,6 +648,9 @@ struct EarlyControl {
   sender: UserId,
   content: MessageContent,
   at_ms: i64,
+  /// Missing in records of older versions.
+  #[serde(rename = "server_id", default, skip_serializing_if = "Option::is_none")]
+  maybe_server_id: Option<MessageId>,
 }
 
 fn keep_early_control(
@@ -609,6 +660,7 @@ fn keep_early_control(
   sender: UserId,
   content: &MessageContent,
   at_ms: i64,
+  maybe_server_id: Option<MessageId>,
 ) -> Result<(), CoreError> {
   let key = early_controls_key(conversation, target);
   let mut early: Vec<EarlyControl> = records::get_json(store, Table::SyncState, &key)?.unwrap_or_default();
@@ -616,6 +668,7 @@ fn keep_early_control(
     sender,
     content: content.clone(),
     at_ms,
+    maybe_server_id,
   });
   records::put_json(store, Table::SyncState, &key, &early)
 }
@@ -631,14 +684,15 @@ fn apply_early_controls(
     return Ok(());
   };
   store.delete(Table::SyncState, &key)?;
-  early.sort_by_key(|control| control.at_ms);
+  early.sort_by_key(|control| (control.at_ms, control.maybe_server_id));
   for control in early {
-    apply_control(
+    apply_control_with(
       store,
       conversation,
       control.sender,
       &control.content,
       control.at_ms,
+      control.maybe_server_id,
     )?;
   }
   Ok(())
@@ -656,4 +710,72 @@ fn history_key(conversation: ConversationId) -> String {
 
 pub(crate) fn bookmarks_key(conversation: ConversationId) -> String {
   format!("bookmarks/{conversation}")
+}
+
+#[cfg(test)]
+mod tests {
+  use teamcraft_proto::{Id, Snowflake};
+
+  use super::*;
+  use crate::store::MemoryStore;
+
+  #[test]
+  fn edits_converge_on_the_highest_server_id_in_any_order() {
+    let conversation: ConversationId = id(10);
+    let target = ClientMessageId::from_bytes([1; 16]);
+    let author: UserId = id(3);
+    // Arriving in order, out of order (history loads newest first), and with an own pending edit.
+    for order in [[(200, "v1"), (300, "v2")], [(300, "v2"), (200, "v1")]] {
+      let store = MemoryStore::new();
+      store
+        .upsert_message(&original(conversation, target, author))
+        .unwrap();
+      apply_control(&store, conversation, author, &edit(target, "pending"), 50).unwrap();
+      for (server_id, body) in order {
+        apply_control_with(
+          &store,
+          conversation,
+          author,
+          &edit(target, body),
+          server_id,
+          Some(id(server_id)),
+        )
+        .unwrap();
+      }
+      let stored = store.message(conversation, target).unwrap().unwrap();
+      assert!(
+        matches!(&stored.content, MessageContent::Text { body, .. } if body == "v2"),
+        "{order:?}: {:?}",
+        stored.content
+      );
+      assert_eq!(stored.maybe_edit_id, Some(id(300)));
+    }
+  }
+
+  fn edit(target: ClientMessageId, body: &str) -> MessageContent {
+    MessageContent::Edit {
+      target,
+      body: body.into(),
+    }
+  }
+
+  fn original(conversation: ConversationId, target: ClientMessageId, author: UserId) -> StoredMessage {
+    StoredMessage {
+      conversation_id: conversation,
+      client_message_id: target,
+      maybe_server_id: Some(id(100)),
+      sender_user_id: author,
+      maybe_thread_id: None,
+      sent_at_ms: 1,
+      content: MessageContent::text("v0", Vec::new()),
+      is_edited: false,
+      edits: Vec::new(),
+      maybe_edit_id: None,
+      is_pinned: false,
+    }
+  }
+
+  fn id<T: Id>(raw: i64) -> T {
+    T::from_snowflake(Snowflake::new(raw).unwrap())
+  }
 }

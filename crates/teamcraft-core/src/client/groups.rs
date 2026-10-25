@@ -1010,8 +1010,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         tracing::warn!(conversation_id = %conversation, mls_message_id = %message.id, %error, "rejected MLS message");
       },
     }
-    self.persist_group(conversation)?;
-    self.advance_cursor(conversation, message)?;
+    self.persist_group_at(conversation, message)?;
     Ok(MlsProgress::Done)
   }
 
@@ -1315,22 +1314,26 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let before = group.members()?;
     let update = group.confirm_commit(&self.provider)?;
     let after = group.members()?;
-    self.note_member_changes(conversation, &before, update.maybe_rejoined)?;
-    if update.maybe_change.is_none() && update.maybe_rejoined.is_none() {
-      // This device's own addition of further devices of members: they wait for a current key
-      // like any (#178); this device takes its turn with the others.
-      for added in after.iter().filter(|member| !before.contains(member)) {
-        self.queue_current_key_share(conversation, *added)?;
+    // The merged state, what it noted and the cursor past the commit go to the store together
+    // (issue #160).
+    self.atomically(|client| {
+      client.note_member_changes(conversation, &before, update.maybe_rejoined)?;
+      if update.maybe_change.is_none() && update.maybe_rejoined.is_none() {
+        // This device's own addition of further devices of members: they wait for a current key
+        // like any (#178); this device takes its turn with the others.
+        for added in after.iter().filter(|member| !before.contains(member)) {
+          client.queue_current_key_share(conversation, *added)?;
+        }
       }
-    }
-    self.persist_group(conversation)?;
-    self
-      .store
-      .delete(Table::AppliedChanges, &pending_post_key(conversation))?;
-    if let Some(device) = update.maybe_rejoined {
-      self.note_device_readded(conversation, device, entry.id.snowflake().unix_millis())?;
-    }
-    self.advance_cursor(conversation, entry)?;
+      client.persist_group(conversation)?;
+      client
+        .store
+        .delete(Table::AppliedChanges, &pending_post_key(conversation))?;
+      if let Some(device) = update.maybe_rejoined {
+        client.note_device_readded(conversation, device, entry.id.snowflake().unix_millis())?;
+      }
+      client.advance_cursor(conversation, entry)
+    })?;
     Ok(update)
   }
 
@@ -1835,20 +1838,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           // only members of the epoch can derive it (security review A5).
           ring.set_current(key_id)?;
         }
-        self.persist_keys()?;
-        self.groups.insert(conversation, group);
-        self.persist_group(conversation)?;
-        self
-          .store
-          .delete(Table::AppliedChanges, &rejoin_key(conversation))?;
-        self.store.delete(
-          Table::AppliedChanges,
-          &super::member_device::device_add_key(conversation),
-        )?;
-        self.welcome_handled(welcome)?;
-        self.remember_member_keys(conversation, &directory, welcome.id.snowflake().unix_millis())?;
-        // Everything up to the welcome belongs to epochs before we joined.
-        self.advance_cursor(conversation, welcome)?;
+        // The key, the joined group, the welcome cursor and the MLS cursor go to the store
+        // together (issue #160): a crash never leaves a group whose welcome counts as unhandled.
+        self.atomically(|client| {
+          client.persist_keys()?;
+          client.groups.insert(conversation, group);
+          client.persist_group(conversation)?;
+          client
+            .store
+            .delete(Table::AppliedChanges, &rejoin_key(conversation))?;
+          client.store.delete(
+            Table::AppliedChanges,
+            &super::member_device::device_add_key(conversation),
+          )?;
+          client.welcome_handled(welcome)?;
+          client.remember_member_keys(conversation, &directory, welcome.id.snowflake().unix_millis())?;
+          // Everything up to the welcome belongs to epochs before we joined.
+          client.advance_cursor(conversation, welcome)
+        })?;
         self.note_dm_welcome_joined(conversation)?;
         if let Ok(response) = self.api.conversation(conversation).await {
           records::put_json(

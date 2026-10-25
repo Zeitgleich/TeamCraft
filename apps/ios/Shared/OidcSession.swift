@@ -13,6 +13,9 @@ struct OidcSession: Codable, Equatable {
   /// Endpoint and client, so a refresh needs neither discovery nor the server profile.
   var tokenEndpoint: URL
   var clientId: String
+  /// The account the ID token names (`preferred_username`, else `email`), for the next sign-in's
+  /// login page (issue #448); not stored with the session's tokens elsewhere.
+  var loginHint: String?
 
   /// Valid for at least `leeway` more seconds.
   func isFresh(leeway: TimeInterval = 30, now: Date = Date()) -> Bool {
@@ -155,7 +158,8 @@ struct OidcClient {
     return OidcSession(
       accessToken: response.accessToken, refreshToken: response.refreshToken,
       expiresAt: Date().addingTimeInterval(response.expiresIn ?? 300), subject: claims.subject,
-      displayName: claims.name, tokenEndpoint: endpoints.tokenEndpoint, clientId: clientId)
+      displayName: claims.name, tokenEndpoint: endpoints.tokenEndpoint, clientId: clientId,
+      loginHint: loginHintFromIdToken(idToken: idToken))
   }
 
   /// Renews the access token with the session's own endpoint and client.
