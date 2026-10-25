@@ -764,12 +764,18 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
     >
       <div class="msg-gutter">{gutter}</div>
       <div class="msg-main">
-        {header} {forwarded} {quote} <div class="msg-body">
-          {rendered_body}
-          {edited}
-          {badges}
-          {delivery_view}
-        </div> {attachments} {link_previews} {acknowledge} {reaction_chips} {replies}
+        <div class="msg-bubble">
+          {header} {forwarded} {quote} <div class="msg-body">
+            {rendered_body}
+            {edited}
+            {badges}
+            <time class="bubble-time" datetime=message.sent_at.to_string()>
+              {time.clone()}
+            </time>
+            {delivery_view}
+          </div> {attachments} {link_previews} {acknowledge}
+        </div>
+        {reaction_chips} {replies}
       </div>
     </div>
   }

@@ -458,6 +458,12 @@ pub fn MessageList(
     }
     handle_list_keys(&ev, container, rows);
   };
+  // Bubbles show no avatars in a conversation of two (#576).
+  let is_dm = move || {
+    state
+      .read(|backend| backend.conversation(conversation))
+      .is_some_and(|conv| conv.kind == ConversationKind::Direct)
+  };
   let is_alone_in_channel = move || {
     state
       .read(|backend| backend.conversation(conversation))
@@ -473,6 +479,7 @@ pub fn MessageList(
       <div
         class="message-list"
         class:log-view=is_log
+        class:is-dm=is_dm
         role="log"
         tabindex="0"
         aria-label=move || i18n.t("messages-label")
