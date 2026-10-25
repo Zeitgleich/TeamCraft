@@ -81,7 +81,9 @@ def parse_commands(source, location):
     commands = []
     for match in COMMAND_ATTRIBUTE.finditer(source):
         line = source.count("\n", 0, match.start()) + 1
-        params = split_top_level(balanced(source, match.end() - 1))
+        # Comments between parameters are not part of the next one's name.
+        signature = re.sub(r"^[ \t]*//.*$", "", balanced(source, match.end() - 1), flags=re.M)
+        params = split_top_level(signature)
         parsed = {}
         for param in params:
             name, _, type_ = param.partition(":")
