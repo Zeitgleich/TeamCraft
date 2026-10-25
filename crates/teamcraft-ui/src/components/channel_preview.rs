@@ -81,6 +81,7 @@ pub fn ChannelPreview(space: SpaceId, channel: ConversationId) -> impl IntoView 
     view! {
       <section class="channel-preview" aria-label=move || i18n.t_with("preview-label", &[("name", &listing.name)])>
         <header class="channel-header">
+          <div class="header-row">
           <div class="header-main">
             <CompactBack />
             <h1 class="header-title" translate="no"><Icon name=IconName::Hash class="header-icon" />{name.clone()}</h1>
@@ -89,6 +90,7 @@ pub fn ChannelPreview(space: SpaceId, channel: ConversationId) -> impl IntoView 
               <span class="header-divider" aria-hidden="true"></span>
               <p class="header-topic" translate="no" title=topic.clone()>{topic.clone()}</p>
             })}
+          </div>
           </div>
         </header>
         <div class="preview-body">
