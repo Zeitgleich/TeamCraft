@@ -364,7 +364,10 @@ class CallController(
       isSecured = false,
       participantCount = 0u,
       participantUserIds = emptyList(),
+      peers = emptyList(),
+      speakingUserIds = emptyList(),
       reconnectingCount = 0u,
+      reconnectingUserIds = emptyList(),
       maybePrivacyCode = null,
     )
     if (join(to)) return true
@@ -390,6 +393,9 @@ class CallController(
     callsManager.registerAppWithTelecom(CallsManager.CAPABILITY_BASELINE or CallsManager.CAPABILITY_SUPPORTS_VIDEO_CALLING)
     isTelecomRegistered = true
   }
+
+  /** The name the call screen shows for a conversation. */
+  suspend fun displayName(conversationId: String): String = displayNameOf(conversationId)
 
   private suspend fun displayNameOf(conversationId: String): String =
     conversationNameOf(conversationId) ?: context.getString(R.string.app_name)

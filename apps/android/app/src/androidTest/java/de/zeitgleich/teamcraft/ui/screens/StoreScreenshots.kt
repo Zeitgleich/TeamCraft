@@ -3,23 +3,20 @@ package de.zeitgleich.teamcraft.ui.screens
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.Image
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -30,9 +27,9 @@ import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import de.zeitgleich.teamcraft.R
-import de.zeitgleich.teamcraft.calls.CallControls
-import de.zeitgleich.teamcraft.calls.CallStatus
-import de.zeitgleich.teamcraft.calls.VideoGrid
+import de.zeitgleich.teamcraft.calls.CallUiActions
+import de.zeitgleich.teamcraft.calls.CallUiState
+import de.zeitgleich.teamcraft.calls.InCallContent
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.Conversation
 import de.zeitgleich.teamcraft.core.FileInfo
@@ -51,6 +48,7 @@ import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.PreviewContent
 import de.zeitgleich.teamcraft.ui.PreviewSender
 import de.zeitgleich.teamcraft.ui.theme.TeamCraftTheme
+import uniffi.teamcraft_ffi.CallPeer
 import uniffi.teamcraft_ffi.CallPhase
 import uniffi.teamcraft_ffi.CallStateInfo
 import uniffi.teamcraft_ffi.ConversationItem
@@ -247,34 +245,45 @@ class StoreScreenshots {
       isSecured = true,
       participantCount = 6u,
       participantUserIds = PEOPLE.map { it.first },
+      peers = tracks.zip(PEOPLE).map { (track, person) -> CallPeer(deviceId = track.deviceId, userId = person.first) },
+      speakingUserIds = listOf(PEOPLE[1].first),
       reconnectingCount = 0u,
+      reconnectingUserIds = emptyList(),
       maybePrivacyCode = "4821 9035 1176",
       maybeEndReason = null,
     )
-    Surface(modifier = Modifier.fillMaxSize()) {
-      Box(Modifier.fillMaxSize().safeDrawingPadding()) {
-        Column(
-          modifier = Modifier.fillMaxSize().padding(16.dp),
-          verticalArrangement = Arrangement.spacedBy(12.dp),
-          horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-          CallStatus(state)
-          VideoGrid(tracks, frames, Modifier.weight(1f)) {}
-          CallControls(
-            maybeState = state,
-            isCameraOn = true,
-            isSpeakerOn = true,
-            onMute = {},
-            onDeafen = {},
-            onCamera = {},
-            onFlipCamera = {},
-            onSpeaker = {},
-            maybeOnAddPeople = null,
-            onHangUp = {},
-          )
-        }
-      }
-    }
+    InCallContent(
+      ui = CallUiState(
+        name = text.channelName,
+        maybeState = state,
+        tracks = tracks,
+        frames = frames,
+        isCameraOn = true,
+        isSpeakerOn = true,
+        elapsedSeconds = 754L,
+        areControlsShown = true,
+        names = PEOPLE.associate { (id, name) -> id to name },
+      ),
+      actions = CallUiActions(
+        onToggleControls = {},
+        onInteraction = {},
+        onMute = {},
+        onDeafen = {},
+        onCamera = {},
+        onFlipCamera = {},
+        onSpeaker = {},
+        maybeOnAddPeople = null,
+        onHangUp = {},
+      ),
+      selfView = { modifier ->
+        Image(
+          bitmap = sampleCameraFrame(480, 640, hue = 215f).asImageBitmap(),
+          contentDescription = null,
+          contentScale = ContentScale.Crop,
+          modifier = modifier,
+        )
+      },
+    )
   }
 
   private fun snapshot() = ChatSnapshot(

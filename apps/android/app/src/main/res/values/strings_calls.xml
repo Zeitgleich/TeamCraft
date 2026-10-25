@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+  <string name="call_more">More options</string>
+  <string name="call_you_muted">You\'re muted</string>
+  <string name="call_toggle_controls">Show or hide the call controls</string>
+  <string name="call_video_spotlight">Show larger</string>
+  <string name="call_encryption_open">Show the encryption code</string>
+  <string name="call_encryption_title">End-to-end encrypted</string>
+  <string name="call_encryption_body">Only the people in this call can hear and see it, not even the server can. To be sure nobody sits in between, compare the code with the others.</string>
   <string name="call_deafen">Deafen</string>
   <string name="call_undeafen">Undeafen</string>
   <string name="call_camera_on">Camera on</string>

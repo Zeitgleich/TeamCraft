@@ -199,6 +199,12 @@ class CallMoves(
     }
   }
 
+  /** People's display names by user ID, for naming the call's participants. */
+  suspend fun names(): Map<String, String> {
+    val snapshot = readSnapshot() ?: return emptyMap()
+    return (snapshot.users + snapshot.me).associate { it.id to it.displayName }
+  }
+
   private suspend fun readSnapshot(): ChatSnapshot? =
     try {
       withContext(Dispatchers.Default) { chat.snapshot() }
