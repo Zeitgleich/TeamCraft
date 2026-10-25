@@ -10,8 +10,9 @@ use openmls_traits::OpenMlsProvider;
 use tls_codec::{
   Deserialize as _, DeserializeBytes as _, Serialize as _, TlsDeserializeBytes, TlsSerialize, TlsSize,
 };
+use zeroize::Zeroizing;
 
-use super::content_keys::ContentKeyBundle;
+use super::content_keys::{ApplicationPayload, ContentKeyBundle, SealedContentKeys};
 use super::rejoin::{SignedRejoinRequest, VerifiedRejoinRequest};
 use super::{CIPHERSUITE, GroupMember, MlsError, credential, validate_key_package};
 use crate::content_key::{ContentKey, ContentKeyId};
@@ -110,6 +111,12 @@ pub enum GroupEvent {
   ContentKeys {
     sender: GroupMember,
     bundle: ContentKeyBundle,
+  },
+  /// A member sealed content keys to one device ([`SealedContentKeys`]); only that device opens
+  /// them, the others ignore the event.
+  SealedContentKeys {
+    sender: GroupMember,
+    sealed: SealedContentKeys,
   },
   /// An authorized commit was merged; the group is in a new epoch.
   MembershipChanged(MembershipUpdate),
@@ -393,6 +400,12 @@ impl ConversationGroup {
     self.group.epoch().as_u64()
   }
 
+  /// The epoch this device joined the group in (by welcome or external commit); persisted with
+  /// the change history.
+  pub fn joined_epoch(&self) -> u64 {
+    self.history.joined_epoch
+  }
+
   /// The content key of the current epoch, derived from the MLS exporter (RFC 9420 §8.5). Every
   /// member that merged the epoch's commit derives the same key, and nobody else can: after a
   /// removal it becomes the current key at once, so the new key can't be withheld from members and
@@ -400,7 +413,7 @@ impl ConversationGroup {
   pub fn epoch_content_key(&self, provider: &impl OpenMlsProvider) -> Result<ContentKey, MlsError> {
     let mut context = self.conversation_id.get().to_be_bytes().to_vec();
     context.extend_from_slice(&self.epoch().to_be_bytes());
-    let exported = zeroize::Zeroizing::new(
+    let exported = Zeroizing::new(
       self
         .group
         .export_secret(provider.crypto(), domain::EPOCH_CONTENT_KEY, &context, 48)
@@ -622,6 +635,35 @@ impl ConversationGroup {
       .map_err(|error| MlsError::openmls("message encoding", error))
   }
 
+  /// Sends content keys to one member device only, sealed to the agreement key its verified
+  /// certificate names (e2ee.md §4.6): the other members see that keys went to it, not which.
+  pub fn send_sealed_content_keys(
+    &mut self,
+    provider: &impl OpenMlsProvider,
+    device: &DeviceKeyPair,
+    recipient: &VerifiedDevice,
+    bundle: &ContentKeyBundle,
+  ) -> Result<Vec<u8>, MlsError> {
+    self.ensure_conversation(bundle.conversation_id())?;
+    if !self.members()?.contains(&GroupMember::from(recipient)) {
+      return Err(MlsError::UnexpectedMessage(
+        "sealed content keys for a device outside the group",
+      ));
+    }
+    let sender = GroupMember {
+      user_id: device.user_id(),
+      device_id: device.public_keys().device_id,
+    };
+    let payload = Zeroizing::new(bundle.seal_for(recipient, sender, self.epoch())?);
+    let message = self
+      .group
+      .create_message(provider, device, &payload)
+      .map_err(|error| MlsError::openmls("application message", error))?;
+    message
+      .to_bytes()
+      .map_err(|error| MlsError::openmls("message encoding", error))
+  }
+
   /// Processes a commit or application message from the group. Commits are merged only if they
   /// pass TeamCraft's authorization rules; otherwise the group stays in its current epoch.
   pub fn process_message(
@@ -646,14 +688,23 @@ impl ConversationGroup {
     };
     let sender = credential::member_of(processed.credential())?;
     let authenticated_data = processed.aad().to_vec();
+    let message_epoch = processed.epoch().as_u64();
     match processed.into_content() {
       ProcessedMessageContent::ApplicationMessage(application) => {
         if maybe_sender_index.is_none() {
           return Err(MlsError::ExternalSender);
         }
-        let bundle = ContentKeyBundle::from_bytes(&zeroize::Zeroizing::new(application.into_bytes()))?;
-        self.ensure_conversation(bundle.conversation_id())?;
-        Ok(GroupEvent::ContentKeys { sender, bundle })
+        match ApplicationPayload::from_bytes(&Zeroizing::new(application.into_bytes()))? {
+          ApplicationPayload::Bundle(bundle) => {
+            self.ensure_conversation(bundle.conversation_id())?;
+            Ok(GroupEvent::ContentKeys { sender, bundle })
+          },
+          ApplicationPayload::Sealed(wire) => {
+            let sealed = SealedContentKeys::received(wire, sender, message_epoch);
+            self.ensure_conversation(sealed.conversation_id())?;
+            Ok(GroupEvent::SealedContentKeys { sender, sealed })
+          },
+        }
       },
       ProcessedMessageContent::StagedCommitMessage(staged) => {
         let (update, maybe_request_id) = match maybe_sender_index {

@@ -21,7 +21,7 @@ use openmls::prelude::{
 use openmls_traits::OpenMlsProvider;
 use tls_codec::{Deserialize as _, Serialize as _};
 
-pub use content_keys::ContentKeyBundle;
+pub use content_keys::{ContentKeyBundle, SealedContentKeys};
 pub use group::{
   ChangeHistory, CommitOutput, ConversationGroup, GroupEvent, MAX_CHANGE_AGE_EPOCHS, MembershipUpdate,
   PendingCommit, StagedJoin, VerifiedWelcome,
@@ -117,6 +117,12 @@ pub enum MlsError {
   /// already saw (a server handing out an old one).
   #[error("group information for epoch {epoch} is older than epoch {floor} seen before")]
   StaleGroupInfo { epoch: u64, floor: u64 },
+  #[error("HPKE failed: {0}")]
+  Hpke(String),
+  /// Content keys sealed to a device didn't open there: for another device, tampered with, or
+  /// moved to another group, epoch or sender.
+  #[error("sealed content keys rejected")]
+  SealedKeysRejected,
   #[error("encoding failed: {0}")]
   Encoding(#[from] tls_codec::Error),
 }
