@@ -104,7 +104,8 @@ function showBrand(root, brand, isSameOrigin) {
   const name = typeof brand.display_name === 'string' ? brand.display_name.trim() : '';
   if (name && [...name].length <= MAX_NAME_CHARS) {
     root.querySelector('.tc-loader-name').textContent = name;
-    document.title = name;
+    // As the app does (BrandView::page_title): the product name stays in the tab.
+    document.title = name === 'TeamCraft' ? name : `${name} – TeamCraft`;
   }
   const assets = isSameOrigin && brand.assets && typeof brand.assets === 'object' ? brand.assets : {};
   const slot = ['icon_dark', 'icon'].find(
