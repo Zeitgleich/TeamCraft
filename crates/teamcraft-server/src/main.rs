@@ -391,7 +391,7 @@ fn spawn_derived_presence(state: AppState) {
       if is_poll_due {
         maybe_last_poll = Some(tokio::time::Instant::now());
       }
-      if let Some(minutes) = state.policy.get().presence.maybe_away_timeout_minutes {
+      if let Some(minutes) = state.policy.get().presence.effective_away_timeout_minutes() {
         let cutoff = tokio::time::Instant::now().checked_sub(Duration::from_secs(u64::from(minutes) * 60));
         if let Some(cutoff) = cutoff
           && let Err(error) = presence::demote_idle_devices(&state, cutoff).await
