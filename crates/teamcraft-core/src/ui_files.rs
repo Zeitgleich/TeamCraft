@@ -1,15 +1,18 @@
 //! Files in the UI adapter: attachments of messages, uploads, downloads and share links.
 
 use teamcraft_client_api::actions::{
-  FileFailure, FileInfo, FileSource, FileTransfer, OutgoingFile, PixelSize, ShareLink, ShareLinkOptions,
+  DownloadItem, DownloadState, FileFailure, FileInfo, FileSource, FileTransfer, OutgoingFile, PixelSize,
+  ShareLink, ShareLinkOptions,
 };
 use teamcraft_client_api::model::{ConversationId, MessageId, ThreadId};
 use teamcraft_proto::{AttachmentId, Base64Bytes};
 
 use crate::client::files::{
-  PendingFile, PendingUpload, TransferFailure, TransferState, UploadRetry, UploadSource, attachments_of,
-  cancel_pending_file, failed_uploads, pending_upload, save_pending_upload, share_links, transfer_state,
+  DownloadRecord, PendingFile, PendingUpload, TransferFailure, TransferState, UploadRetry, UploadSource,
+  attachments_of, cancel_pending_file, download_history, failed_uploads, pending_upload, record_download,
+  save_download_history, save_pending_upload, share_links, transfer_state,
 };
+use crate::error::CoreError;
 use crate::records;
 use crate::store::{
   AttachmentRef, ImageDimensions, LocalStore, MessageContent, MessageMeta, StoredMessage, Table,
@@ -214,10 +217,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       return;
     };
     for attachment in attachments_of(&stored.content) {
-      self.command(CoreCommand::DownloadFile {
-        conversation,
-        attachment: attachment.attachment_id,
-      });
+      self.queue_download(&stored, attachment);
     }
   }
 
@@ -227,12 +227,106 @@ impl<S: LocalStore> CoreChatBackend<S> {
     message: MessageId,
     file_id: &str,
   ) {
-    match self.attachment_ref(conversation, message, file_id) {
-      Some(attachment) => self.command(CoreCommand::DownloadFile {
-        conversation,
-        attachment: attachment.attachment_id,
-      }),
+    let Some(stored) = self.find_stored(conversation, message) else {
+      tracing::warn!(conversation_id = %conversation, "downloading a file that isn't loaded");
+      return;
+    };
+    let maybe_attachment = attachments_of(&stored.content)
+      .into_iter()
+      .find(|attachment| attachment.attachment_id.to_string() == file_id);
+    match maybe_attachment {
+      Some(attachment) => self.queue_download(&stored, attachment),
       None => tracing::warn!(conversation_id = %conversation, "downloading a file that isn't loaded"),
+    }
+  }
+
+  /// The downloads list: files saved to disk, newest first, with where each one stands.
+  pub(crate) fn ui_downloads(&self) -> Vec<DownloadItem> {
+    self
+      .read(download_history(self.store_ref()))
+      .into_iter()
+      .filter_map(|record| {
+        let stored = self.read(
+          self
+            .store_ref()
+            .message(record.conversation_id, record.client_message_id)
+            .map_err(CoreError::from),
+        )?;
+        Some(DownloadItem {
+          conversation: record.conversation_id,
+          message: ui_message_id(&stored),
+          file_id: record.attachment_id.to_string(),
+          file_name: record.file_name.clone(),
+          size_bytes: record.size_bytes,
+          started_at: record.started_at_ms,
+          state: self.download_state(&record),
+        })
+      })
+      .collect()
+  }
+
+  /// Empties the downloads list of everything that no longer runs or waits.
+  pub(crate) fn ui_clear_downloads(&self) {
+    let history = self.read(download_history(self.store_ref()));
+    let running: Vec<DownloadRecord> = history
+      .into_iter()
+      .filter(|record| {
+        matches!(
+          self.download_state(record),
+          DownloadState::Waiting | DownloadState::Active { .. }
+        )
+      })
+      .collect();
+    if let Err(error) = save_download_history(self.store_ref(), &running) {
+      tracing::error!(%error, "could not clear the downloads list");
+    }
+  }
+
+  /// Lists the file as asked for and leaves the download to the host.
+  fn queue_download(&self, stored: &StoredMessage, attachment: &AttachmentRef) {
+    let record = DownloadRecord {
+      conversation_id: stored.conversation_id,
+      client_message_id: stored.client_message_id,
+      attachment_id: attachment.attachment_id,
+      file_name: attachment.file_name.clone(),
+      size_bytes: attachment.size_bytes,
+      started_at_ms: self.now_ms(),
+      maybe_finished_at_ms: None,
+    };
+    if let Err(error) = record_download(self.store_ref(), record) {
+      tracing::error!(%error, "could not list the download");
+    }
+    self.command(CoreCommand::DownloadFile {
+      conversation: stored.conversation_id,
+      attachment: attachment.attachment_id,
+    });
+  }
+
+  fn download_state(&self, record: &DownloadRecord) -> DownloadState {
+    if let Some(progress) = self.transfers().progress(record.attachment_id) {
+      return DownloadState::Active {
+        done_bytes: progress.of_size(record.size_bytes),
+        total_bytes: record.size_bytes,
+      };
+    }
+    match self.read(transfer_state(self.store_ref(), record.attachment_id)) {
+      Some(TransferState::Local { path }) if std::path::Path::new(&path).is_file() => DownloadState::Saved {
+        path,
+        finished_at: record.maybe_finished_at_ms.unwrap_or(record.started_at_ms),
+      },
+      // The browser has no path to look at: what it saved stays saved.
+      Some(TransferState::Local { path }) if cfg!(target_arch = "wasm32") => DownloadState::Saved {
+        path,
+        finished_at: record.maybe_finished_at_ms.unwrap_or(record.started_at_ms),
+      },
+      Some(TransferState::Local { .. }) => DownloadState::Removed,
+      Some(TransferState::Failed { reason }) => DownloadState::Failed {
+        reason: failure_view(reason),
+      },
+      Some(TransferState::Downloading { .. }) | None if record.started_at_ms >= self.started_at_ms() => {
+        DownloadState::Waiting
+      },
+      Some(TransferState::Downloading { .. }) | None => DownloadState::Interrupted,
     }
   }
 

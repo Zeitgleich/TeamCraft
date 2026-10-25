@@ -493,6 +493,14 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.cancel_upload(conversation, message, file_id);
   }
 
+  fn downloads(&self) -> Vec<teamcraft_client_api::actions::DownloadItem> {
+    self.chat.downloads()
+  }
+
+  fn clear_downloads(&self) {
+    self.chat.clear_downloads();
+  }
+
   fn acknowledge(&self, conversation: ConversationId, message: MessageId) {
     self.chat.acknowledge(conversation, message);
   }

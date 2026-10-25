@@ -586,6 +586,7 @@ pub enum ChatAction {
     message: MessageId,
     file_id: String,
   },
+  ClearDownloads,
   DownloadFile {
     conversation: ConversationId,
     message: MessageId,
@@ -842,6 +843,7 @@ impl ChatAction {
         message,
         file_id,
       } => backend.cancel_upload(conversation, message, &file_id),
+      Self::ClearDownloads => backend.clear_downloads(),
       Self::DownloadFile {
         conversation,
         message,
@@ -971,6 +973,7 @@ pub enum ChatQuery {
   ConversationFiles {
     conversation: ConversationId,
   },
+  Downloads,
   ConversationImages {
     conversation: ConversationId,
     around: MessageId,
@@ -1048,6 +1051,9 @@ pub enum ChatQuery {
 pub enum ChatAnswer {
   CallMoveOffer {
     maybe_offer: Option<CallMoveOffer>,
+  },
+  Downloads {
+    downloads: Vec<crate::actions::DownloadItem>,
   },
   MessageExtras {
     extras: Vec<MessageExtras>,
@@ -1207,6 +1213,9 @@ impl ChatQuery {
       },
       Self::ConversationFiles { conversation } => ChatAnswer::Files {
         files: backend.conversation_files(conversation),
+      },
+      Self::Downloads => ChatAnswer::Downloads {
+        downloads: backend.downloads(),
       },
       Self::ConversationImages {
         conversation,

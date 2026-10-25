@@ -336,6 +336,9 @@ pub struct CoreChatBackend<S> {
   typing: crate::TypingState,
   /// File transfers in flight; shared with the client when [`Self::with_transfers`] was given them.
   transfers: crate::transfers::Transfers,
+  /// When this backend (the app's session) started: a download begun before and never finished
+  /// was cut off by a quit.
+  started_at_ms: i64,
   /// When reads last asked the server for something, so the UI's repeated reads don't flood it.
   pub(crate) requests: RefCell<crate::ui_people::RequestLog>,
   #[cfg(not(target_arch = "wasm32"))]
@@ -345,6 +348,7 @@ pub struct CoreChatBackend<S> {
 impl<S: LocalStore> CoreChatBackend<S> {
   /// `store` is shared with the sync engine (e.g. an `Arc`); `me` is the signed-in user.
   pub fn new(store: S, me: UserId, clock: Box<dyn Clock>) -> Self {
+    let started_at_ms = clock.now_ms();
     Self {
       store,
       me,
@@ -352,6 +356,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       commands: Rc::new(RefCell::new(Vec::new())),
       typing: crate::TypingState::default(),
       transfers: crate::transfers::Transfers::new(),
+      started_at_ms,
       requests: RefCell::default(),
       #[cfg(not(target_arch = "wasm32"))]
       search: RefCell::new(Default::default()),
@@ -374,6 +379,10 @@ impl<S: LocalStore> CoreChatBackend<S> {
 
   pub(crate) fn transfers(&self) -> &crate::transfers::Transfers {
     &self.transfers
+  }
+
+  pub(crate) fn started_at_ms(&self) -> i64 {
+    self.started_at_ms
   }
 
   /// Takes the queued commands (the sync task runs them).
@@ -1368,6 +1377,14 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn cancel_upload(&self, conversation: ConversationId, message: MessageId, file_id: &str) {
     self.ui_cancel_upload(conversation, message, file_id);
+  }
+
+  fn downloads(&self) -> Vec<teamcraft_client_api::actions::DownloadItem> {
+    self.ui_downloads()
+  }
+
+  fn clear_downloads(&self) {
+    self.ui_clear_downloads();
   }
 
   fn acknowledge(&self, conversation: ConversationId, message: MessageId) {

@@ -63,6 +63,7 @@ pub enum IconName {
   Smartphone,
   QrCode,
   Download,
+  Folder,
   Trash,
   User,
   Eye,
@@ -194,6 +195,7 @@ impl IconName {
       Self::Smartphone => "M7 2h10v20H7z M11 18h2",
       Self::QrCode => "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h3v3h-3z M20 14v3 M14 20h3 M20 20h1",
       Self::Download => "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5 5-5 M12 15V3",
+      Self::Folder => "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
       Self::Trash => "M3 6h18 M8 6V4h8v2 M19 6l-1 14H6L5 6",
       Self::User => "M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2 M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z",
       Self::UserPlus => {

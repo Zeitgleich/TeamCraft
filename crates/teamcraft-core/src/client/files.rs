@@ -220,6 +220,25 @@ pub enum TransferFailure {
   LocalFile,
 }
 
+/// Most entries the downloads list keeps; older finished ones drop off.
+pub const MAX_DOWNLOAD_HISTORY: usize = 100;
+/// Where the downloads list is kept, beside the transfer states (keyed by attachment ID).
+const DOWNLOAD_HISTORY_KEY: &str = "downloads";
+
+/// One file the user saved to disk, for the downloads list (the desktop app's download manager).
+/// Where it stands comes from [`TransferState`] and the transfers in flight.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownloadRecord {
+  pub conversation_id: ConversationId,
+  pub client_message_id: ClientMessageId,
+  pub attachment_id: AttachmentId,
+  pub file_name: String,
+  pub size_bytes: u64,
+  pub started_at_ms: i64,
+  #[serde(rename = "finished_at_ms", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_finished_at_ms: Option<i64>,
+}
+
 /// A share link this user created (only its creator has the fragment).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredShareLink {
@@ -456,6 +475,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
     };
     set_transfer(&self.store, attachment, &state)?;
+    let now = self.now_ms();
+    let mut history = download_history(&self.store)?;
+    if let Some(record) = history
+      .iter_mut()
+      .find(|record| record.attachment_id == attachment)
+    {
+      record.maybe_finished_at_ms = Some(now);
+      save_download_history(&self.store, &history)?;
+    }
     saved
   }
 
@@ -896,6 +924,26 @@ pub fn failed_uploads(
 
 fn failed_key(outbox_key: &str) -> String {
   format!("failed/{outbox_key}")
+}
+
+/// The downloads list, newest first.
+pub fn download_history(store: &impl LocalStore) -> Result<Vec<DownloadRecord>, CoreError> {
+  Ok(records::get_json(store, Table::FileTransfers, DOWNLOAD_HISTORY_KEY)?.unwrap_or_default())
+}
+
+pub fn save_download_history(store: &impl LocalStore, history: &[DownloadRecord]) -> Result<(), CoreError> {
+  records::put_json(store, Table::FileTransfers, DOWNLOAD_HISTORY_KEY, &history)
+}
+
+/// Puts a file the user asked to save at the top of the downloads list (again, if it was there) and
+/// forgets how an earlier download of it ended.
+pub fn record_download(store: &impl LocalStore, record: DownloadRecord) -> Result<(), CoreError> {
+  let mut history = download_history(store)?;
+  history.retain(|known| known.attachment_id != record.attachment_id);
+  store.delete(Table::FileTransfers, &record.attachment_id.to_string())?;
+  history.insert(0, record);
+  history.truncate(MAX_DOWNLOAD_HISTORY);
+  save_download_history(store, &history)
 }
 
 pub fn transfer_state(

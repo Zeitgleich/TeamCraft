@@ -15,8 +15,8 @@ use std::time::Duration;
 use common::{Peer, backend_of, run_commands, settle};
 use image::{ImageBuffer, ImageFormat, Rgb};
 use teamcraft_client_api::actions::{
-  FileFailure, FileSource, FileTransfer, MessagePriority, OutgoingFile, OutgoingMessage, PixelSize,
-  ShareLinkOptions,
+  DownloadState, FileFailure, FileSource, FileTransfer, MessagePriority, OutgoingFile, OutgoingMessage,
+  PixelSize, ShareLinkOptions,
 };
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::Message;
@@ -308,6 +308,44 @@ async fn downloads_beside_the_loop_open_and_save_files() {
   };
   assert_eq!(std::fs::read(path).unwrap(), b"second");
   assert!(!downloads.is_running());
+  std::fs::remove_dir_all(&directory).unwrap();
+}
+
+/// The desktop app's downloads list: a file asked for waits, then shows where it was saved; a file
+/// moved away afterwards says so; clearing the list keeps nothing that finished.
+#[tokio::test]
+async fn the_downloads_list_follows_a_saved_file() {
+  let (_server, mut alice, mut bob, channel) = channel_with_two().await;
+  let alice_ui = backend_of(&alice);
+  alice_ui.send_message(with_files(
+    channel,
+    "",
+    vec![file("plan.txt", "text/plain", b"plan".to_vec())],
+  ));
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  let bob_ui = backend_of(&bob);
+  let received = last(&bob_ui, channel);
+  let file_id = bob_ui.message_extras(channel, &[received.id])[0].files[0]
+    .file_id
+    .clone();
+  let directory = std::env::temp_dir().join(format!("teamcraft-list-{}", std::process::id()));
+  bob.client.set_download_dir(Some(directory.clone()));
+
+  bob_ui.download_attachment(channel, received.id, &file_id);
+  let listed = bob_ui.downloads();
+  assert_eq!(listed.len(), 1);
+  assert_eq!(listed[0].file_name, "plan.txt");
+  assert_eq!(listed[0].state, DownloadState::Waiting);
+
+  run_commands(&mut bob, &bob_ui).await;
+  let DownloadState::Saved { path, .. } = bob_ui.downloads()[0].state.clone() else {
+    panic!("not saved: {:?}", bob_ui.downloads());
+  };
+  std::fs::remove_file(&path).unwrap();
+  assert_eq!(bob_ui.downloads()[0].state, DownloadState::Removed);
+  bob_ui.clear_downloads();
+  assert!(bob_ui.downloads().is_empty());
   std::fs::remove_dir_all(&directory).unwrap();
 }
 

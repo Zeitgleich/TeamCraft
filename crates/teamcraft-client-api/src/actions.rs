@@ -509,6 +509,45 @@ pub enum WorkspaceEvent {
   Unknown,
 }
 
+/// A file the user saved (or is saving) to disk, for the downloads list of the desktop app.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownloadItem {
+  pub conversation: ConversationId,
+  pub message: MessageId,
+  /// `file_id` of the message's [`FileInfo`].
+  pub file_id: String,
+  pub file_name: String,
+  pub size_bytes: u64,
+  /// When the user asked for it (Unix milliseconds, this device's clock).
+  pub started_at: TimestampMs,
+  pub state: DownloadState,
+}
+
+/// Where a download stands.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum DownloadState {
+  /// Waiting for a free slot.
+  Waiting,
+  Active {
+    done_bytes: u64,
+    total_bytes: u64,
+  },
+  Saved {
+    path: String,
+    finished_at: TimestampMs,
+  },
+  Failed {
+    reason: FileFailure,
+  },
+  /// The app quit while it ran; downloading it again starts over.
+  Interrupted,
+  /// Saved, but the file is no longer where it was saved (moved or deleted).
+  Removed,
+  #[serde(other)]
+  Unknown,
+}
+
 fn is_zero(value: &u32) -> bool {
   *value == 0
 }

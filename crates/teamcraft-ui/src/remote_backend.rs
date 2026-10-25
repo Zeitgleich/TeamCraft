@@ -18,9 +18,9 @@ use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
 use serde_json::json;
 use teamcraft_client_api::actions::{
-  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, LinkedMessage, MessageExtras, NewChannel,
-  NewSpace, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges,
-  SpaceInvite,
+  BrowsableChannel, CategoryInfo, ChannelChanges, DownloadItem, FileInfo, LinkedMessage, MessageExtras,
+  NewChannel, NewSpace, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions,
+  SpaceChanges, SpaceInvite,
 };
 use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
 use teamcraft_client_api::calls::BackgroundImageInfo;
@@ -915,6 +915,17 @@ impl ChatBackend for RemoteChat {
       conversation,
       message,
     });
+  }
+
+  fn downloads(&self) -> Vec<DownloadItem> {
+    match self.ask(ChatQuery::Downloads) {
+      Some(ChatAnswer::Downloads { downloads }) => downloads,
+      _ => Vec::new(),
+    }
+  }
+
+  fn clear_downloads(&self) {
+    self.act(ChatAction::ClearDownloads);
   }
 
   fn conversation_files(&self, conversation: ConversationId) -> Vec<FileInfo> {

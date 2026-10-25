@@ -3,6 +3,7 @@ use leptos::prelude::*;
 use crate::brand::Brand;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::brand_logo::BrandLogo;
+use crate::components::downloads_menu::DownloadsButton;
 use crate::components::icons::{Icon, IconName};
 use crate::components::status_menu::StatusMenu;
 use crate::components::window_controls::{ClickOrDrag, window_drag_handler};
@@ -54,6 +55,7 @@ pub fn TopBar() -> impl IntoView {
         <ShortcutKeys shortcut=QUICK_SWITCHER />
       </button>
       <div class="top-actions">
+        <DownloadsButton />
         <button
           class="icon-btn on-dark"
           aria-label=move || i18n.t("shortcuts-title")

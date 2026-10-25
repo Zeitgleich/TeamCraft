@@ -474,6 +474,20 @@ kbd {
   position: relative;
 }
 
+/* Desktop downloads (like a browser's): the button with the running downloads' ring, and the list */
+.downloads { position: relative; }
+.downloads-btn { position: relative; }
+.downloads-ring { position: absolute; inset: 2px; width: auto; height: auto; pointer-events: none; }
+.downloads-btn.is-active .icon { width: 16px; height: 16px; }
+.downloads-panel { width: min(380px, calc(100vw - 32px)); max-height: min(480px, 70vh); display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+.downloads-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.downloads-title { font-weight: var(--weight-semibold); }
+.downloads-list { margin: 0; padding: 4px 0; list-style: none; overflow-y: auto; }
+.download-row { display: flex; align-items: center; gap: 8px; padding: 8px 12px; }
+@media (hover: hover) and (pointer: fine) { .download-row:hover { background: var(--surface-2); } }
+.download-row .file-state { font-variant-numeric: tabular-nums; }
+.download-actions { display: flex; flex: none; align-items: center; gap: 2px; }
+
 .avatar-btn {
   background: none;
   border: 0;

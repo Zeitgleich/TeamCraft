@@ -343,6 +343,12 @@ pub trait ChatBackend {
   }
   /// Fetches and decrypts a file; its [`FileInfo::transfer`] reports progress and the local path.
   fn download_file(&self, _conversation: ConversationId, _message: MessageId) {}
+  /// Files saved to disk, newest first: running ones with their progress, then finished ones.
+  fn downloads(&self) -> Vec<crate::actions::DownloadItem> {
+    Vec::new()
+  }
+  /// Empties the downloads list of everything that isn't running; the files stay on disk.
+  fn clear_downloads(&self) {}
   /// Like [`Self::download_file`], for one file of the message (`file_id` of [`FileInfo`]).
   fn download_attachment(&self, conversation: ConversationId, message: MessageId, _file_id: &str) {
     self.download_file(conversation, message);

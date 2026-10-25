@@ -44,6 +44,7 @@ pub mod composer_editor;
 pub mod composer_toolbar;
 pub mod count_badge;
 pub mod directory_view;
+pub mod downloads_menu;
 pub mod edge_swipe;
 pub mod emoji_picker;
 pub mod empty_state;

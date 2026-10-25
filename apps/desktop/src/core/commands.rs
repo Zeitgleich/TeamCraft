@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_opener::OpenerExt;
+use teamcraft_client_api::actions::DownloadState;
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::AttachmentPriority;
 use teamcraft_client_api::remote::{
@@ -340,6 +342,33 @@ pub async fn core_attachment(
     .attachment(conversation, message, file_id, priority.unwrap_or_default())
     .await?;
   Ok(tauri::ipc::Response::new(plaintext.expose_secret().to_vec()))
+}
+
+/// Opens a file of the downloads list with the system's app for it, or shows it in its folder
+/// (`reveal`). Only paths the core saved are opened: the webview names the file, not the path.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn core_open_download(
+  app: AppHandle,
+  host: State<'_, CoreHost>,
+  file_id: String,
+  reveal: bool,
+) -> Result<(), CommandError> {
+  let ChatAnswer::Downloads { downloads } = host.current()?.query(ChatQuery::Downloads).await? else {
+    return Err(CommandError::from("no downloads list".to_owned()));
+  };
+  let path = downloads
+    .into_iter()
+    .find_map(|item| match item.state {
+      DownloadState::Saved { path, .. } if item.file_id == file_id => Some(path),
+      _ => None,
+    })
+    .ok_or_else(|| CommandError::from("the file is not in the downloads list".to_owned()))?;
+  let opener = app.opener();
+  let opened = match reveal {
+    true => opener.reveal_item_in_dir(&path),
+    false => opener.open_path(&path, None::<&str>),
+  };
+  opened.map_err(|error| CommandError::from(error.to_string()))
 }
 
 /// Sets an unreadable local database aside and opens a new one (issue #160).
