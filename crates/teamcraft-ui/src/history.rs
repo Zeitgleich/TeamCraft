@@ -81,7 +81,9 @@ pub fn start(state: AppState, i18n: I18n) {
     }
     count
   });
-  on_window("popstate", move || untrack(|| follow_location(state, bar)));
+  on_window("popstate", move || {
+    untrack(|| with_pop_motion(state, || follow_location(state, bar)))
+  });
   if tauri::is_available() {
     handle_mouse_buttons();
     tauri::listen_text(DEEP_LINK_EVENT, move |link| {
@@ -131,9 +133,24 @@ pub fn back_or_home(state: AppState) {
 /// level up (thread → conversation → its list).
 pub fn back_or_up(state: AppState) {
   if depth_of_current_entry() > 0 {
+    // The page moves when `popstate` arrives.
     travel(Travel::Back);
   } else {
-    state.go_up();
+    with_pop_motion(state, || state.go_up());
+  }
+}
+
+/// Runs a step through the app; when it took the phone layout back up (#368), the page that is
+/// left slides out while the view updates.
+fn with_pop_motion(state: AppState, step: impl FnOnce()) {
+  if !state.layout.get_untracked().is_compact() {
+    step();
+    return;
+  }
+  let before = state.compact_depth();
+  step();
+  if state.compact_depth() < before {
+    crate::motion::leave_pane_ghost();
   }
 }
 

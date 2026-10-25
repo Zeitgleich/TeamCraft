@@ -16,6 +16,7 @@ use crate::components::composer_toolbar::{
 use crate::components::emoji_picker::EmojiPicker;
 use crate::components::file_views::blob_url;
 use crate::components::icons::{Icon, IconName};
+use crate::components::sheet::MenuSurface;
 use crate::editor_doc::{BlockFormat, InlineStyle};
 use crate::groups::use_groups;
 use crate::i18n::use_i18n;
@@ -1164,13 +1165,12 @@ pub fn Composer(
                 <Icon name=IconName::Plus />
               </button>
               <Show when=move || is_attach_menu_open.get() fallback=|| ()>
-                <div class="popover-backdrop" on:mousedown=move |_| is_attach_menu_open.set(false)></div>
-                <div
-                  class="popover composer-attach-menu opens-up align-start"
-                  role="menu"
+                <MenuSurface
+                  class="composer-attach-menu opens-up align-start"
+                  label=Signal::derive(move || i18n.t("composer-attach"))
+                  on_close=Callback::new(move |()| is_attach_menu_open.set(false))
                   node_ref=attach_menu
-                  aria-label=move || i18n.t("composer-attach")
-                  on:keydown=move |ev: web_sys::KeyboardEvent| match ev.key().as_str() {
+                  on_keydown=Callback::new(move |ev: web_sys::KeyboardEvent| match ev.key().as_str() {
                     "Escape" => {
                       ev.prevent_default();
                       is_attach_menu_open.set(false);
@@ -1180,7 +1180,7 @@ pub fn Composer(
                       move_focus_vertical(&ev, attach_menu);
                     },
                     _ => {},
-                  }
+                  })
                 >
                   <button type="button" class="menu-item" role="menuitem" on:click=move |_| pick_files(file_input)>
                     <Icon name=IconName::File />
@@ -1196,7 +1196,7 @@ pub fn Composer(
                       <span class="menu-label">{move || i18n.t("composer-attach-camera")}</span>
                     </button>
                   })}
-                </div>
+                </MenuSurface>
               </Show>
             </div>
             <button

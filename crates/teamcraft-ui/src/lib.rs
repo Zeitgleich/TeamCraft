@@ -29,6 +29,7 @@ pub mod diff;
 pub mod editor_doc;
 pub mod feed_motion;
 pub mod feedback;
+pub mod gestures;
 // Shared with the mobile apps (through the FFI), so they live in the client API.
 pub use teamcraft_client_api::{emoji, emoji_catalog};
 pub mod groups;
@@ -162,7 +163,7 @@ mod tests {
       .split("class=\"app\"")
       .nth(1)
       .and_then(|rest| rest.split_once("\n    >\n"))
-      .and_then(|(_, rest)| rest.split("<div class=\"app-body\">").next())
+      .and_then(|(_, rest)| rest.split("      <div\n        class=\"app-body\"").next())
       .expect("the shell has the .app grid with its body");
     // Direct children of the grid sit one indentation level below `<div class="app">`.
     let children: Vec<&str> = grid
