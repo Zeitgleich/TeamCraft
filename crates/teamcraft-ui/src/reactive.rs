@@ -1,5 +1,8 @@
 //! Helpers for reading signals from code that runs both inside and outside reactive scopes.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use leptos::prelude::*;
 use leptos::reactive::graph::Observer;
 
@@ -24,6 +27,28 @@ pub trait UpdateIfAlive: Update {
 }
 
 impl<S: Update> UpdateIfAlive for S {}
+
+/// Whether the reactive owner current at creation (usually the signed-in shell, or a component) is
+/// still alive. Listeners that live as long as the page (window and document events, service
+/// worker messages, desktop shell events) check it: after a sign-out the next shell registers its
+/// own, and the old ones must go quiet instead of reaching their disposed signals (a Back press
+/// after signing in again panicked in the old shell's `popstate` handler). Always alive without an
+/// owner.
+#[derive(Clone)]
+pub struct OwnerLiveness(Arc<AtomicBool>);
+
+impl OwnerLiveness {
+  pub fn of_current_owner() -> Self {
+    let is_alive = Arc::new(AtomicBool::new(true));
+    let flag = is_alive.clone();
+    on_cleanup(move || flag.store(false, Ordering::Relaxed));
+    Self(is_alive)
+  }
+
+  pub fn is_alive(&self) -> bool {
+    self.0.load(Ordering::Relaxed)
+  }
+}
 
 /// Reads a signal, subscribing the caller only when there is one. Component bodies and event handlers
 /// have no observer; reading there is intentional and must not trigger the debug-build warning.
@@ -142,6 +167,27 @@ mod tests {
     value.set_if_alive(2);
     list.update_if_alive(|list| list.push(3));
     assert_eq!(value.try_get_untracked(), None);
+  }
+
+  /// A Back press after signing in again reached the signed-out shell's `popstate` handler.
+  #[test]
+  fn page_listeners_go_quiet_with_their_owner() {
+    let shell = Owner::new();
+    let (liveness, shown) = shell.with(|| (OwnerLiveness::of_current_owner(), StoredValue::new(1)));
+    let on_popstate = move || {
+      if liveness.is_alive() {
+        shown.set_value(2);
+      }
+    };
+    on_popstate();
+    assert_eq!(shown.try_get_value(), Some(2));
+    shell.cleanup();
+    on_popstate();
+    assert_eq!(shown.try_get_value(), None, "disposed, and not touched");
+    assert!(
+      OwnerLiveness::of_current_owner().is_alive(),
+      "without an owner: always"
+    );
   }
 
   #[test]

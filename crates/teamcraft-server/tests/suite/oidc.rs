@@ -141,6 +141,38 @@ mod backchannel_logout {
     app.stop().await;
   }
 
+  /// Keycloak names the subject and the session in every logout token. Signing out on one device
+  /// (or signing in again there, which signs out first) must leave the user's other devices alone.
+  #[tokio::test]
+  async fn two_devices_stay_signed_in_when_one_signs_out() {
+    let app = app!();
+    let (desktop, phone) = (
+      member("carol").with_session("sid-desktop"),
+      member("carol").with_session("sid-phone"),
+    );
+    let desktop_device = register_device(&app, &desktop).await;
+    let phone_device = register_device(&app, &phone).await;
+    let mut desktop_socket = connect(&app, &desktop, &desktop_device).await;
+    let mut phone_socket = connect(&app, &phone, &phone_device).await;
+
+    let token = app.logout_token(Some("sub-carol"), Some("sid-phone"));
+    assert_eq!(post_logout(&app, &token).await.status(), StatusCode::OK);
+
+    assert!(is_closed(&mut phone_socket).await);
+    assert_eq!(app.get(&phone, "/me").await.error_code(), "invalid_token");
+    assert!(
+      !is_closed(&mut desktop_socket).await,
+      "the desktop's gateway connection must stay"
+    );
+    assert_eq!(app.get(&desktop, "/me").await.status, StatusCode::OK);
+
+    // The phone signs in again: a new provider session, and both devices work.
+    let phone_again = member("carol").with_session("sid-phone-2");
+    assert_eq!(app.get(&phone_again, "/me").await.status, StatusCode::OK);
+    assert_eq!(app.get(&desktop, "/me").await.status, StatusCode::OK);
+    app.stop().await;
+  }
+
   #[tokio::test]
   async fn invalid_logout_tokens_are_rejected_and_change_nothing() {
     let app = app!();

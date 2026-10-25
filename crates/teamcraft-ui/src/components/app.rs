@@ -59,7 +59,7 @@ use crate::motion::use_leave_ghost;
 use crate::navigation::Step;
 use crate::notify_sync::NotificationSync;
 use crate::prefs::Zoom;
-use crate::reactive::use_interval;
+use crate::reactive::{OwnerLiveness, use_interval};
 use crate::sections::badge_count;
 use crate::settings::{Settings, Theme};
 use crate::state::{AppState, MainView, Overlay, RailEntry, SidePanel, ToastTone};
@@ -801,7 +801,11 @@ fn open_conversations_from_notifications(state: AppState) {
   {
     open(&value);
   }
+  let liveness = OwnerLiveness::of_current_owner();
   let listener = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
+    if !liveness.is_alive() {
+      return;
+    }
     let data = event.data();
     let is_click = js_sys::Reflect::get(&data, &"type".into())
       .ok()
@@ -1189,13 +1193,19 @@ pub(crate) fn on_document(event: &str, callback: impl Fn() + 'static) {
   listen_on(&document, event, callback);
 }
 
+/// Calls `callback` on `event` while the current reactive owner lives (see [`OwnerLiveness`]).
 pub(crate) fn listen_on(target: &web_sys::EventTarget, event: &str, callback: impl Fn() + 'static) {
-  let listener = Closure::<dyn Fn()>::new(callback);
+  let liveness = OwnerLiveness::of_current_owner();
+  let listener = Closure::<dyn Fn()>::new(move || {
+    if liveness.is_alive() {
+      callback();
+    }
+  });
   if target
     .add_event_listener_with_callback(event, listener.as_ref().unchecked_ref())
     .is_ok()
   {
-    // Lives as long as the page.
+    // Lives as long as the page; it does nothing once its owner is gone.
     listener.forget();
   }
 }
