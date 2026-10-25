@@ -47,16 +47,18 @@ class BrandStore(context: Context, val origin: String, storageKey: String) {
     }
     val brand = check(json) ?: return@withContext null
     prefs.edit().putString(key, json).apply()
-    saveLogo(brand.maybeLogoUrl, isDark = false)
-    saveLogo(brand.maybeLogoDarkUrl, isDark = true)
+    saveImage(brand.maybeLogoUrl, logoFile(isDark = false))
+    saveImage(brand.maybeLogoDarkUrl, logoFile(isDark = true))
+    saveImage(brand.maybeIconUrl, iconFile(isDark = false))
+    saveImage(brand.maybeIconDarkUrl, iconFile(isDark = true))
     brand
   }
 
   /** The cached logo for the theme, decoded; null without one. */
-  fun logo(isDark: Boolean): Bitmap? {
-    val file = logoFile(isDark).takeIf(File::exists) ?: return null
-    return BitmapFactory.decodeFile(file.path)
-  }
+  fun logo(isDark: Boolean): Bitmap? = decoded(logoFile(isDark))
+
+  /** The cached square icon for the theme (the brand's tile on the sign-in screen); null without one. */
+  fun icon(isDark: Boolean): Bitmap? = decoded(iconFile(isDark))
 
   /** The cached icon of the identity provider ("Sign in with …"), decoded; null without one. */
   fun ssoIcon(): Bitmap? = ssoIconFile.takeIf(File::exists)?.let { BitmapFactory.decodeFile(it.path) }
@@ -82,8 +84,9 @@ class BrandStore(context: Context, val origin: String, storageKey: String) {
 
   private fun check(json: String): LoginBrand? = loginBrand(json, origin, Locale.getDefault().toLanguageTag())
 
-  private fun saveLogo(maybeUrl: String?, isDark: Boolean) {
-    val file = logoFile(isDark)
+  private fun decoded(file: File): Bitmap? = file.takeIf(File::exists)?.let { BitmapFactory.decodeFile(it.path) }
+
+  private fun saveImage(maybeUrl: String?, file: File) {
     if (maybeUrl == null) {
       file.delete()
       return
@@ -93,12 +96,14 @@ class BrandStore(context: Context, val origin: String, storageKey: String) {
       directory.mkdirs()
       file.writeBytes(bytes)
     } catch (failure: IOException) {
-      // The previous logo (or none) stays; the name is shown either way.
-      Log.i(TAG, "logo not reachable: ${failure.javaClass.simpleName}")
+      // The previous image (or none) stays; the name is shown either way.
+      Log.i(TAG, "brand image not reachable: ${failure.javaClass.simpleName}")
     }
   }
 
   private fun logoFile(isDark: Boolean) = File(directory, if (isDark) "logo_dark" else "logo")
+
+  private fun iconFile(isDark: Boolean) = File(directory, if (isDark) "icon_dark" else "icon")
 }
 
 private fun download(url: String, maxBytes: Int): ByteArray {

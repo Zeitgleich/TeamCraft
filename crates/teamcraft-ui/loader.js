@@ -28,13 +28,19 @@ const OTHER_BRAND_CROSSFADE_AT = 0.45;
 const CROSSFADE_BLUR = 'blur(3px)';
 // Nothing to fly to (a screen without a brand): the mark rises towards the viewer and fades.
 const DEPART_MS = 320;
-const DEPART_EASING = 'cubic-bezier(0.05, 0.7, 0.1, 1)';
+const EMPHASIZED_EASING = 'cubic-bezier(0.05, 0.7, 0.1, 1)';
+// The screen goes after this even if the handover never finishes (a hidden tab).
+const HANDOVER_TIMEOUT_MS = 2000;
 // The handover waits for the mark to finish assembling, but never longer than this.
 const MAX_ASSEMBLY_WAIT_MS = 900;
 // Where the app shows the brand, most specific first: the sign-in card's mark, logo or name, then the
 // top bar's logo or name (login.rs, top_bar.rs).
 const BRAND_TARGETS = ['.auth-brand img', '.auth-brand .auth-brand-name', '.top-bar .brand-logo', '.top-bar .brand-name'];
 const PRODUCT_MARK_CLASS = 'auth-product-icon';
+// Beside the product's tile, the server brand's tile (login.rs): it slides out from behind the
+// product's as the mark lands.
+const BRAND_TILE = '.auth-tile-brand';
+const BRAND_TILE_MS = 420;
 
 export default function loader() {
   const root = document.getElementById('tc-loader');
@@ -82,8 +88,9 @@ async function handOver(root) {
   root.classList.add('is-handing-over');
   root.setAttribute('aria-busy', 'false');
   const animation = target ? flyInto(mark, target) : depart(mark);
-  // A hidden tab may never finish the animation; the screen goes either way.
-  const done = Promise.race([animation.finished, delay(FLIGHT_MS + 250)]).catch(() => {});
+  // A hidden tab may never finish the animation; the screen goes either way (it no longer takes
+  // input meanwhile).
+  const done = Promise.race([animation.finished, delay(HANDOVER_TIMEOUT_MS)]).catch(() => {});
   done.then(() => root.remove());
 }
 
@@ -100,6 +107,7 @@ function flyInto(mark, target) {
   const at = isSameMark ? SAME_MARK_CROSSFADE_AT : OTHER_BRAND_CROSSFADE_AT;
   const blur = isSameMark ? 'blur(0px)' : CROSSFADE_BLUR;
   const timing = { duration: FLIGHT_MS, fill: 'forwards' };
+  if (isSameMark) revealBrandTile(target);
   target.animate(
     [
       { opacity: 0, filter: blur },
@@ -122,13 +130,24 @@ function flyInto(mark, target) {
   );
 }
 
+function revealBrandTile(target) {
+  const tile = target.closest('.auth-brand')?.querySelector(BRAND_TILE);
+  tile?.animate(
+    [
+      { transform: 'translateX(-70%) scale(0.85)', opacity: 0 },
+      { transform: 'none', opacity: 1 },
+    ],
+    { duration: BRAND_TILE_MS, delay: FLIGHT_MS * SAME_MARK_CROSSFADE_AT, easing: EMPHASIZED_EASING, fill: 'backwards' },
+  );
+}
+
 function depart(mark) {
   return mark.animate(
     [
       { transform: 'none', opacity: 1, filter: 'blur(0px)' },
       { transform: 'scale(1.15)', opacity: 0, filter: CROSSFADE_BLUR },
     ],
-    { duration: DEPART_MS, easing: DEPART_EASING, fill: 'forwards' },
+    { duration: DEPART_MS, easing: EMPHASIZED_EASING, fill: 'forwards' },
   );
 }
 

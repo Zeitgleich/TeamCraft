@@ -152,6 +152,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   fun brandLogo(isDark: Boolean): Bitmap? = maybeBrandStore?.logo(isDark)
 
+  fun brandIcon(isDark: Boolean): Bitmap? = maybeBrandStore?.icon(isDark)
+
   /**
    * Decides where the app starts: the stored server, the managed (or build default) server to
    * confirm, or the server entry. The managed configuration is read again every time.

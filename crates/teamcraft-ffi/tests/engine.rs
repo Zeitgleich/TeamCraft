@@ -108,6 +108,10 @@ mod brand {
     )
     .unwrap();
     assert_eq!(brand.display_name, "Brand A");
+    assert!(!brand.is_product);
+    // The icon is not the brand endpoint's own asset: dropped, the tile shows the initial.
+    assert_eq!(brand.maybe_icon_url, None);
+    assert_eq!(brand.maybe_icon_dark_url, None);
     assert_eq!(brand.maybe_title.as_deref(), Some("Willkommen"));
     assert_eq!(brand.maybe_text, None);
     assert_eq!(
@@ -121,6 +125,14 @@ mod brand {
       Some("https://a.example.com/privacy")
     );
     assert_eq!(brand.links.maybe_terms, None);
+  }
+
+  #[test]
+  fn the_builtin_brand_is_the_product() {
+    let json = r#"{"id": "teamcraft", "display_name": "TeamCraft", "origin": "", "assets": {},
+      "colors": {"light": {}, "dark": {}}, "login_title": {}, "links": {}}"#;
+    let brand = login_brand(json.into(), "https://chat.example.com".into(), "en".into()).unwrap();
+    assert!(brand.is_product);
   }
 
   #[test]

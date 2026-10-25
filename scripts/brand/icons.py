@@ -136,7 +136,7 @@ def web() -> list[Path]:
 
 
 def ios() -> list[Path]:
-  """The single-size app icon with its dark and tinted appearances, and the launch screen logo."""
+  """The single-size app icon with its dark and tinted appearances."""
   icons = IOS / "AppIcon.appiconset"
   out = [
     render(tile(LIGHT_BACKPLATE, "full", width=0.76), 1024, icons / "icon-1024.png", opaque=True),
@@ -157,9 +157,7 @@ def ios() -> list[Path]:
     "info": {"author": "xcode", "version": 1},
   }
   (icons / "Contents.json").write_text(json.dumps(contents, indent=2) + "\n")
-  launch = IOS / "LaunchLogo.imageset"
-  for scale in (1, 2, 3):
-    out.append(render(mark_only(), 120 * scale, launch / f"logo@{scale}x.png"))
+  # The launch screen is the background only; the app's loading screen draws the mark (#463).
   return out
 
 

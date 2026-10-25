@@ -14,6 +14,9 @@ final class BrandStore {
   private(set) var brand: LoginBrand?
   private(set) var logo: UIImage?
   private(set) var darkLogo: UIImage?
+  /// The brand's square icon, for its tile beside TeamCraft's on the sign-in screen (issue #463).
+  private(set) var icon: UIImage?
+  private(set) var darkIcon: UIImage?
   /// The server the brand belongs to; `nil` before a server is chosen.
   private(set) var maybeAddress: ServerAddress?
 
@@ -34,11 +37,15 @@ final class BrandStore {
     brand = nil
     logo = nil
     darkLogo = nil
+    icon = nil
+    darkIcon = nil
     guard let address else { return }
     if let json = UserDefaults.standard.string(forKey: Self.cacheKey(address)) {
       brand = check(json, address: address)
-      logo = cachedImage(address, isDark: false)
-      darkLogo = cachedImage(address, isDark: true)
+      logo = cachedImage(address, name: "logo")
+      darkLogo = cachedImage(address, name: "logo_dark")
+      icon = cachedImage(address, name: "icon")
+      darkIcon = cachedImage(address, name: "icon_dark")
     }
     if let maybeInitial { brand = maybeInitial }
   }
@@ -55,12 +62,16 @@ final class BrandStore {
     }
     UserDefaults.standard.set(json, forKey: Self.cacheKey(address))
     brand = checked
-    let light = await saveLogo(checked.maybeLogoUrl, address: address, isDark: false)
-    let dark = await saveLogo(checked.maybeLogoDarkUrl, address: address, isDark: true)
-    // Another server may have been selected while the logos loaded.
+    let light = await saveImage(checked.maybeLogoUrl, address: address, name: "logo")
+    let dark = await saveImage(checked.maybeLogoDarkUrl, address: address, name: "logo_dark")
+    let lightIcon = await saveImage(checked.maybeIconUrl, address: address, name: "icon")
+    let darkIconImage = await saveImage(checked.maybeIconDarkUrl, address: address, name: "icon_dark")
+    // Another server may have been selected while the images loaded.
     guard isSelected(address) else { return }
     logo = light
     darkLogo = dark
+    icon = lightIcon
+    darkIcon = darkIconImage
   }
 
   private static func cacheKey(_ address: ServerAddress) -> String {
@@ -76,28 +87,28 @@ final class BrandStore {
     return loginBrand(responseJson: json, serverUrl: address.origin, language: language)
   }
 
-  private func saveLogo(_ maybeURL: String?, address: ServerAddress, isDark: Bool) async -> UIImage? {
-    let file = logoFile(address, isDark: isDark)
+  private func saveImage(_ maybeURL: String?, address: ServerAddress, name: String) async -> UIImage? {
+    let file = imageFile(address, name: name)
     guard let maybeURL, let url = URL(string: maybeURL) else {
       try? FileManager.default.removeItem(at: file)
       return nil
     }
     guard let data = await download(url, maxBytes: Self.maxLogoBytes), let image = UIImage(data: data) else {
-      // The previous logo (or none) stays; the name is shown either way.
-      return cachedImage(address, isDark: isDark)
+      // The previous image (or none) stays; the name is shown either way.
+      return cachedImage(address, name: name)
     }
     try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
     try? data.write(to: file, options: .atomic)
     return image
   }
 
-  private func cachedImage(_ address: ServerAddress, isDark: Bool) -> UIImage? {
-    UIImage(contentsOfFile: logoFile(address, isDark: isDark).path(percentEncoded: false))
+  private func cachedImage(_ address: ServerAddress, name: String) -> UIImage? {
+    UIImage(contentsOfFile: imageFile(address, name: name).path(percentEncoded: false))
   }
 
-  private func logoFile(_ address: ServerAddress, isDark: Bool) -> URL {
+  private func imageFile(_ address: ServerAddress, name: String) -> URL {
     URL.applicationSupportDirectory.appending(path: "brand").appending(path: address.storageKey)
-      .appending(path: isDark ? "logo_dark" : "logo")
+      .appending(path: name)
   }
 
   private func download(_ url: URL, maxBytes: Int) async -> Data? {

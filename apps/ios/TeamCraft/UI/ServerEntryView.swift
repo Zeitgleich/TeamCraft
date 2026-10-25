@@ -121,10 +121,41 @@ struct BrandLogo: View {
         .frame(maxWidth: 220, maxHeight: 96)
         .accessibilityLabel(Text(verbatim: brand.brand?.displayName ?? ""))
     } else {
-      Image(systemName: "bubble.left.and.bubble.right.fill")
-        .font(.system(size: 56))
-        .foregroundStyle(Theme.accent)
+      StillMarkView()
+        .frame(width: 72, height: 72)
         .accessibilityHidden(true)
     }
+  }
+}
+
+/// A server brand on the sign-in screen: TeamCraft's tile and the brand's beside it, like two app
+/// icons (issue #463, as on the web). Without an icon, the brand's initial on its accent.
+struct BrandTiles: View {
+  @Environment(\.colorScheme) private var colorScheme
+  let brand: BrandStore
+
+  var body: some View {
+    HStack(spacing: 12) {
+      tile(Theme.surface) { StillMarkView().padding(8) }
+      if let icon = (colorScheme == .dark ? brand.darkIcon : nil) ?? brand.icon {
+        tile(Theme.surface) { Image(uiImage: icon).resizable().scaledToFill() }
+      } else {
+        tile(Theme.accent) {
+          Text(verbatim: String((brand.brand?.displayName ?? "").prefix(1)).uppercased())
+            .font(.title.bold())
+            .foregroundStyle(Theme.onAccent)
+        }
+      }
+    }
+    .accessibilityHidden(true)
+  }
+
+  private func tile(_ background: Color, @ViewBuilder content: () -> some View) -> some View {
+    content()
+      .frame(width: 64, height: 64)
+      .background(background)
+      .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+      .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Theme.border))
+      .shadow(color: .black.opacity(0.1), radius: 8, y: 4)
   }
 }

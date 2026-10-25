@@ -3,18 +3,23 @@ package de.zeitgleich.teamcraft.ui.screens
 import android.graphics.Bitmap
 import androidx.annotation.StringRes
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -38,14 +43,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.autofill.ContentType
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.contentType
 import androidx.compose.ui.semantics.heading
@@ -71,6 +81,12 @@ import uniffi.teamcraft_ffi.SignInPageInfo
 private val CARD_MAX_WIDTH = 440.dp
 private val SSO_ICON_SIZE = 20.dp
 private val BUTTON_MIN_HEIGHT = 48.dp
+/** The brand tiles: app-icon sized squares, the web's 64 px with its 16 px corners. */
+private val TILE_SIZE = 64.dp
+private val TILE_SHAPE = RoundedCornerShape(16.dp)
+private val TILE_GAP = 12.dp
+private val TILE_PADDING = 8.dp
+private val TILE_ELEVATION = 4.dp
 
 private val EMAIL_KEYBOARD = KeyboardOptions(
   keyboardType = KeyboardType.Email,
@@ -94,6 +110,7 @@ private val CODE_KEYBOARD = KeyboardOptions(
 fun LoginScreen(
   maybeBrand: LoginBrand?,
   maybeLogo: Bitmap?,
+  maybeIcon: Bitmap?,
   maybePage: SignInPageInfo?,
   maybeSsoIcon: Bitmap?,
   serverHost: String,
@@ -110,7 +127,7 @@ fun LoginScreen(
       verticalArrangement = Arrangement.spacedBy(16.dp),
       horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-      BrandHeader(maybeBrand, maybeLogo, name)
+      BrandHeader(maybeBrand, maybeLogo, maybeIcon, name)
       maybeError?.let { SignInError(it) }
       if (maybePage == null) {
         val loading = stringResource(R.string.sign_in_loading)
@@ -134,9 +151,10 @@ fun LoginScreen(
   }
 }
 
-/** Logo, heading and the brand's text (or the default hint). */
+/** Tiles, logo, heading and the brand's text (or the default hint). */
 @Composable
-private fun BrandHeader(maybeBrand: LoginBrand?, maybeLogo: Bitmap?, name: String) {
+private fun BrandHeader(maybeBrand: LoginBrand?, maybeLogo: Bitmap?, maybeIcon: Bitmap?, name: String) {
+  if (maybeBrand != null && !maybeBrand.isProduct) BrandTiles(maybeIcon, name)
   if (maybeLogo != null) {
     Image(
       maybeLogo.asImageBitmap(),
@@ -155,6 +173,48 @@ private fun BrandHeader(maybeBrand: LoginBrand?, maybeLogo: Bitmap?, name: Strin
     style = MaterialTheme.typography.bodyMedium,
     textAlign = TextAlign.Center,
   )
+}
+
+/**
+ * A server brand: TeamCraft's tile and the brand's beside it, like two app icons (issue #463, as
+ * on the web). Without an icon, the brand's initial on its accent.
+ */
+@Composable
+private fun BrandTiles(maybeIcon: Bitmap?, name: String) {
+  Row(horizontalArrangement = Arrangement.spacedBy(TILE_GAP), modifier = Modifier.clearAndSetSemantics {}) {
+    Tile(MaterialTheme.colorScheme.surfaceVariant) { StillMark(Modifier.padding(TILE_PADDING).fillMaxSize()) }
+    if (maybeIcon != null) {
+      Tile(MaterialTheme.colorScheme.surfaceVariant) {
+        Image(
+          maybeIcon.asImageBitmap(),
+          contentDescription = null,
+          contentScale = ContentScale.Crop,
+          modifier = Modifier.fillMaxSize(),
+        )
+      }
+    } else {
+      Tile(MaterialTheme.colorScheme.primary) {
+        Text(
+          name.take(1).uppercase(),
+          style = MaterialTheme.typography.headlineSmall,
+          color = MaterialTheme.colorScheme.onPrimary,
+        )
+      }
+    }
+  }
+}
+
+@Composable
+private fun Tile(background: Color, content: @Composable () -> Unit) {
+  Box(
+    Modifier
+      .size(TILE_SIZE)
+      .shadow(TILE_ELEVATION, TILE_SHAPE)
+      .clip(TILE_SHAPE)
+      .background(background)
+      .border(1.dp, MaterialTheme.colorScheme.outlineVariant, TILE_SHAPE),
+    contentAlignment = Alignment.Center,
+  ) { content() }
 }
 
 /** The methods in the server's order, with "or" between them. */

@@ -16,6 +16,9 @@ const MAX_NAME_CHARS: usize = 100;
 const MAX_TEXT_CHARS: usize = 1000;
 /// Name shown while no brand is known (and for a server without brands).
 const FALLBACK_NAME: &str = "TeamCraft";
+/// The id of the server's built-in brand, which it serves when no brand is configured
+/// (teamcraft-server brand.rs).
+const BUILTIN_BRAND_ID: &str = "teamcraft";
 
 /// A checked brand, ready to apply.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +130,12 @@ impl BrandView {
   /// Whether this is the product's own look ([`BrandView::fallback`]): no server brand is known.
   pub fn is_fallback(&self) -> bool {
     *self == Self::fallback()
+  }
+
+  /// Whether the product's own look applies: no server brand is known, or the server serves its
+  /// built-in brand (no brand configured), which has no images of its own.
+  pub fn is_product(&self) -> bool {
+    self.is_fallback() || (self.id == BUILTIN_BRAND_ID && self.assets.is_empty())
   }
 
   /// The browser tab's icon: the favicon, else the icon, each in the theme's variant.
@@ -255,6 +264,22 @@ mod tests {
     with_icon.assets = BTreeMap::from([("icon".to_owned(), "/api/v1/brand/assets/icon".to_owned())]);
     assert!(!BrandView::from_response(with_icon, "").unwrap().has_wordmark());
     assert!(BrandView::fallback().is_fallback() && !BrandView::fallback().has_wordmark());
+  }
+
+  #[test]
+  fn the_builtin_brand_without_images_is_the_product() {
+    let mut builtin = response();
+    builtin.id = "teamcraft".into();
+    builtin.assets.clear();
+    assert!(
+      BrandView::from_response(builtin.clone(), "")
+        .unwrap()
+        .is_product()
+    );
+    builtin.assets = BTreeMap::from([("icon".to_owned(), "/api/v1/brand/assets/icon".to_owned())]);
+    assert!(!BrandView::from_response(builtin, "").unwrap().is_product());
+    assert!(!BrandView::from_response(response(), "").unwrap().is_product());
+    assert!(BrandView::fallback().is_product());
   }
 
   fn response() -> BrandResponse {
