@@ -1731,8 +1731,18 @@ impl Core {
       return;
     };
     // A closed reply channel (the caller gave up) needs nothing.
-    let deliver = move |opened: Result<SecretBytes, String>| drop(reply.send(opened));
-    self.downloads.view(reference, priority.into(), Box::new(deliver));
+    // The caller dropping its end (row scrolled away, viewer closed) cancels a file still waiting.
+    let reply = Rc::new(RefCell::new(Some(reply)));
+    let asker = reply.clone();
+    let deliver = move |opened: Result<SecretBytes, String>| {
+      if let Some(reply) = reply.borrow_mut().take() {
+        drop(reply.send(opened));
+      }
+    };
+    let is_wanted = move || asker.borrow().as_ref().is_some_and(|reply| !reply.is_canceled());
+    self
+      .downloads
+      .view_while(reference, priority.into(), Box::new(deliver), Box::new(is_wanted));
   }
 
   /// Starts the downloads that may run now.
