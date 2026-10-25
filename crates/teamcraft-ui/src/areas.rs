@@ -161,6 +161,8 @@ where
         .flatten()
         .unwrap_or_else(|| ().into_any()),
       Phase::Failed => {
+        // A part of the start that failed to load is the first view: the loading screen must go.
+        crate::startup::first_view();
         let retry = move |_| start.with_value(|start| start());
         let maybe_close = (place == Place::Overlay).then(|| {
           let maybe_state = use_context::<AppState>();

@@ -1,11 +1,13 @@
 // Trunk initializer of the web client: drives the loading screen of index.html while the wasm loads
-// and starts, and removes it once the app is mounted.
+// and starts, and removes it once the app shows its first real view.
 //
 // The screen itself is plain HTML and CSS, so it is painted before this runs, with the TeamCraft mark
 // assembling and typing. This adds what needs script: the saved theme, the brand's name as the page
-// title, download progress, an error with a retry button, and the handover: once the app is mounted,
-// the mark flies into the app's own brand (the server's logo, or the TeamCraft mark when no brand is
-// configured) while the screen fades away (issue #463). Its texts are the `loader-*` messages of
+// title, download progress, an error with a retry button, and the handover. The screen stays while the
+// app checks the session and opens the account's data, until the app says its first view is there
+// (startup.rs): the sign-in card, then the mark flies into the card's TeamCraft mark (issue #463), or
+// the chat, which the screen crossfades into. One screen from the start to the app, no card between.
+// Its texts are the `loader-*` messages of
 // i18n/*.ftl, which scripts/finish-loader.sh puts into init.js as `globalThis.teamcraftLoaderTexts`
 // (this file is pinned by its integrity value, init.js is not).
 
@@ -16,30 +18,40 @@ const KEY_SERVER_URL = 'teamcraft.server_url';
 const BRAND_CACHE_PREFIX = 'teamcraft.brand:';
 const BRAND_PATH = '/api/v1/brand';
 const MAX_NAME_CHARS = 64;
+// The app's signal that its first view is on screen (startup.rs): an attribute on <html>, and an event.
+const FIRST_VIEW_ATTRIBUTE = 'data-first-view';
+const FIRST_VIEW_EVENT = 'teamcraft-first-view';
+// A session check that takes this long (a slow server, the identity provider) says so under the bar.
+const STATUS_AFTER_MS = 2500;
+// The app has not shown a view this long after it started: the screen goes anyway, so it can never
+// stick (the app's own screens show what it is waiting for).
+const FIRST_VIEW_TIMEOUT_MS = 15000;
 // The plain fade of style/loader.css (`.is-done`), for reduced motion.
 const FADE_MS = 180;
-// The handover: the mark moves across the screen (a strong ease-in-out, as the app's moves) and
-// lands where the app shows its brand. A target that is not the TeamCraft mark takes over earlier,
-// through a short blur, so the two read as one shape changing.
+// The handover onto the sign-in card: the mark moves across the screen (a strong ease-in-out, as the
+// app's moves) and lands on the card's TeamCraft mark, which swaps in for the last frames.
 const FLIGHT_MS = 560;
 const FLIGHT_EASING = 'cubic-bezier(0.77, 0, 0.175, 1)';
-const SAME_MARK_CROSSFADE_AT = 0.8;
-const OTHER_BRAND_CROSSFADE_AT = 0.45;
-const CROSSFADE_BLUR = 'blur(3px)';
-// Nothing to fly to (a screen without a brand): the mark rises towards the viewer and fades.
+const CROSSFADE_AT = 0.8;
+// Anything else (the chat, a card without the mark): the mark rises towards the viewer and fades
+// while the backdrop fades into the app.
 const DEPART_MS = 320;
+const DEPART_BLUR = 'blur(3px)';
 const EMPHASIZED_EASING = 'cubic-bezier(0.05, 0.7, 0.1, 1)';
-// The screen goes this long after the app mounted even if the handover never finishes (a hidden
-// tab, an error): the assembly wait, two frames and the flight, with room for a slow device.
+// The screen goes this long after the first view even if the handover never finishes (a hidden
+// tab, an error): the assembly wait, the images, two frames and the flight, with room for a slow
+// device.
 const HANDOVER_TIMEOUT_MS = 2500;
 // The handover waits for the mark to finish assembling, but never longer than this.
 const MAX_ASSEMBLY_WAIT_MS = 900;
-// Where the app shows the brand, most specific first: the sign-in card's mark, logo or name, then the
-// top bar's logo or name (login.rs, top_bar.rs).
-const BRAND_TARGETS = ['.auth-brand img', '.auth-brand .auth-brand-name', '.top-bar .brand-logo', '.top-bar .brand-name'];
-const PRODUCT_MARK_CLASS = 'auth-product-icon';
-// Beside the product's tile, the server brand's tile (login.rs): it slides out from behind the
-// product's as the mark lands.
+// ... and for the card's brand images, so the brand does not pop in after the mark landed.
+const MAX_IMAGE_WAIT_MS = 400;
+// The sign-in card's TeamCraft mark: alone without a server brand, in the product's tile beside
+// the brand's otherwise (login.rs).
+const MARK_TARGET = '.auth-brand .auth-product-icon';
+const CARD_BRAND = '.auth-brand';
+// Beside the product's tile, the server brand's tile: it slides out from behind the product's as
+// the mark lands.
 const BRAND_TILE = '.auth-tile-brand';
 const BRAND_TILE_MS = 420;
 
@@ -65,7 +77,7 @@ export default function loader() {
     },
     onComplete: () => {},
     onSuccess: () => {
-      if (root) handOver(root);
+      if (root) awaitFirstView(root);
     },
     onFailure: (error) => {
       console.error('the app could not be loaded', error);
@@ -74,10 +86,32 @@ export default function loader() {
   };
 }
 
-// The app mounted during init. Once the mark has assembled and the app has laid out, the mark flies
-// into the app's brand, or the screen just fades with reduced motion. Whatever happens on the way
-// (a hidden tab that draws no frames, an error), the screen is gone by the deadline, which starts
-// before anything is awaited.
+// The app mounted during init and now checks the session; the screen stays until its first view is
+// there, saying what it waits for after a while.
+function awaitFirstView(root) {
+  const status = setTimeout(() => showStatus(root), STATUS_AFTER_MS);
+  Promise.race([firstView(), delay(FIRST_VIEW_TIMEOUT_MS)]).then(() => {
+    clearTimeout(status);
+    handOver(root);
+  });
+}
+
+function firstView() {
+  if (document.documentElement.hasAttribute(FIRST_VIEW_ATTRIBUTE)) return Promise.resolve();
+  return new Promise((resolve) => addEventListener(FIRST_VIEW_EVENT, () => resolve(), { once: true }));
+}
+
+function showStatus(root) {
+  const status = root.querySelector('.tc-loader-status');
+  if (!status || root.classList.contains('has-failed')) return;
+  status.textContent = text('loader-checking');
+  root.classList.add('is-waiting');
+}
+
+// The first view is there. Once the mark has assembled and the view has laid out, the mark flies
+// onto the sign-in card's mark or departs into the app, or the screen just fades with reduced
+// motion. Whatever happens on the way (a hidden tab that draws no frames, an error), the screen is
+// gone by the deadline, which starts before anything is awaited.
 function handOver(root) {
   Promise.race([animateHandOver(root), delay(HANDOVER_TIMEOUT_MS)])
     .catch((error) => console.error('the loading screen could not hand over', error))
@@ -92,45 +126,27 @@ async function animateHandOver(root) {
     await delay(FADE_MS + 50);
     return;
   }
-  await assembled(mark);
+  await Promise.all([assembled(mark), brandImages()]);
   await nextFrame();
-  const target = brandTarget();
+  const target = markTarget();
   root.classList.add('is-handing-over');
   root.setAttribute('aria-busy', 'false');
   const animation = target ? flyInto(mark, target) : depart(mark);
   await animation.finished;
 }
 
-// The mark moves onto the target and scales to its height; the target, hidden meanwhile, takes over
-// at the end: the same mark swaps in the last frames, any other brand through a blurred crossfade.
-// Returns the movement, which ends last.
+// The mark moves onto the card's mark and scales to its size; the card's mark, hidden meanwhile,
+// swaps in for the last frames. Returns the movement, which ends last.
 function flyInto(mark, target) {
   const from = mark.getBoundingClientRect();
   const to = target.getBoundingClientRect();
   const scale = Math.min(to.width, to.height) / from.width;
   const dx = to.left + to.width / 2 - (from.left + from.width / 2);
   const dy = to.top + to.height / 2 - (from.top + from.height / 2);
-  const isSameMark = target.classList.contains(PRODUCT_MARK_CLASS);
-  const at = isSameMark ? SAME_MARK_CROSSFADE_AT : OTHER_BRAND_CROSSFADE_AT;
-  const blur = isSameMark ? 'blur(0px)' : CROSSFADE_BLUR;
   const timing = { duration: FLIGHT_MS, fill: 'forwards' };
-  if (isSameMark) revealBrandTile(target);
-  target.animate(
-    [
-      { opacity: 0, filter: blur },
-      { opacity: 0, filter: blur, offset: at },
-      { opacity: 1, filter: 'blur(0px)' },
-    ],
-    { duration: FLIGHT_MS },
-  );
-  mark.animate(
-    [
-      { opacity: 1, filter: 'blur(0px)' },
-      { opacity: 1, filter: 'blur(0px)', offset: at },
-      { opacity: 0, filter: blur },
-    ],
-    timing,
-  );
+  revealBrandTile(target);
+  target.animate([{ opacity: 0 }, { opacity: 0, offset: CROSSFADE_AT }, { opacity: 1 }], { duration: FLIGHT_MS });
+  mark.animate([{ opacity: 1 }, { opacity: 1, offset: CROSSFADE_AT }, { opacity: 0 }], timing);
   return mark.animate(
     [{ transform: 'none' }, { transform: `translate(${dx}px, ${dy}px) scale(${scale})` }],
     { ...timing, easing: FLIGHT_EASING },
@@ -144,7 +160,7 @@ function revealBrandTile(target) {
       { transform: 'translateX(-70%) scale(0.85)', opacity: 0 },
       { transform: 'none', opacity: 1 },
     ],
-    { duration: BRAND_TILE_MS, delay: FLIGHT_MS * SAME_MARK_CROSSFADE_AT, easing: EMPHASIZED_EASING, fill: 'backwards' },
+    { duration: BRAND_TILE_MS, delay: FLIGHT_MS * CROSSFADE_AT, easing: EMPHASIZED_EASING, fill: 'backwards' },
   );
 }
 
@@ -152,7 +168,7 @@ function depart(mark) {
   return mark.animate(
     [
       { transform: 'none', opacity: 1, filter: 'blur(0px)' },
-      { transform: 'scale(1.15)', opacity: 0, filter: CROSSFADE_BLUR },
+      { transform: 'scale(1.15)', opacity: 0, filter: DEPART_BLUR },
     ],
     { duration: DEPART_MS, easing: EMPHASIZED_EASING, fill: 'forwards' },
   );
@@ -166,17 +182,21 @@ function assembled(mark) {
   return Promise.race([Promise.all(entrance), delay(MAX_ASSEMBLY_WAIT_MS)]);
 }
 
-// The first of the app's brand elements that is laid out and on screen.
-function brandTarget() {
-  for (const selector of BRAND_TARGETS) {
-    for (const element of document.querySelectorAll(selector)) {
-      if (element.closest('#tc-loader')) continue;
-      const rect = element.getBoundingClientRect();
-      const isOnScreen = rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth;
-      if (rect.width > 0 && rect.height > 0 && isOnScreen) return element;
-    }
-  }
-  return null;
+// The sign-in card's brand images (the brand's tile and logo) have loaded or failed, or the wait is
+// over.
+function brandImages() {
+  const images = [...document.querySelectorAll(`${CARD_BRAND} img`)].filter((image) => !image.complete);
+  const loaded = images.map((image) => image.decode().catch(() => {}));
+  return Promise.race([Promise.all(loaded), delay(MAX_IMAGE_WAIT_MS)]);
+}
+
+// The sign-in card's TeamCraft mark, when it is laid out and on screen.
+function markTarget() {
+  const element = document.querySelector(MARK_TARGET);
+  if (!element) return null;
+  const rect = element.getBoundingClientRect();
+  const isOnScreen = rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth;
+  return rect.width > 0 && rect.height > 0 && isOnScreen ? element : null;
 }
 
 function prefersReducedMotion() {

@@ -186,6 +186,30 @@
   animation: tc-loader-pulse 1.2s ease-in-out infinite;
 }
 
+/* A long session check says so under the bar; until then the line keeps its place, so nothing
+   moves when it appears. */
+.tc-loader-status {
+  min-height: 1.45em;
+  margin: -16px 0 0;
+  color: var(--text-muted, #566175);
+  opacity: 0;
+  transition: opacity 240ms ease-out;
+}
+
+.tc-loader.is-waiting .tc-loader-status {
+  opacity: 1;
+}
+
+/* Fades with the bar; it keeps its place, so the mark does not move under the handover. */
+.tc-loader.is-handing-over .tc-loader-status {
+  opacity: 0;
+  transition-duration: 120ms;
+}
+
+.tc-loader.has-failed .tc-loader-status {
+  display: none;
+}
+
 .tc-loader-error {
   max-width: 360px;
   text-align: center;

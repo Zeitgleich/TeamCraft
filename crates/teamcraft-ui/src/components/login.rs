@@ -45,6 +45,16 @@ pub fn SessionGate(settings: Settings) -> impl IntoView {
   let control = SessionControl::new(auth::detect(config));
   provide_context(control);
   control.start();
+  // The loading screen covers the session check and the opening of the account's data: the first
+  // view it hands over to is a sign-in screen, or the shell (`Shell`).
+  Effect::new(move |_| {
+    let is_first_view = control
+      .state
+      .with(|state| !matches!(state, SessionState::Checking | SessionState::Ready(_)));
+    if is_first_view {
+      crate::startup::first_view_shown();
+    }
+  });
 
   view! {
     {move || match control.state.get() {
@@ -185,6 +195,8 @@ fn brand_mark(brand: RwSignal<BrandView>) -> AnyView {
   .into_any()
 }
 
+/// Normally hidden behind the loading screen (loader.js), which stays until the first real view; seen
+/// when a check outlasts it, or when the account's data opens again later.
 #[component]
 fn CheckingScreen() -> impl IntoView {
   let i18n = use_i18n();
@@ -1198,6 +1210,7 @@ fn DataGate(me: GetMeResponse, settings: Settings, control: SessionControl) -> i
       },
       Some(Err(error)) => {
         tracing::warn!(%error, "could not load the account data");
+        crate::startup::first_view();
         let detail = error.to_string();
         view! {
           <AuthFrame>

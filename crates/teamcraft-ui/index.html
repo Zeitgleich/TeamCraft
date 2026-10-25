@@ -39,8 +39,8 @@
   </head>
   <body>
     <!-- The loading screen: plain HTML and CSS (style/loader.css), so it shows before any script runs.
-         loader.js adds progress, the saved theme and errors, and hands over to the app once it is
-         mounted: the mark flies into the app's own brand (issue #463). -->
+         loader.js adds progress, the saved theme and errors, and hands over to the app once its first
+         view is there (the sign-in card or the chat; startup.rs), covering the session check. -->
     <div id="tc-loader" class="tc-loader" role="status" aria-busy="true">
       <!-- The TeamCraft mark (icons/mark.svg, scripts/brand/mark.py) inline, so its parts can move:
            the heads swirl in, the bodies rise, the speech bubble pops and types. Ids are prefixed so
@@ -79,6 +79,8 @@
         </g>
       </svg>
       <div class="tc-loader-bar" aria-hidden="true"><div class="tc-loader-progress"></div></div>
+      <!-- What a long start waits for (loader.js). -->
+      <p class="tc-loader-status"></p>
       <!-- Shown by CSS alone after a long wait, in case no script runs at all (init.js blocked or
            missing, no module support); loader.js removes it as soon as it starts. English only:
            without script there is no language choice. -->

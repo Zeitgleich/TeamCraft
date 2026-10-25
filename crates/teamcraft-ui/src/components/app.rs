@@ -124,6 +124,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   let change_source = backend.clone();
   let state = AppState::new(backend, settings, start);
   provide_context(state);
+  crate::startup::first_view();
   crate::viewport::watch_layout(state.layout);
   crate::viewport::track_visual_viewport();
   Effect::new(move |previous: Option<()>| {

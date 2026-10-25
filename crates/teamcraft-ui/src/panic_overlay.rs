@@ -50,6 +50,7 @@ fn show(info: &PanicHookInfo<'_>) {
     .and_then(|root| root.get_attribute("lang"))
     .and_then(|tag| Locale::from_tag(&tag))
     .unwrap_or(Locale::En);
+  crate::startup::remove_loading_screen();
   // Errors building the overlay are ignored: there is nothing left to report them to.
   let _ = build(&document, locale, &details(info), &reload_href());
 }

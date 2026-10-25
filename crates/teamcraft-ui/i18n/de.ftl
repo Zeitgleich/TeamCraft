@@ -11,6 +11,7 @@ loader-loading = Wird geladen
 loader-failed-title = Die App konnte nicht geladen werden
 loader-failed-body = Prüfe deine Verbindung und versuche es dann erneut.
 loader-retry = Erneut versuchen
+loader-checking = Sitzung wird geprüft …
 
 ## Kopfleiste und Kontomenü
 search-placeholder = Suchen

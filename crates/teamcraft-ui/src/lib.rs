@@ -79,6 +79,7 @@ pub mod slash;
 pub mod space_images;
 #[cfg(target_arch = "wasm32")]
 pub mod speaker_test;
+pub mod startup;
 pub mod state;
 pub mod sync_reads;
 pub mod toast_motion;

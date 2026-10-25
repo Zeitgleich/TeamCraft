@@ -345,8 +345,9 @@ brand's logo or name (§5). The server's built-in brand (no brand configured) co
 
 Loading screens always show the mark, animated (issue #463): the heads swirl in, the bodies rise,
 the speech bubble pops and types. The web (`index.html`, `style/loader.css`) animates the inlined
-mark in CSS before any script runs; once the app is mounted, `loader.js` flies it into the sign-in
-card's tile (or the top bar's logo) while the screen fades. Android and iOS draw the same parts with
+mark in CSS before any script runs. It stays through the session check until the app's first view
+is there; then `loader.js` flies the mark into the sign-in card's tile, or the screen crossfades into
+the chat (no card in between). Android and iOS draw the same parts with
 the same timing on a canvas (`LoadingMark.kt`, `LoadingMarkView.swift`); on Android 12+ the system
 splash plays the assembly as an animated vector and the app takes over at its clock and place. iOS's
 launch screen is the background only, so the assembly starts there. Reduced motion: no movement,
