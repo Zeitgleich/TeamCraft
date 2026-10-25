@@ -250,15 +250,21 @@ fn DirectItem(conversation: Conversation) -> impl IntoView {
     .and_then(|user| user.maybe_custom_status)
     .map(|status| status.emoji);
   let name = conversation.name.clone();
+  let is_muted = conversation.is_muted;
   let aria_name = name.clone();
   let label = move || {
-    if count > 0 {
+    let label = if count > 0 {
       i18n.t_with(
         "dm-item-unread",
         &[("name", &aria_name), ("count", &count.to_string())],
       )
     } else {
       aria_name.clone()
+    };
+    if is_muted {
+      i18n.t_with("sidebar-item-muted-label", &[("label", &label)])
+    } else {
+      label
     }
   };
 
@@ -282,6 +288,7 @@ fn DirectItem(conversation: Conversation) -> impl IntoView {
           .filter(|other| state.read(|backend| backend.is_in_call(*other)))
           .map(|_| view! { <span class="sb-call" title=i18n.t("presence-in-call")><Icon name=IconName::Phone /></span> })
       }}
+      {is_muted.then(|| view! { <span class="sb-muted-icon" title=i18n.t("sidebar-item-muted")><Icon name=IconName::BellOff /></span> })}
       {(count > 0).then(|| view! { <span class="badge-count" aria-hidden="true">{count}</span> })}
     </button>
   }

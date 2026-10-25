@@ -15,12 +15,18 @@ pub fn Modal(
   #[prop(into)]
   labelled_by: String,
   #[prop(optional, into)] class: &'static str,
+  /// Whether the dialog fades out when it closes. The quick switcher, opened from the keyboard many
+  /// times a day, comes and goes at once (#359).
+  #[prop(default = true)]
+  has_exit_motion: bool,
   children: Children,
 ) -> impl IntoView {
   let state = use_app_state();
   let dialog = NodeRef::<html::Div>::new();
   let backdrop = NodeRef::<html::Div>::new();
-  use_leave_ghost(backdrop);
+  if has_exit_motion {
+    use_leave_ghost(backdrop);
+  }
   let previously_focused = web_sys::window()
     .and_then(|window| window.document())
     .and_then(|document| document.active_element())

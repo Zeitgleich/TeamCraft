@@ -20,6 +20,7 @@ use crate::components::message_actions::{
 };
 use crate::i18n::use_i18n;
 use crate::model::{Message, MessageId, thread_id_of};
+use crate::motion::PopoverSide;
 use crate::state::use_app_state;
 
 /// Quick reactions until the user has used emoji of their own.
@@ -276,6 +277,12 @@ fn ToolbarBar(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
   let is_saved = move || extras.get().is_some_and(|extras| extras.is_saved);
   let react_button = NodeRef::<html::Button>::new();
   let more_button = NodeRef::<html::Button>::new();
+  let placement = move || {
+    more_button
+      .get_untracked()
+      .map(|button| menu_placement(&button))
+      .unwrap_or_default()
+  };
   let run = move |action: MessageAction| {
     host.close_menu();
     message.with_value(|message| run_message_action(action, message, extras.get_untracked().as_ref()));
@@ -415,8 +422,11 @@ fn ToolbarBar(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
       <Show when=move || host.open.get() == OpenMenu::More fallback=|| ()>
         <div class="popover-backdrop" on:mousedown=move |_| host.close_menu()></div>
         <div
-          class="popover msg-menu"
-          style=move || more_button.get_untracked().map(|button| menu_placement(&button)).unwrap_or_default()
+          class=move || format!("popover msg-menu {}", placement().side.class())
+          style:position="fixed"
+          style:right=move || placement().right
+          style:top=move || placement().top
+          style:bottom=move || placement().bottom
           role="menu"
           aria-label=move || i18n.t("message-more")
           node_ref=menu
@@ -454,7 +464,7 @@ fn ToolbarBar(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
 
 /// Where the "more" menu goes: fixed to the window (the list would clip it), below its button or
 /// above it when the window has no room below.
-fn menu_placement(button: &web_sys::Element) -> String {
+fn menu_placement(button: &web_sys::Element) -> MenuPlacement {
   let rect = button.get_bounding_client_rect();
   let (width, height) = web_sys::window()
     .map(|window| {
@@ -464,18 +474,33 @@ fn menu_placement(button: &web_sys::Element) -> String {
       (read(window.inner_width()), read(window.inner_height()))
     })
     .unwrap_or((1024.0, 768.0));
-  let right = (width - rect.right()).max(0.0);
+  let right = format!("{}px", (width - rect.right()).max(0.0));
   if height - rect.bottom() >= MENU_HEIGHT_PX || rect.top() < height - rect.bottom() {
-    format!(
-      "position: fixed; right: {right}px; top: {}px; bottom: auto;",
-      rect.bottom() + MENU_GAP_PX
-    )
+    MenuPlacement {
+      right,
+      top: format!("{}px", rect.bottom() + MENU_GAP_PX),
+      bottom: "auto".into(),
+      side: PopoverSide::Below,
+    }
   } else {
-    format!(
-      "position: fixed; right: {right}px; top: auto; bottom: {}px;",
-      height - rect.top() + MENU_GAP_PX
-    )
+    MenuPlacement {
+      right,
+      top: "auto".into(),
+      bottom: format!("{}px", height - rect.top() + MENU_GAP_PX),
+      side: PopoverSide::Above,
+    }
   }
+}
+
+/// Where the "More" menu sits, as CSSOM values: the CSP (`style-src 'self'`) blocks `style`
+/// attributes.
+#[derive(Clone, Default)]
+struct MenuPlacement {
+  right: String,
+  top: String,
+  bottom: String,
+  /// The side it opens on, so it grows out of the button (#359).
+  side: PopoverSide,
 }
 
 /// Arrow keys, Home and End move between the entries of a menu (and not between the messages

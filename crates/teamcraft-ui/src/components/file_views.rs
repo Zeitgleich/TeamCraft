@@ -26,7 +26,9 @@ use crate::i18n::{I18n, use_i18n};
 use crate::lightbox::{MediaKey, MediaKind};
 use crate::media_cache::{self, Rendition};
 use crate::media_formats::animation_label;
-use crate::media_layout::{fit_picture, inline_size, loads_inline, thumbnail_size, thumbnail_type};
+use crate::media_layout::{
+  EmbedImage, fit_picture, inline_size, loads_inline, thumbnail_size, thumbnail_type,
+};
 use crate::model::{ConversationId, MessageId};
 use crate::object_url::{FetchError, ObjectUrl};
 use crate::state::{AppState, Overlay, use_app_state};
@@ -166,19 +168,27 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
   let file = StoredValue::new(file);
   let name = file.with_value(|file| file.file_name.clone());
   let label = name.clone();
-  // Follows the "Image size" setting.
-  let style = move || {
+  // Follows the "Image size" setting. Set as CSSOM properties, not a `style` attribute: the CSP
+  // (`style-src 'self'`) blocks those.
+  let maybe_size = move || {
     if layout != TileLayout::Single {
-      return String::new();
+      return None;
     }
     let image_size = state.settings.prefs.with(|prefs| prefs.display.image_size);
-    let maybe_size = match (maybe_dimensions, maybe_thumbnail_size) {
+    match (maybe_dimensions, maybe_thumbnail_size) {
       (Some(picture), _) => Some(fit_picture(picture.width, picture.height, image_size)),
       (None, Some((width, height))) => Some(inline_size(width, height, image_size)),
       (None, None) => None,
-    };
-    maybe_size
-      .map(|(width, height)| format!("--media-w: {width}px; --media-h: {height}px"))
+    }
+  };
+  let media_width = move || {
+    maybe_size()
+      .map(|(width, _)| format!("{width}px"))
+      .unwrap_or_default()
+  };
+  let media_height = move || {
+    maybe_size()
+      .map(|(_, height)| format!("{height}px"))
       .unwrap_or_default()
   };
   let maybe_hidden = match layout {
@@ -205,7 +215,8 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
         class:media-single=is_single
         class:has-size=has_size
         class:actions-pinned=move || is_pinned.get()
-        style=style
+        style:--media-w=media_width
+        style:--media-h=media_height
         on:pointerdown=move |ev: web_sys::PointerEvent| is_touch.set_value(ev.pointer_type() == "touch")
         on:contextmenu=move |ev: web_sys::MouseEvent| {
           // A long-press shows the actions; a right click keeps the browser's menu ("Save image as").
@@ -686,6 +697,7 @@ impl FileActions {
 #[component]
 pub fn LinkPreviewCard(preview: LinkPreview) -> impl IntoView {
   let i18n = use_i18n();
+  let layout = EmbedImage::of(preview.maybe_image.as_deref().and_then(thumbnail_size));
   let image = preview
     .maybe_image
     .as_deref()
@@ -693,23 +705,39 @@ pub fn LinkPreviewCard(preview: LinkPreview) -> impl IntoView {
   let title = preview.maybe_title.clone().unwrap_or_else(|| preview.url.clone());
   // Only web links open from here; anything else would be a way to run a script.
   let is_web_link = preview.url.starts_with("https://") || preview.url.starts_with("http://");
+  // The box is reserved from the header's ratio, so the card doesn't move when the picture loads.
+  let wide_image = image.clone().zip(match layout {
+    EmbedImage::Wide { aspect_ratio } => Some(aspect_ratio),
+    EmbedImage::Thumbnail => None,
+  });
+  let has_wide_image = wide_image.is_some();
+  let thumbnail = match layout {
+    EmbedImage::Thumbnail => image,
+    EmbedImage::Wide { .. } => None,
+  };
   view! {
-    <div class="link-preview">
-      {image.map(|url| view! { <img class="preview-image" src=url alt="" loading="lazy" /> })}
-      <div class="preview-text">
-        {preview.maybe_site_name.map(|site| view! { <span class="preview-site" translate="no">{site}</span> })}
+    <div class="embed-card" class:has-wide-image=has_wide_image>
+      <div class="embed-text">
+        {preview.maybe_site_name.map(|site| view! { <span class="embed-site" translate="no">{site}</span> })}
         {if is_web_link {
           view! {
-            <a href=preview.url.clone() target="_blank" rel="noopener noreferrer nofollow" translate="no" aria-label=move || i18n.t("link-open-new")>
+            <a class="embed-title" href=preview.url.clone() target="_blank" rel="noopener noreferrer nofollow" translate="no" aria-label=move || i18n.t("link-open-new")>
               {title}
             </a>
           }
           .into_any()
         } else {
-          view! { <span translate="no">{title}</span> }.into_any()
+          view! { <span class="embed-title" translate="no">{title}</span> }.into_any()
         }}
-        {preview.maybe_description.map(|text| view! { <span class="preview-description" translate="no">{text}</span> })}
+        {preview.maybe_description.map(|text| view! { <span class="embed-description" translate="no">{text}</span> })}
       </div>
+      {thumbnail.map(|url| view! { <img class="embed-thumb" src=url alt="" loading="lazy" /> })}
+      {wide_image
+        .map(|(url, ratio)| {
+          view! {
+            <img class="embed-wide" src=url alt="" loading="lazy" style:aspect-ratio=ratio.to_string() />
+          }
+        })}
     </div>
   }
 }

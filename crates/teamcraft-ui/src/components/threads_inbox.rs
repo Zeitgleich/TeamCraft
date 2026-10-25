@@ -59,7 +59,7 @@ pub fn ThreadsInbox() -> impl IntoView {
           _ => {
             view! {
               <div class="empty-detail">
-                <Icon name=IconName::Threads class="empty-icon" />
+                <Icon name=IconName::Threads class="threads-empty-icon" />
                 <p>{move || i18n.t("threads-select")}</p>
               </div>
             }

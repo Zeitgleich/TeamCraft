@@ -528,6 +528,19 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.space_members(space)
   }
 
+  fn channel_roles(&self, conversation: ConversationId) -> Vec<teamcraft_client_api::model::ChannelMember> {
+    self.chat.channel_roles(conversation)
+  }
+
+  fn set_channel_role(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    role: teamcraft_client_api::model::ChannelRole,
+  ) {
+    self.chat.set_channel_role(conversation, user, role);
+  }
+
   fn space_invites(&self, space: SpaceId) -> Vec<teamcraft_client_api::model::PendingInvite> {
     self.chat.space_invites(space)
   }
@@ -624,7 +637,9 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
       self
         .chat
         .thread(conversation, thread)
-        .last()
+        .iter()
+        // The root opens the list but isn't a reply; the server only accepts replies.
+        .rfind(|message| message.maybe_thread == Some(thread))
         .map(|message| message.id),
     ) else {
       return;

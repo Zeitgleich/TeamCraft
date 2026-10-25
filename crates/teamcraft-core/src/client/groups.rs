@@ -75,6 +75,12 @@ struct RejoinRecord {
   attempts: u32,
 }
 
+/// When a device was last added back to a group, in server time (the commit's).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct ReaddedRecord {
+  at_ms: i64,
+}
+
 /// A DM or group DM this device created whose MLS group doesn't hold everybody yet: kept until
 /// it does, so a setup cut short is finished later (issue #228).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -687,6 +693,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.join_from_welcome(welcome).await?;
       }
       if !page.has_more || page.messages.is_empty() {
+        self.are_welcomes_synced = true;
         return Ok(());
       }
     }
@@ -732,7 +739,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.post_pending_again(conversation).await?;
       catch_up = self.catch_up_mls(conversation, None).await?;
     }
-    if catch_up.is_behind {
+    // A request that went unanswered (members ignore repeats within `rejoin_cooldown`, issue
+    // #149): the cursor went past the entries that showed this device behind, the epoch still does.
+    let is_still_out = !catch_up.is_behind
+      && self.has_requested_rejoin(conversation)?
+      && self
+        .mls_epoch(conversation)?
+        .is_some_and(|epoch| epoch < catch_up.current_epoch);
+    if catch_up.is_behind || is_still_out {
       return self.request_rejoin(conversation, catch_up.current_epoch).await;
     }
     if !self.has_pending_commit(conversation)? {
@@ -807,7 +821,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       if let Some(request) = message.payload.as_slice().strip_prefix(REJOIN_REQUEST_MAGIC)
         && message.sender_device_id != self.account.device_id
       {
-        self.note_rejoin_request(conversation, request).await?;
+        let requested_at_ms = message.id.snowflake().unix_millis();
+        self
+          .note_rejoin_request(conversation, request, requested_at_ms)
+          .await?;
       }
       if let Some(user) = message
         .payload
@@ -941,7 +958,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         }
         if let Some(device) = update.maybe_rejoined {
           // Somebody answered that device's request already.
-          self.forget_rejoin_request(conversation, device)?;
+          self.note_device_readded(conversation, device, at_ms)?;
         }
         self.note_member_changes(conversation, &before)?;
         if let (Some(rejoined), Some(committer)) = (update.maybe_rejoined, update.maybe_committer) {
@@ -1301,7 +1318,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .store
       .delete(Table::AppliedChanges, &pending_post_key(conversation))?;
     if let Some(device) = update.maybe_rejoined {
-      self.forget_rejoin_request(conversation, device)?;
+      self.note_device_readded(conversation, device, entry.id.snowflake().unix_millis())?;
     }
     self.advance_cursor(conversation, entry)?;
     Ok(update)
@@ -1791,6 +1808,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       convert::conversation(conversation),
     ) {
       Ok(staged) => staged,
+      // The key package is gone (deleted after it expired or was replaced, e2ee.md §4.3.1): the
+      // members' tree holds this device's leaf, so it asks to be added back.
+      Err(MlsError::NoMatchingKeyPackage) => {
+        tracing::warn!(conversation_id = %conversation, "welcome for a key package this device no longer holds; asking to be added back");
+        return Ok(WelcomeJoin::KeyPackageSpent);
+      },
       Err(error) => return Ok(WelcomeJoin::Rejected(error)),
     };
     let mut users = Vec::new();
@@ -2162,11 +2185,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
-  /// Queues adding back a device that asked for it, if its request checks out here.
+  /// Queues adding back a device that asked for it, if its request checks out here and the device
+  /// wasn't added back within `rejoin_cooldown` before the request (server times, issue #149).
   async fn note_rejoin_request(
     &mut self,
     conversation: ConversationId,
     bytes: &[u8],
+    requested_at_ms: i64,
   ) -> Result<(), CoreError> {
     if !self.has_group(conversation)? {
       return Ok(());
@@ -2191,6 +2216,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
     };
     let device = convert::device_from_crypto(member.device_id)?;
+    if self.was_readded_recently(conversation, device, requested_at_ms)? {
+      tracing::warn!(
+        conversation_id = %conversation,
+        device_id = %device,
+        "ignored a rejoin request for a device added back shortly before"
+      );
+      return Ok(());
+    }
     let not_before_ms = self
       .now_ms()
       .saturating_add(self.commit_delay_ms(conversation, device)?);
@@ -2268,17 +2301,46 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(true)
   }
 
-  fn forget_rejoin_request(
+  /// A commit that added `device` back merged at `at_ms` (server time): a waiting request for it is
+  /// answered, and further requests are ignored for `rejoin_cooldown`.
+  fn note_device_readded(
     &mut self,
     conversation: ConversationId,
     device: GroupMember,
+    at_ms: i64,
   ) -> Result<(), CoreError> {
     let device = convert::device_from_crypto(device.device_id)?;
     self.store.delete(
       Table::PendingChanges,
       &PendingChange::rejoin_key(conversation, device),
     )?;
+    let key = readded_key(conversation, device);
+    let is_newer = records::get_json::<ReaddedRecord>(&self.store, Table::AppliedChanges, &key)?
+      .is_none_or(|record| record.at_ms < at_ms);
+    if is_newer {
+      records::put_json(&self.store, Table::AppliedChanges, &key, &ReaddedRecord { at_ms })?;
+    }
     Ok(())
+  }
+
+  /// Whether `device` was added back less than `rejoin_cooldown` before `requested_at_ms`, or after
+  /// it (an old request). A record past the cooldown is dropped.
+  fn was_readded_recently(
+    &mut self,
+    conversation: ConversationId,
+    device: DeviceId,
+    requested_at_ms: i64,
+  ) -> Result<bool, CoreError> {
+    let key = readded_key(conversation, device);
+    let Some(record) = records::get_json::<ReaddedRecord>(&self.store, Table::AppliedChanges, &key)? else {
+      return Ok(false);
+    };
+    let cooldown_ms = i64::try_from(self.settings.rejoin_cooldown.as_millis()).unwrap_or(i64::MAX);
+    if requested_at_ms >= record.at_ms.saturating_add(cooldown_ms) {
+      self.store.delete(Table::AppliedChanges, &key)?;
+      return Ok(false);
+    }
+    Ok(true)
   }
 
   pub(crate) fn advance_cursor(
@@ -2366,6 +2428,11 @@ fn dm_setup_key(conversation: ConversationId) -> String {
 /// Where this device notes that it asked to be added back to a group.
 pub(crate) fn rejoin_key(conversation: ConversationId) -> String {
   format!("rejoin/{conversation}")
+}
+
+/// Where a member notes when another device was last added back to the conversation's group.
+fn readded_key(conversation: ConversationId, device: DeviceId) -> String {
+  format!("readded/{conversation}/{device}")
 }
 
 #[cfg(test)]

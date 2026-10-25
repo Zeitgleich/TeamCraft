@@ -12,6 +12,7 @@ mod content_keys;
 mod credential;
 mod group;
 mod rejoin;
+mod stored_key_packages;
 
 use std::fmt;
 
@@ -27,6 +28,7 @@ pub use group::{
   PendingCommit, StagedJoin, VerifiedWelcome,
 };
 pub use rejoin::{RejoinRequest, SignedRejoinRequest, VerifiedRejoinRequest};
+pub use stored_key_packages::{StoredKeyPackage, delete_key_package, key_package_ref, stored_key_packages};
 
 use crate::identity::{DeviceKeyPair, IdentityError, SignedDeviceCertificate, VerifiedDevice};
 use crate::ids::{ConversationId, DeviceId, UserId};
@@ -113,6 +115,10 @@ pub enum MlsError {
   /// was lost, or state this device lost). It has to be added back instead.
   #[error("this device is in the group already")]
   AlreadyInGroup,
+  /// A welcome for a key package this device doesn't hold (any more): used up, deleted after it
+  /// expired or was replaced (e2ee.md §4.3.1), or never this device's. It has to be added back.
+  #[error("no key package of this device matches the welcome")]
+  NoMatchingKeyPackage,
   /// Joining by external commit: the group information is older than an epoch this user's devices
   /// already saw (a server handing out an old one).
   #[error("group information for epoch {epoch} is older than epoch {floor} seen before")]

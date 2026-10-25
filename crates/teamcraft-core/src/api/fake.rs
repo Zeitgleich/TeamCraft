@@ -163,6 +163,8 @@ struct State {
   created_channels: HashMap<(UserId, IdempotencyKey), ConversationId>,
   /// Create answers still to be lost after the resource was made (a timeout).
   create_answers_to_lose: u32,
+  /// Key package uploads still to be lost after the server stored them (a timeout).
+  key_package_answers_to_lose: u32,
   roster_log: Vec<WorkspaceLogEntryResponse>,
   policy_log: Vec<WorkspaceLogEntryResponse>,
   /// Larger attachments are refused like the server's `max_attachment_bytes`; `None`: no limit.
@@ -561,6 +563,11 @@ impl FakeServer {
   /// The next `count` space / channel creations are made, but the answer never reaches the client.
   pub fn lose_create_answers(&self, count: u32) {
     self.lock().create_answers_to_lose = count;
+  }
+
+  /// The next key package upload is stored, but the answer never reaches the client.
+  pub fn lose_next_key_package_answer(&self) {
+    self.lock().key_package_answers_to_lose += 1;
   }
 
   /// How many channels have this name.
@@ -1257,7 +1264,12 @@ impl ServerApi for FakeServerApi {
       if let Some(last_resort) = maybe_last_resort {
         packages.maybe_last_resort = Some(last_resort);
       }
-      Ok(packages.status(now))
+      let status = packages.status(now);
+      if state.key_package_answers_to_lose > 0 {
+        state.key_package_answers_to_lose -= 1;
+        return Err(ApiError::Network("fake answer lost".into()));
+      }
+      Ok(status)
     })
   }
 
@@ -1446,6 +1458,10 @@ impl ServerApi for FakeServerApi {
         &[me],
       );
       let entry = state.conversation_mut(id)?;
+      // The creator administers the channel.
+      if let Some((role, _)) = entry.members.get_mut(&me) {
+        *role = ChannelRole::Admin;
+      }
       entry.response.visibility = request.visibility.clone();
       entry.response.maybe_topic = request.maybe_topic.clone();
       entry.response.maybe_category_id = request.maybe_category_id;
@@ -1585,6 +1601,68 @@ impl ServerApi for FakeServerApi {
     request: &UpdateConversationMemberRequest,
   ) -> Result<(), ApiError> {
     self.with(|state, me| {
+      let is_instance_admin = state.admins.contains(&me);
+      if let Some(role) = &request.maybe_role {
+        // Like the server: channel admins and workspace admins manage roles; guests stay members;
+        // a channel keeps an admin. (The clients also never change their own role.)
+        if user == me {
+          return Err(ApiError::status(
+            403,
+            ErrorCode::Forbidden,
+            "people can't change their own role",
+          ));
+        }
+        let is_guest = state.user(user)?.kind == UserKind::Guest
+          || state
+            .conversation(conversation)?
+            .response
+            .maybe_space_id
+            .and_then(|space| state.space_roles.get(&(space, user)))
+            .is_some_and(|role| *role == SpaceRole::Guest);
+        if is_guest && *role != ChannelRole::Member {
+          return Err(ApiError::status(
+            400,
+            ErrorCode::InvalidRequest,
+            "guests can't be channel admins or moderators",
+          ));
+        }
+        let entry = state.actor_conversation_mut(conversation, me)?;
+        let is_channel_admin = entry
+          .members
+          .get(&me)
+          .is_some_and(|(own, _)| *own == ChannelRole::Admin);
+        if !is_channel_admin && !is_instance_admin {
+          return Err(ApiError::status(
+            403,
+            ErrorCode::Forbidden,
+            "missing permission manage_channel_roles",
+          ));
+        }
+        if matches!(role, ChannelRole::Unknown(_)) {
+          return Err(ApiError::status(
+            400,
+            ErrorCode::InvalidRequest,
+            "unknown channel role",
+          ));
+        }
+        let admins = entry
+          .members
+          .values()
+          .filter(|(held, _)| *held == ChannelRole::Admin)
+          .count();
+        let Some((held, _)) = entry.members.get_mut(&user) else {
+          return Err(ApiError::status(404, ErrorCode::UserNotFound, "not a member"));
+        };
+        if *held == ChannelRole::Admin && *role != ChannelRole::Admin && admins <= 1 {
+          return Err(ApiError::status(
+            409,
+            ErrorCode::Conflict,
+            "a channel needs at least one admin",
+          ));
+        }
+        *held = role.clone();
+        return Ok(());
+      }
       let entry = state.member_conversation_mut(conversation, me)?;
       if let Some(is_favorite) = request.maybe_is_favorite {
         if user != me {
@@ -3496,6 +3574,7 @@ impl State {
       contains_guests: false,
       maybe_my_membership: None,
       participants: Vec::new(),
+      maybe_image: None,
     };
     let members = members
       .iter()
