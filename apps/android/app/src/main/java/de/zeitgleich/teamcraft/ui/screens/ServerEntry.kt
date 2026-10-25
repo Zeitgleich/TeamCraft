@@ -46,6 +46,8 @@ private val ADDRESS_KEYBOARD = KeyboardOptions(
   imeAction = ImeAction.Go,
 )
 
+private val SERVER_ENTRY_MARK_SIZE = 72.dp
+
 /**
  * The server entry: the user types `team.example.com`, a full address, or pastes an invite or
  * message link; the core normalises it. With [isLocked] the organization fixed the address: the
@@ -70,6 +72,8 @@ fun ServerEntryScreen(
     }
   }
   Centered {
+    // No server yet, so no brand: the product's own mark, as the loading screen left it.
+    StillMark(Modifier.size(SERVER_ENTRY_MARK_SIZE))
     Title(R.string.server_entry_title)
     Text(
       stringResource(if (isLocked) R.string.server_entry_locked else R.string.server_entry_hint),

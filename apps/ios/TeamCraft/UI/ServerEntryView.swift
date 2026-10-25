@@ -17,9 +17,9 @@ struct ServerEntryView: View {
   var body: some View {
     ScrollView {
       VStack(spacing: 24) {
-        Image(systemName: "server.rack")
-          .font(.system(size: 48))
-          .foregroundStyle(Theme.accent)
+        // No server yet, so no brand: the product's own mark, as the loading screen left it.
+        StillMarkView()
+          .frame(width: 72, height: 72)
           .accessibilityHidden(true)
         Text("server_entry_title")
           .font(.largeTitle.bold())

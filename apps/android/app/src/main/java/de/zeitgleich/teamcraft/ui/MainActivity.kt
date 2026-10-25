@@ -1,6 +1,7 @@
 package de.zeitgleich.teamcraft.ui
 
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
@@ -12,6 +13,7 @@ import androidx.activity.viewModels
 import androidx.annotation.RequiresApi
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -33,6 +35,8 @@ import de.zeitgleich.teamcraft.ui.theme.TeamCraftTheme
 
 /** The system splash's assembly ends here (scripts/brand/mark_parts.py); the mark rests from then. */
 private const val SPLASH_END_MS = 1040L
+/** The smallest width from which a device counts as a tablet (Android's own sw600dp). */
+private const val TABLET_MIN_WIDTH_DP = 600
 /** The mark's share of the splash icon's side (88 of 288 dp, scripts/brand/mark_parts.py). */
 private const val SPLASH_MARK_SHARE = 88f / 288f
 
@@ -55,6 +59,8 @@ class MainActivity : FragmentActivity() {
     super.onCreate(savedInstanceState)
     enableEdgeToEdge()
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) handOverFromSplash()
+    // Upright from the first frame while setting up (a recreated activity may be past that).
+    keepUprightWhileSettingUp(isSettingUp = viewModel.appState.value !is AppState.Ready)
     applyScreenPrivacy()
     // Locked at a cold start; a rotation or a recreated activity keeps the unlocked state.
     isLocked.value = AppLockPrefs.prefs(this).isEnabled && !isUnlockedInProcess
@@ -66,6 +72,8 @@ class MainActivity : FragmentActivity() {
       val maybeBrand by viewModel.loginBrand.collectAsState()
       TeamCraftTheme(maybeBrand = maybeBrand) {
         val state by viewModel.appState.collectAsState()
+        val isSettingUp = state !is AppState.Ready
+        LaunchedEffect(isSettingUp) { keepUprightWhileSettingUp(isSettingUp) }
         Box(Modifier.fillMaxSize()) {
           if (isLocked.value) {
             LockScreen(onUnlock = ::unlock)
@@ -107,6 +115,17 @@ class MainActivity : FragmentActivity() {
       // Two frames: the loading screen draws the taken-over mark before the splash goes.
       window.decorView.postOnAnimation { window.decorView.postOnAnimation { splash.remove() } }
     }
+  }
+
+  /**
+   * Phones stay upright while the app sets up (loading screen, server entry, sign-in, keys): the
+   * screens are built for portrait, and a turn mid-way would restart the loading animation.
+   * Tablets and the app itself turn freely.
+   */
+  private fun keepUprightWhileSettingUp(isSettingUp: Boolean) {
+    val isPhone = resources.configuration.smallestScreenWidthDp < TABLET_MIN_WIDTH_DP
+    requestedOrientation =
+      if (isSettingUp && isPhone) ActivityInfo.SCREEN_ORIENTATION_PORTRAIT else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
   }
 
   override fun onStart() {
