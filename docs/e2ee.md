@@ -553,8 +553,11 @@ its own. See [admin.md](admin.md) §2.
   joined after the device fell out lacks the keys before its join; so when a member added back a
   device and the committer joined after this member (it saw the committer's leaf added, or the
   committer added back, which starts its own record afresh), this member
-  sends its own keys too, ranked like an addition, unless a member that joined no later than itself
-  sent them first. Clients before this version ignore the sealed bundles.
+  sends its own keys too, ranked among the members whose record starts before the committer's
+  (online users first, `device_add_stagger` per rank; ranks from `device_add_max_rank` on don't
+  send at all), unless a member that joined no later than itself sent them first. Each device
+  keeps the epochs of at most `max_missed_keys` keys (the newest, and its current key), since no
+  more are ever sent. Clients before this version ignore the sealed bundles.
 - Commits with other proposal types (PSK, re-init, external init, group context changes), from
   external senders, or whose update changes a member's user or device are rejected.
 

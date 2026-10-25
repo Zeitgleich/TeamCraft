@@ -58,9 +58,34 @@ impl KeyHistory {
   /// was added later, or it was added back later and started afresh (#389). It may then lack
   /// keys this device has.
   fn has_record_starting_after(&self, member: &str, joined: u64) -> bool {
+    self.record_start(member).is_some_and(|start| start > joined)
+  }
+
+  /// Where `member`'s own record of keys starts, as far as this device saw: its leaf added or
+  /// it added back, the later one. `None`: before this device joined.
+  fn record_start(&self, member: &str) -> Option<u64> {
     let since = self.member_since.get(member).copied();
     let restarted = self.member_restarted.get(member).copied();
-    since.max(restarted).is_some_and(|start| start > joined)
+    since.max(restarted)
+  }
+
+  /// Keeps the `max` newest key entries (and `keep`, the current key): older ones are never sent
+  /// anyway (at most `max_missed_keys`, newest first), and the record stays bounded.
+  fn prune_key_epochs(&mut self, max: usize, maybe_keep: Option<&str>) {
+    if self.key_epochs.len() <= max {
+      return;
+    }
+    let mut entries: Vec<(String, u64)> = self
+      .key_epochs
+      .iter()
+      .map(|(key, epoch)| (key.clone(), *epoch))
+      .collect();
+    entries.sort_by_key(|(_, epoch)| std::cmp::Reverse(*epoch));
+    let kept: std::collections::BTreeSet<String> =
+      entries.into_iter().take(max).map(|(key, _)| key).collect();
+    self
+      .key_epochs
+      .retain(|key, _| kept.contains(key) || maybe_keep == Some(key.as_str()));
   }
 
   /// The keys of `ring_keys` the member device `device` was entitled to: those this device had
@@ -110,6 +135,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }
     }
     if is_changed {
+      let maybe_current = self
+        .account
+        .key_bag
+        .ring(convert::conversation(conversation))
+        .and_then(|ring| ring.current())
+        .map(|key| key_hex(key.id()));
+      history.prune_key_epochs(self.settings.max_missed_keys, maybe_current.as_deref());
       self.put_key_history(conversation, &history)?;
     }
     Ok(())
@@ -272,15 +304,58 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(());
     }
     let device = convert::device_from_crypto(rejoined.device_id)?;
+    // Ranked only among the members this device sees as older than the committer (who may have
+    // the keys it lacks); beyond `device_add_max_rank` the ones ahead send, not everybody at once.
+    let rank = self.follow_up_rank(conversation, rejoined, committer)?;
+    if rank >= self.settings.device_add_max_rank {
+      return Ok(());
+    }
+    let stagger_ms = i64::try_from(self.settings.device_add_stagger.as_millis()).unwrap_or(i64::MAX);
     let not_before_ms = self
       .now_ms()
-      .saturating_add(self.commit_delay_ms(conversation, device)?);
+      .saturating_add(stagger_ms.saturating_mul(i64::from(rank)));
     self.queue_pending(PendingChange::ShareMissedKeys {
       conversation_id: conversation,
       user_id: convert::user_from_crypto(rejoined.user_id)?,
       device_id: device,
       not_before_ms,
     })
+  }
+
+  /// This device's place among the group's devices that may follow up a rejoin `committer`
+  /// answered: those whose record of keys starts before the committer's, online users first.
+  fn follow_up_rank(
+    &mut self,
+    conversation: ConversationId,
+    rejoined: GroupMember,
+    committer: GroupMember,
+  ) -> Result<u32, CoreError> {
+    let history = self.key_history(conversation)?;
+    let joined = self.group_or_error(conversation)?.joined_epoch();
+    let committer_start = history.record_start(&member_key(committer)?).unwrap_or(joined);
+    let members = self.group_or_error(conversation)?.members()?;
+    let mut candidates = Vec::with_capacity(members.len());
+    for member in members {
+      if member == rejoined || member == committer {
+        continue;
+      }
+      // No entry: in the group since before this device joined, so before the committer.
+      if history
+        .record_start(&member_key(member)?)
+        .is_none_or(|start| start < committer_start)
+      {
+        let user = convert::user_from_crypto(member.user_id)?;
+        candidates.push((
+          convert::device_from_crypto(member.device_id)?,
+          self.is_probably_online(user)?,
+        ));
+      }
+    }
+    Ok(super::workspace::commit_rank(
+      &candidates,
+      self.account.device_id,
+      convert::device_from_crypto(rejoined.device_id)?,
+    ))
   }
 
   /// Another member sealed keys to `recipient`: if it joined no later than this device, it had
@@ -462,6 +537,19 @@ mod tests {
       serde_json::from_str(r#"{"key_epochs":{"00":3},"member_since":{"7/8":2}}"#).unwrap();
     assert!(decoded.member_restarted.is_empty());
     assert_eq!(decoded.member_since.get(DEVICE), Some(&2));
+  }
+
+  #[test]
+  fn only_the_newest_key_entries_and_the_current_key_are_kept() {
+    let keys = generate(5);
+    let mut history = history_of(&keys, &[1, 5, 2, 9, 3], None);
+    let current = key_hex(keys[0].id());
+    history.prune_key_epochs(2, Some(&current));
+    let mut kept: Vec<u64> = history.key_epochs.values().copied().collect();
+    kept.sort_unstable();
+    assert_eq!(kept, [1, 5, 9], "epochs 9 and 5, and the current key");
+    history.prune_key_epochs(10, None);
+    assert_eq!(history.key_epochs.len(), 3, "nothing to prune");
   }
 
   #[test]
