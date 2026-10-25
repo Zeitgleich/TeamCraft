@@ -334,7 +334,8 @@ fn SpaceGroupSection(group: SpaceGroup, collapsed: RwSignal<HashSet<SpaceId>>) -
         id=list_id
         hidden=move || is_collapsed() && phase.get() != SectionPhase::Closing
         class:is-opening=move || phase.get() == SectionPhase::Opening
-        class:is-closing=move || phase.get() == SectionPhase::Closing
+        // A closed list keeps its exit's end while hidden: dropping both at once can draw it for a frame.
+        class:is-closing=move || phase.get() == SectionPhase::Closing || is_collapsed()
         on:animationend=move |ev| end_phase(&ev, phase)
       >
         {group.conversations.into_iter().map(|conv| view! { <li><SidebarItem conversation=conv /></li> }).collect_view()}
@@ -417,7 +418,8 @@ fn SidebarSection(
         id=list_id
         hidden=move || is_collapsed() && phase.get() != SectionPhase::Closing
         class:is-opening=move || phase.get() == SectionPhase::Opening
-        class:is-closing=move || phase.get() == SectionPhase::Closing
+        // A closed list keeps its exit's end while hidden: dropping both at once can draw it for a frame.
+        class:is-closing=move || phase.get() == SectionPhase::Closing || is_collapsed()
         on:animationend=move |ev| end_phase(&ev, phase)
       >
         {if kind == SectionKind::Favorites {

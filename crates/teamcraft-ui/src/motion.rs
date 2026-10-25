@@ -7,6 +7,8 @@
 //! ghost still fades out (the stylesheet drops the movement, #360). An element that already played
 //! its own exit (a swiped toast) carries `.has-exited` and leaves no ghost.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::Duration;
 
 use leptos::html::ElementType;
@@ -15,11 +17,13 @@ use wasm_bindgen::JsCast;
 
 /// How long a ghost stays: the longest exit (`--dur-exit`, 100 ms) plus a frame of slack.
 const GHOST_LIFETIME: Duration = Duration::from_millis(140);
+/// A hidden ghost goes two frames later, or after this when no frames come (a hidden tab).
+const GHOST_REMOVAL_FALLBACK: Duration = Duration::from_millis(100);
 /// Copies of elements that left the view while their exit plays, so a burst can't pile them up.
 const MAX_GHOSTS: u32 = 8;
 
 thread_local! {
-  static GHOSTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+  static GHOSTS: Cell<u32> = const { Cell::new(0) };
 }
 
 /// A monotonic time for comparing moments of the same page (the page's `performance.now()`), never
@@ -134,16 +138,27 @@ fn leave_ghost(element: &web_sys::Element) -> Option<web_sys::HtmlElement> {
   dress_ghost(&ghost, &rect);
   body.append_child(&ghost).ok()?;
   GHOSTS.set(GHOSTS.get() + 1);
-  let removed = ghost.clone();
-  set_timeout(
-    move || {
-      removed.remove();
+  let retired = ghost.clone();
+  set_timeout(move || retire_ghost(retired), GHOST_LIFETIME);
+  Some(ghost)
+}
+
+/// Hides the ghost (`.is-gone`), then removes it two frames later. Its exit holds the last frame
+/// (`forwards`); removing it at once drops the layer and the animation in one commit, and WebKit can
+/// present one frame of the copy as it was before the exit: the element jumps back for a frame.
+fn retire_ghost(ghost: web_sys::HtmlElement) {
+  drop(ghost.class_list().add_1("is-gone"));
+  let is_removed = Rc::new(Cell::new(false));
+  let remove = move || {
+    if !is_removed.replace(true) {
+      ghost.remove();
       // async-ok: a thread-local Cell, not a signal.
       GHOSTS.set(GHOSTS.get().saturating_sub(1));
-    },
-    GHOST_LIFETIME,
-  );
-  Some(ghost)
+    }
+  };
+  let after_frames = remove.clone();
+  request_animation_frame(move || request_animation_frame(after_frames));
+  set_timeout(remove, GHOST_REMOVAL_FALLBACK);
 }
 
 /// A deep copy starts scrolled to the top; give each scrolled part of it the original's place.
