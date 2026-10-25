@@ -115,7 +115,12 @@ fun TeamCraftTheme(maybeBrand: LoginBrand? = null, content: @Composable () -> Un
     isDark -> Dark.withAccent(maybeBrand?.dark)
     else -> Light.withAccent(maybeBrand?.light)
   }
-  CompositionLocalProvider(LocalTeamCraftColors provides if (isDark) DarkExtra else LightExtra) {
+  val backdrop = remember { StatusBarBackdrop() }
+  StatusBarIcons(isDarkTheme = isDark, backdrop = backdrop)
+  CompositionLocalProvider(
+    LocalTeamCraftColors provides if (isDark) DarkExtra else LightExtra,
+    LocalStatusBarBackdrop provides backdrop,
+  ) {
     MaterialTheme(colorScheme = scheme, typography = TeamCraftTypography, shapes = TeamCraftShapes, content = content)
   }
 }
