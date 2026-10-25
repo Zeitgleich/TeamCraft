@@ -4,6 +4,7 @@
 //! sign-in links), including middle and Ctrl/Cmd clicks. The browser build keeps the browser's
 //! own behaviour.
 
+use leptos::prelude::*;
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::links::is_external_link;
 use wasm_bindgen::JsCast;
@@ -21,14 +22,42 @@ pub enum LinkRoute {
   OpenExternally(String),
 }
 
-/// Starts the click routing in the desktop shell; a no-op in the browser.
-pub fn start() {
+/// A right click on a link: the address and where the menu opens (viewport pixels).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkMenuTarget {
+  pub url: String,
+  pub x: i32,
+  pub y: i32,
+}
+
+/// Starts the click routing in the desktop shell; a no-op in the browser. A right click on a link
+/// fills `menu`, which the app shows as its own menu instead of the webview's (open, copy,
+/// download, new tab).
+pub fn start(menu: RwSignal<Option<LinkMenuTarget>>) {
   if !tauri::is_available() {
     return;
   }
   let Some(document) = web_sys::window().and_then(|window| window.document()) else {
     return;
   };
+  let on_context_menu = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |event: web_sys::MouseEvent| {
+    if let Some(anchor) = anchor_of(&event)
+      && let LinkRoute::OpenExternally(url) = route_click(&anchor.href(), 0, false)
+    {
+      event.prevent_default();
+      drop(menu.try_set(Some(LinkMenuTarget {
+        url,
+        x: event.client_x(),
+        y: event.client_y(),
+      })));
+    }
+  });
+  if document
+    .add_event_listener_with_callback_and_bool("contextmenu", on_context_menu.as_ref().unchecked_ref(), true)
+    .is_ok()
+  {
+    on_context_menu.forget();
+  }
   // "auxclick" carries the middle button; "click" the primary one, also with Ctrl/Cmd/Shift held.
   for event in ["click", "auxclick"] {
     let closure = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(on_click);
@@ -68,12 +97,7 @@ fn on_click(event: web_sys::MouseEvent) {
   if event.default_prevented() {
     return;
   }
-  let Some(anchor) = event
-    .target()
-    .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
-    .and_then(|element| element.closest("a[href]").ok().flatten())
-    .and_then(|element| element.dyn_into::<web_sys::HtmlAnchorElement>().ok())
-  else {
+  let Some(anchor) = anchor_of(&event) else {
     return;
   };
   // `href()` is the resolved address: relative links become app URLs and stay native.
@@ -82,6 +106,14 @@ fn on_click(event: web_sys::MouseEvent) {
     event.prevent_default();
     open_in_system(url);
   }
+}
+
+fn anchor_of(event: &web_sys::MouseEvent) -> Option<web_sys::HtmlAnchorElement> {
+  event
+    .target()
+    .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+    .and_then(|element| element.closest("a[href]").ok().flatten())
+    .and_then(|element| element.dyn_into::<web_sys::HtmlAnchorElement>().ok())
 }
 
 fn open_in_system(url: String) {

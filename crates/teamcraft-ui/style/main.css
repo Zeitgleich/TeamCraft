@@ -3150,6 +3150,17 @@ ol.md-list {
   box-shadow: var(--shadow);
 }
 
+/* Right click on a link: opens at the pointer, not under a trigger (#548). */
+.popover.link-menu {
+  position: fixed;
+  right: auto;
+  left: var(--link-menu-x, 0);
+  top: var(--link-menu-y, 0);
+  width: auto;
+  min-width: 11rem;
+  --popover-origin: top left;
+}
+
 .menu-user {
   display: flex;
   align-items: center;

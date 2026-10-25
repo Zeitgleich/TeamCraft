@@ -147,7 +147,9 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   if let Some(sync) = use_context::<StoredValue<NotificationSync, LocalStorage>>() {
     sync.get_value().start(settings);
   }
-  crate::external_links::start();
+  let link_menu = RwSignal::new(None::<crate::external_links::LinkMenuTarget>);
+  provide_context(link_menu);
+  crate::external_links::start(link_menu);
   if tauri::has_core() {
     crate::os_alerts::start(state, i18n);
   }
@@ -306,6 +308,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       <Show when=move || state.is_compact() && state.overlay.get() == Overlay::StatusMenu fallback=|| ()>
         <StatusMenu />
       </Show>
+      <crate::components::link_menu::LinkMenu />
       {move || match state.call.phase.get() {
         CallPhase::PreJoin => {
           state.call.maybe_request.get().map(|request| lazy_area(Place::Screen, move || areas::call_prejoin(request)))
