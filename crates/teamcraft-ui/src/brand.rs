@@ -1,6 +1,7 @@
 //! The brand of the server (docs/branding.md §5): name, logo, colors, login text and links of the
-//! host name the app talks to. It is applied before sign-in, cached per server URL so the next start
-//! paints at once, and refreshed in the background.
+//! host name the app talks to. It is applied before sign-in, cached per server origin so the next
+//! start paints at once, and refreshed in the background. The desktop's `AppConfig.server_url` is
+//! empty (the shell holds the account's server), so there the origin comes from the shell.
 //!
 //! The server's answer is checked by `teamcraft_client_api::brand` (hex colors only, asset paths of the
 //! brand endpoint only, https links only) before anything is applied. Colors are set through the CSSOM
@@ -25,6 +26,12 @@ use crate::reactive::{SetIfAlive, UpdateIfAlive};
 use crate::settings::{Settings, Theme, load_string, store_string};
 
 const BRAND_PATH: &str = "/api/v1/brand";
+
+thread_local! {
+  /// Desktop: the origin of the server the brand on screen belongs to, `None` while no server is
+  /// active (the server entry). Keys the brand cache; the web build uses `AppConfig.server_url`.
+  static ACTIVE_ORIGIN: RefCell<Option<String>> = const { RefCell::new(None) };
+}
 
 /// The brand being shown, readable everywhere below [`provide_brand`].
 #[derive(Clone, Copy)]
@@ -126,12 +133,16 @@ async fn load_shell_image(path: &str) -> Option<String> {
 }
 
 /// Loads the cached brand of the configured server, shows it, and refreshes it from the server.
+/// On the desktop the server is the shell's active one, so the cached brand is applied once the
+/// shell answered (a moment after the first paint, behind the loading screen).
 pub fn provide_brand(settings: Settings) {
   let config = AppConfig::load();
-  let key = cache_key(&config.server_url);
-  let cached = load_string(&key)
-    .and_then(|text| serde_json::from_str::<BrandResponse>(&text).ok())
-    .and_then(|response| BrandView::from_response(response, &config.server_url));
+  let is_desktop = tauri::is_available();
+  let cached = if is_desktop {
+    None
+  } else {
+    cached_brand(&config.server_url)
+  };
   let brand = Brand(RwSignal::new(cached.unwrap_or_else(BrandView::fallback)));
   provide_context(brand);
   provide_context(ShellImages(RwSignal::new(HashMap::new())));
@@ -148,14 +159,30 @@ pub fn provide_brand(settings: Settings) {
   });
 
   leptos::task::spawn_local(async move {
+    let origin = if is_desktop {
+      let Some(origin) = active_shell_origin().await else {
+        // No server chosen yet: the product's own look until one is confirmed.
+        return;
+      };
+      set_active_origin(Some(origin.clone()));
+      if let Some(cached) = cached_brand(&origin) {
+        brand.0.set_if_alive(cached);
+      }
+      origin
+    } else {
+      config.server_url.clone()
+    };
     match fetch_brand(&config).await {
       Ok(text) => match serde_json::from_str::<BrandResponse>(&text)
         .ok()
         .and_then(|response| BrandView::from_response(response, &config.server_url))
       {
         Some(view) => {
-          store_string(&key, &text);
-          brand.0.set_if_alive(view);
+          // The user may have switched servers while the request ran.
+          if current_origin(&config) == origin {
+            store_string(&cache_key(&origin), &text);
+            brand.0.set_if_alive(view);
+          }
         },
         None => tracing::debug!("the server's brand is unusable; keeping the current one"),
       },
@@ -164,15 +191,16 @@ pub fn provide_brand(settings: Settings) {
   });
 }
 
-/// Desktop: the user confirmed a server; show its brand (from its `server-info` answer) at once
-/// and keep it for the next start.
-pub fn show_server_brand(response: BrandResponse) {
+/// Desktop: the user confirmed the server at `origin`; show its brand (from its `server-info`
+/// answer) at once and keep it for the next start, under that origin.
+pub fn show_server_brand(response: BrandResponse, origin: &str) {
   let config = AppConfig::load();
   let Some(view) = BrandView::from_response(response.clone(), &config.server_url) else {
     return;
   };
+  set_active_origin(Some(origin.to_owned()));
   if let Ok(text) = serde_json::to_string(&response) {
-    store_string(&cache_key(&config.server_url), &text);
+    store_string(&cache_key(origin), &text);
   }
   // Another server: its images have the same paths as the previous server's.
   if let Some(images) = use_context::<ShellImages>() {
@@ -185,9 +213,10 @@ pub fn show_server_brand(response: BrandResponse) {
 /// user left is forgotten too, so it does not come back on the next start before a server is
 /// chosen. Only the confirmation and what follows show a server's brand.
 pub fn show_product_brand() {
-  let config = AppConfig::load();
   // An empty value reads as missing (`load_string`).
-  store_string(&cache_key(&config.server_url), "");
+  if let Some(origin) = ACTIVE_ORIGIN.with(|origin| origin.borrow_mut().take()) {
+    store_string(&cache_key(&origin), "");
+  }
   if let Some(images) = use_context::<ShellImages>() {
     images.0.set(HashMap::new());
   }
@@ -195,6 +224,40 @@ pub fn show_product_brand() {
   if !brand.with_untracked(BrandView::is_fallback) {
     brand.set(BrandView::fallback());
   }
+}
+
+fn set_active_origin(origin: Option<String>) {
+  ACTIVE_ORIGIN.with(|active| *active.borrow_mut() = origin);
+}
+
+/// The origin the brand belongs to: the shell's active server on the desktop, else the configured
+/// server URL.
+fn current_origin(config: &AppConfig) -> String {
+  if tauri::is_available() {
+    ACTIVE_ORIGIN.with(|origin| origin.borrow().clone().unwrap_or_default())
+  } else {
+    config.server_url.clone()
+  }
+}
+
+fn cached_brand(origin: &str) -> Option<BrandView> {
+  load_string(&cache_key(origin))
+    .and_then(|text| serde_json::from_str::<BrandResponse>(&text).ok())
+    .and_then(|response| BrandView::from_response(response, origin_base(origin)))
+}
+
+/// Asset URLs of the desktop stay relative (the shell fetches them from the active server).
+fn origin_base(origin: &str) -> &str {
+  if tauri::is_available() { "" } else { origin }
+}
+
+/// Desktop: the origin of the server the shell holds, if one is chosen.
+async fn active_shell_origin() -> Option<String> {
+  tauri::server_state()
+    .await
+    .ok()
+    .and_then(|state| state.maybe_active)
+    .map(|server| server.origin)
 }
 
 /// The product mark (assets/brand/mark.svg) as a `data:` URL: shown while no server brand is

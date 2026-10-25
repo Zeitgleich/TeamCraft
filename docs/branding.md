@@ -205,7 +205,9 @@ validated like the global one.
 - **Desktop, Android, iOS**: the app asks the server URL it is configured with (any host name of a
   brand) for `GET <url>/api/v1/brand` without credentials (the desktop shell has a `public_get`
   command for it), caches the answer per server URL and applies it. A cached brand is only used for that
-  exact URL. Brand data comes from the server the user chose; the app never changes the server URL
+  exact URL. The desktop webview has no configured URL, so it keys the cache by the origin of the
+  shell's active server (and by the confirmed origin right after the confirmation); its images come
+  through the shell (`public_asset`) as `data:` URLs. Brand data comes from the server the user chose; the app never changes the server URL
   based on brand data. `origin` is informational: a brand may have several host names, so it is not
   compared with the entered URL.
 - **Checking**: all platforms run the same checks (`teamcraft-client-api::brand`): only known color
