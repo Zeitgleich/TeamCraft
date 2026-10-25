@@ -681,7 +681,6 @@ login-brand-support = Support
 login-brand-privacy = Datenschutz
 login-brand-terms = Nutzungsbedingungen
 login-brand-imprint = Impressum
-login-footer = Nachrichten sind Ende-zu-Ende-verschlüsselt. Der Server speichert nur Chiffretext.
 login-checking = Sitzung wird geprüft …
 login-signing-in-title = Weiter im Browser
 login-signing-in = Schließe die Anmeldung im gerade geöffneten Browserfenster ab.

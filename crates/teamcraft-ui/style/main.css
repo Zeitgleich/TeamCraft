@@ -5106,24 +5106,6 @@ ol.md-list {
   font-size: var(--text-sm);
 }
 
-.auth-foot {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
-  margin-top: var(--space-6);
-  padding-top: var(--space-4);
-  border-top: 1px solid var(--border);
-  font-size: var(--text-xs);
-  text-align: center;
-}
-
-.auth-foot .icon {
-  flex: none;
-  width: 14px;
-  height: 14px;
-}
-
 .auth-organization {
   margin: var(--space-1) 0 0;
   font-size: var(--text-xs);

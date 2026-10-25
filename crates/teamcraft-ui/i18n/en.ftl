@@ -681,7 +681,6 @@ login-brand-support = Support
 login-brand-privacy = Privacy
 login-brand-terms = Terms
 login-brand-imprint = Imprint
-login-footer = Messages are end-to-end encrypted. The server only stores ciphertext.
 login-checking = Checking your session…
 login-signing-in-title = Continue in your browser
 login-signing-in = Finish signing in in the browser window that just opened.
