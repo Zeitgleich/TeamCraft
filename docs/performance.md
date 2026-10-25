@@ -428,6 +428,71 @@ a phone (Android, Chromium 152) over 10 minutes stayed at about 300 MiB renderer
 JS heap and under 1 % CPU. `perf.rs` now also fails when the PSS or the JS heap grows over the idle
 period.
 
+### Desktop on Linux: memory
+
+A user's 1.0.3 on KDE/Wayland (AMD GPU, window maximized, a real workspace in use)
+showed 512 MiB RAM and 766 MiB GPU memory in the system monitor, 341 MiB and 711 MiB of it in the
+`WebKitWebProcess`. Measured in October 2026 on WebKitGTK 2.54, Radeon RX 7800 XT, with the demo
+workspace (`TEAMCRAFT_BACKEND=mock`) and a UI built with the release profile, the window maximized
+on a 1920×1080 screen. Driven over the WebKit inspector (`WEBKIT_INSPECTOR_HTTP_SERVER`); GPU memory
+from `/proc/<pid>/fdinfo` (`drm-memory-vram`), RAM as PSS from `smaps_rollup`, WebKit's own split
+from the inspector's `Memory` domain.
+
+Where the GPU memory goes: WebKitGTK 2.54 paints tiles on the GPU with Skia, in two painting
+threads plus the main thread. Each has a Skia resource cache that WebKit sizes by the machine's RAM:
+256 MiB per context on machines with 4 GiB or more. The caches fill with whatever was painted
+(scratch textures, pictures) and are only emptied on memory pressure, which WebKit's monitor
+reports when the system runs low. GPU memory therefore rises to a ceiling and stays there; it does
+not grow with use and does not get the app killed:
+
+| GPU memory of the webview                                     | Value    |
+|---------------------------------------------------------------|----------|
+| Signed in, idle                                               | 176 MiB  |
+| After 1,500 channel switches                                  | 219 MiB  |
+| After channels, a few lightbox pictures, 15 rounds            | 465 MiB  |
+| 20 pictures of 4000×3000 shown as thumbnails (synthetic)      | 816 MiB  |
+| The same after they went                                      | 352 MiB  |
+
+Painting on the CPU instead (`WEBKIT_SKIA_ENABLE_CPU_RENDERING=1`) keeps it at 150–190 MiB but
+made a channel switch three times slower and doubled the webview's CPU time (debug build: 300
+instead of 105 ms at p50), which costs battery on a laptop; one GPU painting thread
+(`WEBKIT_SKIA_GPU_PAINTING_THREADS=1`) saved nothing measurable. Both stay off. The cache sizes
+can only be lowered through WebKit's memory pressure settings, which are fixed when the
+`WebKitWebContext` is created; Tauri creates it without a hook for that.
+
+What was fixed:
+
+- **Window listeners per conversation.** The message list dropped the handles of three window
+  listeners (focus, blur, visibility), and Leptos only removes a listener on `handle.remove()`:
+  every conversation opened left three listeners and their closures for the life of the page.
+  `scripts/check-async-signals.py` now fails on a discarded listener handle.
+- **Browser caches.** WebKitGTK starts with the web browser cache model: up to 64 MiB of
+  resources no page shows any more stay in memory, and pages are kept for back and forward. The
+  app never navigates and its pictures are revoked `blob:` URLs, so neither cache is ever hit. The
+  shell sets the document viewer model (`webview_memory.rs`); the inspector's `images` category
+  stays at 0 instead of 17–27 MiB.
+- **The Linux window edge** of the custom title bar was a fixed `::after` over the whole window,
+  a compositing layer of the window's size (7.4 MiB at 1774×1074, 14 MiB at 2560×1440) blended on
+  every frame. Four one-pixel lines now, with no backing store. `scripts/check-css.py` fails on
+  `will-change` outside an allow-list.
+
+Webview memory over channel switches between two busy channels (PSS, same build otherwise):
+
+| Channel switches        | Before    | After     | Budget   |
+|-------------------------|-----------|-----------|----------|
+| 0 (signed in, idle)     | 176 MiB   | 176 MiB   | -        |
+| 600                     | 311 MiB   | 299 MiB   | -        |
+| 1,200                   | 383 MiB   | 371 MiB   | -        |
+| 1,500, then GC and idle | 405 MiB   | 382 MiB   | 400 MiB  |
+
+After the fix the app holds no detached DOM: the wasm-bindgen table of JS values stays at the same
+size (2,408 entries after 20 and after 60 switches), no closure outlives its view once the JS heap
+is collected, and the wasm memory grows by about 28 KiB per switch. The remaining growth is
+WebKit's: its native allocations ("other" in the inspector) level off at about 250 MiB after about
+600 switches, and the JS heap's capacity grows slowly between collections. Growth per 300 switches
+fell from 78 to 14 MiB over the run, so it levels off rather than leaks, but it ends near the
+desktop budget. Idle CPU was unchanged; no animation runs while the app is idle.
+
 ### Android (first numbers)
 
 Release Rust core, debug Kotlin build (`assembleLibreDebug`), API 35 emulator (the Pixel 10 / API 37

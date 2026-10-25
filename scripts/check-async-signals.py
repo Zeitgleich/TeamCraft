@@ -11,6 +11,11 @@ as `feedback::PendingAction`, which do). `on:blur` and `on:focusout` handlers co
 too: the browser fires them when a focused element is removed with its view (#378), after the
 component's owner is disposed.
 
+It also fails on a window listener whose handle is thrown away (`let _ = window_event_listener(..)`
+or the call as a statement): Leptos only removes the listener on `handle.remove()`, so it outlives
+the component and keeps its closure, and everything that holds, for as long as the page lives
+(every message list shown left three behind). Keep the handle and remove it in `on_cleanup`.
+
     scripts/check-async-signals.py [paths ...]   # default: crates/teamcraft-ui/src
 
 The check is textual: `.get()` / `.set(..)` etc. on a `Cell` or a `StoredValue` the task owns look
@@ -35,6 +40,8 @@ REMOVAL_HANDLER = re.compile(r"\bon:(?:blur|focusout)=\s*(?:move\s*)?\|[^|]*\|\s
 # `.get()` without arguments only: `.get(&key)` / `.get(index)` are maps and slices.
 ARGUMENT_GETTERS = {"get", "get_untracked"}
 MARKER = "async-ok:"
+# A window listener started as a statement or into `_`: its handle, the only way to remove it, is gone.
+DROPPED_LISTENER = re.compile(r"^\s*(let\s+_\s*=\s*|_\s*=\s*)?window_event_listener(?:_untyped)?\s*\(")
 
 
 def main(argv=None):
@@ -50,12 +57,29 @@ def main(argv=None):
         print(finding)
     if findings:
         print(
-            f"\n{len(findings)} signal access(es) in deferred code without try_ (issue #322).\n"
-            "Use try_get_untracked/try_set/try_update/try_with, or mark a non-signal with `// async-ok: <reason>`.",
+            f"\n{len(findings)} signal access(es) in deferred code without try_ (issue #322), or window\n"
+            "listener(s) never removed. Use try_get_untracked/try_set/try_update/try_with, or mark a\n"
+            "non-signal with `// async-ok: <reason>`; remove listeners in `on_cleanup`.",
             file=sys.stderr,
         )
         return 1
     return 0
+
+
+def dropped_listeners(name, source):
+    """Findings for window listeners whose handle is discarded, so they are never removed."""
+    findings = []
+    lines = source.splitlines()
+    for number, line in enumerate(lines):
+        previous = lines[number - 1] if number > 0 else ""
+        match = DROPPED_LISTENER.match(line)
+        if not match or MARKER in line or MARKER in previous:
+            continue
+        # Without `_ =` only a statement counts, not an element of a list of handles.
+        is_statement_start = previous.rstrip().endswith((";", "{", "}")) or not previous.strip()
+        if match.group(1) or is_statement_start:
+            findings.append(f"{name}:{number + 1}: {line.strip()} (the listener is never removed)")
+    return findings
 
 
 def check_source(name, source):
@@ -84,6 +108,7 @@ def check_source(name, source):
             if MARKER in line or MARKER in previous or is_comment(line):
                 continue
             findings.append(f"{name}:{line_number + 1}: {line.strip()}")
+    findings.extend(dropped_listeners(name, source))
     return sorted(set(findings), key=lambda text: int(text.split(":")[1]))
 
 

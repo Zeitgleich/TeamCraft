@@ -540,9 +540,14 @@ fn track_unread_divider(conversation: ConversationId, count: Memo<usize>, is_at_
     }
     is_focused.try_set(focused);
   };
-  let _ = window_event_listener(ev::focus, move |_| on_focus_change());
-  let _ = window_event_listener(ev::blur, move |_| on_focus_change());
-  let _ = window_event_listener(ev::visibilitychange, move |_| on_focus_change());
+  let listeners = [
+    window_event_listener(ev::focus, move |_| on_focus_change()),
+    window_event_listener(ev::blur, move |_| on_focus_change()),
+    window_event_listener(ev::visibilitychange, move |_| on_focus_change()),
+  ];
+  // Removed with the list: dropping a handle keeps the listener, so every list shown left three
+  // listeners behind with all they hold (docs/performance.md, "Desktop on Linux: memory").
+  on_cleanup(move || listeners.into_iter().for_each(|listener| listener.remove()));
 
   // News while the user looks elsewhere.
   Effect::new(move |previous: Option<usize>| {

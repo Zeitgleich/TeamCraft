@@ -16,6 +16,9 @@ warning. This check fails on:
   11 px,
 - more raw hex colours outside custom property definitions than MAX_RAW_HEX_COLOURS (a ratchet:
   the count may only go down; new colours become tokens),
+- `will-change` outside WILL_CHANGE: it keeps the element on a compositing layer of its own for as
+  long as it exists (GPU memory of its size, a blend every frame). Only short-lived elements that
+  really move (the lightbox, the crop dialog) get it, each with the reason,
 - inline styles in the UI's Rust code (issue #376): a `style=` attribute on an HTML element in
   `view!` markup or `set_attribute("style", …)`. The web CSP is `style-src 'self'`, which blocks
   them at runtime with only a console error. Dynamic styles use `style:prop=` / `style:--var=` or
@@ -55,6 +58,13 @@ FIXED_FONT_SIZES = {
     ".sheet-reaction": "an emoji in a 44 px button",
     ".emoji-grid li": "an emoji in a 34 px cell",
     ".approval-code": "a verification code sized to its card",
+}
+# Selectors that may set `will-change`, with the reason: only elements that move under the user's
+# finger and go away with their overlay (docs/performance.md, "Desktop on Linux: memory").
+WILL_CHANGE = {
+    ".lightbox-image": "zoomed and panned per pointer move while the lightbox is open",
+    ".lightbox-track": "swiped between pictures while the lightbox is open",
+    ".crop-image": "dragged and zoomed while the crop dialog is open",
 }
 # Font sizes that are not on the scale on purpose, with the reason.
 ALLOWED_FONT_SIZES = {
@@ -108,6 +118,7 @@ def check_sources(sources):
     findings += conflicting_overrides(parsed)
     findings += off_scale_font_sizes(parsed)
     findings += raw_hex_colours(parsed)
+    findings += layer_hints(parsed)
     return findings
 
 
@@ -233,6 +244,20 @@ def off_scale_font_sizes(parsed):
                 findings.append(f"{path}:{decl.line}: {decl.name}: {decl.value} is below {TINY_FONT_PX}px")
                 continue
             findings.append(f"{path}:{decl.line}: {decl.name}: {decl.value} is off the type scale; use var(--text-*)")
+    return findings
+
+
+def layer_hints(parsed):
+    findings = []
+    for path, sheet in parsed.items():
+        for decl in sheet.declarations:
+            if decl.name != "will-change" or decl.value == "auto":
+                continue
+            unlisted = [selector for selector in decl.selectors if selector not in WILL_CHANGE]
+            if unlisted:
+                findings.append(
+                    f"{path}:{decl.line}: will-change on {', '.join(unlisted)} keeps a GPU layer; list it in WILL_CHANGE with the reason, or drop it"
+                )
     return findings
 
 

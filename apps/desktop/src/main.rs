@@ -20,6 +20,8 @@ mod shell_prefs;
 mod single_instance;
 mod tray;
 mod updates;
+#[cfg(target_os = "linux")]
+mod webview_memory;
 mod window_chrome;
 #[cfg(windows)]
 mod windows_shell;
@@ -278,6 +280,10 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     _ => window,
   };
   let window = window.build()?;
+  #[cfg(target_os = "linux")]
+  if let Err(error) = window.with_webview(|webview| webview_memory::configure(&webview.inner())) {
+    tracing::warn!(%error, "could not set the webview's memory caches");
+  }
   tray::reveal_without_host(app.handle());
   if prefs.is_start_minimized
     && !has_tray

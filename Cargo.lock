@@ -10490,6 +10490,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "user-idle-time",
+ "webkit2gtk",
  "windows",
  "zbus",
 ]
