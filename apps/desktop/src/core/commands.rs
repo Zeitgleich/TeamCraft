@@ -202,7 +202,8 @@ pub async fn core_enroll(host: State<'_, CoreHost>, request: EnrollRequest) -> R
   Ok(host.current()?.enroll(request).await?)
 }
 
-#[tauri::command]
+// The web core and the dev bridge take the same snake_case argument names.
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_link_start(host: State<'_, CoreHost>, device_name: String) -> Result<(), CommandError> {
   Ok(host.current()?.link_start(device_name).await?)
 }
@@ -223,7 +224,8 @@ pub async fn core_approval_start(host: State<'_, CoreHost>, code: String) -> Res
   Ok(host.current()?.approval_start(code).await?)
 }
 
-#[tauri::command]
+// The web core and the dev bridge take the same snake_case argument names.
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_approval_confirm(
   host: State<'_, CoreHost>,
   short_code: String,
@@ -310,7 +312,8 @@ pub async fn core_query(host: State<'_, CoreHost>, query: ChatQuery) -> Result<C
 
 /// One file of a message, decrypted, as raw bytes (no JSON) for the image viewer. The bytes stay in
 /// memory; the webview turns them into a `blob:` URL it revokes when the viewer moves on.
-#[tauri::command]
+// The web core and the dev bridge take the same snake_case argument names.
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_attachment(
   host: State<'_, CoreHost>,
   conversation: ConversationId,

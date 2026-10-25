@@ -163,6 +163,8 @@ struct State {
   created_channels: HashMap<(UserId, IdempotencyKey), ConversationId>,
   /// Create answers still to be lost after the resource was made (a timeout).
   create_answers_to_lose: u32,
+  /// Key package uploads still to be lost after the server stored them (a timeout).
+  key_package_answers_to_lose: u32,
   roster_log: Vec<WorkspaceLogEntryResponse>,
   policy_log: Vec<WorkspaceLogEntryResponse>,
   /// Larger attachments are refused like the server's `max_attachment_bytes`; `None`: no limit.
@@ -554,6 +556,11 @@ impl FakeServer {
   /// The next `count` space / channel creations are made, but the answer never reaches the client.
   pub fn lose_create_answers(&self, count: u32) {
     self.lock().create_answers_to_lose = count;
+  }
+
+  /// The next key package upload is stored, but the answer never reaches the client.
+  pub fn lose_next_key_package_answer(&self) {
+    self.lock().key_package_answers_to_lose += 1;
   }
 
   /// How many channels have this name.
@@ -1216,7 +1223,12 @@ impl ServerApi for FakeServerApi {
       if let Some(last_resort) = maybe_last_resort {
         packages.maybe_last_resort = Some(last_resort);
       }
-      Ok(packages.status(now))
+      let status = packages.status(now);
+      if state.key_package_answers_to_lose > 0 {
+        state.key_package_answers_to_lose -= 1;
+        return Err(ApiError::Network("fake answer lost".into()));
+      }
+      Ok(status)
     })
   }
 
