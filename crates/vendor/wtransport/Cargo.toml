@@ -212,3 +212,6 @@ unfulfilled_lint_expectations = "deny"
 unit_bindings = "deny"
 unsafe_op_in_unsafe_fn = "deny"
 unused_qualifications = "warn"
+
+# Not part of upstream: lets the copy build and test on its own (our workspace excludes crates/vendor).
+[workspace]
