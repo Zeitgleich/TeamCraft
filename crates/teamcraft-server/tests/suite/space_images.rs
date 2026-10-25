@@ -265,7 +265,7 @@ pub(crate) fn picture(width: u32, height: u32, format: ImageFormat) -> Vec<u8> {
 }
 
 /// A PNG that doesn't compress: pseudo-random pixels.
-fn noise_png(side: u32) -> Vec<u8> {
+pub(crate) fn noise_png(side: u32) -> Vec<u8> {
   let mut seed = 0x2545_f491_u32;
   let buffer = ImageBuffer::from_fn(side, side, |_, _| {
     seed ^= seed << 13;

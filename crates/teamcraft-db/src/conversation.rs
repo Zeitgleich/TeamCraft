@@ -32,6 +32,15 @@ pub struct Conversation {
   pub maybe_image: Option<StoredSpaceImage>,
 }
 
+/// What [`Database::set_conversation_image`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageChange {
+  /// Stored; the blob key of the previous picture, if there was a different one, can be deleted.
+  Set { maybe_replaced_key: Option<String> },
+  /// The channel doesn't exist (any more): nothing was stored.
+  ChannelGone,
+}
+
 #[derive(Debug, Clone)]
 pub struct Membership {
   pub role: ChannelRole,
@@ -252,21 +261,24 @@ impl Database {
       .collect()
   }
 
-  /// Makes `image` the channel's picture (`None` removes it). Returns the blob key of the picture it
-  /// replaced, which nothing refers to any more; `Ok(None)` also when the channel doesn't exist.
+  /// Makes `image` the channel's picture (`None` removes it). Says which blob key it replaced,
+  /// which nothing refers to any more, or that the channel is gone (deleted while the picture was
+  /// uploading), so the caller deletes the object it stored.
   pub async fn set_conversation_image(
     &self,
     conversation: ConversationId,
     maybe_image: Option<&StoredSpaceImage>,
-  ) -> Result<Option<String>, DbError> {
+  ) -> Result<ImageChange, DbError> {
     let mut tx = self.pool().begin().await?;
     let maybe_previous = sqlx::query_scalar!(
       "SELECT image_key FROM conversations WHERE id = $1 FOR UPDATE",
       to_db(conversation),
     )
     .fetch_optional(&mut *tx)
-    .await?
-    .flatten();
+    .await?;
+    let Some(maybe_previous) = maybe_previous else {
+      return Ok(ImageChange::ChannelGone);
+    };
     let maybe_size = maybe_image
       .map(|image| i64::try_from(image.size_bytes))
       .transpose()
@@ -281,7 +293,10 @@ impl Database {
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(maybe_previous.filter(|previous| maybe_image.is_none_or(|image| image.key != *previous)))
+    Ok(ImageChange::Set {
+      maybe_replaced_key: maybe_previous
+        .filter(|previous| maybe_image.is_none_or(|image| image.key != *previous)),
+    })
   }
 
   pub async fn update_conversation(

@@ -8,8 +8,8 @@
 
 use teamcraft_db::testing::TestDatabase;
 use teamcraft_db::{
-  KeyPackageCounts, NewConversation, NewDevice, NewKeyPackage, NewMessage, NewSpace, OidcIdentity,
-  SnowflakeGenerator, StoredSpaceImage, participants_key,
+  ImageChange, KeyPackageCounts, NewConversation, NewDevice, NewKeyPackage, NewMessage, NewSpace,
+  OidcIdentity, SnowflakeGenerator, StoredSpaceImage, participants_key,
 };
 use teamcraft_proto::{
   ClientMessageId, ConversationId, ConversationKind, ConversationVisibility, DeviceId, HistoryPolicy, Id,
@@ -334,12 +334,19 @@ async fn a_channel_picture_is_set_replaced_and_removed_with_the_previous_key_ret
     }
   };
 
+  let replaced = |key: &str| ImageChange::Set {
+    maybe_replaced_key: Some(key.to_owned()),
+  };
+  let nothing_replaced = ImageChange::Set {
+    maybe_replaced_key: None,
+  };
+
   assert_eq!(shown(db).await, None);
   assert_eq!(
     db.set_conversation_image(channel, Some(&image("a")))
       .await
       .unwrap(),
-    None
+    nothing_replaced
   );
   assert_eq!(shown(db).await, Some(image("a")));
   // The replaced picture's object is returned for deletion; the same key is not.
@@ -347,19 +354,25 @@ async fn a_channel_picture_is_set_replaced_and_removed_with_the_previous_key_ret
     db.set_conversation_image(channel, Some(&image("b")))
       .await
       .unwrap(),
-    Some("a".to_owned())
+    replaced("a")
   );
   assert_eq!(
     db.set_conversation_image(channel, Some(&image("b")))
       .await
       .unwrap(),
-    None
+    nothing_replaced
   );
   assert_eq!(
     db.set_conversation_image(channel, None).await.unwrap(),
-    Some("b".to_owned())
+    replaced("b")
   );
   assert_eq!(shown(db).await, None);
+  // A channel deleted while the picture uploaded: nothing is stored and the caller learns it.
+  let gone: ConversationId = ids.next_id().unwrap();
+  assert_eq!(
+    db.set_conversation_image(gone, Some(&image("c"))).await.unwrap(),
+    ImageChange::ChannelGone
+  );
   test_db.drop_database().await;
 }
 

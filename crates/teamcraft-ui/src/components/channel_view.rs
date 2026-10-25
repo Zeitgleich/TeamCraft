@@ -3,6 +3,7 @@ use leptos::prelude::*;
 use crate::calls::{CallKind, CallPhase, CallRequest};
 use crate::components::avatar::PresenceDot;
 use crate::components::bookmarks::BookmarksBar;
+use crate::components::channel_glyph::ChannelGlyph;
 use crate::components::compact_back::CompactBack;
 use crate::components::composer::Composer;
 use crate::components::file_views::ChannelFiles;
@@ -429,8 +430,15 @@ fn ChannelHeader(
   let title = move || {
     let conv = info.get()?;
     let icon = match conv.kind {
-      ConversationKind::Public => view! { <Icon name=IconName::Hash class="header-icon" /> }.into_any(),
-      ConversationKind::Private => view! { <Icon name=IconName::Lock class="header-icon" /> }.into_any(),
+      ConversationKind::Public | ConversationKind::Private => {
+        let fallback = if conv.kind == ConversationKind::Public {
+          IconName::Hash
+        } else {
+          IconName::Lock
+        };
+        let version = Signal::derive(move || info.get().and_then(|found| found.maybe_image_version));
+        view! { <ChannelGlyph conversation=conversation maybe_version=version fallback=fallback class="header-icon" /> }.into_any()
+      },
       ConversationKind::Integration => {
         view! { <Icon name=IconName::Terminal class="header-icon" /> }.into_any()
       },

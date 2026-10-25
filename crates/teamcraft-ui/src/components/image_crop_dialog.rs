@@ -120,7 +120,7 @@ impl CropTarget {
       ],
       Self::ChannelPicture => [
         preview(64.0, "var(--radius-lg)", "crop-preview-settings"),
-        preview(32.0, "var(--radius-md)", "crop-preview-header"),
+        preview(28.0, "var(--radius-sm)", "crop-preview-header"),
         preview(20.0, "var(--radius-sm)", "crop-preview-sidebar"),
       ],
     }

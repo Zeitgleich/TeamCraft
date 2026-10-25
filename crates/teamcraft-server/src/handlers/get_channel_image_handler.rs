@@ -43,7 +43,7 @@ pub async fn get_channel_image_handler(
     header::X_CONTENT_TYPE_OPTIONS,
     HeaderValue::from_static("nosniff"),
   );
-  // Only for the people who may see the space: no shared cache, revalidate by ETag.
+  // Only for the people who may see the channel: no shared cache, revalidate by ETag.
   headers.insert(
     header::CACHE_CONTROL,
     HeaderValue::from_static("private, no-cache"),

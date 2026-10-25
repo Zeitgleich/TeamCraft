@@ -8,9 +8,10 @@ use leptos::task::spawn_local;
 use teamcraft_client_api::actions::{
   BrowsableChannel, CategoryChoice, CategoryInfo, ChannelChanges, NewChannel, NewSpace, SpaceChanges,
 };
-use teamcraft_proto::{CategoryId, HistoryPolicy, IdempotencyKey};
+use teamcraft_proto::{CategoryId, HistoryPolicy, IdempotencyKey, Permission};
 use wasm_bindgen::JsCast;
 
+use crate::channel_access::ChannelAccess;
 use crate::channel_policy::{ChannelPolicyHub, parse_retention};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::composer_commands::left_text;
@@ -366,7 +367,7 @@ pub fn ChannelSettingsDialog(
             "members" => view! { <ChannelMembers conversation=conversation /> }.into_any(),
             "privacy" => view! { <ChannelPrivacy conversation=conversation is_private=matches!(info.kind, crate::model::ConversationKind::Private) /> }.into_any(),
             "advanced" => view! { <ChannelAdvanced conversation=conversation space=info.maybe_space /> }.into_any(),
-            _ => view! { <ChannelGeneral conversation=conversation name=info.name.clone() topic=info.topic.clone() /> }.into_any(),
+            _ => view! { <ChannelGeneral conversation=conversation name=info.name.clone() topic=info.topic.clone() is_channel=!info.kind.is_direct_like() /> }.into_any(),
           }
         }
       </SectionTabs>
@@ -377,8 +378,16 @@ pub fn ChannelSettingsDialog(
 
 /// Name and topic, saved together.
 #[component]
-fn ChannelGeneral(conversation: ConversationId, name: String, topic: String) -> impl IntoView {
+fn ChannelGeneral(
+  conversation: ConversationId,
+  name: String,
+  topic: String,
+  /// A channel, not a direct conversation: only channels have pictures.
+  is_channel: bool,
+) -> impl IntoView {
   let state = use_app_state();
+  let access = ChannelAccess::new(state, conversation);
+  let can_change_picture = move || is_channel && access.can(&Permission::ManageChannelProperties);
   let i18n = use_i18n();
   let name = RwSignal::new(name);
   let topic = RwSignal::new(topic);
@@ -408,7 +417,9 @@ fn ChannelGeneral(conversation: ConversationId, name: String, topic: String) -> 
       <input id="cs-topic" class="input" maxlength="250" prop:value=move || topic.get() on:input=move |ev| { has_saved.set(false); topic.set(event_target_value(&ev)) } />
       <SaveFooter pending=pending has_saved=has_saved />
     </form>
-    <ChannelImageSection conversation=conversation />
+    <Show when=can_change_picture fallback=|| ()>
+      <ChannelImageSection conversation=conversation />
+    </Show>
   }
 }
 

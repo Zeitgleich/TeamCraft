@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use serde_json::json;
-use teamcraft_db::StoredSpaceImage;
+use teamcraft_db::{ImageChange, StoredSpaceImage};
 use teamcraft_proto::{
   AttachmentId, ConversationId, ConversationKind, ConversationResponse, GatewayEvent, Id, Permission,
 };
@@ -17,7 +17,7 @@ use tracing::warn;
 
 use super::access::{load_conversation, require};
 use super::audit::{self, Target as AuditTarget};
-use super::conversations::get_conversation;
+use super::conversations::{ensure_open_channel, get_conversation};
 use super::space_images::{SPACE_IMAGE_CONTENT_TYPE, SpaceImageFile, run_limited, sanitize};
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
@@ -40,6 +40,7 @@ pub async fn put_channel_image(
     Permission::ManageChannelProperties,
     &access.target(),
   )?;
+  ensure_open_channel(&access)?;
   let (max_bytes, timeout) = {
     let limits = &state.settings.get().limits;
     (
@@ -78,15 +79,21 @@ pub async fn put_channel_image(
     .put_object(&image.key, png, SPACE_IMAGE_CONTENT_TYPE)
     .await
     .map_err(|error| ApiError::Unavailable(format!("storing the picture failed: {error}")))?;
-  let replaced = match state.database.set_conversation_image(id, Some(&image)).await {
-    Ok(replaced) => replaced,
+  match state.database.set_conversation_image(id, Some(&image)).await {
+    Ok(ImageChange::Set { maybe_replaced_key }) => {
+      if let Some(previous) = maybe_replaced_key {
+        forget_object(store, &previous).await;
+      }
+    },
+    // Deleted while the picture was uploading: the object is an orphan now.
+    Ok(ImageChange::ChannelGone) => {
+      forget_object(store, &image.key).await;
+      return Err(ApiError::conversation_not_found());
+    },
     Err(error) => {
       forget_object(store, &image.key).await;
       return Err(error.into());
     },
-  };
-  if let Some(previous) = replaced {
-    forget_object(store, &previous).await;
   }
   announce(state, caller, id, "channel_image_set").await?;
   get_conversation(state, caller, id).await
@@ -106,12 +113,17 @@ pub async fn delete_channel_image(
     Permission::ManageChannelProperties,
     &access.target(),
   )?;
+  ensure_open_channel(&access)?;
   if access.view.conversation.maybe_image.is_none() {
     return Err(ApiError::channel_image_not_found());
   }
   let store = blob_store(state)?;
-  if let Some(previous) = state.database.set_conversation_image(id, None).await? {
-    forget_object(store, &previous).await;
+  match state.database.set_conversation_image(id, None).await? {
+    ImageChange::Set {
+      maybe_replaced_key: Some(previous),
+    } => forget_object(store, &previous).await,
+    ImageChange::Set { .. } => {},
+    ImageChange::ChannelGone => return Err(ApiError::conversation_not_found()),
   }
   announce(state, caller, id, "channel_image_removed").await?;
   get_conversation(state, caller, id).await
