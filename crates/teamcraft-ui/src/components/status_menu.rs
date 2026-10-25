@@ -132,7 +132,8 @@ pub fn StatusMenu() -> impl IntoView {
         tabindex="-1"
         on:click=move |_| state.overlay.set(Overlay::CustomStatus)
       >
-        {move || match me.get().maybe_custom_status {
+        // An empty status (no emoji, no text) is no status: offer to set one.
+        {move || match me.get().maybe_custom_status.filter(|status| !status.text.trim().is_empty() || !status.emoji.trim().is_empty()) {
           Some(status) => {
             view! {
               <span class="menu-emoji" aria-hidden="true">{status.emoji}</span>
@@ -306,7 +307,7 @@ pub fn CustomStatusDialog() -> impl IntoView {
       text: text.get_untracked().trim().to_owned(),
       expiry: expiry.get_untracked(),
     };
-    state.write(|backend| backend.set_custom_status((!status.text.is_empty()).then_some(status)));
+    state.write(|backend| backend.set_custom_status((!status.text.trim().is_empty()).then_some(status)));
     state.close_overlay();
   };
 
