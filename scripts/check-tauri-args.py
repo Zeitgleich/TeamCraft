@@ -31,7 +31,7 @@ COMMAND_ATTRIBUTE = re.compile(
     r"#\[tauri::command(?:\(([^)]*)\))?\]\s*(?:(?:#\[[^\]]*\]|//[^\n]*)\s*)*"
     r"(?:pub(?:\([a-z]+\))?\s+)?(?:async\s+)?fn\s+(\w+)\s*\("
 )
-CALL_SITE = re.compile(r"\b(?:call|invoke)(?:::<[^(]*?>)?\(\s*\"(\w+)\"\s*,")
+CALL_SITE = re.compile(r"\b(?:call|invoke|server_call)(?:::<.*?>)?\(\s*\"(\w+)\"\s*,")
 REFLECT_KEY = re.compile(r"Reflect::set\(\s*&\w+\s*,\s*&\"(\w+)\"")
 FUNCTION_START = re.compile(r"^[ \t]*(?:pub(?:\([a-z]+\))?\s+)?(?:async\s+)?fn\s", re.M)
 # Commands the browser build answers itself in `web_core.rs`; the desktop app has no such command.

@@ -63,6 +63,14 @@ class CheckTauriArgsTest(unittest.TestCase):
         )
         self.assertEqual(problems(source), [])
 
+    def test_a_unit_turbofish_and_multi_line_calls_are_checked(self):
+        source = (
+            'async fn f() {\n  call::<()>(\n    "core_link_start",\n    &json!({ "deviceName": n }),\n  ).await\n}\n'
+        )
+        self.assertEqual(len(problems(source)), 2)
+        source = 'async fn f() { server_call::<Vec<(u8, u8)>>("core_link_start", &json!({})).await }\n'
+        self.assertEqual(len(problems(source)), 1)
+
     def test_reflect_set_keys_are_read(self):
         source = (
             "async fn f() {\n  let args = js_sys::Object::new();\n"
