@@ -333,10 +333,6 @@ fn write_init(staging: &Path, names: &Names, initializer: &str, session_files: &
     .replace("__MAIN_JS__", &format!("{PUBLIC_URL}{}", names.main_js))
     .replace("__MAIN_WASM__", &format!("{PUBLIC_URL}{}", names.main_wasm))
     .replace("__WASM_SIZE__", &wasm_size.to_string())
-    .replace(
-      "__MAIN_WASM_INTEGRITY__",
-      &integrity(&staging.join(&names.main_wasm))?,
-    )
     .replace("__INITIALIZER__", &format!("{PUBLIC_URL}{initializer}"));
   std::fs::write(staging.join("init.js"), init)?;
 
@@ -355,9 +351,8 @@ fn write_init(staging: &Path, names: &Names, initializer: &str, session_files: &
   }
   writeln!(
     links,
-    r#"<link rel="preload" href="{PUBLIC_URL}{}" crossorigin="anonymous" integrity="{}" as="fetch" type="application/wasm">"#,
-    names.main_wasm,
-    integrity(&staging.join(&names.main_wasm))?
+    r#"<link rel="preload" href="{PUBLIC_URL}{}" crossorigin="anonymous" as="fetch" type="application/wasm">"#,
+    names.main_wasm
   )?;
   links.push_str("<script type=\"module\" src=\"/init.js\"></script>\n");
   std::fs::write(
@@ -418,8 +413,10 @@ if (!isGuestLink) {
 const hooks = initializer();
 hooks.onStart?.();
 const total = __WASM_SIZE__;
-// With the preload link's integrity, so the browser uses the preloaded response.
-const response = fetch('__MAIN_WASM__', { integrity: '__MAIN_WASM_INTEGRITY__' }).then((response) => {
+// No integrity here: the browser would hold the body back until it is checked, which stops the
+// progress bar and streaming compilation. It protects nothing, the same server sends index.html;
+// the signed release check is the service worker's.
+const response = fetch('__MAIN_WASM__').then((response) => {
   const reader = response.body.getReader();
   let current = 0;
   const stream = new ReadableStream({
