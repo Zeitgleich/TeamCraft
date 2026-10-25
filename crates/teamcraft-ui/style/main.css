@@ -112,7 +112,9 @@
   --dur-exit: 100ms;
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
   --ease-emphasized: cubic-bezier(0.05, 0.7, 0.1, 1);
-  --ease-exit: cubic-bezier(0.3, 0, 1, 1);
+  /* A strong ease-out, not an ease-in: what leaves moves fastest in the first frame, the one the
+     eye is on, and is gone before an accelerating curve would have started. */
+  --ease-exit: cubic-bezier(0.23, 1, 0.32, 1);
   /* A small overshoot for things that pop (reactions, badges). */
   --ease-pop: cubic-bezier(0.34, 1.56, 0.64, 1);
   --ease-out: var(--ease-standard);
@@ -1373,16 +1375,16 @@ select.input {
   background: transparent;
   color: var(--chrome-text);
   transition:
-    background-color 120ms ease,
-    color 120ms ease;
+    background-color var(--dur-fast) var(--ease-standard),
+    color var(--dur-fast) var(--ease-standard);
 }
 
 .window-glyph {
   display: block;
   transition:
-    background-color 120ms ease,
-    color 120ms ease,
-    box-shadow 120ms ease;
+    background-color var(--dur-fast) var(--ease-standard),
+    color var(--dur-fast) var(--ease-standard),
+    box-shadow var(--dur-fast) var(--ease-standard);
 }
 
 .window-btn:active {
@@ -3949,7 +3951,7 @@ ol.md-list {
   background: hsl(var(--hue) 28% 22%);
   outline: 3px solid transparent;
   outline-offset: -3px;
-  transition: outline-color 0.15s ease;
+  transition: outline-color var(--dur-fast) var(--ease-standard);
 }
 
 .tile-speaking {
@@ -4438,22 +4440,35 @@ ol.md-list {
 }
 
 .incoming-ring {
+  position: relative;
   border-radius: var(--radius-md);
-  animation: ring 1.4s ease-in-out infinite;
+}
+
+/* The pulse is a ring that grows and fades (`transform` and `opacity`, on the compositor), not a
+   box-shadow that is repainted every frame for as long as the call rings. */
+.incoming-ring::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: 0 0 0 2px rgba(46, 182, 125, 0.5);
+  pointer-events: none;
+  animation: ring 1.4s var(--ease-standard) infinite;
 }
 
 @keyframes ring {
-  0%,
-  100% {
-    box-shadow: 0 0 0 0 rgba(46, 182, 125, 0.5);
+  from {
+    opacity: 1;
+    transform: scale(1);
   }
-  50% {
-    box-shadow: 0 0 0 10px rgba(46, 182, 125, 0);
+  to {
+    opacity: 0;
+    transform: scale(1.4);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .incoming-ring {
+  .incoming-ring::after {
     animation: none;
   }
 }
@@ -5254,8 +5269,8 @@ ol.md-list {
   border-radius: var(--radius-md);
   font-size: var(--text-md);
   transition:
-    border-color var(--dur-fast) ease,
-    box-shadow var(--dur-fast) ease;
+    border-color var(--dur-fast) var(--ease-standard),
+    box-shadow var(--dur-fast) var(--ease-standard);
 }
 
 .auth-card .input[aria-invalid="true"] {
@@ -6431,7 +6446,7 @@ ol.md-list {
 :root[data-image-size="standard"] .media-single:not(.has-size) .media-open img { max-width: min(240px, 100%); max-height: 320px; }
 .media-grid[data-tiles="3"] .media-tile:first-child { grid-row: span 2; aspect-ratio: auto; }
 /* Actions float over the picture's top right on hover, focus or long-press; never shown permanently */
-.media-toolbar { position: absolute; top: 6px; right: 6px; z-index: 1; display: flex; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); box-shadow: var(--shadow-card); opacity: 0; visibility: hidden; transform: translateY(-2px); transition: opacity var(--dur-fast), transform var(--dur-fast), visibility 0s linear var(--dur-fast); }
+.media-toolbar { position: absolute; top: 6px; right: 6px; z-index: 1; display: flex; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); box-shadow: var(--shadow-card); opacity: 0; visibility: hidden; transform: translateY(-2px); transition: opacity var(--dur-fast) var(--ease-standard), transform var(--dur-fast) var(--ease-standard), visibility 0s linear var(--dur-fast); }
 .media-tile:focus-within .media-toolbar, .media-tile.actions-pinned .media-toolbar, .media-toolbar:has([aria-expanded="true"]) { opacity: 1; visibility: visible; transform: none; transition-delay: 0s; }
 @media (hover: hover) and (pointer: fine) { .media-tile:hover .media-toolbar { opacity: 1; visibility: visible; transform: none; transition-delay: 0s; } }
 .media-tool { width: 28px; height: 28px; }
@@ -8736,15 +8751,11 @@ ol.md-list {
   animation: motion-dot-in var(--dur-base) var(--ease-pop);
 }
 
+/* One segment: --ease-pop already overshoots the end (about 1.17 from 0.7). A middle keyframe at
+   1.12 would run the curve once per segment and wobble the count (overshoot, then undershoot). */
 @keyframes motion-pop {
-  0% {
+  from {
     transform: scale(0.7);
-  }
-  60% {
-    transform: scale(1.12);
-  }
-  100% {
-    transform: scale(1);
   }
 }
 
@@ -11009,7 +11020,7 @@ ol.md-list {
   opacity: 0;
   animation:
     spin 0.8s linear infinite,
-    lazy-area-show 0.2s ease-out 0.3s forwards;
+    lazy-area-show var(--dur-base) var(--ease-standard) 0.3s forwards;
 }
 
 @keyframes lazy-area-show {
