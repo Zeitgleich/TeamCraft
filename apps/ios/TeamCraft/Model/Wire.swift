@@ -18,6 +18,8 @@ struct FileTransfer: Decodable, Equatable, Sendable {
   let state: String
   let doneBytes: Int64?
   let totalBytes: Int64?
+  /// Failed attempts of an upload that is retried by itself.
+  let failedAttempts: Int?
   /// Where the decrypted file is, once `local`.
   let path: String?
   let reason: String?

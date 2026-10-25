@@ -3209,6 +3209,22 @@
         }
       }
     },
+    "file_upload_retrying": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retrying…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wird erneut versucht …"
+          }
+        }
+      }
+    },
     "file_upload_stalled": {
       "localizations": {
         "en": {

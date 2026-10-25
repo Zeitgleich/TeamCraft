@@ -384,6 +384,7 @@ fn upload_transfer(file: &PendingFile, transfers: &Transfers) -> FileTransfer {
   FileTransfer::Uploading {
     done_bytes,
     total_bytes: file.size_bytes,
+    failed_attempts: file.retry.failed_attempts(),
   }
 }
 

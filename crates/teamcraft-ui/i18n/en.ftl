@@ -1232,6 +1232,7 @@ file-uploading = Uploading…
 file-cancel-upload = Cancel upload
 file-progress-percent = { $percent } %
 file-progress-bytes = { $done } / { $total }
+file-upload-retrying = Retrying…
 file-upload-failed = Upload failed
 file-preview = Show preview
 file-share = Create share link

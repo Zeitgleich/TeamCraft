@@ -1232,6 +1232,7 @@ file-uploading = Wird hochgeladen…
 file-cancel-upload = Hochladen abbrechen
 file-progress-percent = { $percent } %
 file-progress-bytes = { $done } / { $total }
+file-upload-retrying = Wird erneut versucht …
 file-upload-failed = Hochladen fehlgeschlagen
 file-preview = Vorschau anzeigen
 file-share = Freigabelink erstellen

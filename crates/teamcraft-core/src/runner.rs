@@ -22,7 +22,7 @@ use crate::platform;
 use crate::store::LocalStore;
 #[cfg(feature = "ui")]
 use crate::ui_backend::CoreCommand;
-use crate::upkeep::{self, UploadMode, Upkeep};
+use crate::upkeep::{self, Upkeep, UploadMode};
 
 /// Runs a client until it is stopped; see the module docs.
 pub struct SyncRunner<A: ServerApi, S> {
@@ -224,7 +224,12 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
     let downloaded = Box::pin(downloads.next_finished());
     let tick = Box::pin(platform::sleep(Duration::from_millis(until_ms.unsigned_abs())));
     let transfers = select(uploaded, downloaded);
-    match select(commands.next(), select(select(frame, network), select(transfers, tick))).await {
+    match select(
+      commands.next(),
+      select(select(frame, network), select(transfers, tick)),
+    )
+    .await
+    {
       Either::Left((maybe_command, _)) => Wake::Command(maybe_command),
       Either::Right((Either::Left((Either::Left((maybe_frame, _)), _)), _)) => Wake::Frame(maybe_frame),
       Either::Right((Either::Left((Either::Right((Some(()), _)), _)), _)) => Wake::NetworkChanged,
@@ -233,7 +238,9 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
         *maybe_network = None;
         Wake::Tick
       },
-      Either::Right((Either::Right((Either::Left((Either::Left((sent, _)), _)), _)), _)) => Wake::Uploaded(sent),
+      Either::Right((Either::Right((Either::Left((Either::Left((sent, _)), _)), _)), _)) => {
+        Wake::Uploaded(sent)
+      },
       Either::Right((Either::Right((Either::Left((Either::Right((finished, _)), _)), _)), _)) => {
         Wake::Downloaded(finished)
       },
@@ -354,11 +361,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
     }
     self.is_upload_due = false;
     let now = self.client.now_ms();
-    match self
-      .connection
-      .keep_alive(now, self.client.start_upload())
-      .await
-    {
+    match self.connection.keep_alive(now, self.client.start_upload()).await {
       Ok(Some(upload)) => {
         self.maybe_upload = Some(upload);
         // The pending message shows the file's thumbnail from now on.

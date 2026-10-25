@@ -96,8 +96,12 @@ struct FileStateLine: View {
           ProgressView()
         }
         if file.transfer.state == "uploading" {
-          Text(TransferText.progress(file.transfer)).font(.caption2).foregroundStyle(Theme.textMuted)
-            .accessibilityLabel(Text("file_uploading"))
+          if (file.transfer.doneBytes ?? 0) == 0 && (file.transfer.failedAttempts ?? 0) > 0 {
+            Text("file_upload_retrying").font(.caption2).foregroundStyle(Theme.textMuted)
+          } else {
+            Text(TransferText.progress(file.transfer)).font(.caption2).foregroundStyle(Theme.textMuted)
+              .accessibilityLabel(Text("file_uploading"))
+          }
         } else {
           Text("file_downloading").font(.caption2).foregroundStyle(Theme.textMuted)
         }

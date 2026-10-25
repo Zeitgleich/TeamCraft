@@ -120,6 +120,7 @@
   <string name="new_messages">Neue Nachrichten</string>
   <string name="file_failed">Die Datei konnte nicht gesendet oder geladen werden.</string>
   <string name="file_cancel_upload">Abbrechen</string>
+  <string name="file_upload_retrying">Wird erneut versucht …</string>
   <string name="file_upload_stalled">Hochladen fehlgeschlagen. Die Nachricht wartet auf die Datei.</string>
   <string name="priority_normal">Normale Priorität</string>
   <string name="priority_important">Wichtig</string>

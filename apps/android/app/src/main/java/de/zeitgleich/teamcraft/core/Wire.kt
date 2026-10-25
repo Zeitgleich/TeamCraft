@@ -174,6 +174,8 @@ data class FileTransfer(
   val state: String,
   @SerialName("done_bytes") val doneBytes: Long = 0,
   @SerialName("total_bytes") val totalBytes: Long = 0,
+  /** Failed attempts of an upload that is retried by itself. */
+  @SerialName("failed_attempts") val failedAttempts: Int = 0,
   val path: String? = null,
   val reason: String? = null,
 ) {

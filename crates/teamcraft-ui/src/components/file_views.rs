@@ -158,10 +158,11 @@ fn UploadTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
     FileTransfer::Uploading {
       done_bytes,
       total_bytes,
+      failed_attempts,
     } if done_bytes < total_bytes || total_bytes == 0 => view! {
       <span class="upload-state">
         <TransferRing done_bytes=done_bytes total_bytes=total_bytes />
-        <span class="upload-label" role="status">{transfer_label(i18n, done_bytes, total_bytes)}</span>
+        <span class="upload-label" role="status">{upload_label(i18n, done_bytes, total_bytes, failed_attempts)}</span>
         <CancelUploadButton actions=actions />
       </span>
     }
@@ -252,6 +253,14 @@ fn transfer_label(i18n: I18n, done_bytes: u64, total_bytes: u64) -> String {
     "file-progress-percent",
     &[("percent", &percent_of(done_bytes, total_bytes).to_string())],
   )
+}
+
+/// An upload's progress in words; before its first bytes after a failed attempt, that it is retried.
+fn upload_label(i18n: I18n, done_bytes: u64, total_bytes: u64, failed_attempts: u32) -> String {
+  match (done_bytes, failed_attempts) {
+    (0, 1..) => i18n.t("file-upload-retrying"),
+    _ => transfer_label(i18n, done_bytes, total_bytes),
+  }
 }
 
 fn percent_of(done_bytes: u64, total_bytes: u64) -> u64 {
@@ -638,12 +647,16 @@ fn transfer_status(transfer: &FileTransfer, actions: FileActions) -> AnyView {
   let i18n = use_i18n();
   match transfer {
     FileTransfer::Remote => ().into_any(),
-    FileTransfer::Uploading { done_bytes, total_bytes } => {
+    FileTransfer::Uploading {
+      done_bytes,
+      total_bytes,
+      failed_attempts,
+    } => {
       let (done, total) = (*done_bytes, *total_bytes);
       view! {
         <span class="file-transfer">
           <progress class="file-progress" max=total.max(1) value=done aria-label=move || i18n.t("file-progress")></progress>
-          <span class="file-state">{transfer_label(i18n, done, total)}</span>
+          <span class="file-state">{upload_label(i18n, done, total, *failed_attempts)}</span>
           <CancelUploadButton actions=actions />
         </span>
       }

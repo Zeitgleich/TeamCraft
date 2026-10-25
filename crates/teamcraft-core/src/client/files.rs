@@ -142,6 +142,13 @@ impl UploadRetry {
     matches!(self, Self::Stalled { .. })
   }
 
+  pub fn failed_attempts(&self) -> u32 {
+    match self {
+      Self::Fresh => 0,
+      Self::Waiting { attempts, .. } | Self::Stalled { attempts } => *attempts,
+    }
+  }
+
   /// Whether an attempt may run at `now_ms`.
   pub fn is_due(&self, now_ms: i64) -> bool {
     match self {

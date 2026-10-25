@@ -559,7 +559,9 @@ private fun UploadLine(viewModel: MainViewModel, file: FileInfo) {
     when (file.transfer.state) {
       "uploading" -> {
         val transfer = file.transfer
-        val label = if (transfer.totalBytes >= LARGE_TRANSFER_BYTES) {
+        val label = if (transfer.doneBytes == 0L && transfer.failedAttempts > 0) {
+          stringResource(R.string.file_upload_retrying)
+        } else if (transfer.totalBytes >= LARGE_TRANSFER_BYTES) {
           "${Formatter.formatShortFileSize(context, transfer.doneBytes)} / ${Formatter.formatShortFileSize(context, transfer.totalBytes)}"
         } else {
           "${if (transfer.totalBytes > 0) transfer.doneBytes * 100 / transfer.totalBytes else 0} %"
