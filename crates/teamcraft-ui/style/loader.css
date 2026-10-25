@@ -3,6 +3,8 @@
    the fallbacks only matter if main.css is still missing. Nothing here may depend on JS. */
 
 .tc-loader {
+  /* The mark's dot keeps the logo's own blue whatever the accent. */
+  --tc-loader-mark-dot: #0063ee;
   position: fixed;
   inset: 0;
   z-index: 2147483647;
@@ -79,7 +81,7 @@
   left: 38.04%;
   width: 6.4%;
   height: 6.4%;
-  background: #0063ee;
+  background: var(--tc-loader-mark-dot);
 }
 
 .tc-loader.is-product .tc-loader-dot:nth-child(2) {
