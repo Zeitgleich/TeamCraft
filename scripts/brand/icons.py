@@ -128,12 +128,10 @@ def web() -> list[Path]:
   (WEB / "favicon.svg").write_text(glyph("rounded"))
   write_ico({size: png_bytes(glyph("rounded"), size) for size in (16, 32, 48)}, WEB / "favicon.ico")
   shutil.copy(BRAND / "mark.svg", WEB / "mark.svg")
-  # The loading screen animates the dots itself (style/loader.css).
-  (WEB / "loader-mark.svg").write_text(mark.svg(with_dots=False))
+  # The loading screen inlines the mark in index.html (its parts animate); update it there too.
   shutil.copy(BRAND / "wordmark.svg", WEB / "wordmark.svg")
   shutil.copy(BRAND / "wordmark-dark.svg", WEB / "wordmark-dark.svg")
-  names = ("favicon.svg", "favicon.ico", "mark.svg", "loader-mark.svg", "wordmark.svg",
-           "wordmark-dark.svg")
+  names = ("favicon.svg", "favicon.ico", "mark.svg", "wordmark.svg", "wordmark-dark.svg")
   return out + [WEB / name for name in names]
 
 
