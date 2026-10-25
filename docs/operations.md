@@ -293,6 +293,25 @@ In Keycloak, `http://127.0.0.1/*` as a valid redirect URI covers the desktop app
 `app_redirect_uris` lists them, an app built with another redirect URI (a self-build with its own app
 ID) tells its user that the server is not set up for it instead of failing at the provider.
 
+**Several devices per account.** Every device signs in with its own provider session, and all of
+them stay signed in side by side. Signing out on one device ends that device's provider session; the
+provider's back-channel logout names it (`sid`), and the server ends only that session. A logout
+token without `sid` ends all sessions of the user (OIDC Back-Channel Logout 1.0 §2.4). In Keycloak:
+
+| Setting                                                  | Value                                               |
+|----------------------------------------------------------|-----------------------------------------------------|
+| Client `teamcraft` → Backchannel logout URL              | `https://<host>/api/v1/auth/backchannel-logout`     |
+| Client `teamcraft` → Backchannel logout session required | On: the logout token names the session              |
+| Browser flow → User session count limiter                | Not used, or without "Terminate oldest session" (¹) |
+| Realm settings → Tokens → Revoke Refresh Token           | Either: it applies to each device's own token       |
+
+(¹) With it, a sign-in on one device ends the oldest session of the user, another device's.
+
+Up to 1.0.3 the server ended every session of the user on any back-channel logout, since Keycloak
+names the subject in each logout token as well: signing out (or "sign in again", which signs out
+first) on one device signed the others out. To end all sessions of a user, sign them out in the
+provider (Keycloak: Users → user → Sessions → Sign out) or disable the user.
+
 The apps reject a server that is not a TeamCraft server, that answers with an HTML page or a redirect
 (a captive portal), whose version is too old (or for which the app is too old), or whose issuer is not
 `https`. Tokens and local data are kept per server origin; an app never switches to a server because

@@ -42,6 +42,7 @@ use crate::notifier::{
   Decision, NotificationTitle, Notifier, ReadWatcher, all_conversations, needs_channel_confirmation,
   notifications_for,
 };
+use crate::reactive::OwnerLiveness;
 use crate::settings::{load_string, store_string};
 use crate::state::{AppState, MainView};
 
@@ -503,7 +504,11 @@ fn listen_for_actions(state: AppState, i18n: I18n) {
     return;
   }
   let Some(window) = web_sys::window() else { return };
+  let liveness = OwnerLiveness::of_current_owner();
   let listener = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |message: web_sys::MessageEvent| {
+    if !liveness.is_alive() {
+      return;
+    }
     let data = message.data();
     let text = |key: &str| {
       js_sys::Reflect::get(&data, &key.into())
@@ -765,7 +770,12 @@ fn is_shown_in_other_tab(me: crate::model::UserId, conversation: ConversationId)
 
 fn on_window_event(event: &str, callback: impl Fn() + 'static) {
   let Some(window) = web_sys::window() else { return };
-  let closure = Closure::<dyn FnMut()>::new(callback);
+  let liveness = OwnerLiveness::of_current_owner();
+  let closure = Closure::<dyn FnMut()>::new(move || {
+    if liveness.is_alive() {
+      callback();
+    }
+  });
   if window
     .add_event_listener_with_callback(event, closure.as_ref().unchecked_ref())
     .is_ok()

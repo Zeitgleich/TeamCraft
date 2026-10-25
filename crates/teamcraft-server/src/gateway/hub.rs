@@ -674,13 +674,18 @@ impl Hub {
     }
   }
 
-  /// Ends the gateway sessions that authenticated with this identity provider session.
-  pub fn revoke_oidc_session(&self, oidc_session: &str) {
+  /// Ends the gateway sessions that authenticated with this identity provider session, and those of
+  /// `maybe_user` that authenticated without a provider session ID (they may belong to it).
+  pub fn revoke_oidc_session(&self, oidc_session: &str, maybe_user: Option<UserId>) {
     let mut inner = self.lock();
     let ids: Vec<(String, UserId)> = inner
       .sessions
       .iter()
-      .filter(|(_, session)| session.maybe_oidc_session.as_deref() == Some(oidc_session))
+      .filter(|(_, session)| match session.maybe_oidc_session.as_deref() {
+        Some(other) => other == oidc_session,
+        // Signed in with a token without a session ID: it may be the ended session.
+        None => maybe_user == Some(session.user),
+      })
       .map(|(id, session)| (id.clone(), session.user))
       .collect();
     for (id, user) in ids {
@@ -1746,10 +1751,17 @@ mod tests {
     let mut b = hub.open_session(user(1), device(2), DeviceActivity::Active);
     hub.set_oidc_session(&a.session_id, "sid-a");
     hub.set_oidc_session(&b.session_id, "sid-b");
-    hub.revoke_oidc_session("sid-a");
+    let mut sessionless = hub.open_session(user(1), device(3), DeviceActivity::Active);
+    let mut other_user = hub.open_session(user(2), device(4), DeviceActivity::Active);
+    hub.revoke_oidc_session("sid-a", Some(user(1)));
     assert!(a.next_outgoing().await.is_none());
-    hub.publish([user(1)], &event(1));
+    assert!(
+      sessionless.next_outgoing().await.is_none(),
+      "a session without a provider session ID may be the ended one"
+    );
+    hub.publish([user(1), user(2)], &event(1));
     assert_eq!(seqs(&mut b), vec![1]);
+    assert_eq!(seqs(&mut other_user), vec![1]);
   }
 
   #[tokio::test(start_paused = true)]

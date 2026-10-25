@@ -16,6 +16,7 @@ use super::{
 use teamcraft_client_api::os_notify::{NotificationTag, OsNotification, TagTarget};
 
 use crate::model::ConversationId;
+use crate::reactive::OwnerLiveness;
 
 /// Prefix of the i18n keys the server commands answer with.
 const SERVER_KEY_PREFIX: &str = "server-entry-";
@@ -624,8 +625,16 @@ pub fn has_core() -> bool {
   }
 }
 
-/// Calls `callback` whenever the desktop shell emits `event`.
+/// Calls `callback` whenever the desktop shell emits `event`, while the current reactive owner lives
+/// (see [`OwnerLiveness`]).
 pub fn listen(event: &str, callback: impl FnMut() + 'static) {
+  let liveness = OwnerLiveness::of_current_owner();
+  let mut callback = callback;
+  let callback = move || {
+    if liveness.is_alive() {
+      callback();
+    }
+  };
   if !is_available() {
     #[cfg(target_arch = "wasm32")]
     crate::web_core::listen(callback);
@@ -637,12 +646,17 @@ pub fn listen(event: &str, callback: impl FnMut() + 'static) {
   subscribe(event, move |_| callback());
 }
 
-/// Calls `callback` with the text payload of every `event` the desktop shell emits (desktop only).
+/// Calls `callback` with the text payload of every `event` the desktop shell emits (desktop only),
+/// while the current reactive owner lives (see [`OwnerLiveness`]).
 pub fn listen_text(event: &str, mut callback: impl FnMut(String) + 'static) {
   if !is_available() {
     return;
   }
+  let liveness = OwnerLiveness::of_current_owner();
   subscribe(event, move |message| {
+    if !liveness.is_alive() {
+      return;
+    }
     // Tauri delivers `{ event, id, payload }`.
     if let Some(text) = js_sys::Reflect::get(&message, &JsValue::from_str("payload"))
       .ok()
@@ -686,7 +700,8 @@ fn subscribe(event: &str, callback: impl FnMut(JsValue) + 'static) {
   {
     tracing::warn!(event, "could not subscribe to the desktop event");
   }
-  // The subscription lives as long as the page.
+  // The subscription lives as long as the page; `listen` and `listen_text` make it go quiet with
+  // its owner.
   handler.forget();
 }
 

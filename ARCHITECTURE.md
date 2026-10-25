@@ -258,7 +258,8 @@ guest  = "external"
   attribute `tc_identity_key` → ID token claim (e2ee.md §3.1).
 - User profile attribute `tc_identity_key`: editable by the user (written by the client through the
   account API at enrollment), viewable by admins, not editable by the TeamCraft service account.
-- **Deprovisioning:** Keycloak calls `teamcraft-server` via OIDC back-channel logout when sessions end;
+- **Deprovisioning:** Keycloak calls `teamcraft-server` via OIDC back-channel logout when sessions end
+  (a logout token with `sid` ends that device's session only, so the user's other devices stay signed in);
   the service account additionally polls for disabled users and role changes (every few minutes) and
   triggers removal from all groups (docs/admin.md §3.2).
 - **Roles and the admin roster:** Keycloak roles decide who *should* be admin; the cryptographic admin

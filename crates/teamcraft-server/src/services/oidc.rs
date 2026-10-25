@@ -24,46 +24,46 @@ use crate::state::{AppState, OidcSyncSettings};
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Ends the sessions a back-channel logout token names (the provider ended them).
+///
+/// A token with `sid` ends that provider session only, even when it also names the subject
+/// (Back-Channel Logout 1.0 §2.4; Keycloak always sends both): signing out on one device must not
+/// sign the user's other devices out. Only a token without `sid` ends all of the subject's sessions.
 pub async fn backchannel_logout(state: &AppState, logout_token: &str) -> Result<(), ApiError> {
   let identity = state.validator.validate_logout_token(logout_token).await?;
   let now = i64::try_from(jsonwebtoken::get_current_timestamp()).unwrap_or(i64::MAX);
+  let issuer = state.validator.issuer();
+  let maybe_user = match &identity.maybe_subject {
+    Some(subject) => state.database.find_user_by_oidc_subject(issuer, subject).await?,
+    None => None,
+  };
 
-  if let Some(subject) = &identity.maybe_subject {
-    state
-      .revocations
-      .revoke_subject(state.validator.issuer(), subject, now);
-    if let Some(user) = state
-      .database
-      .find_user_by_oidc_subject(state.validator.issuer(), subject)
-      .await?
-    {
-      state.hub.revoke_user(user);
-      audit::record(
-        state,
-        None,
-        "oidc_backchannel_logout",
-        Some(AuditTarget::new("user", user)),
-        &json!({"scope": "subject"}),
-      )
-      .await?;
-    }
-  }
-  if let Some(session) = &identity.maybe_session_id {
-    state
-      .revocations
-      .revoke_session(state.validator.issuer(), session, now);
-    state.hub.revoke_oidc_session(session);
-    if identity.maybe_subject.is_none() {
-      audit::record(
-        state,
-        None,
-        "oidc_backchannel_logout",
-        None::<AuditTarget<'_>>,
-        &json!({"scope": "session"}),
-      )
-      .await?;
-    }
-  }
+  let scope = match (&identity.maybe_session_id, &identity.maybe_subject) {
+    (Some(session), maybe_subject) => {
+      state
+        .revocations
+        .revoke_session(issuer, maybe_subject.as_deref(), session, now);
+      state.hub.revoke_oidc_session(session, maybe_user);
+      "session"
+    },
+    (None, Some(subject)) => {
+      state.revocations.revoke_subject(issuer, subject, now);
+      if let Some(user) = maybe_user {
+        state.hub.revoke_user(user);
+      }
+      "subject"
+    },
+    // The validator refuses tokens that name neither.
+    (None, None) => return Ok(()),
+  };
+  let target = maybe_user.map(|user| AuditTarget::new("user", user));
+  audit::record(
+    state,
+    None,
+    "oidc_backchannel_logout",
+    target,
+    &json!({"scope": scope}),
+  )
+  .await?;
   Ok(())
 }
 

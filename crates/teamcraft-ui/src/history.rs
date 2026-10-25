@@ -29,6 +29,7 @@ use crate::clock::now_ms;
 use crate::components::app::on_window;
 use crate::i18n::I18n;
 use crate::model::TimestampMs;
+use crate::reactive::OwnerLiveness;
 use crate::route::{HistoryStep, Route};
 use crate::state::{AppState, RouteOutcome};
 
@@ -300,7 +301,12 @@ fn listen_mouse(
   event: &str,
   handler: impl Fn(Travel, &web_sys::MouseEvent) + 'static,
 ) {
+  // The next shell after a sign-in adds its own: one step per click, never two.
+  let liveness = OwnerLiveness::of_current_owner();
   let listener = Closure::<dyn Fn(web_sys::MouseEvent)>::new(move |event: web_sys::MouseEvent| {
+    if !liveness.is_alive() {
+      return;
+    }
     if let Some(travel_to) = mouse_travel(event.button()) {
       handler(travel_to, &event);
     }
