@@ -5067,6 +5067,12 @@ ol.md-list {
   flex-wrap: wrap;
 }
 
+/* The question before an action that can't be undone (setting a device up again). */
+.auth-card .auth-confirm-text {
+  margin: 0 0 var(--space-3);
+  font-weight: 600;
+}
+
 /* Side by side while both labels fit on one line, stacked (full width) when not. */
 .auth-card .auth-actions-split .btn {
   flex: 1 1 0;

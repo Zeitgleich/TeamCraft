@@ -324,16 +324,17 @@ async fn link_new_device(
     NewDeviceLink::connect(&api, &offer),
     owner.client.start_link_approval(&code)
   );
+  let new_store = Arc::new(MemoryStore::new());
   let (approved, received) = tokio::join!(
     owner.client.complete_link_approval(owner_side.unwrap()),
-    new_side.unwrap().receive_secrets()
+    new_side.unwrap().receive_secrets(&new_store, "Test device")
   );
   approved.unwrap();
   let link_options = linked_options(received.unwrap());
   PendingEnrollment::new()
     .complete(
       api,
-      Arc::new(MemoryStore::new()),
+      new_store,
       Box::new(clock.clone()),
       settings_with_stagger(),
       link_options,

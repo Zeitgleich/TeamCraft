@@ -58,7 +58,10 @@ impl CoreHost {
     }
     if let Some(runtime) = self.running_for(server_url, user)? {
       let status = runtime.status().await;
-      if !matches!(status, CoreStatus::Failed { .. } | CoreStatus::Stopped) {
+      if !matches!(
+        status,
+        CoreStatus::Failed { .. } | CoreStatus::StoreUnreadable { .. } | CoreStatus::Stopped
+      ) {
         return Ok(status);
       }
       tracing::info!(
@@ -333,9 +336,19 @@ pub async fn core_attachment(
   Ok(tauri::ipc::Response::new(plaintext.expose_secret().to_vec()))
 }
 
+/// Sets an unreadable local database aside and opens a new one (issue #160).
+#[tauri::command]
+pub async fn core_reset_store(host: State<'_, CoreHost>) -> Result<(), CommandError> {
+  Ok(host.current()?.reset_store().await?)
+}
+
 /// Stops the core, e.g. on sign-out. The encrypted database stays on disk.
 #[tauri::command]
-pub fn core_stop(host: State<'_, CoreHost>) -> Result<(), CommandError> {
+pub async fn core_stop(host: State<'_, CoreHost>) -> Result<(), CommandError> {
+  // Signing out of a device that isn't set up yet leaves no keys of the attempt behind (#168).
+  if let Ok(runtime) = host.current() {
+    runtime.forget_unfinished_setup().await;
+  }
   Ok(host.stop()?)
 }
 
@@ -356,6 +369,7 @@ mod tests {
   use std::time::{SystemTime, UNIX_EPOCH};
 
   use secrecy::SecretString;
+  use teamcraft_client_api::remote::StoreProblem;
   use teamcraft_proto::{Id, Snowflake};
   use tokio::io::{AsyncReadExt, AsyncWriteExt};
   use tokio::net::TcpListener;
@@ -403,7 +417,8 @@ mod tests {
     let host = CoreHost::new(TokenCache::live(service.clone()));
     let directory = scratch_dir("replace");
     std::fs::create_dir_all(&directory).expect("dir");
-    // A damaged database: opening fails after the store lock was taken.
+    // A damaged database: opening fails after the store lock was taken, and the user is asked what
+    // to do with it (issue #160).
     let database = directory.join(format!("{}.db", user(1)));
     std::fs::write(&database, b"not a database").expect("file");
 
@@ -423,9 +438,62 @@ mod tests {
       .await
       .expect("second start");
 
-    assert!(matches!(first, CoreStatus::Failed { .. }), "{first:?}");
+    assert!(
+      matches!(
+        first,
+        CoreStatus::StoreUnreadable {
+          problem: StoreProblem::Damaged
+        }
+      ),
+      "{first:?}"
+    );
     assert!(matches!(second, CoreStatus::NeedsEnrollment { .. }), "{second:?}");
     drop(still_held);
+    host.stop().expect("stop");
+    drop(std::fs::remove_dir_all(&directory));
+  }
+
+  #[tokio::test]
+  async fn an_unreadable_database_is_set_aside_and_the_device_set_up_again() {
+    let (server_url, _) = spawn_not_found_server().await;
+    let service = signed_in_service(&server_url).await;
+    let host = CoreHost::new(TokenCache::live(service.clone()));
+    let directory = scratch_dir("reset");
+    std::fs::create_dir_all(&directory).expect("dir");
+    let database = directory.join(format!("{}.db", user(1)));
+    std::fs::write(&database, b"not a database").expect("file");
+    let status = host
+      .start(&service, &server_url, user(1), |tokens| {
+        runtime(&server_url, directory.clone(), tokens)
+      })
+      .await
+      .expect("start");
+    assert!(matches!(status, CoreStatus::StoreUnreadable { .. }), "{status:?}");
+
+    let core = host.current().expect("core");
+    core.reset_store().await.expect("reset");
+    let after = core.status().await;
+    assert!(
+      matches!(
+        after,
+        CoreStatus::NeedsEnrollment {
+          was_data_lost: true,
+          ..
+        }
+      ),
+      "set up again, and told why: {after:?}"
+    );
+    // The old file is kept beside the new database, untouched.
+    let kept: Vec<_> = std::fs::read_dir(&directory)
+      .expect("list")
+      .filter_map(|entry| entry.ok())
+      .filter(|entry| entry.file_name().to_string_lossy().contains(".db.unreadable-"))
+      .collect();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(std::fs::read(kept[0].path()).expect("read"), b"not a database");
+    // A readable database is never reset.
+    assert!(core.reset_store().await.is_err());
+    drop(core);
     host.stop().expect("stop");
     drop(std::fs::remove_dir_all(&directory));
   }

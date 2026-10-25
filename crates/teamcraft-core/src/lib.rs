@@ -54,4 +54,4 @@ pub use client::{
   EnrollmentSecret, FlushReport, GatewayOutcome, GroupAccess, JwksSource, LinkOffer, MAX_VIEWER_BYTES,
   OrgRecoveryUnlock, PendingEnrollment, TypingState,
 };
-pub use error::CoreError;
+pub use error::{CoreError, UnreadableStore};
