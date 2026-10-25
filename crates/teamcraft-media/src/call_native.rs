@@ -23,6 +23,7 @@ use std::thread::JoinHandle as ThreadHandle;
 use std::time::{Duration, Instant};
 
 use socket2::{Domain, Protocol, Socket, Type};
+use teamcraft_net::{ATTEMPT_DELAY, RaceError, interleave, race};
 use teamcraft_proto::{
   CallClientMessage, CallServerMessage, DeviceId, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, VideoCodec,
   VideoLayerInfo, VideoTrackKind,
@@ -52,6 +53,7 @@ use crate::call_resilience::{
   JoinTicket, JoinTicketError, PathMonitor, PathState, ReconnectSchedule, ResilienceConfig,
 };
 use crate::jitter::JitterBufferConfig;
+use crate::sfu_address::{PinnedResolver, sfu_addresses};
 use crate::system_audio::{SystemAudioCapture, SystemAudioError, SystemAudioReceiver, system_audio_queue};
 use crate::video::EncodedVideoFrame;
 use crate::video_capture::CaptureError;
@@ -944,10 +946,31 @@ impl Link {
   }
 }
 
-/// A socket bound to the wildcard address (it follows route changes, which lets QUIC migrate),
-/// with keep-alives for carrier NATs.
+/// Races the QUIC handshake over the SFU's addresses (Happy Eyeballs, issue #420): a broken IPv6
+/// route costs one attempt delay before IPv4 is tried.
 async fn connect(
   sfu_url: &str,
+  maybe_certificate_hash: Option<[u8; 32]>,
+  resilience: &ResilienceConfig,
+) -> Result<(Endpoint<Client>, Connection), NativeCallError> {
+  let addresses = sfu_addresses(sfu_url)
+    .await
+    .map_err(|error| NativeCallError::Connect(error.to_string()))?;
+  race(interleave(addresses), ATTEMPT_DELAY, |address| {
+    connect_to(sfu_url, address, maybe_certificate_hash, resilience)
+  })
+  .await
+  .map_err(|error| match error {
+    RaceError::NoAddress => NativeCallError::Connect("the SFU's host has no address".into()),
+    RaceError::Failed(error) => error,
+  })
+}
+
+/// One attempt at `address`. A socket bound to the wildcard address (it follows route changes,
+/// which lets QUIC migrate), with keep-alives for carrier NATs.
+async fn connect_to(
+  sfu_url: &str,
+  address: SocketAddr,
   maybe_certificate_hash: Option<[u8; 32]>,
   resilience: &ResilienceConfig,
 ) -> Result<(Endpoint<Client>, Connection), NativeCallError> {
@@ -957,6 +980,7 @@ async fn connect(
     None => with_trusted_roots(builder),
   };
   let client_config = builder
+    .dns_resolver(PinnedResolver(address))
     .keep_alive_interval(Some(resilience.keep_alive_interval))
     .max_idle_timeout(Some(resilience.idle_timeout))
     .map_err(|error| NativeCallError::Connect(error.to_string()))?
@@ -1424,6 +1448,49 @@ async fn read_datagrams(connection: Connection, inputs: mpsc::UnboundedSender<Li
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// Issue #420 for calls: nothing answers QUIC on the SFU's IPv6 address (the handshake is
+  /// swallowed, as on a broken route), IPv4 works. The call connects over IPv4.
+  #[tokio::test]
+  async fn the_sfu_handshake_falls_back_to_ipv4() {
+    let identity = wtransport::Identity::self_signed(["localhost"]).unwrap();
+    let hash: [u8; 32] = *identity.certificate_chain().as_slice()[0].hash().as_ref();
+    let config = wtransport::ServerConfig::builder()
+      .with_bind_address(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+      .with_identity(identity)
+      .build();
+    let server = Endpoint::server(config).unwrap();
+    let port = server.local_addr().unwrap().port();
+    tokio::spawn(async move {
+      let mut sessions = Vec::new();
+      loop {
+        if let Ok(request) = server.accept().await.await
+          && let Ok(connection) = request.accept().await
+        {
+          sessions.push(connection);
+        }
+      }
+    });
+    // Nothing listens for UDP on [::1] at this port. The kernel answers with ICMP "port
+    // unreachable", but the client's socket is unconnected and quinn doesn't act on ICMP errors,
+    // so the handshake just waits, like on a route that swallows packets. Should a platform report
+    // the error and fail the attempt at once, IPv4 starts right away and the elapsed-time check
+    // below would fail: that would be a change in the test's assumption, not in the racing.
+    let silent_v6 = SocketAddr::from((Ipv6Addr::LOCALHOST, port));
+    let v4 = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let url = format!("https://localhost:{port}/call");
+    let resilience = ResilienceConfig::default();
+    let started = Instant::now();
+    let racing = race(vec![silent_v6, v4], ATTEMPT_DELAY, |address| {
+      connect_to(&url, address, Some(hash), &resilience)
+    });
+    let (_endpoint, connection) = tokio::time::timeout(Duration::from_secs(5), racing)
+      .await
+      .expect("fell back to IPv4 within the timeout")
+      .unwrap();
+    assert_eq!(connection.remote_address().ip().to_canonical(), v4.ip());
+    assert!(started.elapsed() >= ATTEMPT_DELAY, "IPv6 was not tried first");
+  }
 
   #[test]
   fn a_new_local_address_toward_the_sfu_is_a_network_change() {
