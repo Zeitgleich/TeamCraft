@@ -457,11 +457,15 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
         let emoji = reaction.emoji.clone();
         let label_emoji = reaction.emoji.clone();
         let count = reaction.count;
-        let is_popping = motion.popping.contains(&reaction.emoji);
+        // A count that changed again mid-pop continues the pop on this rebuilt chip (#371).
+        let maybe_pop = motion.pop_of(&reaction.emoji);
+        let is_popping = maybe_pop.is_some();
+        let pop_delay = maybe_pop.map(|pop| format!("-{}ms", pop.elapsed.as_millis())).unwrap_or_default();
         view! {
           <button
             class="reaction"
             class:is-popping=is_popping
+            style:animation-delay=pop_delay
             class:reaction-mine=reaction.reacted_by_me
             aria-pressed=reaction.reacted_by_me.to_string()
             aria-label=move || i18n.t_with("reaction-label", &[("emoji", &label_emoji), ("count", &count.to_string())])

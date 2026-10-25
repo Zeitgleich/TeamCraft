@@ -74,6 +74,7 @@ pub mod slash;
 pub mod space_images;
 pub mod state;
 pub mod sync_reads;
+pub mod toast_motion;
 pub mod unread_divider;
 pub mod viewport;
 #[cfg(target_arch = "wasm32")]

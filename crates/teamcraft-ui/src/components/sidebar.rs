@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::time::Duration;
 
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
@@ -19,6 +20,9 @@ use crate::state::{MainView, Overlay, use_app_state};
 /// Sidebar sections and spaces the user collapsed, remembered on this device.
 const KEY_COLLAPSED_SECTIONS: &str = "teamcraft.sidebar_collapsed";
 const KEY_COLLAPSED_SPACES: &str = "teamcraft.sidebar_collapsed_spaces";
+/// How long the rows of a closing section stay: the exit (`--dur-exit`, 100 ms) plus a frame, in
+/// case `animationend` never comes (the sidebar is hidden).
+const SECTION_EXIT: Duration = Duration::from_millis(140);
 
 /// Channel sidebar: search, threads, then the categories of the current space.
 #[component]
@@ -243,7 +247,7 @@ fn SpaceGroupSection(group: SpaceGroup, collapsed: RwSignal<HashSet<SpaceId>>) -
   let is_collapsed = move || collapsed.with(|set| set.contains(&space));
   let mentions: u32 = group.conversations.iter().map(|conv| conv.mention_count).sum();
   let list_id = format!("sb-space-{space_id}");
-  let is_opening = RwSignal::new(false);
+  let phase = RwSignal::new(SectionPhase::Still);
   let is_muted = {
     let space_id = space_id.clone();
     Memo::new(move |_| {
@@ -278,9 +282,10 @@ fn SpaceGroupSection(group: SpaceGroup, collapsed: RwSignal<HashSet<SpaceId>>) -
           on:click=move |_| {
             collapsed.update(|set| {
               if set.remove(&space) {
-                is_opening.set(true);
+                phase.set(SectionPhase::Opening);
               } else {
                 set.insert(space);
+                close_section(phase);
               }
             });
           }
@@ -323,7 +328,13 @@ fn SpaceGroupSection(group: SpaceGroup, collapsed: RwSignal<HashSet<SpaceId>>) -
           <Icon name=IconName::Sliders />
         </button>
       </div>
-      <ul id=list_id hidden=is_collapsed class:is-opening=move || is_opening.get() on:animationend=move |ev| end_opening(&ev, is_opening)>
+      <ul
+        id=list_id
+        hidden=move || is_collapsed() && phase.get() != SectionPhase::Closing
+        class:is-opening=move || phase.get() == SectionPhase::Opening
+        class:is-closing=move || phase.get() == SectionPhase::Closing
+        on:animationend=move |ev| end_phase(&ev, phase)
+      >
         {group.conversations.into_iter().map(|conv| view! { <li><SidebarItem conversation=conv /></li> }).collect_view()}
       </ul>
     </section>
@@ -352,8 +363,8 @@ fn SidebarSection(
   let is_collapsed = move || collapsed.with(|set| set.contains(&kind));
   let unread_hidden: u32 = conversations.iter().map(|conv| conv.mention_count).sum();
   let list_id = format!("sb-{}", kind.slug());
-  // Only a click that opens the section animates its rows, not a re-render with new counts.
-  let is_opening = RwSignal::new(false);
+  // Only a click animates the rows, not a re-render with new counts.
+  let phase = RwSignal::new(SectionPhase::Still);
 
   let state = use_app_state();
   view! {
@@ -366,9 +377,10 @@ fn SidebarSection(
           on:click=move |_| {
             collapsed.update(|set| {
               if set.remove(&kind) {
-                is_opening.set(true);
+                phase.set(SectionPhase::Opening);
               } else {
                 set.insert(kind);
+                close_section(phase);
               }
             });
           }
@@ -391,7 +403,13 @@ fn SidebarSection(
             }
           })}
       </div>
-      <ul id=list_id hidden=is_collapsed class:is-opening=move || is_opening.get() on:animationend=move |ev| end_opening(&ev, is_opening)>
+      <ul
+        id=list_id
+        hidden=move || is_collapsed() && phase.get() != SectionPhase::Closing
+        class:is-opening=move || phase.get() == SectionPhase::Opening
+        class:is-closing=move || phase.get() == SectionPhase::Closing
+        on:animationend=move |ev| end_phase(&ev, phase)
+      >
         {if kind == SectionKind::Favorites {
           view! { <FavoriteItems conversations=conversations /> }.into_any()
         } else {
@@ -572,10 +590,34 @@ pub fn SidebarItem(conversation: Conversation) -> impl IntoView {
   }
 }
 
-/// Clears a section's opening flag when its own open animation ended. `animationend` bubbles: a
-/// badge animating inside the list must not end the opening early (issue #328).
-fn end_opening(ev: &leptos::ev::AnimationEvent, is_opening: RwSignal<bool>) {
+/// How the rows of a sidebar section move after a click on its head: they slide in when it opens
+/// and out when it closes (#371); the list is only hidden once the exit played.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SectionPhase {
+  Still,
+  Opening,
+  Closing,
+}
+
+/// Plays the exit of a section the user just collapsed; its rows stay until it ended.
+fn close_section(phase: RwSignal<SectionPhase>) {
+  phase.set(SectionPhase::Closing);
+  set_timeout(
+    move || {
+      phase.try_update(|phase| {
+        if *phase == SectionPhase::Closing {
+          *phase = SectionPhase::Still;
+        }
+      });
+    },
+    SECTION_EXIT,
+  );
+}
+
+/// Ends a section's opening or closing when its own animation ended. `animationend` bubbles: a
+/// badge animating inside the list must not end it early (issue #328).
+fn end_phase(ev: &leptos::ev::AnimationEvent, phase: RwSignal<SectionPhase>) {
   if ev.target() == ev.current_target() {
-    is_opening.set(false);
+    phase.set(SectionPhase::Still);
   }
 }

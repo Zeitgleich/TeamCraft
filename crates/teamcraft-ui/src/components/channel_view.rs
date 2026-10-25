@@ -10,6 +10,7 @@ use crate::components::huddle_bar::HuddleBar;
 use crate::components::icons::{Icon, IconName};
 use crate::components::log_view::ChannelFeed;
 use crate::components::security_ui::KeyChangeBanner;
+use crate::components::sliding_indicator::SlidingIndicator;
 use crate::components::tab_list::{on_tab_keys, roving_tabindex};
 use crate::i18n::use_i18n;
 use crate::model::{Conversation, ConversationId, ConversationKind, MembershipIssue, UserId};
@@ -651,6 +652,7 @@ fn ChannelTabs(tab: RwSignal<ChannelTab>) -> impl IntoView {
     move |ev: web_sys::KeyboardEvent| on_tab_keys(&ev, &ChannelTab::ALL, tab, ChannelTab::tab_id);
   view! {
     <div class="view-tabs header-tabs" role="tablist" aria-label=move || i18n.t("channel-tabs") on:keydown=on_keydown>
+      <SlidingIndicator inset_px=8.0 />
       {ChannelTab::ALL
         .into_iter()
         .map(|value| {
