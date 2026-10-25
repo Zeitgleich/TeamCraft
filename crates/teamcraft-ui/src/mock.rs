@@ -894,7 +894,9 @@ impl ChatBackend for MockBackend {
       share_id: format!("demo{file_id}"),
       download_count: 0,
       url: format!("https://chat.example.com/s/demo{file_id}#demo-key"),
-      maybe_expires_at: options.maybe_expires_at,
+      maybe_expires_at: options
+        .maybe_expires_in_seconds
+        .map(|seconds| crate::clock::now_ms() + seconds as i64 * 1000),
       maybe_max_downloads: options.maybe_max_downloads,
       has_password: options.maybe_password.is_some(),
     };

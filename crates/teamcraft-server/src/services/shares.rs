@@ -41,8 +41,25 @@ pub async fn create_share(
 
   let now = OffsetDateTime::now_utc();
   let latest = now + Duration::days(i64::from(settings.max_expiry_days));
-  let expires_at = match request.maybe_expires_at {
-    Some(millis) => {
+  if request.maybe_expires_at.is_some() && request.maybe_expires_in_seconds.is_some() {
+    return Err(ApiError::InvalidRequest(
+      "send expires_at or expires_in_seconds, not both".into(),
+    ));
+  }
+  let expires_at = match (request.maybe_expires_at, request.maybe_expires_in_seconds) {
+    (None, Some(0)) => {
+      return Err(ApiError::InvalidRequest(
+        "expires_in_seconds must be positive".into(),
+      ));
+    },
+    // A relative choice is measured by the server's clock and shortened to the cap.
+    (None, Some(seconds)) => {
+      let seconds = i64::try_from(seconds).unwrap_or(i64::MAX);
+      now
+        .checked_add(Duration::seconds(seconds))
+        .map_or(latest, |at| at.min(latest))
+    },
+    (Some(millis), _) => {
       let at =
         offset_date_time(millis).ok_or_else(|| ApiError::InvalidRequest("invalid expires_at".into()))?;
       if at <= now {
@@ -58,7 +75,7 @@ pub async fn create_share(
       }
       at
     },
-    None => (now + Duration::days(i64::from(settings.default_expiry_days))).min(latest),
+    (None, None) => (now + Duration::days(i64::from(settings.default_expiry_days))).min(latest),
   };
   let cap = settings.max_downloads_cap;
   let maybe_max_downloads = match request.maybe_max_downloads {

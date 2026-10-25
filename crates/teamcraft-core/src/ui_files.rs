@@ -268,7 +268,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     self.command(CoreCommand::CreateShareLink {
       conversation,
       attachment,
-      maybe_expires_at: options.maybe_expires_at,
+      maybe_expires_in_seconds: options.maybe_expires_in_seconds,
       maybe_max_downloads: options.maybe_max_downloads,
       maybe_password: options.maybe_password.map(RedactedText),
     });

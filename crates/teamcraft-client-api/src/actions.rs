@@ -287,8 +287,10 @@ pub struct SavedItem {
 /// Options of a public download link for one file (e2ee.md §4.5.1). `Debug` hides the password.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShareLinkOptions {
+  /// How long the link lasts, counted by the server from the request (never from this device's
+  /// clock) and shortened to the instance maximum.
   #[serde(default)]
-  pub maybe_expires_at: Option<TimestampMs>,
+  pub maybe_expires_in_seconds: Option<u64>,
   #[serde(default)]
   pub maybe_max_downloads: Option<u32>,
   /// Wraps the file key once more; the downloader needs it in addition to the link.
@@ -296,10 +298,14 @@ pub struct ShareLinkOptions {
   pub maybe_password: Option<String>,
 }
 
+/// Shortest password a share link may have: anyone with the link can try passwords offline, so a
+/// short one protects little (`teamcraft_crypto::share_link::MIN_PASSWORD_CHARS` enforces it).
+pub const MIN_SHARE_PASSWORD_CHARS: usize = 8;
+
 impl std::fmt::Debug for ShareLinkOptions {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("ShareLinkOptions")
-      .field("maybe_expires_at", &self.maybe_expires_at)
+      .field("maybe_expires_in_seconds", &self.maybe_expires_in_seconds)
       .field("maybe_max_downloads", &self.maybe_max_downloads)
       .field("has_password", &self.maybe_password.is_some())
       .finish()

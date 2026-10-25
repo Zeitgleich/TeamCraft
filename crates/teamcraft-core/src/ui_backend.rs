@@ -173,7 +173,7 @@ pub enum CoreCommand {
   CreateShareLink {
     conversation: ConversationId,
     attachment: AttachmentId,
-    maybe_expires_at: Option<i64>,
+    maybe_expires_in_seconds: Option<u64>,
     maybe_max_downloads: Option<u32>,
     maybe_password: Option<RedactedText>,
   },
@@ -342,6 +342,12 @@ pub(crate) fn history_jump_key(conversation: ConversationId) -> String {
 /// Text that must not show up in logs (a share link password); `Debug` prints `[redacted]`.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RedactedText(pub String);
+
+impl Drop for RedactedText {
+  fn drop(&mut self) {
+    zeroize::Zeroize::zeroize(&mut self.0);
+  }
+}
 
 impl std::fmt::Debug for RedactedText {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

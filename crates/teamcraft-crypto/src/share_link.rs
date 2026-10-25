@@ -22,6 +22,10 @@ use crate::secret::{SYMMETRIC_KEY_LEN, SecretBytes, SymmetricKey};
 const VERSION: u8 = 1;
 const FLAG_PASSWORD: u8 = 1;
 const SALT_LEN: usize = 16;
+/// Shortest password a link may be wrapped with: anyone with the link can try passwords offline
+/// (Argon2id slows that down, it does not stop it). Mirrored for the UI as
+/// `teamcraft_client_api::actions::MIN_SHARE_PASSWORD_CHARS`.
+pub const MIN_PASSWORD_CHARS: usize = 8;
 /// Longest file name a link carries (bytes).
 pub const MAX_FILE_NAME_BYTES: usize = 1024;
 
@@ -35,6 +39,8 @@ pub enum ShareLinkError {
   WrongPassword,
   #[error("the file name is too long for a link")]
   NameTooLong,
+  #[error("the password needs at least {MIN_PASSWORD_CHARS} characters")]
+  PasswordTooShort,
   #[error("password key derivation failed")]
   KeyDerivation,
   #[error("encryption failed")]
@@ -65,6 +71,12 @@ pub fn create_fragment(
       out.extend_from_slice(key.as_key().expose_secret());
     },
     Some(password) => {
+      let is_long_enough = std::str::from_utf8(password.expose_secret())
+        .map_or(password.expose_secret().len(), |text| text.chars().count())
+        >= MIN_PASSWORD_CHARS;
+      if !is_long_enough {
+        return Err(ShareLinkError::PasswordTooShort);
+      }
       out.push(FLAG_PASSWORD);
       let mut salt = [0u8; SALT_LEN];
       rng.fill_bytes(&mut salt);
@@ -191,6 +203,23 @@ mod tests {
   };
 
   #[test]
+  fn a_short_password_is_refused() {
+    let key = AttachmentKey::generate(&mut OsRng);
+    for short in ["", "1234567", "äöüäöüä"] {
+      let password = SecretBytes::new(short.as_bytes().to_vec());
+      assert!(
+        matches!(
+          create_fragment(&key, "a", Some(&password), CHEAP, &mut OsRng),
+          Err(ShareLinkError::PasswordTooShort)
+        ),
+        "{short:?}"
+      );
+    }
+    let eight = SecretBytes::new("äöüäöüäö".as_bytes().to_vec());
+    assert!(create_fragment(&key, "a", Some(&eight), CHEAP, &mut OsRng).is_ok());
+  }
+
+  #[test]
   fn plain_links_carry_key_and_name() {
     let key = AttachmentKey::generate(&mut OsRng);
     let fragment = create_fragment(&key, "report.pdf", None, CHEAP, &mut OsRng).unwrap();
@@ -231,7 +260,7 @@ mod tests {
     bytes[last] ^= 1;
     assert!(open_fragment(&URL_SAFE_NO_PAD.encode(&bytes), None).is_err());
     // A password link whose parameters ask for absurd memory.
-    let password = SecretBytes::new(b"pw".to_vec());
+    let password = SecretBytes::new(b"a long password".to_vec());
     let fragment = create_fragment(&key, "a", Some(&password), CHEAP, &mut OsRng).unwrap();
     let mut bytes = URL_SAFE_NO_PAD.decode(&fragment).unwrap();
     bytes[2 + SALT_LEN..2 + SALT_LEN + 4].copy_from_slice(&u32::MAX.to_be_bytes());

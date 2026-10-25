@@ -3,28 +3,30 @@
 //! Copy and Revoke. The password is turned into a key wrap on this device; the server never sees it.
 
 use leptos::prelude::*;
-use teamcraft_client_api::actions::{ShareLink, ShareLinkOptions};
+use teamcraft_client_api::actions::{MIN_SHARE_PASSWORD_CHARS, ShareLink, ShareLinkOptions};
 use teamcraft_proto::AttachmentId;
 
-use crate::clock::{format_date_time, now_ms};
+use crate::clock::format_date_time;
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_actions::copy_to_clipboard;
 use crate::components::modal::Modal;
+use crate::components::pending_button::PendingButton;
+use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, MessageId};
 use crate::state::use_app_state;
 
-const MS_PER_HOUR: i64 = 3_600_000;
-const MS_PER_DAY: i64 = 24 * MS_PER_HOUR;
+const SECONDS_PER_HOUR: u64 = 3_600;
+const SECONDS_PER_DAY: u64 = 24 * SECONDS_PER_HOUR;
 /// How long a new link lasts when nothing else is chosen.
-const DEFAULT_EXPIRY_MS: i64 = 7 * MS_PER_DAY;
-/// The expiry choices: i18n key and length. The server caps them (`shares.max_expiry_days`) and
-/// says so when a choice is above the cap.
-const EXPIRIES: [(&str, i64); 4] = [
-  ("share-expiry-hour", MS_PER_HOUR),
-  ("share-expiry-day", MS_PER_DAY),
-  ("share-expiry-week", 7 * MS_PER_DAY),
-  ("share-expiry-month", 30 * MS_PER_DAY),
+const DEFAULT_EXPIRY_SECONDS: u64 = 7 * SECONDS_PER_DAY;
+/// The expiry choices: i18n key and length. The server counts from its own clock and shortens a
+/// choice above the instance maximum; the list shows when the link really ends.
+const EXPIRIES: [(&str, u64); 4] = [
+  ("share-expiry-hour", SECONDS_PER_HOUR),
+  ("share-expiry-day", SECONDS_PER_DAY),
+  ("share-expiry-week", 7 * SECONDS_PER_DAY),
+  ("share-expiry-month", 30 * SECONDS_PER_DAY),
 ];
 /// The download limits: `0` is "no limit".
 const LIMITS: [u32; 4] = [0, 1, 5, 10];
@@ -38,7 +40,8 @@ pub fn ShareLinkDialog(
   let state = use_app_state();
   let i18n = use_i18n();
   let file_id = StoredValue::new(file.to_string());
-  let expiry = RwSignal::new(DEFAULT_EXPIRY_MS);
+  let expiry = RwSignal::new(DEFAULT_EXPIRY_SECONDS);
+  let creating = PendingAction::new();
   let limit = RwSignal::new(0_u32);
   let password = RwSignal::new(String::new());
   let links = Memo::new(move |_| {
@@ -51,29 +54,35 @@ pub fn ShareLinkDialog(
     });
   });
 
+  let is_password_short =
+    move || password.with(|text| !text.is_empty() && text.chars().count() < MIN_SHARE_PASSWORD_CHARS);
   let create = move |ev: leptos::ev::SubmitEvent| {
     ev.prevent_default();
-    let password_text = password.get_untracked();
+    if is_password_short() {
+      return;
+    }
     let options = ShareLinkOptions {
-      maybe_expires_at: Some(now_ms().saturating_add(expiry.get_untracked())),
+      maybe_expires_in_seconds: Some(expiry.get_untracked()),
       maybe_max_downloads: Some(limit.get_untracked()).filter(|limit| *limit > 0),
-      maybe_password: Some(password_text).filter(|password| !password.is_empty()),
+      maybe_password: Some(password.get_untracked()).filter(|password| !password.is_empty()),
     };
-    file_id.with_value(|file_id| {
-      state.write(|backend| backend.create_share_link(conversation, message, file_id, options));
-    });
-    password.set(String::new());
-    state.show_brief_toast(i18n.t("share-created"));
+    creating.run_and_then(
+      move || {
+        file_id.with_value(|file_id| {
+          state.write(|backend| backend.create_share_link(conversation, message, file_id, options));
+        });
+      },
+      move || {
+        // Shown once the core created the link; a failure was reported by the backend. The text of
+        // the password is replaced (the core wipes its copy; a signal's string cannot be wiped).
+        password.try_set(String::new());
+        state.show_brief_toast(i18n.t("share-created"));
+      },
+    );
   };
   let copy = move |link: &ShareLink| {
     copy_to_clipboard(&link.url);
     state.show_brief_toast(i18n.t("lightbox-share-copied"));
-  };
-  let revoke = move |share_id: String| {
-    file_id.with_value(|file_id| {
-      state.write(|backend| backend.revoke_share_link(conversation, message, file_id, &share_id));
-    });
-    state.show_brief_toast(i18n.t("share-revoked"));
   };
 
   view! {
@@ -92,6 +101,7 @@ pub fn ShareLinkDialog(
               {
                 let for_copy = link.clone();
                 let share_id = link.share_id.clone();
+                let revoking = PendingAction::new();
                 let summary = {
                   let link = link.clone();
                   move || link_summary(&link, i18n)
@@ -102,9 +112,23 @@ pub fn ShareLinkDialog(
                     <button type="button" class="btn btn-small" on:click=move |_| copy(&for_copy)>
                       {move || i18n.t("share-copy")}
                     </button>
-                    <button type="button" class="btn btn-small btn-danger" on:click=move |_| revoke(share_id.clone())>
+                    <PendingButton
+                      pending=revoking
+                      class="btn btn-small btn-danger"
+                      on_click=move |_| {
+                        let share_id = share_id.clone();
+                        revoking.run_and_then(
+                          move || {
+                            file_id.with_value(|file_id| {
+                              state.write(|backend| backend.revoke_share_link(conversation, message, file_id, &share_id));
+                            });
+                          },
+                          move || state.show_brief_toast(i18n.t("share-revoked")),
+                        );
+                      }
+                    >
                       {move || i18n.t("share-revoke")}
-                    </button>
+                    </PendingButton>
                   </li>
                 }
               }
@@ -118,12 +142,12 @@ pub fn ShareLinkDialog(
             id="share-expiry"
             class="input"
             data-autofocus
-            on:change=move |ev| expiry.set(event_target_value(&ev).parse().unwrap_or(DEFAULT_EXPIRY_MS))
+            on:change=move |ev| expiry.set(event_target_value(&ev).parse().unwrap_or(DEFAULT_EXPIRY_SECONDS))
           >
             {EXPIRIES
               .into_iter()
-              .map(|(key, ms)| view! {
-                <option value=ms.to_string() selected=ms == DEFAULT_EXPIRY_MS>{move || i18n.t(key)}</option>
+              .map(|(key, seconds)| view! {
+                <option value=seconds.to_string() selected=seconds == DEFAULT_EXPIRY_SECONDS>{move || i18n.t(key)}</option>
               })
               .collect_view()}
           </select>
@@ -148,12 +172,23 @@ pub fn ShareLinkDialog(
             class="input"
             type="password"
             autocomplete="new-password"
+            aria-describedby="share-password-hint"
+            aria-invalid=move || is_password_short().to_string()
             prop:value=move || password.get()
             on:input=move |ev| password.set(event_target_value(&ev))
           />
-          <p class="muted-text small">{move || i18n.t("share-password-hint")}</p>
+          <p id="share-password-hint" class="muted-text small" class:warn-text=is_password_short>
+            {move || i18n.t_with("share-password-hint", &[("count", &MIN_SHARE_PASSWORD_CHARS.to_string())])}
+          </p>
           <div class="share-actions">
-            <button type="submit" class="btn btn-primary">{move || i18n.t("share-create")}</button>
+            <button
+              type="submit"
+              class="btn btn-primary"
+              prop:disabled=move || creating.is_pending() || is_password_short()
+              aria-busy=move || creating.is_pending().then_some("true")
+            >
+              {move || i18n.t("share-create")}
+            </button>
           </div>
         </form>
       </div>

@@ -11,7 +11,7 @@ use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_crypto::share_link::create_fragment;
 use teamcraft_proto::{
   AttachmentId, Base64Bytes, ClientMessageId, ConversationId, CreateAttachmentRequest,
-  CreateShareLinkRequest, ErrorCode, UnixMillis,
+  CreateShareLinkRequest, ErrorCode,
 };
 
 use super::Client;
@@ -269,7 +269,8 @@ pub struct StoredShareLink {
 /// Options of a new share link.
 #[derive(Default)]
 pub struct ShareLinkSettings {
-  pub maybe_expires_at: Option<i64>,
+  /// How long the link lasts from now; the server counts from its own clock and caps it.
+  pub maybe_expires_in_seconds: Option<u64>,
   pub maybe_max_downloads: Option<u32>,
   pub maybe_password: Option<SecretBytes>,
 }
@@ -540,7 +541,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         attachment,
         &CreateShareLinkRequest {
           attachment_id: attachment,
-          maybe_expires_at: settings.maybe_expires_at.map(UnixMillis),
+          maybe_expires_at: None,
+          maybe_expires_in_seconds: settings.maybe_expires_in_seconds,
           maybe_max_downloads: settings.maybe_max_downloads,
           is_password_protected: settings.maybe_password.is_some(),
         },
