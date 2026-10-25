@@ -3,10 +3,6 @@ package de.zeitgleich.teamcraft.ui.screens
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.LinearGradient
-import android.graphics.Paint
-import android.graphics.Shader
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -20,7 +16,6 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import java.io.ByteArrayOutputStream
 import java.io.File
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -164,23 +159,6 @@ class ConversationScreenshots {
       ImageBytes(samplePhoto(THUMBNAIL_PX, THUMBNAIL_PX * 9 / 16)), FileTransfer("remote"),
     ),
   )
-
-  /** A drawn stand-in for a photo: sky, sun and hills, as a JPEG like senders make. */
-  private fun samplePhoto(width: Int, height: Int): ByteArray {
-    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-    val canvas = Canvas(bitmap)
-    val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    paint.shader = LinearGradient(0f, 0f, 0f, height.toFloat(), 0xFF3B7DD8.toInt(), 0xFFF2C38B.toInt(), Shader.TileMode.CLAMP)
-    canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
-    paint.shader = null
-    paint.color = 0xFFFFE08A.toInt()
-    canvas.drawCircle(width * 0.7f, height * 0.3f, width * 0.12f, paint)
-    paint.color = 0xFF2E6B3A.toInt()
-    canvas.drawCircle(width * 0.2f, height * 1.1f, width * 0.6f, paint)
-    paint.color = 0xFF3F8A4C.toInt()
-    canvas.drawCircle(width * 0.9f, height * 1.2f, width * 0.7f, paint)
-    return ByteArrayOutputStream().also { bitmap.compress(Bitmap.CompressFormat.JPEG, 80, it) }.toByteArray()
-  }
 
   private companion object {
     const val ME = "1"

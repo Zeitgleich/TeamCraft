@@ -1,0 +1,39 @@
+TeamCraft ist ein Team-Chat für Unternehmen und Organisationen, die ihren eigenen Server betreiben. Channels, Direktnachrichten, Anrufe und Meetings sind Ende-zu-Ende-verschlüsselt: Der Server speichert und verteilt die Nachrichten, kann sie aber nicht lesen.
+
+Für die App brauchst du einen TeamCraft-Server. Deine Organisation betreibt ihn, und du meldest dich mit deinem Firmenkonto an (Single Sign-on).
+
+CHAT
+• Channels in Spaces, Direktnachrichten und Gruppenchats
+• Threads, Antworten, Reaktionen, Erwähnungen und @channel
+• Nachrichten bearbeiten, löschen, weiterleiten, anheften und merken
+• Fotos und Dateien mit Vorschau, Teilen aus anderen Apps
+• Priorität (wichtig, dringend) und Lesebestätigungen
+• Entwürfe, Ungelesen-Markierung und Sprung zur ersten ungelesenen Nachricht
+• Suche mit Filtern (Person, Channel, Datum, Dateien, Links)
+
+ANRUFE UND MEETINGS
+• Sprach- und Videoanrufe in Direktnachrichten und Channels
+• Mit Kamera oder stummgeschaltet beitreten, Lautsprecher und Video steuern
+• Sicherheitscode, damit niemand mithört
+• Anstehende Meetings und Beitritt zum Anruf des Meetings
+• Anrufe klingeln wie Telefonanrufe und funktionieren mit Android Auto
+
+VERSCHLÜSSELUNG UND DATENSCHUTZ
+• Ende-zu-Ende-Verschlüsselung mit dem MLS-Standard (RFC 9420)
+• Jedes Gerät hat eigene Schlüssel; neue Geräte per QR-Code verknüpfen
+• Wiederherstellung per Passphrase oder über deine Organisation
+• Sicherheitscodes zum Prüfen von Kontakten, Warnung bei geänderten Schlüsseln
+• App-Sperre mit Biometrie oder Displaysperre, Schutz vor Screenshots
+• Keine Werbung, kein Tracking; Push-Benachrichtigungen enthalten keine Nachrichteninhalte
+
+BENACHRICHTIGUNGEN
+• Push über Firebase oder UnifiedPush
+• Benachrichtigungen pro Unterhaltung, stummschalten und Nicht stören
+• Aus der Benachrichtigung antworten und als gelesen markieren
+
+FÜR ORGANISATIONEN
+• Läuft auf deinem eigenen Server; Open Source (AGPL-3.0)
+• Anmeldung über euren Identity Provider (OpenID Connect)
+• Administratoren verwalten Personen und Channels ohne Zugriff auf Nachrichteninhalte
+
+TeamCraft gibt es auch für Windows, macOS, Linux und im Browser. Quellcode, Dokumentation und Server-Einrichtung: https://github.com/Zeitgleich/TeamCraft
