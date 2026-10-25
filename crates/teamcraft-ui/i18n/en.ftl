@@ -688,6 +688,7 @@ removal-unconfirmed-keep = Keep them
 group-refused = The server doesn't let this device read the encrypted group of this conversation. New messages may be missing.
 dm-setup-pending = Setting up encryption… The other side's group is being joined; messages can be sent once it is done.
 dm-setup-failed = Encryption couldn't be set up for this conversation yet. Retry asks the other side's devices to let this device in.
+never-set-up = { $name } never set up TeamCraft. { $name } will see this conversation if they sign in on a device later.
 waiting-first-device = { $name } hasn't finished setting up TeamCraft yet. You can write anyway: { $name } will see your messages once setup is done.
 devices-unverified = { $name } can't be added to the encryption: none of their devices could be verified. Ask { $name } to sign in again; a new device is tried by itself.
 waiting-key-package = { $name } can't be added to the encryption yet because none of their devices has keys left on the server. This is fixed once one of their devices is online again.

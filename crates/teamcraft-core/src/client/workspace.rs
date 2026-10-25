@@ -145,6 +145,11 @@ pub(crate) enum PendingChange {
     maybe_not_before_ms: Option<i64>,
     #[serde(default)]
     attempts: u32,
+    /// When this device began to wait for the user's first device; the wait ends after
+    /// `pending_addition_expiry` ([`UserAddWait::NeverSetUp`]). Missing in records of older
+    /// versions: the wait then starts when they are first looked at.
+    #[serde(default)]
+    maybe_waiting_since_ms: Option<i64>,
   },
 }
 

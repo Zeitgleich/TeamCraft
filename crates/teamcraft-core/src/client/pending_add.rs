@@ -37,6 +37,10 @@ pub enum UserAddWait {
   /// None of the user's devices passed the checks (signed device list, credential, revocation):
   /// not retried; their next device makes it due again.
   Unverifiable,
+  /// The user had no device for `pending_addition_expiry`: the wait is over and the conversation
+  /// says they never set up the app. Their first device, should it ever appear, still gets them
+  /// in (`device_add` makes the addition due again).
+  NeverSetUp,
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
@@ -96,7 +100,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .filter_map(|change| match change {
         PendingChange::AddUser {
           user_id,
-          wait: UserAddWait::NoDevice | UserAddWait::Unverifiable,
+          wait: UserAddWait::NoDevice | UserAddWait::Unverifiable | UserAddWait::NeverSetUp,
           maybe_not_before_ms: None,
           ..
         } => Some(user_id),
@@ -127,6 +131,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         user_id,
         history,
         wait,
+        maybe_waiting_since_ms,
         ..
       } = change
         && user_id == user
@@ -138,6 +143,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           wait,
           maybe_not_before_ms: Some(now),
           attempts: 0,
+          maybe_waiting_since_ms,
         })?;
       }
     }
@@ -157,22 +163,45 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       history,
       attempts,
       maybe_not_before_ms,
-      ..
+      wait: previous_wait,
+      maybe_waiting_since_ms,
     } = change
     else {
       return Ok(PendingOutcome::Done);
     };
     let (conversation, user) = (*conversation_id, *user_id);
+    let since_ms = maybe_waiting_since_ms.unwrap_or_else(|| self.now_ms());
+    if *previous_wait == UserAddWait::NoDevice && self.is_wait_expired(since_ms) {
+      tracing::info!(conversation_id = %conversation, "the added user never set up the app; stopped waiting");
+      self.forget_waiting_dm_setup(conversation)?;
+      return Ok(PendingOutcome::Later(self.user_addition(
+        conversation,
+        user,
+        history.clone(),
+        UserAddWait::NeverSetUp,
+        0,
+        Some(since_ms),
+      )));
+    }
     let is_due = maybe_not_before_ms.is_some_and(|not_before| self.now_ms() >= not_before);
     if !is_due {
-      return Ok(PendingOutcome::Later(change.clone()));
+      // Stamped, so a record from before the expiry existed starts its wait now.
+      let mut waiting = change.clone();
+      if let PendingChange::AddUser {
+        maybe_waiting_since_ms,
+        ..
+      } = &mut waiting
+      {
+        maybe_waiting_since_ms.get_or_insert(since_ms);
+      }
+      return Ok(PendingOutcome::Later(waiting));
     }
     if !self.has_group(conversation)? {
       return Ok(PendingOutcome::Done);
     }
     if let Some(others) = self.resume_dm_setup(conversation)? {
       return self
-        .resume_dm_addition(conversation, user, history, &others)
+        .resume_dm_addition(conversation, user, history, &others, Some(since_ms))
         .await;
     }
     self.sync_mls(conversation).await?;
@@ -219,6 +248,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       history.clone(),
       wait,
       attempts,
+      Some(since_ms),
     )))
   }
 
@@ -231,6 +261,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     user: UserId,
     history: &HistoryPolicy,
     others: &[UserId],
+    since_ms: Option<i64>,
   ) -> Result<PendingOutcome, CoreError> {
     self.finish_dm_setup(conversation, others).await?;
     if self.has_group(conversation)? && self.group_users(conversation)?.contains(&user) {
@@ -243,6 +274,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         history.clone(),
         UserAddWait::NoDevice,
         0,
+        since_ms,
       )));
     }
     Ok(PendingOutcome::Done)
@@ -257,7 +289,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     attempts: u32,
   ) -> Result<(), CoreError> {
     tracing::info!(conversation_id = %conversation, ?wait, "the added user waits for a device");
-    let change = self.user_addition(conversation, user, history, wait, attempts);
+    let since_ms = Some(self.now_ms());
+    let change = self.user_addition(conversation, user, history, wait, attempts, since_ms);
     self.queue_pending(change)
   }
 
@@ -268,6 +301,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     history: HistoryPolicy,
     wait: UserAddWait,
     attempts: u32,
+    maybe_waiting_since_ms: Option<i64>,
   ) -> PendingChange {
     PendingChange::AddUser {
       conversation_id: conversation,
@@ -276,7 +310,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       wait,
       maybe_not_before_ms: self.next_try_ms(wait, attempts),
       attempts,
+      maybe_waiting_since_ms,
     }
+  }
+
+  /// Whether a wait for a first device that began at `since_ms` is over.
+  fn is_wait_expired(&self, since_ms: i64) -> bool {
+    let expiry_ms = i64::try_from(self.settings.pending_addition_expiry.as_millis()).unwrap_or(i64::MAX);
+    self.now_ms().saturating_sub(since_ms) >= expiry_ms
   }
 
   /// No device at all, or devices that can't be added (no key package, or none passes the
@@ -295,7 +336,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// delay starts at `device_add_stagger` and doubles up to `rejoin_retry_max`.
   fn next_try_ms(&self, wait: UserAddWait, attempts: u32) -> Option<i64> {
     match wait {
-      UserAddWait::NoDevice | UserAddWait::Unverifiable => None,
+      UserAddWait::NoDevice | UserAddWait::Unverifiable | UserAddWait::NeverSetUp => None,
       UserAddWait::NoKeyPackage => {
         let base_ms = i64::try_from(self.settings.device_add_stagger.as_millis()).unwrap_or(i64::MAX);
         let max_ms = i64::try_from(self.settings.rejoin_retry_max.as_millis()).unwrap_or(i64::MAX);

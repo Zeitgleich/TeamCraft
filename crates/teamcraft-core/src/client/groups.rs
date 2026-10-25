@@ -678,6 +678,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(Some(others))
   }
 
+  /// A DM whose other side never set up the app: the setup record that only waited for their first
+  /// device goes (nothing is left to repair or race), the pending addition keeps the wait's end.
+  pub(super) fn forget_waiting_dm_setup(&mut self, id: ConversationId) -> Result<(), CoreError> {
+    if self
+      .dm_setup(id)?
+      .is_some_and(|setup| setup.is_waiting_for_device)
+    {
+      self.store.delete(Table::SyncState, &dm_setup_key(id))?;
+    }
+    Ok(())
+  }
+
   /// Gives up a group of one that lost the founding race, once the winner's welcome checked out.
   /// The founding content key stops being current, or this device would keep encrypting with a
   /// key nobody else has; it stays in the ring (and the key bag) for what was encrypted with it.
