@@ -70,7 +70,7 @@ impl Authenticator for TauriAuth {
       js_sys::Reflect::set(&args, &"login".into(), &login.into()).map_err(invalid)?;
       js_sys::Reflect::set(&args, &"password".into(), &password.into()).map_err(invalid)?;
       if let Some(code) = maybe_totp {
-        js_sys::Reflect::set(&args, &"totpCode".into(), &code.into()).map_err(invalid)?;
+        js_sys::Reflect::set(&args, &"totp_code".into(), &code.into()).map_err(invalid)?;
       }
       invoke("auth_login_local", args.into()).await.map(|_| ())
     })
@@ -136,8 +136,8 @@ impl Authenticator for TauriAuth {
       js_sys::Reflect::set(&args, &"path".into(), &path.into()).map_err(invalid)?;
       if let Some(body) = maybe_body {
         let encoded = base64::engine::general_purpose::STANDARD.encode(&body.bytes);
-        js_sys::Reflect::set(&args, &"contentType".into(), &body.content_type.into()).map_err(invalid)?;
-        js_sys::Reflect::set(&args, &"bodyBase64".into(), &encoded.into()).map_err(invalid)?;
+        js_sys::Reflect::set(&args, &"content_type".into(), &body.content_type.into()).map_err(invalid)?;
+        js_sys::Reflect::set(&args, &"body_base64".into(), &encoded.into()).map_err(invalid)?;
       }
       let value = invoke("api_request_bytes", args.into()).await?;
       let response: ApiBytesPayload = serde_wasm_json(&value)?;

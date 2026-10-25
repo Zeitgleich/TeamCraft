@@ -127,7 +127,7 @@ impl From<String> for CommandError {
 }
 
 /// Starts (or reuses) the core for `user` of the active server and reports where it stands.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_start(
   app: AppHandle,
   host: State<'_, CoreHost>,
@@ -178,27 +178,27 @@ pub async fn core_start(
   Ok(status)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_status(host: State<'_, CoreHost>) -> Result<CoreStatus, CommandError> {
   Ok(host.current()?.status().await)
 }
 
 /// Where the gateway connection stands, for the banner; answered without waiting for the core.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn core_connection(host: State<'_, CoreHost>) -> Result<CoreConnection, CommandError> {
   Ok(host.current()?.connection_state().into())
 }
 
 /// The webview saw the network come back or the window become visible again: the gateway and a
 /// running call check their connections at once.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn core_network_changed(host: State<'_, CoreHost>, calls: State<'_, Arc<CallHost>>) {
   host.network_changed();
   calls.network_changed();
 }
 
 /// The user opened a conversation (issue #247: a running catch-up takes it next).
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn core_focus(host: State<'_, CoreHost>, conversation: ConversationId) {
   // No running core: nothing is catching up that the focus could steer.
   if let Ok(runtime) = host.current() {
@@ -206,7 +206,7 @@ pub fn core_focus(host: State<'_, CoreHost>, conversation: ConversationId) {
   }
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_enroll(host: State<'_, CoreHost>, request: EnrollRequest) -> Result<(), CommandError> {
   Ok(host.current()?.enroll(request).await?)
 }
@@ -217,18 +217,18 @@ pub async fn core_link_start(host: State<'_, CoreHost>, device_name: String) -> 
   Ok(host.current()?.link_start(device_name).await?)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_link_status(host: State<'_, CoreHost>) -> Result<LinkStatus, CommandError> {
   Ok(host.current()?.link_status().await)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn core_link_cancel(host: State<'_, CoreHost>) -> Result<(), CommandError> {
   host.current()?.link_cancel();
   Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_approval_start(host: State<'_, CoreHost>, code: String) -> Result<(), CommandError> {
   Ok(host.current()?.approval_start(code).await?)
 }
@@ -242,19 +242,19 @@ pub async fn core_approval_confirm(
   Ok(host.current()?.approval_confirm(short_code).await?)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn core_approval_cancel(host: State<'_, CoreHost>) -> Result<(), CommandError> {
   host.current()?.approval_cancel();
   Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_snapshot(host: State<'_, CoreHost>) -> Result<ChatSnapshot, CommandError> {
   Ok(host.current()?.snapshot().await?)
 }
 
 /// What changed in the snapshot since the webview's cursor (issue #246).
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_snapshot_changes(
   host: State<'_, CoreHost>,
   since: Option<SnapshotCursor>,
@@ -262,7 +262,7 @@ pub async fn core_snapshot_changes(
   Ok(host.current()?.snapshot_changes(since).await?)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_messages(
   host: State<'_, CoreHost>,
   conversation: ConversationId,
@@ -272,7 +272,7 @@ pub async fn core_messages(
   Ok(host.current()?.messages(conversation, start, len).await?)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_thread(
   host: State<'_, CoreHost>,
   conversation: ConversationId,
@@ -281,7 +281,7 @@ pub async fn core_thread(
   Ok(host.current()?.thread(conversation, thread).await?)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_action(host: State<'_, CoreHost>, action: ChatAction) -> Result<(), CommandError> {
   let action = match action {
     // A picture of the user's own: re-encoded here (decoded, scaled to Full HD, JPEG without
@@ -314,7 +314,7 @@ pub async fn core_action(host: State<'_, CoreHost>, action: ChatAction) -> Resul
 }
 
 /// Search, saved items, files, message extras and the other reads of client-api's `ChatQuery`.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn core_query(host: State<'_, CoreHost>, query: ChatQuery) -> Result<ChatAnswer, CommandError> {
   Ok(host.current()?.query(query).await?)
 }
@@ -334,7 +334,7 @@ pub async fn core_attachment(
 }
 
 /// Stops the core, e.g. on sign-out. The encrypted database stays on disk.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn core_stop(host: State<'_, CoreHost>) -> Result<(), CommandError> {
   Ok(host.stop()?)
 }
