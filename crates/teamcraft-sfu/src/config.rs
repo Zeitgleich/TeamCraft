@@ -47,7 +47,7 @@ pub struct SfuConfig {
 impl Default for SfuConfig {
   fn default() -> Self {
     Self {
-      bind_addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 4433)),
+      bind_addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 3478)),
       maybe_dev_http_addr: None,
       forwarding: ForwardingConfig::default(),
       join_timeout: Duration::from_secs(10),

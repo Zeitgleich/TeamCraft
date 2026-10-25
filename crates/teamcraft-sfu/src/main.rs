@@ -2,7 +2,7 @@
 //!
 //! Configuration via environment (spike; moves to the TOML config later):
 //!
-//! - `TEAMCRAFT_SFU_BIND`: UDP address, default `[::]:4433` (dual-stack)
+//! - `TEAMCRAFT_SFU_BIND`: UDP address, default `[::]:3478` (dual-stack)
 //! - `TEAMCRAFT_SFU_JOIN_TOKEN_PUBLIC_KEY`: PEM file with the server's Ed25519 public key for join
 //!   tokens (`[calls] signing_key_path` on the server), and `TEAMCRAFT_SFU_JOIN_TOKEN_ISSUER`: the
 //!   server's `[calls] issuer`

@@ -20,7 +20,7 @@ openssl pkey -in call-signing.pem -pubout -out call-signing.pub.pem     # for th
 
 ```toml
 [calls]
-sfu_url = "https://sfu.example.com:4433/call"
+sfu_url = "https://sfu.example.com:3478/call"
 issuer = "https://chat.example.com"
 signing_key_path = "/etc/teamcraft/call-signing.pem"
 # sfu_control_url = "http://sfu.internal:8081"   # host controls; the registration token authenticates
@@ -34,7 +34,7 @@ Without `[calls]` the join-token endpoint answers 503 and clients cannot call.
 
 | Variable                              | Meaning                                                            |
 |---------------------------------------|--------------------------------------------------------------------|
-| `TEAMCRAFT_SFU_BIND`                  | UDP address, default `[::]:4433`                                   |
+| `TEAMCRAFT_SFU_BIND`                  | UDP address, default `[::]:3478`                                   |
 | `TEAMCRAFT_SFU_JOIN_TOKEN_PUBLIC_KEY` | PEM of the server's public key                                     |
 | `TEAMCRAFT_SFU_JOIN_TOKEN_ISSUER`     | Equals the server's `[calls] issuer`; required with the public key |
 | `TEAMCRAFT_SFU_CERT` / `_KEY`         | TLS certificate and key (PEM) for the public name in `sfu_url`     |
@@ -47,7 +47,7 @@ Without a certificate the SFU makes a short-lived self-signed one: only for test
 accepted only with `TEAMCRAFT_SFU_INSECURE_DEV_TOKENS=1`, no public key, and loopback
 `TEAMCRAFT_SFU_BIND` and `TEAMCRAFT_SFU_DEV_HTTP`; otherwise all joins are rejected.
 
-Network: open `4433/udp` from clients (IPv4 and IPv6). The SFU holds no state; scale by running more
+Network: open `3478/udp` from clients (IPv4 and IPv6). The SFU holds no state; scale by running more
 and pointing `sfu_url` at one (single SFU per instance today).
 
 ## Calls in the browser

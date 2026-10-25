@@ -12,7 +12,7 @@ and whether the phone showed "Connection lost, reconnecting…".
 
 ## 0. Setup
 
-- Production-like server and SFU (real certificate, SFU UDP 4433 reachable over IPv4 and IPv6).
+- Production-like server and SFU (real certificate, SFU UDP 3478 reachable over IPv4 and IPv6).
   SFU logs at `info` so `participant reconnecting`/`participant joined … Resumed` lines are visible.
 - Two accounts: **A** on the phone under test, **B** on a desktop app on a wired network.
 - A and B share a DM. Wi-Fi and mobile data both on on the phone; mobile data allowed for the app.
@@ -54,7 +54,7 @@ leave, A's privacy code is the same afterwards for both (the group re-keyed; com
 
 - [ ] Switch to a Wi-Fi with a captive portal that isn't logged in: the phone keeps mobile data as
   default (Android) or the call rejoins over mobile data once the OS gives up on Wi-Fi. Note the gap.
-- [ ] A Wi-Fi that blocks UDP (guest network or a firewall rule dropping UDP 4433): joining a call
+- [ ] A Wi-Fi that blocks UDP (guest network or a firewall rule dropping UDP 3478): joining a call
   there fails after the connection timeout; an ongoing call switched onto it ends after the grace
   period. Expected today (no TCP fallback, ARCHITECTURE.md §6.6) – note the message the user sees.
 

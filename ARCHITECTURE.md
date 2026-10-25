@@ -480,9 +480,10 @@ that changes its address (migration) or drops everything (rejoin). Real radios:
 
 ### 6.6 Networks that block UDP
 
-Calls need UDP to the SFU's QUIC port (default 4433). Some corporate, hotel and guest networks
-block UDP or everything but 80/443 over TCP; there the WebTransport handshake fails and joining a
-call fails after the connection timeout. Chat is unaffected (HTTPS and WebSocket over TCP). There is
+Calls need UDP to the SFU's QUIC port (default 3478: the STUN/TURN port Teams, Zoom and WebRTC
+services use, so restrictive networks often allow it already; 443/udp is taken by the proxy's
+HTTP/3). Some corporate, hotel and guest networks block UDP or everything but 80/443 over TCP;
+there the WebTransport handshake fails and joining a call fails after the connection timeout. Chat is unaffected (HTTPS and WebSocket over TCP). There is
 no TCP fallback today.
 
 Options for a fallback, by fit with §6.1:
@@ -498,7 +499,7 @@ Options for a fallback, by fit with §6.1:
 
 Recommendation: the TLS/WebSocket relay, tried by the client after QUIC fails or doesn't connect
 within a few seconds (happy-eyeballs style), with the relay's port behind the same reverse proxy as
-the server. Until then, operators document that calls need outbound UDP 4433 (docs/operations.md).
+the server. Until then, operators document that calls need outbound UDP 3478 (docs/operations.md).
 
 ## 7. Clients
 
