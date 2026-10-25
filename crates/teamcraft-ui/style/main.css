@@ -1607,12 +1607,11 @@ select.input {
 }
 
 .channel-header .header-title {
-  flex: 0 1 auto;
-  min-width: 3rem;
   margin: 0;
 }
 
-/* The name, and in a direct conversation the person's status on a small line under it. */
+/* The name, and in a direct conversation the person's status on a small line under it. Must stay
+   after `.header-main > *` (same specificity): it is the one child that gives way. */
 .header-main > .header-identity {
   flex: 0 1 auto;
   min-width: 3rem;
@@ -8676,7 +8675,7 @@ ol.md-list {
   padding: 0 var(--space-1) 0 var(--space-1);
 }
 
-:root[data-layout="compact"] .channel-header .header-main > :not(.header-title):not(.compact-back),
+:root[data-layout="compact"] .channel-header .header-main > :not(.header-identity):not(.compact-back),
 :root[data-layout="compact"] .channel-header .header-actions > .header-btn:not(.compact-keep) {
   display: none;
 }
