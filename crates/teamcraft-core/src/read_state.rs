@@ -605,6 +605,7 @@ mod tests {
           content: crate::store::MessageContent::text("hi", Vec::new()),
           is_edited: false,
           edits: Vec::new(),
+          maybe_edit_id: None,
           is_pinned: false,
         })
         .unwrap();

@@ -30,7 +30,7 @@ use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{
   ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreConnection, CoreStatus, EnrollRequest,
-  LinkStatus, MessageWindow, SecuritySnapshot, StoreHealth,
+  LinkStatus, MessageWindow, SecuritySnapshot, StoreHealth, StoreProblem,
 };
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
@@ -45,7 +45,7 @@ use teamcraft_core::ui_snapshot::SnapshotCache;
 use teamcraft_core::upkeep::{self, Upkeep};
 use teamcraft_core::{
   CallPreparation, Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer,
-  PendingEnrollment, platform,
+  PendingEnrollment, UnreadableStore, platform,
 };
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::identity::IdentityPublicKey;
@@ -202,6 +202,11 @@ pub async fn call(command: &str, args: Value) -> Result<Value, String> {
       to_value(start(user).await?)
     },
     "core_stop" => {
+      // Signing out of a tab that isn't set up yet leaves no keys of the attempt behind (#168).
+      if current_follower().is_none() {
+        // An error means the core isn't running here: nothing to forget.
+        let _ = ask(Request::ForgetUnfinishedSetup).await;
+      }
       stop();
       Ok(Value::Null)
     },
@@ -305,6 +310,10 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
     },
     "core_link_cancel" => {
       send(Request::LinkCancel)?;
+      Ok(Value::Null)
+    },
+    "core_reset_store" => {
+      ask(Request::ResetStore).await??;
       Ok(Value::Null)
     },
     "core_approval_start" => {
@@ -587,6 +596,10 @@ enum Request {
     reply: oneshot::Sender<Result<(), String>>,
   },
   LinkCancel,
+  /// The local database is unreadable: delete it and start this device afresh (issue #160).
+  ResetStore(oneshot::Sender<Result<(), String>>),
+  /// The user signs out: drop what an unfinished enrollment kept (issue #168).
+  ForgetUnfinishedSetup(oneshot::Sender<()>),
   ApprovalStart {
     code: String,
     reply: oneshot::Sender<Result<(), String>>,
@@ -826,27 +839,83 @@ impl Core {
     let key = browser_database_key(&name)
       .await
       .map_err(|error| error.to_string())?;
-    let store = TrackedStore::new(Rc::new(
-      IndexedDbStore::open(&name, &key)
-        .await
-        .map_err(|error| error.to_string())?,
-    ));
+    let opened = match IndexedDbStore::open(&name, &key).await {
+      Ok(opened) => opened,
+      Err(error) => return unreadable_status(error.into()),
+    };
+    let store = TrackedStore::new(Rc::new(opened));
     self.store = Some(store.clone());
     watch_page_lifecycle(store.inner());
-    match Client::open(
+    let maybe_client = match Client::open(
+      self.api(),
+      store.clone(),
+      Box::new(SystemClock),
+      ClientSettings::default(),
+    ) {
+      Ok(maybe_client) => maybe_client,
+      Err(error) => return unreadable_status(error),
+    };
+    match maybe_client {
+      Some(client) => Ok(self.adopt(client)),
+      None => {
+        if let Some(client) = self.resume_link(store).await? {
+          return Ok(self.adopt(client));
+        }
+        Ok(CoreStatus::NeedsEnrollment {
+          has_existing_identity: self.has_existing_identity().await?,
+          was_data_lost: load_string(&self.store_ready_key()).is_some(),
+        })
+      },
+    }
+  }
+
+  /// A device link whose keys arrived before the page went away finishes enrolling now (#168).
+  async fn resume_link(&self, store: Store) -> Result<Option<Client<Api, Store>>, String> {
+    let resumed = PendingEnrollment::resume_link(
       self.api(),
       store,
       Box::new(SystemClock),
       ClientSettings::default(),
+      Argon2Settings::default(),
     )
-    .map_err(|error| error.to_string())?
-    {
-      Some(client) => Ok(self.adopt(client)),
-      None => Ok(CoreStatus::NeedsEnrollment {
-        has_existing_identity: self.has_existing_identity().await?,
-        was_data_lost: load_string(&self.store_ready_key()).is_some(),
-      }),
+    .await;
+    match resumed {
+      Ok(maybe_client) => Ok(maybe_client),
+      // Kept for the next start; "Try again" opens the core again.
+      Err(error) if error.is_transient() || error.is_sign_in_required() => Err(describe(error)),
+      // Dropped if they can't work; the user links again.
+      Err(error) => {
+        tracing::warn!(%error, "could not finish the enrollment of an interrupted device link");
+        Ok(None)
+      },
     }
+  }
+
+  /// Deletes the unreadable database and opens a new one (issue #160). A browser can't keep the
+  /// old one aside: its key is wrapped in the same database, and the space would stay used.
+  async fn reset_store(&mut self) -> Result<(), String> {
+    match self.status {
+      CoreStatus::StoreUnreadable {
+        problem: StoreProblem::NewerVersion,
+      } => {
+        // A newer bundle (after a reload, or in another tab) reads it: never wiped from here.
+        return Err("the local data is from a newer version; reload the page instead".to_owned());
+      },
+      CoreStatus::StoreUnreadable { .. } => {},
+      _ => return Err("the local data is readable; nothing to reset".to_owned()),
+    }
+    self.client = None;
+    self.backend = None;
+    // Dropping the last handle closes the database, so it can be deleted.
+    self.store = None;
+    let name = format!("teamcraft-{}", self.user);
+    IndexedDbStore::delete(&name)
+      .await
+      .map_err(|error| error.to_string())?;
+    tracing::warn!("deleted the unreadable local database");
+    self.open().await;
+    notify_changed();
+    Ok(())
   }
 
   async fn has_existing_identity(&self) -> Result<bool, String> {
@@ -947,6 +1016,30 @@ impl Core {
       Request::LinkCancel => {
         self.link = None;
         self.link_failure = LinkStatus::Idle;
+        // The user gave up on linking: keys from an earlier attempt aren't used any more.
+        if self.client.is_none()
+          && let Some(store) = &self.store
+          && let Err(error) = records::delete_pending_link(store)
+        {
+          tracing::warn!(%error, "could not drop the keys of an abandoned device link");
+        }
+      },
+      Request::ResetStore(reply) => drop(reply.send(self.reset_store().await)),
+      Request::ForgetUnfinishedSetup(reply) => {
+        if self.client.is_none()
+          && let Some(store) = &self.store
+        {
+          // Flushed: the core stops right after, and queued writes would be lost with it.
+          let forgotten = match records::forget_unfinished_enrollment(store) {
+            Ok(()) => store.inner().flush().await.map_err(CoreError::from),
+            Err(error) => Err(error),
+          };
+          if let Err(error) = forgotten {
+            tracing::warn!(%error, "could not drop the keys of an unfinished setup");
+          }
+        }
+        // Deliberately ignored: the caller may have stopped waiting; nothing is left to tell.
+        let _ = reply.send(());
       },
       Request::ApprovalStart { code, reply } => drop(reply.send(self.approval_start(&code).await)),
       Request::ApprovalConfirm { short_code, reply } => {
@@ -1090,7 +1183,17 @@ impl Core {
     let view = Rc::new(RefCell::new(LinkStatus::WaitingForScan {
       code: offer.to_code(),
     }));
-    let future = Box::pin(link_task(self.api(), offer, view.clone()));
+    let store = self
+      .store
+      .clone()
+      .ok_or_else(|| "the local database is not open".to_owned())?;
+    let future = Box::pin(link_task(
+      self.api(),
+      store,
+      device_name.clone(),
+      offer,
+      view.clone(),
+    ));
     self.link_failure = LinkStatus::Idle;
     self.link = Some(LinkRun {
       device_name,
@@ -1704,6 +1807,23 @@ fn not_set_up() -> String {
   "this device is not set up yet".to_owned()
 }
 
+/// The status for an error of opening the store or the client: unreadable data asks the user what
+/// to do (issue #160); anything else is a failure.
+fn unreadable_status(error: CoreError) -> Result<CoreStatus, String> {
+  match error.unreadable_store() {
+    Some(problem) => {
+      tracing::error!(%error, ?problem, "the local database is unreadable");
+      Ok(CoreStatus::StoreUnreadable {
+        problem: match problem {
+          UnreadableStore::Damaged => StoreProblem::Damaged,
+          UnreadableStore::NewerVersion => StoreProblem::NewerVersion,
+        },
+      })
+    },
+    None => Err(error.to_string()),
+  }
+}
+
 /// Error text for the UI: the cause, without internal type names.
 fn describe(error: CoreError) -> String {
   error.to_string()
@@ -1717,6 +1837,8 @@ fn describe_failure(error: CoreError) -> String {
 /// Waits for the existing device to answer, shows the short code, then waits for the keys.
 async fn link_task(
   api: Api,
+  store: Store,
+  device_name: String,
   offer: LinkOffer,
   view: Rc<RefCell<LinkStatus>>,
 ) -> Result<LinkedSecrets, String> {
@@ -1726,7 +1848,7 @@ async fn link_task(
     short_code: link.short_code(),
   };
   notify_changed();
-  link.receive_secrets().await.map_err(describe)
+  link.receive_secrets(&store, &device_name).await.map_err(describe)
 }
 
 /// Issues the store's queued writes at once when the page is hidden, frozen or unloaded: a tab in

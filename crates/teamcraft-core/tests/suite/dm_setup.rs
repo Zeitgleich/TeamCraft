@@ -403,12 +403,12 @@ async fn link(owner: &mut Peer, clock: &Arc<ManualClock>) -> Peer {
     teamcraft_core::client::NewDeviceLink::connect(&api, &offer),
     owner.client.start_link_approval(&code)
   );
+  let store = Arc::new(MemoryStore::new());
   let (approved, secrets) = tokio::join!(
     owner.client.complete_link_approval(owner_side.unwrap()),
-    new_side.unwrap().receive_secrets()
+    new_side.unwrap().receive_secrets(&store, "Test device")
   );
   approved.unwrap();
-  let store = Arc::new(MemoryStore::new());
   let mut client = PendingEnrollment::new()
     .complete(
       api.clone(),

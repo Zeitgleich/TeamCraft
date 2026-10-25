@@ -260,7 +260,11 @@ async fn a_second_device_is_linked_with_a_code_and_confirmed_on_the_first() {
   let first = person("alice", &config).await;
   match first.runtime.status().await {
     CoreStatus::NeedsEnrollment { .. } => enroll(&first).await,
-    CoreStatus::Ready { .. } | CoreStatus::NotStarted | CoreStatus::Failed { .. } | CoreStatus::Stopped => {},
+    CoreStatus::Ready { .. }
+    | CoreStatus::NotStarted
+    | CoreStatus::Failed { .. }
+    | CoreStatus::StoreUnreadable { .. }
+    | CoreStatus::Stopped => {},
   }
   let second = second_device(&first, &config);
   assert!(matches!(
@@ -321,7 +325,11 @@ async fn the_recovery_passphrase_can_be_changed_and_the_new_one_recovers() {
   let first = person("alice", &config).await;
   match first.runtime.status().await {
     CoreStatus::NeedsEnrollment { .. } => enroll(&first).await,
-    CoreStatus::Ready { .. } | CoreStatus::NotStarted | CoreStatus::Failed { .. } | CoreStatus::Stopped => {},
+    CoreStatus::Ready { .. }
+    | CoreStatus::NotStarted
+    | CoreStatus::Failed { .. }
+    | CoreStatus::StoreUnreadable { .. }
+    | CoreStatus::Stopped => {},
   }
   first
     .runtime

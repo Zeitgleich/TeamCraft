@@ -13,6 +13,8 @@ pub(super) const RECORDS: &str = "records";
 pub(super) const KEYS: &str = "keys";
 /// Schema version: bump with an upgrade step when object stores change.
 const SCHEMA_VERSION: u32 = 1;
+/// How long deleting the database may wait for other pages to close it.
+const DELETE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Opens (and on first use creates) the database `name`.
 pub(super) async fn open_database(name: &str) -> Result<IdbDatabase, StoreError> {
@@ -26,9 +28,48 @@ pub(super) async fn open_database(name: &str) -> Result<IdbDatabase, StoreError>
   request.set_onupgradeneeded(Some(on_upgrade.as_ref().unchecked_ref()));
   let result = request_result(&request).await;
   request.set_onupgradeneeded(None);
+  // A newer version of the app upgraded the database (issue #160): refused by the browser itself.
+  if result.is_err()
+    && request
+      .error()
+      .ok()
+      .flatten()
+      .is_some_and(|error| error.name() == "VersionError")
+  {
+    return Err(StoreError::NewerSchema {
+      found: i64::from(SCHEMA_VERSION) + 1,
+      supported: i64::from(SCHEMA_VERSION),
+    });
+  }
   result?
     .dyn_into::<IdbDatabase>()
     .map_err(|_| StoreError::Database("open did not return a database".into()))
+}
+
+/// Deletes the database `name` with everything in it. A page that still holds it open is asked to
+/// close it (`versionchange`; this app's pages do); if one doesn't (`blocked`), or nothing happens
+/// within [`DELETE_TIMEOUT`], this fails with [`StoreError::InUse`] instead of waiting forever.
+/// The browser then still deletes it once the last page let go.
+pub(super) async fn delete_database(name: &str) -> Result<(), StoreError> {
+  let request = factory()?
+    .delete_database(name)
+    .map_err(|error| js_error("delete", &error))?;
+  let (sender, receiver) = oneshot::channel::<Result<(), ()>>();
+  let sender = std::rc::Rc::new(std::cell::RefCell::new(Some(sender)));
+  let on_blocked = completion(&sender, Err(()));
+  request.set_onblocked(Some(on_blocked.as_ref().unchecked_ref()));
+  let deleted = Box::pin(request_result(&request));
+  let blocked = Box::pin(async {
+    let timeout = Box::pin(crate::platform::sleep(DELETE_TIMEOUT));
+    // Only the blocked event or the timeout end this side.
+    drop(futures_util::future::select(receiver, timeout).await);
+  });
+  let outcome = futures_util::future::select(deleted, blocked).await;
+  request.set_onblocked(None);
+  match outcome {
+    futures_util::future::Either::Left((result, _)) => result.map(|_| ()),
+    futures_util::future::Either::Right(((), _)) => Err(StoreError::InUse),
+  }
 }
 
 /// Waits for a request and returns its result.

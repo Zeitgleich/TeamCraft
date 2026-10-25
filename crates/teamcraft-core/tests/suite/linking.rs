@@ -47,21 +47,16 @@ async fn new_laptop_is_linked_by_scanning_its_code() {
   assert_eq!(laptop_side.short_code(), phone_side.short_code());
 
   // The user confirmed the codes on the phone; the phone reports success once the laptop confirmed.
+  let new_store = Arc::new(MemoryStore::new());
   let (approved, received) = tokio::join!(
     alice.client.complete_link_approval(phone_side),
-    laptop_side.receive_secrets()
+    laptop_side.receive_secrets(&new_store, "Test device")
   );
   approved.unwrap();
   let secrets = received.unwrap();
   let link_options = linked_options(secrets);
   let mut laptop = PendingEnrollment::new()
-    .complete(
-      laptop_api,
-      Arc::new(MemoryStore::new()),
-      clock(),
-      settings(),
-      link_options,
-    )
+    .complete(laptop_api, new_store, clock(), settings(), link_options)
     .await
     .unwrap();
   assert_eq!(laptop.identity_fingerprint(), alice.client.identity_fingerprint());
@@ -84,9 +79,10 @@ async fn linked_device_refuses_to_create_an_identity() {
     NewDeviceLink::connect(&laptop_api, &offer),
     alice.client.start_link_approval(&code)
   );
+  let new_store = Arc::new(MemoryStore::new());
   let (approved, received) = tokio::join!(
     alice.client.complete_link_approval(phone_side.unwrap()),
-    laptop_side.unwrap().receive_secrets()
+    laptop_side.unwrap().receive_secrets(&new_store, "Test device")
   );
   approved.unwrap();
   let secrets = received.unwrap();
@@ -97,7 +93,7 @@ async fn linked_device_refuses_to_create_an_identity() {
   let result = PendingEnrollment::new()
     .complete(
       laptop_api,
-      Arc::new(MemoryStore::new()),
+      new_store,
       clock(),
       settings(),
       linked_options(secrets),
@@ -139,9 +135,10 @@ async fn a_lost_transfer_frame_fails_on_both_devices() {
   // The frame with the keys never arrives. The phone waits for the receipt, gives up and leaves the
   // relay; the laptop learns that the transfer is not coming.
   server.lose_relay_frames(1);
+  let new_store = Arc::new(MemoryStore::new());
   let (approved, received) = tokio::join!(
     alice.client.complete_link_approval(phone_side.unwrap()),
-    laptop_side.unwrap().receive_secrets()
+    laptop_side.unwrap().receive_secrets(&new_store, "Test device")
   );
   assert!(matches!(approved, Err(CoreError::LinkNotConfirmed)));
   assert!(received.is_err());

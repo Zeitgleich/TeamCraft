@@ -6,8 +6,11 @@
 //! same short code; once the user confirmed it on the existing device,
 //! [`Client::complete_link_approval`] transfers the backup key and the key bag. The new device
 //! checks that the key bag opens and answers with a receipt; only that receipt makes the existing
-//! device report success, so a lost frame fails on both sides. The new device then enrolls with
-//! the secrets ([`crate::EnrollmentSecret::Linked`]).
+//! device report success, so a lost frame fails on both sides. Before it answers, the new device
+//! stores the secrets (encrypted like the account, issue #168); it then enrolls with them
+//! ([`crate::EnrollmentSecret::Linked`]). If it stops before the account is stored, its next start
+//! finishes enrolling with the stored secrets ([`crate::PendingEnrollment::resume_link`]) instead
+//! of asking for another link the existing device already reported as done.
 //!
 //! The protocol version is in the code itself (`tclink2`): a device that speaks another version
 //! refuses the code when it is scanned, before any key leaves the existing device.
@@ -166,14 +169,32 @@ impl<R: RendezvousConnection> NewDeviceLink<R> {
   }
 
   /// Waits for the transfer the existing device sends after confirmation, checks that the key bag
-  /// in it opens and confirms the receipt to the existing device.
-  pub async fn receive_secrets(mut self) -> Result<LinkedSecrets, CoreError> {
+  /// in it opens, keeps it in `store` for an enrollment as `device_name` and confirms the receipt
+  /// to the existing device. Enroll with the secrets next; [`records::delete_pending_link`] drops
+  /// them if the user gives up instead.
+  pub async fn receive_secrets(
+    mut self,
+    store: &impl LocalStore,
+    device_name: &str,
+  ) -> Result<LinkedSecrets, CoreError> {
     let frame = next_binary(&mut self.connection).await?;
     let plaintext = self.channel.open(&frame).map_err(link_error)?;
     let payload: TransferPayload = serde_json::from_slice(plaintext.expose_secret())
       .map_err(|error| CoreError::Corrupt(error.to_string()))?;
     check_version(payload.version)?;
-    let secrets = match self.open_transfer(payload) {
+    let kept = self.open_transfer(payload).and_then(|secrets| {
+      // Stored before the receipt: once the existing device reports success, a restart here
+      // doesn't lose the keys (issue #168).
+      let pending = records::PendingLink {
+        user_id: self.user,
+        device_name: device_name.to_string(),
+        secrets,
+      };
+      records::save_pending_link(store, &pending)?;
+      store.write_soon();
+      Ok(pending.secrets)
+    });
+    let secrets = match kept {
       Ok(secrets) => secrets,
       Err(error) => {
         self.send_receipt(ReceiptOutcome::Rejected).await;

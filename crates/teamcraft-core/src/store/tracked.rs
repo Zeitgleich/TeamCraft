@@ -178,6 +178,18 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   fn purge_freed(&self) -> Result<(), StoreError> {
     self.inner.purge_freed()
   }
+
+  fn begin_writes(&self) -> Result<(), StoreError> {
+    self.inner.begin_writes()
+  }
+
+  fn end_writes(&self) -> Result<(), StoreError> {
+    self.inner.end_writes()
+  }
+
+  fn write_soon(&self) {
+    self.inner.write_soon();
+  }
 }
 
 /// What a write to `table` under `key` may change in the snapshot.

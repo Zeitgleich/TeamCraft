@@ -1,5 +1,8 @@
 //! Native [`LocalStore`] on SQLCipher (e2ee.md §9). The whole file is encrypted with a raw 256-bit
 //! key from a [`DatabaseKeySource`]; nothing readable touches the disk.
+//!
+//! The layout has a version (`PRAGMA user_version`, [`MIGRATIONS`]); opening upgrades an older
+//! database step by step and refuses a newer one instead of misreading it (issue #160).
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
@@ -8,9 +11,31 @@ use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use teamcraft_proto::{ClientMessageId, ConversationId, Id, MessageId};
 use zeroize::Zeroizing;
 
+use super::sql_group::{
+  Migration, MigrationKind, WriteGroup, run_migrations, sqlite_error as database_error,
+};
+use super::sqlite_wipe::wipe_free_pages;
 use super::{DatabaseKeySource, LocalStore, MessageFilter, StoreError, StoredMessage, Table};
 
-const SCHEMA: &str = "
+/// The layout steps of this store, in order ([`run_migrations`]). Released 1.0 databases carry
+/// version 0 (no version was set) and the tables of version 1, apart from databases older than the
+/// `in_channel` column; step 1 is written to accept both.
+pub(crate) const MIGRATIONS: &[Migration] = &[
+  Migration {
+    version: 1,
+    kind: MigrationKind::Layout(migrate_to_v1),
+  },
+  Migration {
+    version: 2,
+    kind: MigrationKind::Maintenance(wipe_free_pages),
+  },
+];
+/// The layout this version writes.
+#[cfg(test)]
+const SCHEMA_VERSION: i64 = super::sql_group::latest_version(MIGRATIONS);
+
+/// The tables of version 1.
+const SCHEMA_V1: &str = "
   CREATE TABLE IF NOT EXISTS kv (
     tbl TEXT NOT NULL,
     key TEXT NOT NULL,
@@ -31,7 +56,14 @@ const SCHEMA: &str = "
 ";
 
 pub struct SqlCipherStore {
-  connection: Mutex<Connection>,
+  inner: Mutex<Inner>,
+}
+
+/// The connection and the group of writes open on it: one lock, so a write and the group it joins
+/// never disagree.
+struct Inner {
+  connection: Connection,
+  group: WriteGroup,
 }
 
 impl SqlCipherStore {
@@ -71,20 +103,33 @@ impl SqlCipherStore {
     connection
       .execute_batch("PRAGMA secure_delete = ON;")
       .map_err(database_error)?;
-    connection.execute_batch(SCHEMA).map_err(database_error)?;
-    migrate(&connection)?;
-    super::wipe_free_pages_once(&connection);
+    run_migrations(&connection, MIGRATIONS)?;
     Ok(Self {
-      connection: Mutex::new(connection),
+      inner: Mutex::new(Inner {
+        connection,
+        group: WriteGroup::default(),
+      }),
     })
   }
 
-  fn lock(&self) -> MutexGuard<'_, Connection> {
+  fn lock(&self) -> MutexGuard<'_, Inner> {
     // A poisoned lock only means another thread panicked; SQLite keeps the connection consistent.
-    self
-      .connection
-      .lock()
-      .unwrap_or_else(|poisoned| poisoned.into_inner())
+    self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+  }
+
+  /// Runs a write; a failure inside a group of writes undoes the whole group when it ends.
+  fn write(&self, statement: impl FnOnce(&Connection) -> rusqlite::Result<usize>) -> Result<(), StoreError> {
+    let mut inner = self.lock();
+    let Inner { connection, group } = &mut *inner;
+    group.check_open(connection)?;
+    let result = statement(&inner.connection);
+    match result {
+      Ok(_) => Ok(()),
+      Err(error) => {
+        inner.group.note_failure();
+        Err(database_error(error))
+      },
+    }
   }
 }
 
@@ -92,6 +137,7 @@ impl LocalStore for SqlCipherStore {
   fn get(&self, table: Table, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
     self
       .lock()
+      .connection
       .query_row(
         "SELECT value FROM kv WHERE tbl = ?1 AND key = ?2",
         params![table.name(), key],
@@ -102,31 +148,28 @@ impl LocalStore for SqlCipherStore {
   }
 
   fn put(&self, table: Table, key: &str, value: &[u8]) -> Result<(), StoreError> {
-    self
-      .lock()
-      .execute(
+    self.write(|connection| {
+      connection.execute(
         "INSERT INTO kv (tbl, key, value) VALUES (?1, ?2, ?3)
          ON CONFLICT (tbl, key) DO UPDATE SET value = excluded.value",
         params![table.name(), key, value],
       )
-      .map(|_| ())
-      .map_err(database_error)
+    })
   }
 
   fn delete(&self, table: Table, key: &str) -> Result<(), StoreError> {
-    self
-      .lock()
-      .execute(
+    self.write(|connection| {
+      connection.execute(
         "DELETE FROM kv WHERE tbl = ?1 AND key = ?2",
         params![table.name(), key],
       )
-      .map(|_| ())
-      .map_err(database_error)
+    })
   }
 
   fn list(&self, table: Table) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
-    let connection = self.lock();
-    let mut statement = connection
+    let inner = self.lock();
+    let mut statement = inner
+      .connection
       .prepare("SELECT key, value FROM kv WHERE tbl = ?1 ORDER BY key")
       .map_err(database_error)?;
     let rows = statement
@@ -138,9 +181,8 @@ impl LocalStore for SqlCipherStore {
   fn upsert_message(&self, message: &StoredMessage) -> Result<(), StoreError> {
     let record = serde_json::to_vec(message).map_err(|error| StoreError::Corrupt(error.to_string()))?;
     let (sort_group, sort_value) = message.sort_key();
-    self
-      .lock()
-      .execute(
+    self.write(|connection| {
+      connection.execute(
         "INSERT INTO messages
            (conversation_id, client_message_id, sort_group, sort_value, thread_id, is_hidden, in_channel, record)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -159,8 +201,7 @@ impl LocalStore for SqlCipherStore {
           record,
         ],
       )
-      .map(|_| ())
-      .map_err(database_error)
+    })
   }
 
   fn message(
@@ -170,6 +211,7 @@ impl LocalStore for SqlCipherStore {
   ) -> Result<Option<StoredMessage>, StoreError> {
     let maybe_record: Option<Vec<u8>> = self
       .lock()
+      .connection
       .query_row(
         "SELECT record FROM messages WHERE conversation_id = ?1 AND client_message_id = ?2",
         params![
@@ -191,6 +233,7 @@ impl LocalStore for SqlCipherStore {
   ) -> Result<Option<StoredMessage>, StoreError> {
     let maybe_record: Option<Vec<u8>> = self
       .lock()
+      .connection
       .query_row(
         "SELECT record FROM messages WHERE conversation_id = ?1 AND sort_group = 0 AND sort_value = ?2",
         params![conversation.snowflake().get(), server_id.snowflake().get()],
@@ -206,7 +249,7 @@ impl LocalStore for SqlCipherStore {
     conversation: ConversationId,
     filter: MessageFilter,
   ) -> Result<Vec<StoredMessage>, StoreError> {
-    let connection = self.lock();
+    let inner = self.lock();
     let (condition, maybe_thread) = match filter {
       MessageFilter::All => ("", None),
       MessageFilter::TopLevel => (
@@ -221,7 +264,7 @@ impl LocalStore for SqlCipherStore {
     let sql = format!(
       "SELECT record FROM messages WHERE conversation_id = ?1 {condition} ORDER BY sort_group, sort_value"
     );
-    let mut statement = connection.prepare(&sql).map_err(database_error)?;
+    let mut statement = inner.connection.prepare(&sql).map_err(database_error)?;
     let mut values = vec![conversation.snowflake().get()];
     values.extend(maybe_thread);
     let records: Vec<Vec<u8>> = statement
@@ -233,14 +276,24 @@ impl LocalStore for SqlCipherStore {
   }
 
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {
-    self
-      .lock()
-      .execute(
+    self.write(|connection| {
+      connection.execute(
         "DELETE FROM messages WHERE conversation_id = ?1",
         params![conversation.snowflake().get()],
       )
-      .map(|_| ())
-      .map_err(database_error)
+    })
+  }
+
+  fn begin_writes(&self) -> Result<(), StoreError> {
+    let mut inner = self.lock();
+    let Inner { connection, group } = &mut *inner;
+    group.begin(connection)
+  }
+
+  fn end_writes(&self) -> Result<(), StoreError> {
+    let mut inner = self.lock();
+    let Inner { connection, group } = &mut *inner;
+    group.end(connection)
   }
 }
 
@@ -254,9 +307,10 @@ fn decode_message(record: &[u8]) -> Result<StoredMessage, StoreError> {
   serde_json::from_slice(record).map_err(|error| StoreError::Corrupt(error.to_string()))
 }
 
-/// Schema changes after the first version, applied in order to older databases.
-fn migrate(connection: &Connection) -> Result<(), StoreError> {
-  // Thread replies also sent to the conversation (`MessageMeta::is_also_in_channel`).
+/// Version 1: the tables, and the `in_channel` column that early 1.0 previews lacked (thread
+/// replies also sent to the conversation, `MessageMeta::is_also_in_channel`).
+fn migrate_to_v1(connection: &Connection) -> Result<(), StoreError> {
+  connection.execute_batch(SCHEMA_V1).map_err(database_error)?;
   let has_in_channel = connection
     .prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'in_channel'")
     .and_then(|mut statement| statement.exists([]))
@@ -267,10 +321,6 @@ fn migrate(connection: &Connection) -> Result<(), StoreError> {
       .map_err(database_error)?;
   }
   Ok(())
-}
-
-fn database_error(error: rusqlite::Error) -> StoreError {
-  StoreError::Database(error.to_string())
 }
 
 #[cfg(test)]
@@ -289,6 +339,7 @@ mod tests {
     let store = SqlCipherStore::open_in_memory(&key).unwrap();
     let secure_delete: i64 = store
       .lock()
+      .connection
       .query_row("PRAGMA secure_delete", [], |row| row.get(0))
       .unwrap();
     assert_eq!(secure_delete, 1);
@@ -328,5 +379,198 @@ mod tests {
     // Windows can't delete a database file that is still open.
     drop(reopened);
     std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  #[test]
+  fn migration_steps_are_numbered() {
+    crate::store::sql_group::tests::assert_numbered(MIGRATIONS);
+  }
+
+  #[test]
+  fn an_interrupted_group_of_writes_leaves_none_of_them() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let key = SymmetricKey::generate(&mut OsRng);
+    {
+      let store = SqlCipherStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
+      store.put(Table::Users, "before", b"kept").unwrap();
+      store.begin_writes().unwrap();
+      store.put(Table::Outbox, "1", b"entry").unwrap();
+      store.put(Table::SyncState, "sync", b"cursor").unwrap();
+      // The app dies here: the group never ends.
+    }
+    let reopened = SqlCipherStore::open(&path, &StaticKeySource::new(key)).unwrap();
+    assert_eq!(
+      reopened.get(Table::Users, "before").unwrap(),
+      Some(b"kept".to_vec())
+    );
+    assert_eq!(reopened.get(Table::Outbox, "1").unwrap(), None);
+    assert_eq!(reopened.get(Table::SyncState, "sync").unwrap(), None);
+    // And the reopened store commits groups again.
+    crate::store::write_group(&reopened, || reopened.put(Table::Outbox, "2", b"entry")).unwrap();
+    drop(reopened);
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  #[test]
+  fn a_failed_write_undoes_its_group() {
+    let store =
+      SqlCipherStore::open_in_memory(&StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
+    store.begin_writes().unwrap();
+    store.put(Table::Outbox, "1", b"entry").unwrap();
+    // A write SQLite refuses: the table is gone.
+    store
+      .lock()
+      .connection
+      .execute_batch("ALTER TABLE kv RENAME TO kv_gone")
+      .unwrap();
+    assert!(store.put(Table::SyncState, "sync", b"cursor").is_err());
+    store
+      .lock()
+      .connection
+      .execute_batch("ALTER TABLE kv_gone RENAME TO kv")
+      .unwrap();
+    assert!(matches!(store.end_writes(), Err(StoreError::GroupFailed(_))));
+    assert_eq!(store.get(Table::Outbox, "1").unwrap(), None);
+  }
+
+  #[test]
+  fn writes_after_sqlite_rolled_the_group_back_are_refused() {
+    let store =
+      SqlCipherStore::open_in_memory(&StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
+    store.begin_writes().unwrap();
+    store.put(Table::Outbox, "1", b"entry").unwrap();
+    // What SQLite does on a full disk: the transaction is gone.
+    store.lock().connection.execute_batch("ROLLBACK").unwrap();
+    assert!(matches!(
+      store.put(Table::SyncState, "sync", b"cursor"),
+      Err(StoreError::GroupFailed(_))
+    ));
+    assert!(store.end_writes().is_err());
+    assert_eq!(
+      store.get(Table::SyncState, "sync").unwrap(),
+      None,
+      "not committed on its own"
+    );
+    // The next group works again.
+    crate::store::write_group(&store, || store.put(Table::Outbox, "2", b"entry")).unwrap();
+    assert!(store.get(Table::Outbox, "2").unwrap().is_some());
+  }
+
+  #[test]
+  fn a_database_of_the_first_layout_is_upgraded() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let key = SymmetricKey::generate(&mut OsRng);
+    {
+      // Early 1.0 previews: no `in_channel` column, no version.
+      let connection = Connection::open(&path).unwrap();
+      keyed(&connection, &key);
+      connection.execute_batch(SCHEMA_V1).unwrap();
+      connection
+        .execute(
+          "INSERT INTO kv (tbl, key, value) VALUES ('saved_searches', 'legacy', x'6f6e65')",
+          [],
+        )
+        .unwrap();
+    }
+    let store = SqlCipherStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
+    assert_eq!(
+      store.get(Table::SavedSearches, "legacy").unwrap(),
+      Some(b"one".to_vec())
+    );
+    exercise_store(&store);
+    let version: i64 = store
+      .lock()
+      .connection
+      .query_row("PRAGMA user_version", [], |row| row.get(0))
+      .unwrap();
+    assert_eq!(version, SCHEMA_VERSION);
+    drop(store);
+    // Opening again finds nothing to do.
+    SqlCipherStore::open(&path, &StaticKeySource::new(key)).unwrap();
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  #[test]
+  fn a_database_of_a_newer_version_is_refused_untouched() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let key = SymmetricKey::generate(&mut OsRng);
+    drop(SqlCipherStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap());
+    {
+      let connection = Connection::open(&path).unwrap();
+      keyed(&connection, &key);
+      connection.execute_batch("PRAGMA user_version = 99").unwrap();
+    }
+    let opened = SqlCipherStore::open(&path, &StaticKeySource::new(key.duplicate()));
+    let Err(error) = opened else {
+      panic!("a newer layout opened");
+    };
+    assert!(
+      matches!(
+        error,
+        StoreError::NewerSchema {
+          found: 99,
+          supported: SCHEMA_VERSION
+        }
+      ),
+      "{error:?}"
+    );
+    assert!(error.is_unreadable());
+    let connection = Connection::open(&path).unwrap();
+    keyed(&connection, &key);
+    let version: i64 = connection
+      .query_row("PRAGMA user_version", [], |row| row.get(0))
+      .unwrap();
+    assert_eq!(version, 99, "left as it was");
+    drop(connection);
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  #[test]
+  fn a_damaged_file_is_reported_as_unreadable() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let key = SymmetricKey::generate(&mut OsRng);
+    {
+      let store = SqlCipherStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
+      for index in 0..200 {
+        store.put(Table::Users, &index.to_string(), &[7u8; 512]).unwrap();
+      }
+    }
+    // Overwrite pages past the first: SQLCipher's page MAC catches the damage on read.
+    let mut bytes = std::fs::read(&path).unwrap();
+    let length = bytes.len();
+    for byte in &mut bytes[4096..length] {
+      *byte ^= 0xa5;
+    }
+    std::fs::write(&path, &bytes).unwrap();
+    let error = match SqlCipherStore::open(&path, &StaticKeySource::new(key)) {
+      Err(error) => error,
+      Ok(store) => store.list(Table::Users).unwrap_err(),
+    };
+    assert!(error.is_unreadable(), "{error:?}");
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  fn keyed(connection: &Connection, key: &SymmetricKey) {
+    let hex: String = key
+      .expose_secret()
+      .iter()
+      .map(|byte| format!("{byte:02x}"))
+      .collect();
+    connection
+      .execute_batch(&format!("PRAGMA key = \"x'{hex}'\";"))
+      .unwrap();
+  }
+
+  fn scratch_dir() -> std::path::PathBuf {
+    let directory = std::env::temp_dir().join(format!(
+      "teamcraft-sqlcipher-{}",
+      rand_core::RngCore::next_u64(&mut OsRng)
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    directory
   }
 }

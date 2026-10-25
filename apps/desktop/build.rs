@@ -39,6 +39,7 @@ const COMMANDS: &[&str] = &[
   "core_attachment",
   "core_focus",
   "core_stop",
+  "core_reset_store",
   "call_snapshot",
   "call_media_devices",
   "call_action",
