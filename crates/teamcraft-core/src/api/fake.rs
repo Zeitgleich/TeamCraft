@@ -1550,7 +1550,29 @@ impl ServerApi for FakeServerApi {
     self.with(|state, me| {
       let is_instance_admin = state.admins.contains(&me);
       if let Some(role) = &request.maybe_role {
-        // Like the server: channel admins and workspace admins manage roles; a channel keeps an admin.
+        // Like the server: channel admins and workspace admins manage roles; guests stay members;
+        // a channel keeps an admin. (The clients also never change their own role.)
+        if user == me {
+          return Err(ApiError::status(
+            403,
+            ErrorCode::Forbidden,
+            "people can't change their own role",
+          ));
+        }
+        let is_guest = state.user(user)?.kind == UserKind::Guest
+          || state
+            .conversation(conversation)?
+            .response
+            .maybe_space_id
+            .and_then(|space| state.space_roles.get(&(space, user)))
+            .is_some_and(|role| *role == SpaceRole::Guest);
+        if is_guest && *role != ChannelRole::Member {
+          return Err(ApiError::status(
+            400,
+            ErrorCode::InvalidRequest,
+            "guests can't be channel admins or moderators",
+          ));
+        }
         let entry = state.actor_conversation_mut(conversation, me)?;
         let is_channel_admin = entry
           .members

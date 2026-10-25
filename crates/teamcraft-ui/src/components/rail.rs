@@ -4,9 +4,9 @@ use crate::components::count_badge::{BadgeTone, CountBadge};
 use crate::components::icons::{Icon, IconName};
 use crate::components::space_tile::SpaceTileContent;
 use crate::i18n::use_i18n;
-use crate::model::Space;
+use crate::model::{ConversationKind, Space};
 use crate::sections::{RailBadge, badge_count, has_urgent_activity};
-use crate::state::{MainView, Overlay, RailEntry, use_app_state};
+use crate::state::{AppState, MainView, Overlay, RailEntry, use_app_state};
 
 /// Space switcher on the far left (Mattermost "team sidebar"). On top the global destinations with
 /// a label under each icon: Home (the DMs, which live outside spaces), Activity and Threads. In the
@@ -182,14 +182,14 @@ fn RailDestination(
 }
 
 /// Activity is red when an unread item is a mention or in a direct conversation, quiet otherwise.
-pub fn activity_tone(state: crate::state::AppState) -> Signal<BadgeTone> {
+pub fn activity_tone(state: AppState) -> Signal<BadgeTone> {
   Signal::derive(move || {
     BadgeTone::of(state.read(|backend| {
       has_urgent_activity(&backend.activity().items, |id| {
         backend.conversation(id).is_some_and(|conversation| {
           matches!(
             conversation.kind,
-            crate::model::ConversationKind::Direct | crate::model::ConversationKind::Group
+            ConversationKind::Direct | ConversationKind::Group
           )
         })
       })

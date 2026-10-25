@@ -434,11 +434,6 @@ async fn channel_admins_change_roles_and_the_member_list_shows_what_the_server_s
       .find(|member| member.user == user)
       .map(|member| member.role)
   };
-  alice
-    .client
-    .set_channel_role(channel, alice.client.user_id(), ChannelRole::Admin)
-    .await
-    .unwrap();
   assert_eq!(
     role_of(&alice_ui, alice.client.user_id()),
     Some(ChannelRole::Admin)
@@ -457,7 +452,7 @@ async fn channel_admins_change_roles_and_the_member_list_shows_what_the_server_s
 }
 
 #[tokio::test]
-async fn role_changes_without_the_permission_or_of_the_last_admin_are_refused() {
+async fn role_changes_without_the_permission_or_for_oneself_are_refused() {
   let server = FakeServer::new();
   let mut alice = Peer::enroll(&server, "Alice").await;
   let mut bob = Peer::enroll(&server, "Bob").await;
@@ -468,24 +463,30 @@ async fn role_changes_without_the_permission_or_of_the_last_admin_are_refused() 
   run_commands(&mut bob, &bob_ui).await;
   settle_and_flush(&mut [&mut alice, &mut bob]).await;
   let alice_ui = backend_of(&alice);
-  alice
-    .client
-    .set_channel_role(channel, alice.client.user_id(), ChannelRole::Admin)
-    .await
-    .unwrap();
 
+  // Nobody changes their own role, not even a channel admin.
+  let own_admin = alice
+    .client
+    .set_channel_role(channel, alice.client.user_id(), ChannelRole::Moderator)
+    .await;
+  assert!(own_admin.is_err());
   // A member can't promote themselves.
   let own = bob
     .client
     .set_channel_role(channel, bob.client.user_id(), ChannelRole::Admin)
     .await;
   assert!(own.is_err());
-  // The only admin can't step down.
-  let last = alice
+  // A moderator can't change roles either.
+  alice
+    .client
+    .set_channel_role(channel, bob.client.user_id(), ChannelRole::Moderator)
+    .await
+    .unwrap();
+  let demote = bob
     .client
     .set_channel_role(channel, alice.client.user_id(), ChannelRole::Member)
     .await;
-  assert!(last.is_err());
+  assert!(demote.is_err());
   let roles = alice_ui.channel_roles(channel);
   let held = |user| {
     roles
@@ -494,7 +495,7 @@ async fn role_changes_without_the_permission_or_of_the_last_admin_are_refused() 
       .map(|member| member.role.clone())
   };
   assert_eq!(held(alice.client.user_id()), Some(ChannelRole::Admin));
-  assert_eq!(held(bob.client.user_id()), Some(ChannelRole::Member));
+  assert_eq!(held(bob.client.user_id()), Some(ChannelRole::Moderator));
 }
 
 #[tokio::test]

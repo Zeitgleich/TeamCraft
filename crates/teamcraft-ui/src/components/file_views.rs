@@ -726,7 +726,7 @@ pub fn LinkPreviewCard(preview: LinkPreview) -> impl IntoView {
       {wide_image
         .map(|(url, ratio)| {
           view! {
-            <img class="embed-wide" src=url alt="" loading="lazy" style=format!("aspect-ratio: {ratio}") />
+            <img class="embed-wide" src=url alt="" loading="lazy" style:aspect-ratio=ratio.to_string() />
           }
         })}
     </div>

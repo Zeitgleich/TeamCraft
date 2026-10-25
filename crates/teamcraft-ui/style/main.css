@@ -1049,6 +1049,10 @@ select.input {
   margin-left: auto;
 }
 
+.sb-section-head .badge-count + .badge-count {
+  margin-left: 4px;
+}
+
 .sb-section-head .chevron {
   width: 14px;
   height: 14px;

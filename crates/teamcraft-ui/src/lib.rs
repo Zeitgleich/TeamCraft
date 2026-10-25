@@ -20,6 +20,7 @@ pub mod brand;
 pub mod bundle;
 pub mod call_alerts;
 pub mod calls;
+pub mod channel_access;
 pub mod channel_policy;
 pub mod clock;
 pub mod components;

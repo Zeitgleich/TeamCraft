@@ -8,9 +8,14 @@ use leptos::task::spawn_local;
 use teamcraft_client_api::actions::{
   BrowsableChannel, CategoryChoice, CategoryInfo, ChannelChanges, NewChannel, NewSpace, SpaceChanges,
 };
+use teamcraft_client_api::model::{ChannelMember, ChannelRole};
+use teamcraft_client_api::role_rules::{
+  RoleTarget, SpaceStanding, assignable_roles, can_manage_channel_roles,
+};
 use teamcraft_proto::{CategoryId, HistoryPolicy, IdempotencyKey, SpaceResponse};
 use wasm_bindgen::JsCast;
 
+use crate::channel_access::ChannelAccess;
 use crate::channel_policy::{ChannelPolicyHub, parse_retention};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::composer_commands::left_text;
@@ -21,14 +26,11 @@ use crate::components::image_crop_dialog::{
 use crate::components::modal::Modal;
 use crate::components::section_tabs::{Section, SectionTabs};
 use crate::components::space_tile::SpaceTile;
-use teamcraft_client_api::model::{ChannelMember, ChannelRole};
-use teamcraft_client_api::role_rules::{RoleActor, RoleTarget, assignable_roles, can_manage_channel_roles};
-
 use crate::feedback::{PendingAction, failure_message};
 use crate::i18n::use_i18n;
 use crate::image_crop::check_pick;
 use crate::model::{
-  ConversationId, JoinPolicy, Space, SpaceId, SpaceMember, SpaceRole, SpaceRoster, User, hue_from_hex,
+  ConversationId, JoinPolicy, Space, SpaceId, SpaceMember, SpaceRole, SpaceRoster, User, UserId, hue_from_hex,
 };
 use crate::reactive::SetIfAlive;
 use crate::space_images::use_space_images;
@@ -459,30 +461,26 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
         .count()
     })
   });
-  let actor = Memo::new(move |_| {
-    let me = state.me().id;
-    let maybe_space = state
+  let access = ChannelAccess::new(state, conversation);
+  let actor = access.actor;
+  let scheme = access.scheme;
+  // Who is in the channel's space decides who can be given a role; the list loads in the background.
+  let maybe_space = Memo::new(move |_| {
+    state
       .read(|backend| backend.conversation(conversation))
-      .and_then(|info| info.maybe_space);
-    RoleActor {
-      instance_role: state.read(|backend| backend.my_role()),
-      is_space_admin: maybe_space.is_some_and(|space| {
-        state.read(|backend| {
-          backend
-            .spaces()
-            .iter()
-            .any(|found| found.id == space && found.can_manage_space)
-        })
-      }),
-      maybe_own_role: roles.with(|list| {
-        list
-          .iter()
-          .find(|member| member.user == me)
-          .map(|member| member.role.clone())
-      }),
+      .and_then(|info| info.maybe_space)
+  });
+  Effect::new(move |_| {
+    if let Some(space) = maybe_space.get() {
+      state.write(|backend| backend.refresh_space_roster(space));
     }
   });
-  let can_manage_roles = Memo::new(move |_| can_manage_channel_roles(&actor.get()));
+  let space_roster = Memo::new(move |_| match maybe_space.get() {
+    Some(space) => state.read(|backend| backend.space_members(space)),
+    None => SpaceRoster::Loading,
+  });
+  let can_manage_roles =
+    Memo::new(move |_| scheme.with(|scheme| actor.with(|actor| can_manage_channel_roles(scheme, actor))));
   view! {
     <div class="settings-row">
       <span class="muted-text">{move || i18n.t_count("members-count", members.with(Vec::len))}</span>
@@ -495,7 +493,7 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
     <p class="hint">{move || if can_manage_roles.get() { i18n.t("channel-roles-hint") } else { i18n.t("channel-roles-read-only") }}</p>
     <ul class="settings-member-list">
       <For each=move || members.get() key=|user| user.id let:user>
-        <ChannelMemberRow conversation=conversation user=user roles=roles actor=actor admin_count=admin_count />
+        <ChannelMemberRow conversation=conversation user=user roles=roles access=access space_roster=space_roster admin_count=admin_count />
       </For>
     </ul>
   }
@@ -506,7 +504,8 @@ fn ChannelMemberRow(
   conversation: ConversationId,
   user: User,
   roles: Memo<Vec<ChannelMember>>,
-  actor: Memo<RoleActor>,
+  access: ChannelAccess,
+  space_roster: Memo<SpaceRoster>,
   admin_count: Memo<usize>,
 ) -> impl IntoView {
   let state = use_app_state();
@@ -527,15 +526,21 @@ fn ChannelMemberRow(
     })
   });
   let options = Memo::new(move |_| match role.get() {
-    Some(current) => assignable_roles(
-      &actor.get(),
-      &RoleTarget {
-        is_guest,
-        is_self: is_me,
-        current,
-      },
-      admin_count.get(),
-    ),
+    Some(current) => access.scheme.with(|scheme| {
+      access.actor.with(|actor| {
+        assignable_roles(
+          scheme,
+          actor,
+          &RoleTarget {
+            is_guest,
+            space: space_standing(&space_roster.get(), id),
+            is_self: is_me,
+            current,
+          },
+          admin_count.get(),
+        )
+      })
+    }),
     None => Vec::new(),
   });
   view! {
@@ -640,11 +645,12 @@ fn RoleSelect(
       .map(|key| i18n.t(key))
       .unwrap_or_default()
   };
+  // Also runs when a refusal arrives after the row is gone, so it only touches live signals.
   let cancel = {
     let current = current.clone();
     move || {
-      maybe_proposed.set(None);
-      shown.set(current.clone());
+      let _ = maybe_proposed.try_set(None);
+      let _ = shown.try_set(current.clone());
     }
   };
   view! {
@@ -699,6 +705,18 @@ fn RoleSelect(
           }
         })
     }}
+  }
+}
+
+/// Where a person stands in the channel's space according to the space's member list.
+fn space_standing(roster: &SpaceRoster, user: UserId) -> SpaceStanding {
+  match roster {
+    SpaceRoster::Loaded(members) => match members.iter().find(|member| member.user == user) {
+      Some(member) if member.is_guest || member.role == SpaceRole::Guest => SpaceStanding::Guest,
+      Some(_) => SpaceStanding::Member,
+      None => SpaceStanding::NotMember,
+    },
+    SpaceRoster::Loading | SpaceRoster::Hidden => SpaceStanding::Unknown,
   }
 }
 
@@ -1726,6 +1744,35 @@ mod tests {
     assert_eq!(
       HistoryChoice::from_value("from_join").policy(),
       Some(HistoryPolicy::FromJoin)
+    );
+  }
+
+  #[test]
+  fn a_persons_space_standing_follows_the_space_member_list() {
+    let member = |user: u64, role: SpaceRole, is_guest: bool| SpaceMember {
+      user: crate::model::id_from_raw(user),
+      display_name: String::new(),
+      is_guest,
+      role,
+    };
+    let roster = SpaceRoster::Loaded(vec![
+      member(1, SpaceRole::Member, false),
+      member(2, SpaceRole::Guest, true),
+      member(3, SpaceRole::SpaceAdmin, false),
+    ]);
+    let standing = |user: u64| space_standing(&roster, crate::model::id_from_raw(user));
+    assert_eq!(standing(1), SpaceStanding::Member);
+    assert_eq!(standing(2), SpaceStanding::Guest);
+    assert_eq!(standing(3), SpaceStanding::Member);
+    assert_eq!(standing(4), SpaceStanding::NotMember);
+    let unknown = crate::model::id_from_raw(1);
+    assert_eq!(
+      space_standing(&SpaceRoster::Loading, unknown),
+      SpaceStanding::Unknown
+    );
+    assert_eq!(
+      space_standing(&SpaceRoster::Hidden, unknown),
+      SpaceStanding::Unknown
     );
   }
 
