@@ -62,6 +62,7 @@ pub mod object_url;
 pub mod os_alerts;
 pub mod panic_overlay;
 pub mod prefs;
+pub mod preview;
 pub mod profiles;
 pub mod raster;
 pub mod reactive;

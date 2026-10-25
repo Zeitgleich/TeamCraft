@@ -25,6 +25,10 @@
     <link data-trunk rel="copy-dir" href="icons" />
     <link data-trunk rel="copy-file" href="icons/favicon.ico" />
     <link data-trunk rel="copy-file" href="sw.js" />
+    <!-- The PDF viewer of file previews (#557): PDF.js, vendored and pinned, loaded when the first PDF
+         opens. The version is in the path, so a new one is a new URL. -->
+    <link data-trunk rel="copy-dir" href="vendor/pdfjs-6.4.299" data-target-path="pdfjs-6.4.299" />
+    <link data-trunk rel="copy-file" href="pdf-viewer.mjs" data-target-path="pdfjs-6.4.299" />
     <!-- Thumbnails of the photo backgrounds, loaded lazily by the picker (the full pictures are only in the desktop app). -->
     <link data-trunk rel="copy-dir" href="../../assets/backgrounds/thumbs" data-target-path="backgrounds" />
     <!-- The app's wasm is built, split into lazily loaded chunks and started by scripts/build-app.sh (a

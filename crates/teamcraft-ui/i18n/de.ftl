@@ -1243,6 +1243,20 @@ file-upload-retrying = Wird erneut versucht …
 file-upload-failed = Hochladen fehlgeschlagen
 file-upload-unreadable = Die Datei ließ sich nicht mehr lesen. Hänge sie erneut an.
 file-preview = Vorschau anzeigen
+preview-unavailable = Die Datei konnte nicht geladen werden. Prüfe deine Verbindung und versuche es erneut.
+preview-show-source = Quelltext anzeigen
+preview-show-formatted = Formatiert anzeigen
+preview-html-note = Wird ohne Skripte und ohne Inhalte aus dem Web angezeigt.
+preview-links = { $count ->
+    [one] { $count } Link in dieser Datei
+   *[other] { $count } Links in dieser Datei
+  }
+preview-pdf-unreadable = Dieses PDF konnte nicht geöffnet werden. Lade es herunter, um es anderswo anzusehen.
+preview-zoom-in = Vergrößern
+preview-zoom-out = Verkleinern
+preview-page = Seite
+preview-find = Im Dokument suchen
+preview-find-none = Keine Treffer
 file-share = Freigabelink erstellen
 file-copy-share = Freigabelink kopieren
 link-open-new = Link in neuem Tab öffnen

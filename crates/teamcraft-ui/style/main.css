@@ -5388,7 +5388,7 @@ ol.md-list {
   height: 20px;
   padding: 1px;
   border-radius: var(--radius-sm);
-  background: #ffffff;
+  background: white;
   object-fit: contain;
 }
 
@@ -6480,6 +6480,34 @@ ol.md-list {
 .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: var(--weight-medium); }
 .file-size, .file-state { color: var(--text-muted); font-size: var(--text-2xs); letter-spacing: var(--tracking-2xs); }
 .file-progress { width: 100%; height: 4px; margin-top: 4px; }
+/* The preview of a Markdown, HTML or PDF file (#557) */
+.modal.file-preview { width: min(960px, 100%); height: min(88vh, 900px); max-height: none; }
+.preview-head { gap: 12px; justify-content: flex-start; }
+.preview-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preview-size { flex: none; color: var(--text-muted); font-size: var(--text-xs); }
+.preview-tools { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.preview-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
+.preview-status { display: grid; place-items: center; gap: 12px; align-content: center; flex: 1; padding: 32px; text-align: center; }
+.preview-markdown { padding: 16px 20px; overflow-wrap: anywhere; }
+.preview-source { margin: 0; padding: 16px 20px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--text-sm); }
+.preview-note { flex: none; margin: 0; padding: 6px 16px; color: var(--text-muted); font-size: var(--text-xs); border-bottom: 1px solid var(--border); }
+.preview-frame-host { flex: 1; min-height: 240px; display: flex; background: white; }
+.preview-frame { flex: 1; width: 100%; border: 0; background: white; color-scheme: light; }
+.preview-links { flex: none; padding: 8px 16px; border-top: 1px solid var(--border); font-size: var(--text-sm); }
+.preview-links ul { max-height: 160px; overflow: auto; margin: 6px 0 0; padding-left: 18px; overflow-wrap: anywhere; }
+.pdf-tools { flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--border); }
+.pdf-page-field { display: flex; align-items: center; gap: 4px; color: var(--text-muted); }
+.pdf-page-input { width: 5em; }
+.pdf-find { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.pdf-find-state { color: var(--text-muted); font-size: var(--text-xs); }
+.pdf-pages { flex: 1; min-height: 0; overflow: auto; padding: 12px; background: var(--surface-2); outline-offset: -2px; }
+.pdf-page { position: relative; margin: 0 auto 12px; background: white; box-shadow: var(--shadow); }
+.pdf-page.is-broken { outline: 2px solid var(--danger); }
+.pdf-page canvas { display: block; }
+/* Selectable text over the page's canvas (the text layer PDF.js fills in) */
+.pdf-text { position: absolute; inset: 0; overflow: clip; line-height: 1; text-size-adjust: none; forced-color-adjust: none; transform-origin: 0 0; }
+.pdf-text :is(span, br) { position: absolute; color: transparent; white-space: pre; cursor: text; transform-origin: 0 0; }
+.pdf-text ::selection { background: color-mix(in srgb, var(--accent) 35%, transparent); }
 .file-error { color: var(--danger); font-size: var(--text-2xs); letter-spacing: var(--tracking-2xs); }
 /* A file going up or down: bar, how far ("37 %", "12 MB / 48 MB") and, for uploads, cancel */
 .file-transfer { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
