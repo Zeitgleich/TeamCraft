@@ -40,6 +40,14 @@ MARK_RADIUS = 557.0
 BUBBLE_BOX = (413.0, 593.5, 840.5, 1022.0)
 GLYPH_DOT_RADIUS = 44.0
 
+# A soft drop shadow for the macOS backplate (feDropShadow isn't supported by every renderer).
+SHADOW = """    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="12"/>
+      <feOffset dy="10" result="blur"/>
+      <feFlood flood-color="#000" flood-opacity="0.28"/>
+      <feComposite in2="blur" operator="in"/>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>"""
 LIGHT_BACKPLATE = ("#ffffff", "#eaf1fb")
 DARK_BACKPLATE = ("#16284a", "#0b1426")
 GLYPH_BACKPLATE = ("#2b8cff", "#0050e0")
@@ -121,10 +129,13 @@ def web() -> list[Path]:
   (WEB / "favicon.svg").write_text(glyph("rounded"))
   write_ico({size: png_bytes(glyph("rounded"), size) for size in (16, 32, 48)}, WEB / "favicon.ico")
   shutil.copy(BRAND / "mark.svg", WEB / "mark.svg")
+  # The loading screen animates the dots itself (style/loader.css).
+  (WEB / "loader-mark.svg").write_text(mark.svg(with_dots=False))
   shutil.copy(BRAND / "wordmark.svg", WEB / "wordmark.svg")
   shutil.copy(BRAND / "wordmark-dark.svg", WEB / "wordmark-dark.svg")
-  return out + [WEB / name for name in ("favicon.svg", "favicon.ico", "mark.svg", "wordmark.svg",
-                                         "wordmark-dark.svg")]
+  names = ("favicon.svg", "favicon.ico", "mark.svg", "loader-mark.svg", "wordmark.svg",
+           "wordmark-dark.svg")
+  return out + [WEB / name for name in names]
 
 
 def ios() -> list[Path]:
@@ -192,9 +203,7 @@ def tile(backplate, shape: str, width: float = 0.74, safe_radius: float | None =
     <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="{top}"/><stop offset="1" stop-color="{bottom}"/>
     </linearGradient>
-    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
-      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000" flood-opacity="0.28"/>
-    </filter>
+{SHADOW}
 {mark.defs("m-")}
   </defs>
   {plate}
@@ -215,9 +224,7 @@ def glyph(shape: str) -> str:
     <linearGradient id="plate" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="{top}"/><stop offset="1" stop-color="{bottom}"/>
     </linearGradient>
-    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
-      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000" flood-opacity="0.28"/>
-    </filter>
+{SHADOW}
   </defs>
   {plate}
 {place_bubble(f'<path fill="#fff" d="{mark.outline(mark.bubble())}"/>'
@@ -365,8 +372,9 @@ def png_bytes(svg: str, size: int, opaque: bool = False, gray: bool = False) -> 
       finish += ["-colorspace", "Gray"]
     if opaque:
       finish += ["-background", "#000000", "-alpha", "remove", "-alpha", "off"]
-    finish += ["-strip", "-define", "png:compression-level=9", f"PNG32:{target}" if not opaque
-               else f"PNG24:{target}"]
+    # No timestamps, so a re-run without changes leaves the files byte for byte as they are.
+    finish += ["-strip", "-define", "png:exclude-chunks=date,time", "-define",
+               "png:compression-level=9", f"PNG32:{target}" if not opaque else f"PNG24:{target}"]
     subprocess.run(finish, check=True)
     return target.read_bytes()
 
@@ -392,16 +400,49 @@ def write_icns(images: dict[str, bytes], out: Path) -> None:
 
 
 def contact_sheet(images: list[Path], out: Path) -> None:
-  """All PNG icons on one page, each labelled with its path."""
-  arguments = []
-  for path in images:
-    label = str(path.relative_to(ROOT)).replace("apps/", "").replace("crates/", "")
-    label = label.replace("TeamCraft/Resources/Assets.xcassets/", "").replace("src/main/res/", "")
-    arguments += ["-label", label, str(path)]
-  subprocess.run([
-    "magick", "montage", "-background", "#dfe4ea", "-fill", "#1b2230", "-pointsize", "11",
-    *arguments, "-tile", "6x", "-geometry", "180x180+10+8", str(out),
-  ], check=True)
+  """All PNG icons, and the images inside the .ico and .icns files, labelled, at most 180 px."""
+  with tempfile.TemporaryDirectory() as tmp:
+    entries = [(short_label(path), path) for path in images]
+    for container in (DESKTOP / "icon.icns", DESKTOP / "icon.ico", WEB / "favicon.ico"):
+      for name, png in container_images(container):
+        extracted = Path(tmp) / f"{container.stem}-{container.suffix[1:]}-{name}.png"
+        extracted.write_bytes(png)
+        entries.append((f"{short_label(container)} {name}", extracted))
+    arguments = []
+    for label, path in entries:
+      arguments += ["-label", label, str(path)]
+    subprocess.run([
+      "magick", "montage", "-background", "#dfe4ea", "-fill", "#1b2230", "-pointsize", "10",
+      *arguments, "-tile", "8x", "-geometry", "180x180>+8+8", "-depth", "8", "-colors", "256",
+      "-define", "png:compression-level=9", str(out),
+    ], check=True)
+
+
+def short_label(path: Path) -> str:
+  label = str(path.relative_to(ROOT))
+  for prefix in ("apps/android/app/src/main/res/", "apps/ios/TeamCraft/Resources/Assets.xcassets/",
+                 "apps/", "crates/teamcraft-ui/"):
+    label = label.replace(prefix, "")
+  return label
+
+
+def container_images(path: Path) -> list[tuple[str, bytes]]:
+  """The PNG images inside an .ico or .icns written by this script, named by size or type."""
+  data = path.read_bytes()
+  images = []
+  if path.suffix == ".ico":
+    count = struct.unpack("<H", data[4:6])[0]
+    for index in range(count):
+      width, _, _, _, _, _, length, offset = struct.unpack("<BBBBHHII", data[6 + 16 * index:22 + 16 * index])
+      images.append((str(width or 256), data[offset:offset + length]))
+  else:
+    offset = 8
+    while offset < len(data):
+      kind = data[offset:offset + 4].decode()
+      length = struct.unpack(">I", data[offset + 4:offset + 8])[0]
+      images.append((kind, data[offset + 8:offset + length]))
+      offset += length
+  return images
 
 
 if __name__ == "__main__":

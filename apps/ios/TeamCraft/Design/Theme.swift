@@ -4,10 +4,10 @@ import UIKit
 /// The desktop UI's design tokens (crates/teamcraft-ui/style/main.css), the same values as the
 /// Android theme, so the apps look alike. Each color has a light and a dark value.
 enum Theme {
-  static let accent = dynamic(light: 0x0B7F78, dark: 0x35C6BA)
-  static let onAccent = dynamic(light: 0xFFFFFF, dark: 0x04211E)
-  static let accentSoft = dynamic(light: 0xDFF3F1, dark: 0x123A38)
-  static let accentStrong = dynamic(light: 0x096C66, dark: 0x5FD8CE)
+  static let accent = dynamic(light: 0x005DFC, dark: 0x5C9DFF)
+  static let onAccent = dynamic(light: 0xFFFFFF, dark: 0x04122E)
+  static let accentSoft = dynamic(light: 0xE3EDFF, dark: 0x13284A)
+  static let accentStrong = dynamic(light: 0x004BD3, dark: 0x8AB8FF)
   static let background = dynamic(light: 0xF6F7F9, dark: 0x0F141D)
   static let surface = dynamic(light: 0xFFFFFF, dark: 0x151B27)
   static let text = dynamic(light: 0x1B2230, dark: 0xE4E9F2)

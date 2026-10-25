@@ -131,15 +131,17 @@ pub(crate) fn AuthFrame(
   }
 }
 
-/// The top of the card: no server brand yet → the product mark and "TeamCraft"; a logo (a
+/// The top of the card: no server brand yet → the product mark and wordmark; a logo (a
 /// wordmark) → the logo alone; an icon → the icon with the name beside it; nothing → the name.
 fn brand_mark(brand: RwSignal<BrandView>) -> AnyView {
   let name = move || brand.with(|view| view.display_name.clone());
   let (is_product, has_wordmark) = brand.with(|view| (view.is_fallback(), view.has_wordmark()));
   if is_product {
+    // The wordmark's alt text is the name, so it still reads "TeamCraft" if the image fails.
     return view! {
       <img class="auth-logo-img auth-product-icon" src=crate::brand::product_icon() alt="" />
-      <span class="auth-brand-name">{name}</span>
+      <img class="auth-product-wordmark brand-light" src="/icons/wordmark.svg" alt=name />
+      <img class="auth-product-wordmark brand-dark" src="/icons/wordmark-dark.svg" alt="" aria-hidden="true" />
     }
     .into_any();
   }

@@ -22,13 +22,13 @@ import uniffi.teamcraft_ffi.LoginBrand
 
 /** The desktop UI's tokens (crates/teamcraft-ui/style/main.css), so both apps look alike. */
 private val Light = lightColorScheme(
-  primary = Color(0xFF0B7F78),
+  primary = Color(0xFF005DFC),
   onPrimary = Color(0xFFFFFFFF),
-  primaryContainer = Color(0xFFDFF3F1),
-  onPrimaryContainer = Color(0xFF096C66),
+  primaryContainer = Color(0xFFE3EDFF),
+  onPrimaryContainer = Color(0xFF004BD3),
   // Selected chips and tonal buttons: the accent, not Material's default purple.
-  secondaryContainer = Color(0xFFDFF3F1),
-  onSecondaryContainer = Color(0xFF096C66),
+  secondaryContainer = Color(0xFFE3EDFF),
+  onSecondaryContainer = Color(0xFF004BD3),
   background = Color(0xFFF6F7F9),
   onBackground = Color(0xFF1B2230),
   surface = Color(0xFFFFFFFF),
@@ -48,12 +48,12 @@ private val Light = lightColorScheme(
 )
 
 private val Dark = darkColorScheme(
-  primary = Color(0xFF35C6BA),
-  onPrimary = Color(0xFF04211E),
-  primaryContainer = Color(0xFF123A38),
-  onPrimaryContainer = Color(0xFF5FD8CE),
-  secondaryContainer = Color(0xFF123A38),
-  onSecondaryContainer = Color(0xFF5FD8CE),
+  primary = Color(0xFF5C9DFF),
+  onPrimary = Color(0xFF04122E),
+  primaryContainer = Color(0xFF13284A),
+  onPrimaryContainer = Color(0xFF8AB8FF),
+  secondaryContainer = Color(0xFF13284A),
+  onSecondaryContainer = Color(0xFF8AB8FF),
   background = Color(0xFF0F141D),
   onBackground = Color(0xFFE4E9F2),
   surface = Color(0xFF151B27),

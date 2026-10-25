@@ -5,7 +5,11 @@
       <stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#eaf1fb"/>
     </linearGradient>
     <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
-      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000" flood-opacity="0.28"/>
+      <feGaussianBlur in="SourceAlpha" stdDeviation="12"/>
+      <feOffset dy="10" result="blur"/>
+      <feFlood flood-color="#000" flood-opacity="0.28"/>
+      <feComposite in2="blur" operator="in"/>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
     <linearGradient id="m-head-top" gradientUnits="userSpaceOnUse" x1="500" y1="390" x2="760" y2="130">
       <stop offset="0" stop-color="#005af5"/><stop offset="1" stop-color="#0079fd"/>

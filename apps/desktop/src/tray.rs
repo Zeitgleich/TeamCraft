@@ -121,8 +121,15 @@ pub fn install(app: &tauri::App) -> tauri::Result<()> {
         show_main_window(tray.app_handle());
       }
     });
-  if let Some(icon) = app.default_window_icon() {
-    builder = builder.icon(icon.clone());
+  // The app icon is too detailed at tray size; the glyph (icons/tray*.png, scripts/brand) is not.
+  // macOS draws the menu bar icon as a template in the bar's own colour.
+  #[cfg(target_os = "macos")]
+  {
+    builder = builder.icon(tauri::include_image!("icons/tray-template.png")).icon_as_template(true);
+  }
+  #[cfg(not(target_os = "macos"))]
+  {
+    builder = builder.icon(tauri::include_image!("icons/tray.png"));
   }
   builder.build(app)?;
   #[cfg(target_os = "linux")]

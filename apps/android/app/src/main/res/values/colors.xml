@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Launcher icon colors; the app's palette is in ui/theme (desktop UI tokens). -->
 <resources>
-  <color name="icon_background">#0B7F78</color>
-  <color name="icon_foreground">#FFFFFF</color>
+  <color name="icon_background">#FFFFFF</color>
 </resources>

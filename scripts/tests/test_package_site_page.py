@@ -215,7 +215,7 @@ class RenderTest(unittest.TestCase):
     def test_static_files_and_illustrations_are_published(self):
         self.add_release("prerelease", "v1.0.0-rc.1")
         html = self.render()
-        for name in ("style.css", "site.js", "fonts/inter-latin-variable.woff2", "fonts/OFL.txt", "logo.png"):
+        for name in ("style.css", "site.js", "fonts/inter-latin-variable.woff2", "fonts/OFL.txt", "logo.svg"):
             self.assertTrue((self.site / name).is_file(), name)
         self.assertIn('class="showcase"', html)
         self.assertNotIn("<!--", html)
