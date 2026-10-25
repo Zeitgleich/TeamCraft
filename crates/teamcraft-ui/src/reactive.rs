@@ -55,7 +55,8 @@ pub fn use_interval_while_visible(interval_ms: u64, callback: impl Fn() + Clone 
   use_interval_while(interval_ms, move || is_visible.get(), callback);
 }
 
-fn is_document_visible() -> bool {
+/// Whether the page is visible right now (not reactive; see [`use_page_visible`]).
+pub fn is_document_visible() -> bool {
   web_sys::window()
     .and_then(|window| window.document())
     .is_none_or(|document| !document.hidden())

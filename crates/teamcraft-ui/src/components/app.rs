@@ -895,6 +895,8 @@ fn connect_calls(state: AppState) {
       CallEvent::Deafened(is_deafened) => backend.set_call_deafened(is_deafened),
       CallEvent::Microphone(device) => backend.select_microphone(Some(device)),
       CallEvent::Speakers(device) => backend.select_speakers(Some(device)),
+      CallEvent::TestSpeakers(device) => backend.test_speakers(Some(device)),
+      CallEvent::RefreshDevices => backend.refresh_media_devices(),
       CallEvent::Camera(is_on) => backend.set_call_camera(is_on),
       CallEvent::CameraDevice(device) => backend.select_camera(Some(device)),
       CallEvent::Effect(effect) => backend.set_background_effect(effect),

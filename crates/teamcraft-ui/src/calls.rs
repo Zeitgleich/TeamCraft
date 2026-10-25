@@ -18,10 +18,16 @@ pub enum CallEvent {
   Deafened(bool),
   Microphone(String),
   Speakers(String),
+  /// Plays the test sound on these speakers (an empty id: the default).
+  TestSpeakers(String),
+  /// Lists the devices again.
+  RefreshDevices,
   Camera(bool),
   CameraDevice(String),
   Effect(BackgroundEffect),
-  StartScreenShare { has_sound: bool },
+  StartScreenShare {
+    has_sound: bool,
+  },
   StopScreenShare,
   StatusSounds(CallStatusSounds),
 }
