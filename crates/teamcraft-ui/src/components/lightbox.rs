@@ -16,8 +16,8 @@
 //! pinches with soft edges. The picture grows out of the tile it was opened from and closes back
 //! into it.
 //!
-//! It opens at once with the thumbnail scaled up and a small progress indicator, and swaps in the
-//! full file when it is there. Memory stays bounded: files are opened only up to
+//! It opens at once with the thumbnail scaled up and a small progress indicator, and cross-fades to
+//! the full file once that is decoded ([`Arrival`]). Memory stays bounded: files are opened only up to
 //! [`MAX_VIEWER_BYTES`], and their decrypted bytes live in `blob:` URLs in the session's cache
 //! ([`crate::media_cache`], bounded by a byte budget), so reopening a file is instant. Nothing
 //! decrypted ever goes to the server: "open in a new window" hands the same in-memory URL to a
@@ -44,8 +44,8 @@ use crate::components::modal::Modal;
 use crate::components::thread_panel::ThreadPanel;
 use crate::i18n::use_i18n;
 use crate::lightbox::{
-  Command, Direction, Gesture, LightboxScope, MediaKey, MediaKind, ModifierStyle, Point, Pointers, Release,
-  Size, Viewport, album_len, images_in_scope, neighbor, position, wheel_zoom_factor,
+  Arrival, Command, Direction, Gesture, LightboxScope, MediaKey, MediaKind, ModifierStyle, Point, Pointers,
+  Release, Size, Viewport, album_len, images_in_scope, neighbor, position, wheel_zoom_factor,
 };
 use crate::media_cache::{self, Rendition};
 use crate::model::{ConversationId, ConversationKind, thread_id_of};
@@ -79,6 +79,13 @@ pub enum FullMedia {
   TooLarge,
   /// The file's message was deleted (or the file list no longer has it).
   Gone,
+}
+
+/// The current file's thumbnail (or inline rendition), shown until its full picture is there.
+#[derive(Clone)]
+struct Placeholder {
+  key: MediaKey,
+  url: Rc<ObjectUrl>,
 }
 
 /// The lightbox over the conversation, opened on `start`.
@@ -117,7 +124,8 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
       other => other,
     }
   });
-  let thumbnail = RwSignal::new_local(None::<Rc<ObjectUrl>>);
+  let thumbnail = RwSignal::new_local(None::<Placeholder>);
+  let arrival = RwSignal::new(Arrival::default());
   let viewport = RwSignal::new(Viewport::default());
   let is_paused = RwSignal::new(false);
   // An animation found only once the file arrived starts paused under reduced motion too.
@@ -151,6 +159,7 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
     kind,
     full,
     thumbnail,
+    arrival,
     viewport,
     is_paused,
     retries,
@@ -285,7 +294,7 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
   let backdrop = move || {
     thumbnail
       .get()
-      .map(|url| format!("url(\"{}\")", url.as_str()))
+      .map(|placeholder| format!("url(\"{}\")", placeholder.url.as_str()))
       .unwrap_or_default()
   };
   let thread = Memo::new(move |_| thread_id_of(current.get().message));
@@ -366,6 +375,7 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
               viewport=viewport
               full=full
               thumbnail=thumbnail
+              arrival=arrival
               current_file=current_file
               images=images
               current=current
@@ -419,7 +429,8 @@ struct LoadInputs {
   images: Memo<Vec<FileInfo>>,
   kind: Memo<Option<MediaKind>>,
   full: RwSignal<FullMedia, LocalStorage>,
-  thumbnail: RwSignal<Option<Rc<ObjectUrl>>, LocalStorage>,
+  thumbnail: RwSignal<Option<Placeholder>, LocalStorage>,
+  arrival: RwSignal<Arrival>,
   viewport: RwSignal<Viewport>,
   is_paused: RwSignal<bool>,
   retries: RwSignal<u32>,
@@ -437,6 +448,7 @@ fn load_current(inputs: LoadInputs) {
     kind,
     full,
     thumbnail,
+    arrival,
     viewport,
     is_paused,
     retries,
@@ -449,6 +461,7 @@ fn load_current(inputs: LoadInputs) {
     let key = current.get();
     retries.track();
     viewport.set(Viewport::default());
+    arrival.set(Arrival::start(key));
     let next_ticket = ticket.get_value() + 1;
     ticket.set_value(next_ticket);
     let Some(media_type) = media_type.get() else {
@@ -471,7 +484,8 @@ fn load_current(inputs: LoadInputs) {
     // The sharper inline rendition when the conversation already loaded it, else the thumbnail.
     thumbnail.set(
       media_cache::cached(key, Rendition::Inline)
-        .or_else(|| current_file.with_untracked(|file| file.as_ref().and_then(thumbnail_url))),
+        .or_else(|| current_file.with_untracked(|file| file.as_ref().and_then(thumbnail_url)))
+        .map(|url| Placeholder { key, url }),
     );
     let size_bytes = current_file.with_untracked(|file| file.as_ref().map_or(0, |file| file.size_bytes));
     if size_bytes > MAX_VIEWER_BYTES {
@@ -523,7 +537,8 @@ fn Stage(
   video: NodeRef<html::Video>,
   viewport: RwSignal<Viewport>,
   full: RwSignal<FullMedia, LocalStorage>,
-  thumbnail: RwSignal<Option<Rc<ObjectUrl>>, LocalStorage>,
+  thumbnail: RwSignal<Option<Placeholder>, LocalStorage>,
+  arrival: RwSignal<Arrival>,
   current_file: Memo<Option<FileInfo>>,
   images: Memo<Vec<FileInfo>>,
   current: RwSignal<MediaKey>,
@@ -686,48 +701,75 @@ fn Stage(
         <div class="lightbox-slot is-previous" aria-hidden="true">
           <Peer peer=previous_peer />
         </div>
+        // The full file over its own placeholder: the placeholder stays until the file is decoded,
+        // then the two cross-fade.
         <div class="lightbox-slot is-current">
           {move || match (full.get(), kind.get()) {
-            (FullMedia::Ready(url), Some(MediaKind::Video)) => view! {
-              <video
-                class="lightbox-video"
-                src=url.as_str().to_owned()
-                controls
-                playsinline
-                preload="metadata"
-                aria-label=name
-                node_ref=video
-                on:loadedmetadata=move |_| motion.shown()
-                on:error=move |_| full.set(FullMedia::Failed)
-              ></video>
-            }
-            .into_any(),
+            (FullMedia::Ready(url), Some(MediaKind::Video)) => {
+              let key = arrival.with_untracked(|arrival| arrival.key());
+              view! {
+                <video
+                  class="lightbox-video"
+                  src=url.as_str().to_owned()
+                  controls
+                  playsinline
+                  preload="metadata"
+                  aria-label=name
+                  node_ref=video
+                  on:loadedmetadata=move |_| {
+                    mark_shown(arrival, key);
+                    motion.shown();
+                  }
+                  on:error=move |_| full.set(FullMedia::Failed)
+                ></video>
+              }
+              .into_any()
+            },
             (FullMedia::Ready(url), _) => {
-              // Paused: the still frame once it is made, the thumbnail until then.
+              // Paused: the still frame once it is made, the placeholder until then.
               let file_src = url.as_str().to_owned();
+              let file_url = file_src.clone();
               let src = move || {
                 if !is_paused.get() {
                   return file_src.clone();
                 }
                 still
                   .get()
-                  .or_else(|| thumbnail.get())
+                  .or_else(|| thumbnail.get().map(|placeholder| placeholder.url))
                   .map(|frame| frame.as_str().to_owned())
                   .unwrap_or_default()
               };
+              // Captured with the element: a late `load` of a file paged away from is ignored.
+              let key = arrival.with_untracked(|arrival| arrival.key());
+              let on_shown = move |element: &web_sys::HtmlImageElement| {
+                // Measured right away by the motion, before the class binding catches up.
+                drop(element.class_list().remove_1("is-arriving"));
+                mark_shown(arrival, key);
+                layout.update(|tick| *tick += 1);
+                motion.shown();
+              };
+              // A file decoded before the listener was there (cached) fires no `load` of its own.
+              // The node ref may still hold the previous file's image: only this file's counts.
+              Effect::new(move |_| {
+                if let Some(element) = image.get()
+                  && element.src() == file_url
+                  && element.complete()
+                  && element.natural_width() > 0
+                {
+                  on_shown(&element);
+                }
+              });
               view! {
                 <img
                   class="lightbox-image"
+                  class:is-arriving=move || !key.is_some_and(|key| arrival.with(|arrival| arrival.is_full_shown(key)))
                   src=src
                   alt=name
                   decoding="async"
                   draggable="false"
                   node_ref=image
                   style:transform=transform
-                  on:load=move |_| {
-                    layout.update(|tick| *tick += 1);
-                    motion.shown();
-                  }
+                  on:load=move |ev| on_shown(&event_target::<web_sys::HtmlImageElement>(&ev))
                   on:error=move |_| {
                     // The still frame is made from the file; only the file itself failing counts.
                     if !is_paused.get_untracked() {
@@ -738,20 +780,26 @@ fn Stage(
               }
               .into_any()
             },
-            _ => thumbnail
+            _ => ().into_any(),
+          }}
+          {move || {
+            let key = current.get();
+            thumbnail
               .get()
-              .map(|url| {
+              .filter(|placeholder| placeholder.key == key)
+              .map(|placeholder| {
                 view! {
                   <img
                     class="lightbox-image lightbox-placeholder"
-                    src=url.as_str().to_owned()
+                    class:is-hidden=move || arrival.with(|arrival| arrival.is_full_shown(key))
+                    src=placeholder.url.as_str().to_owned()
                     alt=""
+                    aria-hidden="true"
                     draggable="false"
                     on:load=move |_| motion.shown()
                   />
                 }
               })
-              .into_any(),
           }}
         </div>
         <div class="lightbox-slot is-next" aria-hidden="true">
@@ -759,6 +807,14 @@ fn Stage(
         </div>
       </div>
     </div>
+  }
+}
+
+/// The full picture of `maybe_key` is on screen: its placeholder fades out.
+fn mark_shown(arrival: RwSignal<Arrival>, maybe_key: Option<MediaKey>) {
+  if let Some(key) = maybe_key {
+    // The lightbox may have closed in the meantime.
+    arrival.try_update(|arrival| arrival.full_shown(key));
   }
 }
 

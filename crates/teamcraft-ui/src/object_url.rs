@@ -88,20 +88,27 @@ impl Drop for ObjectUrl {
   }
 }
 
-/// Downloads and decrypts one file of a message and makes it a URL for an `<img>` or a download link.
-/// With `maybe_max_side`, a still picture comes as a rendition of at most that many pixels per side
-/// (inline previews); the full file is only decoded where it is looked at closely (the lightbox).
-pub async fn fetch_attachment(
+/// Downloads and decrypts one file of a message. [`crate::media_cache`] makes sure one file is
+/// fetched only once at a time.
+pub async fn fetch_decrypted(
   conversation: ConversationId,
   message: MessageId,
   file_id: String,
+) -> Result<js_sys::Uint8Array, FetchError> {
+  fetch_bytes(conversation, message, file_id)
+    .await
+    .map_err(FetchError::Unavailable)
+}
+
+/// Makes decrypted bytes a URL for an `<img>` or a download link. With `maybe_max_side`, a still
+/// picture comes as a rendition of at most that many pixels per side (inline previews); the full file
+/// is only decoded where it is looked at closely (the lightbox).
+pub async fn url_for(
+  bytes: &js_sys::Uint8Array,
   media_type: &str,
   maybe_max_side: Option<u32>,
 ) -> Result<ObjectUrl, FetchError> {
-  let bytes = fetch_bytes(conversation, message, file_id)
-    .await
-    .map_err(FetchError::Unavailable)?;
-  shown(&bytes, media_type, maybe_max_side)
+  shown(bytes, media_type, maybe_max_side)
     .await
     .map_err(FetchError::Undecodable)
 }
