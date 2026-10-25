@@ -4,6 +4,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
 use crate::components::avatar::PresenceDot;
+use crate::components::channel_glyph::ChannelGlyph;
 use crate::components::huddle_bar::CallPill;
 use crate::components::icons::{Icon, IconName};
 use crate::components::space_tile::SpaceTile;
@@ -192,7 +193,7 @@ pub fn GlobalEntries() -> impl IntoView {
 /// What makes a section look different on screen: its kind and the state of its rows.
 type SectionKey = (
   SectionKind,
-  Vec<(crate::model::ConversationId, u32, u32, bool, bool)>,
+  Vec<(crate::model::ConversationId, u32, u32, bool, bool, Option<String>)>,
 );
 
 fn section_key(section: &crate::sections::Section) -> SectionKey {
@@ -206,6 +207,7 @@ fn section_key(section: &crate::sections::Section) -> SectionKey {
         c.mention_count,
         c.is_favorite,
         c.is_catching_up,
+        c.maybe_image_version.clone(),
       )
     })
     .collect();
@@ -225,7 +227,7 @@ fn GroupedSections(
     </For>
     <For
       each=move || grouped.get().spaces
-      key=|group| (group.space, group.conversations.iter().map(|c| (c.id, c.unread_count, c.mention_count, c.is_catching_up)).collect::<Vec<_>>())
+      key=|group| (group.space, group.conversations.iter().map(|c| (c.id, c.unread_count, c.mention_count, c.is_catching_up, c.maybe_image_version.clone())).collect::<Vec<_>>())
       let:group
     >
       <SpaceGroupSection group=group collapsed=collapsed_spaces />
@@ -496,8 +498,14 @@ pub fn SidebarItem(conversation: Conversation) -> impl IntoView {
     .and_then(|member| state.read(|backend| backend.user(member)));
 
   let leading = match conversation.kind {
-    ConversationKind::Public => view! { <Icon name=IconName::Hash /> }.into_any(),
-    ConversationKind::Private => view! { <Icon name=IconName::Lock /> }.into_any(),
+    ConversationKind::Public | ConversationKind::Private => {
+      let fallback = if conversation.kind == ConversationKind::Public {
+        IconName::Hash
+      } else {
+        IconName::Lock
+      };
+      view! { <ChannelGlyph conversation=id maybe_version=conversation.maybe_image_version.clone() fallback=fallback /> }.into_any()
+    },
     ConversationKind::Integration => view! { <Icon name=IconName::Terminal /> }.into_any(),
     ConversationKind::Group => view! { <Icon name=IconName::Users /> }.into_any(),
     ConversationKind::Direct => {

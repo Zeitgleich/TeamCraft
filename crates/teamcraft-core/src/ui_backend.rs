@@ -493,6 +493,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       can_post: true,
       bookmarks: self.bookmarks_of(response.id),
       is_catching_up: self.read(crate::client::is_catching_up(&self.store, response.id)),
+      maybe_image_version: response.maybe_image.as_ref().map(|image| image.version.clone()),
     }
   }
 
@@ -1743,6 +1744,7 @@ mod tests {
       contains_guests: false,
       maybe_my_membership: None,
       participants: vec![participant(1, "Alice Example"), participant(2, "Bob Example")],
+      maybe_image: None,
     };
     let conversation = backend.to_conversation(&direct, &BTreeMap::new(), &MentionPreferences::default());
     assert_eq!(conversation.name, "Bob Example");
@@ -1988,6 +1990,7 @@ mod tests {
         contains_guests: false,
         maybe_my_membership: None,
         participants: Vec::new(),
+        maybe_image: None,
       };
       for (index, (sender, body, mentions)) in messages.iter().enumerate() {
         store_message(&backend, &conversation, index, *sender, body, mentions);

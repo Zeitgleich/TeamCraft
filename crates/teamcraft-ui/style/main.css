@@ -6391,6 +6391,12 @@ ol.md-list {
 .switcher-space .space-tile { width: 16px; height: 16px; border-radius: var(--radius-xs); font-size: 7px; }
 .space-image-row { display: flex; align-items: center; gap: .75rem; margin-bottom: .5rem; }
 .space-image-preview .space-tile { width: 64px; height: 64px; border-radius: var(--radius-lg); font-size: 22px; }
+.channel-glyph { display: inline-grid; flex: none; width: 20px; height: 20px; overflow: hidden; border-radius: var(--radius-sm); }
+.channel-glyph-image { width: 100%; height: 100%; object-fit: cover; }
+.header-title .channel-glyph { width: 28px; height: 28px; }
+.channel-image-preview { display: grid; place-items: center; width: 64px; height: 64px; overflow: hidden; border-radius: var(--radius-lg); background: var(--surface-3); color: var(--text-muted); }
+.channel-image-preview .icon { width: 28px; height: 28px; }
+.channel-image-preview .space-image { width: 100%; height: 100%; object-fit: cover; }
 .space-image-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
 .color-input { width: 48px; height: 32px; padding: 2px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: none; }
 .profile-avatar-row { display: flex; align-items: center; gap: .75rem; margin-bottom: .75rem; }

@@ -3515,6 +3515,7 @@ impl State {
       contains_guests: false,
       maybe_my_membership: None,
       participants: Vec::new(),
+      maybe_image: None,
     };
     let members = members
       .iter()

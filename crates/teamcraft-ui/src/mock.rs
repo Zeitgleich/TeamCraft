@@ -1262,6 +1262,7 @@ fn demo_conversations() -> Vec<Conversation> {
     can_post: true,
     bookmarks: Vec::new(),
     is_catching_up: false,
+    maybe_image_version: None,
   };
   use ConversationKind::{Integration, Private, Public};
   use SidebarCategory::{Channels, Integrations};
@@ -1437,6 +1438,7 @@ fn demo_conversations() -> Vec<Conversation> {
       can_post: true,
       bookmarks: Vec::new(),
       is_catching_up: false,
+      maybe_image_version: None,
     });
   }
   list
