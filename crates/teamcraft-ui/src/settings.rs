@@ -268,6 +268,12 @@ fn parse_bool(value: &str) -> Option<bool> {
   value.parse().ok()
 }
 
+/// The language the app starts in: the saved choice, else the browser's. For code that runs before
+/// (or without) the settings, like the notification button labels the service worker keeps.
+pub fn stored_locale() -> Locale {
+  load(KEY_LOCALE, Locale::from_tag).unwrap_or_else(browser_locale)
+}
+
 fn browser_locale() -> Locale {
   web_sys::window()
     .and_then(|window| window.navigator().language())

@@ -2292,8 +2292,10 @@ fn announce_database(name: &str) {
     };
     let message = js_sys::Object::new();
     let set = |key: &str, value: &str| js_sys::Reflect::set(&message, &key.into(), &value.into());
+    let label = crate::i18n::translate(crate::settings::stored_locale(), "notify-action-mark-read", None);
     if set("type", "push_database")
       .and_then(|_| set("name", &name))
+      .and_then(|_| set("mark_read_label", &label))
       .is_ok()
     {
       drop(worker.post_message(&message));

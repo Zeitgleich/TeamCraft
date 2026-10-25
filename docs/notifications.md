@@ -341,6 +341,10 @@ Mark as read; for top-level messages in conversations the user may post in also 
 thread reply's answer belongs in the thread, so it has none). A reply is sent like a composer message
 (end-to-end encrypted, through the outbox) and marks the conversation read; `@channel` in a large
 conversation opens the conversation with the text as draft instead, for the usual confirmation.
+In the browser, a push notification shown by the service worker (no tab open) has Mark as read for a
+top-level message: the worker sets the read position with the stored push session token, in the
+language the page last left next to the database name; with an expired session the click opens the
+conversation instead. Join on meeting reminders needs a server push for reminders and is not built.
 
 **Calls (desktop).** A ringing call follows the rules of a direct message from the caller: a muted
 conversation, the level "nothing" and do-not-disturb (except people on the allow list) keep it to the

@@ -120,14 +120,14 @@ pub use service_worker::{handle_notification_click, handle_push, handle_subscrip
 
 #[cfg(feature = "service-worker")]
 mod service_worker {
-  use teamcraft_proto::ConversationId;
+  use teamcraft_proto::{ConversationId, MessageId, SetReadPositionRequest};
   use wasm_bindgen::prelude::wasm_bindgen;
   use wasm_bindgen::{JsCast, JsValue};
   use wasm_bindgen_futures::JsFuture;
   use web_sys::{NotificationOptions, ServiceWorkerGlobalScope};
 
   use crate::api::ApiError;
-  use crate::api::{HttpServerApi, StaticToken, change_web_push_subscription};
+  use crate::api::{HttpServerApi, ServerApi, StaticToken, change_web_push_subscription};
   use crate::clock::{Clock, SystemClock};
   use crate::error::CoreError;
   use crate::push_preview::{PreviewContent, PushPreview, push_preview, push_session};
@@ -144,14 +144,22 @@ mod service_worker {
   const CLICK_ACTION: &str = "default";
   /// The one button that needs no window in front (`NotificationAction::MarkRead`).
   const MARK_READ_ACTION: &str = "mark-read";
+  /// Key of the newest message's ID in a notification's `data`, for the "mark as read" button.
+  const MESSAGE_FIELD: &str = "message_id";
 
   /// The service worker's `push` handler: decrypts the wake-up and shows the notification.
   /// Browsers require a notification for every push, so failures still show one, without content.
+  /// `maybe_mark_read_label` is the translated "Mark as read" (the page leaves it next to the
+  /// database name); without it the notification has no button.
   #[wasm_bindgen(js_name = handlePush)]
-  pub async fn handle_push(database_name: String, payload: Vec<u8>) -> Result<(), JsValue> {
+  pub async fn handle_push(
+    database_name: String,
+    payload: Vec<u8>,
+    maybe_mark_read_label: Option<String>,
+  ) -> Result<(), JsValue> {
     let scope: ServiceWorkerGlobalScope = js_sys::global().unchecked_into();
     let (title, options) = match preview(&database_name, &payload).await {
-      Ok(preview) => notification(&preview),
+      Ok(preview) => notification(&preview, maybe_mark_read_label.as_deref()),
       Err(error) => {
         tracing::warn!(%error, "push could not be opened");
         (FALLBACK_TITLE.to_string(), NotificationOptions::new())
@@ -167,9 +175,14 @@ mod service_worker {
   /// The service worker's `notificationclick` handler: focuses an open app window and tells it which
   /// conversation to show, or opens one. A button (or a click on a notification the page showed for
   /// a call or meeting) goes to the page as a `notification_action` message with the notification's
-  /// tag; "mark as read" does so without bringing the window up.
+  /// tag; "mark as read" does so without bringing the window up. On a push notification (it names
+  /// the newest message) the worker sets the read position itself with the push session's token,
+  /// so the button works while no tab is open; if that fails the click opens the conversation.
   #[wasm_bindgen(js_name = handleNotificationClick)]
-  pub async fn handle_notification_click(event: web_sys::NotificationEvent) -> Result<(), JsValue> {
+  pub async fn handle_notification_click(
+    event: web_sys::NotificationEvent,
+    maybe_database_name: Option<String>,
+  ) -> Result<(), JsValue> {
     let notification = event.notification();
     notification.close();
     let data = notification.data();
@@ -180,11 +193,22 @@ mod service_worker {
     };
     let maybe_conversation = field(CONVERSATION_FIELD);
     let maybe_tag = field(TAG_FIELD);
+    let maybe_message = field(MESSAGE_FIELD);
     // `NotificationEvent.action` is behind web-sys' unstable APIs; read the property directly.
     let action = js_sys::Reflect::get(&event, &JsValue::from_str("action"))
       .ok()
       .and_then(|value| value.as_string())
       .unwrap_or_default();
+    if action == MARK_READ_ACTION
+      && let (Some(database_name), Some(conversation), Some(message)) =
+        (&maybe_database_name, &maybe_conversation, &maybe_message)
+    {
+      match mark_read(database_name, conversation, message).await {
+        Ok(()) => return Ok(()),
+        // Falls through to opening the conversation: the user still wants to see it.
+        Err(error) => tracing::warn!(%error, "could not mark the conversation read from its notification"),
+      }
+    }
     let scope: ServiceWorkerGlobalScope = js_sys::global().unchecked_into();
     let clients = scope.clients();
     let query = web_sys::ClientQueryOptions::new();
@@ -223,6 +247,22 @@ mod service_worker {
       url.push_str(&format!("?{CONVERSATION_FIELD}={conversation}"));
     }
     JsFuture::from(clients.open_window(&url)).await?;
+    Ok(())
+  }
+
+  /// Sets the read position to the notification's message with the stored push session.
+  async fn mark_read(database_name: &str, conversation: &str, message: &str) -> Result<(), CoreError> {
+    let unreadable = || CoreError::Corrupt("unreadable notification data".into());
+    let conversation: ConversationId = conversation.parse().map_err(|_| unreadable())?;
+    let message_id: MessageId = message.parse().map_err(|_| unreadable())?;
+    let key = browser_database_key(database_name).await?;
+    let store = IndexedDbStore::open(database_name, &key).await?;
+    let session = push_session(&store, SystemClock.now_ms())?
+      .ok_or_else(|| CoreError::Browser("no valid push session".into()))?;
+    let api = HttpServerApi::new(&session.server_url, StaticToken(session.access_token));
+    api
+      .set_read_position(conversation, &SetReadPositionRequest { message_id })
+      .await?;
     Ok(())
   }
 
@@ -299,7 +339,10 @@ mod service_worker {
   }
 
   /// Title and body from data only (names and message text), so nothing here needs translating.
-  fn notification(preview: &PushPreview) -> (String, NotificationOptions) {
+  fn notification(
+    preview: &PushPreview,
+    maybe_mark_read_label: Option<&str>,
+  ) -> (String, NotificationOptions) {
     let sender = preview.maybe_sender_name.clone();
     let title = if preview.is_direct {
       sender.clone().or_else(|| preview.maybe_conversation_name.clone())
@@ -330,6 +373,21 @@ mod service_worker {
       &CONVERSATION_FIELD.into(),
       &conversation.to_string().into(),
     );
+    // "Mark as read" for messages of a conversation (a thread has its own read position, which the
+    // wake-up does not let this button set).
+    let maybe_message = preview
+      .wake_up
+      .maybe_message_id
+      .filter(|_| preview.wake_up.maybe_thread_id.is_none() && preview.is_conversation_verified);
+    if let (Some(label), Some(message)) = (maybe_mark_read_label, maybe_message) {
+      let _ = js_sys::Reflect::set(&data, &MESSAGE_FIELD.into(), &message.to_string().into());
+      let button = js_sys::Object::new();
+      let _ = js_sys::Reflect::set(&button, &"action".into(), &MARK_READ_ACTION.into());
+      let _ = js_sys::Reflect::set(&button, &"title".into(), &label.into());
+      let actions = js_sys::Array::of1(&button);
+      // `NotificationOptions.actions` is behind web-sys' unstable APIs; set the property directly.
+      let _ = js_sys::Reflect::set(&options, &"actions".into(), &actions);
+    }
     options.set_data(&data);
     (title, options)
   }

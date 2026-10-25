@@ -108,7 +108,7 @@ self.addEventListener('message', (event) => {
         .catch((error) => event.source.postMessage({ type: 'push', ready: false, reason: reasonOf(error) })),
     );
   } else if (data.type === 'push_database' && typeof data.name === 'string') {
-    event.waitUntil(rememberDatabase(data.name));
+    event.waitUntil(rememberDatabase(data.name, typeof data.mark_read_label === 'string' ? data.mark_read_label : ''));
   }
 });
 
@@ -401,8 +401,17 @@ function loadPush() {
   return pushReady;
 }
 
-async function rememberDatabase(name) {
-  await (await caches.open(PUSH_CONFIG_CACHE)).put('/push-database', new Response(name));
+// The page also leaves the translated "Mark as read" of notification buttons: this worker has no
+// translations, and no page may be open when a push arrives.
+async function rememberDatabase(name, markReadLabel) {
+  const cache = await caches.open(PUSH_CONFIG_CACHE);
+  await cache.put('/push-database', new Response(name));
+  await cache.put('/push-mark-read-label', new Response(markReadLabel));
+}
+
+async function markReadLabel() {
+  const hit = await (await caches.open(PUSH_CONFIG_CACHE)).match('/push-mark-read-label');
+  return hit ? (await hit.text()) || null : null;
 }
 
 async function databaseName() {
@@ -421,7 +430,7 @@ async function showPush(event) {
       if (name) {
         await loadPush();
         const payload = event.data ? new Uint8Array(await event.data.arrayBuffer()) : new Uint8Array();
-        await wasm_bindgen.handlePush(name, payload);
+        await wasm_bindgen.handlePush(name, payload, await markReadLabel());
         return;
       }
     } catch (error) {
@@ -477,7 +486,7 @@ async function clickNotification(event) {
   if (hasPushCode()) {
     try {
       await loadPush();
-      await wasm_bindgen.handleNotificationClick(event);
+      await wasm_bindgen.handleNotificationClick(event, await databaseName());
       return;
     } catch (error) {
       console.warn('notification click not handled by the push code', error);
