@@ -744,6 +744,11 @@ impl Core {
       if self.is_closed {
         return;
       }
+      // Messages answered meanwhile (also during a connect) go out now; then the next file.
+      if self.has_queued_sends.take() {
+        self.send_queued(&mut requests).await;
+      }
+      self.start_upload(&mut requests).await;
       match self.next_wake(&mut requests).await {
         Wake::Request(None) => return,
         Wake::Request(Some(request)) => self.handle(request).await,
@@ -752,10 +757,6 @@ impl Core {
         Wake::Uploaded(sent) => self.on_uploaded(sent, &mut requests).await,
         Wake::Tick => self.on_tick().await,
       }
-      if self.has_queued_sends.take() {
-        self.send_queued(&mut requests).await;
-      }
-      self.start_upload(&mut requests).await;
       self.check_store();
       self.check_push().await;
       self.report_background_failures();
