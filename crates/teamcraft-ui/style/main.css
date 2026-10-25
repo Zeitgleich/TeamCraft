@@ -7869,24 +7869,35 @@ ol.md-list {
 }
 
 /* A message opened from search, a link or the activity list lights up briefly. */
+/* The tint is an overlay behind the content that fades out (`opacity`, on the compositor), not a
+   background repainted for 2.5 s. */
 .msg-highlight {
-  animation: msg-highlight 2.5s ease-out;
+  isolation: isolate;
+}
+
+.msg-highlight::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: var(--mention-bg);
+  pointer-events: none;
+  animation: msg-highlight 2.5s var(--ease-standard) forwards;
 }
 
 @keyframes msg-highlight {
   0%,
   40% {
-    background: var(--mention-bg);
+    opacity: 1;
   }
   100% {
-    background: transparent;
+    opacity: 0;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .msg-highlight {
+  .msg-highlight::before {
     animation: none;
-    background: var(--mention-bg);
   }
 }
 
