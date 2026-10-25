@@ -193,7 +193,8 @@ pub fn linked_options(secrets: teamcraft_core::client::LinkedSecrets) -> Enrollm
 #[cfg(not(target_arch = "wasm32"))]
 /// Wall-clock time that follows tokio's (paused) clock, so a runner's deadlines and its sleeps
 /// agree. The wall clock can also jump ahead on its own, as it does when a laptop wakes up (tokio's
-/// clock is monotonic and stands still during sleep).
+/// clock is monotonic and stands still during sleep). Clones share the jumps.
+#[derive(Clone)]
 pub struct TokioClock {
   started: tokio::time::Instant,
   jumped_ms: Arc<AtomicI64>,

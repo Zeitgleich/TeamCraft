@@ -1241,7 +1241,12 @@ impl Core {
     let count = commands.len();
     let mut maybe_failure = None;
     for command in commands {
-      if let Err(error) = client.run_ui_command(command).await {
+      // A command can take long (an upload, a big history page); heartbeats go on meanwhile.
+      let result = self
+        .connection
+        .keep_alive(SystemClock.now_ms(), client.run_ui_command(command))
+        .await;
+      if let Err(error) = result {
         tracing::warn!(%error, "UI command failed");
         maybe_failure.get_or_insert(error);
       }
@@ -1253,7 +1258,11 @@ impl Core {
     let Some(client) = self.client.as_mut() else {
       return;
     };
-    if upkeep::flush(client).await {
+    if self
+      .connection
+      .keep_alive(SystemClock.now_ms(), upkeep::flush(client))
+      .await
+    {
       self.changed();
     }
   }
@@ -1263,7 +1272,12 @@ impl Core {
     let Some(client) = self.client.as_mut() else {
       return;
     };
-    if self.upkeep.tick(client).await {
+    // The upkeep may resync many conversations; heartbeats go on meanwhile.
+    if self
+      .connection
+      .keep_alive(SystemClock.now_ms(), self.upkeep.tick(client))
+      .await
+    {
       self.changed();
     }
   }

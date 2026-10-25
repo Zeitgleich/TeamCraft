@@ -1,6 +1,9 @@
-//! The realtime gateway (docs/gateway.md): handshake with resume, and applying events.
+//! The realtime gateway (docs/gateway.md): handshake with resume, applying events, and keeping the
+//! connection alive while long work runs (issue #325).
 
+use std::collections::VecDeque;
 use std::future::Future;
+use std::pin::pin;
 use std::time::Duration;
 
 use futures_util::FutureExt;
@@ -39,23 +42,61 @@ pub struct GatewayStart<G> {
   pub outcome: GatewayOutcome,
   /// The heartbeat interval the server asked for in `hello`.
   pub heartbeat_interval: Duration,
+  /// What arrived on the connection while the full sync ran; to be applied before anything newer.
+  pub held: HeldFrames,
+}
+
+/// How [`Client::start_gateway`] runs the handshake and keeps the connection alive during the
+/// sync that follows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GatewayTiming {
+  /// How long each handshake step may take (socket and `hello`, the answer to `identify`/`resume`).
+  pub handshake_timeout: Duration,
+  /// Longest heartbeat interval, also when the server's `hello` allows more.
+  pub max_heartbeat: Duration,
+  /// Frames held while long work runs ([`HeldFrames`]); beyond this the connection isn't read until
+  /// the work is done (the server then drops it as too slow, and the client resumes).
+  pub max_held_frames: usize,
+}
+
+/// Frames that arrived while [`keep_alive`] ran other work, in their order, to be applied once it is
+/// done. A closed connection or a failed read or heartbeat is held too, as the last entry.
+#[derive(Debug, Default)]
+pub struct HeldFrames {
+  frames: VecDeque<Option<Result<GatewayServerMessage, ApiError>>>,
+  is_closed: bool,
+  heartbeats_sent: u32,
+  /// Whether the server answered meanwhile (a heartbeat answer or any other frame).
+  was_heard: bool,
+}
+
+/// What [`HeldFrames`] says about the time the work ran, taken once by the supervisor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KeptAlive {
+  pub heartbeats_sent: u32,
+  pub was_heard: bool,
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Connects the gateway, resuming the stored session if possible; a fresh session triggers a
   /// full sync. Process the returned connection with [`Self::pump`] or [`Self::run_gateway`].
+  /// Frames that arrive during the sync are lost; apps use [`Self::start_gateway`] through the
+  /// connection supervisor.
   pub async fn connect_gateway(&mut self) -> Result<(A::Gateway, GatewayOutcome), CoreError> {
-    let start = self.start_gateway(DEFAULT_HANDSHAKE_TIMEOUT).await?;
+    let start = self.start_gateway(GatewayTiming::default()).await?;
     Ok((start.connection, start.outcome))
   }
 
   /// Like [`Self::connect_gateway`], with a deadline for every handshake step and the heartbeat
-  /// interval from `hello`. A rejected token comes back as an API error with status 401
-  /// ([`CoreError::is_sign_in_required`]).
+  /// interval from `hello`. The connection keeps sending heartbeats while the sync after the
+  /// handshake runs, which can take minutes on a workspace that grew (issue #325); what arrives
+  /// meanwhile comes back in [`GatewayStart::held`]. A rejected token comes back as an API error
+  /// with status 401 ([`CoreError::is_sign_in_required`]).
   pub async fn start_gateway(
     &mut self,
-    handshake_timeout: Duration,
+    timing: GatewayTiming,
   ) -> Result<GatewayStart<A::Gateway>, CoreError> {
+    let handshake_timeout = timing.handshake_timeout;
     // Events may have been missed while disconnected: every group is caught up again before the
     // outbox sends into it.
     self.mls_current.clear();
@@ -75,8 +116,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .await?;
       match receive(&mut connection, handshake_timeout).await? {
         GatewayServerMessage::Resumed { replayed } => {
+          let mut held = HeldFrames::default();
           if replayed == 0 {
-            self.resync_live_state().await?;
+            let heartbeat = heartbeat_interval.min(timing.max_heartbeat);
+            keep_alive(
+              &mut connection,
+              heartbeat,
+              heartbeat,
+              timing.max_held_frames,
+              &mut held,
+              self.resync_live_state(),
+            )
+            .await?;
           } else {
             self.maybe_replay_left = Some(replayed);
           }
@@ -84,6 +135,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
             connection,
             outcome: GatewayOutcome::Resumed,
             heartbeat_interval,
+            held,
           });
         },
         GatewayServerMessage::SessionInvalid => {
@@ -117,8 +169,29 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         )));
       },
     };
-    // The session is kept only once the sync succeeded: a stored session makes the next connect
-    // resume instead of syncing, so a failed sync would otherwise leave its gap unfilled forever.
+    let mut held = HeldFrames::default();
+    let heartbeat = heartbeat_interval.min(timing.max_heartbeat);
+    keep_alive(
+      &mut connection,
+      heartbeat,
+      heartbeat,
+      timing.max_held_frames,
+      &mut held,
+      self.sync_fresh_session(session_id),
+    )
+    .await?;
+    Ok(GatewayStart {
+      connection,
+      outcome: GatewayOutcome::Fresh,
+      heartbeat_interval,
+      held,
+    })
+  }
+
+  /// After `identify`: the full sync, then the session is kept. Only once the sync succeeded: a
+  /// stored session makes the next connect resume instead of syncing, so a failed sync would
+  /// otherwise leave its gap unfilled forever.
+  async fn sync_fresh_session(&mut self, session_id: String) -> Result<(), CoreError> {
     self.full_sync().await?;
     self.sync.maybe_gateway_session = Some(GatewaySession {
       session_id,
@@ -126,12 +199,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     });
     self.persist_sync()?;
     // The full sync already read the counters; the UI still reads what only it keeps.
-    self.finish_connection().await?;
-    Ok(GatewayStart {
-      connection,
-      outcome: GatewayOutcome::Fresh,
-      heartbeat_interval,
-    })
+    self.finish_connection().await
   }
 
   /// After a resumed connection, once the missed events were replayed: counters are read once, so a
@@ -427,6 +495,109 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 }
 
+impl Default for GatewayTiming {
+  fn default() -> Self {
+    Self {
+      handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+      max_heartbeat: Duration::from_secs(25),
+      max_held_frames: 10_000,
+    }
+  }
+}
+
+impl HeldFrames {
+  /// The oldest held frame, if any.
+  pub fn pop(&mut self) -> Option<Option<Result<GatewayServerMessage, ApiError>>> {
+    self.frames.pop_front()
+  }
+
+  pub fn is_empty(&self) -> bool {
+    self.frames.is_empty()
+  }
+
+  /// Heartbeats sent and whether the server was heard since the last call.
+  pub fn take_kept_alive(&mut self) -> KeptAlive {
+    let kept = KeptAlive {
+      heartbeats_sent: self.heartbeats_sent,
+      was_heard: self.was_heard,
+    };
+    self.heartbeats_sent = 0;
+    self.was_heard = false;
+    kept
+  }
+
+  fn hold(&mut self, maybe_frame: Option<Result<GatewayServerMessage, ApiError>>) {
+    match &maybe_frame {
+      // Only proves the connection is alive; nothing to apply.
+      Some(Ok(GatewayServerMessage::HeartbeatAck)) => {
+        self.was_heard = true;
+        return;
+      },
+      Some(Ok(_)) => self.was_heard = true,
+      Some(Err(_)) | None => self.is_closed = true,
+    }
+    self.frames.push_back(maybe_frame);
+  }
+
+  fn is_reading(&self, max_frames: usize) -> bool {
+    !self.is_closed && self.frames.len() < max_frames
+  }
+}
+
+/// Runs `work` while keeping `connection` alive (issue #325): a heartbeat after `first_heartbeat_in`
+/// and then every `heartbeat`, and
+/// what arrives meanwhile is read into `held` (up to `max_held` frames), so neither the server's
+/// heartbeat timeout nor its slow-reader limit drops the connection while a long sync or command
+/// holds the loop. Frames are only held, never applied: they come after what `work` does, in their
+/// order, once the caller takes them.
+pub async fn keep_alive<G: GatewayConnection, T>(
+  connection: &mut G,
+  first_heartbeat_in: Duration,
+  heartbeat: Duration,
+  max_held: usize,
+  held: &mut HeldFrames,
+  work: impl Future<Output = T>,
+) -> T {
+  let mut work = pin!(work);
+  let mut timer = Box::pin(platform::sleep(first_heartbeat_in));
+  loop {
+    let step = {
+      let is_reading = held.is_reading(max_held);
+      let read = async {
+        if is_reading {
+          connection.receive().await
+        } else {
+          std::future::pending().await
+        }
+      };
+      match select(work.as_mut(), select(pin!(read), timer.as_mut())).await {
+        Either::Left((output, _)) => return output,
+        Either::Right((Either::Left((maybe_frame, _)), _)) => KeepAliveStep::Read(maybe_frame),
+        Either::Right((Either::Right(((), _)), _)) => KeepAliveStep::Heartbeat,
+      }
+    };
+    match step {
+      KeepAliveStep::Read(maybe_frame) => held.hold(maybe_frame),
+      KeepAliveStep::Heartbeat => {
+        // A closed connection gets no more heartbeats; the caller replaces it afterwards.
+        if !held.is_closed {
+          match connection.send(&GatewayClientMessage::Heartbeat).await {
+            Ok(()) => held.heartbeats_sent = held.heartbeats_sent.saturating_add(1),
+            Err(error) => held.hold(Some(Err(error))),
+          }
+        }
+        timer = Box::pin(platform::sleep(heartbeat));
+      },
+    }
+  }
+}
+
+/// What woke [`keep_alive`] other than the end of the work.
+enum KeepAliveStep {
+  Read(Option<Result<GatewayServerMessage, ApiError>>),
+  Heartbeat,
+}
+
 async fn receive<G: GatewayConnection>(
   connection: &mut G,
   timeout: Duration,
@@ -461,4 +632,47 @@ fn rejected(error: ErrorBody) -> CoreError {
     status,
     maybe_body: Some(error),
   })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn heartbeat_answers_are_heard_not_held() {
+    let mut held = HeldFrames::default();
+    held.hold(Some(Ok(GatewayServerMessage::HeartbeatAck)));
+    assert!(held.is_empty());
+    assert_eq!(
+      held.take_kept_alive(),
+      KeptAlive {
+        heartbeats_sent: 0,
+        was_heard: true
+      }
+    );
+    assert_eq!(held.take_kept_alive(), KeptAlive::default());
+  }
+
+  #[test]
+  fn frames_are_held_in_order_and_a_close_comes_last() {
+    let mut held = HeldFrames::default();
+    held.hold(Some(Ok(GatewayServerMessage::SessionInvalid)));
+    held.hold(None);
+    assert!(!held.is_reading(10));
+    assert!(matches!(
+      held.pop(),
+      Some(Some(Ok(GatewayServerMessage::SessionInvalid)))
+    ));
+    assert!(matches!(held.pop(), Some(None)));
+    assert!(held.pop().is_none());
+  }
+
+  #[test]
+  fn reading_stops_at_the_bound() {
+    let mut held = HeldFrames::default();
+    held.hold(Some(Ok(GatewayServerMessage::SessionInvalid)));
+    assert!(held.is_reading(2));
+    held.hold(Some(Ok(GatewayServerMessage::SessionInvalid)));
+    assert!(!held.is_reading(2));
+  }
 }
