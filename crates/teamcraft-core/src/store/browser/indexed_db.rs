@@ -6,7 +6,10 @@
 //! queued or on [`IndexedDbStore::flush`]). Of several writes of one record in that time only the
 //! last is issued: a catch-up rewrites some records (the MLS state) after every group it processes,
 //! and one transaction per write left the browser writing for minutes after the catch-up was done
-//! (docs/performance.md). IndexedDB runs read-write transactions on the same object store in the
+//! (docs/performance.md). Records are sealed only when their batch is issued, so a replaced write
+//! costs no encryption either, and a batch holding a large record (the MLS state, megabytes on a
+//! big workspace) waits [`LARGE_BATCH_EXTRA`] longer to take the next rewrite of it along (issue
+//! #326: sealing it after every group a catch-up joined blocked the page). IndexedDB runs read-write transactions on the same object store in the
 //! order they were created, so the database follows the cache in order.
 //! [`IndexedDbStore::flush`] waits until everything written so far is committed.
 //!
@@ -35,13 +38,16 @@ use web_sys::{IdbDatabase, IdbObjectStore, IdbTransaction, IdbTransactionMode};
 
 use super::idb::{self, RECORDS};
 use crate::store::StoreError;
-use crate::store::sealed::{RecordBackend, SealedStore, format_id, parse_id};
+use crate::store::sealed::{LazySeal, RecordBackend, SealedStore, format_id, parse_id};
 
 /// How long writes are collected before they are issued together. Short enough that little is
 /// lost when the page dies, long enough that a burst of writes becomes one transaction.
 const BATCH_DELAY: Duration = Duration::from_millis(50);
 /// Queued this much, the writes are issued right away instead of waiting for the batch delay.
 const MAX_QUEUED_BYTES: usize = 8 * 1024 * 1024;
+/// Queued this much when the batch delay ends, the batch waits [`LARGE_BATCH_EXTRA`] more.
+const LARGE_BATCH_BYTES: usize = 1024 * 1024;
+const LARGE_BATCH_EXTRA: Duration = Duration::from_millis(200);
 /// Property on a write transaction naming the batch of writes it carries.
 const BATCH_PROPERTY: &str = "teamcraftBatch";
 /// `DOMException.name` of a write refused for lack of space.
@@ -86,8 +92,16 @@ struct Writes {
 struct OpenWrite {
   sequence: u32,
   /// `None` deletes the record.
-  maybe_value: Option<Vec<u8>>,
+  maybe_value: Option<RecordValue>,
+  /// What the write counts towards [`MAX_QUEUED_BYTES`] while it is queued.
+  bytes: usize,
   state: WriteState,
+}
+
+/// A record's bytes, sealed when its batch is issued.
+enum RecordValue {
+  Sealed(Vec<u8>),
+  Unsealed(LazySeal),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,12 +162,21 @@ impl SealedStore<IndexedDbRecords> {
 
 impl RecordBackend for IndexedDbRecords {
   fn put_record(&self, id: &LookupId, sealed: &[u8]) -> Result<(), StoreError> {
-    self.write(format_id(id), Some(sealed.to_vec()));
+    self.write(
+      format_id(id),
+      Some(RecordValue::Sealed(sealed.to_vec())),
+      sealed.len(),
+    );
     Ok(())
   }
 
   fn delete_record(&self, id: &LookupId) -> Result<(), StoreError> {
-    self.write(format_id(id), None);
+    self.write(format_id(id), None, 0);
+    Ok(())
+  }
+
+  fn put_lazy(&self, id: &LookupId, size_hint: usize, seal: LazySeal) -> Result<(), StoreError> {
+    self.write(format_id(id), Some(RecordValue::Unsealed(seal)), size_hint);
     Ok(())
   }
 }
@@ -212,16 +235,16 @@ impl IndexedDbRecords {
   }
 
   /// Queues the write; the batch goes out after [`BATCH_DELAY`], or now when much is queued.
-  fn write(&self, key: String, maybe_value: Option<Vec<u8>>) {
+  fn write(&self, key: String, maybe_value: Option<RecordValue>, bytes: usize) {
     let is_due = {
       let mut writes = self.inner.writes.borrow_mut();
-      writes.queue(key, maybe_value);
+      writes.queue(key, maybe_value, bytes);
       if writes.queued_bytes >= MAX_QUEUED_BYTES {
         true
       } else {
         if !writes.is_scheduled {
           writes.is_scheduled = true;
-          schedule(Rc::downgrade(&self.inner));
+          schedule(Rc::downgrade(&self.inner), BATCH_DELAY, true);
         }
         false
       }
@@ -266,15 +289,24 @@ impl Inner {
       let key = key.clone();
       let Some(write) = writes
         .open
-        .get(&key)
+        .get_mut(&key)
         .filter(|write| write.state == WriteState::Queued)
       else {
         continue;
       };
       let sequence = write.sequence;
+      if let Err(error) = write.seal() {
+        tracing::error!(%error, "could not seal a record for IndexedDB");
+        maybe_refused = Some(WriteFailure::Other);
+        break;
+      }
       let record = JsValue::from_str(&key);
       let issued = match &write.maybe_value {
-        Some(value) => records.put_with_key(&js_sys::Uint8Array::from(value.as_slice()), &record),
+        Some(RecordValue::Sealed(value)) => {
+          records.put_with_key(&js_sys::Uint8Array::from(value.as_slice()), &record)
+        },
+        // Sealed just above.
+        Some(RecordValue::Unsealed(_)) => continue,
         None => records.delete(&record),
       };
       match issued {
@@ -361,17 +393,16 @@ impl Inner {
 
 impl Writes {
   /// Records the write as the record's latest and queues its key, once. A queued write it replaces
-  /// no longer counts towards [`MAX_QUEUED_BYTES`]: the MLS state (one record for every group) is
-  /// rewritten after each group a catch-up joins, and counting every copy issued a transaction
-  /// every few groups instead of one per batch (issue #326).
-  fn queue(&mut self, key: String, maybe_value: Option<Vec<u8>>) {
+  /// no longer counts towards [`MAX_QUEUED_BYTES`] and is never sealed: the MLS state (one record
+  /// for every group) is rewritten after each group a catch-up joins, and counting every copy
+  /// issued a transaction every few groups instead of one per batch (issue #326).
+  fn queue(&mut self, key: String, maybe_value: Option<RecordValue>, bytes: usize) {
     self.next_sequence = self.next_sequence.wrapping_add(1);
-    self.queued_bytes = self
-      .queued_bytes
-      .saturating_add(maybe_value.as_ref().map_or(0, Vec::len));
+    self.queued_bytes = self.queued_bytes.saturating_add(bytes);
     let write = OpenWrite {
       sequence: self.next_sequence,
       maybe_value,
+      bytes,
       state: WriteState::Queued,
     };
     let maybe_replaced = self
@@ -379,10 +410,7 @@ impl Writes {
       .insert(key.clone(), write)
       .filter(|earlier| earlier.state == WriteState::Queued);
     match maybe_replaced {
-      Some(replaced) => {
-        let replaced_bytes = replaced.maybe_value.as_ref().map_or(0, Vec::len);
-        self.queued_bytes = self.queued_bytes.saturating_sub(replaced_bytes);
-      },
+      Some(replaced) => self.queued_bytes = self.queued_bytes.saturating_sub(replaced.bytes),
       None => self.queued.push(key),
     }
   }
@@ -440,14 +468,33 @@ impl Drop for IndexedDbRecords {
   }
 }
 
-/// Issues the queued writes after the batch delay, unless the store is gone by then.
-fn schedule(inner: Weak<Inner>) {
+/// Issues the queued writes after `delay`, unless the store is gone by then. A large batch gets
+/// [`LARGE_BATCH_EXTRA`] once when `may_extend`.
+fn schedule(inner: Weak<Inner>, delay: Duration, may_extend: bool) {
   wasm_bindgen_futures::spawn_local(async move {
-    crate::platform::sleep(BATCH_DELAY).await;
-    if let Some(inner) = inner.upgrade() {
+    crate::platform::sleep(delay).await;
+    let Some(inner) = inner.upgrade() else {
+      return;
+    };
+    let is_large = inner.writes.borrow().queued_bytes >= LARGE_BATCH_BYTES;
+    if may_extend && is_large {
+      schedule(Rc::downgrade(&inner), LARGE_BATCH_EXTRA, false);
+    } else {
       inner.issue_queued();
     }
   });
+}
+
+impl OpenWrite {
+  /// Seals the value now if it waited for its batch; it is kept sealed for a retry. A seal that
+  /// fails stays unsealed and is tried again with the write.
+  fn seal(&mut self) -> Result<(), StoreError> {
+    if let Some(RecordValue::Unsealed(seal)) = &self.maybe_value {
+      let sealed = seal()?;
+      self.maybe_value = Some(RecordValue::Sealed(sealed));
+    }
+    Ok(())
+  }
 }
 
 /// The batch a write transaction carries.
