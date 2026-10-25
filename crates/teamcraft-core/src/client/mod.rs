@@ -17,6 +17,7 @@ pub mod files;
 mod gateway;
 mod group_health;
 mod groups;
+mod key_packages;
 mod linking;
 mod member_device;
 mod messaging;
@@ -89,6 +90,10 @@ pub struct ClientSettings {
   pub key_package_low_water: u32,
   /// How often a running client asks the server whether its key packages need renewing.
   pub key_package_check_interval: std::time::Duration,
+  /// How long the private part of one of this device's key packages stays after the package
+  /// expired or, for a last-resort package, after a newer one replaced it on the server: welcomes
+  /// for it may still be on the way (e2ee.md §4.3.1). Then it is deleted.
+  pub key_package_retention: std::time::Duration,
   /// Messages per history page.
   pub history_page_size: u32,
   /// Attempts to land a commit when other members' commits win the epoch.
@@ -210,6 +215,7 @@ impl Default for ClientSettings {
       key_package_target: 30,
       key_package_low_water: 10,
       key_package_check_interval: std::time::Duration::from_secs(6 * 60 * 60),
+      key_package_retention: std::time::Duration::from_secs(30 * 24 * 60 * 60),
       history_page_size: 50,
       max_commit_attempts: 3,
       device_add_stagger: std::time::Duration::from_secs(10),

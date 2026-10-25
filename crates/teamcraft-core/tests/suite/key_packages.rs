@@ -94,6 +94,57 @@ async fn packages_expiring_soon_are_replaced_and_the_last_resort_rotated() {
   assert!(status.has_last_resort);
 }
 
+#[tokio::test]
+async fn a_replaced_last_resort_package_is_deleted_on_the_device() {
+  let server = FakeServer::new();
+  // Without a retention the replaced package goes at once.
+  let no_retention = ClientSettings {
+    key_package_retention: Duration::ZERO,
+    ..settings()
+  };
+  let mut bob = Peer::enroll_with_settings(&server, "Bob", no_retention).await;
+  let enrolled = bob.client.stored_key_packages().unwrap();
+  let first_last_resort = last_resort_refs(&enrolled);
+  assert_eq!(first_last_resort.len(), 1);
+  assert_eq!(enrolled.len(), settings().key_package_target as usize + 1);
+
+  server.advance_clock(30 * DAY);
+  bob.client.top_up_key_packages().await.unwrap();
+
+  let stored = bob.client.stored_key_packages().unwrap();
+  let last_resort = last_resort_refs(&stored);
+  assert_eq!(last_resort.len(), 1, "only the new last-resort package is left");
+  assert_ne!(last_resort, first_last_resort);
+  // The regular packages from enrollment haven't expired yet: they stay next to the new ones.
+  let regular = stored.iter().filter(|package| !package.is_last_resort).count();
+  assert_eq!(regular, 2 * settings().key_package_target as usize);
+}
+
+#[tokio::test]
+async fn a_lost_rotation_answer_keeps_the_old_last_resort_package() {
+  let server = FakeServer::new();
+  let no_retention = ClientSettings {
+    key_package_retention: Duration::ZERO,
+    ..settings()
+  };
+  let mut bob = Peer::enroll_with_settings(&server, "Bob", no_retention).await;
+  server.advance_clock(30 * DAY);
+  server.lose_next_key_package_answer();
+  assert!(bob.client.top_up_key_packages().await.is_err());
+
+  // The server may still hand out the old package: both private parts stay.
+  let stored = bob.client.stored_key_packages().unwrap();
+  assert_eq!(last_resort_refs(&stored).len(), 2);
+}
+
+fn last_resort_refs(packages: &[teamcraft_crypto::mls::StoredKeyPackage]) -> Vec<Vec<u8>> {
+  packages
+    .iter()
+    .filter(|package| package.is_last_resort)
+    .map(|package| package.hash_ref.clone())
+    .collect()
+}
+
 mod one_bad_device {
   use super::*;
 
