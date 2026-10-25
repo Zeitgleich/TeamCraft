@@ -512,10 +512,7 @@ mod tests {
     }
 
     fn ids(messages: Vec<Message>) -> Vec<u64> {
-      messages
-        .iter()
-        .map(|message| raw_id(message.id))
-        .collect()
+      messages.iter().map(|message| raw_id(message.id)).collect()
     }
 
     fn message(raw: u64) -> Message {
