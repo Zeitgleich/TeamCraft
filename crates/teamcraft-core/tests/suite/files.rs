@@ -23,7 +23,7 @@ use teamcraft_client_api::model::Message;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::client::files::{UploadRetrySettings, UploadStep};
 use teamcraft_core::clock::ManualClock;
-use teamcraft_core::downloads::Downloads;
+use teamcraft_core::downloads::{DownloadPriority, Downloads};
 use teamcraft_core::ui_backend::CoreCommand;
 use teamcraft_core::upkeep::{Upkeep, UploadMode};
 use teamcraft_core::{ClientSettings, MAX_VIEWER_BYTES};
@@ -285,6 +285,7 @@ async fn downloads_beside_the_loop_open_and_save_files() {
     .unwrap();
   downloads.view(
     reference,
+    DownloadPriority::Background,
     Box::new(move |result| *sink.borrow_mut() = Some(result.map(|bytes| bytes.expose_secret().to_vec()))),
   );
   let saved: AttachmentId = files[1].file_id.parse().unwrap();

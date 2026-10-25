@@ -29,8 +29,8 @@ use serde_json::Value;
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{
-  ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreConnection, CoreStatus, EnrollRequest,
-  LinkStatus, MessageWindow, SecuritySnapshot, StoreHealth, StoreProblem,
+  AttachmentPriority, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreConnection,
+  CoreStatus, EnrollRequest, LinkStatus, MessageWindow, SecuritySnapshot, StoreHealth, StoreProblem,
 };
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
@@ -301,7 +301,9 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
         field(&args, "message")?,
         field(&args, "file_id")?,
       );
-      let plaintext = ask_attachment(conversation, message, file_id).await?;
+      // An older leader tab's follower sends none: a preview.
+      let priority = field::<Option<AttachmentPriority>>(&args, "priority")?.unwrap_or_default();
+      let plaintext = ask_attachment(conversation, message, file_id, priority).await?;
       Ok(Value::String(BASE64.encode(plaintext.expose_secret())))
     },
     "core_link_start" => {
@@ -347,11 +349,17 @@ pub async fn attachment(
   conversation: ConversationId,
   message: MessageId,
   file_id: String,
+  priority: AttachmentPriority,
 ) -> Result<SecretBytes, String> {
   let Some(follower) = current_follower() else {
-    return ask_attachment(conversation, message, file_id).await;
+    return ask_attachment(conversation, message, file_id, priority).await;
   };
-  let args = serde_json::json!({ "conversation": conversation, "message": message, "file_id": file_id });
+  let args = serde_json::json!({
+    "conversation": conversation,
+    "message": message,
+    "file_id": file_id,
+    "priority": priority,
+  });
   let answer = follower.call("core_attachment", args).await?;
   let encoded = answer.as_str().ok_or("unreadable answer of core_attachment")?;
   BASE64
@@ -364,11 +372,13 @@ async fn ask_attachment(
   conversation: ConversationId,
   message: MessageId,
   file_id: String,
+  priority: AttachmentPriority,
 ) -> Result<SecretBytes, String> {
   ask(|reply| Request::Attachment {
     conversation,
     message,
     file_id,
+    priority,
     reply,
   })
   .await?
@@ -591,6 +601,7 @@ enum Request {
     conversation: ConversationId,
     message: MessageId,
     file_id: String,
+    priority: AttachmentPriority,
     reply: oneshot::Sender<Result<SecretBytes, String>>,
   },
   LinkStart {
@@ -769,8 +780,9 @@ impl Core {
           conversation,
           message,
           file_id,
+          priority,
           reply,
-        })) => self.queue_attachment(conversation, message, &file_id, reply),
+        })) => self.queue_attachment(conversation, message, &file_id, priority, reply),
         Wake::Request(Some(request)) => self.handle(request).await,
         Wake::Frame(frame) => self.on_frame(frame).await,
         Wake::Linked(result) => self.on_linked(result).await,
@@ -1160,8 +1172,9 @@ impl Core {
         conversation,
         message,
         file_id,
+        priority,
         reply,
-      } => self.queue_attachment(conversation, message, &file_id, reply),
+      } => self.queue_attachment(conversation, message, &file_id, priority, reply),
       Request::Thread {
         conversation,
         thread,
@@ -1706,6 +1719,7 @@ impl Core {
     conversation: ConversationId,
     message: MessageId,
     file_id: &str,
+    priority: AttachmentPriority,
     reply: oneshot::Sender<Result<SecretBytes, String>>,
   ) {
     let maybe_reference = self
@@ -1717,8 +1731,8 @@ impl Core {
       return;
     };
     // A closed reply channel (the caller gave up) needs nothing.
-    let deliver = move |opened: Result<SecretBytes, CoreError>| drop(reply.send(opened.map_err(describe)));
-    self.downloads.view(reference, Box::new(deliver));
+    let deliver = move |opened: Result<SecretBytes, String>| drop(reply.send(opened));
+    self.downloads.view(reference, priority.into(), Box::new(deliver));
   }
 
   /// Starts the downloads that may run now.

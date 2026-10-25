@@ -1,6 +1,7 @@
 //! Attachment downloads beside a host's loop (issue #491): the web and desktop cores start them
 //! with the client and then let them run, so a large file doesn't hold up reads, sends or gateway
-//! frames. At most a few run at once; the rest wait their turn in order.
+//! frames. At most a few run at once; the rest wait their turn in order, except what the user opened
+//! (the image viewer), which goes first.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -39,12 +40,24 @@ pub enum Finished {
 }
 
 /// Called with the opened file (or why it couldn't be opened).
-pub type Deliver = Box<dyn FnOnce(Result<SecretBytes, CoreError>)>;
+pub type Deliver = Box<dyn FnOnce(Result<SecretBytes, String>)>;
+
+/// How soon a file for the viewer is wanted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DownloadPriority {
+  /// A preview in the conversation: in turn.
+  #[default]
+  Background,
+  /// The user opened it (the image viewer): ahead of the previews, in a slot of its own.
+  Now,
+}
 
 enum Job {
   View {
     reference: AttachmentRef,
-    deliver: Deliver,
+    priority: DownloadPriority,
+    /// Everybody who asked for the file while it waited.
+    delivers: Vec<Deliver>,
   },
   Save {
     conversation: ConversationId,
@@ -62,9 +75,42 @@ impl Downloads {
     }
   }
 
-  /// Queues opening a file for the viewer or an inline picture.
-  pub fn view(&mut self, reference: AttachmentRef, deliver: Deliver) {
-    self.waiting.push_back(Job::View { reference, deliver });
+  /// Queues opening a file for the viewer or an inline picture. A file the user opened goes ahead of
+  /// the previews; asked for again while it waits, it is downloaded once for both.
+  pub fn view(&mut self, reference: AttachmentRef, priority: DownloadPriority, deliver: Deliver) {
+    let maybe_index = self
+      .waiting
+      .iter()
+      .position(|job| job.views(reference.attachment_id));
+    let mut job = maybe_index
+      .and_then(|index| self.waiting.remove(index))
+      .unwrap_or(Job::View {
+        reference,
+        priority,
+        delivers: Vec::new(),
+      });
+    if let Job::View {
+      priority: waiting,
+      delivers,
+      ..
+    } = &mut job
+    {
+      delivers.push(deliver);
+      if priority == DownloadPriority::Now {
+        *waiting = DownloadPriority::Now;
+      }
+    }
+    if job.is_urgent() {
+      // Behind other files the user opened, ahead of every preview.
+      let at = self
+        .waiting
+        .iter()
+        .position(|waiting| !waiting.is_urgent())
+        .unwrap_or(self.waiting.len());
+      self.waiting.insert(at, job);
+    } else {
+      self.waiting.push_back(job);
+    }
   }
 
   /// Queues saving a file to disk (in the browser: to its download folder).
@@ -84,17 +130,22 @@ impl Downloads {
   /// changed (a file to save is marked as downloading).
   pub async fn start_due<A: ServerApi, S: LocalStore>(&mut self, client: &mut Client<A, S>) -> bool {
     let mut is_changed = false;
-    while self.running.len() < self.limit {
+    // What the user opened has one slot beyond the limit, so it never waits for previews.
+    while self.running.len() < self.limit
+      || (self.running.len() <= self.limit && self.waiting.front().is_some_and(Job::is_urgent))
+    {
       let Some(job) = self.waiting.pop_front() else {
         break;
       };
       match job {
-        Job::View { reference, deliver } => match client.start_viewer_download(&reference).await {
+        Job::View {
+          reference, delivers, ..
+        } => match client.start_viewer_download(&reference).await {
           Ok(download) => self.running.push(Box::pin(async move {
-            deliver(download.open().await);
+            deliver_all(delivers, download.open().await);
             Finished::Viewed
           })),
-          Err(error) => deliver(Err(error)),
+          Err(error) => deliver_all(delivers, Err(error)),
         },
         Job::Save {
           conversation,
@@ -138,8 +189,117 @@ impl Downloads {
   }
 }
 
+impl Job {
+  fn is_urgent(&self) -> bool {
+    matches!(
+      self,
+      Self::View {
+        priority: DownloadPriority::Now,
+        ..
+      }
+    )
+  }
+
+  fn views(&self, attachment: AttachmentId) -> bool {
+    matches!(self, Self::View { reference, .. } if reference.attachment_id == attachment)
+  }
+}
+
+/// Hands the file to everybody who asked for it.
+fn deliver_all(delivers: Vec<Deliver>, opened: Result<SecretBytes, CoreError>) {
+  let opened = opened.map_err(|error| error.to_string());
+  for deliver in delivers {
+    let copy = match &opened {
+      Ok(bytes) => Ok(SecretBytes::new(bytes.expose_secret().to_vec())),
+      Err(error) => Err(error.clone()),
+    };
+    deliver(copy);
+  }
+}
+
+#[cfg(feature = "ui")]
+impl From<teamcraft_client_api::remote::AttachmentPriority> for DownloadPriority {
+  fn from(priority: teamcraft_client_api::remote::AttachmentPriority) -> Self {
+    use teamcraft_client_api::remote::AttachmentPriority;
+    match priority {
+      AttachmentPriority::Background => Self::Background,
+      AttachmentPriority::Now => Self::Now,
+    }
+  }
+}
+
 impl Default for Downloads {
   fn default() -> Self {
     Self::new(DEFAULT_PARALLEL_DOWNLOADS)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::cell::RefCell;
+  use std::rc::Rc;
+
+  use teamcraft_proto::{Base64Bytes, Id, Snowflake};
+
+  use super::*;
+
+  #[test]
+  fn a_file_the_user_opened_goes_ahead_of_the_previews() {
+    let mut downloads = Downloads::new(2);
+    downloads.view(file(1), DownloadPriority::Background, ignore());
+    downloads.view(file(2), DownloadPriority::Background, ignore());
+    downloads.view(file(3), DownloadPriority::Now, ignore());
+    downloads.view(file(4), DownloadPriority::Now, ignore());
+    assert_eq!(waiting(&downloads), [3, 4, 1, 2]);
+  }
+
+  #[test]
+  fn a_preview_opened_while_it_waits_moves_up_and_is_downloaded_once() {
+    let mut downloads = Downloads::new(2);
+    downloads.view(file(1), DownloadPriority::Background, ignore());
+    downloads.view(file(2), DownloadPriority::Background, ignore());
+    let delivered = Rc::new(RefCell::new(0));
+    for _ in 0..2 {
+      let count = delivered.clone();
+      downloads.view(
+        file(2),
+        DownloadPriority::Now,
+        Box::new(move |_| *count.borrow_mut() += 1),
+      );
+    }
+    assert_eq!(waiting(&downloads), [2, 1]);
+    let Some(Job::View { delivers, .. }) = downloads.waiting.pop_front() else {
+      panic!("not a view");
+    };
+    deliver_all(delivers, Ok(SecretBytes::new(b"picture".to_vec())));
+    assert_eq!(*delivered.borrow(), 2, "everybody who asked got it");
+  }
+
+  fn waiting(downloads: &Downloads) -> Vec<i64> {
+    downloads
+      .waiting
+      .iter()
+      .filter_map(|job| match job {
+        Job::View { reference, .. } => Some(reference.attachment_id.snowflake().get()),
+        Job::Save { .. } => None,
+      })
+      .collect()
+  }
+
+  fn file(raw: i64) -> AttachmentRef {
+    AttachmentRef {
+      attachment_id: AttachmentId::from_snowflake(Snowflake::new(raw).unwrap()),
+      key: Base64Bytes::new(Vec::new()),
+      ciphertext_sha256: Base64Bytes::new(Vec::new()),
+      file_name: format!("{raw}.jpg"),
+      media_type: "image/jpeg".into(),
+      size_bytes: 1,
+      maybe_thumbnail: None,
+      maybe_dimensions: None,
+    }
+  }
+
+  fn ignore() -> Deliver {
+    Box::new(|_| {})
   }
 }

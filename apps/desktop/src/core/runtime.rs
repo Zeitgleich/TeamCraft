@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use secrecy::ExposeSecret;
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{Message, ThreadId};
+use teamcraft_client_api::remote::AttachmentPriority;
 use teamcraft_client_api::remote::{
   ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreStatus, EnrollRequest, LinkStatus,
   MessageWindow, SecuritySnapshot, StoreProblem,
@@ -253,6 +254,7 @@ enum Request {
     conversation: ConversationId,
     message: MessageId,
     file_id: String,
+    priority: AttachmentPriority,
     reply: oneshot::Sender<Result<SecretBytes, String>>,
   },
   OrgBackgroundPicture(OrgBackgroundId, oneshot::Sender<Result<Vec<u8>, String>>),
@@ -521,12 +523,14 @@ impl CoreRuntime {
     conversation: ConversationId,
     message: MessageId,
     file_id: String,
+    priority: AttachmentPriority,
   ) -> Result<SecretBytes, String> {
     self
       .ask(|reply| Request::Attachment {
         conversation,
         message,
         file_id,
+        priority,
         reply,
       })
       .await
@@ -1104,8 +1108,9 @@ impl Core {
         conversation,
         message,
         file_id,
+        priority,
         reply,
-      } => self.queue_attachment(conversation, message, &file_id, reply),
+      } => self.queue_attachment(conversation, message, &file_id, priority, reply),
       Request::OrgBackgroundPicture(id, reply) => drop(reply.send(self.org_background_picture(id).await)),
     }
   }
@@ -1117,6 +1122,7 @@ impl Core {
     conversation: ConversationId,
     message: MessageId,
     file_id: &str,
+    priority: AttachmentPriority,
     reply: oneshot::Sender<Result<SecretBytes, String>>,
   ) {
     let maybe_reference = self
@@ -1128,8 +1134,8 @@ impl Core {
       return;
     };
     // A closed reply channel (the caller gave up) needs nothing.
-    let deliver = move |opened: Result<SecretBytes, CoreError>| drop(reply.send(opened.map_err(describe)));
-    self.downloads.view(reference, Box::new(deliver));
+    let deliver = move |opened: Result<SecretBytes, String>| drop(reply.send(opened));
+    self.downloads.view(reference, priority.into(), Box::new(deliver));
   }
 
   /// Starts the downloads that may run now.
