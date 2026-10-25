@@ -17,6 +17,7 @@ use crate::components::sheet::MenuSurface;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::components::tab_list::{on_tab_keys, roving_tabindex};
 use crate::i18n::use_i18n;
+use crate::keys::{SEARCH_IN_CONVERSATION, shortcut_text};
 use crate::model::{Conversation, ConversationId, ConversationKind, MembershipIssue, UserId};
 use crate::prefs::MuteFor;
 use crate::state::{AppState, Overlay, SidePanel, use_app_state};
@@ -528,6 +529,10 @@ fn ChannelHeader(
       .is_some_and(|conv| matches!(conv.kind, ConversationKind::Public | ConversationKind::Private))
   };
   let members_open = move || state.panel.get() == SidePanel::Members;
+  let search_label = move || {
+    let shortcut = shortcut_text(&SEARCH_IN_CONVERSATION, i18n.locale());
+    i18n.t_with("conversation-search", &[("shortcut", &shortcut)])
+  };
 
   view! {
     <header class="channel-header">
@@ -604,6 +609,14 @@ fn ChannelHeader(
       <div class="header-actions">
         <CallButtons conversation=conversation info=info />
         <ConversationBell conversation=conversation />
+        <button
+          class="header-btn compact-keep"
+          aria-label=search_label
+          title=search_label
+          on:click=move |_| state.open_scoped_switcher()
+        >
+          <Icon name=IconName::Search />
+        </button>
         <Show when=is_channel fallback=|| ()>
           <button
             class="header-btn"

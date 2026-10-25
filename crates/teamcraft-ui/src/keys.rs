@@ -39,6 +39,9 @@ pub enum Platform {
 /// Opens the quick switcher.
 pub const QUICK_SWITCHER: Shortcut = Shortcut::primary("K");
 
+/// Searches in the open conversation (the header's search icon opens the same search).
+pub const SEARCH_IN_CONVERSATION: Shortcut = Shortcut::primary("F");
+
 /// Searches messages for the quick switcher's text.
 pub const SEARCH_MESSAGES: Shortcut = Shortcut::new(&[Modifier::Primary], Key::Enter);
 pub const ESCAPE: Shortcut = Shortcut::new(&[], Key::Escape);
