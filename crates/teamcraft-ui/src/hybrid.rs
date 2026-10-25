@@ -277,6 +277,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.mark_read(conversation);
   }
 
+  fn mark_read_through(&self, conversation: ConversationId, message: MessageId) {
+    self.chat.mark_read_through(conversation, message);
+  }
+
   fn set_bookmarks(
     &self,
     conversation: ConversationId,

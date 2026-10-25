@@ -174,6 +174,7 @@ fn ActivityRow(item: ActivityItem) -> impl IntoView {
     )
   };
   let (conversation, message, maybe_thread) = (item.conversation, item.message, item.maybe_thread);
+  let maybe_read_through = item.maybe_read_through;
   let relative = format_relative(item.at, now_ms(), locale);
   let absolute = format_date_time(item.at, locale);
   let is_unread = item.is_unread;
@@ -183,7 +184,16 @@ fn ActivityRow(item: ActivityItem) -> impl IntoView {
       <button
         class="activity-item"
         class:unread=is_unread
-        on:click=move |_| state.open_message(conversation, message, maybe_thread)
+        on:click=move |_| {
+          state.open_message(conversation, message, maybe_thread);
+          // Opening is reading: the entry's target moves its read position up to the entry (a
+          // thread's panel does it for thread entries), and the unread state follows from that.
+          if maybe_thread.is_none()
+            && let Some(read_through) = maybe_read_through
+          {
+            state.write(|backend| backend.mark_read_through(conversation, read_through));
+          }
+        }
       >
         <span class="activity-avatar">
           {actor.map(|user| view! { <Avatar user=user size=AvatarSize::Small /> })}

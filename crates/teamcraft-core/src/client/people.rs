@@ -236,11 +236,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
-  /// Everything in the activity feed sent up to `up_to_ms` counts as read on all devices.
-  pub fn mark_activity_read(&mut self, up_to_ms: i64) -> Result<(), CoreError> {
-    self.update_account_data(|data, now| data.mark_activity_read(up_to_ms, now))
-  }
-
   fn store_privacy(&self, privacy: &PrivacyResponse) -> Result<(), CoreError> {
     records::put_json(
       &self.store,

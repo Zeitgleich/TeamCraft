@@ -1425,6 +1425,17 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::MarkRead { conversation });
   }
 
+  fn mark_read_through(&self, conversation: ConversationId, message: MessageId) {
+    self.act(ChatAction::MarkReadThrough {
+      conversation,
+      message,
+    });
+  }
+
+  fn mark_thread_read(&self, conversation: ConversationId, thread: ThreadId) {
+    self.act(ChatAction::MarkThreadRead { conversation, thread });
+  }
+
   fn set_bookmarks(
     &self,
     conversation: ConversationId,

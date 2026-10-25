@@ -405,6 +405,7 @@ mod tests {
         actor: crate::model::id_from_raw(3),
         at: 0,
         excerpt: String::new(),
+        maybe_read_through: None,
         is_unread,
       }
     }

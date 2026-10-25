@@ -127,7 +127,31 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         message,
       } => self.acknowledge(conversation, message).await,
       CoreCommand::MarkUnread { conversation, from } => self.mark_unread(conversation, from),
-      CoreCommand::MarkActivityRead { up_to_ms } => self.mark_activity_read(up_to_ms),
+      CoreCommand::MarkReadThrough {
+        conversation,
+        message,
+      } => {
+        // Queued: offline, it reaches the server (and the other devices) once back.
+        self
+          .queue_action(PendingAction::ReadPosition {
+            conversation,
+            message,
+          })
+          .await
+      },
+      CoreCommand::MarkThreadRead {
+        conversation,
+        thread,
+        message,
+      } => {
+        self
+          .queue_action(PendingAction::ThreadReadPosition {
+            conversation,
+            thread,
+            message,
+          })
+          .await
+      },
       CoreCommand::RefreshPresence { users } => self.refresh_presence(&users).await,
       CoreCommand::SearchDirectory { query } => self.search_directory(&query).await.map(|_| ()),
       CoreCommand::RefreshPrivacy => self.refresh_privacy().await.map(|_| ()),

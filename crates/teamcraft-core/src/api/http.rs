@@ -451,6 +451,18 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn set_thread_read(
+    &self,
+    conversation: ConversationId,
+    thread: teamcraft_proto::ThreadId,
+    request: &teamcraft_proto::SetThreadReadRequest,
+  ) -> Result<(), ApiError> {
+    let path = format!("/conversations/{conversation}/threads/{thread}/read");
+    self
+      .send_without_response(Method::PUT, &path, Some(request))
+      .await
+  }
+
   async fn set_presence(&self, request: &SetPresenceRequest) -> Result<(), ApiError> {
     self
       .send_without_response(Method::PUT, "/me/presence", Some(request))

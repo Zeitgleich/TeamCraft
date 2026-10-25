@@ -34,6 +34,12 @@ pub struct ActivityItem {
   pub at: TimestampMs,
   /// The start of the message text (of the reply or mention; of the message reacted to).
   pub excerpt: String,
+  /// The message whose read position covers this entry: the mention or reply itself, the reaction
+  /// message. Reading the conversation (or, for `maybe_thread`, the thread) up to it reads the
+  /// entry. Absent from older cores.
+  #[serde(default)]
+  pub maybe_read_through: Option<MessageId>,
+  /// Derived from the read position of the entry's target; there is no flag of its own.
   pub is_unread: bool,
 }
 
@@ -68,6 +74,7 @@ mod tests {
       actor: id_from_raw(3),
       at,
       excerpt: String::new(),
+      maybe_read_through: None,
       is_unread,
     }
   }

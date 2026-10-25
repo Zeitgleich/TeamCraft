@@ -1,13 +1,16 @@
 //! The activity feed of the UI adapter: mentions, reactions to the user's messages and replies in
-//! their threads, built from the decrypted local messages (the server never sees content). What the
-//! user has read is account data, so it follows them across devices.
+//! their threads, built from the decrypted local messages (the server never sees content).
+//!
+//! Whether an entry is unread is not stored anywhere: it follows from the read position of its
+//! target, the conversation's or the thread's (notifications.md, "Activity feed"). Reading
+//! the message anywhere, on any device, therefore clears the entry.
 
 use std::collections::{HashMap, HashSet};
 
 use teamcraft_client_api::activity::{ActivityFeed, ActivityItem, ActivityKind};
-use teamcraft_client_api::model::{ConversationId, Id, ThreadId, UserId};
+use teamcraft_client_api::model::{ConversationId, Id, MessageId, ThreadId, UserId};
 
-use crate::client::stored_account_data;
+use crate::read_state;
 use crate::store::{LocalStore, MessageContent, StoredMessage};
 use crate::ui_backend::{CoreChatBackend, CoreCommand, ui_message_id};
 
@@ -16,35 +19,105 @@ const MAX_ITEMS: usize = 200;
 /// Characters of the message text shown in an entry.
 const EXCERPT_CHARS: usize = 140;
 
+/// What the server says the user has read in one conversation.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConversationReads {
+  /// The conversation's read position.
+  pub maybe_last_read: Option<MessageId>,
+  /// The server's counts for the conversation are zero: every top-level message is read, which
+  /// holds on this device before the new position itself arrived.
+  pub is_caught_up: bool,
+  /// Unread replies per followed thread (the thread's own read position, as a count).
+  pub thread_unread: HashMap<ThreadId, u32>,
+}
+
 impl<S: LocalStore> CoreChatBackend<S> {
   pub(crate) fn ui_activity(&self) -> ActivityFeed {
-    let read_at_ms = self
-      .read(stored_account_data(self.store_ref()))
-      .activity_read_at_ms();
-    let conversations = self
-      .conversation_ids()
+    let unread = self.read(read_state::unread(self.store_ref()));
+    let mut threads: HashMap<ConversationId, HashMap<ThreadId, u32>> = HashMap::new();
+    for thread in self.read(read_state::threads(self.store_ref())) {
+      threads
+        .entry(thread.conversation_id)
+        .or_default()
+        .insert(thread.thread_id, thread.unread_count);
+    }
+    let responses: HashMap<_, _> = self
+      .conversations_raw()
       .into_iter()
-      .map(|conversation| (conversation, self.stored(conversation)));
-    build_feed(self.me_id(), read_at_ms, conversations)
+      .map(|response| (response.id, response))
+      .collect();
+    let conversations = self.conversation_ids().into_iter().map(|conversation| {
+      let reads = ConversationReads {
+        maybe_last_read: responses
+          .get(&conversation)
+          .and_then(|response| response.maybe_my_membership.as_ref())
+          .and_then(|membership| membership.maybe_last_read_message_id),
+        is_caught_up: unread.as_ref().is_some_and(|unread| {
+          unread
+            .conversations
+            .iter()
+            .all(|entry| entry.conversation_id != conversation)
+        }),
+        thread_unread: threads.remove(&conversation).unwrap_or_default(),
+      };
+      (conversation, reads, self.stored(conversation))
+    });
+    build_feed(self.me_id(), conversations)
   }
 
+  /// Reads every entry by moving the read positions of their targets: the conversation's for
+  /// entries in the conversation, the thread's for entries in a followed thread (the shell that
+  /// can reach the server's thread endpoint does those, [`Self::ui_activity`] shows the result).
   pub(crate) fn ui_mark_activity_read(&self) {
-    // Up to the newest entry on screen, not "now": another device's clock may differ.
-    if let Some(newest) = self.ui_activity().items.first() {
-      self.command(CoreCommand::MarkActivityRead { up_to_ms: newest.at });
+    let feed = self.ui_activity();
+    let followed: HashSet<(ConversationId, ThreadId)> = self
+      .read(read_state::threads(self.store_ref()))
+      .into_iter()
+      .map(|thread| (thread.conversation_id, thread.thread_id))
+      .collect();
+    let mut through: HashMap<ConversationId, MessageId> = HashMap::new();
+    let mut thread_through: HashMap<(ConversationId, ThreadId), MessageId> = HashMap::new();
+    for item in feed.items.iter().filter(|item| item.is_unread) {
+      let Some(read_through) = item.maybe_read_through else {
+        continue;
+      };
+      match item.maybe_thread {
+        Some(thread) if followed.contains(&(item.conversation, thread)) => {
+          let entry = thread_through
+            .entry((item.conversation, thread))
+            .or_insert(read_through);
+          *entry = (*entry).max(read_through);
+        },
+        _ => {
+          let entry = through.entry(item.conversation).or_insert(read_through);
+          *entry = (*entry).max(read_through);
+        },
+      }
+    }
+    for (conversation, message) in through {
+      self.command(CoreCommand::MarkReadThrough {
+        conversation,
+        message,
+      });
+    }
+    for ((conversation, thread), message) in thread_through {
+      self.command(CoreCommand::MarkThreadRead {
+        conversation,
+        thread,
+        message,
+      });
     }
   }
 }
 
-/// The feed for `me` over the stored messages of the given conversations.
+/// The feed for `me` over the stored messages and read state of the given conversations.
 pub fn build_feed(
   me: UserId,
-  read_at_ms: i64,
-  conversations: impl IntoIterator<Item = (ConversationId, Vec<StoredMessage>)>,
+  conversations: impl IntoIterator<Item = (ConversationId, ConversationReads, Vec<StoredMessage>)>,
 ) -> ActivityFeed {
   let mut items = Vec::new();
-  for (conversation, messages) in conversations {
-    items.extend(conversation_items(me, read_at_ms, conversation, &messages));
+  for (conversation, reads, messages) in conversations {
+    items.extend(conversation_items(me, &reads, conversation, &messages));
   }
   items.sort_by_key(|item| std::cmp::Reverse(item.at));
   items.truncate(MAX_ITEMS);
@@ -53,10 +126,11 @@ pub fn build_feed(
 
 fn conversation_items(
   me: UserId,
-  read_at_ms: i64,
+  reads: &ConversationReads,
   conversation: ConversationId,
   messages: &[StoredMessage],
 ) -> Vec<ActivityItem> {
+  let read = ReadCheck::new(me, reads, messages);
   let by_id: HashMap<_, _> = messages
     .iter()
     .map(|stored| (stored.client_message_id, stored))
@@ -69,26 +143,14 @@ fn conversation_items(
   for stored in messages.iter().filter(|stored| stored.sender_user_id != me) {
     match &stored.content {
       MessageContent::Text { body, mentions, .. } if mentions.contains(&me) => {
-        items.push(item(
-          stored,
-          conversation,
-          read_at_ms,
-          ActivityKind::Mention,
-          body,
-        ));
+        items.push(item(stored, conversation, &read, ActivityKind::Mention, body));
       },
       MessageContent::Text { body, .. }
         if stored
           .maybe_thread_id
           .is_some_and(|thread| my_threads.contains(&thread)) =>
       {
-        items.push(item(
-          stored,
-          conversation,
-          read_at_ms,
-          ActivityKind::ThreadReply,
-          body,
-        ));
+        items.push(item(stored, conversation, &read, ActivityKind::ThreadReply, body));
       },
       MessageContent::Reaction { target, emoji, .. } => {
         let key = (*target, stored.sender_user_id, emoji.clone());
@@ -127,7 +189,8 @@ fn conversation_items(
       actor: stored.sender_user_id,
       at: stored.sent_at_ms,
       excerpt: shorten(&excerpt),
-      is_unread: stored.sent_at_ms > read_at_ms,
+      maybe_read_through: stored.maybe_server_id,
+      is_unread: !read.is_read(stored, reacted_to.maybe_thread_id),
     });
   }
   items
@@ -136,7 +199,7 @@ fn conversation_items(
 fn item(
   stored: &StoredMessage,
   conversation: ConversationId,
-  read_at_ms: i64,
+  read: &ReadCheck,
   kind: ActivityKind,
   body: &str,
 ) -> ActivityItem {
@@ -154,7 +217,69 @@ fn item(
     actor: stored.sender_user_id,
     at: stored.sent_at_ms,
     excerpt: shorten(body),
-    is_unread: stored.sent_at_ms > read_at_ms,
+    maybe_read_through: stored.maybe_server_id,
+    is_unread: !read.is_read(stored, stored.maybe_thread_id),
+  }
+}
+
+/// Decides from the read positions whether an entry was seen. The one rule: an entry is read when
+/// the read position of its target (the thread of a thread message, else the conversation) is at
+/// or after it.
+struct ReadCheck {
+  /// The conversation's read position, with the top-level messages the server counts as read.
+  conversation_through: Option<MessageId>,
+  /// Per followed thread: the oldest reply of others that is still unread (none: all read).
+  thread_first_unread: HashMap<ThreadId, Option<MessageId>>,
+}
+
+impl ReadCheck {
+  fn new(me: UserId, reads: &ConversationReads, messages: &[StoredMessage]) -> Self {
+    let newest_top_level = reads
+      .is_caught_up
+      .then(|| {
+        messages
+          .iter()
+          .filter(|stored| stored.maybe_thread_id.is_none() && stored.sender_user_id != me)
+          .filter_map(|stored| stored.maybe_server_id)
+          .max()
+      })
+      .flatten();
+    let thread_first_unread = reads
+      .thread_unread
+      .iter()
+      .map(|(thread, unread)| {
+        let mut others: Vec<MessageId> = messages
+          .iter()
+          .filter(|stored| stored.maybe_thread_id == Some(*thread) && stored.sender_user_id != me)
+          .filter_map(|stored| stored.maybe_server_id)
+          .collect();
+        others.sort_unstable_by_key(|id| std::cmp::Reverse(*id));
+        let unread = usize::try_from(*unread).unwrap_or(usize::MAX);
+        // The newest `unread` replies are after the thread's read position. Fewer stored than
+        // counted (history not loaded): the oldest stored one is the best known bound.
+        let first_unread = if unread == 0 {
+          None
+        } else {
+          others.get(unread.saturating_sub(1)).or(others.last()).copied()
+        };
+        (*thread, first_unread)
+      })
+      .collect();
+    Self {
+      conversation_through: reads.maybe_last_read.max(newest_top_level),
+      thread_first_unread,
+    }
+  }
+
+  /// `thread` is the thread the entry's target lives in.
+  fn is_read(&self, entry: &StoredMessage, thread: Option<ThreadId>) -> bool {
+    let Some(id) = entry.maybe_server_id else {
+      return false;
+    };
+    match thread.and_then(|thread| self.thread_first_unread.get(&thread)) {
+      Some(first_unread) => first_unread.is_none_or(|first| id < first),
+      None => self.conversation_through.is_some_and(|through| id <= through),
+    }
   }
 }
 
@@ -349,9 +474,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn entries_newer_than_the_read_mark_are_unread_and_the_feed_is_newest_first() {
+    fn entries_after_the_conversations_read_position_are_unread_and_the_feed_is_newest_first() {
       let feed = feed(
-        105,
+        1,
         vec![
           text(1, ANNA, 100, "old @me", &[ME], None),
           text(2, ANNA, 110, "new @me", &[ME], None),
@@ -360,6 +485,65 @@ mod tests {
       let state: Vec<_> = feed.items.iter().map(|item| (item.at, item.is_unread)).collect();
       assert_eq!(state, [(110, true), (100, false)]);
       assert_eq!(feed.unread_count, 1);
+    }
+
+    #[test]
+    fn a_reaction_is_read_once_the_conversation_is_read_past_it() {
+      let messages = vec![
+        text(1, ME, 100, "ship it", &[], None),
+        reaction(2, ANNA, 110, 1, "🎉", true),
+      ];
+      assert_eq!(
+        feed(1, messages.clone()).unread_count,
+        1,
+        "read only to the reacted message"
+      );
+      assert_eq!(feed(2, messages).unread_count, 0);
+    }
+
+    #[test]
+    fn counts_of_zero_from_the_server_read_the_top_level_entries_before_the_position_arrives() {
+      let messages = vec![
+        text(1, ANNA, 100, "@me one", &[ME], None),
+        text(2, ANNA, 110, "@me two", &[ME], None),
+      ];
+      let reads = |is_caught_up| ConversationReads {
+        is_caught_up,
+        ..ConversationReads::default()
+      };
+      assert_eq!(feed_with(reads(false), messages.clone()).unread_count, 2);
+      assert_eq!(feed_with(reads(true), messages).unread_count, 0);
+    }
+
+    #[test]
+    fn a_thread_reply_follows_the_threads_read_position_not_the_conversations() {
+      let messages = vec![
+        text(1, ME, 100, "root", &[], None),
+        reply(2, ANNA, 110, "first", &[], 1),
+        reply(3, ANNA, 120, "second", &[], 1),
+        text(9, ANNA, 130, "later top level", &[], None),
+      ];
+      let reads = |unread, last_read| ConversationReads {
+        maybe_last_read: Some(message_id(last_read)),
+        thread_unread: HashMap::from([(thread(1), unread)]),
+        ..ConversationReads::default()
+      };
+      let unread_of =
+        |feed: &ActivityFeed| -> Vec<bool> { feed.items.iter().map(|item| item.is_unread).collect() };
+      // Two unread replies although the conversation was read past both: the thread decides.
+      assert_eq!(unread_of(&feed_with(reads(2, 9), messages.clone())), [true, true]);
+      // One unread: only the newest.
+      assert_eq!(
+        unread_of(&feed_with(reads(1, 0), messages.clone())),
+        [true, false]
+      );
+      assert_eq!(unread_of(&feed_with(reads(0, 0), messages)), [false, false]);
+    }
+
+    #[test]
+    fn an_entry_says_how_far_to_read_to_clear_it() {
+      let feed = feed(0, vec![text(4, ANNA, 100, "@me", &[ME], None)]);
+      assert_eq!(feed.items[0].maybe_read_through, Some(message_id(4)));
     }
 
     #[test]
@@ -381,8 +565,17 @@ mod tests {
     }
   }
 
-  fn feed(read_at_ms: i64, messages: Vec<StoredMessage>) -> ActivityFeed {
-    build_feed(user(ME), read_at_ms, [(id_from_raw(50), messages)])
+  /// The feed with the conversation read through message `read_through` (0: nothing read).
+  fn feed(read_through: u64, messages: Vec<StoredMessage>) -> ActivityFeed {
+    let reads = ConversationReads {
+      maybe_last_read: (read_through > 0).then(|| message_id(read_through)),
+      ..ConversationReads::default()
+    };
+    feed_with(reads, messages)
+  }
+
+  fn feed_with(reads: ConversationReads, messages: Vec<StoredMessage>) -> ActivityFeed {
+    build_feed(user(ME), [(id_from_raw(50), reads, messages)])
   }
 
   fn kinds(feed: &ActivityFeed) -> Vec<ActivityKind> {
