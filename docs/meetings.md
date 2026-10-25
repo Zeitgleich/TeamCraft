@@ -135,6 +135,31 @@ Guest sessions are HS256 tokens signed with `guest_token_secret`; every API call
 connection accepts them like an access token and treats the holder as a guest. Guests can't schedule
 meetings and see nothing until they are admitted.
 
+## Guests in the browser
+
+A guest's page keeps going after "You are in" (#446; design in e2ee.md §4.6, "Meeting guests"):
+
+1. After joining, the page enrolls an ephemeral device for the guest session (no account, no backup)
+   and publishes its key packages while the guest waits in the lobby.
+2. A host's "admit" makes the guest a member on the server and lets their device into the chat's
+   encryption group from the join on. The guest's page then shows a slim meeting view: the meeting
+   chat (history from the join on) and the call, nothing else of the app (no sidebar, spaces or
+   settings). Everybody sees the guest as "Guest (unverified)".
+3. **Token scope and expiry.** The session token is valid until the meeting's end plus
+   `guest_grace_secs` and is accepted only on a short list of routes (conversation and messages of
+   the guest's chats, the MLS and key routes of their own device, device registration, the lobby state
+   of the meeting, `leave`, calls). Anything else answers 403. Guests only ever see conversations
+   they are members of, which for a guest is the one meeting chat.
+4. **Leaving.** `POST /meetings/{id}/leave` (guests only) ends the guest's session: their place in
+   the lobby is closed, the account is deactivated (devices flagged removed, gateway connections
+   closed, removed from the chat and the call) and the hosts' devices commit the removal from the
+   encryption group. The page wipes its store. A guest who is turned away, or whose access ends, is
+   treated the same.
+5. **Limits.** Joining counts against the per-address limits (above); a guest's writes count
+   against `user_writes_per_minute`; devices and key packages against `limits.max_devices_per_user`
+   and the key package limits like any user's. The shared link's guest limit bounds how many guests
+   one link lets in.
+
 ## Gateway events
 
 | Event            | To                          | When                                            |

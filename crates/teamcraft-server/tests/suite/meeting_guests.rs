@@ -641,7 +641,8 @@ mod shared_link {
       let (status, _) = rig
         .request(Some(&guest_token), method.clone(), &path, Some(json!({})))
         .await;
-      assert_eq!(status, StatusCode::NOT_FOUND, "{method}");
+      // A guest session doesn't reach these routes at all.
+      assert_eq!(status, StatusCode::FORBIDDEN, "{method}");
     }
     // The link still works: none of that revoked it.
     assert_eq!(rig.join(&invite_token(&link), "Ida").await.0, StatusCode::OK);
@@ -812,6 +813,122 @@ mod knocking {
     // An outsider can't tell a cancelled meeting from none; a member learns that it is over.
     assert_eq!(cancelled_outsider.status, StatusCode::NOT_FOUND);
     assert_eq!(cancelled_member.status, StatusCode::CONFLICT);
+    rig.app.stop().await;
+  }
+}
+
+mod scope_and_leaving {
+  use super::*;
+
+  #[tokio::test]
+  async fn an_admitted_guest_reaches_only_the_routes_a_guest_needs() {
+    let rig = rig!();
+    let alice = owner();
+    let (meeting, chat, token) = rig.meeting_with_guest(&alice, false).await;
+    let (_, joined) = rig.join(&token, "Gus").await;
+    let guest_token = joined["guest_token"].as_str().unwrap().to_owned();
+
+    for (method, path, body) in [
+      (Method::GET, "/users?query=a".to_owned(), None),
+      (Method::POST, "/dms".to_owned(), Some(json!({"user_id": "1"}))),
+      (Method::POST, "/meetings/instant".to_owned(), Some(json!({}))),
+      (Method::GET, "/meetings".to_owned(), None),
+      (Method::GET, "/admin/users".to_owned(), None),
+      (
+        Method::POST,
+        format!("/meetings/{meeting}/guest-links"),
+        Some(json!({})),
+      ),
+      (Method::PATCH, format!("/conversations/{chat}"), Some(json!({}))),
+    ] {
+      let (status, body) = rig.request(Some(&guest_token), method.clone(), &path, body).await;
+      assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {body}");
+    }
+    let (status, _) = rig
+      .request(
+        Some(&guest_token),
+        Method::GET,
+        &format!("/conversations/{chat}"),
+        None,
+      )
+      .await;
+    assert_eq!(status, StatusCode::OK);
+    rig.app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_guest_who_leaves_loses_the_session_and_the_chat() {
+    let rig = rig!();
+    let app = &rig.app;
+    let alice = owner();
+    let alice_device = register_device(app, &alice).await;
+    let (meeting, chat, token) = rig.meeting_with_guest(&alice, false).await;
+    let (_, joined) = rig.join(&token, "Gus").await;
+    let guest_token = joined["guest_token"].as_str().unwrap().to_owned();
+    let guest_id = joined["user_id"].as_str().unwrap().to_owned();
+    let mut alice_socket = ws::connect(app, &alice, &alice_device).await;
+    ws::events(&mut alice_socket, Duration::from_millis(300)).await;
+
+    let (status, body) = rig
+      .request(
+        Some(&guest_token),
+        Method::POST,
+        &format!("/meetings/{meeting}/leave"),
+        Some(json!({})),
+      )
+      .await;
+
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let removed = events_of(&ws::events(&mut alice_socket, QUIET).await, "membership_remove");
+    assert_eq!(removed[0]["user_id"], guest_id.as_str());
+    let (status, _) = rig
+      .request(
+        Some(&guest_token),
+        Method::GET,
+        &format!("/conversations/{chat}"),
+        None,
+      )
+      .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "the session is over");
+    let members = app.get(&alice, &format!("/conversations/{chat}/members")).await;
+    assert!(!members.body.to_string().contains(&guest_id));
+    rig.app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_waiting_guest_who_leaves_cannot_be_admitted_and_members_cannot_use_leave() {
+    let rig = rig!();
+    let app = &rig.app;
+    let alice = owner();
+    let (meeting, _, token) = rig.meeting_with_guest(&alice, true).await;
+    let (_, joined) = rig.join(&token, "Gus").await;
+    let guest_token = joined["guest_token"].as_str().unwrap().to_owned();
+    let guest_id = joined["user_id"].as_str().unwrap().to_owned();
+
+    let member = app
+      .post(&alice, &format!("/meetings/{meeting}/leave"), json!({}))
+      .await;
+    assert_eq!(member.status, StatusCode::FORBIDDEN, "{}", member.body);
+
+    let (status, _) = rig
+      .request(
+        Some(&guest_token),
+        Method::POST,
+        &format!("/meetings/{meeting}/leave"),
+        Some(json!({})),
+      )
+      .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let lobby = app.get(&alice, &format!("/meetings/{meeting}/lobby")).await;
+    assert!(lobby.body["entries"].as_array().unwrap().is_empty());
+    let admit = app
+      .post(
+        &alice,
+        &format!("/meetings/{meeting}/lobby/{guest_id}/admit"),
+        json!({}),
+      )
+      .await;
+    assert_eq!(admit.status, StatusCode::CONFLICT, "{}", admit.body);
     rig.app.stop().await;
   }
 }

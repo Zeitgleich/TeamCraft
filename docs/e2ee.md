@@ -792,8 +792,55 @@ never by the server's member list:
   move in a later call, or a member who points it at an old room with other people in it, gets
   nobody's audio or video there.
 
-Not covered yet: users invited later by editing the meeting (#475); guests have no device that can
-join a group until #446, so admitting a guest lets nobody into the encryption yet.
+- **Meeting guests** (#446). A guest has no account at the identity provider, but is a user of the
+  server (kind `guest`) with a session token for one meeting (docs/meetings.md). Their browser page
+  runs a normal client core with an **ephemeral device**:
+  - *Identity and credential.* The page enrolls like any device (§3, §3.2): a fresh identity key,
+    a device key, the signed device certificate (the MLS `BasicCredential`), key packages and a
+    signed device list. The key bag the server requires with a new identity is wrapped with a random
+    passphrase that is never shown or stored: there is no backup and no recovery, a guest who loses
+    the device (cleared site data) loses the guest's place, and the host admits the same link-holder
+    again as a new guest. The store is encrypted like the web client's (§9) with a key that lives in
+    the page's session only, and is wiped when the guest leaves, is turned away or the meeting's
+    access ends. No push, no search index, no account data sync.
+  - *How members verify a guest without a directory account.* Nothing attests the guest's identity
+    key (§3.1 needs the identity provider), so a member's client pins it on first use, when the
+    admitting host's device fetches it for the add, and marks the user "Guest (unverified)" in the
+    chat, the member list and the call. The certificate chain (identity key → device key → MLS
+    leaf) is verified exactly as for members, so a guest's messages and call media are bound to
+    that one pinned key; what stays open is whether the key is the person the host meant. The
+    host decides that from the lobby entry (the name the guest gave). An identity key
+    change for a pinned guest is refused like for anybody else. The server could still invent a guest
+    of its own; it could do that before (it signs the session tokens), the host still sees every
+    admission, and the guest is shown unverified to everybody.
+  - *How the guest verifies members.* The guest's client treats the members' identity keys like a
+    member's client does: attested ones (§3.1; the issuer and client come from the server info, the
+    JWKS from the identity provider directly) are pinned as attested, the rest on first use. So where
+    attestation is on, a hostile server can't put its own keys in for the members the guest talks
+    to. The guest joins only a group founded by the meeting's organizer (above, "Whose group").
+  - *Admission.* The host's "admit" makes the guest a member on the server, and the host's device
+    then adds the guest's device as above (`let_into_meeting_chat`), always with history from the
+    join on. The guest's device was enrolled and had key packages published while it waited in the
+    lobby, so the add finds it; the welcome reaches it through its normal welcome queue. A guest
+    admitted without a device yet (page still loading) is added when it appears: the host's device
+    that admitted keeps the admitted guests of that meeting in its sync state and adds a guest
+    device that shows up, only if the guest's signed device list names it and the guest is still
+    admitted on the server's lobby; it adds nothing for guests that were turned away.
+  - *Removal.* A guest who leaves (`POST /meetings/{id}/leave`), is turned away or whose access ends
+    is deactivated by the server, which reports the removal. Clients still sign removals
+    themselves (§3): the guest's page removes itself first (a signed leave), and a host's device
+    that admitted the guest commits the signed removal on `membership_remove` for that guest, or
+    when the meeting is over (`ends_at` plus `guest_grace_secs`) at its next sync. A guest device
+    that is gone for good stays a leaf until then; it can read nothing the group sends after the
+    removal commit. Removal at the end is why a guest never keeps a key to a later epoch.
+  - *Calls.* The guest's call key binding (§8) is signed by the guest's device key; members verify
+    it like any other and show the guest as unverified.
+  - *Scope.* A guest session token is accepted only on the routes a guest needs (chat, key
+    material for the guest's own device, the meeting's lobby state and leave, calls). Everything else
+    answers 403, so a guest can't search the directory, open DMs, join spaces or schedule
+    meetings, whatever the roles say.
+
+Not covered yet: users invited later by editing the meeting (#475).
 
 **Server time for merge decisions.** Whether every member merges a commit must not depend on its own
 clock, or a skewed clock would split the group. The roster freshness (admin.md §2.3) is judged at the

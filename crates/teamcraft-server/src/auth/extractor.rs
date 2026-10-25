@@ -1,4 +1,4 @@
-use axum::extract::FromRequestParts;
+use axum::extract::{FromRequestParts, MatchedPath};
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 use teamcraft_db::User;
@@ -6,6 +6,8 @@ use teamcraft_proto::Role;
 
 use super::error::AuthError;
 use crate::error::ApiError;
+use crate::meetings::guest::GUEST_ISSUER;
+use crate::meetings::guest_scope;
 use crate::services::accounts;
 use crate::state::AppState;
 
@@ -28,6 +30,12 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
   async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
     let token = bearer_token(parts)?;
     let identity = accounts::validate_token(state, token).await?;
+    if identity.issuer == GUEST_ISSUER {
+      let maybe_path = parts.extensions.get::<MatchedPath>().map(MatchedPath::as_str);
+      if !guest_scope::allows(&parts.method, maybe_path) {
+        return Err(ApiError::Forbidden("guests can't do that".into()));
+      }
+    }
     let caller = accounts::authenticate(state, identity).await?;
     if is_write(&parts.method) {
       state.rate_limits.check_user_write(caller.user.id)?;

@@ -254,6 +254,60 @@ pub async fn my_lobby_state(
   })
 }
 
+/// A guest leaves the meeting: their place in the lobby is closed and their account is
+/// deactivated, which ends their session and connections, flags their devices removed, takes them
+/// out of the chat and the call and tells the others (whose devices commit the removal from the
+/// encryption group). Members have an account that stays; they leave through the chat instead.
+pub async fn leave(state: &AppState, caller: &AuthenticatedUser, id: MeetingId) -> Result<(), ApiError> {
+  service_of(state)?;
+  if !is_guest(caller) || caller.user.kind != UserKind::Guest {
+    return Err(ApiError::Forbidden("only guests leave a meeting this way".into()));
+  }
+  let meeting = state
+    .database
+    .get_meeting(id)
+    .await?
+    .ok_or_else(ApiError::meeting_not_found)?;
+  if state
+    .database
+    .get_lobby_entry(id, caller.user.id)
+    .await?
+    .is_none()
+  {
+    return Err(ApiError::meeting_not_found());
+  }
+  // A guest who still waits must not stay in the hosts' lobby, where "admit" would let in an
+  // account that is gone. Not waiting any more is fine: they were admitted or turned away.
+  if state
+    .database
+    .decide_lobby(
+      &meeting,
+      caller.user.id,
+      LobbyState::Denied.as_str(),
+      caller.user.id,
+    )
+    .await?
+  {
+    let hosts = state.database.meeting_host_ids(&meeting).await?;
+    state.hub.publish(
+      hosts,
+      &GatewayEvent::LobbyDecision {
+        meeting_id: id,
+        state: LobbyState::Denied,
+      },
+    );
+  }
+  super::admin::deactivate_user(
+    state,
+    Some(caller.user.id),
+    caller.user.id,
+    teamcraft_proto::DeactivationReason::Left,
+    "left the meeting",
+  )
+  .await?;
+  Ok(())
+}
+
 /// Lets a waiting guest into the meeting chat (hosts only).
 pub async fn admit(
   state: &AppState,
