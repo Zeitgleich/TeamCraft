@@ -131,7 +131,7 @@ fn main() -> anyhow::Result<()> {
         tracing::warn!(%error, "no tray icon");
       }
       create_main_window(app)?;
-      notifications::prepare();
+      notifications::prepare(app.handle());
       #[cfg(target_os = "linux")]
       notifications::watch_notifications(app.handle());
       #[cfg(target_os = "linux")]

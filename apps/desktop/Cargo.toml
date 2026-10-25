@@ -91,8 +91,8 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
 # Notifications that can be replaced and withdrawn (UNUserNotificationCenter), through the same
 # safe objc2 bindings (Zlib/Apache-2.0/MIT; already in the tree through Tauri's macOS stack).
 objc2 = "0.6.2"
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSBundle", "NSError", "NSString"] }
-objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNNotificationContent", "UNNotificationRequest", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSBundle", "NSError", "NSSet", "NSString"] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 block2 = "0.6.2"
 
 # Windows: Media Foundation cameras and Windows Graphics Capture for screens and windows.
