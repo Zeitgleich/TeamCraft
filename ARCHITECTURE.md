@@ -311,6 +311,10 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   and signs and verifies the call key bindings for it (`teamcraft_client_api::page_calls`). Calls run in the
   tab that runs the client core (e2ee.md §9.4); background effects are desktop-only for now.
 - Desktop: `cpal` for audio I/O, `opus`, **`webrtc-audio-processing`** (AEC, noise suppression, AGC) – the only WebRTC component used.
+  The media runs in the shell; for each tile on screen the shell sends the decrypted track to the
+  webview over a Tauri channel (`call_watch_video`: H.264 that WebCodecs decodes, or JPEG images
+  where the webview can't decode H.264), and the own camera as sent (with effects) as small JPEG
+  images (`call_watch_camera`). The UI draws both with the same `LiveVideo` as the browser.
 - Browser support (MDN browser-compat-data, checked 2026-10): WebTransport incl. datagrams in Chrome 97,
   Firefox 114, **Safari / iOS Safari 26.4**; WebCodecs `VideoEncoder`/`VideoDecoder` in Chrome 94,
   Firefox 130, Safari 16.4; `AudioEncoder`/`AudioDecoder` in Safari 26. No WebRTC fallback planned;

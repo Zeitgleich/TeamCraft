@@ -46,6 +46,8 @@ const COMMANDS: &[&str] = &[
   "call_watch_video",
   "call_background_preview",
   "call_unwatch_video",
+  "call_watch_camera",
+  "call_unwatch_camera",
   "notify_user",
   "withdraw_notifications",
   "request_attention",

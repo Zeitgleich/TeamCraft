@@ -195,6 +195,8 @@ fn main() -> anyhow::Result<()> {
       calls::commands::call_watch_video,
       calls::commands::call_background_preview,
       calls::commands::call_unwatch_video,
+      calls::commands::call_watch_camera,
+      calls::commands::call_unwatch_camera,
       notifications::notify_user,
       notifications::withdraw_notifications,
       notifications::request_attention,

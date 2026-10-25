@@ -84,5 +84,5 @@ pub mod system_audio;
 pub mod system_audio_pipewire;
 #[cfg(all(feature = "wasapi-loopback", target_os = "windows"))]
 pub mod system_audio_wasapi;
-#[cfg(feature = "web")]
+#[cfg(feature = "web-api")]
 pub mod web_api;

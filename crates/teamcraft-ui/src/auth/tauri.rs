@@ -651,6 +651,41 @@ fn subscribe(event: &str, callback: impl FnMut(JsValue) + 'static) {
   handler.forget();
 }
 
+/// Registers `callback` with the command bridge and returns the argument that hands it to a
+/// command taking a `tauri::ipc::Channel` (what `new Channel()` of the Tauri JS API does). The
+/// callback gets `{ message, index }` per message (in send order by `index`, but not necessarily
+/// delivered in it) and `{ end: true, index }` when the shell drops the channel.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn open_channel(callback: &js_sys::Function) -> Option<(u32, String)> {
+  let internals = internals()?;
+  let transform: js_sys::Function = js_sys::Reflect::get(&internals, &JsValue::from_str("transformCallback"))
+    .ok()?
+    .dyn_into()
+    .ok()?;
+  let id = transform
+    .call2(&internals, callback, &JsValue::FALSE)
+    .ok()?
+    .as_f64()?;
+  // The bridge's ids are random `u32`s, so the cast is exact.
+  let id = id as u32;
+  Some((id, format!("__CHANNEL__:{id}")))
+}
+
+/// Forgets a callback of [`open_channel`]; later messages of its channel are dropped.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn close_channel(id: u32) {
+  let Some(internals) = internals() else {
+    return;
+  };
+  if let Some(unregister) = js_sys::Reflect::get(&internals, &JsValue::from_str("unregisterCallback"))
+    .ok()
+    .and_then(|value| value.dyn_into::<js_sys::Function>().ok())
+  {
+    // Nothing to do when it fails: the callback then just stays registered.
+    let _ = unregister.call1(&internals, &JsValue::from(id));
+  }
+}
+
 /// `window.__TAURI_INTERNALS__`: what the shell injects into its webview for the command bridge.
 /// The shell does not set `withGlobalTauri`, so scripts find no friendlier `window.__TAURI__`.
 fn internals() -> Option<JsValue> {
