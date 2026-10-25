@@ -75,6 +75,15 @@ pub(crate) enum PendingChange {
     conversation_id: ConversationId,
     share: SharedKeys,
   },
+  /// A device was added back by a member who joined the group after this device: that member
+  /// may lack keys of epochs before its join that the device missed. Staggered like
+  /// [`Self::AddDevice`]; dropped once a member who joined no later than this device sent it keys.
+  ShareMissedKeys {
+    conversation_id: ConversationId,
+    user_id: UserId,
+    device_id: DeviceId,
+    not_before_ms: i64,
+  },
   /// A further device of a member joined without this device's commit (by external commit, or a
   /// colleague added it): its key bag may lack the current key (#178). Staggered like
   /// [`Self::AddDevice`]; dropped once any member sent a current key to the group.
@@ -243,6 +252,11 @@ impl PendingChange {
 
   pub(crate) fn current_key_share_prefix(conversation: ConversationId) -> String {
     format!("share_current/{conversation}/")
+  }
+
+  /// Where the follow-up keys for a device added back wait ([`PendingChange::ShareMissedKeys`]).
+  pub(crate) fn missed_keys_share_key(conversation: ConversationId, device: DeviceId) -> String {
+    format!("share_missed/{conversation}/{device}")
   }
 
   /// Where a removal this device started waits ([`PendingChange::Removal`]).
@@ -581,6 +595,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         device_id,
         ..
       } => PendingChange::current_key_share_key(*conversation_id, *device_id),
+      PendingChange::ShareMissedKeys {
+        conversation_id,
+        device_id,
+        ..
+      } => PendingChange::missed_keys_share_key(*conversation_id, *device_id),
       PendingChange::Removal {
         conversation_id,
         user_id,
@@ -749,6 +768,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         return Ok(PendingOutcome::Done);
       },
       PendingChange::ShareCurrentKey { .. } => return self.apply_current_key_share(change).await,
+      PendingChange::ShareMissedKeys { .. } => return self.apply_missed_keys_share(change).await,
     };
     self.commit_change(source.0, source.1).await?;
     Ok(PendingOutcome::Done)

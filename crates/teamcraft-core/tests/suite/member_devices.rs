@@ -10,6 +10,7 @@ use std::sync::Arc;
 use common::{Peer, linked_options, settings, settle};
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
+use teamcraft_core::client::is_waiting_for_device;
 use teamcraft_core::store::{ConversationEvent, LocalStore, MemoryStore, MessageContent, MessageFilter};
 use teamcraft_core::{GroupAccess, LinkOffer, PendingEnrollment};
 use teamcraft_proto::{AddConversationMemberRequest, ConversationId, ListMlsMessagesQuery};
@@ -281,6 +282,82 @@ async fn a_user_who_is_not_in_the_group_still_joins_with_a_signed_self_add() {
   assert!(from_carol.iter().any(|payload| payload.starts_with(b"TCAC")));
   assert!(!from_carol.iter().any(|payload| payload.starts_with(b"TCDA")));
   settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+}
+
+/// Issue #178: the key bag's current key may predate a key switch, so a device that joined on
+/// its own writes only once a member handed it the current key; it shows that it waits.
+#[tokio::test]
+async fn a_device_that_joined_on_its_own_writes_once_a_member_handed_it_the_current_key() {
+  let server = FakeServer::new();
+  let (mut phone, mut bob, channel) = channel_with_history(&server).await;
+  let mut laptop = link_laptop(&mut phone).await;
+  server.set_offline(bob.client.user_id(), true);
+
+  laptop.client.full_sync().await.unwrap();
+  assert_eq!(laptop.client.group_access(channel).unwrap(), GroupAccess::Member);
+  assert!(is_waiting_for_device(laptop.store.as_ref(), channel).unwrap());
+  laptop
+    .client
+    .send_text(channel, None, "from the laptop")
+    .await
+    .unwrap();
+  assert_eq!(laptop.client.flush_outbox().await.unwrap().pending, 1);
+
+  server.set_offline(bob.client.user_id(), false);
+  settle(&mut [&mut phone, &mut bob, &mut laptop]).await;
+  assert!(!is_waiting_for_device(laptop.store.as_ref(), channel).unwrap());
+  // The runner flushes the outbox on its next round.
+  assert_eq!(laptop.client.flush_outbox().await.unwrap().sent, 1);
+  settle(&mut [&mut phone, &mut bob, &mut laptop]).await;
+  assert_eq!(bob.texts(channel), ["one", "two", "three", "from the laptop"]);
+  assert_eq!(phone.texts(channel), ["one", "two", "three", "from the laptop"]);
+}
+
+/// Issue #179: a further device joins the user's DMs on its own, like channels.
+#[tokio::test]
+async fn a_linked_device_joins_a_dm_on_its_own() {
+  let server = FakeServer::new();
+  let mut phone = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let dm = phone.client.open_dm(bob.client.user_id()).await.unwrap();
+  phone.client.send_text(dm, None, "hi Bob").await.unwrap();
+  settle(&mut [&mut phone, &mut bob]).await;
+  phone.client.upload_key_bag().await.unwrap();
+  let mut laptop = link_laptop(&mut phone).await;
+  server.set_offline(bob.client.user_id(), true);
+
+  laptop.client.full_sync().await.unwrap();
+  assert_eq!(laptop.client.group_access(dm).unwrap(), GroupAccess::Member);
+  assert_eq!(laptop.texts(dm), ["hi Bob"]);
+
+  server.set_offline(bob.client.user_id(), false);
+  settle(&mut [&mut phone, &mut bob, &mut laptop]).await;
+  bob.client.send_text(dm, None, "hi laptop").await.unwrap();
+  laptop
+    .client
+    .send_text(dm, None, "hi from the laptop")
+    .await
+    .unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut laptop]).await;
+  assert_eq!(laptop.texts(dm), ["hi Bob", "hi laptop", "hi from the laptop"]);
+  assert_eq!(bob.texts(dm), ["hi Bob", "hi laptop", "hi from the laptop"]);
+}
+
+/// A DM whose group doesn't hold the other participant yet (Bob has no device) may still lose a
+/// founding race: a further device doesn't join it by external commit.
+#[tokio::test]
+async fn a_linked_device_does_not_join_a_dm_group_that_lacks_a_participant() {
+  let server = FakeServer::new();
+  let mut phone = Peer::enroll(&server, "Alice").await;
+  let bob_id = server.add_user("Bob").user_id();
+  let dm = phone.client.open_dm(bob_id).await.unwrap();
+  let mut laptop = link_laptop(&mut phone).await;
+
+  laptop.client.full_sync().await.unwrap();
+  assert_eq!(
+    laptop.client.group_access(dm).unwrap(),
+    GroupAccess::WaitingForDevice
+  );
 }
 
 /// Alice's phone and Bob share a channel with three messages; Alice uploaded her key bag.

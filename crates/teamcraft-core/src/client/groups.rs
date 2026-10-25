@@ -899,8 +899,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Ok(GroupEvent::ContentKeys { bundle, .. }) => {
         self.apply_bundle(conversation, bundle, epoch)?;
       },
-      Ok(GroupEvent::SealedContentKeys { sealed, .. }) => {
-        if sealed.recipient() == self.own_member() {
+      Ok(GroupEvent::SealedContentKeys { sender, sealed }) => {
+        if sealed.recipient() != self.own_member() {
+          self.note_sealed_keys_sent(conversation, sender, sealed.recipient())?;
+        } else {
           match sealed.open(&self.account.device) {
             // Keys of epochs this device missed; none of them becomes current (e2ee.md §4.6).
             Ok(bundle) => {
@@ -936,6 +938,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           self.forget_rejoin_request(conversation, device)?;
         }
         self.note_member_changes(conversation, &before)?;
+        if let (Some(rejoined), Some(committer)) = (update.maybe_rejoined, update.maybe_committer) {
+          self.follow_up_rejoin(conversation, rejoined, committer)?;
+        }
         if update.maybe_change.is_none() && update.maybe_rejoined.is_none() {
           // Further devices of members (an external join, or a colleague's commit): their key
           // bag may lack the current key (#178). One member hands it over (e2ee.md §4.6).
@@ -2218,11 +2223,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let Some(own) = self.post_commit(conversation, output, &[device]).await? else {
       return Ok(false);
     };
-    if let Some(share) = self.after_own_commit(conversation, &own.update, own.at_ms)? {
-      self.queue_pending(PendingChange::ShareHistory {
-        conversation_id: conversation,
-        share,
-      })?;
+    if let Some(share) = self.after_own_commit(conversation, &own.update, own.at_ms)?
+      && let Err(error) = self.share_history_or_queue(conversation, share).await
+    {
+      // Queued when it may work later; the device is back in the group either way.
+      tracing::warn!(conversation_id = %conversation, %error, "keys for a device added back not sent yet");
     }
     tracing::info!(conversation_id = %conversation, device_id = %device, "added back a device that fell out of the group");
     Ok(true)

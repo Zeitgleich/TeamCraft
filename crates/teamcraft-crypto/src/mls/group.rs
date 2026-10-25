@@ -135,6 +135,8 @@ pub struct MembershipUpdate {
   /// both `removed` (its old leaf) and `added`, and stays a member.
   pub maybe_rejoined: Option<GroupMember>,
   pub is_self_removed: bool,
+  /// The member whose commit it was, from its credential; `None` for this device's own commits.
+  pub maybe_committer: Option<GroupMember>,
 }
 
 /// The membership effect of a commit, with every added device verified.
@@ -605,6 +607,7 @@ impl ConversationGroup {
       removed: pending.removed,
       maybe_rejoined: pending.maybe_rejoin.map(|(member, _)| member),
       is_self_removed: false,
+      maybe_committer: None,
     })
   }
 
@@ -707,7 +710,7 @@ impl ConversationGroup {
         }
       },
       ProcessedMessageContent::StagedCommitMessage(staged) => {
-        let (update, maybe_request_id) = match maybe_sender_index {
+        let (mut update, maybe_request_id) = match maybe_sender_index {
           Some(sender_index) => {
             self.authorize_commit(&staged, sender_index, &authenticated_data, directory, authority)?
           },
@@ -716,6 +719,7 @@ impl ConversationGroup {
             None,
           ),
         };
+        update.maybe_committer = Some(sender);
         let epoch = self.epoch();
         self
           .group
@@ -864,6 +868,7 @@ impl ConversationGroup {
         removed: proposed.removed,
         maybe_rejoined: Some(member),
         is_self_removed: staged.self_removed(),
+        maybe_committer: None,
       };
       return Ok((update, Some(verified.request().request_id())));
     }
@@ -885,6 +890,7 @@ impl ConversationGroup {
       removed: proposed.removed,
       maybe_rejoined: None,
       is_self_removed: staged.self_removed(),
+      maybe_committer: None,
     };
     Ok((update, None))
   }
@@ -937,6 +943,7 @@ impl ConversationGroup {
       removed: Vec::new(),
       maybe_rejoined: None,
       is_self_removed: false,
+      maybe_committer: None,
     })
   }
 
