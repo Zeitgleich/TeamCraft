@@ -384,6 +384,9 @@ pub struct Conversation {
   /// what it shows may be incomplete.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub is_catching_up: bool,
+  /// The version of the channel's picture (`GET /api/v1/conversations/{id}/image`), if it has one.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_image_version: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

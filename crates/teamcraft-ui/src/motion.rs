@@ -4,7 +4,8 @@
 //! stay a moment after the view dropped it: [`use_leave_ghost`] leaves an inert copy in its place
 //! that plays the exit animation (`.is-leaving`) and then removes itself. The real element is gone
 //! at once, so focus, state and the next view never wait for an animation. With reduced motion the
-//! ghost still fades out (the stylesheet drops the movement, #360).
+//! ghost still fades out (the stylesheet drops the movement, #360). An element that already played
+//! its own exit (a swiped toast) carries `.has-exited` and leaves no ghost.
 
 use std::time::Duration;
 
@@ -19,6 +20,28 @@ const MAX_GHOSTS: u32 = 8;
 
 thread_local! {
   static GHOSTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// A monotonic time for comparing moments of the same page (the page's `performance.now()`), never
+/// a date. Zero where there is no page.
+pub fn now() -> Duration {
+  let millis = web_sys::window()
+    .and_then(|window| window.performance())
+    .map_or(0.0, |performance| performance.now());
+  Duration::from_secs_f64(millis.max(0.0) / 1000.0)
+}
+
+/// Whether the user asked the system for less motion: for motion the stylesheet can't turn off
+/// (positions measured and played from Rust).
+pub fn prefers_reduced_motion() -> bool {
+  web_sys::window()
+    .and_then(|window| {
+      window
+        .match_media("(prefers-reduced-motion: reduce)")
+        .ok()
+        .flatten()
+    })
+    .is_some_and(|query| query.matches())
 }
 
 /// Which side of its trigger a self-placed popover opens on, so it grows out of (and shrinks back
@@ -65,7 +88,7 @@ where
 /// Leaves an inert, hidden-from-assistive-tech copy of `element` at its place on screen, with
 /// `.is-leaving` for the exit animation, and removes it after [`GHOST_LIFETIME`].
 fn leave_ghost(element: &web_sys::Element) {
-  if !element.is_connected() || GHOSTS.get() >= MAX_GHOSTS {
+  if !element.is_connected() || element.class_list().contains("has-exited") || GHOSTS.get() >= MAX_GHOSTS {
     return;
   }
   let Some(body) = web_sys::window()

@@ -7,6 +7,7 @@ use crate::clock::{format_relative, now_ms};
 use crate::components::admin_console::SectionHeader;
 use crate::components::channel_view::UnconfirmedRemovalActions;
 use crate::components::icons::{Icon, IconName};
+use crate::components::sliding_indicator::SlidingIndicator;
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, ConversationKind, UserId};
 use crate::state::use_app_state;
@@ -142,6 +143,7 @@ pub fn ChannelsSection() -> impl IntoView {
         on:input=move |ev| query.set(event_target_value(&ev))
       />
       <div class="segmented" role="group" aria-label=move || i18n.t("admin-filter")>
+        <SlidingIndicator />
         {ChannelFilter::ALL
           .into_iter()
           .map(|option| {

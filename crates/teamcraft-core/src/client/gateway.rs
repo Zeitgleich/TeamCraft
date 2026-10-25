@@ -57,8 +57,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     handshake_timeout: Duration,
   ) -> Result<GatewayStart<A::Gateway>, CoreError> {
     // Events may have been missed while disconnected: every group is caught up again before the
-    // outbox sends into it.
+    // outbox sends into it, and the welcomes are read again before a spent key package goes
+    // (issue #395).
     self.mls_current.clear();
+    self.are_welcomes_synced = false;
     // A replay cut short by the drop is not waited for; this connection brings its own.
     self.maybe_replay_left = None;
     let (mut connection, mut heartbeat_interval) = self.open_gateway(handshake_timeout).await?;

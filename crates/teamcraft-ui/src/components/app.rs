@@ -73,6 +73,7 @@ use crate::reactive::use_interval;
 use crate::sections::badge_count;
 use crate::settings::{Settings, Theme};
 use crate::state::{AppState, MainView, Overlay, RailEntry, SidePanel, ToastTone};
+use crate::toast_motion::{Swipe, use_flip_stack};
 use crate::toast_timer::Hold;
 use crate::viewport::CompactPane;
 
@@ -196,6 +197,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   on_cleanup(move || listener.remove());
   let banners = NodeRef::<leptos::html::Div>::new();
   track_banner_height(banners);
+  let toast_stack = NodeRef::<leptos::html::Div>::new();
+  use_flip_stack(toast_stack);
 
   view! {
     <a class="skip-link" href="#main-content">
@@ -282,6 +285,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       <div
         class="toasts"
         role="status"
+        node_ref=toast_stack
         on:pointerenter=move |_| state.hold_toasts(Hold::Pointer, true)
         on:pointerleave=move |_| state.hold_toasts(Hold::Pointer, false)
         on:focusin=move |_| state.hold_toasts(Hold::Focus, true)
@@ -296,9 +300,18 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
             let id = toast.id;
             let node = NodeRef::<leptos::html::Div>::new();
             use_leave_ghost(node);
+            let swipe = Swipe::new();
             let is_error = matches!(toast.tone, ToastTone::Error { .. });
             view! {
-              <div class=if is_error { "toast toast-error" } else { "toast" } role=is_error.then_some("alert") node_ref=node>
+              <div
+                class=if is_error { "toast toast-error" } else { "toast" }
+                role=is_error.then_some("alert")
+                node_ref=node
+                on:pointerdown=move |ev| swipe.start(&ev)
+                on:pointermove=move |ev| swipe.track(&ev)
+                on:pointerup=move |ev| swipe.end(&ev, move || state.dismiss_toast(id))
+                on:pointercancel=move |ev| swipe.cancel(&ev)
+              >
                 <div class="toast-body">
                   <span>{toast.text}</span>
                   {match toast.tone {

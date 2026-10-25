@@ -191,6 +191,26 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         }
         continue;
       }
+      let is_direct = matches!(response.kind, ConversationKind::Dm | ConversationKind::Group);
+      if is_direct {
+        // A further device joins the user's DMs and group DMs on its own too (#179); a DM this
+        // device opened is finished by its setup (`repair_dm_setups`), and nobody self-adds.
+        if response.maybe_my_membership.is_none()
+          || response.is_archived
+          || self.has_group(response.id)?
+          || self.has_dm_setup(response.id)?
+        {
+          continue;
+        }
+        match self.join_as_member_device(response.id).await {
+          Err(error) if error.is_transient() => return Err(error),
+          Err(error) => {
+            tracing::warn!(conversation_id = %response.id, %error, "could not join a DM as a further device");
+          },
+          Ok(_) => {},
+        }
+        continue;
+      }
       let is_channel = response.maybe_space_id.is_some() && response.kind == ConversationKind::Channel;
       let key = format!("self-add/{}", response.id);
       if !is_channel
