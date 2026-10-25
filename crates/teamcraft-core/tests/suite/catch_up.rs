@@ -97,6 +97,11 @@ async fn the_focused_conversation_is_readable_before_the_others_are_caught_up() 
   }
   assert_eq!(carol.texts(channels[7]), vec!["news 7".to_string()]);
   assert!(carol.texts(channels[0]).is_empty());
+  assert_eq!(
+    carol.client.catch_up_focus().caught_up_count(),
+    1,
+    "the host is told"
+  );
 
   // The rest arrives with the next sync; the welcome taken ahead didn't skip the others.
   carol.client.full_sync().await.unwrap();

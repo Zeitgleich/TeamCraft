@@ -66,6 +66,9 @@ const MAX_APPROVAL_MISSES: u8 = 3;
 const TICK: Duration = Duration::from_secs(3);
 /// How often the UI is told to read again while a long sync fills the store (issue #247).
 const SYNC_PROGRESS: Duration = Duration::from_secs(1);
+/// How often a long sync is asked whether it caught up the conversation the user opened, which is
+/// shown at once instead of with the next progress round. An atomic read; only while syncing.
+const FOCUS_POLL: Duration = Duration::from_millis(100);
 /// How long a failed account data sync waits before it is retried; also how often the roster's age
 /// is checked locally. Account data itself is read after each connection and on `key_bag_update`
 /// (issue #252), not on a timer.
@@ -1512,14 +1515,18 @@ impl SyncReads<'_> {
     is_closed: &mut bool,
   ) -> F::Output {
     let mut seen_revision = self.store.inner().write_revision();
+    let mut seen_caught_up = self.focus.caught_up_count();
+    // Deadlines, not a fresh sleep per wake-up: a burst of reads must not postpone the progress.
+    let mut progress = Box::pin(platform::sleep(SYNC_PROGRESS));
+    let mut focus_poll = Box::pin(platform::sleep(FOCUS_POLL));
     loop {
-      let progress = pin!(platform::sleep(SYNC_PROGRESS));
       let request = if *is_closed {
         Either::Left(pending())
       } else {
         Either::Right(requests.next())
       };
-      match select(&mut connecting, select(request, progress)).await {
+      let timers = select(progress.as_mut(), focus_poll.as_mut());
+      match select(&mut connecting, select(request, timers)).await {
         Either::Left((outcome, _)) => return outcome,
         Either::Right((Either::Left((Some(request), _)), _)) => {
           if let Some(request) = self.answer(request) {
@@ -1527,13 +1534,23 @@ impl SyncReads<'_> {
           }
         },
         Either::Right((Either::Left((None, _)), _)) => *is_closed = true,
-        Either::Right((Either::Right(((), _)), _)) => {
+        Either::Right((Either::Right((Either::Left(((), _)), _)), _)) => {
+          progress = Box::pin(platform::sleep(SYNC_PROGRESS));
           let revision = self.store.inner().write_revision();
           if revision != seen_revision && self.has_become_known(deferred) {
             notify_local();
           }
           if revision != seen_revision && is_page_visible() {
             seen_revision = revision;
+            notify_local();
+          }
+        },
+        Either::Right((Either::Right((Either::Right(((), _)), _)), _)) => {
+          focus_poll = Box::pin(platform::sleep(FOCUS_POLL));
+          let caught_up = self.focus.caught_up_count();
+          if caught_up != seen_caught_up && is_page_visible() {
+            seen_caught_up = caught_up;
+            seen_revision = self.store.inner().write_revision();
             notify_local();
           }
         },

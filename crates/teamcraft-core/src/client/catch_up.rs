@@ -14,7 +14,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use futures_util::future::join_all;
 use teamcraft_proto::{
@@ -33,9 +33,17 @@ use crate::store::{LocalStore, MessageFilter, Table};
 pub(crate) const CATCHING_UP_PREFIX: &str = "catching_up/";
 
 /// The conversation the user looks at, so a catch-up takes it next. The host sets it from the
-/// UI's reads while a sync holds the client; clones share it.
+/// UI's reads while a sync holds the client; clones share it. It also counts how often the focused
+/// conversation was caught up, so the host can show it at once.
 #[derive(Clone, Debug)]
-pub struct CatchUpFocus(Arc<AtomicI64>);
+pub struct CatchUpFocus {
+  conversation: Arc<AtomicI64>,
+  caught_up: Arc<AtomicU64>,
+}
+
+/// Welcomes a catch-up keeps after the focus first read them, for the next focus; with more waiting,
+/// each focus reads them again.
+const MAX_KEPT_WELCOMES: usize = 1_000;
 
 /// What [`CatchUpFocus`] holds before a conversation was set (snowflakes are never negative).
 const NO_FOCUS: i64 = -1;
@@ -47,6 +55,9 @@ struct AheadOfTheRest {
   tried: BTreeSet<ConversationId>,
   /// Completely caught up ahead; the rest of the catch-up leaves them out.
   done: BTreeSet<ConversationId>,
+  /// The welcomes waiting when the focus first needed them ([`MAX_KEPT_WELCOMES`]). One arriving
+  /// later is joined by the in-order pass.
+  maybe_welcomes: Option<Vec<MlsMessageResponse>>,
 }
 
 /// The first page of a conversation's MLS queue and messages, read ahead.
@@ -58,19 +69,33 @@ pub(crate) struct FirstPages {
 
 impl Default for CatchUpFocus {
   fn default() -> Self {
-    Self(Arc::new(AtomicI64::new(NO_FOCUS)))
+    Self {
+      conversation: Arc::new(AtomicI64::new(NO_FOCUS)),
+      caught_up: Arc::new(AtomicU64::new(0)),
+    }
   }
 }
 
 impl CatchUpFocus {
   pub fn set(&self, conversation: ConversationId) {
-    self.0.store(conversation.snowflake().get(), Ordering::Relaxed);
+    self
+      .conversation
+      .store(conversation.snowflake().get(), Ordering::Relaxed);
   }
 
   pub fn get(&self) -> Option<ConversationId> {
-    Snowflake::new(self.0.load(Ordering::Relaxed))
+    Snowflake::new(self.conversation.load(Ordering::Relaxed))
       .ok()
       .map(ConversationId::from_snowflake)
+  }
+
+  /// Grows whenever a catch-up finished the focused conversation.
+  pub fn caught_up_count(&self) -> u64 {
+    self.caught_up.load(Ordering::Relaxed)
+  }
+
+  fn note_caught_up(&self) {
+    self.caught_up.fetch_add(1, Ordering::Relaxed);
   }
 }
 
@@ -132,6 +157,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       conversations: conversations.iter().copied().collect(),
       tried: BTreeSet::new(),
       done: BTreeSet::new(),
+      maybe_welcomes: None,
     };
     self
       .refresh_members_around_focus(members_order, &mut ahead, &phases)
@@ -179,6 +205,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         }
         self.store.delete(Table::SyncState, &marker_key(conversation))?;
         if self.catch_up_focus.get() == Some(conversation) {
+          self.catch_up_focus.note_caught_up();
           tracing::info!(
             ms = self.now_ms().saturating_sub(phases.started_ms),
             "catch-up: the focused conversation is caught up"
@@ -258,7 +285,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.unmark_resync(focus, ResyncPart::Members)?;
     }
     if !self.has_group(focus)? {
-      self.join_welcomes_of(focus).await?;
+      self.join_welcomes_of(focus, ahead).await?;
     }
     if !self.has_group(focus)? {
       return Ok(());
@@ -269,6 +296,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     self.store.delete(Table::SyncState, &marker_key(focus))?;
     ahead.done.insert(focus);
+    self.catch_up_focus.note_caught_up();
     tracing::info!(
       ms = self.now_ms().saturating_sub(phases.started_ms),
       "catch-up: the focused conversation is caught up ahead of the rest"
@@ -277,28 +305,64 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Joins the conversation's waiting welcomes, in their order, with the welcome cursor held.
-  async fn join_welcomes_of(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+  async fn join_welcomes_of(
+    &mut self,
+    conversation: ConversationId,
+    ahead: &mut AheadOfTheRest,
+  ) -> Result<(), CoreError> {
+    let welcomes = match &ahead.maybe_welcomes {
+      Some(kept) => kept
+        .iter()
+        .filter(|welcome| welcome.conversation_id == conversation)
+        .cloned()
+        .collect(),
+      None => {
+        let (welcomes, maybe_all) = self.read_waiting_welcomes(conversation).await?;
+        ahead.maybe_welcomes = maybe_all;
+        welcomes
+      },
+    };
+    for welcome in &welcomes {
+      self.is_welcome_cursor_held = true;
+      let joined = self.join_from_welcome(welcome).await;
+      self.is_welcome_cursor_held = false;
+      joined?;
+    }
+    Ok(())
+  }
+
+  /// The waiting welcomes of `conversation`, and all waiting welcomes if there are at most
+  /// [`MAX_KEPT_WELCOMES`].
+  async fn read_waiting_welcomes(
+    &self,
+    conversation: ConversationId,
+  ) -> Result<(Vec<MlsMessageResponse>, Option<Vec<MlsMessageResponse>>), CoreError> {
     let mut maybe_after = self.sync.maybe_welcome_cursor;
+    let mut welcomes = Vec::new();
+    let mut maybe_all = Some(Vec::new());
     loop {
       let query = ListMlsMessagesQuery {
         maybe_after,
         maybe_limit: None,
       };
       let page = self.api.list_welcomes(self.account.device_id, &query).await?;
-      let welcomes: Vec<&MlsMessageResponse> = page
-        .messages
-        .iter()
-        .filter(|welcome| welcome.conversation_id == conversation)
-        .collect();
-      for welcome in welcomes {
-        self.is_welcome_cursor_held = true;
-        let joined = self.join_from_welcome(welcome).await;
-        self.is_welcome_cursor_held = false;
-        joined?;
+      maybe_after = page.messages.last().map(|last| last.id);
+      let is_last = !page.has_more || page.messages.is_empty();
+      welcomes.extend(
+        page
+          .messages
+          .iter()
+          .filter(|welcome| welcome.conversation_id == conversation)
+          .cloned(),
+      );
+      if let Some(all) = &mut maybe_all {
+        all.extend(page.messages);
+        if all.len() > MAX_KEPT_WELCOMES {
+          maybe_all = None;
+        }
       }
-      match page.messages.last() {
-        Some(last) if page.has_more => maybe_after = Some(last.id),
-        _ => return Ok(()),
+      if is_last {
+        return Ok((welcomes, maybe_all));
       }
     }
   }
