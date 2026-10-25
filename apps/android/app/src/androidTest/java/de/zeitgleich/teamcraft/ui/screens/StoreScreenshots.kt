@@ -92,12 +92,11 @@ class StoreScreenshots {
         ChannelSample(viewModel)
         PreJoinDialog(text.channelName, onDismiss = {}, onJoin = {})
       },
-      Shot("settings") { viewModel ->
+      Shot("settings", isDark = false) { viewModel ->
         SettingsScreen(viewModel, AppState.Ready(ME, ALEX, identityFingerprint = ""), onBack = {})
       },
     )
-    // All dark: in light mode the status bar's dark icons sit on the dark top bar.
-    shots.forEachIndexed { index, shot -> shoot("${index + 1}-${shot.name}", isDark = true, shot.content) }
+    shots.forEachIndexed { index, shot -> shoot("${index + 1}-${shot.name}", shot.isDark, shot.content) }
   }
 
   private fun shoot(name: String, isDark: Boolean, content: @Composable (MainViewModel) -> Unit) {
@@ -375,8 +374,8 @@ class StoreScreenshots {
     maybePeerPresence = presence,
   )
 
-  /** One picture: its file name (without the number) and what it shows. */
-  private class Shot(val name: String, val content: @Composable (MainViewModel) -> Unit)
+  /** One picture: its file name (without the number), its theme and what it shows. */
+  private class Shot(val name: String, val isDark: Boolean = true, val content: @Composable (MainViewModel) -> Unit)
 
   /** The sample conversation's texts in one language. */
   private class SampleTexts(
