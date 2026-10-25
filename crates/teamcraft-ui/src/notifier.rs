@@ -5,7 +5,7 @@
 //! (levels, mutes, keywords, do-not-disturb); [`Notifier`] watches the backend for new messages and
 //! thread replies and applies it.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use crate::clock::{local_utc_offset_minutes, now_ms};
@@ -16,6 +16,7 @@ use teamcraft_proto::{DndCandidate, PushContentMode};
 
 use crate::model::{
   Conversation, ConversationId, ConversationKind, Message, MessageId, PresenceStatus, ThreadId, User, UserId,
+  is_pending,
 };
 use crate::notify_sync::{LocalZone, dnd_to_server};
 use crate::prefs::{NotificationPrefs, NotifyLevel, ThreadReplies};
@@ -196,11 +197,15 @@ pub fn preview(body: &str) -> String {
   format!("{cut}…")
 }
 
-/// Watches the backend for new messages; the first sight of a conversation only records its state.
+/// Watches the backend for new messages. The first look only records the state; a conversation
+/// that appears later (a new direct message, a channel the user was added to) reports its unread
+/// messages that are newer than everything seen before it.
 #[derive(Default)]
 pub struct Notifier {
   seen_message: RefCell<HashMap<ConversationId, MessageId>>,
   seen_replies: RefCell<HashMap<(ConversationId, ThreadId), usize>>,
+  /// The newest message the server confirmed in any conversation, as of the previous look.
+  maybe_newest_seen: Cell<Option<MessageId>>,
 }
 
 /// One new message found by the watcher, before the policy looks at it.
@@ -218,6 +223,16 @@ impl Notifier {
     let conversations = all_conversations(backend);
     for conversation in &conversations {
       self.collect_messages(backend, conversation, &mut found);
+    }
+    let newest_seen = self
+      .seen_message
+      .borrow()
+      .values()
+      .copied()
+      .filter(|id| !is_pending(*id))
+      .max();
+    if newest_seen.is_some() {
+      self.maybe_newest_seen.set(newest_seen);
     }
     for summary in backend.followed_threads() {
       let Some(conversation) = conversations
@@ -247,18 +262,19 @@ impl Notifier {
       // Still loading; try again on the next change.
       return;
     };
-    let mut seen = self.seen_message.borrow_mut();
-    match seen.insert(conversation.id, newest) {
-      None => {},
-      Some(previous) => {
-        for message in window.into_iter().filter(|message| message.id > previous) {
-          found.push(Found {
-            conversation: conversation.clone(),
-            message,
-            kind: CandidateKind::Message,
-          });
-        }
-      },
+    let maybe_previous = self.seen_message.borrow_mut().insert(conversation.id, newest);
+    let new = new_messages(
+      window,
+      maybe_previous,
+      self.maybe_newest_seen.get(),
+      conversation.unread_count,
+    );
+    for message in new {
+      found.push(Found {
+        conversation: conversation.clone(),
+        message,
+        kind: CandidateKind::Message,
+      });
     }
   }
 
@@ -325,6 +341,33 @@ impl ReadWatcher {
       })
       .map(|(id, _)| *id)
       .collect()
+  }
+}
+
+/// The messages of `window` (a conversation's newest, oldest first) to report: those after the
+/// newest one seen in it before, or, in a conversation seen for the first time, its unread ones
+/// newer than everything seen elsewhere (none on the first look, which only records the state).
+fn new_messages(
+  window: Vec<Message>,
+  maybe_previous: Option<MessageId>,
+  maybe_newest_elsewhere: Option<MessageId>,
+  unread_count: u32,
+) -> Vec<Message> {
+  match (maybe_previous, maybe_newest_elsewhere) {
+    (Some(previous), _) => window
+      .into_iter()
+      .filter(|message| message.id > previous)
+      .collect(),
+    (None, Some(newest_elsewhere)) => {
+      let unread = usize::try_from(unread_count).unwrap_or(usize::MAX);
+      let skipped = window.len().saturating_sub(unread);
+      window
+        .into_iter()
+        .skip(skipped)
+        .filter(|message| message.id > newest_elsewhere)
+        .collect()
+    },
+    (None, None) => Vec::new(),
   }
 }
 
@@ -439,6 +482,55 @@ mod tests {
       let generic = limited_to(shown(), &mode);
       assert_eq!(generic.body, None);
       assert_eq!(generic.title, NotificationTitle::Generic);
+    }
+  }
+
+  mod new_messages {
+    use super::*;
+    use crate::model::{MessageKind, raw_id};
+
+    #[test]
+    fn a_known_conversation_reports_what_came_after_the_last_look() {
+      let window = vec![message(5), message(6), message(7)];
+      assert_eq!(ids(new_messages(window, Some(id_from_raw(5)), None, 0)), [6, 7]);
+    }
+
+    #[test]
+    fn the_first_look_only_records_the_state() {
+      let window = vec![message(5), message(6)];
+      assert_eq!(ids(new_messages(window, None, None, 2)), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn a_new_conversation_reports_its_unread_messages_newer_than_everything_seen() {
+      let window = vec![message(3), message(8), message(9)];
+      assert_eq!(
+        ids(new_messages(window.clone(), None, Some(id_from_raw(7)), 5)),
+        [8, 9]
+      );
+      assert_eq!(ids(new_messages(window, None, Some(id_from_raw(7)), 1)), [9]);
+    }
+
+    fn ids(messages: Vec<Message>) -> Vec<u64> {
+      messages
+        .iter()
+        .map(|message| raw_id(message.id))
+        .collect()
+    }
+
+    fn message(raw: u64) -> Message {
+      Message {
+        id: id_from_raw(raw),
+        conversation: id_from_raw(1),
+        author: id_from_raw(2),
+        kind: MessageKind::User,
+        sent_at: 0,
+        body: String::new(),
+        is_edited: false,
+        reactions: Vec::new(),
+        reply_count: 0,
+        maybe_thread: None,
+      }
     }
   }
 

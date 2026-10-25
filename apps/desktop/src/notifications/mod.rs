@@ -33,10 +33,23 @@ pub struct NotifyError {
   message: String,
 }
 
-/// Notifications the freedesktop service shows, by tag (Linux; the service's IDs).
+/// Notifications the freedesktop service shows, by tag (Linux).
 #[derive(Default)]
 pub struct ShownNotifications {
-  by_tag: Mutex<HashMap<String, u32>>,
+  by_tag: Mutex<HashMap<String, Shown>>,
+  /// Held from reading what is shown until the service answered with the ID: messages that
+  /// arrive together would otherwise each see nothing shown and pop up separately.
+  #[cfg(target_os = "linux")]
+  showing: tokio::sync::Mutex<()>,
+}
+
+/// One notification on screen: the service's ID and what it shows, so the next message of the
+/// same conversation can be added below the earlier ones.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+struct Shown {
+  id: u32,
+  title: String,
+  lines: Vec<String>,
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -82,7 +95,11 @@ pub async fn withdraw_notifications(
       .by_tag
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner);
-    tags.iter().filter_map(|tag| by_tag.remove(tag)).collect()
+    tags
+      .iter()
+      .filter_map(|tag| by_tag.remove(tag))
+      .map(|shown| shown.id)
+      .collect()
   };
   #[cfg(target_os = "linux")]
   {
@@ -158,32 +175,40 @@ fn notify_plugin(app: &AppHandle, notification: OsNotification) -> Result<(), No
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::watch_actions;
+pub use linux::watch_notifications;
 
 #[cfg(target_os = "linux")]
 mod linux {
-  use std::path::PathBuf;
-  use std::sync::OnceLock;
-
   use tauri::{AppHandle, Manager};
   use teamcraft_client_api::os_notify::{
     NotificationAction, NotificationActionEvent, NotificationTag, OsNotification, OsNotificationKind,
   };
 
-  use super::ShownNotifications;
+  use super::{Shown, ShownNotifications};
   use crate::attention::OsProbe;
-  use crate::freedesktop::{DesktopNotification, ServerAction};
+  use crate::freedesktop::{DesktopNotification, ServerEvent};
 
-  /// Reports clicks, buttons and inline replies on the app's notifications for as long as the app
-  /// runs.
-  pub fn watch_actions(app: &AppHandle) {
+  /// Messages of one conversation shown together in a notification; older ones drop off the top.
+  const MAX_STACKED_LINES: usize = 5;
+
+  /// Reports clicks, buttons and inline replies on the app's notifications, and forgets the ones
+  /// that are gone, for as long as the app runs.
+  pub fn watch_notifications(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
       let buses = app.state::<OsProbe>().buses();
       let handle = app.clone();
       buses
-        .watch_actions(move |action: ServerAction| {
-          let Some(tag) = handle.state::<ShownNotifications>().tag_of(action.id) else {
+        .watch_notifications(move |event: ServerEvent| {
+          let shown = handle.state::<ShownNotifications>();
+          let action = match event {
+            ServerEvent::Action(action) => action,
+            ServerEvent::Closed { id } => {
+              shown.forget(id);
+              return;
+            },
+          };
+          let Some(tag) = shown.tag_of(action.id) else {
             return;
           };
           super::report(
@@ -206,14 +231,21 @@ mod linux {
     probe: &OsProbe,
     notification: &OsNotification,
   ) -> bool {
+    let _showing = shown.showing.lock().await;
     let tag = notification.tag.as_str();
-    let replaces_id = shown
-      .by_tag
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .get(tag)
-      .copied()
-      .unwrap_or(0);
+    let (maybe_previous, lines) = shown.next_lines(notification);
+    let body = lines.join("\n");
+    // A ringing call never expires and is updated in place. Everything else replaces its
+    // predecessor with a new notification: KDE Plasma doesn't report a popup that timed out into
+    // its history, and replacing that one only updates the history entry, without a popup (#531).
+    let replaces_id = match maybe_previous {
+      Some(previous) if notification.kind.is_ringing() => previous,
+      Some(previous) => {
+        probe.buses().close(previous).await;
+        0
+      },
+      None => 0,
+    };
     let config = app.config();
     let app_name = config
       .product_name
@@ -232,9 +264,9 @@ mod linux {
     let desktop = DesktopNotification {
       app_name: &app_name,
       app_icon: &app_icon,
-      maybe_desktop_entry: desktop_entry(app).as_deref(),
+      maybe_desktop_entry: crate::desktop_entry::installed(app),
       title: &notification.title,
-      body: notification.maybe_body.as_deref().unwrap_or_default(),
+      body: &body,
       replaces_id,
       actions: &buttons,
       maybe_reply_placeholder: notification
@@ -247,67 +279,8 @@ mod linux {
     let Some(id) = probe.buses().notify(&desktop).await else {
       return false;
     };
-    shown
-      .by_tag
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .insert(tag.to_owned(), id);
+    shown.remember(tag, id, &notification.title, lines);
     true
-  }
-
-  /// The `.desktop` entry the packages installed for this app, looked up once: the Flatpak's ID,
-  /// the identifier, the product name (Tauri's deb, rpm and AppImage name it `TeamCraft.desktop`)
-  /// or the executable's name.
-  fn desktop_entry(app: &AppHandle) -> &'static Option<String> {
-    static ENTRY: OnceLock<Option<String>> = OnceLock::new();
-    ENTRY.get_or_init(|| {
-      let config = app.config();
-      let mut candidates: Vec<String> = std::env::var("FLATPAK_ID").into_iter().collect();
-      candidates.push(config.identifier.clone());
-      candidates.extend(config.product_name.clone());
-      candidates.extend(
-        std::env::current_exe()
-          .ok()
-          .and_then(|path| path.file_stem().map(|stem| stem.to_string_lossy().into_owned())),
-      );
-      let entry = installed_entry(&candidates, &application_dirs());
-      if entry.is_none() {
-        tracing::debug!("no installed .desktop entry: notifications name the app by its name only");
-      }
-      entry
-    })
-  }
-
-  /// The first candidate with a `<name>.desktop` in one of `dirs`.
-  pub(super) fn installed_entry(candidates: &[String], dirs: &[PathBuf]) -> Option<String> {
-    candidates
-      .iter()
-      .find(|name| {
-        dirs
-          .iter()
-          .any(|dir| dir.join(format!("{name}.desktop")).is_file())
-      })
-      .cloned()
-  }
-
-  /// `applications` below the XDG data directories, user first, as desktop environments search.
-  fn application_dirs() -> Vec<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let data_home = std::env::var_os("XDG_DATA_HOME")
-      .map(PathBuf::from)
-      .or_else(|| home.as_ref().map(|home| home.join(".local/share")));
-    let data_dirs =
-      std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".to_owned());
-    data_home
-      .into_iter()
-      .chain(
-        data_dirs
-          .split(':')
-          .filter(|dir| !dir.is_empty())
-          .map(PathBuf::from),
-      )
-      .map(|dir| dir.join("applications"))
-      .collect()
   }
 
   /// The notification spec's category, which servers use for sounds, icons and grouping.
@@ -321,6 +294,55 @@ mod linux {
   }
 
   impl ShownNotifications {
+    /// The notification of the same tag that `notification` follows, if one is still shown or in
+    /// the history, and the lines of its body. A message following one with the same title (the
+    /// same sender, in the same conversation) is added below the earlier ones, as messaging apps
+    /// do; the oldest go first.
+    pub(super) fn next_lines(&self, notification: &OsNotification) -> (Option<u32>, Vec<String>) {
+      let by_tag = self
+        .by_tag
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      let maybe_shown = by_tag.get(notification.tag.as_str());
+      let mut lines = match maybe_shown {
+        Some(shown)
+          if notification.kind == OsNotificationKind::Message && shown.title == notification.title =>
+        {
+          shown.lines.clone()
+        },
+        _ => Vec::new(),
+      };
+      lines.extend(notification.maybe_body.clone());
+      let excess = lines.len().saturating_sub(MAX_STACKED_LINES);
+      lines.drain(..excess);
+      (maybe_shown.map(|shown| shown.id), lines)
+    }
+
+    pub(super) fn remember(&self, tag: &str, id: u32, title: &str, lines: Vec<String>) {
+      self
+        .by_tag
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+          tag.to_owned(),
+          Shown {
+            id,
+            title: title.to_owned(),
+            lines,
+          },
+        );
+    }
+
+    /// Drops a notification that is gone (dismissed, closed), so the next one of its tag starts
+    /// afresh.
+    pub(super) fn forget(&self, id: u32) {
+      self
+        .by_tag
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retain(|_, shown| shown.id != id);
+    }
+
     /// The tag of a notification the service showed under `id`.
     fn tag_of(&self, id: u32) -> Option<String> {
       self
@@ -328,7 +350,7 @@ mod linux {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
-        .find(|(_, shown)| **shown == id)
+        .find(|(_, shown)| shown.id == id)
         .map(|(tag, _)| tag.clone())
     }
   }
@@ -336,32 +358,66 @@ mod linux {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-  use super::linux::installed_entry;
+  use teamcraft_client_api::os_notify::{NotificationTag, OsNotification, OsNotificationKind};
+
+  use super::ShownNotifications;
+
+  const TAG: &str = "conversation:1";
 
   #[test]
-  fn the_desktop_entry_is_the_one_actually_installed() {
-    let dir = std::env::temp_dir().join(format!("teamcraft-desktop-entry-{}", std::process::id()));
-    let applications = dir.join("applications");
-    std::fs::create_dir_all(&applications).unwrap();
-    let candidates = ["de.zeitgleich.teamcraft".to_owned(), "TeamCraft".to_owned()];
+  fn a_closed_notification_is_forgotten() {
+    let shown = ShownNotifications::default();
+    shown.remember(TAG, 7, "Bob", vec!["hello".to_owned()]);
+    assert_eq!(shown.next_lines(&message("Bob", "again")).0, Some(7));
+    shown.forget(8);
     assert_eq!(
-      installed_entry(&candidates, std::slice::from_ref(&applications)),
-      None
+      shown.next_lines(&message("Bob", "again")).0,
+      Some(7),
+      "another notification closed"
     );
-    std::fs::write(applications.join("TeamCraft.desktop"), "[Desktop Entry]\n").unwrap();
+    shown.forget(7);
     assert_eq!(
-      installed_entry(&candidates, std::slice::from_ref(&applications)).as_deref(),
-      Some("TeamCraft")
+      shown.next_lines(&message("Bob", "again")),
+      (None, vec!["again".to_owned()])
     );
-    std::fs::write(
-      applications.join("de.zeitgleich.teamcraft.desktop"),
-      "[Desktop Entry]\n",
-    )
-    .unwrap();
+  }
+
+  #[test]
+  fn messages_stack_and_the_oldest_drop_off() {
+    let shown = ShownNotifications::default();
+    for index in 1..=6 {
+      let (_, lines) = shown.next_lines(&message("Bob", &format!("message {index}")));
+      shown.remember(TAG, index, "Bob", lines);
+    }
+    let (maybe_previous, lines) = shown.next_lines(&message("Bob", "message 7"));
+    assert_eq!(maybe_previous, Some(6));
     assert_eq!(
-      installed_entry(&candidates, &[applications]).as_deref(),
-      Some("de.zeitgleich.teamcraft")
+      lines,
+      ["message 3", "message 4", "message 5", "message 6", "message 7"]
     );
-    std::fs::remove_dir_all(dir).unwrap();
+  }
+
+  #[test]
+  fn another_sender_or_kind_starts_a_new_body() {
+    let shown = ShownNotifications::default();
+    shown.remember(TAG, 3, "Bob in #general", vec!["hi".to_owned()]);
+    assert_eq!(
+      shown.next_lines(&message("Carol in #general", "hey")),
+      (Some(3), vec!["hey".to_owned()])
+    );
+    let mut call = message("Bob in #general", "Calling");
+    call.kind = OsNotificationKind::IncomingCall;
+    assert_eq!(shown.next_lines(&call), (Some(3), vec!["Calling".to_owned()]));
+  }
+
+  fn message(title: &str, body: &str) -> OsNotification {
+    OsNotification {
+      tag: NotificationTag::from_raw(TAG.to_owned()),
+      kind: OsNotificationKind::Message,
+      title: title.to_owned(),
+      maybe_body: Some(body.to_owned()),
+      actions: Vec::new(),
+      maybe_reply: None,
+    }
   }
 }

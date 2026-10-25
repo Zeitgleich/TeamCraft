@@ -1,11 +1,14 @@
 //! Tray icon, unread badge and showing the window again. The UI sends the unread count and the
 //! menu texts in its language (`tray_update`); the shell owns the OS side.
 //!
-//! | Platform | Unread badge                     | Tray click                     |
-//! |----------|----------------------------------|--------------------------------|
-//! | Linux    | launcher badge (Unity API)       | menu only (no click events)    |
-//! | macOS    | dock badge                       | left click shows the window    |
-//! | Windows  | taskbar overlay dot              | left click shows the window    |
+//! | Platform | Unread badge                                     | Tray click                  |
+//! |----------|--------------------------------------------------|-----------------------------|
+//! | Linux    | launcher badge (LauncherEntry signal), tray dot  | menu only (no click events) |
+//! | macOS    | dock badge, tray dot                             | left click shows the window |
+//! | Windows  | taskbar overlay dot, tray dot                    | left click shows the window |
+//!
+//! The tray dot is a red dot drawn into the tray icon's top right while anything is unread (in the
+//! menu bar's own colour on macOS, where the icon is a template).
 //!
 //! Without libayatana-appindicator (Linux) there is no tray icon; the badge still works and the
 //! window is never hidden (see `has_tray`). The same holds while no StatusNotifier host shows the
@@ -16,7 +19,6 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use serde::Deserialize;
-#[cfg(windows)]
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -32,6 +34,12 @@ const MAX_ZOOM: f64 = 2.0;
 /// Side of the Windows taskbar overlay dot, in pixels.
 #[cfg(windows)]
 const DOT_SIZE: u32 = 16;
+/// The unread dot's colour.
+const DOT_COLOR: [u8; 3] = [0xd9, 0x3f, 0x3f];
+/// The tray dot's diameter as a share of the tray icon's side.
+const TRAY_DOT_SHARE: f32 = 0.5;
+/// The transparent ring around the tray dot that sets it off the glyph, as a share of its radius.
+const TRAY_DOT_GAP_SHARE: f32 = 0.3;
 
 /// The texts of the tray menu.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,7 +85,13 @@ enum HostState {
 
 /// The unread count last shown on the badge; managed with or without a tray icon.
 #[derive(Default)]
-pub struct LastUnread(Mutex<Option<u32>>);
+pub struct LastUnread {
+  count: Mutex<Option<u32>>,
+  /// Linux: held while a launcher update is sent, so updates go out in order (each sends the
+  /// latest count).
+  #[cfg(target_os = "linux")]
+  launcher_sending: tokio::sync::Mutex<()>,
+}
 
 /// What the UI tells the tray: unread count and the texts in the user's language.
 #[derive(Debug, Deserialize)]
@@ -121,17 +135,11 @@ pub fn install(app: &tauri::App) -> tauri::Result<()> {
         show_main_window(tray.app_handle());
       }
     });
-  // The app icon is too detailed at tray size; the glyph (icons/tray*.png, scripts/brand) is not.
+  builder = builder.icon(tray_icon(false));
   // macOS draws the menu bar icon as a template in the bar's own colour.
   #[cfg(target_os = "macos")]
   {
-    builder = builder
-      .icon(tauri::include_image!("icons/tray-template.png"))
-      .icon_as_template(true);
-  }
-  #[cfg(not(target_os = "macos"))]
-  {
-    builder = builder.icon(tauri::include_image!("icons/tray.png"));
+    builder = builder.icon_as_template(true);
   }
   builder.build(app)?;
   #[cfg(target_os = "linux")]
@@ -306,14 +314,22 @@ pub fn tray_update(app: AppHandle, last_unread: State<'_, LastUnread>, update: T
     update_tray(&app, &menu, &update);
   }
   let mut last = last_unread
-    .0
+    .count
     .lock()
     .unwrap_or_else(std::sync::PoisonError::into_inner);
   if let Some(unread) = update.maybe_unread
     && *last != Some(unread)
   {
+    let had_unread = last.is_some_and(|count| count > 0);
     *last = Some(unread);
+    drop(last);
     set_badge(&app, unread);
+    if had_unread != (unread > 0)
+      && let Some(tray) = app.tray_by_id(TRAY_ID)
+      && let Err(error) = tray.set_icon(Some(tray_icon(unread > 0)))
+    {
+      tracing::debug!(%error, "could not change the tray icon");
+    }
   }
 }
 
@@ -355,6 +371,7 @@ fn apply_labels(_app: &AppHandle, menu: &TrayMenu, labels: &MenuLabels) -> tauri
   menu.quit.set_text(&labels.quit)
 }
 
+#[cfg(not(target_os = "linux"))]
 fn set_badge(app: &AppHandle, unread: u32) {
   // The notification center owns the badge from macOS 13 on; the window's dock tile label below is
   // kept for an unbundled development run.
@@ -374,20 +391,99 @@ fn set_badge(app: &AppHandle, unread: u32) {
   }
 }
 
+/// Linux: the LauncherEntry signal for the installed `.desktop` entry (or the one the packages
+/// would install, in a development build). Sent in the background; the latest count wins.
+#[cfg(target_os = "linux")]
+fn set_badge(app: &AppHandle, _unread: u32) {
+  let app = app.clone();
+  tauri::async_runtime::spawn(async move {
+    let desktop_entry = match crate::desktop_entry::installed(&app) {
+      Some(entry) => format!("{entry}.desktop"),
+      None => format!("{}.desktop", app.package_info().name),
+    };
+    let buses = app.state::<crate::attention::OsProbe>().buses();
+    let last = app.state::<LastUnread>();
+    let _sending = last.launcher_sending.lock().await;
+    let unread = last
+      .count
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .unwrap_or(0);
+    buses.set_launcher_count(&desktop_entry, unread).await;
+  });
+}
+
+/// The tray icon, with the unread dot while anything is unread. The app icon is too detailed at
+/// tray size; the glyph (icons/tray*.png, scripts/brand) is not.
+fn tray_icon(has_unread: bool) -> Image<'static> {
+  #[cfg(target_os = "macos")]
+  let icon = tauri::include_image!("icons/tray-template.png");
+  #[cfg(not(target_os = "macos"))]
+  let icon = tauri::include_image!("icons/tray.png");
+  if has_unread { with_unread_dot(&icon) } else { icon }
+}
+
+/// `icon` with the unread dot in its top right, set off the glyph by a transparent ring.
+fn with_unread_dot(icon: &Image<'_>) -> Image<'static> {
+  let (width, height) = (icon.width(), icon.height());
+  let radius = width.min(height) as f32 * TRAY_DOT_SHARE / 2.0;
+  let dot = Dot {
+    center: (width as f32 - radius, radius),
+    radius,
+    gap: radius * TRAY_DOT_GAP_SHARE,
+  };
+  let mut rgba = icon.rgba().to_vec();
+  dot.paint(&mut rgba, width);
+  Image::new_owned(rgba, width, height)
+}
+
 /// A red dot for the Windows taskbar button (Windows has no numeric badge for desktop apps).
 #[cfg(windows)]
 fn unread_dot() -> Image<'static> {
-  let center = (DOT_SIZE as f32 - 1.0) / 2.0;
   let radius = DOT_SIZE as f32 / 2.0;
-  let mut rgba = Vec::with_capacity((DOT_SIZE * DOT_SIZE * 4) as usize);
-  for y in 0..DOT_SIZE {
-    for x in 0..DOT_SIZE {
-      let distance = ((x as f32 - center).powi(2) + (y as f32 - center).powi(2)).sqrt();
-      let alpha = ((radius - distance).clamp(0.0, 1.0) * 255.0) as u8;
-      rgba.extend_from_slice(&[0xd9, 0x3f, 0x3f, alpha]);
+  let dot = Dot {
+    center: (radius, radius),
+    radius,
+    gap: 0.0,
+  };
+  let mut rgba = vec![0; (DOT_SIZE * DOT_SIZE * 4) as usize];
+  dot.paint(&mut rgba, DOT_SIZE);
+  Image::new_owned(rgba, DOT_SIZE, DOT_SIZE)
+}
+
+/// An anti-aliased dot in [`DOT_COLOR`], in pixel coordinates (pixel centres at `.5`).
+struct Dot {
+  center: (f32, f32),
+  radius: f32,
+  /// Width of the ring around the dot that is cleared to transparent.
+  gap: f32,
+}
+
+impl Dot {
+  /// Draws the dot over RGBA pixels `width` wide: the ring is cleared, the dot blended on top.
+  fn paint(&self, rgba: &mut [u8], width: u32) {
+    for (index, pixel) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+      let x = (index % width as usize) as f32 + 0.5;
+      let y = (index / width as usize) as f32 + 0.5;
+      let distance = ((x - self.center.0).powi(2) + (y - self.center.1).powi(2)).sqrt();
+      let cleared = (self.radius + self.gap - distance).clamp(0.0, 1.0);
+      let covered = (self.radius - distance).clamp(0.0, 1.0);
+      if cleared <= 0.0 {
+        continue;
+      }
+      let below = f32::from(pixel[3]) / 255.0 * (1.0 - cleared);
+      let alpha = covered + below * (1.0 - covered);
+      if alpha <= 0.0 {
+        pixel.copy_from_slice(&[0, 0, 0, 0]);
+        continue;
+      }
+      for (channel, dot) in pixel.iter_mut().zip(DOT_COLOR) {
+        let mixed = (f32::from(dot) * covered + f32::from(*channel) * below * (1.0 - covered)) / alpha;
+        *channel = mixed.round() as u8;
+      }
+      pixel[3] = (alpha * 255.0).round() as u8;
     }
   }
-  Image::new_owned(rgba, DOT_SIZE, DOT_SIZE)
 }
 
 #[cfg(test)]
@@ -405,6 +501,45 @@ mod tests {
     assert_eq!(parse_language("C"), MenuLanguage::English);
     assert_eq!(parse_language("POSIX"), MenuLanguage::English);
     assert_eq!(parse_language(""), MenuLanguage::English);
+  }
+
+  #[test]
+  fn the_unread_icon_has_a_red_dot_top_right_and_keeps_the_rest() {
+    let plain = tray_icon(false);
+    let unread = tray_icon(true);
+    assert_eq!((unread.width(), unread.height()), (plain.width(), plain.height()));
+    let width = plain.width() as usize;
+    let pixel = |image: &Image<'_>, x: usize, y: usize| {
+      let start = (y * width + x) * 4;
+      image.rgba()[start..start + 4].to_vec()
+    };
+    let radius = (plain.width() as f32 * TRAY_DOT_SHARE / 2.0) as usize;
+    assert_eq!(
+      pixel(&unread, width - radius, radius),
+      [DOT_COLOR[0], DOT_COLOR[1], DOT_COLOR[2], 255]
+    );
+    let bottom_left = plain.height() as usize - 1;
+    assert_eq!(pixel(&unread, 0, bottom_left), pixel(&plain, 0, bottom_left));
+    assert_eq!(
+      pixel(&unread, width / 4, width / 2),
+      pixel(&plain, width / 4, width / 2)
+    );
+  }
+
+  #[test]
+  fn the_ring_around_the_dot_is_transparent() {
+    let mut rgba = [255_u8; 9 * 9 * 4].to_vec();
+    let dot = Dot {
+      center: (4.5, 4.5),
+      radius: 2.0,
+      gap: 2.0,
+    };
+    dot.paint(&mut rgba, 9);
+    let alpha = |x: usize, y: usize| rgba[(y * 9 + x) * 4 + 3];
+    assert_eq!(alpha(4, 4), 255, "dot");
+    assert_eq!(&rgba[(4 * 9 + 4) * 4..(4 * 9 + 4) * 4 + 3], &DOT_COLOR);
+    assert_eq!(alpha(4, 1), 0, "ring");
+    assert_eq!(alpha(0, 0), 255, "outside");
   }
 
   #[test]
