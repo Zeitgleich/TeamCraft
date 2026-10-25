@@ -112,7 +112,9 @@ version as the final 1.0.0 and as each other: reinstall once with `sudo dnf rein
 
 7. **Review the draft release**, then **publish** it in the GitHub UI. Publishing runs `packages.yml`:
    the Pages site with the update manifests and the APT/RPM repositories is rebuilt, and installed
-   desktop apps see the release (stable: `releases/latest/download/latest.json`).
+   desktop apps see the release (stable: `releases/latest/download/latest.json`). It also runs
+   `google-play.yml`, which uploads the App Bundle to Google Play's internal testing track
+   ([Google Play](#google-play)); a published candidate goes there too.
 
    GitHub Pages ignores a deployment of a build version it has already deployed, and the candidate
    was deployed from this very commit. The *Publish* job therefore creates the deployment itself
@@ -170,6 +172,8 @@ Dependabot's pull requests are left out. Edit the template when a known limitati
 | `teamcraft-android-X.Y.Z-{full,libre}-release.apk`              | `android` job, signed with the upload key        |
 | `teamcraft-android-X.Y.Z-{full,libre}-release-unsigned.apk`     | instead, when no upload key is configured        |
 | `teamcraft-android-X.Y.Z-{full,libre}-debug-signed.apk`         | `android` job; throwaway debug key, testing only |
+| `teamcraft-android-X.Y.Z-full-release.aab`                      | `android` job; the bundle for Google Play        |
+| `teamcraft-android-X.Y.Z-full-release-unsigned.aab`             | instead, when no upload key is configured        |
 | `SHA256SUMS`                                                    | over every file above                            |
 
 ## Integrity: checksums, attestations, signatures
@@ -221,7 +225,7 @@ timestamp, notarizes and staples the app and the dmg, and requires Gatekeeper to
 
 | Artifact | Status                                                                                     |
 |----------|--------------------------------------------------------------------------------------------|
-| Android  | Release APKs signed with the upload key when its secrets exist (below), else `-unsigned`   |
+| Android  | Release APKs and AAB signed with the upload key when its secrets exist, else `-unsigned`   |
 | macOS    | Ad-hoc signed, not notarized; Developer ID signing and notarization with the secrets above |
 | Windows  | Not code-signed (`apps/desktop/packaging/windows/README.md`)                               |
 | iOS      | Not built: build and sign it with your own Apple team (`apps/ios/README.md`)               |
@@ -267,6 +271,54 @@ them, a candidate tag builds without FCM and warns. Store builds seal their FCM 
 gateway in the repository variable `TEAMCRAFT_ANDROID_PUSH_GATEWAY_URL` (e.g.
 `https://push-gw.zeitgleich.de`); without it they use the gateway the server names.
 
+## Google Play
+
+`google-play.yml` runs when a release or candidate is published (or by hand: *Actions → Google Play
+→ Run workflow* with the tag). It downloads `teamcraft-android-X.Y.Z-full-release.aab` from the
+release, checks it against `SHA256SUMS` and uploads it to Google Play with
+[r0adkll/upload-google-play](https://github.com/r0adkll/upload-google-play): release name = the
+version, "What's new" = the tag's highlights as plain text (`scripts/play-release-notes.py`: without
+`### Breaking`, cut to Play's 500 characters with a link to the full notes, the same English text for
+every language). The bundle carries the R8 mapping and the Rust library's symbol table, so Play
+deobfuscates and symbolicates crashes on its own. Candidates and releases get increasing
+`versionCode`s ([Build numbers](#build-numbers)); Play rejects a `versionCode` it has seen, so a
+re-run after a successful upload fails at the upload step and changes nothing.
+
+| Setting (repository)                      | Default       | Meaning                                                                   |
+|-------------------------------------------|---------------|---------------------------------------------------------------------------|
+| Secret `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON` | –             | The service account's JSON key; without it the upload is skipped (notice) |
+| Variable `TEAMCRAFT_PLAY_TRACK`           | `internal`    | Track: `internal`, `alpha` (closed), `beta` (open), `production`          |
+| Variable `TEAMCRAFT_PLAY_RELEASE_STATUS`  | `draft`       | `draft` (finish it in the Play Console) or `completed` (roll out)         |
+| Variable `TEAMCRAFT_PLAY_LOCALES`         | `en-US,de-DE` | Languages of "What's new"; use the languages of the store listing         |
+
+Set up once:
+
+1. **Upload the first bundle by hand.** The Play Developer API only works for an app that has a
+   bundle: build `bundleFullRelease` with the upload key (or take the `.aab` of a release), and upload
+   it in the Play Console under *Test and release → Testing → Internal testing → Create new release*.
+   Play App Signing must be set up with the key first (`apps/android/README.md`, "Signing").
+2. **Google Cloud project**: in the [Google Cloud console](https://console.cloud.google.com), pick
+   or create a project and enable the **Google Play Android Developer API** (*APIs & Services →
+   Library*).
+3. **Service account**: *IAM & Admin → Service accounts → Create service account* (no project roles
+   needed), then *Keys → Add key → Create new key → JSON*. Store the downloaded file only in the
+   secret below and delete it locally (or keep it in the password manager).
+4. **Invite it in the Play Console**: *Users and permissions → Invite new users*, the service
+   account's e-mail (`…@<project>.iam.gserviceaccount.com`), *App permissions* → add the app →
+   **Release to testing tracks** (add *Release to production…* only when production releases should
+   be automatic too). Invite, then wait a few minutes until the permission is active.
+5. **Secret**: `gh secret set GOOGLE_PLAY_SERVICE_ACCOUNT_JSON < service-account.json`.
+6. **Status**: while the app was never published (no review passed yet), Play only accepts `draft`
+   releases: each upload then waits in the track as a draft, and *Review release → Start rollout*
+   in the Play Console publishes it. Once the app is published, switch to automatic rollout:
+   `gh variable set TEAMCRAFT_PLAY_RELEASE_STATUS --body completed`.
+
+Promoting a build to the next track (internal → closed → production) is a Play Console action: the
+release on the internal track → *Promote release* → the target track, then review and roll out
+(production: staged rollout with a percentage). The bundle is not uploaded again. To send releases to
+another track automatically, set `TEAMCRAFT_PLAY_TRACK` (and give the service account the matching
+permission); every published tag, candidates included, then goes there.
+
 ## Checking locally
 
 ```sh
@@ -274,6 +326,7 @@ scripts/check-versions.sh v1.0.0-rc.1        # the tag fits the tree
 docker run --rm -v "$PWD:/repo" -w /repo docker.io/rhysd/actionlint:1.7.12
 echo "ghcr.io/x/teamcraft-server:1.0.0@sha256:0" > /tmp/images.txt
 scripts/render-release-notes.py --version 1.0.0 --tag v1.0.0 --repo Zeitgleich/TeamCraft --images /tmp/images.txt
+scripts/play-release-notes.py --version 1.0.0 --tag v1.0.0 --repo Zeitgleich/TeamCraft --locales en-US --out-dir /tmp/whatsnew
 ```
 
 A tag push is the only trigger of `release.yml`; to try it without a release, push a candidate tag

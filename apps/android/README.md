@@ -289,26 +289,45 @@ until the call engine gets the `VOICE_COMMUNICATION` input preset or WebRTC's ec
 
 ## Signing
 
-Release builds are signed with an upload key kept outside the repository:
+One key signs every channel: the GitHub release APKs, the App Bundle for Google Play and (later)
+other stores. It is a self-generated key that is registered with Play App Signing as the app signing
+key, so an APK from GitHub and the Play install update each other. Release builds take it from
+properties outside the repository:
 
 ```properties
 # ~/.gradle/gradle.properties
-teamcraft.uploadKeystore=/secure/path/upload.jks
+teamcraft.uploadKeystore=/secure/path/teamcraft.p12
 teamcraft.uploadKeystorePassword=...
-teamcraft.uploadKeyAlias=upload
+teamcraft.uploadKeyAlias=teamcraft
 teamcraft.uploadKeyPassword=...
 ```
 
-Create one with `keytool -genkeypair -v -keystore upload.jks -keyalg RSA -keysize 4096 -validity
-10000 -alias upload`. Use Play App Signing: Google keeps the app signing key, you keep the upload
-key (a lost upload key can be reset; a lost app signing key can't).
+Set up once per publisher; never replace the key afterwards (installed apps only accept updates
+signed with it, and a lost key can't be reset):
+
+1. Create it: `keytool -genkeypair -v -storetype PKCS12 -keystore teamcraft.p12 -keyalg RSA -keysize
+   4096 -validity 10000 -alias teamcraft`. Keep a backup outside the build machines (a password
+   manager).
+2. Play Console → the app → *Test and release → App integrity → Play App Signing*: choose *Use a
+   different key* → *Export and upload a key from Java keystore*, download `pepk.jar` and the
+   encryption key, and run the command the page shows with this keystore and alias. pepk needs an
+   OpenJDK (Oracle's JDK rejects its unsigned BouncyCastle provider). Upload the encrypted output.
+   Register no separate upload key: Play then accepts bundles signed with this key.
+3. For the release workflow, add it as the secrets `ANDROID_UPLOAD_KEYSTORE_BASE64` (`base64 -w0
+   teamcraft.p12`), `ANDROID_UPLOAD_KEYSTORE_PASSWORD`, `ANDROID_UPLOAD_KEY_ALIAS` and
+   `ANDROID_UPLOAD_KEY_PASSWORD` (docs/release.md).
+
+The certificate's SHA-256 (`keytool -list -v -keystore teamcraft.p12`) is the one Play App Signing
+shows as the app signing key certificate and the one `apksigner verify --print-certs` prints for a
+release APK.
 
 ## Google Play closed testing
 
 1. Create the app in the Play Console with the deployment's application ID (`de.zeitgleich.teamcraft`
    by default; change `applicationId` for your organization).
-2. Build `bundleFullRelease` (an AAB) with the upload key, and upload it to the **Closed testing**
-   track. Testers enter the server address, or the organization sets it through managed configuration.
+2. Build `bundleFullRelease` (an AAB) with the key above, and upload it to the **Closed testing**
+   track. Releases do this automatically for the internal testing track (docs/release.md, "Google
+   Play"). Testers enter the server address, or the organization sets it through managed configuration.
 3. Add the testers (an email list or a Google Group of employees) and share the opt-in link.
 4. Fill in the data safety form: messages are end-to-end encrypted, the server sees metadata
    (e2ee.md §4.4); no ads, no analytics.
