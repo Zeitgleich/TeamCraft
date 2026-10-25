@@ -17,6 +17,7 @@ pub mod files;
 mod gateway;
 mod group_health;
 mod groups;
+mod key_packages;
 mod linking;
 mod member_device;
 mod messaging;
@@ -89,6 +90,10 @@ pub struct ClientSettings {
   pub key_package_low_water: u32,
   /// How often a running client asks the server whether its key packages need renewing.
   pub key_package_check_interval: std::time::Duration,
+  /// How long the private part of one of this device's key packages stays after the package
+  /// expired or, for a last-resort package, after a newer one replaced it on the server: welcomes
+  /// for it may still be on the way (e2ee.md §4.3.1). Then it is deleted.
+  pub key_package_retention: std::time::Duration,
   /// Messages per history page.
   pub history_page_size: u32,
   /// Attempts to land a commit when other members' commits win the epoch.
@@ -120,6 +125,13 @@ pub struct ClientSettings {
   /// A device without a group (a welcome it couldn't join) waits twice as long after each rejoin
   /// request, up to this.
   pub rejoin_retry_max: std::time::Duration,
+  /// Members ignore a device's rejoin request for this long after it was added back (server
+  /// times): each answer costs a commit, and a broken or malicious device could ask far more often
+  /// than `rejoin_retry` (issue #149).
+  pub rejoin_cooldown: std::time::Duration,
+  /// Removal records whose absence ended before the workspace's retention limit are dropped
+  /// (issue #186); this much later, to spare messages still on the way.
+  pub removed_sender_retention_leeway: std::time::Duration,
   /// A DM device that waits for the welcome of a group someone else founded shows "setting up
   /// encryption" this long, then that it failed, with a retry (#278).
   pub dm_welcome_timeout: std::time::Duration,
@@ -191,6 +203,12 @@ pub struct Client<A, S> {
   /// When this device last tried to join each conversation's group as a further device (backs
   /// off while waiting for a member).
   member_join_attempts: HashMap<ConversationId, i64>,
+  /// When this device last handled a further device's request to be added, per conversation and
+  /// device: repeats within `rejoin_retry` cost no requests (issue #187).
+  device_add_requests_handled: HashMap<(ConversationId, teamcraft_proto::DeviceId), i64>,
+  /// Whether this session read all welcomes once: only then may spent key packages go, so a
+  /// welcome that waited for one is opened first (e2ee.md §4.3.1).
+  are_welcomes_synced: bool,
   /// When people waiting for a first device were last checked after a full sync
   /// ([`Client::recheck_waiting_additions`]).
   maybe_waiting_checked_at_ms: Option<i64>,
@@ -210,12 +228,15 @@ impl Default for ClientSettings {
       key_package_target: 30,
       key_package_low_water: 10,
       key_package_check_interval: std::time::Duration::from_secs(6 * 60 * 60),
+      key_package_retention: std::time::Duration::from_secs(30 * 24 * 60 * 60),
       history_page_size: 50,
       max_commit_attempts: 3,
       device_add_stagger: std::time::Duration::from_secs(10),
       device_add_attempts: 6,
       rejoin_retry: std::time::Duration::from_secs(10 * 60),
       rejoin_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
+      rejoin_cooldown: std::time::Duration::from_secs(30 * 60),
+      removed_sender_retention_leeway: std::time::Duration::from_secs(24 * 60 * 60),
       dm_welcome_timeout: std::time::Duration::from_secs(2 * 60),
       removal_retry: std::time::Duration::from_secs(60 * 60),
       removal_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
@@ -277,6 +298,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       mls_current: Default::default(),
       maybe_replay_left: None,
       member_join_attempts: HashMap::new(),
+      device_add_requests_handled: HashMap::new(),
+      are_welcomes_synced: false,
       maybe_waiting_checked_at_ms: None,
       catch_up_focus: CatchUpFocus::default(),
     };

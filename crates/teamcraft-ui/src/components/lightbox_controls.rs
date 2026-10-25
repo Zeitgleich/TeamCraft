@@ -800,21 +800,30 @@ fn open_in_window(url: Rc<ObjectUrl>, title: &str, kind: MediaKind) -> bool {
   let Ok(element) = document.create_element(tag) else {
     return false;
   };
-  let attributes = [
-    ("src", url.as_str()),
-    ("alt", title),
-    ("style", "max-width: 100%; max-height: 100vh; object-fit: contain"),
-  ];
-  for (name, value) in attributes {
+  for (name, value) in [("src", url.as_str()), ("alt", title)] {
     drop(element.set_attribute(name, value));
   }
   if kind == MediaKind::Video {
     drop(element.set_attribute("controls", ""));
   }
-  drop(body.set_attribute(
-    "style",
-    "margin: 0; min-height: 100vh; display: grid; place-items: center; background: #111",
-  ));
+  // CSSOM properties, not `style` attributes: the popup inherits the CSP (`style-src 'self'`),
+  // which blocks those.
+  let element_style = [
+    ("max-width", "100%"),
+    ("max-height", "100vh"),
+    ("object-fit", "contain"),
+  ];
+  if let Some(element) = element.dyn_ref::<web_sys::HtmlElement>() {
+    set_style(element, &element_style);
+  }
+  let body_style = [
+    ("margin", "0"),
+    ("min-height", "100vh"),
+    ("display", "grid"),
+    ("place-items", "center"),
+    ("background", "#111"),
+  ];
+  set_style(&body, &body_style);
   if body.append_child(&element).is_err() {
     return false;
   }
@@ -822,6 +831,13 @@ fn open_in_window(url: Rc<ObjectUrl>, title: &str, kind: MediaKind) -> bool {
   let release = Closure::once_into_js(move || drop(url));
   drop(popup.add_event_listener_with_callback("pagehide", release.unchecked_ref()));
   true
+}
+
+fn set_style(element: &web_sys::HtmlElement, properties: &[(&str, &str)]) {
+  let style = element.style();
+  for (property, value) in properties {
+    drop(style.set_property(property, value));
+  }
 }
 
 fn focus_selector(selector: &str) {

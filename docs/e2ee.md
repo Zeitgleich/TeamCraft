@@ -273,6 +273,16 @@ for months must keep fresh ones on the server:
   packages when fewer than its target are available, and a new last-resort package (replacing the
   old one on the server) when it has none that stays valid. So regular packages are replaced after
   about 27 days and the last-resort package rotates on the same schedule.
+- **Private parts.** openmls deletes a regular package's private part when a welcome uses it. At
+  every check the device also deletes those of packages that expired, and of last-resort packages
+  a newer one replaced on the server, each `key_package_retention` (client, 30 days) later, for
+  welcomes still on the way (#148). A last-resort package counts as replaced only once the server
+  confirmed its successor's upload: after a lost answer the server may still hand out either, and
+  both stay. Nothing is deleted before the device read its welcomes once since it started (the
+  check runs before the first sync), and a welcome for a package it no longer holds makes it ask
+  to be added back (§4.6) instead of losing the conversation. A group keeps its own leaf key, so
+  deleting the package it was joined with changes nothing there. Lifetimes and these times use the
+  system clock openmls checks against.
 - **One bad device.** The adder checks every claimed package (signature, lifetime, credential, the
   user's signed device list, not revoked from this group, the device and user the server claims)
   and leaves out bad ones with a warning, so a revoked or broken device doesn't keep its user's other
@@ -457,7 +467,9 @@ its own. See [admin.md](admin.md) §2.
   from an older client, or the device's floor may be stale) the device posts a device-add request
   into the group's queue (`TCDA`, the user ID): members who see it, also later when they come
   online, check that the user's signed device list names the sending device and add it to that
-  conversation's group like a colleague's new device. Nobody sends content keys after an external
+  conversation's group like a colleague's new device. A member handles one device's request once
+  per `rejoin_retry` in each conversation; repeats (a device asking too often, a server replaying
+  entries) cost it no requests (#187). Nobody sends content keys after an external
   join: the device has what the user's key bag holds; if that lacks the current key (the user's
   other devices hadn't uploaded it yet) it can't read new messages until the key bag arrives
   (#178). `GroupInfo` larger than
@@ -578,8 +590,15 @@ whose commit fails doesn't stop the others, and it is tried again.
 **Falling out and coming back.** A device can still miss or refuse a commit the others merged (a bug,
 a restored backup of the app's store, an old client). It notices when, with every earlier entry of the
 queue handled, an entry from a later epoch comes. Then it asks to be added back (above) and keeps its
-old group until the welcome arrives; it asks again after `rejoin_retry` (10 minutes) without one. The
-members queue the request like a new device of a colleague: ranked, so normally one commits. The
+old group until the welcome arrives; it asks again after `rejoin_retry` (10 minutes) without one,
+also when no later entry comes (its group's epoch is still below the server's). The
+members queue the request like a new device of a colleague: ranked, so normally one commits. Each
+answer costs a commit and a key package of the device, so a member ignores, with a warning, a
+request for a device it saw added back less than `rejoin_cooldown` (client, 30 minutes) before
+the request, by the server times of the commit and the request (#149); a member that joined after
+that commit hasn't seen it and may answer once. A malicious member can thus delay a device's return
+by up to one cooldown (30 minutes): an add-back that doesn't work for the device still starts it.
+The
 cursor stays before the later entries, so nothing after the welcome is lost. Messages encrypted with
 content keys of epochs the device missed stay unreadable unless another device of the user had them
 in the key bag.
@@ -860,7 +879,16 @@ restored together with them on a new device.
 - **Removed senders.** When devices last left conversations and last came back (the removal commit
   and the commit that added them back, server times; only the last absence), so every device of the
   user refuses what they signed while out, by the server's message timestamp (§4.4).
-  Merging keeps the later time of each, so a device's clock never decides. Never pruned yet (#186).
+  Merging keeps the later time of each, so a device's clock never decides. Each full sync drops
+  records that can't matter any more (#186): absences that ended (the device came back) before
+  anything the workspace's retention limit keeps, counted back from the newest server time the
+  device saw (its MLS queue cursors) with `removed_sender_retention_leeway` (client, 1 day), and
+  only when pinned messages don't survive retention. A device that is still out keeps its record,
+  and so does every absence of a conversation the user left: a re-join may share its history
+  again, and what a removed device signed while out must still be refused. A dropped record
+  leaves a tombstone with its left time for the usual 90 days, so the same absence isn't taken
+  back from another device's local records or an older key bag (possibly without its return); a
+  later removal of the device counts as before.
 - **The activity feed's read mark** (`activity_read`) is the sent time of the newest feed entry the
   user looked at. Merging takes the later one, so reading on any device counts everywhere and never
   moves back. The feed itself is computed from decrypted messages on each device (notifications.md).
