@@ -17,6 +17,11 @@ const KEY_LOCALE = 'teamcraft.locale';
 const KEY_SERVER_URL = 'teamcraft.server_url';
 const BRAND_CACHE_PREFIX = 'teamcraft.brand:';
 const BRAND_PATH = '/api/v1/brand';
+// Set when the page goes while the screen is still up: a reload with single sign-on goes to the
+// identity provider and comes back as a second page load. That load shows the mark as it was left,
+// not assembling again, so the two loads read as one screen.
+const KEY_LEFT_AT = 'teamcraft.loader_left_at';
+const RESUME_WINDOW_MS = 10000;
 const MAX_NAME_CHARS = 64;
 // The app's signal that its first view is on screen (startup.rs): an attribute on <html>, and an event.
 const FIRST_VIEW_ATTRIBUTE = 'data-first-view';
@@ -57,6 +62,7 @@ const BRAND_TILE_MS = 420;
 
 export default function loader() {
   const root = document.getElementById('tc-loader');
+  if (root) resumeIfLeft(root);
   return {
     onStart: () => {
       if (!root) return;
@@ -209,6 +215,28 @@ function nextFrame() {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function resumeIfLeft(root) {
+  const leftAt = Number(sessionValue(KEY_LEFT_AT, null));
+  if (leftAt && Date.now() - leftAt < RESUME_WINDOW_MS) root.classList.add('is-resumed');
+  sessionValue(KEY_LEFT_AT, '');
+  addEventListener('pagehide', () => {
+    if (root.isConnected) sessionValue(KEY_LEFT_AT, String(Date.now()));
+  });
+}
+
+// Reads the session storage key, then sets it to `value` (empty: removes it) unless `value` is null.
+function sessionValue(key, value) {
+  try {
+    const previous = sessionStorage.getItem(key);
+    if (value === '') sessionStorage.removeItem(key);
+    else if (value !== null) sessionStorage.setItem(key, value);
+    return previous;
+  } catch (error) {
+    // Storage blocked: every load assembles the mark.
+    return null;
+  }
 }
 
 function showFailure(root) {

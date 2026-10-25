@@ -260,7 +260,8 @@ script runs, with the TeamCraft mark assembling and typing. `loader.js` is the T
 adds the saved theme, the download progress and an error with a retry button. The screen stays while
 the app checks the session and opens the account's data, until the app's first view is there
 (`src/startup.rs`): then the mark flies onto the sign-in card's mark, or the screen crossfades into the
-chat. A check that takes longer says so under the bar. Its texts
+chat. A check that takes longer says so under the bar. A reload with single sign-on loads the page
+twice (to the identity provider and back); the second load shows the mark already assembled. Its texts
 are the `loader-*` messages of `i18n/*.ftl`, which `scripts/finish-loader.sh` (a Trunk hook) copies into
 `init.js` together with the size of the built wasm. Release builds use the `web-release` Cargo profile
 (size over speed) and `wasm-opt -Oz`; the release tarball adds `.br`/`.gz` variants

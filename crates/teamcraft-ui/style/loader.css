@@ -151,6 +151,39 @@
   animation-delay: 1.5s;
 }
 
+/* The second page load of a reload through the identity provider (loader.js): the mark is already
+   assembled and goes on typing. */
+.tc-loader.is-resumed .tc-loader-mark *,
+.tc-loader.is-resumed .tc-loader-mark .tc-loader-swirl,
+.tc-loader.is-resumed .tc-loader-mark .tc-loader-bubble {
+  animation: none;
+}
+
+.tc-loader.is-resumed .tc-loader-mark .tc-loader-dot {
+  opacity: 0.55;
+  animation: tc-loader-hop 1.2s ease-in-out infinite;
+}
+
+.tc-loader.is-resumed .tc-loader-mark .tc-loader-dot:nth-child(2) {
+  animation-delay: 150ms;
+}
+
+.tc-loader.is-resumed .tc-loader-mark .tc-loader-dot:nth-child(3) {
+  animation-delay: 300ms;
+}
+
+.tc-loader.is-resumed .tc-loader-mark .tc-loader-nod {
+  animation: tc-loader-nod 2.4s ease-in-out infinite;
+}
+
+.tc-loader.is-resumed .tc-loader-swirl-top .tc-loader-nod {
+  animation-delay: 200ms;
+}
+
+.tc-loader.is-resumed .tc-loader-swirl-right .tc-loader-nod {
+  animation-delay: 400ms;
+}
+
 .tc-loader.has-failed .tc-loader-mark * {
   animation-play-state: paused;
 }
@@ -408,6 +441,25 @@
   }
 
   .tc-loader-mark .tc-loader-dot:nth-child(3) {
+    animation-delay: 0.4s;
+  }
+
+  /* Resumed (above): no nodding or hopping either, and the mark stays put instead of fading in
+     again. */
+  .tc-loader.is-resumed .tc-loader-mark,
+  .tc-loader.is-resumed .tc-loader-mark .tc-loader-nod {
+    animation: none;
+  }
+
+  .tc-loader.is-resumed .tc-loader-mark .tc-loader-dot {
+    animation: tc-loader-pulse 1.2s ease-in-out infinite;
+  }
+
+  .tc-loader.is-resumed .tc-loader-mark .tc-loader-dot:nth-child(2) {
+    animation-delay: 0.2s;
+  }
+
+  .tc-loader.is-resumed .tc-loader-mark .tc-loader-dot:nth-child(3) {
     animation-delay: 0.4s;
   }
 
