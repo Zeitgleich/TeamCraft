@@ -47,7 +47,7 @@ pub use account::stored_account_data;
 /// Where the engine records its upload limit for the UI.
 pub const MAX_UPLOAD_KEY: &str = "max_upload_bytes";
 pub use actions::{OutgoingText, REPLY_EXCERPT_CHARS, forward_content, reply_ref};
-pub use attachments::{MAX_VIEWER_BYTES, OutgoingFile};
+pub use attachments::{BlobDownload, MAX_VIEWER_BYTES, OutgoingFile};
 pub use attested::{AttestationSettings, JwksSource};
 pub use calls::{CallEventSink, CallKeySigner, CallMoveRecord, CallPreparation, call_move_announcement};
 pub(crate) use catch_up::CATCHING_UP_PREFIX;
@@ -207,6 +207,8 @@ pub struct Client<A, S> {
   /// Refusals of earlier user actions found by a background flush, for the host to show
   /// ([`Client::take_background_failures`]).
   background_failures: Vec<CoreError>,
+  /// File transfers in flight, with their progress; the UI adapter reads a clone.
+  transfers: crate::transfers::Transfers,
   maybe_call_sink: Option<CallEventSink>,
   /// The call this device last prepared to join per conversation: a call move is followed only
   /// when announced for that very call (docs/meetings.md, "A call becomes a meeting").
@@ -317,6 +319,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       sync,
       typing: Default::default(),
       background_failures: Vec::new(),
+      transfers: crate::transfers::Transfers::new(),
       maybe_call_sink: None,
       call_ids: HashMap::new(),
       maybe_preview_fetcher,
@@ -361,6 +364,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   pub fn store(&self) -> &S {
     &self.store
+  }
+
+  /// The file transfers in flight; a clone stays current (the UI adapter reads their progress).
+  pub fn transfers(&self) -> crate::transfers::Transfers {
+    self.transfers.clone()
   }
 
   pub fn api(&self) -> &A {

@@ -17,18 +17,20 @@ use teamcraft_client_api::remote::{
 };
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
+use teamcraft_core::client::files::BlobUpload;
 use teamcraft_core::client::{CatchUpFocus, LinkApproval, LinkedSecrets, NewDeviceLink};
 use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::connection::{
   ConnectionSettings, ConnectionState, ConnectionStatus, ConnectionSupervisor,
 };
+use teamcraft_core::downloads::Downloads;
 use teamcraft_core::records;
 use teamcraft_core::store::{
   DatabaseKeySource, KeySourceError, KeyringKeySource, SqlCipherStore, StoreError, StoreLock, TrackedStore,
 };
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
 use teamcraft_core::ui_snapshot::SnapshotCache;
-use teamcraft_core::upkeep::{self, Upkeep};
+use teamcraft_core::upkeep::{self, Upkeep, UploadMode};
 use teamcraft_core::{
   CallPreparation, Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer,
   PendingEnrollment, UnreadableStore,
@@ -49,6 +51,8 @@ const MAX_APPROVAL_MISSES: u8 = 3;
 /// Retries (outbox, uploads, previews), staggered commits and the other periodic upkeep; also the
 /// connection's regular check.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+/// How often the UI is told to read again while a file goes up, for its progress.
+const TRANSFER_PROGRESS: Duration = Duration::from_millis(500);
 /// How long a failed account data sync waits before it is retried; also how often the roster's age
 /// is checked locally. Account data itself is read after each connection and on `key_bag_update`
 /// (issue #252), not on a timer.
@@ -637,6 +641,16 @@ struct Core {
   was_store_set_aside: bool,
   /// The UI's snapshot, rebuilt per conversation from what the store's writes touched (#246).
   snapshots: SnapshotCache,
+  /// Messages were written to the outbox and answered at once; sending them is still to do.
+  has_queued_sends: bool,
+  /// The file going up beside the loop, so the UI's requests are answered meanwhile.
+  maybe_upload: Option<BlobUpload>,
+  /// A file may be waiting for its upload: one was queued, a retry came due, or one finished.
+  is_upload_due: bool,
+  /// The bytes the transfers in flight had moved when the UI was last told.
+  maybe_reported_bytes: Option<u64>,
+  /// Attachment downloads, running beside the loop (issue #491).
+  downloads: Downloads,
 }
 
 /// Why the client could not be opened.
@@ -707,7 +721,7 @@ impl Core {
       connection,
       catch_up_focus,
       status: CoreStatus::NotStarted,
-      upkeep: Upkeep::new(UPKEEP_INTERVAL),
+      upkeep: Upkeep::new(UPKEEP_INTERVAL).with_uploads(UploadMode::Host),
       link: None,
       link_failure: LinkStatus::Idle,
       approval: None,
@@ -717,6 +731,11 @@ impl Core {
       maybe_open_retry: None,
       was_store_set_aside: false,
       snapshots: SnapshotCache::new(SystemClock.now_ms().unsigned_abs()),
+      has_queued_sends: false,
+      maybe_upload: None,
+      is_upload_due: true,
+      maybe_reported_bytes: None,
+      downloads: Downloads::default(),
     }
   }
 
@@ -735,7 +754,21 @@ impl Core {
         _ = flush.tick(), if self.client.is_some() => {
           self.connection.on_tick(SystemClock.now_ms()).await;
           self.upkeep().await;
+          // Retries of failed uploads come due with time.
+          self.is_upload_due = true;
         },
+        sent = upload_sent(&mut self.maybe_upload), if self.maybe_upload.is_some() => {
+          self.on_uploaded(sent).await;
+        },
+        finished = self.downloads.next_finished(), if self.downloads.is_running() => {
+          if let Some(client) = self.client.as_mut()
+            && Downloads::finish(client, finished)
+          {
+            self.changed();
+          }
+        },
+        // While a file goes up, the UI reads its progress again every so often.
+        () = tokio::time::sleep(TRANSFER_PROGRESS), if self.maybe_reported_bytes.is_some() => {},
         () = sleep_for(maybe_deadline), if maybe_deadline.is_some() => {
           self.connection.on_tick(SystemClock.now_ms()).await;
         },
@@ -745,6 +778,12 @@ impl Core {
           self.changed();
         },
       }
+      if std::mem::take(&mut self.has_queued_sends) {
+        self.send_queued().await;
+      }
+      self.start_upload().await;
+      self.start_downloads().await;
+      self.report_progress();
       self.report_background_failures();
     }
   }
@@ -911,11 +950,10 @@ impl Core {
     let status = CoreStatus::Ready {
       identity_fingerprint: client.identity_fingerprint(),
     };
-    self.backend = Some(CoreChatBackend::new(
-      client.store().clone(),
-      client.user_id(),
-      Box::new(SystemClock),
-    ));
+    self.backend = Some(
+      CoreChatBackend::new(client.store().clone(), client.user_id(), Box::new(SystemClock))
+        .with_transfers(client.transfers()),
+    );
     self.client = Some(client);
     status
   }
@@ -1016,6 +1054,22 @@ impl Core {
           .ok_or_else(|| "this device is not set up yet".to_owned());
         drop(reply.send(result));
       },
+      // A message shows at once: it is answered when it is in the outbox and sent afterwards
+      // (`send_queued`).
+      Request::Action(action, reply) if action.is_new_message() => {
+        let result = match self.backend.as_ref() {
+          Some(backend) => {
+            if let Some(unhandled) = action.apply_to(backend) {
+              tracing::warn!(?unhandled, "chat action not handled");
+            }
+            self.has_queued_sends = true;
+            Ok(())
+          },
+          None => Err("this device is not set up yet".to_owned()),
+        };
+        self.changed();
+        drop(reply.send(result));
+      },
       Request::Action(action, reply) => {
         let result = self.action(*action).await;
         self.changed();
@@ -1051,24 +1105,45 @@ impl Core {
         message,
         file_id,
         reply,
-      } => drop(reply.send(self.attachment(conversation, message, &file_id).await)),
+      } => self.queue_attachment(conversation, message, &file_id, reply),
       Request::OrgBackgroundPicture(id, reply) => drop(reply.send(self.org_background_picture(id).await)),
     }
   }
 
-  async fn attachment(
+  /// Queues one file, decrypted, for the image viewer or an inline picture; it downloads beside
+  /// the loop and is answered when it arrived.
+  fn queue_attachment(
     &mut self,
     conversation: ConversationId,
     message: MessageId,
     file_id: &str,
-  ) -> Result<SecretBytes, String> {
-    let (Some(client), Some(backend)) = (self.client.as_ref(), self.backend.as_ref()) else {
-      return Err("this device is not set up yet".to_owned());
+    reply: oneshot::Sender<Result<SecretBytes, String>>,
+  ) {
+    let maybe_reference = self
+      .backend
+      .as_ref()
+      .and_then(|backend| backend.attachment_ref(conversation, message, file_id));
+    let Some(reference) = maybe_reference else {
+      drop(reply.send(Err("no such file in this conversation".to_owned())));
+      return;
     };
-    let reference = backend
-      .attachment_ref(conversation, message, file_id)
-      .ok_or("no such file in this conversation")?;
-    client.open_attachment(&reference).await.map_err(describe)
+    // A closed reply channel (the caller gave up) needs nothing.
+    let deliver = move |opened: Result<SecretBytes, CoreError>| drop(reply.send(opened.map_err(describe)));
+    self.downloads.view(reference, Box::new(deliver));
+  }
+
+  /// Starts the downloads that may run now.
+  async fn start_downloads(&mut self) {
+    let Some(client) = self.client.as_mut() else {
+      return;
+    };
+    if self
+      .connection
+      .keep_alive(SystemClock.now_ms(), self.downloads.start_due(client))
+      .await
+    {
+      self.changed();
+    }
   }
 
   async fn background_picture(&mut self, id: BackgroundId) -> Result<Vec<u8>, String> {
@@ -1357,18 +1432,14 @@ impl Core {
   /// Every command runs even when one fails: they are independent user actions. The failure goes
   /// back to the UI, which shows it (issue #322: a failed action never passes silently).
   async fn run_queued_commands(&mut self) -> Result<usize, CoreError> {
-    let commands: Vec<CoreCommand> = self
-      .backend
-      .as_ref()
-      .map(CoreChatBackend::drain_commands)
-      .unwrap_or_default();
+    let commands = self.drain_commands();
     let Some(client) = self.client.as_mut() else {
       return Ok(0);
     };
     let count = commands.len();
     let mut maybe_failure = None;
     for command in commands {
-      // A command can take long (an upload, a big history page); heartbeats go on meanwhile.
+      // A command can take long (a big history page); heartbeats go on meanwhile.
       let result = self
         .connection
         .keep_alive(SystemClock.now_ms(), client.run_ui_command(command))
@@ -1387,11 +1458,114 @@ impl Core {
     };
     if self
       .connection
-      .keep_alive(SystemClock.now_ms(), upkeep::flush(client))
+      .keep_alive(SystemClock.now_ms(), upkeep::flush_sends(client))
       .await
     {
       self.changed();
     }
+  }
+
+  /// What the UI adapter queued, without the uploads: those run beside the loop
+  /// ([`Self::start_upload`]).
+  fn drain_commands(&mut self) -> Vec<CoreCommand> {
+    let commands = self
+      .backend
+      .as_ref()
+      .map(CoreChatBackend::drain_commands)
+      .unwrap_or_default();
+    let (uploads, commands): (Vec<_>, Vec<_>) = commands
+      .into_iter()
+      .partition(|command| matches!(command, CoreCommand::UploadFiles));
+    self.is_upload_due |= !uploads.is_empty();
+    commands
+      .into_iter()
+      .filter(|command| match command {
+        // Saved beside the loop, like uploads.
+        CoreCommand::DownloadFile {
+          conversation,
+          attachment,
+        } => {
+          self.downloads.save(*conversation, *attachment);
+          false
+        },
+        _ => true,
+      })
+      .collect()
+  }
+
+  /// Sends what [`Request::Action`] put into the outbox (link previews first). A failure was not
+  /// the action's (that was answered already): it is shown by itself.
+  async fn send_queued(&mut self) {
+    if let Err(error) = self.run_queued_commands().await {
+      (self.on_failure)(describe_failure(error));
+    }
+    self.flush().await;
+    self.changed();
+  }
+
+  /// Starts the next due upload, if none runs: the file is encrypted and announced, then goes up
+  /// beside the loop.
+  async fn start_upload(&mut self) {
+    if !self.is_upload_due {
+      return;
+    }
+    // A cancelled file (or a message deleted meanwhile) stops its upload: dropping it aborts it.
+    if let (Some(upload), Some(client)) = (&self.maybe_upload, &self.client)
+      && !client.is_upload_current(upload)
+    {
+      self.maybe_upload = None;
+      self.changed();
+    }
+    if self.maybe_upload.is_some() {
+      return;
+    }
+    let Some(client) = self.client.as_mut() else {
+      return;
+    };
+    self.is_upload_due = false;
+    let started = self
+      .connection
+      .keep_alive(SystemClock.now_ms(), client.start_upload())
+      .await;
+    match started {
+      Ok(Some(upload)) => {
+        self.maybe_upload = Some(upload);
+        // The pending message shows the file's thumbnail from now on.
+        self.changed();
+      },
+      Ok(None) => {},
+      Err(error) => tracing::debug!(%error, "upload not started"),
+    }
+  }
+
+  /// Tells the UI to read again when the transfers in flight moved on.
+  fn report_progress(&mut self) {
+    let Some(client) = self.client.as_ref() else {
+      return;
+    };
+    let moved = client.transfers().moved_bytes();
+    if moved != self.maybe_reported_bytes {
+      self.maybe_reported_bytes = moved;
+      self.changed();
+    }
+  }
+
+  /// The running upload's blob is stored (or failed): the file goes into its message, which is sent
+  /// once all its files are up.
+  async fn on_uploaded(&mut self, sent: Result<(), ApiError>) {
+    let (Some(upload), Some(client)) = (self.maybe_upload.take(), self.client.as_mut()) else {
+      return;
+    };
+    let finished = self
+      .connection
+      .keep_alive(SystemClock.now_ms(), client.finish_upload(upload, sent))
+      .await;
+    if let Err(error) = finished {
+      tracing::debug!(%error, "upload not finished");
+    }
+    self.is_upload_due = true;
+    self.flush().await;
+    self.changed();
   }
 
   /// The periodic work besides the gateway, the same as in the other apps (teamcraft-core upkeep).
@@ -1415,6 +1589,9 @@ impl Core {
     };
     if self.connection.connect_if_due(client).await.is_some() {
       self.repeat_reports().await;
+      // Back online: what waited goes out now, not on the next tick.
+      self.has_queued_sends = true;
+      self.is_upload_due = true;
       self.changed();
     }
   }
@@ -1486,6 +1663,14 @@ async fn sleep_until_retry(maybe_retry: Option<&OpenRetry>) {
 }
 
 /// Sleeps `maybe_duration` (only polled when there is one).
+/// Resolves when storage answered the running upload; never while there is none.
+async fn upload_sent(maybe_upload: &mut Option<BlobUpload>) -> Result<(), ApiError> {
+  match maybe_upload {
+    Some(upload) => upload.sent().await,
+    None => std::future::pending().await,
+  }
+}
+
 async fn sleep_for(maybe_duration: Option<Duration>) {
   match maybe_duration {
     Some(duration) => tokio::time::sleep(duration).await,

@@ -6387,6 +6387,18 @@ ol.md-list {
 .media-play-badge svg { width: 18px; height: 18px; }
 .media-gif-badge { position: absolute; left: 8px; bottom: 8px; padding: 1px 6px; border-radius: 4px; background: rgba(0, 0, 0, .6); color: var(--on-fill); font-size: var(--text-xs); font-weight: var(--weight-bold); letter-spacing: .04em; pointer-events: none; }
 .media-more { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(0, 0, 0, .5); color: var(--on-fill); font-size: var(--text-2xl); letter-spacing: var(--tracking-2xl); line-height: var(--leading-2xl); font-weight: var(--weight-semibold); pointer-events: none; }
+/* A picture of the user's own message still going up: its local thumbnail, a turning ring over it,
+   or why it stopped and "Try again" */
+.media-tile.is-uploading .media-open { cursor: default; }
+.upload-state { position: absolute; left: 50%; top: 50%; z-index: 1; transform: translate(-50%, -50%); display: inline-flex; align-items: center; gap: 8px; padding: 8px; border-radius: 999px; background: rgba(0, 0, 0, .6); color: var(--on-fill); }
+.upload-state .spinner { width: 22px; height: 22px; border-color: rgba(255, 255, 255, .35); border-top-color: var(--on-fill); }
+.upload-label { font-size: var(--text-sm); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.upload-state .upload-cancel { width: 28px; height: 28px; color: var(--on-fill); }
+.upload-state .upload-cancel svg { width: 16px; height: 16px; }
+.upload-actions { display: inline-flex; align-items: center; gap: 4px; }
+/* How far a transfer got: a ring filled to --media-progress percent */
+.transfer-ring { flex: none; width: 22px; height: 22px; border-radius: 50%; background: conic-gradient(var(--on-fill) calc(var(--media-progress, 0) * 1%), rgba(255, 255, 255, .35) 0); mask: radial-gradient(farthest-side, transparent calc(100% - 3px), black calc(100% - 2px)); }
+.upload-state.is-failed { flex-direction: column; max-width: calc(100% - 16px); padding: 10px 12px; border-radius: var(--radius-md); font-size: var(--text-sm); text-align: center; }
 .media-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px; width: min(360px, 100%); }
 .media-grid .media-tile { aspect-ratio: 1; border-radius: var(--radius-sm); }
 .media-grid .media-open img { object-fit: cover; }
@@ -6419,6 +6431,11 @@ ol.md-list {
 .file-size, .file-state { color: var(--text-muted); font-size: var(--text-2xs); letter-spacing: var(--tracking-2xs); }
 .file-progress { width: 100%; height: 4px; margin-top: 4px; }
 .file-error { color: var(--danger); font-size: var(--text-2xs); letter-spacing: var(--tracking-2xs); }
+/* A file going up or down: bar, how far ("37 %", "12 MB / 48 MB") and, for uploads, cancel */
+.file-transfer { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.file-transfer .file-progress { flex: 1; margin-top: 0; }
+.file-transfer .upload-cancel { width: 24px; height: 24px; }
+.file-transfer .upload-cancel svg { width: 14px; height: 14px; }
 .file-meta .link-btn { align-self: flex-start; font-size: var(--text-2xs); letter-spacing: var(--tracking-2xs); }
 .file-action { flex: none; }
 .files-list { display: flex; flex-direction: column; gap: .5rem; padding: .5rem 1rem; }
@@ -7764,9 +7781,26 @@ ol.md-list {
   height: 14px;
 }
 
+.msg-delivery.is-pending .icon {
+  width: 12px;
+  height: 12px;
+}
+
+/* Not confirmed after a while: still retried by itself, so muted, not an error. */
 .msg-delayed {
+  color: var(--text-muted);
+}
+
+/* Refused by the server for good: says so, with "Try again" and "Delete". */
+.msg-delivery.msg-failed {
   color: var(--danger);
   font-weight: var(--weight-semibold);
+}
+
+.msg-failed .link-btn {
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  font-weight: var(--weight-medium);
 }
 
 /* Card over a person's name while the pointer rests on it. */

@@ -305,6 +305,7 @@ enum Write {
   Delete(Table, String),
   Upsert(Box<StoredMessage>),
   DeleteMessages(ConversationId),
+  DeleteMessage(ConversationId, ClientMessageId),
 }
 
 impl KillPointStore {
@@ -383,6 +384,10 @@ impl LocalStore for KillPointStore {
     self.write(Write::DeleteMessages(conversation))
   }
 
+  fn delete_message(&self, conversation: ConversationId, message: ClientMessageId) -> Result<(), StoreError> {
+    self.write(Write::DeleteMessage(conversation, message))
+  }
+
   fn begin_writes(&self) -> Result<(), StoreError> {
     let mut state = self.state.lock().unwrap();
     if state.has_crashed {
@@ -415,6 +420,7 @@ fn apply(store: &MemoryStore, write: &Write) -> Result<(), StoreError> {
     Write::Delete(table, key) => store.delete(*table, key),
     Write::Upsert(message) => store.upsert_message(message),
     Write::DeleteMessages(conversation) => store.delete_messages(*conversation),
+    Write::DeleteMessage(conversation, message) => store.delete_message(*conversation, *message),
   }
 }
 

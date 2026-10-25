@@ -15,7 +15,9 @@ use std::rc::Rc;
 use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use teamcraft_client_api::actions::{FileFailure, FileInfo, FileTransfer, LinkPreview, ShareLinkOptions};
+use teamcraft_client_api::actions::{
+  FileFailure, FileInfo, FileTransfer, LinkPreview, PixelSize, ShareLinkOptions,
+};
 use teamcraft_client_api::admin::format_bytes;
 
 use crate::components::empty_state::EmptyState;
@@ -29,22 +31,27 @@ use crate::media_formats::animation_label;
 use crate::media_layout::{EmbedImage, fit_picture, inline_size, loads_inline, thumbnail_size};
 use crate::model::{ConversationId, MessageId};
 use crate::object_url::{FetchError, ObjectUrl};
+use crate::prefs::ImageSize;
 use crate::state::{AppState, Overlay, use_app_state};
 
 /// Most tiles a grid shows; the last one counts the pictures it doesn't show ("+3").
 const MAX_GRID_TILES: usize = 4;
+/// From this size on, a transfer's progress is told in bytes ("12 MB / 48 MB"), below in percent.
+const LARGE_TRANSFER_BYTES: u64 = 1024 * 1024;
 
 /// The files attached to one message: pictures and videos inline (one large, several in a grid),
-/// everything else as cards.
+/// everything else as cards. Pictures still going up show where they will be, from their local
+/// thumbnail.
 #[component]
 pub fn MessageFiles(files: Vec<FileInfo>) -> impl IntoView {
-  let (media, cards): (Vec<FileInfo>, Vec<FileInfo>) =
-    files.into_iter().partition(|file| MediaKey::of(file).is_some());
+  let (media, cards): (Vec<FileInfo>, Vec<FileInfo>) = files
+    .into_iter()
+    .partition(|file| MediaKey::of(file).is_some() || is_media_upload(file));
   let media = match media.len() {
     0 => ().into_any(),
     1 => media
       .into_iter()
-      .map(|file| view! { <MediaTile file=file layout=TileLayout::Single /> })
+      .map(|file| tile(file, TileLayout::Single))
       .collect_view()
       .into_any(),
     _ => view! { <MediaGrid files=media /> }.into_any(),
@@ -79,13 +86,200 @@ fn MediaGrid(files: Vec<FileInfo>) -> impl IntoView {
       let layout = TileLayout::Grid {
         maybe_hidden: (index + 1 == MAX_GRID_TILES && hidden > 0).then_some(hidden),
       };
-      view! { <MediaTile file=file layout=layout /> }
+      tile(file, layout)
     })
     .collect_view();
   view! {
     <div class="media-grid" data-tiles=count.min(MAX_GRID_TILES).to_string()>
       {tiles}
     </div>
+  }
+}
+
+/// A sent picture or video, or one still going up.
+fn tile(file: FileInfo, layout: TileLayout) -> AnyView {
+  match MediaKey::of(&file) {
+    Some(_) => view! { <MediaTile file=file layout=layout /> }.into_any(),
+    None => view! { <UploadTile file=file layout=layout /> }.into_any(),
+  }
+}
+
+/// A picture or video of the user's own message that is going up, or failed to.
+fn is_media_upload(file: &FileInfo) -> bool {
+  MediaKind::of(&file.media_type).is_some()
+    && matches!(
+      file.transfer,
+      FileTransfer::Uploading { .. } | FileTransfer::UploadStalled { .. } | FileTransfer::UploadFailed { .. }
+    )
+}
+
+/// A picture of a message that is still going up: its local thumbnail where the sent picture will
+/// be, at the same size, so nothing moves when it is sent. Over it a turning ring while it goes up,
+/// or why it stopped and "Try again".
+#[component]
+fn UploadTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let kind = MediaKind::of(&file.media_type).unwrap_or(MediaKind::Image);
+  let thumbnail = file
+    .maybe_thumbnail_png
+    .as_deref()
+    .and_then(ObjectUrl::from_thumbnail);
+  let maybe_src = thumbnail.as_ref().map(|url| url.as_str().to_owned());
+  // Revoked when the row leaves the screen.
+  StoredValue::new_local(thumbnail);
+  let maybe_thumbnail_size = file.maybe_thumbnail_png.as_deref().and_then(thumbnail_size);
+  let maybe_dimensions = file.maybe_dimensions;
+  let maybe_size = move || {
+    (layout == TileLayout::Single)
+      .then(|| {
+        let image_size = state.settings.prefs.with(|prefs| prefs.display.image_size);
+        tile_size(maybe_dimensions, maybe_thumbnail_size, image_size)
+      })
+      .flatten()
+  };
+  let media_width = move || {
+    maybe_size()
+      .map(|(width, _)| format!("{width}px"))
+      .unwrap_or_default()
+  };
+  let media_height = move || {
+    maybe_size()
+      .map(|(_, height)| format!("{height}px"))
+      .unwrap_or_default()
+  };
+  let actions = FileActions::new(state, &file);
+  let name = file.file_name.clone();
+  let picture = match maybe_src {
+    Some(src) => view! { <img src=src alt=name class="is-preview" draggable="false" /> }.into_any(),
+    None => view! { <span class="media-placeholder"><Icon name=file_icon(Some(kind)) /></span> }.into_any(),
+  };
+  let status = match file.transfer {
+    FileTransfer::Uploading {
+      done_bytes,
+      total_bytes,
+      failed_attempts,
+    } if done_bytes < total_bytes || total_bytes == 0 => view! {
+      <span class="upload-state">
+        <TransferRing done_bytes=done_bytes total_bytes=total_bytes />
+        <span class="upload-label" role="status">{upload_label(i18n, done_bytes, total_bytes, failed_attempts)}</span>
+        <CancelUploadButton actions=actions />
+      </span>
+    }
+    .into_any(),
+    FileTransfer::UploadStalled { .. } => view! {
+      <span class="upload-state is-failed" role="alert">
+        <span>{move || i18n.t("file-upload-failed")}</span>
+        <span class="upload-actions">
+          <button class="btn btn-small" on:click=move |_| actions.retry_upload()>
+            <Icon name=IconName::Rotate />
+            <span>{move || i18n.t("file-retry")}</span>
+          </button>
+          <CancelUploadButton actions=actions />
+        </span>
+      </span>
+    }
+    .into_any(),
+    FileTransfer::UploadFailed { reason } => {
+      let key = match reason {
+        FileFailure::TooLarge => "file-too-large",
+        _ => "file-upload-failed",
+      };
+      view! {
+        <span class="upload-state is-failed" role="alert">
+          <span>{move || i18n.t(key)}</span>
+        </span>
+      }
+      .into_any()
+    },
+    _ => ().into_any(),
+  };
+  let has_size = maybe_dimensions.is_some() || maybe_thumbnail_size.is_some();
+  view! {
+    <div
+      class="media-tile is-uploading"
+      class:media-single=layout == TileLayout::Single
+      class:has-size=has_size
+      style:--media-w=media_width
+      style:--media-h=media_height
+    >
+      <span class="media-open">{picture}</span>
+      {status}
+    </div>
+  }
+}
+
+/// How far a transfer got, as a ring; a turning one before the first bytes moved.
+#[component]
+fn TransferRing(done_bytes: u64, total_bytes: u64) -> impl IntoView {
+  let percent = percent_of(done_bytes, total_bytes);
+  match done_bytes {
+    0 => view! { <span class="spinner" aria-hidden="true"></span> }.into_any(),
+    _ => view! {
+      <span class="transfer-ring" style:--media-progress=percent.to_string() aria-hidden="true"></span>
+    }
+    .into_any(),
+  }
+}
+
+/// "Cancel" on a file that is still going up.
+#[component]
+fn CancelUploadButton(actions: FileActions) -> impl IntoView {
+  let i18n = use_i18n();
+  view! {
+    <button
+      class="icon-btn upload-cancel"
+      aria-label=move || i18n.t("file-cancel-upload")
+      data-tip=move || i18n.t("file-cancel-upload")
+      on:click=move |_| actions.cancel_upload()
+    >
+      <Icon name=IconName::Close />
+    </button>
+  }
+}
+
+/// A transfer's progress in words: bytes of large files ("12 MB / 48 MB"), percent of small ones.
+fn transfer_label(i18n: I18n, done_bytes: u64, total_bytes: u64) -> String {
+  if total_bytes >= LARGE_TRANSFER_BYTES {
+    return i18n.t_with(
+      "file-progress-bytes",
+      &[
+        ("done", &format_bytes(done_bytes)),
+        ("total", &format_bytes(total_bytes)),
+      ],
+    );
+  }
+  i18n.t_with(
+    "file-progress-percent",
+    &[("percent", &percent_of(done_bytes, total_bytes).to_string())],
+  )
+}
+
+/// An upload's progress in words; before its first bytes after a failed attempt, that it is retried.
+fn upload_label(i18n: I18n, done_bytes: u64, total_bytes: u64, failed_attempts: u32) -> String {
+  match (done_bytes, failed_attempts) {
+    (0, 1..) => i18n.t("file-upload-retrying"),
+    _ => transfer_label(i18n, done_bytes, total_bytes),
+  }
+}
+
+fn percent_of(done_bytes: u64, total_bytes: u64) -> u64 {
+  match total_bytes {
+    0 => 0,
+    total => u64::try_from(u128::from(done_bytes.min(total)) * 100 / u128::from(total)).unwrap_or(100),
+  }
+}
+
+/// The inline size of a single picture: the sender's exact size, else its thumbnail's.
+fn tile_size(
+  maybe_dimensions: Option<PixelSize>,
+  maybe_thumbnail_size: Option<(u32, u32)>,
+  image_size: ImageSize,
+) -> Option<(u32, u32)> {
+  match (maybe_dimensions, maybe_thumbnail_size) {
+    (Some(picture), _) => Some(fit_picture(picture.width, picture.height, image_size)),
+    (None, Some((width, height))) => Some(inline_size(width, height, image_size)),
+    (None, None) => None,
   }
 }
 
@@ -173,11 +367,7 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
       return None;
     }
     let image_size = state.settings.prefs.with(|prefs| prefs.display.image_size);
-    match (maybe_dimensions, maybe_thumbnail_size) {
-      (Some(picture), _) => Some(fit_picture(picture.width, picture.height, image_size)),
-      (None, Some((width, height))) => Some(inline_size(width, height, image_size)),
-      (None, None) => None,
-    }
+    tile_size(maybe_dimensions, maybe_thumbnail_size, image_size)
   };
   let media_width = move || {
     maybe_size()
@@ -194,6 +384,14 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
     TileLayout::Single => None,
   };
   let is_single = layout == TileLayout::Single;
+  // A large picture or video on its way down shows how far it got.
+  let downloading = file.with_value(|file| match file.transfer {
+    FileTransfer::Downloading {
+      done_bytes,
+      total_bytes,
+    } if total_bytes >= LARGE_TRANSFER_BYTES => Some((done_bytes, total_bytes)),
+    _ => None,
+  });
   let has_size = maybe_dimensions.is_some() || maybe_thumbnail_size.is_some();
   let badge = file.with_value(|file| animation_label(&file.media_type));
   let size_bytes = file.with_value(|file| file.size_bytes);
@@ -261,6 +459,12 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
             <Icon name=IconName::Rotate />
             <span>{move || i18n.t("file-retry")}</span>
           </button>
+        })}
+        {downloading.map(|(done, total)| view! {
+          <span class="upload-state">
+            <TransferRing done_bytes=done total_bytes=total />
+            <span class="upload-label" role="status">{transfer_label(i18n, done, total)}</span>
+          </span>
         })}
         <MediaToolbar file=file.get_value() />
       </div>
@@ -443,9 +647,30 @@ fn transfer_status(transfer: &FileTransfer, actions: FileActions) -> AnyView {
   let i18n = use_i18n();
   match transfer {
     FileTransfer::Remote => ().into_any(),
-    FileTransfer::Uploading { done_bytes, total_bytes } | FileTransfer::Downloading { done_bytes, total_bytes } => {
-      let (done, total) = (*done_bytes, (*total_bytes).max(1));
-      view! { <progress class="file-progress" max=total value=done aria-label=move || i18n.t("file-progress")></progress> }.into_any()
+    FileTransfer::Uploading {
+      done_bytes,
+      total_bytes,
+      failed_attempts,
+    } => {
+      let (done, total) = (*done_bytes, *total_bytes);
+      view! {
+        <span class="file-transfer">
+          <progress class="file-progress" max=total.max(1) value=done aria-label=move || i18n.t("file-progress")></progress>
+          <span class="file-state">{upload_label(i18n, done, total, *failed_attempts)}</span>
+          <CancelUploadButton actions=actions />
+        </span>
+      }
+      .into_any()
+    },
+    FileTransfer::Downloading { done_bytes, total_bytes } => {
+      let (done, total) = (*done_bytes, *total_bytes);
+      view! {
+        <span class="file-transfer">
+          <progress class="file-progress" max=total.max(1) value=done aria-label=move || i18n.t("file-progress")></progress>
+          <span class="file-state">{transfer_label(i18n, done, total)}</span>
+        </span>
+      }
+      .into_any()
     },
     FileTransfer::Local { path } => view! {
       <span class="file-state" translate="no" title=path.clone()>{move || i18n.t("file-saved")}</span>
@@ -462,6 +687,7 @@ fn transfer_status(transfer: &FileTransfer, actions: FileActions) -> AnyView {
     FileTransfer::UploadStalled { .. } => view! {
       <span class="file-error" role="alert">{move || i18n.t("file-upload-stalled")}</span>
       <button class="link-btn" on:click=move |_| actions.retry_upload()>{move || i18n.t("file-retry")}</button>
+      <button class="link-btn" on:click=move |_| actions.cancel_upload()>{move || i18n.t("file-cancel-upload")}</button>
     }
     .into_any(),
     FileTransfer::UploadFailed { reason } => {
@@ -683,6 +909,14 @@ impl FileActions {
       None => "lightbox-link-unavailable",
     };
     self.state.show_brief_toast(self.i18n.t(key));
+  }
+
+  /// Stops the file's upload; the message goes out without it.
+  fn cancel_upload(self) {
+    let file_id = self.file_id.get_value();
+    self
+      .state
+      .write(|backend| backend.cancel_upload(self.conversation, self.message, &file_id));
   }
 
   /// "Retry" on an upload that stopped retrying by itself; the message waits for it.

@@ -559,8 +559,10 @@ struct MessageRow: View {
               Image(systemName: "pin.fill").font(.caption2).foregroundStyle(Theme.textMuted)
                 .accessibilityLabel(Text("pinned"))
             }
+            // Not confirmed by the server yet; the core keeps retrying in the background.
             if message.isPending && !isSendFailed {
-              Text("pending").font(.caption).foregroundStyle(Theme.textMuted)
+              Image(systemName: "clock").font(.caption2).foregroundStyle(Theme.textMuted)
+                .accessibilityLabel(Text("pending"))
             }
           }
         }

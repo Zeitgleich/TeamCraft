@@ -581,6 +581,11 @@ pub enum ChatAction {
     conversation: ConversationId,
     message: MessageId,
   },
+  CancelUpload {
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: String,
+  },
   DownloadFile {
     conversation: ConversationId,
     message: MessageId,
@@ -730,6 +735,12 @@ pub enum ChatAction {
 }
 
 impl ChatAction {
+  /// A new message: the host answers it once it is in the outbox and sends it afterwards, so the
+  /// message shows at once, also while a sync or an upload holds the client.
+  pub fn is_new_message(&self) -> bool {
+    matches!(self, Self::SendMessage { .. } | Self::PostMessage { .. })
+  }
+
   /// Runs the action on a backend. The original actions are left to the host, which handles
   /// some of them itself (enrollment state, admin flows); returns them back.
   pub fn apply_to(self, backend: &(impl ChatBackend + SearchBackend)) -> Option<Self> {
@@ -815,6 +826,11 @@ impl ChatAction {
         conversation,
         message,
       } => backend.discard_unsent(conversation, message),
+      Self::CancelUpload {
+        conversation,
+        message,
+        file_id,
+      } => backend.cancel_upload(conversation, message, &file_id),
       Self::DownloadFile {
         conversation,
         message,
@@ -1342,6 +1358,18 @@ mod tests {
       ChatAction::DiscardUnsent {
         conversation: id_from_raw(7),
         message: id_from_raw(9),
+      }
+    );
+    let cancel: ChatAction = serde_json::from_str(
+      r#"{"action":"cancel_upload","conversation":"7","message":"9","file_id":"pending-1"}"#,
+    )
+    .expect("parse");
+    assert_eq!(
+      cancel,
+      ChatAction::CancelUpload {
+        conversation: id_from_raw(7),
+        message: id_from_raw(9),
+        file_id: "pending-1".into(),
       }
     );
     // Extras from an older core have no send state: not failed.

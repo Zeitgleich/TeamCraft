@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use leptos::prelude::*;
-use teamcraft_client_api::actions::{MessagePriority, WorkspaceEvent};
+use teamcraft_client_api::actions::{FileTransfer, MessagePriority, WorkspaceEvent};
 use teamcraft_client_api::log::{LogEntry, log_entries};
 use teamcraft_proto::HistoryPolicy;
 use wasm_bindgen::JsCast;
@@ -548,26 +548,81 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
       delivery.set(Delivery::of(message_id, sent_at, now_ms()))
     });
   }
-  let delivery_view = move || match delivery.get() {
-    Delivery::Sent => None,
-    Delivery::Sending => Some(
-      view! {
-        <span class="msg-delivery" role="status">
-          <Icon name=IconName::Clock />
-          {move || i18n.t("message-sending")}
-        </span>
-      }
-      .into_any(),
-    ),
-    Delivery::Delayed => Some(
-      view! {
-        <span class="msg-delivery msg-delayed" role="status">
-          <Icon name=IconName::Alert />
-          {move || i18n.t("message-not-sent")}
-        </span>
-      }
-      .into_any(),
-    ),
+  // A message waits for its files: just the clock while they go up, however long that takes. A
+  // file that stopped says so (with "Try again") on its own tile, not "retrying automatically".
+  let is_uploading = move || {
+    extras.with(|maybe_extras| {
+      maybe_extras.as_ref().is_some_and(|extras| {
+        extras.files.iter().any(|file| {
+          matches!(
+            file.transfer,
+            FileTransfer::Uploading { .. } | FileTransfer::UploadStalled { .. }
+          )
+        })
+      })
+    })
+  };
+  // Refused by the server for good (no permission, too large): only then is it an error.
+  let is_send_failed =
+    move || extras.with(|maybe_extras| maybe_extras.as_ref().is_some_and(|extras| extras.is_send_failed));
+  let delivery_view = move || {
+    if is_send_failed() {
+      return Some(
+        view! {
+          <span class="msg-delivery msg-failed" role="alert">
+            <Icon name=IconName::Alert />
+            {move || i18n.t("message-send-failed")}
+            <button
+              class="link-btn"
+              on:click=move |_| state.write(|backend| backend.retry_send(conversation, message_id))
+            >
+              {move || i18n.t("message-send-retry")}
+            </button>
+            <button
+              class="link-btn"
+              on:click=move |_| state.write(|backend| backend.discard_unsent(conversation, message_id))
+            >
+              {move || i18n.t("message-send-discard")}
+            </button>
+          </span>
+        }
+        .into_any(),
+      );
+    }
+    match delivery.get() {
+      Delivery::Sent => None,
+      // Unconfirmed: a small clock, retried in the background (offline, reconnect, reload).
+      Delivery::Sending => Some(
+        view! {
+          <span
+            class="msg-delivery is-pending"
+            role="status"
+            aria-label=move || i18n.t("message-sending")
+            data-tip=move || i18n.t("message-sending")
+          >
+            <Icon name=IconName::Clock />
+          </span>
+        }
+        .into_any(),
+      ),
+      Delivery::Delayed if is_uploading() => Some(
+        view! {
+          <span class="msg-delivery is-pending" role="status" aria-label=move || i18n.t("message-sending")>
+            <Icon name=IconName::Clock />
+          </span>
+        }
+        .into_any(),
+      ),
+      Delivery::Delayed => Some(
+        view! {
+          <span class="msg-delivery is-pending msg-delayed" role="status">
+            <Icon name=IconName::Clock />
+            {move || i18n.t("message-not-sent")}
+          </span>
+        }
+        .into_any(),
+      ),
+    }
   };
   let is_long_body = markdown::is_long(&body_text);
   let is_expanded = RwSignal::new(false);

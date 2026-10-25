@@ -126,6 +126,8 @@ private const val HIGHLIGHT_MS = 2500L
 /** The box an image preview fits into, keeping its shape (#315). */
 private val PREVIEW_MAX_WIDTH = 280.dp
 private val PREVIEW_MAX_HEIGHT = 320.dp
+/** From this size on, an upload's progress is told in bytes ("12 MB / 48 MB"), below in percent. */
+private const val LARGE_TRANSFER_BYTES = 1024L * 1024L
 
 /** Panoramas and tall screenshots are cut to these shapes (width over height) rather than shrunk to a line. */
 private const val MIN_PREVIEW_RATIO = 0.5f
@@ -448,17 +450,16 @@ private fun MessageRow(
           modifier = Modifier.padding(end = 8.dp),
         )
         Text(
-          if (isSending) stringResource(R.string.pending) else DateUtils.formatDateTime(context, message.sentAt, DateUtils.FORMAT_SHOW_TIME),
+          DateUtils.formatDateTime(context, message.sentAt, DateUtils.FORMAT_SHOW_TIME),
           style = MaterialTheme.typography.bodySmall,
           color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        if (isSending) PendingClock()
         Markers(maybeExtras)
       }
     } else if (isSending || maybeExtras?.isPinned == true || (maybeExtras != null && maybeExtras.priority != "normal")) {
       Row(verticalAlignment = Alignment.Bottom) {
-        if (isSending) {
-          Text(stringResource(R.string.pending), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
+        if (isSending) PendingClock()
         Markers(maybeExtras)
       }
     }
@@ -474,6 +475,9 @@ private fun MessageRow(
     val gridImages = files.filter { it.isImage && it.maybeThumbnail != null }.takeIf { it.size >= 2 }.orEmpty()
     if (gridImages.isNotEmpty()) ImageGrid(gridImages, onOpenFile)
     files.filterNot { it in gridImages }.forEach { file -> FileAttachment(file, onOpenFile) }
+    files.filter { it.transfer.isCancellable || it.transfer.state == "upload_failed" }.forEach { file ->
+      UploadLine(viewModel, file)
+    }
     maybeExtras?.maybeLinkPreview?.let { LinkPreviewCard(it) }
     if (message.reactions.isNotEmpty()) {
       FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -531,6 +535,48 @@ private fun NotSentLine(viewModel: MainViewModel, message: Message) {
     }
     TextButton(onClick = { viewModel.act(ChatActions.discardUnsent(message.conversation, message.id)) }) {
       Text(stringResource(R.string.not_sent_delete), color = MaterialTheme.colorScheme.error)
+    }
+  }
+}
+
+/** Not confirmed by the server yet: a small clock; the core keeps retrying in the background. */
+@Composable
+private fun PendingClock() {
+  Icon(
+    painterResource(R.drawable.ic_schedule),
+    contentDescription = stringResource(R.string.pending),
+    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+    modifier = Modifier.padding(start = 4.dp).size(12.dp),
+  )
+}
+
+/** An own file going up: how far ("37 %", "12 MB / 48 MB") and cancel; stopped: why, retry, cancel. */
+@Composable
+private fun UploadLine(viewModel: MainViewModel, file: FileInfo) {
+  val context = LocalContext.current
+  val cancel: () -> Unit = { viewModel.act(ChatActions.cancelUpload(file.conversation, file.message, file.fileId)) }
+  Row(verticalAlignment = Alignment.CenterVertically) {
+    when (file.transfer.state) {
+      "uploading" -> {
+        val transfer = file.transfer
+        val label = if (transfer.doneBytes == 0L && transfer.failedAttempts > 0) {
+          stringResource(R.string.file_upload_retrying)
+        } else if (transfer.totalBytes >= LARGE_TRANSFER_BYTES) {
+          "${Formatter.formatShortFileSize(context, transfer.doneBytes)} / ${Formatter.formatShortFileSize(context, transfer.totalBytes)}"
+        } else {
+          "${if (transfer.totalBytes > 0) transfer.doneBytes * 100 / transfer.totalBytes else 0} %"
+        }
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        TextButton(onClick = cancel) { Text(stringResource(R.string.file_cancel_upload)) }
+      }
+      "upload_stalled" -> {
+        Text(stringResource(R.string.file_upload_stalled), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+        TextButton(onClick = { viewModel.act(ChatActions.retrySend(file.conversation, file.message)) }) {
+          Text(stringResource(R.string.retry))
+        }
+        TextButton(onClick = cancel) { Text(stringResource(R.string.file_cancel_upload)) }
+      }
+      else -> Text(stringResource(R.string.file_failed), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
     }
   }
 }

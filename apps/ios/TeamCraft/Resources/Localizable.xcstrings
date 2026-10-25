@@ -3161,6 +3161,22 @@
         }
       }
     },
+    "file_cancel_upload": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Abbrechen"
+          }
+        }
+      }
+    },
     "file_failed": {
       "localizations": {
         "en": {
@@ -3189,6 +3205,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "Zum Herunterladen tippen"
+          }
+        }
+      }
+    },
+    "file_upload_retrying": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retrying…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wird erneut versucht …"
+          }
+        }
+      }
+    },
+    "file_upload_stalled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Upload failed. The message waits for the file."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hochladen fehlgeschlagen. Die Nachricht wartet auf die Datei."
           }
         }
       }

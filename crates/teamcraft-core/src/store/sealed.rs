@@ -239,6 +239,17 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     self.cache.delete_messages(conversation)
   }
 
+  fn delete_message(
+    &self,
+    conversation: ConversationId,
+    client_message_id: ClientMessageId,
+  ) -> Result<(), StoreError> {
+    self
+      .backend
+      .delete_record(&self.message_id(conversation, client_message_id))?;
+    self.cache.delete_message(conversation, client_message_id)
+  }
+
   fn purge_freed(&self) -> Result<(), StoreError> {
     self.backend.purge_freed()
   }

@@ -21,6 +21,8 @@ enum ChatAction {
   /// An own message the server rejected: send it again, or drop it.
   case retrySend(conversationId: String, messageId: String)
   case discardUnsent(conversationId: String, messageId: String)
+  /// Stops one file of an own message that is still going up; the message goes without it.
+  case cancelUpload(conversationId: String, messageId: String, fileId: String)
   case joinChannel(conversationId: String)
   case createChannel(spaceId: String, name: String)
   /// The direct conversation with a person; created when there is none yet.
@@ -67,6 +69,8 @@ enum ChatAction {
       object = ["action": "retry_send", "conversation": conversation, "message": message]
     case .discardUnsent(let conversation, let message):
       object = ["action": "discard_unsent", "conversation": conversation, "message": message]
+    case .cancelUpload(let conversation, let message, let file):
+      object = ["action": "cancel_upload", "conversation": conversation, "message": message, "file_id": file]
     case .joinChannel(let conversation):
       object = ["action": "join_channel", "conversation": conversation]
     case .createChannel(let space, let name):

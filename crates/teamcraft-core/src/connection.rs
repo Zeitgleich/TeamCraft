@@ -364,6 +364,13 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
       .is_some_and(|deadline| now_ms >= deadline)
     {
       self.lose(now_ms, &"no answer after a network change");
+      // The network changed or the device woke up: the new connection is tried at once, not after
+      // the backoff (the user is likely looking at the app right now).
+      self.next_attempt_ms = now_ms;
+      self.set_state(ConnectionState::Offline {
+        retry_at_ms: now_ms,
+        maybe_interception: None,
+      });
       return;
     }
     let silent_ms = now_ms.saturating_sub(self.last_heard_ms);

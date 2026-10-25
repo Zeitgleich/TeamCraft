@@ -334,6 +334,8 @@ pub struct CoreChatBackend<S> {
   commands: Rc<RefCell<Vec<CoreCommand>>>,
   /// Who types where; shared with the client when [`Self::with_typing`] was given its state.
   typing: crate::TypingState,
+  /// File transfers in flight; shared with the client when [`Self::with_transfers`] was given them.
+  transfers: crate::transfers::Transfers,
   /// When reads last asked the server for something, so the UI's repeated reads don't flood it.
   pub(crate) requests: RefCell<crate::ui_people::RequestLog>,
   #[cfg(not(target_arch = "wasm32"))]
@@ -349,6 +351,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       clock,
       commands: Rc::new(RefCell::new(Vec::new())),
       typing: crate::TypingState::default(),
+      transfers: crate::transfers::Transfers::new(),
       requests: RefCell::default(),
       #[cfg(not(target_arch = "wasm32"))]
       search: RefCell::new(Default::default()),
@@ -360,6 +363,17 @@ impl<S: LocalStore> CoreChatBackend<S> {
   pub fn with_typing(mut self, typing: crate::TypingState) -> Self {
     self.typing = typing;
     self
+  }
+
+  /// Reads the progress of file transfers from the client ([`crate::Client::transfers`]).
+  #[must_use]
+  pub fn with_transfers(mut self, transfers: crate::transfers::Transfers) -> Self {
+    self.transfers = transfers;
+    self
+  }
+
+  pub(crate) fn transfers(&self) -> &crate::transfers::Transfers {
+    &self.transfers
   }
 
   /// Takes the queued commands (the sync task runs them).
@@ -1352,6 +1366,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_discard_unsent(conversation, message);
   }
 
+  fn cancel_upload(&self, conversation: ConversationId, message: MessageId, file_id: &str) {
+    self.ui_cancel_upload(conversation, message, file_id);
+  }
+
   fn acknowledge(&self, conversation: ConversationId, message: MessageId) {
     self.command(CoreCommand::Acknowledge {
       conversation,
@@ -1899,7 +1917,10 @@ mod tests {
     records::put_json(store.as_ref(), Table::Outbox, &key, &entry).unwrap();
     backend.discard_unsent(conversation, posted.id);
     assert!(records::outbox(&store).unwrap().is_empty());
-    assert!(backend.message_extras(conversation, &[posted.id])[0].is_deleted);
+    assert!(
+      backend.messages(conversation, 0, 10).is_empty(),
+      "never sent, so nothing of it is left"
+    );
   }
 
   #[cfg(not(target_arch = "wasm32"))]

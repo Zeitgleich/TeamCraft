@@ -38,6 +38,7 @@ mod queries;
 mod removal_followups;
 mod runner;
 mod search;
+mod sending;
 mod snapshot_cache;
 mod store_integrity;
 mod sync_engine;

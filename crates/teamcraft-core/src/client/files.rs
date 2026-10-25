@@ -13,11 +13,12 @@ use teamcraft_proto::{
 };
 
 use super::Client;
-use super::attachments::OutgoingFile;
-use crate::api::{ApiError, ServerApi};
+use super::attachments::{BlobDownload, OutgoingFile};
+use crate::api::{ApiError, DetachedRequest, ServerApi};
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{AttachmentRef, ImageDimensions, LocalStore, MessageContent, MessageFilter, Table};
+use crate::transfers::TransferGuard;
 
 /// Argon2id for share link passwords: the browser download page runs it in WebAssembly, so it is
 /// lighter than the backup passphrase's (the link itself is the main secret).
@@ -54,9 +55,27 @@ pub struct PendingFile {
   /// Failed attempts and when the next one is due.
   #[serde(default, skip_serializing_if = "UploadRetry::is_fresh")]
   pub retry: UploadRetry,
-  /// The app's own thumbnail, used when the core can't make one (see `OutgoingFile`).
+  /// The app's own thumbnail, used when the core can't make one (see `OutgoingFile`). Without one,
+  /// the core's is kept here once the upload started. The pending message shows it.
   #[serde(rename = "thumbnail", default, skip_serializing_if = "Option::is_none")]
   pub maybe_thumbnail: Option<Base64Bytes>,
+  /// The picture's upright size, so the pending message reserves the space the sent one takes.
+  #[serde(rename = "dimensions", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_dimensions: Option<ImageDimensions>,
+}
+
+/// One file's encrypted bytes on their way to storage. The client prepares it
+/// ([`Client::start_upload`]), the host drives the request beside its loop ([`Self::sent`]) so the
+/// app stays responsive while a large file goes up, and the client completes it
+/// ([`Client::finish_upload`]).
+pub struct BlobUpload {
+  conversation_id: ConversationId,
+  client_message_id: ClientMessageId,
+  slot: UploadSlot,
+  attachment: AttachmentRef,
+  request: DetachedRequest,
+  /// Lists the upload's progress until it is finished or dropped.
+  _progress: TransferGuard,
 }
 
 /// Largest thumbnail an app may hand in: as large as the core's own (the message carries it); a
@@ -121,6 +140,13 @@ impl Default for UploadRetrySettings {
 impl UploadRetry {
   pub fn is_stalled(&self) -> bool {
     matches!(self, Self::Stalled { .. })
+  }
+
+  pub fn failed_attempts(&self) -> u32 {
+    match self {
+      Self::Fresh => 0,
+      Self::Waiting { attempts, .. } | Self::Stalled { attempts } => *attempts,
+    }
   }
 
   /// Whether an attempt may run at `now_ms`.
@@ -244,6 +270,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           maybe_slot: None,
           retry: UploadRetry::default(),
           maybe_thumbnail: None,
+          maybe_dimensions: None,
         })
         .collect(),
     };
@@ -257,51 +284,106 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Stops at the first network error (the rest resumes next time). A file that failed waits with
   /// exponential backoff, and after [`UploadRetrySettings::max_attempts`] for the user's retry
   /// ([`retry_stalled_upload`]). Returns how many files went up.
+  ///
+  /// Holds the client for the whole upload; a host loop that must stay responsive drives
+  /// [`Self::start_upload`] and [`Self::finish_upload`] itself.
   pub async fn upload_pending(&mut self) -> Result<usize, CoreError> {
     let mut uploaded = 0;
+    while let Some(mut upload) = self.start_upload().await? {
+      let sent = upload.sent().await;
+      if self.finish_upload(upload, sent).await? == UploadStep::Uploaded {
+        uploaded += 1;
+      }
+    }
+    Ok(uploaded)
+  }
+
+  /// Whether the file `upload` sends still waits for it: not cancelled, its message not deleted or
+  /// retried meanwhile. A host drops an upload that isn't, which stops it.
+  pub fn is_upload_current(&self, upload: &BlobUpload) -> bool {
+    self.current_file(upload).ok().flatten().is_some()
+  }
+
+  /// The pending upload `upload` belongs to and the index of its file, found by the upload slot (a
+  /// cancelled file before it moves the index).
+  fn current_file(&self, upload: &BlobUpload) -> Result<Option<(PendingUpload, usize)>, CoreError> {
+    let Some(pending) = pending_upload(&self.store, upload.conversation_id, upload.client_message_id)? else {
+      return Ok(None);
+    };
+    let maybe_index = pending.files.iter().position(|file| {
+      file.maybe_done.is_none()
+        && file.maybe_failure.is_none()
+        && file.maybe_slot.as_ref() == Some(&upload.slot)
+    });
+    Ok(maybe_index.map(|index| (pending, index)))
+  }
+
+  /// Prepares the next file that is due: encrypts it, keeps its thumbnail and size for the pending
+  /// message, and announces it if it has no upload slot yet. `Ok(None)`: nothing is due. A file
+  /// that can never go up is marked failed on the way; a network error stops the search (the rest
+  /// resumes next time).
+  pub async fn start_upload(&mut self) -> Result<Option<BlobUpload>, CoreError> {
     let pending: Vec<PendingUpload> = records::list_json(&self.store, Table::PendingUploads)?;
     for mut upload in pending {
-      for index in 0..upload.files.len() {
-        let file = &upload.files[index];
-        let is_open = file.maybe_done.is_none() && file.maybe_failure.is_none();
-        if !is_open || !file.retry.is_due(self.now_ms()) {
-          continue;
-        }
+      while let Some(index) = next_due_file(&upload, self.now_ms()) {
         match self
-          .upload_one(upload.conversation_id, &mut upload.files[index])
+          .prepare_blob(upload.conversation_id, &mut upload.files[index])
           .await
         {
-          Ok(attachment) => {
-            let file = &mut upload.files[index];
-            file.maybe_done = Some(attachment);
-            file.maybe_slot = None;
-            file.retry = UploadRetry::default();
-            uploaded += 1;
-          },
-          Err(UploadError::Offline(error)) => {
-            // Like the outbox: nothing counts while the server can't be reached at all.
+          Ok((attachment, request, progress)) => {
+            let Some(slot) = upload.files[index].maybe_slot.clone() else {
+              // Invariant: `prepare_blob` leaves the slot it uploads into on the file.
+              return Err(CoreError::Corrupt("prepared upload without a slot".into()));
+            };
             save_pending_upload(&self.store, &upload)?;
-            return Err(error);
+            return Ok(Some(BlobUpload {
+              conversation_id: upload.conversation_id,
+              client_message_id: upload.client_message_id,
+              slot,
+              attachment,
+              request,
+              _progress: progress,
+            }));
           },
-          Err(UploadError::Retry(error)) => {
-            // An expired access token is the app's to renew; it isn't the file's failure.
-            if !error.is_sign_in_required() {
-              let now = self.now_ms();
-              upload.files[index]
-                .retry
-                .record_failure(now, &self.settings.upload_retry);
-            }
-            save_pending_upload(&self.store, &upload)?;
-            return Err(error);
-          },
-          Err(UploadError::Failed(reason)) => upload.files[index].maybe_failure = Some(reason),
+          Err(error) => self.record_upload_error(&mut upload, index, error)?,
         }
-        save_pending_upload(&self.store, &upload)?;
       }
       self.complete_upload(&upload)?;
       self.remove_staged_copies(&upload);
     }
-    Ok(uploaded)
+    Ok(None)
+  }
+
+  /// Completes a blob upload the host drove: confirms it with the server and puts the file into its
+  /// message, which the outbox sends once all its files are up. A message deleted or retried
+  /// meanwhile keeps its own state; the result is dropped then.
+  pub async fn finish_upload(
+    &mut self,
+    upload: BlobUpload,
+    sent: Result<(), ApiError>,
+  ) -> Result<UploadStep, CoreError> {
+    let Some((mut pending, index)) = self.current_file(&upload)? else {
+      tracing::debug!(conversation_id = %upload.conversation_id, "upload finished for a file that is gone");
+      return Ok(UploadStep::Dropped);
+    };
+    let BlobUpload { slot, attachment, .. } = upload;
+    let confirmed = match self.confirm_blob(&slot, sent, &mut pending.files[index]).await {
+      Ok(()) => {
+        let file = &mut pending.files[index];
+        file.maybe_done = Some(attachment);
+        file.maybe_slot = None;
+        file.retry = UploadRetry::default();
+        UploadStep::Uploaded
+      },
+      Err(error) => {
+        self.record_upload_error(&mut pending, index, error)?;
+        UploadStep::Failed
+      },
+    };
+    save_pending_upload(&self.store, &pending)?;
+    self.complete_upload(&pending)?;
+    self.remove_staged_copies(&pending);
+    Ok(confirmed)
   }
 
   /// Downloads and decrypts a file into the download directory; progress and the path are in
@@ -311,6 +393,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     attachment: AttachmentId,
   ) -> Result<String, CoreError> {
+    let download = self.start_download_to_disk(conversation, attachment).await?;
+    let saved = download.save().await;
+    self.finish_download_to_disk(attachment, saved)
+  }
+
+  /// [`Self::download_attachment_to_disk`] for a host that runs the transfer beside its loop: marks
+  /// the file as downloading and hands the transfer back ([`DiskDownload::save`], then
+  /// [`Self::finish_download_to_disk`]).
+  pub async fn start_download_to_disk(
+    &mut self,
+    conversation: ConversationId,
+    attachment: AttachmentId,
+  ) -> Result<DiskDownload, CoreError> {
     let reference = find_attachment(&self.store, conversation, attachment)?
       .ok_or_else(|| CoreError::Corrupt("no such file in this conversation".into()))?;
     if exceeds_download_limit(reference.size_bytes, MAX_DOWNLOAD_BYTES) {
@@ -332,15 +427,36 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         total_bytes: reference.size_bytes,
       },
     )?;
-    let result = self.download_to_disk(&reference).await;
-    let state = match &result {
+    // The cap is enforced on the bytes actually received, not on the sender-declared size.
+    match self.start_download(&reference, MAX_DOWNLOAD_BYTES).await {
+      Ok(download) => Ok(DiskDownload {
+        download,
+        maybe_directory: self.settings.maybe_download_dir.clone(),
+      }),
+      Err(error) => {
+        let failed = TransferState::Failed {
+          reason: failure_of(&error),
+        };
+        set_transfer(&self.store, attachment, &failed)?;
+        Err(error)
+      },
+    }
+  }
+
+  /// Records where a download to disk ended up, or why it failed.
+  pub fn finish_download_to_disk(
+    &mut self,
+    attachment: AttachmentId,
+    saved: Result<String, CoreError>,
+  ) -> Result<String, CoreError> {
+    let state = match &saved {
       Ok(path) => TransferState::Local { path: path.clone() },
       Err(error) => TransferState::Failed {
         reason: failure_of(error),
       },
     };
     set_transfer(&self.store, attachment, &state)?;
-    result
+    saved
   }
 
   /// Creates a public download link for a file of the conversation (e2ee.md §4.5.1).
@@ -394,14 +510,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(link)
   }
 
-  /// Encrypts and uploads one file into its slot, announcing one first if it has none. A slot the
-  /// storage refuses (its URL expired) or whose upload went missing is dropped, so the next attempt
-  /// announces a fresh one.
-  async fn upload_one(
+  /// Encrypts one file and starts its upload into its slot, announcing one first if it has none.
+  /// Keeps the thumbnail and the picture's size on the file for the pending message.
+  async fn prepare_blob(
     &self,
     conversation: ConversationId,
     file: &mut PendingFile,
-  ) -> Result<AttachmentRef, UploadError> {
+  ) -> Result<(AttachmentRef, DetachedRequest, TransferGuard), UploadError> {
     if file.size_bytes > self.settings.max_upload_bytes {
       return Err(UploadError::Failed(TransferFailure::TooLarge));
     }
@@ -416,6 +531,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // Receivers reserve the picture's space before anything loads (issue #316).
     let maybe_dimensions = crate::thumbnail::image_dimensions(&content, &file.media_type)
       .map(|(width, height)| ImageDimensions { width, height });
+    if file.maybe_thumbnail.is_none() {
+      file.maybe_thumbnail = maybe_thumbnail.clone().map(Base64Bytes::new);
+    }
+    file.maybe_dimensions = file.maybe_dimensions.or(maybe_dimensions);
     let encrypted = encrypt_attachment(&content, DEFAULT_CHUNK_SIZE, &mut OsRng)
       .map_err(|_| UploadError::Failed(TransferFailure::LocalFile))?;
     let size_bytes = encrypted.ciphertext.len() as u64;
@@ -423,8 +542,33 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Some(slot) if slot.size_bytes == size_bytes => slot,
       _ => self.announce_upload(conversation, size_bytes).await?,
     };
+    let progress = self.transfers.start(slot.attachment_id, size_bytes);
+    let request = self
+      .api
+      .put_blob_detached(&slot.upload_url, encrypted.ciphertext, progress.counter());
     file.maybe_slot = Some(slot.clone());
-    if let Err(error) = self.api.put_blob(&slot.upload_url, encrypted.ciphertext).await {
+    let attachment = AttachmentRef {
+      attachment_id: slot.attachment_id,
+      key: Base64Bytes::new(encrypted.key.as_key().expose_secret().to_vec()),
+      ciphertext_sha256: Base64Bytes::new(encrypted.ciphertext_sha256.to_vec()),
+      file_name: file.file_name.clone(),
+      media_type: file.media_type.clone(),
+      size_bytes: content.len() as u64,
+      maybe_thumbnail: maybe_thumbnail.map(Base64Bytes::new),
+      maybe_dimensions,
+    };
+    Ok((attachment, request, progress))
+  }
+
+  /// Completes the slot after its blob upload. A storage refusal (expired URL) or an upload that
+  /// went missing drops the slot, so the next attempt announces a fresh one.
+  async fn confirm_blob(
+    &self,
+    slot: &UploadSlot,
+    sent: Result<(), ApiError>,
+    file: &mut PendingFile,
+  ) -> Result<(), UploadError> {
+    if let Err(error) = sent {
       // Was it the storage or the whole network? Completing the slot tells: it succeeds if the
       // blob arrived after all, fails with "not uploaded" if the server is there, and doesn't reach
       // it when this device is offline.
@@ -439,16 +583,39 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }
       return Err(slot_failure(file, error));
     }
-    Ok(AttachmentRef {
-      attachment_id: slot.attachment_id,
-      key: Base64Bytes::new(encrypted.key.as_key().expose_secret().to_vec()),
-      ciphertext_sha256: Base64Bytes::new(encrypted.ciphertext_sha256.to_vec()),
-      file_name: file.file_name.clone(),
-      media_type: file.media_type.clone(),
-      size_bytes: content.len() as u64,
-      maybe_thumbnail: maybe_thumbnail.map(Base64Bytes::new),
-      maybe_dimensions,
-    })
+    Ok(())
+  }
+
+  /// Records why a file didn't go up: a network error is saved and returned (the search stops), a
+  /// file that can never go up is marked failed.
+  fn record_upload_error(
+    &self,
+    upload: &mut PendingUpload,
+    index: usize,
+    error: UploadError,
+  ) -> Result<(), CoreError> {
+    match error {
+      UploadError::Offline(error) => {
+        // Like the outbox: nothing counts while the server can't be reached at all.
+        save_pending_upload(&self.store, upload)?;
+        Err(error)
+      },
+      UploadError::Retry(error) => {
+        // An expired access token is the app's to renew; it isn't the file's failure.
+        if !error.is_sign_in_required() {
+          let now = self.now_ms();
+          upload.files[index]
+            .retry
+            .record_failure(now, &self.settings.upload_retry);
+        }
+        save_pending_upload(&self.store, upload)?;
+        Err(error)
+      },
+      UploadError::Failed(reason) => {
+        upload.files[index].maybe_failure = Some(reason);
+        save_pending_upload(&self.store, upload)
+      },
+    }
   }
 
   /// Announces an upload. Only a server out of reach is "offline" (retried on every tick without
@@ -528,17 +695,26 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.store.delete(Table::PendingUploads, &key)?;
     Ok(())
   }
+}
 
+impl DiskDownload {
+  pub fn attachment_id(&self) -> AttachmentId {
+    self.download.attachment_id()
+  }
+
+  /// Receives and decrypts the file and writes it into the download directory.
   #[cfg(not(target_arch = "wasm32"))]
-  async fn download_to_disk(&self, reference: &AttachmentRef) -> Result<String, CoreError> {
-    let directory = self
-      .settings
-      .maybe_download_dir
-      .clone()
-      .ok_or_else(|| CoreError::Corrupt("no download directory configured".into()))?;
-    let plaintext = self.download_decrypted(reference).await?;
+  pub async fn save(self) -> Result<String, CoreError> {
+    let Self {
+      download,
+      maybe_directory,
+    } = self;
+    let directory =
+      maybe_directory.ok_or_else(|| CoreError::Corrupt("no download directory configured".into()))?;
+    let file_name = download.reference().file_name.clone();
+    let plaintext = download.open().await?;
     std::fs::create_dir_all(&directory).map_err(|error| CoreError::Corrupt(error.to_string()))?;
-    let path = unique_path(&directory, &reference.file_name);
+    let path = unique_path(&directory, &file_name);
     std::fs::write(&path, plaintext.expose_secret())
       .map_err(|error| CoreError::Corrupt(error.to_string()))?;
     Ok(path.to_string_lossy().into_owned())
@@ -547,12 +723,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// The browser has no download directory: the decrypted file is handed to the browser through a
   /// temporary `<a download>` link, which saves it into the browser's download folder.
   #[cfg(target_arch = "wasm32")]
-  async fn download_to_disk(&self, reference: &AttachmentRef) -> Result<String, CoreError> {
-    // The cap is enforced on the bytes actually received, not on the sender-declared size.
-    let plaintext = self
-      .download_decrypted_capped(reference, MAX_DOWNLOAD_BYTES)
-      .await?;
-    let file_name = sanitize_file_name(&reference.file_name);
+  pub async fn save(self) -> Result<String, CoreError> {
+    let file_name = sanitize_file_name(&self.download.reference().file_name);
+    let plaintext = self.download.open().await?;
     save_in_browser(plaintext.expose_secret(), &file_name)?;
     Ok(file_name)
   }
@@ -575,6 +748,41 @@ fn slot_failure(file: &mut PendingFile, error: ApiError) -> UploadError {
 /// captive portal or proxy answered instead.
 fn is_unreachable(error: &ApiError) -> bool {
   error.is_unreachable()
+}
+
+/// A file on its way to disk (or, in the browser, to its download folder), detached from the client
+/// like a [`BlobDownload`].
+pub struct DiskDownload {
+  download: BlobDownload,
+  #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+  maybe_directory: Option<std::path::PathBuf>,
+}
+
+/// What became of a finished blob upload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UploadStep {
+  /// The file is up and in its message.
+  Uploaded,
+  /// It failed for good (shown on the message).
+  Failed,
+  /// The message was deleted or its upload retried meanwhile: nothing changed.
+  Dropped,
+}
+
+impl BlobUpload {
+  /// Resolves once storage answered. Polling may stop half way (a host's `select`) and resume on
+  /// the next call; after it resolved, the upload goes to [`Client::finish_upload`].
+  pub async fn sent(&mut self) -> Result<(), ApiError> {
+    (&mut self.request).await
+  }
+}
+
+/// The first file of `upload` that is neither done nor failed and whose attempt is due.
+fn next_due_file(upload: &PendingUpload, now_ms: i64) -> Option<usize> {
+  upload
+    .files
+    .iter()
+    .position(|file| file.maybe_done.is_none() && file.maybe_failure.is_none() && file.retry.is_due(now_ms))
 }
 
 enum UploadError {
@@ -636,6 +844,44 @@ pub fn retry_stalled_upload(
     save_pending_upload(store, &upload)?;
   }
   Ok(has_waiting)
+}
+
+/// The user's "Cancel" on a file still waiting to go up: the message goes out without it. A message
+/// left with neither text nor files is dropped from the outbox. Returns whether a file was removed.
+pub fn cancel_pending_file(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  message: ClientMessageId,
+  index: usize,
+) -> Result<bool, CoreError> {
+  let Some(mut upload) = pending_upload(store, conversation, message)? else {
+    return Ok(false);
+  };
+  if upload
+    .files
+    .get(index)
+    .is_none_or(|file| file.maybe_done.is_some())
+  {
+    return Ok(false);
+  }
+  upload.files.remove(index);
+  let has_text = store.message(conversation, message)?.is_some_and(
+    |stored| matches!(&stored.content, MessageContent::Text { body, .. } if !body.trim().is_empty()),
+  );
+  if !upload.files.is_empty() || has_text {
+    // Completed by the host's next upload step when the rest is up.
+    save_pending_upload(store, &upload)?;
+    return Ok(true);
+  }
+  crate::store::write_group(store, || {
+    let key = records::outbox_key(conversation, message);
+    store.delete(Table::PendingUploads, &key)?;
+    store.delete(Table::Outbox, &key)?;
+    // Never sent: nobody else has it, so nothing of it is left in the conversation.
+    store.delete_message(conversation, message)?;
+    Ok::<_, CoreError>(())
+  })?;
+  Ok(true)
 }
 
 /// Files of a sent message that couldn't be uploaded (shown to the sender only).
@@ -1018,6 +1264,7 @@ mod tests {
         maybe_slot: None,
         retry: UploadRetry::default(),
         maybe_thumbnail: None,
+        maybe_dimensions: None,
       }],
     };
     save_pending_upload(&store, &upload).unwrap();
@@ -1076,6 +1323,7 @@ mod tests {
         maybe_slot: None,
         retry: UploadRetry::default(),
         maybe_thumbnail: None,
+        maybe_dimensions: None,
       };
       let json = serde_json::to_value(&file).unwrap();
       assert!(json.get("retry").is_none() && json.get("slot").is_none());

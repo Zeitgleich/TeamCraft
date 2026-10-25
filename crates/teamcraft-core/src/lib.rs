@@ -8,6 +8,7 @@ pub mod attestation;
 pub mod client;
 pub mod clock;
 pub mod connection;
+pub mod downloads;
 pub mod error;
 pub mod link_preview;
 pub mod notify_rules;
@@ -25,6 +26,7 @@ pub mod store;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod svg_thumbnail;
 pub mod thumbnail;
+pub mod transfers;
 #[cfg(feature = "ui")]
 mod ui_actions;
 #[cfg(feature = "ui")]

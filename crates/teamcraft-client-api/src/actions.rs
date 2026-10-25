@@ -210,6 +210,10 @@ pub enum FileTransfer {
   Uploading {
     done_bytes: u64,
     total_bytes: u64,
+    /// Attempts that failed so far; retried by itself with growing pauses until
+    /// [`Self::UploadStalled`]. The UI says "retrying" instead of a progress that doesn't move.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    failed_attempts: u32,
   },
   Downloading {
     done_bytes: u64,
@@ -505,6 +509,10 @@ pub enum WorkspaceEvent {
   Unknown,
 }
 
+fn is_zero(value: &u32) -> bool {
+  *value == 0
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -552,6 +560,27 @@ mod tests {
     assert_eq!(
       serde_json::from_str::<LinkedMessage>(r#"{"state":"moved"}"#).expect("parse"),
       LinkedMessage::Unavailable
+    );
+  }
+
+  #[test]
+  fn an_upload_without_failed_attempts_keeps_its_wire_form() {
+    let fresh = FileTransfer::Uploading {
+      done_bytes: 1,
+      total_bytes: 2,
+      failed_attempts: 0,
+    };
+    let json = r#"{"state":"uploading","done_bytes":1,"total_bytes":2}"#;
+    assert_eq!(serde_json::to_string(&fresh).expect("serialize"), json);
+    assert_eq!(serde_json::from_str::<FileTransfer>(json).expect("parse"), fresh);
+    let retrying = FileTransfer::Uploading {
+      done_bytes: 0,
+      total_bytes: 2,
+      failed_attempts: 3,
+    };
+    assert_eq!(
+      serde_json::to_string(&retrying).expect("serialize"),
+      r#"{"state":"uploading","done_bytes":0,"total_bytes":2,"failed_attempts":3}"#
     );
   }
 }

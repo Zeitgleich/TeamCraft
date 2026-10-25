@@ -14,8 +14,11 @@ pub mod proxy;
 mod tls;
 #[cfg(target_arch = "wasm32")]
 mod web_socket;
+#[cfg(target_arch = "wasm32")]
+mod xhr;
 
 use std::future::Future;
+use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
 
@@ -64,6 +67,15 @@ use teamcraft_proto::{RendezvousClientMessage, RendezvousServerMessage};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
 #[cfg(not(target_arch = "wasm32"))]
 pub use tls::set_platform_roots;
+
+use crate::transfers::ByteCounter;
+
+/// A request that doesn't borrow the API: the sync loop keeps serving while it runs (a large blob
+/// upload on a slow link takes minutes).
+pub type DetachedRequest = Pin<Box<dyn Future<Output = Result<(), ApiError>>>>;
+
+/// A download that doesn't borrow the API, like [`DetachedRequest`]; it yields the blob.
+pub type DetachedDownload = Pin<Box<dyn Future<Output = Result<Vec<u8>, ApiError>>>>;
 
 /// Everything the sync engine needs from the server.
 pub trait ServerApi {
@@ -412,6 +424,17 @@ pub trait ServerApi {
   fn delete_org_background(&self, background: OrgBackgroundId) -> impl Future<Output = Result<(), ApiError>>;
   /// Uploads an encrypted blob to a presigned URL (object storage, not the API).
   fn put_blob(&self, url: &str, bytes: Vec<u8>) -> impl Future<Output = Result<(), ApiError>>;
+  /// [`Self::put_blob`] as a request of its own, for the host to drive beside its loop, counting
+  /// the bytes sent into `sent`. Dropping it stops the upload.
+  fn put_blob_detached(&self, url: &str, bytes: Vec<u8>, sent: ByteCounter) -> DetachedRequest;
+  /// [`Self::get_blob_capped`] (or uncapped) as a request of its own, counting the bytes received
+  /// into `received`. Dropping it stops the download.
+  fn get_blob_detached(
+    &self,
+    url: &str,
+    maybe_max_bytes: Option<u64>,
+    received: ByteCounter,
+  ) -> DetachedDownload;
   /// Downloads an encrypted blob from a presigned URL.
   fn get_blob(&self, url: &str) -> impl Future<Output = Result<Vec<u8>, ApiError>>;
   /// Like [`Self::get_blob`], but stops reading (and fails) once the blob grows past `max_bytes`,

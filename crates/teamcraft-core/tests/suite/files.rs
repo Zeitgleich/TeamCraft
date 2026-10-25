@@ -6,26 +6,31 @@
 
 use crate::common;
 
+use std::cell::RefCell;
 use std::io::Cursor;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use common::{Peer, backend_of, run_commands, settle};
 use image::{ImageBuffer, ImageFormat, Rgb};
 use teamcraft_client_api::actions::{
-  FileFailure, FileSource, FileTransfer, MessagePriority, OutgoingFile, OutgoingMessage, ShareLinkOptions,
+  FileFailure, FileSource, FileTransfer, MessagePriority, OutgoingFile, OutgoingMessage, PixelSize,
+  ShareLinkOptions,
 };
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::Message;
 use teamcraft_core::api::fake::FakeServer;
-use teamcraft_core::client::files::UploadRetrySettings;
+use teamcraft_core::client::files::{UploadRetrySettings, UploadStep};
 use teamcraft_core::clock::ManualClock;
-use teamcraft_core::upkeep::Upkeep;
+use teamcraft_core::downloads::Downloads;
+use teamcraft_core::ui_backend::CoreCommand;
+use teamcraft_core::upkeep::{Upkeep, UploadMode};
 use teamcraft_core::{ClientSettings, MAX_VIEWER_BYTES};
 use teamcraft_crypto::attachment::decrypt_attachment;
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_crypto::share_link::open_fragment;
-use teamcraft_proto::ConversationId;
+use teamcraft_proto::{AttachmentId, ConversationId};
 
 #[tokio::test]
 async fn text_with_files_arrives_with_thumbnails_and_downloads() {
@@ -191,6 +196,118 @@ async fn the_periodic_upkeep_uploads_and_sends_what_waited_for_the_network() {
   let received = last(&bob_ui, channel);
   assert_eq!(received.body, "written on the train");
   assert_eq!(bob_ui.message_extras(channel, &[received.id])[0].files.len(), 1);
+}
+
+/// The web and desktop cores drive the blob upload beside their loop (the UI reads meanwhile): the
+/// pending message shows the picture's thumbnail at its final size until the file is up, and the
+/// upkeep leaves the upload to the host.
+#[tokio::test]
+async fn a_host_driven_upload_shows_the_pending_picture_until_it_is_sent() {
+  let (_server, mut alice, mut bob, channel) = channel_with_two().await;
+  let alice_ui = backend_of(&alice);
+  alice_ui.send_message(with_files(
+    channel,
+    "",
+    vec![file("camera.jpg", "image/jpeg", jpeg())],
+  ));
+  let commands = alice_ui.drain_commands();
+  assert!(commands.contains(&CoreCommand::UploadFiles));
+  let pending = last(&alice_ui, channel);
+  let shown = alice_ui.message_extras(channel, &[pending.id])[0].files[0].clone();
+  assert_eq!(
+    shown.maybe_dimensions,
+    Some(PixelSize {
+      width: 64,
+      height: 48
+    }),
+    "the space is reserved from the header at once"
+  );
+  assert!(matches!(
+    shown.transfer,
+    FileTransfer::Uploading { done_bytes: 0, .. }
+  ));
+
+  let mut upkeep = Upkeep::new(Duration::from_secs(60)).with_uploads(UploadMode::Host);
+  upkeep.tick(&mut alice.client).await;
+  assert!(
+    alice.client.flush_outbox().await.unwrap().sent == 0,
+    "the upkeep leaves the upload to the host"
+  );
+
+  let mut upload = alice.client.start_upload().await.unwrap().expect("a due file");
+  let uploading = alice_ui.message_extras(channel, &[pending.id])[0].files[0].clone();
+  assert!(
+    uploading.maybe_thumbnail_png.is_some(),
+    "the pending message shows the thumbnail while the file goes up"
+  );
+  let sent = upload.sent().await;
+  assert_eq!(
+    alice.client.finish_upload(upload, sent).await.unwrap(),
+    UploadStep::Uploaded
+  );
+  assert!(alice.client.start_upload().await.unwrap().is_none());
+  alice.client.flush_outbox().await.unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+  let bob_ui = backend_of(&bob);
+  let received = last(&bob_ui, channel);
+  let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
+  assert_eq!(files[0].maybe_dimensions, shown.maybe_dimensions);
+  assert!(files[0].maybe_thumbnail_png.is_some());
+}
+
+/// The web and desktop cores download beside their loop, a few at a time (issue #491): files for
+/// the viewer are handed over, files to save end up on disk with their state recorded.
+#[tokio::test]
+async fn downloads_beside_the_loop_open_and_save_files() {
+  let (_server, mut alice, mut bob, channel) = channel_with_two().await;
+  let alice_ui = backend_of(&alice);
+  alice_ui.send_message(with_files(
+    channel,
+    "",
+    vec![
+      file("a.txt", "text/plain", b"first".to_vec()),
+      file("b.txt", "text/plain", b"second".to_vec()),
+    ],
+  ));
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  let bob_ui = backend_of(&bob);
+  let received = last(&bob_ui, channel);
+  let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
+  let directory = std::env::temp_dir().join(format!("teamcraft-beside-{}", std::process::id()));
+  bob.client.set_download_dir(Some(directory.clone()));
+
+  let mut downloads = Downloads::new(1);
+  let opened = Rc::new(RefCell::new(None));
+  let sink = opened.clone();
+  let reference = bob_ui
+    .attachment_ref(channel, received.id, &files[0].file_id)
+    .unwrap();
+  downloads.view(
+    reference,
+    Box::new(move |result| *sink.borrow_mut() = Some(result.map(|bytes| bytes.expose_secret().to_vec()))),
+  );
+  let saved: AttachmentId = files[1].file_id.parse().unwrap();
+  downloads.save(channel, saved);
+
+  // One at a time: the save waits for the view.
+  assert!(!downloads.start_due(&mut bob.client).await);
+  let finished = downloads.next_finished().await;
+  assert!(!Downloads::finish(&mut bob.client, finished));
+  assert_eq!(opened.borrow_mut().take().unwrap().unwrap(), b"first");
+  assert!(
+    downloads.start_due(&mut bob.client).await,
+    "marked as downloading"
+  );
+  let finished = downloads.next_finished().await;
+  assert!(Downloads::finish(&mut bob.client, finished));
+  let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
+  let FileTransfer::Local { path } = &files[1].transfer else {
+    panic!("not saved: {:?}", files[1].transfer);
+  };
+  assert_eq!(std::fs::read(path).unwrap(), b"second");
+  assert!(!downloads.is_running());
+  std::fs::remove_dir_all(&directory).unwrap();
 }
 
 /// A refused blob upload (a browser's CSP, a proxy) goes into the same announced attachment on every

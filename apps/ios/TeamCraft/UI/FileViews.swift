@@ -14,15 +14,18 @@ struct AttachmentView: View {
   @State private var isWaitingToOpen = false
 
   var body: some View {
-    Button(action: open) {
-      if file.isImage, let data = file.maybeThumbnailData, let image = UIImage(data: data) {
-        if isTile { tile(image) } else { imagePreview(image) }
-      } else {
-        fileRow
+    VStack(alignment: .leading, spacing: 2) {
+      Button(action: open) {
+        if file.isImage, let data = file.maybeThumbnailData, let image = UIImage(data: data) {
+          if isTile { tile(image) } else { imagePreview(image) }
+        } else {
+          fileRow
+        }
       }
+      .buttonStyle(.plain)
+      .accessibilityLabel(Text(file.fileName))
+      if file.transfer.isCancellable { UploadActions(file: file) }
     }
-    .buttonStyle(.plain)
-    .accessibilityLabel(Text(file.fileName))
     .quickLookPreview($maybePreviewURL)
     .onChange(of: file.transfer.state) { _, state in
       guard isWaitingToOpen, state == "local" || state == "failed" else { return }
@@ -93,18 +96,63 @@ struct FileStateLine: View {
           ProgressView()
         }
         if file.transfer.state == "uploading" {
-          Text("file_uploading").font(.caption2).foregroundStyle(Theme.textMuted)
+          if (file.transfer.doneBytes ?? 0) == 0 && (file.transfer.failedAttempts ?? 0) > 0 {
+            Text("file_upload_retrying").font(.caption2).foregroundStyle(Theme.textMuted)
+          } else {
+            Text(TransferText.progress(file.transfer)).font(.caption2).foregroundStyle(Theme.textMuted)
+              .accessibilityLabel(Text("file_uploading"))
+          }
         } else {
           Text("file_downloading").font(.caption2).foregroundStyle(Theme.textMuted)
         }
       }
-    case "failed":
+    case "failed", "upload_failed":
       Text("file_failed").font(.caption2).foregroundStyle(Theme.danger)
+    case "upload_stalled":
+      Text("file_upload_stalled").font(.caption2).foregroundStyle(Theme.danger)
     case "remote":
       Text("file_tap_to_download").font(.caption2).foregroundStyle(Theme.textMuted)
     default:
       EmptyView()
     }
+  }
+}
+
+/// Under an own file going up: cancel; after it stopped: try again or cancel.
+struct UploadActions: View {
+  @Environment(AppModel.self) private var model
+  let file: FileInfo
+
+  var body: some View {
+    HStack(spacing: 12) {
+      if file.transfer.state == "upload_stalled" {
+        Button("not_sent_retry") {
+          Task { await model.perform(.retrySend(conversationId: file.conversation, messageId: file.message)) }
+        }
+      }
+      Button("file_cancel_upload", role: .destructive) {
+        Task {
+          await model.perform(
+            .cancelUpload(conversationId: file.conversation, messageId: file.message, fileId: file.fileId))
+        }
+      }
+    }
+    .font(.caption.weight(.semibold))
+  }
+}
+
+/// How far a transfer got: bytes for large files ("12 MB / 48 MB"), percent for small ones.
+enum TransferText {
+  static let largeBytes: Int64 = 1024 * 1024
+
+  static func progress(_ transfer: FileTransfer) -> String {
+    let done = transfer.doneBytes ?? 0
+    let total = transfer.totalBytes ?? 0
+    if total >= largeBytes {
+      return "\(FileSizeText.format(done)) / \(FileSizeText.format(total))"
+    }
+    let percent = total > 0 ? done * 100 / total : 0
+    return "\(percent) %"
   }
 }
 

@@ -177,6 +177,16 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     Ok(())
   }
 
+  fn delete_message(
+    &self,
+    conversation: ConversationId,
+    client_message_id: ClientMessageId,
+  ) -> Result<(), StoreError> {
+    self.inner.delete_message(conversation, client_message_id)?;
+    self.note(Change::Conversation(conversation));
+    Ok(())
+  }
+
   fn purge_freed(&self) -> Result<(), StoreError> {
     self.inner.purge_freed()
   }

@@ -120,6 +120,9 @@
   <string name="replying_to">Replying to %1$s</string>
   <string name="new_messages">New messages</string>
   <string name="file_failed">The file couldn\'t be sent or loaded.</string>
+  <string name="file_cancel_upload">Cancel</string>
+  <string name="file_upload_retrying">Retrying…</string>
+  <string name="file_upload_stalled">Upload failed. The message waits for the file.</string>
   <string name="priority_normal">Normal priority</string>
   <string name="priority_important">Important</string>
   <string name="priority_urgent">Urgent</string>

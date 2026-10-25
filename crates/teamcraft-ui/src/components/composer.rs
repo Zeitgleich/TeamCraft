@@ -762,7 +762,11 @@ pub fn Composer(
             let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
             let media_type = media_type_for(&file.name(), &file.type_());
             // SVG, AVIF, HEIC: the browser draws the thumbnail the core in the page can't make.
-            let maybe_thumbnail = match needs_app_thumbnail(&media_type) {
+            // Other pictures get one too: the message shows it while the picture goes up (the
+            // core makes the one the message carries).
+            let wants_thumbnail = needs_app_thumbnail(&media_type)
+              || displayable_type(&media_type).is_some_and(|shown| shown.starts_with("image/"));
+            let maybe_thumbnail = match wants_thumbnail {
               true => raster::app_thumbnail(&bytes, &media_type, APP_THUMBNAIL_SIDE).await,
               false => None,
             };

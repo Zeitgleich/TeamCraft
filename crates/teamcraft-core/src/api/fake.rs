@@ -3172,6 +3172,38 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  fn put_blob_detached(
+    &self,
+    url: &str,
+    bytes: Vec<u8>,
+    sent: crate::transfers::ByteCounter,
+  ) -> super::DetachedRequest {
+    let (api, url) = (self.clone(), url.to_owned());
+    Box::pin(async move {
+      let length = bytes.len() as u64;
+      api.put_blob(&url, bytes).await?;
+      sent.add(length);
+      Ok(())
+    })
+  }
+
+  fn get_blob_detached(
+    &self,
+    url: &str,
+    maybe_max_bytes: Option<u64>,
+    received: crate::transfers::ByteCounter,
+  ) -> super::DetachedDownload {
+    let (api, url) = (self.clone(), url.to_owned());
+    Box::pin(async move {
+      let blob = match maybe_max_bytes {
+        Some(max_bytes) => api.get_blob_capped(&url, max_bytes).await?,
+        None => api.get_blob(&url).await?,
+      };
+      received.add(blob.len() as u64);
+      Ok(blob)
+    })
+  }
+
   async fn put_blob(&self, url: &str, bytes: Vec<u8>) -> Result<(), ApiError> {
     if let Some(raw) = url.strip_prefix(ORG_BACKGROUND_SCHEME) {
       return self.with(|state, _| {

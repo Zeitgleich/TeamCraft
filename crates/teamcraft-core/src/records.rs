@@ -457,10 +457,8 @@ pub fn discard_failed(
   }
   write_group(store, || {
     store.delete(Table::Outbox, &outbox_key(conversation, client_message_id))?;
-    if let Some(mut message) = store.message(conversation, client_message_id)? {
-      message.content = MessageContent::Deleted;
-      store.upsert_message(&message)?;
-    }
+    // Never sent: nobody else has it, so nothing of it is left in the conversation.
+    store.delete_message(conversation, client_message_id)?;
     Ok(())
   })
 }

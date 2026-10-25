@@ -34,15 +34,18 @@ use teamcraft_client_api::remote::{
 };
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
+use teamcraft_core::client::files::BlobUpload;
 use teamcraft_core::client::{CatchUpFocus, LinkApproval, LinkedSecrets, NewDeviceLink};
 use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor};
+use teamcraft_core::downloads::{Downloads, Finished};
 use teamcraft_core::push_preview::{PushSession, save_push_session};
 use teamcraft_core::records;
 use teamcraft_core::store::{IndexedDbStore, StoreError, TrackedStore, browser_database_key};
+use teamcraft_core::transfers::Transfers;
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
 use teamcraft_core::ui_snapshot::SnapshotCache;
-use teamcraft_core::upkeep::{self, Upkeep};
+use teamcraft_core::upkeep::{self, Upkeep, UploadMode};
 use teamcraft_core::{
   CallPreparation, Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer,
   PendingEnrollment, UnreadableStore, platform,
@@ -66,6 +69,8 @@ const MAX_APPROVAL_MISSES: u8 = 3;
 const TICK: Duration = Duration::from_secs(3);
 /// How often the UI is told to read again while a long sync fills the store (issue #247).
 const SYNC_PROGRESS: Duration = Duration::from_secs(1);
+/// How often the UI is told to read again while a file goes up or down, for its progress.
+const TRANSFER_PROGRESS: Duration = Duration::from_millis(500);
 /// How long a failed account data sync waits before it is retried; also how often the roster's age
 /// is checked locally. Account data itself is read after each connection and on `key_bag_update`
 /// (issue #252), not on a timer.
@@ -624,6 +629,10 @@ enum Wake {
   Request(Option<Request>),
   Frame(Option<Result<GatewayServerMessage, ApiError>>),
   Linked(Result<LinkedSecrets, String>),
+  /// Storage answered the running blob upload.
+  Uploaded(Result<(), ApiError>),
+  /// A download beside the loop finished.
+  Downloaded(Finished),
   Tick,
 }
 
@@ -673,6 +682,16 @@ struct Core {
   deferred: VecDeque<Request>,
   /// The UI side hung up during a connect: the loop ends after it.
   is_closed: bool,
+  /// Messages were written to the outbox and answered at once; sending them is still to do.
+  has_queued_sends: Cell<bool>,
+  /// The file going up beside the loop, so reads and sends are answered meanwhile.
+  maybe_upload: Option<BlobUpload>,
+  /// A file may be waiting for its upload: one was queued, a retry came due, or one finished.
+  is_upload_due: bool,
+  /// The bytes the transfers in flight had moved when the UI was last told.
+  maybe_reported_bytes: Option<u64>,
+  /// Attachment downloads, running beside the loop (issue #491).
+  downloads: Downloads,
 }
 
 /// A link in progress on this (new) device.
@@ -703,7 +722,7 @@ impl Core {
       connection,
       status: CoreStatus::NotStarted,
       next_tick_ms: i64::MIN,
-      upkeep: Upkeep::new(UPKEEP_INTERVAL),
+      upkeep: Upkeep::new(UPKEEP_INTERVAL).with_uploads(UploadMode::Host),
       link: None,
       last_session_token: None,
       link_failure: LinkStatus::Idle,
@@ -719,6 +738,11 @@ impl Core {
       catch_up_focus: CatchUpFocus::default(),
       deferred: VecDeque::new(),
       is_closed: false,
+      has_queued_sends: Cell::new(false),
+      maybe_upload: None,
+      is_upload_due: true,
+      maybe_reported_bytes: None,
+      downloads: Downloads::default(),
     }
   }
 
@@ -732,13 +756,35 @@ impl Core {
       if self.is_closed {
         return;
       }
+      // Messages answered meanwhile (also during a connect) go out now; then the next file.
+      if self.has_queued_sends.take() {
+        self.send_queued(&mut requests).await;
+      }
+      self.start_upload(&mut requests).await;
+      self.start_downloads().await;
       match self.next_wake(&mut requests).await {
         Wake::Request(None) => return,
+        // A large file must not hold up the loop while it downloads.
+        Wake::Request(Some(Request::Attachment {
+          conversation,
+          message,
+          file_id,
+          reply,
+        })) => self.queue_attachment(conversation, message, &file_id, reply),
         Wake::Request(Some(request)) => self.handle(request).await,
         Wake::Frame(frame) => self.on_frame(frame).await,
         Wake::Linked(result) => self.on_linked(result).await,
+        Wake::Uploaded(sent) => self.on_uploaded(sent, &mut requests).await,
+        Wake::Downloaded(finished) => {
+          if let Some(client) = self.client.as_mut()
+            && Downloads::finish(client, finished)
+          {
+            notify_changed();
+          }
+        },
         Wake::Tick => self.on_tick().await,
       }
+      self.report_progress();
       self.check_store();
       self.check_push().await;
       self.report_background_failures();
@@ -818,8 +864,19 @@ impl Core {
       (Some(_), Some(connection)) => connection.min(self.next_tick_ms),
       _ => self.next_tick_ms,
     };
+    // While a file goes up, the UI reads its progress again every so often.
+    let deadline = match self.maybe_reported_bytes {
+      Some(_) => deadline.min(now_ms().saturating_add(millis(TRANSFER_PROGRESS))),
+      None => deadline,
+    };
     let until_tick_ms = deadline.saturating_sub(now_ms()).max(0);
-    let Self { connection, link, .. } = self;
+    let Self {
+      connection,
+      link,
+      maybe_upload,
+      downloads,
+      ..
+    } = self;
     let frame = Box::pin(connection.receive());
     let linked = Box::pin(async {
       match link {
@@ -827,15 +884,29 @@ impl Core {
         None => std::future::pending().await,
       }
     });
+    let uploaded = Box::pin(async {
+      match maybe_upload {
+        Some(upload) => upload.sent().await,
+        None => std::future::pending().await,
+      }
+    });
     let tick = Box::pin(platform::sleep(Duration::from_millis(
       until_tick_ms.unsigned_abs(),
     )));
-    let other = select(select(frame, linked), tick);
+    let downloaded = Box::pin(downloads.next_finished());
+    let transfers = select(uploaded, downloaded);
+    let other = select(select(frame, linked), select(transfers, tick));
     match select(requests.next(), other).await {
       Either::Left((request, _)) => Wake::Request(request),
       Either::Right((Either::Left((Either::Left((frame, _)), _)), _)) => Wake::Frame(frame),
       Either::Right((Either::Left((Either::Right((linked, _)), _)), _)) => Wake::Linked(linked),
-      Either::Right((Either::Right(((), _)), _)) => Wake::Tick,
+      Either::Right((Either::Right((Either::Left((Either::Left((sent, _)), _)), _)), _)) => {
+        Wake::Uploaded(sent)
+      },
+      Either::Right((Either::Right((Either::Left((Either::Right((finished, _)), _)), _)), _)) => {
+        Wake::Downloaded(finished)
+      },
+      Either::Right((Either::Right((Either::Right(((), _)), _)), _)) => Wake::Tick,
     }
   }
 
@@ -962,11 +1033,10 @@ impl Core {
     let status = CoreStatus::Ready {
       identity_fingerprint: client.identity_fingerprint(),
     };
-    self.backend = Some(CoreChatBackend::new(
-      client.store().clone(),
-      client.user_id(),
-      Box::new(SystemClock),
-    ));
+    self.backend = Some(
+      CoreChatBackend::new(client.store().clone(), client.user_id(), Box::new(SystemClock))
+        .with_transfers(client.transfers()),
+    );
     self.catch_up_focus = client.catch_up_focus();
     let mut client = client;
     // Calls ring and show their roster in the tab that runs the core.
@@ -1091,7 +1161,7 @@ impl Core {
         message,
         file_id,
         reply,
-      } => drop(reply.send(self.attachment(conversation, message, &file_id).await)),
+      } => self.queue_attachment(conversation, message, &file_id, reply),
       Request::Thread {
         conversation,
         thread,
@@ -1102,6 +1172,21 @@ impl Core {
           .as_ref()
           .map(|backend| backend.thread(conversation, thread))
           .ok_or_else(not_set_up);
+        drop(reply.send(result));
+      },
+      // A message shows at once: it is answered when it is in the outbox, and sent afterwards
+      // while the UI reads it (`send_queued`).
+      Request::Action(action, reply) if action.is_new_message() => {
+        let result = match self.backend.as_ref() {
+          Some(backend) => {
+            queue_send(backend, *action);
+            // async-ok: the core's own flag (a cell), not a signal.
+            self.has_queued_sends.set(true);
+            Ok(())
+          },
+          None => Err(not_set_up()),
+        };
+        notify_changed();
         drop(reply.send(result));
       },
       Request::Action(action, reply) => {
@@ -1340,21 +1425,6 @@ impl Core {
     Ok(MessageWindow::read(backend, conversation, start, len))
   }
 
-  async fn attachment(
-    &self,
-    conversation: ConversationId,
-    message: MessageId,
-    file_id: &str,
-  ) -> Result<SecretBytes, String> {
-    let (Some(client), Some(backend)) = (self.client.as_ref(), self.backend.as_ref()) else {
-      return Err(not_set_up());
-    };
-    let reference = backend
-      .attachment_ref(conversation, message, file_id)
-      .ok_or("no such file in this conversation")?;
-    client.open_attachment(&reference).await.map_err(describe)
-  }
-
   async fn action(&mut self, action: ChatAction) -> Result<(), String> {
     let client = self.client.as_mut().ok_or_else(not_set_up)?;
     // Structure changes are engine operations (they found or change encryption groups).
@@ -1488,18 +1558,14 @@ impl Core {
   /// Every command runs even when one fails: they are independent user actions. The failure goes
   /// back to the UI, which shows it (issue #322: a failed action never passes silently).
   async fn run_queued_commands(&mut self) -> Result<usize, CoreError> {
-    let commands: Vec<CoreCommand> = self
-      .backend
-      .as_ref()
-      .map(CoreChatBackend::drain_commands)
-      .unwrap_or_default();
+    let commands = self.drain_commands();
     let Some(client) = self.client.as_mut() else {
       return Ok(0);
     };
     let count = commands.len();
     let mut maybe_failure = None;
     for command in commands {
-      // A command can take long (an upload, a big history page); heartbeats go on meanwhile.
+      // A command can take long (a big history page); heartbeats go on meanwhile.
       let result = self
         .connection
         .keep_alive(now_ms(), client.run_ui_command(command))
@@ -1512,13 +1578,215 @@ impl Core {
     maybe_failure.map_or(Ok(count), Err)
   }
 
+  /// What the UI adapter queued, without the uploads: those run beside the loop
+  /// ([`Self::start_upload`]).
+  fn drain_commands(&mut self) -> Vec<CoreCommand> {
+    let commands = self
+      .backend
+      .as_ref()
+      .map(CoreChatBackend::drain_commands)
+      .unwrap_or_default();
+    let (uploads, commands): (Vec<_>, Vec<_>) = commands
+      .into_iter()
+      .partition(|command| matches!(command, CoreCommand::UploadFiles));
+    self.is_upload_due |= !uploads.is_empty();
+    commands
+      .into_iter()
+      .filter(|command| match command {
+        // Saved beside the loop, like uploads.
+        CoreCommand::DownloadFile {
+          conversation,
+          attachment,
+        } => {
+          self.downloads.save(*conversation, *attachment);
+          false
+        },
+        _ => true,
+      })
+      .collect()
+  }
+
   async fn flush(&mut self) {
     let Some(client) = self.client.as_mut() else {
       return;
     };
-    if self.connection.keep_alive(now_ms(), upkeep::flush(client)).await {
+    if self
+      .connection
+      .keep_alive(now_ms(), upkeep::flush_sends(client))
+      .await
+    {
       notify_changed();
     }
+  }
+
+  /// Sends what [`Request::Action`] put into the outbox (link previews first), while reads are
+  /// answered. A failure was not the action's (that was answered already): it is shown by itself.
+  async fn send_queued(&mut self, requests: &mut mpsc::UnboundedReceiver<Request>) {
+    let commands = self.drain_commands();
+    let outcome = self
+      .serve_during(requests, async |client: &mut Client<Api, Store>| {
+        let mut maybe_failure = None;
+        for command in commands {
+          if let Err(error) = client.run_ui_command(command).await {
+            maybe_failure.get_or_insert(error);
+          }
+        }
+        upkeep::flush_sends(client).await;
+        maybe_failure
+      })
+      .await;
+    if let Some(Some(error)) = outcome {
+      tracing::warn!(%error, "sending a queued message failed");
+      crate::feedback::report_background_failure(error.to_failure());
+    }
+    notify_changed();
+  }
+
+  /// Starts the next due upload, if none runs: the file is encrypted and announced, then goes up
+  /// beside the loop.
+  async fn start_upload(&mut self, requests: &mut mpsc::UnboundedReceiver<Request>) {
+    if !self.is_upload_due {
+      return;
+    }
+    // A cancelled file (or a message deleted meanwhile) stops its upload: dropping it aborts it.
+    if let (Some(upload), Some(client)) = (&self.maybe_upload, &self.client)
+      && !client.is_upload_current(upload)
+    {
+      self.maybe_upload = None;
+      notify_changed();
+    }
+    if self.maybe_upload.is_some() || self.client.is_none() {
+      return;
+    }
+    self.is_upload_due = false;
+    let started = self
+      .serve_during(requests, async |client: &mut Client<Api, Store>| {
+        client.start_upload().await
+      })
+      .await;
+    match started {
+      Some(Ok(Some(upload))) => {
+        self.maybe_upload = Some(upload);
+        // The pending message shows the file's thumbnail from now on.
+        notify_changed();
+      },
+      Some(Ok(None)) | None => {},
+      Some(Err(error)) => tracing::debug!(%error, "upload not started"),
+    }
+  }
+
+  /// The running upload's blob is stored (or failed): the file goes into its message, which is sent
+  /// once all its files are up.
+  async fn on_uploaded(
+    &mut self,
+    sent: Result<(), ApiError>,
+    requests: &mut mpsc::UnboundedReceiver<Request>,
+  ) {
+    let Some(upload) = self.maybe_upload.take() else {
+      return;
+    };
+    let finished = self
+      .serve_during(requests, async |client: &mut Client<Api, Store>| {
+        let step = client.finish_upload(upload, sent).await;
+        upkeep::flush_sends(client).await;
+        step
+      })
+      .await;
+    if let Some(Err(error)) = finished {
+      tracing::debug!(%error, "upload not finished");
+    }
+    self.is_upload_due = true;
+    notify_changed();
+  }
+
+  /// Queues one file, decrypted, for the image viewer or an inline picture; it downloads beside
+  /// the loop and is answered when it arrived.
+  fn queue_attachment(
+    &mut self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+    reply: oneshot::Sender<Result<SecretBytes, String>>,
+  ) {
+    let maybe_reference = self
+      .backend
+      .as_ref()
+      .and_then(|backend| backend.attachment_ref(conversation, message, file_id));
+    let Some(reference) = maybe_reference else {
+      drop(reply.send(Err("no such file in this conversation".to_owned())));
+      return;
+    };
+    // A closed reply channel (the caller gave up) needs nothing.
+    let deliver = move |opened: Result<SecretBytes, CoreError>| drop(reply.send(opened.map_err(describe)));
+    self.downloads.view(reference, Box::new(deliver));
+  }
+
+  /// Starts the downloads that may run now.
+  async fn start_downloads(&mut self) {
+    let Some(client) = self.client.as_mut() else {
+      return;
+    };
+    if self
+      .connection
+      .keep_alive(now_ms(), self.downloads.start_due(client))
+      .await
+    {
+      notify_changed();
+    }
+  }
+
+  /// Tells the UI to read again when the transfers in flight moved on, at most every
+  /// [`TRANSFER_PROGRESS`] (the loop wakes up for it while there are any).
+  fn report_progress(&mut self) {
+    let Some(client) = self.client.as_ref() else {
+      return;
+    };
+    let moved = client.transfers().moved_bytes();
+    if moved != self.maybe_reported_bytes {
+      self.maybe_reported_bytes = moved;
+      notify_local();
+    }
+  }
+
+  /// Runs `work` with the client while the UI's reads (and new messages) are answered from the
+  /// store, as during a connect. `None` without a client.
+  async fn serve_during<T>(
+    &mut self,
+    requests: &mut mpsc::UnboundedReceiver<Request>,
+    work: impl AsyncFnOnce(&mut Client<Api, Store>) -> T,
+  ) -> Option<T> {
+    let Self {
+      client: Some(client),
+      store: Some(store),
+      backend: Some(backend),
+      connection,
+      status,
+      store_health,
+      maybe_last_security,
+      snapshots,
+      catch_up_focus,
+      deferred,
+      is_closed,
+      has_queued_sends,
+      ..
+    } = self
+    else {
+      return None;
+    };
+    let reads = SyncReads {
+      backend,
+      store,
+      stored: Cell::new(StoredWorkspace::of(backend)),
+      status,
+      store_health,
+      maybe_security: maybe_last_security.as_ref(),
+      snapshots,
+      focus: catch_up_focus,
+      has_queued_sends,
+      transfers: client.transfers(),
+    };
+    let working = pin!(connection.keep_alive(now_ms(), work(client)));
+    Some(reads.serve(working, requests, deferred, is_closed).await)
   }
 
   /// Connects when due. A fresh session's full sync can take minutes on a workspace that grew
@@ -1541,12 +1809,14 @@ impl Core {
       catch_up_focus,
       deferred,
       is_closed,
+      has_queued_sends,
       ..
     } = self
     else {
       return;
     };
     let outcome = {
+      let transfers = client.transfers();
       let mut connecting = pin!(connection.connect_if_due(client));
       // No attempt due (the usual case): done without a timer or a look at the store.
       match poll_immediate(connecting.as_mut()).await {
@@ -1561,6 +1831,8 @@ impl Core {
             maybe_security: maybe_last_security.as_ref(),
             snapshots,
             focus: catch_up_focus,
+            has_queued_sends,
+            transfers,
           };
           reads
             .serve(connecting.as_mut(), requests, deferred, is_closed)
@@ -1570,6 +1842,10 @@ impl Core {
     };
     if outcome.is_some() {
       self.repeat_reports().await;
+      // Back online: what waited goes out now, not on the next tick.
+      // async-ok: the core's own flag (a cell), not a signal.
+      self.has_queued_sends.set(true);
+      self.is_upload_due = true;
       notify_changed();
     }
   }
@@ -1593,6 +1869,8 @@ impl Core {
       return;
     }
     self.next_tick_ms = now.saturating_add(millis(TICK));
+    // Retries of failed uploads come due with time.
+    self.is_upload_due = true;
     self.save_push_session();
     let Some(client) = self.client.as_mut() else {
       return;
@@ -1659,6 +1937,9 @@ struct SyncReads<'a> {
   maybe_security: Option<&'a SecuritySnapshot>,
   snapshots: &'a RefCell<SnapshotCache>,
   focus: &'a CatchUpFocus,
+  /// Set when a new message went into the outbox; the loop sends it once the client is free.
+  has_queued_sends: &'a Cell<bool>,
+  transfers: Transfers,
 }
 
 impl SyncReads<'_> {
@@ -1674,6 +1955,7 @@ impl SyncReads<'_> {
   ) -> F::Output {
     let mut seen_revision = self.store.inner().write_revision();
     let mut seen_caught_up = self.focus.caught_up_count();
+    let mut seen_moved = self.transfers.moved_bytes();
     // Deadlines, not a fresh sleep per wake-up: a burst of reads must not postpone the progress.
     let mut progress = Box::pin(platform::sleep(SYNC_PROGRESS));
     loop {
@@ -1697,6 +1979,12 @@ impl SyncReads<'_> {
           progress = Box::pin(platform::sleep(SYNC_PROGRESS));
           let revision = self.store.inner().write_revision();
           if revision != seen_revision && self.has_become_known(deferred) {
+            notify_local();
+          }
+          // A download or upload in flight: its progress.
+          let moved = self.transfers.moved_bytes();
+          if moved.is_some() && moved != seen_moved && is_page_visible() {
+            seen_moved = moved;
             notify_local();
           }
           if revision != seen_revision && is_page_visible() {
@@ -1737,6 +2025,14 @@ impl SyncReads<'_> {
   fn answer(&self, request: Request) -> Option<Request> {
     let request = match request {
       Request::Snapshot(_) | Request::SnapshotChanges(..) => return self.answer_snapshot(request),
+      // Never held back by a sync or an upload: the message shows at once and goes out after.
+      Request::Action(action, reply) if action.is_new_message() => {
+        queue_send(self.backend, *action);
+        self.has_queued_sends.set(true);
+        drop(reply.send(Ok(())));
+        notify_changed();
+        return None;
+      },
       Request::Focus(conversation) => {
         // The sync holding the client takes it between two steps.
         self.focus.set(conversation);
@@ -1819,6 +2115,13 @@ impl SyncReads<'_> {
       other => return Some(other),
     }
     None
+  }
+}
+
+/// Writes a new message ([`ChatAction::is_new_message`]) into the outbox; the loop sends it.
+fn queue_send(backend: &CoreChatBackend<Store>, action: ChatAction) {
+  if let Some(unhandled) = action.apply_to(backend) {
+    tracing::warn!(?unhandled, "chat action not handled");
   }
 }
 

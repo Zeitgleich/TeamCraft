@@ -284,6 +284,22 @@ impl LocalStore for SqlCipherStore {
     })
   }
 
+  fn delete_message(
+    &self,
+    conversation: ConversationId,
+    client_message_id: ClientMessageId,
+  ) -> Result<(), StoreError> {
+    self.write(|connection| {
+      connection.execute(
+        "DELETE FROM messages WHERE conversation_id = ?1 AND client_message_id = ?2",
+        params![
+          conversation.snowflake().get(),
+          client_message_id.as_bytes().as_slice()
+        ],
+      )
+    })
+  }
+
   fn begin_writes(&self) -> Result<(), StoreError> {
     let mut inner = self.lock();
     let Inner { connection, group } = &mut *inner;

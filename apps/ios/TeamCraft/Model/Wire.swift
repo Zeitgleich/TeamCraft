@@ -12,16 +12,22 @@ enum Wire {
   }
 }
 
-/// Where a file stands: `remote`, `uploading`, `downloading`, `local` or `failed`.
+/// Where a file stands: `remote`, `uploading`, `downloading`, `local`, `failed`, or for an own file
+/// that stopped going up `upload_stalled` (retried on "Try again") and `upload_failed` (for good).
 struct FileTransfer: Decodable, Equatable, Sendable {
   let state: String
   let doneBytes: Int64?
   let totalBytes: Int64?
+  /// Failed attempts of an upload that is retried by itself.
+  let failedAttempts: Int?
   /// Where the decrypted file is, once `local`.
   let path: String?
   let reason: String?
 
   var isInProgress: Bool { state == "uploading" || state == "downloading" }
+
+  /// An own file still on its way up, or stopped: it can be cancelled.
+  var isCancellable: Bool { state == "uploading" || state == "upload_stalled" }
 
   /// 0...1 while uploading or downloading.
   var maybeProgress: Double? {

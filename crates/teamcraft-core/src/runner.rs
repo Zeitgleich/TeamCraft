@@ -1,6 +1,7 @@
 //! Drives a [`Client`] for an app: keeps the gateway connected (through the
 //! [`ConnectionSupervisor`]), flushes the outbox, commits waiting membership changes and runs the
-//! UI's commands.
+//! UI's commands. File uploads and downloads run beside the loop, so a large file holds up neither
+//! sends nor the gateway.
 //!
 //! The runner is a plain future without `Send` bounds: native apps poll it on a tokio task, the
 //! browser with `wasm_bindgen_futures::spawn_local` (ARCHITECTURE.md §7, one engine for all shells).
@@ -14,12 +15,14 @@ use teamcraft_proto::GatewayServerMessage;
 
 use crate::api::{ApiError, ServerApi};
 use crate::client::Client;
+use crate::client::files::BlobUpload;
 use crate::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor, NetworkChanges};
+use crate::downloads::{Downloads, Finished};
 use crate::platform;
 use crate::store::LocalStore;
 #[cfg(feature = "ui")]
 use crate::ui_backend::CoreCommand;
-use crate::upkeep::{self, Upkeep};
+use crate::upkeep::{self, Upkeep, UploadMode};
 
 /// Runs a client until it is stopped; see the module docs.
 pub struct SyncRunner<A: ServerApi, S> {
@@ -37,7 +40,18 @@ pub struct SyncRunner<A: ServerApi, S> {
   /// When the user's typing was last announced, to send at most one per [`TYPING_INTERVAL_MS`].
   #[cfg(feature = "ui")]
   last_typing: Option<(teamcraft_proto::ConversationId, i64)>,
+  /// The file going up beside the loop.
+  maybe_upload: Option<BlobUpload>,
+  /// A file may be waiting for its upload: one was queued, a retry came due, or one finished.
+  is_upload_due: bool,
+  /// Files on their way down beside the loop.
+  downloads: Downloads,
+  /// The bytes the transfers in flight had moved when the app was last told.
+  maybe_reported_bytes: Option<u64>,
 }
+
+/// How often the app is told to read again while a file goes up or down, for its progress.
+const TRANSFER_PROGRESS: Duration = Duration::from_millis(500);
 
 /// The server forwards one typing frame per 3 s and conversation; sending more is wasted.
 #[cfg(feature = "ui")]
@@ -79,6 +93,9 @@ enum Wake {
   Command(Option<RunnerCommand>),
   Frame(Option<Result<GatewayServerMessage, ApiError>>),
   NetworkChanged,
+  /// Storage answered the running blob upload.
+  Uploaded(Result<(), ApiError>),
+  Downloaded(Finished),
   Tick,
 }
 
@@ -104,7 +121,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
     let mut connection = ConnectionSupervisor::new(settings.connection.clone(), ConnectionStatus::new());
     let notify = on_change.clone();
     connection.set_observer(Box::new(move |_| notify()));
-    let upkeep = Upkeep::new(settings.upkeep_interval);
+    let upkeep = Upkeep::new(settings.upkeep_interval).with_uploads(UploadMode::Host);
     let runner = Self {
       client,
       settings,
@@ -116,6 +133,10 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       upkeep,
       #[cfg(feature = "ui")]
       last_typing: None,
+      maybe_upload: None,
+      is_upload_due: true,
+      downloads: Downloads::default(),
+      maybe_reported_bytes: None,
     };
     (runner, RunnerHandle { sender })
   }
@@ -140,8 +161,13 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
     self.flush().await;
     loop {
       if self.connection.connect_if_due(&mut self.client).await.is_some() {
+        // Back online: what waited goes out now, not on the next tick.
+        self.is_upload_due = true;
+        self.flush().await;
         self.changed();
       }
+      self.start_upload().await;
+      self.start_downloads().await;
       match self.next_wake().await {
         Wake::Command(None | Some(RunnerCommand::Stop)) => return self.client,
         Wake::Command(Some(command)) => self.on_command(command).await,
@@ -150,8 +176,15 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
           let now = self.client.now_ms();
           self.connection.network_changed(now).await;
         },
+        Wake::Uploaded(sent) => self.on_uploaded(sent).await,
+        Wake::Downloaded(finished) => {
+          if Downloads::finish(&mut self.client, finished) {
+            self.changed();
+          }
+        },
         Wake::Tick => self.on_tick().await,
       }
+      self.report_progress();
     }
   }
 
@@ -161,11 +194,18 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       .connection
       .next_deadline_ms()
       .map_or(self.next_tick_ms, |deadline| deadline.min(self.next_tick_ms));
+    // While a file goes up or down, the app reads its progress again every so often.
+    let deadline = match self.maybe_reported_bytes {
+      Some(_) => deadline.min(now.saturating_add(millis(TRANSFER_PROGRESS))),
+      None => deadline,
+    };
     let until_ms = deadline.saturating_sub(now).max(0);
     let Self {
       commands,
       connection,
       maybe_network,
+      maybe_upload,
+      downloads,
       ..
     } = self;
     let frame = Box::pin(connection.receive());
@@ -175,8 +215,21 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
         None => std::future::pending().await,
       }
     });
+    let uploaded = Box::pin(async {
+      match maybe_upload {
+        Some(upload) => upload.sent().await,
+        None => std::future::pending().await,
+      }
+    });
+    let downloaded = Box::pin(downloads.next_finished());
     let tick = Box::pin(platform::sleep(Duration::from_millis(until_ms.unsigned_abs())));
-    match select(commands.next(), select(select(frame, network), tick)).await {
+    let transfers = select(uploaded, downloaded);
+    match select(
+      commands.next(),
+      select(select(frame, network), select(transfers, tick)),
+    )
+    .await
+    {
       Either::Left((maybe_command, _)) => Wake::Command(maybe_command),
       Either::Right((Either::Left((Either::Left((maybe_frame, _)), _)), _)) => Wake::Frame(maybe_frame),
       Either::Right((Either::Left((Either::Right((Some(()), _)), _)), _)) => Wake::NetworkChanged,
@@ -185,7 +238,13 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
         *maybe_network = None;
         Wake::Tick
       },
-      Either::Right((Either::Right(((), _)), _)) => Wake::Tick,
+      Either::Right((Either::Right((Either::Left((Either::Left((sent, _)), _)), _)), _)) => {
+        Wake::Uploaded(sent)
+      },
+      Either::Right((Either::Right((Either::Left((Either::Right((finished, _)), _)), _)), _)) => {
+        Wake::Downloaded(finished)
+      },
+      Either::Right((Either::Right((Either::Right(((), _)), _)), _)) => Wake::Tick,
     }
   }
 
@@ -198,6 +257,14 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
         // Nothing to flush: typing changes no stored state.
         return;
       },
+      // Uploads and saves run beside the loop.
+      #[cfg(feature = "ui")]
+      RunnerCommand::Ui(CoreCommand::UploadFiles) => self.is_upload_due = true,
+      #[cfg(feature = "ui")]
+      RunnerCommand::Ui(CoreCommand::DownloadFile {
+        conversation,
+        attachment,
+      }) => self.downloads.save(conversation, attachment),
       #[cfg(feature = "ui")]
       RunnerCommand::Ui(command) => {
         let now = self.client.now_ms();
@@ -230,6 +297,8 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       return;
     }
     self.next_tick_ms = now.saturating_add(millis(self.settings.tick));
+    // Retries of failed uploads come due with time.
+    self.is_upload_due = true;
     // The upkeep may resync many conversations; heartbeats go on meanwhile.
     let is_changed = self
       .connection
@@ -244,7 +313,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
     let now = self.client.now_ms();
     let is_changed = self
       .connection
-      .keep_alive(now, upkeep::flush(&mut self.client))
+      .keep_alive(now, upkeep::flush_sends(&mut self.client))
       .await;
     if is_changed {
       self.changed();
@@ -272,6 +341,73 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       .await
     {
       tracing::debug!("typing not announced");
+    }
+  }
+
+  /// Starts the next due upload, if none runs; drops a running one whose file was cancelled (or its
+  /// message deleted), which stops it.
+  async fn start_upload(&mut self) {
+    if !self.is_upload_due {
+      return;
+    }
+    if let Some(upload) = &self.maybe_upload
+      && !self.client.is_upload_current(upload)
+    {
+      self.maybe_upload = None;
+      self.changed();
+    }
+    if self.maybe_upload.is_some() {
+      return;
+    }
+    self.is_upload_due = false;
+    let now = self.client.now_ms();
+    match self.connection.keep_alive(now, self.client.start_upload()).await {
+      Ok(Some(upload)) => {
+        self.maybe_upload = Some(upload);
+        // The pending message shows the file's thumbnail from now on.
+        self.changed();
+      },
+      Ok(None) => {},
+      Err(error) => tracing::debug!(%error, "upload not started"),
+    }
+  }
+
+  /// The running upload's blob is stored (or failed): the file goes into its message, which is sent
+  /// once all its files are up.
+  async fn on_uploaded(&mut self, sent: Result<(), ApiError>) {
+    let Some(upload) = self.maybe_upload.take() else {
+      return;
+    };
+    let now = self.client.now_ms();
+    if let Err(error) = self
+      .connection
+      .keep_alive(now, self.client.finish_upload(upload, sent))
+      .await
+    {
+      tracing::debug!(%error, "upload not finished");
+    }
+    self.is_upload_due = true;
+    self.flush().await;
+    self.changed();
+  }
+
+  async fn start_downloads(&mut self) {
+    let now = self.client.now_ms();
+    if self
+      .connection
+      .keep_alive(now, self.downloads.start_due(&mut self.client))
+      .await
+    {
+      self.changed();
+    }
+  }
+
+  /// Tells the app to read again when the transfers in flight moved on.
+  fn report_progress(&mut self) {
+    let moved = self.client.transfers().moved_bytes();
+    if moved != self.maybe_reported_bytes {
+      self.maybe_reported_bytes = moved;
+      self.changed();
     }
   }
 
