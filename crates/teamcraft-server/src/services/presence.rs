@@ -22,8 +22,9 @@ const MAX_PRESENCE_QUERY_USERS: usize = 200;
 
 /// What other users see, from the user's manual choice and their devices.
 ///
-/// Appearing offline hides everything. Do-not-disturb wins over activity while it lasts. Otherwise
-/// the user is online if any device is active, away if devices are connected but idle, else offline.
+/// Appearing offline hides everything. Do-not-disturb wins over activity while it lasts, a manual
+/// away while any device is connected. Otherwise the user is online if any device is active, away
+/// if devices are connected but idle, else offline.
 pub fn derive_state(
   preference: &PresencePreference,
   devices: DeviceAggregate,
@@ -38,9 +39,11 @@ pub fn derive_state(
     return PresenceState::DoNotDisturb;
   }
   match devices {
+    DeviceAggregate::NoDevice => PresenceState::Offline,
+    // A manual away stays until the user picks another status, whatever the devices report.
+    _ if preference.manual == ManualPresence::Away => PresenceState::Away,
     DeviceAggregate::Active => PresenceState::Online,
     DeviceAggregate::Idle => PresenceState::Away,
-    DeviceAggregate::NoDevice => PresenceState::Offline,
   }
 }
 
@@ -462,6 +465,29 @@ mod tests {
     assert_eq!(
       derive_state(&auto, DeviceAggregate::NoDevice, now()),
       PresenceState::Offline
+    );
+  }
+
+  #[test]
+  fn a_manual_away_sticks_whatever_the_devices_report() {
+    let away = preference(ManualPresence::Away, None);
+    assert_eq!(
+      derive_state(&away, DeviceAggregate::Active, now()),
+      PresenceState::Away
+    );
+    assert_eq!(
+      derive_state(&away, DeviceAggregate::Idle, now()),
+      PresenceState::Away
+    );
+    assert_eq!(
+      derive_state(&away, DeviceAggregate::NoDevice, now()),
+      PresenceState::Offline
+    );
+    // Back to automatic: activity decides again.
+    let auto = preference(ManualPresence::Auto, None);
+    assert_eq!(
+      derive_state(&auto, DeviceAggregate::Active, now()),
+      PresenceState::Online
     );
   }
 

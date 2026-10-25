@@ -4,7 +4,7 @@ use std::time::Duration;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use teamcraft_proto::{
   ConversationId, DeviceActivity, DeviceId, ErrorBody, GatewayClientMessage, GatewayEvent,
-  GatewayServerMessage, Permission,
+  GatewayServerMessage, Permission, UserId,
 };
 use tokio::time::{Instant, sleep_until, timeout};
 use tracing::{debug, warn};
@@ -244,14 +244,18 @@ async fn handle_client_message(
 ) -> bool {
   match message {
     GatewayClientMessage::Heartbeat => {
-      state.hub.renew_attention(&attached.session_id);
+      let maybe_woken = state.hub.renew_attention(&attached.session_id);
+      refresh_if_woken(state, maybe_woken).await;
       send(socket, &GatewayServerMessage::HeartbeatAck).await.is_ok()
     },
     GatewayClientMessage::SetActivity { activity } => {
       let now = Instant::now();
+      // Becoming active again always goes through: activity after an away shows at once. Only
+      // repeated changes are throttled (at most one idle report per accepted active one).
       let is_too_soon = connection
         .maybe_last_activity_change
-        .is_some_and(|at| now.duration_since(at) < ACTIVITY_CHANGE_INTERVAL);
+        .is_some_and(|at| now.duration_since(at) < ACTIVITY_CHANGE_INTERVAL)
+        && !state.hub.is_waking(&attached.session_id, &activity);
       if !is_too_soon {
         connection.maybe_last_activity_change = Some(now);
         set_activity(state, caller, attached, activity).await;
@@ -263,12 +267,14 @@ async fn handle_client_message(
       // needed. Ignored where the instance turned attention off; the user's own choice is applied
       // in the routing, and clients that know it send nothing.
       if state.settings.get().notifications.is_desktop_attention_enabled {
-        state.hub.set_attention(&attached.session_id, is_attentive);
+        let maybe_woken = state.hub.set_attention(&attached.session_id, is_attentive);
+        refresh_if_woken(state, maybe_woken).await;
       }
       true
     },
     GatewayClientMessage::Typing { conversation_id } => {
-      state.hub.touch_activity(&attached.session_id);
+      let maybe_woken = state.hub.touch_activity(&attached.session_id);
+      refresh_if_woken(state, maybe_woken).await;
       let now = Instant::now();
       let last_typing = &mut connection.last_typing;
       if last_typing
@@ -309,6 +315,14 @@ async fn set_activity(
 ) {
   state.hub.set_activity(&attached.session_id, activity);
   if let Err(error) = presence::refresh_presence(state, caller.user.id).await {
+    warn!(%error, "presence refresh failed");
+  }
+}
+
+/// A sign of life ended an away timeout: everybody learns the user is online again.
+async fn refresh_if_woken(state: &AppState, maybe_woken: Option<UserId>) {
+  let Some(user) = maybe_woken else { return };
+  if let Err(error) = presence::refresh_presence(state, user).await {
     warn!(%error, "presence refresh failed");
   }
 }

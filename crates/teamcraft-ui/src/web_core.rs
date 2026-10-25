@@ -652,6 +652,9 @@ struct Core {
   /// The last attention report, repeated after a reconnect (the server forgets it with the
   /// connection).
   maybe_attention: Option<bool>,
+  /// Whether this device last said it is idle, repeated after a reconnect: a resumed session keeps
+  /// what the server last knew, which may be an away timeout that ended meanwhile.
+  is_idle: bool,
   /// Whether IndexedDB keeps up with the cache, as of the last flush.
   store_health: StoreHealth,
   /// The flush [`Self::check_store`] waits for, while IndexedDB is still writing.
@@ -707,6 +710,7 @@ impl Core {
       approval: None,
       approval_misses: 0,
       maybe_attention: None,
+      is_idle: false,
       store_health: StoreHealth::Saved,
       maybe_flush: None,
       maybe_push_check_at_ms: None,
@@ -1552,7 +1556,7 @@ impl Core {
       }
     };
     if outcome.is_some() {
-      self.repeat_attention().await;
+      self.repeat_reports().await;
       notify_changed();
     }
   }
@@ -1587,8 +1591,9 @@ impl Core {
   }
 
   /// Tells the server whether this device is idle (docs/gateway.md); a failure ends the connection
-  /// like a failed heartbeat.
+  /// like a failed heartbeat. Remembered so a new connection repeats it.
   async fn send_activity(&mut self, is_idle: bool) {
+    self.is_idle = is_idle;
     let activity = if is_idle {
       DeviceActivity::Idle
     } else {
@@ -1610,7 +1615,9 @@ impl Core {
     }
   }
 
-  async fn repeat_attention(&mut self) {
+  /// What a new connection has to hear again: the device's activity and attention.
+  async fn repeat_reports(&mut self) {
+    self.send_activity(self.is_idle).await;
     if let Some(is_attentive) = self.maybe_attention {
       self.send_attention(is_attentive).await;
     }

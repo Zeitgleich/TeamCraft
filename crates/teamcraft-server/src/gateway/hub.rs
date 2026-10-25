@@ -144,6 +144,17 @@ enum Attention {
   Away,
 }
 
+/// What the hub knows about a session's activity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionActivity {
+  Active,
+  /// The device said it is idle: only the device itself ends this.
+  Idle,
+  /// The device said it is active but showed no sign of life for the workspace's away timeout. Any
+  /// sign of life (input, typing, an attentive report) ends this at once.
+  TimedOut,
+}
+
 /// What a user's devices currently report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceAggregate {
@@ -174,7 +185,7 @@ struct Session {
   created_seq: u64,
   user: UserId,
   device: DeviceId,
-  activity: DeviceActivity,
+  activity: SessionActivity,
   /// When the device last said it is active (or did something that shows it is).
   last_active_at: Instant,
   attention: Attention,
@@ -206,7 +217,7 @@ impl Hub {
       created_seq: inner.next_created_seq,
       user,
       device,
-      activity,
+      activity: SessionActivity::reported(&activity),
       last_active_at: Instant::now(),
       attention: Attention::NeverReported,
       next_seq: 1,
@@ -336,47 +347,59 @@ impl Hub {
       if activity == DeviceActivity::Active {
         session.last_active_at = Instant::now();
       }
-      session.activity = activity;
+      session.activity = SessionActivity::reported(&activity);
     }
   }
 
+  /// Whether this report would make an idle or timed-out session active. The gateway lets such a
+  /// report through its throttle, so activity after an away shows at once.
+  pub fn is_waking(&self, session_id: &str, activity: &DeviceActivity) -> bool {
+    *activity == DeviceActivity::Active
+      && self
+        .lock()
+        .sessions
+        .get(session_id)
+        .is_some_and(|session| session.activity != SessionActivity::Active)
+  }
+
   /// Records what a desktop or web session says about the user's attention. Being attentive also
-  /// counts as being active for the away timeout.
-  pub fn set_attention(&self, session_id: &str, is_attentive: bool) {
+  /// counts as being active for the away timeout and ends a timed-out session's away. Returns the
+  /// user if their devices' activity changed (the caller refreshes the presence).
+  pub fn set_attention(&self, session_id: &str, is_attentive: bool) -> Option<UserId> {
     let now = Instant::now();
-    let maybe_user = {
+    let (maybe_lost, maybe_woken) = {
       let mut inner = self.lock();
-      let Some(session) = inner.sessions.get_mut(session_id) else {
-        return;
-      };
+      let session = inner.sessions.get_mut(session_id)?;
       if is_attentive {
         session.attention = Attention::Attentive {
           until: now + self.options.attention_lease,
         };
-        session.last_active_at = now;
-        None
+        (None, session.show_sign_of_life(now))
       } else {
         session.attention = Attention::Away;
-        Some(session.user)
+        (Some(session.user), None)
       }
     };
-    if let Some(user) = maybe_user {
+    if let Some(user) = maybe_lost {
       self.announce_attention_lost(user);
     }
+    maybe_woken
   }
 
   /// A heartbeat of the session: an attentive report stays valid for another lease. Sessions don't
-  /// repeat their report, so the server learns transitions only.
-  pub fn renew_attention(&self, session_id: &str) {
+  /// repeat their report, so the server learns transitions only. Returns the user if a timed-out
+  /// session became active again (the caller refreshes the presence).
+  pub fn renew_attention(&self, session_id: &str) -> Option<UserId> {
     let now = Instant::now();
-    if let Some(session) = self.lock().sessions.get_mut(session_id)
-      && let Attention::Attentive { .. } = session.attention
-    {
-      session.attention = Attention::Attentive {
-        until: now + self.options.attention_lease,
-      };
-      session.last_active_at = now;
-    }
+    let mut inner = self.lock();
+    let session = inner.sessions.get_mut(session_id)?;
+    let Attention::Attentive { .. } = session.attention else {
+      return None;
+    };
+    session.attention = Attention::Attentive {
+      until: now + self.options.attention_lease,
+    };
+    session.show_sign_of_life(now)
   }
 
   /// What wakes when a desktop or web session of `user` stops being attentive. A loss that happens
@@ -404,25 +427,26 @@ impl Hub {
     }
   }
 
-  /// Notes that the device shows signs of life (it typed, it asked for something).
-  pub fn touch_activity(&self, session_id: &str) {
-    if let Some(session) = self.lock().sessions.get_mut(session_id)
-      && session.activity == DeviceActivity::Active
-    {
-      session.last_active_at = Instant::now();
-    }
+  /// Notes that the device shows signs of life (it typed, it asked for something). Returns the user
+  /// if a timed-out session became active again (the caller refreshes the presence).
+  pub fn touch_activity(&self, session_id: &str) -> Option<UserId> {
+    self
+      .lock()
+      .sessions
+      .get_mut(session_id)?
+      .show_sign_of_life(Instant::now())
   }
 
-  /// Turns devices that reported active but have not shown a sign since `cutoff` into idle ones
-  /// (the workspace's away timeout). Returns the users whose devices changed.
+  /// Turns devices that reported active but have not shown a sign since `cutoff` into timed-out
+  /// ones (the workspace's away timeout). Returns the users whose devices changed.
   pub fn demote_idle(&self, cutoff: Instant) -> Vec<UserId> {
     let mut users = HashSet::new();
     for session in self.lock().sessions.values_mut() {
       if session.maybe_connection.is_some()
-        && session.activity == DeviceActivity::Active
+        && session.activity == SessionActivity::Active
         && session.last_active_at < cutoff
       {
-        session.activity = DeviceActivity::Idle;
+        session.activity = SessionActivity::TimedOut;
         users.insert(session.user);
       }
     }
@@ -467,11 +491,11 @@ impl Hub {
         continue;
       }
       if is_mobile(session.device) {
-        active.is_mobile_active |= session.activity == DeviceActivity::Active;
+        active.is_mobile_active |= session.activity == SessionActivity::Active;
       } else {
         active.is_desktop_attentive |= match session.attention {
-          _ if !uses_attention => session.activity == DeviceActivity::Active,
-          Attention::NeverReported => session.activity == DeviceActivity::Active,
+          _ if !uses_attention => session.activity == SessionActivity::Active,
+          Attention::NeverReported => session.activity == SessionActivity::Active,
           Attention::Attentive { until } => until > now,
           Attention::Away => false,
         };
@@ -698,8 +722,8 @@ impl Hub {
         continue;
       }
       match session.activity {
-        DeviceActivity::Active => return DeviceAggregate::Active,
-        _ => aggregate = DeviceAggregate::Idle,
+        SessionActivity::Active => return DeviceAggregate::Active,
+        SessionActivity::Idle | SessionActivity::TimedOut => aggregate = DeviceAggregate::Idle,
       }
     }
     aggregate
@@ -850,6 +874,34 @@ impl Session {
     }
     self.buffer_bytes = self.buffer_bytes.saturating_sub(freed);
     freed
+  }
+
+  /// The session showed a sign of life: it counts for the away timeout, and a session the timeout
+  /// made away is active again. A device that said it is idle stays idle until it says otherwise.
+  /// Returns the user if the activity changed.
+  fn show_sign_of_life(&mut self, now: Instant) -> Option<UserId> {
+    match self.activity {
+      SessionActivity::Active => {
+        self.last_active_at = now;
+        None
+      },
+      SessionActivity::TimedOut => {
+        self.last_active_at = now;
+        self.activity = SessionActivity::Active;
+        Some(self.user)
+      },
+      SessionActivity::Idle => None,
+    }
+  }
+}
+
+impl SessionActivity {
+  /// What a device's own report means; a value this version does not know counts as idle.
+  fn reported(activity: &DeviceActivity) -> Self {
+    match activity {
+      DeviceActivity::Active => Self::Active,
+      DeviceActivity::Idle | DeviceActivity::Unknown(_) => Self::Idle,
+    }
   }
 }
 
@@ -1138,6 +1190,92 @@ mod tests {
     hub.detach(&phone.session_id, phone.connection_id);
     hub.detach(&desktop.session_id, desktop.connection_id);
     assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::NoDevice);
+  }
+
+  mod away_timeout {
+    use super::*;
+
+    const TIMEOUT: Duration = Duration::from_secs(300);
+
+    /// Lets the away timeout pass for a session that does nothing and applies it.
+    async fn time_out(hub: &Hub) -> Vec<UserId> {
+      tokio::time::advance(TIMEOUT + Duration::from_secs(1)).await;
+      hub.demote_idle(Instant::now() - TIMEOUT)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_device_times_out_and_any_sign_of_life_brings_it_back() {
+      let hub = Hub::new(OPTIONS);
+      let web = hub.open_session(user(1), device(1), DeviceActivity::Active);
+
+      assert_eq!(time_out(&hub).await, vec![user(1)]);
+      assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::Idle);
+      assert_eq!(hub.touch_activity(&web.session_id), Some(user(1)));
+      assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::Active);
+      // Already active: nothing changes, nobody needs to hear about it.
+      assert_eq!(hub.touch_activity(&web.session_id), None);
+
+      assert_eq!(time_out(&hub).await, vec![user(1)]);
+      assert_eq!(hub.set_attention(&web.session_id, true), Some(user(1)));
+      assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::Active);
+
+      assert_eq!(time_out(&hub).await, vec![user(1)]);
+      assert_eq!(hub.renew_attention(&web.session_id), Some(user(1)));
+      assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::Active);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn signs_of_life_keep_a_device_from_timing_out() {
+      let hub = Hub::new(OPTIONS);
+      let web = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      tokio::time::advance(TIMEOUT - Duration::from_secs(1)).await;
+      hub.touch_activity(&web.session_id);
+      tokio::time::advance(Duration::from_secs(2)).await;
+      assert!(hub.demote_idle(Instant::now() - TIMEOUT).is_empty());
+      assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::Active);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_device_that_said_it_is_idle_stays_idle_until_it_says_otherwise() {
+      let hub = Hub::new(OPTIONS);
+      let web = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      hub.set_attention(&web.session_id, true);
+      hub.set_activity(&web.session_id, DeviceActivity::Idle);
+
+      assert_eq!(hub.renew_attention(&web.session_id), None);
+      assert_eq!(hub.set_attention(&web.session_id, true), None);
+      assert_eq!(hub.touch_activity(&web.session_id), None);
+      assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::Idle);
+      // An idle device is no candidate for the timeout either.
+      assert!(time_out(&hub).await.is_empty());
+
+      hub.set_activity(&web.session_id, DeviceActivity::Active);
+      assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::Active);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_a_report_that_ends_an_away_is_waking() {
+      let hub = Hub::new(OPTIONS);
+      let web = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      assert!(!hub.is_waking(&web.session_id, &DeviceActivity::Active));
+      assert!(!hub.is_waking(&web.session_id, &DeviceActivity::Idle));
+
+      time_out(&hub).await;
+      assert!(hub.is_waking(&web.session_id, &DeviceActivity::Active));
+      assert!(!hub.is_waking(&web.session_id, &DeviceActivity::Idle));
+
+      hub.set_activity(&web.session_id, DeviceActivity::Idle);
+      assert!(hub.is_waking(&web.session_id, &DeviceActivity::Active));
+      assert!(!hub.is_waking("unknown", &DeviceActivity::Active));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unknown_activity_counts_as_idle() {
+      let hub = Hub::new(OPTIONS);
+      let web = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      hub.set_activity(&web.session_id, DeviceActivity::Unknown("dozing".into()));
+      assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::Idle);
+    }
   }
 
   mod attention {

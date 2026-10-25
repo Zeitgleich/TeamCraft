@@ -63,7 +63,17 @@ differs per viewer).
 Each connected device reports `active` / `idle`. The server aggregates per user: online if any device is
 active, away if devices are connected but none is active, offline otherwise. The manual choice (`PUT
 /api/v1/me/presence`) overrides: *do not disturb* (optionally until a time) shows `dnd` while a device is
-connected; *invisible* shows offline. Changes are sent as `presence_update` to everybody who shares a
+connected; *away* shows `away` while a device is connected, whatever the devices report, until the user
+picks another status; *invisible* shows offline; *auto* (the "Online" choice) follows the devices again.
+
+The workspace's away timeout (`presence.away_timeout_minutes`) marks a device that said `active` but
+showed no sign of life for that long as timed out (away). Unlike a device's own `idle`, which only the
+device ends, any sign of life ends a timeout at once: `set_activity active`, `typing`, an attentive
+`attention` report or a heartbeat while attentive. A `set_activity` that makes an idle or timed-out
+device active always goes through; other activity changes are throttled to one per second. Desktop and
+web report `active` on input while their window is focused and visible (at most once a minute), when
+the window comes to the front, after every reconnect or resume (a resumed session keeps what the server
+last knew), and when the user picks "Online". Changes are sent as `presence_update` to everybody who shares a
 conversation with the user (and to the user's own devices). A disconnected device counts as gone only after
 `presence_offline_grace_secs`, so reconnects don't flicker. `GET /api/v1/presence?user_ids=…` returns the last
 known state; guests only learn about people they share a conversation with.
