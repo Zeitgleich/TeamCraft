@@ -1026,7 +1026,7 @@ private val PRIORITIES = listOf(
 
 /** Before a call: join with the camera on or muted. */
 @Composable
-private fun PreJoinDialog(name: String, onDismiss: () -> Unit, onJoin: (CallOptions) -> Unit) {
+internal fun PreJoinDialog(name: String, onDismiss: () -> Unit, onJoin: (CallOptions) -> Unit) {
   var isCameraOn by rememberSaveable { mutableStateOf(false) }
   var isMuted by rememberSaveable { mutableStateOf(false) }
   AlertDialog(

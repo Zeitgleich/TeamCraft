@@ -265,7 +265,7 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
 }
 
 @Composable
-private fun CallStatus(maybeState: CallStateInfo?) {
+internal fun CallStatus(maybeState: CallStateInfo?) {
   Text(stringResource(phaseText(maybeState)), style = MaterialTheme.typography.headlineSmall)
   maybeState?.let { state ->
     if (state.phase == CallPhase.CONNECTED) {
@@ -280,7 +280,7 @@ private fun CallStatus(maybeState: CallStateInfo?) {
 }
 
 @Composable
-private fun VideoGrid(
+internal fun VideoGrid(
   tracks: List<VideoTrackInfo>,
   frames: Map<UInt, Bitmap>,
   modifier: Modifier,
@@ -374,7 +374,7 @@ private fun ImmersiveWindow() {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun CallControls(
+internal fun CallControls(
   maybeState: CallStateInfo?,
   isCameraOn: Boolean,
   isSpeakerOn: Boolean,

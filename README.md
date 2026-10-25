@@ -11,6 +11,20 @@
 Self-hosted, end-to-end encrypted business team chat with calls, meetings and an AI phone hotline,
 written in Rust. License: AGPL-3.0-or-later.
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/readme-channel-dark.webp">
+    <img src="docs/images/readme-channel-light.webp" alt="A channel with a thread open beside it" width="860">
+  </picture>
+</p>
+<p align="center">
+  <img src="docs/images/readme-call-dark.webp" alt="A video call with screen sharing" width="560">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/readme-phone-dark.webp">
+    <img src="docs/images/readme-phone-light.webp" alt="A channel on a phone" width="162">
+  </picture>
+</p>
+
 - Architecture, threat model and data model: [ARCHITECTURE.md](ARCHITECTURE.md)
 - Feature catalog and roadmap: [PLAN.md](PLAN.md)
 - User and administrator guide: [docs/guide/index.md](docs/guide/index.md)

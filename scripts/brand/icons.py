@@ -32,6 +32,8 @@ DESKTOP = ROOT / "apps/desktop/icons"
 WEB = ROOT / "crates/teamcraft-ui/icons"
 IOS = ROOT / "apps/ios/TeamCraft/Resources/Assets.xcassets"
 ANDROID = ROOT / "apps/android/app/src/main/res"
+PLAY_STORE = ROOT / "apps/android/store"
+PLAY_LOCALES = ("en-US", "de-DE")
 
 # The mark's drawn extent in its own coordinates (heads and bodies included).
 MARK_BOX = (70.8, 115.5, 1182.8, 1166.0)
@@ -64,6 +66,7 @@ def main() -> None:
   written += web()
   written += ios()
   written += android()
+  written += play_store()
   for path in written:
     print(path.relative_to(ROOT))
   if args.contact_sheet:
@@ -192,6 +195,13 @@ def android() -> list[Path]:
   notification = ANDROID / "drawable/ic_notification.xml"
   notification.write_text(notification_vector())
   return out + [notification]
+
+
+def play_store() -> list[Path]:
+  """Google Play's hi-res icon per store language: 512 px, the full square (Play rounds it)."""
+  icon = tile(LIGHT_BACKPLATE, "full", width=0.76)
+  return [render(icon, 512, PLAY_STORE / locale / "images/icon.png", opaque=True)
+          for locale in PLAY_LOCALES]
 
 
 # --- Compositions --------------------------------------------------------------------------------
