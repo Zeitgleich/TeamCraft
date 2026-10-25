@@ -575,7 +575,6 @@ fn ChannelHeader(
             />
           </Show>
         </div>
-        <ChannelTabs tab=tab />
         {move || {
           info.get().and_then(|conv| {
             (conv.kind == crate::model::ConversationKind::Direct)
@@ -595,6 +594,7 @@ fn ChannelHeader(
             {move || i18n.t("external-badge")}
           </span>
         </Show>
+        <ChannelTabs tab=tab />
         <Show when=move || topic().is_some() fallback=|| ()>
           <span class="header-divider" aria-hidden="true"></span>
           <p class="header-topic" title=move || topic().unwrap_or_default()>
