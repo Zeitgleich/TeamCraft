@@ -151,7 +151,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .map(|ring| ring.keys())
       .unwrap_or_default();
     let keys = history.entitled_keys(ring_keys, joined, &device_key, self.settings.max_missed_keys);
-    Ok(ContentKeyBundle::missed_keys(
+    Ok(ContentKeyBundle::without_current(
       convert::conversation(conversation),
       keys,
     ))

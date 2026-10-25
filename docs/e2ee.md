@@ -210,10 +210,12 @@ Result:
   can't hold it back from some members and leave them on a key the removed person knows; the removed
   device never gets the epoch's secrets. (A member that never receives the removal commit stays in
   the old epoch and keeps using the old key; it can't tell.)
-- Content key bundles (MLS application messages) only carry history for new members, the current
-  key for a further device of a member, and the keys a device added back missed (§4.6). A member
-  takes a bundle's "current" key only if it has none yet, so an old or delayed bundle can't switch it
-  back; the one exception is a device that just joined and waits for its first one (§4.6).
+- Content key bundles (MLS application messages) to the whole group carry only a current key: for a
+  new member or a further device of a member. History for a new member and the keys a device added
+  back missed are sealed to the devices they are for (§4.3, §4.6). A member takes only the current
+  key of a bundle sent to the whole group, and takes it as current only if it has none yet, so an
+  old or delayed bundle can't switch it back; the one exception is a device that just joined and
+  waits for its first one (§4.6).
 - Each message header (plaintext) carries `content_key_id`, so clients know which key to use.
 - `content_key_id` is a random 128-bit value, not a sequence number: two members may rotate at the same
   time (e.g. both reach the message limit), and random IDs keep both keys usable without coordination.
@@ -223,8 +225,16 @@ Result:
 ### 4.3 New channel members
 
 - When a member is added, the adding client (or any online member, if the adder is offline) sends the
-  channel's past content keys to the new member through MLS. With history from the join on, it sends
-  only the new epoch key, which the other members derive themselves.
+  channel's past content keys to the new member through MLS: the current key in a bundle to the
+  group, every key of its ring sealed to each of the new member's devices (HPKE to the device's
+  certified agreement key, as for a device added back, §4.6; at most `max_missed_keys` keys per
+  message). The other members see that keys went to the new member, not which: a member who joined
+  from the join on (a guest) never gets earlier history this way, and ignores history keys in a
+  bundle sent to the whole group, which clients before this version send; only a device that just
+  joined and waits for its first current key takes them, as the new member of such a client. A new
+  member on a client before this version gets only the current key from an updated adder. With
+  history from the join on, the adder sends only the new epoch key, which the other members derive
+  themselves.
 - The choice is part of the signed change and settled before signing (guests: always from the join
   on); a client refuses to commit an admin's signed full-history add of a guest.
 - Without an explicit choice the client uses the signed workspace default, never the server's
