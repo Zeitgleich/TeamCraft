@@ -138,6 +138,10 @@ pub struct StoredMessage {
   /// Earlier versions of an edited text, oldest first.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub edits: Vec<EditRecord>,
+  /// Server ID of the edit whose text is shown: an edit with a lower ID loses, so devices agree
+  /// whatever order edits arrive in (issue #160). Absent before the first numbered edit.
+  #[serde(rename = "edit_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_edit_id: Option<MessageId>,
   #[serde(default)]
   pub is_pinned: bool,
 }
@@ -450,6 +454,11 @@ pub trait LocalStore {
   fn end_writes(&self) -> Result<(), StoreError> {
     Ok(())
   }
+
+  /// Starts writing what is queued now instead of after a batching delay, without waiting for it:
+  /// for a write another device relies on next (the secrets of a link, issue #168). Stores that
+  /// write at once keep the default.
+  fn write_soon(&self) {}
 }
 
 /// Runs `writes` as one group of writes ([`LocalStore::begin_writes`]). An error of `writes` doesn't
@@ -531,6 +540,10 @@ macro_rules! forward_local_store {
 
       fn end_writes(&self) -> Result<(), StoreError> {
         (**self).end_writes()
+      }
+
+      fn write_soon(&self) {
+        (**self).write_soon()
       }
     }
   };
@@ -883,6 +896,7 @@ pub(crate) mod tests {
       },
       is_edited: false,
       edits: Vec::new(),
+      maybe_edit_id: None,
       is_pinned: false,
     }
   }

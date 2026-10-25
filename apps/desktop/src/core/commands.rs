@@ -58,7 +58,10 @@ impl CoreHost {
     }
     if let Some(runtime) = self.running_for(server_url, user)? {
       let status = runtime.status().await;
-      if !matches!(status, CoreStatus::Failed { .. } | CoreStatus::Stopped) {
+      if !matches!(
+        status,
+        CoreStatus::Failed { .. } | CoreStatus::StoreUnreadable { .. } | CoreStatus::Stopped
+      ) {
         return Ok(status);
       }
       tracing::info!(
@@ -319,6 +322,12 @@ pub async fn core_attachment(
 ) -> Result<tauri::ipc::Response, CommandError> {
   let plaintext = host.current()?.attachment(conversation, message, file_id).await?;
   Ok(tauri::ipc::Response::new(plaintext.expose_secret().to_vec()))
+}
+
+/// Sets an unreadable local database aside and opens a new one (issue #160).
+#[tauri::command]
+pub async fn core_reset_store(host: State<'_, CoreHost>) -> Result<(), CommandError> {
+  Ok(host.current()?.reset_store().await?)
 }
 
 /// Stops the core, e.g. on sign-out. The encrypted database stays on disk.

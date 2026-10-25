@@ -104,21 +104,16 @@ pub async fn link_device(owner: &mut Peer) -> TestClient {
   )
   .await;
   // The owner's device succeeds only once the new device confirmed the transfer.
+  let new_store = Arc::new(MemoryStore::new());
   let (approved, received) = futures_util::future::join(
     owner.client.complete_link_approval(owner_side.unwrap()),
-    new_side.unwrap().receive_secrets(),
+    new_side.unwrap().receive_secrets(&new_store, "Test device"),
   )
   .await;
   approved.unwrap();
   let link_options = linked_options(received.unwrap());
   PendingEnrollment::new()
-    .complete(
-      api,
-      Arc::new(MemoryStore::new()),
-      clock(),
-      settings(),
-      link_options,
-    )
+    .complete(api, new_store, clock(), settings(), link_options)
     .await
     .unwrap()
 }

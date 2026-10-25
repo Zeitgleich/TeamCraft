@@ -182,6 +182,10 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   fn end_writes(&self) -> Result<(), StoreError> {
     self.inner.end_writes()
   }
+
+  fn write_soon(&self) {
+    self.inner.write_soon();
+  }
 }
 
 /// What a write to `table` under `key` may change in the snapshot.

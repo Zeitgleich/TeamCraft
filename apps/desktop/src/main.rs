@@ -187,6 +187,7 @@ fn main() -> anyhow::Result<()> {
       core::commands::core_query,
       core::commands::core_attachment,
       core::commands::core_stop,
+      core::commands::core_reset_store,
       calls::commands::call_snapshot,
       calls::commands::call_media_devices,
       calls::commands::call_action,

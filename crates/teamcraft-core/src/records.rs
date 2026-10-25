@@ -19,12 +19,13 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::account_data::SenderAbsence;
 use crate::convert;
 use crate::error::CoreError;
-use crate::store::{LocalStore, MessageContent, StoredMessage, Table};
+use crate::store::{LocalStore, MessageContent, StoredMessage, Table, write_group};
 
 const ACCOUNT_KEY: &str = "account";
 const KEY_BAG_KEY: &str = "key_bag";
 const SYNC_KEY: &str = "sync";
 const PENDING_DEVICE_KEY: &str = "pending_device";
+const PENDING_LINK_KEY: &str = "pending_link";
 const MLS_STORAGE_KEY: &str = "provider";
 
 /// This device's identity: the user's keys (inside the key bag) and the device's own keys.
@@ -102,6 +103,15 @@ pub struct PendingDevice {
   pub device: DeviceKeyPair,
 }
 
+/// Secrets an existing device handed over by linking, kept until the account is stored (issue
+/// #168): a new device that stops after confirming the transfer finishes enrolling on its next
+/// start instead of asking for another link.
+pub struct PendingLink {
+  pub user_id: UserId,
+  pub device_name: String,
+  pub secrets: crate::client::LinkedSecrets,
+}
+
 /// Secret part of [`Account`] as stored (SQLCipher protects it at rest).
 #[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct AccountRecord {
@@ -123,6 +133,20 @@ struct PendingDeviceRecord {
   identity_public_key: [u8; 32],
   device_signing_secret: [u8; 32],
   device_agreement_secret: [u8; 32],
+}
+
+/// [`PendingLink`] as stored, protected like [`AccountRecord`].
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+struct PendingLinkRecord {
+  #[zeroize(skip)]
+  user_id: UserId,
+  #[zeroize(skip)]
+  device_name: String,
+  backup_secret: [u8; 32],
+  encrypted_key_bag: Vec<u8>,
+  #[zeroize(skip)]
+  key_bag_version: u64,
+  wrapped_keys: Vec<u8>,
 }
 
 impl Account {
@@ -154,8 +178,10 @@ pub fn save_account(store: &impl LocalStore, account: &Account) -> Result<(), Co
     certificate: account.certificate.to_bytes()?,
     backup_secret: *account.backup_secret.expose_secret(),
   };
-  put_json(store, Table::Account, ACCOUNT_KEY, &record)?;
-  save_key_bag(store, account)
+  write_group(store, || {
+    put_json(store, Table::Account, ACCOUNT_KEY, &record)?;
+    save_key_bag(store, account)
+  })
 }
 
 /// The local copy is never uploaded, so it isn't bound to a sequence or the wrapped keys.
@@ -237,6 +263,38 @@ pub fn delete_pending_device(store: &impl LocalStore) -> Result<(), CoreError> {
   Ok(store.delete(Table::Account, PENDING_DEVICE_KEY)?)
 }
 
+pub fn save_pending_link(store: &impl LocalStore, pending: &PendingLink) -> Result<(), CoreError> {
+  let record = PendingLinkRecord {
+    user_id: pending.user_id,
+    device_name: pending.device_name.clone(),
+    backup_secret: *pending.secrets.backup_secret.expose_secret(),
+    encrypted_key_bag: pending.secrets.encrypted_key_bag.clone(),
+    key_bag_version: pending.secrets.key_bag_version,
+    wrapped_keys: pending.secrets.wrapped_keys.clone(),
+  };
+  put_json(store, Table::Account, PENDING_LINK_KEY, &record)
+}
+
+pub fn load_pending_link(store: &impl LocalStore) -> Result<Option<PendingLink>, CoreError> {
+  let Some(record) = get_json::<PendingLinkRecord>(store, Table::Account, PENDING_LINK_KEY)? else {
+    return Ok(None);
+  };
+  Ok(Some(PendingLink {
+    user_id: record.user_id,
+    device_name: record.device_name.clone(),
+    secrets: crate::client::LinkedSecrets {
+      backup_secret: SymmetricKey::from_bytes(record.backup_secret),
+      encrypted_key_bag: record.encrypted_key_bag.clone(),
+      key_bag_version: record.key_bag_version,
+      wrapped_keys: record.wrapped_keys.clone(),
+    },
+  }))
+}
+
+pub fn delete_pending_link(store: &impl LocalStore) -> Result<(), CoreError> {
+  Ok(store.delete(Table::Account, PENDING_LINK_KEY)?)
+}
+
 pub fn load_sync_state(store: &impl LocalStore) -> Result<SyncState, CoreError> {
   Ok(get_json(store, Table::SyncState, SYNC_KEY)?.unwrap_or_default())
 }
@@ -300,7 +358,7 @@ pub(crate) fn enqueue_message_as(
     }
   }
   let now_ms = latest_pending.map_or(now_ms, |latest| now_ms.max(latest + 1));
-  store.upsert_message(&StoredMessage {
+  let message = StoredMessage {
     conversation_id: draft.conversation_id,
     client_message_id,
     maybe_server_id: None,
@@ -310,8 +368,9 @@ pub(crate) fn enqueue_message_as(
     content: draft.content,
     is_edited: false,
     edits: Vec::new(),
+    maybe_edit_id: None,
     is_pinned: false,
-  })?;
+  };
   let entry = OutboxEntry {
     conversation_id: draft.conversation_id,
     client_message_id,
@@ -319,12 +378,16 @@ pub(crate) fn enqueue_message_as(
     attempts: 0,
     maybe_last_error: None,
   };
-  put_json(
-    store,
-    Table::Outbox,
-    &outbox_key(draft.conversation_id, client_message_id),
-    &entry,
-  )
+  // Together: a message without its outbox entry would show "sending" forever (issue #160).
+  write_group(store, || {
+    store.upsert_message(&message)?;
+    put_json(
+      store,
+      Table::Outbox,
+      &outbox_key(draft.conversation_id, client_message_id),
+      &entry,
+    )
+  })
 }
 
 pub fn outbox(store: &impl LocalStore) -> Result<Vec<OutboxEntry>, CoreError> {
@@ -368,12 +431,14 @@ pub fn discard_failed(
   if !is_send_failed(store, conversation, client_message_id)? {
     return Ok(());
   }
-  store.delete(Table::Outbox, &outbox_key(conversation, client_message_id))?;
-  if let Some(mut message) = store.message(conversation, client_message_id)? {
-    message.content = MessageContent::Deleted;
-    store.upsert_message(&message)?;
-  }
-  Ok(())
+  write_group(store, || {
+    store.delete(Table::Outbox, &outbox_key(conversation, client_message_id))?;
+    if let Some(mut message) = store.message(conversation, client_message_id)? {
+      message.content = MessageContent::Deleted;
+      store.upsert_message(&message)?;
+    }
+    Ok(())
+  })
 }
 
 /// The openmls provider storage holds group state and key package private keys. It is kept as one

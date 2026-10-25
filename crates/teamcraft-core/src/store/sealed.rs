@@ -39,6 +39,8 @@ pub trait RecordBackend {
   fn end_writes(&self) -> Result<(), StoreError> {
     Ok(())
   }
+  /// [`LocalStore::write_soon`] for the records.
+  fn write_soon(&self) {}
 }
 
 /// What a sealed record holds: the plaintext name next to the value, so loading can rebuild the
@@ -219,6 +221,10 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
 
   fn end_writes(&self) -> Result<(), StoreError> {
     self.backend.end_writes()
+  }
+
+  fn write_soon(&self) {
+    self.backend.write_soon();
   }
 }
 

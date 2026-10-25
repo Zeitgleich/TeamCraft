@@ -44,6 +44,14 @@ pub(super) async fn open_database(name: &str) -> Result<IdbDatabase, StoreError>
     .map_err(|_| StoreError::Database("open did not return a database".into()))
 }
 
+/// Deletes the database `name` with everything in it, once no page holds it open any more.
+pub(super) async fn delete_database(name: &str) -> Result<(), StoreError> {
+  let request = factory()?
+    .delete_database(name)
+    .map_err(|error| js_error("delete", &error))?;
+  request_result(&request).await.map(|_| ())
+}
+
 /// Waits for a request and returns its result.
 pub(super) async fn request_result(request: &IdbRequest) -> Result<JsValue, StoreError> {
   let (sender, receiver) = oneshot::channel::<Result<(), ()>>();

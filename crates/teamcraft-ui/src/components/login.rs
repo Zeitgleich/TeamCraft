@@ -6,6 +6,7 @@ use std::rc::Rc;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_client_api::brand::BrandView;
+use teamcraft_client_api::remote::StoreProblem;
 use teamcraft_client_api::sign_in_page::SignInPage;
 use teamcraft_proto::{GetMeResponse, SignInMethod};
 use wasm_bindgen::JsCast;
@@ -265,6 +266,7 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
     problem,
     Some(LoginProblem::CoreFailed(_) | LoginProblem::CoreStopped | LoginProblem::CoreNotSignedIn)
   );
+  let is_store_problem = matches!(problem, Some(LoginProblem::StoreUnreadable(_)));
   let detail = match &problem {
     Some(LoginProblem::Failed(text) | LoginProblem::CoreFailed(text)) => Some(text.clone()),
     _ => None,
@@ -278,6 +280,13 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
     Some(LoginProblem::Failed(_)) => (Some("login-failed-title"), Some("login-failed-body")),
     Some(LoginProblem::CoreFailed(_)) => (Some("login-core-failed-title"), Some("login-core-failed-body")),
     Some(LoginProblem::CoreStopped) => (Some("login-core-stopped-title"), Some("login-core-stopped-body")),
+    Some(LoginProblem::StoreUnreadable(StoreProblem::NewerVersion)) => {
+      (Some("login-store-newer-title"), Some("login-store-newer-body"))
+    },
+    Some(LoginProblem::StoreUnreadable(_)) => (
+      Some("login-store-damaged-title"),
+      Some("login-store-damaged-body"),
+    ),
     Some(LoginProblem::CoreNotSignedIn) => (
       Some("login-core-no-token-title"),
       Some("login-core-no-token-body"),
@@ -312,6 +321,25 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
           <div class="auth-actions">
             <button class="btn btn-primary auth-wide" data-autofocus on:click=move |_| control.sign_out()>
               {move || i18n.t("login-use-other-account")}
+            </button>
+          </div>
+        }
+        .into_any()
+      } else if is_store_problem {
+        // Setting up again is the way out; retrying helps after an update, signing out switches
+        // accounts. Nothing is deleted on the desktop: the old file is kept aside.
+        view! {
+          <div class="auth-actions">
+            <button class="btn btn-primary auth-wide" data-autofocus on:click=move |_| control.reset_store()>
+              {move || i18n.t("login-store-reset")}
+            </button>
+          </div>
+          <div class="auth-actions auth-actions-split">
+            <button class="btn" on:click=move |_| control.retry_core()>
+              {move || i18n.t("login-core-retry")}
+            </button>
+            <button class="btn" on:click=move |_| control.sign_out()>
+              {move || i18n.t("login-core-sign-out")}
             </button>
           </div>
         }

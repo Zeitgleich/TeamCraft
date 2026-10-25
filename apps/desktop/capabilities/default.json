@@ -42,6 +42,7 @@
     "allow-core-query",
     "allow-core-attachment",
     "allow-core-stop",
+    "allow-core-reset-store",
     "allow-call-snapshot",
     "allow-call-media-devices",
     "allow-call-action",

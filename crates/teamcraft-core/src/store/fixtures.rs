@@ -3,6 +3,8 @@
 //!
 //! Each release adds its pair of files with `generate_fixtures` (ignored; run it on the release
 //! commit): `cargo test -p teamcraft-core --all-features -- --ignored generate_fixtures`.
+// Test helpers outside `#[test]` functions panic on failure like the tests themselves.
+#![allow(clippy::unwrap_used)]
 
 use std::path::{Path, PathBuf};
 

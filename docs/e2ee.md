@@ -717,7 +717,14 @@ Implemented as (`teamcraft-crypto::rendezvous`, `teamcraft-core` linking):
   transfer frame, a closed relay or 60 seconds without a receipt fail on the existing device, and the
   new device fails because the transfer never arrives (the relay closes when the existing device
   gives up). A lost receipt makes the existing device report a failure although the new device has
-  the keys; linking again is harmless. The new device then enrolls (§3.2) and joins the user's
+  the keys; linking again is harmless. Before it sends `received`, the new device stores the backup
+  key and the encrypted key bag in its local store, as a record next to the account protected the
+  same way (§9; on the web the write is issued at once instead of after the batching delay). If the
+  app stops before the account is stored, the next start finishes the enrollment with them, so the
+  existing device's success is never a lie the user has to undo by linking again. The record goes
+  with the account write that completes enrollment (one group of writes, §9.5), when the user
+  cancels linking, or when it can't work any more (the key bag no longer opens, another account
+  signed in). The new device then enrolls (§3.2) and joins the user's
   groups on its own (§4.6, "A further device joins on its own"); where it can't yet, an existing
   member adds it when it comes online. It reads the history the key bag opens at once.
 
@@ -1205,6 +1212,39 @@ can: the enrollment screen comes up again, and when this browser had the account
 marker in local storage), it says that the browser deleted the data and offers the recovery
 passphrase or linking from another device. If the browser deleted the marker as well, it looks like a
 first visit, which offers the same two ways.
+
+### 9.5 Integrity: groups of writes, layout versions, recovery (implemented)
+
+**Groups of writes.** Records that must agree are written as one group (`LocalStore::begin_writes` /
+`end_writes`, `write_group`, `Client::atomically`): after a crash, or when one of the group's writes
+fails, the store holds all of them or none. SQLite stores (SQLCipher, sealed SQLite) run a group as
+one transaction; IndexedDB never splits a group between two batches, and a batch is one
+transaction (§9.4). Groups are synchronous, so none stays open across a network request. Grouped:
+a new message and its outbox entry, a sent message and the removal of its outbox entry, the MLS
+state after a processed entry together with the cursor past it, the applied changes and pending
+commit next to the MLS state, the key bag and its "upload me" flag, the account with its key bag
+and the end of a pending enrollment. Where order alone is enough (content keys are written before
+the MLS state that consumed the epoch), reprocessing an entry after a crash is idempotent.
+
+**Layout versions.** The SQLite stores keep their layout version in `PRAGMA user_version`. Opening
+upgrades an older layout step by step in one transaction (forward-only migrations; released 1.0
+databases carry version 0 and the layout of version 1) and refuses a newer one without touching it.
+IndexedDB versions its object stores itself and refuses a newer database (`VersionError`). Databases
+written by every release are kept as fixtures (`crates/teamcraft-core/tests/fixtures/store/`) and
+opened by every later version in CI. Records inside the store stay JSON with defaults for new
+fields and an `Unknown` catch-all, so newer records are read or skipped, not misread.
+
+**Unreadable data.** A store that is damaged (SQLite's corruption codes; a sealed store whose records
+only partly open), whose key no longer opens it (the keystore lost or replaced the key), or whose
+layout is newer is not a generic failure: the app says what happened and offers to set the device
+up again (recovery passphrase or linking, §5, §6). The desktop sets the old file aside
+(`<user>.db.unreadable-<time>`, never deleted); the browser deletes the database, because its key
+wrapping lives in the same database. A keystore that is just unavailable (locked, no keyring
+service) stays a "try again" failure, since the data is intact.
+
+**Concurrent edits.** Two devices editing the same message converge: the edit with the highest
+server ID wins on every device, whatever order the edits arrive in (history loads newest first). An
+own edit shows at once and competes with the others once the server numbered it.
 
 ## 10. Search
 

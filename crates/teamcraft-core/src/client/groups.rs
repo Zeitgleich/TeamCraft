@@ -944,8 +944,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         tracing::warn!(conversation_id = %conversation, mls_message_id = %message.id, %error, "rejected MLS message");
       },
     }
-    self.persist_group(conversation)?;
-    self.advance_cursor(conversation, message)?;
+    self.persist_group_at(conversation, message)?;
     Ok(MlsProgress::Done)
   }
 

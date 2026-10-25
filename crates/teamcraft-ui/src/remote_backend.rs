@@ -127,6 +127,12 @@ pub async fn enable_web_push(auth: &dyn Authenticator) -> Result<(), String> {
   call("core_enable_push", &json!({ "vapid_key": vapid_key })).await
 }
 
+/// Sets the unreadable local database aside (desktop) or deletes it (browser) and opens a new one,
+/// so the device can be set up again (issue #160).
+pub async fn reset_store() -> Result<(), String> {
+  call("core_reset_store", &json!({})).await
+}
+
 pub async fn stop_core() -> Result<(), String> {
   call("core_stop", &json!({})).await
 }

@@ -122,6 +122,12 @@ impl SealedStore<IndexedDbRecords> {
     Self::load(backend, database_key, records)
   }
 
+  /// Deletes the database `name` (records and key wrapping): the user chose to set up a device
+  /// whose data can't be read again (issue #160). The store must be closed first.
+  pub async fn delete(name: &str) -> Result<(), StoreError> {
+    idb::delete_database(name).await
+  }
+
   /// Issues what is queued and waits until every write issued so far is committed. Writes that
   /// failed are issued again, and the flush fails with the reason, until they went through.
   pub async fn flush(&self) -> Result<(), StoreError> {
@@ -180,6 +186,12 @@ impl RecordBackend for IndexedDbRecords {
       self.inner.issue_queued();
     }
     Ok(())
+  }
+
+  fn write_soon(&self) {
+    if self.inner.writes.borrow().group_depth == 0 {
+      self.inner.issue_queued();
+    }
   }
 }
 
