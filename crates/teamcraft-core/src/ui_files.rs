@@ -1,7 +1,8 @@
 //! Files in the UI adapter: attachments of messages, uploads, downloads and share links.
 
 use teamcraft_client_api::actions::{
-  FileFailure, FileInfo, FileSource, FileTransfer, OutgoingFile, PixelSize, ShareLink, ShareLinkOptions,
+  FileFailure, FileInfo, FileSource, FileTransfer, MediaAnchor, MediaPage, OutgoingFile, PixelSize,
+  ShareLink, ShareLinkOptions,
 };
 use teamcraft_client_api::model::{ConversationId, MessageId, ThreadId};
 use teamcraft_proto::{AttachmentId, Base64Bytes};
@@ -10,9 +11,10 @@ use crate::client::files::{
   PendingFile, PendingUpload, TransferFailure, TransferState, UploadRetry, UploadSource, attachments_of,
   cancel_pending_file, failed_uploads, pending_upload, save_pending_upload, share_links, transfer_state,
 };
+use crate::error::CoreError;
 use crate::records;
 use crate::store::{
-  AttachmentRef, ImageDimensions, LocalStore, MessageContent, MessageMeta, StoredMessage, Table,
+  AttachmentRef, ImageDimensions, LocalStore, MediaRange, MessageContent, MessageMeta, StoredMessage, Table,
 };
 use crate::transfers::Transfers;
 use crate::ui_backend::{CoreChatBackend, CoreCommand, RedactedText, ui_message_id};
@@ -180,33 +182,100 @@ impl<S: LocalStore> CoreChatBackend<S> {
     messages.iter().flat_map(|stored| self.files_of(stored)).collect()
   }
 
-  /// The files of a window of at most `max_messages` messages around `around`, newest first: the
-  /// image viewer must not rebuild the thumbnails of a whole conversation. Only messages with
-  /// attachments count towards the window.
-  pub(crate) fn ui_conversation_images(
+  /// A page of at most `max_messages` messages with pictures or videos at `anchor`, newest first
+  /// (the image viewer pages through them, #274). The store reads only the page: the viewer must
+  /// neither rebuild the thumbnails of a whole conversation nor read all of its messages.
+  pub(crate) fn ui_conversation_media(
     &self,
     conversation: ConversationId,
-    around: MessageId,
+    anchor: MediaAnchor,
     max_messages: usize,
-  ) -> Vec<FileInfo> {
-    let mut messages: Vec<StoredMessage> = self
-      .all_messages(conversation)
-      .into_iter()
-      .filter(|stored| !attachments_of(&stored.content).is_empty())
-      .collect();
-    messages.reverse();
-    // An unknown message (deleted meanwhile) gets the newest window.
-    let at = messages
-      .iter()
-      .position(|stored| ui_message_id(stored) == around)
-      .unwrap_or(0);
-    let start = at.saturating_sub(max_messages / 2);
-    messages
-      .iter()
-      .skip(start)
-      .take(max_messages)
-      .flat_map(|stored| self.files_of(stored))
-      .collect()
+  ) -> MediaPage {
+    if max_messages == 0 {
+      return MediaPage::default();
+    }
+    // One more than asked for tells whether there are more beyond.
+    let older = |from: Option<MessageId>, count: usize| {
+      self.media_messages(conversation, MediaRange::Older(from), count.saturating_add(1))
+    };
+    let newer = |from: MessageId, count: usize| {
+      self.media_messages(conversation, MediaRange::Newer(from), count.saturating_add(1))
+    };
+    let maybe_anchor_message = match anchor {
+      MediaAnchor::Around(around) => self.media_message(conversation, around),
+      _ => None,
+    };
+    let (newest_first, has_older, has_newer) = match (anchor, maybe_anchor_message) {
+      (MediaAnchor::Around(around), Some(anchor_message)) => {
+        // The message itself counts on the older side.
+        let newer_count = max_messages / 2;
+        let older_count = max_messages.saturating_sub(newer_count + 1);
+        let mut newer_page = newer(around, newer_count);
+        let has_newer = newer_page.len() > newer_count;
+        newer_page.truncate(newer_count);
+        newer_page.reverse();
+        let mut older_page = older(Some(around), older_count);
+        let has_older = older_page.len() > older_count;
+        older_page.truncate(older_count);
+        newer_page.push(anchor_message);
+        newer_page.extend(older_page);
+        (newer_page, has_older, has_newer)
+      },
+      (MediaAnchor::Older(from), _) => {
+        let mut page = older(Some(from), max_messages);
+        let has_older = page.len() > max_messages;
+        page.truncate(max_messages);
+        (page, has_older, true)
+      },
+      (MediaAnchor::Newer(from), _) => {
+        let mut page = newer(from, max_messages);
+        let has_newer = page.len() > max_messages;
+        page.truncate(max_messages);
+        page.reverse();
+        (page, true, has_newer)
+      },
+      // Also a message that is gone: the newest page.
+      (MediaAnchor::Newest | MediaAnchor::Around(_), _) => {
+        let mut page = older(None, max_messages);
+        let has_older = page.len() > max_messages;
+        page.truncate(max_messages);
+        (page, has_older, false)
+      },
+    };
+    MediaPage {
+      files: newest_first
+        .iter()
+        .flat_map(|stored| self.files_of(stored))
+        .collect(),
+      has_older,
+      has_newer,
+    }
+  }
+
+  fn media_messages(
+    &self,
+    conversation: ConversationId,
+    range: MediaRange,
+    limit: usize,
+  ) -> Vec<StoredMessage> {
+    self.read(
+      self
+        .store_ref()
+        .media_messages(conversation, range, limit)
+        .map_err(CoreError::from),
+    )
+  }
+
+  /// The message with this server ID, when it has pictures or videos (one indexed read).
+  fn media_message(&self, conversation: ConversationId, message: MessageId) -> Option<StoredMessage> {
+    self
+      .read(
+        self
+          .store_ref()
+          .message_by_server_id(conversation, message)
+          .map_err(CoreError::from),
+      )
+      .filter(StoredMessage::has_media)
   }
 
   pub(crate) fn ui_download_file(&self, conversation: ConversationId, message: MessageId) {

@@ -18,9 +18,9 @@ use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
 use serde_json::json;
 use teamcraft_client_api::actions::{
-  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, LinkedMessage, MessageExtras, NewChannel,
-  NewSpace, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges,
-  SpaceInvite,
+  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, LinkedMessage, MediaAnchor, MediaPage,
+  MessageExtras, NewChannel, NewSpace, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink,
+  ShareLinkOptions, SpaceChanges, SpaceInvite,
 };
 use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
 use teamcraft_client_api::calls::BackgroundImageInfo;
@@ -937,19 +937,19 @@ impl ChatBackend for RemoteChat {
     }
   }
 
-  fn conversation_images(
+  fn conversation_media(
     &self,
     conversation: ConversationId,
-    around: MessageId,
+    anchor: MediaAnchor,
     max_messages: usize,
-  ) -> Vec<FileInfo> {
-    match self.ask(ChatQuery::ConversationImages {
+  ) -> MediaPage {
+    match self.ask(ChatQuery::ConversationMedia {
       conversation,
-      around,
+      anchor,
       max_messages,
     }) {
-      Some(ChatAnswer::Files { files }) => files,
-      _ => Vec::new(),
+      Some(ChatAnswer::MediaPage { page }) => page,
+      _ => MediaPage::default(),
     }
   }
 

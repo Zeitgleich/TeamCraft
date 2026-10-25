@@ -25,9 +25,9 @@ use teamcraft_proto::{
 };
 
 use teamcraft_client_api::actions::{
-  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, LinkedMessage, MessageExtras, NewChannel,
-  NewSpace, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges,
-  SpaceInvite,
+  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, LinkedMessage, MediaAnchor, MediaPage,
+  MessageExtras, NewChannel, NewSpace, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink,
+  ShareLinkOptions, SpaceChanges, SpaceInvite,
 };
 use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, PresencePolicy};
 
@@ -517,13 +517,13 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.conversation_files(conversation)
   }
 
-  fn conversation_images(
+  fn conversation_media(
     &self,
     conversation: ConversationId,
-    around: MessageId,
+    anchor: MediaAnchor,
     max_messages: usize,
-  ) -> Vec<FileInfo> {
-    self.chat.conversation_images(conversation, around, max_messages)
+  ) -> MediaPage {
+    self.chat.conversation_media(conversation, anchor, max_messages)
   }
 
   fn download_file(&self, conversation: ConversationId, message: MessageId) {

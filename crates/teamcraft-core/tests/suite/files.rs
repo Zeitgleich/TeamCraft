@@ -15,8 +15,8 @@ use std::time::Duration;
 use common::{Peer, backend_of, run_commands, settle};
 use image::{ImageBuffer, ImageFormat, Rgb};
 use teamcraft_client_api::actions::{
-  FileFailure, FileSource, FileTransfer, MessagePriority, OutgoingFile, OutgoingMessage, PixelSize,
-  ShareLinkOptions,
+  FileFailure, FileSource, FileTransfer, MediaAnchor, MessagePriority, OutgoingFile, OutgoingMessage,
+  PixelSize, ShareLinkOptions,
 };
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::Message;
@@ -64,8 +64,15 @@ async fn text_with_files_arrives_with_thumbnails_and_downloads() {
   assert_eq!(files[1].transfer, FileTransfer::Remote);
   assert_eq!(bob_ui.conversation_files(channel).len(), 2);
   // The viewer's window holds this message's files; a window of zero messages holds none.
-  assert_eq!(bob_ui.conversation_images(channel, received.id, 10).len(), 2);
-  assert!(bob_ui.conversation_images(channel, received.id, 0).is_empty());
+  let page = bob_ui.conversation_media(channel, MediaAnchor::Around(received.id), 10);
+  assert_eq!(page.files.len(), 2);
+  assert!(!page.has_older && !page.has_newer);
+  assert!(
+    bob_ui
+      .conversation_media(channel, MediaAnchor::Around(received.id), 0)
+      .files
+      .is_empty()
+  );
 
   let directory = std::env::temp_dir().join(format!("teamcraft-downloads-{}", std::process::id()));
   bob.client.set_download_dir(Some(directory.clone()));

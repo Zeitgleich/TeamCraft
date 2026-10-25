@@ -16,9 +16,9 @@ use teamcraft_proto::{
 };
 
 use crate::actions::{
-  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, LinkedMessage, MessageExtras, NewChannel,
-  NewSpace, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges,
-  SpaceInvite,
+  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, LinkedMessage, MediaAnchor, MediaPage,
+  MessageExtras, NewChannel, NewSpace, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink,
+  ShareLinkOptions, SpaceChanges, SpaceInvite,
 };
 use crate::activity::ActivityFeed;
 use crate::admin::{
@@ -345,15 +345,16 @@ pub trait ChatBackend {
   fn conversation_files(&self, _conversation: ConversationId) -> Vec<FileInfo> {
     Vec::new()
   }
-  /// The files of a window of at most `max_messages` messages with attachments around `around`,
-  /// newest first. Bounded work for the image viewer; the default returns everything.
-  fn conversation_images(
+  /// A page of at most `max_messages` messages with pictures or videos at `anchor`, newest first
+  /// (the image viewer pages through a conversation with it, #274). Bounded work: a core reads
+  /// only what the page holds. The default pages the whole list.
+  fn conversation_media(
     &self,
     conversation: ConversationId,
-    _around: MessageId,
-    _max_messages: usize,
-  ) -> Vec<FileInfo> {
-    self.conversation_files(conversation)
+    anchor: MediaAnchor,
+    max_messages: usize,
+  ) -> MediaPage {
+    MediaPage::from_files(self.conversation_files(conversation), anchor, max_messages)
   }
   /// Fetches and decrypts a file; its [`FileInfo::transfer`] reports progress and the local path.
   fn download_file(&self, _conversation: ConversationId, _message: MessageId) {}

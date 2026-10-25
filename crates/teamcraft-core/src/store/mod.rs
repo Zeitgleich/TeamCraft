@@ -387,6 +387,19 @@ pub enum MessageFilter {
   All,
 }
 
+/// Which messages with a picture or video [`LocalStore::media_messages`] lists, from a message
+/// outwards (the image viewer pages through them).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaRange {
+  /// Older than the message (the newest ones without one), nearest first.
+  Older(Option<MessageId>),
+  /// Newer than the message, nearest first.
+  Newer(MessageId),
+}
+
+/// Media types the image viewer shows: pictures and videos.
+const MEDIA_TYPE_PREFIXES: [&str; 2] = ["image/", "video/"];
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
   #[error("database error: {0}")]
@@ -458,6 +471,21 @@ pub trait LocalStore {
         .into_iter()
         .find(|message| message.maybe_server_id == Some(server_id)),
     )
+  }
+  /// Up to `limit` listed server messages with a picture or video attachment, in the `range`,
+  /// nearest to its start first. The image viewer pages through a conversation's media with it,
+  /// so a store with an index reads only what it returns. The default scans.
+  fn media_messages(
+    &self,
+    conversation: ConversationId,
+    range: MediaRange,
+    limit: usize,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    Ok(pick_media(
+      self.messages(conversation, MessageFilter::All)?,
+      range,
+      limit,
+    ))
   }
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError>;
   /// Removes one message, e.g. an own one that was never sent and the user dropped.
@@ -565,6 +593,15 @@ macro_rules! forward_local_store {
         (**self).messages(conversation, filter)
       }
 
+      fn media_messages(
+        &self,
+        conversation: ConversationId,
+        range: MediaRange,
+        limit: usize,
+      ) -> Result<Vec<StoredMessage>, StoreError> {
+        (**self).media_messages(conversation, range, limit)
+      }
+
       fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {
         (**self).delete_messages(conversation)
       }
@@ -661,6 +698,23 @@ impl StoredMessage {
     matches!(&self.content, MessageContent::Text { meta, .. } if meta.is_also_in_channel)
   }
 
+  /// A listed server message with a picture or video attachment: what the image viewer pages
+  /// through.
+  pub fn has_media(&self) -> bool {
+    let attachments: &[AttachmentRef] = match &self.content {
+      MessageContent::File { attachment } => std::slice::from_ref(attachment),
+      MessageContent::Text { meta, .. } => &meta.attachments,
+      _ => return false,
+    };
+    self.maybe_server_id.is_some()
+      && !self.is_hidden()
+      && attachments.iter().any(|attachment| {
+        MEDIA_TYPE_PREFIXES
+          .iter()
+          .any(|prefix| attachment.media_type.starts_with(prefix))
+      })
+  }
+
   fn matches(&self, filter: MessageFilter) -> bool {
     match filter {
       MessageFilter::All => true,
@@ -670,6 +724,30 @@ impl StoredMessage {
       MessageFilter::Thread(thread) => !self.is_hidden() && self.maybe_thread_id == Some(thread),
     }
   }
+}
+
+/// The `limit` messages with media in `range` among `messages` (in display order), nearest to the
+/// range's start first.
+pub fn pick_media(messages: Vec<StoredMessage>, range: MediaRange, limit: usize) -> Vec<StoredMessage> {
+  let server_id = |message: &StoredMessage| {
+    message
+      .maybe_server_id
+      .map(|id| teamcraft_proto::Id::snowflake(id).get())
+  };
+  let mut media: Vec<StoredMessage> = messages
+    .into_iter()
+    .filter(StoredMessage::has_media)
+    .filter(|message| match range {
+      MediaRange::Older(Some(from)) => server_id(message) < Some(teamcraft_proto::Id::snowflake(from).get()),
+      MediaRange::Older(None) => true,
+      MediaRange::Newer(from) => server_id(message) > Some(teamcraft_proto::Id::snowflake(from).get()),
+    })
+    .collect();
+  if matches!(range, MediaRange::Older(_)) {
+    media.reverse();
+  }
+  media.truncate(limit);
+  media
 }
 
 impl Table {
@@ -777,6 +855,77 @@ pub(crate) mod tests {
     messages_are_ordered_and_filtered(store);
     replies_also_sent_to_the_conversation_are_listed_in_both(store);
     groups_of_writes_nest_and_are_read_at_once(store);
+    media_messages_are_paged_from_a_message_outwards(store);
+  }
+
+  fn media_messages_are_paged_from_a_message_outwards(store: &impl LocalStore) {
+    let conversation = id(20);
+    // Server IDs 10..=100: every other one has media; a text mentioning a media type has none.
+    for (client, server) in (1..=10u8).zip((10..=100).step_by(10)) {
+      let mut stored = message(conversation, client, Some(server), None, i64::from(client));
+      match client % 2 {
+        0 => stored.content = media_content("image/png"),
+        _ if client == 3 => {
+          stored.content = MessageContent::Text {
+            body: r#""media_type":"image/png""#.into(),
+            mentions: Vec::new(),
+            meta: Default::default(),
+          }
+        },
+        _ => {},
+      }
+      store.upsert_message(&stored).unwrap();
+    }
+    let mut video = message(conversation, 11, Some(110), None, 11);
+    video.content = media_content("video/mp4");
+    let mut document = message(conversation, 12, Some(120), None, 12);
+    document.content = media_content("application/pdf");
+    let mut pending = message(conversation, 13, None, None, 13);
+    pending.content = media_content("image/png");
+    for stored in [&video, &document, &pending] {
+      store.upsert_message(stored).unwrap();
+    }
+    let servers = |range, limit| -> Vec<i64> {
+      store
+        .media_messages(conversation, range, limit)
+        .unwrap()
+        .iter()
+        .map(|stored| Id::snowflake(stored.maybe_server_id.unwrap()).get())
+        .collect()
+    };
+    assert_eq!(
+      servers(MediaRange::Older(None), 3),
+      [110, 100, 80],
+      "newest first, no documents or texts"
+    );
+    assert_eq!(servers(MediaRange::Older(Some(id(80))), 10), [60, 40, 20]);
+    assert_eq!(servers(MediaRange::Newer(id(60)), 2), [80, 100], "nearest first");
+    assert_eq!(servers(MediaRange::Newer(id(100)), 10), [110]);
+    assert!(servers(MediaRange::Newer(id(110)), 10).is_empty());
+    assert!(servers(MediaRange::Older(None), 0).is_empty());
+    assert!(
+      store
+        .media_messages(id(21), MediaRange::Older(None), 10)
+        .unwrap()
+        .is_empty(),
+      "other conversations have their own"
+    );
+    store.delete_messages(conversation).unwrap();
+  }
+
+  fn media_content(media_type: &str) -> MessageContent {
+    // From JSON: the fields every version of the record has.
+    let attachment = serde_json::json!({
+      "attachment_id": id::<teamcraft_proto::AttachmentId>(1),
+      "key": "",
+      "ciphertext_sha256": "",
+      "file_name": "f",
+      "media_type": media_type,
+      "size_bytes": 1,
+    });
+    MessageContent::File {
+      attachment: serde_json::from_value(attachment).unwrap(),
+    }
   }
 
   fn groups_of_writes_nest_and_are_read_at_once(store: &impl LocalStore) {

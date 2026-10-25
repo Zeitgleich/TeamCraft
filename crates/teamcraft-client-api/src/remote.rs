@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use teamcraft_proto::{BackgroundId, Base64Bytes, CategoryId, HistoryPolicy, OrgBackgroundId};
 
 use crate::actions::{
-  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, LinkedMessage, MessageExtras, NewChannel,
-  NewSpace, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges,
-  SpaceInvite,
+  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, LinkedMessage, MediaAnchor, MediaPage,
+  MessageExtras, NewChannel, NewSpace, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink,
+  ShareLinkOptions, SpaceChanges, SpaceInvite,
 };
 use crate::activity::ActivityFeed;
 use crate::admin::DeviceInfo;
@@ -994,9 +994,9 @@ pub enum ChatQuery {
   ConversationFiles {
     conversation: ConversationId,
   },
-  ConversationImages {
+  ConversationMedia {
     conversation: ConversationId,
-    around: MessageId,
+    anchor: MediaAnchor,
     max_messages: usize,
   },
   ShareLinks {
@@ -1104,6 +1104,9 @@ pub enum ChatAnswer {
   },
   Files {
     files: Vec<FileInfo>,
+  },
+  MediaPage {
+    page: MediaPage,
   },
   ShareLinks {
     links: Vec<ShareLink>,
@@ -1231,12 +1234,12 @@ impl ChatQuery {
       Self::ConversationFiles { conversation } => ChatAnswer::Files {
         files: backend.conversation_files(conversation),
       },
-      Self::ConversationImages {
+      Self::ConversationMedia {
         conversation,
-        around,
+        anchor,
         max_messages,
-      } => ChatAnswer::Files {
-        files: backend.conversation_images(conversation, around, max_messages),
+      } => ChatAnswer::MediaPage {
+        page: backend.conversation_media(conversation, anchor, max_messages),
       },
       Self::ShareLinks {
         conversation,

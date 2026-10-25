@@ -694,6 +694,37 @@ pub fn images_in_scope(files: &[FileInfo], scope: LightboxScope, start: MediaKey
   images
 }
 
+/// Whether the viewer, at `position` of its list, should read the next older page: the user is
+/// within `margin` images of the old end and the conversation has more (#274).
+pub fn wants_older(position: Position, margin: usize, has_older: bool) -> bool {
+  has_older && position.index < margin
+}
+
+/// Like [`wants_older`] for the newer end.
+pub fn wants_newer(position: Position, margin: usize, has_newer: bool) -> bool {
+  has_newer && position.len.saturating_sub(position.index + 1) < margin
+}
+
+/// Adds an older page (newest first) to the end of `files`, leaving out files that are in the list
+/// already (a page read while messages arrived can overlap).
+pub fn append_older(files: &mut Vec<FileInfo>, page: Vec<FileInfo>) {
+  let fresh: Vec<FileInfo> = page.into_iter().filter(|file| !is_listed(files, file)).collect();
+  files.extend(fresh);
+}
+
+/// Adds a newer page (newest first) to the start of `files`.
+pub fn prepend_newer(files: &mut Vec<FileInfo>, page: Vec<FileInfo>) {
+  let mut fresh: Vec<FileInfo> = page.into_iter().filter(|file| !is_listed(files, file)).collect();
+  fresh.append(files);
+  *files = fresh;
+}
+
+fn is_listed(files: &[FileInfo], file: &FileInfo) -> bool {
+  files
+    .iter()
+    .any(|listed| listed.message == file.message && listed.file_id == file.file_id)
+}
+
 /// How many images the message of `start` has, to choose the scope it opens with.
 pub fn album_len(files: &[FileInfo], start: MediaKey) -> usize {
   files
@@ -818,6 +849,39 @@ mod tests {
         None,
         "no wrap-around"
       );
+    }
+
+    #[test]
+    fn the_next_page_is_wanted_near_an_end_that_has_more() {
+      let at = |index, len| Position { index, len };
+      assert!(wants_older(at(2, 50), 8, true));
+      assert!(!wants_older(at(2, 50), 8, false), "nothing older left");
+      assert!(!wants_older(at(8, 50), 8, true), "far enough from the old end");
+      assert!(wants_newer(at(45, 50), 8, true));
+      assert!(!wants_newer(at(41, 50), 8, true));
+      assert!(!wants_newer(at(49, 50), 8, false));
+      assert!(
+        wants_older(at(0, 3), 8, true) && wants_newer(at(0, 3), 8, true),
+        "a short list wants both"
+      );
+    }
+
+    #[test]
+    fn pages_join_the_list_without_repeats() {
+      // Newest first: message 5 is the newest, 3 the oldest loaded.
+      let mut files = vec![image(5, 50, "e"), image(4, 40, "d"), image(3, 30, "c")];
+      append_older(
+        &mut files,
+        vec![image(3, 30, "c"), image(2, 20, "b"), image(1, 10, "a")],
+      );
+      let messages: Vec<_> = files.iter().map(|file| file.file_id.as_str()).collect();
+      assert_eq!(messages, ["50", "40", "30", "20", "10"]);
+      prepend_newer(
+        &mut files,
+        vec![image(7, 70, "g"), image(6, 60, "f"), image(5, 50, "e")],
+      );
+      let messages: Vec<_> = files.iter().map(|file| file.file_id.as_str()).collect();
+      assert_eq!(messages, ["70", "60", "50", "40", "30", "20", "10"]);
     }
 
     #[test]
