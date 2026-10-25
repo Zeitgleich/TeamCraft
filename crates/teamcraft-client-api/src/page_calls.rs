@@ -47,6 +47,9 @@ pub const EXPORT_WATCH_VIDEO: &str = "watch_video";
 pub const EXPORT_UNWATCH_VIDEO: &str = "unwatch_video";
 /// `camera_view() -> video | undefined`: a new `<video>` playing the camera this device sends.
 pub const EXPORT_CAMERA_VIEW: &str = "camera_view";
+/// `network_changed()`: the page's core saw the network come back or change, or the page woke up
+/// (`online`, `visibilitychange`, `pageshow`, `resume`); a running call checks its session.
+pub const EXPORT_NETWORK_CHANGED: &str = "network_changed";
 /// `stop() -> Promise`: leaves a running call; the page is signing out.
 pub const EXPORT_STOP: &str = "stop";
 

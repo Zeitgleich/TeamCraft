@@ -16,22 +16,35 @@
 //!
 //! Browsers can't migrate a WebTransport session to another network. When the session closes
 //! without the call being over, the driver opens a new one with a fresh join ticket and the engine
-//! rejoins within the SFU's grace period (ARCHITECTURE.md §6.5); audio and video carry over.
+//! rejoins within the SFU's grace period (ARCHITECTURE.md §6.5); audio and video carry over. A
+//! session the SFU closed because it is going away (a restart, a deploy) is rejoined after a random
+//! part of a short spread, like on native clients.
+//!
+//! A dead session doesn't have to wait for QUIC's idle timeout: where the browser reports the
+//! session's received packets (`getStats()`), the SFU's keep-alives prove the path alive, and
+//! silence beyond the stall timeout, or no packet soon after the page reported a network change
+//! ([`WebCall::network_changed`]), counts as lost. A network change while rejoining makes the
+//! next attempt due at once. When the page goes away (closed, reloaded), the driver closes its
+//! sessions in the `pagehide` handler itself: the SFU frees the slot at once instead of the others
+//! seeing "reconnecting" until the grace period ends.
 
 mod video;
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
-use std::pin::Pin;
+use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
 use futures::channel::{mpsc, oneshot};
-use js_sys::{Array, Float32Array, Function, Object, Reflect, Uint8Array};
+use futures::future::{Either, select};
+use js_sys::{Array, Float32Array, Function, Object, Promise, Reflect, Uint8Array};
 use teamcraft_proto::{
-  CallClientMessage, CallServerMessage, DeviceId, MediaStreamId, VideoCodec, VideoTrackKind,
+  CallClientMessage, CallServerMessage, DeviceId, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, VideoCodec,
+  VideoTrackKind,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -58,7 +71,10 @@ use crate::call_cues::{CallCue, CuePlayer, StatusCues};
 use crate::call_engine::{
   AudioOrigin, CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats, EngineOutput,
 };
-use crate::call_resilience::{JoinTicket, JoinTicketError, ReconnectSchedule, ResilienceConfig};
+use crate::call_resilience::{
+  Jitter, JoinTicket, JoinTicketError, PathMonitor, PathState, ReconnectSchedule, ResilienceConfig,
+  rejoin_attempt,
+};
 use crate::datagram::SimulcastLayer;
 use crate::jitter::{JitterBuffer, JitterBufferConfig, Playout};
 use crate::rtp::AudioLevel;
@@ -88,6 +104,12 @@ const OPUS_LOSS_STEP_PERCENT: u8 = 5;
 const SECURE_CONTEXT: &str = "camera and microphone access (the page needs HTTPS)";
 /// Mixed frames above this amplitude count as audible in [`CallStats`].
 const AUDIBLE_AMPLITUDE: f32 = 0.01;
+/// The session's packet count is read every this many timer ticks (500 ms).
+const STATS_EVERY_TICKS: u32 = 5;
+/// How long a session whose signaling stream ended waits for its close reason.
+const CLOSE_INFO_WAIT: Duration = Duration::from_millis(200);
+/// WebTransport close code of a deliberate leave (as on native clients).
+const LEAVE_CLOSE_CODE: u32 = 0;
 
 /// A running call in the browser.
 pub struct WebCall {
@@ -102,7 +124,8 @@ pub struct WebCallConfig {
   /// WebTransport URL from the join token response, e.g. `https://sfu.example.com:4433/call`.
   pub sfu_url: String,
   /// Accept self-signed SFU certificates by their SHA-256 hashes (`serverCertificateHashes`,
-  /// development and tests); empty uses the browser's trusted roots.
+  /// development and tests); empty uses the browser's trusted roots. For the first session: every
+  /// rejoin uses its fresh ticket's ([`JoinTicket::certificate_hashes`]).
   pub certificate_hashes: Vec<[u8; 32]>,
   pub token: String,
   pub engine: CallEngineConfig,
@@ -112,7 +135,7 @@ pub struct WebCallConfig {
   /// Binds DAVE keys to device identities (e2ee.md §8); `None` only for development pages.
   pub maybe_authenticator: Option<Arc<dyn CallKeyAuthenticator>>,
   pub jitter: JitterBufferConfig,
-  /// Rejoin timing after a lost session.
+  /// Loss detection and rejoin timing ([`ResilienceConfig::browser`]).
   pub resilience: ResilienceConfig,
   /// Fresh join tickets for rejoining; without one the first ticket is used again, which works
   /// only while it is valid (development pages).
@@ -204,10 +227,18 @@ pub enum WebCallError {
 /// Everything the call task reacts to.
 enum Input {
   Signal(CallServerMessage),
-  /// The signaling stream of the session with this generation ended.
-  SignalingClosed {
+  /// The session with this generation ended (its signaling stream did).
+  SessionEnded {
     generation: u64,
+    end: SessionEnd,
   },
+  /// What the browser reported about the packets the session with this generation received.
+  PathPackets {
+    generation: u64,
+    count: PacketCount,
+  },
+  /// The page saw the network come back or change, or woke up.
+  NetworkChanged,
   /// A rejoin attempt opened a new session.
   Relinked {
     transport: Transport,
@@ -262,6 +293,46 @@ enum Command {
   UnwatchVideo(MediaStreamId),
   SetStatusCues(StatusCues),
   Leave,
+}
+
+/// How a session ended, as far as rejoining cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionEnd {
+  /// It broke, the SFU closed it for another reason, or the path went silent: rejoin at once.
+  Lost,
+  /// The SFU is shutting down (a restart, a deploy): rejoin after a random part of a short spread,
+  /// so the restarted SFU doesn't get every client at once.
+  GoingAway,
+}
+
+/// A session's received packets, from `getStats()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PacketCount {
+  Received(u64),
+  /// The browser reports no packet counts: lost sessions show only when they close.
+  Unsupported,
+  /// No reading this time (the session is closing).
+  Unknown,
+}
+
+/// Whether the browser reports packet counts, which prove the session's path alive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathWatch {
+  Untested,
+  Watching,
+  Unavailable,
+}
+
+/// The sessions the call holds open: the current one, and lost ones until the call is back (closing
+/// one tells the SFU this device left; it keeps the slot only for lost connections). Shared with
+/// [`PageExit`], which closes them all when the page goes away.
+#[derive(Clone, Default)]
+struct OpenSessions(Rc<RefCell<Vec<WebTransport>>>);
+
+/// Leaves the call from the page's `pagehide` handler, while the page can still send.
+struct PageExit {
+  window: web_sys::Window,
+  listener: Closure<dyn FnMut()>,
 }
 
 /// The connection to the SFU.
@@ -470,6 +541,14 @@ impl WebCall {
       .map_err(|_| WebCallError::Ended)
   }
 
+  /// The page saw the network come back or change, became visible again or resumed (the core's
+  /// network-change signal): the session must prove it is still alive, a rejoin under way tries
+  /// again at once.
+  pub fn network_changed(&self) {
+    // The call already ended if this fails.
+    let _ = self.inputs.unbounded_send(Input::NetworkChanged);
+  }
+
   /// The next event, or `None` once the call ended.
   pub async fn next_event(&mut self) -> Option<CallEngineEvent> {
     self.events.next().await
@@ -562,15 +641,25 @@ async fn run_call(
   if let Some(authenticator) = &config.maybe_authenticator {
     engine.set_authenticator(Arc::clone(authenticator));
   }
+  let sessions = OpenSessions::default();
+  sessions.track(&transport.transport);
+  let _page_exit = PageExit::watch(&sessions, &inputs);
   let mut state = CallState {
     maybe_transport: Some(transport),
+    lost_transports: Vec::new(),
+    sessions,
     generation: 0,
     maybe_lost_at: None,
+    maybe_hurry: None,
+    monitor: PathMonitor::new(Instant::now()),
+    path_watch: PathWatch::Untested,
+    is_stats_pending: false,
+    timer_ticks: 0,
     ticket: JoinTicket {
       sfu_url: config.sfu_url.clone(),
       token: config.token.clone(),
+      certificate_hashes: config.certificate_hashes.clone(),
     },
-    certificate_hashes: config.certificate_hashes.clone(),
     resilience: config.resilience,
     maybe_ticket_source: config.maybe_ticket_source.clone(),
     cues: CuePlayer::new(config.status_cues),
@@ -612,6 +701,7 @@ async fn run_call(
     }
     if engine.is_in_call() {
       state.maybe_lost_at = None;
+      state.close_lost_sessions();
     }
   };
 
@@ -620,9 +710,8 @@ async fn run_call(
   for sender in std::mem::take(&mut state.senders) {
     sender.stop();
   }
-  if let Some(transport) = &state.maybe_transport {
-    transport.close();
-  }
+  // Leaves: the SFU frees the slot at once.
+  state.sessions.close_all();
   let mut stats = state.stats;
   stats.maybe_privacy_code = engine.privacy_code();
   info!(?stats, "call ended");
@@ -638,12 +727,23 @@ enum Flow {
 struct CallState<'a> {
   /// The current session; `None` while rejoining.
   maybe_transport: Option<Transport>,
-  /// Counts sessions, so a late end of an old one is not taken for the current one.
+  /// Lost sessions, kept open until the call is back on a new one (see [`OpenSessions`]).
+  lost_transports: Vec<Transport>,
+  sessions: OpenSessions,
+  /// Counts sessions, so late news of an old one is not taken for the current one.
   generation: u64,
   /// When the connection was lost, while rejoining.
   maybe_lost_at: Option<Instant>,
+  /// Makes the rejoin task's next attempt due at once, while rejoining.
+  maybe_hurry: Option<mpsc::UnboundedSender<()>>,
+  /// Whether the current session's path is alive, from its packet count.
+  monitor: PathMonitor,
+  path_watch: PathWatch,
+  /// A `getStats()` reading is on its way.
+  is_stats_pending: bool,
+  timer_ticks: u32,
+  /// The ticket of the current (or last) session.
   ticket: JoinTicket,
-  certificate_hashes: Vec<[u8; 32]>,
   resilience: ResilienceConfig,
   maybe_ticket_source: Option<Rc<dyn WebJoinTicketSource>>,
   /// Status sounds, mixed into the playback (never sent).
@@ -674,20 +774,31 @@ impl CallState<'_> {
   ) -> Result<Flow, WebCallError> {
     match input {
       Input::Signal(message) => engine.handle_signal(message, Instant::now())?,
-      Input::SignalingClosed { generation } => {
-        if generation == self.generation {
-          return Ok(self.on_session_lost(engine));
+      Input::SessionEnded { generation, end } => {
+        if generation == self.generation && self.maybe_transport.is_some() {
+          return Ok(self.on_session_lost(engine, end));
         }
       },
+      Input::PathPackets { generation, count } => {
+        self.is_stats_pending = false;
+        if generation == self.generation && self.maybe_transport.is_some() {
+          return Ok(self.on_path_packets(engine, count));
+        }
+      },
+      Input::NetworkChanged => self.on_network_changed(),
       Input::Relinked {
         transport,
         ticket,
         generation,
       } => {
         info!("connected again, rejoining the call");
+        let now = Instant::now();
+        self.sessions.track(&transport.transport);
         self.maybe_transport = Some(transport);
         self.generation = generation;
-        engine.rejoin(ticket.token.clone(), Instant::now());
+        self.maybe_hurry = None;
+        self.monitor = PathMonitor::new(now);
+        engine.rejoin(ticket.token.clone(), now);
         self.ticket = ticket;
       },
       Input::ReconnectExpired => {
@@ -720,7 +831,13 @@ impl CallState<'_> {
           return Err(WebCallError::ConnectionLost);
         }
       },
-      Input::TimerTick => engine.on_timer(Instant::now()),
+      Input::TimerTick => {
+        engine.on_timer(Instant::now());
+        self.timer_ticks = self.timer_ticks.wrapping_add(1);
+        if self.timer_ticks.is_multiple_of(STATS_EVERY_TICKS) {
+          self.request_path_stats();
+        }
+      },
       Input::VideoTick(kind) => {
         if let Some(sender) = self.senders.iter_mut().find(|sender| sender.kind == kind) {
           sender.capture().await?;
@@ -820,33 +937,112 @@ impl CallState<'_> {
     Ok(())
   }
 
-  /// The session ended. Unless the call is over, the device rejoins on a new session.
-  fn on_session_lost(&mut self, engine: &mut CallEngine) -> Flow {
+  /// The session ended or went silent. Unless the call is over, the device rejoins on a new
+  /// session; the old one stays open until then.
+  fn on_session_lost(&mut self, engine: &mut CallEngine, end: SessionEnd) -> Flow {
     if engine.is_over() {
       return Flow::Leave;
     }
-    warn!("lost the connection to the call, rejoining");
-    // The session is gone already; nothing to close.
-    self.maybe_transport = None;
+    match end {
+      SessionEnd::Lost => warn!("lost the connection to the call, rejoining"),
+      SessionEnd::GoingAway => info!("the SFU is going away, rejoining"),
+    }
+    if let Some(transport) = self.maybe_transport.take() {
+      self.lost_transports.push(transport);
+    }
     engine.connection_lost();
     let now = Instant::now();
     let lost_at = *self.maybe_lost_at.get_or_insert(now);
     let grace = engine
       .maybe_reconnect_grace()
       .unwrap_or(self.resilience.default_reconnect_grace);
-    self.spawn_reconnect(lost_at, grace, self.generation + 1);
+    // From here on, news of the lost session is old.
+    self.generation += 1;
+    let schedule = reconnect_schedule(lost_at, grace, end, now, &self.resilience, Jitter::random());
+    let (hurry, hurry_rx) = mpsc::unbounded();
+    self.maybe_hurry = Some(hurry);
+    self.spawn_reconnect(schedule, hurry_rx, self.generation);
     Flow::Continue
   }
 
+  /// A packet count of the current session arrived: a path silent for too long, or after a
+  /// network change, is lost.
+  fn on_path_packets(&mut self, engine: &mut CallEngine, count: PacketCount) -> Flow {
+    let now = Instant::now();
+    match count {
+      PacketCount::Received(count) => {
+        self.path_watch = PathWatch::Watching;
+        self.monitor.on_received_packets(count, now);
+      },
+      PacketCount::Unsupported => {
+        if self.path_watch == PathWatch::Untested {
+          debug!("the browser reports no packet counts: a lost session shows when it closes");
+        }
+        self.path_watch = PathWatch::Unavailable;
+        return Flow::Continue;
+      },
+      PacketCount::Unknown => return Flow::Continue,
+    }
+    if self.monitor.check(now, &self.resilience) == PathState::Dead {
+      return self.on_session_lost(engine, SessionEnd::Lost);
+    }
+    Flow::Continue
+  }
+
+  /// The page reported a network change: the session has to show it still works, a rejoin under
+  /// way tries again at once.
+  fn on_network_changed(&mut self) {
+    if self.maybe_transport.is_some() {
+      if self.path_watch != PathWatch::Unavailable {
+        debug!("network changed, checking the call's session");
+        self.monitor.on_network_changed(Instant::now(), &self.resilience);
+        self.request_path_stats();
+      }
+    } else if let Some(hurry) = &self.maybe_hurry {
+      // The rejoin task is gone once it gave up; nothing to hurry then.
+      let _ = hurry.unbounded_send(());
+    }
+  }
+
+  /// Asks the browser for the current session's packet count; the answer arrives as
+  /// [`Input::PathPackets`].
+  fn request_path_stats(&mut self) {
+    if self.path_watch == PathWatch::Unavailable || self.is_stats_pending {
+      return;
+    }
+    let Some(transport) = &self.maybe_transport else {
+      return;
+    };
+    self.is_stats_pending = true;
+    let session = transport.transport.clone();
+    let inputs = self.inputs.clone();
+    let generation = self.generation;
+    spawn_local(async move {
+      let count = received_packets(&session).await;
+      // The call ended meanwhile if nobody reads the inputs.
+      let _ = inputs.unbounded_send(Input::PathPackets { generation, count });
+    });
+  }
+
+  /// Back in the call on a new session: the lost ones can go.
+  fn close_lost_sessions(&mut self) {
+    for transport in self.lost_transports.drain(..) {
+      self.sessions.close(&transport.transport);
+    }
+  }
+
   /// Tries to open a new session until one is up or the grace period is over.
-  fn spawn_reconnect(&self, lost_at: Instant, grace: Duration, generation: u64) {
+  fn spawn_reconnect(
+    &self,
+    mut schedule: ReconnectSchedule,
+    mut hurry: mpsc::UnboundedReceiver<()>,
+    generation: u64,
+  ) {
     let inputs = self.inputs.clone();
     let maybe_source = self.maybe_ticket_source.clone();
     let fallback = self.ticket.clone();
-    let hashes = self.certificate_hashes.clone();
     let resilience = self.resilience;
     spawn_local(async move {
-      let mut schedule = ReconnectSchedule::new(lost_at, grace);
       // The call ended meanwhile when nobody reads the inputs any more.
       while !inputs.is_closed() {
         let now = Instant::now();
@@ -854,15 +1050,25 @@ impl CallState<'_> {
           let _ = inputs.unbounded_send(Input::ReconnectExpired);
           return;
         }
-        sleep(schedule.next_attempt_at().saturating_duration_since(now)).await;
-        let attempt = async {
-          let ticket = match &maybe_source {
-            Some(source) => source.fetch().await?,
-            None => fallback.clone(),
-          };
-          let transport = Transport::connect(&ticket.sfu_url, &hashes, &inputs, generation).await?;
-          Ok::<_, WebCallError>((transport, ticket))
-        };
+        let wait = schedule.next_attempt_at().saturating_duration_since(now);
+        match select(pin!(sleep(wait)), hurry.next()).await {
+          Either::Left(_) => {},
+          // The network came back: no need to wait out the back-off.
+          Either::Right((Some(()), _)) => {
+            schedule.hurry(Instant::now());
+            continue;
+          },
+          // The call task is gone.
+          Either::Right((None, _)) => return,
+        }
+        let maybe_fetch = maybe_source.as_ref().map(|source| source.fetch());
+        let attempt = rejoin_attempt(maybe_fetch, fallback.clone(), |ticket: JoinTicket| {
+          let inputs = inputs.clone();
+          async move {
+            let hashes = &ticket.certificate_hashes;
+            Transport::connect(&ticket.sfu_url, hashes, &inputs, generation).await
+          }
+        });
         match attempt.await {
           Ok((transport, ticket)) => {
             let _ = inputs.unbounded_send(Input::Relinked {
@@ -1084,7 +1290,12 @@ impl Transport {
       .writable()
       .get_writer()
       .map_err(browser("datagram stream"))?;
-    spawn_local(read_signaling(stream.readable(), inputs.clone(), generation));
+    spawn_local(read_signaling(
+      stream.readable(),
+      transport.closed(),
+      inputs.clone(),
+      generation,
+    ));
     spawn_local(read_datagrams(datagram_stream.readable(), inputs.clone()));
     Ok(Self {
       transport,
@@ -1115,10 +1326,128 @@ impl Transport {
     // Unreliable by design: the browser drops datagrams when its queue is full.
     let _ = self.datagrams.write_with_chunk(&Uint8Array::from(bytes));
   }
+}
 
-  fn close(&self) {
-    self.transport.close();
+impl OpenSessions {
+  fn track(&self, session: &WebTransport) {
+    self.0.borrow_mut().push(session.clone());
   }
+
+  /// Closes one session as a leave.
+  fn close(&self, session: &WebTransport) {
+    self.0.borrow_mut().retain(|open| open != session);
+    close_session(session);
+  }
+
+  fn close_all(&self) {
+    for session in self.0.borrow_mut().drain(..) {
+      close_session(&session);
+    }
+  }
+}
+
+impl PageExit {
+  /// `None` without a window to listen on: the session then ends without a leave on page close.
+  fn watch(sessions: &OpenSessions, inputs: &mpsc::UnboundedSender<Input>) -> Option<Self> {
+    let window = web_sys::window()?;
+    let sessions = sessions.clone();
+    let inputs = inputs.clone();
+    let listener = Closure::<dyn FnMut()>::new(move || {
+      info!("the page is going away, leaving the call");
+      // Closed here: the page may get no other chance to run.
+      sessions.close_all();
+      // The call already ended if nobody reads the inputs.
+      let _ = inputs.unbounded_send(Input::Command(Command::Leave));
+    });
+    window
+      .add_event_listener_with_callback("pagehide", listener.as_ref().unchecked_ref())
+      .inspect_err(|error| debug!(error = %js_message(error), "cannot watch the page closing"))
+      .ok()?;
+    Some(Self { window, listener })
+  }
+}
+
+impl Drop for PageExit {
+  fn drop(&mut self) {
+    // A listener that was never added or is gone already: nothing to remove.
+    let _ = self
+      .window
+      .remove_event_listener_with_callback("pagehide", self.listener.as_ref().unchecked_ref());
+  }
+}
+
+/// Closes a session as a leave; a closed one stays closed.
+fn close_session(session: &WebTransport) {
+  let info = dictionary(&[
+    ("closeCode", JsValue::from(LEAVE_CLOSE_CODE)),
+    ("reason", JsValue::from_str("leave")),
+  ]);
+  let result = info.and_then(|info| session.close(&info));
+  if let Err(error) = result {
+    debug!(error = %js_message(&error), "closing a call session failed");
+  }
+}
+
+/// The packets the session received so far (`getStats().packetsReceived`).
+async fn received_packets(session: &WebTransport) -> PacketCount {
+  let Ok(promise) = session.get_stats() else {
+    return PacketCount::Unsupported;
+  };
+  let Ok(stats) = JsFuture::from(promise).await else {
+    return PacketCount::Unknown;
+  };
+  match Reflect::get(&stats, &JsValue::from_str("packetsReceived"))
+    .ok()
+    .and_then(|count| count.as_f64())
+  {
+    // Counts are whole numbers far below 2^53.
+    Some(count) if count >= 0.0 => PacketCount::Received(count as u64),
+    _ => PacketCount::Unsupported,
+  }
+}
+
+/// How a session whose signaling stream ended was closed: `closed` resolves with the SFU's close
+/// code when the SFU closed it, and rejects when it broke.
+async fn session_end_of(closed: Promise) -> SessionEnd {
+  let closed = JsFuture::from(closed);
+  match select(pin!(closed), pin!(sleep(CLOSE_INFO_WAIT))).await {
+    Either::Left((Ok(info), _)) => {
+      let maybe_code = Reflect::get(&info, &JsValue::from_str("closeCode"))
+        .ok()
+        .and_then(|code| code.as_f64())
+        // Close codes are 32-bit.
+        .map(|code| code as u32);
+      session_end(maybe_code)
+    },
+    // Broke, or still open with its signaling stream gone: either way the session is lost.
+    Either::Left((Err(_), _)) | Either::Right(_) => SessionEnd::Lost,
+  }
+}
+
+/// What a session closed with this code (none: it broke) means for rejoining.
+fn session_end(maybe_close_code: Option<u32>) -> SessionEnd {
+  if maybe_close_code == Some(SFU_GOING_AWAY_CLOSE_CODE) {
+    SessionEnd::GoingAway
+  } else {
+    SessionEnd::Lost
+  }
+}
+
+/// The rejoin attempts after a session ended at `now`: the first at once, or a little later when the
+/// SFU is going away.
+fn reconnect_schedule(
+  lost_at: Instant,
+  grace: Duration,
+  end: SessionEnd,
+  now: Instant,
+  config: &ResilienceConfig,
+  jitter: Jitter,
+) -> ReconnectSchedule {
+  let mut schedule = ReconnectSchedule::with_jitter(lost_at, grace, jitter);
+  if end == SessionEnd::GoingAway {
+    schedule.spread_first_attempt(now, config);
+  }
+  schedule
 }
 
 impl WebAudio {
@@ -1501,7 +1830,12 @@ impl SignalingDecoder {
   }
 }
 
-async fn read_signaling(stream: ReadableStream, inputs: mpsc::UnboundedSender<Input>, generation: u64) {
+async fn read_signaling(
+  stream: ReadableStream,
+  closed: Promise,
+  inputs: mpsc::UnboundedSender<Input>,
+  generation: u64,
+) {
   let mut decoder = SignalingDecoder::default();
   let result = read_chunks(stream, |chunk| {
     let bodies = match decoder.push(&chunk) {
@@ -1527,7 +1861,8 @@ async fn read_signaling(stream: ReadableStream, inputs: mpsc::UnboundedSender<In
   if let Err(error) = result {
     debug!(error = %js_message(&error), "signaling stream ended");
   }
-  let _ = inputs.unbounded_send(Input::SignalingClosed { generation });
+  let end = session_end_of(closed).await;
+  let _ = inputs.unbounded_send(Input::SessionEnded { generation, end });
 }
 
 async fn read_datagrams(stream: ReadableStream, inputs: mpsc::UnboundedSender<Input>) {
@@ -1699,6 +2034,8 @@ fn to_i16(sample: f32) -> i16 {
 mod tests {
   use super::*;
 
+  const GRACE: Duration = Duration::from_secs(30);
+
   #[test]
   fn refused_media_is_classified_by_the_exception_name() {
     for (name, reason) in [
@@ -1713,6 +2050,64 @@ mod tests {
       ("SomeFutureError", MediaAccessReason::Other),
     ] {
       assert_eq!(media_access_reason(name), reason, "{name}");
+    }
+  }
+
+  mod session_end {
+    use super::*;
+
+    #[test]
+    fn only_the_sfu_going_away_spreads_the_rejoin() {
+      assert_eq!(
+        session_end(Some(SFU_GOING_AWAY_CLOSE_CODE)),
+        SessionEnd::GoingAway
+      );
+      // Broken, or closed for another reason (the engine knows from signaling whether the call is
+      // over).
+      for maybe_code in [None, Some(0), Some(0x4801), Some(0x4804)] {
+        assert_eq!(session_end(maybe_code), SessionEnd::Lost, "{maybe_code:?}");
+      }
+    }
+
+    #[test]
+    fn a_lost_session_is_rejoined_at_once() {
+      let lost_at = Instant::now();
+      let now = lost_at + Duration::from_millis(50);
+      let schedule = reconnect_schedule(
+        lost_at,
+        GRACE,
+        SessionEnd::Lost,
+        now,
+        &ResilienceConfig::browser(),
+        Jitter::seeded(1),
+      );
+      assert!(schedule.next_attempt_at() <= now);
+    }
+
+    #[test]
+    fn going_away_spreads_the_first_rejoin_over_clients() {
+      let lost_at = Instant::now();
+      let config = ResilienceConfig::browser();
+      let firsts: Vec<Instant> = (0..8)
+        .map(|seed| {
+          reconnect_schedule(
+            lost_at,
+            GRACE,
+            SessionEnd::GoingAway,
+            lost_at,
+            &config,
+            Jitter::seeded(seed),
+          )
+          .next_attempt_at()
+        })
+        .collect();
+      for first in &firsts {
+        assert!(*first >= lost_at && *first < lost_at + config.going_away_spread);
+      }
+      let mut distinct = firsts.clone();
+      distinct.sort();
+      distinct.dedup();
+      assert!(distinct.len() >= 6, "{firsts:?}");
     }
   }
 

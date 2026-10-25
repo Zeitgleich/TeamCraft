@@ -233,6 +233,8 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
     "core_status" => to_value(ask(Request::Status).await?),
     "core_connection" => to_value(connection_state()?),
     "core_network_changed" => {
+      // Calls run in this tab too and hear the same signal (as on desktop).
+      crate::web_calls::network_changed();
       send(Request::NetworkChanged)?;
       Ok(Value::Null)
     },

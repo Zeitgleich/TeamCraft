@@ -889,12 +889,10 @@ fn native_config(preparation: CallPreparation) -> Result<NativeCallConfig, TeamC
   let authenticator =
     DeviceCallKeyAuthenticator::from_verified(Arc::new(CoreSigner(preparation.signer)), preparation.devices)
       .map_err(|error| TeamCraftError::Call(error.to_string()))?;
-  let mut config = NativeCallConfig::device_bound(
-    preparation.join.sfu_url,
-    preparation.join.token,
-    engine,
-    authenticator,
-  );
+  let ticket = JoinTicket::from(preparation.join);
+  let mut config = NativeCallConfig::device_bound(ticket.sfu_url, ticket.token, engine, authenticator);
+  // A development SFU's self-signed certificates; rejoins use their fresh token's.
+  config.certificate_hashes = ticket.certificate_hashes;
   config.source = AudioSource::Microphone(AudioDeviceChoice::Default);
   config.sink = AudioSink::Speakers(AudioDeviceChoice::Default);
   config.maybe_processing = Some(AudioProcessingConfig::default());
@@ -935,10 +933,8 @@ impl JoinTicketSource for EngineJoinTickets {
       let join = answered.map_err(|error| JoinTicketError {
         reason: error.to_string(),
       })?;
-      Ok(JoinTicket {
-        sfu_url: join.sfu_url,
-        token: join.token,
-      })
+      // With this token's certificate hashes: a restarted SFU may have a new self-signed one.
+      Ok(JoinTicket::from(join))
     })
   }
 }

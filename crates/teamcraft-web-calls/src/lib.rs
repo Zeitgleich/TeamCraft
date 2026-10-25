@@ -34,7 +34,7 @@ use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{CallKeyAuthenticator, CallKeyError};
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
 use teamcraft_media::call_resilience::{
-  JoinTicket, JoinTicketError, ResilienceConfig, certificate_hash_from_hex,
+  JoinTicket, JoinTicketError, ResilienceConfig, certificate_hashes_from_hex,
 };
 use teamcraft_media::call_view::{CallRoster, status_cues};
 use teamcraft_media::call_web::{
@@ -130,6 +130,7 @@ enum Control {
   },
   Unwatch(MediaStreamId),
   StatusSounds(CallStatusSounds),
+  NetworkChanged,
   Leave,
 }
 
@@ -253,6 +254,15 @@ pub fn camera_view() -> Option<HtmlVideoElement> {
   Some(video)
 }
 
+/// The page's core saw the network come back or change, or the page woke up: a running call checks
+/// its session, or retries a rejoin at once.
+#[wasm_bindgen]
+pub fn network_changed() {
+  if let Ok(host) = host() {
+    host.control(Control::NetworkChanged);
+  }
+}
+
 /// Leaves a running call and forgets the page's callbacks (the page signs out).
 #[wasm_bindgen]
 pub async fn stop() {
@@ -279,11 +289,7 @@ impl Host {
     let own_device = prepared.device_id;
     let config = WebCallConfig {
       sfu_url: prepared.sfu_url,
-      certificate_hashes: prepared
-        .certificate_sha256
-        .iter()
-        .filter_map(|hash| certificate_hash_from_hex(hash))
-        .collect(),
+      certificate_hashes: certificate_hashes_from_hex(&prepared.certificate_sha256),
       token: prepared.token,
       engine: CallEngineConfig {
         user_id: prepared.user_id,
@@ -301,7 +307,7 @@ impl Host {
       maybe_trusted_roster: Some(prepared.trusted_devices),
       maybe_authenticator: Some(Arc::new(PageAuthenticator)),
       jitter: JitterBufferConfig::default(),
-      resilience: ResilienceConfig::default(),
+      resilience: ResilienceConfig::browser(),
       maybe_ticket_source: Some(Rc::new(PageTickets)),
       status_cues: status_cues(sounds),
       maybe_worklet_url: Some(self.worklet_url.clone()),
@@ -673,6 +679,7 @@ async fn apply(call: &WebCall, control: Control) {
     Control::Watch { stream_id, canvas } => call.watch_video(stream_id, canvas),
     Control::Unwatch(stream_id) => call.unwatch_video(stream_id),
     Control::StatusSounds(sounds) => call.set_status_cues(status_cues(sounds)),
+    Control::NetworkChanged => call.network_changed(),
     Control::Leave => {},
   }
 }
@@ -725,7 +732,9 @@ impl WebJoinTicketSource for PageTickets {
         .prepare(conversation)
         .await
         .map_err(|failure| ticket_error(failure.to_wire()))?;
+      // The SFU may have come back with another certificate (a restart): this token's hashes.
       Ok(JoinTicket {
+        certificate_hashes: certificate_hashes_from_hex(&prepared.certificate_sha256),
         sfu_url: prepared.sfu_url,
         token: prepared.token,
       })

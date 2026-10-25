@@ -50,7 +50,7 @@ use crate::call_engine::{
   AudioOrigin, CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats, EngineOutput,
 };
 use crate::call_resilience::{
-  JoinTicket, JoinTicketError, PathMonitor, PathState, ReconnectSchedule, ResilienceConfig,
+  JoinTicket, JoinTicketError, PathMonitor, PathState, ReconnectSchedule, ResilienceConfig, rejoin_attempt,
 };
 use crate::jitter::JitterBufferConfig;
 use crate::sfu_address::{PinnedResolver, sfu_addresses};
@@ -86,8 +86,11 @@ pub struct NativeCall {
 pub struct NativeCallConfig {
   /// WebTransport URL from the join token response, e.g. `https://sfu.example.com:4433/call`.
   pub sfu_url: String,
-  /// Accept the SFU's self-signed certificate by its SHA-256 hash (development); `None` uses the
-  /// system's trusted roots.
+  /// SHA-256s of the SFU's self-signed certificates, from the join token response; every rejoin
+  /// uses its own fresh ticket's instead ([`JoinTicket::certificate_hashes`]).
+  pub certificate_hashes: Vec<[u8; 32]>,
+  /// A self-signed SFU certificate accepted on every connection besides the ticket's (development
+  /// tools, tests). With neither, the system's trusted roots apply.
   pub maybe_certificate_hash: Option<[u8; 32]>,
   pub token: String,
   pub engine: CallEngineConfig,
@@ -223,6 +226,7 @@ impl NativeCallConfig {
   pub fn new(sfu_url: String, token: String, engine: CallEngineConfig) -> Self {
     Self {
       sfu_url,
+      certificate_hashes: Vec::new(),
       maybe_certificate_hash: None,
       token,
       engine,
@@ -262,7 +266,8 @@ impl NativeCallConfig {
 impl NativeCall {
   /// Connects, joins and starts sending and playing in the background.
   pub async fn join(config: NativeCallConfig) -> Result<Self, NativeCallError> {
-    let link = Link::open(&config.sfu_url, config.maybe_certificate_hash, &config.resilience).await?;
+    let hashes = accepted_hashes(config.maybe_certificate_hash, &config.certificate_hashes);
+    let link = Link::open(&config.sfu_url, &hashes, &config.resilience).await?;
     let (commands, command_rx) = mpsc::unbounded_channel();
     let (event_tx, events) = mpsc::unbounded_channel();
     let task = tokio::spawn(run_call(config, link, command_rx, event_tx));
@@ -622,8 +627,10 @@ struct CallConnection {
   route: RouteWatch,
   maybe_schedule: Option<ReconnectSchedule>,
   maybe_attempt: Option<JoinHandle<Result<(Link, JoinTicket), NativeCallError>>>,
+  /// The ticket of the current (or last) connection.
   ticket: JoinTicket,
-  maybe_certificate_hash: Option<[u8; 32]>,
+  /// Accepted on every connection besides the ticket's certificates.
+  maybe_pinned_hash: Option<[u8; 32]>,
   resilience: ResilienceConfig,
   maybe_ticket_source: Option<Arc<dyn JoinTicketSource>>,
 }
@@ -686,8 +693,9 @@ impl CallConnection {
       ticket: JoinTicket {
         sfu_url: config.sfu_url.clone(),
         token: config.token.clone(),
+        certificate_hashes: config.certificate_hashes.clone(),
       },
-      maybe_certificate_hash: config.maybe_certificate_hash,
+      maybe_pinned_hash: config.maybe_certificate_hash,
       resilience: config.resilience,
       maybe_ticket_source: config.maybe_ticket_source.clone(),
     }
@@ -792,18 +800,18 @@ impl CallConnection {
   }
 
   fn start_attempt(&mut self) {
-    let maybe_source = self.maybe_ticket_source.clone();
+    let maybe_fetch = self.maybe_ticket_source.as_ref().map(|source| source.fetch());
     let fallback = self.ticket.clone();
-    let maybe_hash = self.maybe_certificate_hash;
+    let maybe_pinned_hash = self.maybe_pinned_hash;
     let resilience = self.resilience;
-    self.maybe_attempt = Some(tokio::spawn(async move {
-      let ticket = match maybe_source {
-        Some(source) => source.fetch().await?,
-        None => fallback,
-      };
-      let link = Link::open(&ticket.sfu_url, maybe_hash, &resilience).await?;
-      Ok((link, ticket))
-    }));
+    self.maybe_attempt = Some(tokio::spawn(rejoin_attempt(
+      maybe_fetch,
+      fallback,
+      move |ticket: JoinTicket| async move {
+        let hashes = accepted_hashes(maybe_pinned_hash, &ticket.certificate_hashes);
+        Link::open(&ticket.sfu_url, &hashes, &resilience).await
+      },
+    )));
   }
 
   /// A new connection is up: rejoin on it.
@@ -903,10 +911,10 @@ impl Link {
   /// Connects to the SFU and opens the signaling stream.
   async fn open(
     sfu_url: &str,
-    maybe_certificate_hash: Option<[u8; 32]>,
+    certificate_hashes: &[[u8; 32]],
     resilience: &ResilienceConfig,
   ) -> Result<Self, NativeCallError> {
-    let (endpoint, connection) = connect(sfu_url, maybe_certificate_hash, resilience).await?;
+    let (endpoint, connection) = connect(sfu_url, certificate_hashes, resilience).await?;
     let (send, recv) = connection
       .open_bi()
       .await
@@ -950,14 +958,14 @@ impl Link {
 /// route costs one attempt delay before IPv4 is tried.
 async fn connect(
   sfu_url: &str,
-  maybe_certificate_hash: Option<[u8; 32]>,
+  certificate_hashes: &[[u8; 32]],
   resilience: &ResilienceConfig,
 ) -> Result<(Endpoint<Client>, Connection), NativeCallError> {
   let addresses = sfu_addresses(sfu_url)
     .await
     .map_err(|error| NativeCallError::Connect(error.to_string()))?;
   race(interleave(addresses), ATTEMPT_DELAY, |address| {
-    connect_to(sfu_url, address, maybe_certificate_hash, resilience)
+    connect_to(sfu_url, address, certificate_hashes, resilience)
   })
   .await
   .map_err(|error| match error {
@@ -967,17 +975,19 @@ async fn connect(
 }
 
 /// One attempt at `address`. A socket bound to the wildcard address (it follows route changes,
-/// which lets QUIC migrate), with keep-alives for carrier NATs.
+/// which lets QUIC migrate), with keep-alives for carrier NATs. Self-signed certificates are
+/// accepted by their hashes; without any, the trusted roots decide.
 async fn connect_to(
   sfu_url: &str,
   address: SocketAddr,
-  maybe_certificate_hash: Option<[u8; 32]>,
+  certificate_hashes: &[[u8; 32]],
   resilience: &ResilienceConfig,
 ) -> Result<(Endpoint<Client>, Connection), NativeCallError> {
   let builder = ClientConfig::builder().with_bind_default();
-  let builder = match maybe_certificate_hash {
-    Some(hash) => builder.with_server_certificate_hashes([Sha256Digest::new(hash)]),
-    None => with_trusted_roots(builder),
+  let builder = if certificate_hashes.is_empty() {
+    with_trusted_roots(builder)
+  } else {
+    builder.with_server_certificate_hashes(certificate_hashes.iter().copied().map(Sha256Digest::new))
   };
   let client_config = builder
     .dns_resolver(PinnedResolver(address))
@@ -992,6 +1002,18 @@ async fn connect_to(
     .await
     .map_err(|error| NativeCallError::Connect(error.to_string()))?;
   Ok((endpoint, connection))
+}
+
+/// The certificates a connection accepts: the pinned one (development tools) and the ticket's,
+/// each once.
+fn accepted_hashes(maybe_pinned: Option<[u8; 32]>, ticket_hashes: &[[u8; 32]]) -> Vec<[u8; 32]> {
+  let mut hashes: Vec<[u8; 32]> = maybe_pinned.into_iter().collect();
+  for hash in ticket_hashes {
+    if !hashes.contains(hash) {
+      hashes.push(*hash);
+    }
+  }
+  hashes
 }
 
 /// An unspecified-address UDP socket on a free port, like wtransport's default client binding:
@@ -1480,9 +1502,10 @@ mod tests {
     let v4 = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let url = format!("https://localhost:{port}/call");
     let resilience = ResilienceConfig::default();
+    let hashes = [hash];
     let started = Instant::now();
     let racing = race(vec![silent_v6, v4], ATTEMPT_DELAY, |address| {
-      connect_to(&url, address, Some(hash), &resilience)
+      connect_to(&url, address, &hashes, &resilience)
     });
     let (_endpoint, connection) = tokio::time::timeout(Duration::from_secs(5), racing)
       .await
@@ -1522,6 +1545,16 @@ mod tests {
     for code in [0, 0x4801, 0x4802, 0x4804] {
       assert_eq!(application_close_end(code), LinkEnd::Closed, "{code:#x}");
     }
+  }
+
+  #[test]
+  fn a_connection_accepts_the_pinned_and_the_tickets_certificates() {
+    assert!(accepted_hashes(None, &[]).is_empty(), "trusted roots");
+    assert_eq!(accepted_hashes(None, &[[1; 32], [2; 32]]), vec![[1; 32], [2; 32]]);
+    assert_eq!(
+      accepted_hashes(Some([1; 32]), &[[1; 32], [3; 32]]),
+      vec![[1; 32], [3; 32]]
+    );
   }
 
   #[test]
