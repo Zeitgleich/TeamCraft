@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use futures_util::future::{join, join3, join5};
+use futures_util::stream::{self, StreamExt};
 use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
 use teamcraft_proto::{
@@ -23,13 +25,13 @@ use teamcraft_proto::{
   RetentionSetting, RetentionStatusResponse, Role, RuntimeSettingsKey, RuntimeSettingsResponse,
   RuntimeSettingsSection, SchemeChange, SendTestMailRequest, SetAnnouncementRequest,
   SetChannelModerationRequest, SetRetentionRequest, SettingsTestResponse, SpaceId, UpdateBrandRequest,
-  UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, UpdatePermissionSchemeRequest, UserKind,
-  WorkspacePolicy, WorkspacePolicyResponse,
+  UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, UpdatePermissionSchemeRequest,
+  UpdateSpaceRequest, UserKind, WorkspacePolicy, WorkspacePolicyResponse,
 };
 
 use crate::admin::{
-  AdminChannel, AdminSpace, AdminUser, AuditAction, AuditEntry, AuditFilter, DeviceInfo, Retention,
-  SettingsTestKind,
+  AdminChannel, AdminLoad, AdminSpace, AdminSpaceChanges, AdminUser, AuditAction, AuditEntry, AuditFilter,
+  DeviceInfo, Retention, SettingsTestKind,
 };
 use crate::auth::{ApiMethod, Authenticator, BinaryBody};
 use crate::model::{
@@ -41,6 +43,8 @@ const REFRESH_DELAY: Duration = Duration::from_millis(500);
 const LIST_LIMIT: u32 = 200;
 /// Channels beyond this many get no per-channel details (owner, retention) until the list shrinks.
 const DETAIL_LIMIT: usize = 100;
+/// Requests in flight at once when the details of many channels or users are read.
+const DETAIL_CONCURRENCY: usize = 8;
 /// Signing and publishing happens in the core; the server shows the result after this long.
 const PUBLISH_SETTLE: Duration = Duration::from_millis(1500);
 
@@ -52,12 +56,15 @@ pub struct AdminLive {
   data: Rc<RefCell<AdminData>>,
   notify: Rc<RefCell<Option<ChangeNotifier>>>,
   refresh_queued: Rc<Cell<bool>>,
+  /// A refresh is running; another request meanwhile makes it run once more, never in parallel.
+  is_refreshing: Rc<Cell<bool>>,
+  is_refresh_wanted_again: Rc<Cell<bool>>,
 }
 
 /// What the last refresh returned.
 #[derive(Default)]
 pub struct AdminData {
-  is_loaded: bool,
+  load: AdminLoad,
   channels: Vec<AdminChannel>,
   users: Vec<AdminUser>,
   audit: Vec<AuditEntry>,
@@ -90,6 +97,8 @@ impl AdminLive {
       data: Rc::new(RefCell::new(AdminData::default())),
       notify: Rc::new(RefCell::new(None)),
       refresh_queued: Rc::new(Cell::new(false)),
+      is_refreshing: Rc::new(Cell::new(false)),
+      is_refresh_wanted_again: Rc::new(Cell::new(false)),
     }
   }
 
@@ -119,6 +128,24 @@ impl AdminLive {
 
   pub fn spaces(&self) -> Vec<AdminSpace> {
     self.data.borrow().spaces.clone()
+  }
+
+  pub fn list_load(&self) -> AdminLoad {
+    self.data.borrow().load.clone()
+  }
+
+  /// Renames, archives or restores a space, or changes its join policy. The server checks that
+  /// the caller may; the answer shows up with the refresh.
+  pub fn change_space(&self, space: SpaceId, changes: AdminSpaceChanges) {
+    let request = UpdateSpaceRequest {
+      maybe_name: changes.maybe_name,
+      maybe_join_policy: changes.maybe_join_policy,
+      maybe_is_archived: changes.maybe_is_archived,
+      ..UpdateSpaceRequest::default()
+    };
+    if let Ok(body) = serde_json::to_string(&request) {
+      self.send(ApiMethod::Patch, format!("/api/v1/spaces/{space}"), Some(body));
+    }
   }
 
   pub fn announcement(&self) -> Option<AnnouncementResponse> {
@@ -462,49 +489,62 @@ impl AdminLive {
     (by_role(Role::Owner), by_role(Role::Admin))
   }
 
-  /// Fetches everything now; a part that fails keeps its previous value and shows its error.
+  /// Fetches everything now; a part that fails keeps its previous value and shows its error. Only
+  /// one refresh runs at a time (the console polls); a request meanwhile reruns it once.
   pub async fn refresh(&self) {
-    let mut errors: Vec<String> = Vec::new();
-    let spaces = self
-      .fetch::<ListAdminSpacesResponse>("/api/v1/admin/spaces", &mut errors)
-      .await;
-    let conversations = self
-      .fetch::<ListAdminConversationsResponse>(
-        &format!("/api/v1/admin/conversations?limit={LIST_LIMIT}"),
-        &mut errors,
-      )
-      .await;
-    let users = self
-      .fetch::<ListAdminUsersResponse>(
-        &format!("/api/v1/admin/users?status=all&limit={LIST_LIMIT}"),
-        &mut errors,
-      )
-      .await;
-    let audit_path = audit_path(self.data.borrow().audit_filter);
-    let audit = self.fetch::<ListAuditResponse>(&audit_path, &mut errors).await;
-    let policy = self
-      .fetch::<WorkspacePolicyResponse>("/api/v1/workspace/policy", &mut errors)
-      .await;
-    let announcement = self
-      .fetch::<GetAnnouncementResponse>("/api/v1/announcement", &mut errors)
-      .await;
-    let instance = self
-      .fetch::<AdminInstanceResponse>("/api/v1/admin/instance", &mut errors)
-      .await;
-    let brands = self
-      .fetch::<AdminBrandsResponse>("/api/v1/admin/brands", &mut errors)
-      .await;
-    let mail = self
-      .fetch::<AdminMailSettingsResponse>("/api/v1/admin/settings/mail", &mut errors)
-      .await;
-    let calendar = self
-      .fetch::<AdminCalendarSettingsResponse>("/api/v1/admin/settings/calendar", &mut errors)
-      .await;
-    let runtime = self
-      .fetch::<RuntimeSettingsResponse>("/api/v1/admin/settings", &mut errors)
-      .await;
+    if self.is_refreshing.replace(true) {
+      self.is_refresh_wanted_again.set(true);
+      return;
+    }
+    loop {
+      self.is_refresh_wanted_again.set(false);
+      self.refresh_once().await;
+      // async-ok: a Cell, not a signal.
+      if !self.is_refresh_wanted_again.get() {
+        break;
+      }
+    }
+    // async-ok: a Cell, not a signal.
+    self.is_refreshing.set(false);
+  }
 
-    self.reload_cached(&mut errors).await;
+  /// The lists first and all at once, so the console shows spaces and channels after one round
+  /// trip; the per-channel and per-user details follow with bounded concurrency (not one request
+  /// after the other: work proportional to the instance size on open).
+  async fn refresh_once(&self) {
+    let mut errors: Vec<String> = Vec::new();
+    let ((spaces, conversations, users, policy, announcement), (instance, brands, mail, calendar, runtime)) =
+      join(
+        join5(
+          self.fetch_result::<ListAdminSpacesResponse>("/api/v1/admin/spaces".to_owned()),
+          self.fetch_result::<ListAdminConversationsResponse>(format!(
+            "/api/v1/admin/conversations?limit={LIST_LIMIT}"
+          )),
+          self.fetch_result::<ListAdminUsersResponse>(format!(
+            "/api/v1/admin/users?status=all&limit={LIST_LIMIT}"
+          )),
+          self.fetch_result::<WorkspacePolicyResponse>("/api/v1/workspace/policy".to_owned()),
+          self.fetch_result::<GetAnnouncementResponse>("/api/v1/announcement".to_owned()),
+        ),
+        join5(
+          self.fetch_result::<AdminInstanceResponse>("/api/v1/admin/instance".to_owned()),
+          self.fetch_result::<AdminBrandsResponse>("/api/v1/admin/brands".to_owned()),
+          self.fetch_result::<AdminMailSettingsResponse>("/api/v1/admin/settings/mail".to_owned()),
+          self.fetch_result::<AdminCalendarSettingsResponse>("/api/v1/admin/settings/calendar".to_owned()),
+          self.fetch_result::<RuntimeSettingsResponse>("/api/v1/admin/settings".to_owned()),
+        ),
+      )
+      .await;
+    let spaces = settle(spaces, &mut errors);
+    let conversations = settle(conversations, &mut errors);
+    let users = settle(users, &mut errors);
+    let policy = settle(policy, &mut errors);
+    let announcement = settle(announcement, &mut errors);
+    let instance = settle(instance, &mut errors);
+    let brands = settle(brands, &mut errors);
+    let mail = settle(mail, &mut errors);
+    let calendar = settle(calendar, &mut errors);
+    let runtime = settle(runtime, &mut errors);
 
     let space_names: HashMap<SpaceId, String> = spaces
       .as_ref()
@@ -520,38 +560,92 @@ impl AdminLive {
       policy.policy.history_default.clone()
     });
 
-    let mut channels = Vec::new();
-    if let Some(list) = &conversations {
-      for (index, summary) in list.conversations.iter().enumerate() {
-        let details = if index < DETAIL_LIMIT {
+    // Show the lists now, with what the summaries carry; owners and retention fill in below.
+    {
+      let mut data = self.data.borrow_mut();
+      let is_first_load = data.load != AdminLoad::Loaded;
+      if is_first_load {
+        if let Some(list) = &conversations {
+          data.channels = list
+            .conversations
+            .iter()
+            .map(|summary| {
+              channel_from_wire(
+                summary,
+                &space_names,
+                ChannelDetails::default(),
+                policy_default_history.clone(),
+              )
+            })
+            .collect();
+        }
+        if let Some(spaces) = &spaces {
+          data.spaces = spaces.spaces.iter().map(space_from_wire).collect();
+        }
+        data.load = match (&spaces, &conversations) {
+          (Some(_), Some(_)) => AdminLoad::Loaded,
+          _ => AdminLoad::Failed(errors.first().cloned().unwrap_or_default()),
+        };
+      }
+    }
+    self.changed();
+
+    let mut reload_errors = Vec::new();
+    self.reload_cached(&mut reload_errors).await;
+    errors.extend(reload_errors);
+
+    let summaries: Vec<&AdminConversationSummary> = conversations
+      .as_ref()
+      .map(|list| list.conversations.iter().collect())
+      .unwrap_or_default();
+    let user_summaries: Vec<&AdminUserSummary> = users
+      .as_ref()
+      .map(|list| list.users.iter().collect())
+      .unwrap_or_default();
+    let (details, space_memberships, devices) = join3(
+      stream::iter(summaries.iter().enumerate().map(|(index, summary)| async move {
+        if index < DETAIL_LIMIT {
           self.channel_details(summary).await
         } else {
           ChannelDetails::default()
-        };
-        channels.push(channel_from_wire(
-          summary,
-          &space_names,
-          details,
-          policy_default_history.clone(),
-        ));
-      }
-    }
-    let space_memberships = match &spaces {
-      Some(spaces) => self.space_memberships(&spaces.spaces).await,
-      None => HashMap::new(),
-    };
-    let mut admin_users = Vec::new();
-    if let Some(list) = &users {
-      for summary in &list.users {
-        let devices = self.devices_of(summary.id).await;
+        }
+      }))
+      .buffered(DETAIL_CONCURRENCY)
+      .collect::<Vec<_>>(),
+      async {
+        match &spaces {
+          Some(spaces) => self.space_memberships(&spaces.spaces).await,
+          None => HashMap::new(),
+        }
+      },
+      stream::iter(user_summaries.iter().map(|summary| self.devices_of(summary.id)))
+        .buffered(DETAIL_CONCURRENCY)
+        .collect::<Vec<_>>(),
+    )
+    .await;
+    let channels: Vec<AdminChannel> = summaries
+      .iter()
+      .zip(details)
+      .map(|(summary, details)| {
+        channel_from_wire(summary, &space_names, details, policy_default_history.clone())
+      })
+      .collect();
+    let admin_users: Vec<AdminUser> = user_summaries
+      .iter()
+      .zip(devices)
+      .map(|(summary, devices)| {
         let names = space_memberships.get(&summary.id).cloned().unwrap_or_default();
-        admin_users.push(user_from_wire(summary, devices, names));
-      }
-    }
+        user_from_wire(summary, devices, names)
+      })
+      .collect();
+    let audit_path = audit_path(self.data.borrow().audit_filter);
+    let audit = settle(
+      self.fetch_result::<ListAuditResponse>(audit_path).await,
+      &mut errors,
+    );
 
     {
       let mut data = self.data.borrow_mut();
-      data.is_loaded = true;
       if conversations.is_some() {
         data.channels = channels;
       }
@@ -563,14 +657,7 @@ impl AdminLive {
         data.policy_version = policy.version;
       }
       if let Some(spaces) = &spaces {
-        data.spaces = spaces
-          .spaces
-          .iter()
-          .map(|space| AdminSpace {
-            id: space.id,
-            name: space.name.clone(),
-          })
-          .collect();
+        data.spaces = spaces.spaces.iter().map(space_from_wire).collect();
       }
       if let Some(announcement) = announcement {
         data.announcement = announcement.maybe_announcement;
@@ -597,6 +684,9 @@ impl AdminLive {
           .iter()
           .map(|entry| audit_from_wire(entry, &space_names, &channels, &users))
           .collect();
+      }
+      if data.load != AdminLoad::Loaded && spaces.is_some() && conversations.is_some() {
+        data.load = AdminLoad::Loaded;
       }
       data.maybe_error = errors.into_iter().next();
     }
@@ -773,24 +863,19 @@ impl AdminLive {
   }
 
   async fn fetch<T: serde::de::DeserializeOwned>(&self, path: &str, errors: &mut Vec<String>) -> Option<T> {
-    let response = match self.auth.api_get(path).await {
-      Ok(response) => response,
-      Err(error) => {
-        errors.push(error.to_string());
-        return None;
-      },
-    };
+    settle(self.fetch_result(path.to_owned()).await, errors)
+  }
+
+  async fn fetch_result<T: serde::de::DeserializeOwned>(&self, path: String) -> Result<T, String> {
+    let response = self
+      .auth
+      .api_get(&path)
+      .await
+      .map_err(|error| error.to_string())?;
     if response.status != 200 {
-      errors.push(format!("{path}: {}", response.status));
-      return None;
+      return Err(format!("{path}: {}", response.status));
     }
-    match serde_json::from_str(&response.body) {
-      Ok(value) => Some(value),
-      Err(error) => {
-        errors.push(format!("{path}: {error}"));
-        None
-      },
-    }
+    serde_json::from_str(&response.body).map_err(|error| format!("{path}: {error}"))
   }
 
   /// Like [`Self::send`], and an answer of type `T` replaces the cached copy at once, so the form
@@ -936,6 +1021,30 @@ fn refusal_of(body: &str, status: u16) -> String {
 }
 
 // ---- Mappings (pure, tested) ------------------------------------------------------------------------
+
+/// Puts a failed request's reason on the list of errors and gives the value of a good one.
+fn settle<T>(result: Result<T, String>, errors: &mut Vec<String>) -> Option<T> {
+  match result {
+    Ok(value) => Some(value),
+    Err(error) => {
+      errors.push(error);
+      None
+    },
+  }
+}
+
+fn space_from_wire(space: &AdminSpaceSummary) -> AdminSpace {
+  AdminSpace {
+    id: space.id,
+    name: space.name.clone(),
+    join_policy: space.join_policy.clone(),
+    is_archived: space.is_archived,
+    member_count: space.member_count,
+    guest_count: space.guest_count,
+    channel_count: space.channel_count,
+    created_at: space.created_at.0,
+  }
+}
 
 fn channel_from_wire(
   summary: &AdminConversationSummary,

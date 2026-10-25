@@ -202,6 +202,12 @@ impl AdminBackend for MockBackend {
       .map(|(index, name)| AdminSpace {
         id: id_from_raw(900 + index as u64),
         name,
+        join_policy: teamcraft_proto::JoinPolicy::Open,
+        is_archived: false,
+        member_count: 0,
+        guest_count: 0,
+        channel_count: 0,
+        created_at: 0,
       })
       .collect()
   }

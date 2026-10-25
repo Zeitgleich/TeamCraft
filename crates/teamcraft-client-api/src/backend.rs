@@ -22,7 +22,8 @@ use crate::actions::{
 };
 use crate::activity::ActivityFeed;
 use crate::admin::{
-  AdminChannel, AdminSpace, AdminUser, AuditEntry, AuditFilter, Retention, SelfJoinOutcome, SettingsTestKind,
+  AdminChannel, AdminLoad, AdminSpace, AdminSpaceChanges, AdminUser, AuditEntry, AuditFilter, Retention,
+  SelfJoinOutcome, SettingsTestKind,
 };
 use crate::calls::{
   ActiveCall, BackgroundEffect, BackgroundImageInfo, CallHistoryItem, CallMoveOffer, CallRequest,
@@ -622,6 +623,13 @@ pub trait AdminBackend {
   fn admin_spaces(&self) -> Vec<AdminSpace> {
     Vec::new()
   }
+  /// Whether the space and channel lists arrived (`admin_refresh` retries a failed load).
+  fn admin_load(&self) -> AdminLoad {
+    AdminLoad::Loaded
+  }
+  /// Renames, archives or restores a space, or changes how people join it. The server decides who
+  /// may; the admin needs no membership and sees no content.
+  fn change_admin_space(&self, _space: SpaceId, _changes: AdminSpaceChanges) {}
   /// What each role may do at the scope (`None`: the whole instance) and the changes made there.
   fn permission_scheme(&self, _maybe_space: Option<SpaceId>) -> PermissionSchemeResponse {
     PermissionSchemeResponse { roles: Vec::new() }

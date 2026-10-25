@@ -11276,4 +11276,9 @@ ol.md-list {
 
 .chats-filter .input {
   width: 100%;
+
+.skeleton-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
