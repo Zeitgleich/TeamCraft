@@ -77,7 +77,7 @@ pub struct ServerCheckView {
   pub maybe_logo_dark: Option<String>,
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn server_state(
   servers: State<'_, Arc<ServerState>>,
   service: State<'_, Arc<Service>>,
@@ -95,7 +95,7 @@ pub fn server_state(
 
 /// Normalises what the user typed, asks that server how to sign in and keeps the answer for
 /// [`server_confirm`]. Errors carry the i18n key of their message as `kind`.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn server_check(
   address: String,
   servers: State<'_, Arc<ServerState>>,
@@ -132,7 +132,7 @@ pub async fn server_check(
 /// "Did you mean …?" for an address that does not resolve: looks up the same name under other
 /// common top-level domains, only when the user asked for it (a button on the server entry).
 /// Answers the host (and port) of the first one that resolves; it is only suggested, never used.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn server_suggest(
   address: String,
   servers: State<'_, Arc<ServerState>>,
@@ -188,7 +188,7 @@ async fn brand_logos(
 }
 
 /// Makes the checked server with this origin the active account's server.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn server_confirm(
   origin: String,
   servers: State<'_, Arc<ServerState>>,
@@ -227,7 +227,7 @@ pub async fn server_confirm(
 }
 
 /// Leaves the active server (the user is signed out already): back to the server entry.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn server_forget(
   servers: State<'_, Arc<ServerState>>,
   service: State<'_, Arc<Service>>,
@@ -253,12 +253,12 @@ pub async fn server_forget(
   Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn auth_restore(service: State<'_, Arc<Service>>) -> Result<bool, CommandError> {
   Ok(service.restore().await?)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 /// Signs in through the system browser. `look` (language, theme, brand) styles the page the
 /// browser shows afterwards; an older UI sends none.
 pub async fn auth_login(
@@ -282,7 +282,7 @@ pub async fn auth_login(
 
 /// Signs in a local account. The password goes straight into a secret and is never logged; errors
 /// carry the kinds `refused`, `disabled`, `rate_limited` and `network`.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn auth_login_local(
   login: String,
   password: String,
@@ -301,29 +301,29 @@ pub async fn auth_login_local(
   )
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn auth_cancel(service: State<'_, Arc<Service>>) {
   service.cancel_login();
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn auth_logout(service: State<'_, Arc<Service>>) -> Result<(), CommandError> {
   Ok(service.logout().await?)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn api_get(path: String, service: State<'_, Arc<Service>>) -> Result<ApiResponse, CommandError> {
   Ok(service.api_get(&path).await?)
 }
 
 /// A request without credentials (the brand of the server, shown before sign-in).
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn public_get(path: String, service: State<'_, Arc<Service>>) -> Result<ApiResponse, CommandError> {
   Ok(service.public_get(&path).await?)
 }
 
 /// A brand image of the active server as bytes (the webview shows it as a `data:` URL).
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn public_asset(
   path: String,
   service: State<'_, Arc<Service>>,
@@ -331,7 +331,7 @@ pub async fn public_asset(
   Ok(service.public_asset(&path).await?)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn api_request(
   method: ApiMethod,
   path: String,
@@ -342,7 +342,7 @@ pub async fn api_request(
 }
 
 /// Like `api_request` with a binary body (`content_type` and base64 `body_base64` together).
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn api_request_bytes(
   method: ApiMethod,
   path: String,

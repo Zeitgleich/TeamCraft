@@ -39,7 +39,7 @@ pub struct ShownNotifications {
   by_tag: Mutex<HashMap<String, u32>>,
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn notify_user(
   app: AppHandle,
   shown: State<'_, ShownNotifications>,
@@ -70,7 +70,7 @@ pub async fn notify_user(
 }
 
 /// Removes the notifications with these tags.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn withdraw_notifications(
   app: AppHandle,
   shown: State<'_, ShownNotifications>,
@@ -108,7 +108,7 @@ pub async fn withdraw_notifications(
 
 /// Asks for the user's attention while a call rings (Windows flashes the taskbar entry, macOS
 /// bounces the dock icon, Linux sets the urgency hint) or stops asking.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn request_attention(app: AppHandle, is_wanted: bool) {
   let Some(window) = app.get_webview_window(crate::tray::MAIN_WINDOW) else {
     return;

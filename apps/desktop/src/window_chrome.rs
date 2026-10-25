@@ -117,7 +117,7 @@ pub fn on_resized<R: Runtime>(window: &Window<R>) {
   notify(window.app_handle());
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn window_chrome(
   window: WebviewWindow,
   chrome: State<'_, WindowChromeState>,
@@ -150,7 +150,7 @@ pub fn window_chrome(
   }
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn window_action(window: WebviewWindow, action: WindowAction) -> Result<(), WindowChromeError> {
   let result = match action {
     WindowAction::Minimize => window.minimize(),
