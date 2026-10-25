@@ -45,12 +45,22 @@ pub fn SessionGate(settings: Settings) -> impl IntoView {
   let control = SessionControl::new(auth::detect(config));
   provide_context(control);
   control.start();
-  // The loading screen covers the session check and the opening of the account's data: the first
-  // view it hands over to is a sign-in screen, or the shell (`Shell`).
+  // The loading screen covers the session check, the way through the identity provider and the
+  // opening of the account's data: the first view it hands over to is a screen that waits for the
+  // user, or the shell (`Shell`, below `Ready`). Not the passing states, which a signed-in start
+  // goes through on its way to the chat.
   Effect::new(move |_| {
-    let is_first_view = control
-      .state
-      .with(|state| !matches!(state, SessionState::Checking | SessionState::Ready(_)));
+    let is_first_view = control.state.with(|state| match state {
+      SessionState::NeedsServer { .. }
+      | SessionState::ConfirmServer(_)
+      | SessionState::SignedOut(_)
+      | SessionState::NeedsDeviceSetup(_)
+      | SessionState::NeedsEnrollment { .. } => true,
+      SessionState::Checking
+      | SessionState::SigningIn
+      | SessionState::OpeningCore
+      | SessionState::Ready(_) => false,
+    });
     if is_first_view {
       crate::startup::first_view_shown();
     }

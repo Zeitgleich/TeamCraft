@@ -221,8 +221,12 @@ function resumeIfLeft(root) {
   const leftAt = Number(sessionValue(KEY_LEFT_AT, null));
   if (leftAt && Date.now() - leftAt < RESUME_WINDOW_MS) root.classList.add('is-resumed');
   sessionValue(KEY_LEFT_AT, '');
-  addEventListener('pagehide', () => {
-    if (root.isConnected) sessionValue(KEY_LEFT_AT, String(Date.now()));
+  // A page kept in the back/forward cache comes back as it was, not as a new load.
+  addEventListener('pagehide', (event) => {
+    if (root.isConnected && !event.persisted) sessionValue(KEY_LEFT_AT, String(Date.now()));
+  });
+  addEventListener('pageshow', (event) => {
+    if (event.persisted) sessionValue(KEY_LEFT_AT, '');
   });
 }
 
