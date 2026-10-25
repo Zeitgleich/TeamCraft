@@ -114,11 +114,12 @@ version as the final 1.0.0 and as each other: reinstall once with `sudo dnf rein
    the Pages site with the update manifests and the APT/RPM repositories is rebuilt, and installed
    desktop apps see the release (stable: `releases/latest/download/latest.json`).
 
-   GitHub Pages ignores a deployment of a commit it has already deployed, and the candidate was
-   deployed from this very commit, so the final release's site may not go live although the deploy
-   reports success. The *Publish* job therefore waits until the live site serves its build
-   (`site-build.txt`) and fails after 10 minutes if it doesn't. When it fails, rebuild the site from
-   the default branch:
+   GitHub Pages ignores a deployment of a build version it has already deployed, and the candidate
+   was deployed from this very commit. The *Publish* job therefore creates the deployment itself
+   with a build version unique per run (SHA, run id and attempt) instead of using
+   `actions/deploy-pages`, and then waits until the live site serves its build (`site-build.txt`);
+   it fails after 10 minutes if it doesn't. This is not yet proven on a real final release. When it
+   fails, rebuild the site from the default branch:
 
    ```sh
    gh workflow run packages.yml --ref main

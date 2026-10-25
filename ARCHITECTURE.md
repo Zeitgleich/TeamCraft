@@ -305,6 +305,11 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
 - **RTP packets inside QUIC unreliable datagrams.** QUIC handles the transport encryption and connection setup (no ICE/DTLS/SDP).
 - Signaling (join, leave, subscribe, layer selection) on a reliable QUIC stream of the same session.
 - Browser: WebTransport + **WebCodecs** for encoding/decoding; `getUserMedia` for capture (gives the browser's echo cancellation).
+  The calls (call state, ringtone, engine) are a wasm module of their own (`teamcraft-web-calls`)
+  that the page imports in the background after sign-in, so it isn't part of the app's first
+  download; the page keeps the client core and the device key, forwards the gateway's call events,
+  and signs and verifies the call key bindings for it (`teamcraft_client_api::page_calls`). Calls run in the
+  tab that runs the client core (e2ee.md §9.4); background effects are desktop-only for now.
 - Desktop: `cpal` for audio I/O, `opus`, **`webrtc-audio-processing`** (AEC, noise suppression, AGC) – the only WebRTC component used.
 - Browser support (MDN browser-compat-data, checked 2026-10): WebTransport incl. datagrams in Chrome 97,
   Firefox 114, **Safari / iOS Safari 26.4**; WebCodecs `VideoEncoder`/`VideoDecoder` in Chrome 94,
@@ -447,7 +452,7 @@ Settings → Chats).
 | Android  | core signal (`NetworkCallback`)            | yes       | yes, engine token | "Connection lost, reconnecting…" |
 | iOS      | core signal (`NWPathMonitor`)              | yes       | yes, engine token | "Connection lost, reconnecting…" |
 | Desktop  | core signal (wake, webview) + route lookup | yes       | yes, core token   | header status, tiles dimmed      |
-| Browser  | –                                          | no        | yes, page's token | (no browser call UI yet)         |
+| Browser  | session closes (browsers can't migrate)    | no        | yes, page's token | header status, tiles dimmed      |
 
 Tests: deterministic ones drive the SFU's rooms and real call engines in memory (lost connection,
 grace expiry, takeover, a lossy uplink) and the native client over loopback through a UDP relay

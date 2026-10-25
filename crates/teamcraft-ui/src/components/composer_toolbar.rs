@@ -7,6 +7,7 @@ use wasm_bindgen::JsCast;
 use teamcraft_client_api::actions::MessagePriority;
 
 use crate::components::icons::{Icon, IconName};
+use crate::components::sheet::MenuSurface;
 use crate::editor_doc::{BlockFormat, InlineStyle};
 use crate::i18n::{I18n, use_i18n};
 use crate::keys::{Key, Modifier, Platform, Shortcut, shortcut_text};
@@ -124,17 +125,17 @@ pub fn FormatToolbar(
           <Icon name=IconName::ChevronDown />
         </button>
         <Show when=move || is_style_menu_open.get() fallback=|| ()>
-          <div class="popover-backdrop" on:mousedown=move |_| is_style_menu_open.set(false)></div>
-          <div
-            class="popover format-style-menu opens-up align-start"
-            role="menu"
-            aria-label=move || i18n.t("format-style")
-            on:keydown=move |ev: web_sys::KeyboardEvent| {
+          <MenuSurface
+            class="format-style-menu opens-up align-start"
+            sheet_class="format-style-menu"
+            label=Signal::derive(move || i18n.t("format-style"))
+            on_close=Callback::new(move |()| is_style_menu_open.set(false))
+            on_keydown=Callback::new(move |ev: web_sys::KeyboardEvent| {
               if ev.key() == "Escape" {
                 ev.prevent_default();
                 is_style_menu_open.set(false);
               }
-            }
+            })
           >
             {TEXT_STYLES
               .into_iter()
@@ -158,7 +159,7 @@ pub fn FormatToolbar(
                 }
               })
               .collect_view()}
-          </div>
+          </MenuSurface>
         </Show>
       </div>
       <span class="format-sep" aria-hidden="true"></span>
@@ -222,13 +223,13 @@ pub fn SendOptionsMenu(
   };
 
   view! {
-    <div class="popover-backdrop" on:mousedown=move |_| on_close.run(())></div>
-    <div
-      class="popover send-options opens-up"
-      role="menu"
-      aria-label=move || i18n.t("composer-send-options")
+    <MenuSurface
+      class="send-options opens-up"
+      sheet_class="send-options"
+      label=Signal::derive(move || i18n.t("composer-send-options"))
+      on_close=on_close
       node_ref=menu
-      on:keydown=move |ev: web_sys::KeyboardEvent| match ev.key().as_str() {
+      on_keydown=Callback::new(move |ev: web_sys::KeyboardEvent| match ev.key().as_str() {
         "Escape" => {
           ev.prevent_default();
           on_close.run(());
@@ -238,7 +239,7 @@ pub fn SendOptionsMenu(
           move_focus_vertical(&ev, menu);
         },
         _ => {},
-      }
+      })
     >
       <p class="menu-heading">{move || i18n.t("composer-priority")}</p>
       {priority_item(MessagePriority::Normal, "priority-normal")}
@@ -247,7 +248,7 @@ pub fn SendOptionsMenu(
       <div class="menu-sep" role="separator"></div>
       {toggle_item(is_silent, "composer-silent", "composer-silent-detail")}
       {toggle_item(wants_acknowledgement, "composer-ack", "composer-ack-detail")}
-    </div>
+    </MenuSurface>
   }
 }
 

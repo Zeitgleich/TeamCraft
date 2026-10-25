@@ -10,59 +10,9 @@ use web_sys::{ReadableStream, WritableStream};
 
 /// The AudioWorklet module: `teamcraft-capture` posts every 128-sample render quantum of its
 /// input to the main thread; `teamcraft-playback` plays queued mono chunks and drops the oldest
-/// when more than `processorOptions.maxSamples` wait (latency bound).
-pub const WORKLET_SOURCE: &str = r#"
-class TeamcraftCapture extends AudioWorkletProcessor {
-  process(inputs) {
-    const channel = inputs[0] && inputs[0][0];
-    if (channel) this.port.postMessage(channel.slice(0));
-    return true;
-  }
-}
-
-class TeamcraftPlayback extends AudioWorkletProcessor {
-  constructor(options) {
-    super();
-    this.chunks = [];
-    this.offset = 0;
-    this.available = 0;
-    this.maxSamples = options.processorOptions.maxSamples;
-    this.port.onmessage = (event) => {
-      this.chunks.push(event.data);
-      this.available += event.data.length;
-      while (this.available > this.maxSamples && this.chunks.length > 1) {
-        this.available -= this.chunks[0].length - this.offset;
-        this.chunks.shift();
-        this.offset = 0;
-      }
-    };
-  }
-
-  process(_inputs, outputs) {
-    const output = outputs[0];
-    const out = output[0];
-    let written = 0;
-    while (written < out.length && this.chunks.length > 0) {
-      const chunk = this.chunks[0];
-      const count = Math.min(out.length - written, chunk.length - this.offset);
-      out.set(chunk.subarray(this.offset, this.offset + count), written);
-      written += count;
-      this.offset += count;
-      this.available -= count;
-      if (this.offset === chunk.length) {
-        this.chunks.shift();
-        this.offset = 0;
-      }
-    }
-    out.fill(0, written);
-    for (let channel = 1; channel < output.length; channel++) output[channel].set(out);
-    return true;
-  }
-}
-
-registerProcessor("teamcraft-capture", TeamcraftCapture);
-registerProcessor("teamcraft-playback", TeamcraftPlayback);
-"#;
+/// when more than `processorOptions.maxSamples` wait (latency bound). Also a file of its own, for
+/// pages that serve it ([`crate::call_web::WebCallConfig::maybe_worklet_url`]).
+pub const WORKLET_SOURCE: &str = include_str!("call_web/teamcraft-call-worklet.js");
 
 #[wasm_bindgen]
 extern "C" {

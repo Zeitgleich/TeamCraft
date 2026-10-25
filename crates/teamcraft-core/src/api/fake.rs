@@ -1845,6 +1845,7 @@ impl ServerApi for FakeServerApi {
         token: format!("fake:{conversation}"),
         sfu_url: "https://sfu.invalid/call".to_owned(),
         expires_at: UnixMillis(0),
+        sfu_certificate_sha256: Vec::new(),
       })
     })
   }

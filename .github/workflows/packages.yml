@@ -97,12 +97,50 @@ jobs:
     permissions:
       pages: write
       id-token: write
+      actions: read
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      # Pages ignores a deployment whose pages_build_version it has already deployed, and
+      # actions/deploy-pages sends GITHUB_SHA as that version without a way to change it. A final
+      # release is tagged on its release candidate's commit, so the SHA alone repeats (issue #279).
+      # This step makes the same three API calls as deploy-pages (artifact lookup, OIDC token,
+      # create + poll the deployment) with a build version that is unique per run.
       - id: deployment
-        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        name: Deploy to Pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BUILD_VERSION: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          artifact_id="$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID/artifacts" \
+            --jq '[.artifacts[] | select(.name == "github-pages")] | first | .id')"
+          if [ -z "$artifact_id" ] || [ "$artifact_id" = "null" ]; then
+            echo "::error::The github-pages artifact of this run was not found."
+            exit 1
+          fi
+          oidc_token="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r .value)"
+          echo "::add-mask::$oidc_token"
+          deployment="$(gh api -X POST "repos/$REPO/pages/deployments" \
+            -F "artifact_id=$artifact_id" -f "pages_build_version=$BUILD_VERSION" -f "oidc_token=$oidc_token")"
+          deployment_id="$(jq -r '.id // (.status_url | split("/") | last)' <<< "$deployment")"
+          echo "page_url=$(jq -r .page_url <<< "$deployment")" >> "$GITHUB_OUTPUT"
+          for attempt in $(seq 1 60); do
+            status="$(gh api "repos/$REPO/pages/deployments/$deployment_id" --jq .status)"
+            echo "Attempt $attempt: deployment $deployment_id is '$status'."
+            case "$status" in
+              succeed) exit 0 ;;
+              *fail* | *error* | *cancel* | *lost*)
+                echo "::error::The Pages deployment ended as '$status'."
+                exit 1
+                ;;
+            esac
+            sleep 10
+          done
+          echo "::error::The Pages deployment did not finish within 10 minutes."
+          exit 1
       # deploy-pages can report success without the site changing: Pages ignored the deployment of a
       # final release whose commit the release candidate had already deployed (issue #279). Wait for
       # this run's build id on the live site (cache-busted) and fail loudly if it never shows up.

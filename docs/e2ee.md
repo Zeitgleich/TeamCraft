@@ -1139,6 +1139,23 @@ calls are verified with no extra prompts, and the DAVE privacy code and per-memb
 remain available for out-of-band comparison. Meeting guests without an account get an ephemeral
 key and are shown as "Guest (unverified)".
 
+**Who signs in the browser.** The web client's call engine is a wasm module of its own
+(`teamcraft-web-calls`, loaded by the page; `teamcraft_client_api::page_calls`). It never holds the
+device key: the page prepares the join with its client core and keeps a `DeviceCallKeyAuthenticator`
+(the core's signer and the conversation's verified devices); the module asks the page through
+JavaScript callbacks to sign its fresh DAVE key (step 2) and to verify the others' bindings (step 3),
+and gets back only the signed binding or the verified DAVE key. Both run in the same page and origin,
+so this adds no party: whoever can run script in the page could use the core's signer anyway (§9.3).
+A rejoin prepares again, so the trusted roster follows membership changes.
+
+**The SFU's certificate.** Clients reach the SFU over TLS (QUIC). Normally its certificate chains to
+a trusted root. For test and development setups with a short-lived self-signed certificate, the
+server can hand out its SHA-256 with the join token (`[calls] sfu_certificate_sha256`, several while
+one replaces another): browsers pass them as `serverCertificateHashes`, the desktop app pins the
+first. A compromised server could point clients at an SFU of its choosing this way, but it can do
+that through `sfu_url` already, and the SFU only ever sees DAVE-encrypted media and verified
+bindings: the hash decides reachability, not confidentiality.
+
 **Lost connections** (ARCHITECTURE.md §6.5). A QUIC connection that migrates to another network
 keeps its DAVE state; nothing changes for the keys. A connection the SFU loses (idle timeout) keeps
 the device's call slot for a grace period, but not its DAVE leaf: the SFU proposes removing the leaf
@@ -1293,6 +1310,11 @@ everything (§9.1). Signing the releases narrows this to what the operator contr
   releases. Pages call `registration.update()` when they become visible, come back online and
   hourly, at most every 15 minutes, and ask `GET /api/v1/client-compatibility`; a version the server
   no longer supports asks for the reload too.
+- **Call module.** The browser's call engine (`teamcraft-web-calls`, §8) is a separate ES module and
+  wasm the page imports after sign-in. Its files are part of the release like any other (listed in
+  the manifest, served from the verified cache); the build gives them content-hashed names and writes
+  them into `index.html` (`<meta name="teamcraft-calls">`), so a page never imports another build's
+  module, also without a service worker.
 - **Push code.** The service worker needs Rust for push (§7: open the sealed wake-up, read the store,
   build the notification). A worker cannot verify scripts it loads with `importScripts`, so
   `scripts/finish-sw.sh` (a Trunk hook) inlines the JS glue into `sw.js`, and the worker reads the wasm

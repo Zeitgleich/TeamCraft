@@ -18,6 +18,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::message_actions::{
   ActionContext, ActionSurface, MessageAction, message_actions, run_message_action, with_shortcut,
 };
+use crate::components::sheet::Sheet;
 use crate::i18n::use_i18n;
 use crate::model::{Message, MessageId, thread_id_of};
 use crate::motion::PopoverSide;
@@ -599,28 +600,8 @@ fn ActionSheet(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
   let actions = NodeRef::<html::Div>::new();
   let picker_button = NodeRef::<html::Button>::new();
   let is_picking = RwSignal::new(false);
-  let sheet = NodeRef::<html::Div>::new();
-  // The dialog takes the focus (for screen readers), without a ring on the first entry.
-  Effect::new(move |_| {
-    if let Some(element) = sheet.get() {
-      drop(element.focus());
-    }
-  });
   view! {
-    <div class="sheet-backdrop" on:click=move |_| close()></div>
-    <div
-      class="action-sheet"
-      node_ref=sheet
-      tabindex="-1"
-      role="dialog"
-      aria-modal="true"
-      aria-label=move || i18n.t("message-action-sheet")
-      on:keydown=move |ev| {
-        if ev.key() == "Escape" && !is_picking.get_untracked() {
-          close();
-        }
-      }
-    >
+    <Sheet class="action-sheet" label=Signal::derive(move || i18n.t("message-action-sheet")) on_close=Callback::new(move |()| close())>
       <div class="sheet-reactions">
         {quick
           .into_iter()
@@ -664,6 +645,6 @@ fn ActionSheet(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
             .collect_view()
         }}
       </div>
-    </div>
+    </Sheet>
   }
 }

@@ -332,6 +332,17 @@ pub struct IncomingCall {
   pub with_video: bool,
 }
 
+/// Why this app can't take part in calls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallsUnavailableReason {
+  /// This app has no call support at all.
+  NotInThisApp,
+  /// The browser lacks what calls need (WebTransport, WebCodecs audio, AudioWorklet).
+  BrowserUnsupported,
+  /// TeamCraft is open in another tab of this browser, which runs the account; calls run there.
+  OtherTab,
+}
+
 /// What the user is about to join.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallRequest {

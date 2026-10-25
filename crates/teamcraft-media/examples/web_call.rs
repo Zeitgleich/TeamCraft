@@ -83,7 +83,7 @@ pub async fn join_dev_call(
   };
   let config = WebCallConfig {
     sfu_url,
-    maybe_certificate_hash,
+    certificate_hashes: maybe_certificate_hash.into_iter().collect(),
     token,
     engine,
     source: parse_source(&source)?,
@@ -95,6 +95,8 @@ pub async fn join_dev_call(
     // The test page has one dev token; it is reused for a rejoin while still valid.
     maybe_ticket_source: None,
     status_cues: StatusCues::default(),
+    // The development page has no Content-Security-Policy.
+    maybe_worklet_url: None,
   };
   let call = WebCall::join(config)
     .await

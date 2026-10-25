@@ -23,3 +23,5 @@ awk -v init="$init" '
 mv "$index.tmp" "$index"
 # The loading screen's initializer is now in init.js (it needs this file to exist).
 sh "$(dirname "$0")/finish-loader.sh"
+# Edits index.html too, so it runs in this hook, after the script above.
+sh "$(dirname "$0")/finish-calls.sh"

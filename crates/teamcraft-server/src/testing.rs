@@ -298,6 +298,7 @@ impl TestApp {
       maybe_sfu_registration_token: None,
       ring_timeout_secs: 30,
       maybe_sfu_control_url: None,
+      maybe_sfu_certificate_sha256: None,
     };
     Self::start_with_calls_config(&config, signing_key_pem).await
   }

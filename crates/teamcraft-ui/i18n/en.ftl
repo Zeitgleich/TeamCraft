@@ -95,9 +95,13 @@ bottom-nav-you = You
 conversation-more = More
 composer-camera = Take a photo or video
 composer-photos = Photos and videos
-calls-browser-title = Calls in the browser are coming soon
-calls-browser-body = For now, call from the TeamCraft desktop or mobile app. Your conversations are there too.
+calls-browser-title = Calls aren't available here
+calls-browser-body = Call from the TeamCraft desktop or mobile app. Your conversations are there too.
 calls-browser-download = Get the app
+calls-unsupported-title = This browser can't make calls
+calls-unsupported-body = Calls need a current Chrome, Edge, Firefox or Safari. Update your browser, switch to one of these, or call from the TeamCraft app.
+calls-other-tab-title = Calls run in your other tab
+calls-other-tab-body = TeamCraft is open in another tab of this browser, and calls run there. Make and take calls in that tab, or close it and reload this one.
 
 ## Sidebar
 sidebar-label = Channels and direct messages
@@ -219,10 +223,8 @@ switcher-hint-close = close
 
 ## Settings
 settings-title = Settings
-settings-tab-display = Display
 settings-tab-sidebar = Sidebar
 settings-tab-notifications = Notifications
-settings-tab-advanced = Advanced
 settings-theme = Theme
 settings-theme-system = Match system
 settings-theme-light = Light
@@ -233,7 +235,6 @@ settings-send-enter = Enter ({ $newline } for a new line)
 settings-send-ctrl-enter = { $send } (Enter for a new line)
 settings-join-leave = Show join and leave messages
 settings-unreads-group = Group unread channels at the top of the sidebar
-settings-advanced-stub = Advanced settings will appear here.
 
 shortcut-switcher = Search everything
 shortcut-settings = Open settings
@@ -618,7 +619,7 @@ audit-guest-invited = Guest invited
 audit-channel-archived = Channel archived
 
 ## Device approval, linking and key changes
-settings-tab-devices = Devices and security
+settings-tab-devices = Devices
 settings-devices-hint = Devices that can read your messages. Remove any device you no longer use or recognize.
 settings-device-current = This device
 settings-device-link = Link a new device
@@ -796,9 +797,6 @@ contact-not-verified = Not verified yet.
 contact-unmark = Remove verification
 
 ## Settings: notifications
-settings-tab-language = Language
-settings-tab-privacy = Privacy
-settings-tab-calls = Calls
 notif-what = Notify me about
 notif-desktop = Desktop notifications
 notif-level-hint = Applies to channels. Direct messages and group messages count as mentions.
@@ -917,7 +915,6 @@ privacy-away-30 = 30 minutes
 privacy-away-never = Never
 privacy-away-hint = An admin can set the shortest allowed time.
 privacy-offline-hint = To appear offline, choose Offline in the status menu.
-settings-devices-title = Devices
 settings-device-sign-out = Sign out
 settings-device-sign-out-confirm = Sign out device
 security-my-key = Your security key
@@ -2221,7 +2218,7 @@ key-down = Down arrow
 key-left = Left arrow
 key-right = Right arrow
 key-plus-word = plus
-calls-unavailable = Calls are only available in the TeamCraft desktop app for now.
+calls-unavailable = Calls aren't available here. Use your other TeamCraft tab or the TeamCraft app.
 admin-recovery-unavailable = Starting an organization recovery from the console is not available yet.
 settings-devices-unavailable = The device list could not be loaded yet.
 security-my-key-unavailable = Your key is not available yet: this device has no encryption keys set up.
@@ -2303,6 +2300,16 @@ error-too-large = That is too large for the server. Try something smaller.
 error-server-trouble = The server has a problem right now. Try again in a few minutes.
 error-conflict = Someone changed this at the same time. Look at the current state and try again.
 error-not-found = This doesn't exist any more. It may have been deleted or moved.
+error-call-microphone-denied = The browser blocked the microphone. Allow it for this site (the icon in the address bar), then join again.
+error-call-microphone-missing = No microphone was found. Connect one, then join again.
+error-call-microphone-in-use = The microphone can't be opened. Close other apps that use it and try again.
+error-call-camera-denied = The browser blocked the camera. Allow it for this site (the icon in the address bar), then turn the camera on again.
+error-call-camera-missing = No camera was found. Connect one, then turn the camera on again.
+error-call-camera-in-use = The camera can't be opened. Close other apps that use it and try again.
+error-call-screen-unavailable = Your screen can't be shared from here.
+error-call-unsupported = This browser can't make calls. Use a current Chrome, Edge, Firefox or Safari, or the TeamCraft app.
+error-call-server-unreachable = The call server can't be reached. The network may block calls (UDP); try another network or ask your admin.
+error-call-background-required = Your organization requires a background behind your camera, which the browser can't add yet. Turn your camera on in the TeamCraft app.
 action-running = Working…
 panic-title = Something went wrong
 panic-body = The app ran into an error and has to be reloaded. What you were typing just now may be lost.
@@ -2336,3 +2343,86 @@ linked-message-open = Open message
 linked-message-deleted = This message was deleted
 linked-message-not-loaded = Message not loaded yet
 linked-message-unavailable = Message from a conversation you can’t see
+
+## Settings: sections, search and rows (#327)
+settings-tab-account = Account
+settings-tab-appearance = Appearance
+settings-tab-preferences = Preferences
+settings-tab-keyboard = Keyboard
+settings-tab-audio-video = Audio & video
+settings-tab-security = Security & privacy
+settings-tab-about = Help & about
+settings-search = Search settings
+settings-search-none = Nothing matches. Try another word.
+settings-search-count = { $count ->
+    [0] No settings found
+    [one] One setting found
+   *[other] { $count } settings found
+}
+settings-back-to-list = All settings
+settings-copy-username = Copy username
+settings-name-from-sign-in = Your name comes from your organization's sign-in.
+settings-profile-details = Profile details
+settings-profile-details-hint = People see these on your profile card.
+settings-profile-hours-show = Show my working hours
+settings-profile-hours-show-hint = Others see when you usually work and your local time.
+settings-profile-save = Save profile
+settings-messages-look = Messages
+settings-messages-look-hint = The preview shows your choices.
+settings-messages-show = In conversations
+settings-preview-name = Sam Example
+settings-preview-text = The new layout is ready. Have a look before Friday?
+settings-text-size = Text size
+settings-text-size-hint = Makes text larger or smaller without zooming everything.
+settings-join-leave-hint = Shows a line when someone joins or leaves a channel.
+settings-app-language = App language
+settings-mirror-hint = Only your own view is mirrored; others see you the right way round.
+settings-keyboard-filter = Search shortcuts
+settings-device-this = This device
+settings-device-others = Other devices
+settings-device-active-now = Active now
+settings-device-no-others = You are signed in on this device only.
+settings-device-sign-out-question = Sign out { $name }? It can no longer read your messages.
+settings-device-sign-out-others = Sign out all other devices
+settings-device-sign-out-others-confirm = { $count ->
+    [one] Sign out the other device? It can no longer read your messages.
+   *[other] Sign out all { $count } other devices? They can no longer read your messages.
+}
+settings-help-app = TeamCraft
+settings-help-version = Version
+settings-help-copy-debug = Copy debug info
+settings-help-copy-debug-hint = Version, platform and language for a support request. No names or messages.
+shortcuts-general = General
+shortcuts-navigation = Moving around
+shortcuts-messages = Messages
+notif-master-title = Notifications
+notif-master = Allow notifications
+notif-master-hint = Off: no message notifies you on any device. Calls and reminders still do.
+notif-this-device = This device
+notif-device-system = System notifications
+notif-device-desktop = TeamCraft notifies you through your system's notifications.
+notif-browser-unsupported = This browser can't show notifications.
+notif-test = Send a test
+notif-test-title = Notifications work
+notif-test-body = This is how new messages will show up.
+notif-test-sent = If you didn't see the test, check your system's notification settings.
+notif-first-name-hint = Counts your first name like an @mention.
+notif-channel-mentions-hint = Messages that address everybody in a channel.
+notif-confirm-channel-hint = Avoids notifying a big channel by mistake.
+notif-phone = Phone and other devices
+notif-phone-hint = Push notifications for your phone, held back while you are at the desktop.
+notif-per-conversation-filter = Filter conversations
+notif-per-conversation-none = No conversation matches.
+privacy-typing-hint = People in the conversation see that you are writing.
+calls-noise-hint = Filters typing, fans and other background noise.
+calls-echo-hint = Stops others from hearing themselves through your speakers.
+security-status-ok = Your messages are end-to-end encrypted
+security-status-ok-hint = Only your devices and the people in a conversation can read them. Not even the server can.
+security-status-no-keys = This device can't read encrypted messages yet
+security-status-set-up = Set up this device
+security-recovery-row = Recovery passphrase
+security-passphrase-mismatch = The two passphrases are not the same.
+security-verified-count = { $verified } of { $total } people verified
+security-advanced = Advanced
+settings-list-limited = Showing { $shown } of { $total }. Filter to find the others.
+security-verify-filter = Filter people

@@ -41,6 +41,7 @@
     "allow-core-action",
     "allow-core-query",
     "allow-core-attachment",
+    "allow-core-focus",
     "allow-core-stop",
     "allow-core-reset-store",
     "allow-call-snapshot",

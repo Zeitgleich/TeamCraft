@@ -95,9 +95,13 @@ bottom-nav-you = Ich
 conversation-more = Mehr
 composer-camera = Foto oder Video aufnehmen
 composer-photos = Fotos und Videos
-calls-browser-title = Anrufe im Browser kommen bald
-calls-browser-body = Nutze bis dahin die Desktop- oder Mobil-App von TeamCraft. Deine Unterhaltungen sind dort auch.
+calls-browser-title = Anrufe sind hier nicht verfügbar
+calls-browser-body = Rufe aus der Desktop- oder Mobil-App von TeamCraft an. Deine Unterhaltungen sind dort auch.
 calls-browser-download = App herunterladen
+calls-unsupported-title = Dieser Browser kann keine Anrufe führen
+calls-unsupported-body = Anrufe brauchen ein aktuelles Chrome, Edge, Firefox oder Safari. Aktualisiere deinen Browser, wechsle zu einem davon oder rufe aus der TeamCraft-App an.
+calls-other-tab-title = Anrufe laufen in deinem anderen Tab
+calls-other-tab-body = TeamCraft ist in einem anderen Tab dieses Browsers geöffnet, und Anrufe laufen dort. Führe Anrufe dort oder schließe ihn und lade diesen Tab neu.
 
 ## Seitenleiste
 sidebar-label = Kanäle und Direktnachrichten
@@ -219,10 +223,8 @@ switcher-hint-close = schließen
 
 ## Einstellungen
 settings-title = Einstellungen
-settings-tab-display = Darstellung
 settings-tab-sidebar = Seitenleiste
 settings-tab-notifications = Benachrichtigungen
-settings-tab-advanced = Erweitert
 settings-theme = Design
 settings-theme-system = Wie das System
 settings-theme-light = Hell
@@ -233,7 +235,6 @@ settings-send-enter = Enter ({ $newline } für eine neue Zeile)
 settings-send-ctrl-enter = { $send } (Enter für eine neue Zeile)
 settings-join-leave = Beitritts- und Austrittsmeldungen anzeigen
 settings-unreads-group = Ungelesene Kanäle oben in der Seitenleiste gruppieren
-settings-advanced-stub = Hier erscheinen die erweiterten Einstellungen.
 
 shortcut-switcher = Alles durchsuchen
 shortcut-settings = Einstellungen öffnen
@@ -618,7 +619,7 @@ audit-guest-invited = Gast eingeladen
 audit-channel-archived = Kanal archiviert
 
 ## Geräte-Freigabe, Verknüpfung und Schlüsseländerungen
-settings-tab-devices = Geräte und Sicherheit
+settings-tab-devices = Geräte
 settings-devices-hint = Geräte, die deine Nachrichten lesen können. Entferne Geräte, die du nicht mehr nutzt oder nicht kennst.
 settings-device-current = Dieses Gerät
 settings-device-link = Neues Gerät verknüpfen
@@ -796,9 +797,6 @@ contact-not-verified = Noch nicht überprüft.
 contact-unmark = Überprüfung entfernen
 
 ## Einstellungen: Benachrichtigungen
-settings-tab-language = Sprache
-settings-tab-privacy = Datenschutz
-settings-tab-calls = Anrufe
 notif-what = Benachrichtige mich über
 notif-desktop = Desktop-Benachrichtigungen
 notif-level-hint = Gilt für Kanäle. Direktnachrichten und Gruppenchats zählen als Erwähnungen.
@@ -917,7 +915,6 @@ privacy-away-30 = 30 Minuten
 privacy-away-never = Nie
 privacy-away-hint = Ein Admin kann die kürzeste erlaubte Zeit festlegen.
 privacy-offline-hint = Um offline zu erscheinen, wähle im Statusmenü „Offline“.
-settings-devices-title = Geräte
 settings-device-sign-out = Abmelden
 settings-device-sign-out-confirm = Gerät abmelden
 security-my-key = Dein Sicherheitsschlüssel
@@ -2221,7 +2218,7 @@ key-down = Pfeil runter
 key-left = Pfeil links
 key-right = Pfeil rechts
 key-plus-word = plus
-calls-unavailable = Anrufe sind vorerst nur in der TeamCraft-Desktop-App möglich.
+calls-unavailable = Anrufe sind hier nicht verfügbar. Nutze deinen anderen TeamCraft-Tab oder die TeamCraft-App.
 admin-recovery-unavailable = Eine Organisationswiederherstellung kann noch nicht aus der Konsole gestartet werden.
 settings-devices-unavailable = Die Geräteliste konnte noch nicht geladen werden.
 security-my-key-unavailable = Dein Schlüssel ist noch nicht verfügbar: Auf diesem Gerät ist keine Verschlüsselung eingerichtet.
@@ -2303,6 +2300,16 @@ error-too-large = Das ist zu groß für den Server. Versuche es mit etwas Kleine
 error-server-trouble = Der Server hat gerade ein Problem. Versuche es in ein paar Minuten erneut.
 error-conflict = Jemand hat das gleichzeitig geändert. Sieh dir den aktuellen Stand an und versuche es erneut.
 error-not-found = Das gibt es nicht mehr. Es wurde vielleicht gelöscht oder verschoben.
+error-call-microphone-denied = Der Browser hat das Mikrofon blockiert. Erlaube es für diese Seite (Symbol in der Adressleiste) und tritt dann erneut bei.
+error-call-microphone-missing = Es wurde kein Mikrofon gefunden. Schließe eines an und tritt dann erneut bei.
+error-call-microphone-in-use = Das Mikrofon lässt sich nicht öffnen. Schließe andere Apps, die es nutzen, und versuche es erneut.
+error-call-camera-denied = Der Browser hat die Kamera blockiert. Erlaube sie für diese Seite (Symbol in der Adressleiste) und schalte die Kamera dann erneut ein.
+error-call-camera-missing = Es wurde keine Kamera gefunden. Schließe eine an und schalte die Kamera dann erneut ein.
+error-call-camera-in-use = Die Kamera lässt sich nicht öffnen. Schließe andere Apps, die sie nutzen, und versuche es erneut.
+error-call-screen-unavailable = Dein Bildschirm kann von hier aus nicht geteilt werden.
+error-call-unsupported = Dieser Browser kann keine Anrufe führen. Nutze ein aktuelles Chrome, Edge, Firefox oder Safari oder die TeamCraft-App.
+error-call-server-unreachable = Der Anrufserver ist nicht erreichbar. Das Netzwerk blockiert vielleicht Anrufe (UDP); versuche ein anderes Netzwerk oder frag deinen Admin.
+error-call-background-required = Deine Organisation verlangt einen Hintergrund hinter deinem Kamerabild, den der Browser noch nicht einfügen kann. Schalte deine Kamera in der TeamCraft-App ein.
 action-running = Läuft…
 panic-title = Etwas ist schiefgelaufen
 panic-body = Die App ist auf einen Fehler gestoßen und muss neu geladen werden. Was du gerade getippt hast, kann verloren gehen.
@@ -2336,3 +2343,86 @@ linked-message-open = Zur Nachricht
 linked-message-deleted = Diese Nachricht wurde gelöscht
 linked-message-not-loaded = Nachricht nicht geladen
 linked-message-unavailable = Nachricht aus einem Gespräch, das du nicht sehen kannst
+
+## Settings: sections, search and rows (#327)
+settings-tab-account = Konto
+settings-tab-appearance = Darstellung
+settings-tab-preferences = Allgemein
+settings-tab-keyboard = Tastatur
+settings-tab-audio-video = Audio & Video
+settings-tab-security = Sicherheit & Datenschutz
+settings-tab-about = Hilfe & Info
+settings-search = Einstellungen durchsuchen
+settings-search-none = Nichts gefunden. Versuch es mit einem anderen Wort.
+settings-search-count = { $count ->
+    [0] Keine Einstellung gefunden
+    [one] Eine Einstellung gefunden
+   *[other] { $count } Einstellungen gefunden
+}
+settings-back-to-list = Alle Einstellungen
+settings-copy-username = Benutzernamen kopieren
+settings-name-from-sign-in = Dein Name kommt aus der Anmeldung deiner Organisation.
+settings-profile-details = Profildetails
+settings-profile-details-hint = Andere sehen das auf deiner Profilkarte.
+settings-profile-hours-show = Meine Arbeitszeiten anzeigen
+settings-profile-hours-show-hint = Andere sehen, wann du meistens arbeitest, und deine Ortszeit.
+settings-profile-save = Profil speichern
+settings-messages-look = Nachrichten
+settings-messages-look-hint = Die Vorschau zeigt deine Auswahl.
+settings-messages-show = In Unterhaltungen
+settings-preview-name = Sam Beispiel
+settings-preview-text = Das neue Layout ist fertig. Schaust du es dir vor Freitag an?
+settings-text-size = Textgröße
+settings-text-size-hint = Macht Text größer oder kleiner, ohne alles zu zoomen.
+settings-join-leave-hint = Zeigt eine Zeile, wenn jemand einem Kanal beitritt oder ihn verlässt.
+settings-app-language = Sprache der App
+settings-mirror-hint = Nur deine eigene Ansicht wird gespiegelt; andere sehen dich seitenrichtig.
+settings-keyboard-filter = Tastenkürzel durchsuchen
+settings-device-this = Dieses Gerät
+settings-device-others = Andere Geräte
+settings-device-active-now = Gerade aktiv
+settings-device-no-others = Du bist nur auf diesem Gerät angemeldet.
+settings-device-sign-out-question = { $name } abmelden? Es kann deine Nachrichten dann nicht mehr lesen.
+settings-device-sign-out-others = Alle anderen Geräte abmelden
+settings-device-sign-out-others-confirm = { $count ->
+    [one] Das andere Gerät abmelden? Es kann deine Nachrichten dann nicht mehr lesen.
+   *[other] Alle { $count } anderen Geräte abmelden? Sie können deine Nachrichten dann nicht mehr lesen.
+}
+settings-help-app = TeamCraft
+settings-help-version = Version
+settings-help-copy-debug = Debug-Infos kopieren
+settings-help-copy-debug-hint = Version, Plattform und Sprache für eine Support-Anfrage. Keine Namen oder Nachrichten.
+shortcuts-general = Allgemein
+shortcuts-navigation = Navigieren
+shortcuts-messages = Nachrichten
+notif-master-title = Benachrichtigungen
+notif-master = Benachrichtigungen erlauben
+notif-master-hint = Aus: Keine Nachricht benachrichtigt dich, auf keinem Gerät. Anrufe und Erinnerungen weiterhin schon.
+notif-this-device = Dieses Gerät
+notif-device-system = Systembenachrichtigungen
+notif-device-desktop = TeamCraft benachrichtigt dich über die Benachrichtigungen deines Systems.
+notif-browser-unsupported = Dieser Browser kann keine Benachrichtigungen anzeigen.
+notif-test = Test senden
+notif-test-title = Benachrichtigungen funktionieren
+notif-test-body = So erscheinen neue Nachrichten.
+notif-test-sent = Wenn du den Test nicht gesehen hast, prüfe die Benachrichtigungseinstellungen deines Systems.
+notif-first-name-hint = Zählt deinen Vornamen wie eine @Erwähnung.
+notif-channel-mentions-hint = Nachrichten, die alle in einem Kanal ansprechen.
+notif-confirm-channel-hint = Damit du nicht aus Versehen einen großen Kanal benachrichtigst.
+notif-phone = Telefon und andere Geräte
+notif-phone-hint = Push-Benachrichtigungen fürs Telefon, zurückgehalten, solange du am Desktop bist.
+notif-per-conversation-filter = Unterhaltungen filtern
+notif-per-conversation-none = Keine Unterhaltung passt.
+privacy-typing-hint = Die anderen in der Unterhaltung sehen, dass du schreibst.
+calls-noise-hint = Filtert Tippen, Lüfter und andere Hintergrundgeräusche.
+calls-echo-hint = Verhindert, dass andere sich über deine Lautsprecher selbst hören.
+security-status-ok = Deine Nachrichten sind Ende-zu-Ende-verschlüsselt
+security-status-ok-hint = Nur deine Geräte und die Leute in einer Unterhaltung können sie lesen. Nicht einmal der Server.
+security-status-no-keys = Dieses Gerät kann verschlüsselte Nachrichten noch nicht lesen
+security-status-set-up = Dieses Gerät einrichten
+security-recovery-row = Wiederherstellungs-Passphrase
+security-passphrase-mismatch = Die beiden Passphrasen sind nicht gleich.
+security-verified-count = { $verified } von { $total } Personen verifiziert
+security-advanced = Erweitert
+settings-list-limited = { $shown } von { $total } angezeigt. Filtern, um die anderen zu finden.
+security-verify-filter = Personen filtern

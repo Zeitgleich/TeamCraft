@@ -84,6 +84,8 @@ const OPUS_BITRATE_BPS: u32 = 32_000;
 const OPUS_LOSS_FLOOR_PERCENT: u8 = 5;
 /// The planned loss changes the encoder's configuration only in steps this big.
 const OPUS_LOSS_STEP_PERCENT: u8 = 5;
+/// What a page without `navigator.mediaDevices` lacks: browsers offer it only to HTTPS pages.
+const SECURE_CONTEXT: &str = "camera and microphone access (the page needs HTTPS)";
 /// Mixed frames above this amplitude count as audible in [`CallStats`].
 const AUDIBLE_AMPLITUDE: f32 = 0.01;
 
@@ -99,9 +101,9 @@ pub struct WebCall {
 pub struct WebCallConfig {
   /// WebTransport URL from the join token response, e.g. `https://sfu.example.com:4433/call`.
   pub sfu_url: String,
-  /// Accept a self-signed SFU certificate by its SHA-256 hash (`serverCertificateHashes`,
-  /// development); `None` uses the browser's trusted roots.
-  pub maybe_certificate_hash: Option<[u8; 32]>,
+  /// Accept self-signed SFU certificates by their SHA-256 hashes (`serverCertificateHashes`,
+  /// development and tests); empty uses the browser's trusted roots.
+  pub certificate_hashes: Vec<[u8; 32]>,
   pub token: String,
   pub engine: CallEngineConfig,
   pub source: AudioSource,
@@ -117,6 +119,10 @@ pub struct WebCallConfig {
   pub maybe_ticket_source: Option<Rc<dyn WebJoinTicketSource>>,
   /// Which call status sounds (reconnecting, reconnected, connection lost) play.
   pub status_cues: StatusCues,
+  /// Where the page serves the AudioWorklet module (`call_web/teamcraft-call-worklet.js`). Pages
+  /// whose Content-Security-Policy allows scripts only from their own origin need it; `None` loads
+  /// the module from a blob URL.
+  pub maybe_worklet_url: Option<String>,
 }
 
 /// Gets a fresh join ticket from `teamcraft-server` in the page.
@@ -141,10 +147,48 @@ pub struct BrowserAudioDevices {
   pub outputs: Vec<AudioDeviceInfo>,
 }
 
+/// The browser's microphones, speakers and cameras. Labels are empty until the page has permission
+/// for the kind (browser privacy rule).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BrowserMediaDevices {
+  pub inputs: Vec<AudioDeviceInfo>,
+  pub outputs: Vec<AudioDeviceInfo>,
+  /// Camera ids are `MediaDeviceInfo.deviceId`s, as [`capture_camera`] takes them.
+  pub cameras: Vec<AudioDeviceInfo>,
+}
+
+/// What the page asked the browser for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaInput {
+  Microphone,
+  Camera,
+  Screen,
+}
+
+/// Why the browser refused a microphone, camera or screen (the `DOMException` name).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaAccessReason {
+  /// The user or a site setting refused (`NotAllowedError`, `SecurityError`). For the screen, the
+  /// user closed the picker.
+  Denied,
+  /// No such device (`NotFoundError`, `OverconstrainedError`).
+  NotFound,
+  /// The device is there but can't be opened, usually because another app holds it
+  /// (`NotReadableError`, `AbortError`).
+  InUse,
+  Other,
+}
+
 #[derive(Debug, Error)]
 pub enum WebCallError {
   #[error("{context} failed: {message}")]
   Browser { context: &'static str, message: String },
+  #[error("{input:?} unavailable ({reason:?}): {message}")]
+  MediaAccess {
+    input: MediaInput,
+    reason: MediaAccessReason,
+    message: String,
+  },
   #[error("this browser lacks {0}")]
   Unsupported(&'static str),
   #[error(transparent)]
@@ -291,8 +335,14 @@ impl WebCall {
   pub async fn join(config: WebCallConfig) -> Result<Self, WebCallError> {
     ensure_supported()?;
     let (inputs, input_rx) = mpsc::unbounded();
-    let audio = WebAudio::open(&config.source, &config.sink, &inputs).await?;
-    let transport = Transport::connect(&config.sfu_url, config.maybe_certificate_hash, &inputs, 0).await?;
+    let audio = WebAudio::open(
+      &config.source,
+      &config.sink,
+      config.maybe_worklet_url.as_deref(),
+      &inputs,
+    )
+    .await?;
+    let transport = Transport::connect(&config.sfu_url, &config.certificate_hashes, &inputs, 0).await?;
     let (event_tx, events) = mpsc::unbounded();
     let (finished_tx, finished) = oneshot::channel();
     let task_inputs = inputs.clone();
@@ -336,6 +386,12 @@ impl WebCall {
   /// `MediaDeviceInfo.deviceId`. Call it from a user gesture, like `join`.
   pub async fn start_camera(&self, maybe_device: Option<&str>) -> Result<(), WebCallError> {
     let stream = video::capture_camera(maybe_device).await?;
+    self.share_camera_stream(stream).await
+  }
+
+  /// Sends a camera stream the app opened itself ([`capture_camera`]), e.g. to show it as the
+  /// self view too; replaces a running camera. Stopping the camera stops the stream's tracks.
+  pub async fn share_camera_stream(&self, stream: MediaStream) -> Result<(), WebCallError> {
     self.start_video(stream, video::camera_plan()).await
   }
 
@@ -420,14 +476,44 @@ impl WebCall {
   }
 
   /// Leaves the call and returns its statistics.
-  pub async fn leave(self) -> Result<CallStats, WebCallError> {
+  pub async fn leave(mut self) -> Result<CallStats, WebCallError> {
     let _ = self.inputs.unbounded_send(Input::Command(Command::Leave));
-    self.finished.await.map_err(|_| WebCallError::Ended)?
+    (&mut self.finished).await.map_err(|_| WebCallError::Ended)?
   }
+}
+
+/// A call dropped without [`WebCall::leave`] still ends: the task holds its own input sender, so it
+/// would otherwise keep the microphone, camera and connection open.
+impl Drop for WebCall {
+  fn drop(&mut self) {
+    // After `leave` the task is gone and the channel closed; nothing left to end.
+    let _ = self.inputs.unbounded_send(Input::Command(Command::Leave));
+  }
+}
+
+/// Asks for the camera (`getUserMedia`); `maybe_device` is a `MediaDeviceInfo.deviceId`. Call it
+/// from a user gesture.
+pub async fn capture_camera(maybe_device: Option<&str>) -> Result<MediaStream, WebCallError> {
+  video::capture_camera(maybe_device).await
+}
+
+/// Whether this browser has what calls need (WebTransport, WebCodecs audio, AudioWorklet); the
+/// error names the first thing missing.
+pub fn check_support() -> Result<(), WebCallError> {
+  ensure_supported()
 }
 
 /// Lists microphones and speakers (`enumerateDevices`), defaults first.
 pub async fn list_audio_devices() -> Result<BrowserAudioDevices, WebCallError> {
+  let devices = list_media_devices().await?;
+  Ok(BrowserAudioDevices {
+    inputs: devices.inputs,
+    outputs: devices.outputs,
+  })
+}
+
+/// Lists microphones, speakers and cameras (`enumerateDevices`), defaults first.
+pub async fn list_media_devices() -> Result<BrowserMediaDevices, WebCallError> {
   let media_devices = window()?
     .navigator()
     .media_devices()
@@ -439,7 +525,7 @@ pub async fn list_audio_devices() -> Result<BrowserAudioDevices, WebCallError> {
     .await
     .map_err(browser("enumerateDevices"))?
     .unchecked_into();
-  let mut devices = BrowserAudioDevices::default();
+  let mut devices = BrowserMediaDevices::default();
   for entry in list.iter() {
     let info: MediaDeviceInfo = entry.unchecked_into();
     let device = AudioDeviceInfo {
@@ -451,6 +537,7 @@ pub async fn list_audio_devices() -> Result<BrowserAudioDevices, WebCallError> {
     match info.kind() {
       MediaDeviceKind::Audioinput => devices.inputs.push(device),
       MediaDeviceKind::Audiooutput => devices.outputs.push(device),
+      MediaDeviceKind::Videoinput => devices.cameras.push(device),
       _ => {},
     }
   }
@@ -483,7 +570,7 @@ async fn run_call(
       sfu_url: config.sfu_url.clone(),
       token: config.token.clone(),
     },
-    maybe_certificate_hash: config.maybe_certificate_hash,
+    certificate_hashes: config.certificate_hashes.clone(),
     resilience: config.resilience,
     maybe_ticket_source: config.maybe_ticket_source.clone(),
     cues: CuePlayer::new(config.status_cues),
@@ -529,6 +616,10 @@ async fn run_call(
   };
 
   audio.close();
+  // The camera and the shared screen stop with the call (the browser's indicators go off).
+  for sender in std::mem::take(&mut state.senders) {
+    sender.stop();
+  }
   if let Some(transport) = &state.maybe_transport {
     transport.close();
   }
@@ -552,7 +643,7 @@ struct CallState<'a> {
   /// When the connection was lost, while rejoining.
   maybe_lost_at: Option<Instant>,
   ticket: JoinTicket,
-  maybe_certificate_hash: Option<[u8; 32]>,
+  certificate_hashes: Vec<[u8; 32]>,
   resilience: ResilienceConfig,
   maybe_ticket_source: Option<Rc<dyn WebJoinTicketSource>>,
   /// Status sounds, mixed into the playback (never sent).
@@ -752,7 +843,7 @@ impl CallState<'_> {
     let inputs = self.inputs.clone();
     let maybe_source = self.maybe_ticket_source.clone();
     let fallback = self.ticket.clone();
-    let maybe_hash = self.maybe_certificate_hash;
+    let hashes = self.certificate_hashes.clone();
     let resilience = self.resilience;
     spawn_local(async move {
       let mut schedule = ReconnectSchedule::new(lost_at, grace);
@@ -769,7 +860,7 @@ impl CallState<'_> {
             Some(source) => source.fetch().await?,
             None => fallback.clone(),
           };
-          let transport = Transport::connect(&ticket.sfu_url, maybe_hash, &inputs, generation).await?;
+          let transport = Transport::connect(&ticket.sfu_url, &hashes, &inputs, generation).await?;
           Ok::<_, WebCallError>((transport, ticket))
         };
         match attempt.await {
@@ -958,23 +1049,23 @@ impl Transport {
   /// `generation`.
   async fn connect(
     sfu_url: &str,
-    maybe_certificate_hash: Option<[u8; 32]>,
+    certificate_hashes: &[[u8; 32]],
     inputs: &mpsc::UnboundedSender<Input>,
     generation: u64,
   ) -> Result<Self, WebCallError> {
     let options = Object::new();
-    if let Some(hash) = maybe_certificate_hash {
-      let entry = dictionary(&[
-        ("algorithm", JsValue::from_str("sha-256")),
-        ("value", Uint8Array::from(&hash[..]).into()),
-      ])
-      .map_err(browser("WebTransport options"))?;
-      Reflect::set(
-        &options,
-        &JsValue::from_str("serverCertificateHashes"),
-        &Array::of1(&entry),
-      )
-      .map_err(browser("WebTransport options"))?;
+    if !certificate_hashes.is_empty() {
+      let entries = Array::new();
+      for hash in certificate_hashes {
+        let entry = dictionary(&[
+          ("algorithm", JsValue::from_str("sha-256")),
+          ("value", Uint8Array::from(&hash[..]).into()),
+        ])
+        .map_err(browser("WebTransport options"))?;
+        entries.push(&entry);
+      }
+      Reflect::set(&options, &JsValue::from_str("serverCertificateHashes"), &entries)
+        .map_err(browser("WebTransport options"))?;
     }
     let transport = WebTransport::new(sfu_url, &options).map_err(browser("WebTransport"))?;
     JsFuture::from(transport.ready())
@@ -1034,12 +1125,13 @@ impl WebAudio {
   async fn open(
     source: &AudioSource,
     sink: &AudioSink,
+    maybe_worklet_url: Option<&str>,
     inputs: &mpsc::UnboundedSender<Input>,
   ) -> Result<Self, WebCallError> {
     let options = AudioContextOptions::new();
     options.set_sample_rate(SAMPLE_RATE_HZ as f32);
     let context = AudioContext::new_with_context_options(&options).map_err(browser("AudioContext"))?;
-    load_worklet(&context).await?;
+    load_worklet(&context, maybe_worklet_url).await?;
     let mut audio = Self {
       context,
       maybe_capture: None,
@@ -1119,12 +1211,12 @@ impl Capture {
     let promise = window()?
       .navigator()
       .media_devices()
-      .map_err(browser("mediaDevices"))?
+      .map_err(|_| WebCallError::Unsupported(SECURE_CONTEXT))?
       .get_user_media_with_constraints(&constraints)
-      .map_err(browser("getUserMedia"))?;
+      .map_err(media_access(MediaInput::Microphone))?;
     let stream: MediaStream = JsFuture::from(promise)
       .await
-      .map_err(browser("getUserMedia"))?
+      .map_err(media_access(MediaInput::Microphone))?
       .unchecked_into();
     let source = context
       .create_media_stream_source(&stream)
@@ -1468,7 +1560,17 @@ async fn read_chunks(
 }
 
 /// Registers both worklet processors with the context (from a blob URL, no extra file to serve).
-async fn load_worklet(context: &AudioContext) -> Result<(), WebCallError> {
+async fn load_worklet(context: &AudioContext, maybe_url: Option<&str>) -> Result<(), WebCallError> {
+  if let Some(url) = maybe_url {
+    let promise = context
+      .audio_worklet()
+      .and_then(|worklet| worklet.add_module(url))
+      .map_err(browser("AudioWorklet"))?;
+    return JsFuture::from(promise)
+      .await
+      .map(|_| ())
+      .map_err(browser("AudioWorklet"));
+  }
   let options = BlobPropertyBag::new();
   options.set_type("text/javascript");
   let blob =
@@ -1555,6 +1657,31 @@ fn browser(context: &'static str) -> impl Fn(JsValue) -> WebCallError {
   }
 }
 
+/// A refused `getUserMedia`/`getDisplayMedia`, classified by the `DOMException`'s name. A missing
+/// `mediaDevices` (pages that aren't a secure context) counts as denied.
+fn media_access(input: MediaInput) -> impl Fn(JsValue) -> WebCallError {
+  move |error| {
+    let name = Reflect::get(&error, &JsValue::from_str("name"))
+      .ok()
+      .and_then(|name| name.as_string())
+      .unwrap_or_default();
+    WebCallError::MediaAccess {
+      input,
+      reason: media_access_reason(&name),
+      message: js_message(&error),
+    }
+  }
+}
+
+fn media_access_reason(dom_exception_name: &str) -> MediaAccessReason {
+  match dom_exception_name {
+    "NotAllowedError" | "SecurityError" => MediaAccessReason::Denied,
+    "NotFoundError" | "OverconstrainedError" => MediaAccessReason::NotFound,
+    "NotReadableError" | "AbortError" => MediaAccessReason::InUse,
+    _ => MediaAccessReason::Other,
+  }
+}
+
 /// A readable message from a thrown JS value (usually a `DOMException` or `Error`).
 fn js_message(error: &JsValue) -> String {
   Reflect::get(error, &JsValue::from_str("message"))
@@ -1571,6 +1698,23 @@ fn to_i16(sample: f32) -> i16 {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn refused_media_is_classified_by_the_exception_name() {
+    for (name, reason) in [
+      ("NotAllowedError", MediaAccessReason::Denied),
+      ("SecurityError", MediaAccessReason::Denied),
+      ("NotFoundError", MediaAccessReason::NotFound),
+      ("OverconstrainedError", MediaAccessReason::NotFound),
+      ("NotReadableError", MediaAccessReason::InUse),
+      ("AbortError", MediaAccessReason::InUse),
+      ("TypeError", MediaAccessReason::Other),
+      ("", MediaAccessReason::Other),
+      ("SomeFutureError", MediaAccessReason::Other),
+    ] {
+      assert_eq!(media_access_reason(name), reason, "{name}");
+    }
+  }
 
   mod signaling_decoder {
     use super::*;

@@ -245,7 +245,7 @@ pub fn run_message_action(action: MessageAction, message: &Message, maybe_extras
 }
 
 /// Copies `text` and says whether it worked: "Copied", or an error when the browser refused.
-fn copy_and_confirm(text: String) {
+pub(crate) fn copy_and_confirm(text: String) {
   let state = use_app_state();
   let i18n = use_i18n();
   let (copied, failed) = (i18n.t("action-copied"), i18n.t("action-copy-failed"));
