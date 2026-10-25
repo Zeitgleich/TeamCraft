@@ -4,7 +4,7 @@
 use leptos::prelude::*;
 use teamcraft_proto::{UserId, WorkingHours};
 
-use crate::clock::{format_date_time, format_relative, now_ms, time_in_zone};
+use crate::clock::{format_date_time, format_relative, format_relative_short, now_ms, time_in_zone};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
@@ -46,8 +46,9 @@ pub fn InMeetingBadge(user: UserId) -> impl IntoView {
 
 /// "Last seen 5 minutes ago" for a person who is offline and lets others see it. Shows nothing
 /// while they are online, hide it, appear offline or the workspace switched last seen off.
+/// `is_compact` abbreviates it ("last seen: 5 min. ago") for the line under a name.
 #[component]
-pub fn LastSeen(user: UserId) -> impl IntoView {
+pub fn LastSeen(user: UserId, #[prop(optional)] is_compact: bool) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let locale = i18n.locale().tag();
@@ -59,10 +60,12 @@ pub fn LastSeen(user: UserId) -> impl IntoView {
       let maybe_at = is_offline.then(|| state.read(|backend| backend.last_seen(user))).flatten();
       maybe_at.map(|at| {
         let now = now_ms();
-        let label = if now - at < LAST_SEEN_JUST_NOW_MS {
-          i18n.t("last-seen-just-now")
-        } else {
-          i18n.t_with("last-seen", &[("when", &format_relative(at, now, locale))])
+        let is_just_now = now - at < LAST_SEEN_JUST_NOW_MS;
+        let label = match (is_compact, is_just_now) {
+          (false, true) => i18n.t("last-seen-just-now"),
+          (false, false) => i18n.t_with("last-seen", &[("when", &format_relative(at, now, locale))]),
+          (true, true) => i18n.t("last-seen-short-just-now"),
+          (true, false) => i18n.t_with("last-seen-short", &[("when", &format_relative_short(at, now, locale))]),
         };
         let exact = format_date_time(at, locale);
         view! { <span class="last-seen" title=exact>{label}</span> }
