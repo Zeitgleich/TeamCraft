@@ -476,6 +476,13 @@ pub trait LocalStore {
     Ok(())
   }
 
+  /// [`Self::purge_freed`], but for writes that come in bursts (the MLS storage is rewritten for
+  /// every processed group message): the store may wait up to a configured interval and merge
+  /// the purges, and still purges on [`Self::purge_freed`], when it is dropped and when the app
+  /// stops it. Never fails the caller's write: a purge that did not run stays due and is
+  /// retried.
+  fn purge_freed_soon(&self) {}
+
   /// Starts a group of writes that reaches the disk together: after a crash, or a write of the
   /// group that failed, either all of them are kept or none (issue #160). Groups nest; the
   /// outermost [`Self::end_writes`] commits. Reads see the group's writes at once, also from other
@@ -579,6 +586,10 @@ macro_rules! forward_local_store {
 
       fn purge_freed(&self) -> Result<(), StoreError> {
         (**self).purge_freed()
+      }
+
+      fn purge_freed_soon(&self) {
+        (**self).purge_freed_soon()
       }
 
       fn begin_writes(&self) -> Result<(), StoreError> {

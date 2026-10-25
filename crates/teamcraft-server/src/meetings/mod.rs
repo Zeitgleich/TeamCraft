@@ -3,6 +3,7 @@
 
 pub mod caldav;
 pub mod guest;
+pub mod guest_scope;
 pub mod ical;
 pub mod mailer;
 

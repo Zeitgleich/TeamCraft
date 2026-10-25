@@ -24,12 +24,12 @@ use teamcraft_media::effects::{
   TractSegmenter,
 };
 use teamcraft_media::system_audio::SystemAudioCapture;
-use teamcraft_media::video::{VideoResolution, fit_within, simulcast_layers};
+use teamcraft_media::video::{VideoResolution, fit_within, screen_limits, simulcast_layers};
 use teamcraft_media::video_capture::{CameraInfo, CaptureFormat, VideoCapture};
 use teamcraft_media::video_codec::OpenH264Decoder;
 use teamcraft_media::video_jpeg::JpegTranscoder;
 use teamcraft_media::video_pipeline::FrameFilter;
-use teamcraft_proto::{MediaStreamId, VideoCodec, VideoLayerInfo};
+use teamcraft_proto::{MediaStreamId, ScreenContentMode, VideoCodec, VideoLayerInfo};
 use tracing::{debug, info, warn};
 
 use super::VideoSink;
@@ -46,15 +46,7 @@ const CAMERA_FORMAT: CaptureFormat = CaptureFormat {
   },
   framerate: 30,
 };
-const SCREEN_FORMAT: CaptureFormat = CaptureFormat {
-  resolution: VideoResolution {
-    width: 1920,
-    height: 1080,
-  },
-  framerate: 15,
-};
 const CAMERA_BITRATE_BPS: u32 = 1_500_000;
-const SCREEN_BITRATE_BPS: u32 = 2_000_000;
 
 /// Cameras for the device picker.
 #[cfg(target_os = "linux")]
@@ -131,8 +123,9 @@ pub(super) fn open_camera(_maybe_id: Option<&str>) -> Result<Box<dyn VideoCaptur
 #[cfg(target_os = "linux")]
 pub(super) fn open_screen(
   maybe_restore_token: Option<&str>,
+  mode: ScreenContentMode,
 ) -> Result<(Box<dyn VideoCapture>, Option<String>), String> {
-  teamcraft_media::capture_portal::PortalCapture::screen(SCREEN_FORMAT, maybe_restore_token)
+  teamcraft_media::capture_portal::PortalCapture::screen(screen_format(mode), maybe_restore_token)
     .map(|(capture, maybe_token)| (Box::new(capture) as Box<dyn VideoCapture>, maybe_token))
     .map_err(|error| error.to_string())
 }
@@ -141,12 +134,13 @@ pub(super) fn open_screen(
 #[cfg(target_os = "windows")]
 pub(super) fn open_screen(
   maybe_restore_token: Option<&str>,
+  mode: ScreenContentMode,
 ) -> Result<(Box<dyn VideoCapture>, Option<String>), String> {
   use teamcraft_media::capture_windows::{ScreenSource, WindowsScreenCapture};
 
   let source = ScreenSource::from_token(maybe_restore_token);
   let maybe_token = source.to_token();
-  WindowsScreenCapture::open(source, SCREEN_FORMAT)
+  WindowsScreenCapture::open(source, screen_format(mode))
     .map(|capture| (Box::new(capture) as Box<dyn VideoCapture>, maybe_token))
     .map_err(|error| error.to_string())
 }
@@ -157,10 +151,11 @@ pub(super) fn open_screen(
 #[cfg(target_os = "macos")]
 pub(super) fn open_screen(
   _maybe_restore_token: Option<&str>,
+  mode: ScreenContentMode,
 ) -> Result<(Box<dyn VideoCapture>, Option<String>), String> {
   use teamcraft_media::capture_screencapturekit::ScreenCaptureKitScreen;
 
-  ScreenCaptureKitScreen::pick(SCREEN_FORMAT)
+  ScreenCaptureKitScreen::pick(screen_format(mode))
     .map(|capture| (Box::new(capture) as Box<dyn VideoCapture>, None))
     .map_err(|error| error.to_string())
 }
@@ -168,6 +163,7 @@ pub(super) fn open_screen(
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub(super) fn open_screen(
   _maybe_restore_token: Option<&str>,
+  _mode: ScreenContentMode,
 ) -> Result<(Box<dyn VideoCapture>, Option<String>), String> {
   Err("screen sharing is not supported on this platform yet".into())
 }
@@ -204,9 +200,19 @@ pub(super) fn camera_layers(format: CaptureFormat) -> Vec<VideoLayerInfo> {
   )
 }
 
-/// One layer for a screen (no simulcast: text must stay readable).
-pub(super) fn screen_layers(format: CaptureFormat) -> Vec<VideoLayerInfo> {
-  simulcast_layers(format.resolution, format.framerate, SCREEN_BITRATE_BPS, 1)
+/// The largest picture a screen share of `mode` asks the capture for (#530).
+fn screen_format(mode: ScreenContentMode) -> CaptureFormat {
+  let (resolution, framerate) = screen_limits(mode);
+  CaptureFormat {
+    resolution,
+    framerate,
+  }
+}
+
+/// Two layers for a screen: the picture within the mode's limits, and a half-size one for weak
+/// links.
+pub(super) fn screen_layers(format: CaptureFormat, mode: ScreenContentMode) -> Vec<VideoLayerInfo> {
+  teamcraft_media::video::screen_layers(format.resolution, format.framerate, mode)
 }
 
 /// The effects filter for the camera, if a segmentation model and a GPU are available. The model
@@ -475,11 +481,18 @@ mod tests {
   }
 
   #[test]
-  fn cameras_get_three_layers_and_screens_one() {
+  fn cameras_get_three_layers_and_screens_two() {
     assert_eq!(camera_layers(CAMERA_FORMAT).len(), 3);
-    let screen = screen_layers(SCREEN_FORMAT);
-    assert_eq!(screen.len(), 1);
-    assert_eq!((screen[0].width, screen[0].height), (1920, 1080));
+    let screen = screen_layers(
+      screen_format(ScreenContentMode::Detail),
+      ScreenContentMode::Detail,
+    );
+    assert_eq!(screen.len(), 2);
+    assert_eq!(
+      (screen[1].width, screen[1].height, screen[1].max_framerate),
+      (2560, 1440, 30)
+    );
+    assert_eq!((screen[0].width, screen[0].height), (1280, 720));
   }
 
   #[test]
@@ -515,13 +528,16 @@ mod tests {
     use teamcraft_media::video_codec::{OpenH264Encoder, VideoContent, VideoEncoder};
     use teamcraft_proto::{DeviceId, Id, MediaStreamId, Snowflake};
 
-    let layer = screen_layers(CaptureFormat {
-      resolution: VideoResolution {
-        width: 320,
-        height: 180,
+    let layer = screen_layers(
+      CaptureFormat {
+        resolution: VideoResolution {
+          width: 320,
+          height: 180,
+        },
+        framerate: 15,
       },
-      framerate: 15,
-    })[0];
+      ScreenContentMode::Detail,
+    )[0];
     let mut encoder = OpenH264Encoder::new(&layer, VideoContent::Camera).unwrap();
     let picture = encoder
       .encode(&test_pattern(layer_resolution(&layer), 0, 0).unwrap(), true)

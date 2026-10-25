@@ -370,6 +370,8 @@ pub struct CallPrefs {
   pub push_to_talk: bool,
   /// Screen shares include the computer's sound (off until the user turns it on).
   pub share_sound: bool,
+  /// What a screen share keeps under pressure (detail: resolution, motion: frame rate).
+  pub screen_mode: teamcraft_client_api::calls::ScreenContentMode,
   /// Tones while the connection is lost and when it is back.
   pub status_sounds: teamcraft_client_api::calls::CallStatusSounds,
 }
@@ -388,6 +390,7 @@ impl Default for CallPrefs {
       echo_cancellation: true,
       push_to_talk: false,
       share_sound: false,
+      screen_mode: teamcraft_client_api::calls::ScreenContentMode::Detail,
       status_sounds: teamcraft_client_api::calls::CallStatusSounds::All,
     }
   }

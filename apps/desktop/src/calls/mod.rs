@@ -46,8 +46,8 @@ use teamcraft_media::ringtone;
 use teamcraft_media::system_audio::SystemAudioCapture;
 use teamcraft_media::video_pipeline::{VideoSendConfig, preferred_encoders};
 use teamcraft_proto::{
-  AudioCodec, ConversationId, DeviceId, GatewayEvent, MediaCapabilities, MediaStreamId, VideoCodec,
-  VideoTrackKind,
+  AudioCodec, ConversationId, DeviceId, GatewayEvent, MediaCapabilities, MediaStreamId, ScreenContentMode,
+  VideoCodec, VideoTrackKind,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -115,6 +115,7 @@ struct MediaCall {
 enum Control {
   Mute(bool),
   Deafen(bool),
+  MoveHere,
   Audio {
     source: AudioSource,
     sink: AudioSink,
@@ -401,6 +402,11 @@ impl CallHost {
     self.control(Control::Deafen(is_deafened)).await;
   }
 
+  /// Takes the call over from the account's other devices (#505).
+  pub async fn move_here(&self) {
+    self.control(Control::MoveHere).await;
+  }
+
   /// The network changed or the computer woke up (the same signal the gateway reconnects on): a
   /// running call checks that its connection followed, and rejoins otherwise.
   pub fn network_changed(self: &Arc<Self>) {
@@ -556,16 +562,16 @@ impl CallHost {
   /// Shows the system's screen/window picker and shares the choice as its own stream, with the
   /// computer's sound when `has_sound`. Sound that can't be captured here doesn't stop the share;
   /// the call state says so.
-  pub async fn start_screen_share(&self, has_sound: bool) -> Result<(), String> {
+  pub async fn start_screen_share(&self, has_sound: bool, mode: ScreenContentMode) -> Result<(), String> {
     self.ensure_video_codec().await?;
     let maybe_token = lock(&self.state).maybe_screen_token.clone();
     let (capture, maybe_new_token) =
-      tokio::task::spawn_blocking(move || video::open_screen(maybe_token.as_deref()))
+      tokio::task::spawn_blocking(move || video::open_screen(maybe_token.as_deref(), mode))
         .await
         .map_err(|error| error.to_string())??;
     let config = VideoSendConfig {
       kind: VideoTrackKind::Screen,
-      layers: video::screen_layers(capture.format()),
+      layers: video::screen_layers(capture.format(), mode),
       capture,
       encoders: preferred_encoders(),
       maybe_filter: None,
@@ -731,6 +737,7 @@ async fn run_media(
       maybe_control = controls.recv() => match maybe_control {
         Some(Control::Mute(is_muted)) => call.set_muted(is_muted),
         Some(Control::Deafen(is_deafened)) => call.set_deafened(is_deafened),
+        Some(Control::MoveHere) => call.move_here(),
         Some(Control::Audio { source, sink, done }) => {
           let result = call.set_audio(source, sink).await.map_err(|error| error.to_string());
           let _ = done.send(result);

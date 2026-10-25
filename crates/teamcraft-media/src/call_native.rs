@@ -156,6 +156,7 @@ pub enum NativeCallError {
 enum Command {
   Mute(bool),
   Deafen(bool),
+  MoveHere,
   SwitchAudio {
     source: AudioSource,
     sink: AudioSink,
@@ -289,6 +290,11 @@ impl NativeCall {
 
   pub fn set_deafened(&self, is_deafened: bool) {
     let _ = self.commands.send(Command::Deafen(is_deafened));
+  }
+
+  /// Takes the call over from the account's other devices.
+  pub fn move_here(&self) {
+    let _ = self.commands.send(Command::MoveHere);
   }
 
   /// Publishes a video track; [`CallEngineEvent::VideoPublished`] for this device brings the stream
@@ -564,6 +570,7 @@ async fn run_call(
             engine.set_muted(is_muted);
             capture.set_muted(is_muted);
           },
+          Some(Command::MoveHere) => engine.move_here(),
           Some(Command::Deafen(is_deafened)) => {
             engine.set_deafened(is_deafened);
             sinks.mixer.set_deafened(is_deafened);

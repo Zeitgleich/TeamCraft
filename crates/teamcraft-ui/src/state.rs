@@ -101,8 +101,8 @@ pub struct UnreadMarker {
 /// The entry of the space rail that is selected, and so which sidebar shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RailEntry {
-  /// Home: the DMs and group DMs, which live outside spaces (Element's and Discord's home).
-  Home,
+  /// Chats: the DMs and group DMs, which live outside spaces (Element's and Discord's home).
+  Chats,
   /// The space in [`AppState::space`] (or all spaces, in the grouped sidebar).
   Space,
 }
@@ -192,6 +192,8 @@ pub enum Overlay {
   SpaceSettings(SpaceId),
   /// The image lightbox over a conversation, opened on this image.
   Lightbox(ConversationId, MediaKey),
+  /// The preview of a Markdown, HTML or PDF file of a conversation.
+  FilePreview(ConversationId, MediaKey),
   /// The versions of an edited message.
   EditHistory(ConversationId, MessageId),
   /// Edit the bookmarks bar of a conversation.
@@ -308,7 +310,7 @@ pub struct AppState {
 fn start_position(start: Option<(SpaceId, ConversationId)>) -> (SpaceId, RailEntry, MainView) {
   match start {
     Some((space, conversation)) => (space, RailEntry::Space, MainView::Conversation(conversation)),
-    None => (id_from_raw(0), RailEntry::Home, MainView::GettingStarted),
+    None => (id_from_raw(0), RailEntry::Chats, MainView::GettingStarted),
   }
 }
 
@@ -494,7 +496,7 @@ impl AppState {
       // Phones start on Home's list, like the mobile apps.
       if self.is_compact() {
         self.awaits_first_conversation.set(false);
-        self.open_home();
+        self.open_chats();
       } else {
         self.open_conversation(conversation.id);
       }
@@ -637,10 +639,10 @@ impl AppState {
     }
   }
 
-  /// Shows Home: the DM it had open last (#498), or the page's start when there is none.
-  pub fn open_home(&self) {
-    self.rail.set(RailEntry::Home);
-    // Phones show Home's list (the welcome page while the workspace is empty); a conversation
+  /// Shows Chats: the DM it had open last (#498), or the page's start when there is none.
+  pub fn open_chats(&self) {
+    self.rail.set(RailEntry::Chats);
+    // Phones show the chat list (the welcome page while the workspace is empty); a conversation
     // opens from there.
     if self.is_compact() {
       let is_empty =
@@ -831,7 +833,7 @@ impl AppState {
       self.space.set(space);
       self.rail.set(RailEntry::Space);
     } else if conversation.kind.is_direct_like() {
-      self.rail.set(RailEntry::Home);
+      self.rail.set(RailEntry::Chats);
     }
     if let SidePanel::Thread {
       conversation: open, ..
@@ -1372,7 +1374,7 @@ impl AppState {
     };
     match maybe_space {
       Some(space) => self.open_space(space),
-      None => self.open_home(),
+      None => self.open_chats(),
     }
   }
 
@@ -1418,7 +1420,7 @@ impl AppState {
   /// All conversations of the current sidebar in its order: the DMs on Home,
   /// otherwise the channels of the current space (of every space in the grouped sidebar).
   pub fn navigable_conversations(&self) -> Vec<Conversation> {
-    if self.rail.get() == RailEntry::Home {
+    if self.rail.get() == RailEntry::Chats {
       return self.direct_list();
     }
     let space = self.space.get();
@@ -1593,7 +1595,7 @@ impl AppState {
     }
     match route {
       Route::Start => self.open_start(),
-      Route::Home => self.open_home(),
+      Route::Home => self.open_chats(),
       Route::Space(space) => {
         if !self.read(|backend| backend.spaces().iter().any(|candidate| candidate.id == space)) {
           // The link of an open space the user isn't in yet: offer to join it.
@@ -1670,7 +1672,7 @@ impl AppState {
   /// [`start_position`] does on startup).
   fn open_start(&self) {
     if self.is_compact() {
-      self.open_home();
+      self.open_chats();
       return;
     }
     let first = self.read(|backend| {
@@ -1690,7 +1692,7 @@ impl AppState {
   }
 
   fn show_unavailable_route(&self) {
-    self.open_home();
+    self.open_chats();
     self.unavailable_routes.update(|count| *count += 1);
   }
 
@@ -1800,7 +1802,7 @@ mod tests {
   #[test]
   fn without_a_channel_the_app_starts_on_home_with_the_welcome_page() {
     let (_, rail, view) = start_position(None);
-    assert_eq!(rail, RailEntry::Home);
+    assert_eq!(rail, RailEntry::Chats);
     assert_eq!(view, MainView::GettingStarted);
   }
 
@@ -2017,7 +2019,7 @@ mod tests {
         state.open_threads();
         assert_eq!(state.follow_route(route), RouteOutcome::Unavailable, "{route:?}");
         assert_eq!(state.unavailable_routes.get(), before + 1, "{route:?}");
-        assert_eq!(state.rail.get(), RailEntry::Home, "{route:?}");
+        assert_eq!(state.rail.get(), RailEntry::Chats, "{route:?}");
         assert_eq!(
           state.pending_route.get(),
           None,
@@ -2031,7 +2033,7 @@ mod tests {
       let state = test_state();
       state.reject_route();
       assert_eq!(state.unavailable_routes.get(), 1);
-      assert_eq!(state.rail.get(), RailEntry::Home);
+      assert_eq!(state.rail.get(), RailEntry::Chats);
       assert!(state.take_follows_url());
     }
 
@@ -2065,7 +2067,7 @@ mod tests {
       state.open_threads();
       state.rail.set(RailEntry::Space);
       assert_eq!(state.follow_route(Route::Start), RouteOutcome::Shown);
-      assert_eq!(state.rail.get(), RailEntry::Home);
+      assert_eq!(state.rail.get(), RailEntry::Chats);
       assert_eq!(state.view.get(), MainView::GettingStarted);
       assert_eq!(state.route(), Route::Start);
     }
@@ -2260,7 +2262,7 @@ mod tests {
     fn home_and_a_space_show_their_list_instead_of_a_conversation() {
       let state = compact_state();
       let (space, _) = first_channel(&state);
-      state.open_home();
+      state.open_chats();
       assert_eq!(state.view.get(), MainView::Home);
       assert_eq!(state.compact_pane(), CompactPane::List);
       assert_eq!(state.route(), Route::Home);

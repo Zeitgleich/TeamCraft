@@ -90,6 +90,7 @@ impl FakeCalls {
           active.is_deafened = is_deafened;
         }
       },
+      CallAction::MoveHere => {},
       CallAction::SetCamera { is_on } => {
         if let Some(active) = &mut snapshot.maybe_active {
           active.is_camera_on = is_on;
@@ -100,7 +101,7 @@ impl FakeCalls {
           active.background = effect;
         }
       },
-      CallAction::StartScreenShare { has_sound } => {
+      CallAction::StartScreenShare { has_sound, .. } => {
         if let Some(active) = &mut snapshot.maybe_active {
           active.is_sharing_screen = true;
           active.screen_sound = if has_sound {

@@ -12,6 +12,7 @@ use leptos::prelude::{Get, GetUntracked, RwSignal, Set};
 use std::rc::Rc;
 use teamcraft_client_api::calls::{
   CallMoveOffer, CallStatusSounds, CallsUnavailableReason, OrgBackgroundRule, RemoteVideoTrack,
+  ScreenContentMode,
 };
 use teamcraft_proto::OrgBackgroundId;
 
@@ -31,8 +32,8 @@ use teamcraft_client_api::actions::{
 use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, PresencePolicy};
 
 use crate::admin::{
-  AdminChannel, AdminSpace, AdminUser, AuditEntry, AuditFilter, DeviceInfo, PolicyBlocker, Retention,
-  SelfJoinOutcome, SettingsTestKind,
+  AdminChannel, AdminLoad, AdminSpace, AdminSpaceChanges, AdminUser, AuditEntry, AuditFilter, DeviceInfo,
+  PolicyBlocker, Retention, SelfJoinOutcome, SettingsTestKind,
 };
 use crate::admin_live::AdminLive;
 use crate::auth::Authenticator;
@@ -901,6 +902,12 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
     }
   }
 
+  fn move_call_here(&self) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::MoveHere);
+    }
+  }
+
   fn select_microphone(&self, maybe_device: Option<String>) {
     if let Some(calls) = &self.maybe_calls {
       calls.act(CallAction::SelectMicrophone { maybe_device });
@@ -943,9 +950,12 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
     }
   }
 
-  fn start_screen_share(&self, has_sound: bool) {
+  fn start_screen_share(&self, has_sound: bool, content_mode: ScreenContentMode) {
     if let Some(calls) = &self.maybe_calls {
-      calls.act(CallAction::StartScreenShare { has_sound });
+      calls.act(CallAction::StartScreenShare {
+        has_sound,
+        content_mode,
+      });
     }
   }
 
@@ -1015,6 +1025,19 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     match &self.maybe_admin {
       Some(admin) => admin.spaces(),
       None => Vec::new(),
+    }
+  }
+
+  fn admin_load(&self) -> AdminLoad {
+    self
+      .maybe_admin
+      .as_ref()
+      .map_or(AdminLoad::Loaded, AdminLive::list_load)
+  }
+
+  fn change_admin_space(&self, space: SpaceId, changes: AdminSpaceChanges) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.change_space(space, changes);
     }
   }
 

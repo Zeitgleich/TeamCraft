@@ -93,6 +93,9 @@ pub enum CallClientMessage {
     stream_id: MediaStreamId,
     maybe_max_layer: Option<u8>,
   },
+  /// Takes the call over to this device: the SFU closes the account's other devices in the call
+  /// with [`CallEvent::ConnectionReplaced`] (#505). Only the account's own devices are affected.
+  MoveHere,
   #[serde(other)]
   Unknown,
 }
@@ -217,9 +220,23 @@ pub enum CallEvent {
     by_user_id: UserId,
   },
   /// The same device joined the call on another connection (another window, or this one came
-  /// back after the SFU gave it up for lost); the SFU closes this connection right after. Not to
-  /// be answered with a rejoin.
+  /// back after the SFU gave it up for lost), or another device of the account took the call over
+  /// ([`CallClientMessage::MoveHere`]); the SFU closes this connection right after. Not to be
+  /// answered with a rejoin.
   ConnectionReplaced,
+  #[serde(other)]
+  Unknown,
+}
+
+/// What a screen share keeps when the link or the machine can't carry it all (WebRTC's
+/// `contentHint`): `Detail` keeps the resolution (text, slides, code) and lets the frame rate drop;
+/// `Motion` keeps the frame rate (video, games, scrolling) at a lower resolution.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenContentMode {
+  #[default]
+  Detail,
+  Motion,
   #[serde(other)]
   Unknown,
 }
@@ -306,6 +323,7 @@ impl fmt::Debug for CallClientMessage {
         .field("stream_id", stream_id)
         .field("maybe_max_layer", maybe_max_layer)
         .finish(),
+      Self::MoveHere => f.write_str("MoveHere"),
       Self::Unknown => f.write_str("Unknown"),
     }
   }
@@ -462,6 +480,14 @@ mod tests {
     assert_eq!(
       serde_json::to_string(&message).unwrap(),
       r#"{"type":"error","error":{"error_code":"invalid_join_token","message":"expired"}}"#
+    );
+  }
+
+  #[test]
+  fn move_here_wire_format() {
+    assert_eq!(
+      serde_json::to_string(&CallClientMessage::MoveHere).unwrap(),
+      r#"{"type":"move_here"}"#
     );
   }
 

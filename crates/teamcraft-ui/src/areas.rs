@@ -28,6 +28,7 @@ use crate::components::admin_console::AdminConsole;
 use crate::components::call_prejoin::PreJoinScreen;
 use crate::components::call_screen::CallScreen;
 use crate::components::directory_view::DirectoryView;
+use crate::components::file_preview::FilePreview;
 use crate::components::lightbox::Lightbox;
 use crate::components::login::SessionGate;
 use crate::components::meetings_view::{MeetingCreatedDialog, MeetingsView, ScheduleMeetingDialog};
@@ -84,6 +85,8 @@ areas! {
   admin_console(section: AdminSection) => admin: view! { <AdminConsole section=section /> };
   settings(_unit: ()) => settings: view! { <SettingsModal /> };
   lightbox(conversation: ConversationId, start: MediaKey) => lightbox: view! { <Lightbox conversation=conversation start=start /> };
+  /// The preview of Markdown, HTML and PDF files (#557).
+  file_preview(conversation: ConversationId, key: MediaKey) => preview: view! { <FilePreview conversation=conversation key=key /> };
   /// Creating and configuring spaces and channels, and inviting people.
   new_space(_unit: ()) => workspace: view! { <NewSpaceDialog /> };
   new_channel(space: SpaceId) => workspace: view! { <NewChannelDialog space=space /> };

@@ -341,6 +341,14 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
 - **Audio:** forward the 3–5 loudest speakers based on the audio-level header extension; in large calls nobody receives dozens of audio streams.
 - **Video:** simulcast (3 layers) from each sender; the SFU picks the layer per receiver from its bandwidth estimate and viewport size ("last-N" for gallery view).
 - **Screen share:** separate session/stream, so a heavy share cannot degrade the call.
+- **Screen share quality** (`teamcraft_media::video::screen_layers`): two content modes, chosen per
+  share (remembered): *detail* (default) keeps text sharp, up to 1440p at 30 fps; *motion* keeps
+  smooth video, up to 1080p at 60 fps. The top layer's bitrate follows the pixel rate (about 0.06
+  bit per pixel, 2 to 8 Mbit/s: 1080p30 about 4, 1440p30 about 6.6); a second layer at half size and
+  a quarter of the bitrate serves weak viewers, and the uplink budget drops the big layer first.
+  A smaller source is never enlarged. Hardware encoders and the screen-content tuning of the encoders
+  apply as for cameras. Not yet: 4K, AV1/VP9 screen-content tools, battery and CPU budgets per
+  mode (to be measured, docs/performance.md).
 - **Screen share sound** (opt-in): the computer's playback without the call itself, as a second
   Opus stream per device (music mode, 64 kbit/s). The SFU forwards it to everyone regardless of
   the speaker selection. It is encrypted with the device's DAVE audio key, like the microphone.
@@ -410,6 +418,16 @@ numbering, own tracks, subscriptions and mute state, and reconciles everything e
 call ("connection lost"). Refused joins, removal or end by the host and `connection_replaced` are
 final: they are never answered with a rejoin. A locked meeting still lets a device of its roster
 back in.
+
+**Several devices of one account.** A call's participants are devices, not users: the SFU's slots,
+the server's roster and the DAVE group (one leaf per device, e2ee.md §8) are keyed by device, so a
+phone can join while the laptop is in the call and leaving on one keeps the other in. Each device
+has its own key package and call key binding, so no media key is shared between devices. A device
+doesn't play the microphone of another device of its own account (the user is in the room with
+it; playing it would echo), and a second device joins muted by default ("Join here too"). "Move
+call here" joins and then sends `move_here`: the SFU closes the account's *other* devices in that
+call with `connection_replaced`, which they treat as a final leave; it never touches another
+user's device. The server's ringing already stops for everybody once any device of a callee joins.
 
 Rejoin attempts back off exponentially (250 ms doubling to 2 s) with jitter (each pause between
 half and all of its interval), so clients that lost the SFU together don't come back in lockstep.

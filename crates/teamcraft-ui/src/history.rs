@@ -126,7 +126,7 @@ pub fn back_or_home(state: AppState) {
   if depth_of_current_entry() > 0 {
     travel(Travel::Back);
   } else {
-    state.open_home();
+    state.open_chats();
   }
 }
 

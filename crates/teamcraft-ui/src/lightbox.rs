@@ -182,6 +182,11 @@ impl MediaKey {
   /// (files still uploading have none yet).
   pub fn of(file: &FileInfo) -> Option<Self> {
     MediaKind::of(&file.media_type)?;
+    Self::for_file(file)
+  }
+
+  /// The key of any received file (the preview of documents, #557), with or without a picture.
+  pub fn for_file(file: &FileInfo) -> Option<Self> {
     let attachment = file.file_id.parse().ok()?;
     Some(Self {
       message: file.message,

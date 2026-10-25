@@ -228,6 +228,7 @@ struct HubState {
 enum Control {
   SetMuted(bool),
   SetDeafened(bool),
+  MoveHere,
   StartCamera {
     format: CaptureFormat,
     done: oneshot::Sender<Result<(), TeamCraftError>>,
@@ -274,6 +275,11 @@ impl CallSession {
   /// Stops playing the call (and mutes, as on desktop).
   pub fn set_deafened(&self, is_deafened: bool) {
     self.send(Control::SetDeafened(is_deafened));
+  }
+
+  /// Takes the call over from the account's other devices, which leave it.
+  pub fn move_here(&self) {
+    self.send(Control::MoveHere);
   }
 
   /// Other devices' video and frames go to `listener` from now on.
@@ -600,6 +606,7 @@ async fn apply_control(
 ) {
   match control {
     Control::SetMuted(is_muted) => call.set_muted(is_muted),
+    Control::MoveHere => call.move_here(),
     Control::SetDeafened(is_deafened) => {
       call.set_deafened(is_deafened);
       state.is_deafened = is_deafened;

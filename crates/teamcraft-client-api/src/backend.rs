@@ -22,12 +22,13 @@ use crate::actions::{
 };
 use crate::activity::ActivityFeed;
 use crate::admin::{
-  AdminChannel, AdminSpace, AdminUser, AuditEntry, AuditFilter, Retention, SelfJoinOutcome, SettingsTestKind,
+  AdminChannel, AdminLoad, AdminSpace, AdminSpaceChanges, AdminUser, AuditEntry, AuditFilter, Retention,
+  SelfJoinOutcome, SettingsTestKind,
 };
 use crate::calls::{
   ActiveCall, BackgroundEffect, BackgroundImageInfo, CallHistoryItem, CallMoveOffer, CallRequest,
   CallStatusSounds, CallsUnavailableReason, HuddleInfo, IncomingCall, MediaDevices, Participant,
-  RemoteVideoTrack,
+  RemoteVideoTrack, ScreenContentMode,
 };
 use crate::calls::{OrgBackgroundRule, OrgBackgrounds};
 use crate::model::{
@@ -568,6 +569,8 @@ pub trait CallBackend {
   fn decline_call(&self, _conversation: ConversationId) {}
   fn set_call_muted(&self, _is_muted: bool) {}
   fn set_call_deafened(&self, _is_deafened: bool) {}
+  /// Takes the active call over from the account's other devices, which leave it (#505).
+  fn move_call_here(&self) {}
   /// Which call status sounds play on this device, for this and later calls.
   fn set_call_status_sounds(&self, _sounds: CallStatusSounds) {}
   /// A [`crate::calls::MediaDevice::id`]; `None` follows the system default.
@@ -583,7 +586,7 @@ pub trait CallBackend {
   /// Opens the system's video effects panel (macOS); nothing elsewhere.
   fn open_system_video_effects(&self) {}
   /// `has_sound`: share the computer's sound too (without the call's own).
-  fn start_screen_share(&self, _has_sound: bool) {}
+  fn start_screen_share(&self, _has_sound: bool, _mode: ScreenContentMode) {}
   fn set_push_to_talk(&self, _is_enabled: bool, _maybe_shortcut: Option<String>) {}
   /// The push-to-talk key inside the window went down (`true`) or up.
   fn set_talking(&self, _is_talking: bool) {}
@@ -620,6 +623,13 @@ pub trait AdminBackend {
   fn admin_spaces(&self) -> Vec<AdminSpace> {
     Vec::new()
   }
+  /// Whether the space and channel lists arrived (`admin_refresh` retries a failed load).
+  fn admin_load(&self) -> AdminLoad {
+    AdminLoad::Loaded
+  }
+  /// Renames, archives or restores a space, or changes how people join it. The server decides who
+  /// may; the admin needs no membership and sees no content.
+  fn change_admin_space(&self, _space: SpaceId, _changes: AdminSpaceChanges) {}
   /// What each role may do at the scope (`None`: the whole instance) and the changes made there.
   fn permission_scheme(&self, _maybe_space: Option<SpaceId>) -> PermissionSchemeResponse {
     PermissionSchemeResponse { roles: Vec::new() }

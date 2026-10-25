@@ -1,7 +1,7 @@
 //! View models of the administration console. Admins see metadata only: nothing here carries message
 //! content (admin.md §2.1).
 
-use teamcraft_proto::{HistoryPolicy, Role};
+use teamcraft_proto::{HistoryPolicy, JoinPolicy, Role};
 
 use crate::model::{ConversationId, ConversationKind, DeviceId, SpaceId, TimestampMs, User, UserId};
 
@@ -441,11 +441,36 @@ pub struct AuditEntry {
   pub detail: String,
 }
 
-/// A space as admins see it, for scoping a permission scheme.
+/// A space as admins see it: metadata and counts only, never content (admin.md §2.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdminSpace {
   pub id: SpaceId,
   pub name: String,
+  pub join_policy: JoinPolicy,
+  pub is_archived: bool,
+  pub member_count: u32,
+  pub guest_count: u32,
+  pub channel_count: u32,
+  pub created_at: TimestampMs,
+}
+
+/// What an admin changes on a space (admin.md §3.1); fields left `None` stay as they are.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AdminSpaceChanges {
+  pub maybe_name: Option<String>,
+  pub maybe_join_policy: Option<JoinPolicy>,
+  pub maybe_is_archived: Option<bool>,
+}
+
+/// Whether the console's lists (spaces, channels) arrived: the first load of a large instance
+/// takes a while, and a failure must not look like an empty instance.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum AdminLoad {
+  #[default]
+  Loading,
+  Loaded,
+  /// Nothing could be loaded; the text says why. A reload retries.
+  Failed(String),
 }
 
 /// Narrows the audit log; the server filters, so the list stays short.

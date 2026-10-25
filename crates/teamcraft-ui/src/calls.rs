@@ -32,6 +32,8 @@ pub enum CallEvent {
   Decline(ConversationId),
   Muted(bool),
   Deafened(bool),
+  /// Takes the call over from the account's other devices, which leave it.
+  MoveHere,
   Microphone(String),
   Speakers(String),
   /// Plays the test sound on these speakers (an empty id: the default).
@@ -43,6 +45,7 @@ pub enum CallEvent {
   Effect(BackgroundEffect),
   StartScreenShare {
     has_sound: bool,
+    mode: ScreenContentMode,
   },
   StopScreenShare,
   StatusSounds(CallStatusSounds),
@@ -70,6 +73,8 @@ pub struct CallState {
   pub is_sharing_screen: RwSignal<bool>,
   /// Screen shares include the computer's sound (the user's choice, remembered in the settings).
   pub share_sound: RwSignal<bool>,
+  /// What a screen share keeps under pressure: resolution (detail) or frame rate (motion).
+  pub screen_mode: RwSignal<ScreenContentMode>,
   pub has_hand_raised: RwSignal<bool>,
   pub is_deafened: RwSignal<bool>,
   /// An announced move of this call into a meeting room the user hasn't followed yet.
@@ -96,6 +101,7 @@ impl CallState {
       is_minimized: RwSignal::new(false),
       is_sharing_screen: RwSignal::new(false),
       share_sound: RwSignal::new(false),
+      screen_mode: RwSignal::new(ScreenContentMode::default()),
       has_hand_raised: RwSignal::new(false),
       is_deafened: RwSignal::new(false),
       move_offer: RwSignal::new(None),
@@ -156,6 +162,7 @@ impl CallState {
     if is_sharing {
       self.emit(CallEvent::StartScreenShare {
         has_sound: self.share_sound.get_untracked(),
+        mode: self.screen_mode.get_untracked(),
       });
     } else {
       self.emit(CallEvent::StopScreenShare);
@@ -181,6 +188,20 @@ impl CallState {
   pub fn join(&self, request: CallRequest) {
     self.maybe_request.set(Some(request));
     self.enter();
+  }
+
+  /// The account is in this call on another device: joins next to it with the microphone muted,
+  /// so the two don't echo each other.
+  pub fn join_alongside(&self, request: CallRequest) {
+    self.is_mic_on.set(false);
+    self.join(request);
+  }
+
+  /// The account is in this call on another device: joins and takes the call over, so the other
+  /// device leaves.
+  pub fn join_and_take_over(&self, request: CallRequest) {
+    self.join(request);
+    self.emit(CallEvent::MoveHere);
   }
 
   /// Leaves the pre-join screen and enters the call.
