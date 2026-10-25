@@ -161,9 +161,9 @@ fn place(
   }
   drop(classes.add_1("has-selection"));
   if is_jump {
-    // Transitions come back once the jump has been drawn, so the next selection slides.
-    let indicator = indicator.clone();
-    request_animation_frame(move || drop(indicator.class_list().add_1("is-live")));
+    // Reading the layout applies the jump without a transition; the next selection slides.
+    let _ = indicator.offset_width();
+    drop(classes.add_1("is-live"));
   }
 }
 

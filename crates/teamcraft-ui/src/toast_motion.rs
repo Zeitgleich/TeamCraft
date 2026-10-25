@@ -142,7 +142,7 @@ impl Default for Swipe {
 struct Drag {
   pointer_id: i32,
   origin: (f64, f64),
-  /// The two last samples (x, time in ms), for the release velocity.
+  /// The two last samples of the move (x, time in ms), for the release velocity.
   last: (f64, f64),
   previous: (f64, f64),
   is_swiping: bool,
@@ -213,14 +213,9 @@ impl Swipe {
     let Some(toast) = toast_of(ev).filter(|_| drag.is_swiping) else {
       return;
     };
-    let dx = drag.last.0 - drag.origin.0;
-    let elapsed_ms = drag.last.1 - drag.previous.1;
-    let velocity = if elapsed_ms > 0.0 {
-      (drag.last.0 - drag.previous.0) / elapsed_ms
-    } else {
-      0.0
-    };
-    if is_dismissal(dx, velocity) {
+    let release = (f64::from(ev.client_x()), ev.time_stamp());
+    let dx = release.0 - drag.origin.0;
+    if is_dismissal(dx, release_velocity(drag.previous, release)) {
       fly_off(&toast, dx.signum(), on_dismiss);
     } else {
       spring_back(&toast);
@@ -241,6 +236,17 @@ impl Swipe {
 fn is_dismissal(dx_px: f64, velocity: f64) -> bool {
   dx_px.abs() > DISMISS_DISTANCE_PX
     || (velocity.abs() > DISMISS_VELOCITY_PX_PER_MS && velocity.signum() == dx_px.signum())
+}
+
+/// Speed in px/ms from the sample before the last move to the release: a finger that stopped
+/// before lifting has slowed down, one that flicked has not.
+fn release_velocity(from: (f64, f64), release: (f64, f64)) -> f64 {
+  let elapsed_ms = release.1 - from.1;
+  if elapsed_ms > 0.0 {
+    (release.0 - from.0) / elapsed_ms
+  } else {
+    0.0
+  }
 }
 
 /// The toast fades as it is pulled away: half gone at its own width.
@@ -303,6 +309,14 @@ mod tests {
       assert!(!is_dismissal(30.0, 0.05));
       assert!(!is_dismissal(30.0, -0.5));
     }
+  }
+
+  #[test]
+  fn a_finger_that_stopped_before_lifting_does_not_flick() {
+    // Moved 15 px in 30 ms, then held still for 200 ms.
+    assert!(release_velocity((10.0, 30.0), (25.0, 260.0)) < DISMISS_VELOCITY_PX_PER_MS);
+    // Lifted right after the move.
+    assert!(release_velocity((10.0, 30.0), (25.0, 65.0)) > DISMISS_VELOCITY_PX_PER_MS);
   }
 
   #[test]
