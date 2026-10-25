@@ -149,6 +149,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   }
   if tauri::is_available() {
     sync_tray(state, i18n);
+  } else {
+    sync_favicon(state);
   }
   if let Some((_, conversation)) = start {
     state.open_conversation(conversation);
@@ -724,6 +726,25 @@ fn sync_tray_labels(i18n: crate::i18n::I18n) {
     let name = brand.0.with(|brand| brand.display_name.clone());
     let (show, quit) = (i18n.t("tray-show"), i18n.t("tray-quit"));
     leptos::task::spawn_local(async move { tauri::tray_update(None, &name, &show, &quit).await });
+  });
+}
+
+/// The browser tab's icon gets a red dot while the tray would show a count.
+fn sync_favicon(state: AppState) {
+  Effect::new(move |previous: Option<bool>| {
+    let has_unread = state.read(|backend| {
+      let mut list: Vec<_> = backend
+        .spaces()
+        .into_iter()
+        .flat_map(|space| backend.space_conversations(space.id))
+        .collect();
+      list.extend(backend.direct_conversations());
+      badge_count(&list) > 0
+    });
+    if previous != Some(has_unread) {
+      crate::brand::show_unread_in_favicon(has_unread);
+    }
+    has_unread
   });
 }
 
