@@ -15,7 +15,7 @@ use crate::components::message_link_card::MessageLinkPreviews;
 use crate::components::message_toolbar::{ActiveMessage, LONG_PRESS, ToolbarHost};
 use crate::components::profile_views::UserHoverCard;
 use crate::components::rich_text::RichText;
-use crate::delivery::Delivery;
+use crate::delivery::{Delivery, is_read_by_all};
 use crate::feed_motion::{Entrance, RowMotion};
 use crate::i18n::use_i18n;
 use crate::markdown;
@@ -565,6 +565,22 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
   // Refused by the server for good (no permission, too large): only then is it an error.
   let is_send_failed =
     move || extras.with(|maybe_extras| maybe_extras.as_ref().is_some_and(|extras| extras.is_send_failed));
+  // Receipts exist in DMs and group DMs only, and are empty when either side turned them off.
+  let sent_time = time.clone();
+  let is_read = move || {
+    state.read(|backend| {
+      backend
+        .conversation(conversation)
+        .filter(|conv| conv.kind.is_direct_like())
+        .is_some_and(|conv| {
+          is_read_by_all(
+            &backend.seen_by(conversation, message_id),
+            &conv.member_ids,
+            me.id,
+          )
+        })
+    })
+  };
   let delivery_view = move || {
     if is_send_failed() {
       return Some(
@@ -590,6 +606,35 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
       );
     }
     match delivery.get() {
+      // Own messages on the server: one tick, two blue ones once everyone read it (#568).
+      Delivery::Sent if is_mine => {
+        let is_read = is_read();
+        let sent_time = sent_time.clone();
+        let key = if is_read {
+          "message-status-read"
+        } else {
+          "message-status-sent"
+        };
+        let icon = if is_read {
+          IconName::CheckDouble
+        } else {
+          IconName::Check
+        };
+        Some(
+          view! {
+            <span
+              class="msg-delivery is-sent"
+              class:is-read=is_read
+              role="img"
+              aria-label=move || i18n.t(key)
+              data-tip=move || format!("{}, {}", i18n.t(key), sent_time)
+            >
+              <Icon name=icon />
+            </span>
+          }
+          .into_any(),
+        )
+      },
       Delivery::Sent => None,
       // Unconfirmed: a small clock, retried in the background (offline, reconnect, reload).
       Delivery::Sending => Some(
