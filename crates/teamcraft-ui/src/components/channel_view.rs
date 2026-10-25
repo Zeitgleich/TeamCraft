@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 
 use crate::calls::{CallKind, CallPhase, CallRequest};
-use crate::components::avatar::PresenceDot;
+use crate::components::avatar::{Avatar, AvatarSize, PresenceDot};
 use crate::components::bookmarks::BookmarksBar;
 use crate::components::channel_glyph::ChannelGlyph;
 use crate::components::compact_back::CompactBack;
@@ -24,6 +24,9 @@ const DM_SETUP_EXPIRY_MARGIN_MS: u64 = 500;
 
 /// How far back the seen line looks for the user's own latest message.
 const SEEN_LOOKBACK: usize = 50;
+
+/// Members shown as pictures next to the count in a wide header; the count says the rest.
+const HEADER_AVATARS: usize = 3;
 
 /// The tabs of a conversation's header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -526,6 +529,7 @@ fn ChannelHeader(
 
   view! {
     <header class="channel-header">
+      <div class="header-row">
       <div class="header-main">
         <CompactBack />
         <div class="header-identity">
@@ -588,7 +592,6 @@ fn ChannelHeader(
             {move || i18n.t("external-badge")}
           </span>
         </Show>
-        <ChannelTabs tab=tab />
         <Show when=move || topic().is_some() fallback=|| ()>
           <span class="header-divider" aria-hidden="true"></span>
           <p class="header-topic" title=move || topic().unwrap_or_default()>
@@ -640,15 +643,32 @@ fn ChannelHeader(
             });
           }
         >
-          <Icon name=IconName::Users />
+          <Icon name=IconName::Users class="header-members-icon" />
+          <span class="avatar-stack header-avatars" aria-hidden="true">
+            {move || {
+              let ids = info
+                .get()
+                .map(|conv| conv.member_ids.into_iter().take(HEADER_AVATARS).collect::<Vec<_>>())
+                .unwrap_or_default();
+              state
+                .read(|backend| ids.into_iter().filter_map(|id| backend.user(id)).collect::<Vec<_>>())
+                .into_iter()
+                .map(|user| view! { <Avatar user=user size=AvatarSize::Small /> })
+                .collect_view()
+            }}
+          </span>
           <span>{member_count}</span>
         </button>
+      </div>
+      </div>
+      <div class="header-row header-row-tabs">
+        <ChannelTabs tab=tab />
       </div>
     </header>
   }
 }
 
-/// Messages and Files, right after the conversation's name.
+/// Messages and Files, on the header's second row.
 #[component]
 fn ChannelTabs(tab: RwSignal<ChannelTab>) -> impl IntoView {
   let i18n = use_i18n();

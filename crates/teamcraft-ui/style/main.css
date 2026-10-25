@@ -764,21 +764,34 @@ select.input {
   color: var(--accent-strong);
 }
 
-/* In the channel header the tabs sit on its bottom edge, after the name. */
-.channel-header > .header-main {
-  align-self: stretch;
+/* In the channel header the tabs are the second row (#580): they scroll sideways, with the edges
+   fading out, instead of wrapping or squeezing the first row. The row's padding keeps the fade off
+   the tabs at rest. */
+.view-tabs.header-tabs {
+  flex: 1;
+  min-width: 0;
+  padding: 0 var(--space-4);
+  border-bottom: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 var(--space-4), #000 calc(100% - var(--space-4)), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 var(--space-4), #000 calc(100% - var(--space-4)), transparent);
 }
 
-.view-tabs.header-tabs {
-  align-self: stretch;
-  align-items: flex-end;
-  margin-left: var(--space-2);
-  padding: 0;
-  border-bottom: 0;
+.view-tabs.header-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .view-tabs.header-tabs [role="tab"] {
-  height: 34px;
+  flex: none;
+  height: 36px;
+  white-space: nowrap;
+}
+
+/* Inside the scroller the underline sits on its bottom edge, not below it. */
+.view-tabs.header-tabs > .tab-indicator {
+  bottom: 0;
 }
 
 /* A conversation's messages tab: feed, seen line and composer, laid out as before the tabs. */
@@ -1648,12 +1661,29 @@ select.input {
 .channel-header {
   flex: none;
   display: flex;
-  align-items: center;
-  gap: 12px;
-  height: 52px;
-  padding: 0 16px;
+  flex-direction: column;
   border-bottom: 1px solid var(--border);
   container: channel-header / inline-size;
+}
+
+/* Two rows (#580): the name, topic and actions, then the tabs. */
+.header-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 48px;
+  padding: 0 16px;
+}
+
+.header-row.header-row-tabs {
+  height: 36px;
+  padding: 0;
+}
+
+@media (pointer: coarse) {
+  .header-row.header-row-tabs {
+    height: auto;
+  }
 }
 
 /* Only the topic and then the name give way; tabs and buttons keep their size and never overlap. */
@@ -1773,12 +1803,6 @@ select.input {
   }
 }
 
-@container channel-header (max-width: 420px) {
-  .header-main > .header-tabs {
-    display: none;
-  }
-}
-
 @media (pointer: coarse) {
   @container channel-header (max-width: 800px) {
     .header-topic,
@@ -1799,12 +1823,6 @@ select.input {
       display: none;
     }
   }
-
-  @container channel-header (max-width: 480px) {
-    .header-main > .header-tabs {
-      display: none;
-    }
-  }
 }
 
 .header-btn {
@@ -1817,6 +1835,34 @@ select.input {
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
+}
+
+/* Members: overlapping pictures and the count; narrower, the pictures fold into the plain icon. */
+.header-avatars {
+  padding-left: 0;
+}
+
+.header-avatars > .avatar {
+  margin-left: -6px;
+  box-shadow: 0 0 0 2px var(--surface);
+}
+
+.header-avatars > .avatar:first-child {
+  margin-left: 0;
+}
+
+.header-members-icon {
+  display: none;
+}
+
+@container channel-header (max-width: 900px) {
+  .header-avatars {
+    display: none;
+  }
+
+  .header-members-icon {
+    display: inline-block;
+  }
 }
 
 .header-btn[aria-pressed="true"] {
@@ -9226,7 +9272,7 @@ ol.md-list {
 }
 
 /* Headers: the back button first, everything sized for a finger. */
-:root[data-layout="compact"] .channel-header,
+:root[data-layout="compact"] .channel-header .header-row:not(.header-row-tabs),
 :root[data-layout="compact"] .panel-header {
   gap: var(--space-1);
   min-height: var(--topbar-h);

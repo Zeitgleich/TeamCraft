@@ -28,7 +28,7 @@ INJECTED = re.compile(
     r"ipc::Request|ipc::Channel)\b"
 )
 COMMAND_ATTRIBUTE = re.compile(
-    r"#\[tauri::command(?:\(([^)]*)\))?\]\s*(?:(?:#\[[^\]]*\]|//[^\n]*)\s*)*"
+    r"#\[tauri::command(?:\(([^)]*)\))?\]\s*(?:(?:#\[[^\]]*\]|//[^\n]*\n)\s*)*"
     r"(?:pub(?:\([a-z]+\))?\s+)?(?:async\s+)?fn\s+(\w+)\s*\("
 )
 CALL_SITE = re.compile(r"\b(?:call|invoke|server_call)(?:::<.*?>)?\(\s*\"(\w+)\"\s*,")
