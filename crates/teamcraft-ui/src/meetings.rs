@@ -377,6 +377,16 @@ pub fn invited_users(request: &CreateMeetingRequest) -> Vec<UserId> {
     .collect()
 }
 
+/// The TeamCraft users a saved meeting lists as attendees (externals have no account). The
+/// organizer's own device sets the meeting chat's group up from this as it knows the meeting.
+pub fn attending_users(meeting: &MeetingResponse) -> Vec<UserId> {
+  meeting
+    .attendees
+    .iter()
+    .filter_map(|attendee| attendee.maybe_user_id)
+    .collect()
+}
+
 /// A live meeting where `me` is the host, so guests and members with its link may wait in its
 /// lobby. Also without `has_lobby`: guests of the shared link and members always wait there.
 pub fn hosts_lobby(meeting: &MeetingResponse, me: UserId) -> bool {

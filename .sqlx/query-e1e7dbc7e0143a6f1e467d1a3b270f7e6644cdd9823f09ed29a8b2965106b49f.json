@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO mls_group_infos (conversation_id, epoch, group_info) VALUES ($1, $2, $3)\n       ON CONFLICT (conversation_id) DO UPDATE\n         SET epoch = EXCLUDED.epoch, group_info = EXCLUDED.group_info, updated_at = now()\n         WHERE mls_group_infos.epoch < EXCLUDED.epoch\n            OR (mls_group_infos.epoch = EXCLUDED.epoch\n                AND (EXCLUDED.epoch > 0 OR mls_group_infos.group_info = EXCLUDED.group_info))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e1e7dbc7e0143a6f1e467d1a3b270f7e6644cdd9823f09ed29a8b2965106b49f"
+}

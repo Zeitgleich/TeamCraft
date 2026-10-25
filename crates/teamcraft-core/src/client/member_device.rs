@@ -97,6 +97,8 @@ pub(super) enum GroupInfoOutcome {
   OnServer,
   /// Nothing published: no group, a commit still pending, too large, or the epoch moved on.
   NotPublished,
+  /// Another founder's group information holds epoch 0; this device's group is not the server's.
+  Superseded,
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
@@ -594,8 +596,27 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     match self.api.put_mls_group_info(conversation, &request).await {
       Ok(()) => Ok(GroupInfoOutcome::OnServer),
-      // The group moved on: the next commit carries newer information anyway.
-      Err(error) if error.is_epoch_conflict() => Ok(GroupInfoOutcome::NotPublished),
+      Err(error) if error.is_epoch_conflict() => {
+        // At epoch 0 the server keeps the first group's information, so a conflict while the
+        // server's group is still in epoch 0 means another device founded it first. Otherwise the
+        // group moved on, and the next commit carries newer information anyway.
+        let query = ListMlsMessagesQuery {
+          maybe_after: None,
+          maybe_limit: Some(1),
+        };
+        let is_second_founder = epoch == 0
+          && self
+            .api
+            .list_mls_messages(conversation, &query)
+            .await?
+            .current_epoch
+            == 0;
+        Ok(if is_second_founder {
+          GroupInfoOutcome::Superseded
+        } else {
+          GroupInfoOutcome::NotPublished
+        })
+      },
       Err(error) => Err(error.into()),
     }
   }

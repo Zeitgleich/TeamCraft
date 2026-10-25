@@ -233,6 +233,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .set_up_meeting_chat(conversation, &invitees)
         .await
         .map(|_| ()),
+      CoreCommand::UpdateMeetingChatMembers {
+        conversation,
+        invitees,
+        removed,
+      } => self
+        .update_meeting_chat_members(conversation, &invitees, &removed)
+        .await
+        .map(|_| ()),
       CoreCommand::AddPeopleToCall {
         from,
         in_call,

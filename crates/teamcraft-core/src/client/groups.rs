@@ -20,6 +20,7 @@ use teamcraft_proto::{
   PostMlsCommitRequest, PostMlsMessageRequest, SpaceId, UserId,
 };
 
+use super::member_device::GroupInfoOutcome;
 use super::workspace::{PendingChange, SharedKeys};
 use super::{Client, pending_post_key};
 use crate::api::{ApiError, ServerApi};
@@ -275,6 +276,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let had_setup = self.dm_setup(id)?.is_some();
     let me = self.user_id();
     let others = conversation_members(invitees, me);
+    // Nothing to do, and no request to make, when this device is in a group that holds everybody.
+    if !had_setup && self.has_group(id)? && self.group_holds(id, &others)? {
+      return Ok(true);
+    }
     // Noted before anything can fail: a setup cut short here (no network, the app closed) is
     // finished on a later sync (`repair_dm_setups`).
     self.note_participants_setup(id, &others, true)?;
@@ -291,10 +296,69 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return self.has_group(id);
     }
     let is_complete = self.finish_dm_setup(id, &others).await?;
-    if self.has_group(id)? {
-      self.publish_group_info_if_missing(id).await?;
+    if self.has_group(id)? && self.publish_group_info_if_missing(id).await? == GroupInfoOutcome::Superseded {
+      // Two devices of the organizer founded it at once and the other one was first: this one
+      // joins that group, then adds whoever is still missing.
+      self.rejoin_superseded_group(id).await?;
+      return self.finish_dm_setup(id, &others).await;
     }
     Ok(is_complete)
+  }
+
+  /// The organizer changed who is invited to a meeting (`PATCH /meetings/{id}`): `invitees` is the
+  /// whole invitee list as the organizer just saved it, `removed` the users taken off it. Signed by
+  /// this device: the users missing from the encryption group are added (or wait for their first
+  /// device), the removed ones are removed, with a commit that rotates the key so they read nothing
+  /// new. Never from the server's member list; guests the host admitted stay (e2ee.md §4.6,
+  /// "Meeting chats"). `Ok(true)` once everybody invited is in.
+  pub async fn update_meeting_chat_members(
+    &mut self,
+    id: ConversationId,
+    invitees: &[UserId],
+    removed: &[UserId],
+  ) -> Result<bool, CoreError> {
+    let is_complete = self.set_up_meeting_chat(id, invitees).await?;
+    let me = self.user_id();
+    let removed: Vec<UserId> = removed
+      .iter()
+      .copied()
+      .filter(|user| *user != me && !invitees.contains(user))
+      .collect();
+    if removed.is_empty() {
+      return Ok(is_complete);
+    }
+    if !self.has_group(id)? {
+      return Err(CoreError::NoGroup(id));
+    }
+    for user in removed {
+      if !self.group_users(id)?.contains(&user) {
+        continue;
+      }
+      self
+        .commit_change(
+          id,
+          ChangeSource::Own(MembershipAction::RemoveUser {
+            user_id: convert::user(user),
+          }),
+        )
+        .await?;
+    }
+    Ok(is_complete)
+  }
+
+  /// This device founded a meeting chat's group alone while another device's group holds epoch 0
+  /// on the server: gives its own up and joins the server's by external commit, so the organizer's
+  /// devices never run two groups (e2ee.md §4.6, "Meeting chats").
+  pub(super) async fn rejoin_superseded_group(&mut self, id: ConversationId) -> Result<(), CoreError> {
+    tracing::info!(conversation_id = %id, "another device founded the meeting chat's group first");
+    self.drop_group(id)?;
+    self.join_as_member_device(id).await?;
+    Ok(())
+  }
+
+  fn group_holds(&mut self, id: ConversationId, users: &[UserId]) -> Result<bool, CoreError> {
+    let in_group = self.group_users(id)?;
+    Ok(users.iter().all(|user| in_group.contains(user)))
   }
 
   /// "Admit" by a host of a meeting: lets the admitted user's devices into the chat's encryption
@@ -491,7 +555,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_limit: Some(1),
     };
     let server_epoch = self.api.list_mls_messages(id, &query).await?.current_epoch;
+    let is_meeting_chat = self.dm_setup(id)?.is_some_and(|setup| setup.is_meeting_chat);
     match self.mls_epoch(id)? {
+      // A meeting chat is only ever founded by the organizer's devices: the winner is the
+      // organizer's other device, which sends this one no welcome. It joins by external commit.
+      Some(0) if server_epoch > 0 && is_meeting_chat => self.rejoin_superseded_group(id).await?,
       Some(0) if server_epoch > 0 => {
         // Another founding won, says the server: this device waits for the winner's welcome.
         // Adding now would only lose the epoch again and spend the others' key packages.

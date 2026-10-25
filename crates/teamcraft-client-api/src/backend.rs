@@ -274,6 +274,16 @@ pub trait ChatBackend {
   /// they invited (the organizer's own request: the group is never founded from the server's
   /// member list).
   fn set_up_meeting_chat(&self, _conversation: ConversationId, _invitees: Vec<UserId>) {}
+  /// The organizer saved a changed invitee list of a meeting: `invitees` is the whole list, `removed`
+  /// the users taken off it. The new ones go into the chat's encryption group and the removed ones
+  /// out of it, signed by this device.
+  fn update_meeting_chat_members(
+    &self,
+    _conversation: ConversationId,
+    _invitees: Vec<UserId>,
+    _removed: Vec<UserId>,
+  ) {
+  }
   /// "Add people" in a DM or group DM call (docs/meetings.md, "A call becomes a meeting"): a meeting
   /// room with the people in the call (`in_call`, as the call shows them) and `added`, whose
   /// encryption group gets exactly them, and the call moves there. The same `key` again (a retry)

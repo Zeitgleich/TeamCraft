@@ -240,6 +240,9 @@ struct State {
   garbled_entries: HashMap<UserId, HashSet<teamcraft_proto::MlsMessageId>>,
   /// Group information served whatever the group's epoch ([`FakeServer::serve_group_info`]).
   forced_group_infos: HashMap<ConversationId, teamcraft_proto::MlsGroupInfoResponse>,
+  /// How many more group information reads answer "not found" per conversation
+  /// ([`FakeServer::hide_group_info_reads`]).
+  hidden_group_info_reads: HashMap<ConversationId, u32>,
   /// Users whose member removals (`DELETE …/members/{user}`) are refused, the check before them
   /// still allowed ([`FakeServer::refuse_removal_steps_by`]).
   refusing_removal_steps_by: HashSet<UserId>,
@@ -842,6 +845,12 @@ impl FakeServer {
     response: teamcraft_proto::MlsGroupInfoResponse,
   ) {
     self.lock().forced_group_infos.insert(conversation, response);
+  }
+
+  /// The next `count` reads of the conversation's group information answer "not found" although the
+  /// server holds it: two devices checking at the same moment, before either has published.
+  pub fn hide_group_info_reads(&self, conversation: ConversationId, count: u32) {
+    self.lock().hidden_group_info_reads.insert(conversation, count);
   }
 
   /// Forgets every stored MLS group information, as for groups whose last commit came from a
@@ -2378,6 +2387,16 @@ impl ServerApi for FakeServerApi {
       if let Some(forced) = state.forced_group_infos.get(&conversation) {
         return Ok(forced.clone());
       }
+      if let Some(hidden) = state.hidden_group_info_reads.get_mut(&conversation)
+        && *hidden > 0
+      {
+        *hidden -= 1;
+        return Err(ApiError::status(
+          404,
+          ErrorCode::MlsGroupInfoNotFound,
+          "no group information for the current epoch",
+        ));
+      }
       let entry = state.member_conversation(conversation, me)?;
       match &entry.maybe_group_info {
         Some((epoch, group_info)) if *epoch == entry.epoch => Ok(teamcraft_proto::MlsGroupInfoResponse {
@@ -2406,6 +2425,19 @@ impl ServerApi for FakeServerApi {
           409,
           ErrorCode::EpochConflict,
           format!("the group is in epoch {}", entry.epoch),
+        ));
+      }
+      // Like the server: at epoch 0 the first information wins (two founders' groups differ).
+      if request.epoch == 0
+        && entry
+          .maybe_group_info
+          .as_ref()
+          .is_some_and(|(_, stored)| *stored != request.group_info)
+      {
+        return Err(ApiError::status(
+          409,
+          ErrorCode::EpochConflict,
+          "another group information holds epoch 0",
         ));
       }
       entry.maybe_group_info = Some((request.epoch, request.group_info.clone()));

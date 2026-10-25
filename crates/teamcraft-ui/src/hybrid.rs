@@ -452,6 +452,17 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.set_up_meeting_chat(conversation, invitees);
   }
 
+  fn update_meeting_chat_members(
+    &self,
+    conversation: ConversationId,
+    invitees: Vec<UserId>,
+    removed: Vec<UserId>,
+  ) {
+    self
+      .chat
+      .update_meeting_chat_members(conversation, invitees, removed);
+  }
+
   fn add_people_to_call(
     &self,
     from: ConversationId,

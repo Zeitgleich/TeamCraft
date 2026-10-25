@@ -252,6 +252,12 @@ pub enum CoreCommand {
     conversation: ConversationId,
     invitees: Vec<UserId>,
   },
+  /// The organizer saved a changed invitee list of a meeting.
+  UpdateMeetingChatMembers {
+    conversation: ConversationId,
+    invitees: Vec<UserId>,
+    removed: Vec<UserId>,
+  },
   /// The user added people to their DM call: it moves into the meeting chat they just started.
   AddPeopleToCall {
     from: ConversationId,
@@ -1329,6 +1335,19 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.command(CoreCommand::SetUpMeetingChat {
       conversation,
       invitees,
+    });
+  }
+
+  fn update_meeting_chat_members(
+    &self,
+    conversation: ConversationId,
+    invitees: Vec<UserId>,
+    removed: Vec<UserId>,
+  ) {
+    self.command(CoreCommand::UpdateMeetingChatMembers {
+      conversation,
+      invitees,
+      removed,
     });
   }
 

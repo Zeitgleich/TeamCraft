@@ -21,7 +21,7 @@ use crate::feedback::PendingAction;
 use crate::i18n::{I18n, use_i18n};
 use crate::meetings::{
   ExternalInvitee, FormError, MeetingError, MeetingsHub, Repeat, STATUS_CONFLICT, STATUS_NOT_FOUND,
-  ScheduleForm, hosts_lobby, is_over, my_rsvp,
+  ScheduleForm, attending_users, hosts_lobby, is_over, my_rsvp,
 };
 use crate::model::{ConversationId, UserId};
 use crate::reactive::{SetIfAlive, use_interval_while_visible};
@@ -232,7 +232,16 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
           .then(|| {
             let meeting = meeting_for_join.clone();
             view! {
-              <button class="btn btn-primary" on:click=move |_| join_meeting(state, i18n, meeting.conversation_id)>
+              <button class="btn btn-primary" on:click=move |_| {
+                if is_host {
+                  // A meeting from before 1.0.3 has a chat without encryption: the organizer's
+                  // device founds its group the first time it opens the meeting (nothing happens
+                  // when the group is there already).
+                  let invitees = attending_users(&meeting);
+                  state.try_write(|backend| backend.set_up_meeting_chat(meeting.conversation_id, invitees));
+                }
+                join_meeting(state, i18n, meeting.conversation_id)
+              }>
                 {move || i18n.t("meetings-join")}
               </button>
             }
