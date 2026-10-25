@@ -548,15 +548,17 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
       delivery.set(Delivery::of(message_id, sent_at, now_ms()))
     });
   }
-  // A message waits for its files: "Sending…" while they go up, however long that takes. A file
-  // that stopped says so on its own tile.
+  // A message waits for its files: just the clock while they go up, however long that takes. A
+  // file that stopped says so (with "Try again") on its own tile, not "retrying automatically".
   let is_uploading = move || {
     extras.with(|maybe_extras| {
       maybe_extras.as_ref().is_some_and(|extras| {
-        extras
-          .files
-          .iter()
-          .any(|file| matches!(file.transfer, FileTransfer::Uploading { .. }))
+        extras.files.iter().any(|file| {
+          matches!(
+            file.transfer,
+            FileTransfer::Uploading { .. } | FileTransfer::UploadStalled { .. }
+          )
+        })
       })
     })
   };
