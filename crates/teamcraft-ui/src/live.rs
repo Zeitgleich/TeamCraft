@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
+use teamcraft_client_api::custom_status::set_request;
 use teamcraft_client_api::live::{LiveMarks, LiveReceipt, LiveSnapshot};
 use teamcraft_proto::{
   AnnouncementId, AnnouncementResponse, CustomStatus as CustomStatusWire, GetAnnouncementResponse,
@@ -273,7 +274,7 @@ impl LiveServer {
     self.state.borrow().presence.get(&user).map(|entry| {
       (
         presence_status(&entry.state),
-        entry.maybe_status.as_ref().map(custom_status_from_wire),
+        entry.maybe_status.as_ref().and_then(CustomStatus::from_wire),
       )
     })
   }
@@ -337,28 +338,32 @@ impl LiveServer {
     self.send(method, path, None);
   }
 
-  /// Stores (or clears) the custom status of the signed-in user and shows it right away.
+  /// Stores (or clears) the custom status of the signed-in user over REST, for a UI without a
+  /// client core (the core queues it otherwise), and shows it right away.
   pub fn set_custom_status(&self, me: UserId, maybe_status: Option<&CustomStatus>, now: TimestampMs) {
-    match maybe_status {
-      Some(status) => {
-        let wire = custom_status_to_wire(status, now);
-        let body = serde_json::to_string(&wire).ok();
+    let maybe_wire = maybe_status.and_then(|status| status.to_wire(now));
+    match maybe_wire.as_ref().and_then(|wire| set_request(wire, now)) {
+      Some(request) => {
+        let body = serde_json::to_string(&request).ok();
         self.send(ApiMethod::Put, "/api/v1/me/status".to_owned(), body);
-        let mut state = self.state.borrow_mut();
-        let entry = state.presence.entry(me).or_insert(UserPresence {
-          user_id: me,
-          state: PresenceState::Online,
-          maybe_status: None,
-          maybe_last_seen: None,
-        });
-        entry.maybe_status = Some(wire);
       },
-      None => {
-        self.send(ApiMethod::Delete, "/api/v1/me/status".to_owned(), None);
-        if let Some(entry) = self.state.borrow_mut().presence.get_mut(&me) {
-          entry.maybe_status = None;
-        }
-      },
+      None => self.send(ApiMethod::Delete, "/api/v1/me/status".to_owned(), None),
+    }
+    self.show_own_status(me, maybe_wire);
+  }
+
+  /// Shows the user's own status change until the server's answer (or the core's next snapshot)
+  /// confirms it.
+  pub fn show_own_status(&self, me: UserId, maybe_wire: Option<CustomStatusWire>) {
+    {
+      let mut state = self.state.borrow_mut();
+      let entry = state.presence.entry(me).or_insert(UserPresence {
+        user_id: me,
+        state: PresenceState::Online,
+        maybe_status: None,
+        maybe_last_seen: None,
+      });
+      entry.maybe_status = maybe_wire;
     }
     self.changed();
   }
@@ -570,37 +575,22 @@ pub fn presence_status(state: &PresenceState) -> PresenceStatus {
   }
 }
 
-/// The wire form of a status; the expiry choice becomes a point in time in the user's time zone.
-pub fn custom_status_to_wire(status: &CustomStatus, now: TimestampMs) -> CustomStatusWire {
-  let maybe_expires_at = match status.expiry {
+/// The status with its end resolved in the user's time zone ("today" ends at local midnight), on
+/// this device's clock. It reaches the server as the time left from when it is sent
+/// (`SetCustomStatusRequest::for_status`), so a clock that is off doesn't matter. An end the
+/// caller already chose (a preset's duration, the unchanged end of the current status) stays.
+pub fn with_local_expiry(mut status: CustomStatus, now: TimestampMs) -> CustomStatus {
+  if status.maybe_expires_at.is_some() {
+    return status;
+  }
+  status.maybe_expires_at = match status.expiry {
     StatusExpiry::Never => None,
     StatusExpiry::ThirtyMinutes => Some(now + 30 * 60_000),
     StatusExpiry::OneHour => Some(now + 60 * 60_000),
     StatusExpiry::Today => Some(end_of_local_day(now)),
     StatusExpiry::ThisWeek => Some(end_of_local_week(now)),
   };
-  CustomStatusWire {
-    maybe_emoji: Some(status.emoji.clone()).filter(|emoji| !emoji.is_empty()),
-    maybe_text: Some(status.text.clone()).filter(|text| !text.is_empty()),
-    maybe_expires_at: maybe_expires_at.map(unix_millis),
-    maybe_activity: None,
-  }
-}
-
-pub fn custom_status_from_wire(status: &CustomStatusWire) -> CustomStatus {
-  CustomStatus {
-    emoji: status.maybe_emoji.clone().unwrap_or_default(),
-    text: status.maybe_text.clone().unwrap_or_default(),
-    expiry: if status.maybe_expires_at.is_some() {
-      StatusExpiry::Today
-    } else {
-      StatusExpiry::Never
-    },
-  }
-}
-
-fn unix_millis(value: TimestampMs) -> teamcraft_proto::UnixMillis {
-  teamcraft_proto::UnixMillis(value)
+  status
 }
 
 #[cfg(test)]
@@ -833,27 +823,53 @@ mod tests {
 
   #[test]
   fn custom_status_round_trips_and_expiry_becomes_a_time() {
-    let status = CustomStatus {
-      emoji: "🌴".into(),
-      text: "On vacation".into(),
-      expiry: StatusExpiry::OneHour,
-    };
-    let wire = custom_status_to_wire(&status, NOW);
-    assert_eq!(wire.maybe_expires_at, Some(unix_millis(NOW + 3_600_000)));
-    let back = custom_status_from_wire(&wire);
+    let status = with_local_expiry(
+      CustomStatus {
+        emoji: "🌴".into(),
+        text: "On vacation".into(),
+        expiry: StatusExpiry::OneHour,
+        maybe_expires_at: None,
+      },
+      NOW,
+    );
+    let wire = status.to_wire(NOW).unwrap();
+    assert_eq!(
+      wire.maybe_expires_at,
+      Some(teamcraft_proto::UnixMillis(NOW + 3_600_000))
+    );
+    let back = CustomStatus::from_wire(&wire).unwrap();
     assert_eq!((back.emoji.as_str(), back.text.as_str()), ("🌴", "On vacation"));
+    assert_eq!(back.maybe_expires_at, Some(NOW + 3_600_000));
   }
 
   #[test]
   fn a_status_without_expiry_stays_until_cleared() {
-    let status = CustomStatus {
-      emoji: String::new(),
-      text: "Heads down".into(),
-      expiry: StatusExpiry::Never,
-    };
-    let wire = custom_status_to_wire(&status, NOW);
+    let status = with_local_expiry(
+      CustomStatus {
+        emoji: String::new(),
+        text: "Heads down".into(),
+        expiry: StatusExpiry::Never,
+        maybe_expires_at: None,
+      },
+      NOW,
+    );
+    let wire = status.to_wire(NOW).unwrap();
     assert_eq!(wire.maybe_expires_at, None);
     assert_eq!(wire.maybe_emoji, None);
+  }
+
+  #[test]
+  fn today_ends_at_local_midnight() {
+    let status = with_local_expiry(
+      CustomStatus {
+        emoji: "🌴".into(),
+        text: "Out".into(),
+        expiry: StatusExpiry::Today,
+        maybe_expires_at: None,
+      },
+      NOW,
+    );
+    assert_eq!(status.maybe_expires_at, Some(end_of_local_day(NOW)));
   }
 
   #[test]

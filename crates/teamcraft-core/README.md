@@ -144,7 +144,7 @@ the server API, the sync engine and first-run enrollment. All cryptography is de
 - Content key rotation by message count / age (`RotationPolicy`) – only removals rotate.
 - Org key rotation after a recovery, and the approval flow (both need server endpoints).
 - An edit or delete that arrives before its target message isn't applied later.
-- Custom status, passkey PRF wrapper wiring; sending read receipts.
+- Passkey PRF wrapper wiring; sending read receipts.
 - Moving a channel to another space (no server endpoint).
 - The other UI traits (`CallBackend`, `AdminBackend`, `SecurityBackend`).
 - The MLS storage and the search index are rebuilt or rewritten whole; fine at today's sizes,
@@ -161,46 +161,45 @@ the server API, the sync engine and first-run enrollment. All cryptography is de
    the core.
 4. `epoch_conflict` has the epoch only in the text; non-member admins parse it to post proposals
    (being fixed).
-5. No custom status on the server (being fixed).
-6. **Dev realm:** no account API access for the public client and no `tc_identity_key` user-profile
+5. **Dev realm:** no account API access for the public client and no `tc_identity_key` user-profile
    attribute, so attestation is unavailable in dev (being fixed).
-7. **Org recovery:** no endpoints for sealed shares, recovery requests with approvals, or handing a
+6. **Org recovery:** no endpoints for sealed shares, recovery requests with approvals, or handing a
    user's wrapped backup keys to the approving admins.
-8. **Search segments:** stored through the attachment endpoints and announced in messages; a segment
+7. **Search segments:** stored through the attachment endpoints and announced in messages; a segment
    listing per conversation would let devices find them without reading the messages first.
-9. **VAPID public key:** the server logs its application server key at start but has no endpoint
+8. **VAPID public key:** the server logs its application server key at start but has no endpoint
    for it; the web app has to be configured with it. A `GET /api/v1/push/vapid-key` (or a field in
    an instance-info response) would remove that step.
-10. **Push previews without a session:** the service worker can only fetch the pushed message while
-    a stored access token is valid. If the server put the message ciphertext into the wake-up when
-    it fits (Web Push allows ~4 KB), previews would work without any token; it stays opaque to the
-    push service either way.
-11. **Stale devices accumulate:** devices that never come back stay registered with key packages, so
+9. **Push previews without a session:** the service worker can only fetch the pushed message while
+   a stored access token is valid. If the server put the message ciphertext into the wake-up when
+   it fits (Web Push allows ~4 KB), previews would work without any token; it stays opaque to the
+   push service either way.
+10. **Stale devices accumulate:** devices that never come back stay registered with key packages, so
     `add_member` claims and welcomes all of them. In the dev database, repeated integration runs
     (each registers new devices for the same users) made a welcome exceed the server's body limit.
     Real deployments need device expiry (and the client a way to skip stale devices).
-12. **Dev environment:** the shared dev Postgres may carry migrations from unmerged branches; the
+11. **Dev environment:** the shared dev Postgres may carry migrations from unmerged branches; the
     integration tests ran against a throwaway database and a server on port 8083 (another session's
     server used 8081). They leave small encrypted test files in the dev Garage bucket.
 
-13. **Chat actions:** the server's read position only moves forward (mark unread is account data
+12. **Chat actions:** the server's read position only moves forward (mark unread is account data
     instead); no server-side silent flag (recipients' devices decide); delete for everyone hides
     the message but the ciphertext stays stored; no key-bag-update gateway event, so account data
     syncs by polling.
-14. **Files:** no endpoint reports the attachment size limit (the client has a setting); no
+13. **Files:** no endpoint reports the attachment size limit (the client has a setting); no
     share-link endpoint or public download page yet (`POST /attachments/{id}/share-links`).
-15. **Workspace:** no endpoint to move a channel between spaces; `membership_add` has no
+14. **Workspace:** no endpoint to move a channel between spaces; `membership_add` has no
     `added_by`, so "added by" comes from the encrypted system message only.
 
-16. **Device lists** (security review A4): no `GET /users/{id}/device-list` / `PUT /me/device-list`
+15. **Device lists** (security review A4): no `GET /users/{id}/device-list` / `PUT /me/device-list`
     yet (opaque signed blob, compare-and-swap on `sequence`). Clients publish and check lists when
     the endpoints exist and fall back to certificates only while they return 404.
-17. **Removals** (security review A8): clients no longer sign removals the server reports. Deactivating
+16. **Removals** (security review A8): clients no longer sign removals the server reports. Deactivating
     a user has to go through admins' clients (`admin_remove_member` per conversation), so the admin
     API needs the list of a user's conversations; until then a deactivated user stays in the MLS
     groups (the server stops delivering to them).
 
-18. **Org recovery** (security review B3, B4): the recovery request endpoints should carry the request
+17. **Org recovery** (security review B3, B4): the recovery request endpoints should carry the request
     ID, user and request key (`RecoveryRequest`); the approval log should tell owners' clients that a
     recovery finished, so they rotate the org key automatically (`rotate_org_recovery`).
 

@@ -64,16 +64,22 @@ impl PresenceStatus {
   }
 }
 
-/// Emoji, text and optional expiry shown next to a user's name.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Emoji, text and optional expiry shown next to a user's name (PLAN.md §4: server-visible).
+/// Conversions to and from the wire form live in [`crate::custom_status`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CustomStatus {
   pub emoji: String,
   pub text: String,
+  /// The user's choice when setting it.
   pub expiry: StatusExpiry,
+  /// When it ends, by the server's clock: set on statuses the server reported, and by clients that
+  /// know the user's time zone when they resolve `expiry` ("today" ends at local midnight).
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_expires_at: Option<TimestampMs>,
 }
 
 /// When a custom status clears itself.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StatusExpiry {
   Never,
   ThirtyMinutes,
@@ -126,6 +132,10 @@ pub struct User {
   /// Whether the person has set up the app (has a device), as far as the backend knows.
   #[serde(default)]
   pub device_setup: DeviceSetup,
+  /// The e-mail address, only where the workspace's directory policy shows it to this viewer (the
+  /// server leaves it out otherwise).
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_email: Option<String>,
 }
 
 /// Whether a person has a device to receive messages on.

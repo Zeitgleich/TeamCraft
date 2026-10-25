@@ -123,10 +123,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // The log carries state and status; last seen is read on its own (`ui_last_seen`).
       read_state::note_announced_presence(
         &self.store,
-        UserPresence {
+        self.with_queued_own_status(UserPresence {
           maybe_last_seen: None,
           ..presence.clone()
-        },
+        })?,
         self.settings.max_announced_presence,
       )?;
       let state = presence.state.clone();
@@ -162,6 +162,27 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     cache.merge(&response.users, now);
     records::put_json(&self.store, Table::SyncState, DIRECTORY_CACHE_KEY, &cache)?;
     Ok(response.users.len())
+  }
+
+  /// The directory policy doesn't show e-mail addresses (any more): the ones kept from earlier
+  /// answers go too, from the people of the user's conversations and from the directory cache.
+  /// Writes only the records that had one.
+  pub(crate) fn drop_cached_emails(&self) -> Result<(), CoreError> {
+    let users: Vec<UserSummary> = records::list_json(&self.store, Table::Users)?;
+    for mut user in users {
+      if user.maybe_email.take().is_some() {
+        records::put_json(&self.store, Table::Users, &user.id.to_string(), &user)?;
+      }
+    }
+    let mut cache = DirectoryCache::load(&self.store, self.now_ms())?;
+    let mut had_emails = false;
+    for entry in &mut cache.entries {
+      had_emails |= entry.user.maybe_email.take().is_some();
+    }
+    if had_emails {
+      records::put_json(&self.store, Table::SyncState, DIRECTORY_CACHE_KEY, &cache)?;
+    }
+    Ok(())
   }
 
   /// The person registered a device (`device_add`): the cache stops saying they have none.

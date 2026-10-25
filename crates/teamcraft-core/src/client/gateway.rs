@@ -410,12 +410,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         records::put_json(&self.store, Table::Presence, &user_id.to_string(), &state)?;
         read_state::note_announced_presence(
           &self.store,
-          UserPresence {
+          self.with_queued_own_status(UserPresence {
             user_id,
             state: state.clone(),
             maybe_status,
             maybe_last_seen: None,
-          },
+          })?,
           self.settings.max_announced_presence,
         )?;
         if state == teamcraft_proto::PresenceState::Offline {

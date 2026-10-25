@@ -99,6 +99,11 @@ pub trait ChatBackend {
     self.set_presence(presence);
   }
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>);
+  /// Which statuses the workspace allows (PLAN.md §4): whether there are any, whether people may
+  /// write their own, and the presets. The server enforces it; the UI only offers what it allows.
+  fn presence_policy(&self) -> teamcraft_proto::PresencePolicy {
+    teamcraft_proto::PresencePolicy::default()
+  }
 
   /// Whether the user follows the thread (followed threads feed the threads inbox).
   fn is_thread_followed(&self, _conversation: ConversationId, _thread: ThreadId) -> bool {

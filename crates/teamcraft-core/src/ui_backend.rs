@@ -418,7 +418,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       username: summary.maybe_username.clone().unwrap_or_default(),
       display_name: summary.display_name.clone(),
       presence: maybe_presence.map_or(PresenceStatus::Offline, presence_status),
-      maybe_custom_status: None,
+      maybe_custom_status: self.custom_status_of(summary.id),
       avatar_hue: hue(summary.id),
       is_guest: summary.kind == UserKind::Guest,
       is_bot: false,
@@ -428,7 +428,22 @@ impl<S: LocalStore> CoreChatBackend<S> {
         Some(false) => DeviceSetup::NoDevices,
         None => DeviceSetup::Unknown,
       },
+      maybe_email: summary.maybe_email.clone(),
     }
+  }
+
+  /// The person's custom status from the presence log (what the server last announced, or the
+  /// user's own change while it waits for the server). It keeps its end: the UI stops showing it
+  /// once that passed, before the server's announcement that it ended arrives.
+  fn custom_status_of(&self, user: UserId) -> Option<CustomStatus> {
+    let maybe_entry: Option<teamcraft_proto::live::RevisedPresence> = self.read(records::get_json(
+      &self.store,
+      Table::AnnouncedPresence,
+      &user.to_string(),
+    ));
+    maybe_entry
+      .and_then(|entry| entry.presence.maybe_status)
+      .and_then(|status| CustomStatus::from_wire(&status))
   }
 
   pub(crate) fn to_conversation(
@@ -779,12 +794,13 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
         username: String::new(),
         display_name: String::new(),
         presence: PresenceStatus::Online,
-        maybe_custom_status: None,
+        maybe_custom_status: self.custom_status_of(self.me),
         avatar_hue: hue(self.me),
         is_guest: false,
         is_bot: false,
         maybe_organization: None,
         device_setup: DeviceSetup::HasDevices,
+        maybe_email: None,
       })
   }
 
@@ -994,6 +1010,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       presence,
       maybe_until,
     });
+  }
+
+  fn presence_policy(&self) -> teamcraft_proto::PresencePolicy {
+    self.verified_policy().presence
   }
 
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>) {

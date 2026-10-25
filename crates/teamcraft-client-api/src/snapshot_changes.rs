@@ -571,6 +571,7 @@ mod tests {
       is_bot: false,
       maybe_organization: None,
       device_setup: DeviceSetup::Unknown,
+      maybe_email: None,
     }
   }
 }

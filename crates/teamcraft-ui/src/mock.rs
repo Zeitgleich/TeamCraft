@@ -918,7 +918,8 @@ impl ChatBackend for MockBackend {
   }
 
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>) {
-    self.state.borrow_mut().users[0].maybe_custom_status = maybe_status;
+    self.state.borrow_mut().users[0].maybe_custom_status =
+      maybe_status.map(|status| crate::live::with_local_expiry(status, crate::clock::now_ms()));
   }
 }
 
@@ -1208,17 +1209,20 @@ fn demo_users() -> Vec<User> {
       } else {
         crate::model::DeviceSetup::HasDevices
       },
+      maybe_email: Some(format!("{username}@example.com")),
     })
     .collect();
   users[3].maybe_custom_status = Some(CustomStatus {
     emoji: "🎧".into(),
     text: "Focus time".into(),
     expiry: crate::model::StatusExpiry::Today,
+    maybe_expires_at: Some(crate::clock::end_of_local_day(crate::clock::now_ms())),
   });
   users[6].maybe_custom_status = Some(CustomStatus {
     emoji: "🌴".into(),
     text: "Vacation until Monday".into(),
     expiry: crate::model::StatusExpiry::ThisWeek,
+    maybe_expires_at: Some(crate::clock::end_of_local_week(crate::clock::now_ms())),
   });
   users.push(User {
     id: bot(),
@@ -1231,6 +1235,7 @@ fn demo_users() -> Vec<User> {
     is_bot: true,
     maybe_organization: None,
     device_setup: crate::model::DeviceSetup::HasDevices,
+    maybe_email: None,
   });
   users
 }

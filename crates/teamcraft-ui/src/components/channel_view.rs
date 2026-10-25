@@ -458,11 +458,36 @@ fn ChannelHeader(
       },
     };
     let full_name = conv.name.clone();
-    Some(view! {
-      <h1 class="header-title" translate="no" title=full_name>
-        {icon}
-        <span class="header-name">{conv.name}</span>
-      </h1>
+    // A direct conversation's name is the person: it opens their profile card.
+    let maybe_person = (conv.kind == ConversationKind::Direct)
+      .then(|| conv.member_ids.iter().copied().find(|id| *id != state.me().id))
+      .flatten();
+    Some(match maybe_person {
+      Some(person) => {
+        let label = i18n.t_with("profile-open", &[("name", &conv.name)]);
+        view! {
+          <h1 class="header-title" translate="no">
+            <button
+              type="button"
+              class="header-person"
+              title=full_name
+              aria-label=label
+              on:click=move |_| state.overlay.set(Overlay::UserProfile(person))
+            >
+              {icon}
+              <span class="header-name">{conv.name}</span>
+            </button>
+          </h1>
+        }
+        .into_any()
+      },
+      None => view! {
+        <h1 class="header-title" translate="no" title=full_name>
+          {icon}
+          <span class="header-name">{conv.name}</span>
+        </h1>
+      }
+      .into_any(),
     })
   };
 
@@ -551,6 +576,7 @@ fn ChannelHeader(
                 .map(|other| {
                   view! {
                     <div class="header-sub">
+                      <HeaderStatus user=other />
                       <crate::components::profile_views::InMeetingBadge user=other />
                       <crate::components::profile_views::LastSeen user=other is_compact=true />
                       {move || local_time().map(|label| view! { <span class="header-local-time" title=move || i18n.t("profile-local-time")>{label}</span> })}
@@ -766,6 +792,27 @@ fn ConversationMore(
         </MenuSurface>
       </Show>
     </div>
+  }
+}
+
+/// The other person's custom status on the line under a direct conversation's name: the emoji and
+/// a short text (the full text, and its end, are in the title and the profile card).
+#[component]
+fn HeaderStatus(user: crate::model::UserId) -> impl IntoView {
+  let state = use_app_state();
+  move || {
+    state
+      .read(|backend| backend.user(user))
+      .and_then(|person| person.maybe_custom_status)
+      .map(|status| {
+        let full = format!("{} {}", status.emoji, status.text).trim().to_owned();
+        view! {
+          <span class="header-status" title=full translate="no">
+            {(!status.emoji.is_empty()).then(|| view! { <span aria-hidden="true">{status.emoji.clone()}</span> })}
+            <span class="header-status-text">{status.text.clone()}</span>
+          </span>
+        }
+      })
   }
 }
 

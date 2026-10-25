@@ -1442,6 +1442,17 @@ impl ChatBackend for RemoteChat {
     });
   }
 
+  fn presence_policy(&self) -> teamcraft_proto::PresencePolicy {
+    self
+      .mirror
+      .borrow()
+      .snapshot
+      .security
+      .maybe_presence_policy
+      .clone()
+      .unwrap_or_default()
+  }
+
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>) {
     self.mirror.borrow_mut().snapshot.me.maybe_custom_status = maybe_status.clone();
     self.act(ChatAction::SetCustomStatus { maybe_status });

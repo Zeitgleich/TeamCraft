@@ -2,6 +2,7 @@
 
 use leptos::prelude::*;
 use teamcraft_client_api::actions::ChannelChanges;
+use teamcraft_client_api::custom_status::is_allowed;
 use teamcraft_proto::{HistoryPolicy, IdempotencyKey};
 
 use crate::clock::{end_of_local_day, now_ms};
@@ -60,13 +61,22 @@ pub fn run(state: AppState, i18n: I18n, conversation: ConversationId, command: S
       } else {
         emoji
       };
-      state.write(|backend| {
-        backend.set_custom_status(Some(CustomStatus {
-          emoji,
-          text: status,
-          expiry: StatusExpiry::Never,
-        }))
-      });
+      let status = CustomStatus {
+        emoji,
+        text: status,
+        expiry: StatusExpiry::Never,
+        maybe_expires_at: None,
+      };
+      // The server would refuse it; say why instead of failing later.
+      let policy = state.read(|backend| backend.presence_policy());
+      if !is_allowed(&policy, &status) {
+        return text(if policy.statuses_enabled {
+          "slash-status-presets-only"
+        } else {
+          "slash-status-disabled"
+        });
+      }
+      state.write(|backend| backend.set_custom_status(Some(status)));
       text("slash-status-set")
     },
     SlashCommand::Topic(topic) => change_channel(

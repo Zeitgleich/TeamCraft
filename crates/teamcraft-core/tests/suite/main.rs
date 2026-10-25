@@ -14,6 +14,7 @@ mod chat_actions;
 #[path = "../common/mod.rs"]
 mod common;
 mod connection;
+mod custom_status;
 mod dev_stack;
 mod devices;
 mod dm_setup;

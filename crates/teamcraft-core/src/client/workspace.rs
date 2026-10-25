@@ -343,7 +343,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if let Some(alarm) = &state.maybe_alarm {
       tracing::error!(%alarm, "workspace log alarm");
     }
-    records::put_json(&self.store, Table::Workspace, WORKSPACE_KEY, &state)
+    records::put_json(&self.store, Table::Workspace, WORKSPACE_KEY, &state)?;
+    // Addresses the server showed under an earlier policy are not shown under this one.
+    if !state.policy.directory.shows_email {
+      self.drop_cached_emails()?;
+    }
+    Ok(())
   }
 
   /// Compares a member's workspace head (from a message) with this device's.

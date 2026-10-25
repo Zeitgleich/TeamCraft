@@ -95,6 +95,26 @@ async fn a_status_is_stored_returned_and_shown_in_the_presence_list_even_when_of
 }
 
 #[tokio::test]
+async fn a_duration_ends_on_the_server_s_clock_whatever_the_client_s_clock_said() {
+  let app = app!();
+  let carol = member("carol");
+  // The client's own end looks past (its clock runs behind); the duration wins.
+  let before = OffsetDateTime::now_utc().unix_timestamp() * 1000;
+  let set = app
+    .put(
+      &carol,
+      "/me/status",
+      json!({"text": "Lunch", "expires_at": 1000, "expires_in_seconds": 1800}),
+    )
+    .await;
+  assert_eq!(set.status, StatusCode::OK, "{}", set.body);
+  let end = set.body["expires_at"].as_i64().unwrap();
+  let after = OffsetDateTime::now_utc().unix_timestamp() * 1000 + 1000;
+  assert!((before + 1_800_000..=after + 1_800_000).contains(&end), "{end}");
+  app.stop().await;
+}
+
+#[tokio::test]
 async fn invalid_statuses_are_rejected() {
   let app = app!();
   let carol = member("carol");
@@ -106,6 +126,8 @@ async fn invalid_statuses_are_rejected() {
     json!({"emoji": "e".repeat(100)}),
     json!({"text": "ok", "expires_at": 1000}),
     json!({"text": "ok", "expires_at": i64::MAX}),
+    json!({"text": "ok", "expires_in_seconds": 0}),
+    json!({"text": "ok", "expires_in_seconds": u64::MAX}),
   ] {
     assert_eq!(
       app.put(&carol, "/me/status", body.clone()).await.status,
