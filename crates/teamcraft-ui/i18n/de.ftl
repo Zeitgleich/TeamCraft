@@ -219,10 +219,8 @@ switcher-hint-close = schließen
 
 ## Einstellungen
 settings-title = Einstellungen
-settings-tab-display = Darstellung
 settings-tab-sidebar = Seitenleiste
 settings-tab-notifications = Benachrichtigungen
-settings-tab-advanced = Erweitert
 settings-theme = Design
 settings-theme-system = Wie das System
 settings-theme-light = Hell
@@ -233,7 +231,6 @@ settings-send-enter = Enter ({ $newline } für eine neue Zeile)
 settings-send-ctrl-enter = { $send } (Enter für eine neue Zeile)
 settings-join-leave = Beitritts- und Austrittsmeldungen anzeigen
 settings-unreads-group = Ungelesene Kanäle oben in der Seitenleiste gruppieren
-settings-advanced-stub = Hier erscheinen die erweiterten Einstellungen.
 
 shortcut-switcher = Alles durchsuchen
 shortcut-settings = Einstellungen öffnen
@@ -618,7 +615,7 @@ audit-guest-invited = Gast eingeladen
 audit-channel-archived = Kanal archiviert
 
 ## Geräte-Freigabe, Verknüpfung und Schlüsseländerungen
-settings-tab-devices = Geräte und Sicherheit
+settings-tab-devices = Geräte
 settings-devices-hint = Geräte, die deine Nachrichten lesen können. Entferne Geräte, die du nicht mehr nutzt oder nicht kennst.
 settings-device-current = Dieses Gerät
 settings-device-link = Neues Gerät verknüpfen
@@ -796,9 +793,6 @@ contact-not-verified = Noch nicht überprüft.
 contact-unmark = Überprüfung entfernen
 
 ## Einstellungen: Benachrichtigungen
-settings-tab-language = Sprache
-settings-tab-privacy = Datenschutz
-settings-tab-calls = Anrufe
 notif-what = Benachrichtige mich über
 notif-desktop = Desktop-Benachrichtigungen
 notif-level-hint = Gilt für Kanäle. Direktnachrichten und Gruppenchats zählen als Erwähnungen.
@@ -917,7 +911,6 @@ privacy-away-30 = 30 Minuten
 privacy-away-never = Nie
 privacy-away-hint = Ein Admin kann die kürzeste erlaubte Zeit festlegen.
 privacy-offline-hint = Um offline zu erscheinen, wähle im Statusmenü „Offline“.
-settings-devices-title = Geräte
 settings-device-sign-out = Abmelden
 settings-device-sign-out-confirm = Gerät abmelden
 security-my-key = Dein Sicherheitsschlüssel
@@ -2326,3 +2319,86 @@ linked-message-open = Zur Nachricht
 linked-message-deleted = Diese Nachricht wurde gelöscht
 linked-message-not-loaded = Nachricht nicht geladen
 linked-message-unavailable = Nachricht aus einem Gespräch, das du nicht sehen kannst
+
+## Settings: sections, search and rows (#327)
+settings-tab-account = Konto
+settings-tab-appearance = Darstellung
+settings-tab-preferences = Allgemein
+settings-tab-keyboard = Tastatur
+settings-tab-audio-video = Audio & Video
+settings-tab-security = Sicherheit & Datenschutz
+settings-tab-about = Hilfe & Info
+settings-search = Einstellungen durchsuchen
+settings-search-none = Nichts gefunden. Versuch es mit einem anderen Wort.
+settings-search-count = { $count ->
+    [0] Keine Einstellung gefunden
+    [one] Eine Einstellung gefunden
+   *[other] { $count } Einstellungen gefunden
+}
+settings-back-to-list = Alle Einstellungen
+settings-copy-username = Benutzernamen kopieren
+settings-name-from-sign-in = Dein Name kommt aus der Anmeldung deiner Organisation.
+settings-profile-details = Profildetails
+settings-profile-details-hint = Andere sehen das auf deiner Profilkarte.
+settings-profile-hours-show = Meine Arbeitszeiten anzeigen
+settings-profile-hours-show-hint = Andere sehen, wann du meistens arbeitest, und deine Ortszeit.
+settings-profile-save = Profil speichern
+settings-messages-look = Nachrichten
+settings-messages-look-hint = Die Vorschau zeigt deine Auswahl.
+settings-messages-show = In Unterhaltungen
+settings-preview-name = Sam Beispiel
+settings-preview-text = Das neue Layout ist fertig. Schaust du es dir vor Freitag an?
+settings-text-size = Textgröße
+settings-text-size-hint = Macht Text größer oder kleiner, ohne alles zu zoomen.
+settings-join-leave-hint = Zeigt eine Zeile, wenn jemand einem Kanal beitritt oder ihn verlässt.
+settings-app-language = Sprache der App
+settings-mirror-hint = Nur deine eigene Ansicht wird gespiegelt; andere sehen dich seitenrichtig.
+settings-keyboard-filter = Tastenkürzel durchsuchen
+settings-device-this = Dieses Gerät
+settings-device-others = Andere Geräte
+settings-device-active-now = Gerade aktiv
+settings-device-no-others = Du bist nur auf diesem Gerät angemeldet.
+settings-device-sign-out-question = { $name } abmelden? Es kann deine Nachrichten dann nicht mehr lesen.
+settings-device-sign-out-others = Alle anderen Geräte abmelden
+settings-device-sign-out-others-confirm = { $count ->
+    [one] Das andere Gerät abmelden? Es kann deine Nachrichten dann nicht mehr lesen.
+   *[other] Alle { $count } anderen Geräte abmelden? Sie können deine Nachrichten dann nicht mehr lesen.
+}
+settings-help-app = TeamCraft
+settings-help-version = Version
+settings-help-copy-debug = Debug-Infos kopieren
+settings-help-copy-debug-hint = Version, Plattform und Sprache für eine Support-Anfrage. Keine Namen oder Nachrichten.
+shortcuts-general = Allgemein
+shortcuts-navigation = Navigieren
+shortcuts-messages = Nachrichten
+notif-master-title = Benachrichtigungen
+notif-master = Benachrichtigungen erlauben
+notif-master-hint = Aus: Keine Nachricht benachrichtigt dich, auf keinem Gerät. Anrufe und Erinnerungen weiterhin schon.
+notif-this-device = Dieses Gerät
+notif-device-system = Systembenachrichtigungen
+notif-device-desktop = TeamCraft benachrichtigt dich über die Benachrichtigungen deines Systems.
+notif-browser-unsupported = Dieser Browser kann keine Benachrichtigungen anzeigen.
+notif-test = Test senden
+notif-test-title = Benachrichtigungen funktionieren
+notif-test-body = So erscheinen neue Nachrichten.
+notif-test-sent = Wenn du den Test nicht gesehen hast, prüfe die Benachrichtigungseinstellungen deines Systems.
+notif-first-name-hint = Zählt deinen Vornamen wie eine @Erwähnung.
+notif-channel-mentions-hint = Nachrichten, die alle in einem Kanal ansprechen.
+notif-confirm-channel-hint = Damit du nicht aus Versehen einen großen Kanal benachrichtigst.
+notif-phone = Telefon und andere Geräte
+notif-phone-hint = Push-Benachrichtigungen fürs Telefon, zurückgehalten, solange du am Desktop bist.
+notif-per-conversation-filter = Unterhaltungen filtern
+notif-per-conversation-none = Keine Unterhaltung passt.
+privacy-typing-hint = Die anderen in der Unterhaltung sehen, dass du schreibst.
+calls-noise-hint = Filtert Tippen, Lüfter und andere Hintergrundgeräusche.
+calls-echo-hint = Verhindert, dass andere sich über deine Lautsprecher selbst hören.
+security-status-ok = Deine Nachrichten sind Ende-zu-Ende-verschlüsselt
+security-status-ok-hint = Nur deine Geräte und die Leute in einer Unterhaltung können sie lesen. Nicht einmal der Server.
+security-status-no-keys = Dieses Gerät kann verschlüsselte Nachrichten noch nicht lesen
+security-status-set-up = Dieses Gerät einrichten
+security-recovery-row = Wiederherstellungs-Passphrase
+security-passphrase-mismatch = Die beiden Passphrasen sind nicht gleich.
+security-verified-count = { $verified } von { $total } Personen verifiziert
+security-advanced = Erweitert
+settings-list-limited = { $shown } von { $total } angezeigt. Filtern, um die anderen zu finden.
+security-verify-filter = Personen filtern

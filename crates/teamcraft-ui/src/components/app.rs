@@ -38,7 +38,7 @@ use crate::components::meetings_view::{MeetingsView, ScheduleMeetingDialog};
 use crate::components::members_panel::MembersPanel;
 use crate::components::message_actions::{EditHistoryDialog, ForwardDialog, PinsPanel, SavedView};
 use crate::components::offline_banner::OfflineBanner;
-use crate::components::profile_views::{EditProfileDialog, UserProfileDialog};
+use crate::components::profile_views::UserProfileDialog;
 use crate::components::quick_switcher::QuickSwitcher;
 use crate::components::rail::SpaceRail;
 use crate::components::search_view::SearchView;
@@ -361,7 +361,6 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::SpaceSettings(space) => view! { <SpaceSettingsDialog space=space /> }.into_any(),
         Overlay::EditHistory(conversation, message) => view! { <EditHistoryDialog conversation=conversation message=message /> }.into_any(),
         Overlay::Bookmarks(conversation) => view! { <BookmarksDialog conversation=conversation /> }.into_any(),
-        Overlay::EditProfile => view! { <EditProfileDialog /> }.into_any(),
         Overlay::UserProfile(user) => view! { <UserProfileDialog user=user /> }.into_any(),
         Overlay::CallsUnavailable => view! { <CallsUnavailableDialog /> }.into_any(),
         Overlay::None | Overlay::StatusMenu => ().into_any(),

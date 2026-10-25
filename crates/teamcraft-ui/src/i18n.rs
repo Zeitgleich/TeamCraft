@@ -323,6 +323,49 @@ mod tests {
     }
   }
 
+  /// Every key the settings sections ask for exists in each language: the `.t(..)` calls, the
+  /// `label`, `hint` and `heading` of their rows and cards, and what the settings search reads.
+  #[test]
+  fn settings_keys_exist() {
+    let sources = [
+      include_str!("components/settings_account.rs"),
+      include_str!("components/settings_keyboard.rs"),
+      include_str!("components/settings_modal.rs"),
+      include_str!("components/settings_notifications.rs"),
+      include_str!("components/settings_security.rs"),
+      include_str!("components/settings_tabs.rs"),
+    ];
+    let mut keys: Vec<String> = sources.into_iter().flat_map(keys_in_source).collect();
+    for source in sources {
+      for marker in [
+        "label=\"",
+        "hint=\"",
+        "heading=\"",
+        "heading_key: \"",
+        ".t_count(\"",
+      ] {
+        for (at, _) in source.match_indices(marker) {
+          // `enterkeyhint="…"` is no key: only attributes that start a word count.
+          let starts_word = source[..at].ends_with(char::is_whitespace) || marker.starts_with('.');
+          let rest = &source[at + marker.len()..];
+          if let (true, Some(end)) = (starts_word, rest.find('"')) {
+            keys.push(rest[..end].to_owned());
+          }
+        }
+      }
+    }
+    keys.extend(crate::components::settings_search::every_key());
+    assert!(
+      keys.iter().any(|key| key == "notif-master"),
+      "the scan missed rows"
+    );
+    for locale in [Locale::En, Locale::De] {
+      for key in &keys {
+        assert_ne!(&translate(locale, key, None), key, "{locale:?} lacks {key}");
+      }
+    }
+  }
+
   #[test]
   fn locale_tags_parse() {
     assert_eq!(Locale::from_tag("de-DE"), Some(Locale::De));
