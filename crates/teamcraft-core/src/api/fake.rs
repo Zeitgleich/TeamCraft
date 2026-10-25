@@ -1405,6 +1405,10 @@ impl ServerApi for FakeServerApi {
         &[me],
       );
       let entry = state.conversation_mut(id)?;
+      // The creator administers the channel.
+      if let Some((role, _)) = entry.members.get_mut(&me) {
+        *role = ChannelRole::Admin;
+      }
       entry.response.visibility = request.visibility.clone();
       entry.response.maybe_topic = request.maybe_topic.clone();
       entry.response.maybe_category_id = request.maybe_category_id;
@@ -1544,6 +1548,46 @@ impl ServerApi for FakeServerApi {
     request: &UpdateConversationMemberRequest,
   ) -> Result<(), ApiError> {
     self.with(|state, me| {
+      let is_instance_admin = state.admins.contains(&me);
+      if let Some(role) = &request.maybe_role {
+        // Like the server: channel admins and workspace admins manage roles; a channel keeps an admin.
+        let entry = state.actor_conversation_mut(conversation, me)?;
+        let is_channel_admin = entry
+          .members
+          .get(&me)
+          .is_some_and(|(own, _)| *own == ChannelRole::Admin);
+        if !is_channel_admin && !is_instance_admin {
+          return Err(ApiError::status(
+            403,
+            ErrorCode::Forbidden,
+            "missing permission manage_channel_roles",
+          ));
+        }
+        if matches!(role, ChannelRole::Unknown(_)) {
+          return Err(ApiError::status(
+            400,
+            ErrorCode::InvalidRequest,
+            "unknown channel role",
+          ));
+        }
+        let admins = entry
+          .members
+          .values()
+          .filter(|(held, _)| *held == ChannelRole::Admin)
+          .count();
+        let Some((held, _)) = entry.members.get_mut(&user) else {
+          return Err(ApiError::status(404, ErrorCode::UserNotFound, "not a member"));
+        };
+        if *held == ChannelRole::Admin && *role != ChannelRole::Admin && admins <= 1 {
+          return Err(ApiError::status(
+            409,
+            ErrorCode::Conflict,
+            "a channel needs at least one admin",
+          ));
+        }
+        *held = role.clone();
+        return Ok(());
+      }
       let entry = state.member_conversation_mut(conversation, me)?;
       if let Some(is_favorite) = request.maybe_is_favorite {
         if user != me {

@@ -380,7 +380,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
-  async fn refresh_members(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+  pub(crate) async fn refresh_members(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
     let read = self.api.list_members(conversation).await;
     self.store_members(conversation, read)
   }

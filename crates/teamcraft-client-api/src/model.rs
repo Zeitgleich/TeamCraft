@@ -2,8 +2,8 @@
 //! shapes.
 
 use serde::{Deserialize, Serialize};
+pub use teamcraft_proto::{ChannelRole, InviteId, JoinPolicy, SpaceRole};
 pub use teamcraft_proto::{ConversationId, DeviceId, Id, MessageId, Snowflake, SpaceId, ThreadId, UserId};
-pub use teamcraft_proto::{InviteId, JoinPolicy, SpaceRole};
 
 /// Builds a typed ID from a small integer. Mock data and tests use it; real IDs come from the server.
 pub fn id_from_raw<T: Id>(raw: u64) -> T {
@@ -191,6 +191,13 @@ pub struct Space {
   /// server checks again).
   #[serde(default)]
   pub can_manage_space: bool,
+}
+
+/// A member of a channel with the role the member list holds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelMember {
+  pub user: UserId,
+  pub role: ChannelRole,
 }
 
 /// A member of a space as the space settings list them.

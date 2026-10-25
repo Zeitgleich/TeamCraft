@@ -12,7 +12,7 @@ use teamcraft_client_api::actions::{ChannelChanges, NewChannel, NewSpace, SpaceI
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{Message, MessageKind, SpaceRoster, SystemEvent};
 use teamcraft_core::api::fake::FakeServer;
-use teamcraft_proto::{ConversationId, HistoryPolicy, IdempotencyKey, SpaceId, SpaceRole};
+use teamcraft_proto::{ChannelRole, ConversationId, HistoryPolicy, IdempotencyKey, SpaceId, SpaceRole};
 
 #[tokio::test]
 async fn public_channels_are_browsed_and_joined() {
@@ -414,6 +414,87 @@ async fn space_settings_list_change_and_remove_members_and_withdraw_invitations(
     "the roster is reloaded after the removal"
   );
   assert!(alice_ui.space_invites(space).is_empty());
+}
+
+#[tokio::test]
+async fn channel_admins_change_roles_and_the_member_list_shows_what_the_server_stored() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let space = alice.space().await;
+  let channel = create_public_channel(&mut alice, space, "Ops").await;
+  let bob_ui = backend_of(&bob);
+  bob_ui.join_channel(channel);
+  run_commands(&mut bob, &bob_ui).await;
+  settle_and_flush(&mut [&mut alice, &mut bob]).await;
+  let alice_ui = backend_of(&alice);
+  let role_of = |ui: &dyn ChatBackend, user| {
+    ui.channel_roles(channel)
+      .into_iter()
+      .find(|member| member.user == user)
+      .map(|member| member.role)
+  };
+  alice
+    .client
+    .set_channel_role(channel, alice.client.user_id(), ChannelRole::Admin)
+    .await
+    .unwrap();
+  assert_eq!(
+    role_of(&alice_ui, alice.client.user_id()),
+    Some(ChannelRole::Admin)
+  );
+  assert_eq!(
+    role_of(&alice_ui, bob.client.user_id()),
+    Some(ChannelRole::Member)
+  );
+
+  alice_ui.set_channel_role(channel, bob.client.user_id(), ChannelRole::Moderator);
+  run_commands(&mut alice, &alice_ui).await;
+  assert_eq!(
+    role_of(&alice_ui, bob.client.user_id()),
+    Some(ChannelRole::Moderator)
+  );
+}
+
+#[tokio::test]
+async fn role_changes_without_the_permission_or_of_the_last_admin_are_refused() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let space = alice.space().await;
+  let channel = create_public_channel(&mut alice, space, "Ops").await;
+  let bob_ui = backend_of(&bob);
+  bob_ui.join_channel(channel);
+  run_commands(&mut bob, &bob_ui).await;
+  settle_and_flush(&mut [&mut alice, &mut bob]).await;
+  let alice_ui = backend_of(&alice);
+  alice
+    .client
+    .set_channel_role(channel, alice.client.user_id(), ChannelRole::Admin)
+    .await
+    .unwrap();
+
+  // A member can't promote themselves.
+  let own = bob
+    .client
+    .set_channel_role(channel, bob.client.user_id(), ChannelRole::Admin)
+    .await;
+  assert!(own.is_err());
+  // The only admin can't step down.
+  let last = alice
+    .client
+    .set_channel_role(channel, alice.client.user_id(), ChannelRole::Member)
+    .await;
+  assert!(last.is_err());
+  let roles = alice_ui.channel_roles(channel);
+  let held = |user| {
+    roles
+      .iter()
+      .find(|member| member.user == user)
+      .map(|member| member.role.clone())
+  };
+  assert_eq!(held(alice.client.user_id()), Some(ChannelRole::Admin));
+  assert_eq!(held(bob.client.user_id()), Some(ChannelRole::Member));
 }
 
 #[tokio::test]
