@@ -9,13 +9,13 @@ use std::sync::Arc;
 
 use common::{Peer, linked_options, settings, settle};
 use teamcraft_core::api::ServerApi;
-use teamcraft_core::api::fake::FakeServer;
+use teamcraft_core::api::fake::{FakeServer, NetworkCut};
 use teamcraft_core::client::is_waiting_for_device;
 use teamcraft_core::store::{
   ConversationEvent, LocalStore, MemoryStore, MessageContent, MessageFilter, Table,
 };
 use teamcraft_core::{GroupAccess, LinkOffer, PendingEnrollment};
-use teamcraft_proto::{AddConversationMemberRequest, ConversationId, ListMlsMessagesQuery};
+use teamcraft_proto::{AddConversationMemberRequest, ConversationId, HistoryPolicy, ListMlsMessagesQuery};
 
 #[tokio::test]
 async fn a_linked_device_joins_on_its_own_and_reads_while_everybody_else_is_offline() {
@@ -403,12 +403,8 @@ async fn a_device_linked_after_the_upgrade_writes_in_a_dm_from_before_it() {
   let dm = phone.client.open_dm(bob.client.user_id()).await.unwrap();
   phone.client.send_text(dm, None, "hi Bob").await.unwrap();
   settle(&mut [&mut phone, &mut bob]).await;
-  for peer in [&phone, &bob] {
-    peer
-      .store
-      .delete(Table::AppliedChanges, &format!("key_history/{dm}"))
-      .unwrap();
-  }
+  forget_key_epochs(&phone, dm);
+  forget_key_epochs(&bob, dm);
   phone.client.upload_key_bag().await.unwrap();
   let mut laptop = link_laptop(&mut phone).await;
 
@@ -436,6 +432,74 @@ async fn a_device_linked_after_the_upgrade_writes_in_a_dm_from_before_it() {
     phone.content_key_of(dm, "hi Bob").await,
     "the key bag's key is not handed over"
   );
+}
+
+/// A member's hand-over fails on the way and another member's arrives first: the member never
+/// switched to the key it made, so nobody writes with a key the others don't have.
+#[tokio::test]
+async fn a_failed_hand_over_never_leaves_a_member_writing_with_a_key_nobody_has() {
+  let server = FakeServer::new();
+  let (mut phone, mut bob, dm, mut laptop) = pre_upgrade_dm_with_new_laptop(&server).await;
+  server.cut_next_application(phone.client.user_id(), NetworkCut::BeforeRequest);
+  phone.client.sync_mls(dm).await.unwrap();
+  assert!(phone.client.apply_pending_changes().await.is_err());
+  bob.client.sync_mls(dm).await.unwrap();
+  bob.client.apply_pending_changes().await.unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut laptop]).await;
+  phone.client.apply_pending_changes().await.unwrap();
+
+  assert_everybody_reads_everybody(dm, &mut phone, &mut bob, &mut laptop).await;
+}
+
+/// Two members hand over a fresh key at once, each before seeing the other's: the device takes
+/// the first, each member keeps its own, and everybody reads everybody.
+#[tokio::test]
+async fn two_members_handing_over_at_once_keep_everybody_reading() {
+  let server = FakeServer::new();
+  let (mut phone, mut bob, dm, mut laptop) = pre_upgrade_dm_with_new_laptop(&server).await;
+  server.hold_next_application(phone.client.user_id());
+  phone.client.sync_mls(dm).await.unwrap();
+  phone.client.apply_pending_changes().await.unwrap();
+  bob.client.sync_mls(dm).await.unwrap();
+  bob.client.apply_pending_changes().await.unwrap();
+  server.release_held_messages();
+  settle(&mut [&mut phone, &mut bob, &mut laptop]).await;
+  assert!(!is_waiting_for_device(laptop.store.as_ref(), dm).unwrap());
+
+  assert_everybody_reads_everybody(dm, &mut phone, &mut bob, &mut laptop).await;
+  assert_ne!(
+    phone.content_key_of(dm, "from Alice's phone").await,
+    bob.content_key_of(dm, "from Bob").await,
+    "two keys in use, both known to everybody"
+  );
+}
+
+/// A member whose current key only its key bag knows adds somebody with full history: the new
+/// member gets a fresh current key, not that one.
+#[tokio::test]
+async fn a_full_history_add_hands_a_fresh_key_when_the_current_one_is_unknown_to_the_group() {
+  let server = FakeServer::new();
+  let (mut phone, mut bob, channel) = channel_with_history(&server).await;
+  let mut carol = Peer::enroll(&server, "Carol").await;
+  forget_key_epochs(&phone, channel);
+  phone
+    .client
+    .add_member_with_history(channel, carol.client.user_id(), Some(HistoryPolicy::Full))
+    .await
+    .unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut carol]).await;
+  carol.client.full_sync().await.unwrap();
+  assert_eq!(carol.texts(channel), ["one", "two", "three"]);
+
+  carol.client.send_text(channel, None, "from Carol").await.unwrap();
+  carol.client.flush_outbox().await.unwrap();
+  phone.client.send_text(channel, None, "from Alice").await.unwrap();
+  settle(&mut [&mut phone, &mut bob, &mut carol]).await;
+  let carol_key = carol.content_key_of(channel, "from Carol").await;
+  assert_ne!(carol_key, phone.content_key_of(channel, "one").await);
+  assert_eq!(carol_key, phone.content_key_of(channel, "from Alice").await);
+  assert!(bob.texts(channel).contains(&"from Carol".to_string()));
+  assert!(carol.texts(channel).contains(&"from Alice".to_string()));
 }
 
 /// Issue #179: a further device joins the user's DMs on its own, like channels.
@@ -483,6 +547,63 @@ async fn a_linked_device_does_not_join_a_dm_group_that_lacks_a_participant() {
     laptop.client.group_access(dm).unwrap(),
     GroupAccess::WaitingForDevice
   );
+}
+
+/// A DM of Alice's phone and Bob from before key epochs were recorded (both hand over at once),
+/// and Alice's newly linked laptop, which joined it and waits for a current key.
+async fn pre_upgrade_dm_with_new_laptop(server: &FakeServer) -> (Peer, Peer, ConversationId, Peer) {
+  let no_stagger = teamcraft_core::ClientSettings {
+    device_add_stagger: std::time::Duration::ZERO,
+    ..settings()
+  };
+  let mut phone = Peer::enroll_with_settings(server, "Alice", no_stagger.clone()).await;
+  let mut bob = Peer::enroll_with_settings(server, "Bob", no_stagger).await;
+  let dm = phone.client.open_dm(bob.client.user_id()).await.unwrap();
+  phone.client.send_text(dm, None, "hi Bob").await.unwrap();
+  settle(&mut [&mut phone, &mut bob]).await;
+  forget_key_epochs(&phone, dm);
+  forget_key_epochs(&bob, dm);
+  phone.client.upload_key_bag().await.unwrap();
+  let mut laptop = link_laptop(&mut phone).await;
+  laptop.client.full_sync().await.unwrap();
+  assert!(is_waiting_for_device(laptop.store.as_ref(), dm).unwrap());
+  (phone, bob, dm, laptop)
+}
+
+/// As on a device from before key epochs were recorded.
+fn forget_key_epochs(peer: &Peer, conversation: ConversationId) {
+  peer
+    .store
+    .delete(Table::AppliedChanges, &format!("key_history/{conversation}"))
+    .unwrap();
+}
+
+async fn assert_everybody_reads_everybody(
+  dm: ConversationId,
+  phone: &mut Peer,
+  bob: &mut Peer,
+  laptop: &mut Peer,
+) {
+  phone
+    .client
+    .send_text(dm, None, "from Alice's phone")
+    .await
+    .unwrap();
+  bob.client.send_text(dm, None, "from Bob").await.unwrap();
+  laptop
+    .client
+    .send_text(dm, None, "from the laptop")
+    .await
+    .unwrap();
+  laptop.client.flush_outbox().await.unwrap();
+  settle(&mut [&mut *phone, &mut *bob, &mut *laptop]).await;
+  let expected = ["hi Bob", "from Alice's phone", "from Bob", "from the laptop"];
+  for peer in [&*phone, &*bob, &*laptop] {
+    let texts = peer.texts(dm);
+    for text in expected {
+      assert!(texts.contains(&text.to_string()), "{}: {texts:?}", peer.name);
+    }
+  }
 }
 
 /// Alice's phone and Bob share a channel with three messages; Alice uploaded her key bag.

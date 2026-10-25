@@ -32,6 +32,22 @@ struct KeyHistory {
   member_since: BTreeMap<String, u64>,
 }
 
+/// The current key a bundle hands over ([`Client::hand_over_key`]).
+pub(crate) enum HandOverKey {
+  /// This device's current key, which it had in the group.
+  Known(ContentKey),
+  /// Made for the hand-over: in the ring, current once the bundle went out.
+  Fresh(ContentKey),
+}
+
+impl HandOverKey {
+  pub(crate) fn key(&self) -> &ContentKey {
+    match self {
+      Self::Known(key) | Self::Fresh(key) => key,
+    }
+  }
+}
+
 impl KeyHistory {
   /// The keys of `ring_keys` the member device `device` was entitled to: those this device had
   /// from an epoch in which both were in the group (from `joined`, this device's join, and the
@@ -158,40 +174,69 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// The current key to hand to others in a bundle: one this device had in the group since its
   /// join. A current key only the key bag knows (also every key from before this was recorded)
-  /// may be stale, one a removed member knows (#178): a fresh random key replaces it as this
-  /// device's current key and is the one handed over. It is new and reaches only the group's
-  /// members of this epoch, over MLS. `None` without a current key, or while this device waits
-  /// for one itself.
-  pub(crate) fn group_known_current_key(
+  /// may be stale, one a removed member knows (#178): then a fresh random key is made and handed
+  /// over instead; it is new and reaches only the group's members of this epoch, over MLS. The
+  /// fresh key goes into the ring but becomes current only with
+  /// [`Self::adopt_handed_over_key`] once the bundle went out, so a failed send never leaves this
+  /// device writing with a key nobody has. Without a current key (or while this device waits for
+  /// one) `None`, unless `is_new_key_allowed`: a device sharing history with a new member makes
+  /// one then (also while waiting; a fresh key is safe).
+  pub(crate) fn hand_over_key(
     &mut self,
     conversation: ConversationId,
-  ) -> Result<Option<ContentKey>, CoreError> {
-    if super::member_device::is_waiting_for_current_key(&self.store, conversation)? {
-      return Ok(None);
-    }
-    let Some(current) = self
+    is_new_key_allowed: bool,
+  ) -> Result<Option<HandOverKey>, CoreError> {
+    let is_waiting = super::member_device::is_waiting_for_current_key(&self.store, conversation)?;
+    let maybe_current = self
       .account
       .key_bag
       .ring(convert::conversation(conversation))
       .and_then(|ring| ring.current())
       .map(ContentKey::duplicate)
-    else {
-      return Ok(None);
-    };
-    if self.has_key_epoch(conversation, current.id())? {
-      return Ok(Some(current));
+      .filter(|_| !is_waiting);
+    match maybe_current {
+      Some(current) if self.has_key_epoch(conversation, current.id())? => {
+        return Ok(Some(HandOverKey::Known(current)));
+      },
+      Some(_) => {
+        tracing::info!(conversation_id = %conversation, "a current key only the key bag knew is replaced by a fresh one");
+      },
+      None if !is_new_key_allowed => return Ok(None),
+      None => {},
     }
-    let fresh = self
+    let fresh = ContentKey::generate(&mut OsRng);
+    self
       .account
       .key_bag
       .ring_mut(convert::conversation(conversation))
-      .rotate(&mut OsRng)
-      .duplicate();
+      .insert(fresh.duplicate())?;
+    self.persist_keys()?;
+    Ok(Some(HandOverKey::Fresh(fresh)))
+  }
+
+  /// After the bundle with `key` went out: a fresh key becomes this device's current key, noted
+  /// for the epoch it was sent in (a device that waited for one has it now).
+  pub(crate) fn adopt_handed_over_key(
+    &mut self,
+    conversation: ConversationId,
+    key: &HandOverKey,
+  ) -> Result<(), CoreError> {
+    let HandOverKey::Fresh(fresh) = key else {
+      return Ok(());
+    };
+    self
+      .account
+      .key_bag
+      .ring_mut(convert::conversation(conversation))
+      .set_current(fresh.id())?;
     self.persist_keys()?;
     let epoch = self.group_or_error(conversation)?.epoch();
     self.note_key_epochs(conversation, &[fresh.id()], epoch)?;
-    tracing::info!(conversation_id = %conversation, "replaced a current key only the key bag knew before handing it over");
-    Ok(Some(fresh))
+    self.store.delete(
+      Table::AppliedChanges,
+      &super::member_device::current_key_wait_key(conversation),
+    )?;
+    Ok(())
   }
 
   /// A member added `rejoined` back. If that member joined the group after this device, it may

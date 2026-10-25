@@ -276,11 +276,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(PendingOutcome::Done);
     }
     // Never a key only the key bag knows: the waiting device would take it (#178).
-    let Some(current) = self.group_known_current_key(conversation)? else {
+    let Some(handed) = self.hand_over_key(conversation, false)? else {
       return Ok(PendingOutcome::Done);
     };
-    let bundle = ContentKeyBundle::epoch_key(convert::conversation(conversation), current);
+    let bundle = ContentKeyBundle::epoch_key(convert::conversation(conversation), handed.key().duplicate());
     self.send_bundle(conversation, &bundle, None).await?;
+    self.adopt_handed_over_key(conversation, &handed)?;
     tracing::info!(conversation_id = %conversation, device_id = %device_id, "sent the current content key for a further device");
     Ok(PendingOutcome::Done)
   }

@@ -95,6 +95,19 @@ impl ContentKeyBundle {
     }
   }
 
+  /// Every key of the ring, naming `current` (a key of the ring) as the current one: for a sender
+  /// that switches to `current` only once the bundle went out.
+  pub fn full_history_naming(ring: &ContentKeyRing, current: ContentKeyId) -> Result<Self, ContentKeyError> {
+    if ring.get(current).is_none() {
+      return Err(ContentKeyError::UnknownKey(current));
+    }
+    Ok(Self {
+      conversation_id: ring.conversation_id(),
+      maybe_current: Some(current),
+      keys: ring.keys().iter().map(ContentKey::duplicate).collect(),
+    })
+  }
+
   pub fn conversation_id(&self) -> ConversationId {
     self.conversation_id
   }
@@ -358,6 +371,27 @@ mod tests {
       new_members_ring.current().map(ContentKey::id),
       ring.current().map(ContentKey::id)
     );
+  }
+
+  #[test]
+  fn a_full_history_bundle_names_only_a_key_of_the_ring() {
+    let mut ring = ContentKeyRing::new(CONVERSATION);
+    let current = ring.rotate(&mut OsRng).id();
+    let next = ContentKey::generate(&mut OsRng);
+    let next_id = next.id();
+    ring.insert(next).unwrap();
+    let bundle = ContentKeyBundle::full_history_naming(&ring, next_id).unwrap();
+    assert_eq!(bundle.current(), Some(next_id));
+    assert_eq!(bundle.keys().len(), 2);
+    assert_eq!(
+      ring.current().map(ContentKey::id),
+      Some(current),
+      "the ring is unchanged"
+    );
+    assert!(matches!(
+      ContentKeyBundle::full_history_naming(&ring, ContentKey::generate(&mut OsRng).id()),
+      Err(ContentKeyError::UnknownKey(_))
+    ));
   }
 
   #[test]

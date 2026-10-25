@@ -1402,33 +1402,36 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     share: SharedKeys,
   ) -> Result<(), CoreError> {
     // The bundle names a current key the new member takes: never one only the key bag knows.
-    let maybe_current = self.group_known_current_key(conversation)?;
-    let bundle = match share {
+    let (bundle, handed) = match share {
       SharedKeys::FullHistory => {
-        let ring = self.account.key_bag.ring_mut(convert::conversation(conversation));
-        let is_new_key = ring.current().is_none();
-        let bundle = ContentKeyBundle::full_history(ring, &mut OsRng);
-        self.persist_keys()?;
-        if is_new_key && let Some(current) = bundle.current() {
-          // Made just now for the bundle: a fresh key, so a device waiting for one has it.
-          let epoch = self.group_or_error(conversation)?.epoch();
-          self.note_key_epochs(conversation, &[current], epoch)?;
-          self.store.delete(
-            Table::AppliedChanges,
-            &super::member_device::current_key_wait_key(conversation),
-          )?;
-        }
-        bundle
+        let handed = self
+          .hand_over_key(conversation, true)?
+          .ok_or(CoreError::NoContentKey(conversation))?;
+        let ring = self
+          .account
+          .key_bag
+          .ring(convert::conversation(conversation))
+          .ok_or(CoreError::NoContentKey(conversation))?;
+        (
+          ContentKeyBundle::full_history_naming(ring, handed.key().id())?,
+          handed,
+        )
       },
       SharedKeys::CurrentKey => {
-        let key = maybe_current.ok_or(CoreError::NoContentKey(conversation))?;
-        ContentKeyBundle::epoch_key(convert::conversation(conversation), key)
+        let handed = self
+          .hand_over_key(conversation, false)?
+          .ok_or(CoreError::NoContentKey(conversation))?;
+        (
+          ContentKeyBundle::epoch_key(convert::conversation(conversation), handed.key().duplicate()),
+          handed,
+        )
       },
       SharedKeys::MissedKeys { user_id, device_id } => {
         return self.send_missed_keys(conversation, user_id, device_id).await;
       },
     };
-    self.send_bundle(conversation, &bundle, None).await
+    self.send_bundle(conversation, &bundle, None).await?;
+    self.adopt_handed_over_key(conversation, &handed)
   }
 
   /// Seals to a device added back the keys of the epochs it was a member in (e2ee.md §4.6). Done

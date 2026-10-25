@@ -471,12 +471,16 @@ its own. See [admin.md](admin.md) §2.
   when the group switches keys anyway. A member hands over only a current key it had in the group
   since its own join (derived or received there, see "Keys a device added back missed"). If its
   current key is one only its key bag knows, which may be stale in the same way (and so is every
-  current key from before devices recorded this), it makes a fresh random key, switches to it and
-  hands over that one: it is new and reaches only the epoch's members over MLS. The same rule holds
-  for the current key in the history it shares with a new member. The waiting device takes the
-  first current key a member sends after its join (the adder's history share for a new user, the
-  hand-over for a further device; only members of the epoch can send it, the server can delay it,
-  not forge it), or the next epoch key it derives itself. Members on clients before this version
+  current key from before devices recorded this), it makes a fresh random key and hands over that
+  one: it is new and reaches only the epoch's members over MLS. It switches to the fresh key only
+  once the bundle went out, so a failed send never leaves it writing with a key nobody has. The
+  same rule holds for the current key in the history it shares with a new member; a device that
+  waits for a key itself makes a fresh one when it shares history (that is safe), never for a
+  hand-over. The waiting device takes the first current key a member sends after its join (the
+  adder's history share for a new user, the hand-over for a further device; only members of the
+  epoch can send it, the server can delay it, not forge it), or the next epoch key it derives
+  itself. So any one member decides which key a waiting device writes with; members that handed
+  over at the same time each keep their own key, and every member has all of them. Members on clients before this version
   don't send the hand-over: until a member with this version comes online, the device reads but
   doesn't write.
   `GroupInfo` larger than
