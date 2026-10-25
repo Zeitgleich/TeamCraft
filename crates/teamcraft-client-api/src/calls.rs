@@ -306,6 +306,120 @@ pub struct MediaDevices {
   pub cameras: Vec<MediaDevice>,
   pub microphones: Vec<MediaDevice>,
   pub speakers: Vec<MediaDevice>,
+  /// Whether there is a camera at all, beyond the named ones (browsers name devices only once
+  /// the page may use them). Older shells send nothing: [`DevicePresence::Unknown`].
+  #[serde(default)]
+  pub camera_presence: DevicePresence,
+  #[serde(default)]
+  pub microphone_presence: DevicePresence,
+}
+
+/// What listing the devices found for one kind of input.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DevicePresence {
+  /// At least one device, named in the list.
+  Present,
+  /// At least one device, unnamed until the user allows the page to use it.
+  Hidden,
+  /// There is a device, but the user or a site setting refused access to it.
+  Blocked,
+  /// No device of this kind.
+  Missing,
+  /// Not listed yet, or a platform that doesn't say (also what a newer value reads as).
+  #[default]
+  #[serde(other)]
+  Unknown,
+}
+
+/// A browser's permission for the camera or the microphone (`navigator.permissions.query`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrowserPermission {
+  Granted,
+  Denied,
+  /// The user hasn't been asked yet (or dismissed the question).
+  Prompt,
+  /// The browser can't say (no Permissions API, or it doesn't know the name).
+  Unknown,
+}
+
+impl BrowserPermission {
+  /// From `PermissionStatus.state`.
+  pub fn from_state(state: &str) -> Self {
+    match state {
+      "granted" => Self::Granted,
+      "denied" => Self::Denied,
+      "prompt" => Self::Prompt,
+      _ => Self::Unknown,
+    }
+  }
+}
+
+impl MediaDevices {
+  /// Devices from a platform that names every device it lists (the desktop app).
+  pub fn listed(
+    cameras: Vec<MediaDevice>,
+    microphones: Vec<MediaDevice>,
+    speakers: Vec<MediaDevice>,
+  ) -> Self {
+    Self {
+      camera_presence: DevicePresence::of_named(&cameras),
+      microphone_presence: DevicePresence::of_named(&microphones),
+      cameras,
+      microphones,
+      speakers,
+    }
+  }
+}
+
+impl DevicePresence {
+  /// From a browser's listing of one kind of input (`enumerateDevices`), its permission for that
+  /// kind, and whether the listing had any device at all.
+  ///
+  /// Browsers name devices only once the page may use them; until then they list one unnamed
+  /// device per kind that exists. A browser that lists nothing at all before permission tells
+  /// nothing, so an empty kind counts as missing only when the permission is granted or the
+  /// browser listed other devices.
+  pub fn in_browser<'a>(
+    ids: impl IntoIterator<Item = &'a str>,
+    permission: BrowserPermission,
+    has_listed_any: bool,
+  ) -> Self {
+    match (Self::from_ids(ids), permission) {
+      (Self::Present, _) => Self::Present,
+      (_, BrowserPermission::Denied) => Self::Blocked,
+      (Self::Missing, BrowserPermission::Granted) => Self::Missing,
+      (Self::Missing, _) if has_listed_any => Self::Missing,
+      (Self::Missing, _) => Self::Unknown,
+      (other, _) => other,
+    }
+  }
+
+  /// From a listing's device ids. Browsers list a device with an empty id (one per kind) until
+  /// the page may use that kind.
+  pub fn from_ids<'a>(ids: impl IntoIterator<Item = &'a str>) -> Self {
+    let mut presence = Self::Missing;
+    for id in ids {
+      if !id.is_empty() {
+        return Self::Present;
+      }
+      presence = Self::Hidden;
+    }
+    presence
+  }
+
+  /// Whether the device can't be used at all: none there, or access refused.
+  pub fn is_unavailable(self) -> bool {
+    matches!(self, Self::Missing | Self::Blocked)
+  }
+
+  fn of_named(devices: &[MediaDevice]) -> Self {
+    if devices.is_empty() {
+      Self::Missing
+    } else {
+      Self::Present
+    }
+  }
 }
 
 /// A remote participant as the media layer reports it.
@@ -638,6 +752,95 @@ impl CallHistoryItem {
 
   pub fn is_ongoing(&self) -> bool {
     self.maybe_ended_at.is_none()
+  }
+}
+
+#[cfg(test)]
+mod device_tests {
+  use super::*;
+
+  #[test]
+  fn browser_listings_tell_hidden_devices_from_missing_ones() {
+    assert_eq!(DevicePresence::from_ids([]), DevicePresence::Missing);
+    assert_eq!(DevicePresence::from_ids([""]), DevicePresence::Hidden);
+    assert_eq!(DevicePresence::from_ids(["", "cam-1"]), DevicePresence::Present);
+    assert_eq!(
+      DevicePresence::from_ids(["default", "mic-1"]),
+      DevicePresence::Present
+    );
+  }
+
+  #[test]
+  fn an_empty_kind_is_missing_only_when_the_browser_would_have_listed_it() {
+    use BrowserPermission::{Granted, Prompt, Unknown};
+    // Allowed, or the browser listed other devices (unnamed ones per kind before permission).
+    assert_eq!(
+      DevicePresence::in_browser([], Granted, false),
+      DevicePresence::Missing
+    );
+    assert_eq!(
+      DevicePresence::in_browser([], Prompt, true),
+      DevicePresence::Missing
+    );
+    // A browser that lists nothing before permission tells nothing.
+    assert_eq!(
+      DevicePresence::in_browser([], Prompt, false),
+      DevicePresence::Unknown
+    );
+    assert_eq!(
+      DevicePresence::in_browser([], Unknown, false),
+      DevicePresence::Unknown
+    );
+  }
+
+  #[test]
+  fn a_refused_permission_blocks_unless_devices_are_named() {
+    use BrowserPermission::{Denied, Prompt};
+    assert_eq!(
+      DevicePresence::in_browser([""], Denied, true),
+      DevicePresence::Blocked
+    );
+    assert_eq!(
+      DevicePresence::in_browser([], Denied, false),
+      DevicePresence::Blocked
+    );
+    assert_eq!(
+      DevicePresence::in_browser([""], Prompt, true),
+      DevicePresence::Hidden
+    );
+    assert_eq!(
+      DevicePresence::in_browser(["cam-1"], Denied, true),
+      DevicePresence::Present
+    );
+    assert_eq!(BrowserPermission::from_state("denied"), Denied);
+    assert_eq!(BrowserPermission::from_state("later"), BrowserPermission::Unknown);
+  }
+
+  #[test]
+  fn named_listings_are_present_or_missing() {
+    let camera = MediaDevice {
+      id: "cam-1".into(),
+      label: "Camera".into(),
+    };
+    let devices = MediaDevices::listed(vec![camera], Vec::new(), Vec::new());
+    assert_eq!(devices.camera_presence, DevicePresence::Present);
+    assert_eq!(devices.microphone_presence, DevicePresence::Missing);
+  }
+
+  #[test]
+  fn presence_is_forward_compatible_on_the_wire() {
+    let old: MediaDevices = serde_json::from_str(r#"{"cameras":[],"microphones":[],"speakers":[]}"#).unwrap();
+    assert_eq!(old.camera_presence, DevicePresence::Unknown);
+    let newer: MediaDevices = serde_json::from_str(
+      r#"{"cameras":[],"microphones":[],"speakers":[],"camera_presence":"on_mars","microphone_presence":"blocked"}"#,
+    )
+    .unwrap();
+    assert_eq!(newer.camera_presence, DevicePresence::Unknown);
+    assert_eq!(newer.microphone_presence, DevicePresence::Blocked);
+    assert_eq!(
+      serde_json::to_value(DevicePresence::Missing).unwrap(),
+      serde_json::json!("missing")
+    );
   }
 }
 

@@ -45,6 +45,10 @@ pub struct SnapshotChanges {
   /// Conversations whose entry, message count or newest message changed, or that are new.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub conversations: Vec<ConversationChange>,
+  /// Conversations whose messages may differ although their entry did not change: a thread reply,
+  /// an edit, a reaction. A reader re-reads what it shows of their feeds and threads.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub feeds: Vec<ConversationId>,
   /// The order of all conversations, when it changed (one left, one moved, one is new).
   #[serde(rename = "order", default, skip_serializing_if = "Option::is_none")]
   pub maybe_order: Option<Vec<ConversationId>>,
@@ -97,6 +101,7 @@ impl SnapshotChanges {
       && self.maybe_user_ids.is_none()
       && self.maybe_spaces.is_none()
       && self.conversations.is_empty()
+      && self.feeds.is_empty()
       && self.maybe_order.is_none()
       && self.maybe_security.is_none()
       && self.maybe_live.is_none()
@@ -182,7 +187,7 @@ impl ChatSnapshot {
   }
 
   /// Takes what changed since this snapshot was read.
-  pub fn apply(&mut self, changes: SnapshotChanges) -> AppliedChanges {
+  pub fn apply(&mut self, mut changes: SnapshotChanges) -> AppliedChanges {
     if let Some(full) = changes.maybe_full {
       let is_changed = *self != *full;
       *self = *full;
@@ -192,6 +197,8 @@ impl ChatSnapshot {
         conversations: BTreeSet::new(),
       };
     }
+    // Feeds are not part of the snapshot: they only tell which conversations to re-read.
+    let feeds = std::mem::take(&mut changes.feeds);
     let is_changed = !changes.is_empty();
     if let Some(me) = changes.maybe_me {
       self.me = me;
@@ -204,6 +211,7 @@ impl ChatSnapshot {
       .conversations
       .iter()
       .map(|change| change.conversation.id)
+      .chain(feeds)
       .collect();
     for change in changes.conversations {
       self.apply_conversation(change);
@@ -360,6 +368,18 @@ mod tests {
     assert_eq!(held.conversations[1].name, "renamed");
     assert_eq!(held.message_counts[1], (id_from_raw(2), 9));
     assert!(held.last_activity.contains(&(id_from_raw(2), 500)));
+  }
+
+  #[test]
+  fn a_changed_feed_touches_its_conversation_but_not_the_snapshot() {
+    let mut held = snapshot(&[1, 2]);
+    let applied = held.apply(SnapshotChanges {
+      feeds: vec![id_from_raw(2)],
+      ..SnapshotChanges::default()
+    });
+    assert!(!applied.is_changed && !applied.is_replaced);
+    assert!(applied.touches(id_from_raw(2)) && !applied.touches(id_from_raw(1)));
+    assert_eq!(held, snapshot(&[1, 2]));
   }
 
   #[test]

@@ -6,7 +6,7 @@ use crate::components::message_list::handle_list_keys;
 use crate::components::message_row::MessageRow;
 use crate::components::message_toolbar::{MessageToolbar, ToolbarHost};
 use crate::i18n::use_i18n;
-use crate::model::{ConversationId, Message, ThreadId};
+use crate::model::{Conversation, ConversationId, ConversationKind, Message, ThreadId};
 use crate::state::{SidePanel, use_app_state};
 
 /// Right-hand thread view: root message, replies and a reply composer.
@@ -27,7 +27,7 @@ pub fn ThreadPanel(
   let conv_name = Memo::new(move |_| {
     state
       .read(|backend| backend.conversation(conversation))
-      .map(|conv| conv.name)
+      .map(|conv| conversation_label(&conv))
       .unwrap_or_default()
   });
   let can_post = state
@@ -48,7 +48,7 @@ pub fn ThreadPanel(
         <div class="panel-title">
           <h2>{move || i18n.t("thread-title")}</h2>
           <span class="panel-subtitle" translate="no">
-            {move || format!("# {}", conv_name.get())}
+            {move || conv_name.get()}
           </span>
         </div>
         <button
@@ -109,5 +109,13 @@ pub fn ThreadPanel(
         can_post=can_post
       />
     </aside>
+  }
+}
+
+/// "# general" for a channel, the plain name for a direct or group conversation (no "#" there).
+pub fn conversation_label(conv: &Conversation) -> String {
+  match conv.kind {
+    ConversationKind::Direct | ConversationKind::Group => conv.name.clone(),
+    _ => format!("# {}", conv.name),
   }
 }

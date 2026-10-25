@@ -7,6 +7,8 @@
 use std::sync::Arc;
 
 use crate::common::{PASSPHRASE, Peer, clock, options, settings};
+use teamcraft_client_api::backend::ChatBackend;
+use teamcraft_client_api::model::{ThreadId, thread_id_of};
 use teamcraft_client_api::remote::{ChatSnapshot, SecuritySnapshot};
 use teamcraft_client_api::snapshot_changes::SnapshotCursor;
 use teamcraft_core::api::fake::{FakeGateway, FakeServer, FakeServerApi};
@@ -14,7 +16,7 @@ use teamcraft_core::store::{MemoryStore, TrackedStore};
 use teamcraft_core::ui_backend::CoreChatBackend;
 use teamcraft_core::ui_snapshot::SnapshotCache;
 use teamcraft_core::{Client, PendingEnrollment};
-use teamcraft_proto::ConversationId;
+use teamcraft_proto::{ClientMessageId, ConversationId};
 
 type Store = TrackedStore<Arc<MemoryStore>>;
 
@@ -47,6 +49,106 @@ async fn a_new_message_sends_only_its_conversation() {
   let applied = carol.held.apply(changes);
   assert!(applied.touches(first) && !applied.touches(second));
   carol.assert_up_to_date();
+}
+
+/// A reply that stays in its thread leaves the conversation's entry as it was; the reader is still
+/// told to re-read the feed, or the thread panel never shows it.
+#[tokio::test]
+async fn a_thread_reply_from_another_member_touches_its_conversation() {
+  let (mut alice, mut carol, [first, second]) = workspace().await;
+  let thread = carol.thread_of(&mut alice, first).await;
+
+  alice
+    .client
+    .send_text(first, Some(thread), "in the thread")
+    .await
+    .unwrap();
+  carol.catch_up(&mut alice).await;
+  let changes = carol.changes();
+
+  assert!(changes.feeds.contains(&first) || changes.conversations.iter().any(|c| c.conversation.id == first));
+  let applied = carol.held.apply(changes);
+  assert!(applied.touches(first) && !applied.touches(second));
+  carol.assert_up_to_date();
+  assert!(
+    carol
+      .thread_bodies(first, thread)
+      .contains(&"in the thread".to_owned())
+  );
+  assert_eq!(carol.root_reply_count(first), 1);
+}
+
+/// The sender's own reply shows up while it is still pending, before the server has it.
+#[tokio::test]
+async fn an_own_thread_reply_touches_its_conversation_while_pending() {
+  let (mut alice, mut carol, [first, second]) = workspace().await;
+  let thread = carol.thread_of(&mut alice, first).await;
+
+  carol.backend.post_message(first, Some(thread), "my reply");
+  let changes = carol.changes();
+
+  let applied = carol.held.apply(changes);
+  assert!(applied.touches(first) && !applied.touches(second));
+  assert!(
+    carol
+      .thread_bodies(first, thread)
+      .contains(&"my reply".to_owned())
+  );
+}
+
+/// Edits, reactions and deletes add no message; the reader still re-reads the feed right away,
+/// not only after the next new message (issue #481).
+mod changes_without_a_new_message {
+  use super::*;
+
+  #[tokio::test]
+  async fn an_edit_touches_its_conversation() {
+    let (mut alice, mut carol, [first, second], target) = with_message().await;
+
+    alice.client.edit_message(first, target, "edited").await.unwrap();
+
+    carol.assert_feed_follows(&mut alice, first, second).await;
+    let feed = carol.backend.messages(first, 0, 10);
+    assert!(
+      feed
+        .iter()
+        .any(|message| message.body == "edited" && message.is_edited)
+    );
+  }
+
+  #[tokio::test]
+  async fn a_reaction_touches_its_conversation() {
+    let (mut alice, mut carol, [first, second], target) = with_message().await;
+
+    alice.client.react(first, target, "👍", true).await.unwrap();
+
+    carol.assert_feed_follows(&mut alice, first, second).await;
+    let feed = carol.backend.messages(first, 0, 10);
+    let reacted = feed.iter().find(|message| message.body == "hello").unwrap();
+    assert_eq!(reacted.reactions.len(), 1);
+  }
+
+  #[tokio::test]
+  async fn a_delete_touches_its_conversation() {
+    let (mut alice, mut carol, [first, second], target) = with_message().await;
+
+    alice.client.delete_message(first, target).await.unwrap();
+
+    carol.assert_feed_follows(&mut alice, first, second).await;
+    let feed = carol.backend.messages(first, 0, 10);
+    assert!(feed.iter().all(|message| message.body != "hello"));
+  }
+
+  /// Alice wrote "hello" and then "later" in the first channel; Carol has read both.
+  async fn with_message() -> (Peer, Reader, [ConversationId; 2], ClientMessageId) {
+    let (mut alice, mut carol, channels) = workspace().await;
+    let target = alice.client.send_text(channels[0], None, "hello").await.unwrap();
+    alice.client.send_text(channels[0], None, "later").await.unwrap();
+    carol.catch_up(&mut alice).await;
+    let changes = carol.changes();
+    carol.held.apply(changes);
+    (alice, carol, channels, target)
+  }
 }
 
 #[tokio::test]
@@ -156,6 +258,43 @@ impl Reader {
       }
     }
     panic!("clients did not settle");
+  }
+
+  /// Alice posts a message in `conversation`; returns its thread once Carol has read it.
+  async fn thread_of(&mut self, alice: &mut Peer, conversation: ConversationId) -> ThreadId {
+    alice.client.send_text(conversation, None, "root").await.unwrap();
+    self.catch_up(alice).await;
+    let changes = self.changes();
+    self.held.apply(changes);
+    let feed = self.backend.messages(conversation, 0, 10);
+    thread_id_of(feed.iter().find(|message| message.body == "root").unwrap().id)
+  }
+
+  /// Takes Alice's change: only `changed` has to be re-read, and the held snapshot stays current.
+  async fn assert_feed_follows(&mut self, alice: &mut Peer, changed: ConversationId, other: ConversationId) {
+    self.catch_up(alice).await;
+    let changes = self.changes();
+    let applied = self.held.apply(changes);
+    assert!(applied.touches(changed) && !applied.touches(other));
+    self.assert_up_to_date();
+  }
+
+  fn thread_bodies(&self, conversation: ConversationId, thread: ThreadId) -> Vec<String> {
+    self
+      .backend
+      .thread(conversation, thread)
+      .into_iter()
+      .map(|message| message.body)
+      .collect()
+  }
+
+  fn root_reply_count(&self, conversation: ConversationId) -> usize {
+    let feed = self.backend.messages(conversation, 0, 10);
+    feed
+      .iter()
+      .find(|message| message.body == "root")
+      .unwrap()
+      .reply_count as usize
   }
 
   fn changes(&mut self) -> teamcraft_client_api::snapshot_changes::SnapshotChanges {

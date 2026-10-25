@@ -1420,6 +1420,11 @@ impl ChatBackend for RemoteChat {
     maybe_until: Option<teamcraft_client_api::model::TimestampMs>,
   ) {
     self.mirror.borrow_mut().snapshot.me.presence = presence;
+    // Choosing "Online" is activity on this device: it ends an away timeout the server applied
+    // (the server can't tell which device a presence request came from).
+    if presence == PresenceStatus::Online {
+      self.act(ChatAction::SetActivity { is_idle: false });
+    }
     self.act(ChatAction::SetPresence {
       presence,
       maybe_until,
@@ -1538,6 +1543,72 @@ mod tests {
       let mut feed = Feed::default();
       feed.apply(window(PAGE * 3, &["a"]));
       assert_eq!(feed.held_pages(), vec![0, 2]);
+    }
+  }
+
+  mod refresh_plan {
+    use super::*;
+
+    /// A thread reply that stays in its thread changes no conversation entry; the shown thread and
+    /// feed (the root's reply count) are read again all the same.
+    #[test]
+    fn a_changed_feed_reloads_the_shown_thread_and_pages() {
+      let (conversation, thread) = (id_from_raw(7), crate::model::thread_id_of(id_from_raw(70)));
+      let backend = backend();
+      {
+        let mut mirror = backend.mirror.borrow_mut();
+        mirror.threads.insert((conversation, thread), Vec::new());
+        mirror.used_threads.insert((conversation, thread));
+        let feed = mirror.feeds.entry(conversation).or_default();
+        feed.apply(window(3, &["a", "b", "c"]));
+        feed.is_used = true;
+      }
+
+      let plan = backend.plan_refresh(SnapshotChanges {
+        feeds: vec![conversation],
+        ..SnapshotChanges::default()
+      });
+
+      assert!(!plan.is_snapshot_changed, "the sidebar has nothing to re-render");
+      assert_eq!(plan.threads, vec![(conversation, thread)]);
+      assert_eq!(plan.pages, vec![(conversation, 0)]);
+    }
+
+    #[test]
+    fn a_changed_feed_elsewhere_reloads_nothing_here() {
+      let (conversation, thread) = (id_from_raw(7), crate::model::thread_id_of(id_from_raw(70)));
+      let backend = backend();
+      {
+        let mut mirror = backend.mirror.borrow_mut();
+        mirror.threads.insert((conversation, thread), Vec::new());
+        mirror.used_threads.insert((conversation, thread));
+      }
+
+      let plan = backend.plan_refresh(SnapshotChanges {
+        feeds: vec![id_from_raw(8)],
+        ..SnapshotChanges::default()
+      });
+
+      assert!(plan.threads.is_empty() && plan.pages.is_empty());
+    }
+
+    fn backend() -> RemoteChat {
+      let snapshot = ChatSnapshot::read(&crate::mock::MockBackend::new(0), Default::default());
+      RemoteChat {
+        mirror: Rc::new(RefCell::new(Mirror {
+          snapshot,
+          cursor: SnapshotCursor::default(),
+          feeds: HashMap::new(),
+          threads: HashMap::new(),
+          used_threads: HashSet::new(),
+          loading: HashSet::new(),
+          outdated: HashSet::new(),
+        })),
+        notify: Rc::new(RefCell::new(None)),
+        maybe_error: Rc::new(RefCell::new(None)),
+        refresh_queued: Rc::new(Cell::new(false)),
+        answers: Rc::new(RefCell::new(HashMap::new())),
+      }
     }
   }
 

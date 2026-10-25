@@ -7,7 +7,7 @@ pub enum AvatarSize {
   Small,
   Medium,
   Large,
-  /// The picture at the top of a profile card.
+  /// The largest picture: a profile card's header, and the user's own tile before a call.
   ExtraLarge,
 }
 

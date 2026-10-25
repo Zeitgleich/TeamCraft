@@ -857,6 +857,18 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
     }
   }
 
+  fn refresh_media_devices(&self) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::RefreshDevices);
+    }
+  }
+
+  fn test_speakers(&self, maybe_device: Option<String>) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.test_speakers(maybe_device);
+    }
+  }
+
   fn set_call_camera(&self, is_on: bool) {
     if let Some(calls) = &self.maybe_calls {
       calls.act(CallAction::SetCamera { is_on });

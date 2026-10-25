@@ -36,6 +36,9 @@ web-sys = { version = "0.3", features = [
   "VisualViewport", "MutationObserver", "MutationObserverInit", "Performance", "TouchEvent", "TouchList", "Touch",
   "HtmlDocument", "DomParser", "SupportedType", "Range", "Text", "CharacterData", "InputEvent", "TreeWalker",
   "ImageBitmap", "IntersectionObserver", "IntersectionObserverEntry",
+  # The pre-join speaker test (speaker_test.rs): it has to start inside the click.
+  "AudioContext", "AudioContextState", "AudioBuffer", "AudioBufferSourceNode", "AudioDestinationNode",
+  "AudioNode", "AudioScheduledSourceNode", "BaseAudioContext",
 ] }
 # Fluent: the i18n format mandated by the project rules (English source + translations).
 fluent-bundle = "0.16"

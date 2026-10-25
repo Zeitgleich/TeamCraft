@@ -29,7 +29,7 @@ use crate::components::call_screen::CallScreen;
 use crate::components::directory_view::DirectoryView;
 use crate::components::lightbox::Lightbox;
 use crate::components::login::SessionGate;
-use crate::components::meetings_view::{MeetingsView, ScheduleMeetingDialog};
+use crate::components::meetings_view::{MeetingCreatedDialog, MeetingsView, ScheduleMeetingDialog};
 use crate::components::search_view::SearchView;
 use crate::components::settings_modal::SettingsModal;
 use crate::components::space_invites::{AddToChannelDialog, BrowseSpacesDialog, InvitePeopleDialog};
@@ -97,6 +97,7 @@ areas! {
   call_screen(request: CallRequest) => calls: view! { <CallScreen request=request /> };
   meetings(_unit: ()) => meetings: view! { <MeetingsView /> };
   schedule_meeting(_unit: ()) => meetings: view! { <ScheduleMeetingDialog /> };
+  meeting_created(_unit: ()) => meetings: view! { <MeetingCreatedDialog /> };
   directory(_unit: ()) => directory: view! { <DirectoryView /> };
   search(_unit: ()) => search: view! { <SearchView /> };
 }

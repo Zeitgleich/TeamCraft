@@ -137,7 +137,8 @@ pub fn StatusMenu() -> impl IntoView {
           tabindex="-1"
           on:click=move |_| state.overlay.set(Overlay::CustomStatus)
         >
-          {move || match me.get().maybe_custom_status {
+          // An empty status (no emoji, no text) is no status: offer to set one.
+          {move || match me.get().maybe_custom_status.filter(|status| !status.text.trim().is_empty() || !status.emoji.trim().is_empty()) {
             Some(status) => {
               let maybe_until = status.maybe_expires_at.map(|at| status_until_label(at, now_ms(), i18n));
               view! {
@@ -349,7 +350,7 @@ pub fn CustomStatusDialog() -> impl IntoView {
       maybe_expires_at: chosen_end.get_untracked().filter(|end| *end > now_ms()),
     };
     // Without text there is no status (the emoji alone is the default one).
-    let is_empty = status.text.is_empty();
+    let is_empty = status.text.trim().is_empty();
     state.write(|backend| backend.set_custom_status((!is_empty).then_some(status)));
     state.close_overlay();
   };

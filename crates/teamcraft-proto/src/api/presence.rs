@@ -27,6 +27,9 @@ wire_enum! {
   pub enum ManualPresence {
     /// No override: online/away follow device activity.
     Auto => "auto",
+    /// "Away" chosen by hand: shown while a device is connected, whatever the devices report,
+    /// until the user picks another status.
+    Away => "away",
     DoNotDisturb => "dnd",
     /// "Appear offline".
     Invisible => "invisible",
@@ -165,4 +168,37 @@ pub struct PrivacyResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct UpdatePrivacyRequest {
   pub last_seen: LastSeenVisibility,
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn manual_presence_wire_values_are_stable() {
+    for (manual, wire) in [
+      (ManualPresence::Auto, "auto"),
+      (ManualPresence::Away, "away"),
+      (ManualPresence::DoNotDisturb, "dnd"),
+      (ManualPresence::Invisible, "invisible"),
+    ] {
+      let request = SetPresenceRequest {
+        manual,
+        maybe_until: None,
+      };
+      let json = format!(r#"{{"manual":"{wire}"}}"#);
+      assert_eq!(serde_json::to_string(&request).unwrap(), json);
+      assert_eq!(
+        serde_json::from_str::<SetPresenceRequest>(&json).unwrap(),
+        request
+      );
+    }
+  }
+
+  #[test]
+  fn an_unknown_manual_presence_is_kept() {
+    let request: SetPresenceRequest = serde_json::from_str(r#"{"manual":"busy"}"#).unwrap();
+    assert_eq!(request.manual, ManualPresence::Unknown("busy".into()));
+    assert_eq!(serde_json::to_string(&request).unwrap(), r#"{"manual":"busy"}"#);
+  }
 }

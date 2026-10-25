@@ -526,6 +526,10 @@ pub trait CallBackend {
   /// A [`crate::calls::MediaDevice::id`]; `None` follows the system default.
   fn select_microphone(&self, _maybe_device: Option<String>) {}
   fn select_speakers(&self, _maybe_device: Option<String>) {}
+  /// Lists the devices again; [`CallBackend::media_devices`] changes after a notification.
+  fn refresh_media_devices(&self) {}
+  /// Plays a short test sound on the speakers; a failure reaches the user.
+  fn test_speakers(&self, _maybe_device: Option<String>) {}
   fn set_call_camera(&self, _is_on: bool) {}
   fn select_camera(&self, _maybe_device: Option<String>) {}
   fn set_background_effect(&self, _effect: BackgroundEffect) {}

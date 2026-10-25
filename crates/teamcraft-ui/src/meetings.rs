@@ -6,20 +6,25 @@ use std::rc::Rc;
 
 use leptos::prelude::*;
 use teamcraft_proto::{
-  CreateGuestLinkRequest, CreateInstantMeetingRequest, CreateMeetingRequest, ErrorBody, GuestLinkResponse,
-  IdempotencyKey, JoinMeetingRequest, JoinMeetingResponse, ListLobbyResponse, ListMeetingsResponse,
-  LobbyEntry, LobbyState, LobbyStateResponse, MeetingControlAction, MeetingControlRequest, MeetingId,
-  MeetingInvitee, MeetingRecurrence, MeetingResponse, RecurrenceFrequency, RsvpStatus, SetRsvpRequest,
-  UnixMillis,
+  CreateGuestLinkRequest, CreateInstantMeetingRequest, CreateMeetingRequest, ErrorBody, ErrorCode,
+  GuestLinkResponse, IdempotencyKey, JoinMeetingRequest, JoinMeetingResponse, ListLobbyResponse,
+  ListMeetingsResponse, LobbyEntry, LobbyState, LobbyStateResponse, MeetingControlAction,
+  MeetingControlRequest, MeetingId, MeetingInvitee, MeetingRecurrence, MeetingResponse, RecurrenceFrequency,
+  RsvpStatus, SetRsvpRequest, UnixMillis,
 };
 
 use crate::auth::fetch::fetch;
 use crate::auth::{ApiMethod, ApiResponse, AppConfig, AuthError, Authenticator};
 use crate::clock::{now_ms, parse_local_datetime};
+use crate::feedback::{ActionFailure, FailureKind};
 use crate::meeting_reminders::ServerClock;
 use crate::model::{ConversationId, TimestampMs, UserId};
 use crate::reactive::SetIfAlive;
 
+/// HTTP status of a refused request for a meeting the caller is not in (or that doesn't exist).
+pub const STATUS_NOT_FOUND: u16 = 404;
+/// HTTP status of a refused request for a meeting that is over or cancelled.
+pub const STATUS_CONFLICT: u16 = 409;
 /// Meetings that ended less than this long ago are still listed.
 const LIST_LOOKBACK_MS: i64 = 60 * 60_000;
 const LIST_LIMIT: u32 = 100;
@@ -147,6 +152,61 @@ impl MeetingsClient {
       .await
   }
 
+  /// One meeting the caller is in (organizer, invited or admitted); `404` for others.
+  pub async fn get(&self, meeting: MeetingId) -> Result<MeetingResponse, MeetingError> {
+    self
+      .call(ApiMethod::Get, &format!("/api/v1/meetings/{meeting}"), None)
+      .await
+  }
+
+  /// The meeting's shared guest link (one link for many guests, each waits in the lobby), made on
+  /// first use. Hosts only.
+  pub async fn shared_guest_link(&self, meeting: MeetingId) -> Result<GuestLinkResponse, MeetingError> {
+    self
+      .call(
+        ApiMethod::Put,
+        &format!("/api/v1/meetings/{meeting}/shared-guest-link"),
+        Some("{}".to_owned()),
+      )
+      .await
+  }
+
+  /// Revokes the shared guest link: nobody new gets in with it.
+  pub async fn revoke_shared_guest_link(&self, meeting: MeetingId) -> Result<(), MeetingError> {
+    self
+      .send(
+        ApiMethod::Delete,
+        &format!("/api/v1/meetings/{meeting}/shared-guest-link"),
+        None,
+      )
+      .await
+      .map(|_| ())
+  }
+
+  /// Asks the hosts to let the caller into a meeting they opened by its link.
+  pub async fn knock(&self, meeting: MeetingId) -> Result<LobbyState, MeetingError> {
+    let response: LobbyStateResponse = self
+      .call(
+        ApiMethod::Post,
+        &format!("/api/v1/meetings/{meeting}/lobby/me"),
+        None,
+      )
+      .await?;
+    Ok(response.state)
+  }
+
+  /// Where the caller stands after knocking.
+  pub async fn my_lobby_state(&self, meeting: MeetingId) -> Result<LobbyState, MeetingError> {
+    let response: LobbyStateResponse = self
+      .call(
+        ApiMethod::Get,
+        &format!("/api/v1/meetings/{meeting}/lobby/me"),
+        None,
+      )
+      .await?;
+    Ok(response.state)
+  }
+
   pub async fn lobby(&self, meeting: MeetingId) -> Result<Vec<LobbyEntry>, MeetingError> {
     let response: ListLobbyResponse = self
       .call(ApiMethod::Get, &format!("/api/v1/meetings/{meeting}/lobby"), None)
@@ -207,6 +267,8 @@ pub struct MeetingsHub {
   /// Why the last call failed, for a visible message.
   pub maybe_error: RwSignal<Option<String>>,
   pub is_loaded: RwSignal<bool>,
+  /// The meeting just scheduled or started, for the dialog that hands out its link.
+  pub maybe_created: RwSignal<Option<MeetingResponse>>,
   /// The server's clock as of the last list (meeting reminders run on it).
   pub clock: RwSignal<ServerClock>,
 }
@@ -219,6 +281,7 @@ impl MeetingsHub {
       lobbies: RwSignal::new(Vec::new()),
       maybe_error: RwSignal::new(None),
       is_loaded: RwSignal::new(false),
+      maybe_created: RwSignal::new(None),
       clock: RwSignal::new(ServerClock::default()),
     }
   }
@@ -234,6 +297,17 @@ impl MeetingsHub {
         .iter()
         .find(|meeting| meeting.conversation_id == conversation && meeting.organizer_user_id == me)
         .map(|meeting| meeting.id)
+    })
+  }
+
+  /// The title of the meeting whose chat is `conversation`, if it is one of the user's. Reactive.
+  pub fn title_for(&self, conversation: ConversationId) -> Option<String> {
+    self.meetings.with(|all| {
+      all
+        .iter()
+        .find(|meeting| meeting.conversation_id == conversation)
+        .map(|meeting| meeting.title.clone())
+        .filter(|title| !title.trim().is_empty())
     })
   }
 
@@ -288,11 +362,10 @@ impl MeetingsHub {
   }
 }
 
-/// A live meeting where `me` is the host and guests may wait.
+/// A live meeting where `me` is the host, so guests and members with its link may wait in its
+/// lobby. Also without `has_lobby`: guests of the shared link and members always wait there.
 pub fn hosts_lobby(meeting: &MeetingResponse, me: UserId) -> bool {
-  meeting.organizer_user_id == me
-    && meeting.has_lobby
-    && meeting.status == teamcraft_proto::MeetingStatus::Scheduled
+  meeting.organizer_user_id == me && meeting.status == teamcraft_proto::MeetingStatus::Scheduled
 }
 
 /// Whether the meeting has ended or was cancelled (shown dimmed, no join).
@@ -566,6 +639,25 @@ fn check(response: ApiResponse) -> Result<ApiResponse, MeetingError> {
   })
 }
 
+impl MeetingError {
+  /// The failure an error toast words (`feedback::report_failure`).
+  pub fn to_failure(&self) -> ActionFailure {
+    match self {
+      Self::Refused { code, .. } => ActionFailure::new(
+        FailureKind::Server(ErrorCode::from(code.clone())),
+        self.to_string(),
+      ),
+      Self::Auth(AuthError::Network(_)) => ActionFailure::new(FailureKind::Network, self.to_string()),
+      Self::Auth(_) | Self::Unreadable(_) => ActionFailure::other(self.to_string()),
+    }
+  }
+
+  /// Whether the server refused with this HTTP status.
+  pub fn is_status(&self, expected: u16) -> bool {
+    matches!(self, Self::Refused { status, .. } if *status == expected)
+  }
+}
+
 fn to_json<T: serde::Serialize>(value: &T) -> Result<String, MeetingError> {
   serde_json::to_string(value).map_err(|error| MeetingError::Unreadable(error.to_string()))
 }
@@ -687,6 +779,56 @@ mod tests {
         code: "unknown".into()
       })
     );
+  }
+
+  #[test]
+  fn refusals_become_failures_worded_by_their_code_and_keep_their_status() {
+    let not_found = MeetingError::Refused {
+      status: STATUS_NOT_FOUND,
+      code: "meeting_not_found".into(),
+    };
+    let offline = MeetingError::Auth(AuthError::Network("down".into()));
+
+    assert_eq!(
+      not_found.to_failure().kind,
+      FailureKind::Server(ErrorCode::MeetingNotFound)
+    );
+    assert!(not_found.is_status(STATUS_NOT_FOUND));
+    assert!(!not_found.is_status(STATUS_CONFLICT));
+    assert_eq!(offline.to_failure().kind, FailureKind::Network);
+    assert!(!offline.is_status(STATUS_NOT_FOUND));
+    assert_eq!(
+      MeetingError::Unreadable("x".into()).to_failure().kind,
+      FailureKind::Other
+    );
+  }
+
+  #[test]
+  fn hosts_see_the_lobby_of_their_live_meetings_also_without_has_lobby() {
+    let organizer: UserId = id_from_raw(1);
+    let mut meeting = MeetingResponse {
+      id: id_from_raw(7),
+      title: "Sync".into(),
+      maybe_description: None,
+      starts_at: UnixMillis(NOW),
+      ends_at: UnixMillis(NOW + 3_600_000),
+      kind: teamcraft_proto::MeetingKind::Instant,
+      status: teamcraft_proto::MeetingStatus::Scheduled,
+      has_lobby: false,
+      organizer_user_id: organizer,
+      conversation_id: id_from_raw(9),
+      join_url: String::new(),
+      maybe_recurrence: None,
+      attendees: Vec::new(),
+      undelivered_invitations: Vec::new(),
+    };
+    assert!(
+      hosts_lobby(&meeting, organizer),
+      "shared-link guests and members always wait"
+    );
+    assert!(!hosts_lobby(&meeting, id_from_raw(2)));
+    meeting.status = teamcraft_proto::MeetingStatus::Cancelled;
+    assert!(!hosts_lobby(&meeting, organizer));
   }
 
   fn filled_form() -> ScheduleForm {

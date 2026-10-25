@@ -777,6 +777,7 @@ mod tests {
       "/settings/security",
       "/admin/users",
       "/home",
+      "/meeting/42",
     ] {
       assert!(is_return_path(path), "{path}");
     }
@@ -788,7 +789,7 @@ mod tests {
       "/c/1?x=1",
       "/c/1#token",
       "/dm/7/",
-      "/meeting/42",
+      "/meeting/42#invite=token",
       "/unknown",
       "c/1",
     ] {

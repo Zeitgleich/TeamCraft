@@ -263,12 +263,20 @@ fn apply_to_document(view: &BrandView, is_dark: bool) {
     });
   }
   document.set_title(&view.page_title());
-  // The desktop has no tab, and its webview could not load the server's images anyway.
-  if !tauri::is_available()
-    && let Some(icon) = view.favicon(is_dark)
-  {
-    set_favicon(&document, icon);
-  }
+}
+
+/// The tab's icon: always the product's mark, so people find TeamCraft among their tabs whatever
+/// the brand, with a red dot while something is unread (as the sidebar's red badges count it).
+pub fn show_unread_in_favicon(has_unread: bool) {
+  let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+    return;
+  };
+  let href = if has_unread {
+    "/icons/favicon-unread.svg"
+  } else {
+    "/icons/favicon.svg"
+  };
+  set_favicon(&document, href);
 }
 
 fn set_favicon(document: &web_sys::Document, href: &str) {
@@ -283,8 +291,7 @@ fn set_favicon(document: &web_sys::Document, href: &str) {
       Some(link)
     });
   if let Some(link) = link {
-    // index.html's own favicon is an SVG; a brand's may be PNG or ICO, which the browser sniffs.
-    drop(link.remove_attribute("type"));
+    drop(link.set_attribute("type", "image/svg+xml"));
     drop(link.set_attribute("href", href));
   }
 }

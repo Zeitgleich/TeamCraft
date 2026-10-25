@@ -24,7 +24,7 @@ use crate::toast_timer::{Hold, ToastClock};
 use crate::unread_divider::{DividerEvent, next_divider};
 use crate::viewport::{CompactDepth, CompactPane, Layout, current_layout};
 use teamcraft_client_api::actions::{NewChannel, NewSpace, PermalinkTarget};
-use teamcraft_proto::Role;
+use teamcraft_proto::{MeetingId, Role};
 
 /// How many of the newest messages are searched for the first unread one.
 const UNREAD_SCAN_LIMIT: usize = 500;
@@ -170,6 +170,8 @@ pub enum Overlay {
   VerifyContact(UserId),
   /// The dialog that schedules a meeting.
   ScheduleMeeting,
+  /// The link of the meeting just scheduled or started (`MeetingsHub::maybe_created`), to copy.
+  MeetingCreated,
   /// Pick a conversation to forward a message to.
   Forward(ConversationId, MessageId),
   NewSpace,
@@ -288,6 +290,8 @@ pub struct AppState {
   linked_message: RwSignal<Option<PermalinkTarget>>,
   /// A route that names something which hasn't loaded yet.
   pub pending_route: RwSignal<Option<Route>>,
+  /// A meeting link (`/meeting/{id}`) the meetings screen has yet to open; it takes it.
+  pub maybe_meeting_link: RwSignal<Option<MeetingId>>,
   /// Bumped when a route named something that doesn't exist or the user can't open.
   pub unavailable_routes: RwSignal<u64>,
   /// Set while the app follows a URL it was given or redirects on its own (the first conversation
@@ -373,6 +377,7 @@ impl AppState {
       settings_page: RwSignal::new(SettingsPage::Section(SettingsTab::DEFAULT)),
       linked_message: RwSignal::new(None),
       pending_route: RwSignal::new(None),
+      maybe_meeting_link: RwSignal::new(None),
       unavailable_routes: RwSignal::new(0),
       follows_url: StoredValue::new(false),
       settings,
@@ -770,8 +775,20 @@ impl AppState {
       // Only a catch-up has a use for it; settled switches cost no extra request.
       self.read(|backend| backend.focus_conversation(id));
     }
-    if conversation.unread_count > 0 || conversation.mention_count > 0 {
+    if conversation.has_unread() {
       self.write(|backend| backend.mark_read(id));
+    }
+  }
+
+  /// Sending in a conversation reads everything before the sent message: the user answers what they
+  /// saw. The read marker goes to the newest message already in the store, before the send is
+  /// confirmed, so the sent message itself plays no part. Nothing to send when nothing is unread.
+  pub fn mark_read_on_send(&self, conversation: ConversationId) {
+    let has_unread = self
+      .read(|backend| backend.conversation(conversation))
+      .is_some_and(|conversation| conversation.has_unread());
+    if has_unread {
+      self.write(|backend| backend.mark_read(conversation));
     }
   }
 
@@ -1550,6 +1567,10 @@ impl AppState {
       Route::Activity => self.open_activity(),
       Route::Calls => self.open_calls(),
       Route::Meetings => self.open_meetings(),
+      Route::Meeting(meeting) => {
+        self.open_meetings();
+        self.maybe_meeting_link.set(Some(meeting));
+      },
       Route::People => self.open_directory(),
       Route::Saved => self.open_saved(),
       Route::Search => self.open_search(None),
@@ -1807,6 +1828,15 @@ mod tests {
         assert_eq!(state.follow_route(route), RouteOutcome::Shown, "{route:?}");
         assert_eq!(state.route(), route);
       }
+    }
+
+    #[test]
+    fn a_meeting_link_opens_the_meetings_screen_and_hands_the_meeting_over() {
+      let state = test_state();
+      let meeting: MeetingId = crate::model::id_from_raw(5_000_005);
+      assert_eq!(state.follow_route(Route::Meeting(meeting)), RouteOutcome::Shown);
+      assert_eq!(state.route(), Route::Meetings);
+      assert_eq!(state.maybe_meeting_link.get_untracked(), Some(meeting));
     }
 
     #[test]
@@ -2248,6 +2278,18 @@ mod tests {
       place_divider(&state, unread);
       state.divider_event(unread, DividerEvent::Sent);
       assert_eq!(state.unread_marker.get_untracked(), None);
+    }
+
+    #[test]
+    fn sending_reads_what_came_before() {
+      let state = test_state();
+      let unread = unread_conversation(&state);
+      // Unread although open: a message that arrived while the user read along.
+      state.mark_read_on_send(unread);
+      let after = state
+        .read(|backend| backend.conversation(unread))
+        .expect("still there");
+      assert!(!after.has_unread());
     }
 
     #[test]

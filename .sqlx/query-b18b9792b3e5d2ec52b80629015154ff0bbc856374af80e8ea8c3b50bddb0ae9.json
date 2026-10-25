@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, meeting_id, email, label, redeemed_at IS NOT NULL AS \"is_redeemed!\", guest_user_id\n         FROM meeting_invites WHERE id = $1",
+  "query": "SELECT id, meeting_id, email, label, redeemed_at IS NOT NULL AS \"is_redeemed!\", guest_user_id,\n                is_shared, revoked_at IS NOT NULL AS \"is_revoked!\"\n         FROM meeting_invites WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -63,6 +63,23 @@
             "name": "guest_user_id"
           }
         }
+      },
+      {
+        "ordinal": 6,
+        "name": "is_shared",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "meeting_invites",
+            "name": "is_shared"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "is_revoked!",
+        "type_info": "Bool",
+        "origin": "Expression"
       }
     ],
     "parameters": {
@@ -76,8 +93,10 @@
       true,
       true,
       null,
-      true
+      true,
+      false,
+      null
     ]
   },
-  "hash": "b57600f44282649003092e87a441bfcee1cbc5c32d6fef9728dd385767ed4d82"
+  "hash": "b18b9792b3e5d2ec52b80629015154ff0bbc856374af80e8ea8c3b50bddb0ae9"
 }

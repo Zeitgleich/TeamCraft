@@ -31,6 +31,7 @@ use anyhow::Context;
 use tauri::path::BaseDirectory;
 use tauri::webview::NewWindowResponse;
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_window_state::StateFlags;
 use tracing_subscriber::EnvFilter;
 
@@ -246,9 +247,20 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     .visible(!is_hidden)
     .inner_size(1360.0, 860.0)
     .min_inner_size(720.0, 520.0)
-    .on_new_window(|url, _features| match is_allowed_new_window(&url) {
-      true => NewWindowResponse::Allow,
-      false => NewWindowResponse::Deny,
+    .on_new_window({
+      let app = app.handle().clone();
+      move |url, _features| {
+        if is_allowed_new_window(&url) {
+          return NewWindowResponse::Allow;
+        }
+        // A link (target="_blank" in a message, a preview card, "what's new"): the system browser.
+        if is_external_link(&url)
+          && let Err(error) = app.opener().open_url(url.as_str(), None::<&str>)
+        {
+          tracing::warn!(%error, "could not open a link in the browser");
+        }
+        NewWindowResponse::Deny
+      }
     });
   let window = window_chrome::configure(window, prefs.title_bar);
   app.manage(WindowChromeState::new(prefs.title_bar));
@@ -275,6 +287,11 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
 /// through the system browser instead.
 fn is_allowed_new_window(url: &tauri::Url) -> bool {
   url.as_str() == "about:blank"
+}
+
+/// Links the system may open: web pages and mail addresses, never local files or app URLs.
+fn is_external_link(url: &tauri::Url) -> bool {
+  matches!(url.scheme(), "https" | "http" | "mailto")
 }
 
 /// The client core reads its access token synchronously; this keeps a copy current (the login code
@@ -325,7 +342,27 @@ fn keep_tokens_fresh(service: Arc<AuthService<KeyringStore>>) {
 
 #[cfg(test)]
 mod tests {
-  use super::is_allowed_new_window;
+  use super::{is_allowed_new_window, is_external_link};
+
+  #[test]
+  fn only_web_and_mail_links_go_to_the_system() {
+    let external = |url: &str| url.parse().is_ok_and(|url| is_external_link(&url));
+    for opened in [
+      "https://example.com/a",
+      "http://example.com/",
+      "mailto:a@example.com",
+    ] {
+      assert!(external(opened), "{opened}");
+    }
+    for refused in [
+      "file:///etc/passwd",
+      "tauri://localhost/",
+      "about:blank",
+      "javascript:alert(1)",
+    ] {
+      assert!(!external(refused), "{refused}");
+    }
+  }
 
   #[test]
   fn only_the_blank_viewer_window_may_open() {
