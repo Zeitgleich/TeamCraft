@@ -85,13 +85,17 @@ users the organizer invited, and a host's "admit" lets an admitted person in (e2
    members (`call_move`), and rings the added people in the meeting chat: when its call starts, or
    at once if it runs. Only one of them answering, or the ring timeout, ends that ringing; the people
    moving over don't. The adding app then announces the move in the DM's encryption group (an
-   encrypted `call_moved` event with the room and the added people, not shown in the history).
+   encrypted `call_moved` event with the room, the added people and the DM call's ID, not shown in
+   the history).
    `call_move` alone moves nobody: a device in the DM's call shows "X moved the call into a meeting
    room and added Y" once the announcement is in, and on the user's tap checks it (announced by a
    member of the DM's group, the room's group holds nobody but the DM's members and the named
-   people) before it joins the room's call with its microphone and camera as they were; the adding
-   user's own device follows without the tap. The DM keeps its members and history, and the added
-   people never see it. Web, desktop, iOS and Android all do this.
+   people, and the announcement is for the call this device is in now) before it joins the room's
+   call with its microphone and camera as they were. Only the device that added the people follows
+   without the tap; the user's other devices ask too. A followed announcement is forgotten, so it
+   never moves the device again. The DM keeps its members and history, and the added people never
+   see it. If the server refuses the move (409), the adding app cancels the room it just made.
+   Web, desktop, iOS and Android all do this.
 
    | Condition                   | What happens                                                                                                                                                                                                                 |
    |-----------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|

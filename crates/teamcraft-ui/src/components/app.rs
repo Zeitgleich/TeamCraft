@@ -988,11 +988,11 @@ fn connect_calls(state: AppState) {
 /// Somebody added people to the DM call this device is in, and the server says the call moved into
 /// a meeting room (docs/meetings.md, "A call becomes a meeting"). The server's word alone moves
 /// nothing: the move shows only once a member of the DM's encryption group announced it, with who
-/// moved it and whom they added. A move the user made follows at once (after the core's check);
-/// anybody else's waits for the user's tap in the call screen.
+/// moved it and whom they added. A move this device asked for follows at once (after the core's
+/// check); any other, the user's own from another device included, waits for a tap in the call
+/// screen.
 fn follow_moved_calls(state: AppState) {
   let call = state.call;
-  let me = untrack(|| state.me().id);
   let pending = crate::feedback::PendingAction::new();
   Effect::new(move |_| {
     let maybe_offer = state.read(|backend| {
@@ -1004,6 +1004,7 @@ fn follow_moved_calls(state: AppState) {
         to,
         by: offer.by,
         added: offer.added,
+        is_requested_here: offer.is_requested_here,
       })
     });
     let is_in_that_call = maybe_offer.as_ref().is_some_and(|offer| {
@@ -1018,7 +1019,7 @@ fn follow_moved_calls(state: AppState) {
       return;
     }
     call.move_offer.set(maybe_offer.clone());
-    if let Some(offer) = maybe_offer.filter(|offer| offer.by == me) {
+    if let Some(offer) = maybe_offer.filter(|offer| offer.is_requested_here) {
       state.follow_call_move(offer.from, offer.to, pending);
     }
   });

@@ -208,6 +208,9 @@ pub struct Client<A, S> {
   /// ([`Client::take_background_failures`]).
   background_failures: Vec<CoreError>,
   maybe_call_sink: Option<CallEventSink>,
+  /// The call this device last prepared to join per conversation: a call move is followed only
+  /// when announced for that very call (docs/meetings.md, "A call becomes a meeting").
+  call_ids: HashMap<ConversationId, teamcraft_proto::CallId>,
   maybe_preview_fetcher: Option<Box<dyn crate::link_preview::PreviewFetcher>>,
   maybe_jwks_source: Option<Box<dyn JwksSource>>,
   /// When the key packages were last checked ([`Client::renew_key_packages_if_due`]).
@@ -315,6 +318,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       typing: Default::default(),
       background_failures: Vec::new(),
       maybe_call_sink: None,
+      call_ids: HashMap::new(),
       maybe_preview_fetcher,
       maybe_jwks_source,
       last_key_package_check_ms: i64::MIN,

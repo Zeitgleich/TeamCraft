@@ -261,6 +261,9 @@ pub enum ConversationEvent {
     meeting: ConversationId,
     #[serde(default)]
     added: Vec<UserId>,
+    /// The DM call that moves: an announcement of another call moves nothing.
+    #[serde(rename = "call", default, skip_serializing_if = "Option::is_none")]
+    maybe_call: Option<teamcraft_proto::CallId>,
   },
   /// From a newer client.
   #[serde(other)]

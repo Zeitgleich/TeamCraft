@@ -53,7 +53,7 @@ use teamcraft_proto::{
   InviteResponse, ListCategoriesResponse, ListInvitesResponse, SpaceResponse, UpdateCategoryRequest,
   UpdateConversationRequest, UpdateSpaceMemberRequest, UpdateSpaceRequest,
 };
-use teamcraft_proto::{CreateInstantMeetingRequest, MeetingResponse};
+use teamcraft_proto::{CreateInstantMeetingRequest, MeetingId, MeetingResponse};
 use teamcraft_proto::{GatewayInfoResponse, PushGatewayResponse, WebPushKeyResponse};
 use teamcraft_proto::{
   ListCallHistoryQuery, ListCallHistoryResponse, ListPresenceResponse, PrivacyResponse, UpdatePrivacyRequest,
@@ -276,6 +276,9 @@ pub trait ServerApi {
     &self,
     request: &CreateInstantMeetingRequest,
   ) -> impl Future<Output = Result<MeetingResponse, ApiError>>;
+
+  /// Cancels a meeting the user organizes (`DELETE /meetings/{id}`).
+  fn cancel_meeting(&self, meeting: MeetingId) -> impl Future<Output = Result<(), ApiError>>;
 
   /// Moves the conversation's DM call into a meeting the user started for it (docs/meetings.md).
   fn move_call(

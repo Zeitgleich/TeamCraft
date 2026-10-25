@@ -163,7 +163,9 @@ class CallMoves(
     val info = maybeInfo ?: return null
     if (pending.value != move) return null
     val maybeSnapshot = readSnapshot()
-    val isMine = maybeSnapshot?.me?.id == info.byUserId
+    // Only a move this device asked for follows without a tap (not one replayed from earlier,
+    // nor the user's own from another device).
+    val isMine = info.isRequestedHere
     val offer = CallMoveOffer(
       from = move.from,
       to = move.to,

@@ -736,13 +736,15 @@ never by the server's member list:
   Only once the group is founded does it ask the server to move the call, so the others find the
   welcome waiting when they switch over. A retry founds nothing anew and adds only who is missing.
   The server's `call_move` event is only a trigger: the adding device announces the move in the
-  DM's group (an encrypted `CallMoved` event naming the room and the added people), and another
-  device follows only that announcement, decrypted in the DM's group (so its sender is a member),
-  after the user's tap that shows who moved the call and whom they added, and only if the room's
-  group, once this device is in it, holds nobody but the DM's members and the named people. A
-  server that redirects the call, or a member who points it at an old room with other people in it,
-  gets nobody's audio or video there. The announcement isn't bound to one call: a replayed one
-  leads at most into a room with the people it named, and still needs the tap.
+  DM's group (an encrypted `CallMoved` event naming the room, the added people and the DM call's
+  ID), and another device follows only that announcement, decrypted in the DM's group (so its
+  sender is a member), after the user's tap that shows who moved the call and whom they added, and
+  only if it is for the call this device is in now (the call ID of its own join token) and the
+  room's group, once this device is in it, holds nobody but the DM's members and the named people.
+  Only the device that added the people follows without the tap (a flag only it writes into its
+  record); a followed announcement is deleted. A server that redirects the call, replays an earlier
+  move in a later call, or a member who points it at an old room with other people in it, gets
+  nobody's audio or video there.
 
 Not covered yet: users invited later by editing the meeting (#475); guests have no device that can
 join a group until #446, so admitting a guest lets nobody into the encryption yet.

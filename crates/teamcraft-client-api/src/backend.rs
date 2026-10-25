@@ -271,15 +271,17 @@ pub trait ChatBackend {
   /// they invited (the organizer's own request: the group is never founded from the server's
   /// member list).
   fn set_up_meeting_chat(&self, _conversation: ConversationId, _invitees: Vec<UserId>) {}
-  /// "Add people" in a DM or group DM call: the call moves into the meeting chat `meeting` the user
-  /// just started, whose encryption group gets the people in the call (`in_call`, as the call shows
-  /// them) and `added`; everybody in the call is then told to switch over (docs/meetings.md).
-  fn move_call_to_meeting(
+  /// "Add people" in a DM or group DM call (docs/meetings.md, "A call becomes a meeting"): a meeting
+  /// room with the people in the call (`in_call`, as the call shows them) and `added`, whose
+  /// encryption group gets exactly them, and the call moves there. The same `key` again (a retry)
+  /// gets the same room.
+  fn add_people_to_call(
     &self,
     _from: ConversationId,
-    _meeting: ConversationId,
     _in_call: Vec<UserId>,
     _added: Vec<UserId>,
+    _maybe_title: Option<String>,
+    _key: teamcraft_proto::IdempotencyKey,
   ) {
   }
   /// The announced move of the call of `from` into `to`, if a member of `from`'s encryption group

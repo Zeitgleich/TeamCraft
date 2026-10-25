@@ -108,6 +108,10 @@ struct State {
   failing_read_positions: HashSet<ConversationId>,
   /// `PUT read-position` requests that arrived, to check that queued ones are sent once.
   read_position_writes: u64,
+  /// Meetings cancelled through the API, in order.
+  cancelled_meetings: Vec<teamcraft_proto::MeetingId>,
+  /// The running call of each conversation (a new one after [`FakeServer::end_call`]).
+  calls: HashMap<ConversationId, CallId>,
   /// Instant meetings by the idempotency key they were created with.
   instant_meetings: HashMap<IdempotencyKey, MeetingResponse>,
   /// Calls moved into a meeting (`move_call`), in order.
@@ -659,6 +663,11 @@ impl FakeServer {
     }
     state.publish(members, &GatewayEvent::ConversationUpdate { conversation_id: id });
     id
+  }
+
+  /// The conversation's call ends: the next join token opens a new call with a new ID.
+  pub fn end_call(&self, conversation: ConversationId) {
+    self.lock().calls.remove(&conversation);
   }
 
   /// The calls moved into a meeting so far, in order.
@@ -1936,8 +1945,16 @@ impl ServerApi for FakeServerApi {
           "no such conversation",
         ));
       }
+      let call_id = match state.calls.get(&conversation) {
+        Some(call_id) => *call_id,
+        None => {
+          let call_id = state.next_id();
+          state.calls.insert(conversation, call_id);
+          call_id
+        },
+      };
       Ok(CallJoinTokenResponse {
-        call_id: CallId::from_snowflake(conversation.snowflake()),
+        call_id,
         token: format!("fake:{conversation}"),
         sfu_url: "https://sfu.invalid/call".to_owned(),
         expires_at: UnixMillis(0),
@@ -2007,6 +2024,14 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  /// Notes the cancellation; the fake keeps no calendar.
+  async fn cancel_meeting(&self, meeting: teamcraft_proto::MeetingId) -> Result<(), ApiError> {
+    self.with(|state, _| {
+      state.cancelled_meetings.push(meeting);
+      Ok(())
+    })
+  }
+
   /// Tells the conversation's members that its call moved, like the server; the fake has no call
   /// roster, so being a member is enough.
   async fn move_call(&self, conversation: ConversationId, request: &MoveCallRequest) -> Result<(), ApiError> {
@@ -2025,7 +2050,11 @@ impl ServerApi for FakeServerApi {
         members,
         &GatewayEvent::CallMove {
           conversation_id: conversation,
-          call_id: CallId::from_snowflake(conversation.snowflake()),
+          call_id: state
+            .calls
+            .get(&conversation)
+            .copied()
+            .unwrap_or_else(|| CallId::from_snowflake(conversation.snowflake())),
           to_conversation_id: request.to_conversation_id,
           moved_by: me,
         },

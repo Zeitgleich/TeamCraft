@@ -448,14 +448,17 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.set_up_meeting_chat(conversation, invitees);
   }
 
-  fn move_call_to_meeting(
+  fn add_people_to_call(
     &self,
     from: ConversationId,
-    meeting: ConversationId,
     in_call: Vec<UserId>,
     added: Vec<UserId>,
+    maybe_title: Option<String>,
+    key: teamcraft_proto::IdempotencyKey,
   ) {
-    self.chat.move_call_to_meeting(from, meeting, in_call, added);
+    self
+      .chat
+      .add_people_to_call(from, in_call, added, maybe_title, key);
   }
 
   fn let_into_meeting_chat(&self, conversation: ConversationId, user: UserId) {

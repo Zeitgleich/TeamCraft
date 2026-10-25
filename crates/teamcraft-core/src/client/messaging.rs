@@ -586,11 +586,22 @@ fn apply_control_with(
     return records::put_json(store, Table::Account, &bookmarks_key(conversation), items);
   }
   if let MessageContent::Event {
-    event: crate::store::ConversationEvent::CallMoved { meeting, added },
+    event: crate::store::ConversationEvent::CallMoved {
+      meeting,
+      added,
+      maybe_call,
+    },
   } = content
   {
-    // Decrypted in the conversation's group, so `sender` is a member of it.
-    return super::calls::note_call_move(store, conversation, *meeting, sender, added);
+    // Decrypted in the conversation's group, so `sender` is a member of it. Somebody else's move
+    // (or the user's on another device) waits for the user's tap.
+    let record = super::calls::CallMoveRecord {
+      by: sender,
+      added: added.clone(),
+      maybe_call: *maybe_call,
+      is_requested_here: false,
+    };
+    return super::calls::note_call_move(store, conversation, *meeting, &record);
   }
   let target = match content {
     MessageContent::Edit { target, .. }

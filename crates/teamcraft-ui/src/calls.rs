@@ -16,6 +16,8 @@ pub struct MoveOffer {
   pub to: ConversationId,
   pub by: UserId,
   pub added: Vec<UserId>,
+  /// This device asked for the move: it follows without a tap.
+  pub is_requested_here: bool,
 }
 
 /// What the user did that the call backend has to carry out.

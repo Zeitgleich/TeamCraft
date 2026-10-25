@@ -8,12 +8,12 @@ use serde::{Deserialize, Serialize};
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
 use teamcraft_crypto::identity::{DeviceKeyPair, VerifiedDevice};
 use teamcraft_proto::{
-  CallJoinTokenResponse, ConversationId, CreateCallJoinTokenRequest, CreateInstantMeetingRequest, DeviceId,
-  GatewayEvent, IdempotencyKey, MoveCallRequest, UserId,
+  CallId, CallJoinTokenResponse, ConversationId, ConversationKind, CreateCallJoinTokenRequest,
+  CreateInstantMeetingRequest, DeviceId, GatewayEvent, IdempotencyKey, MoveCallRequest, UserId,
 };
 
 use super::Client;
-use crate::api::ServerApi;
+use crate::api::{ApiError, ServerApi};
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{ConversationEvent, LocalStore, MessageContent, Table};
@@ -37,6 +37,12 @@ pub struct CallKeySigner {
 pub struct CallMoveRecord {
   pub by: UserId,
   pub added: Vec<UserId>,
+  /// The DM call it moves; a record without one (or of another call) is never followed.
+  #[serde(rename = "call", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_call: Option<CallId>,
+  /// This device asked for the move: it follows without the user's tap.
+  #[serde(default)]
+  pub is_requested_here: bool,
 }
 
 /// Everything joining a conversation's call needs from the core (e2ee.md §8).
@@ -71,6 +77,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn prepare_call(&mut self, conversation: ConversationId) -> Result<CallPreparation, CoreError> {
     self.ensure_call_group(conversation).await?;
     let join = self.call_join_token(conversation).await?;
+    self.call_ids.insert(conversation, join.call_id);
     let devices = self.verified_call_devices(conversation).await?;
     Ok(CallPreparation {
       join,
@@ -148,10 +155,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         maybe_idempotency_key: Some(key),
       })
       .await?;
-    self
+    let result = self
       .move_call_to_meeting(from, meeting.conversation_id, in_call, added)
-      .await?;
-    Ok(meeting.conversation_id)
+      .await;
+    if let Err(CoreError::Api(ApiError::Status { status: 409, .. })) = &result {
+      // Somebody else moved the call first: this room stays empty, so it goes again.
+      if let Err(cancel_error) = self.api.cancel_meeting(meeting.id).await {
+        tracing::warn!(error = %cancel_error, "cancelling the room of a refused move failed");
+      }
+    }
+    result.map(|()| meeting.conversation_id)
   }
 
   /// Moves this user's DM or group DM call into the meeting chat `meeting` they just started for it,
@@ -169,6 +182,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     added: &[UserId],
   ) -> Result<(), CoreError> {
     let me = self.user_id();
+    // The announcement names this very call, so it can't move a later one.
+    let Some(call) = self.call_ids.get(&from).copied() else {
+      return Err(CoreError::CallMoveRefused {
+        from,
+        to: meeting,
+        reason: "this device isn't in that call",
+      });
+    };
     // The DM's group is what its members agreed on in signed commits, not what the server lists.
     let in_group = self.group_users(from)?;
     let mut invitees: Vec<UserId> = in_call
@@ -198,8 +219,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let event = ConversationEvent::CallMoved {
       meeting,
       added: rung.clone(),
+      maybe_call: Some(call),
     };
-    note_call_move(&self.store, from, meeting, me, &rung)?;
+    let record = CallMoveRecord {
+      by: me,
+      added: rung,
+      maybe_call: Some(call),
+      is_requested_here: true,
+    };
+    note_call_move(&self.store, from, meeting, &record)?;
     self.enqueue(from, None, MessageContent::Event { event })?;
     self.flush_outbox().await?;
     Ok(())
@@ -218,9 +246,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let Some(record) = call_move_announcement(&self.store, from, to)? else {
       return Err(refused("nobody in the conversation announced it"));
     };
+    // An announcement of an earlier call (replayed by the server) moves nothing now.
+    if record.maybe_call.is_none() || record.maybe_call != self.call_ids.get(&from).copied() {
+      return Err(refused("announced for another call"));
+    }
     let in_dm = self.group_users(from)?;
     if !in_dm.contains(&record.by) {
       return Err(refused("announced by somebody outside the conversation's group"));
+    }
+    if self.api.conversation(to).await?.kind != ConversationKind::Meeting {
+      return Err(refused("not a meeting room"));
     }
     self.ensure_call_group(to).await?;
     let me = self.user_id();
@@ -228,6 +263,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if !self.group_users(to)?.iter().all(is_expected) {
       return Err(refused("the meeting room holds somebody the move didn't name"));
     }
+    // Followed once: the same announcement never moves this device again.
+    self.store.delete(Table::SyncState, &call_move_key(from, to))?;
     Ok(())
   }
 
@@ -275,14 +312,9 @@ pub(crate) fn note_call_move(
   store: &impl LocalStore,
   from: ConversationId,
   meeting: ConversationId,
-  by: UserId,
-  added: &[UserId],
+  record: &CallMoveRecord,
 ) -> Result<(), CoreError> {
-  let record = CallMoveRecord {
-    by,
-    added: added.to_vec(),
-  };
-  records::put_json(store, Table::SyncState, &call_move_key(from, meeting), &record)
+  records::put_json(store, Table::SyncState, &call_move_key(from, meeting), record)
 }
 
 /// The announced move of `from`'s call into `meeting`, if any.

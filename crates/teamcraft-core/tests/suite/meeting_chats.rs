@@ -12,6 +12,7 @@ use common::{Peer, link_device, settings, settle};
 use teamcraft_client_api::failure::{CallFailure, FailureKind};
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
+use teamcraft_core::client::call_move_announcement;
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::error::CoreError;
 use teamcraft_proto::{AddConversationMemberRequest, ConversationId, IdempotencyKey, UserId};
@@ -246,8 +247,7 @@ mod call_moves {
   #[tokio::test]
   async fn the_meeting_has_exactly_the_people_in_the_call_and_the_added_ones() {
     let (server, mut alice, mut bob, mut carol, mallory) = dm_call().await;
-    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
-    bob.client.full_sync().await.unwrap();
+    let dm = in_dm_call(&mut alice, &mut bob).await;
     let (alice_id, bob_id, carol_id) = (
       alice.client.user_id(),
       bob.client.user_id(),
@@ -282,8 +282,7 @@ mod call_moves {
   #[tokio::test]
   async fn the_dm_stays_as_it_was() {
     let (server, mut alice, mut bob, mut carol, _) = dm_call().await;
-    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
-    bob.client.full_sync().await.unwrap();
+    let dm = in_dm_call(&mut alice, &mut bob).await;
     alice.client.send_text(dm, None, "before the call").await.unwrap();
     let epoch = alice.client.mls_epoch(dm).unwrap();
     let (alice_id, bob_id, carol_id) = (
@@ -311,8 +310,7 @@ mod call_moves {
   #[tokio::test]
   async fn people_the_call_lists_outside_the_dms_group_are_left_out() {
     let (server, mut alice, mut bob, mut carol, mallory) = dm_call().await;
-    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
-    bob.client.full_sync().await.unwrap();
+    let dm = in_dm_call(&mut alice, &mut bob).await;
     let (alice_id, bob_id, carol_id) = (
       alice.client.user_id(),
       bob.client.user_id(),
@@ -335,8 +333,7 @@ mod call_moves {
   #[tokio::test]
   async fn a_lost_answer_is_retried_into_the_same_group() {
     let (server, mut alice, mut bob, mut carol, _) = dm_call().await;
-    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
-    bob.client.full_sync().await.unwrap();
+    let dm = in_dm_call(&mut alice, &mut bob).await;
     let (alice_id, bob_id, carol_id) = (
       alice.client.user_id(),
       bob.client.user_id(),
@@ -369,8 +366,7 @@ mod call_moves {
   #[tokio::test]
   async fn the_others_follow_only_a_move_announced_in_the_dms_group() {
     let (server, mut alice, mut bob, carol, _) = dm_call().await;
-    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
-    bob.client.full_sync().await.unwrap();
+    let dm = in_dm_call(&mut alice, &mut bob).await;
     let (alice_id, bob_id, carol_id) = (
       alice.client.user_id(),
       bob.client.user_id(),
@@ -391,8 +387,7 @@ mod call_moves {
   #[tokio::test]
   async fn a_move_the_server_made_up_is_refused() {
     let (server, mut alice, mut bob, _, mallory) = dm_call().await;
-    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
-    bob.client.full_sync().await.unwrap();
+    let dm = in_dm_call(&mut alice, &mut bob).await;
     // A room Mallory organizes, which nobody in the DM announced.
     let elsewhere = server.create_meeting_chat(mallory, &[bob.client.user_id()]);
 
@@ -410,8 +405,7 @@ mod call_moves {
   #[tokio::test]
   async fn a_room_holding_somebody_the_move_didnt_name_is_refused() {
     let (server, mut alice, mut bob, mut carol, _) = dm_call().await;
-    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
-    bob.client.full_sync().await.unwrap();
+    let dm = in_dm_call(&mut alice, &mut bob).await;
     let dave = Peer::enroll(&server, "Dave").await;
     let (alice_id, bob_id, carol_id, dave_id) = (
       alice.client.user_id(),
@@ -443,8 +437,7 @@ mod call_moves {
   #[tokio::test]
   async fn adding_people_starts_one_room_also_when_retried() {
     let (_server, mut alice, mut bob, mut carol, _) = dm_call().await;
-    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
-    bob.client.full_sync().await.unwrap();
+    let dm = in_dm_call(&mut alice, &mut bob).await;
     let (alice_id, bob_id, carol_id) = (
       alice.client.user_id(),
       bob.client.user_id(),
@@ -468,6 +461,101 @@ mod call_moves {
     assert_eq!(carol.client.prepare_call(room).await.unwrap().devices.len(), 3);
     bob.client.full_sync().await.unwrap();
     bob.client.accept_call_move(dm, room).await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn a_move_is_followed_once() {
+    let (server, mut alice, mut bob, _, _) = dm_call().await;
+    let dm = in_dm_call(&mut alice, &mut bob).await;
+    let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+    let meeting = server.create_meeting_chat(alice_id, &[bob_id]);
+    alice
+      .client
+      .move_call_to_meeting(dm, meeting, &[alice_id, bob_id], &[])
+      .await
+      .unwrap();
+    bob.client.full_sync().await.unwrap();
+    bob.client.accept_call_move(dm, meeting).await.unwrap();
+
+    let again = bob.client.accept_call_move(dm, meeting).await;
+
+    assert!(
+      matches!(again, Err(CoreError::CallMoveRefused { .. })),
+      "{again:?}"
+    );
+  }
+
+  /// The server replays an old move in a later call: neither the mover's device (which would
+  /// follow its own move without a tap) nor anybody else's moves.
+  #[tokio::test]
+  async fn a_move_of_an_earlier_call_moves_nothing_in_a_later_one() {
+    let (server, mut alice, mut bob, _, _) = dm_call().await;
+    let dm = in_dm_call(&mut alice, &mut bob).await;
+    let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+    let meeting = server.create_meeting_chat(alice_id, &[bob_id]);
+    alice
+      .client
+      .move_call_to_meeting(dm, meeting, &[alice_id, bob_id], &[])
+      .await
+      .unwrap();
+    bob.client.full_sync().await.unwrap();
+    // Nobody followed; the call ends, and a new private call starts later.
+    server.end_call(dm);
+    alice.client.prepare_call(dm).await.unwrap();
+    bob.client.prepare_call(dm).await.unwrap();
+
+    for peer in [&mut alice, &mut bob] {
+      let replayed = peer.client.accept_call_move(dm, meeting).await;
+      assert!(
+        matches!(replayed, Err(CoreError::CallMoveRefused { .. })),
+        "{replayed:?}"
+      );
+    }
+  }
+
+  #[tokio::test]
+  async fn only_the_device_that_added_people_follows_without_a_tap() {
+    let (server, mut alice, mut bob, mut carol, _) = dm_call().await;
+    let dm = in_dm_call(&mut alice, &mut bob).await;
+    let (alice_id, bob_id, carol_id) = (
+      alice.client.user_id(),
+      bob.client.user_id(),
+      carol.client.user_id(),
+    );
+    let meeting = server.create_meeting_chat(alice_id, &[bob_id, carol_id]);
+    let mut laptop = link_device(&mut alice).await;
+    alice
+      .client
+      .move_call_to_meeting(dm, meeting, &[alice_id, bob_id], &[carol_id])
+      .await
+      .unwrap();
+    bob.client.full_sync().await.unwrap();
+    laptop.full_sync().await.unwrap();
+    carol.client.full_sync().await.unwrap();
+
+    let own = call_move_announcement(alice.client.store(), dm, meeting)
+      .unwrap()
+      .unwrap();
+    let others = call_move_announcement(bob.client.store(), dm, meeting)
+      .unwrap()
+      .unwrap();
+    let other_own_device = call_move_announcement(laptop.store(), dm, meeting)
+      .unwrap()
+      .unwrap();
+    assert!(own.is_requested_here);
+    assert!(!others.is_requested_here);
+    assert!(
+      !other_own_device.is_requested_here,
+      "the user's other device asks too"
+    );
+  }
+
+  async fn in_dm_call(alice: &mut Peer, bob: &mut Peer) -> ConversationId {
+    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
+    bob.client.full_sync().await.unwrap();
+    alice.client.prepare_call(dm).await.unwrap();
+    bob.client.prepare_call(dm).await.unwrap();
+    dm
   }
 
   async fn dm_call() -> (FakeServer, Peer, Peer, Peer, UserId) {

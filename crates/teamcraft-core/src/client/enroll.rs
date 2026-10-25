@@ -171,6 +171,7 @@ impl PendingEnrollment {
       typing: Default::default(),
       background_failures: Vec::new(),
       maybe_call_sink: None,
+      call_ids: HashMap::new(),
       maybe_preview_fetcher,
       maybe_jwks_source,
       last_key_package_check_ms: i64::MIN,

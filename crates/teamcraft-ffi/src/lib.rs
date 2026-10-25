@@ -489,6 +489,7 @@ impl TeamCraft {
           Ok(maybe_record.map(|record| CallMoveInfo {
             by_user_id: record.by.to_string(),
             added_user_ids: record.added.iter().map(ToString::to_string).collect(),
+            is_requested_here: record.is_requested_here,
           }))
         })
       })

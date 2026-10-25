@@ -245,11 +245,12 @@ pub enum CoreCommand {
     invitees: Vec<UserId>,
   },
   /// The user added people to their DM call: it moves into the meeting chat they just started.
-  MoveCallToMeeting {
+  AddPeopleToCall {
     from: ConversationId,
-    meeting: ConversationId,
     in_call: Vec<UserId>,
     added: Vec<UserId>,
+    maybe_title: Option<String>,
+    key: teamcraft_proto::IdempotencyKey,
   },
   /// The user follows an announced move of their call into a meeting room.
   AcceptCallMove {
@@ -1281,18 +1282,20 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     });
   }
 
-  fn move_call_to_meeting(
+  fn add_people_to_call(
     &self,
     from: ConversationId,
-    meeting: ConversationId,
     in_call: Vec<UserId>,
     added: Vec<UserId>,
+    maybe_title: Option<String>,
+    key: teamcraft_proto::IdempotencyKey,
   ) {
-    self.command(CoreCommand::MoveCallToMeeting {
+    self.command(CoreCommand::AddPeopleToCall {
       from,
-      meeting,
       in_call,
       added,
+      maybe_title,
+      key,
     });
   }
 
@@ -1306,6 +1309,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       .map(|record| teamcraft_client_api::calls::CallMoveOffer {
         by: record.by,
         added: record.added,
+        is_requested_here: record.is_requested_here,
       })
   }
 

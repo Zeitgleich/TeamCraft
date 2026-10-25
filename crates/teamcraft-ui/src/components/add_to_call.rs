@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 use teamcraft_proto::IdempotencyKey;
 
 use crate::clock::now_ms;
@@ -39,53 +40,26 @@ pub fn AddToCallDialog(conversation: ConversationId) -> impl IntoView {
     people.insert(me);
     people
   });
-  // Two steps, each with its failure in the dialog: the meeting room (REST), then the move (the
-  // core founds the room's group, the server moves the call, the DM's group hears of it). A retry
-  // after a failed move reuses the room.
-  let creating = PendingAction::new();
-  let moving = PendingAction::new();
-  let maybe_room = RwSignal::new(None::<ConversationId>);
-  let is_pending = move || creating.is_pending() || moving.is_pending();
-  let move_into = move |room: ConversationId, in_call: Vec<UserId>, added: Vec<UserId>| {
-    moving.run_and_then(
-      || state.write(|backend| backend.move_call_to_meeting(conversation, room, in_call, added)),
-      move || {
-        let _ = state.overlay.try_set(crate::state::Overlay::None);
-      },
-    );
-  };
+  // The dialog stays open until the core answered (the room, its encryption group, the move);
+  // a failure shows here, and the retry with the same key gets the same room.
+  let pending = PendingAction::new();
   let add = move || {
-    let Some(hub) = maybe_hub else { return };
     let picked: Vec<UserId> = chosen.with_untracked(|list| list.iter().map(|user| user.id).collect());
     let me = state.me().id;
-    let Some(MovePlan {
-      in_call,
-      added,
-      invitees,
-    }) = MovePlan::new(&in_call.get_untracked(), &picked, me)
-    else {
+    let Some(MovePlan { in_call, added }) = MovePlan::new(&in_call.get_untracked(), &picked, me) else {
       return;
     };
-    if let Some(room) = maybe_room.get_untracked() {
-      move_into(room, in_call, added);
-      return;
-    }
     let title = i18n.t("call-meeting-title");
-    let client = hub.client();
-    creating.spawn(async move {
-      let meeting = client
-        .start_instant(Some(title), invitees, Some(key))
-        .await
-        .map_err(|error| error.to_failure())?;
-      if maybe_room.try_set(Some(meeting.conversation_id)).is_some() {
-        // The dialog is gone (closed meanwhile): nothing is moved without it.
-        return Ok(());
-      }
-      move_into(meeting.conversation_id, in_call, added);
-      // The call screen shows the host controls of the new meeting.
-      hub.refresh(me, now_ms()).await;
-      Ok(())
-    });
+    pending.run_and_then(
+      || state.write(|backend| backend.add_people_to_call(conversation, in_call, added, Some(title), key)),
+      move || {
+        let _ = state.overlay.try_set(crate::state::Overlay::None);
+        // The call screen shows the host controls of the new meeting.
+        if let Some(hub) = maybe_hub {
+          spawn_local(async move { hub.refresh(me, now_ms()).await });
+        }
+      },
+    );
   };
   view! {
     <Dialog title_key="call-add-people">
@@ -99,24 +73,20 @@ pub fn AddToCallDialog(conversation: ConversationId) -> impl IntoView {
           on_submit=Callback::new(move |()| add())
         />
         <p class="hint">{move || i18n.t("call-add-hint")}</p>
-        <FailureNote pending=creating />
-        <FailureNote pending=moving />
+        <FailureNote pending=pending />
         <footer class="modal-foot">
           <span class="grow"></span>
           <button type="button" class="btn" on:click=move |_| state.close_overlay()>{move || i18n.t("cancel")}</button>
           <button
             type="submit"
             class="btn btn-primary"
-            prop:disabled=move || is_pending() || chosen.with(Vec::is_empty)
-            aria-busy=move || is_pending().then_some("true")
+            prop:disabled=move || pending.is_pending() || chosen.with(Vec::is_empty)
+            aria-busy=move || pending.is_pending().then_some("true")
           >
-            <Show when=is_pending fallback=|| ()>
+            <Show when=move || pending.is_pending() fallback=|| ()>
               <span class="spinner" role="status" aria-label=move || i18n.t("action-running")></span>
             </Show>
-            {move || {
-              let has_failed = creating.maybe_failure().is_some() || moving.maybe_failure().is_some();
-              if has_failed { i18n.t("data-retry") } else { i18n.t("call-add") }
-            }}
+            {move || if pending.maybe_failure().is_some() { i18n.t("data-retry") } else { i18n.t("call-add") }}
           </button>
         </footer>
       </form>
@@ -132,14 +102,13 @@ pub fn CallMoveBanner() -> impl IntoView {
   let i18n = use_i18n();
   let call = state.call;
   let pending = PendingAction::new();
-  let me = state.me().id;
   let name_of = move |user: UserId| {
     state
       .read(|backend| backend.user(user))
       .map_or_else(|| i18n.t("left-in-group-unknown"), |user| user.display_name)
   };
   move || {
-    let offer = call.move_offer.get().filter(|offer| offer.by != me)?;
+    let offer = call.move_offer.get().filter(|offer| !offer.is_requested_here)?;
     let added = offer
       .added
       .iter()
@@ -169,8 +138,6 @@ struct MovePlan {
   in_call: Vec<UserId>,
   /// The picked people who aren't in the call yet, in the order picked: they ring.
   added: Vec<UserId>,
-  /// The meeting's invitees: everybody but the user, who organizes it.
-  invitees: Vec<UserId>,
 }
 
 impl MovePlan {
@@ -187,17 +154,7 @@ impl MovePlan {
     }
     let mut in_call: Vec<UserId> = in_call.iter().copied().collect();
     in_call.sort_unstable();
-    let invitees = in_call
-      .iter()
-      .chain(added.iter())
-      .copied()
-      .filter(|user| *user != me)
-      .collect();
-    Some(Self {
-      in_call,
-      added,
-      invitees,
-    })
+    Some(Self { in_call, added })
   }
 }
 
@@ -207,7 +164,7 @@ mod tests {
   use crate::model::id_from_raw;
 
   #[test]
-  fn the_meeting_invites_the_people_in_the_call_and_rings_only_the_added_ones() {
+  fn the_added_people_are_the_picked_ones_not_in_the_call() {
     let (me, bob, carol, dave): (UserId, UserId, UserId, UserId) =
       (id_from_raw(1), id_from_raw(2), id_from_raw(3), id_from_raw(4));
     let in_call = HashSet::from([me, bob]);
@@ -216,7 +173,6 @@ mod tests {
 
     assert_eq!(plan.added, vec![dave, carol], "Bob is in the call already");
     assert_eq!(plan.in_call, vec![me, bob]);
-    assert_eq!(plan.invitees, vec![bob, dave, carol]);
   }
 
   #[test]

@@ -831,18 +831,20 @@ impl ChatBackend for RemoteChat {
     });
   }
 
-  fn move_call_to_meeting(
+  fn add_people_to_call(
     &self,
     from: ConversationId,
-    meeting: ConversationId,
     in_call: Vec<UserId>,
     added: Vec<UserId>,
+    maybe_title: Option<String>,
+    key: teamcraft_proto::IdempotencyKey,
   ) {
-    self.act(ChatAction::MoveCallToMeeting {
+    self.act(ChatAction::AddPeopleToCall {
       from,
-      meeting,
       in_call,
       added,
+      maybe_title,
+      key,
     });
   }
 

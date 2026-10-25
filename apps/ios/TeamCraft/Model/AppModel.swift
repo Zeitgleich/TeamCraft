@@ -745,12 +745,6 @@ final class AppModel {
     try await core().acceptCallMove(fromConversationId: from, toConversationId: to)
   }
 
-  /// The signed-in user (`nil` before an account is ready).
-  var maybeUserId: String? {
-    if case .ready(let account) = phase { return account.userId }
-    return nil
-  }
-
   /// Where a message link points, if this device is in that conversation and has the message.
   func resolvePermalink(_ link: String) async -> PermalinkTarget? {
     await answer(.resolvePermalink(link: link))?.maybeTarget

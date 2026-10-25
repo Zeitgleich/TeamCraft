@@ -77,6 +77,9 @@ pub trait CallListener: Send + Sync {
 pub struct CallMoveInfo {
   pub by_user_id: String,
   pub added_user_ids: Vec<String>,
+  /// This device asked for the move (`add_people_to_call` here): follow it without a tap. Any
+  /// other move, the user's own from another device included, waits for the user's tap.
+  pub is_requested_here: bool,
 }
 
 /// Told about other devices' video in the call and their decoded frames (on decoder threads).

@@ -651,11 +651,13 @@ pub enum ChatAction {
     conversation: ConversationId,
     invitees: Vec<UserId>,
   },
-  MoveCallToMeeting {
+  AddPeopleToCall {
     from: ConversationId,
-    meeting: ConversationId,
     in_call: Vec<UserId>,
     added: Vec<UserId>,
+    #[serde(rename = "title", default, skip_serializing_if = "Option::is_none")]
+    maybe_title: Option<String>,
+    key: teamcraft_proto::IdempotencyKey,
   },
   AcceptCallMove {
     from: ConversationId,
@@ -858,12 +860,13 @@ impl ChatAction {
         conversation,
         invitees,
       } => backend.set_up_meeting_chat(conversation, invitees),
-      Self::MoveCallToMeeting {
+      Self::AddPeopleToCall {
         from,
-        meeting,
         in_call,
         added,
-      } => backend.move_call_to_meeting(from, meeting, in_call, added),
+        maybe_title,
+        key,
+      } => backend.add_people_to_call(from, in_call, added, maybe_title, key),
       Self::AcceptCallMove { from, to } => backend.accept_call_move(from, to),
       Self::LetIntoMeetingChat { conversation, user } => backend.let_into_meeting_chat(conversation, user),
       Self::SetBookmarks {

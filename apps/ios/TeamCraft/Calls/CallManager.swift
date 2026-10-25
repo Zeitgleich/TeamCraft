@@ -227,14 +227,15 @@ final class CallManager: NSObject, @unchecked Sendable {
     Task { await checkAnnouncedMove() }
   }
 
-  /// The user's own move is followed at once; somebody else's is offered on the call screen.
+  /// A move this device asked for is followed at once; any other (the user's own from another
+  /// device included) is offered on the call screen.
   @MainActor
   private func checkAnnouncedMove() async {
     guard let move = maybeAnnouncedMove,
       let info = await AppModel.shared.callMoveOffer(from: move.from, to: move.to),
       maybeAnnouncedMove == move, activeCall?.conversationId == move.from
     else { return }
-    if info.byUserId == AppModel.shared.maybeUserId {
+    if info.isRequestedHere {
       await follow(move)
       return
     }
@@ -243,7 +244,7 @@ final class CallManager: NSObject, @unchecked Sendable {
     maybeMoveOffer = CallMoveOffer(
       fromConversationId: move.from, toConversationId: move.to,
       byName: names[info.byUserId] ?? String(localized: "call_move_someone"),
-      addedNames: info.addedUserIds.compactMap { names[$0] })
+      addedNames: info.addedUserIds.map { names[$0] ?? String(localized: "call_move_someone") })
   }
 
   /// Checks the move in the core, then switches the call over. A refused move is dropped (the

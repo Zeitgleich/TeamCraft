@@ -444,6 +444,9 @@ pub struct HuddleInfo {
 pub struct CallMoveOffer {
   pub by: UserId,
   pub added: Vec<UserId>,
+  /// This device asked for the move ("Add people" here): it follows without the user's tap.
+  #[serde(default)]
+  pub is_requested_here: bool,
 }
 
 /// A call someone started that the user can accept or decline.
