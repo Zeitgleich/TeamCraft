@@ -9153,15 +9153,14 @@ ol.md-list {
   display: inline-flex;
 }
 
-/* Appearance: a message drawn with the chosen density, image size and text size. The text size
-   scales only this preview until the type scale reads `--text-scale` (#370). */
+/* Appearance: a message drawn with the chosen density and image size; the text size scales it
+   with the rest of the app. */
 .set-preview {
-  --preview-scale: 1;
   display: flex;
   gap: var(--space-3);
   padding: var(--space-4);
   background: var(--bg);
-  font-size: calc(var(--text-base) * var(--preview-scale));
+  font-size: var(--text-base);
 }
 
 .set-preview.is-compact {
@@ -9198,7 +9197,7 @@ ol.md-list {
 
 .set-preview-time {
   color: var(--text-muted);
-  font-size: 0.85em;
+  font-size: var(--text-xs);
 }
 
 .set-preview-text {
@@ -9431,7 +9430,7 @@ ol.md-list {
 @media (pointer: coarse) {
   .set-modal .input,
   .set-modal select {
-    font-size: 16px;
+    font-size: max(16px, 1em);
   }
 }
 

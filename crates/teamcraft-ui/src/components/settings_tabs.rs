@@ -155,8 +155,8 @@ fn ThemeTiles() -> impl IntoView {
   }
 }
 
-/// A message as the conversation would show it with the chosen density, image size and text
-/// size, so the choices can be seen before going back.
+/// A message as the conversation would show it with the chosen density and image size, so the
+/// choices can be seen before going back. The text size scales the whole app, this preview too.
 #[component]
 fn MessagePreview() -> impl IntoView {
   let state = use_app_state();
@@ -167,7 +167,6 @@ fn MessagePreview() -> impl IntoView {
       class="set-preview"
       class:is-compact=move || display.get().density == Density::Compact
       class:is-large-image=move || display.get().image_size == ImageSize::Large
-      style:--preview-scale=move || display.get().text_size.scale().to_string()
       aria-hidden="true"
     >
       <span class="set-preview-avatar"></span>
@@ -183,17 +182,18 @@ fn MessagePreview() -> impl IntoView {
   }
 }
 
-/// The text size as a slider with its value; the preview above follows it while dragging.
+/// The text size as a slider over [`TextSize::STEPS`] with its value; the app, the preview above
+/// included, follows it while dragging (`--text-scale`, issue #370).
 #[component]
 fn TextSizeRow() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let prefs = state.settings.prefs;
   let size = Memo::new(move |_| prefs.get().display.text_size);
-  let max_step = (TextSize::STEPS.len() - 1).to_string();
-  let set_step = move |ev: leptos::ev::Event| {
-    if let Ok(step) = event_target_value(&ev).parse::<usize>() {
-      let chosen = TextSize::from_step(step);
+  let max_position = (TextSize::STEPS.len() - 1).to_string();
+  let set_position = move |ev: leptos::ev::Event| {
+    if let Ok(position) = event_target_value(&ev).parse::<usize>() {
+      let chosen = text_size_at(position);
       if chosen != size.get_untracked() {
         prefs.update(|all| all.display.text_size = chosen);
       }
@@ -212,18 +212,32 @@ fn TextSizeRow() -> impl IntoView {
         <input
           type="range"
           min="0"
-          max=max_step
+          max=max_position
           step="1"
           aria-label=move || i18n.t("settings-text-size")
           aria-valuetext=percent
-          prop:value=move || size.get().step().to_string()
-          on:input=set_step
+          prop:value=move || slider_position(size.get()).to_string()
+          on:input=set_position
         />
         <span class="set-slider-end is-large" aria-hidden="true">"A"</span>
         <output class="set-slider-value">{percent}</output>
       </div>
     </SettingRow>
   }
+}
+
+/// The slider position of a text size.
+fn slider_position(size: TextSize) -> usize {
+  TextSize::STEPS
+    .iter()
+    .position(|step| *step == size.percent())
+    .unwrap_or_default()
+}
+
+/// The text size at a slider position; positions past the end are the largest.
+fn text_size_at(position: usize) -> TextSize {
+  let last = TextSize::STEPS.len() - 1;
+  TextSize::from_percent(TextSize::STEPS[position.min(last)])
 }
 
 #[component]
@@ -642,6 +656,17 @@ fn demo_tools() -> impl IntoView {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn the_slider_walks_the_text_size_steps() {
+    for size in TextSize::STEPS.map(TextSize::from_percent) {
+      assert_eq!(text_size_at(slider_position(size)), size);
+    }
+    assert_eq!(
+      text_size_at(99).percent(),
+      *TextSize::STEPS.last().unwrap_or(&100)
+    );
+  }
 
   #[test]
   fn debug_info_names_the_build_and_nothing_personal() {

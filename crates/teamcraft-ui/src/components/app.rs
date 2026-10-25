@@ -542,28 +542,22 @@ fn apply_theme(theme: RwSignal<Theme>) {
 }
 
 /// Mirrors the message density and the image size into `data-density` and `data-image-size` on
-/// `<html>` for the CSS, and the text size into `--text-scale` (CSSOM: the web CSP blocks style
-/// attributes).
+/// `<html>` for the CSS.
 fn apply_density(settings: Settings) {
   Effect::new(move |_| {
     let display = settings.prefs.get().display;
     let Some(root) = web_sys::window()
       .and_then(|window| window.document())
       .and_then(|doc| doc.document_element())
-      .and_then(|root| root.dyn_into::<web_sys::HtmlElement>().ok())
     else {
       return;
     };
-    // TODO(#370): the type scale is in pixels and doesn't read `--text-scale` yet; only the
-    // Appearance preview does. #370 moves it to rem multiplied by this factor.
-    let scale = display.text_size.scale().to_string();
     if root
       .set_attribute("data-density", display.density.slug())
       .is_err()
       || root
         .set_attribute("data-image-size", display.image_size.slug())
         .is_err()
-      || root.style().set_property("--text-scale", &scale).is_err()
     {
       tracing::debug!("could not apply density attributes");
     }
