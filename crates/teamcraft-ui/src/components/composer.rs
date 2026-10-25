@@ -1164,7 +1164,7 @@ pub fn Composer(
               <Show when=move || is_attach_menu_open.get() fallback=|| ()>
                 <div class="popover-backdrop" on:mousedown=move |_| is_attach_menu_open.set(false)></div>
                 <div
-                  class="popover composer-attach-menu"
+                  class="popover composer-attach-menu opens-up align-start"
                   role="menu"
                   node_ref=attach_menu
                   aria-label=move || i18n.t("composer-attach")

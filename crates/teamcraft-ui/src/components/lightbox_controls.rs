@@ -491,7 +491,7 @@ fn MoreMenu(
       </button>
       <Show when=move || is_open.get() fallback=|| ()>
         <div class="popover-backdrop" on:mousedown=move |_| is_open.set(false)></div>
-        <div class="popover lightbox-menu" role="menu" node_ref=menu aria-label=move || i18n.t("lightbox-more") on:keydown=on_menu_keydown>
+        <div class="popover lightbox-menu opens-up" role="menu" node_ref=menu aria-label=move || i18n.t("lightbox-more") on:keydown=on_menu_keydown>
           <button class="menu-item" role="menuitem" on:click=view_thread>
             <Icon name=IconName::Threads />
             <span class="menu-label">{move || i18n.t("lightbox-view-thread")}</span>

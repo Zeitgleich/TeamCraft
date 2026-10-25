@@ -73,8 +73,8 @@
   --radius-pill: 999px;
 
   /* Motion (issue #273): three durations and three curves. Only transform and opacity animate
-     (the compositor runs them; layout never does). Reduced motion turns every duration into ~0
-     (the block below, and the global rule under "Narrow windows"). */
+     (the compositor runs them; layout never does). Reduced motion keeps short fades and drops the
+     movement (the block below, and the one at the end of "Motion"). */
   --dur-fast: 120ms;
   --dur-base: 180ms;
   --dur-slow: 260ms;
@@ -92,12 +92,14 @@
   --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.05), 0 16px 40px rgba(16, 24, 40, 0.1);
 }
 
+/* Reduced motion means gentler, not none (#360): fades that explain a change stay, a little
+   shorter; nothing moves (see "Motion"). */
 @media (prefers-reduced-motion: reduce) {
   :root {
-    --dur-fast: 1ms;
-    --dur-base: 1ms;
-    --dur-slow: 1ms;
-    --dur-exit: 1ms;
+    --dur-fast: 120ms;
+    --dur-base: 150ms;
+    --dur-slow: 150ms;
+    --dur-exit: 100ms;
     --press-scale: 1;
   }
 }
@@ -1861,7 +1863,7 @@ select.input {
   display: none;
 }
 
-/* Reduced motion shortens the tokens to ~0 (motion system, #273). */
+/* The sheet rises from the bottom edge; reduced motion turns it into a fade ("Motion", #360). */
 .action-sheet {
   animation: sheet-in var(--dur-base) var(--ease-emphasized);
 }
@@ -3058,15 +3060,6 @@ ol.md-list {
   .header-divider,
   .composer-hint {
     display: none;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    transition-duration: 0.01ms !important;
-    animation-duration: 0.01ms !important;
   }
 }
 
@@ -4695,14 +4688,6 @@ ol.md-list {
   padding: 0 var(--space-4);
   border-radius: var(--radius-md);
   font-size: var(--text-md);
-  transition:
-    background-color var(--dur-fast) ease,
-    border-color var(--dur-fast) ease,
-    transform var(--dur-fast) ease;
-}
-
-.auth-card .btn:active:not(:disabled) {
-  transform: translateY(1px);
 }
 
 .auth-card .btn:disabled {
@@ -5169,13 +5154,8 @@ ol.md-list {
     animation: none;
   }
 
-  .auth-card .btn,
   .auth-card .input {
     transition: none;
-  }
-
-  .auth-card .btn:active:not(:disabled) {
-    transform: none;
   }
 }
 
@@ -5194,9 +5174,10 @@ ol.md-list {
   }
 }
 
+/* A slow turn is not vestibular motion, and a still ring would look like a hang (#360). */
 @media (prefers-reduced-motion: reduce) {
   .spinner {
-    animation-duration: 3s;
+    animation-duration: 1.6s;
   }
 }
 
@@ -6164,6 +6145,12 @@ ol.md-list {
 
 .crop-stage.is-animated .crop-image {
   transition: transform var(--dur-base) var(--ease-standard);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .crop-stage.is-animated .crop-image {
+    transition: none;
+  }
 }
 
 .crop-mask {
@@ -7383,8 +7370,8 @@ ol.md-list {
    Every transition and entrance of the shell in one place, all on the tokens of the first block.
    Rules: only transform and opacity move (compositor work, no layout); entrances run once when an
    element mounts; exits are played by inert copies (`.motion-ghost.is-leaving`, src/motion.rs) so
-   the real element is gone at once; nothing loops while it isn't visible. Reduced motion sets the
-   durations to ~0 (first block) and the global rule under "Narrow windows" catches the rest. */
+   the real element is gone at once; nothing loops while it isn't visible. Reduced motion keeps the
+   fades and turns every movement into one (end of this section). */
 
 /* Press: a slight shrink, so a click is felt before the result shows. Hover and focus change
    colour at once (no paint transitions); the focus ring is the outline from "Base". */
@@ -7462,8 +7449,9 @@ ol.md-list {
   }
 }
 
-/* Dialogs scale and fade in; their exit is faster and smaller. The quick switcher drops in from
-   the top bar's search. */
+/* Dialogs scale and fade in; their exit is faster and smaller. The quick switcher is opened from
+   the keyboard many times a day, so it appears and goes at once (any motion there reads as
+   latency); `Modal` leaves no exit ghost for it either. */
 .modal-backdrop {
   animation: motion-fade-in var(--dur-base) var(--ease-standard);
 }
@@ -7472,8 +7460,9 @@ ol.md-list {
   animation: motion-dialog-in var(--dur-base) var(--ease-emphasized);
 }
 
+.modal-backdrop:has(> .modal-switcher),
 .modal.modal-switcher {
-  animation: motion-switcher-in var(--dur-fast) var(--ease-emphasized);
+  animation: none;
 }
 
 /* The lightbox's image has its own transform (zoom); only the whole layer fades. */
@@ -7527,18 +7516,27 @@ ol.md-list {
   }
 }
 
-@keyframes motion-switcher-in {
-  from {
-    opacity: 0;
-    transform: translateY(-8px) scale(0.98);
-  }
-}
-
-/* Popovers and menus open from their anchor. */
+/* Popovers and menus grow out of the edge that touches their trigger and shrink back into it.
+   The default hangs below the trigger, right-aligned; `.opens-up` sits above it, `.align-start`
+   aligns its left edge. Menus that place themselves (message menu, emoji picker) set the class
+   when they flip. */
 .popover,
 .emoji-picker {
   animation: motion-popover-in var(--dur-fast) var(--ease-emphasized);
-  transform-origin: top right;
+  transform-origin: var(--popover-origin, top right);
+}
+
+:is(.popover, .emoji-picker).align-start {
+  --popover-origin: top left;
+}
+
+:is(.popover, .emoji-picker).opens-up {
+  --popover-origin: bottom right;
+  --popover-dy: 4px;
+}
+
+:is(.popover, .emoji-picker).opens-up.align-start {
+  --popover-origin: bottom left;
 }
 
 .motion-ghost.is-leaving.popover {
@@ -7548,18 +7546,18 @@ ol.md-list {
 @keyframes motion-popover-in {
   from {
     opacity: 0;
-    transform: translateY(-4px) scale(0.96);
+    transform: translateY(var(--popover-dy, -4px)) scale(0.96);
   }
 }
 
 @keyframes motion-popover-out {
   to {
     opacity: 0;
-    transform: scale(0.97);
+    transform: translateY(var(--popover-dy, -4px)) scale(0.97);
   }
 }
 
-/* Toasts rise in and slide out to the side; banners settle in from above. */
+/* Toasts rise in and sink back out the same way; banners settle in from above. */
 .toast {
   animation: motion-toast-in var(--dur-base) var(--ease-emphasized);
 }
@@ -7583,7 +7581,7 @@ ol.md-list {
 @keyframes motion-toast-out {
   to {
     opacity: 0;
-    transform: translateX(24px);
+    transform: translateY(8px) scale(0.98);
   }
 }
 
@@ -7681,6 +7679,63 @@ ol.md-list {
 .segmented button[aria-pressed="true"],
 .view-tabs [role="tab"][aria-selected="true"]::after {
   animation: motion-fade-in var(--dur-fast) var(--ease-standard);
+}
+
+/* Reduced motion (#360): every entrance and exit becomes a plain fade on the shortened tokens;
+   pops and presses go. Spinners keep turning (slower, see .spinner). */
+@media (prefers-reduced-motion: reduce) {
+  .main > *,
+  .channel-files,
+  .preview-details,
+  .side-panel:not(.embedded),
+  .modal,
+  .popover,
+  .emoji-picker,
+  .toast,
+  .app-banners > *,
+  .key-banner,
+  .msg.msg-arriving,
+  .sb-section ul.is-opening,
+  .action-sheet {
+    animation-name: motion-fade-in;
+  }
+
+  .motion-ghost.is-leaving,
+  .motion-ghost.is-leaving:is(.popover, .toast),
+  .motion-ghost.is-leaving .modal {
+    animation-name: motion-fade-out;
+  }
+
+  .reaction.is-popping,
+  .badge-count.is-bumped,
+  .dot-unread,
+  .unread-dot {
+    animation: none;
+  }
+
+  :is(.sb-item, .menu-item, .switcher-row, .activity-item):active:not(:disabled),
+  .rail-dest:active .rail-dest-icon {
+    transform: none;
+  }
+
+  .space-btn::before,
+  .sb-section-head .chevron,
+  .sb-space-head .chevron {
+    transition: none;
+  }
+}
+
+/* Reduced transparency: no blur, solid surfaces (#360). */
+@media (prefers-reduced-transparency: reduce) {
+  .round-btn {
+    backdrop-filter: none;
+    background: #141a26;
+  }
+
+  .lightbox-backdrop {
+    filter: none;
+    background-image: none !important;
+  }
 }
 
 /* ---- Compact layout (phones, issue #307) ----
@@ -8005,6 +8060,21 @@ ol.md-list {
   border-radius: 0;
 }
 
+/* They rise as sheets and fall back out (the lightbox fades, the switcher doesn't move). */
+:root[data-layout="compact"] .modal:not(.modal-switcher, .modal-lightbox) {
+  animation-name: sheet-in;
+}
+
+:root[data-layout="compact"] .motion-ghost.is-leaving .modal:not(.modal-lightbox) {
+  animation-name: sheet-out;
+}
+
+@keyframes sheet-out {
+  to {
+    transform: translateY(100%);
+  }
+}
+
 :root[data-layout="compact"] .modal-body {
   flex: 1;
   min-height: 0;
@@ -8032,17 +8102,40 @@ ol.md-list {
   overflow-y: auto;
   padding-bottom: calc(var(--space-2) + env(safe-area-inset-bottom));
   border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-  animation: sheet-in var(--dur-base) var(--ease-emphasized);
+  animation: sheet-rise var(--dur-base) var(--ease-emphasized);
+}
+
+:root[data-layout="compact"] .motion-ghost.is-leaving.status-menu {
+  animation: sheet-fall var(--dur-exit) var(--ease-exit) forwards;
 }
 
 :root[data-layout="compact"] .popover-backdrop {
   background: rgba(8, 12, 20, 0.45);
 }
 
-@keyframes sheet-in {
+@keyframes sheet-rise {
   from {
     transform: translateY(24px);
     opacity: 0;
+  }
+}
+
+@keyframes sheet-fall {
+  to {
+    transform: translateY(24px);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-layout="compact"] .modal:not(.modal-switcher, .modal-lightbox),
+  :root[data-layout="compact"] .status-menu {
+    animation-name: motion-fade-in;
+  }
+
+  :root[data-layout="compact"] .motion-ghost.is-leaving .modal:not(.modal-lightbox),
+  :root[data-layout="compact"] .motion-ghost.is-leaving.status-menu {
+    animation-name: motion-fade-out;
   }
 }
 
