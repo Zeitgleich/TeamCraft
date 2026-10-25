@@ -47,6 +47,13 @@ const PAGE: usize = 100;
 /// Events arrive in bursts (a sync delivers many); refresh once after they settle.
 const REFRESH_DELAY: Duration = Duration::from_millis(120);
 
+thread_local! {
+  /// The backend the core's events go to (#344). The page subscribes once; a new sign-in connects a
+  /// new backend, which takes the events over, so listeners never stack and the old backend's
+  /// mirror is not refreshed any more.
+  static CORE_EVENTS: RefCell<EventRoute<RemoteChat>> = const { RefCell::new(EventRoute::new()) };
+}
+
 /// Where the local client stands, as the shell reports it.
 pub async fn core_status(user: UserId) -> Result<CoreStatus, String> {
   call("core_start", &json!({ "user": user })).await
@@ -185,6 +192,12 @@ struct Slot {
   is_outdated: bool,
 }
 
+/// The receiver of events the page subscribed to once (see `CORE_EVENTS`).
+struct EventRoute<T> {
+  is_subscribed: bool,
+  maybe_target: Option<T>,
+}
+
 #[derive(Clone)]
 pub struct RemoteChat {
   mirror: Rc<RefCell<Mirror>>,
@@ -231,6 +244,26 @@ impl Slot {
   }
 }
 
+impl<T: Clone> EventRoute<T> {
+  const fn new() -> Self {
+    Self {
+      is_subscribed: false,
+      maybe_target: None,
+    }
+  }
+
+  /// Makes `target` the receiver; returns whether the caller still has to subscribe (the first
+  /// time only).
+  fn route_to(&mut self, target: T) -> bool {
+    self.maybe_target = Some(target);
+    !std::mem::replace(&mut self.is_subscribed, true)
+  }
+
+  fn target(&self) -> Option<T> {
+    self.maybe_target.clone()
+  }
+}
+
 impl RemoteChat {
   /// Reads the first snapshot and starts following the shell's change events.
   pub async fn connect() -> Result<Self, String> {
@@ -257,12 +290,21 @@ impl RemoteChat {
       refresh_queued: Rc::new(Cell::new(false)),
       answers: Rc::new(RefCell::new(HashMap::new())),
     };
-    let listener = backend.clone();
-    listen(CORE_CHANGED_EVENT, move || listener.queue_refresh());
-    // Desktop: failures of the core's background commands (the browser core reports its own).
-    listen_text(CORE_FAILED_EVENT, |text| {
-      report_background_failure(ActionFailure::from_wire(&text))
-    });
+    // async-ok: a thread-local, not a signal.
+    let must_subscribe = CORE_EVENTS.with(|route| route.borrow_mut().route_to(backend.clone()));
+    if must_subscribe {
+      listen(CORE_CHANGED_EVENT, || {
+        // async-ok: a thread-local, not a signal.
+        let maybe_target = CORE_EVENTS.with(|route| route.borrow().target());
+        if let Some(target) = maybe_target {
+          target.queue_refresh();
+        }
+      });
+      // Desktop: failures of the core's background commands (the browser core reports its own).
+      listen_text(CORE_FAILED_EVENT, |text| {
+        report_background_failure(ActionFailure::from_wire(&text))
+      });
+    }
     Ok(backend)
   }
 
@@ -1391,6 +1433,23 @@ impl SearchBackend for RemoteChat {
 mod tests {
   use super::*;
   use crate::model::{MessageKind, id_from_raw};
+
+  mod event_route {
+    use super::*;
+
+    /// #344: a reconnect (a new sign-in) must not stack a second listener on the shell's events.
+    #[test]
+    fn a_reconnect_takes_the_events_over_without_subscribing_again() {
+      let mut route = EventRoute::new();
+      assert!(route.route_to("first"), "the first connect subscribes");
+      assert!(!route.route_to("second"), "a reconnect does not subscribe again");
+      assert_eq!(
+        route.target(),
+        Some("second"),
+        "events go to the newest backend only"
+      );
+    }
+  }
 
   mod feed {
     use super::*;

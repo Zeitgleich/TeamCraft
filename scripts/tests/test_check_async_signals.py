@@ -59,6 +59,11 @@ class CheckAsyncSignalsTest(unittest.TestCase):
         source = "async fn load(&self) {\n  self.busy.set(true);\n  fetch().await;\n  self.data.set(1);\n}\n"
         self.assertEqual(findings(source), ["x.rs:4: self.data.set(1);"])
 
+    def test_a_closure_inside_a_task_is_reported_once(self):
+        # Issue #344: the access lies in both bodies, the task's and the closure's.
+        source = "spawn_local(async move {\n  load().await;\n  let f = Closure::new(move || flag.set(true));\n});\n"
+        self.assertEqual(findings(source), ["x.rs:3: let f = Closure::new(move || flag.set(true));"])
+
 
 if __name__ == "__main__":
     unittest.main()
