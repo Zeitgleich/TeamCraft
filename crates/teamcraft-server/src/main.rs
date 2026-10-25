@@ -41,7 +41,7 @@ use teamcraft_server::services::presence::{self, refresh_presence};
 use teamcraft_server::services::session::{self, PolicyHolder};
 use teamcraft_server::services::{
   attachments, backgrounds, brands, calendar_settings, email_digest, guests, key_packages, mail_settings,
-  oidc, retention, runtime_settings, urgent,
+  meeting_guests, oidc, retention, runtime_settings, urgent,
 };
 use teamcraft_server::state::{
   AppState, MeetingMailConfig, OidcSyncSettings, PushSettings, PushTtls, RetryPolicy, Settings,
@@ -336,6 +336,11 @@ fn spawn_background_sweeper(state: AppState) {
         Ok(0) => {},
         Ok(swept) => info!(swept, "swept unfinished attachments"),
         Err(error) => warn!(%error, "sweeping unfinished attachments failed"),
+      }
+      match meeting_guests::sweep_expired_guests(&state).await {
+        Ok(0) => {},
+        Ok(ended) => info!(ended, "ended sessions of guests whose meeting is over"),
+        Err(error) => warn!(%error, "ending expired guest sessions failed"),
       }
     }
   });

@@ -150,12 +150,20 @@ A guest's page keeps going after "You are in" (#446; design in e2ee.md §4.6, "M
    the guest's chats, the MLS and key routes of their own device, device registration, the lobby state
    of the meeting, `leave`, calls). Anything else answers 403. Guests only ever see conversations
    they are members of, which for a guest is the one meeting chat.
-4. **Leaving.** `POST /meetings/{id}/leave` (guests only) ends the guest's session: their place in
+4. **Link secret.** The link a host copies is `…#invite=<token>&k=<link secret>&o=<organizer's key
+   fingerprint>` (all in the fragment). The guest page proves with the secret that it holds the
+   link (`PUT .../lobby/me/proof`; the hosts read it from the lobby entry) and checks the
+   meeting's group against the fingerprint; the server stores the proof but can't make or check one
+   (e2ee.md §4.6, "Meeting guests"). Guest sessions are also ended by the server when the meeting's
+   access ends (end plus `guest_grace_secs`) or it is cancelled, by a sweep at least every ten
+   minutes. A guest sees the other attendees' names, never their e-mail addresses. A guest can't
+   replace their identity key.
+5. **Leaving.** `POST /meetings/{id}/leave` (guests only) ends the guest's session: their place in
    the lobby is closed, the account is deactivated (devices flagged removed, gateway connections
    closed, removed from the chat and the call) and the hosts' devices commit the removal from the
    encryption group. The page wipes its store. A guest who is turned away, or whose access ends, is
    treated the same.
-5. **Limits.** Joining counts against the per-address limits (above); a guest's writes count
+6. **Limits.** Joining counts against the per-address limits (above); a guest's writes count
    against `user_writes_per_minute`; devices and key packages against `limits.max_devices_per_user`
    and the key package limits like any user's. The shared link's guest limit bounds how many guests
    one link lets in.

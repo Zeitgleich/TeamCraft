@@ -931,4 +931,124 @@ mod scope_and_leaving {
     assert_eq!(admit.status, StatusCode::CONFLICT, "{}", admit.body);
     rig.app.stop().await;
   }
+
+  #[tokio::test]
+  async fn the_link_proof_is_set_once_and_only_hosts_read_it() {
+    let rig = rig!();
+    let app = &rig.app;
+    let alice = owner();
+    let (meeting, _, token) = rig.meeting_with_guest(&alice, true).await;
+    let (_, joined) = rig.join(&token, "Gus").await;
+    let guest_token = joined["guest_token"].as_str().unwrap().to_owned();
+    let guest_id = joined["user_id"].as_str().unwrap().to_owned();
+    let proof_path = format!("/meetings/{meeting}/lobby/me/proof");
+
+    let put = |proof: &'static str| {
+      let (rig, token, path) = (&rig, guest_token.clone(), proof_path.clone());
+      async move {
+        rig
+          .request(Some(&token), Method::PUT, &path, Some(json!({"proof": proof})))
+          .await
+          .0
+      }
+    };
+    assert_eq!(put("cHJvb2Y=").await, StatusCode::NO_CONTENT);
+    assert_eq!(put("b3RoZXI=").await, StatusCode::CONFLICT, "set once");
+    let member = app.put(&alice, &proof_path, json!({"proof": "cHJvb2Y="})).await;
+    assert_eq!(member.status, StatusCode::FORBIDDEN);
+
+    let entry = app
+      .get(&alice, &format!("/meetings/{meeting}/lobby/{guest_id}"))
+      .await;
+    assert_eq!(entry.status, StatusCode::OK, "{}", entry.body);
+    assert_eq!(entry.body["proof"], "cHJvb2Y=");
+    let lobby = app.get(&alice, &format!("/meetings/{meeting}/lobby")).await;
+    assert_eq!(lobby.body["entries"][0]["proof"], "cHJvb2Y=");
+    let (status, _) = rig
+      .request(
+        Some(&guest_token),
+        Method::GET,
+        &format!("/meetings/{meeting}/lobby/{guest_id}"),
+        None,
+      )
+      .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "guests don't read lobby entries");
+    rig.app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn guests_see_no_addresses_and_cannot_reset_their_identity_key() {
+    let rig = rig!();
+    let app = &rig.app;
+    let alice = owner();
+    let (meeting, _, token) = rig.meeting_with_guest(&alice, false).await;
+    let (_, joined) = rig.join(&token, "Gus").await;
+    let guest_token = joined["guest_token"].as_str().unwrap().to_owned();
+
+    let (status, body) = rig
+      .request(
+        Some(&guest_token),
+        Method::GET,
+        &format!("/meetings/{meeting}"),
+        None,
+      )
+      .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.to_string().contains("gus@example.org"), "{body}");
+    let host_view = app.get(&alice, &format!("/meetings/{meeting}")).await;
+    assert!(host_view.body.to_string().contains("gus@example.org"));
+
+    let (status, body) = rig
+      .request(
+        Some(&guest_token),
+        Method::PUT,
+        "/me/identity-key",
+        Some(json!({"public_key": "cHVi", "signature": "c2ln", "replace": true})),
+      )
+      .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    rig.app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn guests_of_a_finished_meeting_are_ended_by_the_sweep() {
+    let rig = rig!();
+    let app = &rig.app;
+    let alice = owner();
+    let (meeting, chat, token) = rig.meeting_with_guest(&alice, false).await;
+    let (_, joined) = rig.join(&token, "Gus").await;
+    let guest_id = joined["user_id"].as_str().unwrap().to_owned();
+    let grace = time::Duration::seconds(7200);
+    let ends = time::OffsetDateTime::from_unix_timestamp(ENDS_AT / 1000).unwrap();
+
+    use teamcraft_server::services::meeting_guests::sweep_expired_guests_at;
+    assert_eq!(
+      sweep_expired_guests_at(&app.state, ends).await.unwrap(),
+      0,
+      "still in the meeting"
+    );
+    assert_eq!(
+      sweep_expired_guests_at(&app.state, ends + grace - time::Duration::seconds(1))
+        .await
+        .unwrap(),
+      0,
+      "still in the grace time"
+    );
+    assert_eq!(
+      sweep_expired_guests_at(&app.state, ends + grace + time::Duration::seconds(1))
+        .await
+        .unwrap(),
+      1
+    );
+    assert_eq!(
+      sweep_expired_guests_at(&app.state, ends + grace + time::Duration::seconds(1))
+        .await
+        .unwrap(),
+      0
+    );
+    let members = app.get(&alice, &format!("/conversations/{chat}/members")).await;
+    assert!(!members.body.to_string().contains(&guest_id));
+    let _ = meeting;
+    rig.app.stop().await;
+  }
 }

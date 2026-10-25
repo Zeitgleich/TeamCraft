@@ -55,6 +55,7 @@ const READ_WRITE: &[&str] = &[
   "/conversations/{conversation_id}/mls/group-info",
   "/conversations/{conversation_id}/call/join-token",
   "/meetings/{meeting_id}/leave",
+  "/meetings/{meeting_id}/lobby/me/proof",
 ];
 
 /// Whether a guest session may call `method` on the route `matched_path` (axum's route pattern, as

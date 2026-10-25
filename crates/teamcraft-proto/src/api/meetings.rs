@@ -264,6 +264,16 @@ impl std::fmt::Debug for JoinMeetingResponse {
 pub struct LobbyEntry {
   pub user: UserSummary,
   pub requested_at: UnixMillis,
+  /// The proof a guest gave that they hold the link's secret (`PUT .../lobby/me/proof`); hosts'
+  /// devices check it before they add the guest's device. Absent until the guest sent it.
+  #[serde(rename = "proof", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_proof: Option<crate::Base64Bytes>,
+}
+
+/// `PUT /api/v1/meetings/{id}/lobby/me/proof`: a guest's proof of the link secret. Set once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PutGuestProofRequest {
+  pub proof: crate::Base64Bytes,
 }
 
 /// `GET /api/v1/meetings/{id}/lobby`: who waits for the host.

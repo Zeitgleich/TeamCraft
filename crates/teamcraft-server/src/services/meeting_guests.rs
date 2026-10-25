@@ -9,9 +9,9 @@
 
 use teamcraft_db::{LobbyRow, SharedInviteClaim, StoredMeeting, StoredMeetingInvite};
 use teamcraft_proto::{
-  CreateGuestLinkRequest, GatewayEvent, GuestLinkResponse, JoinMeetingRequest, JoinMeetingResponse,
-  ListLobbyResponse, LobbyEntry, LobbyState, LobbyStateResponse, MeetingId, MeetingInviteId, MeetingStatus,
-  UserId, UserKind,
+  Base64Bytes, CreateGuestLinkRequest, GatewayEvent, GuestLinkResponse, JoinMeetingRequest,
+  JoinMeetingResponse, ListLobbyResponse, LobbyEntry, LobbyState, LobbyStateResponse, MeetingId,
+  MeetingInviteId, MeetingStatus, PutGuestProofRequest, UserId, UserKind,
 };
 use time::OffsetDateTime;
 
@@ -26,6 +26,10 @@ use crate::state::AppState;
 
 const MAX_NAME_CHARS: usize = 100;
 const MAX_LABEL_CHARS: usize = 100;
+/// A link proof is a MAC; real ones are 32 bytes.
+const MAX_PROOF_BYTES: usize = 128;
+/// Guests ended per sweep; a larger backlog is worked off over the next sweeps.
+const SWEEP_BATCH: i64 = 200;
 
 /// Trades a join link (personal or shared) for a guest session and puts the guest into the lobby
 /// (or straight into the meeting if it has no lobby and the link is personal). Needs no
@@ -225,16 +229,65 @@ pub async fn list_lobby(
     .database
     .get_users(&waiting.iter().map(|row| row.user).collect::<Vec<_>>())
     .await?;
+  let mut proofs = state.database.guest_proofs(meeting.id).await?;
   let entries = waiting
     .iter()
     .filter_map(|row| {
       users
         .iter()
         .find(|user| user.id == row.user)
-        .map(|user| entry(state, user, row))
+        .map(|user| entry(state, user, row, proofs.remove(&row.user)))
     })
     .collect();
   Ok(ListLobbyResponse { entries })
+}
+
+/// One guest's lobby entry with the proof they gave, also after they were let in (hosts only):
+/// the host's device checks the proof before it adds the guest's device.
+pub async fn lobby_entry(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: MeetingId,
+  guest: UserId,
+) -> Result<LobbyEntry, ApiError> {
+  let meeting = host_meeting(state, caller, id).await?;
+  let row = state
+    .database
+    .get_lobby_entry(meeting.id, guest)
+    .await?
+    .ok_or_else(ApiError::meeting_not_found)?;
+  let user = state
+    .database
+    .get_user(guest)
+    .await?
+    .ok_or_else(ApiError::meeting_not_found)?;
+  let maybe_proof = state.database.guest_proofs(meeting.id).await?.remove(&guest);
+  Ok(entry(state, &user, &row, maybe_proof))
+}
+
+/// A guest hands the hosts the proof that they hold the link's secret (once). The server can't
+/// check it: it never sees the secret, and so can't make a proof for a guest of its own either.
+pub async fn put_guest_proof(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: MeetingId,
+  request: PutGuestProofRequest,
+) -> Result<(), ApiError> {
+  service_of(state)?;
+  if caller.user.kind != UserKind::Guest {
+    return Err(ApiError::Forbidden("only guests give a link proof".into()));
+  }
+  if request.proof.is_empty() || request.proof.len() > MAX_PROOF_BYTES {
+    return Err(ApiError::InvalidRequest("proof has an invalid size".into()));
+  }
+  if !state
+    .database
+    .set_guest_proof(id, caller.user.id, request.proof.as_slice())
+    .await?
+  {
+    return Err(ApiError::Conflict("the proof was given already".into()));
+  }
+  Ok(())
 }
 
 /// The caller's own place in the lobby (for guests that reconnect).
@@ -306,6 +359,40 @@ pub async fn leave(state: &AppState, caller: &AuthenticatedUser, id: MeetingId) 
   )
   .await?;
   Ok(())
+}
+
+/// Ends the sessions of guests whose meeting is over (plus the grace time) or cancelled. Their
+/// tokens have expired by then; this also takes them out of the chat, closes their devices and
+/// tells the members, whose devices commit the removal from the encryption group (e2ee.md §4.6,
+/// "Meeting guests"). Run periodically; returns how many guests it ended.
+pub async fn sweep_expired_guests(state: &AppState) -> Result<usize, ApiError> {
+  sweep_expired_guests_at(state, OffsetDateTime::now_utc()).await
+}
+
+/// [`sweep_expired_guests`] as of `now`.
+pub async fn sweep_expired_guests_at(state: &AppState, now: OffsetDateTime) -> Result<usize, ApiError> {
+  let Some(service) = state.maybe_meetings.as_deref() else {
+    return Ok(0);
+  };
+  let expired = state
+    .database
+    .list_guests_past_access(now, service.guest_grace().as_secs_f64(), SWEEP_BATCH)
+    .await?;
+  let mut ended = 0;
+  for (_, guest) in expired {
+    if super::admin::deactivate_user(
+      state,
+      None,
+      guest,
+      teamcraft_proto::DeactivationReason::Left,
+      "the meeting's access ended",
+    )
+    .await?
+    {
+      ended += 1;
+    }
+  }
+  Ok(ended)
 }
 
 /// Lets a waiting guest into the meeting chat (hosts only).
@@ -513,10 +600,16 @@ fn access_ends_at(service: &MeetingService, meeting: &StoredMeeting) -> OffsetDa
   meeting.ends_at + service.guest_grace()
 }
 
-fn entry(state: &AppState, user: &teamcraft_db::User, row: &LobbyRow) -> LobbyEntry {
+fn entry(
+  state: &AppState,
+  user: &teamcraft_db::User,
+  row: &LobbyRow,
+  maybe_proof: Option<Vec<u8>>,
+) -> LobbyEntry {
   LobbyEntry {
     user: user_summary(state, user),
     requested_at: unix_millis(row.requested_at),
+    maybe_proof: maybe_proof.map(Base64Bytes::new),
   }
 }
 
