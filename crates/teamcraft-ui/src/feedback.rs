@@ -19,7 +19,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_proto::ErrorCode;
 
-pub use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
+pub use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind, NotificationFailure};
 
 use crate::i18n::I18n;
 use crate::model::TimestampMs;
@@ -98,6 +98,11 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
     FailureKind::CaptivePortal => "error-captive-portal",
     FailureKind::UntrustedCertificate => "error-untrusted-certificate",
     FailureKind::Other => "error-generic",
+    FailureKind::Notification(failure) => match failure {
+      NotificationFailure::NotAllowed => "error-notification-not-allowed",
+      NotificationFailure::Unsupported => "error-notification-unsupported",
+      NotificationFailure::Refused => "error-notification-refused",
+    },
     FailureKind::Call(failure) => match failure {
       CallFailure::MicrophoneDenied => "error-call-microphone-denied",
       CallFailure::MicrophoneMissing => "error-call-microphone-missing",

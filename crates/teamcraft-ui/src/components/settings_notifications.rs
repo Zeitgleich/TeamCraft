@@ -288,9 +288,7 @@ fn ThisDeviceCard() -> impl IntoView {
       maybe_reply: None,
     };
     testing.spawn(async move {
-      tauri::try_show_notification(&notification)
-        .await
-        .map_err(|error| ActionFailure::new(FailureKind::Other, error))?;
+      tauri::try_show_notification(&notification).await?;
       has_tested.set_if_alive(true);
       Ok(())
     });
@@ -314,6 +312,7 @@ fn ThisDeviceCard() -> impl IntoView {
     }
   });
 
+  // The row is always in the DOM, so a search hit for the test lands on it, also without permission.
   view! {
     <SettingsCard heading="notif-this-device">
       <SettingRow label=if is_desktop { "notif-device-system" } else { "notif-browser" } live_hint=status>
@@ -322,14 +321,14 @@ fn ThisDeviceCard() -> impl IntoView {
             {move || i18n.t("notif-browser-allow")}
           </PendingButton>
         </Show>
-        <Show when=is_granted fallback=|| ()>
-          <span class="set-inline" id=row_id("notif-test")>
+        <span class="set-inline" id=row_id("notif-test")>
+          <Show when=is_granted fallback=|| ()>
             <PendingButton pending=testing class="btn btn-small" on_click=send_test>
               <Icon name=IconName::Bell />
               <span>{move || i18n.t("notif-test")}</span>
             </PendingButton>
-          </span>
-        </Show>
+          </Show>
+        </span>
       </SettingRow>
     </SettingsCard>
   }
