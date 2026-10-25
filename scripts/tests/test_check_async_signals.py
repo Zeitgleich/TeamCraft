@@ -85,5 +85,29 @@ class CheckAsyncSignalsTest(unittest.TestCase):
         self.assertEqual(findings(source), ["x.rs:3: let f = Closure::new(move || flag.set(true));"])
 
 
+    def test_a_discarded_window_listener_is_found(self):
+        source = (
+            "let _ = window_event_listener(ev::focus, move |_| f());\n"
+            "_ = window_event_listener_untyped(\"blur\", move |_| f());\n"
+            "window_event_listener(ev::resize, move |_| f());\n"
+        )
+        self.assertEqual(
+            findings(source),
+            [
+                "x.rs:1: let _ = window_event_listener(ev::focus, move |_| f()); (the listener is never removed)",
+                "x.rs:2: _ = window_event_listener_untyped(\"blur\", move |_| f()); (the listener is never removed)",
+                "x.rs:3: window_event_listener(ev::resize, move |_| f()); (the listener is never removed)",
+            ],
+        )
+
+    def test_a_kept_and_removed_window_listener_passes(self):
+        source = (
+            "let listener = window_event_listener(ev::focus, move |_| f());\n"
+            "on_cleanup(move || listener.remove());\n"
+            "let listeners = [\n  window_event_listener(ev::blur, move |_| f()),\n];\n"
+        )
+        self.assertEqual(findings(source), [])
+
+
 if __name__ == "__main__":
     unittest.main()
