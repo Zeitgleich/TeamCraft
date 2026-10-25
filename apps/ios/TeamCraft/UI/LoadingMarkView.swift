@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// The loading screen of a cold start, over the app: the TeamCraft mark assembles and types while
-/// `isLoading`, then gets out of the way once it has assembled. The same choreography as the web's
+/// `isLoading`, and gets out of the way as soon as loading is over. The same choreography as the web's
 /// loading screen (crates/teamcraft-ui/style/loader.css, issue #463): the heads swirl in, the
 /// bodies rise, the speech bubble pops and types, the team nods along. A screen that was not
 /// loading at first never shows it.
@@ -46,17 +46,16 @@ struct LoadingMarkOverlay: View {
       }
       .accessibilityElement()
       .accessibilityLabel(Text("loading"))
+      // Leaving: no longer announced.
+      .accessibilityHidden(maybeDepartedAt != nil)
       .task(id: isLoading) { await handOverWhenLoaded() }
     }
   }
 
-  /// Once loading is over and the mark has assembled, the handover plays and the overlay goes.
+  /// Once loading is over the handover plays and the overlay goes; a fast start is not held back
+  /// for the animation.
   private func handOverWhenLoaded() async {
     guard !isLoading else { return }
-    let assembled = (reduceMotion ? MarkTiming.fadeMs : MarkTiming.assembledMs) / 1000
-    let wait = assembled - Date().timeIntervalSince(start)
-    if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
-    guard !Task.isCancelled else { return }
     maybeDepartedAt = Date()
     try? await Task.sleep(for: .milliseconds(Int(reduceMotion ? MarkTiming.fadeMs : MarkTiming.departMs)))
     guard !Task.isCancelled else { return }
@@ -103,8 +102,6 @@ private enum MarkTiming {
   static let nodShare = 0.06
   /// Every part rests here: assembled, the loops not started yet.
   static let restingMs = 1040.0
-  /// The mark has assembled (the loops start later, at 1100 ms); the handover waits for this.
-  static let assembledMs = 900.0
   /// The handover: the mark rises towards the viewer and fades with the backdrop.
   static let departMs = 320.0
   static let departScale = 1.15

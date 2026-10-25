@@ -1,6 +1,7 @@
 package de.zeitgleich.teamcraft.ui.screens
 
 import android.graphics.Bitmap
+import android.icu.text.BreakIterator
 import androidx.annotation.StringRes
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -195,13 +196,20 @@ private fun BrandTiles(maybeIcon: Bitmap?, name: String) {
     } else {
       Tile(MaterialTheme.colorScheme.primary) {
         Text(
-          name.take(1).uppercase(),
+          firstGrapheme(name).uppercase(),
           style = MaterialTheme.typography.headlineSmall,
           color = MaterialTheme.colorScheme.onPrimary,
         )
       }
     }
   }
+}
+
+/** The first user-perceived character (an emoji or accented letter stays whole). */
+private fun firstGrapheme(text: String): String {
+  val breaks = BreakIterator.getCharacterInstance().apply { setText(text) }
+  val end = breaks.next()
+  return if (end == BreakIterator.DONE) "" else text.substring(0, end)
 }
 
 @Composable

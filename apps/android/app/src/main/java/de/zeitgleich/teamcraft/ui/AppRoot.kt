@@ -67,6 +67,7 @@ fun AppRoot(
   val state by viewModel.appState.collectAsState()
   val isBusy by viewModel.isBusy.collectAsState()
   val brand by viewModel.loginBrand.collectAsState()
+  val brandIcons by viewModel.brandIcons.collectAsState()
   val maybeServer by viewModel.server.collectAsState()
   val isServerLocked by viewModel.isServerLocked.collectAsState()
   val maybeSignInPage by viewModel.signInPage.collectAsState()
@@ -99,7 +100,7 @@ fun AppRoot(
       is AppState.SignedOut -> LoginScreen(
         maybeBrand = brand,
         maybeLogo = remember(brand, isDark) { viewModel.brandLogo(isDark) },
-        maybeIcon = remember(brand, isDark) { viewModel.brandIcon(isDark) },
+        maybeIcon = brandIcons?.forTheme(isDark),
         maybePage = maybeSignInPage,
         maybeSsoIcon = maybeSsoIcon,
         serverHost = maybeServer?.address?.host.orEmpty(),

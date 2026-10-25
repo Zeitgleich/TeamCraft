@@ -29,8 +29,9 @@ const CROSSFADE_BLUR = 'blur(3px)';
 // Nothing to fly to (a screen without a brand): the mark rises towards the viewer and fades.
 const DEPART_MS = 320;
 const EMPHASIZED_EASING = 'cubic-bezier(0.05, 0.7, 0.1, 1)';
-// The screen goes after this even if the handover never finishes (a hidden tab).
-const HANDOVER_TIMEOUT_MS = 2000;
+// The screen goes this long after the app mounted even if the handover never finishes (a hidden
+// tab, an error): the assembly wait, two frames and the flight, with room for a slow device.
+const HANDOVER_TIMEOUT_MS = 2500;
 // The handover waits for the mark to finish assembling, but never longer than this.
 const MAX_ASSEMBLY_WAIT_MS = 900;
 // Where the app shows the brand, most specific first: the sign-in card's mark, logo or name, then the
@@ -74,12 +75,21 @@ export default function loader() {
 }
 
 // The app mounted during init. Once the mark has assembled and the app has laid out, the mark flies
-// into the app's brand, or the screen just fades with reduced motion.
-async function handOver(root) {
+// into the app's brand, or the screen just fades with reduced motion. Whatever happens on the way
+// (a hidden tab that draws no frames, an error), the screen is gone by the deadline, which starts
+// before anything is awaited.
+function handOver(root) {
+  Promise.race([animateHandOver(root), delay(HANDOVER_TIMEOUT_MS)])
+    .catch((error) => console.error('the loading screen could not hand over', error))
+    .finally(() => root.remove());
+}
+
+async function animateHandOver(root) {
   const mark = root.querySelector('.tc-loader-mark');
   if (!mark || !mark.animate || prefersReducedMotion()) {
     await nextFrame();
-    fadeOut(root);
+    root.classList.add('is-done');
+    await delay(FADE_MS + 50);
     return;
   }
   await assembled(mark);
@@ -88,10 +98,7 @@ async function handOver(root) {
   root.classList.add('is-handing-over');
   root.setAttribute('aria-busy', 'false');
   const animation = target ? flyInto(mark, target) : depart(mark);
-  // A hidden tab may never finish the animation; the screen goes either way (it no longer takes
-  // input meanwhile).
-  const done = Promise.race([animation.finished, delay(HANDOVER_TIMEOUT_MS)]).catch(() => {});
-  done.then(() => root.remove());
+  await animation.finished;
 }
 
 // The mark moves onto the target and scales to its height; the target, hidden meanwhile, takes over
@@ -149,11 +156,6 @@ function depart(mark) {
     ],
     { duration: DEPART_MS, easing: EMPHASIZED_EASING, fill: 'forwards' },
   );
-}
-
-function fadeOut(root) {
-  root.classList.add('is-done');
-  setTimeout(() => root.remove(), FADE_MS + 50);
 }
 
 // The mark's entrance (its finite animations) has played; the typing loops go on.

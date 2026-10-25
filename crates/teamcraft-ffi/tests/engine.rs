@@ -128,6 +128,23 @@ mod brand {
   }
 
   #[test]
+  fn the_brand_endpoints_own_icons_reach_the_tile() {
+    let json = r#"{"id": "brand-a", "display_name": "Brand A", "origin": "",
+      "assets": {"icon": "/api/v1/brand/assets/icon", "icon_dark": "/api/v1/brand/assets/icon_dark"},
+      "colors": {"light": {}, "dark": {}}, "login_title": {}, "links": {}}"#;
+    let brand = login_brand(json.into(), "https://chat.example.com/".into(), "en".into()).unwrap();
+    assert!(!brand.is_product);
+    assert_eq!(
+      brand.maybe_icon_url.as_deref(),
+      Some("https://chat.example.com/api/v1/brand/assets/icon")
+    );
+    assert_eq!(
+      brand.maybe_icon_dark_url.as_deref(),
+      Some("https://chat.example.com/api/v1/brand/assets/icon_dark")
+    );
+  }
+
+  #[test]
   fn the_builtin_brand_is_the_product() {
     let json = r#"{"id": "teamcraft", "display_name": "TeamCraft", "origin": "", "assets": {},
       "colors": {"light": {}, "dark": {}}, "login_title": {}, "links": {}}"#;

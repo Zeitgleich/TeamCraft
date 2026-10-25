@@ -7,6 +7,6 @@
     <item name="android:windowBackground">#F6F7F9</item>
     <item name="android:windowSplashScreenBackground">#F6F7F9</item>
     <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_mark</item>
-    <item name="android:windowSplashScreenAnimationDuration">1040</item>
+    <item name="android:windowSplashScreenAnimationDuration">1000</item>
   </style>
 </resources>

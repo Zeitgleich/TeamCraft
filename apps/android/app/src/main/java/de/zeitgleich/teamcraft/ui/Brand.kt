@@ -118,3 +118,8 @@ private fun download(url: String, maxBytes: Int): ByteArray {
     connection.disconnect()
   }
 }
+
+/** The brand's square icon in both themes, decoded (null: the brand has none for that theme). */
+class BrandIcons(val light: Bitmap?, val dark: Bitmap?) {
+  fun forTheme(isDark: Boolean): Bitmap? = if (isDark) dark ?: light else light
+}

@@ -27,6 +27,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -59,8 +60,6 @@ private const val NOD_PERIOD_MS = 2400f
 private const val NOD_SHARE = 0.06f
 /** Every part rests here: assembled, the loops not started yet. */
 private const val RESTING_MS = 1040f
-/** The mark has assembled (the loops start later, at 1100 ms); the handover waits for this. */
-private const val ASSEMBLED_MS = 900L
 /** The handover: the mark rises towards the viewer and fades with the backdrop. */
 private const val DEPART_MS = 320f
 private const val DEPART_SCALE = 1.15f
@@ -75,7 +74,8 @@ private val HOP_DELAYS_MS = listOf(1100f, 1250f, 1400f)
 
 /**
  * The loading screen of a cold start, over the app: the TeamCraft mark assembles and types while
- * [isLoading], then gets out of the way once it has assembled. Removes itself when done; a
+ * [isLoading], and gets out of the way as soon as loading is over (a fast start is not held back
+ * for the animation). Removes itself when done; a
  * screen that was not loading at first never shows it. With [maybeHandoff] it goes on from where
  * the system splash left the mark (Android 12+, MainActivity), at its place and size.
  */
@@ -94,7 +94,6 @@ fun LoadingMarkOverlay(isLoading: Boolean, maybeHandoff: SplashHandoff? = null) 
   LaunchedEffect(Unit) {
     var origin = withFrameMillis { it }
     var maybeTakenOver: SplashHandoff? = null
-    val assembled = if (reduceMotion) FADE_MS.toLong() else ASSEMBLED_MS
     val departure = if (reduceMotion) FADE_MS else DEPART_MS
     while (true) {
       val frame = withFrameMillis { it }
@@ -105,7 +104,7 @@ fun LoadingMarkOverlay(isLoading: Boolean, maybeHandoff: SplashHandoff? = null) 
       }
       val now = frame - origin
       elapsed.longValue = now
-      if (departedAt.longValue < 0 && !loading && now >= assembled) departedAt.longValue = now
+      if (departedAt.longValue < 0 && !loading) departedAt.longValue = now
       if (departedAt.longValue >= 0 && now - departedAt.longValue >= departure) break
     }
     isShown = false
@@ -118,7 +117,8 @@ fun LoadingMarkOverlay(isLoading: Boolean, maybeHandoff: SplashHandoff? = null) 
       .fillMaxSize()
       .graphicsLayer { alpha = 1f - departure(elapsed.longValue, departedAt.longValue, reduceMotion) }
       .background(background)
-      .semantics { contentDescription = label },
+      // Read here, so the screen recomposes once when it starts to leave and stops announcing.
+      .then(if (departedAt.longValue < 0) Modifier.semantics { contentDescription = label } else Modifier.clearAndSetSemantics {}),
   ) {
     val t = elapsed.longValue
     val gone = departure(t, departedAt.longValue, reduceMotion)
