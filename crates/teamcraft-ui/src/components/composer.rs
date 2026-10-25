@@ -176,14 +176,13 @@ pub fn Composer(
   let state = use_app_state();
   // Thread replies can also be posted to the conversation itself.
   let also_send_to_channel = RwSignal::new(false);
-  let channel_name = move || {
+  // Only a channel's thread reply can also go to the channel: in a direct or group conversation
+  // everybody already sees the thread, so the choice would mean nothing.
+  let maybe_channel_name = move || {
     state
       .read(|backend| backend.conversation(conversation))
-      .map(|conv| match conv.kind {
-        ConversationKind::Direct | ConversationKind::Group => conv.name,
-        _ => format!("#{}", conv.name),
-      })
-      .unwrap_or_default()
+      .filter(|conv| !matches!(conv.kind, ConversationKind::Direct | ConversationKind::Group))
+      .map(|conv| format!("#{}", conv.name))
   };
   let editor = NodeRef::<html::Div>::new();
   let file_input = NodeRef::<html::Input>::new();
@@ -417,7 +416,9 @@ pub fn Composer(
         priority: priority.get_untracked(),
         wants_acknowledgement: wants_acknowledgement.get_untracked(),
         is_silent: is_silent.get_untracked(),
-        also_send_to_channel: maybe_thread.is_some() && also_send_to_channel.get_untracked(),
+        also_send_to_channel: maybe_thread.is_some()
+          && maybe_channel_name().is_some()
+          && also_send_to_channel.get_untracked(),
         files,
       });
     });
@@ -1322,14 +1323,14 @@ pub fn Composer(
           </div>
         </div>
         // Slack and Mattermost: a thread reply can also go to the conversation.
-        {maybe_thread.is_some().then(|| view! {
+        {move || maybe_thread.and_then(|_| maybe_channel_name()).map(|name| view! {
           <label class="also-send">
             <input
               type="checkbox"
               prop:checked=move || also_send_to_channel.get()
               on:change=move |ev| also_send_to_channel.set(event_target_checked(&ev))
             />
-            <span>{move || i18n.t_with("composer-also-send", &[("name", &channel_name())])}</span>
+            <span>{move || i18n.t_with("composer-also-send", &[("name", &name)])}</span>
           </label>
         })}
       </Show>
