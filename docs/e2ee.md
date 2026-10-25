@@ -482,8 +482,14 @@ encrypted name`, base64url. Without a password the key material is the file key;
 using lighter parameters than the backup passphrase (32 MiB, 3 passes) because the download page
 runs them in WebAssembly, and refusing parameters outside the backup's limits when opening, so a
 hostile link can't make the browser allocate absurd memory. The file name is encrypted with the
-file key. The server endpoint for creating links (`POST /attachments/{id}/share-links`) and the
-download page are not built yet.
+file key. The server serves the links (`/api/v1/shares`); the download page is the web app's
+`/f/<share-id>#<fragment>` route (`share_download.rs`), which needs no session: it reads the
+fragment in the browser, asks `GET /api/v1/shares/{id}` for size and password need, asks for the
+password if the link has one (a wrong one is told apart from a damaged link and doesn't count as a
+download), counts the download with `POST /api/v1/shares/{id}/download`, fetches the ciphertext and
+decrypts it chunk by chunk into a `Blob` it offers to save. The page holds the whole ciphertext in
+memory, so files above 1 GiB are refused with a hint; the signed-in app's chunks are not loaded for
+it. Revoking links and the options dialog are separate (#501).
 
 **Thumbnails:** the sender's client makes a preview of image attachments (decoding capped at
 40 megapixels) and puts it next to the file key inside the encrypted message. It is turned upright

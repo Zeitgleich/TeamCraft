@@ -152,6 +152,20 @@ pub fn ciphertext_matches(ciphertext: &[u8], expected_sha256: &[u8]) -> bool {
 
 /// Decrypts a whole file in memory. For large files use [`AttachmentDecryptor`].
 pub fn decrypt_attachment(key: &AttachmentKey, ciphertext: &[u8]) -> Result<SecretBytes, AttachmentError> {
+  let mut plaintext = Vec::with_capacity(ciphertext.len());
+  decrypt_attachment_chunks(key, ciphertext, |chunk| plaintext.extend_from_slice(chunk))?;
+  Ok(SecretBytes::new(plaintext))
+}
+
+/// Decrypts a blob in memory chunk by chunk, handing every plaintext chunk to `sink` in order, so
+/// the caller never needs the whole plaintext as one buffer (the share download page builds a
+/// browser `Blob` from the chunks). Nothing is trustworthy until this returns `Ok`: a tampered or
+/// truncated blob fails at its end.
+pub fn decrypt_attachment_chunks(
+  key: &AttachmentKey,
+  ciphertext: &[u8],
+  mut sink: impl FnMut(&[u8]),
+) -> Result<(), AttachmentError> {
   let header = ciphertext
     .get(..HEADER_LEN)
     .ok_or(AttachmentError::MalformedHeader)?;
@@ -165,12 +179,11 @@ pub fn decrypt_attachment(key: &AttachmentKey, ciphertext: &[u8]) -> Result<Secr
     (body.len() - 1) / encrypted_chunk_len
   };
   let (chunks, last) = body.split_at(full_chunks * encrypted_chunk_len);
-  let mut plaintext = Vec::with_capacity(body.len());
   for chunk in chunks.chunks(encrypted_chunk_len) {
-    plaintext.extend_from_slice(decryptor.decrypt_chunk(chunk)?.expose_secret());
+    sink(decryptor.decrypt_chunk(chunk)?.expose_secret());
   }
-  plaintext.extend_from_slice(decryptor.finish(last)?.expose_secret());
-  Ok(SecretBytes::new(plaintext))
+  sink(decryptor.finish(last)?.expose_secret());
+  Ok(())
 }
 
 impl AttachmentKey {
@@ -515,6 +528,22 @@ mod tests {
       let decrypted = decrypt_attachment(&encrypted.key, &encrypted.ciphertext).unwrap();
       assert_eq!(decrypted.expose_secret(), plaintext.as_slice(), "length {len}");
     }
+  }
+
+  #[test]
+  fn chunks_arrive_in_order_and_a_truncated_blob_fails() {
+    let plaintext = sample(2 * CHUNK as usize + 10);
+    let encrypted = encrypt_attachment(&plaintext, CHUNK, &mut OsRng).unwrap();
+    let mut joined = Vec::new();
+    let mut count = 0;
+    decrypt_attachment_chunks(&encrypted.key, &encrypted.ciphertext, |chunk| {
+      joined.extend_from_slice(chunk);
+      count += 1;
+    })
+    .unwrap();
+    assert_eq!((joined, count), (plaintext, 3));
+    let truncated = &encrypted.ciphertext[..encrypted.ciphertext.len() - 30];
+    assert!(decrypt_attachment_chunks(&encrypted.key, truncated, |_| {}).is_err());
   }
 
   #[test]

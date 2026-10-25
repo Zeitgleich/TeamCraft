@@ -75,6 +75,7 @@ pub mod sections;
 pub mod server_backend;
 pub mod session;
 pub mod settings;
+pub mod share_link;
 #[cfg(any(target_arch = "wasm32", test))]
 pub mod shell_video;
 pub mod sign_in_page;
