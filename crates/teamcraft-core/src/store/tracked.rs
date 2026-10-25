@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use teamcraft_proto::{ClientMessageId, ConversationId, MessageId, UserId};
 
-use super::{LocalStore, MessageFilter, StoreError, StoredMessage, Table};
+use super::{LocalStore, MediaRange, MessageFilter, StoreError, StoredMessage, Table};
 
 /// Records of [`Table::Account`] every conversation entry reads (unread marks, mention rules).
 const SHARED_ACCOUNT_RECORDS: [&str; 2] = [
@@ -169,6 +169,15 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     filter: MessageFilter,
   ) -> Result<Vec<StoredMessage>, StoreError> {
     self.inner.messages(conversation, filter)
+  }
+
+  fn media_messages(
+    &self,
+    conversation: ConversationId,
+    range: MediaRange,
+    limit: usize,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    self.inner.media_messages(conversation, range, limit)
   }
 
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {

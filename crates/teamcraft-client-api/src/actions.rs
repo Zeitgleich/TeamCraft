@@ -207,6 +207,77 @@ pub struct FileInfo {
   pub maybe_duration_ms: Option<u64>,
 }
 
+impl FileInfo {
+  /// A picture or a video: what the image viewer pages through.
+  pub fn is_picture_or_video(&self) -> bool {
+    self.media_type.starts_with("image/") || self.media_type.starts_with("video/")
+  }
+}
+
+/// Where in a conversation's pictures and videos a page of the image viewer starts (#274).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "message", rename_all = "snake_case")]
+pub enum MediaAnchor {
+  /// The newest ones.
+  Newest,
+  /// Half a page each side of the message (the newest ones when it is gone).
+  Around(MessageId),
+  /// Older than the message.
+  Older(MessageId),
+  /// Newer than the message.
+  Newer(MessageId),
+}
+
+/// A page of the files of messages with pictures or videos, newest first, and whether the
+/// conversation has more beyond either end (`Older`/`Newer` pages only know the end they walk to).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaPage {
+  pub files: Vec<FileInfo>,
+  pub has_older: bool,
+  pub has_newer: bool,
+}
+
+impl MediaPage {
+  /// The page of `anchor` among `files` (newest first, all of the conversation): for backends that
+  /// hold the whole list anyway. `max_messages` counts messages with pictures or videos.
+  pub fn from_files(files: Vec<FileInfo>, anchor: MediaAnchor, max_messages: usize) -> Self {
+    let mut messages: Vec<(MessageId, Vec<FileInfo>)> = Vec::new();
+    for file in files {
+      match messages.last_mut() {
+        Some((message, group)) if *message == file.message => group.push(file),
+        _ => messages.push((file.message, vec![file])),
+      }
+    }
+    messages.retain(|(_, group)| group.iter().any(FileInfo::is_picture_or_video));
+    let position = |id: MessageId| messages.iter().position(|(message, _)| *message == id);
+    // The range of `messages` the page shows.
+    let range = match anchor {
+      MediaAnchor::Newest => 0..max_messages.min(messages.len()),
+      MediaAnchor::Around(id) => {
+        let start = position(id).unwrap_or(0).saturating_sub(max_messages / 2);
+        start..(start + max_messages).min(messages.len())
+      },
+      MediaAnchor::Older(id) => {
+        let start = position(id).map_or(messages.len(), |at| at + 1);
+        start..(start + max_messages).min(messages.len())
+      },
+      MediaAnchor::Newer(id) => {
+        let end = position(id).unwrap_or(0);
+        end.saturating_sub(max_messages)..end
+      },
+    };
+    let (has_newer, has_older) = (range.start > 0, range.end < messages.len());
+    Self {
+      files: messages[range]
+        .iter()
+        .flat_map(|(_, group)| group.clone())
+        .collect(),
+      has_older,
+      has_newer,
+    }
+  }
+}
+
 /// A size in pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PixelSize {
@@ -541,6 +612,97 @@ fn is_zero(value: &u32) -> bool {
 mod tests {
   use super::*;
   use crate::model::id_from_raw;
+
+  fn media_file(message: i64, media_type: &str) -> FileInfo {
+    // From JSON: only the fields every version of the record has.
+    serde_json::from_value(serde_json::json!({
+      "conversation": "1",
+      "message": message.to_string(),
+      "file_id": message.to_string(),
+      "file_name": "f",
+      "media_type": media_type,
+      "size_bytes": 1,
+      "transfer": { "state": "remote" },
+    }))
+    .unwrap()
+  }
+
+  /// Messages 9, 8, ..., 1 (newest first); 5 only has a document.
+  fn nine_messages() -> Vec<FileInfo> {
+    (1..=9)
+      .rev()
+      .map(|message| {
+        media_file(
+          message,
+          if message == 5 {
+            "application/pdf"
+          } else {
+            "image/png"
+          },
+        )
+      })
+      .collect()
+  }
+
+  fn messages_of(page: &MediaPage) -> Vec<i64> {
+    page
+      .files
+      .iter()
+      .map(|file| file.message.to_string().parse().unwrap())
+      .collect()
+  }
+
+  #[test]
+  fn media_pages_start_at_the_newest_or_around_a_message() {
+    let newest = MediaPage::from_files(nine_messages(), MediaAnchor::Newest, 3);
+    assert_eq!(messages_of(&newest), [9, 8, 7]);
+    assert!(newest.has_older && !newest.has_newer);
+    let around = MediaPage::from_files(nine_messages(), MediaAnchor::Around(id_from_raw(6)), 4);
+    assert_eq!(messages_of(&around), [8, 7, 6, 4], "documents don't count");
+    assert!(around.has_older && around.has_newer);
+    let gone = MediaPage::from_files(nine_messages(), MediaAnchor::Around(id_from_raw(99)), 4);
+    assert_eq!(
+      messages_of(&gone),
+      [9, 8, 7, 6],
+      "an unknown message gets the newest page"
+    );
+  }
+
+  #[test]
+  fn media_pages_walk_outwards_in_both_directions() {
+    let older = MediaPage::from_files(nine_messages(), MediaAnchor::Older(id_from_raw(7)), 3);
+    assert_eq!(messages_of(&older), [6, 4, 3]);
+    assert!(older.has_older);
+    let last = MediaPage::from_files(nine_messages(), MediaAnchor::Older(id_from_raw(2)), 3);
+    assert_eq!(messages_of(&last), [1]);
+    assert!(!last.has_older);
+    let newer = MediaPage::from_files(nine_messages(), MediaAnchor::Newer(id_from_raw(3)), 2);
+    assert_eq!(
+      messages_of(&newer),
+      [6, 4],
+      "the nearest ones, still newest first"
+    );
+    assert!(newer.has_newer);
+    let end = MediaPage::from_files(nine_messages(), MediaAnchor::Newer(id_from_raw(9)), 5);
+    assert_eq!(messages_of(&end), [] as [i64; 0]);
+    assert!(
+      MediaPage::from_files(nine_messages(), MediaAnchor::Older(id_from_raw(99)), 3)
+        .files
+        .is_empty()
+    );
+  }
+
+  #[test]
+  fn media_anchors_are_stable_on_the_wire() {
+    assert_eq!(
+      serde_json::to_string(&MediaAnchor::Newest).unwrap(),
+      r#"{"kind":"newest"}"#
+    );
+    assert_eq!(
+      serde_json::to_string(&MediaAnchor::Older(id_from_raw(7))).unwrap(),
+      r#"{"kind":"older","message":"7"}"#
+    );
+  }
 
   #[test]
   fn outgoing_messages_default_to_plain_ones() {

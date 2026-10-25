@@ -29,7 +29,7 @@ use std::rc::Rc;
 use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use teamcraft_client_api::actions::{FileInfo, MAX_VIEWER_BYTES};
+use teamcraft_client_api::actions::{FileInfo, MAX_VIEWER_BYTES, MediaAnchor};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
@@ -45,7 +45,8 @@ use crate::components::thread_panel::ThreadPanel;
 use crate::i18n::use_i18n;
 use crate::lightbox::{
   Arrival, Command, Direction, Gesture, LightboxScope, MediaKey, MediaKind, ModifierStyle, Point, Pointers,
-  Release, Size, Viewport, album_len, images_in_scope, neighbor, position, wheel_zoom_factor,
+  Release, Size, Viewport, album_len, append_older, images_in_scope, neighbor, position, prepend_newer,
+  wants_newer, wants_older, wheel_zoom_factor,
 };
 use crate::media_cache::{self, Rendition};
 use crate::model::{ConversationId, ConversationKind, thread_id_of};
@@ -55,11 +56,12 @@ use crate::state::use_app_state;
 /// Pixels per line of a wheel event that scrolls by lines (Firefox with a mouse wheel).
 const WHEEL_LINE_PX: f64 = 16.0;
 
-/// Most messages (with attachments) the lightbox loads around the opened one. The list is read once
-/// when the lightbox opens: rebuilding the thumbnails of a whole conversation on every state change
-/// would stall a big channel. Older images beyond the window are not paged through (tracked as a
-/// v1.1 issue).
-const MAX_WINDOW_MESSAGES: usize = 100;
+/// Messages (with pictures or videos) the lightbox reads at a time: around the opened one when it
+/// opens, then a page further out whenever the user comes within [`PAGE_MARGIN`] images of an end
+/// (#274). The core reads only the page from its store, so a conversation of any size opens at once.
+const PAGE_MESSAGES: usize = 40;
+/// How close to an end of the loaded images the next page is read.
+const PAGE_MARGIN: usize = 8;
 
 /// Below this window width the thread panel starts hidden: the picture needs the room.
 const THREAD_PANEL_MIN_WIDTH_PX: f64 = 1200.0;
@@ -93,12 +95,14 @@ struct Placeholder {
 pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  // Read once; a memo without dependencies never recomputes.
-  let files = Memo::new(move |_| {
-    untrack(|| {
-      state.read(|backend| backend.conversation_images(conversation, start.message, MAX_WINDOW_MESSAGES))
+  // The first page, read once when the lightbox opens; later pages are added as the user pages.
+  let first = untrack(|| {
+    state.read(|backend| {
+      backend.conversation_media(conversation, MediaAnchor::Around(start.message), PAGE_MESSAGES)
     })
   });
+  let (has_older, has_newer) = (RwSignal::new(first.has_older), RwSignal::new(first.has_newer));
+  let files = RwSignal::new(first.files);
   // `None` until the user picks one: then the album decides, once the files are known.
   let chosen_scope = RwSignal::new(None::<LightboxScope>);
   let album_size = Memo::new(move |_| files.with(|files| album_len(files, start)));
@@ -114,6 +118,47 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
     images.with(|images| images.iter().find(|file| key.matches(file)).cloned())
   });
   let at = Memo::new(move |_| images.with(|images| position(images, current.get())));
+  // Near an end of what is loaded (in the whole conversation, not one message's album), the next
+  // page comes in: the neighbours keep their keys, so the view stays where it is.
+  Effect::new(move |_| {
+    let Some(position) = at.get() else {
+      return;
+    };
+    if scope.get_untracked() != LightboxScope::Conversation {
+      return;
+    }
+    if wants_older(position, PAGE_MARGIN, has_older.get_untracked()) {
+      let maybe_oldest = files.with_untracked(|files| files.last().map(|file| file.message));
+      let page = maybe_oldest.map(|oldest| {
+        state
+          .read(|backend| backend.conversation_media(conversation, MediaAnchor::Older(oldest), PAGE_MESSAGES))
+      });
+      // A page without files ends the paging, so an unchanged edge isn't asked again.
+      has_older.set(
+        page
+          .as_ref()
+          .is_some_and(|page| page.has_older && !page.files.is_empty()),
+      );
+      if let Some(page) = page {
+        files.update(|files| append_older(files, page.files));
+      }
+    }
+    if wants_newer(position, PAGE_MARGIN, has_newer.get_untracked()) {
+      let maybe_newest = files.with_untracked(|files| files.first().map(|file| file.message));
+      let page = maybe_newest.map(|newest| {
+        state
+          .read(|backend| backend.conversation_media(conversation, MediaAnchor::Newer(newest), PAGE_MESSAGES))
+      });
+      has_newer.set(
+        page
+          .as_ref()
+          .is_some_and(|page| page.has_newer && !page.files.is_empty()),
+      );
+      if let Some(page) = page {
+        files.update(|files| prepend_newer(files, page.files));
+      }
+    }
+  });
   let full = RwSignal::new_local(FullMedia::Loading);
   // A WebP or PNG turns out to move once it is loaded (animated WebP, APNG): it can be paused then.
   let kind = Memo::new(move |_| {

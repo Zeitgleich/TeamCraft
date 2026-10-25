@@ -20,7 +20,7 @@ use teamcraft_crypto::local_store::{LocalStoreKeys, LookupId};
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{Base64Bytes, ClientMessageId, ConversationId, MessageId};
 
-use super::{LocalStore, MemoryStore, MessageFilter, StoreError, StoredMessage, Table};
+use super::{LocalStore, MediaRange, MemoryStore, MessageFilter, StoreError, StoredMessage, Table};
 
 const ENTRY_NAMESPACE: &str = "entry";
 const MESSAGE_NAMESPACE: &str = "message";
@@ -231,6 +231,15 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     filter: MessageFilter,
   ) -> Result<Vec<StoredMessage>, StoreError> {
     self.cache.messages(conversation, filter)
+  }
+
+  fn media_messages(
+    &self,
+    conversation: ConversationId,
+    range: MediaRange,
+    limit: usize,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    self.cache.media_messages(conversation, range, limit)
   }
 
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {

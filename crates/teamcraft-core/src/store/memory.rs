@@ -7,7 +7,7 @@ use std::sync::{Mutex, MutexGuard};
 use teamcraft_proto::{ClientMessageId, ConversationId, MessageId};
 use zeroize::Zeroize as _;
 
-use super::{LocalStore, MessageFilter, StoreError, StoredMessage, Table};
+use super::{LocalStore, MediaRange, MessageFilter, StoreError, StoredMessage, Table, pick_media};
 
 #[derive(Debug, Default)]
 pub struct MemoryStore {
@@ -122,6 +122,25 @@ impl LocalStore for MemoryStore {
       .collect();
     messages.sort_by_key(StoredMessage::sort_key);
     Ok(messages)
+  }
+
+  fn media_messages(
+    &self,
+    conversation: ConversationId,
+    range: MediaRange,
+    limit: usize,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    // Only the messages with media are copied out of the map.
+    let media: Vec<StoredMessage> = self
+      .lock()
+      .messages
+      .values()
+      .filter(|message| message.conversation_id == conversation && message.has_media())
+      .cloned()
+      .collect();
+    let mut media = media;
+    media.sort_by_key(StoredMessage::sort_key);
+    Ok(pick_media(media, range, limit))
   }
 
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {

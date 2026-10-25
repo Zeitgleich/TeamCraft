@@ -13,8 +13,8 @@ use teamcraft_client_api::actions::{
   BrowsableChannel, CategoryInfo, ChannelChanges, NewChannel, NewSpace, SpaceChanges, SpaceInvite,
 };
 use teamcraft_client_api::actions::{
-  FileInfo, LinkedMessage, MessageExtras, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink,
-  ShareLinkOptions,
+  FileInfo, LinkedMessage, MediaAnchor, MediaPage, MessageExtras, OutgoingMessage, PermalinkTarget,
+  SavedItem, ShareLink, ShareLinkOptions,
 };
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::calls::{
@@ -1453,13 +1453,13 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_conversation_files(conversation)
   }
 
-  fn conversation_images(
+  fn conversation_media(
     &self,
     conversation: ConversationId,
-    around: MessageId,
+    anchor: MediaAnchor,
     max_messages: usize,
-  ) -> Vec<FileInfo> {
-    self.ui_conversation_images(conversation, around, max_messages)
+  ) -> MediaPage {
+    self.ui_conversation_media(conversation, anchor, max_messages)
   }
 
   fn download_file(&self, conversation: ConversationId, message: MessageId) {
