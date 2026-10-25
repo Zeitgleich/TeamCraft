@@ -115,10 +115,18 @@ version as the final 1.0.0 and as each other: reinstall once with `sudo dnf rein
    desktop apps see the release (stable: `releases/latest/download/latest.json`).
 
    GitHub Pages ignores a deployment of a build version it has already deployed, and the candidate
-   was deployed from this very commit. The *Publish* job therefore gives `deploy-pages` a build
-   version unique per run (a hash of the SHA and the run, instead of the bare `GITHUB_SHA`), and
-   then waits until the live site serves its build (`site-build.txt`); it fails after 10 minutes if
-   it doesn't. When it fails anyway, re-run the workflow (`gh workflow run packages.yml --ref main`).
+   was deployed from this very commit. The *Publish* job therefore creates the deployment itself
+   with a build version unique per run (SHA, run id and attempt) instead of using
+   `actions/deploy-pages`, and then waits until the live site serves its build (`site-build.txt`);
+   it fails after 10 minutes if it doesn't. This is not yet proven on a real final release. When it
+   fails, rebuild the site from the default branch:
+
+   ```sh
+   gh workflow run packages.yml --ref main
+   ```
+
+   If `main` still points at the release commit, that run is ignored as well; the site then goes live
+   with the next run after `main` moves on.
 8. **Deploy**: release teamcraft-deploy with `teamcraft_version: "X.Y.Z"` (its own CHANGELOG and tag).
 
 A failed run can be re-run from the Actions UI; the last job uploads into the existing draft with
