@@ -353,6 +353,51 @@ What the numbers say:
 - 63 tasks over 50 ms (3.9 s in total, the longest 130 ms) while coming back: the catch-up's MLS
   work and decryption on the page's thread.
 
+#### Coming back: the open channel first, heartbeats during the sync
+
+The large workspace again for #247, #325 and #326, same machine and harness, release server,
+October 2026. The machine ran other sessions' builds meanwhile (load 12 to 28 on 24 threads), so
+read single switch times with care. Two additions to the harness: the client's catch-up phase
+timings and lost gateway connections are printed from its console, and 20 switches each are
+measured while the background catch-up runs and right after it, while the browser still writes it.
+
+| What                                                 | Before             | After              | Budget       |
+|------------------------------------------------------|--------------------|--------------------|--------------|
+| Coming back: channel list shows                      | 1.5 s              | 1.5 s              | ≤ 2 s        |
+| Coming back: first channel read                      | 22.4 s             | 1.9 s              | ≤ 5 s        |
+| Coming back: all 15 channels of the first space read | 23.8 s             | 5.8 s              | -            |
+| Coming back: whole workspace caught up               | 28.7 s             | 18.0 s             | -            |
+| Catch-up phases: member lists / welcomes / content   | 0.3 / 20.7 / 6.3 s | 0.4 / 12.3 / 3.9 s | -            |
+| Switch p95 while the catch-up runs                   | 133 ms             | 84 ms              | ≤ 100 ms     |
+| Switch p95 right after the catch-up                  | 98 ms              | 125 ms             | ≤ 100 ms     |
+| Switch p50 / p95, settled                            | 38 / 72 ms         | 47 / 87 ms         | p95 ≤ 100 ms |
+| Tasks over 50 ms while coming back (count / total)   | 60 / 3.6 s         | 56 / 3.2 s         | -            |
+| Gateway connections lost while coming back           | 0                  | 0                  | -            |
+| Idle: CPU, whole browser / API requests per minute   | 0.1 % / 0          | 0.2 % / 0          | ≤ 1 % / none |
+
+What changed and what the numbers say:
+
+- **The open channel first** (#247): between two member-list batches and between two welcomes the
+  catch-up takes the conversation the user opened completely (members, its welcomes, MLS queue,
+  messages). The UI tells the core when a conversation opens (`core_focus`): a channel with nothing
+  stored asked the core for no messages, so the core never learned the focus before. The web core
+  shows a conversation caught up ahead at once instead of with the next one-second progress round.
+  Each of the 15 channels the harness opens in turn is readable 0.3 to 1 s after the click.
+- **Welcomes are the bulk of a catch-up**: 300 joins in the server's order, each reading the
+  conversation, its members and its MLS queue, and each rewriting the MLS state (3.6 MB here, one
+  record for all groups). Those rewrites are what kept the page busy: every write was sealed at
+  once (base64 in JSON, then AES-GCM). IndexedDB now seals a record when its batch goes out, so a
+  replaced write costs nothing, and a batch over 1 MiB waits 200 ms more to take the next rewrite
+  along (#326). The welcomes phase went from 20.7 to 12.3 s.
+- **Heartbeats during the sync** (#325): the full sync, long commands and the upkeep run inside
+  `keep_alive`; the catch-up kept its one connection (before: a sync over 90 s lost it, here the
+  catch-up took less, so the test `runner::a_sync_longer_than_the_heartbeat_timeout_keeps_its_connection`
+  covers the long case).
+- **Left open:** one switch of 20 right after the catch-up took 125 ms (the UI re-reading what the
+  catch-up changed in all 300 conversations at once). The MLS state is still one record rewritten
+  per group, quadratic in the number of groups; splitting it per group is a change to the store
+  format and needs its own review.
+
 The desktop and Android apps are measured against the same harness (`PERF_MOBILE_USER`) in a local
 session. Slack, Teams and Element were not measured: that needs their apps installed and accounts
 on their services.
