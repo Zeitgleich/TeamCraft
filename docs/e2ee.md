@@ -1151,8 +1151,9 @@ A rejoin prepares again, so the trusted roster follows membership changes.
 **The SFU's certificate.** Clients reach the SFU over TLS (QUIC). Normally its certificate chains to
 a trusted root. For test and development setups with a short-lived self-signed certificate, the
 server can hand out its SHA-256 with the join token (`[calls] sfu_certificate_sha256`, several while
-one replaces another): browsers pass them as `serverCertificateHashes`, the desktop app pins the
-first. A compromised server could point clients at an SFU of its choosing this way, but it can do
+one replaces another): browsers pass them as `serverCertificateHashes`, the native clients accept
+the same ones. Every rejoin uses the hashes of its own fresh token, so an SFU restarted with a new
+certificate is reached again. A compromised server could point clients at an SFU of its choosing this way, but it can do
 that through `sfu_url` already, and the SFU only ever sees DAVE-encrypted media and verified
 bindings: the hash decides reachability, not confidentiality.
 
