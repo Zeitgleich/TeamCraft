@@ -1444,6 +1444,22 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::AdminJoinChannel { conversation });
   }
 
+  fn request_admin_join(&self, conversation: ConversationId) {
+    self.act(ChatAction::RequestAdminJoin { conversation });
+  }
+
+  fn withdraw_admin_join(&self, conversation: ConversationId) {
+    self.act(ChatAction::WithdrawAdminJoin { conversation });
+  }
+
+  fn approve_admin_join(&self, conversation: ConversationId, user: UserId) {
+    self.act(ChatAction::ApproveAdminJoin { conversation, user });
+  }
+
+  fn decline_admin_join(&self, conversation: ConversationId, user: UserId) {
+    self.act(ChatAction::DeclineAdminJoin { conversation, user });
+  }
+
   fn admin_remove_from_all_chats(&self, user: UserId) {
     self.act(ChatAction::AdminRemoveFromAllChats { user });
   }

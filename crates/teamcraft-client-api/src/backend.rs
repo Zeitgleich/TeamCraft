@@ -177,6 +177,15 @@ pub trait ChatBackend {
   fn publish_roster(&self, _base_version: u64, _members: Vec<crate::admin::RosterEntry>) {}
   /// Adds the signed-in admin to a conversation through the encryption group (admin.md §2.2).
   fn admin_add_self(&self, _conversation: ConversationId) {}
+  /// The signed-in admin asks the owners of a private channel to let them in (admin.md §2.4,
+  /// `admin_self_join = owner_approval`).
+  fn request_admin_join(&self, _conversation: ConversationId) {}
+  /// Takes the signed-in admin's request back.
+  fn withdraw_admin_join(&self, _conversation: ConversationId) {}
+  /// A channel owner lets the admin in: the server membership, this device's MLS add and the
+  /// visible "joined as a workspace admin" message.
+  fn approve_admin_join(&self, _conversation: ConversationId, _user: UserId) {}
+  fn decline_admin_join(&self, _conversation: ConversationId, _user: UserId) {}
   /// Removes a deactivated user from all chats with signed removals (admin.md §3.2.1). Needs
   /// [`Self::can_sign_workspace`].
   fn admin_remove_from_all_chats(&self, _user: UserId) {}
@@ -583,6 +592,11 @@ pub trait ChatBackend {
   }
   /// The user looked at the feed: everything in it so far counts as read (synced to their devices).
   fn mark_activity_read(&self) {}
+  /// The admins' requests waiting for the user's decision, as in [`Self::activity`]; backends that
+  /// build the feed locally answer without building it (the notifications ask on every change).
+  fn join_requests(&self) -> Vec<crate::activity::JoinRequest> {
+    self.activity().join_requests
+  }
   /// When the person was last active, if they are offline and let others see it. Backends that
   /// read the server ask for it on first look and answer `None` until it arrives.
   fn last_seen(&self, _user: UserId) -> Option<TimestampMs> {

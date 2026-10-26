@@ -606,7 +606,11 @@ fn workspace_event(event: &ConversationEvent, actor: UserId) -> Option<Workspace
       user: *user,
       by: actor,
     },
-    ConversationEvent::AdminJoined { user } => WorkspaceEvent::AdminJoined { user: *user },
+    ConversationEvent::AdminJoined { user, is_approved } => WorkspaceEvent::AdminJoined {
+      user: *user,
+      // Who approved is who sent it: a member can't name somebody else.
+      maybe_approved_by: is_approved.then_some(actor),
+    },
     ConversationEvent::Archived => WorkspaceEvent::Archived { by: actor },
     ConversationEvent::Unarchived => WorkspaceEvent::Unarchived { by: actor },
     ConversationEvent::MadePrivate => WorkspaceEvent::MadePrivate { by: actor },

@@ -17,6 +17,8 @@ const MISSED_CALL_TAG_PREFIX: &str = "missed-call:";
 const MEETING_TAG_PREFIX: &str = "meeting:";
 /// Tag prefix of a note to self (`/remind`); its due time follows.
 const REMINDER_TAG_PREFIX: &str = "reminder:";
+/// Tag prefix of an admin's request to join a private channel; `{conversation}:{user}` follows.
+const JOIN_REQUEST_TAG_PREFIX: &str = "admin-join:";
 
 /// One notification to show. A newer one with the same tag replaces it; withdrawing the tag
 /// removes it, where the platform can.
@@ -61,6 +63,8 @@ pub enum OsNotificationKind {
   MeetingReminder,
   /// `/remind` and other notes to self.
   Reminder,
+  /// An admin asks to join a private channel the user owns (admin.md §2.4).
+  JoinRequest,
   #[serde(other)]
   Unknown,
 }
@@ -87,6 +91,8 @@ pub enum NotificationAction {
   MarkRead,
   /// Sent text from the notification's reply field.
   Reply,
+  /// Let in the admin who asked to join (an owner's decision; the answer to it is `Decline`).
+  Approve,
   #[serde(other)]
   Unknown,
 }
@@ -109,6 +115,11 @@ pub enum TagTarget {
   MissedCall(String),
   Meeting(String),
   Reminder,
+  /// An admin's request to join: the conversation and the admin, as text.
+  JoinRequest {
+    conversation: String,
+    user: String,
+  },
 }
 
 impl NotificationTag {
@@ -133,6 +144,14 @@ impl NotificationTag {
     Self(format!("{REMINDER_TAG_PREFIX}{}", due_at.to_string()))
   }
 
+  pub fn join_request(conversation: impl ToString, user: impl ToString) -> Self {
+    Self(format!(
+      "{JOIN_REQUEST_TAG_PREFIX}{}:{}",
+      conversation.to_string(),
+      user.to_string()
+    ))
+  }
+
   /// A tag as a platform handed it back.
   pub fn from_raw(raw: impl Into<String>) -> Self {
     Self(raw.into())
@@ -153,6 +172,14 @@ impl NotificationTag {
       TagTarget::Meeting(id.to_owned())
     } else if tag.starts_with(REMINDER_TAG_PREFIX) {
       TagTarget::Reminder
+    } else if let Some((conversation, user)) = tag
+      .strip_prefix(JOIN_REQUEST_TAG_PREFIX)
+      .and_then(|rest| rest.split_once(':'))
+    {
+      TagTarget::JoinRequest {
+        conversation: conversation.to_owned(),
+        user: user.to_owned(),
+      }
     } else {
       TagTarget::Conversation(tag.to_owned())
     }
@@ -171,6 +198,7 @@ impl NotificationAction {
       Self::JoinMeeting => "join-meeting",
       Self::MarkRead => "mark-read",
       Self::Reply => "inline-reply",
+      Self::Approve => "approve",
       Self::Unknown => "unknown",
     }
   }
@@ -186,6 +214,7 @@ impl NotificationAction {
       Self::JoinMeeting,
       Self::MarkRead,
       Self::Reply,
+      Self::Approve,
     ]
     .into_iter()
     .find(|action| action.key() == key)
@@ -228,6 +257,13 @@ mod tests {
       TagTarget::Meeting("7".into())
     );
     assert_eq!(NotificationTag::reminder(99).target(), TagTarget::Reminder);
+    assert_eq!(
+      NotificationTag::join_request(42, 7).target(),
+      TagTarget::JoinRequest {
+        conversation: "42".into(),
+        user: "7".into()
+      }
+    );
     assert_eq!(NotificationTag::conversation(42).as_str(), "42");
   }
 
@@ -242,6 +278,7 @@ mod tests {
       NotificationAction::JoinMeeting,
       NotificationAction::MarkRead,
       NotificationAction::Reply,
+      NotificationAction::Approve,
     ] {
       assert_eq!(NotificationAction::from_key(action.key()), action);
     }

@@ -215,6 +215,22 @@ pub enum CoreCommand {
   JoinChannel {
     conversation: ConversationId,
   },
+  /// An admin asks the owners of a private channel to let them in (admin.md §2.4).
+  RequestAdminJoin {
+    conversation: ConversationId,
+  },
+  WithdrawAdminJoin {
+    conversation: ConversationId,
+  },
+  /// A channel owner lets an admin in who asked: the server membership and the own MLS add.
+  ApproveAdminJoin {
+    conversation: ConversationId,
+    user: UserId,
+  },
+  DeclineAdminJoin {
+    conversation: ConversationId,
+    user: UserId,
+  },
   JoinSpace {
     space: SpaceId,
   },
@@ -1646,6 +1662,26 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn join_channel(&self, conversation: ConversationId) {
     self.command(CoreCommand::JoinChannel { conversation });
+  }
+
+  fn join_requests(&self) -> Vec<teamcraft_client_api::activity::JoinRequest> {
+    self.ui_join_requests()
+  }
+
+  fn request_admin_join(&self, conversation: ConversationId) {
+    self.command(CoreCommand::RequestAdminJoin { conversation });
+  }
+
+  fn withdraw_admin_join(&self, conversation: ConversationId) {
+    self.command(CoreCommand::WithdrawAdminJoin { conversation });
+  }
+
+  fn approve_admin_join(&self, conversation: ConversationId, user: UserId) {
+    self.command(CoreCommand::ApproveAdminJoin { conversation, user });
+  }
+
+  fn decline_admin_join(&self, conversation: ConversationId, user: UserId) {
+    self.command(CoreCommand::DeclineAdminJoin { conversation, user });
   }
 
   fn joinable_spaces(&self) -> Vec<JoinableSpace> {

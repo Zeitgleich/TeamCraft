@@ -27,6 +27,7 @@ use teamcraft_proto::{
   SpaceResponse, SpaceRole, SyncHeadsResponse, UnixMillis, UpdateConversationMemberRequest,
   UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserKind, UserSummary,
 };
+use teamcraft_proto::{AdminJoinRequestChange, AdminJoinRequestResponse};
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
   WorkspaceLogKind,
@@ -73,6 +74,8 @@ const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 /// "expiring soon" within the renewal window (e2ee.md §4.3).
 const KEY_PACKAGE_MIN_VALIDITY_MS: i64 = 42 * DAY_MS;
 const KEY_PACKAGE_RENEWAL_WINDOW_MS: i64 = 56 * DAY_MS;
+/// The server's default lifetime of an admin's request to join a private channel.
+const ADMIN_JOIN_REQUEST_MS: i64 = 7 * DAY_MS;
 
 /// The seed of the fake gateway's token key, to open what the client sealed (tests).
 pub const FAKE_GATEWAY_TOKEN_SEED: [u8; 32] = [0x42; 32];
@@ -185,6 +188,8 @@ struct State {
   relays: HashMap<String, Relay>,
   /// Open device link requests by relay ID (the server keeps them next to the relays).
   link_requests: HashMap<String, FakeLinkRequest>,
+  /// Open requests of admins to join a private channel, with when they were made (admin.md §2.4).
+  admin_join_requests: BTreeMap<(ConversationId, UserId), i64>,
   /// Relayed binary frames still to be lost on the way (a flaky connection during linking).
   relay_frames_to_lose: u32,
   /// Like the server: a repeated idempotency key returns the first space / channel.
@@ -1636,6 +1641,101 @@ impl ServerApi for FakeServerApi {
           reason: DeviceLinkClosedReason::Rejected,
         },
       );
+      Ok(())
+    })
+  }
+
+  async fn admin_join_requests(&self) -> Result<Vec<AdminJoinRequestResponse>, ApiError> {
+    self.with(|state, me| {
+      let mut requests = Vec::new();
+      for ((conversation, user), requested_at) in &state.admin_join_requests {
+        let entry = state.conversation(*conversation)?;
+        let is_owner = entry
+          .members
+          .get(&me)
+          .is_some_and(|(role, _)| *role == ChannelRole::Admin);
+        if (*user == me || is_owner) && !entry.members.contains_key(user) {
+          requests.push(state.admin_join_response(*conversation, *user, *requested_at)?);
+        }
+      }
+      Ok(requests)
+    })
+  }
+
+  async fn request_admin_join(
+    &self,
+    conversation: ConversationId,
+  ) -> Result<AdminJoinRequestResponse, ApiError> {
+    self.with(|state, me| {
+      if !state.admins.contains(&me) {
+        return Err(ApiError::status(403, ErrorCode::Forbidden, "admins only"));
+      }
+      let entry = state.conversation(conversation)?;
+      if entry.response.visibility != ConversationVisibility::Private || entry.members.contains_key(&me) {
+        return Err(ApiError::status(409, ErrorCode::Conflict, "nothing to ask for"));
+      }
+      let now = state.now_ms();
+      let key = (conversation, me);
+      let is_new = !state.admin_join_requests.contains_key(&key);
+      let requested_at = *state.admin_join_requests.entry(key).or_insert(now);
+      if is_new {
+        state.publish_admin_join(conversation, me, AdminJoinRequestChange::Requested);
+      }
+      state.admin_join_response(conversation, me, requested_at)
+    })
+  }
+
+  async fn approve_admin_join(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<ConversationMemberResponse, ApiError> {
+    self.with(|state, me| {
+      state.require_channel_owner(conversation, me)?;
+      let summary = state.user(user)?.clone();
+      if state.conversation(conversation)?.members.contains_key(&user) {
+        return Ok(ConversationMemberResponse {
+          user: summary,
+          role: ChannelRole::Member,
+        });
+      }
+      if state.admin_join_requests.remove(&(conversation, user)).is_none() {
+        return Err(ApiError::status(
+          404,
+          ErrorCode::AdminJoinRequestNotFound,
+          "no open request",
+        ));
+      }
+      let floor = state.peek_id();
+      let entry = state.conversation_mut(conversation)?;
+      entry.members.insert(user, (ChannelRole::Member, floor));
+      let members: Vec<UserId> = entry.members.keys().copied().collect();
+      state.publish(
+        members,
+        &GatewayEvent::MembershipAdd {
+          conversation_id: conversation,
+          user: summary.clone(),
+        },
+      );
+      state.publish_admin_join(conversation, user, AdminJoinRequestChange::Approved);
+      Ok(ConversationMemberResponse {
+        user: summary,
+        role: ChannelRole::Member,
+      })
+    })
+  }
+
+  async fn close_admin_join(&self, conversation: ConversationId, user: UserId) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      let change = if user == me {
+        AdminJoinRequestChange::Withdrawn
+      } else {
+        state.require_channel_owner(conversation, me)?;
+        AdminJoinRequestChange::Declined
+      };
+      if state.admin_join_requests.remove(&(conversation, user)).is_some() {
+        state.publish_admin_join(conversation, user, change);
+      }
       Ok(())
     })
   }
@@ -4425,6 +4525,64 @@ impl State {
   /// The ID the next created object gets, minus one: "everything created so far".
   fn peek_id(&self) -> i64 {
     self.next_id
+  }
+
+  fn admin_join_response(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    requested_at: i64,
+  ) -> Result<AdminJoinRequestResponse, ApiError> {
+    Ok(AdminJoinRequestResponse {
+      conversation_id: conversation,
+      user: self.user(user)?.clone(),
+      requested_at: UnixMillis(requested_at),
+      expires_at: UnixMillis(requested_at.saturating_add(ADMIN_JOIN_REQUEST_MS)),
+    })
+  }
+
+  /// Requests are decided by the channel's owners (members with the channel role `admin`).
+  fn require_channel_owner(&self, conversation: ConversationId, me: UserId) -> Result<(), ApiError> {
+    let is_owner = self
+      .conversation(conversation)?
+      .members
+      .get(&me)
+      .is_some_and(|(role, _)| *role == ChannelRole::Admin);
+    if is_owner {
+      Ok(())
+    } else {
+      Err(ApiError::status(403, ErrorCode::Forbidden, "owners only"))
+    }
+  }
+
+  /// Tells the channel's owners and the admin, as the server does.
+  fn publish_admin_join(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+    change: AdminJoinRequestChange,
+  ) {
+    let mut recipients: Vec<UserId> = self
+      .conversations
+      .get(&conversation)
+      .map(|entry| {
+        entry
+          .members
+          .iter()
+          .filter(|(_, (role, _))| *role == ChannelRole::Admin)
+          .map(|(member, _)| *member)
+          .collect()
+      })
+      .unwrap_or_default();
+    recipients.push(user);
+    self.publish(
+      recipients,
+      &GatewayEvent::AdminJoinRequestUpdate {
+        conversation_id: conversation,
+        user_id: user,
+        change,
+      },
+    );
   }
 
   fn user(&self, user: UserId) -> Result<&UserSummary, ApiError> {

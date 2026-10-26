@@ -22,6 +22,7 @@ use teamcraft_proto::{
   RegisterDeviceRequest, SearchUsersResponse, SendMessageRequest, SpaceId, SpaceMemberResponse,
   UpdateSpaceMemberRequest, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
 };
+use teamcraft_proto::{AdminJoinRequestResponse, ListAdminJoinRequestsResponse};
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
   WorkspaceLogKind,
@@ -357,6 +358,52 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   async fn withdraw_device_link(&self, request_id: &str) -> Result<(), ApiError> {
     self
       .send_without_response::<()>(Method::DELETE, &format!("/device-links/{request_id}"), None)
+      .await
+  }
+
+  async fn admin_join_requests(&self) -> Result<Vec<AdminJoinRequestResponse>, ApiError> {
+    Ok(
+      self
+        .get::<ListAdminJoinRequestsResponse>("/admin-join-requests")
+        .await?
+        .requests,
+    )
+  }
+
+  async fn request_admin_join(
+    &self,
+    conversation: ConversationId,
+  ) -> Result<AdminJoinRequestResponse, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/conversations/{conversation}/admin-join-requests"),
+        &serde_json::json!({}),
+      )
+      .await
+  }
+
+  async fn approve_admin_join(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<ConversationMemberResponse, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/conversations/{conversation}/admin-join-requests/{user}/approve"),
+        &serde_json::json!({}),
+      )
+      .await
+  }
+
+  async fn close_admin_join(&self, conversation: ConversationId, user: UserId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(
+        Method::DELETE,
+        &format!("/conversations/{conversation}/admin-join-requests/{user}"),
+        None,
+      )
       .await
   }
 

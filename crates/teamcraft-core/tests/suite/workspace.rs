@@ -576,7 +576,10 @@ async fn admin_self_join_follows_the_signed_policy() {
   settle(&mut [&mut alice, &mut bob, &mut carol]).await;
   assert!(bob.client.has_group(channel).unwrap(), "self-join is visible");
   // Never silent (admin.md §2.4): the committing member tells everybody, once.
-  let joined = teamcraft_core::store::ConversationEvent::AdminJoined { user: bob_id };
+  let joined = teamcraft_core::store::ConversationEvent::AdminJoined {
+    user: bob_id,
+    is_approved: false,
+  };
   for peer in [&carol, &bob] {
     let shown = peer
       .store
@@ -588,6 +591,145 @@ async fn admin_self_join_follows_the_signed_policy() {
       })
       .count();
     assert_eq!(shown, 1, "{}", peer.name);
+  }
+}
+
+/// Issue #776 (admin.md §2.4): under `owner_approval` the admin asks, a channel owner's client
+/// adds them with its own commit and tells everybody; the server's request is only a hint.
+mod owner_approval {
+  use teamcraft_core::read_state;
+  use teamcraft_core::store::{ConversationEvent, MessageContent, MessageFilter};
+
+  use super::*;
+
+  #[tokio::test]
+  async fn an_owner_approves_and_everybody_sees_the_admin_join_once() {
+    let (server, mut alice, mut bob, mut carol, channel) = setup().await;
+    let bob_id = bob.client.user_id();
+
+    bob.client.request_admin_join(channel).await.unwrap();
+    // Asking twice keeps one request.
+    bob.client.request_admin_join(channel).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    let waiting = read_state::admin_join_requests(&carol.store).unwrap();
+    assert_eq!(waiting.len(), 1, "the owner's device heard of it");
+    assert_eq!(waiting[0].user.id, bob_id);
+    assert!(
+      read_state::admin_join_requests(&alice.store).unwrap().is_empty(),
+      "not her channel"
+    );
+
+    carol.client.approve_admin_join(channel, bob_id).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    assert!(
+      bob.client.has_group(channel).unwrap(),
+      "the owner's commit let him in"
+    );
+    let joined = ConversationEvent::AdminJoined {
+      user: bob_id,
+      is_approved: true,
+    };
+    for peer in [&carol, &bob] {
+      let shown = peer
+        .store
+        .messages(channel, MessageFilter::TopLevel)
+        .unwrap()
+        .into_iter()
+        .filter(|message| matches!(&message.content, MessageContent::Event { event } if *event == joined))
+        .count();
+      assert_eq!(shown, 1, "{}", peer.name);
+    }
+    for peer in [&carol, &bob] {
+      assert!(
+        read_state::admin_join_requests(&peer.store).unwrap().is_empty(),
+        "{}: settled",
+        peer.name
+      );
+    }
+    drop(server);
+  }
+
+  #[tokio::test]
+  async fn a_declined_request_is_gone_for_both_and_the_admin_stays_out() {
+    let (_server, mut alice, mut bob, mut carol, channel) = setup().await;
+    let bob_id = bob.client.user_id();
+
+    bob.client.request_admin_join(channel).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    carol.client.decline_admin_join(channel, bob_id).await.unwrap();
+    // Declined on another device already: nothing to do, no error.
+    carol.client.decline_admin_join(channel, bob_id).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    assert!(read_state::admin_join_requests(&bob.store).unwrap().is_empty());
+    assert!(read_state::admin_join_requests(&carol.store).unwrap().is_empty());
+    assert!(!bob.client.has_group(channel).unwrap());
+    // Approving what is gone fails clearly instead of adding him anyway.
+    let late = carol.client.approve_admin_join(channel, bob_id).await;
+    assert!(late.is_err(), "{late:?}");
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    assert!(!bob.client.has_group(channel).unwrap());
+  }
+
+  #[tokio::test]
+  async fn somebody_only_the_server_calls_an_admin_is_not_let_in() {
+    let (server, mut alice, mut bob, mut carol, channel) = setup().await;
+    let mut dave = Peer::enroll(&server, "Dave").await;
+    let dave_id = dave.client.user_id();
+    // The server says Dave is an admin; the signed roster doesn't.
+    server.set_admin(dave_id);
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+    let refused = dave.client.request_admin_join(channel).await;
+    assert!(
+      matches!(refused, Err(teamcraft_core::CoreError::NotAnAdmin(user)) if user == dave_id),
+      "{refused:?}"
+    );
+    let not_approved = carol.client.approve_admin_join(channel, dave_id).await;
+    assert!(
+      matches!(not_approved, Err(teamcraft_core::CoreError::NotAnAdmin(user)) if user == dave_id),
+      "{not_approved:?}"
+    );
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+    assert!(!dave.client.has_group(channel).unwrap());
+  }
+
+  #[tokio::test]
+  async fn the_admins_own_self_join_stays_refused_while_the_request_waits() {
+    let (_server, mut alice, mut bob, mut carol, channel) = setup().await;
+    let bob_id = bob.client.user_id();
+    bob.client.request_admin_join(channel).await.unwrap();
+    // A server that adds him anyway gains nothing: members refuse his own signed self-join.
+    bob.client.admin_add_member(channel, bob_id).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    assert!(!bob.client.has_group(channel).unwrap());
+  }
+
+  /// Alice owns the workspace, Bob is a signed admin, Carol founds (owns) a private channel; the
+  /// policy asks for an owner's approval.
+  async fn setup() -> (FakeServer, Peer, Peer, Peer, teamcraft_proto::ConversationId) {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    let mut carol = Peer::enroll(&server, "Carol").await;
+    let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner), (bob_id, RosterRole::Admin)])
+      .await
+      .unwrap();
+    alice
+      .client
+      .publish_policy(policy(AdminSelfJoin::OwnerApproval))
+      .await
+      .unwrap();
+    server.set_admin(bob_id);
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    let channel = carol
+      .client
+      .create_channel(carol.space().await, "private")
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    (server, alice, bob, carol, channel)
   }
 }
 

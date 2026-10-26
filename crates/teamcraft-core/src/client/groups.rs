@@ -949,19 +949,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // No choice made: the signed default, not the server's word for the channel (A9).
       _ => self.implicit_history_in(conversation, user).await?,
     };
-    let history = self.effective_history(user, requested).await?;
-    self
-      .commit_change(
-        conversation,
-        ChangeSource::Own(MembershipAction::AddUser {
-          user_id: convert::user(user),
-          history,
-        }),
-      )
-      .await?;
-    self
-      .queue_user_addition_if_missing(conversation, user, history)
-      .await?;
+    let history = self.commit_addition(conversation, user, requested).await?;
     let shared = match history {
       HistoryShare::FromJoin => HistoryPolicy::FromJoin,
       _ => HistoryPolicy::Full,
@@ -975,6 +963,31 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         },
       )
       .await
+  }
+
+  /// This device's own MLS add of `user`, whom the server lists already, with the history the user
+  /// may get of `requested`; a commit that could not happen now is queued. Returns the history
+  /// shared.
+  pub(crate) async fn commit_addition(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+    requested: HistoryShare,
+  ) -> Result<HistoryShare, CoreError> {
+    let history = self.effective_history(user, requested).await?;
+    self
+      .commit_change(
+        conversation,
+        ChangeSource::Own(MembershipAction::AddUser {
+          user_id: convert::user(user),
+          history,
+        }),
+      )
+      .await?;
+    self
+      .queue_user_addition_if_missing(conversation, user, history)
+      .await?;
+    Ok(history)
   }
 
   /// Adds devices of current members that aren't in the group yet (a colleague's new laptop).
@@ -2560,7 +2573,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(());
     }
     self
-      .announce(conversation, ConversationEvent::AdminJoined { user })
+      .announce(
+        conversation,
+        ConversationEvent::AdminJoined {
+          user,
+          is_approved: false,
+        },
+      )
       .await
   }
 

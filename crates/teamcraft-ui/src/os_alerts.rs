@@ -19,6 +19,7 @@ use std::time::Duration;
 use leptos::leptos_dom::helpers::{TimeoutHandle, set_timeout_with_handle};
 use leptos::prelude::*;
 use teamcraft_client_api::actions::{MessagePriority, OutgoingMessage};
+use teamcraft_client_api::activity::{JoinRequest, JoinRequestStanding};
 use teamcraft_client_api::call_window::{CallWindow, CallWindowTheme};
 use teamcraft_client_api::os_notify::{
   NOTIFICATION_ACTION_EVENT, NotificationAction, NotificationActionEvent, NotificationButton,
@@ -34,6 +35,7 @@ use crate::call_alerts::{
 use crate::calls::{CallKind, CallPhase, CallRequest, IncomingCall};
 use crate::clock::{local_utc_offset_minutes, now_ms};
 use crate::i18n::I18n;
+use crate::join_request_alerts::{AlertChanges, JoinRequestAlerts, tag as join_request_tag};
 use crate::meeting_reminders::{
   DueReminder, FiredReminders, ReminderKind, ReminderSchedule, ReminderSettings,
 };
@@ -59,6 +61,8 @@ const DUE_SLACK_MS: i64 = 2_000;
 const FIRED_REMINDERS_KEY: &str = "teamcraft.meeting_reminders.";
 /// Storage key prefix of the conversation a tab shows in front; the user ID follows.
 const TAB_FOCUS_KEY: &str = "teamcraft.focused_conversation.";
+/// Storage key prefix of the join requests this device notified about; the user ID follows.
+const JOIN_REQUESTS_KEY: &str = "teamcraft.join_request_alerts.";
 
 /// Ringing calls of this device, shared by the watcher and the call handler (which tells it when
 /// the user accepted or declined here).
@@ -70,6 +74,7 @@ pub fn start(state: AppState, i18n: I18n) {
   let calls = CallAlertsCell(StoredValue::new_local(CallAlerts::default()));
   provide_context(calls);
   watch_messages(state, i18n);
+  watch_join_requests(state, i18n);
   if tauri::is_available() {
     watch_calls(state, i18n, calls);
   } else {
@@ -170,6 +175,105 @@ fn watch_messages(state: AppState, i18n: I18n) {
       leptos::task::spawn_local(async move { tauri::withdraw_tags(&tags).await });
     }
   });
+}
+
+// ---- Join requests --------------------------------------------------------------------------------
+
+/// Admins asking to join a channel the user owns (admin.md §2.4): one notification per request,
+/// with Approve where the verified roster lists the admin and Decline always; withdrawn once the
+/// request is gone. Each device notifies once per request, also across restarts.
+fn watch_join_requests(state: AppState, i18n: I18n) {
+  let alerts = StoredValue::new_local(None::<JoinRequestAlerts>);
+  Effect::new(move |_| {
+    let requests = state.read(|backend| backend.join_requests());
+    // Only the tab that notifies keeps the record (tabs share it): another tab marking a request
+    // as notified would keep the notifying one from ever showing it.
+    if !is_notifying_tab() {
+      return;
+    }
+    let key = format!("{JOIN_REQUESTS_KEY}{}", state.me().id);
+    let Some(changes) = alerts.try_update_value(|maybe_alerts| {
+      let alerts = maybe_alerts.get_or_insert_with(|| {
+        load_string(&key)
+          .map(|text| JoinRequestAlerts::from_json(&text))
+          .unwrap_or_default()
+      });
+      let changes = alerts.update(&requests);
+      store_string(&key, &alerts.to_json());
+      changes
+    }) else {
+      return;
+    };
+    if changes == AlertChanges::default() {
+      return;
+    }
+    let shown: Vec<OsNotification> = changes
+      .new
+      .iter()
+      .map(|request| join_request_notification(state, i18n, request))
+      .collect();
+    let gone = changes.gone;
+    leptos::task::spawn_local(async move {
+      if !gone.is_empty() {
+        tauri::withdraw_tags(&gone).await;
+      }
+      for notification in &shown {
+        tauri::show_notification(notification).await;
+      }
+    });
+  });
+}
+
+fn join_request_notification(state: AppState, i18n: I18n, request: &JoinRequest) -> OsNotification {
+  let channel = state
+    .read(|backend| backend.conversation(request.conversation))
+    .map(|conversation| format!("#{}", conversation.name))
+    .unwrap_or_default();
+  let mut actions = Vec::new();
+  if request.standing == JoinRequestStanding::Approvable {
+    actions.push(button(
+      NotificationAction::Approve,
+      i18n.t("join-request-approve"),
+    ));
+  }
+  actions.push(button(
+    NotificationAction::Decline,
+    i18n.t("join-request-decline"),
+  ));
+  OsNotification {
+    tag: join_request_tag(request),
+    kind: OsNotificationKind::JoinRequest,
+    title: i18n.t_with(
+      "notify-join-request",
+      &[("name", &request.user_name), ("channel", &channel)],
+    ),
+    maybe_body: Some(i18n.t("notify-join-request-body")),
+    actions,
+    maybe_reply: None,
+  }
+}
+
+fn on_join_request_action(state: AppState, conversation: &str, user: &str, action: NotificationAction) {
+  let (Ok(conversation), Ok(user)) = (conversation.parse(), user.parse()) else {
+    return;
+  };
+  // Only while the request still waits (and, for Approve, may be approved here): a notification
+  // left over from before is no reason to add anybody.
+  let maybe_request = state.read(|backend| {
+    backend
+      .join_requests()
+      .into_iter()
+      .find(|request| request.conversation == conversation && request.user == user)
+  });
+  match (action, maybe_request) {
+    (NotificationAction::Approve, Some(request)) if request.standing == JoinRequestStanding::Approvable => {
+      state.write(|backend| backend.approve_admin_join(conversation, user));
+    },
+    (NotificationAction::Decline, Some(_)) => {
+      state.write(|backend| backend.decline_admin_join(conversation, user));
+    },
+    _ => state.open_activity(),
+  }
 }
 
 // ---- Calls ----------------------------------------------------------------------------------------
@@ -696,6 +800,9 @@ pub fn handle_action(state: AppState, i18n: I18n, event: NotificationActionEvent
       }
     },
     TagTarget::Meeting(id) => on_meeting_action(state, i18n, &id, event.action),
+    TagTarget::JoinRequest { conversation, user } => {
+      on_join_request_action(state, &conversation, &user, event.action);
+    },
     TagTarget::Reminder => {},
   }
 }
