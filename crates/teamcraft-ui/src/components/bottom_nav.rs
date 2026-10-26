@@ -41,7 +41,7 @@ pub fn BottomNav() -> impl IntoView {
       && (is_list() || state.view.get() == MainView::GettingStarted)
   });
   let is_activity = Signal::derive(move || {
-    state.overlay.get() != Overlay::StatusMenu && state.view.get() == MainView::Activity
+    state.overlay.get() != Overlay::StatusMenu && state.rail.get() == RailEntry::Activity
   });
   let is_spaces = Signal::derive(move || {
     state.overlay.get() != Overlay::StatusMenu && state.rail.get() == RailEntry::Space && is_list()

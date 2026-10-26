@@ -118,7 +118,6 @@ pub mod storage_banner;
 pub mod tab_elsewhere;
 pub mod tab_list;
 pub mod thread_panel;
-pub mod threads_inbox;
 pub mod top_bar;
 pub mod update_notice;
 pub mod video_player;

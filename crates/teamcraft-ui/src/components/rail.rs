@@ -10,13 +10,14 @@ use crate::components::space_tile::SpaceTileContent;
 use crate::i18n::use_i18n;
 use crate::model::{ConversationKind, Space};
 use crate::sections::{RailBadge, badge_count, has_urgent_activity};
-use crate::state::{AppState, MainView, Overlay, RailEntry, use_app_state};
+use crate::state::{AppState, Overlay, RailEntry, use_app_state};
 
 /// The largest count a space tile's badge shows; more reads "9+".
 const RAIL_BADGE_CAP: u32 = 9;
 
-/// Space switcher on the far left (Mattermost "team sidebar"). On top the global destinations with
-/// a label under each icon: Home (the DMs, which live outside spaces), Activity and Threads. In the
+/// Space switcher on the far left (Mattermost "team sidebar"). On top the global places with a
+/// label under each icon: Chats (the DMs, which live outside spaces) and Activity, whose list takes
+/// the sidebar's place like a space's (#752; followed threads are one of its filters). In the
 /// grouped sidebar one entry stands for all spaces.
 ///
 /// Only the spaces (with "add space" at their end) scroll; the destinations above and Focus below
@@ -54,7 +55,6 @@ pub fn SpaceRail() -> impl IntoView {
       <div class="rail-destinations">
         <ChatsButton />
         <ActivityButton />
-        <ThreadsButton />
         <RailCreateMenu />
       </div>
       <span class="rail-divider" aria-hidden="true"></span>
@@ -118,8 +118,7 @@ fn ChatsButton() -> impl IntoView {
     let list = state.with_mutes(state.read(|backend| backend.direct_conversations()));
     badge_count(&list)
   });
-  let is_current =
-    Signal::derive(move || state.rail.get() == RailEntry::Chats && !is_destination_view(state.view.get()));
+  let is_current = Signal::derive(move || state.rail.get() == RailEntry::Chats);
   let label = Signal::derive(move || match count.get() {
     0 => i18n.t("chats-title"),
     unread => i18n.t_with("rail-chats-unread", &[("count", &unread.to_string())]),
@@ -136,7 +135,7 @@ fn ChatsButton() -> impl IntoView {
   }
 }
 
-/// Mentions, reactions and thread replies addressed to the user.
+/// Mentions, reactions and thread replies addressed to the user, and the threads they follow.
 #[component]
 fn ActivityButton() -> impl IntoView {
   let state = use_app_state();
@@ -153,50 +152,11 @@ fn ActivityButton() -> impl IntoView {
       icon=IconName::Bell
       label_key="rail-activity"
       accessible_label=label
-      is_current=Signal::derive(move || state.view.get() == MainView::Activity)
+      maybe_tip_key="rail-activity-tip"
+      is_current=Signal::derive(move || state.rail.get() == RailEntry::Activity)
       count=Signal::derive(move || count.get())
       tone=tone
       on_open=Callback::new(move |()| state.open_activity())
-    />
-  }
-}
-
-/// The threads the user follows, with the number that have unread replies.
-#[component]
-fn ThreadsButton() -> impl IntoView {
-  let state = use_app_state();
-  let i18n = use_i18n();
-  let count = Memo::new(move |_| {
-    state.read(|backend| {
-      backend
-        .followed_threads()
-        .iter()
-        .filter(|thread| thread.unread_replies > 0)
-        .count() as u32
-    })
-  });
-  let tone = Signal::derive(move || {
-    BadgeTone::of(state.read(|backend| {
-      backend
-        .followed_threads()
-        .iter()
-        .any(|thread| thread.unread_replies > 0 && thread.has_mention)
-    }))
-  });
-  let label = Signal::derive(move || match (count.get(), tone.get()) {
-    (0, _) => i18n.t("sidebar-threads"),
-    (unread, BadgeTone::Mention) => i18n.t_with("rail-threads-mentions", &[("count", &unread.to_string())]),
-    (unread, BadgeTone::Unread) => i18n.t_with("rail-threads-unread", &[("count", &unread.to_string())]),
-  });
-  view! {
-    <RailDestination
-      icon=IconName::Threads
-      label_key="rail-threads"
-      accessible_label=label
-      is_current=Signal::derive(move || state.view.get() == MainView::Threads)
-      count=Signal::derive(move || count.get())
-      tone=tone
-      on_open=Callback::new(move |()| state.open_threads())
     />
   }
 }
@@ -208,6 +168,9 @@ fn RailDestination(
   label_key: &'static str,
   /// The full label for screen readers and the tooltip, with the count in words.
   accessible_label: Signal<String>,
+  /// A sentence for the tooltip saying what the place is for, after the label.
+  #[prop(optional)]
+  maybe_tip_key: Option<&'static str>,
   is_current: Signal<bool>,
   count: Signal<u32>,
   #[prop(into, optional)] tone: Signal<BadgeTone>,
@@ -219,7 +182,11 @@ fn RailDestination(
       class="rail-dest"
       class:current=move || is_current.get()
       aria-label=move || accessible_label.get()
-      title=move || accessible_label.get()
+      title=move || match maybe_tip_key {
+        Some(key) => format!("{}\n{}", accessible_label.get(), i18n.t(key)),
+        None => accessible_label.get(),
+      }
+      aria-description=move || maybe_tip_key.map(|key| i18n.t(key))
       aria-current=move || is_current.get().then_some("page")
       on:click=move |_| on_open.run(())
     >
@@ -248,11 +215,6 @@ pub fn activity_tone(state: AppState) -> Signal<BadgeTone> {
   })
 }
 
-/// Views that have their own rail destination: while one is open, Home isn't the current one.
-fn is_destination_view(view: MainView) -> bool {
-  matches!(view, MainView::Activity | MainView::Threads)
-}
-
 /// In the grouped sidebar: back from Home to the channels of every space.
 #[component]
 fn AllSpacesButton() -> impl IntoView {
@@ -268,7 +230,7 @@ fn AllSpacesButton() -> impl IntoView {
     });
     RailBadge::of(&state.with_mutes(list))
   });
-  let is_current = move || state.rail.get() == RailEntry::Space && !is_destination_view(state.view.get());
+  let is_current = move || state.rail.get() == RailEntry::Space;
   view! {
     <li>
       <button
@@ -312,9 +274,7 @@ fn SpaceButton(space: Space) -> impl IntoView {
   let badge = Memo::new(move |_| {
     RailBadge::of(&state.with_mutes(state.read(|backend| backend.space_conversations(id))))
   });
-  let is_current = move || {
-    state.rail.get() == RailEntry::Space && state.space.get() == id && !is_destination_view(state.view.get())
-  };
+  let is_current = move || state.rail.get() == RailEntry::Space && state.space.get() == id;
   let is_muted = move || {
     state
       .settings
