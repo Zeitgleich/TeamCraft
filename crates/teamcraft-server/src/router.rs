@@ -82,6 +82,10 @@ use crate::handlers::{
   withdraw_device_link_handler,
 };
 use crate::handlers::{
+  approve_admin_join_handler, close_admin_join_handler, list_admin_join_requests_handler,
+  request_admin_join_handler,
+};
+use crate::handlers::{
   complete_org_background_upload_handler, create_org_background_upload_handler,
   delete_org_background_handler, download_org_background_handler,
 };
@@ -372,6 +376,19 @@ pub fn router(state: AppState) -> Router {
     .route(
       "/conversations/{conversation_id}/join",
       post(join_conversation_handler),
+    )
+    .route("/admin-join-requests", get(list_admin_join_requests_handler))
+    .route(
+      "/conversations/{conversation_id}/admin-join-requests",
+      post(request_admin_join_handler),
+    )
+    .route(
+      "/conversations/{conversation_id}/admin-join-requests/{user_id}",
+      delete(close_admin_join_handler),
+    )
+    .route(
+      "/conversations/{conversation_id}/admin-join-requests/{user_id}/approve",
+      post(approve_admin_join_handler),
     )
     .route(
       "/conversations/{conversation_id}/read-position",

@@ -585,6 +585,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       | GatewayEvent::OrgRecoveryUpdate { .. }
       | GatewayEvent::SystemEvent { .. }
       | GatewayEvent::UserGroupUpdate { .. }
+      | GatewayEvent::AdminJoinRequestUpdate { .. }
       | GatewayEvent::LobbyDecision { .. } => Ok(()),
       // A new name, username or avatar, or the account was deactivated: the cached summary goes.
       GatewayEvent::ProfileUpdate { user_id } => {

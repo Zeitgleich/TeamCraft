@@ -2482,6 +2482,7 @@ settings-f-invites_require_verified_email = Invitations need a verified e-mail a
 settings-f-default_spaces = Spaces every new member joins (IDs)
 settings-f-default_channels = Public channels they join with them (IDs)
 settings-f-remove_deactivated_after_days = Remove deactivated users from all chats after (empty: never)
+settings-f-admin_join_request_days = Admins' requests to join a private channel expire after
 settings-f-read_receipts_default = Send read receipts by default
 settings-f-urgent_repeat_interval_secs = Repeat urgent messages every
 settings-f-urgent_max_pushes = Most pushes for an urgent message

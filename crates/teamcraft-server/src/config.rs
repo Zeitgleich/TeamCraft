@@ -227,6 +227,9 @@ pub struct PolicyConfig {
   /// after the deactivation. None (the default): only when an admin removes them (admin.md §3.4).
   #[serde(rename = "remove_deactivated_after_days", default)]
   pub maybe_remove_deactivated_after_days: Option<u32>,
+  /// Days an admin's request to join a private channel waits for the channel's owners before it
+  /// expires (admin.md §2.4, `admin_self_join = owner_approval`).
+  pub admin_join_request_days: u32,
   /// Days a direct message deleted with a deleted account is remembered for the remaining
   /// participants, so their devices that were offline that long still drop it with its local
   /// history on the next sync (admin.md §3.2.1). After that it only leaves the list.
@@ -1331,6 +1334,7 @@ impl Default for PolicyConfig {
       default_spaces: Vec::new(),
       default_channels: Vec::new(),
       maybe_remove_deactivated_after_days: None,
+      admin_join_request_days: teamcraft_proto::DEFAULT_ADMIN_JOIN_REQUEST_DAYS,
       deleted_conversations_kept_days: 180,
     }
   }

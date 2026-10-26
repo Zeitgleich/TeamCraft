@@ -4,6 +4,7 @@
 //! Regenerate it with `cargo sqlx prepare --workspace` against a migrated dev database.
 
 mod admin;
+mod admin_join_request;
 mod announcement;
 mod attachment;
 mod audit;
@@ -55,6 +56,7 @@ pub use admin::{
   AdminConversationFilter, AdminConversationRow, AdminDeviceRow, AdminSpaceRow, AdminUserRow, ChatRemoval,
   ChatRemovalEffects, Deactivation, PushDeviceCount, StorageTotals, UserStatusFilter,
 };
+pub use admin_join_request::{AdminJoinRequest, AdminJoinRequestOutcome};
 pub use announcement::{NewAnnouncement, StoredAnnouncement};
 pub use attachment::{Attachment, NewAttachment, RemovedAttachment};
 pub use audit::{AuditEntry, AuditQuery, NewAuditEntry};

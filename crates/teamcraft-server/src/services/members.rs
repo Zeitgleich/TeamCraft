@@ -8,6 +8,7 @@ use teamcraft_proto::{
 use tracing::warn;
 
 use super::access::{ConversationAccess, is_guest, load_conversation, require};
+use super::admin_join_requests;
 use super::audit::{self, Target as AuditTarget};
 use super::conversations::{can_list_members, ensure_open_channel};
 use super::convert::user_summary;
@@ -147,6 +148,7 @@ pub async fn add_member(
     Some(user.id),
   )
   .await;
+  admin_join_requests::resolve_on_join(state, caller.user.id, id, user.id).await?;
   Ok(ConversationMemberResponse {
     user: user_summary(state, &user),
     role,

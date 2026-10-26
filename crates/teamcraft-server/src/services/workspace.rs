@@ -13,6 +13,7 @@ use teamcraft_proto::{
 };
 
 use super::access::require;
+use super::admin_join_requests;
 use super::audit::{self, Target as AuditTarget};
 use super::convert::unix_millis;
 use crate::auth::AuthenticatedUser;
@@ -85,7 +86,9 @@ pub async fn append(
 
   let version = request.expected_version + 1;
   if let Some(document) = maybe_document {
+    let self_join = document.policy.admin_self_join.clone();
     state.policy.set(document.policy);
+    admin_join_requests::close_all_after_policy_change(state, &self_join).await?;
   }
   audit::record(
     state,

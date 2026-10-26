@@ -2482,6 +2482,7 @@ settings-f-invites_require_verified_email = Einladungen brauchen eine bestätigt
 settings-f-default_spaces = Spaces, denen jedes neue Mitglied beitritt (IDs)
 settings-f-default_channels = Öffentliche Kanäle, denen sie mit beitreten (IDs)
 settings-f-remove_deactivated_after_days = Deaktivierte Nutzer aus allen Chats entfernen nach (leer: nie)
+settings-f-admin_join_request_days = Beitrittsanfragen von Admins zu privaten Kanälen laufen ab nach
 settings-f-read_receipts_default = Lesebestätigungen standardmäßig senden
 settings-f-urgent_repeat_interval_secs = Dringende Nachrichten wiederholen alle
 settings-f-urgent_max_pushes = Höchstzahl Pushes je dringender Nachricht

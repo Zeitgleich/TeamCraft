@@ -1,0 +1,65 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT r.conversation_id, r.user_id, r.requested_at, r.expires_at\n         FROM admin_join_requests r\n         JOIN conversations c ON c.id = r.conversation_id\n         JOIN users u ON u.id = r.user_id\n         WHERE r.expires_at > now()\n           AND c.kind = 'channel' AND c.visibility = 'private' AND c.archived_at IS NULL\n           AND u.deactivated_at IS NULL\n           AND EXISTS (SELECT 1 FROM space_members s\n                       WHERE s.space_id = c.space_id AND s.user_id = r.user_id\n                         AND (s.expires_at IS NULL OR s.expires_at > now()))\n           AND NOT EXISTS (SELECT 1 FROM memberships m\n                           WHERE m.conversation_id = r.conversation_id AND m.user_id = r.user_id)\n           AND (r.user_id = $1\n                OR EXISTS (SELECT 1 FROM memberships o\n                           WHERE o.conversation_id = r.conversation_id AND o.user_id = $1\n                             AND o.role = 'admin'))\n         ORDER BY r.requested_at, r.conversation_id, r.user_id\n         LIMIT $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "conversation_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "admin_join_requests",
+            "name": "conversation_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "admin_join_requests",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "requested_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "admin_join_requests",
+            "name": "requested_at"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "expires_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "admin_join_requests",
+            "name": "expires_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "eacda72a375de94e0fc4c2b1250de3f877360e0e920622e8c7bde349fc4d6f74"
+}
