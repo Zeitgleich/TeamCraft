@@ -355,6 +355,12 @@ pub trait ChatBackend {
   fn conversation_files(&self, _conversation: ConversationId) -> Vec<FileInfo> {
     Vec::new()
   }
+  /// The newest `limit` links shared in a conversation, newest first. The default reads the
+  /// messages newest first and stops once `limit` links are found, so a long conversation is not
+  /// read whole.
+  fn conversation_links(&self, conversation: ConversationId, limit: usize) -> crate::links::LinkPage {
+    crate::links::links_page(self, conversation, limit)
+  }
   /// A page of at most `max_messages` messages with pictures or videos at `anchor`, newest first
   /// (the image viewer pages through a conversation with it, #274). Bounded work: a core reads
   /// only what the page holds. The default pages the whole list.

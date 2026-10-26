@@ -825,6 +825,68 @@ select.input {
   max-width: none;
 }
 
+/* The tab's Files / Links switch and the links list. */
+.channel-files .shared-kind {
+  margin: var(--space-4) var(--space-4) 0;
+  width: fit-content;
+}
+
+.links-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-4);
+  list-style: none;
+}
+
+.link-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.link-row-icon {
+  flex: none;
+  color: var(--text-muted);
+}
+
+.link-row-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.link-row-title,
+.link-row-url,
+.link-row-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.link-row-title {
+  font-weight: var(--weight-semibold);
+}
+
+.link-row-url,
+.link-row-meta {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+}
+
+.links-more {
+  display: flex;
+  justify-content: center;
+  padding: 0 var(--space-4) var(--space-4);
+}
+
 /* Preview of a channel the user hasn't joined. */
 .channel-preview {
   flex: 1;

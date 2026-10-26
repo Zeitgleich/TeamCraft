@@ -19,11 +19,14 @@ use teamcraft_client_api::actions::{FileFailure, FileInfo, FileTransfer, LinkPre
 use teamcraft_client_api::admin::format_bytes;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
+use teamcraft_client_api::links::{LINKS_PER_PAGE, LinkInfo};
 
+use crate::clock::format_date_time;
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::components::lightbox::prefers_reduced_motion;
 use crate::components::message_actions::copy_to_clipboard;
+use crate::components::sliding_indicator::SlidingIndicator;
 use crate::i18n::{I18n, use_i18n};
 use crate::lightbox::{MediaKey, MediaKind};
 use crate::media_cache::{self, Rendition};
@@ -1180,7 +1183,25 @@ pub fn LinkPreviewCard(preview: LinkPreview) -> impl IntoView {
   }
 }
 
-/// Everything shared in the conversation: the "Files" tab of the channel header.
+/// What the "Files & links" tab lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SharedKind {
+  Files,
+  Links,
+}
+
+impl SharedKind {
+  const ALL: [Self; 2] = [Self::Files, Self::Links];
+
+  fn label_key(self) -> &'static str {
+    match self {
+      Self::Files => "shared-kind-files",
+      Self::Links => "shared-kind-links",
+    }
+  }
+}
+
+/// Everything shared in the conversation: the "Files & links" tab of the channel header.
 #[component]
 pub fn ChannelFiles(
   conversation: ConversationId,
@@ -1188,20 +1209,113 @@ pub fn ChannelFiles(
   panel_id: String,
   /// The element ID of the tab that labels the panel.
   labelled_by: String,
+  /// Shows a message in the conversation (leaves this tab).
+  on_show_message: Callback<MessageId>,
 ) -> impl IntoView {
   let state = use_app_state();
+  let i18n = use_i18n();
+  let kind = RwSignal::new(SharedKind::Files);
   let files = Memo::new(move |_| state.read(|backend| backend.conversation_files(conversation)));
   view! {
     <div class="channel-files panel-scroll" role="tabpanel" id=panel_id aria-labelledby=labelled_by>
-      <div class="files-list">
-        <For each=move || files.get() key=|file| (file.message, file.file_id.clone()) let:file>
-          <FileCard file=file />
-        </For>
+      <div class="segmented shared-kind" role="group" aria-label=move || i18n.t("shared-kind-label")>
+        <SlidingIndicator />
+        {SharedKind::ALL
+          .into_iter()
+          .map(|option| {
+            view! {
+              <button aria-pressed=move || (kind.get() == option).to_string() on:click=move |_| kind.set(option)>
+                {move || i18n.t(option.label_key())}
+              </button>
+            }
+          })
+          .collect_view()}
       </div>
-      <Show when=move || files.get().is_empty() fallback=|| ()>
-        <EmptyState icon=IconName::Paperclip title_key="files-empty-title" body_key="files-empty" />
-      </Show>
+      {move || match kind.get() {
+        SharedKind::Files => view! {
+          <div class="files-list">
+            <For each=move || files.get() key=|file| (file.message, file.file_id.clone()) let:file>
+              <FileCard file=file />
+            </For>
+          </div>
+          <Show when=move || files.get().is_empty() fallback=|| ()>
+            <EmptyState icon=IconName::Paperclip title_key="files-empty-title" body_key="files-empty" />
+          </Show>
+        }
+          .into_any(),
+        SharedKind::Links => view! { <ChannelLinks conversation=conversation on_show_message=on_show_message /> }
+          .into_any(),
+      }}
     </div>
+  }
+}
+
+/// The links shared in the conversation, newest first, a page more at a time.
+#[component]
+fn ChannelLinks(conversation: ConversationId, on_show_message: Callback<MessageId>) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let limit = RwSignal::new(LINKS_PER_PAGE);
+  let page = Memo::new(move |_| state.read(|backend| backend.conversation_links(conversation, limit.get())));
+  view! {
+    <ul class="links-list" aria-label=move || i18n.t("shared-kind-links")>
+      <For each=move || page.get().links key=|link| (link.message, link.url.clone()) let:link>
+        <LinkRow link=link on_show_message=on_show_message />
+      </For>
+    </ul>
+    <Show when=move || page.with(|page| page.links.is_empty()) fallback=|| ()>
+      <EmptyState icon=IconName::Link title_key="links-empty-title" body_key="links-empty" />
+    </Show>
+    <Show when=move || page.with(|page| page.has_more) fallback=|| ()>
+      <div class="links-more">
+        <button type="button" class="btn" on:click=move |_| limit.update(|limit| *limit += LINKS_PER_PAGE)>
+          {move || i18n.t("links-more")}
+        </button>
+      </div>
+    </Show>
+  }
+}
+
+#[component]
+fn LinkRow(link: LinkInfo, on_show_message: Callback<MessageId>) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let sender = state
+    .read(|backend| backend.user(link.sender))
+    .map(|user| user.display_name)
+    .unwrap_or_default();
+  let when = format_date_time(link.sent_at, i18n.locale().tag());
+  let title = link
+    .maybe_preview
+    .as_ref()
+    .and_then(|preview| preview.maybe_title.clone())
+    .unwrap_or_else(|| link.url.clone());
+  let message = link.message;
+  view! {
+    <li class="link-row">
+      <span class="link-row-icon" aria-hidden="true"><Icon name=IconName::Link /></span>
+      <div class="link-row-text">
+        <a
+          class="link-row-title"
+          href=link.url.clone()
+          target="_blank"
+          rel="noopener noreferrer nofollow"
+          translate="no"
+          aria-label=move || i18n.t("link-open-new")
+        >
+          {title}
+        </a>
+        <span class="link-row-url" translate="no">{link.url.clone()}</span>
+        <span class="link-row-meta"><span translate="no">{sender}</span>" · "<time>{when}</time></span>
+      </div>
+      <button
+        type="button"
+        class="btn btn-small"
+        on:click=move |_| on_show_message.run(message)
+      >
+        {move || i18n.t("links-show-message")}
+      </button>
+    </li>
   }
 }
 
