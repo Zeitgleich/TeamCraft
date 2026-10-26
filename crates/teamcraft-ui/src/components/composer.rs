@@ -19,6 +19,7 @@ use crate::components::file_drop::{
 use crate::components::file_views::blob_url;
 use crate::components::icons::{Icon, IconName};
 use crate::components::sheet::MenuSurface;
+use crate::composer_focus::{self, FocusSituation};
 use crate::editor_doc::{BlockFormat, InlineStyle};
 use crate::groups::use_groups;
 use crate::i18n::use_i18n;
@@ -35,7 +36,7 @@ use crate::raster;
 use crate::reactive::SetIfAlive;
 use crate::settings::SendMode;
 use crate::slash::{self, Parsed};
-use crate::state::use_app_state;
+use crate::state::{Overlay, SidePanel, use_app_state};
 use crate::unread_divider::DividerEvent;
 use crate::viewport::is_touch_primary;
 
@@ -281,6 +282,28 @@ pub fn Composer(
       drop(web_sys::Url::revoke_object_url(url));
     }
     current
+  });
+
+  // Opening a conversation (or a thread) lets the user type at once, with mouse and keyboard only
+  // (#722). Once, when the editor is in the page; nothing reactive is tracked.
+  let has_tried_focus = StoredValue::new(false);
+  Effect::new(move |_| {
+    let Some(element) = editor.get() else { return };
+    if has_tried_focus.get_value() {
+      return;
+    }
+    has_tried_focus.set_value(true);
+    let situation = untrack(|| FocusSituation {
+      is_fine_pointer: composer_focus::is_fine_pointer(),
+      can_post,
+      is_overlay_open: state.overlay.get_untracked() != Overlay::None,
+      is_focus_taken: composer_focus::is_focus_taken(),
+      is_thread_composer: maybe_thread.is_some(),
+      is_thread_open: matches!(state.panel.get_untracked(), SidePanel::Thread { .. }),
+    });
+    if composer_focus::should_focus(situation) {
+      drop(element.focus());
+    }
   });
 
   // Drafts sync across devices: restore once the stored one arrives, store while typing.
