@@ -115,7 +115,7 @@ impl ScreenCaptureKitScreen {
         })
       },
       // Cancelled in the picker: nothing is shared.
-      Ok(SCPickerOutcome::Cancelled) => Err(CaptureError::Denied("screen")),
+      Ok(SCPickerOutcome::Cancelled) => Err(CaptureError::Cancelled("screen")),
       Ok(SCPickerOutcome::Error(error)) => Err(CaptureError::Device(error)),
       Err(_) => Err(CaptureError::Device("the picker closed without an answer".into())),
     }

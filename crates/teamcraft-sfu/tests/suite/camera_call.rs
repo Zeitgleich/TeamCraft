@@ -27,6 +27,25 @@ const HD: VideoResolution = VideoResolution {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn camera_simulcast_reaches_a_viewer_and_decodes() {
+  camera_reaches_the_viewer(Start::WhenSecured).await;
+}
+
+/// The desktop turns the camera on right after joining, before the call is end-to-end encrypted:
+/// the pictures until then are dropped, the first keyframe among them, and the viewer still gets
+/// a picture at once (issue #683), not after the next periodic keyframe (300 frames).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_camera_started_before_the_call_is_secured_reaches_the_viewer() {
+  camera_reaches_the_viewer(Start::AtOnce).await;
+}
+
+/// When the presenter starts its camera.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Start {
+  WhenSecured,
+  AtOnce,
+}
+
+async fn camera_reaches_the_viewer(start: Start) {
   let (port, certificate_hash) = start_sfu().await;
   let mut presenter = join(port, certificate_hash, 1, 2).await;
   let mut viewer = join(port, certificate_hash, 2, 1).await;
@@ -41,7 +60,7 @@ async fn camera_simulcast_reaches_a_viewer_and_decodes() {
     {
       is_presenter_secured = true;
     }
-    if is_presenter_secured && !has_started {
+    if (is_presenter_secured || start == Start::AtOnce) && !has_started {
       let config = VideoSendConfig {
         kind: VideoTrackKind::Camera,
         capture: Box::new(TestPatternCapture::new(CaptureFormat {

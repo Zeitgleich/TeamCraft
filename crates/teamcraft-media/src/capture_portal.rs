@@ -2,10 +2,17 @@
 //! user (a screen/window picker, or camera permission), then hands out a PipeWire remote with
 //! just that source. Works in Flatpak and on Wayland, where nothing else can capture the screen.
 //!
-//! The portal talk is D-Bus (async, on a small runtime the capture keeps for its session); the
-//! frames come from a PipeWire stream on a thread of its own, converted to I420 and queued.
+//! The portal talk is D-Bus, async on one runtime of its own that lives as long as the process;
+//! the frames come from a PipeWire stream on a thread of its own, converted to I420 and queued.
+//!
+//! One runtime for every portal request, not one per capture: the portal library keeps a single
+//! D-Bus connection for the whole process, and that connection reads its messages on a task of
+//! the runtime it was opened on. A runtime that is idle (or gone) after the first request leaves
+//! every later request, the next screen picker among them, waiting for an answer nobody reads
+//! (issue #683).
 
 use std::os::fd::OwnedFd;
+use std::sync::OnceLock;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -17,11 +24,12 @@ use pw::properties::properties;
 use pw::spa;
 use pw::spa::param::video::{VideoFormat, VideoInfoRaw};
 use pw::spa::pod::Pod;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::capture_convert::{PixelFormat, RawPicture};
 use crate::video::VideoResolution;
 use crate::video_capture::{CaptureError, CaptureFormat, FrameSender, VideoCapture};
+use crate::video_pipeline::RepeatedWarning;
 
 /// What to capture through the portal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,12 +39,17 @@ pub enum PortalSource {
   Screen,
 }
 
+/// Worker threads of the portal runtime: D-Bus messages only, so one is plenty.
+const PORTAL_WORKER_THREADS: usize = 1;
+
+/// The runtime of all portal requests (see the module docs); built on first use.
+static PORTAL_RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
+
 /// A portal-granted camera or screen.
 pub struct PortalCapture {
   source: PortalSource,
   format: CaptureFormat,
-  /// Keeps the D-Bus connection (and with it the screencast session) alive.
-  runtime: tokio::runtime::Runtime,
+  /// Keeps the screencast session (and with it the share) open.
   maybe_session: Option<ScreencastSession>,
   maybe_remote: Option<Remote>,
   maybe_running: Option<(pw::channel::Sender<()>, JoinHandle<()>)>,
@@ -56,16 +69,31 @@ struct Remote {
 
 /// State of the PipeWire stream callbacks.
 struct StreamState {
+  source: PortalSource,
   format: VideoInfoRaw,
   frames: FrameSender,
   start: Instant,
+  delivered: u64,
+  /// Pictures that can't be used, logged at most every few seconds.
+  warning: RepeatedWarning,
+}
+
+/// What a PipeWire buffer's chunk holds.
+#[derive(Debug, PartialEq, Eq)]
+enum ChunkContent {
+  /// The picture's bytes within the mapped data.
+  Picture(std::ops::Range<usize>),
+  /// No picture: a metadata-only buffer (some compositors send these when only the cursor moved)
+  /// or one the producer marked as damaged.
+  Empty,
+  /// The chunk claims bytes beyond the mapped data.
+  OutOfRange,
 }
 
 impl PortalCapture {
   /// Asks for camera access. `wanted` is a hint; the camera's offer decides.
   pub fn camera(wanted: CaptureFormat) -> Result<Self, CaptureError> {
-    let runtime = runtime()?;
-    let fd = runtime.block_on(async {
+    let fd = portal_runtime()?.block_on(async {
       let camera = Camera::new().await.map_err(portal_error)?;
       if !camera.is_present().await.map_err(portal_error)? {
         return Err(CaptureError::NoDevice("camera"));
@@ -81,10 +109,10 @@ impl PortalCapture {
         .await
         .map_err(portal_error)
     })?;
+    debug!("camera portal granted a PipeWire remote");
     Ok(Self {
       source: PortalSource::Camera,
       format: wanted,
-      runtime,
       maybe_session: None,
       maybe_remote: Some(Remote { fd, maybe_node: None }),
       maybe_running: None,
@@ -97,8 +125,7 @@ impl PortalCapture {
     wanted: CaptureFormat,
     maybe_restore_token: Option<&str>,
   ) -> Result<(Self, Option<String>), CaptureError> {
-    let runtime = runtime()?;
-    let (proxy, session, node, size, fd, maybe_token) = runtime.block_on(async {
+    let (proxy, session, node, size, fd, maybe_token) = portal_runtime()?.block_on(async {
       let proxy = Screencast::new().await.map_err(portal_error)?;
       let session = proxy
         .create_session(Default::default())
@@ -117,13 +144,13 @@ impl PortalCapture {
         .await
         .map_err(portal_error)?
         .response()
-        .map_err(|_| CaptureError::Denied("screen"))?;
+        .map_err(picker_error)?;
       let streams = proxy
         .start(&session, None, Default::default())
         .await
         .map_err(portal_error)?
         .response()
-        .map_err(|_| CaptureError::Denied("screen"))?;
+        .map_err(picker_error)?;
       let stream = streams
         .streams()
         .first()
@@ -147,10 +174,10 @@ impl PortalCapture {
       },
       _ => wanted,
     };
+    debug!(node, ?size, "screencast portal granted a stream");
     let capture = Self {
       source: PortalSource::Screen,
       format,
-      runtime,
       maybe_session: Some(ScreencastSession {
         _proxy: proxy,
         session,
@@ -207,8 +234,13 @@ impl Drop for PortalCapture {
     self.stop();
     if let Some(screencast) = self.maybe_session.take() {
       // Ends the share in the desktop's indicator too; failure just leaves it to time out.
-      if let Err(error) = self.runtime.block_on(screencast.session.close()) {
-        debug!(%error, "screencast session not closed");
+      match portal_runtime() {
+        Ok(runtime) => {
+          if let Err(error) = runtime.block_on(screencast.session.close()) {
+            debug!(%error, "screencast session not closed");
+          }
+        },
+        Err(error) => debug!(%error, "screencast session not closed"),
       }
     }
   }
@@ -240,13 +272,25 @@ fn run_stream(
     },
   )?;
   let state = StreamState {
+    source,
     format: VideoInfoRaw::default(),
     frames,
     start: Instant::now(),
+    delivered: 0,
+    warning: RepeatedWarning::default(),
   };
   let loop_for_quit = main_loop.clone();
+  let loop_for_error = main_loop.clone();
   let _listener = stream
     .add_local_listener_with_user_data(state)
+    .state_changed(move |_, state, old, new| {
+      debug!(source = ?state.source, ?old, ?new, "PipeWire stream state");
+      if let pw::stream::StreamState::Error(error) = new {
+        // The encoder thread sees the queue close and reports the capture as ended.
+        warn!(source = ?state.source, %error, "PipeWire stream failed");
+        loop_for_error.quit();
+      }
+    })
     .param_changed(|_, state, id, param| {
       let Some(param) = param else {
         return;
@@ -254,8 +298,23 @@ fn run_stream(
       if id != spa::param::ParamType::Format.as_raw() {
         return;
       }
-      if let Err(error) = state.format.parse(param) {
-        warn!(?error, "unreadable video format");
+      match state.format.parse(param) {
+        Ok(_) => {
+          let size = state.format.size();
+          let framerate = state.format.framerate();
+          info!(
+            source = ?state.source,
+            format = ?state.format.format(),
+            width = size.width,
+            height = size.height,
+            framerate = framerate.num,
+            "PipeWire stream format"
+          );
+          if pixel_format_of(state.format.format()).is_none() {
+            warn!(format = ?state.format.format(), "PipeWire offers a video format we can't convert");
+          }
+        },
+        Err(error) => warn!(?error, "unreadable video format"),
       }
     })
     .process(move |stream, state| {
@@ -271,17 +330,37 @@ fn run_stream(
       let chunk = data.chunk();
       let (offset, size, stride) = (chunk.offset() as usize, chunk.size() as usize, chunk.stride());
       trace!(offset, size, stride, "buffer");
+      let is_corrupted = chunk.flags().contains(spa::buffer::ChunkFlags::CORRUPTED);
       let Some(pixel_format) = pixel_format_of(state.format.format()) else {
-        trace!(format = ?state.format.format(), "buffer in an unconverted format");
+        state.warning.warn(|suppressed| {
+          warn!(format = ?state.format.format(), suppressed, "PipeWire buffer in a format we can't convert");
+        });
         return;
       };
-      let Some(bytes) = data.data() else {
-        trace!("buffer not mapped");
+      let Some(mapped) = data.data() else {
+        // A DMA-BUF the stream can't map: no picture ever comes this way.
+        state
+          .warning
+          .warn(|suppressed| warn!(source = ?state.source, suppressed, "PipeWire buffer not mapped"));
         return;
       };
-      let Some(bytes) = bytes.get(offset..offset + size) else {
-        trace!(offset, size, mapped = bytes.len(), "buffer chunk out of range");
-        return;
+      let bytes = match picture_range(mapped.len(), offset, size, is_corrupted) {
+        ChunkContent::Picture(range) => &mapped[range],
+        // Metadata-only buffers (a cursor move, nothing new on screen) and damaged ones.
+        ChunkContent::Empty => return,
+        ChunkContent::OutOfRange => {
+          let mapped_len = mapped.len();
+          state.warning.warn(|suppressed| {
+            warn!(
+              offset,
+              size,
+              mapped = mapped_len,
+              suppressed,
+              "PipeWire buffer chunk out of range"
+            );
+          });
+          return;
+        },
       };
       let picture = RawPicture {
         format: pixel_format,
@@ -293,11 +372,20 @@ fn run_stream(
       let timestamp_us = u64::try_from(state.start.elapsed().as_micros()).unwrap_or(u64::MAX);
       match picture.to_i420(timestamp_us) {
         Ok(frame) => {
+          if state.delivered == 0 {
+            debug!(source = ?state.source, "first PipeWire frame");
+          }
+          state.delivered += 1;
           if !state.frames.send(frame) {
             loop_for_quit.quit();
           }
         },
-        Err(error) => debug!(%error, "captured frame dropped"),
+        Err(error) => {
+          let source = state.source;
+          state
+            .warning
+            .warn(|suppressed| warn!(%error, ?source, suppressed, "captured frame dropped"));
+        },
       }
     })
     .register()?;
@@ -392,11 +480,40 @@ fn pixel_format_of(format: VideoFormat) -> Option<PixelFormat> {
   }
 }
 
-fn runtime() -> Result<tokio::runtime::Runtime, CaptureError> {
-  tokio::runtime::Builder::new_current_thread()
-    .enable_all()
-    .build()
-    .map_err(|error| CaptureError::Device(error.to_string()))
+/// Where the picture of a buffer is: `size` bytes from `offset` of `mapped_len` mapped bytes.
+fn picture_range(mapped_len: usize, offset: usize, size: usize, is_corrupted: bool) -> ChunkContent {
+  if size == 0 || is_corrupted {
+    return ChunkContent::Empty;
+  }
+  match offset.checked_add(size) {
+    Some(end) if end <= mapped_len => ChunkContent::Picture(offset..end),
+    _ => ChunkContent::OutOfRange,
+  }
+}
+
+/// The portal runtime. Its worker keeps reading the shared D-Bus connection between requests,
+/// so a request made from any thread later is answered. Callers block on it from plain threads
+/// (the capture's blocking task, the encoder thread), never from async code.
+fn portal_runtime() -> Result<&'static tokio::runtime::Runtime, CaptureError> {
+  PORTAL_RUNTIME
+    .get_or_init(|| {
+      tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(PORTAL_WORKER_THREADS)
+        .thread_name("xdg-portal")
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())
+    })
+    .as_ref()
+    .map_err(|error| CaptureError::Device(format!("portal runtime: {error}")))
+}
+
+/// The screen picker's answer: closed without a choice, or refused.
+fn picker_error(error: ashpd::Error) -> CaptureError {
+  match error {
+    ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled) => CaptureError::Cancelled("screen"),
+    _ => CaptureError::Denied("screen"),
+  }
 }
 
 fn portal_error(error: ashpd::Error) -> CaptureError {
@@ -428,5 +545,47 @@ mod tests {
     assert_eq!(pixel_format_of(VideoFormat::BGRx), Some(PixelFormat::Bgrx));
     assert_eq!(pixel_format_of(VideoFormat::YUY2), Some(PixelFormat::Yuyv));
     assert_eq!(pixel_format_of(VideoFormat::RGB), None);
+  }
+
+  #[test]
+  fn buffers_without_a_usable_picture_are_told_apart() {
+    assert_eq!(picture_range(100, 10, 50, false), ChunkContent::Picture(10..60));
+    assert_eq!(picture_range(100, 0, 100, false), ChunkContent::Picture(0..100));
+    // A cursor move only, and a damaged buffer: nothing to convert, nothing to warn about.
+    assert_eq!(picture_range(100, 0, 0, false), ChunkContent::Empty);
+    assert_eq!(picture_range(100, 0, 100, true), ChunkContent::Empty);
+    assert_eq!(picture_range(100, 60, 50, false), ChunkContent::OutOfRange);
+    assert_eq!(picture_range(100, usize::MAX, 2, false), ChunkContent::OutOfRange);
+  }
+
+  #[test]
+  fn a_closed_picker_is_a_cancel_and_anything_else_a_refusal() {
+    use ashpd::desktop::ResponseError;
+
+    assert!(matches!(
+      picker_error(ashpd::Error::Response(ResponseError::Cancelled)),
+      CaptureError::Cancelled("screen")
+    ));
+    assert!(matches!(
+      picker_error(ashpd::Error::Response(ResponseError::Other)),
+      CaptureError::Denied("screen")
+    ));
+  }
+
+  #[test]
+  fn the_portal_runtime_is_shared_and_keeps_running() {
+    let first = portal_runtime().unwrap();
+    let second = portal_runtime().unwrap();
+    assert!(std::ptr::eq(first, second), "one runtime for every request");
+    // A task spawned during one request still runs after it, while nobody blocks on the
+    // runtime: what the shared D-Bus connection's reader needs (issue #683).
+    let (sent, received) = std::sync::mpsc::channel();
+    first.block_on(async move {
+      tokio::spawn(async move {
+        tokio::task::yield_now().await;
+        let _ = sent.send(());
+      });
+    });
+    assert!(received.recv_timeout(std::time::Duration::from_secs(10)).is_ok());
   }
 }

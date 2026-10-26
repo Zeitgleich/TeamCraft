@@ -59,6 +59,8 @@ pub mod call_view;
 pub mod call_web;
 #[cfg(any(feature = "native", feature = "web"))]
 pub mod capture_convert;
+#[cfg(feature = "native")]
+pub mod capture_fallback;
 #[cfg(any(feature = "native", feature = "web"))]
 pub mod capture_negotiate;
 #[cfg(any(

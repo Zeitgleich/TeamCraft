@@ -51,6 +51,7 @@ pub fn list_cameras() -> Vec<CameraInfo> {
 impl NokhwaCamera {
   /// `maybe_id` is a [`CameraInfo::id`] (the camera's index); `None` opens the first camera.
   pub fn open(maybe_id: Option<&str>, wanted: CaptureFormat) -> Result<Self, CaptureError> {
+    ensure_camera_permission()?;
     let index = match maybe_id {
       Some(id) => CameraIndex::String(id.to_owned()),
       None => CameraIndex::Index(0),
@@ -149,6 +150,41 @@ impl Drop for NokhwaCamera {
   fn drop(&mut self) {
     self.stop();
   }
+}
+
+/// How long the macOS camera permission dialog may stay open.
+#[cfg(target_os = "macos")]
+const PERMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// macOS: asks for camera access unless already granted. Without it AVFoundation opens the
+/// camera but never delivers a frame, so the call would send nothing and say nothing (#683).
+#[cfg(target_os = "macos")]
+fn ensure_camera_permission() -> Result<(), CaptureError> {
+  if nokhwa::nokhwa_check() {
+    return Ok(());
+  }
+  let (answer, answer_rx) = std::sync::mpsc::channel();
+  let answer = std::sync::Mutex::new(answer);
+  nokhwa::nokhwa_initialize(move |is_granted| {
+    // The receiver is gone once the wait below gave up; nothing to tell then.
+    let _ = answer
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .send(is_granted);
+  });
+  match answer_rx.recv_timeout(PERMISSION_TIMEOUT) {
+    Ok(true) => Ok(()),
+    Ok(false) | Err(_) => {
+      warn!("camera access not granted");
+      Err(CaptureError::Denied("camera"))
+    },
+  }
+}
+
+/// Windows asks no permission here (the system's privacy settings apply to the device open).
+#[cfg(not(target_os = "macos"))]
+fn ensure_camera_permission() -> Result<(), CaptureError> {
+  Ok(())
 }
 
 /// Opens the camera in the mode closest to `wanted` among those it offers, instead of demanding one
