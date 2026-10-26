@@ -36,8 +36,10 @@ struct NotificationContentBuilder {
       maybeSenderName: notification.maybeSenderName,
       maybeText: notification.maybeText,
       maybeFileName: notification.maybeFileName,
+      maybeAttachmentKind: notification.maybeAttachmentKind,
       isDirect: notification.isDirect,
-      fallbackSender: strings.appName, fallbackText: strings.newMessage, fileText: strings.fileText)
+      fallbackSender: strings.appName, fallbackText: strings.newMessage, fileText: strings.fileText,
+      kindText: strings.attachmentText, fromSenderText: strings.newMessageFrom)
     let content = Self.mutable(base)
     content.title = text.title
     content.subtitle = text.maybeSubtitle ?? ""
@@ -192,6 +194,8 @@ struct NotificationStrings {
   let appName: String
   let newMessage: String
   let fileText: (String) -> String
+  let attachmentText: (NotificationAttachmentKind) -> String
+  let newMessageFrom: (String) -> String
   let callTitle: String
   let callFrom: (String) -> String
   let callUnknown: String
@@ -203,6 +207,15 @@ struct NotificationStrings {
       appName: String(localized: "app_name"),
       newMessage: String(localized: "notification_new_message"),
       fileText: { String(localized: "notification_file \($0)") },
+      attachmentText: { kind in
+        switch kind {
+        case .image: String(localized: "notification_photo")
+        case .video: String(localized: "notification_video")
+        case .audio: String(localized: "notification_audio")
+        case .file: String(localized: "notification_new_message")
+        }
+      },
+      newMessageFrom: { String(localized: "notification_new_message_from \($0)") },
       callTitle: String(localized: "notification_call_title"),
       callFrom: { String(localized: "notification_call_from \($0)") },
       callUnknown: String(localized: "notification_call_unknown"),

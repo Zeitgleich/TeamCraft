@@ -293,6 +293,13 @@ timed out, not showable, workspace policy, device setting); the diagnostics show
 the app logs it, never the content. A high-priority FCM wake-up that can't be opened at all shows a
 plain "New message".
 
+**iOS message content (issue #331).** The notification service extension opens the wake-up with the
+same core call and shows the same texts: sender and conversation, the text, a label for photos, videos
+and audio ("📷 Photo", "🎬 Video", "🎤 Audio", otherwise "📎 file name"), and "New message from <name>"
+when only the sender is known. The setting is Settings → Notifications → Notification content. Still
+open: avatars as a communication notification, the extension's catch-up (design: e2ee.md §7.2) and the
+last gap in the diagnostics.
+
 **Notification content.** Each device chooses "sender and message" (default), "sender only" or
 "nothing" (Settings → Notifications); the workspace policy `push_content` limits it, and the stricter
 of the two applies (the core applies both when it opens the wake-up; the setting is kept in the store

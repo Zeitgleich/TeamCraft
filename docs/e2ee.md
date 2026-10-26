@@ -1339,6 +1339,31 @@ exactly what Apple and Google handle: a device token and ciphertext. Threat mode
 - The server authenticates to the gateway with an Ed25519 key pair of its own (not related to any
   user, device or MLS key); that key authenticates the *server* only and protects no content.
 
+### 7.2 iOS: catching a conversation up for a notification (design, not implemented)
+
+The Android app catches a conversation up itself when a push names a sender the store does not know
+(`Client::catch_up_for_push`, §7 above). The iOS notification extension must not do that on its own:
+catching up advances MLS state (a welcome spends its key package; a commit moves the epoch), and an
+extension that is killed by the system at an arbitrary point, next to an app that may start at any time,
+could leave the shared store half-advanced or fork it from the app's copy. So today the extension stops
+after fetching and decrypting the one message and shows "New message from <name>" when that fails.
+Two options, in order of preference:
+
+1. **The app catches up, the notification is updated.** The extension keeps the sealed wake-up in the
+   delivered notification's `userInfo`. When the app next runs (foreground, background refresh, or the
+   next push) it takes the cross-process lock, runs the normal sync, finds the pending wake-ups of
+   its delivered notifications, reopens them with the core and replaces the notification content with
+   the text. No new rights for the extension; the cost is that the text appears when the app runs.
+2. **The extension catches up under the lock.** The extension takes the cross-process lock for the whole
+   catch-up and the store records an "advance in progress" marker that a started app finishes or rolls
+   back before it syncs. Needs a crash-safe store protocol (each step idempotent, the welcome's key
+   package spent only after the join is stored), a time budget below the extension's 30 s with
+   `serviceExtensionTimeWillExpire` handled, and a memory check against the extension's limit. This
+   handles decryption keys in the extension, so it needs a security review before it ships.
+
+Both keep the push content-free and the keys in the shared Keychain access group; neither changes what
+the server sees.
+
 ## 8. Calls
 
 Calls use DAVE (see ARCHITECTURE.md §6): an MLS group per call (members are devices) and per-frame
