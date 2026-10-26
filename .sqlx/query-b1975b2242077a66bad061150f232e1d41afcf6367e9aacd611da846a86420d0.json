@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO users (id, oidc_issuer, oidc_subject, username, email, display_name, kind, oidc_role, organization)\n         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $10)\n         ON CONFLICT (oidc_issuer, oidc_subject) DO UPDATE\n           SET username = EXCLUDED.username,\n               email = EXCLUDED.email,\n               display_name = EXCLUDED.display_name,\n               kind = EXCLUDED.kind,\n               oidc_role = EXCLUDED.oidc_role,\n               organization = CASE WHEN $9 THEN EXCLUDED.organization ELSE users.organization END\n         RETURNING id, username, display_name, kind, created_at, organization, deactivated_at IS NOT NULL AS \"is_deactivated!\",\n                   default_memberships_at IS NULL AS \"is_awaiting_defaults!\"",
+  "query": "SELECT u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,\n                u.deactivated_at IS NOT NULL AS \"is_deactivated!\", u.deleted_at IS NOT NULL AS \"is_deleted!\"\n         FROM users u\n         WHERE u.deactivated_at IS NULL\n           AND (u.display_name ILIKE $2 OR u.username ILIKE $2)\n           AND ($5::text IS NULL OR u.organization = $5)\n           AND (NOT $3 OR EXISTS (\n                 SELECT 1 FROM memberships a JOIN memberships b ON a.conversation_id = b.conversation_id\n                 WHERE a.user_id = $1 AND b.user_id = u.id))\n         ORDER BY u.display_name, u.id\n         LIMIT $4",
   "describe": {
     "columns": [
       {
@@ -77,7 +77,7 @@
       },
       {
         "ordinal": 7,
-        "name": "is_awaiting_defaults!",
+        "name": "is_deleted!",
         "type_info": "Bool",
         "origin": "Expression"
       }
@@ -86,13 +86,8 @@
       "Left": [
         "Int8",
         "Text",
-        "Text",
-        "Text",
-        "Text",
-        "Text",
-        "Text",
-        "Text",
         "Bool",
+        "Int8",
         "Text"
       ]
     },
@@ -107,5 +102,5 @@
       null
     ]
   },
-  "hash": "fb14713e931341a570573078742b5529addd2619d2253d6cffef41d854722912"
+  "hash": "b1975b2242077a66bad061150f232e1d41afcf6367e9aacd611da846a86420d0"
 }

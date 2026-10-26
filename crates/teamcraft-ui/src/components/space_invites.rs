@@ -787,6 +787,7 @@ mod tests {
       is_bot: false,
       maybe_organization: None,
       is_deactivated: false,
+      is_deleted: false,
       device_setup: DeviceSetup::Unknown,
       maybe_email: None,
     }

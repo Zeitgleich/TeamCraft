@@ -105,6 +105,8 @@ pub enum AuditAction {
   UserReactivated,
   /// A deactivated user's devices left every group and the user left every chat.
   UserRemovedFromChats,
+  /// An account was deleted; only its tombstone is left.
+  UserDeleted,
   RecoveryStarted,
   AdminJoinedChannel,
   OwnerAssigned,
@@ -133,13 +135,14 @@ pub enum AuditAction {
 }
 
 impl AuditAction {
-  pub const ALL: [AuditAction; 26] = [
+  pub const ALL: [AuditAction; 27] = [
     Self::PolicyChanged,
     Self::RetentionChanged,
     Self::DeviceRemoved,
     Self::UserDeactivated,
     Self::UserReactivated,
     Self::UserRemovedFromChats,
+    Self::UserDeleted,
     Self::RecoveryStarted,
     Self::AdminJoinedChannel,
     Self::OwnerAssigned,
@@ -170,6 +173,7 @@ impl AuditAction {
       Self::UserDeactivated => "user-deactivated",
       Self::UserReactivated => "user-reactivated",
       Self::UserRemovedFromChats => "user-removed-from-chats",
+      Self::UserDeleted => "user-deleted",
       Self::RecoveryStarted => "recovery-started",
       Self::AdminJoinedChannel => "admin-joined-channel",
       Self::OwnerAssigned => "owner-assigned",

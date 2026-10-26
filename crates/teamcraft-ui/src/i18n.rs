@@ -96,6 +96,13 @@ pub fn use_i18n() -> I18n {
   expect_context::<I18n>()
 }
 
+/// Translates a message without arguments in the UI's language, for code outside components that
+/// may run without the translator in reach (then English).
+pub fn translate_current(key: &str) -> String {
+  let locale = use_context::<I18n>().map_or(Locale::En, |i18n| i18n.locale());
+  translate(locale, key, None)
+}
+
 pub(crate) fn translate(locale: Locale, key: &str, maybe_args: Option<&FluentArgs>) -> String {
   BUNDLES.with(|bundles| {
     // Fall back to English for messages a translation has not caught up with yet.

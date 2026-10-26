@@ -1589,6 +1589,15 @@ impl Core {
           .await
           .map_err(describe_failure);
       },
+      ChatAction::AdminDeleteUser { user } => {
+        return client.admin_delete_user(*user).await.map_err(describe_failure);
+      },
+      ChatAction::AdminRemoveGroupLeftover { conversation, user } => {
+        return client
+          .admin_remove_group_leftover(*conversation, *user)
+          .await
+          .map_err(describe_failure);
+      },
       _ => {},
     }
     let backend = self.backend.as_ref().ok_or("this device is not set up yet")?;
@@ -1604,7 +1613,9 @@ impl Core {
       | ChatAction::PublishPolicy { .. }
       | ChatAction::PublishRoster { .. }
       | ChatAction::AdminJoinChannel { .. }
-      | ChatAction::AdminRemoveFromAllChats { .. } => {},
+      | ChatAction::AdminRemoveFromAllChats { .. }
+      | ChatAction::AdminDeleteUser { .. }
+      | ChatAction::AdminRemoveGroupLeftover { .. } => {},
       // Everything else goes to the backend, which queues what needs the engine as commands.
       other => {
         if let Some(unhandled) = other.apply_to(backend) {

@@ -243,7 +243,8 @@ async fn enforce(
   Ok(())
 }
 
-async fn delete_object(state: &AppState, key: &str) -> Result<(), ApiError> {
+/// Deletes an object from storage (a missing one counts as deleted); nothing without storage.
+pub(crate) async fn delete_object(state: &AppState, key: &str) -> Result<(), ApiError> {
   if let Some(store) = &state.maybe_blob_store {
     store
       .delete_object(key)

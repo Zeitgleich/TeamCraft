@@ -196,6 +196,9 @@ pub trait ServerApi {
   /// Removes a deactivated user from what is left after the signed removals: devices, direct
   /// messages, spaces (`POST /admin/users/{id}/remove-from-chats`; idempotent).
   fn admin_remove_from_chats(&self, user: UserId) -> impl Future<Output = Result<(), ApiError>>;
+  /// Deletes the account after the signed removals (`DELETE /admin/users/{id}`, admin.md §3.2.1):
+  /// devices, key material, memberships and direct messages go, a tombstone stays; idempotent.
+  fn admin_delete_user(&self, user: UserId) -> impl Future<Output = Result<(), ApiError>>;
   /// Joins an open space (`POST /spaces/{id}/join`).
   fn join_space(&self, space: SpaceId) -> impl Future<Output = Result<SpaceResponse, ApiError>>;
   /// Adds a person to a space as member or guest (`POST /spaces/{id}/members`). On someone who is

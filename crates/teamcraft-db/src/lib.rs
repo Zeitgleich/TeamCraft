@@ -46,6 +46,7 @@ pub mod testing;
 mod thread;
 mod urgent;
 mod user;
+mod user_deletion;
 mod user_group;
 mod workspace_log;
 
@@ -103,5 +104,6 @@ pub use system_event::{NewSystemEvent, StoredSystemEvent};
 pub use thread::{ConversationUnreadRow, FollowedThread, ThreadActivity, ThreadQuery, ThreadUnreadTotals};
 pub use urgent::{Acknowledgement, DueReminder};
 pub use user::{OidcIdentity, OidcUserRow, PresencePreference, SyncedUser, User, UserSearch};
+pub use user_deletion::{ActiveAdminCounts, DELETED_USER_NAME, DirectConversationToDelete, UserDeletion};
 pub use user_group::{GroupCreateOutcome, NewUserGroup, UserGroup};
 pub use workspace_log::{AppendOutcome, WorkspaceLogEntry};

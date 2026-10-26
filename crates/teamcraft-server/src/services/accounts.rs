@@ -44,6 +44,7 @@ fn bot_identity(bot: &teamcraft_db::StoredBot) -> TokenIdentity {
     is_email_verified: false,
     role: Role::Guest,
     issued_at: 0,
+    authenticated_at: 0,
     maybe_session_id: None,
     authentication_methods: Vec::new(),
     maybe_acr: None,
@@ -64,6 +65,7 @@ pub fn guest_identity(invite_subject: String, display_name: String, issued_at: i
     is_email_verified: false,
     role: Role::Guest,
     issued_at,
+    authenticated_at: issued_at,
     maybe_session_id: None,
     authentication_methods: Vec::new(),
     maybe_acr: None,
@@ -83,6 +85,7 @@ pub async fn authenticate(state: &AppState, identity: TokenIdentity) -> Result<A
   ) {
     return Err(AuthError::SessionEnded.into());
   }
+  ensure_not_released(state, &identity).await?;
   super::session::enforce(state, &identity).await?;
   let kind = match identity.role {
     _ if identity.issuer == BOT_ISSUER => UserKind::Bot,
@@ -125,6 +128,25 @@ pub async fn authenticate(state: &AppState, identity: TokenIdentity) -> Result<A
     role: identity.role,
     maybe_oidc_session: identity.maybe_session_id,
   })
+}
+
+/// The identity of a deleted account was released (admin.md §3.2.1): only a sign-in after the
+/// deletion may create the new account. A token whose sign-in happened before it, also one
+/// refreshed since, is refused with `account_deleted`, so a device of the deleted person can't
+/// quietly open a new account. One key lookup per request; the REST, gateway and rendezvous paths
+/// all come through here.
+async fn ensure_not_released(state: &AppState, identity: &TokenIdentity) -> Result<(), ApiError> {
+  let Some(released_at) = state
+    .database
+    .identity_released_at(&identity.issuer, &identity.subject)
+    .await?
+  else {
+    return Ok(());
+  };
+  if identity.authenticated_at <= released_at.unix_timestamp() {
+    return Err(AuthError::AccountDeleted.into());
+  }
+  Ok(())
 }
 
 /// The expiry guests get when their invite has none, in seconds from now.

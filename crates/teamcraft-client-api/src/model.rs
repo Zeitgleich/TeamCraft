@@ -136,6 +136,10 @@ pub struct User {
   /// lists, pickers or mentions (issue #654).
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub is_deactivated: bool,
+  /// The account was deleted (issue #630): only a tombstone naming old messages is left. The UI
+  /// shows its own "Deleted user" instead of the name; always deactivated too.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_deleted: bool,
   /// The e-mail address, only where the workspace's directory policy shows it to this viewer (the
   /// server leaves it out otherwise).
   #[serde(default, skip_serializing_if = "Option::is_none")]

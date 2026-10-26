@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO released_identities (issuer, subject)\n         SELECT oidc_issuer, oidc_subject FROM users\n         WHERE id = $1 AND deleted_at IS NULL AND oidc_issuer IS NOT NULL AND oidc_subject IS NOT NULL\n         ON CONFLICT (issuer, subject) DO UPDATE SET released_at = EXCLUDED.released_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2c73e61aed023dd6256a2db2611da41eb6d9a03bab6342ff47941741091d655a"
+}
