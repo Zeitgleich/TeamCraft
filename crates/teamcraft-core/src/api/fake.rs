@@ -1808,17 +1808,26 @@ impl ServerApi for FakeServerApi {
       if let Some(conversation) = existing {
         return Ok(conversation.view(me));
       }
+      let participants = if request.user_id == me {
+        vec![me]
+      } else {
+        vec![me, request.user_id]
+      };
       let id = state.create_conversation(
         ConversationKind::Dm,
         None,
         None,
         HistoryPolicy::Full,
-        &if request.user_id == me {
-          vec![me]
-        } else {
-          vec![me, request.user_id]
-        },
+        &participants,
       );
+      // Like the server: a DM's participants are the people it was opened for (issue #643).
+      let summaries = participants
+        .iter()
+        .map(|user| state.user(*user).cloned())
+        .collect::<Result<Vec<_>, _>>()?;
+      if let Some(conversation) = state.conversations.get_mut(&id) {
+        conversation.response.participants = summaries;
+      }
       state.publish(
         [me, request.user_id],
         &GatewayEvent::ConversationUpdate { conversation_id: id },

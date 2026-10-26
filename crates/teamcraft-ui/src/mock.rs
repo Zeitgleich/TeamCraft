@@ -1336,6 +1336,7 @@ fn demo_conversations() -> Vec<Conversation> {
     can_post: true,
     bookmarks: Vec::new(),
     is_catching_up: false,
+    is_notes_to_self: false,
     maybe_image_version: None,
   };
   use ConversationKind::{Integration, Private, Public};
@@ -1512,6 +1513,7 @@ fn demo_conversations() -> Vec<Conversation> {
       can_post: true,
       bookmarks: Vec::new(),
       is_catching_up: false,
+      is_notes_to_self: false,
       maybe_image_version: None,
     });
   }

@@ -496,6 +496,7 @@ mod tests {
       can_post: true,
       bookmarks: Vec::new(),
       is_catching_up: false,
+      is_notes_to_self: false,
       maybe_image_version: None,
     }
   }

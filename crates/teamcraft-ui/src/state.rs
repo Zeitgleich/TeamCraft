@@ -709,7 +709,7 @@ impl AppState {
   /// or name), without the display limit.
   pub fn direct_list(&self) -> Vec<Conversation> {
     let sort = self.settings.prefs.with(|prefs| prefs.sidebar.dm_sort);
-    build_direct(self.direct_entries(), self.me().id, sort, 0, "", HomeFilter::All)
+    build_direct(self.direct_entries(), sort, 0, "", HomeFilter::All)
       .sections
       .into_iter()
       .flat_map(|section| section.conversations)

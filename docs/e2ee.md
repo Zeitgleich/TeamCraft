@@ -774,7 +774,12 @@ returns the same conversation every time). Its only participant is the user, so 
 that user's devices: the device that finds none after a sync founds the group like any DM's, and
 the user's further devices join it as further devices (#179). Nobody else can be added; the server
 never lists it among anyone else's conversations. The apps show it as "Notes" pinned above the
-direct messages (`ClientSettings::creates_notes_to_self`).
+direct messages (`ClientSettings::creates_notes_to_self`). Two devices opening it at once still get
+one conversation: the DM's participants key is unique, and the request that loses the insert
+returns the winner's conversation. A conversation is the notes only when its *participants* (the
+people the DM was opened for, kept by the server also once one is deactivated) are the user alone,
+never because the user is its only member left: a DM whose other person was deactivated stays that
+DM (issue #643). Showing it is display only; the group's membership is unaffected either way.
 
 **Founding a DM, and finishing it.** A DM or group DM has no creator who must found it: whichever
 participant's device first commits at epoch 0 owns the group, and the server keeps only that commit.

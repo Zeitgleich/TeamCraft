@@ -534,12 +534,9 @@ impl<S: LocalStore> CoreChatBackend<S> {
     unread: &[StoredMessage],
   ) -> Conversation {
     let mut member_ids = self.members(response.id);
+    let is_notes_to_self = response.is_notes_to_self(self.me);
     // Notes to self (a DM of one): known from the conversation itself before any member list.
-    if member_ids.is_empty()
-      && response.kind == ConversationKindProto::Dm
-      && response.participants.len() == 1
-      && response.participants.iter().all(|user| user.id == self.me)
-    {
+    if member_ids.is_empty() && is_notes_to_self {
       member_ids = vec![self.me];
     }
     let kind = match (&response.kind, &response.visibility) {
@@ -595,6 +592,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       can_post: true,
       bookmarks: self.bookmarks_of(response.id),
       is_catching_up: self.read(crate::client::is_catching_up(&self.store, response.id)),
+      is_notes_to_self,
       maybe_image_version: response.maybe_image.as_ref().map(|image| image.version.clone()),
     }
   }
