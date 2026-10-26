@@ -309,22 +309,15 @@ impl EncoderLoop {
     let mut encode_warning = RepeatedWarning::default();
     let started_at = Instant::now();
     loop {
-      self.apply_controls(&mut simulcast);
+      if self.apply_controls(&mut simulcast) == LoopStep::Stop {
+        return;
+      }
       if self.check_first_picture(Instant::now(), started_at) == LoopStep::Stop {
         return;
       }
       let frame = match self.frame_rx.recv_timeout(CONTROL_POLL) {
         Ok(frame) => frame,
-        Err(RecvTimeoutError::Timeout) => {
-          // Stopped: the controls' sender is gone.
-          if matches!(
-            self.control_rx.try_recv(),
-            Err(std_mpsc::TryRecvError::Disconnected)
-          ) {
-            return;
-          }
-          continue;
-        },
+        Err(RecvTimeoutError::Timeout) => continue,
         Err(RecvTimeoutError::Disconnected) => {
           warn!(kind = ?self.kind, "the video capture ended");
           self.report_start(Err(VideoStartError::CaptureEnded(self.source_name())));
@@ -373,15 +366,21 @@ impl EncoderLoop {
     }
   }
 
-  fn apply_controls(&self, simulcast: &mut SimulcastEncoder) {
-    for control in self.control_rx.try_iter() {
-      match control {
-        SenderControl::Keyframe(layer) => {
+  /// Applies every queued control; [`LoopStep::Stop`] once the sender is gone (the track was
+  /// stopped). The only place that takes controls from the queue: a keyframe request taken
+  /// anywhere else to look for the stop got lost (issue #683), and with it the picture of a
+  /// still screen for whoever asked.
+  fn apply_controls(&self, simulcast: &mut SimulcastEncoder) -> LoopStep {
+    loop {
+      match self.control_rx.try_recv() {
+        Ok(SenderControl::Keyframe(layer)) => {
           if let Err(error) = simulcast.request_keyframe(layer) {
             warn!(%error, "keyframe request");
           }
         },
-        SenderControl::NeededLayers(layers) => simulcast.set_needed_layers(&layers),
+        Ok(SenderControl::NeededLayers(layers)) => simulcast.set_needed_layers(&layers),
+        Err(std_mpsc::TryRecvError::Empty) => return LoopStep::Continue,
+        Err(std_mpsc::TryRecvError::Disconnected) => return LoopStep::Stop,
       }
     }
   }
@@ -689,6 +688,27 @@ mod tests {
           pictures_encoded: 1
         }
       );
+    }
+
+    #[tokio::test]
+    async fn a_keyframe_request_made_while_no_frame_comes_is_not_lost() {
+      let pushed = Arc::new(Mutex::new(None));
+      let (sender, _first_picture, mut encoded_rx) = start_sender(
+        Box::new(SharedCapture(manual_capture(), Arc::clone(&pushed))),
+        fake_encoders(),
+      );
+      let frames = pushed.lock().unwrap().clone().unwrap();
+      let mut is_keyframe = async |index: u64| {
+        assert!(frames.send(test_pattern(VGA, index, index * 33_333).unwrap()));
+        encoded_rx.recv().await.unwrap().1.is_keyframe
+      };
+      assert!(is_keyframe(0).await, "the first picture");
+      assert!(!is_keyframe(1).await);
+      // A still screen: no frame for a while, during which the encoder thread polls its queues.
+      // It used to take the request off the queue there, looking for a stop (issue #683).
+      sender.request_keyframe(0);
+      tokio::time::sleep(CONTROL_POLL * 5).await;
+      assert!(is_keyframe(2).await, "the request waited for the next frame");
     }
 
     #[tokio::test]
