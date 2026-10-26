@@ -12,6 +12,8 @@ use crate::reactive::SetIfAlive;
 use crate::rest::{RestClient, RestError};
 
 /// Where the bridge listens by default (`[listen]` of its configuration).
+/// Where the bridge reads the bot token from (a mounted secret in the container).
+const TOKEN_FILE: &str = "/run/secrets/teamcraft-bridge-token";
 const DEFAULT_BRIDGE_URL: &str = "http://127.0.0.1:8088";
 /// Longest bot name the form accepts; the server has the last word.
 pub const MAX_BOT_NAME_CHARS: usize = 80;
@@ -101,12 +103,12 @@ pub fn use_bots() -> Option<BotsHub> {
   use_context::<BotsHub>()
 }
 
-/// What `teamcraft-bridge.toml` needs for this bot: the server and the token (written to a file
-/// the operator keeps secret, never inline in the example). The token is shown once, so the snippet
-/// is built from the reveal.
-pub fn bridge_config(server_url: &str, bot_name: &str, token: &str) -> String {
+/// What `teamcraft-bridge.toml` needs for this bot: the server, and a reference to a file that holds
+/// the token. The token itself is not written into the snippet, so a pasted configuration never
+/// carries the credential; it is shown beside it to be saved into that file.
+pub fn bridge_config(server_url: &str, bot_name: &str) -> String {
   format!(
-    "[server]\nurl = \"{}\"\nbot_token = \"{token}\"\n\n[identity]\ndevice_name = \"{}\"\n",
+    "[server]\nurl = \"{}\"\nbot_token_file = \"{TOKEN_FILE}\"\n\n[identity]\ndevice_name = \"{}\"\n",
     toml_escape(server_url.trim_end_matches('/')),
     toml_escape(bot_name),
   )
@@ -157,9 +159,10 @@ mod tests {
 
   #[test]
   fn the_config_names_server_token_and_device() {
-    let text = bridge_config("https://chat.example.com/", "NAS \"bridge\"", "tcb_abc");
+    let text = bridge_config("https://chat.example.com/", "NAS \"bridge\"");
     assert!(text.contains("url = \"https://chat.example.com\""));
-    assert!(text.contains("bot_token = \"tcb_abc\""));
+    assert!(text.contains("bot_token_file = \"/run/secrets/teamcraft-bridge-token\""));
+    assert!(!text.contains("tcb_"), "the token is never inline");
     assert!(text.contains("device_name = \"NAS \\\"bridge\\\"\""), "{text}");
   }
 

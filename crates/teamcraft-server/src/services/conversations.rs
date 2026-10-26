@@ -80,6 +80,8 @@ pub async fn get_conversation(
   Ok(response)
 }
 
+const INTEGRATION_STAYS_PRIVATE: &str = "integration channels carry machine output and stay private";
+
 pub async fn create_channel(
   state: &AppState,
   caller: &AuthenticatedUser,
@@ -106,6 +108,9 @@ pub async fn create_channel(
   }
   if let ConversationVisibility::Unknown(_) = request.visibility {
     return Err(ApiError::InvalidRequest("unknown visibility".into()));
+  }
+  if request.is_integration && request.visibility == ConversationVisibility::Public {
+    return Err(ApiError::Conflict(INTEGRATION_STAYS_PRIVATE.into()));
   }
   if let Some(category) = request.maybe_category_id {
     let found = state.database.get_category(category).await?;
@@ -240,6 +245,12 @@ pub async fn update_conversation(
     if found.is_none_or(|c| c.space_id != space) {
       return Err(ApiError::category_not_found());
     }
+  }
+
+  if request.maybe_is_integration == Some(true)
+    && access.view.conversation.visibility == ConversationVisibility::Public
+  {
+    return Err(ApiError::Conflict(INTEGRATION_STAYS_PRIVATE.into()));
   }
 
   let kinds = visible_changes(
@@ -405,9 +416,7 @@ pub async fn convert_channel_privacy(
     return Err(ApiError::Conflict("unarchive the channel first".into()));
   }
   if access.view.conversation.is_integration && request.visibility == ConversationVisibility::Public {
-    return Err(ApiError::Conflict(
-      "integration channels carry machine output and stay private".into(),
-    ));
+    return Err(ApiError::Conflict(INTEGRATION_STAYS_PRIVATE.into()));
   }
   let before = access.view.conversation.visibility.clone();
   state
