@@ -34,11 +34,16 @@ class AppGraph(context: Context) {
   val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
   val servers = ServerStore(context)
   val managedConfig = ManagedConfig(context)
-  val auth = AuthRepository(context, servers)
+  // Profile pictures of the notifications belong to the signed-in account; `core` is only used when called.
+  private val avatars = AvatarCache(context) { core.core() }
+  val auth = AuthRepository(context, servers, onSignedOut = avatars::clear)
   // Decrypted pictures leave memory with the account they belong to.
-  val core = CoreRepository(context, auth, onAccountClosed = Pictures::clear)
+  val core = CoreRepository(context, auth, onAccountClosed = {
+    Pictures.clear()
+    avatars.clear()
+  })
   val notificationContent = NotificationContentPrefs(context)
-  val notifier = MessageNotifier(context, notificationContent, AvatarCache(context) { core.core() })
+  val notifier = MessageNotifier(context, notificationContent, avatars)
   val mentionPrefs = MentionPrefs(context)
   val calls = CallController(context, core, scope)
   val pushStats = PushStats(context)

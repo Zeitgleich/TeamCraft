@@ -147,7 +147,8 @@ impl Engine {
       Err(error) if error.error_code() == Some(&ErrorCode::AvatarNotFound) => return Ok(None),
       Err(error) => return Err(teamcraft_core::CoreError::from(error).into()),
     };
-    let (url, size_bytes) = avatar_location(&answer)?;
+    // Plain http only for a development server on this computer, which is plain http itself.
+    let (url, size_bytes) = avatar_location(&answer, self.server_url.starts_with("http://"))?;
     let picture = api
       .get_blob_capped(&url, size_bytes.min(max_bytes))
       .await
@@ -268,15 +269,18 @@ fn from_json<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, TeamCraftE
 }
 
 /// The download URL and size of `GET /users/{id}/avatar`'s answer; refuses a type that is not a
-/// picture and a URL that is not http(s).
-fn avatar_location(answer: &str) -> Result<(String, u64), TeamCraftError> {
+/// picture and a URL that is not `https` (`http` only if `is_plain_http_allowed`).
+fn avatar_location(answer: &str, is_plain_http_allowed: bool) -> Result<(String, u64), TeamCraftError> {
   let location: AvatarResponse =
     serde_json::from_str(answer).map_err(|error| TeamCraftError::Core(error.to_string()))?;
   if let AvatarContentType::Unknown(other) = &location.content_type {
     return Err(TeamCraftError::Core(format!("{other:?} is not a picture type")));
   }
-  if !location.download_url.starts_with("https://") && !location.download_url.starts_with("http://") {
-    return Err(TeamCraftError::Core("the picture is not at a web address".into()));
+  let is_secure = location.download_url.starts_with("https://");
+  if !is_secure && !(is_plain_http_allowed && location.download_url.starts_with("http://")) {
+    return Err(TeamCraftError::Core(
+      "the picture is not at a secure web address".into(),
+    ));
   }
   Ok((location.download_url, location.size_bytes))
 }
@@ -289,7 +293,7 @@ mod avatar_tests {
 
   #[test]
   fn reads_the_location_of_a_picture() {
-    let (url, size) = avatar_location(ANSWER).unwrap();
+    let (url, size) = avatar_location(ANSWER, false).unwrap();
     assert_eq!(url, "https://files.example.com/a?sig=1");
     assert_eq!(size, 1234);
   }
@@ -297,17 +301,24 @@ mod avatar_tests {
   #[test]
   fn refuses_other_content_types() {
     let answer = ANSWER.replace("image/jpeg", "text/html");
-    assert!(avatar_location(&answer).is_err());
+    assert!(avatar_location(&answer, false).is_err());
   }
 
   #[test]
   fn refuses_other_schemes() {
     let answer = ANSWER.replace("https://files.example.com/a?sig=1", "file:///etc/passwd");
-    assert!(avatar_location(&answer).is_err());
+    assert!(avatar_location(&answer, false).is_err());
+  }
+
+  #[test]
+  fn plain_http_only_where_the_server_is_plain_http() {
+    let answer = ANSWER.replace("https://", "http://");
+    assert!(avatar_location(&answer, false).is_err());
+    assert!(avatar_location(&answer, true).is_ok());
   }
 
   #[test]
   fn refuses_garbage() {
-    assert!(avatar_location("<html>login</html>").is_err());
+    assert!(avatar_location("<html>login</html>", false).is_err());
   }
 }
