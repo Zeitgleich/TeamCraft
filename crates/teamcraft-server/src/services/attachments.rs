@@ -53,6 +53,11 @@ pub async fn sweep_unfinished_before(
   let Some(store) = state.maybe_blob_store.as_ref() else {
     return Ok(0);
   };
+  if store.check_available().is_err() {
+    // As for backgrounds: rows go first, so nothing is swept while the storage is known to be down.
+    warn!("the storage is down; sweeping unfinished attachments later");
+    return Ok(0);
+  }
   let removed = state
     .database
     .sweep_unfinished_attachments(before, multipart_before)

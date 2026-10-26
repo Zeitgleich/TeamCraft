@@ -166,6 +166,41 @@ mod http {
     app.stop().await;
   }
 
+  /// The sweeper deletes rows before objects: while the storage is down it leaves both for the
+  /// next sweep instead of losing track of objects it can't delete.
+  #[tokio::test]
+  async fn nothing_is_swept_while_the_storage_is_down() {
+    let (fake, endpoint) = FakeStorage::start().await;
+    let clock = ManualClock::new();
+    let dependencies = Arc::new(Dependencies::new(
+      DependencyOptions::default(),
+      Arc::new(clock.clone()),
+    ));
+    let Some(app) =
+      TestApp::start_with_dependencies(Some(storage_config(&endpoint)), None, dependencies).await
+    else {
+      return;
+    };
+    let carol = member("carol");
+    let abandoned = app
+      .post(&carol, "/me/backgrounds", json!({"size_bytes": 10}))
+      .await;
+    assert_eq!(abandoned.status, StatusCode::CREATED, "{}", abandoned.body);
+    let store = app.state.maybe_blob_store.clone().unwrap();
+    fake.set_failing(true);
+    for _ in 0..3 {
+      assert!(store.object_size("probe").await.is_err());
+    }
+    let later = time::OffsetDateTime::now_utc() + time::Duration::hours(1);
+    let sweep = || teamcraft_server::services::backgrounds::sweep(&app.state, later);
+    assert_eq!(sweep().await.unwrap(), 0, "swept while the storage is down");
+
+    fake.set_failing(false);
+    clock.advance(OPEN_FOR);
+    assert_eq!(sweep().await.unwrap(), 1, "the next sweep after the outage");
+    app.stop().await;
+  }
+
   /// A 503 of ours carries `Retry-After` and the stable code `unavailable`.
   fn assert_unavailable(status: &StatusCode, body: &serde_json::Value) {
     assert_eq!(*status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
@@ -210,6 +245,45 @@ mod http {
       .await
       .unwrap();
     assert!(response.status().is_success());
+  }
+}
+
+#[cfg(feature = "integration")]
+mod clock_skew {
+  use serde_json::json;
+  use teamcraft_server::testing::TestApp;
+
+  use super::*;
+  use crate::common::{call_with_token, member};
+
+  /// The identity provider's clock runs ahead or behind by less than the leeway (30 s): its tokens
+  /// work. Far beyond it the token is refused with 401 `invalid_token`, a clear answer the app
+  /// handles by refreshing, never a 500.
+  #[tokio::test]
+  async fn tokens_from_a_skewed_provider_work_within_the_leeway_and_fail_clearly_beyond() {
+    let Some(app) = TestApp::start().await else {
+      return;
+    };
+    let carol = member("carol");
+    let now = i64::try_from(jsonwebtoken::get_current_timestamp()).unwrap();
+    let cases = [
+      // Provider 20 s ahead: issued and valid "in the future".
+      (json!({"nbf": now + 20}), now + 20, StatusCode::OK),
+      // Provider 20 s behind: the token ran out moments ago by our clock.
+      (json!({"exp": now - 20}), now - 320, StatusCode::OK),
+      // Five minutes ahead and behind: refused, clearly.
+      (json!({"nbf": now + 300}), now + 300, StatusCode::UNAUTHORIZED),
+      (json!({"exp": now - 300}), now - 600, StatusCode::UNAUTHORIZED),
+    ];
+    for (overrides, issued_at, expected) in cases {
+      let token = app.token_with(&carol, issued_at, &overrides);
+      let (status, body) = call_with_token(&app, &token, reqwest::Method::GET, "/me", None).await;
+      assert_eq!(status, expected, "{overrides}: {body}");
+      if expected == StatusCode::UNAUTHORIZED {
+        assert_eq!(body["error_code"], "invalid_token", "{body}");
+      }
+    }
+    app.stop().await;
   }
 }
 
