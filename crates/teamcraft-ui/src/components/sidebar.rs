@@ -223,6 +223,15 @@ pub fn GlobalEntries() -> impl IntoView {
         <Icon name=IconName::Bookmark />
         <span class="sb-name">{move || i18n.t("sidebar-saved")}</span>
       </button>
+      <button
+        class="sb-item"
+        class:current=move || state.view.get() == MainView::Files
+        aria-current=move || (state.view.get() == MainView::Files).then_some("page")
+        on:click=move |_| state.open_files()
+      >
+        <Icon name=IconName::Paperclip />
+        <span class="sb-name">{move || i18n.t("sidebar-files")}</span>
+      </button>
   }
 }
 

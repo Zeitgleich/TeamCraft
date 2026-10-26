@@ -58,6 +58,8 @@ pub enum Route {
   /// `/people`: people and user groups.
   People,
   Saved,
+  /// `/files`: every file the user can see.
+  Files,
   /// `/search`: the search page. The query never goes into the URL.
   Search,
   /// `/settings`: the settings dialog's list of sections (phones); `/settings/{tab}`: a section.
@@ -94,6 +96,7 @@ impl Route {
       ["meeting", meeting] => id(meeting).map(Self::Meeting),
       ["people"] => Some(Self::People),
       ["saved"] => Some(Self::Saved),
+      ["files"] => Some(Self::Files),
       ["search"] => Some(Self::Search),
       ["settings"] => Some(Self::Settings(SettingsPage::Sections)),
       ["settings", tab] => SettingsTab::from_slug(tab).map(|tab| Self::Settings(SettingsPage::Section(tab))),
@@ -151,6 +154,7 @@ impl Route {
       Self::Meeting(meeting) => format!("/meeting/{meeting}"),
       Self::People => "/people".to_owned(),
       Self::Saved => "/saved".to_owned(),
+      Self::Files => "/files".to_owned(),
       Self::Search => "/search".to_owned(),
       Self::Settings(SettingsPage::Sections) => "/settings".to_owned(),
       Self::Settings(SettingsPage::Section(tab)) => format!("/settings/{}", tab.slug()),
@@ -189,6 +193,7 @@ impl Route {
       | Self::Meeting(_)
       | Self::People
       | Self::Saved
+      | Self::Files
       | Self::Search
       | Self::Settings(_)
       | Self::Admin(_) => None,
@@ -554,6 +559,7 @@ mod tests {
       Route::Meeting(id_from_raw(MEETING)),
       Route::People,
       Route::Saved,
+      Route::Files,
       Route::Search,
       Route::Settings(SettingsPage::Sections),
       Route::Settings(SettingsPage::Section(SettingsTab::Security)),
