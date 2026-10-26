@@ -40,8 +40,18 @@ impl MenuAnchor {
         .parent_element()
         .and_then(|parent| parent.dyn_into::<web_sys::HtmlElement>().ok())
     {
-      let top = format!("{}px", button.get_bounding_client_rect().top());
-      drop(parent.style().set_property("--rail-menu-top", &top));
+      // A menu that opens up (Focus, at the rail's foot) hangs from the button's bottom edge.
+      let rect = button.get_bounding_client_rect();
+      let window_height = web_sys::window()
+        .and_then(|window| window.inner_height().ok())
+        .and_then(|height| height.as_f64())
+        .unwrap_or(rect.bottom());
+      let style = parent.style();
+      drop(style.set_property("--rail-menu-top", &format!("{}px", rect.top())));
+      drop(style.set_property(
+        "--rail-menu-bottom",
+        &format!("{}px", window_height - rect.bottom()),
+      ));
     }
     self.is_open.update(|is_open| *is_open = !*is_open);
   }
@@ -171,7 +181,7 @@ pub fn RailFocusMenu() -> impl IntoView {
     </button>
     <Show when=move || anchor.is_open.get() fallback=|| ()>
       <MenuSurface
-        class="rail-menu"
+        class="rail-menu opens-up"
         label=Signal::derive(move || i18n.t("rail-focus"))
         on_close=Callback::new(move |()| anchor.close())
         on_keydown=Callback::new(move |ev: web_sys::KeyboardEvent| {

@@ -1039,8 +1039,10 @@ select.input {
   padding: 10px 0;
 }
 
-/* Many spaces scroll; the destinations above and "add" below stay put. */
-.space-rail ul {
+/* Only the spaces and "add space" scroll (#652); the destinations above and Focus at the foot stay
+   put. An edge fades where spaces are scrolled out of sight (`.has-more-*`, rail.rs), instead of a
+   hard cut. */
+.rail-spaces {
   flex: 0 1 auto;
   min-height: 0;
   width: 100%;
@@ -1049,8 +1051,41 @@ select.input {
   align-items: center;
   gap: var(--space-2);
   padding: 6px 0;
-  overflow-y: auto;
+  overflow: hidden auto;
+  overscroll-behavior: contain;
   scrollbar-width: none;
+  --rail-fade-top: 0px;
+  --rail-fade-bottom: 0px;
+  -webkit-mask-image: linear-gradient(to bottom, transparent, black var(--rail-fade-top), black calc(100% - var(--rail-fade-bottom)), transparent);
+  mask-image: linear-gradient(to bottom, transparent, black var(--rail-fade-top), black calc(100% - var(--rail-fade-bottom)), transparent);
+}
+
+.rail-spaces::-webkit-scrollbar {
+  display: none;
+}
+
+.rail-spaces.has-more-above {
+  --rail-fade-top: var(--space-6);
+}
+
+.rail-spaces.has-more-below {
+  --rail-fade-bottom: var(--space-6);
+}
+
+.space-rail ul {
+  flex: none;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.rail-bottom {
+  flex: none;
+  margin-top: auto;
+  display: flex;
+  justify-content: center;
 }
 
 /* Global destinations: an icon with a short label under it (Home, Activity, Threads). */
@@ -1190,6 +1225,7 @@ select.input {
 }
 
 .rail-add {
+  flex: none;
   width: 40px;
   height: 40px;
   border: 1px dashed rgba(255, 255, 255, 0.3);
@@ -12345,6 +12381,13 @@ ol.md-list {
   top: var(--rail-menu-top, 0);
   width: 15rem;
   --popover-origin: top left;
+}
+
+/* At the rail's foot (Focus): above the button's bottom edge, growing up out of it. */
+.popover.rail-menu.opens-up {
+  top: auto;
+  bottom: var(--rail-menu-bottom, 0);
+  --popover-origin: bottom left;
 }
 
 .rail-menu .menu-item {
