@@ -25,6 +25,9 @@ class MessageNotificationSpecTest {
     assertEquals(ShortcutSpec(CONVERSATION, "Alice", NotificationSender("user-Alice", "Alice")), spec.maybeShortcut)
     assertEquals(listOf(MessageAction.REPLY, MessageAction.MARK_READ, MessageAction.MUTE), spec.actions)
     assertNull(spec.maybeLargeIconSender)
+    // The lock screen names the sender, never the text.
+    assertEquals("Alice", spec.publicTitle)
+    assertEquals("from Alice", spec.publicText)
   }
 
   @Test
@@ -42,6 +45,9 @@ class MessageNotificationSpecTest {
     assertEquals(NotificationChannels.MESSAGES, spec.channel)
     // A channel's shortcut is the conversation's, not a person's.
     assertNull(spec.maybeShortcut!!.maybePerson)
+    assertEquals("Project A", spec.publicTitle)
+    assertEquals("2 from Bob, Alice", spec.publicText)
+    assertFalse(spec.publicText.contains("first") || spec.publicText.contains("second"))
   }
 
   @Test
@@ -111,6 +117,8 @@ class MessageNotificationSpecTest {
     assertEquals(emptyList<MessageAction>(), spec.actions)
     // A channel shows no single sender's picture.
     assertNull(spec.maybeLargeIconSender)
+    assertEquals("Project A", spec.publicTitle)
+    assertEquals("2 from Bob, Alice", spec.publicText)
     assertNoText(spec)
   }
 
@@ -128,6 +136,9 @@ class MessageNotificationSpecTest {
       assertNull(spec.maybeLargeIconSender)
       assertEquals(emptyList<MessageAction>(), spec.actions)
       assertFalse(spec.title.contains("Alice") || spec.text.contains("Alice"))
+      // Names hidden by the setting: the lock screen names nobody either.
+      assertEquals("App", spec.publicTitle)
+      assertFalse(spec.publicText.contains("Alice"))
     }
   }
 
@@ -154,6 +165,8 @@ class MessageNotificationSpecTest {
     assertEquals("Project A, Bob", spec.text)
     assertEquals(listOf("Project A", "Bob"), spec.lines)
     assertEquals(7, spec.number)
+    assertEquals("2 conversations", spec.publicTitle)
+    assertEquals("Project A, Bob", spec.publicText)
   }
 
   @Test
@@ -163,6 +176,8 @@ class MessageNotificationSpecTest {
     val spec = summary(conversations, isShown = false, privacy = privacy)!!
     assertEquals("3 new", spec.text)
     assertEquals(emptyList<String>(), spec.lines)
+    assertEquals("App", spec.publicTitle)
+    assertEquals("3 new", spec.publicText)
   }
 
   @Test
@@ -220,7 +235,7 @@ class MessageNotificationSpecTest {
   }
 
   private fun assertNoText(spec: MessageNotificationSpec) {
-    assertFalse(spec.title.contains("secret") || spec.text.contains("secret"))
+    for (shown in listOf(spec.title, spec.text, spec.publicTitle, spec.publicText)) assertFalse(shown.contains("secret"))
   }
 
   private fun summary(

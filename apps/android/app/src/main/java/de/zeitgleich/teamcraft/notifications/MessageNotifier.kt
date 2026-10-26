@@ -309,9 +309,9 @@ class MessageNotifier(
       .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
       .setContentIntent(openIntent(spec.conversationId))
       .setDeleteIntent(actionIntent(NotificationActionReceiver.ACTION_DISMISSED, spec.conversationId, isMutable = false))
-      // The lock screen shows only "New message" unless the user unlocks.
+      // The lock screen names the sender but not the text unless the user unlocks.
       .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-      .setPublicVersion(publicVersion(spec.channel, spec.messageCount))
+      .setPublicVersion(publicVersion(spec.channel, spec.publicTitle, spec.publicText))
     if (spec.messageCount > 1) builder.setNumber(spec.messageCount)
     spec.maybeConversation?.let { conversation -> builder.setStyle(messagingStyle(conversation)) }
     spec.maybeLargeIconSender?.let { sender ->
@@ -418,7 +418,6 @@ class MessageNotifier(
     if (isShown && spec == maybeLastSummary) return
     val inbox = NotificationCompat.InboxStyle().setBigContentTitle(spec.title)
     spec.lines.forEach(inbox::addLine)
-    val messageCount = shown.conversations.values.sumOf { entry -> entry.lines.count { !it.isOwn } }
     val summary = NotificationCompat.Builder(context, NotificationChannels.MESSAGES)
       .setSmallIcon(R.drawable.ic_notification)
       .setContentTitle(spec.title)
@@ -435,7 +434,7 @@ class MessageNotifier(
       .setNumber(spec.number)
       .setBadgeIconType(NotificationCompat.BADGE_ICON_SMALL)
       .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-      .setPublicVersion(publicVersion(NotificationChannels.MESSAGES, messageCount))
+      .setPublicVersion(publicVersion(NotificationChannels.MESSAGES, spec.publicTitle, spec.publicText))
       .setContentIntent(launchIntent())
       .build()
     postSafely(null, SUMMARY_ID, summary)
@@ -486,19 +485,14 @@ class MessageNotifier(
   private fun isAppLockOn(): Boolean = AppLockPrefs.prefs(context).isEnabled
 
   /**
-   * What the lock screen shows while it hides sensitive content: no names, no text. Watch bridges
-   * that follow the lock screen's privacy show this too while the phone is locked.
+   * What the lock screen shows while it hides sensitive content: who wrote, never what (no names
+   * when the setting hides them). Watch bridges that follow the lock screen's privacy show this
+   * too while the phone is locked.
    */
-  private fun publicVersion(channel: String, messageCount: Int) = NotificationCompat.Builder(context, channel)
+  private fun publicVersion(channel: String, title: String, text: String) = NotificationCompat.Builder(context, channel)
     .setSmallIcon(R.drawable.ic_notification)
-    .setContentTitle(context.getString(R.string.app_name))
-    .setContentText(
-      if (messageCount > 1) {
-        context.resources.getQuantityString(R.plurals.notification_new_messages, messageCount, messageCount)
-      } else {
-        context.getString(R.string.notification_new_message)
-      },
-    )
+    .setContentTitle(title)
+    .setContentText(text)
     .setCategory(NotificationCompat.CATEGORY_MESSAGE)
     .build()
 

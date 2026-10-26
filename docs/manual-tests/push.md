@@ -65,8 +65,8 @@ content policy says otherwise) within ~5 s.
 - [ ] Watch (Wear OS emulator paired with the phone, or a vendor bridge such as Garmin Connect): one
   message is one watch notification with sender and text; reply and mark as read work from the watch.
   With "sender only" or the app lock it reads "New message from <name>", still one notification. With
-  the phone locked and the system set to hide sensitive content, bridges that follow it show
-  "New message".
+  the phone locked and the system set to hide sensitive content, the lock screen and bridges that
+  follow it show "New message from <name>" (never the text); with "nothing", "New message".
 - [ ] Badge on the app icon (iOS; Android launchers that show numbers) matches conversations with
   unread mentions and DMs.
 

@@ -16,6 +16,12 @@ data class MessageNotificationSpec(
   val title: String,
   /** `EXTRA_TEXT`: the newest message, or "New message from Alice" when only the sender shows. */
   val text: String,
+  /**
+   * The lock screen's public version (also what watch bridges show while the phone is locked):
+   * the sender, never the text; "New message" only when the setting hides names.
+   */
+  val publicTitle: String,
+  val publicText: String,
   /** MessagingStyle, only when the content shows. */
   val maybeConversation: ConversationStyleSpec?,
   /** The sender whose picture is the large icon (one-to-one chat, sender only). */
@@ -71,6 +77,9 @@ data class SummarySpec(
   val text: String,
   val lines: List<String>,
   val number: Int,
+  /** The lock screen's public version: the conversation names, or a count when names are hidden. */
+  val publicTitle: String,
+  val publicText: String,
 )
 
 /** Builds [MessageNotificationSpec] and [SummarySpec]. */
@@ -91,14 +100,18 @@ object MessageNotificationSpecs {
     val isGroup = entry.maybeTitle != null || senders.map { it.key }.distinct().size > 1
     val newestSender = newest.maybeSenderKey?.let { NotificationSender(it, newest.senderName) }
     val headline = entry.maybeTitle ?: newest.senderName.ifBlank { labels.appName }
+    val (publicTitle, publicText) = if (privacy.showsNames) {
+      headline to NotificationText.senderOnly(entry.lines, labels)
+    } else {
+      labels.appName to newMessages(received.size, labels)
+    }
     val (title, text) = when {
       privacy.showsContent -> headline to if (isGroup && entry.maybeTitle != null && newest.senderName.isNotBlank()) {
         "${newest.senderName}: ${newest.text}"
       } else {
         newest.text
       }
-      privacy.showsNames -> headline to NotificationText.senderOnly(entry.lines, labels)
-      else -> labels.appName to newMessages(received.size, labels)
+      else -> publicTitle to publicText
     }
     val conversation = if (privacy.showsContent) {
       ConversationStyleSpec(
@@ -129,6 +142,8 @@ object MessageNotificationSpecs {
       },
       title = title,
       text = text,
+      publicTitle = publicTitle,
+      publicText = publicText,
       maybeConversation = conversation,
       maybeLargeIconSender = newestSender.takeIf { !privacy.showsContent && privacy.showsNames && entry.maybeTitle == null },
       messageCount = received.size,
@@ -158,11 +173,15 @@ object MessageNotificationSpecs {
     if (conversations.size < 2 && !isShown) return null
     val messageCount = conversations.sumOf { entry -> entry.lines.count { !it.isOwn } }
     val names = MessagePrivacy.summaryLines(privacy, conversations).filter { it.isNotBlank() }
+    val title = conversationsTitle(conversations.size)
+    val text = if (names.isEmpty()) newMessages(messageCount, labels) else names.joinToString(", ")
     return SummarySpec(
-      title = conversationsTitle(conversations.size),
-      text = if (names.isEmpty()) newMessages(messageCount, labels) else names.joinToString(", "),
+      title = title,
+      text = text,
       lines = names.take(MAX_SUMMARY_LINES),
       number = maybeBadge ?: conversations.size,
+      publicTitle = if (names.isEmpty()) labels.appName else title,
+      publicText = text,
     )
   }
 

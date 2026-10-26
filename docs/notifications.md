@@ -310,8 +310,8 @@ conversations show (bridges mirror a summary as a second notification), never al
 (`GROUP_ALERT_CHILDREN`), names the conversations ("Project A, Bob") or counts the messages when names
 are hidden, and is posted again only when it changed. With "sender only" or the app lock, the watch
 shows "New message from Alice"; with "nothing", "New message". Bridges that follow the lock screen's
-privacy show the public version ("New message", "3 new messages") while the phone is locked and
-Android hides sensitive content on the lock screen; that is the user's system setting.
+privacy show the public version while the phone is locked and Android hides sensitive content: the
+sender ("New message from Alice", "Project A: 2 new messages from Alice, Bob"), never the text.
 
 **iOS message content (issue #331).** The notification service extension opens the wake-up with the
 same core call and shows the same texts: sender and conversation, the text, a label for photos, videos
@@ -326,7 +326,9 @@ of the two applies (the core applies both when it opens the wake-up; the setting
 so a notification extension reads it too). The app lock caps it at "sender only" and removes reply,
 mark read and the conversation shortcut. Changing either re-posts what is in the shade. "Sender only"
 reads "New message from Alice" or "3 new messages from Alice, Bob". The lock screen's public version
-stays "New message" for devices set to hide sensitive content.
+(shown when the device hides sensitive content on the lock screen, and by watch bridges that follow
+it) names who wrote but never the text: "New message from Alice" under the sender's or conversation's
+name, and the summary's names the conversations. With "nothing" it stays "New message".
 
 **iOS.** `call` arrives as a mutable alert through the notification service extension; without the
 filtering entitlement it shows as a time-sensitive "incoming call" alert with answer and decline, with
