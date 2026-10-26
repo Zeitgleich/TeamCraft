@@ -25,7 +25,7 @@ use crate::session::use_session;
 
 /// "Connecting" and "unreachable" only show when the connection stays down longer than this, counted
 /// from the page's return when it was hidden or frozen: a quick reconnect needs no banner.
-const CONNECTING_GRACE_MS: i64 = 3_000;
+const CONNECTING_GRACE_MS: i64 = 10_000;
 /// How often the countdown to the next attempt updates.
 const COUNTDOWN_MS: u64 = 1_000;
 
@@ -259,7 +259,7 @@ mod tests {
   use super::*;
 
   const OFFLINE: CoreConnection = CoreConnection::Offline {
-    retry_at_ms: 10_500,
+    retry_at_ms: 17_500,
     maybe_interception: None,
   };
 
@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn a_captive_portal_is_named_in_the_banner() {
       let portal = CoreConnection::Offline {
-        retry_at_ms: 5_000,
+        retry_at_ms: 12_000,
         maybe_interception: Some(NetworkInterception::CaptivePortal),
       };
       let unsettled = Unsettled::default().observe(portal, 0);
