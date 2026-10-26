@@ -15,6 +15,7 @@
 //! The protocol version is in the code itself (`tclink2`): a device that speaks another version
 //! refuses the code when it is scanned, before any key leaves the existing device.
 
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use futures_util::future::{Either, select};
@@ -24,7 +25,10 @@ use teamcraft_crypto::backup::BackupKey;
 use teamcraft_crypto::key_bag::{EncryptedKeyBag, KeyBagBinding};
 use teamcraft_crypto::rendezvous::{Initiator, RendezvousChannel, RendezvousKey, Responder};
 use teamcraft_crypto::secret::SymmetricKey;
-use teamcraft_proto::{Base64Bytes, RendezvousClientMessage, RendezvousServerMessage, UserId};
+use teamcraft_proto::{
+  Base64Bytes, CreateDeviceLinkRequest, DeviceLinkPlatform, DeviceLinkRequest, RendezvousClientMessage,
+  RendezvousServerMessage, UserId,
+};
 use zeroize::Zeroizing;
 
 use super::Client;
@@ -45,6 +49,61 @@ const RECEIPT_TIMEOUT: Duration = Duration::from_secs(60);
 pub struct LinkOffer {
   rendezvous_id: String,
   key: RendezvousKey,
+}
+
+/// What the new device tells the user's other devices about itself, so they can ask to approve it
+/// ([`LinkOffer::announce`]). The server and the other devices only have the new device's word for
+/// both; they are shown as unverified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkAnnouncement {
+  pub device_name: String,
+  pub platform: DeviceLinkPlatform,
+}
+
+/// The open link requests, shared so an app can read them while the sync loop owns the client.
+/// Times are on the clock the caller passes in.
+#[derive(Clone, Default)]
+pub struct LinkRequestList(Arc<Mutex<Vec<PendingLinkRequest>>>);
+
+impl LinkRequestList {
+  /// The requests still open at `now_ms`, oldest first; expired ones are dropped.
+  pub fn open(&self, now_ms: i64) -> Vec<LinkRequestInfo> {
+    let mut requests = self.lock();
+    requests.retain(|entry| entry.expires_at_ms > now_ms);
+    requests
+      .iter()
+      .map(|entry| LinkRequestInfo {
+        id: entry.request.id.clone(),
+        device_name: entry.request.device_name.clone(),
+        platform: entry.request.platform.clone(),
+        seconds_left: u64::try_from((entry.expires_at_ms - now_ms) / 1000).unwrap_or(0),
+      })
+      .collect()
+  }
+
+  fn lock(&self) -> MutexGuard<'_, Vec<PendingLinkRequest>> {
+    // A poisoned lock only means another thread panicked; the list itself stays consistent.
+    self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+  }
+}
+
+/// A request of a new device to be linked, as the user's other devices hold it. The key stays in
+/// the core: the app shows [`LinkRequestInfo`] and asks to review by ID.
+pub(crate) struct PendingLinkRequest {
+  request: DeviceLinkRequest,
+  /// On this device's clock; the server counted the time left, not a date, so a wrong clock only
+  /// moves the prompt's end a little. The server and the relay enforce the real expiry.
+  expires_at_ms: i64,
+}
+
+/// What the app shows of a pending request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkRequestInfo {
+  pub id: String,
+  pub device_name: String,
+  pub platform: DeviceLinkPlatform,
+  /// Whole seconds left when [`Client::link_requests`] was called.
+  pub seconds_left: u64,
 }
 
 /// What the existing device hands over: enough to decrypt the user's key bag.
@@ -118,6 +177,39 @@ impl LinkOffer {
     )
   }
 
+  /// The offer a link request carries (the key came through the server; the handshake and the code
+  /// the user types catch a server that tampered with it, e2ee.md §5).
+  pub(crate) fn from_request(request: &DeviceLinkRequest) -> Result<Self, CoreError> {
+    let invalid = || CoreError::Corrupt("not a device link request".into());
+    if request.id.len() != 32 || !request.id.bytes().all(|b| b.is_ascii_hexdigit()) {
+      return Err(invalid());
+    }
+    let key = Zeroizing::new(<[u8; 32]>::try_from(request.key.as_slice()).map_err(|_| invalid())?);
+    Ok(Self {
+      rendezvous_id: request.id.clone(),
+      key: RendezvousKey::from_bytes(*key),
+    })
+  }
+
+  /// Asks the user's other devices to approve this one (a prompt on each, e2ee.md §5), while
+  /// [`NewDeviceLink::connect`] waits in the relay. **This hands the authentication key to the
+  /// server**, which a scanned code does not: call it only when the user chose the prompt. The
+  /// typed code still decides, so a server that injects itself is detected.
+  pub async fn announce<A: ServerApi>(
+    &self,
+    api: &A,
+    announcement: &LinkAnnouncement,
+  ) -> Result<(), CoreError> {
+    let request = CreateDeviceLinkRequest {
+      rendezvous_id: self.rendezvous_id.clone(),
+      key: Base64Bytes::new(self.key.expose_secret().to_vec()),
+      device_name: announcement.device_name.clone(),
+      platform: announcement.platform.clone(),
+    };
+    api.announce_device_link(&request).await?;
+    Ok(())
+  }
+
   pub fn parse(code: &str) -> Result<Self, CoreError> {
     let invalid = || CoreError::Corrupt("not a device link code".into());
     let mut parts = code.trim().split(':');
@@ -147,6 +239,8 @@ impl LinkOffer {
 
 impl<R: RendezvousConnection> NewDeviceLink<R> {
   /// Joins the relay and runs the handshake as initiator; returns once the existing device answered.
+  /// Nothing about the code leaves the device except to the relay: the key reaches the server only
+  /// when the user asks for the prompt on the other devices ([`LinkOffer::announce`]).
   pub async fn connect<A: ServerApi<Rendezvous = R>>(api: &A, offer: &LinkOffer) -> Result<Self, CoreError> {
     let user = api.me().await?.id;
     let mut connection = join(api, offer).await?;
@@ -249,10 +343,106 @@ impl<R> LinkApproval<R> {
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
+  /// The new devices of this account that ask to be linked and wait for a decision; the expired
+  /// ones are dropped. Order: oldest first.
+  pub fn link_requests(&self) -> Vec<LinkRequestInfo> {
+    self.link_requests.open(self.now_ms())
+  }
+
+  /// A handle on the same list for an app whose sync loop owns the client; read it with a clock.
+  pub fn link_request_list(&self) -> LinkRequestList {
+    self.link_requests.clone()
+  }
+
+  /// Takes up a link request: joins its relay as the approving device and runs the handshake. The
+  /// other devices drop their prompts. The user then types the code the new device shows
+  /// ([`Self::complete_link_approval`]); nothing is sent to the new device before that.
+  pub async fn review_link_request(&mut self, id: &str) -> Result<LinkApproval<A::Rendezvous>, CoreError> {
+    let request = self
+      .link_requests
+      .lock()
+      .iter()
+      .find(|entry| entry.request.id == id)
+      .map(|entry| entry.request.clone())
+      .ok_or(CoreError::LinkRequestGone)?;
+    let offer = LinkOffer::from_request(&request)?;
+    // The request stays listed until the join worked: a failed try (network) can be repeated.
+    let approval = self.approve_offer(&offer).await?;
+    self.forget_link_request(id);
+    Ok(approval)
+  }
+
+  /// Denies a link request: it is closed at the server and the new device is told.
+  pub async fn reject_link_request(&mut self, id: &str) -> Result<(), CoreError> {
+    self.api.reject_device_link(id).await?;
+    self.forget_link_request(id);
+    Ok(())
+  }
+
+  /// A request arrived over the gateway (or the list read at connect).
+  pub(super) fn note_link_request(&mut self, request: DeviceLinkRequest) {
+    let expires_at_ms =
+      self.now_ms() + i64::try_from(request.expires_in_secs.saturating_mul(1000)).unwrap_or(0);
+    // A repeated announcement replaces the earlier one of the same ID.
+    {
+      let mut requests = self.link_requests.lock();
+      requests.retain(|entry| entry.request.id != request.id);
+      requests.push(PendingLinkRequest {
+        request,
+        expires_at_ms,
+      });
+    }
+    self.note_link_requests_changed();
+  }
+
+  pub(super) fn forget_link_request(&mut self, id: &str) {
+    let was_removed = {
+      let mut requests = self.link_requests.lock();
+      let before = requests.len();
+      requests.retain(|entry| entry.request.id != id);
+      requests.len() != before
+    };
+    if was_removed {
+      self.note_link_requests_changed();
+    }
+  }
+
+  /// Replaces the list with what the server holds (after a (re)connect: events in between were
+  /// lost). Failures are only logged; the next connect tries again.
+  pub(super) async fn refresh_link_requests(&mut self) {
+    let requests = match self.api.device_links().await {
+      Ok(requests) => requests,
+      Err(error) => {
+        tracing::debug!(%error, "could not read the open device link requests");
+        return;
+      },
+    };
+    let now = self.now_ms();
+    *self.link_requests.lock() = requests
+      .into_iter()
+      .map(|request| PendingLinkRequest {
+        expires_at_ms: now + i64::try_from(request.expires_in_secs.saturating_mul(1000)).unwrap_or(0),
+        request,
+      })
+      .collect();
+    self.note_link_requests_changed();
+  }
+
+  /// Tells the UI, which reads [`Self::link_requests`] when the mark moves.
+  fn note_link_requests_changed(&self) {
+    if let Err(error) = crate::read_state::update_marks(&self.store, |marks| marks.link_requests += 1) {
+      tracing::warn!(%error, "could not note the change of the device link requests");
+    }
+  }
+
   /// Scans a new device's code, joins the relay and runs the handshake as responder.
   pub async fn start_link_approval(&self, code: &str) -> Result<LinkApproval<A::Rendezvous>, CoreError> {
     let offer = LinkOffer::parse(code)?;
-    let mut connection = join(&self.api, &offer).await?;
+    self.approve_offer(&offer).await
+  }
+
+  async fn approve_offer(&self, offer: &LinkOffer) -> Result<LinkApproval<A::Rendezvous>, CoreError> {
+    let mut connection = join(&self.api, offer).await?;
     let (responder, hello) = Responder::new(&offer.key, &mut OsRng).map_err(link_error)?;
     connection.send_binary(hello).await?;
     let auth_hello = next_binary(&mut connection).await?;
@@ -356,6 +546,9 @@ async fn next_binary<R: RendezvousConnection>(connection: &mut R) -> Result<Vec<
       Some(Ok(RendezvousFrame::Control(
         RendezvousServerMessage::Joined { .. } | RendezvousServerMessage::PeerJoined,
       ))) => {},
+      Some(Ok(RendezvousFrame::Control(RendezvousServerMessage::Rejected))) => {
+        return Err(CoreError::LinkDenied);
+      },
       Some(Ok(RendezvousFrame::Control(RendezvousServerMessage::Error { error }))) => {
         return Err(CoreError::Gateway(error.message));
       },

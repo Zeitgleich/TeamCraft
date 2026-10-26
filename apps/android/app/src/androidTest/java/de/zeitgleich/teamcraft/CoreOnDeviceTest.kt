@@ -17,6 +17,7 @@ import de.zeitgleich.teamcraft.security.KeystoreBox
 import de.zeitgleich.teamcraft.security.SealedFile
 import uniffi.teamcraft_ffi.AppConfig
 import uniffi.teamcraft_ffi.EventListener
+import uniffi.teamcraft_ffi.LinkPlatform
 import uniffi.teamcraft_ffi.TeamCraft
 import uniffi.teamcraft_ffi.TeamCraftException
 import uniffi.teamcraft_ffi.TokenProvider
@@ -54,7 +55,7 @@ class CoreOnDeviceTest {
       fail("not enrolled yet")
     } catch (expected: TeamCraftException.NotEnrolled) {
     }
-    val code = core.startDeviceLink()
+    val code = core.startDeviceLink("Test phone", LinkPlatform.ANDROID)
     assertTrue(code.startsWith("tclink1:"))
     core.close()
   }

@@ -15,6 +15,7 @@ wire_enum! {
     SpaceNotFound => "space_not_found",
     ChannelNotFound => "channel_not_found",
     DeviceNotFound => "device_not_found",
+    DeviceLinkNotFound => "device_link_not_found",
     CategoryNotFound => "category_not_found",
     InviteNotFound => "invite_not_found",
     IdentityKeyNotFound => "identity_key_not_found",

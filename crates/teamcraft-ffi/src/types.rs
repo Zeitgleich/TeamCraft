@@ -2,12 +2,14 @@
 //! 64-bit unsigned type that matches, and the app only passes them back.
 
 use teamcraft_client_api::model::{self as view, ConversationKind as ConversationKindView, PresenceStatus};
+use teamcraft_core::client::LinkRequestInfo;
 use teamcraft_core::notify_rules::MentionPreferences;
 use teamcraft_core::prefetch::SegmentPrefetch;
 use teamcraft_core::push_guard::{PushDiagnostics, Suppression};
 use teamcraft_core::push_preview::{AttachmentKind, PreviewContent, PreviewGap, PushPreview};
 use teamcraft_proto::{
-  PushContentMode, PushKind, PushProvider, TestPushOutcome as TestPushOutcomeProto, TestPushResponse,
+  DeviceLinkPlatform, PushContentMode, PushKind, PushProvider, TestPushOutcome as TestPushOutcomeProto,
+  TestPushResponse,
 };
 
 /// Where the app keeps an account's data.
@@ -71,6 +73,30 @@ pub enum NetworkInterception {
   CaptivePortal,
   /// A certificate the device doesn't trust, usually a proxy that inspects encrypted traffic.
   UntrustedCertificate,
+}
+
+/// What a device that asks to be linked runs on (e2ee.md §5); shown in the prompt on the user's
+/// other devices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum LinkPlatform {
+  Android,
+  Ios,
+  Macos,
+  Windows,
+  Linux,
+  Web,
+  Other,
+}
+
+/// A new device of the user that asks to be linked and waits for a decision.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct LinkRequestItem {
+  /// Names the request in `review_link_request` and `reject_link_request`.
+  pub id: String,
+  pub device_name: String,
+  pub platform: LinkPlatform,
+  /// Seconds the request stays open, when it was read.
+  pub seconds_left: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -658,6 +684,45 @@ impl From<teamcraft_core::connection::ConnectionState> for ConnectionState {
         }),
       },
       Core::SignInRequired => Self::SignInRequired,
+    }
+  }
+}
+
+impl From<LinkPlatform> for DeviceLinkPlatform {
+  fn from(platform: LinkPlatform) -> Self {
+    match platform {
+      LinkPlatform::Android => Self::Android,
+      LinkPlatform::Ios => Self::Ios,
+      LinkPlatform::Macos => Self::Macos,
+      LinkPlatform::Windows => Self::Windows,
+      LinkPlatform::Linux => Self::Linux,
+      LinkPlatform::Web => Self::Web,
+      LinkPlatform::Other => Self::Other,
+    }
+  }
+}
+
+impl From<DeviceLinkPlatform> for LinkPlatform {
+  fn from(platform: DeviceLinkPlatform) -> Self {
+    match platform {
+      DeviceLinkPlatform::Android => Self::Android,
+      DeviceLinkPlatform::Ios => Self::Ios,
+      DeviceLinkPlatform::Macos => Self::Macos,
+      DeviceLinkPlatform::Windows => Self::Windows,
+      DeviceLinkPlatform::Linux => Self::Linux,
+      DeviceLinkPlatform::Web => Self::Web,
+      DeviceLinkPlatform::Other => Self::Other,
+    }
+  }
+}
+
+impl From<LinkRequestInfo> for LinkRequestItem {
+  fn from(request: LinkRequestInfo) -> Self {
+    Self {
+      id: request.id,
+      device_name: request.device_name,
+      platform: request.platform.into(),
+      seconds_left: request.seconds_left,
     }
   }
 }

@@ -349,6 +349,22 @@ async fn invoke(bridge: &Arc<Bridge>, body: &str) -> Value {
       bridge.alice.runtime.approval_cancel();
       Ok(Value::Null)
     },
+    "core_link_announce" => bridge.alice.runtime.link_announce().await.map(|()| Value::Null),
+    "core_link_requests" => {
+      Ok(serde_json::to_value(bridge.alice.runtime.link_requests().await).expect("link requests"))
+    },
+    "core_link_request_review" => bridge
+      .alice
+      .runtime
+      .link_request_review(args["id"].as_str().unwrap_or("").to_owned())
+      .await
+      .map(|()| Value::Null),
+    "core_link_request_reject" => bridge
+      .alice
+      .runtime
+      .link_request_reject(args["id"].as_str().unwrap_or("").to_owned())
+      .await
+      .map(|()| Value::Null),
     "call_snapshot" => Ok(serde_json::to_value(bridge.calls.snapshot()).expect("call snapshot")),
     "call_media_devices" => Ok(serde_json::to_value(bridge.calls.snapshot().devices).expect("devices")),
     "call_action" => {

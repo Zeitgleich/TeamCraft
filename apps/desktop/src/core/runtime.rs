@@ -13,13 +13,13 @@ use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::AttachmentPriority;
 use teamcraft_client_api::remote::{
-  ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreStatus, EnrollRequest, LinkStatus,
-  MessageWindow, SecuritySnapshot, StoreProblem,
+  ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreStatus, EnrollRequest, LinkRequestView,
+  LinkStatus, MessageWindow, SecuritySnapshot, StoreProblem,
 };
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
 use teamcraft_core::client::files::{BlobUpload, sweep_staged_copies};
-use teamcraft_core::client::{CatchUpFocus, LinkApproval, LinkedSecrets, NewDeviceLink};
+use teamcraft_core::client::{CatchUpFocus, LinkAnnouncement, LinkApproval, LinkedSecrets, NewDeviceLink};
 use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::connection::{
   ConnectionSettings, ConnectionState, ConnectionStatus, ConnectionSupervisor,
@@ -39,6 +39,7 @@ use teamcraft_core::{
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
+use teamcraft_proto::DeviceLinkPlatform;
 use teamcraft_proto::{
   BackgroundId, CallJoinTokenResponse, ClientUpdatePolicy, ConversationId, DeviceActivity,
   GatewayClientMessage, GatewayEvent, MessageId, OrgBackgroundId, UserId,
@@ -277,6 +278,16 @@ enum Request {
     reply: oneshot::Sender<Result<(), String>>,
   },
   ApprovalCancel,
+  LinkAnnounce(oneshot::Sender<Result<(), String>>),
+  LinkRequests(oneshot::Sender<Vec<LinkRequestView>>),
+  LinkRequestReview {
+    id: String,
+    reply: oneshot::Sender<Result<(), String>>,
+  },
+  LinkRequestReject {
+    id: String,
+    reply: oneshot::Sender<Result<(), String>>,
+  },
   /// The network changed or the computer woke up: check the connection now.
   NetworkChanged,
   /// Ends the core loop, closing the database and releasing the store lock.
@@ -508,6 +519,36 @@ impl CoreRuntime {
 
   pub fn approval_cancel(&self) {
     drop(self.requests.send(Request::ApprovalCancel));
+  }
+
+  /// New device: asks the user's other devices to approve this one. This hands the code's key to
+  /// the server, so it only happens when the user chooses it (e2ee.md §5).
+  pub async fn link_announce(&self) -> Result<(), String> {
+    self
+      .ask(Request::LinkAnnounce)
+      .await
+      .unwrap_or_else(|| Err(stopped()))
+  }
+
+  /// New devices of this account that wait for a decision (e2ee.md §5, approve prompt).
+  pub async fn link_requests(&self) -> Vec<LinkRequestView> {
+    self.ask(Request::LinkRequests).await.unwrap_or_default()
+  }
+
+  /// Takes up a request and joins its relay; the user then types the code the new device shows
+  /// into [`Self::approval_confirm`]. The other devices drop their prompt.
+  pub async fn link_request_review(&self, id: String) -> Result<(), String> {
+    self
+      .ask(|reply| Request::LinkRequestReview { id, reply })
+      .await
+      .unwrap_or_else(|| Err(stopped()))
+  }
+
+  pub async fn link_request_reject(&self, id: String) -> Result<(), String> {
+    self
+      .ask(|reply| Request::LinkRequestReject { id, reply })
+      .await
+      .unwrap_or_else(|| Err(stopped()))
   }
 
   pub async fn prepare_call(&self, conversation: ConversationId) -> Result<CallPreparation, String> {
@@ -1043,6 +1084,10 @@ impl Core {
         drop(reply.send(self.approval_confirm(&short_code).await))
       },
       Request::ApprovalCancel => self.approval = None,
+      Request::LinkAnnounce(reply) => drop(reply.send(self.link_announce().await)),
+      Request::LinkRequests(reply) => drop(reply.send(self.link_requests())),
+      Request::LinkRequestReview { id, reply } => drop(reply.send(self.link_request_review(&id).await)),
+      Request::LinkRequestReject { id, reply } => drop(reply.send(self.link_request_reject(&id).await)),
       Request::NetworkChanged => self.connection.network_changed(SystemClock.now_ms()).await,
       // Handled by the loop in `run`.
       Request::Shutdown => {},
@@ -1291,6 +1336,54 @@ impl Core {
     let approval = client.start_link_approval(code).await.map_err(describe)?;
     self.approval = Some(approval);
     self.approval_misses = 0;
+    Ok(())
+  }
+
+  async fn link_announce(&mut self) -> Result<(), String> {
+    let run = self.link.as_ref().ok_or("no device link in progress")?;
+    let code = match &*run.view.borrow() {
+      LinkStatus::WaitingForScan { code } | LinkStatus::Confirm { code, .. } => code.clone(),
+      _ => return Err("no device link in progress".to_owned()),
+    };
+    let announcement = LinkAnnouncement {
+      device_name: run.device_name.clone(),
+      platform: platform(),
+    };
+    let offer = LinkOffer::parse(&code).map_err(describe)?;
+    offer.announce(&self.api(), &announcement).await.map_err(describe)
+  }
+
+  fn link_requests(&mut self) -> Vec<LinkRequestView> {
+    let Some(client) = self.client.as_mut() else {
+      return Vec::new();
+    };
+    client
+      .link_requests()
+      .into_iter()
+      .map(|request| LinkRequestView {
+        id: request.id,
+        device_name: request.device_name,
+        platform: request.platform,
+        seconds_left: request.seconds_left,
+      })
+      .collect()
+  }
+
+  /// Existing device: takes up a request from a prompt; the typed-code check is the same as for a
+  /// scanned code ([`Self::approval_confirm`]).
+  async fn link_request_review(&mut self, id: &str) -> Result<(), String> {
+    let client = self.client.as_mut().ok_or("this device is not set up yet")?;
+    let approval = client.review_link_request(id).await.map_err(describe)?;
+    self.approval = Some(approval);
+    self.approval_misses = 0;
+    self.changed();
+    Ok(())
+  }
+
+  async fn link_request_reject(&mut self, id: &str) -> Result<(), String> {
+    let client = self.client.as_mut().ok_or("this device is not set up yet")?;
+    client.reject_link_request(id).await.map_err(describe)?;
+    self.changed();
     Ok(())
   }
 
@@ -1752,6 +1845,16 @@ async fn link_task(
   };
   on_change();
   link.receive_secrets(&store, &device_name).await.map_err(describe)
+}
+
+/// What this build runs on, for the prompt on the user's other devices.
+fn platform() -> DeviceLinkPlatform {
+  match std::env::consts::OS {
+    "macos" => DeviceLinkPlatform::Macos,
+    "windows" => DeviceLinkPlatform::Windows,
+    "linux" => DeviceLinkPlatform::Linux,
+    _ => DeviceLinkPlatform::Other,
+  }
 }
 
 async fn poll_link(link: &mut Option<LinkRun>) -> Result<LinkedSecrets, String> {

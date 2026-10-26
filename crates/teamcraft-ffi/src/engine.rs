@@ -17,9 +17,9 @@ use teamcraft_client_api::model::{
 use teamcraft_client_api::notify::{MentionRules, is_mentioned};
 use teamcraft_client_api::search::parse_query;
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpRendezvous, HttpServerApi, ServerApi};
-use teamcraft_core::client::LinkApproval;
 use teamcraft_core::client::NewDeviceLink;
 use teamcraft_core::client::files::sweep_staged_copies;
+use teamcraft_core::client::{LinkAnnouncement, LinkApproval, LinkRequestList};
 use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
 use teamcraft_core::notify_rules::{load_mention_preferences, save_mention_preferences};
@@ -43,13 +43,16 @@ use tokio::task::{JoinHandle, LocalSet};
 use crate::calls::{CallHub, CallPreparation};
 use crate::error::TeamCraftError;
 use crate::types::{
-  AccountState, AppConfig, ConversationItem, ConversationKind, MentionSettings, MessageItem,
-  NotificationContent, NotificationContentSettings, Presence, PushDiagnosticsInfo, PushNotification,
-  PushService, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult, TestPushResult,
+  AccountState, AppConfig, ConversationItem, ConversationKind, LinkPlatform, LinkRequestItem,
+  MentionSettings, MessageItem, NotificationContent, NotificationContentSettings, Presence,
+  PushDiagnosticsInfo, PushNotification, PushService, SearchHitItem, SegmentPrefetchMode,
+  SegmentPrefetchResult, TestPushResult,
 };
 use crate::{EventListener, TokenProvider};
 
 /// Decrypted downloads, one folder per account below it.
+/// Wrong short codes allowed before a link approval is dropped.
+const MAX_APPROVAL_MISSES: u8 = 3;
 const DOWNLOADS_DIR: &str = "downloads";
 /// The longest a wake-up is worked on before its notification is shown with what is known by then.
 /// FCM gives a high-priority message about 10 s; the app hands over to expedited work at 8 s.
@@ -92,6 +95,10 @@ pub(crate) struct Engine {
   pub(crate) identity_fingerprint: String,
   pub(crate) maybe_recovery: Option<crate::bridge::PendingRecovery>,
   maybe_link_offer: Option<LinkOffer>,
+  /// What the new device tells the user's other devices about itself while it waits.
+  maybe_link_announcement: Option<LinkAnnouncement>,
+  /// The open link requests of other devices, readable while the sync loop owns the client.
+  link_requests: LinkRequestList,
   maybe_new_link: Option<NewDeviceLink<HttpRendezvous>>,
   maybe_approval: Option<PendingApproval>,
   calls: CallHub,
@@ -121,6 +128,8 @@ pub(crate) enum ClientSlot {
 struct PendingApproval {
   approval: LinkApproval<HttpRendezvous>,
   was_running: bool,
+  /// Wrong codes typed so far; the attempt ends after [`MAX_APPROVAL_MISSES`].
+  misses: u8,
 }
 
 /// The app's [`TokenProvider`] as the core's token source.
@@ -261,6 +270,8 @@ impl Engine {
       identity_fingerprint: String::new(),
       maybe_recovery: None,
       maybe_link_offer: None,
+      maybe_link_announcement: None,
+      link_requests: LinkRequestList::default(),
       maybe_new_link: None,
       maybe_approval: None,
       calls: CallHub::default(),
@@ -331,12 +342,35 @@ impl Engine {
     self.complete_enrollment(options).await
   }
 
-  pub(crate) async fn start_device_link(&mut self) -> Result<String, TeamCraftError> {
+  pub(crate) async fn start_device_link(
+    &mut self,
+    device_name: String,
+    platform: LinkPlatform,
+  ) -> Result<String, TeamCraftError> {
     let offer = LinkOffer::generate();
     let code = offer.to_code();
     self.maybe_link_offer = Some(offer);
+    self.maybe_link_announcement = Some(LinkAnnouncement {
+      device_name,
+      platform: platform.into(),
+    });
     self.maybe_new_link = None;
     Ok(code)
+  }
+
+  /// New device: asks the user's other devices to approve this one. Hands the code's key to the
+  /// server, so the app calls it only when the user chose the prompt over scanning (e2ee.md §5).
+  pub(crate) async fn announce_device_link(&mut self) -> Result<(), TeamCraftError> {
+    let offer = self
+      .maybe_link_offer
+      .as_ref()
+      .ok_or(TeamCraftError::NoLinkInProgress)?;
+    let announcement = self
+      .maybe_link_announcement
+      .as_ref()
+      .ok_or(TeamCraftError::NoLinkInProgress)?;
+    offer.announce(&self.api(), announcement).await?;
+    Ok(())
   }
 
   pub(crate) async fn wait_for_link_peer(&mut self) -> Result<String, TeamCraftError> {
@@ -359,15 +393,53 @@ impl Engine {
       .take()
       .ok_or(TeamCraftError::NoLinkInProgress)?;
     self.maybe_link_offer = None;
+    self.maybe_link_announcement = None;
     let secrets = link.receive_secrets(&self.store, &device_name).await?;
     let options = enrollment_options(device_name, EnrollmentSecret::Linked(secrets));
     self.complete_enrollment(options).await
   }
 
-  pub(crate) async fn approve_device_link(&mut self, code: String) -> Result<String, TeamCraftError> {
+  /// Existing device: joins the new device's relay with its scanned or typed `code`. The user then
+  /// types the code the new device shows into [`Self::confirm_device_link`].
+  pub(crate) async fn approve_device_link(&mut self, code: String) -> Result<(), TeamCraftError> {
+    self
+      .begin_approval(|client| Box::pin(async move { client.start_link_approval(&code).await }))
+      .await
+  }
+
+  /// Existing device: takes up a request from a prompt; same next step as a scanned code.
+  pub(crate) async fn review_link_request(&mut self, id: String) -> Result<(), TeamCraftError> {
+    self
+      .begin_approval(|client| Box::pin(async move { client.review_link_request(&id).await }))
+      .await
+  }
+
+  pub(crate) async fn reject_link_request(&mut self, id: String) -> Result<(), TeamCraftError> {
+    self
+      .with_client(|client| Box::pin(async move { client.reject_link_request(&id).await }))
+      .await
+  }
+
+  /// The open link requests, read from the shared list (the sync loop keeps running).
+  pub(crate) fn link_requests(&self) -> Vec<LinkRequestItem> {
+    self
+      .link_requests
+      .open(SystemClock.now_ms())
+      .into_iter()
+      .map(LinkRequestItem::from)
+      .collect()
+  }
+
+  async fn begin_approval<F>(&mut self, start: F) -> Result<(), TeamCraftError>
+  where
+    F: for<'a> FnOnce(
+      &'a mut CoreClient,
+    )
+      -> LocalFuture<'a, Result<LinkApproval<HttpRendezvous>, teamcraft_core::CoreError>>,
+  {
     let was_running = matches!(self.client, ClientSlot::Running { .. });
-    let client = self.take_client().await?;
-    let result = client.start_link_approval(&code).await;
+    let mut client = self.take_client().await?;
+    let result = start(&mut client).await;
     self.client = ClientSlot::Idle(client);
     let approval = match result {
       Ok(approval) => approval,
@@ -378,15 +450,35 @@ impl Engine {
         return Err(error.into());
       },
     };
-    let short_code = approval.short_code();
     self.maybe_approval = Some(PendingApproval {
       approval,
       was_running,
+      misses: 0,
     });
-    Ok(short_code)
+    Ok(())
   }
 
-  pub(crate) async fn confirm_device_link(&mut self) -> Result<(), TeamCraftError> {
+  /// Existing device: the user typed the code the new device shows. Only a match sends the keys
+  /// (docs/security-review.md C3: a script or a stray tap can't approve a device the user did not
+  /// see); a few wrong codes end the attempt.
+  pub(crate) async fn confirm_device_link(&mut self, typed_code: String) -> Result<(), TeamCraftError> {
+    let digits = |text: &str| text.chars().filter(char::is_ascii_digit).collect::<String>();
+    let pending = self
+      .maybe_approval
+      .as_mut()
+      .ok_or(TeamCraftError::NoLinkInProgress)?;
+    if digits(&typed_code) != digits(&pending.approval.short_code()) {
+      pending.misses += 1;
+      let was_running = pending.was_running;
+      if pending.misses >= MAX_APPROVAL_MISSES {
+        self.maybe_approval = None;
+        if was_running {
+          self.start().await?;
+        }
+        return Err(TeamCraftError::LinkAttemptEnded);
+      }
+      return Err(TeamCraftError::LinkCodeRejected);
+    }
     let pending = self
       .maybe_approval
       .take()
@@ -846,6 +938,7 @@ impl Engine {
 
   fn adopt(&mut self, mut client: CoreClient) {
     self.attach_call_sink(&mut client);
+    self.link_requests = client.link_request_list();
     self.identity_fingerprint = client.identity_fingerprint();
     self.maybe_backend = Some(
       CoreChatBackend::new(self.store.clone(), client.user_id(), Box::new(SystemClock))
@@ -885,6 +978,7 @@ impl Engine {
             self.client_settings(),
           ) {
             self.attach_call_sink(&mut client);
+            self.link_requests = client.link_request_list();
             self.client = ClientSlot::Idle(Box::new(client));
           }
         },

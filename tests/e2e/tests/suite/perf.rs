@@ -405,7 +405,6 @@ async fn seed(stack: &Stack, alice: &mut Peer, bob: &mut Peer, scale: Scale) -> 
           file_name: format!("photo-{index}.jpg"),
           media_type: "image/jpeg".into(),
           content: IMAGES[index % IMAGES.len()].to_vec(),
-          maybe_duration_ms: None,
         },
       )
       .await

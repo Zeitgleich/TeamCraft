@@ -1,7 +1,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
-use teamcraft_proto::UserId;
+use teamcraft_proto::{Base64Bytes, DeviceLinkPlatform, DeviceLinkRequest, UserId};
 use tokio::sync::mpsc;
 
 use crate::config::RendezvousConfig;
@@ -16,6 +17,8 @@ pub enum Signal {
   PeerJoined,
   /// The peer left; the relay is gone.
   PeerLeft,
+  /// A device of the user denied the link request of the device waiting here.
+  Rejected,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -38,6 +41,15 @@ pub enum RelayError {
   Closed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum AnnounceError {
+  /// No relay of the caller where only the new device waits: nothing to approve.
+  #[error("no device is waiting at that rendezvous")]
+  NotWaiting,
+  #[error("the rendezvous already has a link request")]
+  AlreadyAnnounced,
+}
+
 /// A device attached to a rendezvous.
 pub struct Joined {
   pub slot: usize,
@@ -57,12 +69,25 @@ struct Limits {
   max_total_bytes: usize,
   max_pending_frames: usize,
   max_per_user: usize,
+  /// How long a link request stays open; the relay's lifetime.
+  request_ttl: Duration,
 }
 
 #[derive(Default)]
 struct Inner {
   channels: HashMap<String, Channel>,
   per_user: HashMap<UserId, usize>,
+  /// Link requests of devices waiting in a relay (e2ee.md §5), by rendezvous ID. In memory like
+  /// the relays: a restart ends both, and the new device starts over.
+  requests: HashMap<String, PendingRequest>,
+}
+
+struct PendingRequest {
+  user: UserId,
+  key: Base64Bytes,
+  device_name: String,
+  platform: DeviceLinkPlatform,
+  announced_at: Instant,
 }
 
 struct Channel {
@@ -81,6 +106,7 @@ impl RendezvousHub {
         max_total_bytes: config.max_total_bytes,
         max_pending_frames: config.max_pending_frames,
         max_per_user: config.max_per_user,
+        request_ttl: Duration::from_secs(config.ttl_secs),
       },
       inner: Mutex::new(Inner::default()),
     }
@@ -159,11 +185,112 @@ impl RendezvousHub {
     }
   }
 
-  /// A device is gone (closed, expired, errored): the relay ends and the peer is told.
-  pub fn leave(&self, id: &str, slot: usize) {
+  /// Announces the device waiting at `id` (slot 0, owned by `user`) to the user's other devices.
+  pub fn announce(
+    &self,
+    id: &str,
+    user: UserId,
+    key: Base64Bytes,
+    device_name: String,
+    platform: DeviceLinkPlatform,
+    now: Instant,
+  ) -> Result<DeviceLinkRequest, AnnounceError> {
     let mut inner = self.lock();
+    let is_waiting = inner.channels.get(id).is_some_and(|channel| {
+      channel.user == user && channel.senders[0].is_some() && channel.senders[1].is_none()
+    });
+    if !is_waiting {
+      return Err(AnnounceError::NotWaiting);
+    }
+    inner.prune_requests(now, self.limits.request_ttl);
+    if inner.requests.contains_key(id) {
+      return Err(AnnounceError::AlreadyAnnounced);
+    }
+    let request = DeviceLinkRequest {
+      id: id.to_owned(),
+      key: key.clone(),
+      device_name: device_name.clone(),
+      platform: platform.clone(),
+      expires_in_secs: self.limits.request_ttl.as_secs(),
+    };
+    inner.requests.insert(
+      id.to_owned(),
+      PendingRequest {
+        user,
+        key,
+        device_name,
+        platform,
+        announced_at: now,
+      },
+    );
+    Ok(request)
+  }
+
+  /// The open link requests of `user`, with the time they have left.
+  pub fn pending_requests(&self, user: UserId, now: Instant) -> Vec<DeviceLinkRequest> {
+    let mut inner = self.lock();
+    inner.prune_requests(now, self.limits.request_ttl);
+    let mut requests: Vec<_> = inner
+      .requests
+      .iter()
+      .filter(|(_, request)| request.user == user)
+      .map(|(id, request)| {
+        let left = self
+          .limits
+          .request_ttl
+          .saturating_sub(now.saturating_duration_since(request.announced_at));
+        (
+          request.announced_at,
+          DeviceLinkRequest {
+            id: id.clone(),
+            key: request.key.clone(),
+            device_name: request.device_name.clone(),
+            platform: request.platform.clone(),
+            expires_in_secs: left.as_secs(),
+          },
+        )
+      })
+      .collect();
+    requests.sort_by_key(|(announced_at, _)| *announced_at);
+    requests.into_iter().map(|(_, request)| request).collect()
+  }
+
+  /// Drops the request of `id` (taken up, gone); returns its owner if there was one.
+  pub fn close_request(&self, id: &str) -> Option<UserId> {
+    self.lock().requests.remove(id).map(|request| request.user)
+  }
+
+  /// Drops the request of `id` if it is `user`'s; `false` if there is none of theirs.
+  pub fn withdraw(&self, id: &str, user: UserId) -> bool {
+    let mut inner = self.lock();
+    if inner.requests.get(id).is_none_or(|request| request.user != user) {
+      return false;
+    }
+    inner.requests.remove(id);
+    true
+  }
+
+  /// A device of `user` denies the request: it is dropped and the waiting device is told. `false`
+  /// if the request is not (or no longer) the user's.
+  pub fn reject(&self, id: &str, user: UserId) -> bool {
+    let mut inner = self.lock();
+    if inner.requests.get(id).is_none_or(|request| request.user != user) {
+      return false;
+    }
+    inner.requests.remove(id);
+    if let Some(Some(waiting)) = inner.channels.get(id).map(|channel| &channel.senders[0]) {
+      let _ = waiting.try_send(Signal::Rejected);
+    }
+    true
+  }
+
+  /// A device is gone (closed, expired, errored): the relay ends and the peer is told. Returns the
+  /// owner of the link request that went with it, if any (its prompts have to go).
+  pub fn leave(&self, id: &str, slot: usize) -> Option<UserId> {
+    let mut inner = self.lock();
+    let request_owner = inner.requests.remove(id).map(|request| request.user);
     let Some(channel) = inner.channels.remove(id) else {
-      return;
+      return request_owner;
     };
     if let Some(count) = inner.per_user.get_mut(&channel.user) {
       *count = count.saturating_sub(1);
@@ -174,10 +301,19 @@ impl RendezvousHub {
     if let Some(peer) = &channel.senders[1 - slot] {
       let _ = peer.try_send(Signal::PeerLeft);
     }
+    request_owner
   }
 
   fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
     self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+  }
+}
+
+impl Inner {
+  fn prune_requests(&mut self, now: Instant, ttl: Duration) {
+    self
+      .requests
+      .retain(|_, request| now.saturating_duration_since(request.announced_at) < ttl);
   }
 }
 
@@ -287,5 +423,137 @@ mod tests {
     hub.leave("r1", 0);
     assert!(hub.join("r3", user(1)).is_ok());
     assert!(hub.join("r4", user(2)).is_ok(), "other users are unaffected");
+  }
+
+  mod link_requests {
+    use super::*;
+
+    fn announce(
+      hub: &RendezvousHub,
+      id: &str,
+      owner: UserId,
+      at: Instant,
+    ) -> Result<DeviceLinkRequest, AnnounceError> {
+      hub.announce(
+        id,
+        owner,
+        Base64Bytes::new(vec![1; 32]),
+        "Phone".into(),
+        DeviceLinkPlatform::Android,
+        at,
+      )
+    }
+
+    #[test]
+    fn only_a_device_that_waits_in_its_own_relay_can_be_announced() {
+      let hub = hub();
+      let now = Instant::now();
+      assert_eq!(
+        announce(&hub, "r", user(1), now).err(),
+        Some(AnnounceError::NotWaiting)
+      );
+      let _new_device = hub.join("r", user(1)).unwrap();
+      assert_eq!(
+        announce(&hub, "r", user(2), now).err(),
+        Some(AnnounceError::NotWaiting)
+      );
+      let request = announce(&hub, "r", user(1), now).unwrap();
+      assert_eq!(request.expires_in_secs, 300);
+      assert_eq!(
+        announce(&hub, "r", user(1), now).err(),
+        Some(AnnounceError::AlreadyAnnounced)
+      );
+      // Once an approving device sits in the relay there is nothing left to announce.
+      let _approver = hub.join("r", user(1)).unwrap();
+      hub.close_request("r");
+      assert_eq!(
+        announce(&hub, "r", user(1), now).err(),
+        Some(AnnounceError::NotWaiting)
+      );
+    }
+
+    #[test]
+    fn requests_are_listed_for_their_owner_with_the_time_left_and_expire() {
+      let hub = hub();
+      let start = Instant::now();
+      let _a = hub.join("r1", user(1)).unwrap();
+      announce(&hub, "r1", user(1), start).unwrap();
+      assert!(hub.pending_requests(user(2), start).is_empty());
+      let listed = hub.pending_requests(user(1), start + Duration::from_secs(100));
+      assert_eq!(listed.len(), 1);
+      assert_eq!(listed[0].expires_in_secs, 200);
+      assert!(
+        hub
+          .pending_requests(user(1), start + Duration::from_secs(300))
+          .is_empty()
+      );
+    }
+
+    #[test]
+    fn open_requests_are_bounded_by_the_relays_of_the_user() {
+      let hub = hub();
+      let now = Instant::now();
+      let _a = hub.join("r1", user(1)).unwrap();
+      let _b = hub.join("r2", user(1)).unwrap();
+      announce(&hub, "r1", user(1), now).unwrap();
+      announce(&hub, "r2", user(1), now).unwrap();
+      // A request needs its own relay, and a user has `max_per_user` of them.
+      assert_eq!(hub.join("r3", user(1)).err(), Some(JoinError::TooMany));
+      assert_eq!(
+        announce(&hub, "r3", user(1), now).err(),
+        Some(AnnounceError::NotWaiting)
+      );
+      assert_eq!(hub.pending_requests(user(1), now).len(), 2);
+      hub.leave("r1", 0);
+      assert_eq!(hub.pending_requests(user(1), now).len(), 1);
+    }
+
+    #[test]
+    fn rejecting_tells_the_waiting_device_and_only_the_owner_may() {
+      let hub = hub();
+      let now = Instant::now();
+      let mut waiting = hub.join("r", user(1)).unwrap();
+      announce(&hub, "r", user(1), now).unwrap();
+      assert!(!hub.reject("r", user(2)));
+      assert!(hub.reject("r", user(1)));
+      assert_eq!(drain(&mut waiting), vec![Signal::Rejected]);
+      assert!(
+        !hub.reject("r", user(1)),
+        "a decided request can't be decided again"
+      );
+      assert!(hub.pending_requests(user(1), now).is_empty());
+    }
+
+    #[test]
+    fn withdrawing_is_for_the_owner_only_and_leaving_takes_the_request_along() {
+      let hub = hub();
+      let now = Instant::now();
+      let _waiting = hub.join("r", user(1)).unwrap();
+      announce(&hub, "r", user(1), now).unwrap();
+      assert!(!hub.withdraw("r", user(2)));
+      assert_eq!(
+        hub.pending_requests(user(1), now).len(),
+        1,
+        "somebody else's call changed nothing"
+      );
+      assert_eq!(hub.leave("r", 0), Some(user(1)));
+      assert!(hub.pending_requests(user(1), now).is_empty());
+      assert_eq!(hub.leave("r", 0), None);
+    }
+
+    #[test]
+    fn a_request_that_was_taken_up_is_closed_once() {
+      let hub = hub();
+      let _waiting = hub.join("r", user(1)).unwrap();
+      announce(&hub, "r", user(1), Instant::now()).unwrap();
+      let _approver = hub.join("r", user(1)).unwrap();
+      assert_eq!(hub.close_request("r"), Some(user(1)));
+      assert_eq!(hub.close_request("r"), None);
+      assert_eq!(
+        hub.leave("r", 1),
+        None,
+        "a taken-up request needs no second announcement"
+      );
+    }
   }
 }

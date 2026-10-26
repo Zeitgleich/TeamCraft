@@ -3,4 +3,4 @@
 pub mod connection;
 mod hub;
 
-pub use hub::{JoinError, Joined, RelayError, RendezvousHub, Signal};
+pub use hub::{AnnounceError, JoinError, Joined, RelayError, RendezvousHub, Signal};

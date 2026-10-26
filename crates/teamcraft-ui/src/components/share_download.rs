@@ -74,10 +74,14 @@ pub fn ShareDownloadPage(id: String, fragment: String) -> impl IntoView {
         Ok(response) => {
           // Without a password the name is readable right away.
           if !is_protected {
-            match open_fragment(&fragment.get_value(), None) {
+            let Some(text) = fragment.try_get_value() else {
+              return;
+            };
+            match open_fragment(&text, None) {
               Ok(link) => {
                 file_name.set_if_alive(Some(display_file_name(&link.file_name)));
-                opened.set_value(Some(link));
+                // A page closed meanwhile drops the link with it.
+                let _ = opened.try_set_value(Some(link));
               },
               Err(_) => {
                 phase.set_if_alive(Phase::Failed(Failure::BadLink));
@@ -104,12 +108,19 @@ pub fn ShareDownloadPage(id: String, fragment: String) -> impl IntoView {
       let client = client.clone();
       spawn_local(async move {
         platform::sleep(PAINT_DELAY).await;
-        if opened.with_value(Option::is_none) {
-          let secret = SecretBytes::new(password.get_untracked().into_bytes());
-          match open_fragment(&fragment.get_value(), Some(&secret)) {
+        let Some(is_closed) = opened.try_with_value(Option::is_none) else {
+          return;
+        };
+        if is_closed {
+          let (Some(typed), Some(text)) = (password.try_get_untracked(), fragment.try_get_value()) else {
+            return;
+          };
+          let secret = SecretBytes::new(typed.into_bytes());
+          match open_fragment(&text, Some(&secret)) {
             Ok(link) => {
               file_name.set_if_alive(Some(display_file_name(&link.file_name)));
-              opened.set_value(Some(link));
+              // A page closed meanwhile drops the link with it.
+              let _ = opened.try_set_value(Some(link));
             },
             Err(ShareLinkError::WrongPassword) => {
               has_wrong_password.set_if_alive(true);
@@ -122,7 +133,8 @@ pub fn ShareDownloadPage(id: String, fragment: String) -> impl IntoView {
             },
           }
         }
-        let outcome = fetch_and_decrypt(&client, &id.get_value(), opened, grant).await;
+        let Some(id) = id.try_get_value() else { return };
+        let outcome = fetch_and_decrypt(&client, &id, opened, grant).await;
         match outcome {
           Ok(blob) => {
             let Some(url) = ObjectUrl::from_blob(&blob) else {
@@ -240,8 +252,9 @@ async fn fetch_and_decrypt(
   opened: StoredValue<Option<OpenedShareLink>, LocalStorage>,
   grant: StoredValue<Option<String>>,
 ) -> Result<web_sys::Blob, ShareError> {
-  let download = client.start_download(id, grant.get_value()).await?;
-  grant.set_value(Some(download.grant.clone()));
+  let download = client.start_download(id, grant.try_get_value().flatten()).await?;
+  // A page closed meanwhile has no retry to keep the grant for.
+  let _ = grant.try_set_value(Some(download.grant.clone()));
   if download.size_bytes > MAX_PAGE_DOWNLOAD_BYTES {
     return Err(ShareError::TooLarge);
   }

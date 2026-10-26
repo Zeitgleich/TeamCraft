@@ -61,6 +61,7 @@ use teamcraft_proto::{
   InviteResponse, ListCategoriesResponse, ListInvitesResponse, SpaceResponse, UpdateCategoryRequest,
   UpdateConversationRequest, UpdateSpaceMemberRequest, UpdateSpaceRequest,
 };
+use teamcraft_proto::{CreateDeviceLinkRequest, DeviceLinkRequest};
 use teamcraft_proto::{CreateInstantMeetingRequest, MeetingId, MeetingResponse};
 use teamcraft_proto::{GatewayInfoResponse, PushGatewayResponse, WebPushKeyResponse};
 use teamcraft_proto::{
@@ -116,6 +117,18 @@ pub trait ServerApi {
   ) -> impl Future<Output = Result<DeviceListResponse, ApiError>>;
   /// Revokes one of the caller's own devices (it can't log in any more).
   fn revoke_device(&self, device: DeviceId) -> impl Future<Output = Result<(), ApiError>>;
+
+  /// The new device, waiting in the relay, asks the caller's other devices to approve it.
+  fn announce_device_link(
+    &self,
+    request: &CreateDeviceLinkRequest,
+  ) -> impl Future<Output = Result<DeviceLinkRequest, ApiError>>;
+  /// The link requests open for the caller; read on every (re)connect of the gateway.
+  fn device_links(&self) -> impl Future<Output = Result<Vec<DeviceLinkRequest>, ApiError>>;
+  /// Denies a request; the waiting device is told.
+  fn reject_device_link(&self, request_id: &str) -> impl Future<Output = Result<(), ApiError>>;
+  /// The new device gives up its request.
+  fn withdraw_device_link(&self, request_id: &str) -> impl Future<Output = Result<(), ApiError>>;
 
   fn upload_key_packages(
     &self,

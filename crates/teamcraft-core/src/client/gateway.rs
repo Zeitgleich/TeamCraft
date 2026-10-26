@@ -148,6 +148,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           } else {
             self.maybe_replay_left = Some(replayed);
           }
+          self.refresh_link_requests().await;
           return Ok(GatewayStart {
             connection,
             outcome: GatewayOutcome::Resumed,
@@ -197,6 +198,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.sync_fresh_session(session_id),
     )
     .await?;
+    self.refresh_link_requests().await;
     Ok(GatewayStart {
       connection,
       outcome: GatewayOutcome::Fresh,
@@ -505,6 +507,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       | GatewayEvent::SystemEvent { .. }
       | GatewayEvent::UserGroupUpdate { .. }
       | GatewayEvent::LobbyDecision { .. } => Ok(()),
+      GatewayEvent::DeviceLinkRequested { request } => {
+        self.note_link_request(request);
+        Ok(())
+      },
+      GatewayEvent::DeviceLinkClosed { request_id, .. } => {
+        self.forget_link_request(&request_id);
+        Ok(())
+      },
       // Call roster and ringing go to the app's call handling (media runs outside the core).
       GatewayEvent::CallEnd {
         conversation_id,

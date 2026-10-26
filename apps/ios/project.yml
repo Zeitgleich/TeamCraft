@@ -57,6 +57,7 @@ targets:
       - sdk: AudioToolbox.framework
       - sdk: AVFAudio.framework
       - sdk: AVFoundation.framework
+      - sdk: VisionKit.framework
       - sdk: CoreFoundation.framework
       - sdk: CallKit.framework
       - sdk: Intents.framework
@@ -111,7 +112,7 @@ targets:
         BGTaskSchedulerPermittedIdentifiers: [de.zeitgleich.teamcraft.segment-prefetch]
         ITSAppUsesNonExemptEncryption: true
         NSMicrophoneUsageDescription: "TeamCraft uses the microphone for calls."
-        NSCameraUsageDescription: "TeamCraft uses the camera for video calls."
+        NSCameraUsageDescription: "TeamCraft uses the camera for video calls and to scan the code of a new device you link."
         NSFaceIDUsageDescription: "TeamCraft uses Face ID to unlock the app when the app lock is on."
         NSUserActivityTypes: [INSendMessageIntent, INStartCallIntent]
         # CFBundleURLTypes: the OIDC redirect (ASWebAuthenticationSession handles it itself, but a

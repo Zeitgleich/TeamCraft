@@ -236,16 +236,20 @@ extension StatusExpiryValue {
   }
 }
 
-/// Existing device: approves a new device by the code it shows (e2ee.md §5).
+/// Existing device: joins a new device by the code it shows (scanned or typed), then the user types the
+/// short code the new device shows (e2ee.md §5). This device never shows that code.
 struct ApproveLinkView: View {
   @Environment(AppModel.self) private var model
 
-  private enum Step {
-    case enterCode, compare(String), done, failed
+  private enum Step: Equatable {
+    case enterCode, typeCode, done
   }
 
   @State private var code = ""
   @State private var step = Step.enterCode
+  @State private var maybeError: LocalizedStringKey?
+  @State private var isWorking = false
+  @State private var isScanning = false
 
   var body: some View {
     Form {
@@ -253,41 +257,64 @@ struct ApproveLinkView: View {
       case .enterCode:
         Section {
           Text("approve_hint").foregroundStyle(Theme.textMuted)
+          Button("approve_scan", systemImage: "qrcode.viewfinder") { isScanning = true }
           TextField("approve_code", text: $code, axis: .vertical)
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
             .font(.system(.body, design: .monospaced))
-          Button("approve_start") { Task { await approve() } }
-            .disabled(code.trimmingCharacters(in: .whitespaces).isEmpty)
+          Button("approve_start") { Task { await approve(code) } }
+            .disabled(isWorking || code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+          if let error = maybeError {
+            Text(error).font(.footnote).foregroundStyle(Theme.danger)
+          }
         }
-      case .compare(let shortCode):
+      case .typeCode:
         Section {
-          Text("approve_compare")
-          Text(shortCode).font(.system(.largeTitle, design: .monospaced).bold())
-          Button("approve_confirm") { Task { await confirm() } }
+          LinkTypedCodeForm(
+            onApproved: { step = .done },
+            onEnded: { restart(with: "link_attempt_ended") },
+            onCancel: {
+              Task { await model.cancelLinkApproval() }
+              restart(with: nil)
+            })
         }
       case .done:
         Section { Label("approve_done", systemImage: "checkmark.circle") }
-      case .failed:
-        Section {
-          Text("error_generic").foregroundStyle(Theme.danger)
-          Button("retry") { step = .enterCode }
-        }
       }
     }
     .navigationTitle("approve_title")
     .navigationBarTitleDisplayMode(.inline)
+    .sheet(isPresented: $isScanning) {
+      ScanLinkCodeView { scanned in
+        isScanning = false
+        code = scanned
+        Task { await approve(scanned) }
+      }
+    }
+    .onDisappear {
+      // Leaving the typed-code step: nothing is sent, the attempt is dropped.
+      if step == .typeCode { Task { await model.cancelLinkApproval() } }
+    }
   }
 
-  private func approve() async {
-    do { step = .compare(try await model.approveLink(code: code)) } catch { step = .failed }
-  }
-
-  private func confirm() async {
+  /// Joins the new device whose code was scanned or typed; the typed-code step follows.
+  private func approve(_ text: String) async {
+    guard !isWorking else { return }
+    isWorking = true
+    maybeError = nil
     do {
-      try await model.confirmLink()
-      step = .done
-    } catch { step = .failed }
+      try await model.approveLink(code: text)
+      step = .typeCode
+    } catch {
+      maybeError = AppFailure(CoreFailure(error)).message
+    }
+    isWorking = false
+  }
+
+  private func restart(with maybeMessage: LocalizedStringKey?) {
+    code = ""
+    maybeError = maybeMessage
+    step = .enterCode
   }
 }
 

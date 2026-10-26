@@ -65,6 +65,7 @@ use super::{
 };
 use crate::clock::{Clock, SystemClock};
 use crate::transfers::ByteCounter;
+use teamcraft_proto::{CreateDeviceLinkRequest, DeviceLinkRequest, ListDeviceLinksResponse};
 
 /// How long a TCP and TLS (or WebSocket) handshake may take.
 #[cfg(not(target_arch = "wasm32"))]
@@ -322,6 +323,34 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   async fn revoke_device(&self, device: DeviceId) -> Result<(), ApiError> {
     self
       .send_without_response::<()>(Method::DELETE, &format!("/devices/{device}"), None)
+      .await
+  }
+
+  async fn announce_device_link(
+    &self,
+    request: &CreateDeviceLinkRequest,
+  ) -> Result<DeviceLinkRequest, ApiError> {
+    self.send_json(Method::POST, "/device-links", request).await
+  }
+
+  async fn device_links(&self) -> Result<Vec<DeviceLinkRequest>, ApiError> {
+    Ok(
+      self
+        .get::<ListDeviceLinksResponse>("/device-links")
+        .await?
+        .requests,
+    )
+  }
+
+  async fn reject_device_link(&self, request_id: &str) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::POST, &format!("/device-links/{request_id}/reject"), None)
+      .await
+  }
+
+  async fn withdraw_device_link(&self, request_id: &str) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/device-links/{request_id}"), None)
       .await
   }
 
