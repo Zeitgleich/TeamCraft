@@ -64,6 +64,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -107,6 +108,7 @@ import de.zeitgleich.teamcraft.core.SendOptions
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.EmojiInput
+import de.zeitgleich.teamcraft.ui.FirstUnread
 import de.zeitgleich.teamcraft.ui.Mentions
 import de.zeitgleich.teamcraft.ui.PendingShare
 import de.zeitgleich.teamcraft.ui.TypingLine
@@ -137,11 +139,14 @@ fun ConversationScreen(
   var messages by remember { mutableStateOf<List<Message>>(emptyList()) }
   var extras by remember { mutableStateOf<Map<String, MessageExtras>>(emptyMap()) }
   var pinned by remember { mutableStateOf<List<Message>>(emptyList()) }
-  var maybeFirstUnread by remember { mutableStateOf<String?>(null) }
+  var firstUnread by remember { mutableStateOf<FirstUnread>(FirstUnread.Loading) }
+  // Counts sends from this screen's composer: each one brings the newest message into view.
+  var sentCount by remember { mutableIntStateOf(0) }
   var undecrypted by remember { mutableStateOf(0) }
   LaunchedEffect(conversationId) {
     // Where the user stopped reading, before marking the conversation read.
-    maybeFirstUnread = viewModel.readChat { query(ChatQueries.firstUnread(conversationId)).maybeMessage }
+    val maybeMessage = viewModel.readChat { query(ChatQueries.firstUnread(conversationId)).maybeMessage }
+    firstUnread = maybeMessage?.let { FirstUnread.At(it) } ?: FirstUnread.None
   }
   LaunchedEffect(changes, conversationId) {
     snapshot = viewModel.readChat { snapshot() }
@@ -178,7 +183,8 @@ fun ConversationScreen(
       snapshot = snapshot,
       messages = messages,
       extras = extras,
-      maybeFirstUnread = maybeFirstUnread,
+      firstUnread = firstUnread,
+      sentCount = sentCount,
       onOpenThread = onOpenThread,
       maybeOnReply = { message -> ReplyTarget.set(conversationId, message, snapshot?.name(message.author).orEmpty()) },
       modifier = Modifier.weight(1f),
@@ -187,7 +193,7 @@ fun ConversationScreen(
     )
     TypingIndicator(viewModel, conversationId, snapshot, changes)
     if (conversation?.canPost != false) {
-      Composer(viewModel, conversationId, maybeThread = null, snapshot = snapshot)
+      Composer(viewModel, conversationId, maybeThread = null, snapshot = snapshot, onSent = { sentCount++ })
     } else {
       Text(
         stringResource(R.string.read_only_channel),
@@ -212,6 +218,7 @@ fun ThreadScreen(
   var messages by remember { mutableStateOf<List<Message>>(emptyList()) }
   var extras by remember { mutableStateOf<Map<String, MessageExtras>>(emptyMap()) }
   var isFollowed by remember { mutableStateOf(false) }
+  var sentCount by remember { mutableIntStateOf(0) }
   LaunchedEffect(changes, threadId) {
     snapshot = viewModel.readChat { snapshot() }
     messages = viewModel.readChat { query(ChatQueries.thread(conversationId, threadId)).messages } ?: emptyList()
@@ -237,7 +244,8 @@ fun ThreadScreen(
       snapshot = snapshot,
       messages = messages,
       extras = extras,
-      maybeFirstUnread = null,
+      firstUnread = FirstUnread.None,
+      sentCount = sentCount,
       onOpenThread = null,
       maybeOnReply = null,
       modifier = Modifier.weight(1f),
@@ -245,7 +253,7 @@ fun ThreadScreen(
       onOpenPermalink = onOpenPermalink,
     )
     TypingIndicator(viewModel, conversationId, snapshot, changes)
-    Composer(viewModel, conversationId, maybeThread = threadId, snapshot = snapshot)
+    Composer(viewModel, conversationId, maybeThread = threadId, snapshot = snapshot, onSent = { sentCount++ })
   }
 }
 
@@ -507,7 +515,8 @@ private fun MessageList(
   snapshot: ChatSnapshot?,
   messages: List<Message>,
   extras: Map<String, MessageExtras>,
-  maybeFirstUnread: String?,
+  firstUnread: FirstUnread,
+  sentCount: Int,
   onOpenThread: ((String) -> Unit)?,
   maybeOnReply: ((Message) -> Unit)?,
   modifier: Modifier,
@@ -520,7 +529,8 @@ private fun MessageList(
     snapshot = snapshot,
     messages = messages,
     extras = extras,
-    maybeFirstUnread = maybeFirstUnread,
+    firstUnread = firstUnread,
+    sentCount = sentCount,
     onOpenThread = onOpenThread,
     maybeOnReply = maybeOnReply,
     onLongPress = { maybeSelected = it },
@@ -724,7 +734,13 @@ object ReplyTarget {
 /** The message field with its suggestions, reply line and attachments (internal: screenshots show it with sample data). */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-internal fun Composer(viewModel: MainViewModel, conversationId: String, maybeThread: String?, snapshot: ChatSnapshot?) {
+internal fun Composer(
+  viewModel: MainViewModel,
+  conversationId: String,
+  maybeThread: String?,
+  snapshot: ChatSnapshot?,
+  onSent: () -> Unit = {},
+) {
   val context = LocalContext.current
   var text by rememberSaveable(conversationId, maybeThread) { mutableStateOf("") }
   var isDraftLoaded by remember(conversationId, maybeThread) { mutableStateOf(false) }
@@ -789,6 +805,7 @@ internal fun Composer(viewModel: MainViewModel, conversationId: String, maybeThr
     wantsAcknowledgement = false
     isSilent = false
     ReplyTarget.current.value = null
+    onSent()
   }
   var isConfirmingChannel by remember { mutableStateOf(false) }
   if (isConfirmingChannel) {
