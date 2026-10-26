@@ -13,6 +13,7 @@ mod calls;
 mod catch_up;
 mod custom_status;
 pub mod devices;
+pub mod direct_uploads;
 mod enroll;
 pub mod files;
 mod gateway;

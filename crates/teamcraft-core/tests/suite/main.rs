@@ -17,6 +17,7 @@ mod connection;
 mod custom_status;
 mod dev_stack;
 mod devices;
+mod direct_uploads;
 mod dm_setup;
 mod enrollment;
 mod files;
