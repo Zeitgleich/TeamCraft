@@ -91,33 +91,36 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       (own, roster, policy, welcomes),
       (threads, unread, settings, key_packages),
       (key_bag, device_list, links, presence),
-    ) = futures_util::join!(
-      async { futures_util::join!(api.sync_heads(), api.list_spaces(), api.list_conversations()) },
-      async {
-        futures_util::join!(
-          api.user(me),
-          api.list_workspace_log(&WorkspaceLogKind::Roster, &roster_query),
-          api.list_workspace_log(&WorkspaceLogKind::Policy, &policy_query),
-          api.list_welcomes(device, &welcomes_query),
-        )
-      },
-      async {
-        futures_util::join!(
-          api.list_threads(&threads_query),
-          api.unread(),
-          api.notification_settings(),
-          api.key_package_status(device),
-        )
-      },
-      async {
-        futures_util::join!(
-          api.key_bag(),
-          api.device_list(me),
-          api.device_links(),
-          presence_of(api, &known),
-        )
-      },
-    );
+    ) = Box::pin(async {
+      futures_util::join!(
+        async { futures_util::join!(api.sync_heads(), api.list_spaces(), api.list_conversations()) },
+        async {
+          futures_util::join!(
+            api.user(me),
+            api.list_workspace_log(&WorkspaceLogKind::Roster, &roster_query),
+            api.list_workspace_log(&WorkspaceLogKind::Policy, &policy_query),
+            api.list_welcomes(device, &welcomes_query),
+          )
+        },
+        async {
+          futures_util::join!(
+            api.list_threads(&threads_query),
+            api.unread(),
+            api.notification_settings(),
+            api.key_package_status(device),
+          )
+        },
+        async {
+          futures_util::join!(
+            api.key_bag(),
+            api.device_list(me),
+            api.device_links(),
+            presence_of(api, &known),
+          )
+        },
+      )
+    })
+    .await;
     self.read_ahead = ReadAhead {
       own: Some(own),
       roster: Some((roster_after, roster)),
@@ -144,13 +147,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub(super) async fn read_resumed(&self, known: Vec<UserId>) -> ReadAhead {
     let api = &self.api;
     let threads_query = self.threads_query();
-    let (own, threads, unread, links, presence) = futures_util::join!(
-      api.user(self.user_id()),
-      api.list_threads(&threads_query),
-      api.unread(),
-      api.device_links(),
-      presence_of(api, &known),
-    );
+    // On the heap: five HTTP futures side by side are large, and this one is nested in the
+    // connection's own future.
+    let (own, threads, unread, links, presence) = Box::pin(async {
+      futures_util::join!(
+        api.user(self.user_id()),
+        api.list_threads(&threads_query),
+        api.unread(),
+        api.device_links(),
+        presence_of(api, &known),
+      )
+    })
+    .await;
     ReadAhead {
       own: Some(own),
       read_state: Some((threads, unread)),

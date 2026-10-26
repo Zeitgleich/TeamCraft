@@ -31,6 +31,11 @@ pub enum GatewayOutcome {
   Fresh,
 }
 
+/// A connection heard from this recently is resumed with its first reads beside the answer; after
+/// longer (an app started again, a laptop that slept) the session is likely gone and the reads wait
+/// for the answer, so a refused resume costs no reads. Well under the server's default window.
+const LIKELY_RESUMABLE_MS: i64 = 60_000;
+
 /// How long each step of the handshake (socket and `hello`, the answer to `resume` or `identify`)
 /// may take when the caller doesn't say: a server that accepts the socket and then stays silent must
 /// not hold the reconnect loop forever.
@@ -123,6 +128,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let outcome = self.start_gateway_traced(timing).await;
     // Answers no step took this time must not stand in for a later read.
     self.drop_read_ahead();
+    if outcome.is_ok() {
+      self.maybe_last_heard_ms = Some(self.now_ms());
+    }
     outcome
   }
 
@@ -142,14 +150,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.trace_lap("socket and hello");
       // The reads once per connection go out while the server answers: the session kept every
       // event since the device was last connected, so nothing read now can miss a change (#714).
+      let is_likely_resumable = self
+        .maybe_last_heard_ms
+        .is_some_and(|heard| self.now_ms().saturating_sub(heard) < LIKELY_RESUMABLE_MS);
       let known = self.known_people_ahead()?;
-      let (answer, read_ahead) = futures_util::join!(
-        receive(&mut connection, handshake_timeout),
-        self.read_resumed(known),
-      );
+      let (answer, maybe_read_ahead) =
+        futures_util::join!(receive(&mut connection, handshake_timeout), async {
+          if is_likely_resumable {
+            Some(self.read_resumed(known.clone()).await)
+          } else {
+            None
+          }
+        },);
       match answer? {
         GatewayServerMessage::Resumed { replayed } => {
-          self.read_ahead = read_ahead;
+          self.read_ahead = match maybe_read_ahead {
+            Some(read_ahead) => read_ahead,
+            None => self.read_resumed(known).await,
+          };
           if replayed > 0 {
             // `GET /unread` already counts the replayed messages (see `resync_live_state`).
             self.read_ahead.read_state = None;
@@ -359,6 +377,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Applies one frame from the server.
   pub async fn handle_frame(&mut self, frame: GatewayServerMessage) -> Result<(), CoreError> {
+    self.maybe_last_heard_ms = Some(self.now_ms());
     match frame {
       GatewayServerMessage::Event { seq, event } => {
         self.handle_event(event).await?;

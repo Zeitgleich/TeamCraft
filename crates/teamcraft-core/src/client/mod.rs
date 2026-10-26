@@ -287,6 +287,9 @@ pub struct Client<A, S> {
   maybe_heads: Option<heads::HeadsInSync>,
   /// The first reads of a gateway connection, read at once and waiting for their steps (#714).
   read_ahead: read_ahead::ReadAhead,
+  /// When this process last heard from the gateway (any frame): a reconnect soon after reads its
+  /// once-per-connection data while the server answers `resume`.
+  maybe_last_heard_ms: Option<i64>,
 }
 
 impl Default for ClientSettings {
@@ -383,6 +386,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       sync_trace: Default::default(),
       maybe_heads: None,
       read_ahead: Default::default(),
+      maybe_last_heard_ms: None,
     };
     // A catch-up the app was closed during left its marks; the next one sets them again.
     catch_up::clear_marks(&client.store)?;

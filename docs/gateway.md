@@ -35,8 +35,10 @@ A fresh session costs what changed since the device was last caught up, not what
   for keys, an earlier failure). The heads only let the client skip reads; nothing read is trusted
   because of them. A server without the endpoint (404) makes the client read everything, as before.
 - A resume reads the once-per-connection data (counts and threads, presence, link requests, its own
-  summary) while the server answers `resume`: the session kept every event in between, so nothing read
-  then can be missed. With events to replay the counts are read only after the replay (`counted_through`).
+  summary) at once, and when the connection was heard from within the last minute (a network blip, not
+  an app started again) already while the server answers `resume`: the session kept every event in
+  between, so nothing read then can be missed. With events to replay the counts are read only after the
+  replay (`counted_through`).
 
 The client logs where the time of each connection went (`gateway connection caught up` with the phases;
 `Client::last_connection_phases`); docs/performance.md, "Coming back: requests and round trips", has the

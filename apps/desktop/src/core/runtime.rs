@@ -1642,11 +1642,11 @@ impl Core {
       maybe_security: security_of(client).ok(),
       on_change: on_change.as_ref(),
     };
-    let work = async {
+    let work = Box::pin(async {
       let ran = run_commands(connection, client, commands).await;
       let flushed = flush_sends_of(connection, client).await;
       (ran, flushed)
-    };
+    });
     let served = serve_reads_during(work, requests, &mut reads).await;
     self.has_queued_sends |= served.has_queued;
     let (ran, _) = served.output;
@@ -1766,7 +1766,9 @@ impl Core {
       maybe_security: security_of(client).ok(),
       on_change: on_change.as_ref(),
     };
-    let served = serve_reads_during(connection.connect_if_due(client), requests, &mut reads).await;
+    // On the heap: the connection's future holds the whole sync, too big for the core thread's stack.
+    let connecting = Box::pin(connection.connect_if_due(client));
+    let served = serve_reads_during(connecting, requests, &mut reads).await;
     self.has_queued_sends |= served.has_queued;
     if served.output.is_some() {
       self.repeat_reports().await;
