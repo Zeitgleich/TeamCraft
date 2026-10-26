@@ -18,6 +18,7 @@ use crate::components::admin_settings::SettingsSection;
 use crate::components::admin_updates::UpdatesPolicySection;
 use crate::components::admin_users::UsersSection;
 use crate::components::icons::{Icon, IconName};
+use crate::components::roster_banner::RosterBanner;
 use crate::history::back_or_home;
 use crate::i18n::use_i18n;
 use crate::reactive::use_interval_while_visible;
@@ -81,6 +82,8 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
         </ul>
       </nav>
       <div class="admin-content">
+        // On every page: an admin role nobody signed is refused by other people's apps (#765).
+        <RosterBanner />
         {move || {
           maybe_error.get().map(|detail| {
             let text = match admin_error_i18n_key(&detail) {

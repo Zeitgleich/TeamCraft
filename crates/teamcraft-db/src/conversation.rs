@@ -70,6 +70,8 @@ pub struct ConversationFilter {
   pub only_joined: bool,
   /// Only public, unarchived channels the viewer is not in yet (channel browser).
   pub only_joinable: bool,
+  /// With `only_joinable`: private channels too, for workspace admins (admin.md §2.4).
+  pub includes_private: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -228,14 +230,15 @@ impl Database {
          WHERE ($2::bigint IS NULL OR c.id = $2)
            AND ($3::bigint IS NULL OR c.space_id = $3)
            AND (NOT $4 OR m.user_id IS NOT NULL)
-           AND (NOT $5 OR (c.kind = 'channel' AND c.visibility = 'public' AND c.archived_at IS NULL
-                           AND m.user_id IS NULL))
+           AND (NOT $5 OR (c.kind = 'channel' AND (c.visibility = 'public' OR $6)
+                           AND c.archived_at IS NULL AND m.user_id IS NULL))
          ORDER BY c.id"#,
       to_db(viewer),
       filter.maybe_conversation.map(to_db),
       filter.maybe_space.map(to_db),
       filter.only_joined,
       filter.only_joinable,
+      filter.includes_private,
     )
     .fetch_all(self.pool())
     .await?;

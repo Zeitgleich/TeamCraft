@@ -475,18 +475,10 @@ impl AdminLive {
     self.data.borrow().maybe_error.clone()
   }
 
-  /// Owners and admins by role: the first signed roster, if the workspace has none.
+  /// Owners and admins as the server lists them (active accounts only, each once): proposed for the
+  /// first roster, and as additions to a signed one (issue #765).
   pub fn roster_candidates(&self) -> (Vec<UserId>, Vec<UserId>) {
-    let data = self.data.borrow();
-    let by_role = |wanted: Role| {
-      data
-        .users
-        .iter()
-        .filter(|user| user.role == wanted)
-        .map(|user| user.user.id)
-        .collect()
-    };
-    (by_role(Role::Owner), by_role(Role::Admin))
+    teamcraft_client_api::admin::role_holders(&self.data.borrow().users)
   }
 
   /// Fetches everything now; a part that fails keeps its previous value and shows its error. Only

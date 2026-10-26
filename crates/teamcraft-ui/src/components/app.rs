@@ -38,6 +38,7 @@ use crate::components::notification_prompt::NotificationPrompt;
 use crate::components::offline_banner::OfflineBanner;
 use crate::components::profile_views::UserProfileDialog;
 use crate::components::rail::SpaceRail;
+use crate::components::roster_banner::RosterBanner;
 use crate::components::security_ui::{DeviceApprovalDialog, LinkDeviceDialog};
 use crate::components::settings_tabs::apply_call_prefs;
 #[cfg(target_arch = "wasm32")]
@@ -262,6 +263,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         <ReleaseBanner />
         <OfflineBanner />
         <StorageBanner />
+        <RosterBanner />
         <NotificationPrompt />
         <AnnouncementBanner />
         <UpdateNotice />
