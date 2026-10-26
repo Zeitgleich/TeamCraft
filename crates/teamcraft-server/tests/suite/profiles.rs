@@ -163,6 +163,12 @@ mod avatars {
     let completed = app.post(&carol, "/me/avatar/complete", json!({})).await;
     assert_eq!(completed.status, StatusCode::OK, "{}", completed.body);
     assert_eq!(completed.body["has_avatar"], true);
+    assert!(
+      completed.body["avatar_version"]
+        .as_str()
+        .is_some_and(|version| !version.contains('/')),
+      "clients key their cached copy by an opaque version"
+    );
 
     let avatar = app.get(&dave, &format!("/users/{carol_id}/avatar")).await;
     assert_eq!(avatar.status, StatusCode::OK, "{}", avatar.body);

@@ -8,16 +8,16 @@ use web_sys::{IdbDatabase, IdbFactory, IdbOpenDbRequest, IdbRequest, IdbTransact
 use crate::store::StoreError;
 
 /// Object store with the encrypted records.
-pub(super) const RECORDS: &str = "records";
+pub(crate) const RECORDS: &str = "records";
 /// Object store with the database key wrapping (a non-extractable `CryptoKey` and the wrapped key).
-pub(super) const KEYS: &str = "keys";
+pub(crate) const KEYS: &str = "keys";
 /// Schema version: bump with an upgrade step when object stores change.
 const SCHEMA_VERSION: u32 = 1;
 /// How long deleting the database may wait for other pages to close it.
 const DELETE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Opens (and on first use creates) the database `name`.
-pub(super) async fn open_database(name: &str) -> Result<IdbDatabase, StoreError> {
+pub(crate) async fn open_database(name: &str) -> Result<IdbDatabase, StoreError> {
   let request = factory()?
     .open_with_u32(name, SCHEMA_VERSION)
     .map_err(|error| js_error("open", &error))?;
@@ -50,7 +50,7 @@ pub(super) async fn open_database(name: &str) -> Result<IdbDatabase, StoreError>
 /// close it (`versionchange`; this app's pages do); if one doesn't (`blocked`), or nothing happens
 /// within [`DELETE_TIMEOUT`], this fails with [`StoreError::InUse`] instead of waiting forever.
 /// The browser then still deletes it once the last page let go.
-pub(super) async fn delete_database(name: &str) -> Result<(), StoreError> {
+pub(crate) async fn delete_database(name: &str) -> Result<(), StoreError> {
   let request = factory()?
     .delete_database(name)
     .map_err(|error| js_error("delete", &error))?;
@@ -73,7 +73,7 @@ pub(super) async fn delete_database(name: &str) -> Result<(), StoreError> {
 }
 
 /// Waits for a request and returns its result.
-pub(super) async fn request_result(request: &IdbRequest) -> Result<JsValue, StoreError> {
+pub(crate) async fn request_result(request: &IdbRequest) -> Result<JsValue, StoreError> {
   let (sender, receiver) = oneshot::channel::<Result<(), ()>>();
   let sender = std::rc::Rc::new(std::cell::RefCell::new(Some(sender)));
   let on_success = completion(&sender, Ok(()));
@@ -90,7 +90,7 @@ pub(super) async fn request_result(request: &IdbRequest) -> Result<JsValue, Stor
 }
 
 /// Waits until a transaction committed.
-pub(super) async fn transaction_done(transaction: &IdbTransaction) -> Result<(), StoreError> {
+pub(crate) async fn transaction_done(transaction: &IdbTransaction) -> Result<(), StoreError> {
   let (sender, receiver) = oneshot::channel::<Result<(), ()>>();
   let sender = std::rc::Rc::new(std::cell::RefCell::new(Some(sender)));
   let on_complete = completion(&sender, Ok(()));
@@ -108,7 +108,7 @@ pub(super) async fn transaction_done(transaction: &IdbTransaction) -> Result<(),
   }
 }
 
-pub(super) fn js_error(context: &str, error: &JsValue) -> StoreError {
+pub(crate) fn js_error(context: &str, error: &JsValue) -> StoreError {
   StoreError::Database(format!(
     "IndexedDB {context}: {}",
     crate::platform::describe_js_error(error)

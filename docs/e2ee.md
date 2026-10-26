@@ -416,8 +416,10 @@ picture inline (up to 16 MiB, a few at a time), and the lightbox does for any im
 client core downloads the blob, checks its hash and decrypts it in memory (desktop: `core_attachment`,
 raw bytes to the webview; web: the core in the page), up to `MAX_VIEWER_BYTES` (128 MiB) on every
 platform; bigger files are only saved. The page holds the plaintext only as `blob:` URLs in a session
-cache bounded by bytes (`teamcraft-ui` `media_cache`), revoked once evicted and no longer shown;
-nothing is written to disk unless the user saves the file. "Copy image" draws that image into a canvas
+cache bounded by bytes (`teamcraft-ui` `media_cache`), revoked once evicted and no longer shown.
+The full file is never written to disk unless the user saves it; only the inline rendition of a still
+picture (at most 960 pixels a side) is also kept in the persistent media cache (§9.6), sealed like the
+local store. "Copy image" draws that image into a canvas
 in the page; "open in a new window" opens a blank window of the page itself (`about:blank`, the only
 window the desktop app allows) that shows the same `blob:` URL. Neither creates a URL the server or
 anyone else could load.
@@ -1557,6 +1559,8 @@ before using organization backgrounds.
   Android Keystore (hardware-backed where available); see §9.2.
 - Decrypted search index (`tantivy`) also stored encrypted.
 - Attachments cached encrypted.
+- Pictures shown again and again (avatars, space and channel pictures, inline renditions of image
+  attachments) are kept in a persistent media cache, sealed (§9.6).
 
 ### 9.1 Browser (implemented)
 
@@ -1791,6 +1795,36 @@ since the data is intact.
 **Concurrent edits.** Two devices editing the same message converge: the edit with the highest
 server ID wins on every device, whatever order the edits arrive in (history loads newest first). An
 own edit shows at once and competes with the others once the server numbered it.
+
+### 9.6 Persistent media cache (implemented)
+
+Avatars, space and channel pictures and the inline renditions of image attachments (§4.5) stay on the
+device across restarts (issue #749, `teamcraft-core` `media_cache`), so they show at once after a
+start and remain visible while the server or its object storage is unavailable.
+
+- **Sealed like the local store.** From the local database key, `teamcraft-crypto::local_store`
+  derives the lookup and record keys; each entry is sealed (XChaCha20-Poly1305) under the lookup ID of
+  its name in the namespace `media_cache`, with that ID as associated data. The name inside
+  (`avatar/{user}`, `space_image/{space}`, `channel_image/{channel}`, `rendition/{attachment}`) is
+  checked again on opening, so an entry can't be moved to another picture unnoticed. Neither the
+  pictures nor whose they are can be read from the cache: files and records are named by the
+  pseudorandom ID. Renditions are end-to-end encrypted content; avatars and space or channel pictures
+  are directory data the server holds in plain text (§4.4), but follow the same rule.
+- **Desktop:** one sealed file per entry under the app's data directory, a folder per server and
+  user beside the encrypted database, with keys derived from the SQLCipher key from the OS keystore.
+  The shell opens it together with the store; the webview reads and fills it through the shell.
+- **Web:** an IndexedDB database per account (`teamcraft-media-{user}`), apart from the store, with a
+  database key of its own wrapped by a non-extractable Web Crypto key exactly like the store's (§9.1).
+  Deleting it can't touch the store, and two tabs racing to create its key only lose cached entries.
+- **Versions.** An entry holds the version it was made from: a space or channel picture's `version`,
+  an avatar's `avatar_version` (absent from older servers: the cached avatar is shown and refreshed
+  once per session), or what a rendition was made with. The app shows a cached older version while
+  it downloads the one the server names, and keeps showing it when that download fails.
+- **Bounded.** The least recently used entries go once the cache is larger than its limit, a setting
+  on the device (200 MB by default); one entry is at most 8 MiB. Everything is deleted at sign-out.
+- An entry that doesn't open (tampered with, another key) is deleted and counts as missing.
+- The mobile apps don't use it: Android keeps avatars in its own file cache and opens pictures from
+  the decrypted downloads (§4.5).
 
 ## 10. Search
 

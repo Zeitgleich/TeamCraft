@@ -46,6 +46,7 @@ use teamcraft_proto::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+use super::media::{KeptKey, MediaSlot};
 use crate::auth::{AuthService, TokenPeek, TokenStore};
 
 /// Wrong short codes allowed before a link approval is dropped.
@@ -303,6 +304,8 @@ pub struct CoreRuntime {
   connection: ConnectionStatus,
   /// Shared with the client: the conversation the user opened, set while the core thread syncs.
   focus: CatchUpFocus,
+  /// The media cache (#749), opened with the store; read without asking the core thread.
+  media: MediaSlot,
   /// Taken by [`CoreRuntime::shutdown`] or on drop.
   thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
@@ -326,6 +329,8 @@ impl CoreRuntime {
     let status = connection.clone();
     let focus = CatchUpFocus::default();
     let shared_focus = focus.clone();
+    let media = MediaSlot::default();
+    let shared_media = media.clone();
     let thread = std::thread::Builder::new()
       .name("teamcraft-core".to_owned())
       .spawn(move || {
@@ -341,7 +346,16 @@ impl CoreRuntime {
           on_failure,
           on_call_event,
         };
-        let core = Core::new(config, user, key, tokens, hooks, status, shared_focus);
+        let core = Core::new(
+          config,
+          user,
+          key,
+          tokens,
+          hooks,
+          status,
+          shared_focus,
+          shared_media,
+        );
         // A panic ends the core for good: logged here, and `status` then answers `Stopped`, so the
         // UI shows an internal error instead of a keystore problem.
         let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| runtime.block_on(core.run(receiver))));
@@ -355,8 +369,14 @@ impl CoreRuntime {
       staging_dir,
       connection,
       focus,
+      media,
       thread: Mutex::new(thread),
     }
+  }
+
+  /// The media cache once the store is open (#749).
+  pub fn media(&self) -> &MediaSlot {
+    &self.media
   }
 
   pub fn staging_dir(&self) -> &std::path::Path {
@@ -704,6 +724,8 @@ struct Core {
   maybe_reported_bytes: Option<u64>,
   /// Attachment downloads, running beside the loop (issue #491).
   downloads: Downloads,
+  /// Filled when the store opens, with the store's key (#749).
+  media: MediaSlot,
 }
 
 /// Why the client could not be opened.
@@ -742,6 +764,8 @@ struct LinkRun {
 }
 
 impl Core {
+  // The shell shares four handles with the core thread; bundling them would only rename them.
+  #[allow(clippy::too_many_arguments)]
   fn new(
     config: CoreConfig,
     user: UserId,
@@ -750,6 +774,7 @@ impl Core {
     hooks: Hooks,
     status: ConnectionStatus,
     catch_up_focus: CatchUpFocus,
+    media: MediaSlot,
   ) -> Self {
     let Hooks {
       on_change,
@@ -789,6 +814,7 @@ impl Core {
       is_upload_due: true,
       maybe_reported_bytes: None,
       downloads: Downloads::default(),
+      media,
     }
   }
 
@@ -890,10 +916,14 @@ impl Core {
     let store = match &self.store {
       Some(store) => store.clone(),
       None => {
+        let key = KeptKey::new(&self.key);
         let store = TrackedStore::new(Arc::new(
-          SqlCipherStore::open(&path, &self.key).map_err(|error| open_error(error.into()))?,
+          SqlCipherStore::open(&path, &key).map_err(|error| open_error(error.into()))?,
         ));
         self.store = Some(store.clone());
+        if let Some(database_key) = key.take() {
+          self.media.open(&self.config.data_dir, self.user, &database_key);
+        }
         store
       },
     };

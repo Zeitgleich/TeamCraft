@@ -287,6 +287,8 @@ impl SessionControl {
     let control = *self;
     control.core_round.update(|round| *round = round.wrapping_add(1));
     spawn_local(async move {
+      // Pictures of this account don't outlive the session on this device (#749).
+      crate::persisted_media::clear().await;
       if tauri::has_core()
         && let Err(error) = remote_backend::stop_core().await
       {

@@ -23,6 +23,7 @@ const KEY_PREFS: &str = "teamcraft.prefs";
 const KEY_RECENT_CONVERSATIONS: &str = "teamcraft.recent_conversations";
 const KEY_RECENT_EMOJI: &str = "teamcraft.recent_emoji";
 const KEY_FAVORITE_ORDER: &str = "teamcraft.favorite_order";
+const KEY_MEDIA_CACHE_LIMIT: &str = "teamcraft.media_cache_limit";
 /// Per account: `teamcraft.last_open.<user id>`, a [`LastOpen`].
 const KEY_LAST_OPEN_PREFIX: &str = "teamcraft.last_open.";
 /// Conversations the quick switcher remembers as recently visited.
@@ -110,6 +111,54 @@ impl SendMode {
 
   pub fn from_slug(slug: &str) -> Option<Self> {
     Self::ALL.into_iter().find(|mode| mode.slug() == slug)
+  }
+}
+
+/// How much the persistent media cache (#749: avatars, space and channel pictures, inline
+/// pictures) may keep on this device. Read when a picture is stored, so a lower limit takes effect
+/// with the next one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaCacheLimit {
+  Mib100,
+  Mib200,
+  Mib500,
+  Gib1,
+}
+
+impl MediaCacheLimit {
+  pub const ALL: [MediaCacheLimit; 4] = [Self::Mib100, Self::Mib200, Self::Mib500, Self::Gib1];
+  pub const DEFAULT: MediaCacheLimit = Self::Mib200;
+
+  pub fn slug(self) -> &'static str {
+    match self {
+      Self::Mib100 => "100mb",
+      Self::Mib200 => "200mb",
+      Self::Mib500 => "500mb",
+      Self::Gib1 => "1gb",
+    }
+  }
+
+  pub fn from_slug(slug: &str) -> Option<Self> {
+    Self::ALL.into_iter().find(|limit| limit.slug() == slug)
+  }
+
+  pub fn bytes(self) -> u64 {
+    const MIB: u64 = 1024 * 1024;
+    match self {
+      Self::Mib100 => 100 * MIB,
+      Self::Mib200 => teamcraft_client_api::media::DEFAULT_MEDIA_CACHE_BYTES,
+      Self::Mib500 => 500 * MIB,
+      Self::Gib1 => 1024 * MIB,
+    }
+  }
+
+  /// The stored choice, else the default.
+  pub fn load() -> Self {
+    load(KEY_MEDIA_CACHE_LIMIT, Self::from_slug).unwrap_or(Self::DEFAULT)
+  }
+
+  pub fn save(self) {
+    store_string(KEY_MEDIA_CACHE_LIMIT, self.slug());
   }
 }
 

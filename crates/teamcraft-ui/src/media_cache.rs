@@ -1,9 +1,13 @@
 //! Decrypted images of this session, shared by the inline previews in the conversation and the
 //! lightbox, so an image opens instantly the second time.
 //!
-//! - The cache holds `blob:` URLs only (e2ee.md: decrypted data stays in memory), least recently
-//!   used first out, within [`MEDIA_CACHE_BUDGET_BYTES`]. A view still showing an evicted image keeps
-//!   its own reference; the URL is revoked once nobody holds it.
+//! - The cache holds `blob:` URLs, least recently used first out, within
+//!   [`MEDIA_CACHE_BUDGET_BYTES`]. A view still showing an evicted image keeps its own reference;
+//!   the URL is revoked once nobody holds it.
+//! - Inline renditions of still pictures are also kept in the persistent media cache (#749,
+//!   [`crate::persisted_media`]), sealed with keys derived from the local database key like the
+//!   rest of the local store (e2ee.md §4.5): after a restart, or while the server is out of reach,
+//!   a preview comes from there without downloading the file. The full file never goes there.
 //! - Inline previews load in the background, at most [`MAX_BACKGROUND_LOADS`] at a time, and skip
 //!   the download when their row left the screen while they waited. They keep a rendition of at
 //!   most [`INLINE_RENDITION_SIDE`] pixels, not the decoded original. The lightbox loads the full
@@ -26,6 +30,7 @@ use teamcraft_client_api::remote::AttachmentPriority;
 use crate::lightbox::MediaKey;
 use crate::model::ConversationId;
 use crate::object_url::{FetchError, ObjectUrl, fetch_decrypted, url_for};
+use crate::persisted_media::{self, CachedPicture, MediaKey as CacheKey};
 
 /// Decrypted bytes the cache keeps at most. A large workspace stays within the memory budget of
 /// docs/performance.md with this on top; one image bigger than this is shown but not kept.
@@ -35,6 +40,11 @@ pub const INLINE_RENDITION_SIDE: u32 = 960;
 /// Inline previews downloading at the same time; opening a channel full of photos doesn't start
 /// dozens of downloads at once.
 const MAX_BACKGROUND_LOADS: usize = 3;
+/// What a persisted rendition was made with: one made with another side is made again.
+const RENDITION_VERSION: &str = "inline-960";
+/// Largest rendition kept on the device. A scaled still picture is far smaller; this keeps out an
+/// inline picture shown as it is (one the browser couldn't scale).
+const MAX_PERSISTED_RENDITION_BYTES: u64 = 2 * 1024 * 1024;
 
 thread_local! {
   static CACHE: RefCell<Lru<(MediaKey, Rendition), Rc<ObjectUrl>>> = RefCell::new(Lru::new(MEDIA_CACHE_BUDGET_BYTES));
@@ -112,6 +122,11 @@ pub async fn load(
   if let Some(hit) = cached(key, rendition) {
     return Ok(Some(hit));
   }
+  if rendition == Rendition::Inline
+    && let Some(hit) = persisted(key).await
+  {
+    return Ok(Some(hit));
+  }
   let (_permit, maybe_max_side, priority) = match rendition {
     Rendition::Full => (None, None, AttachmentPriority::Now),
     Rendition::Inline => (
@@ -135,6 +150,9 @@ pub async fn load(
     .await?;
     let url = Rc::new(url_for(&bytes, media_type, maybe_max_side).await?);
     CACHE.with_borrow_mut(|cache| cache.insert((key, rendition), url.clone(), url.byte_len()));
+    if rendition == Rendition::Inline {
+      persist(key, &url);
+    }
     Ok(url)
   })
   .await?;
@@ -169,6 +187,41 @@ where
       },
     }
   }
+}
+
+/// The inline rendition from the persistent cache, now also in the session's.
+async fn persisted(key: MediaKey) -> Option<Rc<ObjectUrl>> {
+  let picture = persisted_media::get(CacheKey::Rendition(key.attachment)).await?;
+  if picture.version != RENDITION_VERSION {
+    return None;
+  }
+  let url = Rc::new(ObjectUrl::from_bytes(&picture.bytes, &picture.content_type)?);
+  CACHE.with_borrow_mut(|cache| cache.insert((key, Rendition::Inline), url.clone(), url.byte_len()));
+  Some(url)
+}
+
+/// Keeps a rendition just made in the persistent cache: still pictures only (an animation is the
+/// whole file), within [`MAX_PERSISTED_RENDITION_BYTES`].
+fn persist(key: MediaKey, url: &ObjectUrl) {
+  let blob = url.blob().clone();
+  if url.is_animated()
+    || url.byte_len() > MAX_PERSISTED_RENDITION_BYTES
+    || !blob.type_().starts_with("image/")
+  {
+    return;
+  }
+  leptos::task::spawn_local(async move {
+    let Ok(buffer) = wasm_bindgen_futures::JsFuture::from(blob.array_buffer()).await else {
+      tracing::debug!("could not read a rendition to cache it");
+      return;
+    };
+    let picture = CachedPicture {
+      version: RENDITION_VERSION.to_owned(),
+      content_type: blob.type_(),
+      bytes: js_sys::Uint8Array::new(&buffer).to_vec(),
+    };
+    persisted_media::put(CacheKey::Rendition(key.attachment), picture);
+  });
 }
 
 /// The image if it is in the cache (and marks it as just used).
@@ -337,6 +390,11 @@ mod tests {
 
   thread_local! {
     static TEST_LOADS: RefCell<InFlight<u32, u32>> = RefCell::new(InFlight::default());
+  }
+
+  #[test]
+  fn a_persisted_rendition_names_the_side_it_was_made_with() {
+    assert_eq!(RENDITION_VERSION, format!("inline-{INLINE_RENDITION_SIDE}"));
   }
 
   #[test]
