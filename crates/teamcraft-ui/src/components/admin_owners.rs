@@ -122,6 +122,7 @@ fn RosterEditor(status: OwnerRosterStatus) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let signed = StoredValue::new(signed_roster(&status));
+  let unverifiable = StoredValue::new(status.unverifiable_owners.clone());
   let base_version = status.version;
   let draft = RwSignal::new(signed.get_value());
   // The roster waiting for the owner's confirmation (every change with ID and key, review #263).
@@ -214,6 +215,10 @@ fn RosterEditor(status: OwnerRosterStatus) -> impl IntoView {
                 <strong translate="no">{name_of(user)}</strong>
                 " "
                 <span class="muted-text small">{i18n.t(role_key)}</span>
+                {unverifiable.with_value(|users| users.contains(&user)).then(|| view! {
+                  " "
+                  <span class="badge badge-failing">{i18n.t("roster-key-unverifiable")}</span>
+                })}
                 " "
                 <button type="button" class="btn btn-small" on:click=move |_| set_role(user, Some(toggled))>
                   {i18n.t(toggle_key)}

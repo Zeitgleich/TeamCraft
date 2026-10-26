@@ -220,6 +220,11 @@ pub struct OwnerRosterStatus {
   /// Admins of the verified roster (not owners).
   #[serde(default)]
   pub admins: Vec<UserId>,
+  /// Owners of the verified roster whose identity key this device can't use: they can't sign and
+  /// don't count as owners, but they stay in the roster until an owner removes them explicitly
+  /// (an edit never drops them silently).
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub unverifiable_owners: Vec<UserId>,
   /// When member clients stop accepting the admins unless an owner signs the roster again; `None`
   /// for a roster from before signing times.
   #[serde(rename = "expires_at", default, skip_serializing_if = "Option::is_none")]
@@ -289,12 +294,17 @@ pub fn normalized_roster(entries: &[RosterEntry]) -> Vec<RosterEntry> {
   unique
 }
 
-/// The entries of the signed roster in `status`.
+/// The entries of the signed roster in `status`, owners whose key can't be used included.
 pub fn signed_roster(status: &OwnerRosterStatus) -> Vec<RosterEntry> {
-  let owners = status.owners.iter().map(|owner| RosterEntry {
-    user: owner.user,
-    role: RosterRoleChoice::Owner,
-  });
+  let owners = status
+    .owners
+    .iter()
+    .map(|owner| owner.user)
+    .chain(status.unverifiable_owners.iter().copied())
+    .map(|user| RosterEntry {
+      user,
+      role: RosterRoleChoice::Owner,
+    });
   let admins = status.admins.iter().map(|user| RosterEntry {
     user: *user,
     role: RosterRoleChoice::Admin,
@@ -511,6 +521,9 @@ pub fn admin_error_i18n_key(detail: &str) -> Option<&'static str> {
   if detail.contains(&format!("{ROSTER_BASE_CODE}:")) {
     return Some("admin-error-roster-changed");
   }
+  if detail.contains(&format!("{ROSTER_KEY_UNUSABLE_CODE}:")) {
+    return Some("admin-error-roster-key-unusable");
+  }
   detail
     .contains(&format!("{NOT_AN_OWNER_CODE}:"))
     .then_some("admin-error-not-an-owner")
@@ -518,6 +531,10 @@ pub fn admin_error_i18n_key(detail: &str) -> Option<&'static str> {
 
 /// Stable code that starts the core's refusal to sign a roster or policy for a non-owner.
 pub const NOT_AN_OWNER_CODE: &str = "not_an_owner";
+
+/// Stable code that starts the core's refusal to sign a roster that keeps an entry whose identity
+/// key can't be used on this device.
+pub const ROSTER_KEY_UNUSABLE_CODE: &str = "roster_key_unusable";
 
 /// Stable code that starts the core's refusal to sign a roster edited from an older version.
 pub const ROSTER_BASE_CODE: &str = "roster_changed";
@@ -816,6 +833,7 @@ mod tests {
         maybe_expires_at: None,
         recommended_minimum: 2,
         warning_lead_ms: 0,
+        unverifiable_owners: Vec::new(),
       };
       assert_eq!(
         roster_changes(&signed_roster(&status), &proposed),
@@ -951,6 +969,7 @@ mod tests {
             })
             .collect(),
           admins: admins.iter().map(|raw| user(*raw)).collect(),
+          unverifiable_owners: Vec::new(),
           maybe_expires_at,
           recommended_minimum: 1,
           warning_lead_ms: 0,
@@ -990,6 +1009,53 @@ mod tests {
       assert_eq!(idp_roster_proposal(&[owner(1)], &[], &[user(1)]), vec![owner(1)]);
       // Nothing listed: nothing changes.
       assert_eq!(idp_roster_proposal(&signed, &[], &[]), normalized_roster(&signed));
+    }
+
+    /// An owner whose key this device can't use is part of the starting list: any other edit keeps
+    /// them, only an explicit removal takes them out.
+    #[test]
+    fn an_owner_with_an_unusable_key_is_never_dropped_by_an_edit() {
+      let status = OwnerRosterStatus {
+        version: 2,
+        owners: vec![OwnerSigning {
+          user: user(1),
+          maybe_last_signed_at: None,
+        }],
+        admins: vec![user(3)],
+        unverifiable_owners: vec![user(2)],
+        maybe_expires_at: None,
+        recommended_minimum: 2,
+        warning_lead_ms: 0,
+      };
+      let signed = signed_roster(&status);
+      assert_eq!(signed, vec![owner(1), owner(2), admin(3)]);
+      // Adding somebody else changes nothing about the owner.
+      let mut edited = signed.clone();
+      edited.push(admin(4));
+      assert_eq!(
+        roster_changes(&signed, &normalized_roster(&edited)),
+        vec![RosterChange::Add {
+          user: user(4),
+          role: RosterRoleChoice::Admin
+        }]
+      );
+      // So does taking over provider roles that don't list them.
+      let proposed = idp_roster_proposal(&signed, &[user(1)], &[]);
+      assert!(proposed.contains(&owner(2)));
+      // Removing them is a change the owner sees and confirms.
+      let removed: Vec<RosterEntry> = signed
+        .iter()
+        .copied()
+        .filter(|entry| entry.user != user(2))
+        .collect();
+      assert_eq!(
+        roster_changes(&signed, &removed),
+        vec![RosterChange::Remove { user: user(2) }]
+      );
+      assert_eq!(
+        admin_error_i18n_key("roster_key_unusable: the key of user 2 can't be used"),
+        Some("admin-error-roster-key-unusable")
+      );
     }
 
     #[test]
@@ -1109,6 +1175,7 @@ mod tests {
       OwnerRosterStatus {
         version: 1,
         admins: Vec::new(),
+        unverifiable_owners: Vec::new(),
         owners: (1..=owners)
           .map(|raw| OwnerSigning {
             user: UserId::from_snowflake(crate::model::Snowflake::new(raw).unwrap()),
