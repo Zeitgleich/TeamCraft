@@ -9,6 +9,10 @@ struct AttachmentView: View {
   let file: FileInfo
   /// A square tile of an image grid instead of the large preview.
   var isTile = false
+  /// In a chat bubble: a picture spans this width at its own shape, and a file row takes the
+  /// bubble's colours (`isInBubble`).
+  var maybeMediaWidth: CGFloat?
+  var isInBubble = false
 
   @State private var maybePreviewURL: URL?
   @State private var isWaitingToOpen = false
@@ -16,8 +20,14 @@ struct AttachmentView: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 2) {
       Button(action: open) {
-        if file.isImage, let data = file.maybeThumbnailData, let image = UIImage(data: data) {
-          if isTile { tile(image) } else { imagePreview(image) }
+        if file.isImage, let image = ThumbnailCache.image(for: file) {
+          if isTile {
+            tile(image)
+          } else if let width = maybeMediaWidth {
+            bubblePreview(image, width: width)
+          } else {
+            imagePreview(image)
+          }
         } else {
           fileRow
         }
@@ -44,6 +54,27 @@ struct AttachmentView: View {
       }
   }
 
+  /// A picture across the bubble at its own shape, at most `bubbleMediaMaxHeight` tall: panoramas
+  /// and tall screenshots are cut to a sensible shape rather than shrunk to a line.
+  private func bubblePreview(_ image: UIImage, width: CGFloat) -> some View {
+    let size = bubblePictureSize(image, room: width)
+    return Color.clear
+      .frame(width: size.width, height: size.height)
+      .overlay { Image(uiImage: image).resizable().scaledToFill() }
+      .clipShape(RoundedRectangle(cornerRadius: bubbleMediaCornerRadius, style: .continuous))
+      .overlay(alignment: .bottom) {
+        if let progress = file.transfer.maybeProgress { ProgressView(value: progress).padding(6) }
+      }
+      .overlay(alignment: .bottomLeading) {
+        if file.transfer.state == "failed" || file.transfer.state == "upload_failed" {
+          FileStateLine(file: file)
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(.regularMaterial, in: Capsule())
+            .padding(6)
+        }
+      }
+  }
+
   private func imagePreview(_ image: UIImage) -> some View {
     VStack(alignment: .leading, spacing: 4) {
       Image(uiImage: image).resizable().scaledToFit()
@@ -58,15 +89,20 @@ struct AttachmentView: View {
       FileThumbnail(file: file, side: 56)
       VStack(alignment: .leading, spacing: 2) {
         Text(file.fileName).font(.subheadline.weight(.semibold)).lineLimit(2)
-        Text(FileSizeText.format(file.sizeBytes)).font(.caption).foregroundStyle(Theme.textMuted)
+        Text(FileSizeText.format(file.sizeBytes)).font(.caption)
+          .foregroundStyle(isInBubble ? AnyShapeStyle(.secondary) : AnyShapeStyle(Theme.textMuted))
         FileStateLine(file: file)
       }
-      Spacer(minLength: 0)
+      if !isInBubble { Spacer(minLength: 0) }
     }
     .padding(8)
-    .background(Theme.surface)
-    .overlay(RoundedRectangle(cornerRadius: Theme.radius).stroke(Theme.border))
+    .background(rowBackground)
+    .overlay(RoundedRectangle(cornerRadius: Theme.radius).stroke(isInBubble ? Color.clear : Theme.border))
     .clipShape(RoundedRectangle(cornerRadius: Theme.radius))
+  }
+
+  private var rowBackground: AnyShapeStyle {
+    isInBubble ? AnyShapeStyle(.primary.opacity(0.08)) : AnyShapeStyle(Theme.surface)
   }
 
   private func open() {
@@ -163,7 +199,7 @@ struct FileThumbnail: View {
 
   var body: some View {
     Group {
-      if let data = file.maybeThumbnailData, let image = UIImage(data: data) {
+      if let image = ThumbnailCache.image(for: file) {
         Image(uiImage: image).resizable().scaledToFill()
       } else {
         Image(systemName: icon).font(.title2).foregroundStyle(Theme.textMuted)
@@ -189,9 +225,41 @@ enum FileSizeText {
   }
 }
 
+/// The tallest a picture in a bubble gets; its width is the bubble's.
+let bubbleMediaMaxHeight: CGFloat = 340
+let bubbleMediaCornerRadius: CGFloat = 14
+
+/// A picture's size in a bubble: its own shape (panoramas and tall screenshots cut to a sensible
+/// one), as wide as `room` allows and at most `bubbleMediaMaxHeight` tall.
+func bubblePictureSize(_ image: UIImage, room: CGFloat) -> CGSize {
+  let ratio = image.size.height > 0 ? image.size.width / image.size.height : 4 / 3
+  let shape = min(max(ratio, 0.6), 2.2)
+  let width = min(room, bubbleMediaMaxHeight * shape)
+  return CGSize(width: width, height: width / shape)
+}
+
+/// Decoded thumbnails by file, so scrolling past a picture doesn't decode it again on every render.
+enum ThumbnailCache {
+  private static let images: NSCache<NSString, UIImage> = {
+    let cache = NSCache<NSString, UIImage>()
+    cache.countLimit = 200
+    return cache
+  }()
+
+  static func image(for file: FileInfo) -> UIImage? {
+    let key = file.fileId as NSString
+    if let cached = images.object(forKey: key) { return cached }
+    guard let data = file.maybeThumbnailData, let image = UIImage(data: data) else { return nil }
+    images.setObject(image, forKey: key)
+    return image
+  }
+}
+
 /// A link preview card from the data the sender's core fetched.
 struct LinkPreviewCard: View {
   let preview: LinkPreview
+  /// In a chat bubble: tinted with the bubble's text colour instead of a card of its own.
+  var isInBubble = false
 
   var body: some View {
     let content = VStack(alignment: .leading, spacing: 4) {
@@ -200,25 +268,32 @@ struct LinkPreviewCard: View {
           .clipShape(RoundedRectangle(cornerRadius: 8))
       }
       if let site = preview.maybeSiteName {
-        Text(site).font(.caption).foregroundStyle(Theme.textMuted)
+        Text(site).font(.caption).foregroundStyle(muted)
       }
       if let title = preview.maybeTitle {
         Text(title).font(.subheadline.weight(.semibold)).lineLimit(2)
       }
       if let description = preview.maybeDescription {
-        Text(description).font(.caption).foregroundStyle(Theme.textMuted).lineLimit(3)
+        Text(description).font(.caption).foregroundStyle(muted).lineLimit(3)
       }
     }
     .frame(maxWidth: .infinity, alignment: .leading)
     .padding(10)
-    .background(Theme.surface)
-    .overlay(alignment: .leading) { Rectangle().fill(Theme.accent).frame(width: 3) }
+    .padding(.leading, 3)
+    .background(isInBubble ? AnyShapeStyle(.primary.opacity(0.08)) : AnyShapeStyle(Theme.surface))
+    .overlay(alignment: .leading) {
+      Rectangle().fill(isInBubble ? AnyShapeStyle(.primary) : AnyShapeStyle(Theme.accent)).frame(width: 3)
+    }
     .clipShape(RoundedRectangle(cornerRadius: 8))
     if let url = preview.maybeOpenableURL {
       Link(destination: url) { content }.buttonStyle(.plain)
     } else {
       content
     }
+  }
+
+  private var muted: AnyShapeStyle {
+    isInBubble ? AnyShapeStyle(.secondary) : AnyShapeStyle(Theme.textMuted)
   }
 }
 
