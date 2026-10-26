@@ -13,8 +13,9 @@ use crate::components::space_tile::SpaceTile;
 use crate::i18n::use_i18n;
 use crate::meetings::MeetingsHub;
 use crate::model::{Conversation, ConversationId, ConversationKind, PresenceStatus, SpaceId};
+use crate::reactive::{items_by_key, keyed_item};
 use crate::sections::{
-  GroupedSidebar, SectionKind, SpaceGroup, badge_count, build_grouped, build_sections, move_favorite,
+  GroupedSidebar, Section, SectionKind, SpaceGroup, badge_count, build_grouped, build_sections, move_favorite,
 };
 use crate::settings::{load_json, store_json};
 use crate::state::{MainView, Overlay, use_app_state};
@@ -50,6 +51,12 @@ pub fn Sidebar() -> impl IntoView {
         .spaces()
         .into_iter()
         .find(|candidate| candidate.id == space)
+        // The head shows no counts: a new message must not build its tile (picture) again.
+        .map(|mut space| {
+          space.unread_count = 0;
+          space.mention_count = 0;
+          space
+        })
     })
   });
   let is_grouped = Memo::new(move |_| {
@@ -168,12 +175,7 @@ pub fn Sidebar() -> impl IntoView {
             view! { <GroupedSections grouped=grouped collapsed=collapsed collapsed_spaces=collapsed_spaces /> }
               .into_any()
           } else {
-            view! {
-              <For each=move || sections.get() key=section_key let:section>
-                <SidebarSection kind=section.kind conversations=section.conversations collapsed=collapsed />
-              </For>
-            }
-              .into_any()
+            view! { <SectionList sections=sections.into() collapsed=collapsed /> }.into_any()
           }
         }}
       </div>
@@ -242,28 +244,35 @@ pub fn GlobalEntries() -> impl IntoView {
   }
 }
 
-/// What makes a section look different on screen: its kind and the state of its rows.
-type SectionKey = (
-  SectionKind,
-  Vec<(crate::model::ConversationId, u32, u32, bool, bool, Option<String>)>,
-);
+/// The sections of the sidebar, each built once: a section and its rows stay while their channels
+/// change (new messages, unread counts, presence), so nothing on screen is built again that didn't
+/// change (issue #687). A section only goes when it has no channels left.
+#[component]
+fn SectionList(sections: Signal<Vec<Section>>, collapsed: RwSignal<HashSet<SectionKind>>) -> impl IntoView {
+  view! {
+    <For
+      each=move || sections.with(|sections| sections.iter().map(|section| section.kind).collect::<Vec<_>>())
+      key=|kind| *kind
+      let:kind
+    >
+      <SidebarSection kind=kind conversations=section_conversations(sections, kind) collapsed=collapsed />
+    </For>
+  }
+}
 
-fn section_key(section: &crate::sections::Section) -> SectionKey {
-  let rows = section
-    .conversations
-    .iter()
-    .map(|c| {
-      (
-        c.id,
-        c.unread_count,
-        c.mention_count,
-        c.is_favorite,
-        c.is_catching_up,
-        c.maybe_image_version.clone(),
-      )
-    })
-    .collect();
-  (section.kind, rows)
+/// The channels of the section of `kind`; the last ones once it is gone (it is about to be removed).
+fn section_conversations(sections: Signal<Vec<Section>>, kind: SectionKind) -> Memo<Vec<Conversation>> {
+  Memo::new(move |previous: Option<&Vec<Conversation>>| {
+    sections
+      .with(|sections| {
+        sections
+          .iter()
+          .find(|section| section.kind == kind)
+          .map(|section| section.conversations.clone())
+      })
+      .or_else(|| previous.cloned())
+      .unwrap_or_default()
+  })
 }
 
 /// The grouped layout: unread and favorite channels, then one collapsible group per space.
@@ -273,29 +282,43 @@ fn GroupedSections(
   collapsed: RwSignal<HashSet<SectionKind>>,
   collapsed_spaces: RwSignal<HashSet<SpaceId>>,
 ) -> impl IntoView {
+  let top = Signal::derive(move || grouped.with(|grouped| grouped.top.clone()));
   view! {
-    <For each=move || grouped.get().top key=section_key let:section>
-      <SidebarSection kind=section.kind conversations=section.conversations collapsed=collapsed />
-    </For>
+    <SectionList sections=top collapsed=collapsed />
     <For
-      each=move || grouped.get().spaces
-      key=|group| (group.space, group.conversations.iter().map(|c| (c.id, c.unread_count, c.mention_count, c.is_catching_up, c.maybe_image_version.clone())).collect::<Vec<_>>())
-      let:group
+      each=move || grouped.with(|grouped| grouped.spaces.iter().map(|group| group.space).collect::<Vec<_>>())
+      key=|space| *space
+      let:space
     >
-      <SpaceGroupSection group=group collapsed=collapsed_spaces />
+      <SpaceGroupSection space=space grouped=grouped collapsed=collapsed_spaces />
     </For>
   }
 }
 
 /// The channels of one space, under a header with the space's name, a mute toggle and its settings.
 #[component]
-fn SpaceGroupSection(group: SpaceGroup, collapsed: RwSignal<HashSet<SpaceId>>) -> impl IntoView {
+fn SpaceGroupSection(
+  space: SpaceId,
+  grouped: Memo<GroupedSidebar>,
+  collapsed: RwSignal<HashSet<SpaceId>>,
+) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let space = group.space;
+  // Like `section_conversations`: the last one once the space has no group any more.
+  let group = Memo::new(move |previous: Option<&Option<SpaceGroup>>| {
+    grouped
+      .with(|grouped| grouped.spaces.iter().find(|group| group.space == space).cloned())
+      .or_else(|| previous.cloned().flatten())
+  });
+  let conversations = Memo::new(move |_| {
+    group
+      .with(|group| group.as_ref().map(|group| group.conversations.clone()))
+      .unwrap_or_default()
+  });
   let space_id = space.to_string();
   let is_collapsed = move || collapsed.with(|set| set.contains(&space));
-  let mentions: u32 = group.conversations.iter().map(|conv| conv.mention_count).sum();
+  let mentions =
+    Memo::new(move |_| conversations.with(|list| list.iter().map(|conv| conv.mention_count).sum::<u32>()));
   let list_id = format!("sb-space-{space_id}");
   let phase = RwSignal::new(SectionPhase::Still);
   let is_muted = {
@@ -307,19 +330,20 @@ fn SpaceGroupSection(group: SpaceGroup, collapsed: RwSignal<HashSet<SpaceId>>) -
         .with(|prefs| prefs.notifications.is_space_muted(&space_id))
     })
   };
-  let name = group.name.clone();
-  let toggle_label = {
-    let name = name.clone();
-    move || {
-      i18n.t_with(
-        if is_muted.get() {
-          "space-unmute"
-        } else {
-          "space-mute"
-        },
-        &[("name", &name)],
-      )
-    }
+  let name = Memo::new(move |_| {
+    group
+      .with(|group| group.as_ref().map(|group| group.name.clone()))
+      .unwrap_or_default()
+  });
+  let toggle_label = move || {
+    i18n.t_with(
+      if is_muted.get() {
+        "space-unmute"
+      } else {
+        "space-mute"
+      },
+      &[("name", &name.get())],
+    )
   };
 
   view! {
@@ -341,14 +365,17 @@ fn SpaceGroupSection(group: SpaceGroup, collapsed: RwSignal<HashSet<SpaceId>>) -
           }
         >
           <Icon name=IconName::ChevronDown class="chevron" />
-          <span translate="no">{name.clone()}</span>
-          {move || (is_collapsed() && mentions > 0).then(|| view! { <span class="badge-count">{mentions}</span> })}
+          <span translate="no">{move || name.get()}</span>
+          {move || {
+            let mentions = mentions.get();
+            (is_collapsed() && mentions > 0).then(|| view! { <span class="badge-count">{mentions}</span> })
+          }}
         </button>
         <button
           class="icon-btn icon-btn-small"
           aria-pressed=move || is_muted.get().to_string()
-          aria-label=toggle_label.clone()
-          title=toggle_label.clone()
+          aria-label=toggle_label
+          title=toggle_label
           on:click={
             let space_id = space_id.clone();
             move |_| {
@@ -388,9 +415,20 @@ fn SpaceGroupSection(group: SpaceGroup, collapsed: RwSignal<HashSet<SpaceId>>) -
         class:is-closing=move || phase.get() == SectionPhase::Closing || is_collapsed()
         on:animationend=move |ev| end_phase(&ev, phase)
       >
-        {group.conversations.into_iter().map(|conv| view! { <li><SidebarItem conversation=conv /></li> }).collect_view()}
+        <ConversationRows conversations=conversations />
       </ul>
     </section>
+  }
+}
+
+/// The rows of a section, one per conversation, each built once and updated in place.
+#[component]
+fn ConversationRows(conversations: Memo<Vec<Conversation>>) -> impl IntoView {
+  let by_id = items_by_key(conversations.into(), |conv: &Conversation| conv.id);
+  view! {
+    <For each=move || conversations.get() key=|conv| conv.id let:conv>
+      <li><SidebarItem conversation=keyed_item(by_id, conv.id, conv) /></li>
+    </For>
   }
 }
 
@@ -409,19 +447,25 @@ pub fn space_mute_entry(is_muted: bool) -> crate::prefs::ConversationNotify {
 #[component]
 fn SidebarSection(
   kind: SectionKind,
-  conversations: Vec<Conversation>,
+  conversations: Memo<Vec<Conversation>>,
   collapsed: RwSignal<HashSet<SectionKind>>,
 ) -> impl IntoView {
   let i18n = use_i18n();
   let is_collapsed = move || collapsed.with(|set| set.contains(&kind));
   // Hidden mentions and unread DMs stay red (like every other badge); plain unread messages in
   // channels that aren't muted are quiet.
-  let mentions_hidden = badge_count(&conversations);
-  let unread_hidden: u32 = conversations
-    .iter()
-    .filter(|conv| !conv.is_muted && !matches!(conv.kind, ConversationKind::Direct | ConversationKind::Group))
-    .map(|conv| conv.unread_count.saturating_sub(conv.mention_count))
-    .sum();
+  let mentions_hidden = Memo::new(move |_| conversations.with(|list| badge_count(list)));
+  let unread_hidden = Memo::new(move |_| {
+    conversations.with(|list| {
+      list
+        .iter()
+        .filter(|conv| {
+          !conv.is_muted && !matches!(conv.kind, ConversationKind::Direct | ConversationKind::Group)
+        })
+        .map(|conv| conv.unread_count.saturating_sub(conv.mention_count))
+        .sum::<u32>()
+    })
+  });
   let list_id = format!("sb-{}", kind.slug());
   // Only a click animates the rows, not a re-render with new counts.
   let phase = RwSignal::new(SectionPhase::Still);
@@ -447,8 +491,14 @@ fn SidebarSection(
         >
           <Icon name=IconName::ChevronDown class="chevron" />
           <span>{move || i18n.t(kind.title_key())}</span>
-          {move || (is_collapsed() && mentions_hidden > 0).then(|| view! { <span class="badge-count">{mentions_hidden}</span> })}
-          {move || (is_collapsed() && unread_hidden > 0).then(|| view! { <span class="badge-count is-quiet">{unread_hidden}</span> })}
+          {move || {
+            let mentions = mentions_hidden.get();
+            (is_collapsed() && mentions > 0).then(|| view! { <span class="badge-count">{mentions}</span> })
+          }}
+          {move || {
+            let unread = unread_hidden.get();
+            (is_collapsed() && unread > 0).then(|| view! { <span class="badge-count is-quiet">{unread}</span> })
+          }}
         </button>
         {(kind == SectionKind::Unreads)
           .then(|| {
@@ -475,7 +525,7 @@ fn SidebarSection(
         {if kind == SectionKind::Favorites {
           view! { <FavoriteItems conversations=conversations /> }.into_any()
         } else {
-          conversations.into_iter().map(|conv| view! { <li><SidebarItem conversation=conv /></li> }).collect_view().into_any()
+          view! { <ConversationRows conversations=conversations /> }.into_any()
         }}
       </ul>
       // The end of the channel list says where the others are.
@@ -497,59 +547,70 @@ fn SidebarSection(
 
 /// Favorites can be put in order by dragging, or with Ctrl+Shift+↑/↓ on the focused one.
 #[component]
-fn FavoriteItems(conversations: Vec<Conversation>) -> impl IntoView {
+fn FavoriteItems(conversations: Memo<Vec<Conversation>>) -> impl IntoView {
   let state = use_app_state();
-  let shown: Vec<ConversationId> = conversations.iter().map(|conv| conv.id).collect();
-  let shown = StoredValue::new(shown);
+  let by_id = items_by_key(conversations.into(), |conv: &Conversation| conv.id);
   let dragged = RwSignal::new(None::<ConversationId>);
+  // Positions are read when they are needed: the rows stay while the order changes.
+  let index_of =
+    move |id: ConversationId| conversations.with_untracked(|list| list.iter().position(|conv| conv.id == id));
   let move_to = move |moved: ConversationId, to: usize| {
-    let order = shown.with_value(|shown| move_favorite(shown, moved, to));
-    state.settings.favorite_order.set(order);
-    // The list is rebuilt; keep the keyboard focus on the moved item.
+    let shown: Vec<ConversationId> =
+      conversations.with_untracked(|list| list.iter().map(|conv| conv.id).collect());
+    state
+      .settings
+      .favorite_order
+      .set(move_favorite(&shown, moved, to));
+    // The moved row is put in its new place; keep the keyboard focus on it.
     set_timeout(move || focus_sidebar_item(moved), std::time::Duration::ZERO);
   };
-  conversations
-    .into_iter()
-    .enumerate()
-    .map(|(index, conv)| {
-      let id = conv.id;
-      view! {
-        <li
-          draggable="true"
-          on:dragstart=move |_| dragged.set(Some(id))
-          on:dragend=move |_| dragged.set(None)
-          on:dragover=move |ev| {
-            if dragged.get_untracked().is_some() {
-              ev.prevent_default();
+  view! {
+    <For each=move || conversations.get() key=|conv| conv.id let:conv>
+      {
+        let id = conv.id;
+        view! {
+          <li
+            draggable="true"
+            on:dragstart=move |_| dragged.set(Some(id))
+            on:dragend=move |_| dragged.set(None)
+            on:dragover=move |ev| {
+              if dragged.get_untracked().is_some() {
+                ev.prevent_default();
+              }
             }
-          }
-          on:drop=move |ev| {
-            if let Some(moving) = dragged.get_untracked() {
-              ev.prevent_default();
-              dragged.set(None);
-              move_to(moving, index);
+            on:drop=move |ev| {
+              if let Some(moving) = dragged.get_untracked() {
+                ev.prevent_default();
+                dragged.set(None);
+                if let Some(index) = index_of(id) {
+                  move_to(moving, index);
+                }
+              }
             }
-          }
-          on:keydown=move |ev| {
-            if !(ev.ctrl_key() && ev.shift_key()) {
-              return;
+            on:keydown=move |ev| {
+              if !(ev.ctrl_key() && ev.shift_key()) {
+                return;
+              }
+              let Some(index) = index_of(id) else {
+                return;
+              };
+              let maybe_to = match ev.key().as_str() {
+                "ArrowUp" => index.checked_sub(1),
+                "ArrowDown" => Some(index + 1),
+                _ => None,
+              };
+              if let Some(to) = maybe_to {
+                ev.prevent_default();
+                move_to(id, to);
+              }
             }
-            let maybe_to = match ev.key().as_str() {
-              "ArrowUp" => index.checked_sub(1),
-              "ArrowDown" => Some(index + 1),
-              _ => None,
-            };
-            if let Some(to) = maybe_to {
-              ev.prevent_default();
-              move_to(id, to);
-            }
-          }
-        >
-          <SidebarItem conversation=conv />
-        </li>
+          >
+            <SidebarItem conversation=keyed_item(by_id, id, conv) />
+          </li>
+        }
       }
-    })
-    .collect_view()
+    </For>
+  }
 }
 
 fn focus_sidebar_item(conversation: ConversationId) {
@@ -563,76 +624,91 @@ fn focus_sidebar_item(conversation: ConversationId) {
   }
 }
 
+/// One conversation of the sidebar. Built once per row; what it shows follows `conversation`, so a
+/// new count or presence changes the badge or the dot, not the whole row (issue #687).
 #[component]
-pub fn SidebarItem(conversation: Conversation) -> impl IntoView {
+pub fn SidebarItem(#[prop(into)] conversation: Signal<Conversation>) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let id = conversation.id;
+  // A conversation keeps its id and kind.
+  let (id, kind) = conversation.with_untracked(|conv| (conv.id, conv.kind));
   let is_current = move || state.view.get() == MainView::Conversation(id);
-  let unread = conversation.unread_count > 0 && !conversation.is_muted;
-  let mentions = conversation.mention_count;
-  let me = state.me();
-  let maybe_other = conversation
-    .member_ids
-    .iter()
-    .copied()
-    .find(|member| *member != me.id)
-    .filter(|_| conversation.kind == ConversationKind::Direct)
-    .and_then(|member| state.read(|backend| backend.user(member)));
+  let is_muted = Memo::new(move |_| conversation.with(|conv| conv.is_muted));
+  let is_unread = Memo::new(move |_| conversation.with(|conv| conv.unread_count > 0 && !conv.is_muted));
+  let mentions = Memo::new(move |_| conversation.with(|conv| conv.mention_count));
+  let is_catching_up = Memo::new(move |_| conversation.with(|conv| conv.is_catching_up));
+  let name = Memo::new(move |_| conversation.with(|conv| conv.name.clone()));
+  let me = state.me().id;
+  // The other person of a DM.
+  let maybe_peer = Memo::new(move |_| {
+    (kind == ConversationKind::Direct)
+      .then(|| conversation.with(|conv| conv.member_ids.iter().copied().find(|member| *member != me)))
+      .flatten()
+  });
+  let maybe_other = Memo::new(move |_| {
+    maybe_peer
+      .get()
+      .and_then(|member| state.read(|backend| backend.user(member)))
+  });
 
-  let leading = match conversation.kind {
+  let leading = match kind {
     ConversationKind::Public | ConversationKind::Private => {
-      let fallback = if conversation.kind == ConversationKind::Public {
+      let fallback = if kind == ConversationKind::Public {
         IconName::Hash
       } else {
         IconName::Lock
       };
-      view! { <ChannelGlyph conversation=id maybe_version=conversation.maybe_image_version.clone() fallback=fallback /> }.into_any()
+      let version = Memo::new(move |_| conversation.with(|conv| conv.maybe_image_version.clone()));
+      view! { <ChannelGlyph conversation=id maybe_version=version fallback=fallback /> }.into_any()
     },
     ConversationKind::Integration => view! { <Icon name=IconName::Terminal /> }.into_any(),
     ConversationKind::Group => view! { <Icon name=IconName::Users /> }.into_any(),
     ConversationKind::Direct => {
       // Presence arrives later than the row is built, so it is read reactively.
-      let maybe_other_id = maybe_other.as_ref().map(|user| user.id);
-      let presence = move || {
-        maybe_other_id
-          .and_then(|member| state.read(|backend| backend.user(member)))
-          .map_or(PresenceStatus::Offline, |user| user.presence)
-      };
-      view! { <span class="dm-dot">{move || view! { <PresenceDot presence=presence() /> }}</span> }.into_any()
+      let presence = Memo::new(move |_| {
+        maybe_other.with(|maybe_user| {
+          maybe_user
+            .as_ref()
+            .map_or(PresenceStatus::Offline, |user| user.presence)
+        })
+      });
+      view! { <span class="dm-dot">{move || view! { <PresenceDot presence=presence.get() /> }}</span> }
+        .into_any()
     },
   };
-  let external_probe = conversation.clone();
-  let call_peer = (conversation.kind == ConversationKind::Direct)
-    .then(|| {
-      conversation
-        .member_ids
-        .iter()
-        .copied()
-        .find(|member| *member != me.id)
+  let status_emoji = Memo::new(move |_| {
+    maybe_other.with(|maybe_user| {
+      maybe_user
+        .as_ref()
+        .and_then(|user| user.maybe_custom_status.as_ref())
+        .map(|status| status.emoji.clone())
     })
-    .flatten();
-  let status_emoji = maybe_other
-    .and_then(|user| user.maybe_custom_status)
-    .map(|status| status.emoji);
-  let name = conversation.name.clone();
-  let aria_name = name.clone();
-  let is_muted = conversation.is_muted;
-  let is_catching_up = conversation.is_catching_up;
+  });
+  let has_external = Memo::new(move |_| {
+    conversation
+      .with(|conv| state.read(|backend| crate::components::channel_view::has_external_members(backend, conv)))
+  });
+  let is_peer_in_call = Memo::new(move |_| {
+    maybe_peer
+      .get()
+      .is_some_and(|peer| state.read(|backend| backend.is_in_call(peer)))
+  });
   let label = move || {
-    let label = if is_catching_up {
+    let aria_name = name.get();
+    let mentions = mentions.get();
+    let label = if is_catching_up.get() {
       i18n.t_with("sidebar-item-catching-up", &[("name", &aria_name)])
     } else if mentions > 0 {
       i18n.t_with(
         "sidebar-item-mentions",
         &[("name", &aria_name), ("count", &mentions.to_string())],
       )
-    } else if unread {
+    } else if is_unread.get() {
       i18n.t_with("sidebar-item-unread", &[("name", &aria_name)])
     } else {
-      aria_name.clone()
+      aria_name
     };
-    if is_muted {
+    if is_muted.get() {
       i18n.t_with("sidebar-item-muted-label", &[("label", &label)])
     } else {
       label
@@ -643,30 +719,33 @@ pub fn SidebarItem(conversation: Conversation) -> impl IntoView {
     <button
       class="sb-item"
       class:current=is_current
-      class:unread=unread
-      class:muted=conversation.is_muted
-      class:catching-up=is_catching_up
+      class:unread=move || is_unread.get()
+      class:muted=move || is_muted.get()
+      class:catching-up=move || is_catching_up.get()
       data-conversation=id.to_string()
       aria-current=move || is_current().then_some("page")
       aria-label=label
       on:click=move |_| state.open_conversation(id)
     >
       {leading} <span class="sb-name" translate="no">
-        {name}
-      </span> {status_emoji.map(|emoji| view! { <span class="sb-status" aria-hidden="true">{emoji}</span> })}
+        {move || name.get()}
+      </span> {move || status_emoji.get().map(|emoji| view! { <span class="sb-status" aria-hidden="true">{emoji}</span> })}
       {move || {
-        state
-          .read(|backend| crate::components::channel_view::has_external_members(backend, &external_probe))
+        has_external
+          .get()
           .then(|| view! { <span class="sb-external" title=i18n.t("external-badge-detail")><Icon name=IconName::User /></span> })
       }}
       {move || {
-        call_peer
-          .filter(|peer| state.read(|backend| backend.is_in_call(*peer)))
-          .map(|_| view! { <span class="sb-call" title=i18n.t("presence-in-call")><Icon name=IconName::Phone /></span> })
+        is_peer_in_call
+          .get()
+          .then(|| view! { <span class="sb-call" title=i18n.t("presence-in-call")><Icon name=IconName::Phone /></span> })
       }}
-      {is_muted.then(|| view! { <span class="sb-muted-icon" title=i18n.t("sidebar-item-muted")><Icon name=IconName::BellOff /></span> })}
-      {is_catching_up.then(|| view! { <span class="sb-catching-up" aria-hidden="true" title=i18n.t("catching-up")><Icon name=IconName::Clock /></span> })}
-      {(mentions > 0).then(|| view! { <span class="badge-count" aria-hidden="true">{mentions}</span> })}
+      {move || is_muted.get().then(|| view! { <span class="sb-muted-icon" title=i18n.t("sidebar-item-muted")><Icon name=IconName::BellOff /></span> })}
+      {move || is_catching_up.get().then(|| view! { <span class="sb-catching-up" aria-hidden="true" title=i18n.t("catching-up")><Icon name=IconName::Clock /></span> })}
+      {move || {
+        let mentions = mentions.get();
+        (mentions > 0).then(|| view! { <span class="badge-count" aria-hidden="true">{mentions}</span> })
+      }}
     </button>
   }
 }

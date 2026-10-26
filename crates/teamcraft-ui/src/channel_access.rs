@@ -11,7 +11,7 @@ use teamcraft_client_api::model::{ChannelMember, Conversation, SpaceId};
 use teamcraft_client_api::role_rules::{RoleActor, can_in_channel, can_in_workspace, scheme_of};
 use teamcraft_proto::{ChannelRole, ConversationVisibility, Permission, PermissionScheme, Role};
 
-use crate::model::{ConversationId, ConversationKind, Space, SpaceId};
+use crate::model::{ConversationId, ConversationKind, Space};
 use crate::state::AppState;
 
 /// Whether the signed-in user is a guest (external): guests browse no channels, invite nobody and

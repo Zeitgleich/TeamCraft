@@ -32,14 +32,15 @@ pub fn Avatar(
   let presence = user.presence;
   let id = user.id;
   // Their picture, once loaded (signed-in builds); the generated initials until then.
-  let picture = move || crate::profiles::use_profiles().and_then(|hub| hub.avatar_url(id));
+  let picture = Memo::new(move |_| crate::profiles::use_profiles().and_then(|hub| hub.avatar_url(id)));
   let initials = user.initials();
+  // Both are always there, one hidden: an avatar built again by a list or row that renders anew
+  // keeps its `<img>` (only changed attributes are written) instead of loading and flashing it
+  // (issue #687).
   view! {
     <span class=size.class() style:--hue=user.avatar_hue.to_string() aria-hidden="true">
-      {move || match picture() {
-        Some(url) => view! { <img class="avatar-img" src=url alt="" /> }.into_any(),
-        None => view! { <span class="avatar-initials">{initials.clone()}</span> }.into_any(),
-      }}
+      <img class="avatar-img" src=move || picture.get() alt="" hidden=move || picture.with(Option::is_none) />
+      <span class="avatar-initials" hidden=move || picture.with(Option::is_some)>{initials}</span>
       {show_presence.then(|| view! { <PresenceDot presence=presence /> })}
     </span>
   }

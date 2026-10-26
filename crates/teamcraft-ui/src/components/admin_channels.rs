@@ -304,6 +304,11 @@ pub fn ChannelsSection() -> impl IntoView {
       .get()
       .and_then(|id| channels.get().into_iter().find(|channel| channel.id == id))
   });
+  // The detail is built again for another channel only: a refresh with new counts updates it in
+  // place, so the moderation form and a join result stay and nothing flickers (issue #687).
+  let detail_channel = Memo::new(move |_| {
+    selected_channel.with(|maybe_channel| maybe_channel.as_ref().map(|channel| channel.id))
+  });
 
   view! {
     <SectionHeader
@@ -385,8 +390,8 @@ pub fn ChannelsSection() -> impl IntoView {
         </Show>
       </div>
       <aside class="detail-pane" aria-label=move || i18n.t("admin-detail-label")>
-        {move || match selected_channel.get() {
-          Some(channel) => view! { <ChannelDetail channel=channel /> }.into_any(),
+        {move || match detail_channel.get().and_then(|_| selected_channel.get_untracked()) {
+          Some(channel) => view! { <ChannelDetail channel=channel latest=selected_channel /> }.into_any(),
           None => view! { <p class="empty-state">{move || i18n.t("admin-channel-select")}</p> }.into_any(),
         }}
       </aside>
@@ -436,22 +441,33 @@ fn ChannelRow(channel: AdminChannel, selected: RwSignal<Option<ConversationId>>,
 }
 
 #[component]
-fn ChannelDetail(channel: AdminChannel) -> impl IntoView {
+fn ChannelDetail(channel: AdminChannel, latest: Memo<Option<AdminChannel>>) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let outcome = RwSignal::new(None::<SelfJoinOutcome>);
   let id = channel.id;
   let is_private = channel.kind == ConversationKind::Private;
-  let owner_name = channel
-    .maybe_owner
-    .and_then(|owner| state.read(|backend| backend.user(owner)))
-    .map(|user| user.display_name);
+  // The channel as the last refresh has it; the one it was opened with once it is gone.
+  let current = Memo::new(move |previous: Option<&AdminChannel>| {
+    latest
+      .get()
+      .or_else(|| previous.cloned())
+      .unwrap_or_else(|| channel.clone())
+  });
+  let maybe_owner = Memo::new(move |_| current.with(|channel| channel.maybe_owner));
+  let owner_name = Memo::new(move |_| {
+    maybe_owner
+      .get()
+      .and_then(|owner| state.read(|backend| backend.user(owner)))
+      .map(|user| user.display_name)
+  });
   let retention = move || {
+    let retention = current.with(|channel| channel.retention);
     let mut parts = Vec::new();
-    if let Some(days) = channel.retention.maybe_days {
+    if let Some(days) = retention.maybe_days {
       parts.push(i18n.t_count("admin-retention-days", days as usize));
     }
-    if let Some(messages) = channel.retention.maybe_max_messages {
+    if let Some(messages) = retention.maybe_max_messages {
       parts.push(i18n.t_count("admin-retention-messages", messages as usize));
     }
     if parts.is_empty() {
@@ -460,31 +476,34 @@ fn ChannelDetail(channel: AdminChannel) -> impl IntoView {
       parts.join(" / ")
     }
   };
-  let history = match &channel.history {
-    HistoryPolicy::FromJoin => "from_join".to_owned(),
-    HistoryPolicy::Full => "full".to_owned(),
-    HistoryPolicy::Unknown(other) => other.clone(),
+  let history = move || {
+    current.with(|channel| match &channel.history {
+      HistoryPolicy::FromJoin => "from_join".to_owned(),
+      HistoryPolicy::Full => "full".to_owned(),
+      HistoryPolicy::Unknown(other) => other.clone(),
+    })
   };
 
   view! {
-    <h3 translate="no">{format!("# {}", channel.name)}</h3>
-    <p class="muted-text" translate="no">{channel.space_name.clone()}</p>
+    <h3 translate="no">{move || current.with(|channel| format!("# {}", channel.name))}</h3>
+    <p class="muted-text" translate="no">{move || current.with(|channel| channel.space_name.clone())}</p>
     <dl class="meta-list">
       <dt>{move || i18n.t("admin-col-members")}</dt>
-      <dd>{move || i18n.t_count("members-count", channel.member_count as usize)}</dd>
+      <dd>{move || i18n.t_count("members-count", current.with(|channel| channel.member_count) as usize)}</dd>
       <dt>{move || i18n.t("admin-guests")}</dt>
-      <dd>{channel.guest_count}</dd>
+      <dd>{move || current.with(|channel| channel.guest_count)}</dd>
       <dt>{move || i18n.t("admin-col-owner")}</dt>
-      <dd translate="no">{owner_name.unwrap_or_else(|| "–".to_owned())}</dd>
+      <dd translate="no">{move || owner_name.get().unwrap_or_else(|| "–".to_owned())}</dd>
       <dt>{move || i18n.t("admin-messages")}</dt>
-      <dd>{channel.message_count.to_string()}</dd>
+      <dd>{move || current.with(|channel| channel.message_count.to_string())}</dd>
       <dt>{move || i18n.t("admin-col-storage")}</dt>
-      <dd>{format_bytes(channel.storage_bytes)}</dd>
+      <dd>{move || current.with(|channel| format_bytes(channel.storage_bytes))}</dd>
       <dt>{move || i18n.t("admin-history")}</dt>
       <dd>{move || {
+        let history = history();
         let key = format!("admin-history-{history}");
         let text = i18n.t(&key);
-        if text == key { history.clone() } else { text }
+        if text == key { history } else { text }
       }}</dd>
       <dt>{move || i18n.t("admin-retention")}</dt>
       <dd>{retention}</dd>
@@ -503,7 +522,7 @@ fn ChannelDetail(channel: AdminChannel) -> impl IntoView {
       })}
       <button class="btn" disabled title=move || i18n.t("admin-soon")>{move || i18n.t("admin-archive")}</button>
     </div>
-    {channel.maybe_owner.is_none().then(|| view! { <OwnerAssign channel=id /> })}
+    {move || maybe_owner.get().is_none().then(|| view! { <OwnerAssign channel=id /> })}
     <ModerationEditor channel=id />
     <p class="status-line" role="status">
       {move || {
