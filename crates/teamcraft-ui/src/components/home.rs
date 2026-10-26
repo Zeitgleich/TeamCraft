@@ -3,8 +3,8 @@
 //! their own sidebar, as in Element or Discord: newest first, with a text filter, filter chips and "new message".
 
 use leptos::prelude::*;
-use teamcraft_proto::Role;
 
+use crate::channel_access::can_invite_to;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::channel_view::shown_name;
 use crate::components::huddle_bar::CallPill;
@@ -126,15 +126,12 @@ pub fn HomeSidebar() -> impl IntoView {
   }
 }
 
-/// "Invite people" under the list, for members who may (not guests); it invites to the current space.
+/// "Invite people" under the list, for people who may invite to the current space (not guests).
 #[component]
 fn InviteFooter() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let can_invite = Memo::new(move |_| {
-    state.read(|backend| backend.my_role()) != Role::Guest
-      && state.read(|backend| !backend.spaces().is_empty())
-  });
+  let can_invite = Memo::new(move |_| can_invite_to(state, state.space.get()));
   view! {
     <Show when=move || can_invite.get() fallback=|| ()>
       <button class="sb-more sb-footer" on:click=move |_| state.overlay.set(Overlay::InvitePeople(state.space.get_untracked()))>
@@ -244,6 +241,7 @@ fn section_slug(kind: DirectSectionKind) -> &'static str {
     DirectSectionKind::Notes => "notes",
     DirectSectionKind::Favorites => "favorites",
     DirectSectionKind::Conversations => "conversations",
+    DirectSectionKind::Deactivated => "deactivated",
   }
 }
 

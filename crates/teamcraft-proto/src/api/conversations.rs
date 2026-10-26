@@ -4,7 +4,7 @@ use utoipa::ToSchema;
 use crate::wire_enum::wire_enum;
 use crate::{
   CategoryId, ChannelModeration, ChannelRole, ConversationId, ConversationKind, ConversationVisibility,
-  HistoryPolicy, IdempotencyKey, MessageId, SpaceId, SpaceImage, UnixMillis, UserId, UserSummary,
+  HistoryPolicy, IdempotencyKey, MessageId, Permission, SpaceId, SpaceImage, UnixMillis, UserId, UserSummary,
 };
 
 wire_enum! {
@@ -79,9 +79,41 @@ pub struct ConversationResponse {
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_organizer_user_id: Option<UserId>,
+  /// The channel permissions the caller holds in the conversation now (`create_post`,
+  /// `manage_members`, ...), so clients offer only what will work (issue #691). A hint: every
+  /// request is checked again. Absent from older servers; clients then evaluate the built-in
+  /// scheme themselves.
+  #[serde(rename = "my_permissions", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_my_permissions: Option<Vec<Permission>>,
 }
 
 impl ConversationResponse {
+  /// A DM or group DM whose other participants are all deactivated (issue #698): clients list it
+  /// apart from the active conversations, its history stays readable. `is_deactivated` judges a
+  /// participant by the freshest account state the client has.
+  pub fn has_only_deactivated_others(
+    &self,
+    me: UserId,
+    is_deactivated: impl Fn(&UserSummary) -> bool,
+  ) -> bool {
+    if !matches!(self.kind, ConversationKind::Dm | ConversationKind::Group) {
+      return false;
+    }
+    let mut others = self.participants.iter().filter(|user| user.id != me).peekable();
+    others.peek().is_some() && others.all(is_deactivated)
+  }
+
+  /// Whether the caller may post: the server's word ([`Self::maybe_my_permissions`]) when it gave
+  /// one, otherwise anything that isn't archived (an older server checks on send).
+  pub fn may_post(&self) -> bool {
+    self
+      .maybe_my_permissions
+      .as_ref()
+      .map_or(!self.is_archived, |granted| {
+        granted.contains(&Permission::CreatePost)
+      })
+  }
+
   /// The user's notes to themself: a DM opened with oneself (e2ee.md, "Notes to self"). Decided by
   /// the DM's participants, never by its current members: a DM whose other person was
   /// deactivated has only the user left as member and is still not their notes (issue #643).
@@ -250,5 +282,95 @@ mod tests {
     assert_eq!(listed.deleted_conversation_ids.len(), 1);
     let older: ListConversationsResponse = serde_json::from_str(r#"{"conversations":[]}"#).unwrap();
     assert!(older.deleted_conversation_ids.is_empty());
+  }
+
+  use crate::{Id, Snowflake, UserKind};
+
+  const ME: i64 = 1;
+
+  #[test]
+  fn my_permissions_are_optional_on_the_wire_and_decide_posting() {
+    let older = conversation(ConversationKind::Channel, &[]);
+    let json = serde_json::to_value(&older).unwrap();
+    assert!(
+      json.get("my_permissions").is_none(),
+      "older answers stay as they were"
+    );
+    // Without the server's word, anything not archived offers posting.
+    assert!(older.may_post());
+    let archived = ConversationResponse {
+      is_archived: true,
+      ..older.clone()
+    };
+    assert!(!archived.may_post());
+    let announcement = ConversationResponse {
+      maybe_my_permissions: Some(vec![Permission::AddReaction]),
+      ..older.clone()
+    };
+    let json = serde_json::to_value(&announcement).unwrap();
+    assert_eq!(json["my_permissions"], serde_json::json!(["add_reaction"]));
+    assert!(!announcement.may_post());
+    let parsed: ConversationResponse = serde_json::from_value(json).unwrap();
+    assert_eq!(parsed.maybe_my_permissions, Some(vec![Permission::AddReaction]));
+  }
+
+  #[test]
+  fn only_dms_whose_other_people_are_all_deactivated_count_as_deactivated() {
+    let deactivated = |user: &UserSummary| user.is_deactivated;
+    let me = user_id(ME);
+    assert!(conversation(ConversationKind::Dm, &[(2, true)]).has_only_deactivated_others(me, deactivated));
+    assert!(!conversation(ConversationKind::Dm, &[(2, false)]).has_only_deactivated_others(me, deactivated));
+    let group = conversation(ConversationKind::Group, &[(2, true), (3, false)]);
+    assert!(
+      !group.has_only_deactivated_others(me, deactivated),
+      "one is still there"
+    );
+    let gone = conversation(ConversationKind::Group, &[(2, true), (3, true)]);
+    assert!(gone.has_only_deactivated_others(me, deactivated));
+    // Notes to self have nobody else; channels never count.
+    assert!(!conversation(ConversationKind::Dm, &[]).has_only_deactivated_others(me, deactivated));
+    assert!(
+      !conversation(ConversationKind::Channel, &[(2, true)]).has_only_deactivated_others(me, deactivated)
+    );
+  }
+
+  fn conversation(kind: ConversationKind, others: &[(i64, bool)]) -> ConversationResponse {
+    let participants = std::iter::once((ME, false))
+      .chain(others.iter().copied())
+      .map(|(raw, is_deactivated)| UserSummary {
+        id: user_id(raw),
+        maybe_username: None,
+        display_name: format!("Person {raw}"),
+        kind: UserKind::Member,
+        maybe_email: None,
+        maybe_organization: None,
+        maybe_has_devices: None,
+        is_deactivated,
+      })
+      .collect();
+    ConversationResponse {
+      id: ConversationId::from_snowflake(Snowflake::new(9).unwrap()),
+      maybe_space_id: None,
+      kind,
+      maybe_name: None,
+      maybe_topic: None,
+      maybe_description: None,
+      visibility: ConversationVisibility::Private,
+      history_policy: HistoryPolicy::FromJoin,
+      maybe_category_id: None,
+      is_archived: false,
+      moderation: ChannelModeration::default(),
+      is_integration: false,
+      contains_guests: false,
+      maybe_my_membership: None,
+      participants,
+      maybe_image: None,
+      maybe_organizer_user_id: None,
+      maybe_my_permissions: None,
+    }
+  }
+
+  fn user_id(raw: i64) -> UserId {
+    UserId::from_snowflake(Snowflake::new(raw).unwrap())
   }
 }

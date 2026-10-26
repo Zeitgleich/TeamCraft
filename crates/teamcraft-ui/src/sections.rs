@@ -115,6 +115,9 @@ pub enum DirectSectionKind {
   Notes,
   Favorites,
   Conversations,
+  /// DMs whose other people are all deactivated (issue #698): after the active ones, never cut
+  /// off, so their history stays a click away.
+  Deactivated,
 }
 
 impl DirectSectionKind {
@@ -124,6 +127,7 @@ impl DirectSectionKind {
       Self::Notes => "notes-title",
       Self::Favorites => "sidebar-favorites",
       Self::Conversations => "sidebar-direct-messages",
+      Self::Deactivated => "sidebar-deactivated-accounts",
     }
   }
 }
@@ -182,9 +186,9 @@ pub struct DirectList {
 }
 
 /// Lists DMs and group DMs (each with the time of its newest message): favorites, then the rest,
-/// both in `sort` order. Only those `chip` lets through and whose names contain `filter` (any case)
-/// are kept; while filtering the limit doesn't apply. `limit` 0 shows all; unread conversations stay
-/// visible beyond it.
+/// both in `sort` order, and last the DMs of deactivated accounts (issue #698). Only those `chip`
+/// lets through and whose names contain `filter` (any case) are kept; while filtering the limit
+/// doesn't apply. `limit` 0 shows all; unread conversations stay visible beyond it.
 pub fn build_direct(
   conversations: Vec<(Conversation, Option<TimestampMs>)>,
   sort: DmSort,
@@ -213,6 +217,10 @@ pub fn build_direct(
     .into_iter()
     .map(|(conversation, _)| conversation)
     .partition(|conversation| conversation.is_notes_to_self);
+  // A deactivated account's DM leaves the active list, favorite or not (issue #698).
+  let (deactivated, list): (Vec<Conversation>, Vec<Conversation>) = list
+    .into_iter()
+    .partition(|conversation| conversation.has_only_deactivated_others);
   let (favorites, rest): (Vec<Conversation>, Vec<Conversation>) = list
     .into_iter()
     .partition(|conversation| conversation.is_favorite);
@@ -232,6 +240,7 @@ pub fn build_direct(
     (DirectSectionKind::Notes, notes),
     (DirectSectionKind::Favorites, favorites),
     (DirectSectionKind::Conversations, rest),
+    (DirectSectionKind::Deactivated, deactivated),
   ]
   .into_iter()
   .filter(|(_, conversations)| !conversations.is_empty())
@@ -563,6 +572,15 @@ mod tests {
       vec![amy, zed, bob, group, channel]
     }
 
+    fn sample_with_old() -> Vec<(Conversation, Option<TimestampMs>)> {
+      let mut old = direct(11, 0, Some(50));
+      old.0.name = "Amy (old)".into();
+      old.0.has_only_deactivated_others = true;
+      let mut conversations = sample();
+      conversations.push(old);
+      conversations
+    }
+
     #[test]
     fn notes_to_self_are_pinned_above_everything() {
       let mut notes = direct(9, 0, None);
@@ -590,6 +608,31 @@ mod tests {
       let list = build_direct(conversations, DmSort::Recent, 0, "", HomeFilter::All);
       assert_eq!(names(&list)[0], ["Zoe"]);
       assert!(names(&list)[1].contains(&"Former colleague"));
+    }
+
+    #[test]
+    fn a_deactivated_accounts_dm_moves_out_of_the_list_to_the_end() {
+      // "Amy (old)" is Amy's deactivated account, favorite and newest; the new account is active.
+      let mut old = direct(11, 0, Some(50));
+      old.0.name = "Amy (old)".into();
+      old.0.is_favorite = true;
+      old.0.has_only_deactivated_others = true;
+      let mut conversations = sample();
+      conversations.push(old);
+      let list = build_direct(conversations, DmSort::Recent, 1, "", HomeFilter::All);
+      let last = list.sections.last().expect("sections");
+      assert_eq!(last.kind, DirectSectionKind::Deactivated);
+      assert_eq!(names(&list).last().expect("names"), &["Amy (old)"]);
+      // Not among the favorites or the active conversations, and the limit doesn't hide it.
+      assert!(list.sections[..list.sections.len() - 1].iter().all(|section| {
+        section
+          .conversations
+          .iter()
+          .all(|c| !c.has_only_deactivated_others)
+      }));
+      // Searching still finds it, so its history stays reachable.
+      let found = build_direct(sample_with_old(), DmSort::Recent, 0, "old", HomeFilter::All);
+      assert_eq!(names(&found), [vec!["Amy (old)"]]);
     }
 
     #[test]
@@ -751,6 +794,8 @@ mod tests {
       bookmarks: Vec::new(),
       is_catching_up: false,
       is_notes_to_self: false,
+      maybe_permissions: None,
+      has_only_deactivated_others: false,
       maybe_image_version: None,
     }
   }

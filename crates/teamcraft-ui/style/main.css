@@ -2297,9 +2297,16 @@ select.input {
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .reaction:hover {
+  .reaction:not(:disabled):hover {
     border-color: var(--text-muted);
   }
+}
+
+/* Counts for people who may not react (issue #691): readable, not pressable. */
+.reaction:disabled {
+  cursor: default;
+  opacity: 1;
+  color: inherit;
 }
 
 .reaction-mine {

@@ -1,5 +1,6 @@
 use leptos::prelude::*;
 
+use crate::channel_access::ChannelAccess;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
 use crate::components::org_badge::OrgBadge;
@@ -24,10 +25,13 @@ pub fn MembersPanel(conversation: ConversationId) -> impl IntoView {
     })
   });
 
-  // Channels add people here; direct messages start a new group instead.
+  // Channels add people here, for people who may add members; direct messages start a new group
+  // instead.
+  let access = ChannelAccess::new(state, conversation);
   let is_channel = state
     .read(|backend| backend.conversation(conversation))
     .is_some_and(|conv| matches!(conv.kind, ConversationKind::Public | ConversationKind::Private));
+  let can_add_people = move || is_channel && access.can_add_members();
   view! {
     <aside class="side-panel members-panel" aria-label=move || i18n.t("members-panel-label")>
       <header class="panel-header">
@@ -35,7 +39,7 @@ pub fn MembersPanel(conversation: ConversationId) -> impl IntoView {
           <h2>{move || i18n.t("members-title")}</h2>
           <span class="panel-subtitle">{move || i18n.t_count("members-count", members.get().len())}</span>
         </div>
-        {is_channel.then(|| view! {
+        <Show when=can_add_people fallback=|| ()>
           <button
             class="btn btn-small"
             on:click=move |_| state.overlay.set(Overlay::AddToChannel(conversation))
@@ -43,7 +47,7 @@ pub fn MembersPanel(conversation: ConversationId) -> impl IntoView {
             <Icon name=IconName::Plus />
             {move || i18n.t("channel-add-people")}
           </button>
-        })}
+        </Show>
         <button
           class="icon-btn"
           aria-label=move || i18n.t("close")

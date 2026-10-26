@@ -55,6 +55,15 @@ pub struct SpaceResponse {
   /// A UI hint like `can_add_members`.
   #[serde(default)]
   pub can_manage_space: bool,
+  /// Whether the caller may create channels in the space (`create_channel`, which guests don't
+  /// have). A UI hint like `can_add_members`; servers that don't send it leave it to the request.
+  #[serde(default = "unknown_is_allowed")]
+  pub can_create_channels: bool,
+}
+
+/// What a client assumes for a hint an older server doesn't send: offered, and the server decides.
+fn unknown_is_allowed() -> bool {
+  true
 }
 
 /// The picture of a space: a square PNG the server re-encoded from the upload
@@ -248,12 +257,14 @@ mod tests {
       member_count: 12,
       can_add_members: true,
       can_invite_guests: false,
+      can_create_channels: false,
       ..space(None)
     };
     let value = serde_json::to_value(&space).unwrap();
     assert_eq!(value["member_count"], json!(12));
     assert_eq!(value["can_add_members"], json!(true));
     assert_eq!(value["can_invite_guests"], json!(false));
+    assert_eq!(value["can_create_channels"], json!(false));
     assert_eq!(serde_json::from_value::<SpaceResponse>(value).unwrap(), space);
   }
 
@@ -290,6 +301,8 @@ mod tests {
       can_add_members: false,
       can_invite_guests: false,
       can_manage_space: false,
+      // What an older server, which doesn't send it, is taken to mean.
+      can_create_channels: true,
     }
   }
 }

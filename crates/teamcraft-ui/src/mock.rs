@@ -236,6 +236,7 @@ impl MockBackend {
           can_add_members: true,
           can_invite_guests: true,
           can_manage_space: true,
+          can_create_channels: true,
         },
         Space {
           id: space_b(),
@@ -251,6 +252,7 @@ impl MockBackend {
           can_add_members: false,
           can_invite_guests: false,
           can_manage_space: false,
+          can_create_channels: false,
         },
       ],
       conversations: demo_conversations(),
@@ -1341,6 +1343,8 @@ fn demo_conversations() -> Vec<Conversation> {
     bookmarks: Vec::new(),
     is_catching_up: false,
     is_notes_to_self: false,
+    maybe_permissions: None,
+    has_only_deactivated_others: false,
     maybe_image_version: None,
   };
   use ConversationKind::{Integration, Private, Public};
@@ -1518,6 +1522,8 @@ fn demo_conversations() -> Vec<Conversation> {
       bookmarks: Vec::new(),
       is_catching_up: false,
       is_notes_to_self: false,
+      maybe_permissions: None,
+      has_only_deactivated_others: false,
       maybe_image_version: None,
     });
   }
