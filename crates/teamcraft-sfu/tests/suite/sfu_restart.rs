@@ -19,7 +19,7 @@ use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
 use teamcraft_media::call_native::{JoinTicketSource, NativeCall, NativeCallConfig, TicketFuture};
 use teamcraft_media::call_resilience::{JoinTicket, ResilienceConfig};
-use teamcraft_proto::MediaCapabilities;
+use teamcraft_proto::{MediaCapabilities, SfuRosterReport};
 use teamcraft_sfu::auth::{DevTokenVerifier, JoinGrant};
 use teamcraft_sfu::config::SfuConfig;
 use teamcraft_sfu::reporting::ParticipantReporter;
@@ -30,6 +30,7 @@ use tokio::task::JoinHandle;
 use wtransport::Identity;
 
 const CALL_ID: u64 = 43;
+const CONVERSATION_ID: u64 = 44;
 const ALICE: u64 = 1;
 const BOB: u64 = 2;
 
@@ -135,8 +136,32 @@ async fn assert_back_together(mut alice: NativeCall, mut bob: NativeCall, report
     .lock()
     .unwrap()
     .iter()
-    .any(|(kind, _)| *kind == ReportKind::Left);
+    .any(|report| matches!(report, Report::Left));
   assert!(!has_left, "{:?}", reports.lock().unwrap());
+  // The restarted SFU's roster has both of them back in the call the server kept (it drops no one
+  // within its restart grace), named with the conversation for a server that restarted too.
+  let latest_roster = reports
+    .lock()
+    .unwrap()
+    .iter()
+    .rev()
+    .find_map(|report| match report {
+      Report::Roster(roster) => Some(roster.clone()),
+      _ => None,
+    })
+    .expect("the SFU reports its roster");
+  let [call] = &latest_roster.calls[..] else {
+    panic!("{latest_roster:?}");
+  };
+  assert_eq!(call.call_id, id_of(CALL_ID));
+  assert_eq!(call.maybe_conversation_id, Some(id_of(CONVERSATION_ID)));
+  let mut devices: Vec<u64> = call
+    .participants
+    .iter()
+    .map(|entry| entry.device_id.to_string().parse().unwrap())
+    .collect();
+  devices.sort_unstable();
+  assert_eq!(devices, vec![ALICE, BOB], "{latest_roster:?}");
   let alice_stats = alice.leave().await.unwrap();
   let bob_stats = bob.leave().await.unwrap();
   assert!(alice_stats.maybe_privacy_code.is_some());
@@ -145,28 +170,33 @@ async fn assert_back_together(mut alice: NativeCall, mut bob: NativeCall, report
   assert!(bob_stats.frames_received > 25, "{bob_stats:?}");
 }
 
-type Reports = Arc<Mutex<Vec<(ReportKind, JoinGrant)>>>;
+type Reports = Arc<Mutex<Vec<Report>>>;
 
 /// The SFU certificate's hash that `teamcraft-server` names with its tokens
 /// (`[calls] sfu_certificate_sha256`).
 type AnnouncedHash = Arc<Mutex<[u8; 32]>>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReportKind {
+#[derive(Debug, Clone)]
+enum Report {
   Joined,
   Left,
+  Roster(SfuRosterReport),
 }
 
 /// What the SFU would tell `teamcraft-server`.
 struct RecordingReporter(Reports);
 
 impl ParticipantReporter for RecordingReporter {
-  fn joined(&self, grant: JoinGrant) {
-    self.0.lock().unwrap().push((ReportKind::Joined, grant));
+  fn joined(&self, _grant: JoinGrant) {
+    self.0.lock().unwrap().push(Report::Joined);
   }
 
-  fn left(&self, grant: JoinGrant) {
-    self.0.lock().unwrap().push((ReportKind::Left, grant));
+  fn left(&self, _grant: JoinGrant) {
+    self.0.lock().unwrap().push(Report::Left);
+  }
+
+  fn roster(&self, report: SfuRosterReport) {
+    self.0.lock().unwrap().push(Report::Roster(report));
   }
 }
 
@@ -183,6 +213,8 @@ impl SfuProcess {
       bind_addr: SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
       idle_timeout: Duration::from_secs(2),
       reconnect_grace: Duration::from_secs(10),
+      // Several rosters within the second the test listens after the rejoin.
+      roster_interval: Duration::from_millis(200),
       ..SfuConfig::default()
     };
     let sfu = Sfu::bind(config, identity.clone_identity(), Arc::new(DevTokenVerifier))
@@ -396,7 +428,7 @@ fn backend(port: u16) -> SocketAddr {
 }
 
 fn token(device: u64) -> String {
-  format!("dev:{CALL_ID}:{device}:{device}")
+  format!("dev:{CALL_ID}:{device}:{device}:{CONVERSATION_ID}")
 }
 
 fn sfu_url(port: u16) -> String {

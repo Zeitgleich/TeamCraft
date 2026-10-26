@@ -41,6 +41,9 @@ pub fn VideoTile(
   let display = user.display_name.clone();
   let hue = user.avatar_hue;
   let initials = user.initials();
+  let id = user.id;
+  // Their profile picture, like everywhere else (`Avatar`); the initials until it loaded or without.
+  let picture = move || crate::profiles::use_profiles().and_then(|hub| hub.avatar_url(id));
 
   view! {
     <div
@@ -72,7 +75,17 @@ pub fn VideoTile(
           when=move || is_camera_on.get()
           fallback={
             let initials = initials.clone();
-            move || view! { <span class="tile-initials" aria-hidden="true">{initials.clone()}</span> }
+            move || {
+              let initials = initials.clone();
+              view! {
+                <span class="tile-initials" aria-hidden="true">
+                  {move || match picture() {
+                    Some(url) => view! { <img class="avatar-img" src=url alt="" /> }.into_any(),
+                    None => initials.clone().into_any(),
+                  }}
+                </span>
+              }
+            }
           }
         >
           {move || match video.get() {

@@ -113,6 +113,15 @@ exists; clients can still read what they have stored locally.
   about 5 s instead of at once. Rooms, locks and host removals live in the SFU's memory and start
   fresh; the server's meeting admission still applies to every rejoin. Desktop and mobile apps of
   version 1.0.2 and older end the call on "going away" (a browser tab rejoins).
+- The SFU reports its whole call roster to the server at start and every
+  `TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS` (default 30); the server drops participants the SFU no
+  longer has (after `[calls] roster_grace_secs`, default 60, while the SFU is fresh from a restart)
+  and ends calls with nobody left. If the SFU stops reporting for `[calls] roster_timeout_secs`
+  (default 120), the server ends its calls. Keep the timeout a few intervals long.
+- Restarting `teamcraft-server` doesn't end running calls either: at start it reads the SFU's
+  roster over `[calls] sfu_control_url` (and otherwise from the SFU's next roster) and takes over
+  the calls that kept running, without ringing again. Calls whose join tokens came from a server
+  before 1.0.8 can't be taken over (the tokens don't name the conversation).
 
 ### Company proxies, TLS inspection and captive portals (clients)
 

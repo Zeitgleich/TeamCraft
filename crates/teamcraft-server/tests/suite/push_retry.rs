@@ -546,6 +546,8 @@ MC4CAQAwBQYDK2VwBCIEIAxxS2yuWa9SUUAfZhI0772UQ48VXZLz45+L2A5IfcWA
       ring_timeout_secs: 30,
       maybe_sfu_control_url: None,
       maybe_sfu_certificate_sha256: None,
+      roster_grace_secs: 60,
+      roster_timeout_secs: 120,
     }
   }
 }

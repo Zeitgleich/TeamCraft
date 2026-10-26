@@ -992,6 +992,12 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
     }
   }
 
+  fn leave_call_everywhere(&self, conversation: ConversationId) {
+    if let Some(live) = &self.maybe_live {
+      live.leave_call_everywhere(conversation);
+    }
+  }
+
   fn select_microphone(&self, maybe_device: Option<String>) {
     if let Some(calls) = &self.maybe_calls {
       calls.act(CallAction::SelectMicrophone { maybe_device });

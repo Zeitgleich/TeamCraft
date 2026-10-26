@@ -531,6 +531,7 @@ impl Network {
       call_id: call(),
       user_id: user(id),
       device_id: device(id),
+      maybe_conversation_id: None,
     };
     let (room, session, outcome) = self.rooms.join(grant, capabilities, handle).unwrap();
     self.client_mut(id).maybe_connection = Some(MemoryConnection {
