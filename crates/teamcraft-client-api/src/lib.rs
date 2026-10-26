@@ -21,6 +21,7 @@ pub mod failure;
 pub mod links;
 pub mod live;
 pub mod log;
+pub mod markdown;
 pub mod model;
 pub mod notify;
 pub mod oidc_login;
