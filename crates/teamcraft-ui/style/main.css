@@ -7601,6 +7601,34 @@ html.call-window body {
 .settings-form label { font-weight: var(--weight-semibold); font-size: var(--text-sm); }
 .settings-row { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2); }
 .settings-member-list { list-style: none; margin: 0; padding: 0; }
+
+/* Channel settings, Integrations (issue #764): label above each field, hints spaced from what
+   follows. */
+.channel-integrations {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.channel-integrations .detail-heading {
+  margin: var(--space-4) 0 0;
+}
+
+.channel-integrations .detail-heading:first-child {
+  margin-top: 0;
+}
+
+.channel-integrations .field {
+  margin: 0;
+}
+
+.channel-integrations .hint {
+  margin: 0 0 var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
 .settings-member .member-name { flex: none; }
 .settings-member { display: flex; align-items: center; gap: var(--space-2); padding: 6px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
 /* A bridge source: its name over who added it when (channel settings, Integrations). */

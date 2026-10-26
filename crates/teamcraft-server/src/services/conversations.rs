@@ -41,7 +41,8 @@ pub async fn list_conversations(
       .maybe_space_id
       .ok_or_else(|| ApiError::InvalidRequest("joinable needs space_id".into()))?;
     let access = load_space(state, caller, space).await?;
-    if is_guest(caller) || access.view.maybe_role.is_none() {
+    let is_admin = is_instance_admin(caller);
+    if is_guest(caller) || (access.view.maybe_role.is_none() && !is_admin) {
       return Err(ApiError::Forbidden(
         "the channel browser is for members of the space".into(),
       ));
@@ -49,6 +50,9 @@ pub async fn list_conversations(
     ConversationFilter {
       maybe_space: Some(space),
       only_joinable: true,
+      // Admins may join private channels by themselves (admin.md §2.4); members' clients decide by
+      // the signed policy and the signed roster whether that join is let in.
+      includes_private: is_admin,
       ..ConversationFilter::default()
     }
   } else {

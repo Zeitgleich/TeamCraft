@@ -270,6 +270,12 @@ pub enum ConversationEvent {
     #[serde(rename = "call", default, skip_serializing_if = "Option::is_none")]
     maybe_call: Option<teamcraft_proto::CallId>,
   },
+  /// A workspace admin added themselves to this private channel (admin.md §2.4). Sent by the
+  /// member whose client committed the admin's signed self-join, so the join is never silent;
+  /// shown whatever the join/leave setting says.
+  AdminJoined {
+    user: UserId,
+  },
   /// From a newer client.
   #[serde(other)]
   Unknown,

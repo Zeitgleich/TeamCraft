@@ -120,6 +120,8 @@ pub struct OwnerStatus {
   pub owners: Vec<(UserId, Option<i64>)>,
   /// Admins of the roster (not owners).
   pub admins: Vec<UserId>,
+  /// Owners whose identity key in the roster can't be used: no signers, but still in the roster.
+  pub unverifiable_owners: Vec<UserId>,
   /// When clients stop accepting the admins unless an owner signs the roster again; `None` for a
   /// roster from before signing times.
   pub maybe_expires_at_ms: Option<i64>,
@@ -439,9 +441,15 @@ impl WorkspaceState {
       .filter(|member| member.role == RosterRole::Admin)
       .map(|member| member.user_id)
       .collect();
+    let unverifiable_owners = unusable_key_members(&self.roster)
+      .into_iter()
+      .filter(|(_, role)| *role == RosterRole::Owner)
+      .map(|(user, _)| user)
+      .collect();
     Some(OwnerStatus {
       owners,
       admins,
+      unverifiable_owners,
       maybe_expires_at_ms,
       recommended_minimum: self.policy.owners.recommended_minimum.max(1),
     })
@@ -484,6 +492,27 @@ impl WorkspaceState {
         .collect(),
     ))
   }
+}
+
+/// Roster members whose identity key isn't a usable key, with their role.
+fn unusable_key_members(roster: &RosterDocument) -> Vec<(UserId, RosterRole)> {
+  roster
+    .members
+    .iter()
+    .filter(|member| <[u8; 32]>::try_from(member.identity_key.as_slice()).is_err())
+    .map(|member| (member.user_id, member.role.clone()))
+    .collect()
+}
+
+/// The first entry of `roles` that the verified roster holds with a key this device can't use: it
+/// can't be signed again as it is, so the new roster is refused instead of changing it silently.
+/// Leaving the person out of `roles` (an explicit removal) is fine.
+pub fn kept_unusable_entry(roster: &RosterDocument, roles: &[(UserId, RosterRole)]) -> Option<UserId> {
+  let unusable = unusable_key_members(roster);
+  roles
+    .iter()
+    .map(|(user, _)| *user)
+    .find(|user| unusable.iter().any(|(listed, _)| listed == user))
 }
 
 fn owner_keys(roster: &RosterDocument) -> BTreeMap<UserId, Base64Bytes> {
@@ -657,6 +686,7 @@ pub fn owner_roster_status(
       })
       .collect(),
     admins: status.admins,
+    unverifiable_owners: status.unverifiable_owners,
     maybe_expires_at: status.maybe_expires_at_ms,
     recommended_minimum: status.recommended_minimum,
     warning_lead_ms: millis(warning_lead),
@@ -881,6 +911,34 @@ mod tests {
 
   mod owner_status {
     use super::*;
+
+    #[test]
+    fn an_owner_whose_key_is_unusable_is_listed_and_not_re_signed_silently() {
+      let (alice, bob) = (Owner::new(1), Owner::new(2));
+      let mut state = WorkspaceState::default();
+      let mut first = roster(1, &[&alice, &bob], Some(1_000), &state);
+      first.members[1].identity_key = Base64Bytes::new(vec![7; 5]);
+      state
+        .apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 1, &first)])
+        .unwrap();
+      let status = state.owner_status(100).unwrap();
+      assert_eq!(
+        status.owners.iter().map(|(user, _)| *user).collect::<Vec<_>>(),
+        vec![alice.user_id]
+      );
+      assert_eq!(status.unverifiable_owners, vec![bob.user_id]);
+      // Keeping Bob means signing his entry again, which can't be done as it is: refused.
+      let keep = [
+        (alice.user_id, RosterRole::Owner),
+        (bob.user_id, RosterRole::Owner),
+      ];
+      assert_eq!(kept_unusable_entry(&state.roster, &keep), Some(bob.user_id));
+      // Removing him explicitly is fine.
+      assert_eq!(
+        kept_unusable_entry(&state.roster, &[(alice.user_id, RosterRole::Owner)]),
+        None
+      );
+    }
 
     #[test]
     fn signing_times_are_kept_per_owner_and_dropped_with_the_owner() {

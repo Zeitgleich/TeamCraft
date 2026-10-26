@@ -171,6 +171,7 @@ impl AdminBackend for MockBackend {
       }],
       version: 1,
       admins: Vec::new(),
+      unverifiable_owners: Vec::new(),
       maybe_expires_at: Some(self.now + 27 * DAY),
       recommended_minimum: self.ops.borrow().policy.owners.recommended_minimum,
       warning_lead_ms: 7 * DAY,

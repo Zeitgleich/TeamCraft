@@ -70,6 +70,29 @@ mod channels {
     app.stop().await;
   }
 
+  /// admin.md §2.4, issue #765: the browser lists a space's private channels to workspace admins
+  /// (marked private, for a self-join members' apps check), never to members.
+  #[tokio::test]
+  async fn admins_find_private_channels_in_the_browser_and_members_do_not() {
+    let app = app!();
+    let (alice, bob, carol) = (owner(), admin(), member("carol"));
+    let space = create_space(&app, &alice, "Team", "open").await;
+    create_channel(&app, &alice, &space, "general", "public").await;
+    create_channel(&app, &alice, &space, "leads", "private").await;
+    for user in [&bob, &carol] {
+      app.post(user, &format!("/spaces/{space}/join"), json!({})).await;
+    }
+    let path = format!("/conversations?space_id={space}&joinable=true");
+    let for_admin = app.get(&bob, &path).await;
+    assert_eq!(names(&for_admin, "conversations"), vec!["general", "leads"]);
+    assert_eq!(for_admin.body["conversations"][1]["visibility"], "private");
+    assert_eq!(
+      names(&app.get(&carol, &path).await, "conversations"),
+      vec!["general"]
+    );
+    app.stop().await;
+  }
+
   #[tokio::test]
   async fn private_channels_are_invisible_to_outsiders_and_unreadable_for_admins() {
     let app = app!();
