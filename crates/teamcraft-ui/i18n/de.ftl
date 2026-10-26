@@ -2049,6 +2049,7 @@ release-too-old = Diese Version von TeamCraft wird vom Server nicht mehr unterst
 release-reload = Jetzt neu laden
 shortcut-search-here = In dieser Unterhaltung suchen
 drop-files-here = Zum Anhängen hier ablegen
+drop-files-unreadable = Die abgelegten Dateien konnten nicht gelesen werden. Hänge sie stattdessen mit der Plus-Schaltfläche an.
 message-show-more = Mehr anzeigen
 message-show-less = Weniger anzeigen
 message-sending = Wird gesendet …
