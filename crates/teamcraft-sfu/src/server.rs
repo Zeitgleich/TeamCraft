@@ -55,6 +55,8 @@ const PERIODIC_INTERVAL: Duration = Duration::from_millis(100);
 
 /// HTTP path of the WebTransport session.
 const PRE_JOIN_LIMIT: u32 = 0x4803;
+/// Rosters never go out more often than this, whatever the configuration says.
+const MIN_ROSTER_INTERVAL: Duration = Duration::from_millis(100);
 
 pub const CALL_PATH: &str = "/call";
 
@@ -249,7 +251,7 @@ impl Sfu {
 /// Reports the roster at start, every [`SfuConfig::roster_interval`] and when woken early, until
 /// the SFU goes away. A tick missed under load is not caught up: one current roster is enough.
 async fn report_rosters(shared: Arc<Shared>) {
-  let mut interval = tokio::time::interval(shared.config.roster_interval.max(Duration::from_secs(1)));
+  let mut interval = tokio::time::interval(shared.config.roster_interval.max(MIN_ROSTER_INTERVAL));
   interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
   loop {
     tokio::select! {
@@ -259,10 +261,16 @@ async fn report_rosters(shared: Arc<Shared>) {
     if shared.rooms.is_going_away() {
       return;
     }
-    shared.reporter.roster(SfuRosterReport {
-      uptime_secs: shared.started_at.elapsed().as_secs(),
-      calls: shared.rooms.roster(),
-    });
+    shared.reporter.roster(shared.roster());
+  }
+}
+
+impl Shared {
+  fn roster(&self) -> SfuRosterReport {
+    SfuRosterReport {
+      uptime_secs: self.started_at.elapsed().as_secs(),
+      calls: self.rooms.roster(),
+    }
   }
 }
 
@@ -370,6 +378,11 @@ async fn release_slot(
 }
 
 impl SfuControl {
+  /// Every call on this SFU and who is in it, for a server that starts and takes them over.
+  pub fn roster(&self) -> SfuRosterReport {
+    self.shared.roster()
+  }
+
   pub fn apply(&self, request: &SfuControlRequest) -> Result<(), RoomError> {
     self
       .shared

@@ -18,14 +18,14 @@ use std::{
     Arc, Mutex, MutexGuard, PoisonError,
     atomic::{AtomicBool, AtomicU64, Ordering},
   },
-  time::{Duration, Instant},
+  time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use teamcraft_media::{datagram::StreamId, dave::DaveEpoch};
 use teamcraft_proto::{
-  Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallRosterEntry, DeviceId, ErrorBody,
-  ErrorCode, MediaCapabilities, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, SfuCallRoster, SfuControlAction,
-  TransportFeedback, UserId, VideoCodec, VideoLayerInfo, VideoTrackKind,
+  Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallRosterEntry, ConversationId,
+  DeviceId, ErrorBody, ErrorCode, MediaCapabilities, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, SfuCallRoster,
+  SfuControlAction, TransportFeedback, UnixMillis, UserId, VideoCodec, VideoLayerInfo, VideoTrackKind,
 };
 use thiserror::Error;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
@@ -71,6 +71,11 @@ struct ControlState {
 /// One call.
 pub struct Room {
   call_id: CallId,
+  /// The call's conversation, from the first join token that named it (all come from the server).
+  maybe_conversation_id: Option<ConversationId>,
+  /// Who opened the room, and when: reported so a restarted server can show the call's start.
+  started_by: UserId,
+  started_at: UnixMillis,
   reconnect_grace: Duration,
   mute_report_burst: u32,
   mute_reports_per_second: u32,
@@ -316,6 +321,9 @@ impl Rooms {
       .map(|room| SfuCallRoster {
         call_id: room.call_id,
         participants: room.roster(),
+        maybe_conversation_id: room.maybe_conversation_id,
+        maybe_started_by: Some(room.started_by),
+        maybe_started_at: Some(room.started_at),
       })
       .collect()
   }
@@ -348,7 +356,7 @@ impl Rooms {
     let room = match rooms.get(&call_id) {
       Some(room) => Arc::clone(room),
       None => {
-        let room = Arc::new(Room::new(call_id, &self.config)?);
+        let room = Arc::new(Room::new(&grant, unix_now_millis(), &self.config)?);
         rooms.insert(call_id, Arc::clone(&room));
         info!(call_id = %call_id, "room created");
         room
@@ -389,7 +397,9 @@ impl Rooms {
 }
 
 impl Room {
-  fn new(call_id: CallId, config: &SfuConfig) -> Result<Self, RoomError> {
+  /// The room of `first`'s call, opened by its join at `now`.
+  fn new(first: &JoinGrant, now: UnixMillis, config: &SfuConfig) -> Result<Self, RoomError> {
+    let call_id = first.call_id;
     let state = RoomState {
       participants: HashMap::new(),
       latest_sessions: HashMap::new(),
@@ -399,6 +409,9 @@ impl Room {
     };
     Ok(Self {
       call_id,
+      maybe_conversation_id: first.maybe_conversation_id,
+      started_by: first.user_id,
+      started_at: now,
       reconnect_grace: config.reconnect_grace,
       mute_report_burst: config.mute_report_burst,
       mute_reports_per_second: config.mute_reports_per_second,
@@ -1113,6 +1126,14 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
   mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The wall clock, only for the start time the roster reports (shown, never trusted for order).
+fn unix_now_millis() -> UnixMillis {
+  let millis = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .map_or(0, |elapsed| elapsed.as_millis());
+  UnixMillis(i64::try_from(millis).unwrap_or(i64::MAX))
+}
+
 #[cfg(test)]
 mod tests {
   use teamcraft_proto::{Id, Snowflake};
@@ -1121,6 +1142,7 @@ mod tests {
   use super::*;
 
   const CALL: i64 = 9;
+  const CONVERSATION: i64 = 77;
 
   #[test]
   fn the_roster_lists_every_device_of_every_call() {
@@ -1132,6 +1154,10 @@ mod tests {
 
     assert_eq!(roster.len(), 1);
     assert_eq!(roster[0].call_id, id(CALL));
+    // What a restarted server needs to take the call over.
+    assert_eq!(roster[0].maybe_conversation_id, Some(id(CONVERSATION)));
+    assert_eq!(roster[0].maybe_started_by, Some(id(1)));
+    assert!(roster[0].maybe_started_at.is_some());
     let mut participants = roster[0].participants.clone();
     participants.sort_by_key(|entry| entry.device_id);
     assert_eq!(participants, vec![entry(1, 10), entry(2, 20)]);
@@ -1186,6 +1212,7 @@ mod tests {
       call_id: id(CALL),
       user_id: id(user),
       device_id: id(device),
+      maybe_conversation_id: Some(id(CONVERSATION)),
     };
     let (_, session, _) = rooms.join(grant, MediaCapabilities::default(), handle).unwrap();
     (signal_rx, session)

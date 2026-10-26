@@ -118,6 +118,9 @@ async fn reports_reach_the_server_in_the_order_they_were_made() {
         user_id: laptop.user_id,
         device_id: laptop.device_id,
       }],
+      maybe_conversation_id: None,
+      maybe_started_by: None,
+      maybe_started_at: None,
     }],
   };
 
@@ -216,5 +219,6 @@ fn grant(device: i64) -> JoinGrant {
     call_id: "5".parse().unwrap(),
     user_id: "7".parse().unwrap(),
     device_id: device.to_string().parse().unwrap(),
+    maybe_conversation_id: None,
   }
 }

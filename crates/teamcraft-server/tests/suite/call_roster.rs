@@ -358,6 +358,103 @@ mod reconciliation {
   }
 
   #[tokio::test]
+  async fn a_restarted_server_takes_over_the_call_from_the_first_roster() {
+    // This server never issued a token for the call: it ran on the SFU through a restart.
+    let app = app!(30);
+    let (alice, bob) = (owner(), member("bob"));
+    let channel = channel_with(&app, &[&bob]).await;
+    let (alice_device, bob_device) = (
+      register_device(&app, &alice).await,
+      register_device(&app, &bob).await,
+    );
+    let (alice_id, bob_id) = (user_id(&app, &alice).await, user_id(&app, &bob).await);
+    let mut bob_socket = ws::connect(&app, &bob, &bob_device).await;
+    ws::events(&mut bob_socket, QUIET).await;
+    let call_id = "987654321";
+
+    let running = json!({ "uptime_secs": 600, "calls": [{
+      "call_id": call_id,
+      "conversation_id": channel,
+      "started_by": alice_id,
+      "started_at": 1_800_000_000_000_i64,
+      "participants": [
+        { "user_id": alice_id, "device_id": alice_device },
+        { "user_id": bob_id, "device_id": bob_device },
+      ],
+    }]});
+    assert_eq!(
+      roster(&app, Some(SFU_TOKEN), &running).await,
+      StatusCode::NO_CONTENT
+    );
+
+    let update = call_events(&ws::events(&mut bob_socket, QUIET).await);
+    assert_eq!(update.len(), 1, "{update:?}");
+    assert_eq!(update[0]["type"], "call_update");
+    assert_eq!(update[0]["is_ringing"], false, "nothing rings again");
+    let state = app.get(&bob, &format!("/conversations/{channel}/call")).await;
+    assert_eq!(state.status, StatusCode::OK, "{}", state.body);
+    assert_eq!(state.body["call_id"], call_id);
+    assert_eq!(state.body["participants"].as_array().unwrap().len(), 2);
+    // A new join token names the running call.
+    assert_eq!(join_token(&app, &bob, &channel, &bob_device).await, call_id);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn an_sfu_restart_keeps_the_call_while_everybody_rejoins() {
+    let app = app!(30);
+    let (alice, bob) = (owner(), member("bob"));
+    let channel = channel_with(&app, &[&bob]).await;
+    let (alice_device, bob_device) = (
+      register_device(&app, &alice).await,
+      register_device(&app, &bob).await,
+    );
+    let (alice_id, bob_id) = (user_id(&app, &alice).await, user_id(&app, &bob).await);
+    let mut bob_socket = ws::connect(&app, &bob, &bob_device).await;
+    let call_id = join_token(&app, &alice, &channel, &alice_device).await;
+    report(
+      &app,
+      "joined",
+      Some(SFU_TOKEN),
+      &call_id,
+      &alice_id,
+      &alice_device,
+    )
+    .await;
+    report(&app, "joined", Some(SFU_TOKEN), &call_id, &bob_id, &bob_device).await;
+    ws::events(&mut bob_socket, QUIET).await;
+
+    // The restarted SFU has no rooms yet; then both rejoin.
+    roster(&app, Some(SFU_TOKEN), &json!({ "uptime_secs": 0, "calls": [] })).await;
+    report(
+      &app,
+      "joined",
+      Some(SFU_TOKEN),
+      &call_id,
+      &alice_id,
+      &alice_device,
+    )
+    .await;
+    report(&app, "joined", Some(SFU_TOKEN), &call_id, &bob_id, &bob_device).await;
+    let back = json!({ "uptime_secs": 30, "calls": [{
+      "call_id": call_id,
+      "participants": [
+        { "user_id": alice_id, "device_id": alice_device },
+        { "user_id": bob_id, "device_id": bob_device },
+      ],
+    }]});
+    roster(&app, Some(SFU_TOKEN), &back).await;
+
+    assert!(
+      call_events(&ws::events(&mut bob_socket, QUIET).await).is_empty(),
+      "no call_end, no re-ring"
+    );
+    let state = app.get(&bob, &format!("/conversations/{channel}/call")).await;
+    assert_eq!(state.body["call_id"], call_id.as_str());
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn rosters_need_the_registration_token() {
     let app = app!(30);
     let empty = json!({ "uptime_secs": 600, "calls": [] });

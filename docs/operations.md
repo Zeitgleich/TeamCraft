@@ -118,6 +118,10 @@ exists; clients can still read what they have stored locally.
   longer has (after `[calls] roster_grace_secs`, default 60, while the SFU is fresh from a restart)
   and ends calls with nobody left. If the SFU stops reporting for `[calls] roster_timeout_secs`
   (default 120), the server ends its calls. Keep the timeout a few intervals long.
+- Restarting `teamcraft-server` doesn't end running calls either: at start it reads the SFU's
+  roster over `[calls] sfu_control_url` (and otherwise from the SFU's next roster) and takes over
+  the calls that kept running, without ringing again. Calls whose join tokens came from a server
+  before 1.0.8 can't be taken over (the tokens don't name the conversation).
 
 ### Company proxies, TLS inspection and captive portals (clients)
 

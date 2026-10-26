@@ -259,6 +259,9 @@ async fn run() -> anyhow::Result<()> {
   spawn_partition_maintenance(state.clone(), config.server.partitions_ahead_months);
   spawn_derived_presence(state.clone());
   spawn_call_roster_sweeper(state.clone());
+  // Before anybody asks for a join token: calls that ran on through this restart are taken over,
+  // not opened a second time next to themselves (at most the SFU control timeout).
+  calls::adopt_running_calls(&state).await;
   // Wake-ups that failed for a temporary reason, also those queued before a restart.
   spawn_retry_workers(&state);
 

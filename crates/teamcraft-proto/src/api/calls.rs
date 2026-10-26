@@ -131,11 +131,21 @@ pub struct SfuRosterReport {
   pub calls: Vec<SfuCallRoster>,
 }
 
-/// One call on the SFU, with every device in it (also those reconnecting).
+/// One call on the SFU, with every device in it (also those reconnecting). Also the answer of the
+/// SFU's `GET {sfu}/internal/v1/calls/roster`, which a starting server reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct SfuCallRoster {
   pub call_id: CallId,
   pub participants: Vec<CallRosterEntry>,
+  /// The call's conversation, from the server-signed join tokens: a server that restarted and lost
+  /// its calls takes this one over. Missing when the tokens came from an older server.
+  #[serde(rename = "conversation_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_conversation_id: Option<ConversationId>,
+  /// Who joined the room first, and when (the SFU's clock): the start a restarted server shows.
+  #[serde(rename = "started_by", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_started_by: Option<UserId>,
+  #[serde(rename = "started_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_started_at: Option<UnixMillis>,
 }
 
 #[cfg(test)]
@@ -189,14 +199,20 @@ mod tests {
           user_id: UserId::from_snowflake(Snowflake::new(2).unwrap()),
           device_id: DeviceId::from_snowflake(Snowflake::new(3).unwrap()),
         }],
+        maybe_conversation_id: Some(ConversationId::from_snowflake(Snowflake::new(9).unwrap())),
+        maybe_started_by: Some(UserId::from_snowflake(Snowflake::new(2).unwrap())),
+        maybe_started_at: Some(UnixMillis(1000)),
       }],
     };
     let json = serde_json::to_string(&report).unwrap();
     assert_eq!(
       json,
-      r#"{"uptime_secs":90,"calls":[{"call_id":"7","participants":[{"user_id":"2","device_id":"3"}]}]}"#
+      r#"{"uptime_secs":90,"calls":[{"call_id":"7","participants":[{"user_id":"2","device_id":"3"}],"conversation_id":"9","started_by":"2","started_at":1000}]}"#
     );
     assert_eq!(serde_json::from_str::<SfuRosterReport>(&json).unwrap(), report);
+    let older: SfuRosterReport =
+      serde_json::from_str(r#"{"uptime_secs":1,"calls":[{"call_id":"7","participants":[]}]}"#).unwrap();
+    assert_eq!(older.calls[0].maybe_conversation_id, None);
   }
 
   #[test]
