@@ -131,11 +131,12 @@ private struct NotificationsSettingsPage: View {
   }
 }
 
-/// Typing indicator and the search download.
+/// Typing indicator, call sounds, original pictures and the search download.
 private struct ChatsSettingsPage: View {
   @Environment(AppModel.self) private var model
   @AppStorage("share_typing") private var isSharingTyping = true
   @AppStorage(CallStatusSoundsSetting.key) private var statusSounds = CallStatusSoundsSetting.all.rawValue
+  @AppStorage(OriginalDownloadSetting.key) private var originalDownload = OriginalDownloadSetting.always.rawValue
   @State private var prefetch = SegmentPrefetchMode.unmeteredOnly
   @State private var isPrefetchLoaded = false
 
@@ -152,6 +153,15 @@ private struct ChatsSettingsPage: View {
         }
       } footer: {
         Text("call_status_sounds_hint")
+      }
+      Section {
+        Picker("original_download_title", selection: $originalDownload) {
+          Text("original_download_always").tag(OriginalDownloadSetting.always.rawValue)
+          Text("original_download_unmetered").tag(OriginalDownloadSetting.unmeteredOnly.rawValue)
+          Text("original_download_never").tag(OriginalDownloadSetting.never.rawValue)
+        }
+      } footer: {
+        Text("original_download_hint")
       }
       Section {
         Picker("prefetch_title", selection: $prefetch) {

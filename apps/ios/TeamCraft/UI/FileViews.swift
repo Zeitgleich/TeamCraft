@@ -2,13 +2,17 @@ import QuickLook
 import SwiftUI
 
 /// A file in a message: images as a large preview, other files with icon, name and size; progress
-/// while it moves. A tap opens a downloaded file in Quick Look (zoom, share, save), or downloads it
-/// first (the core decrypts it into the app's private storage) and opens it once it is here.
+/// while it moves. A tap on a picture opens the image viewer where the screen offers it (#240);
+/// other files open in Quick Look once downloaded (the core decrypts them into the app's private
+/// storage), and are downloaded first.
 struct AttachmentView: View {
   @Environment(AppModel.self) private var model
+  @Environment(\.openPicture) private var maybeOpenPicture
   let file: FileInfo
-  /// A square tile of an image grid instead of the large preview.
+  /// A tile of an album, sized by the album, instead of the large preview.
   var isTile = false
+  /// On the album's last tile: how many pictures the album doesn't show ("+3").
+  var maybeHiddenCount: Int?
   /// In a chat bubble: a picture spans this width at its own shape, and a file row takes the
   /// bubble's colours (`isInBubble`).
   var maybeMediaWidth: CGFloat?
@@ -34,6 +38,7 @@ struct AttachmentView: View {
       }
       .buttonStyle(.plain)
       .accessibilityLabel(Text(file.fileName))
+      .accessibilityValue(maybeHiddenCount.map { Text("album_more_pictures \($0)") } ?? Text(verbatim: ""))
       if file.transfer.isCancellable { UploadActions(file: file) }
     }
     .quickLookPreview($maybePreviewURL)
@@ -46,12 +51,22 @@ struct AttachmentView: View {
 
   private func tile(_ image: UIImage) -> some View {
     Color.clear
-      .aspectRatio(1, contentMode: .fit)
       .overlay { Image(uiImage: image).resizable().scaledToFill() }
-      .clipShape(RoundedRectangle(cornerRadius: 8))
+      .overlay {
+        if let hidden = maybeHiddenCount {
+          // The pictures beyond the album's tiles; they open in the viewer.
+          Text(verbatim: "+\(hidden)")
+            .font(.title2.weight(.semibold))
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.black.opacity(0.45))
+        }
+      }
+      .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
       .overlay(alignment: .bottom) {
         if let progress = file.transfer.maybeProgress { ProgressView(value: progress).padding(4) }
       }
+      .contentShape(Rectangle())
   }
 
   /// A picture across the bubble at its own shape, at most `bubbleMediaMaxHeight` tall: panoramas
@@ -106,6 +121,10 @@ struct AttachmentView: View {
   }
 
   private func open() {
+    if file.isViewablePicture, let openPicture = maybeOpenPicture {
+      openPicture(file)
+      return
+    }
     switch file.transfer.state {
     case "local":
       if let path = file.transfer.path { maybePreviewURL = URL(fileURLWithPath: path) }
@@ -309,6 +328,7 @@ struct FilesGalleryView: View {
 
   @State private var files: [FileInfo]?
   @State private var maybePreviewURL: URL?
+  @State private var maybeViewing: PictureTarget?
 
   private let columns = [GridItem(.adaptive(minimum: 110), spacing: 8)]
 
@@ -333,11 +353,14 @@ struct FilesGalleryView: View {
     .navigationBarTitleDisplayMode(.inline)
     .task(id: model.changeCount) { files = await model.files(conversationId: conversation.id) }
     .quickLookPreview($maybePreviewURL)
+    .fullScreenCover(item: $maybeViewing) { target in PictureViewer(target: target) }
   }
 
   private func tile(_ file: FileInfo) -> some View {
     Button {
-      if file.transfer.state == "local", let path = file.transfer.path {
+      if file.isViewablePicture {
+        maybeViewing = PictureTarget(file: file)
+      } else if file.transfer.state == "local", let path = file.transfer.path {
         maybePreviewURL = URL(fileURLWithPath: path)
       } else if file.transfer.state == "remote" || file.transfer.state == "failed" {
         Task { await model.perform(.downloadFile(conversationId: file.conversation, messageId: file.message)) }
