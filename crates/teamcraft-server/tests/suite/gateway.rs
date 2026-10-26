@@ -713,6 +713,39 @@ mod presence {
   }
 
   #[tokio::test]
+  async fn sending_a_message_makes_the_sender_online_unless_they_chose_otherwise() {
+    let app = app!();
+    let s = scene(&app).await;
+    let mut alice = Gateway::connect(&app, &s.alice, &s.alice_device).await;
+    let mut carol = Gateway::connect(&app, &s.carol, &s.carol_device).await;
+    assert_eq!(alice.presence_of(&s.carol_id).await, PresenceState::Online);
+    // The device said it is idle (a stale lock reading, say), yet carol writes from it.
+    carol
+      .send(&GatewayClientMessage::SetActivity {
+        activity: DeviceActivity::Idle,
+      })
+      .await;
+    assert_eq!(alice.presence_of(&s.carol_id).await, PresenceState::Away);
+    send(&app, &s.carol, &s.channel, &s.carol_device, 1).await;
+    assert_eq!(alice.presence_of(&s.carol_id).await, PresenceState::Online);
+
+    // A manual away is never ended by activity, also not by sending.
+    app.put(&s.carol, "/me/presence", json!({"manual": "away"})).await;
+    assert_eq!(alice.presence_of(&s.carol_id).await, PresenceState::Away);
+    carol
+      .send(&GatewayClientMessage::SetActivity {
+        activity: DeviceActivity::Idle,
+      })
+      .await;
+    send(&app, &s.carol, &s.channel, &s.carol_device, 2).await;
+    let listed = app
+      .get(&s.alice, &format!("/presence?user_ids={}", s.carol_id))
+      .await;
+    assert_eq!(listed.body["presences"][0]["state"], json!("away"));
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn a_user_with_several_devices_is_online_while_any_is_active() {
     let app = app!();
     let s = scene(&app).await;
