@@ -3196,6 +3196,7 @@ impl ServerApi for FakeServerApi {
         return Err(ApiError::Status {
           status: 404,
           maybe_body: None,
+          maybe_retry_after: None,
         });
       }
       let _ = me;
@@ -3782,6 +3783,7 @@ impl ServerApi for FakeServerApi {
           return Err(ApiError::Status {
             status: 403,
             maybe_body: None,
+            maybe_retry_after: None,
           });
         }
         entry.maybe_blob = Some(bytes);
@@ -3795,6 +3797,7 @@ impl ServerApi for FakeServerApi {
           return Err(ApiError::Status {
             status: 403,
             maybe_body: None,
+            maybe_retry_after: None,
           });
         }
         entry.maybe_blob = Some(bytes);
@@ -3810,6 +3813,7 @@ impl ServerApi for FakeServerApi {
         return Err(ApiError::Status {
           status: 403,
           maybe_body: None,
+          maybe_retry_after: None,
         });
       }
       entry.maybe_blob = Some(bytes);
@@ -3834,6 +3838,7 @@ impl ServerApi for FakeServerApi {
           .ok_or(ApiError::Status {
             status: 404,
             maybe_body: None,
+            maybe_retry_after: None,
           })
       });
     }
@@ -3845,6 +3850,7 @@ impl ServerApi for FakeServerApi {
           .ok_or(ApiError::Status {
             status: 404,
             maybe_body: None,
+            maybe_retry_after: None,
           })
       });
     }
@@ -3855,6 +3861,7 @@ impl ServerApi for FakeServerApi {
         .ok_or(ApiError::Status {
           status: 404,
           maybe_body: None,
+          maybe_retry_after: None,
         })
     })
   }
@@ -4730,6 +4737,8 @@ impl State {
         ErrorBody::new(ErrorCode::Unavailable, "fake server: a dependency is down")
           .with_retry_after_secs(retry_after_secs),
       ),
+      // The server sends it as a header too.
+      maybe_retry_after: Some(std::time::Duration::from_secs(retry_after_secs)),
     })
   }
 }
@@ -4813,6 +4822,7 @@ fn org_background_blob<'a>(state: &'a mut State, raw: &str) -> Result<&'a mut Fa
     .ok_or(ApiError::Status {
       status: 404,
       maybe_body: None,
+      maybe_retry_after: None,
     })
 }
 
@@ -4840,6 +4850,7 @@ fn background_blob<'a>(state: &'a mut State, raw: &str) -> Result<&'a mut FakeBa
     .ok_or(ApiError::Status {
       status: 404,
       maybe_body: None,
+      maybe_retry_after: None,
     })
 }
 
@@ -4848,6 +4859,7 @@ fn store_fake_part(state: &mut State, url: &str, bytes: Vec<u8>) -> Result<Strin
   let refused = || ApiError::Status {
     status: 404,
     maybe_body: None,
+    maybe_retry_after: None,
   };
   let mut fields = url.strip_prefix(PART_SCHEME).ok_or_else(refused)?.split('/');
   let (Some(id), Some(number), Some(size)) = (fields.next(), fields.next(), fields.next()) else {
@@ -4864,6 +4876,7 @@ fn store_fake_part(state: &mut State, url: &str, bytes: Vec<u8>) -> Result<Strin
     return Err(ApiError::Status {
       status: 403,
       maybe_body: None,
+      maybe_retry_after: None,
     });
   }
   let is_discarding = state.is_discarding_parts;
@@ -4929,10 +4942,12 @@ fn blob_entry<'a>(state: &'a mut State, url: &str) -> Result<&'a mut FakeAttachm
     .ok_or(ApiError::Status {
       status: 404,
       maybe_body: None,
+      maybe_retry_after: None,
     })?;
   state.attachments.get_mut(&id).ok_or(ApiError::Status {
     status: 404,
     maybe_body: None,
+    maybe_retry_after: None,
   })
 }
 

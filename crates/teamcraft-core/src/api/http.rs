@@ -1773,11 +1773,15 @@ async fn send(request: RequestBuilder) -> Result<Response, ApiError> {
   if status.is_success() {
     return Ok(response);
   }
-  let maybe_header_wait = response
+  let maybe_header = response
     .headers()
     .get(reqwest::header::RETRY_AFTER)
     .and_then(|value| value.to_str().ok())
-    .and_then(parse_retry_after);
+    .map(str::to_owned);
+  let maybe_header_wait = maybe_header.as_deref().and_then(parse_retry_after);
+  // Uploads read the capped header wait from the error (#772); the retry policy reads the body,
+  // filled from the header when only that was sent (#743).
+  let maybe_retry_after = maybe_header.as_deref().and_then(super::parse_retry_after);
   let maybe_body = response.json::<ErrorBody>().await.ok().map(|body| {
     match (body.maybe_retry_after_secs, maybe_header_wait) {
       (None, Some(wait)) => body.with_retry_after_secs(wait.as_secs()),
@@ -1787,6 +1791,7 @@ async fn send(request: RequestBuilder) -> Result<Response, ApiError> {
   Err(ApiError::Status {
     status: status.as_u16(),
     maybe_body,
+    maybe_retry_after,
   })
 }
 
@@ -2099,6 +2104,22 @@ mod tests {
       let error = api.me().await.unwrap_err();
       assert!(matches!(error, ApiError::Status { status: 502, .. }), "{error}");
       assert!(error.is_transient());
+      assert_eq!(error.retry_after(), None, "no Retry-After, no wait asked for");
+    }
+
+    #[tokio::test]
+    async fn a_storage_outage_says_when_to_come_back() {
+      let base = canned_server(
+        "503 Service Unavailable\r\nretry-after: 30",
+        "application/json",
+        r#"{"error_code":"unavailable","message":"storage"}"#,
+      )
+      .await;
+      let api = HttpServerApi::new(base, StaticToken("t".into()));
+      let error = api.me().await.unwrap_err();
+      assert!(matches!(error, ApiError::Status { status: 503, .. }), "{error}");
+      assert_eq!(error.retry_after(), Some(Duration::from_secs(30)));
+      assert_eq!(error.error_code(), Some(&teamcraft_proto::ErrorCode::Unavailable));
     }
 
     #[tokio::test]
