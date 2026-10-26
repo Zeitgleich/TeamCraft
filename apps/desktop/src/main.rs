@@ -14,6 +14,7 @@ mod auth;
 mod autostart;
 mod call_window;
 mod calls;
+mod clipboard;
 mod core;
 #[cfg(target_os = "linux")]
 mod desktop_entry;
@@ -29,8 +30,10 @@ mod single_instance;
 mod startup_env;
 mod tray;
 mod updates;
+mod webview_downloads;
 #[cfg(target_os = "linux")]
 mod webview_memory;
+mod webview_menu;
 mod window_chrome;
 #[cfg(windows)]
 mod windows_shell;
@@ -88,6 +91,8 @@ fn main() -> anyhow::Result<()> {
   let builder = builder.menu(app_menu::initial);
   builder
     .plugin(tauri_plugin_opener::init())
+    // The save dialog of "Save…" (core_save_attachment); the webview gets no dialog permission.
+    .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_global_shortcut::Builder::new().build())
     .plugin(tauri_plugin_notification::init())
     // The shell drives it (updates.rs); the webview gets no updater permission.
@@ -219,6 +224,7 @@ fn main() -> anyhow::Result<()> {
       core::commands::core_action,
       core::commands::core_query,
       core::commands::core_attachment,
+      core::commands::core_save_attachment,
       core::commands::core_stage_file,
       core::commands::core_stop,
       core::commands::core_reset_store,
@@ -233,6 +239,7 @@ fn main() -> anyhow::Result<()> {
       calls::commands::call_watch_camera,
       calls::commands::call_unwatch_camera,
       external_links::open_external,
+      clipboard::clipboard_write_image,
       notifications::notify_user,
       notifications::withdraw_notifications,
       notifications::request_attention,
@@ -295,6 +302,8 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     // handler would swallow the drop on every platform and only report file paths. WebKitGTK hands
     // the page no files, so on Linux the shell reads them for it (dropped_files.rs, #651).
     .disable_drag_drop_handler()
+    // A download the page starts itself lands in the downloads folder and is reported (#719).
+    .on_download(webview_downloads::on_download)
     .on_new_window({
       let app = app.handle().clone();
       move |url, _features| {
@@ -339,6 +348,11 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     )),
     _ => window,
   };
+  // `TEAMCRAFT_DEVTOOLS=1`: the webview's own context menu everywhere (webview_menu.rs).
+  let window = match webview_menu::is_devtools_requested() {
+    true => window.initialization_script(webview_menu::NATIVE_MENU_SCRIPT),
+    false => window,
+  };
   let window = window.build()?;
   #[cfg(target_os = "linux")]
   {
@@ -347,10 +361,11 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     let configured = window.with_webview(move |webview| {
       let webview = webview.inner();
       webview_memory::configure(&webview);
+      webview_menu::filter_menus(&webview);
       dropped_files::watch(&webview, dropped, handle);
     });
     if let Err(error) = configured {
-      tracing::warn!(%error, "could not set up the webview's memory caches and file drops");
+      tracing::warn!(%error, "could not set up the webview's memory caches, menus and file drops");
     }
   }
   tray::reveal_without_host(app.handle());

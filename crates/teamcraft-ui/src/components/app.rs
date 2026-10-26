@@ -155,6 +155,12 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   let link_menu = RwSignal::new(None::<crate::external_links::LinkMenuTarget>);
   provide_context(link_menu);
   crate::external_links::start(link_menu);
+  provide_context(RwSignal::new(
+    None::<crate::components::attachment_menu::AttachmentMenuTarget>,
+  ));
+  if tauri::is_available() {
+    report_webview_downloads(state, i18n);
+  }
   if tauri::has_core() {
     crate::os_alerts::start(state, i18n);
   }
@@ -315,6 +321,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         <StatusMenu />
       </Show>
       <crate::components::link_menu::LinkMenu />
+      <crate::components::attachment_menu::AttachmentMenu />
       {move || match state.call.phase.get() {
         CallPhase::PreJoin => {
           state.call.maybe_request.get().map(|request| lazy_area(Place::Screen, move || areas::call_prejoin(request)))
@@ -812,6 +819,29 @@ fn sync_favicon(state: AppState) {
       crate::brand::show_unread_in_favicon(has_unread);
     }
     has_unread
+  });
+}
+
+/// A download the webview started by itself (the shell saves it in the downloads folder, #719)
+/// says where it went, or that it failed, instead of vanishing.
+fn report_webview_downloads(state: AppState, i18n: crate::i18n::I18n) {
+  #[derive(serde::Deserialize)]
+  struct Outcome {
+    is_saved: bool,
+    maybe_name: Option<String>,
+  }
+  tauri::listen_text("webview-download-finished", move |text| {
+    let Ok(outcome) = serde_json::from_str::<Outcome>(&text) else {
+      return;
+    };
+    match (outcome.is_saved, outcome.maybe_name) {
+      (true, Some(name)) => state.show_brief_toast(i18n.t_with("webview-download-saved", &[("name", &name)])),
+      (true, None) => state.show_brief_toast(i18n.t("webview-download-saved-unnamed")),
+      (false, _) => state.show_error(
+        i18n.t("webview-download-failed"),
+        "the webview's download did not finish".to_owned(),
+      ),
+    }
   });
 }
 

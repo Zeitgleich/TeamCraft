@@ -319,6 +319,52 @@ async fn downloads_beside_the_loop_open_and_save_files() {
   std::fs::remove_dir_all(&directory).unwrap();
 }
 
+/// "Save…" in the desktop app (#719): the file goes exactly where the user picked it in the save
+/// dialog, replacing a file of that name (the dialog asked), without a download directory.
+#[tokio::test]
+async fn a_file_saved_through_the_dialog_goes_to_the_picked_path() {
+  let (_server, mut alice, mut bob, channel) = channel_with_two().await;
+  let alice_ui = backend_of(&alice);
+  alice_ui.send_message(with_files(
+    channel,
+    "",
+    vec![file("notes.txt", "text/plain", b"tide".to_vec())],
+  ));
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  let bob_ui = backend_of(&bob);
+  let received = last(&bob_ui, channel);
+  let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
+  let directory = std::env::temp_dir().join(format!("teamcraft-save-as-{}", std::process::id()));
+  std::fs::create_dir_all(&directory).unwrap();
+  let target = directory.join("picked name.txt");
+  std::fs::write(&target, b"old").unwrap();
+
+  let mut downloads = Downloads::new(1);
+  downloads.save_to(channel, files[0].file_id.parse().unwrap(), target.clone());
+  assert!(
+    downloads.start_due(&mut bob.client).await,
+    "marked as downloading"
+  );
+  let finished = downloads.next_finished().await;
+  assert!(Downloads::finish(&mut bob.client, finished));
+
+  assert_eq!(std::fs::read(&target).unwrap(), b"tide");
+  let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
+  assert_eq!(
+    files[0].transfer,
+    FileTransfer::Local {
+      path: target.to_string_lossy().into_owned()
+    }
+  );
+  assert_eq!(
+    std::fs::read_dir(&directory).unwrap().count(),
+    1,
+    "no second copy"
+  );
+  std::fs::remove_dir_all(&directory).unwrap();
+}
+
 /// A refused blob upload (a browser's CSP, a proxy) goes into the same announced attachment on every
 /// retry, so unfinished uploads don't pile up into 409 Conflict. Retries back off, stop after the cap
 /// with a visible state, and the user's "Retry" sends the message once the network allows.

@@ -158,6 +158,7 @@ async fn a_core_started_right_after_login_reads_the_live_session() {
       server_url: config.server_url.clone(),
       data_dir: directory.clone(),
       keystore_scope: "test".into(),
+      maybe_download_dir: None,
       argon2: Argon2Settings {
         memory_kib: 1024,
         iterations: 1,
@@ -209,6 +210,7 @@ pub(super) async fn person(name: &'static str, config: &DesktopConfig) -> Person
     server_url: config.server_url.clone(),
     data_dir: directory.clone(),
     keystore_scope: "test".into(),
+    maybe_download_dir: None,
     // Cheap Argon2 so the test is quick; real clients use the 128 MiB default.
     argon2: Argon2Settings {
       memory_kib: 1024,
@@ -242,6 +244,7 @@ fn second_device(person: &Person, config: &DesktopConfig) -> CoreRuntime {
     server_url: config.server_url.clone(),
     data_dir: person.directory.join("second-device"),
     keystore_scope: "test".into(),
+    maybe_download_dir: None,
     argon2: Argon2Settings {
       memory_kib: 1024,
       iterations: 1,
