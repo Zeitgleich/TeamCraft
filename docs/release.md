@@ -95,6 +95,10 @@ version as the final 1.0.0 and as each other: reinstall once with `sudo dnf rein
    git push origin vX.Y.Z
    ```
 
+   The tagged commit must not contain `[skip ci]` in its message: GitHub then skips every workflow
+   its push would start, the Release run included. If the last PR landed with `[skip ci]`, land one
+   more commit without it and tag that.
+
    For example, `highlights.md`:
 
    ```markdown
