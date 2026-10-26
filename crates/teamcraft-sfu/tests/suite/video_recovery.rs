@@ -150,6 +150,63 @@ async fn a_viewer_that_lost_the_first_keyframe_asks_for_another() {
   );
 }
 
+/// A camera whose driver hangs: it never stops. Stopping it and leaving still go through, and
+/// the audio task stays free meanwhile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_capture_that_never_stops_does_not_freeze_the_call() {
+  let (port, certificate_hash) = start_sfu().await;
+  let sfu = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port);
+  let presenter = join(sfu, certificate_hash, 1, 2).await;
+  let _viewer = join(sfu, certificate_hash, 2, 1).await;
+  let config = VideoSendConfig {
+    kind: VideoTrackKind::Camera,
+    capture: Box::new(HangingCamera::default()),
+    layers: simulcast_layers(VGA, 30, 150_000, 1),
+    encoders: software_encoders(),
+    maybe_filter: None,
+    maybe_idle_refresh: None,
+  };
+  presenter.start_video(config).await.unwrap();
+  presenter.stop_video(VideoTrackKind::Camera);
+  // Without a bound the call's task would wait for the camera for good, and so would leaving.
+  let left = tokio::time::timeout(Duration::from_secs(10), presenter.leave()).await;
+  assert!(
+    matches!(left, Ok(Ok(_))),
+    "the call hung behind the camera: {left:?}"
+  );
+}
+
+/// A camera that delivers frames but whose stop never returns (a driver stuck in its read).
+#[derive(Default)]
+struct HangingCamera {
+  maybe_running: Option<TestPatternCapture>,
+}
+
+impl VideoCapture for HangingCamera {
+  fn format(&self) -> CaptureFormat {
+    CaptureFormat {
+      resolution: VGA,
+      framerate: 30,
+    }
+  }
+
+  fn start(&mut self, frames: FrameSender) -> Result<(), CaptureError> {
+    let mut capture = TestPatternCapture::new(self.format());
+    capture.start(frames)?;
+    self.maybe_running = Some(capture);
+    Ok(())
+  }
+
+  fn stop(&mut self) {
+    if let Some(mut capture) = self.maybe_running.take() {
+      capture.stop();
+    }
+    // Hangs for good, as a read that never returns: the sender lives as long as the wait.
+    let (_never_sent, blocked) = std::sync::mpsc::channel::<()>();
+    let _ = blocked.recv();
+  }
+}
+
 /// A shared screen that shows one picture when told to, and then stands still.
 #[derive(Clone, Default)]
 struct StillScreen(Arc<Mutex<Option<FrameSender>>>);

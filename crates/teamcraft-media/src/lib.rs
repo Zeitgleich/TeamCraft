@@ -34,6 +34,8 @@ pub mod video_jpeg;
 pub mod video_mediacodec;
 #[cfg(feature = "native")]
 pub mod video_pipeline;
+#[cfg(feature = "native")]
+mod worker_thread;
 
 #[cfg(feature = "native")]
 pub mod audio_codec;
@@ -57,6 +59,16 @@ pub mod call_video;
 pub mod call_view;
 #[cfg(feature = "web")]
 pub mod call_web;
+// Used by the nokhwa cameras (macOS, Windows); tested on every platform.
+#[cfg(feature = "native")]
+#[cfg_attr(
+  not(any(
+    all(feature = "avfoundation", target_os = "macos"),
+    all(feature = "mediafoundation", target_os = "windows")
+  )),
+  allow(dead_code)
+)]
+mod camera_thread;
 #[cfg(any(feature = "native", feature = "web"))]
 pub mod capture_convert;
 #[cfg(feature = "native")]

@@ -20,6 +20,7 @@ use crate::video_codec::{
   FallbackEncoder, OpenH264Decoder, OpenH264Encoder, SimulcastEncoder, VideoCodecError, VideoContent,
   VideoDecoder, VideoEncoder,
 };
+use crate::worker_thread::{Joined, WorkerThread};
 
 /// How often the encoder thread looks at controls while no frame arrives.
 const CONTROL_POLL: Duration = Duration::from_millis(20);
@@ -36,6 +37,10 @@ const KEYFRAME_REFRESH_DELAY: Duration = Duration::from_millis(150);
 /// The default [`VideoSendConfig::maybe_idle_refresh`] of screen shares: a still screen's
 /// picture again about once a second, so a viewer never waits long for one.
 pub const SCREEN_IDLE_REFRESH: Duration = Duration::from_secs(1);
+/// How long stopping a track waits for its encoder thread, which stops the capture (cameras wait
+/// up to half a second for theirs, `camera_thread`). Bounded: a capture stuck in its driver must
+/// not stop the call (issue #683).
+const SENDER_STOP_WAIT: Duration = Duration::from_secs(1);
 
 /// Makes the encoder for one layer; hardware where available (see [`software_encoders`]).
 pub type EncoderFactory =
@@ -88,7 +93,7 @@ pub struct VideoSender {
   pub layers: Vec<VideoLayerInfo>,
   controls: std_mpsc::Sender<SenderControl>,
   counters: Arc<SendCounters>,
-  thread: Option<JoinHandle<()>>,
+  thread: Option<WorkerThread>,
 }
 
 /// Resolves once a started track encoded its first picture, or with why it never will. While
@@ -242,13 +247,11 @@ impl VideoSender {
       counters: Arc::clone(&counters),
       maybe_first_picture: Some(first_picture),
     };
-    let thread = std::thread::Builder::new()
-      .name("video-encoder".into())
-      .spawn(move || {
-        encoder_loop.run();
-        capture.stop();
-      })
-      .map_err(|error| CaptureError::Device(error.to_string()))?;
+    let thread = WorkerThread::spawn("video-encoder", move || {
+      encoder_loop.run();
+      capture.stop();
+    })
+    .map_err(|error| CaptureError::Device(error.to_string()))?;
     let sender = Self {
       kind,
       layers,
@@ -286,7 +289,7 @@ impl VideoSender {
   /// the shared window closed), no encoder could be built or the first picture never came: the
   /// track sends nothing any more.
   pub fn has_ended(&self) -> bool {
-    self.thread.as_ref().is_some_and(JoinHandle::is_finished)
+    self.thread.as_ref().is_some_and(WorkerThread::is_finished)
   }
 }
 
@@ -604,13 +607,16 @@ impl VideoSender {
     self.counters.progress()
   }
 
+  /// Stops the encoder thread and waits for it (and with it the capture), at most
+  /// [`SENDER_STOP_WAIT`]: this runs on the call's task, whose audio must go on even when a
+  /// capture hangs in its driver.
   fn shut_down(&mut self) {
     let (closed, _) = std_mpsc::channel();
     drop(std::mem::replace(&mut self.controls, closed));
     if let Some(thread) = self.thread.take()
-      && thread.join().is_err()
+      && thread.join_within(SENDER_STOP_WAIT) == Joined::Detached
     {
-      warn!("video encoder thread panicked");
+      warn!(kind = ?self.kind, "the video capture hangs; the track is left behind");
     }
   }
 }
