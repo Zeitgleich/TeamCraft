@@ -54,6 +54,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
             height: size.height,
           }),
           maybe_duration_ms: file.maybe_duration_ms,
+          maybe_content_sha256: None,
         })
         .collect();
     }
@@ -80,6 +81,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
         maybe_sent_at,
         maybe_dimensions: None,
         maybe_duration_ms: file.maybe_duration_ms,
+        maybe_content_sha256: None,
       });
     attachments_of(&stored.content)
       .into_iter()
@@ -125,6 +127,9 @@ impl<S: LocalStore> CoreChatBackend<S> {
           height: size.height,
         }),
         maybe_duration_ms: attachment.maybe_duration_ms,
+        maybe_content_sha256: <&[u8; 32]>::try_from(attachment.ciphertext_sha256.as_slice())
+          .ok()
+          .map(teamcraft_client_api::media::to_hex),
       })
       .chain(failed)
       .collect()
