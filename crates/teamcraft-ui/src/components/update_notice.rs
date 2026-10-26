@@ -27,7 +27,10 @@ const PREFERENCES: [UpdatePreference; 3] = [
 /// Above the app: "ready, restart", "available", or "too old". Renders nothing outside the
 /// desktop app. How it can be hidden is the status's [`Dismissal`]: "Later" until the next launch,
 /// "Dismiss" for good for a version the app can't install (deb, rpm, Flatpak), and not at all when
-/// too old or when a self-installed update waits for its restart.
+/// too old or when a self-installed update waits for its restart (#729): it only needs a restart,
+/// and the banner keeps asking for it, in the accent colour (the one banner meant to be seen;
+/// connection trouble stays quiet, offline_banner.rs). During a call its button waits for the call
+/// to end.
 #[component]
 pub fn UpdateNotice() -> impl IntoView {
   let i18n = use_i18n();
@@ -45,9 +48,10 @@ pub fn UpdateNotice() -> impl IntoView {
       return None;
     }
     let is_alert = matches!(banner, UpdateBanner::TooOld { .. });
+    let is_ready = matches!(banner, UpdateBanner::Ready { .. });
     let hide = dismiss_button(i18n, current.dismissal(), version, dismissed, error);
     Some(view! {
-      <div class="update-banner" role=if is_alert { "alert" } else { "status" }>
+      <div class="update-banner" class:is-ready=is_ready role=if is_alert { "alert" } else { "status" }>
         <Icon name=if is_alert { IconName::Alert } else { IconName::Download } />
         {banner_body(i18n, banner, current.install, status, error)}
         {hide}
@@ -196,12 +200,23 @@ fn banner_body(
       version,
       maybe_notes_url,
       can_restart,
-    } => view! {
-      <span>{i18n.t_with("update-ready", &[("version", &version)])}</span>
-      {notes_link(i18n, maybe_notes_url)}
-      {restart_button(i18n, can_restart, status, error)}
-    }
-    .into_any(),
+    } => {
+      // A package manager installed it (deb/rpm, PackageKit): the files are new, the running app isn't.
+      let is_installed = !install.updates_itself();
+      let text_key = if is_installed { "update-ready-installed" } else { "update-ready-banner" };
+      view! {
+        <span class="update-banner-text">{i18n.t_with(text_key, &[("version", &version)])}</span>
+        {notes_link(i18n, maybe_notes_url)}
+        <button
+          class="btn btn-small update-banner-restart"
+          prop:disabled=!can_restart
+          on:click=move |_| run(error, status, tauri::update_restart())
+        >
+          {i18n.t(if can_restart { "update-restart-short" } else { "update-restart-after-call" })}
+        </button>
+      }
+      .into_any()
+    },
     UpdateBanner::Available {
       version,
       maybe_notes_url,
@@ -369,6 +384,8 @@ fn run(
   });
 }
 
+/// The version a hidden banner stays hidden for this launch; whether it can be hidden at all is the
+/// status's [`Dismissal`].
 fn banner_version(banner: &UpdateBanner) -> Option<String> {
   match banner {
     UpdateBanner::Ready { version, .. } | UpdateBanner::Available { version, .. } => Some(version.clone()),
@@ -464,6 +481,9 @@ mod tests {
       "update-available",
       "update-restart",
       "update-restart-after-call",
+      "update-restart-short",
+      "update-ready-banner",
+      "update-ready-installed",
       "update-download",
       "update-later",
       "update-whats-new",

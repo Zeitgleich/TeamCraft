@@ -84,6 +84,16 @@ impl I18n {
     fluent_args.set("count", count);
     translate(get_if_observed(self.locale), key, Some(&fluent_args))
   }
+
+  /// Translates a message that selects a plural form from `$count` and has further arguments.
+  pub fn t_count_with(&self, key: &str, count: usize, args: &[(&str, &str)]) -> String {
+    let mut fluent_args = FluentArgs::new();
+    fluent_args.set("count", count);
+    for (name, value) in args {
+      fluent_args.set(name.to_string(), value.to_string());
+    }
+    translate(get_if_observed(self.locale), key, Some(&fluent_args))
+  }
 }
 
 pub fn provide_i18n(initial: Locale) -> I18n {

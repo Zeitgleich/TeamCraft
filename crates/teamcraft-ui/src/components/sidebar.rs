@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
@@ -23,6 +24,8 @@ use crate::state::{MainView, Overlay, use_app_state};
 /// Sidebar sections and spaces the user collapsed, remembered on this device.
 const KEY_COLLAPSED_SECTIONS: &str = "teamcraft.sidebar_collapsed";
 const KEY_COLLAPSED_SPACES: &str = "teamcraft.sidebar_collapsed_spaces";
+/// Whether the global entries (calls, meetings, people, ...) are folded away on a phone (#703).
+const KEY_ENTRIES_COLLAPSED: &str = "teamcraft.sidebar_entries_collapsed";
 /// How long the rows of a closing section stay: the exit (`--dur-exit`, 100 ms) plus a frame, in
 /// case `animationend` never comes (the sidebar is hidden).
 const SECTION_EXIT: Duration = Duration::from_millis(140);
@@ -94,7 +97,9 @@ pub fn Sidebar() -> impl IntoView {
     RwSignal::new(load_json::<HashSet<SpaceId>>(KEY_COLLAPSED_SPACES).unwrap_or_default());
   Effect::new(move |_| collapsed_spaces.with(|set| store_json(KEY_COLLAPSED_SPACES, set)));
   // A local filter of the list below, not the global search.
-  let query = RwSignal::new(String::new());
+  let filter = ListFilter::new();
+  let query = filter.query;
+  let entries = EntriesDisclosure::new();
   let listed = Memo::new(move |_| {
     let needle = query.get().trim().to_lowercase();
     let list = state.with_mutes(conversations.get());
@@ -128,6 +133,8 @@ pub fn Sidebar() -> impl IntoView {
             }
           }}
         </h2>
+        <EntriesToggle entries=entries controls="sidebar-entries" />
+        <ListFilterToggle filter=filter field_id="sidebar-filter" label_key="sidebar-filter" />
         <Show when=move || !is_guest(state) fallback=|| ()>
           <button class="icon-btn" aria-label=move || i18n.t("browse-title") title=move || i18n.t("browse-title") on:click=move |_| state.overlay.set(Overlay::BrowseChannels(state.space.get_untracked()))>
             <Icon name=IconName::List />
@@ -149,26 +156,8 @@ pub fn Sidebar() -> impl IntoView {
           </button>
         </Show>
       </div>
-      <GlobalEntries />
-      <div class="chats-filter">
-        <label class="visually-hidden" for="sidebar-filter">{move || i18n.t("sidebar-filter")}</label>
-        <input
-          id="sidebar-filter"
-          class="input"
-          type="search"
-          autocomplete="off"
-          spellcheck="false"
-          placeholder=move || i18n.t("sidebar-filter")
-          prop:value=move || query.get()
-          on:input=move |ev| query.set(event_target_value(&ev))
-          on:keydown=move |ev| {
-            if ev.key() == "Escape" && !query.with_untracked(String::is_empty) {
-              ev.stop_propagation();
-              query.set(String::new());
-            }
-          }
-        />
-      </div>
+      <GlobalEntries entries=entries id="sidebar-entries" />
+      <ListFilterField filter=filter id="sidebar-filter" label_key="sidebar-filter" />
       <div class="sidebar-scroll">
         {move || {
           if is_grouped.get() {
@@ -187,11 +176,14 @@ pub fn Sidebar() -> impl IntoView {
 /// The entries that are not about one space: calls, meetings, people, saved items. Home and the
 /// space sidebar both start with them; threads and activity are on the rail, search in the top bar.
 #[component]
-pub fn GlobalEntries() -> impl IntoView {
+pub fn GlobalEntries(entries: EntriesDisclosure, id: &'static str) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
 
+  // One row of pills on a phone (#703), folded away there when the user chose so; a list on wide
+  // layouts, which ignore the folding.
   view! {
+    <div class="sb-entries" id=id class:is-collapsed=move || entries.is_collapsed.get()>
       <button
         class="sb-item sb-calls"
         class:current=move || state.view.get() == MainView::Calls
@@ -241,6 +233,185 @@ pub fn GlobalEntries() -> impl IntoView {
         <Icon name=IconName::Paperclip />
         <span class="sb-name">{move || i18n.t("sidebar-files")}</span>
       </button>
+    </div>
+  }
+}
+
+/// Whether the global entries are folded away on a phone (#703). Remembered on this device, the
+/// same for Home and the space sidebar; wide layouts always show the entries.
+#[derive(Clone, Copy)]
+pub struct EntriesDisclosure {
+  is_collapsed: RwSignal<bool>,
+}
+
+impl EntriesDisclosure {
+  pub fn new() -> Self {
+    let is_collapsed = RwSignal::new(load_json::<bool>(KEY_ENTRIES_COLLAPSED).unwrap_or(false));
+    Effect::new(move |previous: Option<bool>| {
+      let now = is_collapsed.get();
+      // Nothing to write for the value just read.
+      if previous.is_some() {
+        store_json(KEY_ENTRIES_COLLAPSED, &now);
+      }
+      now
+    });
+    Self { is_collapsed }
+  }
+
+  fn toggle(self) {
+    self.is_collapsed.update(|collapsed| *collapsed = !*collapsed);
+  }
+}
+
+impl Default for EntriesDisclosure {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
+/// The chevron beside a sidebar's title that folds its global entries away on a phone; wide layouts
+/// hide it.
+#[component]
+pub fn EntriesToggle(entries: EntriesDisclosure, controls: &'static str) -> impl IntoView {
+  let i18n = use_i18n();
+  view! {
+    <button
+      type="button"
+      class="icon-btn sb-entries-toggle"
+      class:is-collapsed=move || entries.is_collapsed.get()
+      aria-label=move || i18n.t("sidebar-shortcuts")
+      title=move || i18n.t("sidebar-shortcuts")
+      aria-controls=controls
+      aria-expanded=move || (!entries.is_collapsed.get()).to_string()
+      on:click=move |_| entries.toggle()
+    >
+      <Icon name=IconName::ChevronDown />
+    </button>
+  }
+}
+
+/// The text filter of a sidebar's list (#703). Wide layouts always show its field; on a phone the
+/// field waits behind a search button in the sidebar's header until it is used, so the list starts
+/// near the top of the screen. It stays while it holds text.
+#[derive(Clone, Copy)]
+pub struct ListFilter {
+  pub query: RwSignal<String>,
+  is_open: RwSignal<bool>,
+  wrap: NodeRef<html::Div>,
+  field: NodeRef<html::Input>,
+  toggle: NodeRef<html::Button>,
+}
+
+impl ListFilter {
+  pub fn new() -> Self {
+    Self {
+      query: RwSignal::new(String::new()),
+      is_open: RwSignal::new(false),
+      wrap: NodeRef::new(),
+      field: NodeRef::new(),
+      toggle: NodeRef::new(),
+    }
+  }
+
+  /// Shows the field and puts the caret in it. The class goes on by hand before the focus: the
+  /// reactive class follows a moment later, and a hidden field can't take focus (on iOS, the
+  /// keyboard only opens for a focus inside the tap).
+  fn open(self) {
+    if let Some(wrap) = self.wrap.get_untracked() {
+      drop(wrap.class_list().add_1("is-open"));
+    }
+    self.is_open.set(true);
+    if let Some(field) = self.field.get_untracked() {
+      drop(field.focus());
+    }
+  }
+
+  fn close_if_empty(self) {
+    if self.query.with_untracked(String::is_empty) {
+      self.is_open.set(false);
+    }
+  }
+
+  /// Hides the field from the keyboard; the focus goes back to the button that opened it.
+  fn close(self) {
+    self.is_open.set(false);
+    if let Some(toggle) = self.toggle.get_untracked() {
+      drop(toggle.focus());
+    }
+  }
+}
+
+impl Default for ListFilter {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
+/// The search button that opens a [`ListFilter`] on a phone; wide layouts hide it.
+#[component]
+pub fn ListFilterToggle(
+  filter: ListFilter,
+  field_id: &'static str,
+  label_key: &'static str,
+) -> impl IntoView {
+  let i18n = use_i18n();
+  view! {
+    <button
+      type="button"
+      class="icon-btn sb-filter-toggle"
+      aria-label=move || i18n.t(label_key)
+      title=move || i18n.t(label_key)
+      aria-controls=field_id
+      node_ref=filter.toggle
+      aria-expanded=move || filter.is_open.get().to_string()
+      // Keeps the focus in an open field, so its blur doesn't close it under the press.
+      on:mousedown=|ev| ev.prevent_default()
+      on:click=move |_| filter.open()
+    >
+      <Icon name=IconName::Search />
+    </button>
+  }
+}
+
+/// The field of a [`ListFilter`]. Escape clears it, a second Escape (or leaving it empty) hides it
+/// again on a phone.
+#[component]
+pub fn ListFilterField(filter: ListFilter, id: &'static str, label_key: &'static str) -> impl IntoView {
+  let i18n = use_i18n();
+  let query = filter.query;
+  view! {
+    <div
+      class="chats-filter"
+      class:is-open=move || filter.is_open.get()
+      class:has-query=move || !query.with(String::is_empty)
+      node_ref=filter.wrap
+    >
+      <label class="visually-hidden" for=id>{move || i18n.t(label_key)}</label>
+      <input
+        id=id
+        class="input"
+        type="search"
+        autocomplete="off"
+        spellcheck="false"
+        placeholder=move || i18n.t(label_key)
+        node_ref=filter.field
+        prop:value=move || query.get()
+        on:input=move |ev| query.set(event_target_value(&ev))
+        on:blur=move |_| filter.close_if_empty()
+        on:keydown=move |ev| {
+          if ev.key() != "Escape" {
+            return;
+          }
+          if !query.with_untracked(String::is_empty) {
+            ev.stop_propagation();
+            query.set(String::new());
+          } else if filter.is_open.get_untracked() {
+            ev.stop_propagation();
+            filter.close();
+          }
+        }
+      />
+    </div>
   }
 }
 
