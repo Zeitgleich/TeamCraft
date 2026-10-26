@@ -1062,6 +1062,9 @@ pub enum ChatQuery {
   FirstUnread {
     conversation: ConversationId,
   },
+  NewestMessage {
+    conversation: ConversationId,
+  },
   IsWaitingForDevice {
     conversation: ConversationId,
   },
@@ -1333,6 +1336,9 @@ impl ChatQuery {
       },
       Self::FirstUnread { conversation } => ChatAnswer::Message {
         maybe_message: backend.first_unread(conversation),
+      },
+      Self::NewestMessage { conversation } => ChatAnswer::Message {
+        maybe_message: backend.newest_message(conversation),
       },
       Self::Draft {
         conversation,

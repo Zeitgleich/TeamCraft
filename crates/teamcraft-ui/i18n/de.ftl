@@ -1668,6 +1668,7 @@ slash-msg-send-there = Unterhaltung geöffnet. Schreibe deine Nachricht dort.
 slash-groupmsg-unsupported = Gruppenunterhaltungen sind noch nicht verfügbar.
 slash-muted = Unterhaltung stummgeschaltet.
 slash-unmuted = Stummschaltung aufgehoben.
+slash-channel-only = Nur Kanäle haben einen Namen, ein Thema und einen Zweck.
 slash-reminder-set = Erinnerung gesetzt für { $time }.
 slash-meet-starting = Meeting wird gestartet …
 slash-meet-unavailable = Meetings brauchen eine angemeldete Sitzung.

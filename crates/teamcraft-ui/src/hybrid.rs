@@ -434,6 +434,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.first_unread(conversation)
   }
 
+  fn newest_message(&self, conversation: ConversationId) -> Option<MessageId> {
+    self.chat.newest_message(conversation)
+  }
+
   fn is_waiting_for_device(&self, conversation: ConversationId) -> bool {
     self.chat.is_waiting_for_device(conversation)
   }

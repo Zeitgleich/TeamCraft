@@ -355,6 +355,12 @@ pub trait ChatBackend {
   fn first_unread(&self, _conversation: ConversationId) -> Option<MessageId> {
     None
   }
+  /// The newest message the server stored in the conversation, reactions, edits and deletions
+  /// included: where `mark_read` moves the read marker. Unlike the newest row it changes when a
+  /// reaction arrives, which raises the unread count too (#641).
+  fn newest_message(&self, _conversation: ConversationId) -> Option<MessageId> {
+    None
+  }
   /// The unsent text of a conversation or thread (synced to the user's devices, encrypted).
   fn draft(&self, _conversation: ConversationId, _maybe_thread: Option<ThreadId>) -> Option<String> {
     None

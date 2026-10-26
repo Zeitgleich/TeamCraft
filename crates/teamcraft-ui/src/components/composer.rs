@@ -507,7 +507,7 @@ pub fn Composer(
       return;
     };
     let list = match found.kind {
-      TriggerKind::Command => slash::matching_commands(&found.query)
+      TriggerKind::Command => slash::matching_commands(&found.query, maybe_channel_name().is_some())
         .into_iter()
         .map(|(name, usage)| Suggestion {
           insert: name.to_owned(),
@@ -1082,8 +1082,7 @@ pub fn Composer(
               <div class="composer-notice composer-help" role="status">
                 <p>{move || i18n.t("slash-help-title")}</p>
                 <ul>
-                  {slash::COMMANDS
-                    .iter()
+                  {slash::commands(maybe_channel_name().is_some())
                     .map(|(name, usage)| view! { <li><code>{format!("/{name} {usage}").trim_end().to_owned()}</code></li> })
                     .collect_view()}
                 </ul>
