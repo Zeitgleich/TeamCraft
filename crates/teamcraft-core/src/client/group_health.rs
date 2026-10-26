@@ -1,7 +1,8 @@
 //! What members notice about a group that the server's word alone doesn't settle (e2ee.md §4.6,
 //! "Removal order"): users still in the group whom the server no longer lists, and a server that
 //! lists this user but refuses the group's queue. Neither makes this device sign or drop anything
-//! on its own (security review A8); both are recorded for the UI, where an admin decides.
+//! on its own (security review A8). Leftovers are never shown to members (issue #661): only after
+//! a fresh member list confirmed them twice are they recorded, for the admin console.
 
 use std::collections::BTreeSet;
 
@@ -16,6 +17,10 @@ use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, Table};
 
+/// Fresh member lists that must agree before a user still in the group counts as a leftover.
+const LEFTOVER_CONFIRMATIONS: u32 = 2;
+const LEFTOVERS_PREFIX: &str = "leftovers/";
+
 /// How a removal or leave this device started stands, for the UI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemovalStatus {
@@ -28,6 +33,15 @@ pub enum RemovalStatus {
   Unconfirmed,
 }
 
+/// Users a check found in the group but not in the server's member list, waiting for the next
+/// check to confirm them (a single mismatch is never reported).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct LeftoverSuspects {
+  users: Vec<UserId>,
+  /// Fresh member lists that agreed so far.
+  checks: u32,
+}
+
 /// That the server refused this device the group's queue while listing the user as a member.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct QueueRefusal {
@@ -35,40 +49,81 @@ struct QueueRefusal {
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
-  /// Users with a device in the group whom the server no longer lists, as last noted.
-  pub(crate) fn group_leftovers(&self, conversation: ConversationId) -> Result<Vec<UserId>, CoreError> {
-    group_leftovers(&self.store, conversation)
-  }
-
-  /// Notes who is in the group but not in the server's (cached) member list, leaving out
-  /// removals already on their way (this device's own, or an admin's signed change waiting to be
-  /// committed). A colleague's removal whose signed change got lost or refused shows up here, so
-  /// an admin can sign it again; nobody signs it on the server's word (security review A8).
+  /// Notes who is in the group but not in the server's cached member list, leaving out removals
+  /// already on their way (this device's own, or an admin's signed change waiting to be
+  /// committed). The cache may be stale (a member who just joined, a missed event, issue #661), so
+  /// this only marks them as suspects; [`Client::check_group_leftovers`] asks the server.
   pub(crate) fn note_group_leftovers(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    let key = leftovers_key(conversation);
     let maybe_members: Option<ListConversationMembersResponse> =
       records::get_json(&self.store, Table::Members, &conversation.to_string())?;
     let (true, Some(members)) = (self.has_group(conversation)?, maybe_members) else {
-      self.store.delete(Table::AppliedChanges, &key)?;
-      return Ok(());
+      return self.clear_leftovers(conversation);
     };
-    let listed: BTreeSet<UserId> = members.members.iter().map(|member| member.user.id).collect();
-    let being_removed = self.removals_on_their_way(conversation)?;
-    let me = self.account.user_id;
-    let leftovers: Vec<UserId> = self
-      .group_users(conversation)?
-      .into_iter()
-      .filter(|user| *user != me && !listed.contains(user) && !being_removed.contains(user))
-      .collect();
-    if leftovers.is_empty() {
-      self.store.delete(Table::AppliedChanges, &key)?;
+    let candidates = self.unlisted_group_users(conversation, &members)?;
+    if candidates.is_empty() {
+      return self.clear_leftovers(conversation);
+    }
+    let mut suspects = self.leftover_suspects(conversation)?;
+    for user in candidates {
+      if !suspects.users.contains(&user) {
+        suspects.users.push(user);
+      }
+    }
+    records::put_json(
+      &self.store,
+      Table::AppliedChanges,
+      &suspects_key(conversation),
+      &suspects,
+    )
+  }
+
+  /// Confirms suspected leftovers against a member list fetched now (never the cache). A user the
+  /// server lists is dropped at once; one it doesn't list on two checks in a row is a leftover:
+  /// meeting guests among them are removed with their own signed leaves, everybody else is
+  /// recorded for the admin console and logged. Nobody is removed on the server's word alone.
+  pub(crate) async fn check_group_leftovers(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<(), CoreError> {
+    let suspects = self.leftover_suspects(conversation)?;
+    if suspects.users.is_empty() || !self.has_group(conversation)? {
       return Ok(());
     }
-    self.queue_guest_removals(conversation, &leftovers)?;
-    if group_leftovers(&self.store, conversation)? != leftovers {
-      tracing::warn!(conversation_id = %conversation, count = leftovers.len(), "users in the encryption group whom the server no longer lists");
+    let members = self.api.list_members(conversation).await?;
+    records::put_json(&self.store, Table::Members, &conversation.to_string(), &members)?;
+    let unlisted = self.unlisted_group_users(conversation, &members)?;
+    let still: Vec<UserId> = suspects
+      .users
+      .into_iter()
+      .filter(|user| unlisted.contains(user))
+      .collect();
+    if still.is_empty() {
+      return self.clear_leftovers(conversation);
     }
-    records::put_json(&self.store, Table::AppliedChanges, &key, &leftovers)
+    // The guests' own leaves: safe on a fresh list, and they should go without waiting.
+    self.queue_guest_removals(conversation, &still)?;
+    let checks = suspects.checks.saturating_add(1);
+    records::put_json(
+      &self.store,
+      Table::AppliedChanges,
+      &suspects_key(conversation),
+      &LeftoverSuspects {
+        users: still.clone(),
+        checks,
+      },
+    )?;
+    if checks < LEFTOVER_CONFIRMATIONS {
+      return Ok(());
+    }
+    if group_leftovers(&self.store, conversation)? != still {
+      tracing::warn!(conversation_id = %conversation, count = still.len(), "users in the encryption group whom the server no longer lists");
+    }
+    records::put_json(
+      &self.store,
+      Table::AppliedChanges,
+      &leftovers_key(conversation),
+      &still,
+    )
   }
 
   /// The server refused the group's queue (403/404). Quiet only when that is expected: this
@@ -124,6 +179,41 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(self.stored_pending(&key)?.is_some())
   }
 
+  /// Group users other than this one whom `members` doesn't list and whose removal isn't already
+  /// on its way.
+  fn unlisted_group_users(
+    &mut self,
+    conversation: ConversationId,
+    members: &ListConversationMembersResponse,
+  ) -> Result<Vec<UserId>, CoreError> {
+    let listed: BTreeSet<UserId> = members.members.iter().map(|member| member.user.id).collect();
+    let being_removed = self.removals_on_their_way(conversation)?;
+    let me = self.account.user_id;
+    Ok(
+      self
+        .group_users(conversation)?
+        .into_iter()
+        .filter(|user| *user != me && !listed.contains(user) && !being_removed.contains(user))
+        .collect(),
+    )
+  }
+
+  fn leftover_suspects(&self, conversation: ConversationId) -> Result<LeftoverSuspects, CoreError> {
+    Ok(
+      records::get_json(&self.store, Table::AppliedChanges, &suspects_key(conversation))?.unwrap_or_default(),
+    )
+  }
+
+  fn clear_leftovers(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    self
+      .store
+      .delete(Table::AppliedChanges, &suspects_key(conversation))?;
+    self
+      .store
+      .delete(Table::AppliedChanges, &leftovers_key(conversation))?;
+    Ok(())
+  }
+
   /// Users whose removal from the group is under way: this device's own removals, and admins'
   /// signed removals waiting in this device's queue to be committed.
   fn removals_on_their_way(&self, conversation: ConversationId) -> Result<BTreeSet<UserId>, CoreError> {
@@ -155,8 +245,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 }
 
-/// Users with a device in the conversation's group whom the server no longer lists (as the last
-/// sync noted them). Read by the UI from the store; shown to admins.
+/// Users with a device in the conversation's group whom the server no longer lists, confirmed by
+/// fresh member lists. Read by the admin console from the store; never shown to members.
 pub fn group_leftovers(
   store: &impl LocalStore,
   conversation: ConversationId,
@@ -222,8 +312,29 @@ pub fn unconfirmed_removals(store: &impl LocalStore) -> Result<Vec<(Conversation
   )
 }
 
+/// Confirmed leftovers in every conversation this device is in, for the admin console.
+pub fn all_group_leftovers(store: &impl LocalStore) -> Result<Vec<(ConversationId, UserId)>, CoreError> {
+  let mut leftovers = Vec::new();
+  for (key, users) in
+    records::list_json_with_prefix::<Vec<UserId>>(store, Table::AppliedChanges, LEFTOVERS_PREFIX)?
+  {
+    let Some(Ok(conversation)) = key
+      .strip_prefix(LEFTOVERS_PREFIX)
+      .map(str::parse::<ConversationId>)
+    else {
+      continue;
+    };
+    leftovers.extend(users.into_iter().map(|user| (conversation, user)));
+  }
+  Ok(leftovers)
+}
+
 pub(crate) fn leftovers_key(conversation: ConversationId) -> String {
-  format!("leftovers/{conversation}")
+  format!("{LEFTOVERS_PREFIX}{conversation}")
+}
+
+fn suspects_key(conversation: ConversationId) -> String {
+  format!("leftover_suspects/{conversation}")
 }
 
 pub(crate) fn queue_refused_key(conversation: ConversationId) -> String {

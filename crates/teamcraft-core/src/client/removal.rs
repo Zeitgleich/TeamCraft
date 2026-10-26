@@ -87,35 +87,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.record_and_run_removal(conversation, me, maybe_event).await
   }
 
-  /// "Retry" on a removal or leave shown as failed, or "remove" on somebody the server no longer
-  /// lists who is still in the group (e2ee.md §4.6): this user decides and signs it, never the
-  /// server's word (security review A8).
+  /// "Retry" on a removal or leave shown as failed, or "remove" on an admin's unconfirmed one
+  /// (e2ee.md §4.6): this user decides and signs it, never the server's word (security review
+  /// A8). Somebody the server merely stopped listing is never offered for removal (#661).
   pub async fn retry_removal(&mut self, conversation: ConversationId, user: UserId) -> Result<(), CoreError> {
     let key = PendingChange::removal_key(conversation, user);
-    if self.stored_pending(&key)?.is_some() {
-      return self.record_and_run_removal(conversation, user, None).await;
-    }
-    if !self.group_leftovers(conversation)?.contains(&user) {
+    if self.stored_pending(&key)?.is_none() {
       return Err(CoreError::InvalidRequest(
         "no removal of this user to retry".into(),
       ));
     }
-    // Only admins of the signed roster are asked (the UI), and only they sign it here.
-    let me = self.account.user_id;
-    if !self.workspace()?.is_admin(me) {
-      return Err(CoreError::NotAnAdmin(me));
-    }
-    // The server's word is only why the user is asked; ask it again before signing anything.
-    let members = self.api.list_members(conversation).await?;
-    if members.members.iter().any(|member| member.user.id == user) {
-      return self.note_group_leftovers(conversation);
-    }
-    let maybe_event = self
-      .has_group(conversation)?
-      .then_some(ConversationEvent::MemberRemoved { user });
-    let result = self.record_and_run_removal(conversation, user, maybe_event).await;
-    self.note_group_leftovers(conversation)?;
-    result
+    self.record_and_run_removal(conversation, user, None).await
   }
 
   /// Revokes one of this user's other devices: on the server first, so a lost laptop loses its

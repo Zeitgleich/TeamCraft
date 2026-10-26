@@ -204,8 +204,6 @@ fn MembershipIssueBanners(conversation: ConversationId, info: Memo<Option<Conver
     state.read(|backend| backend.membership_issues(conversation))
   });
   plan_dm_setup_expiry(issues, expired);
-  // Signing somebody's removal takes a second click that says what it rests on.
-  let confirming = RwSignal::new(None::<UserId>);
   move || {
     let me = state.me().id;
     let channel = info.get().map(|conv| conv.name).unwrap_or_default();
@@ -235,14 +233,6 @@ fn MembershipIssueBanners(conversation: ConversationId, info: Memo<Option<Conver
           MembershipIssue::RemovalFailed { user } => (
             "alert",
             i18n.t_with("removal-failed", &[("name", &name_of(user))]),
-            Some(user),
-          ),
-          MembershipIssue::LeftInGroup { user } => (
-            "alert",
-            i18n.t_with(
-              "left-in-group",
-              &[("name", &name_of(user)), ("channel", &channel)],
-            ),
             Some(user),
           ),
           MembershipIssue::RemovalUnconfirmed { user } => (
@@ -286,42 +276,14 @@ fn MembershipIssueBanners(conversation: ConversationId, info: Memo<Option<Conver
             </button>
           }
         });
-        let is_leftover = matches!(issue, MembershipIssue::LeftInGroup { .. });
         let is_unconfirmed = matches!(issue, MembershipIssue::RemovalUnconfirmed { .. });
         let actions = maybe_retry.map(|user| {
           if is_unconfirmed {
             return view! { <UnconfirmedRemovalActions conversation=conversation user=user /> }.into_any();
           }
-          if !is_leftover {
-            return view! {
-              <button class="btn btn-small" on:click=move |_| state.write(|backend| backend.retry_removal(conversation, user))>
-                {i18n.t("removal-retry")}
-              </button>
-            }
-            .into_any();
-          }
-          if confirming.get() == Some(user) {
-            let question = i18n.t_with("left-in-group-confirm", &[("name", &name_of(user))]);
-            return view! {
-              <span>{question}</span>
-              <button
-                class="btn btn-small"
-                on:click=move |_| {
-                  confirming.set(None);
-                  state.write(|backend| backend.retry_removal(conversation, user));
-                }
-              >
-                {i18n.t("left-in-group-remove")}
-              </button>
-              <button class="btn btn-small" on:click=move |_| confirming.set(None)>
-                {i18n.t("cancel")}
-              </button>
-            }
-            .into_any();
-          }
           view! {
-            <button class="btn btn-small" on:click=move |_| confirming.set(Some(user))>
-              {i18n.t("left-in-group-remove")}
+            <button class="btn btn-small" on:click=move |_| state.write(|backend| backend.retry_removal(conversation, user))>
+              {i18n.t("removal-retry")}
             </button>
           }
           .into_any()

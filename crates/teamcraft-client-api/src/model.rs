@@ -343,9 +343,6 @@ pub enum MembershipIssue {
   /// ([`crate::backend::ChatBackend::retry_removal`]), "keep" drops it
   /// ([`crate::backend::ChatBackend::discard_removal`]).
   RemovalUnconfirmed { user: UserId },
-  /// `user` is still in the encryption group though the server no longer lists them; shown to
-  /// admins, who can sign the removal again.
-  LeftInGroup { user: UserId },
   /// The server lists the user but refuses this device the encryption group: new messages may be
   /// missing.
   GroupRefused,
@@ -618,9 +615,15 @@ mod tests {
 
   #[test]
   fn membership_issues_keep_their_wire_form_and_tolerate_new_kinds() {
-    let issue = MembershipIssue::LeftInGroup { user: id_from_raw(7) };
+    let issue = MembershipIssue::RemovalFailed { user: id_from_raw(7) };
     let json = serde_json::to_value(&issue).unwrap_or_default();
-    assert_eq!(json["type"], "left_in_group");
+    assert_eq!(json["type"], "removal_failed");
+    // Dropped in #661: an older core's leftover issue is ignored.
+    assert_eq!(
+      serde_json::from_value::<MembershipIssue>(serde_json::json!({ "type": "left_in_group", "user": "7" }))
+        .ok(),
+      Some(MembershipIssue::Unknown)
+    );
     assert_eq!(
       serde_json::from_value::<MembershipIssue>(serde_json::json!({ "type": "group_refused" })).ok(),
       Some(MembershipIssue::GroupRefused)

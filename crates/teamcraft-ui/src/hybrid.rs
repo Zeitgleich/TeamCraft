@@ -524,6 +524,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.unconfirmed_removals()
   }
 
+  fn group_leftovers(&self) -> Vec<(ConversationId, UserId)> {
+    self.chat.group_leftovers()
+  }
+
   fn draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) -> Option<String> {
     self.chat.draft(conversation, maybe_thread)
   }

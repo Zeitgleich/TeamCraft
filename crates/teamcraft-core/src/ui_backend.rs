@@ -1323,19 +1323,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
         crate::client::RemovalStatus::Unconfirmed => MembershipIssue::RemovalUnconfirmed { user },
       })
       .collect();
-    // Only admins are asked to sign somebody's removal again (e2ee.md §4.6).
-    let workspace: crate::workspace::WorkspaceState = self.read(
-      records::get_json(&self.store, Table::Workspace, crate::client::WORKSPACE_KEY)
-        .map(Option::unwrap_or_default),
-    );
-    if workspace.is_admin(self.me) {
-      issues.extend(
-        self
-          .read(crate::client::group_leftovers(&self.store, conversation))
-          .into_iter()
-          .map(|user| MembershipIssue::LeftInGroup { user }),
-      );
-    }
+    // Users left in the group are never shown here (#661): the admin console lists them.
     if self.read(crate::client::is_queue_refused(&self.store, conversation)) {
       issues.push(MembershipIssue::GroupRefused);
     }
@@ -1469,6 +1457,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn unconfirmed_removals(&self) -> Vec<(ConversationId, UserId)> {
     self.read(crate::client::unconfirmed_removals(&self.store))
+  }
+
+  fn group_leftovers(&self) -> Vec<(ConversationId, UserId)> {
+    self.read(crate::client::all_group_leftovers(&self.store))
   }
 
   fn typing_users(&self, conversation: ConversationId) -> Vec<UserId> {

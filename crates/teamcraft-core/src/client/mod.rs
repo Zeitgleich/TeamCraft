@@ -61,7 +61,8 @@ pub use gateway::{
   keep_alive,
 };
 pub use group_health::{
-  RemovalStatus, group_leftovers, is_queue_refused, pending_removals, unconfirmed_removals,
+  RemovalStatus, all_group_leftovers, group_leftovers, is_queue_refused, pending_removals,
+  unconfirmed_removals,
 };
 pub use groups::{DmSetupStatus, dm_setup_status};
 pub use guest::{GuestAdmission, GuestLinkMaterial, guest_link_fragment};

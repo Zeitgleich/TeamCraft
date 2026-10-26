@@ -111,6 +111,45 @@ fn UnconfirmedRemovals(channels: Memo<Vec<AdminChannel>>) -> impl IntoView {
   }
 }
 
+/// Users still in an encryption group of this admin's device whom the server no longer lists,
+/// confirmed by fresh member lists (#661). Only the server's word is behind it, so no client
+/// removes them; members never see this. Informational, for the admin's security review.
+#[component]
+fn GroupLeftovers(channels: Memo<Vec<AdminChannel>>) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let leftovers = Memo::new(move |_| state.read(|backend| backend.group_leftovers()));
+  move || {
+    leftovers
+      .get()
+      .into_iter()
+      .map(|(conversation, user)| {
+        let channel = channels
+          .get()
+          .into_iter()
+          .find(|channel| channel.id == conversation)
+          .map(|channel| channel.name)
+          .unwrap_or_default();
+        let name = state
+          .read(|backend| backend.user(user))
+          .map(|user| user.display_name)
+          .filter(|name| !name.is_empty())
+          .unwrap_or_else(|| i18n.t("left-in-group-unknown"));
+        let text = i18n.t_with("admin-left-in-group", &[("name", &name), ("channel", &channel)]);
+        view! {
+          <div class="key-banner" role="status">
+            <Icon name=IconName::Lock />
+            <div class="key-banner-text">
+              <strong translate="no">{text}</strong>
+              <span class="muted-text small">{move || i18n.t("admin-left-in-group-hint")}</span>
+            </div>
+          </div>
+        }
+      })
+      .collect_view()
+  }
+}
+
 /// All spaces and channels including private ones, with metadata only.
 #[component]
 pub fn ChannelsSection() -> impl IntoView {
@@ -150,6 +189,7 @@ pub fn ChannelsSection() -> impl IntoView {
       subtitle=Signal::derive(move || i18n.t("admin-channels-subtitle"))
     />
     <UnconfirmedRemovals channels=channels />
+    <GroupLeftovers channels=channels />
     <div class="admin-toolbar">
       <label class="visually-hidden" for="admin-channel-search">{move || i18n.t("admin-search")}</label>
       <input
