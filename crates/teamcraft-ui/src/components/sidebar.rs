@@ -85,7 +85,20 @@ pub fn Sidebar() -> impl IntoView {
   let collapsed_spaces =
     RwSignal::new(load_json::<HashSet<SpaceId>>(KEY_COLLAPSED_SPACES).unwrap_or_default());
   Effect::new(move |_| collapsed_spaces.with(|set| store_json(KEY_COLLAPSED_SPACES, set)));
-  let listed = Memo::new(move |_| state.with_mutes(conversations.get()));
+  // A local filter of the list below, not the global search.
+  let query = RwSignal::new(String::new());
+  let listed = Memo::new(move |_| {
+    let needle = query.get().trim().to_lowercase();
+    let list = state.with_mutes(conversations.get());
+    if needle.is_empty() {
+      list
+    } else {
+      list
+        .into_iter()
+        .filter(|conversation| conversation.name.to_lowercase().contains(&needle))
+        .collect()
+    }
+  });
   let sections = Memo::new(move |_| build_sections(&listed.get(), &state.settings.sidebar_options()));
   let grouped =
     Memo::new(move |_| build_grouped(&spaces.get(), &listed.get(), &state.settings.sidebar_options()));
@@ -123,6 +136,25 @@ pub fn Sidebar() -> impl IntoView {
         </Show>
       </div>
       <GlobalEntries />
+      <div class="chats-filter">
+        <label class="visually-hidden" for="sidebar-filter">{move || i18n.t("sidebar-filter")}</label>
+        <input
+          id="sidebar-filter"
+          class="input"
+          type="search"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder=move || i18n.t("sidebar-filter")
+          prop:value=move || query.get()
+          on:input=move |ev| query.set(event_target_value(&ev))
+          on:keydown=move |ev| {
+            if ev.key() == "Escape" && !query.with_untracked(String::is_empty) {
+              ev.stop_propagation();
+              query.set(String::new());
+            }
+          }
+        />
+      </div>
       <div class="sidebar-scroll">
         {move || {
           if is_grouped.get() {
@@ -428,6 +460,19 @@ fn SidebarSection(
           conversations.into_iter().map(|conv| view! { <li><SidebarItem conversation=conv /></li> }).collect_view().into_any()
         }}
       </ul>
+      // The end of the channel list says where the others are.
+      {(kind == SectionKind::Channels)
+        .then(|| {
+          view! {
+            <button
+              class="sb-more sb-footer"
+              hidden=is_collapsed
+              on:click=move |_| state.overlay.set(Overlay::BrowseChannels(state.space.get_untracked()))
+            >
+              {move || i18n.t("browse-title")}
+            </button>
+          }
+        })}
     </section>
   }
 }

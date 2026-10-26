@@ -3,6 +3,7 @@
 //! their own sidebar, as in Element or Discord: newest first, with a text filter, filter chips and "new message".
 
 use leptos::prelude::*;
+use teamcraft_proto::Role;
 
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::huddle_bar::CallPill;
@@ -117,8 +118,27 @@ pub fn HomeSidebar() -> impl IntoView {
           }
         }}
       </div>
+      <InviteFooter />
       <CallPill />
     </nav>
+  }
+}
+
+/// "Invite people" under the list, for members who may (not guests); it invites to the current space.
+#[component]
+fn InviteFooter() -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let can_invite = Memo::new(move |_| {
+    state.read(|backend| backend.my_role()) != Role::Guest
+      && state.read(|backend| !backend.spaces().is_empty())
+  });
+  view! {
+    <Show when=move || can_invite.get() fallback=|| ()>
+      <button class="sb-more sb-footer" on:click=move |_| state.overlay.set(Overlay::InvitePeople(state.space.get_untracked()))>
+        {move || i18n.t("invite-title")}
+      </button>
+    </Show>
   }
 }
 
