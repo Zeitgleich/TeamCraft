@@ -293,6 +293,7 @@ huddle-in-progress = Huddle läuft
 huddle-on-other-device = Du bist in diesem Call auf einem anderen Gerät
 huddle-join-here = Auch hier beitreten
 huddle-move-here = Call hierher holen
+huddle-leave-everywhere = Auf allen Geräten verlassen
 huddle-bar-label = Huddle
 call-title-direct = Anruf mit { $name }
 call-title-group = Anruf in { $name }

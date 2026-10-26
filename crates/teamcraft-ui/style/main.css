@@ -3851,6 +3851,24 @@ ol.md-list {
   gap: 6px;
 }
 
+/* In the call on another device: three choices don't fit next to the names on a phone; they move
+   to their own row, the main one last (nearest the thumb). */
+@media (max-width: 600px) {
+  .huddle-bar-choices {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .huddle-bar-choices .huddle-info {
+    flex-basis: calc(100% - 40px);
+  }
+
+  .huddle-bar-choices .huddle-controls {
+    flex-basis: 100%;
+    justify-content: flex-end;
+  }
+}
+
 .call-pill {
   flex: none;
   display: flex;
@@ -4223,6 +4241,8 @@ ol.md-list {
   color: var(--on-fill);
   font-size: clamp(18px, 3vw, 36px);
   font-weight: var(--weight-semibold);
+  /* The profile picture fills the same circle. */
+  overflow: hidden;
 }
 
 .silhouette {
