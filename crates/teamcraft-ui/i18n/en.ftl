@@ -2049,6 +2049,7 @@ release-too-old = This version of TeamCraft is no longer supported by the server
 release-reload = Reload now
 shortcut-search-here = Search in this conversation
 drop-files-here = Drop to attach
+drop-files-unreadable = The dropped files couldn’t be read. Attach them with the + button instead.
 message-show-more = Show more
 message-show-less = Show less
 message-sending = Sending…

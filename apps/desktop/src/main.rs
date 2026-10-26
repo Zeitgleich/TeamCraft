@@ -280,6 +280,27 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
         }
         NewWindowResponse::Deny
       }
+    })
+    // The app never leaves its own pages (#651): a file dropped beside the drop zones, or a link the
+    // page did not route, would replace the whole app. Web links go to the browser instead.
+    .on_navigation({
+      let app = app.handle().clone();
+      let maybe_dev_url = cfg!(debug_assertions)
+        .then(|| app.config().build.dev_url.clone())
+        .flatten();
+      move |url| {
+        if is_app_navigation(url, maybe_dev_url.as_ref()) {
+          return true;
+        }
+        // The scheme only: a dropped file's address names the file.
+        tracing::warn!(scheme = url.scheme(), "refused to navigate away from the app");
+        if matches!(url.scheme(), "http" | "https")
+          && let Err(error) = external_links::open(&app, url.as_str())
+        {
+          tracing::warn!(%error, "could not open a link in the browser");
+        }
+        false
+      }
     });
   let window = window_chrome::configure(window, prefs.title_bar);
   app.manage(WindowChromeState::new(prefs.title_bar));
@@ -310,6 +331,21 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
 /// through the system browser instead.
 fn is_allowed_new_window(url: &tauri::Url) -> bool {
   url.as_str() == "about:blank"
+}
+
+/// Navigation the webview may do: within the app's own pages (`tauri://localhost` on Linux and macOS,
+/// `http(s)://tauri.localhost` on Windows, the dev server in debug builds) and the in-page documents
+/// frames load (`about:`, `blob:`, `data:`). Never a `file:` or another site.
+fn is_app_navigation(url: &tauri::Url, maybe_dev_url: Option<&tauri::Url>) -> bool {
+  match url.scheme() {
+    "tauri" => url.host_str() == Some("localhost"),
+    "http" | "https" => {
+      url.host_str() == Some("tauri.localhost")
+        || maybe_dev_url.is_some_and(|dev| dev.origin() == url.origin())
+    },
+    "about" | "blob" | "data" => true,
+    _ => false,
+  }
 }
 
 /// The client core reads its access token synchronously; this keeps a copy current (the login code
@@ -360,7 +396,36 @@ fn keep_tokens_fresh(service: Arc<AuthService<KeyringStore>>) {
 
 #[cfg(test)]
 mod tests {
-  use super::is_allowed_new_window;
+  use super::{is_allowed_new_window, is_app_navigation};
+
+  #[test]
+  fn the_window_stays_on_the_app() {
+    let dev: tauri::Url = "http://127.0.0.1:8082".parse().expect("valid URL");
+    let allowed = |url: &str, maybe_dev: Option<&tauri::Url>| {
+      url.parse().is_ok_and(|url| is_app_navigation(&url, maybe_dev))
+    };
+    for app in [
+      "tauri://localhost/",
+      "tauri://localhost/s/1/c/13",
+      "http://tauri.localhost/",
+      "https://tauri.localhost/settings",
+      "about:blank",
+      "blob:tauri://localhost/1b4c",
+    ] {
+      assert!(allowed(app, None), "{app}");
+    }
+    assert!(allowed("http://127.0.0.1:8082/c/1", Some(&dev)));
+    for refused in [
+      "file:///home/user/Pictures/beach.jpg",
+      "https://example.com/",
+      "tauri://example.com/",
+      "http://127.0.0.1:8082/",
+      "http://127.0.0.1:9000/",
+    ] {
+      let maybe_dev = refused.contains("9000").then_some(&dev);
+      assert!(!allowed(refused, maybe_dev), "{refused}");
+    }
+  }
 
   #[test]
   fn only_the_blank_viewer_window_may_open() {
