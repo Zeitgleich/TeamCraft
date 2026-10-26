@@ -3,8 +3,9 @@
 use leptos::prelude::*;
 use teamcraft_client_api::actions::ChannelChanges;
 use teamcraft_client_api::custom_status::is_allowed;
-use teamcraft_proto::{HistoryPolicy, IdempotencyKey};
+use teamcraft_proto::{HistoryPolicy, IdempotencyKey, Permission, Role};
 
+use crate::channel_access::may_now;
 use crate::clock::{end_of_local_day, now_ms};
 use crate::feedback::PendingAction;
 use crate::i18n::I18n;
@@ -13,7 +14,7 @@ use crate::model::{ConversationId, CustomStatus, StatusExpiry, User};
 use crate::prefs::{ConversationNotify, MuteFor};
 use crate::reminders::{Reminder, due_time, from_json, to_json};
 use crate::settings::{load_string, store_string};
-use crate::slash::{ReminderTime, SlashCommand, SlashError, StatusChange};
+use crate::slash::{CommandContext, ReminderTime, SlashCommand, SlashError, StatusChange, Unavailable};
 use crate::state::{AppState, Overlay};
 
 // Markdown source: the backslash and both underscores are escaped so they show as typed.
@@ -46,13 +47,12 @@ pub fn explain_error(i18n: I18n, error: &SlashError) -> String {
 
 pub fn run(state: AppState, i18n: I18n, conversation: ConversationId, command: SlashCommand) -> Outcome {
   let text = |key: &str| Outcome::Notice(Notice::Text(i18n.t(key)));
-  // Typed outside a channel anyway (DM, group DM, meeting chat): the server would refuse it
-  // (#648), so say why instead.
-  let has_channel_settings = state
-    .read(|backend| backend.conversation(conversation))
-    .is_some_and(|conv| conv.has_channel_settings());
-  if !has_channel_settings && command.is_channel_only() {
-    return text("slash-channel-only");
+  // Typed where it can't work (outside a channel, without the right): the server would refuse it
+  // (#648, #692), so say why instead.
+  match command.check(context(state, conversation)) {
+    Ok(()) => {},
+    Err(Unavailable::NotAChannel) => return text("slash-channel-only"),
+    Err(Unavailable::NotAllowed) => return text("slash-not-allowed"),
   }
   match command {
     SlashCommand::Presence(presence) => {
@@ -187,6 +187,19 @@ pub fn run(state: AppState, i18n: I18n, conversation: ConversationId, command: S
     SlashCommand::Help => Outcome::Notice(Notice::Help),
     SlashCommand::Remind { when, text: body } => remind(i18n, when, body),
     SlashCommand::Meet => start_meeting(state, i18n),
+  }
+}
+
+/// Where the composer of `conversation` is and what the user may do there, read once.
+pub fn context(state: AppState, conversation: ConversationId) -> CommandContext {
+  let is_channel = state
+    .read(|backend| backend.conversation(conversation))
+    .is_some_and(|conv| conv.has_channel_settings());
+  CommandContext {
+    is_channel,
+    can_change_channel: is_channel && may_now(state, conversation, &Permission::ManageChannelProperties),
+    can_manage_members: is_channel && may_now(state, conversation, &Permission::ManageMembers),
+    is_guest: state.read(|backend| backend.my_role()) == Role::Guest,
   }
 }
 

@@ -98,6 +98,11 @@ struct Suggestion {
 
 const MAX_SUGGESTIONS: usize = 8;
 
+/// Whether `list` shows the same entries as `shown`, so the selected one stays selected.
+fn is_same_list(shown: &[Suggestion], list: &[Suggestion]) -> bool {
+  shown.len() == list.len() && shown.iter().zip(list).all(|(a, b)| a.label == b.label)
+}
+
 /// People and groups whose name starts with, or contains, what was typed after `@`.
 fn mention_suggestions(
   query: &str,
@@ -507,31 +512,30 @@ pub fn Composer(
       return;
     };
     let list = match found.kind {
-      TriggerKind::Command => slash::matching_commands(&found.query, maybe_channel_name().is_some())
-        .into_iter()
-        .map(|(name, usage)| Suggestion {
-          insert: name.to_owned(),
-          label: format!("/{name} {usage}").trim_end().to_owned(),
-          detail: String::new(),
-          person: None,
-          is_exact: name == found.query.to_lowercase(),
-        })
-        .collect(),
+      TriggerKind::Command => {
+        slash::matching_commands(&found.query, composer_commands::context(state, conversation))
+          .into_iter()
+          .map(|(name, usage)| Suggestion {
+            insert: name.to_owned(),
+            label: format!("/{name} {usage}").trim_end().to_owned(),
+            detail: String::new(),
+            person: None,
+            is_exact: name == found.query.to_lowercase(),
+          })
+          .collect()
+      },
       TriggerKind::Mention => {
         let people = state.read(|backend| backend.users());
         let groups = groups.map(|hub| hub.groups()).unwrap_or_default();
         mention_suggestions(&found.query, &people, &groups, &i18n.t("mention-channel"))
       },
     };
-    // The caret moving inside the same query (arrow keys, a click) keeps the selection; a new list
-    // starts at its first entry.
-    let is_same_list = suggestions.with_untracked(|shown| {
-      shown.len() == list.len() && shown.iter().zip(&list).all(|(a, b)| a.label == b.label)
-    });
-    if !is_same_list {
+    // The caret moving inside the same query (arrow keys, a click) keeps the selection (#690); a
+    // new list starts at its first entry.
+    if !suggestions.with_untracked(|shown| is_same_list(shown, &list)) {
       selected_suggestion.set(0);
-      suggestions.set(list);
     }
+    suggestions.set(list);
   };
   let after_edit = move || {
     if let Some(element) = editor.get_untracked() {
@@ -1089,7 +1093,7 @@ pub fn Composer(
               <div class="composer-notice composer-help" role="status">
                 <p>{move || i18n.t("slash-help-title")}</p>
                 <ul>
-                  {slash::commands(maybe_channel_name().is_some())
+                  {slash::commands(composer_commands::context(state, conversation))
                     .map(|(name, usage)| view! { <li><code>{format!("/{name} {usage}").trim_end().to_owned()}</code></li> })
                     .collect_view()}
                 </ul>
@@ -1194,7 +1198,12 @@ pub fn Composer(
             translate="no"
             data-placeholder=move || {
               let name = conversation_name.get_value();
-              if name.is_empty() { i18n.t(placeholder_key) } else { i18n.t_with(placeholder_key, &[("name", &name)]) }
+              // Always with the argument: Fluent shows a missing one as "{$name}" (#699).
+              if name.is_empty() && placeholder_key == "composer-placeholder" {
+                i18n.t("composer-placeholder-untitled")
+              } else {
+                i18n.t_with(placeholder_key, &[("name", &name)])
+              }
             }
             node_ref=editor
             on:keydown=on_keydown
@@ -1476,6 +1485,34 @@ mod tests {
       Some(file("late.txt")),
       "a disposed list is not written"
     );
+  }
+
+  #[test]
+  fn the_selection_stays_while_the_list_is_unchanged() {
+    let shown = vec![suggestion("/shrug [text]"), suggestion("/shortcuts")];
+    assert!(
+      is_same_list(&shown, &shown.clone()),
+      "arrow keys refresh the same list"
+    );
+    assert!(
+      !is_same_list(&shown, &shown[..1]),
+      "a narrower query starts at the top"
+    );
+    assert!(!is_same_list(
+      &shown,
+      &[suggestion("/settings"), suggestion("/shortcuts")]
+    ));
+    assert!(!is_same_list(&[], &shown));
+  }
+
+  fn suggestion(label: &str) -> Suggestion {
+    Suggestion {
+      insert: label.trim_start_matches('/').into(),
+      label: label.into(),
+      detail: String::new(),
+      person: None,
+      is_exact: false,
+    }
   }
 
   fn file(name: &str) -> PendingFile {

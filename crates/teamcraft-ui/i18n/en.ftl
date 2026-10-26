@@ -157,6 +157,7 @@ bookmarks-add-soon = Bookmarks can't be edited yet
 
 ## Composer
 composer-placeholder = Write to { $name }
+composer-placeholder-untitled = Write a message
 composer-placeholder-reply = Reply…
 composer-readonly = You can't post in this channel.
 composer-label = Message
@@ -1688,7 +1689,8 @@ slash-msg-send-there = Conversation opened. Write your message there.
 slash-groupmsg-unsupported = Group conversations are not available yet.
 slash-muted = Conversation muted.
 slash-unmuted = Conversation unmuted.
-slash-channel-only = Only channels have a name, topic and purpose.
+slash-channel-only = This command works only in channels.
+slash-not-allowed = You don't have the right to do that here.
 slash-reminder-set = Reminder set for { $time }.
 slash-meet-starting = Starting a meeting…
 slash-meet-unavailable = Meetings need a signed-in session.
@@ -2817,3 +2819,6 @@ channel-sources-bridge-instance-hint = The bridge runs beside the server (deploy
 channel-sources-bridge-loopback-hint = The bridge runs next to the producers and listens on its default local address. Use the bridge's own address if you opened its listener.
 
 notes-title = Notes
+notes-empty-title = Nothing noted yet
+notes-empty = Keep ideas, links and files here. Only your own devices can read them.
+composer-placeholder-notes = Note something for yourself

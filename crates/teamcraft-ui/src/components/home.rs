@@ -6,6 +6,7 @@ use leptos::prelude::*;
 use teamcraft_proto::Role;
 
 use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::channel_view::shown_name;
 use crate::components::huddle_bar::CallPill;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
@@ -296,11 +297,7 @@ fn DirectItem(conversation: Conversation) -> impl IntoView {
   let status_emoji = maybe_other_user
     .and_then(|user| user.maybe_custom_status)
     .map(|status| status.emoji);
-  let name = if is_notes {
-    i18n.t("notes-title")
-  } else {
-    conversation.name.clone()
-  };
+  let name = shown_name(i18n, &conversation);
   let is_muted = conversation.is_muted;
   let aria_name = name.clone();
   let label = move || {

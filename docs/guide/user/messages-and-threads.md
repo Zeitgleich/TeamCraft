@@ -61,7 +61,9 @@ Hover a message and open **More actions**:
 ## Slash commands
 
 Type `/` in the composer for the list. Commands run on your device. To send text that starts with a
-slash, type `//`.
+slash, type `//`. The list and `/help` show only the commands that work in the conversation:
+channel commands not in direct messages, your notes or meeting chats, and changing a channel or its
+members only with the right to do so.
 
 | Command                                   | Does                                         |
 |-------------------------------------------|----------------------------------------------|

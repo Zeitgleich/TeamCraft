@@ -561,7 +561,16 @@ pub fn MessageList(
               label_key: "channel-add-people",
               on_click: Callback::new(move |()| state.overlay.set(Overlay::AddToChannel(conversation))),
             });
-            view! { <EmptyState icon=IconName::Smile title_key="channel-empty-title" body_key="channel-empty" maybe_action=maybe_action /> }
+            // The notes to self have nobody to greet (#699).
+            let is_notes = state
+              .read(|backend| backend.conversation(conversation))
+              .is_some_and(|conv| conv.is_notes_to_self);
+            let (icon, title_key, body_key) = if is_notes {
+              (IconName::Compose, "notes-empty-title", "notes-empty")
+            } else {
+              (IconName::Smile, "channel-empty-title", "channel-empty")
+            };
+            view! { <EmptyState icon=icon title_key=title_key body_key=body_key maybe_action=maybe_action /> }
           }}
         </Show>
         <div class="spacer" style:height=move || format!("{}px", window.get().pad_top)></div>
