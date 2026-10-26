@@ -176,9 +176,16 @@ impl Transfer {
         detail: "HTTP 511 network authentication required".into(),
       });
     }
+    let maybe_retry_after = self
+      .xhr
+      .get_response_header("Retry-After")
+      .ok()
+      .flatten()
+      .and_then(|value| super::parse_retry_after(&value));
     Err(ApiError::Status {
       status,
       maybe_body: None,
+      maybe_retry_after,
     })
   }
 }

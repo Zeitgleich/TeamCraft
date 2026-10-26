@@ -216,6 +216,19 @@ impl UploadRetry {
   /// Counts a failed attempt: the next one waits with exponential backoff, and after
   /// [`UploadRetrySettings::max_attempts`] the file stalls, keeping `cause` for the user.
   pub fn record_failure(&mut self, now_ms: i64, settings: &UploadRetrySettings, cause: RetryCause) {
+    self.record_failure_after(now_ms, settings, cause, None);
+  }
+
+  /// [`Self::record_failure`] for an answer that said when to come back (`Retry-After`, #749): the
+  /// next attempt waits at least that long, but never longer than
+  /// [`UploadRetrySettings::retry_max`], so a hostile or misconfigured server can't park a file.
+  pub fn record_failure_after(
+    &mut self,
+    now_ms: i64,
+    settings: &UploadRetrySettings,
+    cause: RetryCause,
+    maybe_server_wait: Option<std::time::Duration>,
+  ) {
     let attempts = match self {
       Self::Fresh => 1,
       Self::Waiting { attempts, .. } | Self::Stalled { attempts, .. } => attempts.saturating_add(1),
@@ -227,7 +240,9 @@ impl UploadRetry {
     let base = millis(settings.retry_after);
     let ceiling = millis(settings.retry_max).max(base);
     let doublings = attempts.saturating_sub(1).min(32);
-    let wait = base.saturating_mul(1_i64 << doublings).min(ceiling);
+    let backoff = base.saturating_mul(1_i64 << doublings).min(ceiling);
+    let server_wait = maybe_server_wait.map_or(0, |wait| millis(wait).min(ceiling));
+    let wait = backoff.max(server_wait);
     *self = Self::Waiting {
       attempts,
       retry_at_ms: now_ms.saturating_add(wait),
@@ -755,6 +770,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       match self.api.complete_attachment(slot.attachment_id).await {
         Ok(_) => {},
         Err(probe) if is_unreachable(&probe) => return Err(UploadError::Offline(CoreError::Api(error))),
+        // The server says its storage is down and when to come back: its answer decides the wait
+        // (#749), and the slot stays for that retry.
+        Err(probe) if probe.retry_after().is_some() => return Err(slot_failure(file, probe)),
         Err(_) => return Err(slot_failure(file, error)),
       }
     } else if let Err(error) = self.api.complete_attachment(slot.attachment_id).await {
@@ -784,9 +802,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         // An expired access token is the app's to renew; it isn't the file's failure.
         if !error.is_sign_in_required() {
           let now = self.now_ms();
-          upload.files[index]
-            .retry
-            .record_failure(now, &self.settings.upload_retry, RetryCause::of(&error));
+          let maybe_server_wait = match &error {
+            CoreError::Api(api) => api.retry_after(),
+            _ => None,
+          };
+          upload.files[index].retry.record_failure_after(
+            now,
+            &self.settings.upload_retry,
+            RetryCause::of(&error),
+            maybe_server_wait,
+          );
         }
         save_pending_upload(&self.store, upload)?;
         Err(error)
@@ -1636,6 +1661,28 @@ mod tests {
     }
 
     #[test]
+    fn the_servers_retry_after_is_honoured_but_capped() {
+      let settings = UploadRetrySettings::default();
+      let wait_after = |maybe_server_wait: Option<u64>| {
+        let mut retry = UploadRetry::default();
+        retry.record_failure_after(
+          0,
+          &settings,
+          RetryCause::StorageUnavailable,
+          maybe_server_wait.map(std::time::Duration::from_secs),
+        );
+        match retry {
+          UploadRetry::Waiting { retry_at_ms, .. } => retry_at_ms,
+          other => panic!("still retrying: {other:?}"),
+        }
+      };
+      assert_eq!(wait_after(None), 2_000, "the backoff alone");
+      assert_eq!(wait_after(Some(30)), 30_000, "the server asked for 30 s");
+      assert_eq!(wait_after(Some(1)), 2_000, "never sooner than the backoff");
+      assert_eq!(wait_after(Some(3_600)), 60_000, "never longer than retry_max");
+    }
+
+    #[test]
     fn the_last_cause_is_the_one_the_stall_shows() {
       let settings = UploadRetrySettings {
         max_attempts: 2,
@@ -1655,6 +1702,7 @@ mod tests {
       let bare_503 = CoreError::Api(ApiError::Status {
         status: 503,
         maybe_body: None,
+        maybe_retry_after: None,
       });
       assert_eq!(RetryCause::of(&bare_503), RetryCause::StorageUnavailable);
       let conflict = CoreError::Api(ApiError::status(409, ErrorCode::Conflict, "not uploaded"));

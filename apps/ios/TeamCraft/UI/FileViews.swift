@@ -90,15 +90,16 @@ struct FileStateLine: View {
     switch file.transfer.state {
     case "uploading", "downloading":
       VStack(alignment: .leading, spacing: 2) {
-        if let progress = file.transfer.maybeProgress {
+        if file.transfer.isRetrying {
+          // Retried by itself, as on desktop and web (#742): quiet; the words are for VoiceOver.
+          ProgressView().accessibilityLabel(Text("file_upload_retrying"))
+        } else if let progress = file.transfer.maybeProgress {
           ProgressView(value: progress)
         } else {
           ProgressView()
         }
         if file.transfer.state == "uploading" {
-          if (file.transfer.doneBytes ?? 0) == 0 && (file.transfer.failedAttempts ?? 0) > 0 {
-            Text("file_upload_retrying").font(.caption2).foregroundStyle(Theme.textMuted)
-          } else {
+          if !file.transfer.isRetrying {
             Text(TransferText.progress(file.transfer)).font(.caption2).foregroundStyle(Theme.textMuted)
               .accessibilityLabel(Text("file_uploading"))
           }
@@ -109,7 +110,11 @@ struct FileStateLine: View {
     case "failed", "upload_failed":
       Text("file_failed").font(.caption2).foregroundStyle(Theme.danger)
     case "upload_stalled":
-      Text("file_upload_stalled").font(.caption2).foregroundStyle(Theme.danger)
+      if file.transfer.isStorageUnavailable {
+        Text("file_upload_storage_unavailable").font(.caption2).foregroundStyle(Theme.danger)
+      } else {
+        Text("file_upload_stalled").font(.caption2).foregroundStyle(Theme.danger)
+      }
     case "remote":
       Text("file_tap_to_download").font(.caption2).foregroundStyle(Theme.textMuted)
     default:

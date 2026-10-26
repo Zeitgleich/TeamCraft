@@ -3193,6 +3193,22 @@
         }
       }
     },
+    "file_upload_storage_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The file storage is unavailable right now. Try again in a moment."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Dateispeicher ist gerade nicht erreichbar. Versuche es gleich noch einmal."
+          }
+        }
+      }
+    },
     "file_uploading": {
       "localizations": {
         "en": {

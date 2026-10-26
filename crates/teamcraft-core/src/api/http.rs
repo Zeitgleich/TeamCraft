@@ -1762,10 +1762,16 @@ async fn send(request: RequestBuilder) -> Result<Response, ApiError> {
   if status.is_success() {
     return Ok(response);
   }
+  let maybe_retry_after = response
+    .headers()
+    .get(reqwest::header::RETRY_AFTER)
+    .and_then(|value| value.to_str().ok())
+    .and_then(super::parse_retry_after);
   let maybe_body = response.json::<ErrorBody>().await.ok();
   Err(ApiError::Status {
     status: status.as_u16(),
     maybe_body,
+    maybe_retry_after,
   })
 }
 
@@ -2078,6 +2084,22 @@ mod tests {
       let error = api.me().await.unwrap_err();
       assert!(matches!(error, ApiError::Status { status: 502, .. }), "{error}");
       assert!(error.is_transient());
+      assert_eq!(error.retry_after(), None, "no Retry-After, no wait asked for");
+    }
+
+    #[tokio::test]
+    async fn a_storage_outage_says_when_to_come_back() {
+      let base = canned_server(
+        "503 Service Unavailable\r\nretry-after: 30",
+        "application/json",
+        r#"{"error_code":"unavailable","message":"storage"}"#,
+      )
+      .await;
+      let api = HttpServerApi::new(base, StaticToken("t".into()));
+      let error = api.me().await.unwrap_err();
+      assert!(matches!(error, ApiError::Status { status: 503, .. }), "{error}");
+      assert_eq!(error.retry_after(), Some(Duration::from_secs(30)));
+      assert_eq!(error.error_code(), Some(&teamcraft_proto::ErrorCode::Unavailable));
     }
 
     #[tokio::test]

@@ -88,4 +88,15 @@ class WireTest {
     )
     assertEquals(null, decoded.maybeThumbnail)
   }
+
+  @Test
+  fun uploadRetriesAndStallsSayWhy() {
+    fun transfer(json: String) = WireJson.decodeFromString(FileTransfer.serializer(), json)
+    assertTrue(transfer("""{"state":"uploading","done_bytes":0,"total_bytes":9,"failed_attempts":2}""").isRetrying)
+    assertFalse(transfer("""{"state":"uploading","done_bytes":3,"total_bytes":9}""").isRetrying)
+    val down = transfer("""{"state":"upload_stalled","reason":"storage_unavailable"}""")
+    assertTrue(down.isStorageUnavailable)
+    assertTrue(down.isCancellable)
+    assertFalse(transfer("""{"state":"upload_stalled","reason":"network"}""").isStorageUnavailable)
+  }
 }

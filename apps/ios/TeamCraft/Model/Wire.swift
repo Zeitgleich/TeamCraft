@@ -29,6 +29,12 @@ struct FileTransfer: Decodable, Equatable, Sendable {
   /// An own file still on its way up, or stopped: it can be cancelled.
   var isCancellable: Bool { state == "uploading" || state == "upload_stalled" }
 
+  /// An upload whose attempts failed so far and that the core retries by itself (#742).
+  var isRetrying: Bool { state == "uploading" && (doneBytes ?? 0) == 0 && (failedAttempts ?? 0) > 0 }
+
+  /// It stopped because the file storage (or the server) is down, not this device's network.
+  var isStorageUnavailable: Bool { reason == "storage_unavailable" }
+
   /// 0...1 while uploading or downloading.
   var maybeProgress: Double? {
     guard isInProgress, let total = totalBytes, total > 0 else { return nil }
