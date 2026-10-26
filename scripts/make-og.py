@@ -4,6 +4,12 @@
 Composes the brand mark (assets/brand/mark.svg) on a dark navy backdrop with
 the wordmark and tagline, matching the package-site design system. Output is
 written to scripts/site/og-image.png (the path the og:image meta tag uses).
+
+Why a script instead of a hand-drawn static asset: the card is generated from
+the same brand mark SVG and brand tokens the rest of the site uses, so it stays
+pixel-consistent with the design system and can be regenerated in one command
+if the mark or palette ever changes. The rendered PNG is committed so the site
+never needs the toolchain at build time.
 """
 import io
 import pathlib
@@ -11,9 +17,9 @@ import pathlib
 import cairosvg
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 MARK = ROOT / "assets/brand/mark.svg"
-OUT = pathlib.Path(__file__).resolve().parent / "og-image.png"
+OUT = pathlib.Path(__file__).resolve().parent / "site" / "og-image.png"
 
 W, H = 1200, 630
 NAVY = (11, 15, 22)          # #0b0f16
@@ -26,6 +32,8 @@ MUTED = (135, 147, 168)      # #8793a8
 FONT_DIR = pathlib.Path("/home/paperclip/.local/lib/node_modules/sourcey/dist/og/fonts")
 FONT_BOLD = FONT_DIR / "Inter-Bold.ttf"
 FONT_REG = FONT_DIR / "Inter-Regular.ttf"
+
+URL = "zeitgleich.github.io/TeamCraft"
 
 
 def render_mark(size: int) -> Image.Image:
@@ -74,12 +82,29 @@ def main() -> None:
     # Tagline with a blue accent on "can't read".
     d.text((tx, ty + 120), "Team chat your server", font=f_tag, fill=MUTED)
     d.text((tx, ty + 170), "can't read.", font=f_tag, fill=LIGHT_BLUE)
-    # URL pill.
-    d.rounded_rectangle([tx, ty + 250, tx + 300, ty + 300], radius=25, fill=BLUE)
-    d.text((tx + 24, ty + 262), "zeitgleich.github.io/TeamCraft", font=f_url, fill=WHITE)
+
+    # URL pill sized to the text so it never overflows.
+    url_w = f_url.getlength(URL)
+    pad_x = 28
+    pad_y = 18
+    pill_w = int(url_w) + pad_x * 2
+    pill_h = 60
+    pill_x = tx
+    pill_y = ty + 250
+    d.rounded_rectangle(
+        [pill_x, pill_y, pill_x + pill_w, pill_y + pill_h],
+        radius=pill_h // 2,
+        fill=BLUE,
+    )
+    d.text(
+        (pill_x + pad_x, pill_y + (pill_h - 30) // 2),
+        URL,
+        font=f_url,
+        fill=WHITE,
+    )
 
     bg.save(OUT, "PNG")
-    print(f"wrote {OUT} ({bg.size})")
+    print(f"wrote {OUT} ({bg.size}) pill_w={pill_w} url_w={url_w:.0f}")
 
 
 if __name__ == "__main__":
