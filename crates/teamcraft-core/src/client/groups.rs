@@ -248,7 +248,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if self.has_group(id)? && maybe_setup.is_none() {
       return Ok(id);
     }
-    // Opened by the user: tried now, whatever the backoff of an earlier attempt says.
+    self.start_participants_setup(id, others).await?;
+    Ok(id)
+  }
+
+  /// Notes (or renews) the setup record of a DM, group DM or meeting chat with `others` and takes
+  /// the first step of [`Self::finish_dm_setup`]: founds the group when nobody has one, joins
+  /// one somebody else founded, and adds whoever of `others` is missing.
+  pub(super) async fn start_participants_setup(
+    &mut self,
+    id: ConversationId,
+    others: &[UserId],
+  ) -> Result<bool, CoreError> {
+    let maybe_setup = self.dm_setup(id)?;
+    // Asked for by the user: tried now, whatever the backoff of an earlier attempt says.
     let setup = DmSetupRecord {
       others: others.to_vec(),
       tried_at_ms: self.now_ms(),
@@ -261,8 +274,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_welcome_deadline_ms: None,
     };
     records::put_json(&self.store, Table::SyncState, &dm_setup_key(id), &setup)?;
-    self.finish_dm_setup(id, others).await?;
-    Ok(id)
+    self.finish_dm_setup(id, others).await
   }
 
   /// Finishes the MLS setup of DMs this device created whose setup was cut short, at a growing

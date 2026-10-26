@@ -63,10 +63,13 @@ pub enum CallFailure {
   /// The organization requires a background behind the camera image, which this device can't
   /// apply.
   BackgroundRequired,
+  /// This device isn't in the conversation's encryption group yet (the welcome hasn't come, or
+  /// another device has to let it in), so it can't check who is in the call.
+  EncryptionPending,
 }
 
 impl CallFailure {
-  const ALL: [Self; 10] = [
+  const ALL: [Self; 11] = [
     Self::MicrophoneDenied,
     Self::MicrophoneMissing,
     Self::MicrophoneInUse,
@@ -77,6 +80,7 @@ impl CallFailure {
     Self::Unsupported,
     Self::ServerUnreachable,
     Self::BackgroundRequired,
+    Self::EncryptionPending,
   ];
 
   /// Stable name on the wire, after [`CALL_PREFIX`].
@@ -92,6 +96,7 @@ impl CallFailure {
       Self::Unsupported => "unsupported",
       Self::ServerUnreachable => "server_unreachable",
       Self::BackgroundRequired => "background_required",
+      Self::EncryptionPending => "encryption_pending",
     }
   }
 

@@ -109,6 +109,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       CallFailure::Unsupported => "error-call-unsupported",
       CallFailure::ServerUnreachable => "error-call-server-unreachable",
       CallFailure::BackgroundRequired => "error-call-background-required",
+      CallFailure::EncryptionPending => "error-call-encryption-pending",
     },
     FailureKind::Server(code) => match code {
       ErrorCode::NotSpaceMember => "error-not-space-member",

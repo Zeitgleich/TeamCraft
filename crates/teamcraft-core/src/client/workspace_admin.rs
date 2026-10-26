@@ -191,10 +191,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         }
         continue;
       }
-      let is_direct = matches!(response.kind, ConversationKind::Dm | ConversationKind::Group);
+      let is_direct = matches!(
+        response.kind,
+        ConversationKind::Dm | ConversationKind::Group | ConversationKind::Meeting
+      );
       if is_direct {
-        // A further device joins the user's DMs and group DMs on its own too (#179); a DM this
-        // device opened is finished by its setup (`repair_dm_setups`), and nobody self-adds.
+        // A further device joins the user's DMs, group DMs and meeting chats on its own too
+        // (#179); one this device set up is finished by its setup (`repair_dm_setups`), and
+        // nobody self-adds.
         if response.maybe_my_membership.is_none()
           || response.is_archived
           || self.has_group(response.id)?

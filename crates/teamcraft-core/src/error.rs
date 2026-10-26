@@ -101,6 +101,11 @@ pub enum CoreError {
   UnknownIdentity(UserId),
   #[error("conversation {0} has no MLS group on this device")]
   NoGroup(ConversationId),
+  /// A call needs this device in the conversation's MLS group (e2ee.md §8), and it isn't yet:
+  /// the welcome hasn't come, or another device of the user or a member has to let it in. The
+  /// message starts with a stable code the UI localizes (`CallFailure::EncryptionPending`).
+  #[error("call_encryption_pending: this device is not in the encryption group of conversation {0} yet")]
+  CallEncryptionPending(ConversationId),
   #[error("conversation {0} has no content key on this device yet")]
   NoContentKey(ConversationId),
   #[error("gave up after {attempts} attempts: {reason}")]
