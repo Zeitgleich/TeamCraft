@@ -200,6 +200,18 @@ thread-follow = Follow
 thread-following = Following
 thread-messages-label = Thread messages
 thread-replies-divider = Replies
+thread-last-reply = last reply { $time }
+files-count = { $count ->
+    [one] { $count } file
+   *[other] { $count } files
+  }
+files-download-all = Download all
+date-jump-label = Jump to a day
+date-jump-open = { $date }, jump to a day
+date-jump-today = Today
+date-jump-yesterday = Yesterday
+date-jump-last-week = A week ago
+date-jump-pick = Pick a day
 threads-title = Threads
 threads-filter = Filter threads
 threads-all = All your threads

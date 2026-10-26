@@ -1971,6 +1971,34 @@ select.input {
   font-weight: var(--weight-semibold);
 }
 
+/* A day label that opens the jump menu (issue #300). */
+.date-pill {
+  padding: 3px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  transition: background var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .date-pill:hover {
+    border-color: var(--text-muted);
+    background: var(--surface-2);
+  }
+}
+
+.date-pill:active {
+  background: var(--surface-2);
+}
+
+.date-pill:focus-visible {
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: 2px;
+}
+
 .date-divider::before,
 .date-divider::after {
   content: "";
@@ -7991,16 +8019,90 @@ ol.md-list {
   left: 50%;
   z-index: 5;
   transform: translateX(-50%);
-  padding: 3px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  background: var(--surface);
   color: var(--text-muted);
   font-size: var(--text-xs);
   letter-spacing: var(--tracking-xs);
   font-weight: var(--weight-semibold);
-  box-shadow: 0 1px 4px rgba(16, 24, 40, 0.12);
+  transition: opacity var(--dur-base) var(--ease-standard);
   pointer-events: none;
+}
+
+/* A translucent material over the text scrolling underneath; fades out once the feed rests. */
+.floating-day .date-pill {
+  background: color-mix(in srgb, var(--surface) 85%, transparent);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 1px 4px rgba(16, 24, 40, 0.12);
+  pointer-events: auto;
+}
+
+.floating-day.is-idle {
+  opacity: 0;
+}
+
+.floating-day.is-idle .date-pill {
+  pointer-events: none;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .floating-day .date-pill {
+    background: var(--surface);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+.popover.date-jump-menu {
+  position: fixed;
+  right: auto;
+  left: var(--date-jump-x, 0);
+  top: var(--date-jump-y, 0);
+  width: 14.5rem;
+  --popover-origin: top left;
+}
+
+.date-jump-pick {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) 14px 6px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+/* Thread summary: who replied, how many, when. */
+.reply-avatars {
+  display: inline-flex;
+}
+
+.reply-avatars .avatar-sm:first-child {
+  margin-left: 0;
+}
+
+.reply-last {
+  color: var(--text-muted);
+  font-weight: var(--weight-regular);
+}
+
+/* Several attachments: their count and one button to save them all. */
+.files-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+}
+
+.files-bar .link-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.files-bar .icon {
+  width: 14px;
+  height: 14px;
 }
 
 /* A message still in the outbox. */
