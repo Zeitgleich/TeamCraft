@@ -70,6 +70,7 @@ async fn camera_reaches_the_viewer(start: Start) {
         layers: simulcast_layers(HD, 30, 1_500_000, 3),
         encoders: software_encoders(),
         maybe_filter: None,
+        maybe_idle_refresh: None,
       };
       presenter.start_video(config).await.unwrap();
       has_started = true;

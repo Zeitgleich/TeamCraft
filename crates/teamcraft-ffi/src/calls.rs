@@ -674,6 +674,7 @@ async fn start_camera(
     ),
     encoders: preferred_encoders(),
     maybe_filter: None,
+    maybe_idle_refresh: None,
   };
   call
     .start_video(config)

@@ -109,6 +109,7 @@ fn test_pattern_camera() -> VideoSendConfig {
     layers: simulcast_layers(format.resolution, format.framerate, 1_500_000, 3),
     encoders: software_encoders(),
     maybe_filter: None,
+    maybe_idle_refresh: None,
   }
 }
 

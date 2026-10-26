@@ -98,6 +98,12 @@ pub enum CallClientMessage {
     stream_id: MediaStreamId,
     maybe_max_layer: Option<u8>,
   },
+  /// A subscribed track can't be decoded until its next keyframe (a lost fragment, a frame that
+  /// didn't decrypt, a decoder that failed): the SFU asks the publisher for one on the layer this
+  /// device receives. Rate-limited on both sides; older SFUs ignore it.
+  RequestKeyframe {
+    stream_id: MediaStreamId,
+  },
   /// This device muted or unmuted its microphone; the SFU tells the others
   /// ([`CallEvent::ParticipantMuted`]). Sent again after every (re)join. Metadata only: it changes
   /// nothing about what the SFU forwards.
@@ -340,6 +346,10 @@ impl fmt::Debug for CallClientMessage {
         .field("stream_id", stream_id)
         .field("maybe_max_layer", maybe_max_layer)
         .finish(),
+      Self::RequestKeyframe { stream_id } => f
+        .debug_struct("RequestKeyframe")
+        .field("stream_id", stream_id)
+        .finish(),
       Self::MoveHere => f.write_str("MoveHere"),
       Self::SetMuted { is_muted } => f.debug_struct("SetMuted").field("is_muted", is_muted).finish(),
       Self::Unknown => f.write_str("Unknown"),
@@ -517,6 +527,16 @@ mod tests {
       r#"{"type":"participant_muted","device_id":"7","is_muted":false}"#
     );
     assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), event);
+  }
+
+  #[test]
+  fn keyframe_request_wire_format() {
+    let request = CallClientMessage::RequestKeyframe {
+      stream_id: MediaStreamId(12),
+    };
+    let json = serde_json::to_string(&request).unwrap();
+    assert_eq!(json, r#"{"type":"request_keyframe","stream_id":12}"#);
+    assert_eq!(serde_json::from_str::<CallClientMessage>(&json).unwrap(), request);
   }
 
   #[test]

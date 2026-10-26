@@ -135,6 +135,8 @@ enum Control {
     stream_id: MediaStreamId,
     maybe_max_layer: Option<u8>,
   },
+  /// The webview's decoder of a watched track failed.
+  RequestKeyframe(MediaStreamId),
   Leave,
 }
 
@@ -382,6 +384,11 @@ impl CallHost {
     self.self_view.unwatch(channel);
   }
 
+  /// Asks for a keyframe of a watched track whose decoder in the webview failed.
+  pub async fn request_keyframe(&self, stream_id: MediaStreamId) {
+    self.control(Control::RequestKeyframe(stream_id)).await;
+  }
+
   /// Stops receiving a track, if `channel` is the one it is sent through.
   pub async fn unwatch_video(&self, stream_id: MediaStreamId, channel: ChannelId) {
     let is_removed = {
@@ -513,6 +520,7 @@ impl CallHost {
       capture,
       encoders: preferred_encoders(),
       maybe_filter: Some(self.self_view.filter(maybe_filter)),
+      maybe_idle_refresh: None,
     };
     // Answers once the capture runs; the media task turns the camera on in the call state, and
     // off again (with an error for the user) if no picture comes.
@@ -600,6 +608,7 @@ impl CallHost {
       capture,
       encoders: preferred_encoders(),
       maybe_filter: None,
+      maybe_idle_refresh: VideoSendConfig::default_idle_refresh(&VideoTrackKind::Screen),
     };
     self.start_video(config).await?;
     if maybe_new_token.is_some() {
@@ -617,7 +626,12 @@ impl CallHost {
     } else {
       ScreenShareSound::Off
     };
-    self.update_active(|active| active.screen_sound = screen_sound);
+    // A share that ended meanwhile keeps its sound shown as off.
+    self.update_active(|active| {
+      if active.is_sharing_screen {
+        active.screen_sound = screen_sound;
+      }
+    });
     Ok(())
   }
 
@@ -807,11 +821,19 @@ async fn run_media(
           call.stop_video(kind);
         },
         Some(Control::StartScreenAudio(capture, done)) => {
-          let result = call.start_screen_audio(capture).await.map_err(|error| error.to_string());
+          // The share may have ended between its start and this (no picture came): its sound
+          // must not go out on its own.
+          let result = if video_starts.is_running(&VideoTrackKind::Screen) {
+            call.start_screen_audio(capture).await.map_err(|error| error.to_string())
+          } else {
+            tracing::info!("screen share ended before its sound started; the sound stays off");
+            Err("no screen is shared".to_owned())
+          };
           let _ = done.send(result);
         },
         Some(Control::StopScreenAudio) => call.stop_screen_audio(),
         Some(Control::Subscribe { stream_id, maybe_max_layer }) => call.subscribe_video(stream_id, maybe_max_layer),
+        Some(Control::RequestKeyframe(stream_id)) => call.request_keyframe(stream_id),
         Some(Control::StatusSounds(sounds)) => call.set_status_cues(status_cues(sounds)),
         Some(Control::NetworkChanged) => call.network_changed(),
         Some(Control::Leave) | None => break,
@@ -907,6 +929,11 @@ impl VideoStarts {
 
   fn is_current(&self, start: &VideoStart) -> bool {
     self.current.get(&start.kind) == Some(&start.number)
+  }
+
+  /// Whether a track of `kind` was started and is neither stopped nor failed.
+  fn is_running(&self, kind: &VideoTrackKind) -> bool {
+    self.current.contains_key(kind)
   }
 }
 
@@ -1085,6 +1112,8 @@ mod tests {
       starts.stopped(&VideoTrackKind::Camera);
       assert!(!starts.is_current(&second));
       assert!(starts.is_current(&screen));
+      assert!(!starts.is_running(&VideoTrackKind::Camera));
+      assert!(starts.is_running(&VideoTrackKind::Screen));
     }
   }
 
@@ -1165,6 +1194,31 @@ mod tests {
       tokio::time::timeout(PROMPT, media.task).await.unwrap().unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_failed_screen_share_does_not_send_its_sound_alone() {
+      let mut media = start_media().await;
+      let answer = start_video(&media, VideoTrackKind::Screen, Box::new(EndingCapture));
+      assert_eq!(
+        tokio::time::timeout(PROMPT, answer).await.unwrap().unwrap(),
+        Ok(())
+      );
+      // The share fails before its sound is asked for (the UI asks right after the answer).
+      tokio::time::timeout(PROMPT, media.reported.recv())
+        .await
+        .unwrap()
+        .unwrap();
+      let (done, sound) = oneshot::channel();
+      let capture = Box::new(teamcraft_media::system_audio::ManualSystemAudio::default());
+      media
+        .controls
+        .send(Control::StartScreenAudio(capture, done))
+        .unwrap();
+      let result = tokio::time::timeout(PROMPT, sound).await.unwrap().unwrap();
+      assert!(result.is_err(), "the computer's sound went out without a share");
+      media.controls.send(Control::Leave).unwrap();
+      tokio::time::timeout(PROMPT, media.task).await.unwrap().unwrap();
+    }
+
     /// A running media task and what it shares.
     struct Media {
       controls: mpsc::UnboundedSender<Control>,
@@ -1238,6 +1292,7 @@ mod tests {
       capture: Box<dyn VideoCapture>,
     ) -> oneshot::Receiver<Result<(), String>> {
       let config = VideoSendConfig {
+        maybe_idle_refresh: VideoSendConfig::default_idle_refresh(&kind),
         kind,
         capture,
         layers: simulcast_layers(FORMAT.resolution, 30, 300_000, 1),

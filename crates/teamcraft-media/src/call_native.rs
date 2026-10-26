@@ -59,7 +59,8 @@ use crate::system_audio::{SystemAudioCapture, SystemAudioError, SystemAudioRecei
 use crate::video::EncodedVideoFrame;
 use crate::video_capture::CaptureError;
 use crate::video_pipeline::{
-  FirstPicture, FrameSink, RepeatedWarning, VideoReceiver, VideoSendConfig, VideoSender, VideoStartError,
+  FirstPicture, FrameSink, KeyframeNeeded, RepeatedWarning, VideoReceiver, VideoSendConfig, VideoSender,
+  VideoStartError,
 };
 
 /// Audio frame period.
@@ -218,6 +219,8 @@ enum VideoCommand {
     sink: FrameSink,
   },
   Unwatch(MediaStreamId),
+  /// A received track's decoder failed: ask for a keyframe (rate-limited by the engine).
+  RequestKeyframe(MediaStreamId),
 }
 
 /// The driver's video: own tracks being captured and received tracks being decoded.
@@ -226,6 +229,9 @@ struct VideoState {
   /// Own tracks; the stream id arrives with `VideoPublished`.
   senders: Vec<(VideoSender, Option<MediaStreamId>)>,
   receivers: HashMap<MediaStreamId, VideoReceiver>,
+  /// The call task's own command queue, for the decoder threads' keyframe requests. Weak: it
+  /// must not keep the call running once the app dropped its handle.
+  maybe_commands: Option<mpsc::WeakUnboundedSender<Command>>,
   /// What others' tracks show, for counting what arrives per kind.
   remote_kinds: HashMap<MediaStreamId, VideoTrackKind>,
   counts: VideoCounts,
@@ -312,7 +318,12 @@ impl NativeCall {
     let link = Link::open(&config.sfu_url, &hashes, &config.resilience).await?;
     let (commands, command_rx) = mpsc::unbounded_channel();
     let (event_tx, events) = mpsc::unbounded_channel();
-    let task = tokio::spawn(run_call(config, link, command_rx, event_tx));
+    let task = tokio::spawn(run_call(
+      config,
+      link,
+      (commands.downgrade(), command_rx),
+      event_tx,
+    ));
     Ok(Self {
       commands,
       events,
@@ -387,6 +398,13 @@ impl NativeCall {
 
   pub fn unwatch_video(&self, stream_id: MediaStreamId) {
     self.video(VideoCommand::Unwatch(stream_id));
+  }
+
+  /// The app's own decoder of a subscribed track failed: its deltas are dropped until the next
+  /// keyframe, which is asked for (at most once a second). Tracks decoded with
+  /// [`NativeCall::watch_video`] do this by themselves.
+  pub fn request_keyframe(&self, stream_id: MediaStreamId) {
+    self.video(VideoCommand::RequestKeyframe(stream_id));
   }
 
   /// Sends one encoded frame of an own track.
@@ -483,7 +501,10 @@ fn with_trusted_roots(
 async fn run_call(
   config: NativeCallConfig,
   link: Link,
-  mut commands: mpsc::UnboundedReceiver<Command>,
+  (own_commands, mut commands): (
+    mpsc::WeakUnboundedSender<Command>,
+    mpsc::UnboundedReceiver<Command>,
+  ),
   events: mpsc::UnboundedSender<CallEngineEvent>,
 ) -> Result<CallStats, NativeCallError> {
   let start = Instant::now();
@@ -516,7 +537,10 @@ async fn run_call(
     events,
     mixer,
     stats: CallStats::default(),
-    video: VideoState::default(),
+    video: VideoState {
+      maybe_commands: Some(own_commands),
+      ..VideoState::default()
+    },
     cues: CuePlayer::new(config.status_cues),
   };
   let mut connection = CallConnection::new(&config, link, start);
@@ -1159,7 +1183,7 @@ fn handle_video(
       stream_id,
       maybe_max_layer,
       sink,
-    } => match VideoReceiver::start(sink) {
+    } => match VideoReceiver::start(sink, video.keyframe_requester(stream_id)) {
       Ok(receiver) => {
         video.receivers.insert(stream_id, receiver);
         engine.subscribe_video(stream_id, maybe_max_layer.or(Some(u8::MAX)));
@@ -1171,6 +1195,7 @@ fn handle_video(
         engine.subscribe_video(stream_id, None);
       }
     },
+    VideoCommand::RequestKeyframe(stream_id) => engine.request_keyframe(stream_id, Instant::now()),
     VideoCommand::Publish { kind, codec, layers } => engine.publish_video(kind, codec, layers),
     VideoCommand::Unpublish(stream_id) => engine.unpublish_video(stream_id),
     VideoCommand::Subscribe {
@@ -1325,6 +1350,21 @@ impl Sinks {
 }
 
 impl VideoState {
+  /// What a decoder thread of `stream_id` calls when it needs a keyframe: a command to the call
+  /// task (nothing once the call ended).
+  fn keyframe_requester(&self, stream_id: MediaStreamId) -> KeyframeNeeded {
+    let maybe_commands = self.maybe_commands.clone();
+    Box::new(move || {
+      if let Some(commands) = maybe_commands
+        .as_ref()
+        .and_then(mpsc::WeakUnboundedSender::upgrade)
+      {
+        // A closed queue means the call ended meanwhile.
+        let _ = commands.send(Command::Video(VideoCommand::RequestKeyframe(stream_id)));
+      }
+    })
+  }
+
   /// Hands an own picture to the engine and counts what became of it.
   fn send(
     &mut self,

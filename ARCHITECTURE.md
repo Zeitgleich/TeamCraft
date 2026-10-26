@@ -340,6 +340,13 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
 - Forwards encrypted frames, never decodes.
 - **Audio:** forward the 3–5 loudest speakers based on the audio-level header extension; in large calls nobody receives dozens of audio streams.
 - **Video:** simulcast (3 layers) from each sender; the SFU picks the layer per receiver from its bandwidth estimate and viewport size ("last-N" for gallery view).
+- **Keyframes:** the SFU asks the publisher for one when a receiver switches layers, (re)subscribes,
+  or sends `request_keyframe` because it can't decode until the next one (a lost fragment, a frame
+  that didn't decrypt, a failed decoder). Requests are rate-limited per receiver and track (1 s) and
+  per track and layer (500 ms, `KeyframeRequestConfig`). A sender whose capture delivers nothing
+  (a still screen) answers a keyframe request with its last picture after 150 ms, and screen
+  shares send their last picture again about once a second while the screen doesn't change
+  (`VideoSendConfig::maybe_idle_refresh`).
 - **Screen share:** separate session/stream, so a heavy share cannot degrade the call.
 - **Screen share quality** (`teamcraft_media::video::screen_layers`): two content modes, chosen per
   share (remembered): *detail* (default) keeps text sharp, up to 1440p at 30 fps; *motion* keeps

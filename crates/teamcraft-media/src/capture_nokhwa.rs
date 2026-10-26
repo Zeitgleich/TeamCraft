@@ -6,9 +6,6 @@
 //! cross-checked with `cargo xwin` (Windows), never run on a Mac or a Windows machine. The macOS
 //! app's Info.plist needs `NSCameraUsageDescription`, or macOS denies access silently.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::JoinHandle;
 use std::time::Instant;
 
 use nokhwa::Camera;
@@ -18,9 +15,10 @@ use nokhwa::utils::{
 };
 use tracing::{info, warn};
 
-use crate::capture_negotiate::{OfferedMode, choose_mode};
-
+use crate::camera_thread::{CameraReader, CameraThread};
 use crate::capture_convert::{PixelFormat, RawPicture};
+use crate::capture_negotiate::{OfferedMode, choose_mode};
+use crate::video::VideoFrame;
 use crate::video_capture::{CameraInfo, CaptureError, CaptureFormat, FrameSender, VideoCapture};
 
 /// Frame formats `RawPicture::to_i420` converts.
@@ -30,8 +28,12 @@ const SUPPORTED_FORMATS: &[FrameFormat] = &[FrameFormat::NV12, FrameFormat::YUYV
 pub struct NokhwaCamera {
   index: CameraIndex,
   format: CaptureFormat,
-  maybe_running: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
+  maybe_running: Option<CameraThread>,
 }
+
+/// An open nokhwa camera, read on its camera thread. nokhwa's read blocks until a frame comes, for
+/// good when none does: [`CameraThread`] stops it with a bounded wait.
+struct NokhwaReader(Camera);
 
 /// Cameras the system reports.
 pub fn list_cameras() -> Vec<CameraInfo> {
@@ -71,77 +73,17 @@ impl VideoCapture for NokhwaCamera {
 
   fn start(&mut self, frames: FrameSender) -> Result<(), CaptureError> {
     self.stop();
-    let stop = Arc::new(AtomicBool::new(false));
-    let thread_stop = Arc::clone(&stop);
     let index = self.index.clone();
     let wanted = self.format;
-    // nokhwa's camera isn't `Send` on every platform: open it on the capture thread.
-    let (opened, opened_rx) = std::sync::mpsc::channel();
-    let thread = std::thread::Builder::new()
-      .name("camera".into())
-      .spawn(move || {
-        let mut camera = match open_negotiated(index, wanted) {
-          Ok(camera) => {
-            let _ = opened.send(Ok(()));
-            camera
-          },
-          Err(error) => {
-            let _ = opened.send(Err(error));
-            return;
-          },
-        };
-        let start = Instant::now();
-        while !thread_stop.load(Ordering::Relaxed) {
-          let buffer = match camera.frame() {
-            Ok(buffer) => buffer,
-            Err(error) => {
-              warn!(%error, "camera stopped");
-              break;
-            },
-          };
-          let Some(pixel_format) = pixel_format_of(buffer.source_frame_format()) else {
-            warn!(format = ?buffer.source_frame_format(), "unsupported camera format");
-            break;
-          };
-          let resolution = buffer.resolution();
-          let picture = RawPicture {
-            format: pixel_format,
-            width: resolution.width(),
-            height: resolution.height(),
-            stride: 0,
-            data: buffer.buffer(),
-          };
-          let timestamp_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
-          match picture.to_i420(timestamp_us) {
-            Ok(frame) => {
-              if !frames.send(frame) {
-                break;
-              }
-            },
-            Err(error) => warn!(%error, "camera frame dropped"),
-          }
-        }
-        if let Err(error) = camera.stop_stream() {
-          warn!(%error, "camera not stopped cleanly");
-        }
-      })
-      .map_err(|error| CaptureError::Device(error.to_string()))?;
-    let result = opened_rx
-      .recv()
-      .unwrap_or_else(|_| Err(CaptureError::Device("camera thread ended".into())));
-    self.maybe_running = Some((stop, thread));
-    if result.is_err() {
-      self.stop();
-    }
-    result
+    // nokhwa's camera isn't `Send` on every platform: it is opened on the camera thread.
+    let open = move || open_negotiated(index, wanted).map(NokhwaReader);
+    self.maybe_running = Some(CameraThread::start("camera", open, frames)?);
+    Ok(())
   }
 
   fn stop(&mut self) {
-    if let Some((stop, thread)) = self.maybe_running.take() {
-      stop.store(true, Ordering::Relaxed);
-      if thread.join().is_err() {
-        warn!("camera thread panicked");
-      }
+    if let Some(running) = self.maybe_running.take() {
+      running.stop();
     }
   }
 }
@@ -149,6 +91,39 @@ impl VideoCapture for NokhwaCamera {
 impl Drop for NokhwaCamera {
   fn drop(&mut self) {
     self.stop();
+  }
+}
+
+impl CameraReader for NokhwaReader {
+  fn read(&mut self, start: Instant) -> Result<Option<VideoFrame>, CaptureError> {
+    let buffer = self
+      .0
+      .frame()
+      .map_err(|error| CaptureError::Device(error.to_string()))?;
+    let pixel_format = pixel_format_of(buffer.source_frame_format())
+      .ok_or_else(|| CaptureError::UnsupportedFormat(format!("{:?}", buffer.source_frame_format())))?;
+    let resolution = buffer.resolution();
+    let picture = RawPicture {
+      format: pixel_format,
+      width: resolution.width(),
+      height: resolution.height(),
+      stride: 0,
+      data: buffer.buffer(),
+    };
+    let timestamp_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+    match picture.to_i420(timestamp_us) {
+      Ok(frame) => Ok(Some(frame)),
+      Err(error) => {
+        warn!(%error, "camera frame dropped");
+        Ok(None)
+      },
+    }
+  }
+
+  fn close(&mut self) {
+    if let Err(error) = self.0.stop_stream() {
+      warn!(%error, "camera not stopped cleanly");
+    }
   }
 }
 
