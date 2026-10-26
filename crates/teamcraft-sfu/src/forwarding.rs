@@ -599,6 +599,10 @@ impl Forwarder {
   ) -> Result<Vec<DeviceId>, ForwardError> {
     let fragment = FrameFragment::from_header(rtp_header)?;
     let starts_keyframe = fragment.is_keyframe && fragment.index == 0;
+    if starts_keyframe {
+      // The keyframe asked for is here: a receiver that loses it may ask again at once.
+      self.last_keyframe_requests.remove(&(stream_id, layer));
+    }
     let Some(route) = self.video_tracks.get_mut(&stream_id) else {
       return Ok(Vec::new());
     };
@@ -929,6 +933,21 @@ mod tests {
       let after_interval = later + KeyframeRequestConfig::default().per_receiver_interval;
       assert_eq!(
         forwarder.request_keyframe(device(2), VIDEO, after_interval),
+        vec![keyframe_request(0)]
+      );
+    }
+
+    #[test]
+    fn a_lost_first_keyframe_can_be_asked_for_again_at_once() {
+      let (mut forwarder, now) = video_room();
+      let effects = forwarder.subscribe(device(2), VIDEO, Some(0), now).unwrap();
+      assert!(effects.contains(&keyframe_request(0)));
+      // The keyframe passes the SFU but gets lost on the way to the receiver, which asks again
+      // right away: not merged with the subscription's request, that one was answered.
+      let soon = now + Duration::from_millis(100);
+      assert_eq!(send_frame(&mut forwarder, 0, true, soon), devices(&[2]));
+      assert_eq!(
+        forwarder.request_keyframe(device(2), VIDEO, soon),
         vec![keyframe_request(0)]
       );
     }

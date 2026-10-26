@@ -226,6 +226,7 @@ fn main() -> anyhow::Result<()> {
       calls::commands::call_watch_video,
       calls::commands::call_background_preview,
       calls::commands::call_unwatch_video,
+      calls::commands::call_request_keyframe,
       calls::commands::call_watch_camera,
       calls::commands::call_unwatch_camera,
       external_links::open_external,

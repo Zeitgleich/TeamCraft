@@ -6,7 +6,11 @@
 //! sequence numbers, while frame numbers count across layers so a receiver's reassembly keeps
 //! working when the SFU switches it to another layer.
 
+use std::time::Duration;
+
 use teamcraft_proto::{DeviceId, MediaStreamId, VideoCodec, VideoTrack, VideoTrackKind};
+// `std::time::Instant` on native; the browser clock on wasm, where `std` has none.
+use web_time::Instant;
 
 use crate::datagram::{SimulcastLayer, StreamId};
 use crate::fragment::{CompleteFrame, FragmentError, FrameAssembler, FrameFragment, fragment_frame};
@@ -17,6 +21,8 @@ use crate::rtp::{PayloadType, RtpError, RtpHeader, RtpPacket, RtpTimestamp, Sequ
 pub const MAX_FRAGMENT_PAYLOAD_BYTES: usize = 1100;
 /// Simulcast layers per track the datagram header can address.
 const MAX_LAYERS: usize = 16;
+/// Skipped packets a receiver waits for (they may come late); more missing at once is a loss.
+const MAX_TRACKED_MISSING_PACKETS: usize = 64;
 
 /// A track this device publishes.
 #[derive(Debug)]
@@ -35,6 +41,17 @@ pub struct IncomingVideo {
   pub codec: VideoCodec,
   maybe_layer: Option<SimulcastLayer>,
   assembler: FrameAssembler,
+  /// Sequence number the next packet of the received layer should have (each layer counts its
+  /// own), once one arrived.
+  maybe_expected_sequence: Option<SequenceNumber>,
+  /// Skipped sequence numbers that may still arrive (reordered). Still missing when a later
+  /// frame completes means lost.
+  missing: Vec<SequenceNumber>,
+  /// Packets went missing since the last [`IncomingVideo::take_loss`].
+  is_loss: bool,
+  /// Deltas are useless until the next keyframe: none arrived yet, or one went missing.
+  is_waiting_for_keyframe: bool,
+  maybe_last_keyframe_request: Option<Instant>,
 }
 
 /// A decrypted video frame for the app's decoder.
@@ -102,6 +119,11 @@ impl IncomingVideo {
       codec: track.codec.clone(),
       maybe_layer: None,
       assembler: FrameAssembler::new(),
+      maybe_expected_sequence: None,
+      missing: Vec::new(),
+      is_loss: false,
+      is_waiting_for_keyframe: true,
+      maybe_last_keyframe_request: None,
     }
   }
 
@@ -111,14 +133,93 @@ impl IncomingVideo {
     layer: SimulcastLayer,
     packet: &RtpPacket<'_>,
   ) -> Result<Option<CompleteFrame>, FragmentError> {
+    let fragment = FrameFragment::from_header(&packet.header)?;
     if self.maybe_layer != Some(layer) {
-      // Another layer starts at a keyframe; fragments of the old layer can't complete it.
+      // Another layer starts at a keyframe; fragments of the old layer can't complete it, and
+      // its deltas can't follow the old layer's pictures.
       self.maybe_layer = Some(layer);
       self.assembler = FrameAssembler::new();
+      self.maybe_expected_sequence = None;
+      self.missing.clear();
+      self.is_waiting_for_keyframe = true;
     }
-    let fragment = FrameFragment::from_header(&packet.header)?;
-    self.assembler.push(fragment, packet.payload)
+    self.watch_sequence(packet.header.sequence_number, &fragment);
+    let maybe_complete = self.assembler.push(fragment, packet.payload)?;
+    // All of this frame arrived, so what is still missing belonged to an earlier one.
+    if maybe_complete.is_some() && !self.missing.is_empty() {
+      self.missing.clear();
+      self.note_loss();
+    }
+    Ok(maybe_complete)
   }
+
+  /// Whether packets went missing since the last call; the decoder then needs a keyframe.
+  pub fn take_loss(&mut self) -> bool {
+    std::mem::take(&mut self.is_loss)
+  }
+
+  /// Whether a complete frame can go to the decoder: a keyframe always, a delta only while no
+  /// picture before it went missing.
+  pub fn accepts(&mut self, is_keyframe: bool) -> bool {
+    if is_keyframe {
+      self.is_waiting_for_keyframe = false;
+    }
+    !self.is_waiting_for_keyframe
+  }
+
+  /// Deltas are dropped until the next keyframe (a frame that didn't decrypt, a new or failed
+  /// decoder).
+  pub fn wait_for_keyframe(&mut self) {
+    self.is_waiting_for_keyframe = true;
+  }
+
+  /// Whether a keyframe request may go out now (at most one per `interval`); counts it if so.
+  pub fn is_keyframe_request_due(&mut self, now: Instant, interval: Duration) -> bool {
+    let is_due = self
+      .maybe_last_keyframe_request
+      .is_none_or(|last| now.saturating_duration_since(last) >= interval);
+    if is_due {
+      self.maybe_last_keyframe_request = Some(now);
+    }
+    is_due
+  }
+
+  /// Keeps track of skipped sequence numbers of the received layer. A late packet (reordered)
+  /// fills its gap. Whatever is missing before a keyframe's first packet isn't needed any more;
+  /// a gap too large to track is a loss at once.
+  fn watch_sequence(&mut self, sequence: SequenceNumber, fragment: &FrameFragment) {
+    if fragment.is_keyframe && fragment.index == 0 {
+      self.missing.clear();
+    }
+    let Some(expected) = self.maybe_expected_sequence else {
+      self.maybe_expected_sequence = Some(sequence.next());
+      return;
+    };
+    if is_older(sequence, expected) {
+      self.missing.retain(|missing| *missing != sequence);
+      return;
+    }
+    let skipped = sequence.0.wrapping_sub(expected.0);
+    if self.missing.len() + usize::from(skipped) > MAX_TRACKED_MISSING_PACKETS {
+      self.missing.clear();
+      self.note_loss();
+    } else {
+      self
+        .missing
+        .extend((0..skipped).map(|offset| SequenceNumber(expected.0.wrapping_add(offset))));
+    }
+    self.maybe_expected_sequence = Some(sequence.next());
+  }
+
+  fn note_loss(&mut self) {
+    self.is_loss = true;
+    self.is_waiting_for_keyframe = true;
+  }
+}
+
+/// Whether `a` comes before `b` in 16-bit wrapping sequence order.
+fn is_older(a: SequenceNumber, b: SequenceNumber) -> bool {
+  a != b && b.0.wrapping_sub(a.0) < 0x8000
 }
 
 /// Dynamic RTP payload types per codec. Receivers know the codec from the published track; the
@@ -180,6 +281,44 @@ mod tests {
       completed,
       vec![(true, frame.clone()), (false, frame.clone()), (true, frame)]
     );
+  }
+
+  #[test]
+  fn losses_are_told_from_late_packets_and_end_at_a_keyframe() {
+    let mut outgoing = OutgoingVideo::new(VideoTrackKind::Screen, VideoCodec::Vp9);
+    let mut incoming = IncomingVideo::new(&track());
+    let mut send = |is_keyframe: bool| {
+      outgoing
+        .packetize(
+          StreamId(7),
+          SimulcastLayer::BASE,
+          RtpTimestamp(0),
+          is_keyframe,
+          &[7; 2000],
+        )
+        .unwrap()
+    };
+    let (keyframe, lost_delta, delta, next_keyframe) = (send(true), send(false), send(false), send(true));
+    let push = |incoming: &mut IncomingVideo, packets: &[Vec<u8>]| {
+      let mut completed = Vec::new();
+      for bytes in packets {
+        let packet = RtpPacket::parse(bytes).unwrap();
+        if let Some(complete) = incoming.push(SimulcastLayer::BASE, &packet).unwrap() {
+          completed.push(incoming.accepts(complete.is_keyframe));
+        }
+      }
+      completed
+    };
+    assert!(!incoming.accepts(false), "nothing before the first keyframe");
+    assert_eq!(push(&mut incoming, &keyframe), vec![true]);
+    assert!(!incoming.take_loss());
+    // A whole delta lost: the next one completes while its packets are still missing.
+    drop(lost_delta);
+    assert_eq!(push(&mut incoming, &delta), vec![false]);
+    assert!(incoming.take_loss());
+    // The keyframe ends the wait; what went missing before it no longer matters.
+    assert_eq!(push(&mut incoming, &next_keyframe), vec![true]);
+    assert!(!incoming.take_loss());
   }
 
   #[test]

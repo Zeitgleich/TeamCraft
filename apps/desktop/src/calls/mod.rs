@@ -135,6 +135,8 @@ enum Control {
     stream_id: MediaStreamId,
     maybe_max_layer: Option<u8>,
   },
+  /// The webview's decoder of a watched track failed.
+  RequestKeyframe(MediaStreamId),
   Leave,
 }
 
@@ -380,6 +382,11 @@ impl CallHost {
   /// Stops the self view, if `channel` is the one it sends through.
   pub fn unwatch_camera(&self, channel: ChannelId) {
     self.self_view.unwatch(channel);
+  }
+
+  /// Asks for a keyframe of a watched track whose decoder in the webview failed.
+  pub async fn request_keyframe(&self, stream_id: MediaStreamId) {
+    self.control(Control::RequestKeyframe(stream_id)).await;
   }
 
   /// Stops receiving a track, if `channel` is the one it is sent through.
@@ -812,6 +819,7 @@ async fn run_media(
         },
         Some(Control::StopScreenAudio) => call.stop_screen_audio(),
         Some(Control::Subscribe { stream_id, maybe_max_layer }) => call.subscribe_video(stream_id, maybe_max_layer),
+        Some(Control::RequestKeyframe(stream_id)) => call.request_keyframe(stream_id),
         Some(Control::StatusSounds(sounds)) => call.set_status_cues(status_cues(sounds)),
         Some(Control::NetworkChanged) => call.network_changed(),
         Some(Control::Leave) | None => break,

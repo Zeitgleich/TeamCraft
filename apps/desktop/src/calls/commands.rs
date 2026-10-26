@@ -45,7 +45,13 @@ pub async fn call_watch_video(
   };
   let sink = if prefer_jpeg {
     calls.ensure_video_codec().await?;
-    video::jpeg_sink(send)
+    let host = Arc::clone(calls.inner());
+    // Called on the transcoder's thread: the request goes through the call's control queue.
+    let keyframe_needed = move || {
+      let host = Arc::clone(&host);
+      tauri::async_runtime::spawn(async move { host.request_keyframe(stream_id).await });
+    };
+    video::jpeg_sink(send, keyframe_needed)
   } else {
     video::h264_sink(send)
   };
@@ -82,6 +88,17 @@ pub async fn call_unwatch_video(
   channel: u32,
 ) -> Result<(), CommandError> {
   calls.unwatch_video(stream_id, ChannelId(channel)).await;
+  Ok(())
+}
+
+/// The webview's decoder of a watched track failed: the call asks for a keyframe (at most once
+/// a second) and drops the track's deltas until it comes.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn call_request_keyframe(
+  calls: State<'_, Arc<CallHost>>,
+  stream_id: MediaStreamId,
+) -> Result<(), CommandError> {
+  calls.request_keyframe(stream_id).await;
   Ok(())
 }
 

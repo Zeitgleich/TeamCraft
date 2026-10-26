@@ -40,6 +40,9 @@ pub type FrameFilter = Box<dyn FnMut(VideoFrame) -> VideoFrame + Send>;
 /// Gets decoded frames of a watched track, on the decoder thread.
 pub type FrameSink = Box<dyn FnMut(VideoFrame) + Send>;
 
+/// Called on the decoder thread when a frame didn't decode: the track needs a keyframe.
+pub type KeyframeNeeded = Box<dyn FnMut() + Send>;
+
 /// Drops frames that come faster than the send rate. Some slack keeps a 30 fps camera whose
 /// timestamps jitter from losing every other frame.
 struct FrameLimiter {
@@ -506,8 +509,9 @@ impl Drop for VideoSender {
 }
 
 impl VideoReceiver {
-  /// Decodes frames pushed with [`VideoReceiver::push`] into `sink`.
-  pub fn start(mut sink: FrameSink) -> Result<Self, VideoCodecError> {
+  /// Decodes frames pushed with [`VideoReceiver::push`] into `sink`; a frame that doesn't decode
+  /// calls `keyframe_needed` and the decoder waits for the next keyframe.
+  pub fn start(mut sink: FrameSink, mut keyframe_needed: KeyframeNeeded) -> Result<Self, VideoCodecError> {
     let (frames, frame_rx) = std_mpsc::channel::<ReceivedVideoFrame>();
     let thread = std::thread::Builder::new()
       .name("video-decoder".into())
@@ -533,6 +537,7 @@ impl VideoReceiver {
             Err(error) => {
               warn!(%error, "video frame not decoded; waiting for a keyframe");
               is_waiting_for_keyframe = true;
+              keyframe_needed();
             },
           }
         }
@@ -615,8 +620,11 @@ mod tests {
     let frames = pushed.lock().unwrap().clone().unwrap();
     let decoded = Arc::new(Mutex::new(Vec::new()));
     let sink_frames = Arc::clone(&decoded);
-    let receiver =
-      VideoReceiver::start(Box::new(move |frame| sink_frames.lock().unwrap().push(frame))).unwrap();
+    let receiver = VideoReceiver::start(
+      Box::new(move |frame| sink_frames.lock().unwrap().push(frame)),
+      Box::new(|| {}),
+    )
+    .unwrap();
 
     let mut received = Vec::new();
     for index in 0..10u64 {
