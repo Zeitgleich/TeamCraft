@@ -132,6 +132,10 @@ pub struct User {
   /// Whether the person has set up the app (has a device), as far as the backend knows.
   #[serde(default)]
   pub device_setup: DeviceSetup,
+  /// The account is deactivated: shown as the author of old messages, never offered in people
+  /// lists, pickers or mentions (issue #654).
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_deactivated: bool,
   /// The e-mail address, only where the workspace's directory policy shows it to this viewer (the
   /// server leaves it out otherwise).
   #[serde(default, skip_serializing_if = "Option::is_none")]

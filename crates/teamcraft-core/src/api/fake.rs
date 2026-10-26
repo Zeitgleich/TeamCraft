@@ -382,6 +382,7 @@ impl FakeServer {
         maybe_email: None,
         maybe_organization: None,
         maybe_has_devices: None,
+        is_deactivated: false,
       },
     );
     drop(state);
@@ -389,6 +390,29 @@ impl FakeServer {
       server: self.clone(),
       user: id,
     }
+  }
+
+  /// The user's name changes (at the identity provider, say): everyone is told, like the server's
+  /// `ProfileUpdate`.
+  pub fn rename_user(&self, user: UserId, display_name: &str, username: &str) {
+    let mut state = self.lock();
+    if let Some(summary) = state.users.get_mut(&user) {
+      summary.display_name = display_name.to_owned();
+      summary.maybe_username = Some(username.to_owned());
+    }
+    let everyone: Vec<UserId> = state.users.keys().copied().collect();
+    state.publish(everyone, &GatewayEvent::ProfileUpdate { user_id: user });
+  }
+
+  /// An admin deactivates the user: like the server, `GET /users/{id}` no longer finds them, and
+  /// everyone is told.
+  pub fn deactivate_user(&self, user: UserId) {
+    let mut state = self.lock();
+    if let Some(summary) = state.users.get_mut(&user) {
+      summary.is_deactivated = true;
+    }
+    let everyone: Vec<UserId> = state.users.keys().copied().collect();
+    state.publish(everyone, &GatewayEvent::ProfileUpdate { user_id: user });
   }
 
   /// How many device link requests the server holds.
@@ -1281,7 +1305,13 @@ impl ServerApi for FakeServerApi {
   }
 
   async fn user(&self, user: UserId) -> Result<UserSummary, ApiError> {
-    self.with(|state, _| state.user(user).cloned())
+    self.with(|state, _| {
+      let summary = state.user(user)?;
+      if summary.is_deactivated {
+        return Err(ApiError::status(404, ErrorCode::UserNotFound, "unknown user"));
+      }
+      Ok(summary.clone())
+    })
   }
 
   async fn search_users(&self, query: &str) -> Result<teamcraft_proto::SearchUsersResponse, ApiError> {
