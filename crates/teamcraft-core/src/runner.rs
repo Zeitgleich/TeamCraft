@@ -1,7 +1,8 @@
 //! Drives a [`Client`] for an app: keeps the gateway connected (through the
 //! [`ConnectionSupervisor`]), flushes the outbox, commits waiting membership changes and runs the
 //! UI's commands. File uploads and downloads run beside the loop, so a large file holds up neither
-//! sends nor the gateway.
+//! sends nor the gateway. It reports the device's activity on every new connection, so a resumed
+//! session the server timed out comes back online (docs/gateway.md, "Presence").
 //!
 //! The runner is a plain future without `Send` bounds: native apps poll it on a tokio task, the
 //! browser with `wasm_bindgen_futures::spawn_local` (ARCHITECTURE.md §7, one engine for all shells).
@@ -11,7 +12,7 @@ use std::time::Duration;
 use futures_channel::mpsc;
 use futures_util::StreamExt;
 use futures_util::future::{Either, select};
-use teamcraft_proto::GatewayServerMessage;
+use teamcraft_proto::{DeviceActivity, GatewayClientMessage, GatewayServerMessage};
 
 use crate::api::{ApiError, ServerApi};
 use crate::client::Client;
@@ -84,6 +85,9 @@ pub enum RunnerCommand {
   /// A request the UI adapter queued.
   #[cfg(feature = "ui")]
   Ui(CoreCommand),
+  /// The device became active or idle (the app came to the foreground or went to the background,
+  /// or the user touched it): told to the server now if connected, and on every new connection.
+  SetActivity(DeviceActivity),
   /// Ends [`SyncRunner::run`], which hands the client back.
   Stop,
 }
@@ -161,6 +165,8 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
     self.flush().await;
     loop {
       if self.connection.connect_if_due(&mut self.client).await.is_some() {
+        // A resumed session keeps what the server last knew, which may be an away timeout.
+        self.report_activity().await;
         // Back online: what waited goes out now, not on the next tick.
         self.is_upload_due = true;
         self.flush().await;
@@ -251,6 +257,12 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
   async fn on_command(&mut self, command: RunnerCommand) {
     match command {
       RunnerCommand::Flush => {},
+      RunnerCommand::SetActivity(activity) => {
+        self.client.set_device_activity(activity);
+        self.report_activity().await;
+        // Nothing to flush: the activity changes no stored state.
+        return;
+      },
       #[cfg(feature = "ui")]
       RunnerCommand::Ui(CoreCommand::Typing { conversation }) => {
         self.announce_typing(conversation).await;
@@ -341,6 +353,21 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       .await
     {
       tracing::debug!("typing not announced");
+    }
+  }
+
+  /// Tells the server what the device last said about its activity; offline, the next connection
+  /// does. A failed send replaces the connection, which then reports it again.
+  async fn report_activity(&mut self) {
+    if !self.connection.is_connected() {
+      return;
+    }
+    let message = GatewayClientMessage::SetActivity {
+      activity: self.client.device_activity().clone(),
+    };
+    let now = self.client.now_ms();
+    if !self.connection.send(now, &message).await {
+      tracing::debug!("device activity not reported");
     }
   }
 

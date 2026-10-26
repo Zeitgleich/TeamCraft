@@ -76,7 +76,10 @@ and a repeated report only counts for the timeout (no presence refresh). Desktop
 `active` on input while their window is focused and visible (at most every 30 s), when the window
 comes to the front, after every reconnect or resume (a resumed session keeps what the server last
 knew; a new one identifies with the last report), and when the user picks "Online". Their own "Away
-after" (privacy settings) defaults to 15 minutes without input. The desktop app counts input anywhere
+after" (privacy settings) defaults to 15 minutes without input. The mobile apps report `active` when
+they come to the foreground and on touch (at most every 30 s), `idle` when they go to the background,
+and repeat the last report after every reconnect or resume, so a phone the server timed out while it
+was away comes back online when it is opened (issue #472). The desktop app counts input anywhere
 on the computer (the OS idle time, polled every 5 s, also while the window is in the background or in
 the tray) as input and treats a locked screen as away at once, unless automatic away is off; only the
 idle duration and the lock state leave the OS layer, no key or pointer data.

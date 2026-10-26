@@ -14,6 +14,7 @@ import de.zeitgleich.teamcraft.auth.AuthRepository
 import de.zeitgleich.teamcraft.security.KeystoreBox
 import de.zeitgleich.teamcraft.security.SealedFile
 import de.zeitgleich.teamcraft.server.StoragePaths
+import uniffi.teamcraft_ffi.AppActivity
 import uniffi.teamcraft_ffi.AppConfig
 import uniffi.teamcraft_ffi.ConnectionState
 import uniffi.teamcraft_ffi.EventListener
@@ -47,6 +48,15 @@ class CoreRepository(
   /** The network changed: the open core checks its connection now. Opens no core. */
   fun networkChanged() {
     maybeCore?.networkChanged()
+  }
+
+  /**
+   * What the user does with the app, for presence (issue #472): the open core tells the server,
+   * input at most every 30 s. Opens no core and never waits, so it is fine on every touch.
+   */
+  fun reportActivity(activity: AppActivity) {
+    // A core closed meanwhile (sign-out, another account) has nothing to report to.
+    runCatching { maybeCore?.reportActivity(activity) }
   }
 
   /** The core of the signed-in account, opened on first use (and again after a server change). */

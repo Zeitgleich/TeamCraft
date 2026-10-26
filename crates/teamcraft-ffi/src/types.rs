@@ -3,6 +3,7 @@
 
 use teamcraft_client_api::model::{self as view, ConversationKind as ConversationKindView, PresenceStatus};
 use teamcraft_core::client::LinkRequestInfo;
+use teamcraft_core::device_activity::AppUse;
 use teamcraft_core::notify_rules::MentionPreferences;
 use teamcraft_core::prefetch::SegmentPrefetch;
 use teamcraft_core::push_guard::{PushDiagnostics, Suppression};
@@ -39,6 +40,17 @@ pub enum AccountState {
     /// Shown for out-of-band comparison (safety number).
     identity_fingerprint: String,
   },
+}
+
+/// What the user does with the app, for presence (`TeamCraft::report_activity`, issue #472).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AppActivity {
+  /// The app came to the foreground (opened, resumed, unlocked).
+  Foreground,
+  /// The user touched the screen or pressed a key.
+  Interaction,
+  /// The app went to the background.
+  Background,
 }
 
 /// Where the gateway connection stands. The banner follows this, not the OS connectivity: the
@@ -684,6 +696,16 @@ impl From<teamcraft_core::connection::ConnectionState> for ConnectionState {
         }),
       },
       Core::SignInRequired { .. } => Self::SignInRequired,
+    }
+  }
+}
+
+impl From<AppActivity> for AppUse {
+  fn from(activity: AppActivity) -> Self {
+    match activity {
+      AppActivity::Foreground => Self::Foreground,
+      AppActivity::Interaction => Self::Interaction,
+      AppActivity::Background => Self::Background,
     }
   }
 }

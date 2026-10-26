@@ -11,8 +11,8 @@ use teamcraft_core::records;
 use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::org_recovery::RecoveryRequestKey;
 use teamcraft_proto::{
-  AvatarContentType, AvatarResponse, Base64Bytes, CreateRecoveryRequest, ErrorCode, RecoveryRequestId,
-  RecoveryRequestResponse, RecoveryResultPayload,
+  AvatarContentType, AvatarResponse, Base64Bytes, CreateRecoveryRequest, DeviceActivity, ErrorCode,
+  RecoveryRequestId, RecoveryRequestResponse, RecoveryResultPayload,
 };
 
 use crate::engine::{ClientSlot, Engine, parse_id};
@@ -96,7 +96,19 @@ impl Engine {
           .with_client(|client| Box::pin(async move { client.accept_identity_change(user) }))
           .await
       },
-      ChatAction::SetActivity { .. } | ChatAction::SetAttention { .. } => Ok(()),
+      // Unthrottled; the apps report through `TeamCraft::report_activity`, which repeats input at
+      // most every 30 s.
+      ChatAction::SetActivity { is_idle } => {
+        self.report_activity(if is_idle {
+          DeviceActivity::Idle
+        } else {
+          DeviceActivity::Active
+        });
+        Ok(())
+      },
+      // Attention holds phone pushes back while a desktop or web session is looked at; a phone
+      // reports none.
+      ChatAction::SetAttention { .. } => Ok(()),
       ChatAction::PublishPolicy { .. }
       | ChatAction::PublishRoster { .. }
       | ChatAction::AdminJoinChannel { .. }

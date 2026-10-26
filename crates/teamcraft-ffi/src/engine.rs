@@ -36,7 +36,7 @@ use teamcraft_core::{
 };
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
-use teamcraft_proto::{CallJoinTokenResponse, ConversationId, Id, ThreadId};
+use teamcraft_proto::{CallJoinTokenResponse, ConversationId, DeviceActivity, Id, ThreadId};
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, LocalSet};
 
@@ -524,6 +524,21 @@ impl Engine {
     let task = tokio::task::spawn_local(runner.run());
     self.client = ClientSlot::Running { handle, task };
     Ok(())
+  }
+
+  /// The device became active or idle (issue #472): the sync loop tells the server now and on every
+  /// new connection; a client that isn't syncing keeps it for its next connection.
+  pub(crate) fn report_activity(&mut self, activity: DeviceActivity) {
+    match &mut self.client {
+      ClientSlot::Running { handle, .. } => {
+        // Refused only by a loop that ended abnormally; the app reports again on its next
+        // foreground or touch.
+        handle.send(RunnerCommand::SetActivity(activity));
+      },
+      ClientSlot::Idle(client) => client.set_device_activity(activity),
+      // Not enrolled yet: the first connection identifies as active.
+      ClientSlot::Missing => {},
+    }
   }
 
   pub(crate) async fn stop(&mut self) -> Result<(), TeamCraftError> {

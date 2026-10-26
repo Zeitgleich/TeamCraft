@@ -15,9 +15,9 @@ use teamcraft_proto::{
   AddConversationMemberRequest, AddSpaceMemberRequest, Base64Bytes, ChannelModeration, ChannelRole,
   ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ClaimedKeyPackage, ConversationId, ConversationKind,
   ConversationMemberResponse, ConversationResponse, ConversationVisibility, CreateChannelRequest,
-  CreateDmRequest, CreateGroupDmRequest, DeviceId, DeviceResponse, ErrorCode, GatewayClientMessage,
-  GatewayEvent, GatewayServerMessage, GetMeResponse, HistoryPolicy, Id, IdempotencyKey, IdentityKeyResponse,
-  JoinPolicy, KeyBagResponse, KeyPackageStatusResponse, ListConversationMembersResponse,
+  CreateDmRequest, CreateGroupDmRequest, DeviceActivity, DeviceId, DeviceResponse, ErrorCode,
+  GatewayClientMessage, GatewayEvent, GatewayServerMessage, GetMeResponse, HistoryPolicy, Id, IdempotencyKey,
+  IdentityKeyResponse, JoinPolicy, KeyBagResponse, KeyPackageStatusResponse, ListConversationMembersResponse,
   ListConversationsResponse, ListDevicesResponse, ListMessagesQuery, ListMessagesResponse,
   ListMlsMessagesQuery, ListMlsMessagesResponse, ListSpaceMembersResponse, ListSpacesResponse, MessageId,
   MessageResponse, MlsMessageKind, MlsMessageResponse, MoveChannelRequest, MyMembership, NotificationLevel,
@@ -142,6 +142,8 @@ struct State {
   portal_users: HashSet<UserId>,
   /// Heartbeats received, to check that a busy client keeps sending them.
   heartbeats: u64,
+  /// `set_activity` frames per user, in order (presence after an away timeout, issue #472).
+  activity_reports: HashMap<UserId, Vec<DeviceActivity>>,
   /// What `GET /unread` answers per user; without an entry nothing is unread.
   unread: HashMap<UserId, UnreadResponse>,
   /// A malicious server: the next registered device gets this ID instead of a fresh one.
@@ -566,6 +568,16 @@ impl FakeServer {
   /// How many gateway heartbeats arrived so far.
   pub fn heartbeat_count(&self) -> u64 {
     self.lock().heartbeats
+  }
+
+  /// The `set_activity` frames `user`'s devices sent so far, in order.
+  pub fn activity_reports(&self, user: UserId) -> Vec<DeviceActivity> {
+    self
+      .lock()
+      .activity_reports
+      .get(&user)
+      .cloned()
+      .unwrap_or_default()
   }
 
   /// While set, a captive portal answers this user's REST calls (hotel Wi-Fi before signing in).
@@ -4041,9 +4053,14 @@ impl GatewayConnection for FakeGateway {
           },
         );
       },
-      GatewayClientMessage::SetActivity { .. }
-      | GatewayClientMessage::Attention { .. }
-      | GatewayClientMessage::Unknown => {},
+      GatewayClientMessage::SetActivity { activity } => {
+        state
+          .activity_reports
+          .entry(self.user)
+          .or_default()
+          .push(activity.clone());
+      },
+      GatewayClientMessage::Attention { .. } | GatewayClientMessage::Unknown => {},
     }
     Ok(())
   }

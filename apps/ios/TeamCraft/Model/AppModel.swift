@@ -594,6 +594,14 @@ final class AppModel {
     if await segmentPrefetch() != .off { SegmentPrefetchTask.schedule() }
   }
 
+  /// Presence (issue #472): the app came to the foreground, went to the background, or the user
+  /// touched it. The open core tells the server (input at most every 30 s), so coming back ends an
+  /// away timeout at once. Opens no core and never waits; call it before starting or stopping sync,
+  /// so the report is queued ahead of them.
+  func reportActivity(_ activity: AppActivity) {
+    maybeCore?.reportActivity(activity: activity)
+  }
+
   // MARK: Push
 
   // "v2": sealed for the push gateway (docs/push-gateway.md); a registration made by an older version

@@ -34,6 +34,8 @@ struct RootView: View {
       LoadingMarkOverlay(isLoading: isStarting)
     }
     .overlay { if model.isBusy { BusyOverlay() } }
+    // Every touch counts for presence; the core reports it at most every 30 s (issue #472).
+    .background { InteractionObserver { model.reportActivity(.interaction) } }
     .fullScreenCover(item: callBinding) { call in
       CallScreen(call: call)
     }

@@ -15,7 +15,8 @@ mod types;
 mod video;
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Instant;
 
 pub use calls::{
   CallEndReason, CallListener, CallMoveInfo, CallPhase, CallSession, CallStateInfo, EncodedVideoListener,
@@ -28,11 +29,12 @@ pub use server_entry::{
 };
 use teamcraft_core::api::proxy::SystemProxy;
 use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
+use teamcraft_core::device_activity::ActivityReports;
 use teamcraft_media::openh264_library::{self, OpenH264Binary};
 use tokio::sync::{mpsc, oneshot};
 pub use types::{
-  AccountState, AppConfig, BrandAccent, BrandLinks, ConnectionState, ConversationItem, ConversationKind,
-  EmojiSuggestion, LinkPlatform, LinkRequestItem, LoginBrand, MentionSettings, MessageItem,
+  AccountState, AppActivity, AppConfig, BrandAccent, BrandLinks, ConnectionState, ConversationItem,
+  ConversationKind, EmojiSuggestion, LinkPlatform, LinkRequestItem, LoginBrand, MentionSettings, MessageItem,
   NetworkInterception, NetworkProxy, NotificationAttachmentKind, NotificationContent,
   NotificationContentSettings, NotificationGap, NotificationSuppression, OrgRecoveryStart, Presence,
   PushDiagnosticsInfo, PushNotification, PushNotificationKind, PushService, ReactionItem, SearchHitItem,
@@ -52,6 +54,8 @@ pub struct TeamCraft {
   /// Network changes the app reports; the sync loop (and later calls) listen.
   network: NetworkChanges,
   connection: ConnectionStatus,
+  /// What the app last reported about its use; input repeats at most every 30 s (issue #472).
+  activity: Mutex<ActivityReports>,
 }
 
 /// Supplies the current OIDC access token. The app owns login and refresh (AppAuth on Android);
@@ -88,6 +92,7 @@ impl TeamCraft {
       jobs,
       network,
       connection,
+      activity: Mutex::default(),
     }))
   }
 
@@ -102,6 +107,25 @@ impl TeamCraft {
   /// [`EventListener::on_change`].
   pub fn connection_state(&self) -> ConnectionState {
     self.connection.get().into()
+  }
+
+  /// What the user does with the app, for presence (issue #472): `Foreground` when the app comes
+  /// to the foreground, `Background` when it leaves it, `Interaction` on every touch or key press.
+  /// The server derives the user's presence from it and ends an away timeout at once when the app
+  /// comes back. Cheap and never waits: input reports at most every 30 s.
+  pub fn report_activity(&self, activity: AppActivity) {
+    // Plain data: a panic elsewhere while it was locked leaves nothing half-changed.
+    let maybe_due = self
+      .activity
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .next(activity.into(), Instant::now());
+    let Some(device_activity) = maybe_due else {
+      return;
+    };
+    let job: Job = Box::new(move |engine| Box::pin(async move { engine.report_activity(device_activity) }));
+    // Refused only once the handle is closing; nothing to report to then.
+    let _ = self.jobs.send(job);
   }
 
   pub async fn account_state(&self) -> Result<AccountState, TeamCraftError> {
