@@ -1,3 +1,5 @@
+use leptos::ev;
+use leptos::html;
 use leptos::prelude::*;
 
 use crate::components::count_badge::{BadgeTone, CountBadge};
@@ -12,6 +14,9 @@ use crate::state::{AppState, MainView, Overlay, RailEntry, use_app_state};
 /// Space switcher on the far left (Mattermost "team sidebar"). On top the global destinations with
 /// a label under each icon: Home (the DMs, which live outside spaces), Activity and Threads. In the
 /// grouped sidebar one entry stands for all spaces.
+///
+/// Only the spaces (with "add space" at their end) scroll; the destinations above and Focus below
+/// stay in place (#652). Where spaces are scrolled out of sight, the scroller's edge fades.
 #[component]
 pub fn SpaceRail() -> impl IntoView {
   let state = use_app_state();
@@ -24,6 +29,22 @@ pub fn SpaceRail() -> impl IntoView {
       .with(|prefs| prefs.sidebar.is_grouped_by_space)
   });
 
+  let scroller = NodeRef::<html::Div>::new();
+  // The edges depend on the content and the rail's height as well as on scrolling.
+  Effect::new(move |_| {
+    spaces.track();
+    is_grouped.track();
+    if let Some(element) = scroller.get() {
+      request_animation_frame(move || mark_hidden_edges(&element));
+    }
+  });
+  let on_resize = window_event_listener(ev::resize, move |_| {
+    if let Some(element) = scroller.get_untracked() {
+      mark_hidden_edges(&element);
+    }
+  });
+  on_cleanup(move || on_resize.remove());
+
   view! {
     <nav class="space-rail" aria-label=move || i18n.t("rail-label")>
       <div class="rail-destinations">
@@ -33,32 +54,52 @@ pub fn SpaceRail() -> impl IntoView {
         <RailCreateMenu />
       </div>
       <span class="rail-divider" aria-hidden="true"></span>
-      <ul>
-        {move || {
-          if is_grouped.get() {
-            view! { <AllSpacesButton /> }.into_any()
-          } else {
-            view! {
-              // A new name, color or picture renders the button again.
-              <For
-                each=move || spaces.get()
-                key=|space| (space.id, space.name.clone(), space.hue, space.maybe_image_version.clone())
-                let:space
-              >
-                <SpaceButton space=space />
-              </For>
+      <div class="rail-spaces" node_ref=scroller on:scroll=move |_| {
+        if let Some(element) = scroller.get_untracked() {
+          mark_hidden_edges(&element);
+        }
+      }>
+        <ul>
+          {move || {
+            if is_grouped.get() {
+              view! { <AllSpacesButton /> }.into_any()
+            } else {
+              view! {
+                // A new name, color or picture renders the button again.
+                <For
+                  each=move || spaces.get()
+                  key=|space| (space.id, space.name.clone(), space.hue, space.maybe_image_version.clone())
+                  let:space
+                >
+                  <SpaceButton space=space />
+                </For>
+              }
+                .into_any()
             }
-              .into_any()
-          }
-        }}
-      </ul>
-      <RailFocusMenu />
-      // Browsing lists the open spaces to join and has the button to create a new one.
-      <button class="rail-add" on:click=move |_| state.overlay.set(Overlay::BrowseSpaces(None)) aria-label=move || i18n.t("rail-add-space") title=move || i18n.t("rail-add-space")>
-        <Icon name=IconName::Plus />
-      </button>
+          }}
+        </ul>
+        // Browsing lists the open spaces to join and has the button to create a new one.
+        <button class="rail-add" on:click=move |_| state.overlay.set(Overlay::BrowseSpaces(None)) aria-label=move || i18n.t("rail-add-space") title=move || i18n.t("rail-add-space")>
+          <Icon name=IconName::Plus />
+        </button>
+      </div>
+      <div class="rail-bottom">
+        <RailFocusMenu />
+      </div>
     </nav>
   }
+}
+
+/// Marks the sides of the spaces' scroller with content out of sight (`.has-more-above`,
+/// `.has-more-below`), where the stylesheet fades the edge.
+fn mark_hidden_edges(element: &web_sys::HtmlDivElement) {
+  // A pixel of slack: fractional scroll positions never quite reach the end.
+  let top = element.scroll_top();
+  let has_more_below = top + element.client_height() < element.scroll_height() - 1;
+  let classes = element.class_list();
+  // Toggling a class on a live element doesn't fail.
+  drop(classes.toggle_with_force("has-more-above", top > 1));
+  drop(classes.toggle_with_force("has-more-below", has_more_below));
 }
 
 /// Chats (the DMs and group DMs), with the number of unread DMs and mentions in them.
