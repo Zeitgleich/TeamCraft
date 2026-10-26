@@ -553,7 +553,7 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     conversation: ConversationId,
     anchor: MediaAnchor,
     max_messages: usize,
-  ) -> MediaPage {
+  ) -> Option<MediaPage> {
     self.chat.conversation_media(conversation, anchor, max_messages)
   }
 

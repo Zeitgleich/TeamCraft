@@ -1515,8 +1515,8 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     conversation: ConversationId,
     anchor: MediaAnchor,
     max_messages: usize,
-  ) -> MediaPage {
-    self.ui_conversation_media(conversation, anchor, max_messages)
+  ) -> Option<MediaPage> {
+    Some(self.ui_conversation_media(conversation, anchor, max_messages))
   }
 
   fn download_file(&self, conversation: ConversationId, message: MessageId) {

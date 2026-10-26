@@ -64,14 +64,15 @@ async fn text_with_files_arrives_with_thumbnails_and_downloads() {
   assert_eq!(files[1].transfer, FileTransfer::Remote);
   assert_eq!(bob_ui.conversation_files(channel).len(), 2);
   // The viewer's window holds this message's files; a window of zero messages holds none.
-  let page = bob_ui.conversation_media(channel, MediaAnchor::Around(received.id), 10);
+  let page = bob_ui
+    .conversation_media(channel, MediaAnchor::Around(received.id), 10)
+    .expect("the core answers at once");
   assert_eq!(page.files.len(), 2);
   assert!(!page.has_older && !page.has_newer);
   assert!(
     bob_ui
       .conversation_media(channel, MediaAnchor::Around(received.id), 0)
-      .files
-      .is_empty()
+      .is_some_and(|page| page.files.is_empty())
   );
 
   let directory = std::env::temp_dir().join(format!("teamcraft-downloads-{}", std::process::id()));

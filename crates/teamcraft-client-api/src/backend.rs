@@ -390,14 +390,20 @@ pub trait ChatBackend {
   }
   /// A page of at most `max_messages` messages with pictures or videos at `anchor`, newest first
   /// (the image viewer pages through a conversation with it, #274). Bounded work: a core reads
-  /// only what the page holds. The default pages the whole list.
+  /// only what the page holds. The default pages the whole list. `None` while a backend that asks
+  /// the core waits for its answer (a change notification follows), so the viewer never mistakes
+  /// a page not read yet for an empty one (#637).
   fn conversation_media(
     &self,
     conversation: ConversationId,
     anchor: MediaAnchor,
     max_messages: usize,
-  ) -> MediaPage {
-    MediaPage::from_files(self.conversation_files(conversation), anchor, max_messages)
+  ) -> Option<MediaPage> {
+    Some(MediaPage::from_files(
+      self.conversation_files(conversation),
+      anchor,
+      max_messages,
+    ))
   }
   /// Fetches and decrypts a file; its [`FileInfo::transfer`] reports progress and the local path.
   fn download_file(&self, _conversation: ConversationId, _message: MessageId) {}

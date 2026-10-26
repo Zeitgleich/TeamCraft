@@ -1348,7 +1348,10 @@ impl ChatQuery {
         anchor,
         max_messages,
       } => ChatAnswer::MediaPage {
-        page: backend.conversation_media(conversation, anchor, max_messages),
+        // The core reads its own store and always answers.
+        page: backend
+          .conversation_media(conversation, anchor, max_messages)
+          .unwrap_or_default(),
       },
       Self::ShareLinks {
         conversation,

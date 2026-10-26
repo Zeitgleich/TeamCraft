@@ -1034,14 +1034,15 @@ impl ChatBackend for RemoteChat {
     conversation: ConversationId,
     anchor: MediaAnchor,
     max_messages: usize,
-  ) -> MediaPage {
+  ) -> Option<MediaPage> {
     match self.ask(ChatQuery::ConversationMedia {
       conversation,
       anchor,
       max_messages,
-    }) {
-      Some(ChatAnswer::MediaPage { page }) => page,
-      _ => MediaPage::default(),
+    })? {
+      ChatAnswer::MediaPage { page } => Some(page),
+      // An answer of another kind (an older core): nothing to page through.
+      _ => Some(MediaPage::default()),
     }
   }
 
