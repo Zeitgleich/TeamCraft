@@ -9,6 +9,7 @@ pub mod attachment;
 pub mod attestation;
 pub mod backup;
 pub mod call_binding;
+pub mod change_digest;
 pub mod content_key;
 pub mod device_list;
 pub mod guest_link;

@@ -1,5 +1,7 @@
 use serde_json::json;
-use teamcraft_db::{ExpiryChange, NewSpace, NewSpaceMember, SpaceChanges, SpaceListing, SpaceView};
+use teamcraft_db::{
+  ExpiryChange, NewSpace, NewSpaceMember, SpaceChanges, SpaceListing, SpaceMember, SpaceView,
+};
 use teamcraft_proto::{
   AddSpaceMemberRequest, CategoryId, CategoryResponse, CreateCategoryRequest, CreateSpaceRequest,
   GatewayEvent, JoinPolicy, ListCategoriesResponse, ListSpaceMembersResponse, ListSpacesResponse, Permission,
@@ -216,7 +218,13 @@ pub async fn list_space_members(
     ));
   }
   let members = state.database.list_space_members(id).await?;
-  Ok(ListSpaceMembersResponse {
+  Ok(space_members_response(state, &members))
+}
+
+/// The answer of `GET /spaces/{id}/members` for these members (also what `GET /sync/heads`
+/// digests).
+pub fn space_members_response(state: &AppState, members: &[SpaceMember]) -> ListSpaceMembersResponse {
+  ListSpaceMembersResponse {
     members: members
       .iter()
       .map(|member| SpaceMemberResponse {
@@ -226,7 +234,7 @@ pub async fn list_space_members(
         maybe_sponsor_user_id: member.maybe_sponsor,
       })
       .collect(),
-  })
+  }
 }
 
 pub async fn add_space_member(

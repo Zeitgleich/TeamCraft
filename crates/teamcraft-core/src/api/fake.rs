@@ -13,18 +13,19 @@ use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_util::StreamExt;
 use teamcraft_proto::{
   AddConversationMemberRequest, AddSpaceMemberRequest, Base64Bytes, ChannelModeration, ChannelRole,
-  ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ClaimedKeyPackage, ConversationId, ConversationKind,
-  ConversationMemberResponse, ConversationResponse, ConversationVisibility, CreateChannelRequest,
-  CreateDmRequest, CreateGroupDmRequest, DeviceId, DeviceResponse, ErrorCode, GatewayClientMessage,
-  GatewayEvent, GatewayServerMessage, GetMeResponse, HistoryPolicy, Id, IdempotencyKey, IdentityKeyResponse,
-  JoinPolicy, KeyBagResponse, KeyPackageStatusResponse, ListConversationMembersResponse,
+  ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ClaimedKeyPackage, ConversationHead, ConversationId,
+  ConversationKind, ConversationMemberResponse, ConversationResponse, ConversationVisibility,
+  CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, DeviceId, DeviceResponse, ErrorCode,
+  GatewayClientMessage, GatewayEvent, GatewayServerMessage, GetMeResponse, HistoryPolicy, Id, IdempotencyKey,
+  IdentityKeyResponse, JoinPolicy, KeyBagResponse, KeyPackageStatusResponse, ListConversationMembersResponse,
   ListConversationsResponse, ListDevicesResponse, ListMessagesQuery, ListMessagesResponse,
   ListMlsMessagesQuery, ListMlsMessagesResponse, ListSpaceMembersResponse, ListSpacesResponse, MessageId,
-  MessageResponse, MlsMessageKind, MlsMessageResponse, MoveChannelRequest, MyMembership, NotificationLevel,
-  PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest,
+  MessageResponse, MlsMessageId, MlsMessageKind, MlsMessageResponse, MoveChannelRequest, MyMembership,
+  NotificationLevel, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest,
   RegisterDeviceRequest, Role, SendMessageRequest, SetPresenceRequest, SetReadPositionRequest, Snowflake,
-  SpaceId, SpaceMemberResponse, SpaceResponse, SpaceRole, UnixMillis, UpdateConversationMemberRequest,
-  UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserKind, UserSummary,
+  SpaceHead, SpaceId, SpaceMemberResponse, SpaceResponse, SpaceRole, SyncHeadsResponse, UnixMillis,
+  UpdateConversationMemberRequest, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserKind,
+  UserSummary,
 };
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
@@ -102,6 +103,9 @@ pub struct FakeGateway {
 #[derive(Default)]
 struct State {
   next_id: i64,
+  /// `GET /sync/heads` answers a bare 404, like a server from before the endpoint (issue #714):
+  /// a full sync then reads everything.
+  lacks_sync_heads: bool,
   directory_searches: u64,
   /// Conversations whose history answers 403 (a removal the list doesn't show yet, a policy).
   forbidden_histories: HashSet<ConversationId>,
@@ -556,6 +560,11 @@ impl FakeServer {
   /// The user's member lists answer only after `delay` (a catch-up of many conversations).
   pub fn delay_member_lists(&self, user: UserId, delay: std::time::Duration) {
     self.lock().member_list_delays.insert(user, delay);
+  }
+
+  /// Answers `GET /sync/heads` with a bare 404 from now on, like an older server (issue #714).
+  pub fn stop_serving_sync_heads(&self) {
+    self.lock().lacks_sync_heads = true;
   }
 
   /// The user's `GET /conversations` answers only after `delay` (a long full sync).
@@ -1698,28 +1707,7 @@ impl ServerApi for FakeServerApi {
 
   /// Every known user is in every fake space, except the outsiders.
   async fn list_space_members(&self, space: SpaceId) -> Result<ListSpaceMembersResponse, ApiError> {
-    self.with(|state, _| {
-      state.default_space_entry();
-      if !state.spaces.contains_key(&space) {
-        return Err(ApiError::status(404, ErrorCode::SpaceNotFound, "no such space"));
-      }
-      let members = state
-        .users
-        .values()
-        .filter(|user| !state.space_outsiders.contains(&user.id))
-        .map(|user| SpaceMemberResponse {
-          user: user.clone(),
-          role: state
-            .space_roles
-            .get(&(space, user.id))
-            .cloned()
-            .unwrap_or(SpaceRole::Member),
-          maybe_expires_at: None,
-          maybe_sponsor_user_id: None,
-        })
-        .collect();
-      Ok(ListSpaceMembersResponse { members })
-    })
+    self.with(|state, _| state.space_members_answer(space))
   }
 
   async fn list_conversations(&self) -> Result<ListConversationsResponse, ApiError> {
@@ -1755,32 +1743,7 @@ impl ServerApi for FakeServerApi {
     if let Some(delay) = maybe_delay {
       crate::platform::sleep(delay).await;
     }
-    self.with(|state, me| {
-      if state.broken_member_lists.contains(&conversation) {
-        return Err(ApiError::Decode("fake server: unreadable member list".into()));
-      }
-      // Instance admins may list any conversation's members, like the server.
-      let entry = if state.admins.contains(&me) {
-        state.conversation(conversation)?
-      } else {
-        state.member_conversation(conversation, me)?
-      };
-      let members = entry
-        .members
-        .iter()
-        .map(|(user, (role, _))| (*user, role.clone()))
-        .collect::<Vec<_>>();
-      let members = members
-        .into_iter()
-        .map(|(user, role)| {
-          Ok(ConversationMemberResponse {
-            user: state.user(user)?.clone(),
-            role,
-          })
-        })
-        .collect::<Result<_, ApiError>>()?;
-      Ok(ListConversationMembersResponse { members })
-    })
+    self.with(|state, me| state.members_answer(conversation, me))
   }
 
   async fn create_channel(
@@ -3172,6 +3135,80 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  /// Like the server: the newest message and MLS entry of each of the user's conversations (from
+  /// the join on), and digests of the member lists as `list_members` and `list_space_members`
+  /// would answer them.
+  async fn sync_heads(&self) -> Result<SyncHeadsResponse, ApiError> {
+    let spaces = self.with(|state, me| {
+      if state.lacks_sync_heads {
+        return Err(ApiError::Status {
+          status: 404,
+          maybe_body: None,
+        });
+      }
+      let _ = me;
+      state.default_space_entry();
+      Ok(
+        state
+          .spaces
+          .values()
+          .filter(|space| space.maybe_my_role.is_some())
+          .map(|space| space.id)
+          .collect::<Vec<_>>(),
+      )
+    })?;
+    let mut space_heads = Vec::new();
+    for space in spaces {
+      let answer = self.server.lock().space_members_answer(space);
+      if let Ok(members) = answer {
+        space_heads.push(SpaceHead {
+          space_id: space,
+          members_digest: fake_digest(&members),
+        });
+      }
+    }
+    let conversations: Vec<(ConversationId, Option<MessageId>, Option<MlsMessageId>)> =
+      self.with(|state, me| {
+        Ok(
+          state
+            .conversations
+            .values()
+            .filter_map(|entry| {
+              let (_, floor) = entry.members.get(&me)?;
+              let maybe_last_mls = entry
+                .mls
+                .iter()
+                .filter(|message| message.id.snowflake().get() > *floor)
+                .map(|message| message.id)
+                .max();
+              let maybe_last_message = entry.messages.iter().map(|message| message.id).max();
+              Some((entry.response.id, maybe_last_message, maybe_last_mls))
+            })
+            .collect(),
+        )
+      })?;
+    let mut heads = Vec::new();
+    for (conversation, maybe_last_message_id, maybe_last_mls_message_id) in conversations {
+      let mut state = self.server.lock();
+      // An unreadable list never matches, so the client reads it (and fails) every time.
+      let members_digest = match state.members_answer(conversation, self.user) {
+        Ok(members) => fake_digest(&members),
+        Err(_) => format!("unreadable-{}", state.next_id::<MessageId>()),
+      };
+      drop(state);
+      heads.push(ConversationHead {
+        conversation_id: conversation,
+        maybe_last_message_id,
+        maybe_last_mls_message_id,
+        members_digest,
+      });
+    }
+    Ok(SyncHeadsResponse {
+      conversations: heads,
+      spaces: space_heads,
+    })
+  }
+
   /// The fake doesn't track read positions: nothing is unread unless a test set it.
   async fn unread(&self) -> Result<UnreadResponse, ApiError> {
     self.with(|state, me| {
@@ -4165,6 +4202,62 @@ impl FakeGateway {
 }
 
 impl State {
+  /// What `GET /spaces/{id}/members` answers.
+  fn space_members_answer(&mut self, space: SpaceId) -> Result<ListSpaceMembersResponse, ApiError> {
+    self.default_space_entry();
+    if !self.spaces.contains_key(&space) {
+      return Err(ApiError::status(404, ErrorCode::SpaceNotFound, "no such space"));
+    }
+    let members = self
+      .users
+      .values()
+      .filter(|user| !self.space_outsiders.contains(&user.id))
+      .map(|user| SpaceMemberResponse {
+        user: user.clone(),
+        role: self
+          .space_roles
+          .get(&(space, user.id))
+          .cloned()
+          .unwrap_or(SpaceRole::Member),
+        maybe_expires_at: None,
+        maybe_sponsor_user_id: None,
+      })
+      .collect();
+    Ok(ListSpaceMembersResponse { members })
+  }
+
+  /// What `GET …/members` answers `me`.
+  fn members_answer(
+    &self,
+    conversation: ConversationId,
+    me: UserId,
+  ) -> Result<ListConversationMembersResponse, ApiError> {
+    if self.broken_member_lists.contains(&conversation) {
+      return Err(ApiError::Decode("fake server: unreadable member list".into()));
+    }
+    // Instance admins may list any conversation's members, like the server.
+    let entry = if self.admins.contains(&me) {
+      self.conversation(conversation)?
+    } else {
+      self.member_conversation(conversation, me)?
+    };
+    let members = entry
+      .members
+      .iter()
+      .map(|(user, (role, _))| (*user, role.clone()))
+      .collect::<Vec<_>>();
+    let members = members
+      .into_iter()
+      .map(|(user, role)| {
+        Ok(ConversationMemberResponse {
+          user: self.user(user)?.clone(),
+          role,
+        })
+      })
+      .collect::<Result<_, ApiError>>()?;
+    Ok(ListConversationMembersResponse { members })
+  }
+
   /// Time-sortable like the server's: the server's clock in the time bits, so clients reading an
   /// ID's time get the server's time.
   fn next_id<T: Id>(&mut self) -> T {
@@ -4696,6 +4789,10 @@ fn blob_entry<'a>(state: &'a mut State, url: &str) -> Result<&'a mut FakeAttachm
 
 fn pending_session(connection: u64) -> String {
   format!("{PENDING_PREFIX}{connection}")
+}
+
+fn fake_digest(answer: &impl serde::Serialize) -> String {
+  teamcraft_crypto::change_digest::change_digest(&serde_json::to_vec(answer).unwrap_or_default())
 }
 
 fn page(
