@@ -131,7 +131,7 @@ fn space_link(origin: &str, space: SpaceId) -> Option<String> {
 
 /// Where the server's web app lives: the desktop's account server, else the configured server,
 /// else the page's own origin (the web app served by the server).
-fn web_origin() -> Option<String> {
+pub(crate) fn web_origin() -> Option<String> {
   if let Some(server) = crate::session::use_session().and_then(|session| session.server.get_untracked()) {
     return Some(server.origin);
   }

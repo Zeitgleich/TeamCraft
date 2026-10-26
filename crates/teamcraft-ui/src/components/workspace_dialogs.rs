@@ -18,6 +18,7 @@ use wasm_bindgen::JsCast;
 use crate::channel_access::ChannelAccess;
 use crate::channel_policy::{ChannelPolicyHub, parse_retention};
 use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::channel_integrations::ChannelIntegrations;
 use crate::components::composer_commands::left_text;
 use crate::components::icons::{Icon, IconName};
 use crate::components::image_crop_dialog::{
@@ -197,6 +198,7 @@ pub fn NewChannelDialog(space: SpaceId) -> impl IntoView {
   let name = RwSignal::new(String::new());
   let topic = RwSignal::new(String::new());
   let is_private = RwSignal::new(false);
+  let is_integration = RwSignal::new(false);
   let category = RwSignal::new(String::new());
   let history = RwSignal::new(HistoryChoice::WorkspaceDefault);
   let categories = Memo::new(move |_| state.read(|backend| backend.categories(space)));
@@ -216,10 +218,12 @@ pub fn NewChannelDialog(space: SpaceId) -> impl IntoView {
     state.create_channel(NewChannel {
       space,
       name,
-      is_private: is_private.get_untracked(),
+      // A log channel carries machine output and stays private.
+      is_private: is_private.get_untracked() || is_integration.get_untracked(),
       maybe_topic: non_empty(&topic.get_untracked()),
       maybe_category,
       maybe_history: history.get_untracked().policy(),
+      is_integration: is_integration.get_untracked(),
       maybe_idempotency_key: Some(key),
     });
   };
@@ -230,8 +234,14 @@ pub fn NewChannelDialog(space: SpaceId) -> impl IntoView {
         <input id="channel-name" class="input" data-autofocus required maxlength="80" prop:value=move || name.get() on:input=move |ev| name.set(event_target_value(&ev)) />
         <label for="channel-topic">{move || i18n.t("channel-topic")}</label>
         <input id="channel-topic" class="input" maxlength="250" prop:value=move || topic.get() on:input=move |ev| topic.set(event_target_value(&ev)) />
+        <label for="channel-kind">{move || i18n.t("channel-kind")}</label>
+        <select id="channel-kind" class="input" on:change=move |ev| is_integration.set(event_target_value(&ev) == "log")>
+          <option value="normal">{move || i18n.t("channel-mode-normal")}</option>
+          <option value="log">{move || i18n.t("channel-mode-log")}</option>
+        </select>
+        <p class="hint">{move || if is_integration.get() { i18n.t("channel-mode-log-hint") } else { i18n.t("channel-mode-normal-hint") }}</p>
         <label class="check-row">
-          <input type="checkbox" prop:checked=move || is_private.get() on:change=move |ev| is_private.set(event_target_checked(&ev)) />
+          <input type="checkbox" prop:checked=move || is_private.get() || is_integration.get() prop:disabled=move || is_integration.get() on:change=move |ev| is_private.set(event_target_checked(&ev)) />
           <span>{move || i18n.t("channel-private")}</span>
         </label>
         <label for="channel-category">{move || i18n.t("channel-category")}</label>
@@ -333,6 +343,7 @@ fn BrowseRow(channel: BrowsableChannel) -> impl IntoView {
 const CHANNEL_GENERAL: Section = Section::new("general", "settings-section-general");
 const CHANNEL_MEMBERS: Section = Section::new("members", "settings-section-members");
 const CHANNEL_PRIVACY: Section = Section::new("privacy", "settings-section-privacy");
+const CHANNEL_INTEGRATIONS: Section = Section::new("integrations", "settings-section-integrations");
 const CHANNEL_ADVANCED: Section = Section::new("advanced", "settings-section-advanced");
 
 /// Settings of one channel in sections: general, members, privacy and retention, advanced. Each
@@ -350,12 +361,16 @@ pub fn ChannelSettingsDialog(
   let Some(info) = info else {
     return view! { <Dialog title_key="channel-settings-title"><p>{move || i18n.t("channel-missing")}</p></Dialog> }.into_any();
   };
-  let sections = vec![
+  let mut sections = vec![
     CHANNEL_GENERAL,
     CHANNEL_MEMBERS,
     CHANNEL_PRIVACY,
     CHANNEL_ADVANCED,
   ];
+  // Bots and the log mode are for channels, not for direct conversations.
+  if !info.kind.is_direct_like() {
+    sections.insert(3, CHANNEL_INTEGRATIONS);
+  }
   let first = maybe_section
     .and_then(|slug| sections.iter().copied().find(|section| section.slug == slug))
     .unwrap_or(CHANNEL_GENERAL);
@@ -370,6 +385,7 @@ pub fn ChannelSettingsDialog(
           match section.slug {
             "members" => view! { <ChannelMembers conversation=conversation /> }.into_any(),
             "privacy" => view! { <ChannelPrivacy conversation=conversation is_private=matches!(info.kind, crate::model::ConversationKind::Private) /> }.into_any(),
+            "integrations" => view! { <ChannelIntegrations conversation=conversation /> }.into_any(),
             "advanced" => view! { <ChannelAdvanced conversation=conversation space=info.maybe_space /> }.into_any(),
             _ => view! { <ChannelGeneral conversation=conversation name=info.name.clone() topic=info.topic.clone() is_channel=!info.kind.is_direct_like() /> }.into_any(),
           }

@@ -12453,3 +12453,9 @@ ol.md-list {
   color: var(--text-muted);
   font-weight: var(--weight-semibold);
 }
+
+.integration-create { display: grid; grid-template-columns: 1fr auto; gap: var(--space-2); align-items: end; max-width: 36rem; }
+.integration-create label { grid-column: 1 / -1; }
+.integration-reveal { display: grid; gap: var(--space-2); max-width: 46rem; padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-md); margin-bottom: var(--space-4); }
+.integration-copy-row { display: flex; gap: var(--space-2); align-items: center; }
+.integration-copy-row .input { flex: 1; min-width: 0; }

@@ -30,6 +30,7 @@ async fn a_default_member_joins_the_group_and_reads_only_from_the_join_on() {
         maybe_category: None,
         // Even a channel that shows its history to members does not show it to a self-add.
         maybe_history: Some(HistoryPolicy::Full),
+        is_integration: false,
       },
     )
     .await

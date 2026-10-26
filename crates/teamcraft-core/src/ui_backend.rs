@@ -476,7 +476,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       maybe_custom_status: self.custom_status_of(summary.id),
       avatar_hue: hue(summary.id),
       is_guest: summary.kind == UserKind::Guest,
-      is_bot: false,
+      is_bot: summary.kind == UserKind::Bot,
       maybe_organization: summary.maybe_organization.clone(),
       device_setup: match summary.maybe_has_devices {
         Some(true) => DeviceSetup::HasDevices,

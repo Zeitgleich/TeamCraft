@@ -37,6 +37,8 @@ pub struct ChannelOptions {
   pub maybe_topic: Option<String>,
   pub maybe_category: Option<CategoryId>,
   pub maybe_history: Option<HistoryPolicy>,
+  /// An integration (log) channel: log view, log retention, push only for mentions (docs/bridge.md).
+  pub is_integration: bool,
   /// Makes a retry of the creation return the same channel.
   pub maybe_idempotency_key: Option<IdempotencyKey>,
 }
@@ -84,7 +86,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_history_policy: options.maybe_history,
       maybe_topic: options.maybe_topic,
       maybe_description: None,
-      is_integration: false,
+      is_integration: options.is_integration,
       maybe_idempotency_key: options.maybe_idempotency_key,
     };
     self.create_channel_from(space, &request).await

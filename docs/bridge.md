@@ -56,17 +56,28 @@ journalctl -f | curl -T - -H 'Content-Type: text/plain' http://127.0.0.1:8088/in
 
 ## Setup
 
-1. An admin registers the bot: `POST /api/v1/admin/bots {"name": "NAS bridge"}`. The response has
-   the bot's user ID and its token (`tcb_...`), **shown once**.
-2. An admin adds the bot to the space (role `guest`) and flags the channels it serves
-   `is_integration` (`PATCH /conversations/{id}`): they get log retention (30 days by default,
-   `[integration]` in the server config), and push only for @mentions.
-3. Configure the bridge (`crates/teamcraft-bridge/teamcraft-bridge.example.toml`) with the server
+In the app:
+
+1. **Admin console → Integrations:** an admin creates the bot (a name). The bot's token (`tcb_...`)
+   is **shown once** with a ready-to-paste `teamcraft-bridge.toml` snippet; "New token" replaces the
+   token at once, "Revoke" deactivates the bot. (API: `POST /api/v1/admin/bots`.)
+2. **Channel settings → Integrations** (channel admins): add the bot to the channel. If the bot is not
+   in the channel's space yet it joins it as a guest first (space admins), then its device is
+   committed into the channel's encryption group from the client and handed the content keys. The
+   section also shows a `[[sources]]` block for this channel with the webhook and log URLs to point
+   Grafana, CI or `journalctl` at. A bot can be added to **any** channel; a bot's messages carry a
+   bot badge.
+3. **Channel settings → Integrations → Mode** (or "Channel type" in the new-channel dialog): "Normal"
+   or "Log channel" (`is_integration`: log view, log retention, 30 days by default, `[integration]`
+   in the server config, and push only for @mentions). Log channels are private; switch an existing
+   private channel at any time.
+4. Configure the bridge (`crates/teamcraft-bridge/teamcraft-bridge.example.toml`) with the server
    URL, the bot token, a database key and a recovery passphrase, and one `[[sources]]` block per
-   producer. Start it; the first run enrolls the bot's device.
-4. A member adds the bot to each channel from a client: that commits the bot's device into the
-   channel's encrypted group and hands it the content keys. The bridge picks the welcome up through
-   its gateway connection and starts sending.
+   producer. Start it; the first run enrolls the bot's device and it picks the welcomes of its
+   channels up through its gateway connection.
+
+The bridge never adds itself to a channel, and the app never shows a bot's token again after the
+first display (only its hash is stored).
 
 ## Bots
 
@@ -93,3 +104,4 @@ loopback only: `-p 127.0.0.1:8088:8088`.
 - Source configuration is read at start; changing a source needs a restart.
 - Channel membership of the bot is managed by members/admins, as for any user; the bridge never
   adds itself.
+- The bot list shows no last-activity time and bots have no picture yet.

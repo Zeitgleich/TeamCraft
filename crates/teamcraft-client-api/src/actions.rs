@@ -491,6 +491,9 @@ pub struct NewChannel {
   /// What people added later see (default: the workspace policy's).
   #[serde(default)]
   pub maybe_history: Option<HistoryPolicy>,
+  /// A log channel for bots and machine output (docs/bridge.md); such a channel is private.
+  #[serde(default)]
+  pub is_integration: bool,
   /// Generated once per user action; a retry of the queued action reuses it so the server creates
   /// the channel only once.
   #[serde(default)]
@@ -511,6 +514,9 @@ pub struct ChannelChanges {
   pub maybe_is_private: Option<bool>,
   #[serde(default)]
   pub maybe_is_archived: Option<bool>,
+  /// Switches the channel between normal and log mode.
+  #[serde(default)]
+  pub maybe_is_integration: Option<bool>,
   #[serde(default)]
   pub maybe_category: Option<CategoryChoice>,
   /// Moves the channel to another space (admin of both spaces, and every channel member already in
@@ -702,6 +708,15 @@ mod tests {
       serde_json::to_string(&MediaAnchor::Older(id_from_raw(7))).unwrap(),
       r#"{"kind":"older","message":"7"}"#
     );
+  }
+
+  #[test]
+  fn queued_channel_actions_from_before_log_channels_still_parse() {
+    let channel: NewChannel =
+      serde_json::from_str(r#"{"space":"1","name":"general","is_private":false}"#).expect("parse");
+    assert!(!channel.is_integration);
+    let changes: ChannelChanges = serde_json::from_str("{}").expect("parse");
+    assert_eq!(changes.maybe_is_integration, None);
   }
 
   #[test]
