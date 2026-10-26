@@ -24,6 +24,13 @@ use crate::reactive::SetIfAlive;
 use crate::settings::{SendMode, Theme};
 use crate::state::use_app_state;
 
+/// The tray icon styles' values in the settings' choices (their wire names).
+const TRAY_ICON_SLUGS: [(TrayIconStyle, &str); 3] = [
+  (TrayIconStyle::Colour, "colour"),
+  (TrayIconStyle::White, "white"),
+  (TrayIconStyle::Black, "black"),
+];
+
 #[component]
 pub fn AppearanceSection() -> impl IntoView {
   let state = use_app_state();
@@ -456,20 +463,19 @@ fn DesktopCard() -> impl IntoView {
   }
 }
 
-/// The tray icon style's value in the settings' choices (its wire name).
+/// The tray icon style's value in the settings' choices; a style of a newer app shows as colour.
 fn tray_icon_slug(style: TrayIconStyle) -> &'static str {
-  match style {
-    TrayIconStyle::Colour | TrayIconStyle::Unknown => "colour",
-    TrayIconStyle::White => "white",
-    TrayIconStyle::Black => "black",
-  }
+  TRAY_ICON_SLUGS
+    .iter()
+    .find(|(known, _)| *known == style)
+    .map_or(TRAY_ICON_SLUGS[0].1, |(_, slug)| *slug)
 }
 
 fn tray_icon_from_slug(slug: &str) -> TrayIconStyle {
-  TrayIconStyle::CHOICES
-    .into_iter()
-    .find(|style| tray_icon_slug(*style) == slug)
-    .unwrap_or_default()
+  TRAY_ICON_SLUGS
+    .iter()
+    .find(|(_, known)| *known == slug)
+    .map_or_else(TrayIconStyle::default, |(style, _)| *style)
 }
 
 #[component]

@@ -209,11 +209,47 @@ pub enum CallEngineEvent {
 /// What a driver counts during a call, for tests and diagnostics.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CallStats {
+  /// Audio frames (20 ms) sent and received; video is counted per kind below.
   pub frames_sent: u64,
   pub frames_received: u64,
   /// 20 ms mix frames with audible content.
   pub audible_frames_played: u64,
+  pub camera: VideoStats,
+  pub screen: VideoStats,
   pub maybe_privacy_code: Option<String>,
+}
+
+/// One kind of video (camera or screen) during a call. Encoded pictures count per layer: a
+/// captured frame becomes up to three pictures with simulcast.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VideoStats {
+  /// Frames the own capture delivered.
+  pub frames_captured: u64,
+  /// Pictures the own encoders produced.
+  pub pictures_encoded: u64,
+  /// Own pictures sent to the SFU.
+  pub pictures_sent: u64,
+  /// Own pictures not sent: the track not (yet) confirmed, the call not yet secured, or
+  /// encryption or packetization failed.
+  pub pictures_dropped: u64,
+  /// Own pictures of layers nobody receives or the uplink can't carry (not a failure).
+  pub pictures_paused: u64,
+  /// Pictures of others' tracks of this kind that arrived (decrypted).
+  pub pictures_received: u64,
+}
+
+/// What became of an own video picture handed to [`CallEngine::send_video`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoSendOutcome {
+  Sent,
+  /// The SFU hasn't confirmed the track (yet), or it was unpublished.
+  NotPublished,
+  /// Nobody receives this layer, or the uplink can't carry it.
+  LayerPaused,
+  /// DAVE isn't ready yet: nothing leaves unencrypted.
+  NotSecured,
+  /// Encryption or packetization failed (logged by the engine).
+  Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -582,30 +618,38 @@ impl CallEngine {
 
   /// Encrypts, splits and sends one encoded frame of an own track. Dropped before DAVE is ready,
   /// like audio, and on layers nobody receives or the uplink can't carry.
-  pub fn send_video(&mut self, stream_id: MediaStreamId, frame: &EncodedVideoFrame, now: Instant) {
+  pub fn send_video(
+    &mut self,
+    stream_id: MediaStreamId,
+    frame: &EncodedVideoFrame,
+    now: Instant,
+  ) -> VideoSendOutcome {
     let stream = StreamId(stream_id.0);
-    if self.is_compromised || !self.own_video.contains_key(&stream) {
-      return;
+    if self.is_compromised {
+      return VideoSendOutcome::NotSecured;
+    }
+    if !self.own_video.contains_key(&stream) {
+      return VideoSendOutcome::NotPublished;
     }
     let is_layer_sent = self
       .sent_layers
       .get(&stream)
       .is_none_or(|layers| layers.contains(&frame.layer.value()));
     if !is_layer_sent {
-      return;
+      return VideoSendOutcome::LayerPaused;
     }
     let Some(dave) = self.maybe_dave.as_mut().filter(|dave| dave.is_ready()) else {
-      return;
+      return VideoSendOutcome::NotSecured;
     };
     let encrypted = match dave.encrypt_frame(MediaKind::Video, frame_codec(&frame.codec), &frame.data) {
       Ok(encrypted) => encrypted.into_owned(),
       Err(error) => {
         warn!(%error, "video frame not encrypted, dropped");
-        return;
+        return VideoSendOutcome::Failed;
       },
     };
     let Some(track) = self.own_video.get_mut(&stream) else {
-      return;
+      return VideoSendOutcome::NotPublished;
     };
     let packets = match track.packetize(
       stream,
@@ -617,12 +661,13 @@ impl CallEngine {
       Ok(packets) => packets,
       Err(error) => {
         warn!(%error, "video frame dropped");
-        return;
+        return VideoSendOutcome::Failed;
       },
     };
     for rtp in packets {
       self.send_media(stream, frame.layer, &rtp, now);
     }
+    VideoSendOutcome::Sent
   }
 
   /// Periodic work (every ~100 ms): reports arrival times of received datagrams to the SFU.
@@ -1325,7 +1370,27 @@ impl CallEngine {
     } else {
       self.remote_video.insert(stream, IncomingVideo::new(&track));
     }
+    let is_own = track.device_id == self.config.device_id;
+    let own_layers: Vec<u8> = track.layers.iter().map(|info| info.layer).collect();
+    let stream_id = track.stream_id;
     self.event(CallEngineEvent::VideoPublished(track));
+    // The driver dropped the pictures encoded before this confirmation, the first keyframe
+    // among them: receivers would see nothing until the next one (issue #683).
+    if is_own {
+      self.request_own_keyframes(stream_id, &own_layers);
+    }
+  }
+
+  /// Asks the driver for a keyframe on each of `layers` of the own track `stream_id` (every
+  /// layer when the track has no layer list).
+  fn request_own_keyframes(&mut self, stream_id: MediaStreamId, layers: &[u8]) {
+    let layers = if layers.is_empty() { &[0][..] } else { layers };
+    for layer in layers {
+      self.event(CallEngineEvent::KeyframeRequested {
+        stream_id,
+        layer: *layer,
+      });
+    }
   }
 
   /// Encrypts one audio frame and sends it on `stream`. Dropped before DAVE is ready (there is no
@@ -1466,6 +1531,21 @@ impl CallEngine {
         privacy_code: code.to_owned(),
       };
       self.event(event);
+      // Pictures before this were dropped (nothing leaves unencrypted), and receivers that just
+      // got the new epoch's keys start with a keyframe.
+      let own: Vec<(MediaStreamId, Vec<u8>)> = self
+        .own_tracks
+        .values()
+        .map(|track| {
+          (
+            track.stream_id,
+            track.layers.iter().map(|info| info.layer).collect(),
+          )
+        })
+        .collect();
+      for (stream_id, layers) in own {
+        self.request_own_keyframes(stream_id, &layers);
+      }
     }
   }
 
@@ -1871,8 +1951,83 @@ mod tests {
         is_keyframe: true,
         data: vec![1; 100],
       };
-      alice.send_video(MediaStreamId(50), &frame, now);
+      assert_eq!(
+        alice.send_video(MediaStreamId(50), &frame, now),
+        VideoSendOutcome::NotPublished
+      );
       assert!(drain(&mut alice).is_empty());
+    }
+
+    #[test]
+    fn a_confirmed_own_track_asks_for_a_keyframe_on_every_layer() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      let track = own_camera(layers(2));
+      alice.publish_video(VideoTrackKind::Camera, VideoCodec::H264, layers(2));
+      drain(&mut alice);
+      let published = CallEvent::VideoPublished { track: track.clone() };
+      alice.handle_signal(event(6, published), now).unwrap();
+      // Pictures encoded before the confirmation were dropped, the first keyframe among them.
+      assert_eq!(
+        keyframe_requests(&mut alice),
+        vec![(MediaStreamId(50), 0), (MediaStreamId(50), 1)]
+      );
+
+      let mut frame = EncodedVideoFrame {
+        codec: VideoCodec::H264,
+        layer: SimulcastLayer::BASE,
+        timestamp: RtpTimestamp(0),
+        is_keyframe: true,
+        // An IDR slice header (first macroblock 0, slice type, picture parameter set 0) and data.
+        data: [&[0, 0, 0, 1, 0x65][..], &[0x88; 64]].concat(),
+      };
+      assert_eq!(
+        alice.send_video(MediaStreamId(50), &frame, now),
+        VideoSendOutcome::Sent
+      );
+      frame.layer = SimulcastLayer::new(2).unwrap();
+      assert_eq!(
+        alice.send_video(MediaStreamId(50), &frame, now),
+        VideoSendOutcome::LayerPaused
+      );
+    }
+
+    #[test]
+    fn securing_the_call_asks_for_keyframes_of_own_tracks() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      alice.publish_video(VideoTrackKind::Camera, VideoCodec::H264, layers(1));
+      let published = CallEvent::VideoPublished {
+        track: own_camera(layers(1)),
+      };
+      alice.handle_signal(event(6, published), now).unwrap();
+      drain(&mut alice);
+      // A new epoch (someone joined, or the group just became ready): pictures before it were
+      // dropped or can't be decrypted by the newcomers.
+      alice.report_secured();
+      assert_eq!(keyframe_requests(&mut alice), vec![(MediaStreamId(50), 0)]);
+    }
+
+    fn own_camera(layers: Vec<VideoLayerInfo>) -> VideoTrack {
+      VideoTrack {
+        stream_id: MediaStreamId(50),
+        device_id: device(1),
+        kind: VideoTrackKind::Camera,
+        codec: VideoCodec::H264,
+        layers,
+      }
+    }
+
+    fn keyframe_requests(engine: &mut CallEngine) -> Vec<(MediaStreamId, u8)> {
+      drain(engine)
+        .into_iter()
+        .filter_map(|output| match output {
+          EngineOutput::Event(CallEngineEvent::KeyframeRequested { stream_id, layer }) => {
+            Some((stream_id, layer))
+          },
+          _ => None,
+        })
+        .collect()
     }
 
     #[test]

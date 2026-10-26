@@ -14,6 +14,7 @@ use openh264::encoder::{
 use openh264::formats::YUVSource;
 use teamcraft_proto::{VideoCodec, VideoLayerInfo};
 use thiserror::Error;
+use tracing::warn;
 
 use crate::datagram::SimulcastLayer;
 use crate::openh264_library::{self, OpenH264LibraryError};
@@ -21,6 +22,11 @@ use crate::video::{EncodedVideoFrame, VideoError, VideoFrame, VideoResolution};
 
 /// A keyframe at least this often, so receivers recover from losses without asking.
 const KEYFRAME_INTERVAL_FRAMES: u32 = 300;
+/// A hardware encoder that took this many frames in a row without giving a picture...
+const STALL_MIN_FRAMES: u32 = 10;
+/// ...over at least this much capture time has stalled; software takes over. Short enough that
+/// the others barely notice, long enough for an encoder's start-up latency.
+const STALL_MIN_SPAN_US: u64 = 1_500_000;
 
 /// Encodes raw frames of one fixed resolution.
 pub trait VideoEncoder {
@@ -64,13 +70,37 @@ pub struct OpenH264Decoder {
   decoder: Decoder,
 }
 
-/// A hardware encoder that hands over to OpenH264 for good when it fails (a lost GPU, a driver
-/// error mid-call), with a keyframe so receivers recover right away.
+/// A hardware encoder that hands over to software for good when it fails (a lost GPU, a driver
+/// error mid-call) or stalls (takes frames but gives no pictures, issue #683), with a keyframe so
+/// receivers recover right away.
 pub struct FallbackEncoder {
   maybe_hardware: Option<Box<dyn VideoEncoder>>,
-  maybe_software: Option<OpenH264Encoder>,
+  maybe_software: Option<Box<dyn VideoEncoder>>,
+  make_software: SoftwareEncoderFactory,
   layer: VideoLayerInfo,
   content: VideoContent,
+  stall: StallWatch,
+}
+
+/// Builds the software encoder a [`FallbackEncoder`] switches to (OpenH264; a fake in tests).
+pub type SoftwareEncoderFactory =
+  Box<dyn Fn(&VideoLayerInfo, VideoContent) -> Result<Box<dyn VideoEncoder>, VideoCodecError> + Send>;
+
+/// Tells a stalled encoder from one that drops a frame now and then: no picture for
+/// [`STALL_MIN_FRAMES`] frames spanning [`STALL_MIN_SPAN_US`] of capture time. Measured with the
+/// frames' own timestamps, so it needs no clock of its own.
+#[derive(Debug, Default)]
+struct StallWatch {
+  maybe_first_unanswered_us: Option<u64>,
+  unanswered_frames: u32,
+}
+
+/// What a [`FallbackEncoder`]'s hardware made of one frame.
+enum HardwareAnswer {
+  /// A picture, or none for this frame (encoder latency, a dropped frame).
+  Encoded(Option<EncodedPicture>),
+  /// The hardware is gone (failed or stalled), or was already.
+  Gone,
 }
 
 /// Encodes every simulcast layer of one track from the full-size frames, skipping layers no
@@ -180,12 +210,64 @@ impl VideoDecoder for OpenH264Decoder {
 }
 
 impl FallbackEncoder {
+  /// Falls back to OpenH264.
   pub fn new(hardware: Box<dyn VideoEncoder>, layer: &VideoLayerInfo, content: VideoContent) -> Self {
+    Self::with_software(
+      hardware,
+      layer,
+      content,
+      Box::new(|layer, content| Ok(Box::new(OpenH264Encoder::new(layer, content)?) as Box<dyn VideoEncoder>)),
+    )
+  }
+
+  /// Falls back to what `make_software` builds.
+  pub fn with_software(
+    hardware: Box<dyn VideoEncoder>,
+    layer: &VideoLayerInfo,
+    content: VideoContent,
+    make_software: SoftwareEncoderFactory,
+  ) -> Self {
     Self {
       maybe_hardware: Some(hardware),
       maybe_software: None,
+      make_software,
       layer: *layer,
       content,
+      stall: StallWatch::default(),
+    }
+  }
+
+  /// Whether the hardware encoder still does the work.
+  pub fn is_hardware(&self) -> bool {
+    self.maybe_hardware.is_some()
+  }
+
+  /// What the hardware made of `frame`; [`HardwareAnswer::Gone`] once it failed or stalled (it
+  /// is then dropped, and software takes over).
+  fn encode_in_hardware(&mut self, frame: &VideoFrame, is_keyframe_forced: bool) -> HardwareAnswer {
+    let Some(hardware) = self.maybe_hardware.as_mut() else {
+      return HardwareAnswer::Gone;
+    };
+    let layer = (self.layer.width, self.layer.height);
+    match hardware.encode(frame, is_keyframe_forced) {
+      Ok(Some(picture)) => {
+        self.stall = StallWatch::default();
+        HardwareAnswer::Encoded(Some(picture))
+      },
+      Ok(None) if self.stall.is_stalled_after(frame.timestamp_us()) => {
+        warn!(
+          ?layer,
+          "hardware encoder gives no pictures; continuing in software"
+        );
+        self.maybe_hardware = None;
+        HardwareAnswer::Gone
+      },
+      Ok(None) => HardwareAnswer::Encoded(None),
+      Err(error) => {
+        warn!(%error, ?layer, "hardware encoder failed; continuing in software");
+        self.maybe_hardware = None;
+        HardwareAnswer::Gone
+      },
     }
   }
 }
@@ -200,24 +282,27 @@ impl VideoEncoder for FallbackEncoder {
     frame: &VideoFrame,
     is_keyframe_forced: bool,
   ) -> Result<Option<EncodedPicture>, VideoCodecError> {
-    let mut is_switching = false;
-    if let Some(hardware) = &mut self.maybe_hardware {
-      match hardware.encode(frame, is_keyframe_forced) {
-        Ok(maybe_picture) => return Ok(maybe_picture),
-        Err(error) => {
-          tracing::warn!(%error, "hardware encoder failed; continuing in software");
-          self.maybe_hardware = None;
-          is_switching = true;
-        },
-      }
+    let was_hardware = self.is_hardware();
+    if let HardwareAnswer::Encoded(maybe_picture) = self.encode_in_hardware(frame, is_keyframe_forced) {
+      return Ok(maybe_picture);
     }
+    let is_switching = was_hardware;
     let software = match &mut self.maybe_software {
       Some(software) => software,
       None => self
         .maybe_software
-        .insert(OpenH264Encoder::new(&self.layer, self.content)?),
+        .insert((self.make_software)(&self.layer, self.content)?),
     };
     software.encode(frame, is_keyframe_forced || is_switching)
+  }
+}
+
+impl StallWatch {
+  /// Counts a frame that gave no picture; `true` once that makes a stall.
+  fn is_stalled_after(&mut self, timestamp_us: u64) -> bool {
+    let first_us = *self.maybe_first_unanswered_us.get_or_insert(timestamp_us);
+    self.unanswered_frames = self.unanswered_frames.saturating_add(1);
+    self.unanswered_frames >= STALL_MIN_FRAMES && timestamp_us.saturating_sub(first_us) >= STALL_MIN_SPAN_US
   }
 }
 
@@ -268,10 +353,10 @@ impl SimulcastEncoder {
     let timestamp = EncodedVideoFrame::rtp_timestamp(frame.timestamp_us());
     let mut encoded = Vec::new();
     for layer in self.layers.iter_mut().filter(|layer| layer.is_needed) {
-      let Some(picture) = layer
-        .encoder
-        .encode(frame, std::mem::take(&mut layer.wants_keyframe))?
-      else {
+      let wants_keyframe = std::mem::take(&mut layer.wants_keyframe);
+      let Some(picture) = layer.encoder.encode(frame, wants_keyframe)? else {
+        // A dropped frame doesn't satisfy a keyframe request: the next frame asks again.
+        layer.wants_keyframe = wants_keyframe;
         continue;
       };
       encoded.push(EncodedVideoFrame {
@@ -470,6 +555,184 @@ mod tests {
     assert!(starts_with_sps(&[0, 0, 1, 0x27]));
     assert!(!starts_with_sps(&[0, 0, 0, 1, 0x65]));
     assert!(!starts_with_sps(&[]));
+  }
+
+  mod fallback {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    /// 30 fps.
+    const FRAME_INTERVAL_US: u64 = 33_334;
+
+    #[test]
+    fn a_stalled_hardware_encoder_hands_over_to_software_with_a_keyframe() {
+      let (mut encoder, software_log) = fallback_encoder(FakeEncoder::Stalled);
+      let outputs = encode_many(&mut encoder, 60);
+      // 10 frames are not enough on their own: the stall also has to last 1.5 s of capture time.
+      let first = outputs.iter().position(Option::is_some).unwrap();
+      assert_eq!(first, 45, "1.5 s at 30 fps");
+      assert!(!encoder.is_hardware());
+      assert!(
+        outputs[first].as_ref().unwrap().is_keyframe,
+        "receivers recover at once"
+      );
+      assert!(outputs[first..].iter().all(Option::is_some));
+      assert_eq!(software_log.lock().unwrap().first(), Some(&true));
+    }
+
+    #[test]
+    fn a_hardware_encoder_that_drops_some_frames_keeps_the_work() {
+      let (mut encoder, software_log) = fallback_encoder(FakeEncoder::EveryOther(0));
+      let outputs = encode_many(&mut encoder, 300);
+      assert!(encoder.is_hardware());
+      assert_eq!(outputs.iter().filter(|output| output.is_some()).count(), 150);
+      assert!(software_log.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_slow_starting_hardware_encoder_keeps_the_work() {
+      // No picture for the first second (start-up latency), then one per frame.
+      let (mut encoder, _) = fallback_encoder(FakeEncoder::StartsAfter(30));
+      let outputs = encode_many(&mut encoder, 90);
+      assert!(encoder.is_hardware());
+      assert!(outputs[30..].iter().all(Option::is_some));
+    }
+
+    #[test]
+    fn a_failing_hardware_encoder_hands_over_at_once() {
+      let (mut encoder, software_log) = fallback_encoder(FakeEncoder::Failing);
+      let outputs = encode_many(&mut encoder, 3);
+      assert!(!encoder.is_hardware());
+      assert!(outputs.iter().all(Option::is_some));
+      assert_eq!(*software_log.lock().unwrap(), vec![true, false, false]);
+    }
+
+    #[test]
+    fn a_dropped_frame_keeps_a_keyframe_request_for_the_next() {
+      let layers = simulcast_layers(
+        VideoResolution {
+          width: 32,
+          height: 32,
+        },
+        30,
+        100_000,
+        1,
+      );
+      let mut simulcast = SimulcastEncoder::new(&layers, |_| {
+        Ok(Box::new(FakeEncoder::StartsAfter(2)) as Box<dyn VideoEncoder>)
+      })
+      .unwrap();
+      let mut keyframes = Vec::new();
+      for index in 0..4 {
+        for picture in simulcast.encode(&frame(index)).unwrap() {
+          keyframes.push(picture.is_keyframe);
+        }
+      }
+      // The start's keyframe request survives the two frames the encoder gave nothing for.
+      assert_eq!(keyframes, vec![true, false]);
+    }
+
+    /// Hardware stand-ins; pictures are keyframes when forced.
+    enum FakeEncoder {
+      Stalled,
+      Failing,
+      /// A picture for every other frame (the counter is the frame number).
+      EveryOther(u32),
+      /// No picture for this many frames, then one per frame.
+      StartsAfter(u32),
+    }
+
+    impl VideoEncoder for FakeEncoder {
+      fn codec(&self) -> VideoCodec {
+        VideoCodec::H264
+      }
+
+      fn encode(
+        &mut self,
+        _frame: &VideoFrame,
+        is_keyframe_forced: bool,
+      ) -> Result<Option<EncodedPicture>, VideoCodecError> {
+        let picture = Some(EncodedPicture {
+          is_keyframe: is_keyframe_forced,
+          data: vec![0, 0, 0, 1, 0x65],
+        });
+        match self {
+          Self::Stalled => Ok(None),
+          Self::Failing => Err(VideoCodecError::Codec("device lost".into())),
+          Self::EveryOther(count) => {
+            *count += 1;
+            Ok(if *count % 2 == 0 { picture } else { None })
+          },
+          Self::StartsAfter(remaining) => {
+            if *remaining == 0 {
+              return Ok(picture);
+            }
+            *remaining -= 1;
+            Ok(None)
+          },
+        }
+      }
+    }
+
+    /// A fallback encoder over `hardware` whose software side records its keyframe flags.
+    fn fallback_encoder(hardware: FakeEncoder) -> (FallbackEncoder, Arc<Mutex<Vec<bool>>>) {
+      let log: Arc<Mutex<Vec<bool>>> = Arc::default();
+      let software_log = Arc::clone(&log);
+      let layer = simulcast_layers(
+        VideoResolution {
+          width: 32,
+          height: 32,
+        },
+        30,
+        100_000,
+        1,
+      )[0];
+      let encoder = FallbackEncoder::with_software(
+        Box::new(hardware),
+        &layer,
+        VideoContent::Camera,
+        Box::new(move |_, _| {
+          Ok(Box::new(RecordingEncoder(Arc::clone(&software_log))) as Box<dyn VideoEncoder>)
+        }),
+      );
+      (encoder, log)
+    }
+
+    /// Software stand-in: a picture per frame, recording whether a keyframe was forced.
+    struct RecordingEncoder(Arc<Mutex<Vec<bool>>>);
+
+    impl VideoEncoder for RecordingEncoder {
+      fn codec(&self) -> VideoCodec {
+        VideoCodec::H264
+      }
+
+      fn encode(
+        &mut self,
+        _frame: &VideoFrame,
+        is_keyframe_forced: bool,
+      ) -> Result<Option<EncodedPicture>, VideoCodecError> {
+        self.0.lock().unwrap().push(is_keyframe_forced);
+        Ok(Some(EncodedPicture {
+          is_keyframe: is_keyframe_forced,
+          data: vec![0, 0, 0, 1, 0x65],
+        }))
+      }
+    }
+
+    fn encode_many(encoder: &mut FallbackEncoder, count: u64) -> Vec<Option<EncodedPicture>> {
+      (0..count)
+        .map(|index| encoder.encode(&frame(index), index == 0).unwrap())
+        .collect()
+    }
+
+    fn frame(index: u64) -> VideoFrame {
+      let resolution = VideoResolution {
+        width: 32,
+        height: 32,
+      };
+      VideoFrame::new(resolution, index * FRAME_INTERVAL_US, vec![128; 32 * 32 * 3 / 2]).unwrap()
+    }
   }
 
   fn encode_frames(simulcast: &mut SimulcastEncoder, index: &mut u32, count: u32) -> Vec<EncodedVideoFrame> {

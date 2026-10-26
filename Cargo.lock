@@ -10702,6 +10702,7 @@ dependencies = [
  "teamcraft-desktop-native",
  "teamcraft-media",
  "teamcraft-proto",
+ "teamcraft-sfu",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -10710,6 +10711,7 @@ dependencies = [
  "user-idle-time",
  "webkit2gtk",
  "windows",
+ "wtransport",
  "zbus",
 ]
 
