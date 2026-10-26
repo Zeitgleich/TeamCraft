@@ -109,7 +109,7 @@ self.addEventListener('message', (event) => {
         .catch((error) => event.source.postMessage({ type: 'push', ready: false, reason: reasonOf(error) })),
     );
   } else if (data.type === 'push_database' && typeof data.name === 'string') {
-    event.waitUntil(rememberDatabase(data.name, typeof data.mark_read_label === 'string' ? data.mark_read_label : ''));
+    event.waitUntil(rememberDatabase(data.name, typeof data.labels === 'string' ? data.labels : ''));
   }
 });
 
@@ -403,17 +403,28 @@ function loadPush() {
   return pushReady;
 }
 
-// The page also leaves the translated "Mark as read" of notification buttons: this worker has no
-// translations, and no page may be open when a push arrives.
-async function rememberDatabase(name, markReadLabel) {
+// The page also leaves the notification texts in the user's language (JSON, `NotificationLabels` in
+// teamcraft-core): this worker has no translations, and no page may be open when a push arrives.
+async function rememberDatabase(name, labels) {
   const cache = await caches.open(PUSH_CONFIG_CACHE);
   await cache.put('/push-database', new Response(name));
-  await cache.put('/push-mark-read-label', new Response(markReadLabel));
+  await cache.put('/push-labels', new Response(labels));
 }
 
-async function markReadLabel() {
-  const hit = await (await caches.open(PUSH_CONFIG_CACHE)).match('/push-mark-read-label');
+async function notificationLabels() {
+  const hit = await (await caches.open(PUSH_CONFIG_CACHE)).match('/push-labels');
   return hit ? (await hit.text()) || null : null;
+}
+
+// "New message" in the user's language for the fallback below; English without the page's labels.
+async function newMessageText() {
+  try {
+    const labels = JSON.parse((await notificationLabels()) || '{}');
+    if (typeof labels.new_message === 'string' && labels.new_message.trim()) return labels.new_message;
+  } catch (error) {
+    console.warn('notification labels unreadable', error);
+  }
+  return 'New message';
 }
 
 async function databaseName() {
@@ -432,16 +443,16 @@ async function showPush(event) {
       if (name) {
         await loadPush();
         const payload = event.data ? new Uint8Array(await event.data.arrayBuffer()) : new Uint8Array();
-        await wasm_bindgen.handlePush(name, payload, await markReadLabel());
+        await wasm_bindgen.handlePush(name, payload, await notificationLabels());
         return;
       }
     } catch (error) {
       console.warn('push could not be opened', error);
     }
   }
-  // Browsers require a notification for every push.
+  // Browsers require a notification for every push; it says at least that a message came.
   await self.registration.showNotification('TeamCraft', {
-    body: 'New activity',
+    body: await newMessageText(),
     tag: 'teamcraft-wake-up',
     renotify: false,
   });

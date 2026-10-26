@@ -1333,8 +1333,17 @@ Details:
   (`PushSession`, in the encrypted store) so the worker can fetch and decrypt it; otherwise the
   notification has names only. Like the NSE, the worker never touches MLS state. The page subscribes
   with the server's VAPID key (`GET /api/v1/push/web-key`), registers the subscription with a fresh push
-  key, keeps the access token in the `PushSession` fresh, and tells the worker which database to open;
-  a click on a notification focuses an open window or opens `/?conversation_id=<id>`.
+  key, keeps the access token in the `PushSession` fresh, and tells the worker which database to open
+  together with the notification texts in the user's language (`NotificationLabels`: "New message",
+  "New message from {name}", "Photo", "Incoming call from {name}", "Mark as read", …), which the
+  worker keeps in its cache: it has no translations, and no page may be open when a push arrives.
+  These texts are UI strings, not secrets. Title and body follow the native apps' rules
+  (`push_text::notification_text`, iOS `NotificationText`); the apps' subtitle (the sender in a
+  channel) leads the body, as web notifications have none. A notification never goes out empty:
+  when policy, device setting or a failure leaves no names or text, it still says "New message" in
+  that language (issue #644). The server sends only the
+  sealed wake-up; any "from <site>" line under the notification is the browser naming the app.
+  A click on a notification focuses an open window or opens `/?conversation_id=<id>`.
   Browsers rotate or drop subscriptions on their own. The worker handles `pushsubscriptionchange`
   (subscribing again with the old subscription's key where the browser did not) and tells open pages;
   the page that owns the store (§9.4), at every start and on that message, compares

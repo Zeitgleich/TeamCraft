@@ -1582,7 +1582,12 @@ fn default_server_client() -> String {
 }
 
 fn default_app_scopes() -> Vec<String> {
-  vec!["openid".into(), "profile".into(), "email".into(), "offline_access".into()]
+  vec![
+    "openid".into(),
+    "profile".into(),
+    "email".into(),
+    "offline_access".into(),
+  ]
 }
 
 fn default_algorithms() -> Vec<String> {
