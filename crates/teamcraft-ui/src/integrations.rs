@@ -11,12 +11,23 @@ use crate::model::{ConversationId, UserId};
 use crate::reactive::SetIfAlive;
 use crate::rest::{RestClient, RestError};
 
-/// Where the bridge listens by default (`[listen]` of its configuration).
 /// Where the bridge reads the bot token from (a mounted secret in the container).
 const TOKEN_FILE: &str = "/run/secrets/teamcraft-bridge-token";
+/// Where the bridge listens by default (`[listen]` of its configuration).
 const DEFAULT_BRIDGE_URL: &str = "http://127.0.0.1:8088";
 /// Longest bot name the form accepts; the server has the last word.
 pub const MAX_BOT_NAME_CHARS: usize = 80;
+
+/// Where the bridge that receives a source's webhooks and log lines runs; it decides the base of the
+/// URLs the channel settings show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeLocation {
+  /// On the instance (teamcraft-deploy role `teamcraft_bridge`): the proxy routes `/hooks/` and
+  /// `/ingest/` of the instance's host name to it.
+  Instance,
+  /// Next to the producers, on its default loopback address.
+  Loopback,
+}
 
 /// The bots of the instance, for the admin console. Provided as context after sign-in.
 #[derive(Clone, Copy)]
@@ -123,14 +134,24 @@ pub fn source_block(conversation: ConversationId, source_name: &str, source_toke
   )
 }
 
+/// Where producers reach the bridge: the instance's address (`server_url`) or the loopback default.
+/// Without a known instance address the loopback default is the only usable answer.
+pub fn bridge_base_url(location: BridgeLocation, server_url: &str) -> String {
+  let server = server_url.trim().trim_end_matches('/');
+  match location {
+    BridgeLocation::Instance if !server.is_empty() => server.to_owned(),
+    BridgeLocation::Instance | BridgeLocation::Loopback => DEFAULT_BRIDGE_URL.to_owned(),
+  }
+}
+
 /// The URL a webhook sender posts to.
-pub fn webhook_url(source_token: &str) -> String {
-  format!("{DEFAULT_BRIDGE_URL}/hooks/{source_token}")
+pub fn webhook_url(base_url: &str, source_token: &str) -> String {
+  format!("{base_url}/hooks/{source_token}")
 }
 
 /// The URL log lines are piped to.
-pub fn ingest_url(source_token: &str) -> String {
-  format!("{DEFAULT_BRIDGE_URL}/ingest/{source_token}")
+pub fn ingest_url(base_url: &str, source_token: &str) -> String {
+  format!("{base_url}/ingest/{source_token}")
 }
 
 /// A random-looking source token for the snippet: 32 hex characters from the browser's CSPRNG
@@ -175,8 +196,32 @@ mod tests {
 
   #[test]
   fn urls_carry_the_source_token() {
-    assert_eq!(webhook_url("t"), "http://127.0.0.1:8088/hooks/t");
-    assert_eq!(ingest_url("t"), "http://127.0.0.1:8088/ingest/t");
+    assert_eq!(
+      webhook_url(DEFAULT_BRIDGE_URL, "t"),
+      "http://127.0.0.1:8088/hooks/t"
+    );
+    assert_eq!(
+      ingest_url(DEFAULT_BRIDGE_URL, "t"),
+      "http://127.0.0.1:8088/ingest/t"
+    );
+  }
+
+  #[test]
+  fn a_bridge_on_the_instance_is_reached_through_its_host_name() {
+    let base = bridge_base_url(BridgeLocation::Instance, "https://chat.example.com/");
+    assert_eq!(base, "https://chat.example.com");
+    assert_eq!(webhook_url(&base, "t"), "https://chat.example.com/hooks/t");
+    assert_eq!(ingest_url(&base, "t"), "https://chat.example.com/ingest/t");
+  }
+
+  #[test]
+  fn a_local_bridge_or_an_unknown_instance_uses_the_loopback_default() {
+    let server = "https://chat.example.com";
+    assert_eq!(
+      bridge_base_url(BridgeLocation::Loopback, server),
+      DEFAULT_BRIDGE_URL
+    );
+    assert_eq!(bridge_base_url(BridgeLocation::Instance, " "), DEFAULT_BRIDGE_URL);
   }
 
   #[test]

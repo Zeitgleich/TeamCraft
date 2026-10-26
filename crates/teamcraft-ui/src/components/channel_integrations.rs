@@ -7,10 +7,13 @@ use teamcraft_proto::{HistoryPolicy, Permission};
 use crate::channel_access::ChannelAccess;
 use crate::components::admin_integrations::CopyButton;
 use crate::components::icons::{Icon, IconName};
+use crate::components::space_invites::web_origin;
 use crate::components::workspace_dialogs::FailureNote;
 use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
-use crate::integrations::{ingest_url, new_source_token, source_block, webhook_url};
+use crate::integrations::{
+  BridgeLocation, bridge_base_url, ingest_url, new_source_token, source_block, webhook_url,
+};
 use crate::model::{ConversationId, ConversationKind, User};
 use crate::state::use_app_state;
 
@@ -238,27 +241,61 @@ fn BotCandidateRow(conversation: ConversationId, bot: User, joins_space: bool) -
 }
 
 /// What to point Grafana, CI or `journalctl` at: a source block for the bridge's configuration
-/// with this channel, and the two URLs.
+/// with this channel, and the two URLs, on the instance's host name (teamcraft-deploy) or on the
+/// bridge's loopback default.
 #[component]
 fn SourceHints(conversation: ConversationId) -> impl IntoView {
   let i18n = use_i18n();
   let token = new_source_token();
   let block = source_block(conversation, "my-source", &token);
-  let webhook = webhook_url(&token);
-  let ingest = ingest_url(&token);
-  let logs_command = format!("journalctl -f | curl -T - -H 'Content-Type: text/plain' {ingest}");
-  let hook_command = format!("curl -d '{{\"text\":\"Deploy finished\"}}' {webhook}");
+  let server = web_origin().unwrap_or_default();
+  let location = RwSignal::new(BridgeLocation::Instance);
+  let commands = Memo::new(move |_| {
+    let base = bridge_base_url(location.get(), &server);
+    let webhook = webhook_url(&base, &token);
+    let ingest = ingest_url(&base, &token);
+    (
+      format!("curl -d '{{\"text\":\"Deploy finished\"}}' {webhook}"),
+      format!("journalctl -f | curl -T - -H 'Content-Type: text/plain' {ingest}"),
+    )
+  });
+  let hook_command = Signal::derive(move || commands.get().0);
+  let logs_command = Signal::derive(move || commands.get().1);
+  let location_button = move |value: BridgeLocation, key: &'static str| {
+    let is_selected = move || location.get() == value;
+    view! {
+      <button
+        type="button"
+        role="radio"
+        aria-checked=move || is_selected().to_string()
+        aria-pressed=move || is_selected().to_string()
+        on:click=move |_| location.set(value)
+      >
+        {move || i18n.t(key)}
+      </button>
+    }
+  };
   view! {
     <h3 class="detail-heading">{move || i18n.t("channel-sources")}</h3>
     <p class="hint">{move || i18n.t("channel-sources-hint")}</p>
     <label for="channel-source-block">{move || i18n.t("channel-sources-block")}</label>
     <textarea id="channel-source-block" class="input mono" rows="5" readonly prop:value=block.clone()></textarea>
     <div class="integration-copy-row"><CopyButton text=block.clone() /></div>
+    <div class="segmented" role="radiogroup" aria-label=move || i18n.t("channel-sources-bridge")>
+      {location_button(BridgeLocation::Instance, "channel-sources-bridge-instance")}
+      {location_button(BridgeLocation::Loopback, "channel-sources-bridge-loopback")}
+    </div>
+    <p class="hint">
+      {move || match location.get() {
+        BridgeLocation::Instance => i18n.t("channel-sources-bridge-instance-hint"),
+        BridgeLocation::Loopback => i18n.t("channel-sources-bridge-loopback-hint"),
+      }}
+    </p>
     <label for="channel-source-hook">{move || i18n.t("channel-sources-webhook")}</label>
-    <input id="channel-source-hook" class="input mono" readonly prop:value=hook_command.clone() />
-    <div class="integration-copy-row"><CopyButton text=hook_command.clone() /></div>
+    <input id="channel-source-hook" class="input mono" readonly prop:value=hook_command />
+    <div class="integration-copy-row"><CopyButton text=hook_command /></div>
     <label for="channel-source-logs">{move || i18n.t("channel-sources-logs")}</label>
-    <input id="channel-source-logs" class="input mono" readonly prop:value=logs_command.clone() />
-    <div class="integration-copy-row"><CopyButton text=logs_command.clone() /></div>
+    <input id="channel-source-logs" class="input mono" readonly prop:value=logs_command />
+    <div class="integration-copy-row"><CopyButton text=logs_command /></div>
   }
 }

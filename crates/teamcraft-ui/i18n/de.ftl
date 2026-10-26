@@ -2750,5 +2750,10 @@ channel-sources-hint = Grafana, CI oder journalctl auf die Bridge richten. Diese
 channel-sources-block = Quelle für die Bridge-Konfiguration
 channel-sources-webhook = Webhook (Slack-kompatibel)
 channel-sources-logs = Logzeilen
+channel-sources-bridge = Wo die Bridge läuft
+channel-sources-bridge-instance = Auf diesem Server
+channel-sources-bridge-loopback = Auf eigenem Rechner
+channel-sources-bridge-instance-hint = Die Bridge läuft neben dem Server (Deployment-Option teamcraft_bridge); Quellen senden an die Adresse dieses Servers.
+channel-sources-bridge-loopback-hint = Die Bridge läuft neben den Quellen und lauscht auf ihrer lokalen Standardadresse. Wurde ihr Listener geöffnet, die eigene Adresse der Bridge verwenden.
 
 notes-title = Mein Speicher

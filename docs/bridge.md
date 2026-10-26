@@ -65,8 +65,8 @@ In the app:
    in the channel's space yet it joins it as a guest first (space admins), then its device is
    committed into the channel's encryption group from the client and handed the content keys. The
    section also shows a `[[sources]]` block for this channel with the webhook and log URLs to point
-   Grafana, CI or `journalctl` at. A bot can be added to **any** channel; a bot's messages carry a
-   bot badge.
+   Grafana, CI or `journalctl` at, for either place the bridge can run (see "Where producers reach
+   the bridge" below). A bot can be added to **any** channel; a bot's messages carry a bot badge.
 3. **Channel settings → Integrations → Mode** (or "Channel type" in the new-channel dialog): "Normal"
    or "Log channel" (`is_integration`: log view, log retention, 30 days by default, `[integration]`
    in the server config, and push only for @mentions). Log channels are private; switch an existing
@@ -78,6 +78,18 @@ In the app:
 
 The bridge never adds itself to a channel, and the app never shows a bot's token again after the
 first display (only its hash is stored).
+
+### Where producers reach the bridge
+
+The channel section's "Where the bridge runs" switch picks the base of the URLs it shows:
+
+| Choice             | URLs                                                       | When                                                                                                                          |
+|--------------------|------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------|
+| On this server     | `https://<instance host>/hooks/<token>`, `/ingest/<token>` | The deployment runs the bridge (teamcraft-deploy role `teamcraft_bridge`); its proxy routes both paths to the loopback bridge |
+| On its own machine | `http://127.0.0.1:8088/hooks/<token>`, `/ingest/<token>`   | The bridge runs next to the producers on its default listener; use its own address instead if you opened the listener         |
+
+The first is the default. The app does not check whether a bridge answers there: on an instance
+without the bridge role the instance's host name has no `/hooks/` route.
 
 ## Bots
 

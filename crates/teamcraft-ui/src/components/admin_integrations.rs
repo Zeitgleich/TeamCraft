@@ -183,14 +183,14 @@ fn TokenReveal(hub: BotsHub, reveal: BotTokenResponse) -> impl IntoView {
 
 /// Copies `text`; the label says "Copied" afterwards.
 #[component]
-pub fn CopyButton(text: String) -> impl IntoView {
+pub fn CopyButton(#[prop(into)] text: Signal<String>) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let is_copied = RwSignal::new(false);
   let copy = move |_| {
     let failed = i18n.t("action-copy-failed");
     // Started inside the click: browsers only allow clipboard writes from a user action.
-    let copying = copy_text(&text);
+    let copying = copy_text(&text.get_untracked());
     spawn_local(async move {
       if copying.await {
         is_copied.set_if_alive(true);
