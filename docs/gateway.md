@@ -70,21 +70,27 @@ The workspace's away timeout (`presence.away_timeout_minutes`, 15 for a new work
 stored policies with less are applied as 5, absent lets the devices decide) marks a device that said
 `active` but showed no sign of life for that long as timed out (away). Unlike a device's own `idle`,
 which only the device ends, any sign of life ends a timeout at once: `set_activity active`, `typing`,
-an attentive `attention` report or a heartbeat while attentive. A `set_activity` that makes an idle or
-timed-out device active always goes through; other activity changes are throttled to one per second,
-and a repeated report only counts for the timeout (no presence refresh). Desktop and web report
-`active` on input while their window is focused and visible (at most every 30 s), when the window
-comes to the front, after every reconnect or resume (a resumed session keeps what the server last
-knew; a new one identifies with the last report), and when the user picks "Online". Their own "Away
-after" (privacy settings) defaults to 15 minutes without input. The desktop app counts input anywhere
-on the computer (the OS idle time, polled every 5 s, also while the window is in the background or in
-the tray) as input and treats a locked screen as away at once, unless automatic away is off; only the
-idle duration and the lock state leave the OS layer, no key or pointer data.
+an attentive `attention` report or a heartbeat while attentive. Sending a message goes further: it
+makes the sending device active at once, also when it said `idle` (a stale lock or idle reading can't
+keep somebody away who is writing), until the device's next report or the timeout. A `set_activity`
+that makes an idle or timed-out device active always goes through; other activity changes are
+throttled to one per second, and a repeated report only counts for the timeout (no presence refresh).
+Desktop and web report `active` on input in their window (at most every 30 s, whether or not the
+webview counts the window as focused), when the window comes to the front, after every reconnect or
+resume (a resumed session keeps what the server last knew; a new one identifies with the last report),
+and when the user picks "Online". Their own "Away after" (privacy settings) defaults to 15 minutes
+without input. The desktop app counts input anywhere on the computer (the OS idle time, polled every
+5 s, also while the window is in the background or in the tray) as input and treats a locked screen as
+away at once, unless automatic away is off; only the idle duration and the lock state leave the OS
+layer, no key or pointer data. A lock reading that input in the window contradicts (a locked screen
+passes none) is stale and ignored until the OS reports the screen unlocked.
 
-Changes are sent as `presence_update` to everybody who shares a conversation with the user (and to the
-user's own devices). A disconnected device counts as gone only after `presence_offline_grace_secs`, so
-reconnects don't flicker. `GET /api/v1/presence?user_ids=…` returns the last known state; guests only
-learn about people they share a conversation with.
+The server recomputes a user's presence one refresh at a time, each from the devices' current state,
+so overlapping refreshes (two devices, the periodic refresh, a disconnect) never announce an older
+state last. Changes are sent as `presence_update` to everybody who shares a conversation with the user
+(and to the user's own devices). A disconnected device counts as gone only after
+`presence_offline_grace_secs`, so reconnects don't flicker. `GET /api/v1/presence?user_ids=…` returns
+the last known state; guests only learn about people they share a conversation with.
 
 ## Limits of M1
 

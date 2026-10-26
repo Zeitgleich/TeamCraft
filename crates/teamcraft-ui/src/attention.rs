@@ -46,6 +46,19 @@ pub fn is_attentive(signals: &AttentionSignals, now: TimestampMs, input_window: 
   signals.is_focused && signals.is_visible && has_recent_input && is_os_active && !signals.is_screen_locked
 }
 
+/// Whether the screen counts as locked, from the OS reading and input in the app.
+///
+/// The OS reading is believed until input reaches the app while it says "locked": a locked
+/// screen passes no input to the window, so the reading is stale (a lock hint nobody cleared, a
+/// screen saver that reports itself active while the user works). From then on it is ignored
+/// until the OS says "unlocked" once; the next real lock counts again. Without this, a stuck
+/// reading made the device away five seconds after every input (issue #720).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LockReading {
+  is_os_locked: bool,
+  is_contradicted: bool,
+}
+
 /// When the user last did anything on this computer, for presence (gateway.md, "Presence"): the
 /// newer of the last input in the app and the input the OS reports. `None` while the screen is
 /// locked, which counts as away at once. Only the idle duration and the lock state leave the OS layer.
@@ -61,6 +74,25 @@ pub fn last_activity_at(
   let os_input_at =
     maybe_os_idle.map(|idle| now.saturating_sub(i64::try_from(idle.as_millis()).unwrap_or(i64::MAX)));
   Some(os_input_at.map_or(last_input_at, |at| at.max(last_input_at)))
+}
+
+impl LockReading {
+  /// What the OS says now.
+  pub fn observe(&mut self, is_os_locked: bool) {
+    self.is_os_locked = is_os_locked;
+    if !is_os_locked {
+      self.is_contradicted = false;
+    }
+  }
+
+  /// Pointer, key, wheel or touch input arrived in the app.
+  pub fn on_app_input(&mut self) {
+    self.is_contradicted |= self.is_os_locked;
+  }
+
+  pub fn is_locked(&self) -> bool {
+    self.is_os_locked && !self.is_contradicted
+  }
 }
 
 impl AttentionReporter {
@@ -265,6 +297,41 @@ mod tests {
     #[test]
     fn a_locked_screen_has_no_activity() {
       assert_eq!(last_activity_at(NOW, NOW, Some(Duration::ZERO), true), None);
+    }
+  }
+
+  mod lock {
+    use super::*;
+
+    #[test]
+    fn the_os_reading_counts_until_input_contradicts_it() {
+      let mut lock = LockReading::default();
+      assert!(!lock.is_locked());
+      lock.observe(true);
+      assert!(lock.is_locked());
+      // Input in the window while "locked": the reading is stale and stays ignored.
+      lock.on_app_input();
+      assert!(!lock.is_locked());
+      lock.observe(true);
+      assert!(!lock.is_locked());
+    }
+
+    #[test]
+    fn a_real_lock_after_an_unlock_counts_again() {
+      let mut lock = LockReading::default();
+      lock.observe(true);
+      lock.on_app_input();
+      lock.observe(false);
+      lock.observe(true);
+      assert!(lock.is_locked());
+    }
+
+    #[test]
+    fn input_while_unlocked_changes_nothing() {
+      let mut lock = LockReading::default();
+      lock.on_app_input();
+      lock.observe(true);
+      assert!(lock.is_locked());
     }
   }
 

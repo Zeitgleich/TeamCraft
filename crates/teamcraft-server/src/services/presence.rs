@@ -4,9 +4,9 @@ use std::collections::HashSet;
 
 use teamcraft_db::{PresencePreference, StoredLastSeen, StoredStatus};
 use teamcraft_proto::{
-  CustomStatus, GatewayEvent, LastSeenVisibility, ListPresenceResponse, ManualPresence, PresenceActivity,
-  PresenceState, PrivacyResponse, SetCustomStatusRequest, SetPresenceRequest, SetPresenceResponse,
-  UpdatePrivacyRequest, UserId, UserPresence,
+  CustomStatus, DeviceId, GatewayEvent, LastSeenVisibility, ListPresenceResponse, ManualPresence,
+  PresenceActivity, PresenceState, PrivacyResponse, SetCustomStatusRequest, SetPresenceRequest,
+  SetPresenceResponse, UpdatePrivacyRequest, UserId, UserPresence,
 };
 use time::OffsetDateTime;
 use tracing::warn;
@@ -155,8 +155,22 @@ async fn poll_calendar(state: &AppState, users: &[UserId], now: OffsetDateTime) 
   }
 }
 
+/// The user did something on `device` themselves (sent a message): the device counts as in use
+/// at once, whatever it last reported, and everybody learns the user is online (unless a manual
+/// status says otherwise).
+pub async fn note_user_action(state: &AppState, user: UserId, device: DeviceId) -> Result<(), ApiError> {
+  match state.hub.note_user_action(user, device) {
+    Some(user) => refresh_presence(state, user).await,
+    None => Ok(()),
+  }
+}
+
 /// Recomputes the user's presence and tells everyone who shares a conversation if it changed.
+///
+/// One refresh per user at a time, each reading the devices afresh: overlapping refreshes (two
+/// devices, the periodic refresh, a disconnect) can't announce a state older than the newest.
 pub async fn refresh_presence(state: &AppState, user: UserId) -> Result<(), ApiError> {
+  let _refreshing = state.hub.presence_refresh_lock(user).lock().await;
   let preference = state.database.get_presence_preference(user).await?;
   let now = OffsetDateTime::now_utc();
   let aggregate = state.hub.device_aggregate(user);
