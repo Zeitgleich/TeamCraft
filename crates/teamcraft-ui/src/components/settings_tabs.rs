@@ -16,7 +16,7 @@ use crate::components::settings_rows::{
   SegmentedRow, SelectRow, SettingRow, SettingsCard, SwitchRow, row_id, slug_options,
 };
 use crate::components::update_notice::UpdatesSection;
-use crate::feedback::{ActionFailure, FailureKind, PendingAction};
+use crate::feedback::{ActionFailure, FailureKind, PendingAction, report_failure};
 use crate::i18n::{Locale, use_i18n};
 use crate::keys::t_with_shortcuts;
 use crate::prefs::{CallPrefs, Density, ImageSize, SidebarSort, TextSize, Zoom};
@@ -349,11 +349,18 @@ pub fn PreferencesSection() -> impl IntoView {
 fn DesktopCard() -> impl IntoView {
   let prefs = RwSignal::new(None::<tauri::ShellPrefs>);
   let autostart = RwSignal::new(None::<bool>);
+  // Hidden where the system can't start the app at login; shown (and waiting) until that is known.
+  let is_autostart_supported = RwSignal::new(true);
   let saving_prefs = PendingAction::new();
   let saving_autostart = PendingAction::new();
   leptos::task::spawn_local(async move {
     prefs.set_if_alive(tauri::shell_prefs().await);
-    autostart.set_if_alive(tauri::autostart().await);
+    match tauri::autostart().await {
+      Ok(Some(is_on)) => autostart.set_if_alive(Some(is_on)),
+      Ok(None) => is_autostart_supported.set_if_alive(false),
+      // The switch stays disabled; the toast says why.
+      Err(error) => report_failure(ActionFailure::new(FailureKind::Other, error)),
+    }
   });
   let save = move |change: fn(&mut tauri::ShellPrefs, bool), value: bool| {
     let Some(before) = prefs.get_untracked() else {
@@ -373,11 +380,17 @@ fn DesktopCard() -> impl IntoView {
   let set_autostart = move |on: bool| {
     autostart.set(Some(on));
     saving_autostart.spawn(async move {
-      if let Err(error) = tauri::set_autostart(on).await {
-        autostart.set_if_alive(Some(!on));
-        return Err(ActionFailure::new(FailureKind::Other, error));
+      match tauri::set_autostart(on).await {
+        // What the system reports: the user may have refused (the Flatpak portal asks).
+        Ok(is_on) => {
+          autostart.set_if_alive(Some(is_on));
+          Ok(())
+        },
+        Err(error) => {
+          autostart.set_if_alive(Some(!on));
+          Err(ActionFailure::new(FailureKind::Other, error))
+        },
       }
-      Ok(())
     });
   };
   let is_busy = Signal::derive(move || prefs.get().is_none() || saving_prefs.is_pending());
@@ -385,12 +398,14 @@ fn DesktopCard() -> impl IntoView {
 
   view! {
     <SettingsCard heading="settings-desktop">
-      <SwitchRow
-        label="settings-autostart"
-        is_disabled=Signal::derive(move || autostart.get().is_none() || saving_autostart.is_pending())
-        value=Signal::derive(move || autostart.get().unwrap_or(false))
-        on_change=Callback::new(set_autostart)
-      />
+      <Show when=move || is_autostart_supported.get()>
+        <SwitchRow
+          label="settings-autostart"
+          is_disabled=Signal::derive(move || autostart.get().is_none() || saving_autostart.is_pending())
+          value=Signal::derive(move || autostart.get().unwrap_or(false))
+          on_change=Callback::new(set_autostart)
+        />
+      </Show>
       <SwitchRow
         label="settings-close-to-tray"
         hint="settings-close-to-tray-hint"

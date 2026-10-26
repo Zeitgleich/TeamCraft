@@ -72,6 +72,12 @@ fn main() -> anyhow::Result<()> {
   let builder = tauri::Builder::default().plugin(single_instance::plugin());
   #[cfg(windows)]
   let builder = windows_shell::plugins(builder);
+  // "Start at login" as a LaunchAgent that starts the app in the tray (autostart.rs).
+  #[cfg(target_os = "macos")]
+  let builder = builder.plugin(tauri_plugin_autostart::init(
+    tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+    Some(vec![autostart::AUTOSTART_ARG]),
+  ));
   builder
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -263,7 +269,9 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
   // Linux asks D-Bus for the icon's host in the background; a window hidden before the answer is
   // brought back by `tray::reveal_without_host` if there is none.
   let has_tray = tray::may_have_tray(app.handle());
-  let is_hidden = prefs.is_start_minimized && has_tray;
+  // Started at login (autostart.rs): in the tray, like "start minimized".
+  let is_start_minimized = prefs.is_start_minimized || autostart::is_login_launch();
+  let is_hidden = is_start_minimized && has_tray;
   // The title stays set without a title bar: the taskbar, Alt+Tab and the dock show it.
   let window = WebviewWindowBuilder::new(app, tray::MAIN_WINDOW, WebviewUrl::default())
     .title("TeamCraft")
@@ -324,7 +332,7 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     tracing::warn!(%error, "could not set the webview's memory caches");
   }
   tray::reveal_without_host(app.handle());
-  if prefs.is_start_minimized
+  if is_start_minimized
     && !has_tray
     && let Err(error) = window.minimize()
   {

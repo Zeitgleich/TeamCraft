@@ -587,16 +587,18 @@ pub async fn set_shell_prefs(prefs: ShellPrefs) -> Result<(), String> {
   call::<()>("shell_prefs_set", &serde_json::json!({ "prefs": prefs })).await
 }
 
-/// "Start at login": `None` outside the desktop app or where the shell doesn't support it.
-pub async fn autostart() -> Option<bool> {
+/// "Start at login": `Ok(None)` outside the desktop app or where the system can't do it (the
+/// switch is hidden then), an error when the state couldn't be read.
+pub async fn autostart() -> Result<Option<bool>, String> {
   if !is_available() {
-    return None;
+    return Ok(None);
   }
-  call::<bool>("autostart_get", &serde_json::json!({})).await.ok()
+  call::<Option<bool>>("autostart_get", &serde_json::json!({})).await
 }
 
-pub async fn set_autostart(is_enabled: bool) -> Result<(), String> {
-  call::<()>("autostart_set", &serde_json::json!({ "enabled": is_enabled })).await
+/// Turns "start at login" on or off; answers the state the system reports afterwards.
+pub async fn set_autostart(is_enabled: bool) -> Result<bool, String> {
+  call::<bool>("autostart_set", &serde_json::json!({ "enabled": is_enabled })).await
 }
 
 /// Desktop only: where the update machinery is (docs/updates.md §4). `None` in the browser.
