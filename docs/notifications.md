@@ -293,7 +293,25 @@ Whatever is known by then is shown: "New message" under the sender's name when t
 read, never nothing. `PushNotification.maybe_gap` says why less was shown (no session, not decrypted,
 timed out, not showable, workspace policy, device setting); the diagnostics show the last reason and
 the app logs it, never the content. A high-priority FCM wake-up that can't be opened at all shows a
-plain "New message".
+plain "New message". When the text could not be read in time (timed out, not decrypted, no session),
+the app opens the same wake-up again after 30 s and 60 s once a network is there
+(`notification_for_push_retry`, not counted as a received push) and fills the line in, silently and
+under the same notification ID; a notification read or swiped away meanwhile is not brought back.
+
+**Android on watches (issue #739).** Wear OS and vendor bridges (Garmin Connect, Galaxy Wearable)
+mirror the phone's notifications. A message is posted once, after the wake-up was opened, and every
+later change (more messages, a late decryption, an avatar, a setting) replaces it under the same tag
+and ID with `setOnlyAlertOnce`, so a watch alerts once per message. The notification carries
+MessagingStyle (a `Person` per sender with name and avatar, conversation title, group conversation
+for channels and chats with several senders) and also plain title and text for bridges that read
+only those; it is not local-only, has the conversation's shortcut and `LocusId`, and offers reply
+(remote input), mark as read and mute. The group summary is posted only while two or more
+conversations show (bridges mirror a summary as a second notification), never alerts
+(`GROUP_ALERT_CHILDREN`), names the conversations ("Project A, Bob") or counts the messages when names
+are hidden, and is posted again only when it changed. With "sender only" or the app lock, the watch
+shows "New message from Alice"; with "nothing", "New message". Bridges that follow the lock screen's
+privacy show the public version ("New message", "3 new messages") while the phone is locked and
+Android hides sensitive content on the lock screen; that is the user's system setting.
 
 **iOS message content (issue #331).** The notification service extension opens the wake-up with the
 same core call and shows the same texts: sender and conversation, the text, a label for photos, videos

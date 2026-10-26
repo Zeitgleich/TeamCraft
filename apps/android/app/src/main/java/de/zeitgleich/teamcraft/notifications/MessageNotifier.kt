@@ -1,6 +1,7 @@
 package de.zeitgleich.teamcraft.notifications
 
 import android.Manifest
+import android.app.Notification
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
@@ -34,9 +35,12 @@ import uniffi.teamcraft_ffi.PushNotification
 
 /**
  * Message notifications: one MessagingStyle notification per conversation (tag = conversation ID),
- * shown by Android as a conversation through a long-lived shortcut, grouped under a summary, with
- * "reply" and "mark as read" actions that work without opening the app (Android Auto needs them).
- * The lines survive a process restart ([NotificationStore]).
+ * shown by Android as a conversation through a long-lived shortcut, grouped under a summary once two
+ * or more conversations show, with "reply" and "mark as read" actions that work without opening the
+ * app (Android Auto and Wear OS need them). A message is posted once, after its wake-up was opened;
+ * every later change replaces the notification under the same ID without alerting again, so a watch
+ * sees one notification per message (issue #739). What it shows is [MessageNotificationSpecs]; the
+ * lines survive a process restart ([NotificationStore]).
  */
 class MessageNotifier(
   private val context: Context,
@@ -47,6 +51,9 @@ class MessageNotifier(
   private val manager = NotificationManagerCompat.from(context)
   private val lock = Any()
   private var maybeShown: ShownNotifications? = null
+
+  /** The summary last posted, so an unchanged one is not posted (and mirrored) again. */
+  private var maybeLastSummary: SummarySpec? = null
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
   init {
@@ -55,44 +62,43 @@ class MessageNotifier(
 
   /** Adds a pushed message to its conversation's notification (see [PushDecision.ShowMessage]). */
   fun show(notification: PushNotification, isAlerting: Boolean) {
-    val text = NotificationText.from(
-      maybeConversationName = notification.maybeConversationName,
-      maybeSenderName = notification.maybeSenderName,
-      maybeText = notification.maybeText,
-      maybeFileName = notification.maybeFileName,
-      maybeAttachmentKind = notification.maybeAttachmentKind,
-      isDirect = notification.isDirect,
-      labels = labels(),
-    )
-    val sentAtMs = notification.maybeMessageId?.let(NotificationLines::sentAtMs)
-      ?: notification.maybeSentAtMs
-      ?: System.currentTimeMillis()
-    val line = NotificationLine(
-      maybeMessageId = notification.maybeMessageId,
-      maybeThreadId = notification.maybeThreadId,
-      maybeSenderKey = notification.maybeSenderId ?: text.senderName,
-      senderName = text.senderName,
-      text = text.text,
-      sentAtMs = sentAtMs,
-    )
+    val line = line(notification)
     val isMention = notification.isMention || notification.isUrgent
     synchronized(lock) {
       val shown = shown()
       val previous = shown.conversations[notification.conversationId]
-      val lines = previous?.lines.orEmpty()
-      // A second wake-up for a shown message re-posts it as it was (it may carry less text).
-      val isKnown = notification.isDuplicate && lines.any { it.maybeMessageId == line.maybeMessageId }
       val entry = ConversationNotification(
         conversationId = notification.conversationId,
-        maybeTitle = text.maybeConversationTitle ?: previous?.maybeTitle,
+        maybeTitle = title(notification) ?: previous?.maybeTitle,
         isVerified = notification.isConversationVerified,
         isMention = isMention,
         isDirect = notification.isDirect,
-        lines = if (isKnown) lines else NotificationLines.merge(lines, line),
+        lines = NotificationLines.withWakeUp(previous?.lines.orEmpty(), line, notification.isDuplicate),
       )
       val badge = notification.maybeBadge?.toInt() ?: shown.maybeBadge
       update(shown.copy(conversations = shown.conversations + (entry.conversationId to entry), maybeBadge = badge))
       post(entry, isAlerting = isAlerting)
+      postSummary()
+    }
+  }
+
+  /**
+   * A retry read a message that was shown as a placeholder ([PushRetry]): fills in its line under
+   * the same ID, silently. Does nothing when the notification is gone or already complete.
+   */
+  fun fillIn(notification: PushNotification) {
+    val line = line(notification)
+    synchronized(lock) {
+      val shown = shown()
+      val previous = shown.conversations[notification.conversationId] ?: return
+      val lines = NotificationLines.filledIn(previous.lines, line) ?: return
+      val entry = previous.copy(
+        maybeTitle = title(notification) ?: previous.maybeTitle,
+        isVerified = previous.isVerified || notification.isConversationVerified,
+        lines = lines,
+      )
+      update(shown.copy(conversations = shown.conversations + (entry.conversationId to entry)))
+      post(entry, isAlerting = false)
       postSummary()
     }
   }
@@ -218,12 +224,42 @@ class MessageNotifier(
   fun clearAll() {
     synchronized(lock) {
       maybeShown = ShownNotifications()
+      maybeLastSummary = null
       store.delete()
       manager.cancelAll()
       avatars.clear()
       runCatching { ShortcutManagerCompat.removeAllDynamicShortcuts(context) }
     }
   }
+
+  private fun line(notification: PushNotification): NotificationLine {
+    val text = text(notification)
+    val sentAtMs = notification.maybeMessageId?.let(NotificationLines::sentAtMs)
+      ?: notification.maybeSentAtMs
+      ?: System.currentTimeMillis()
+    return NotificationLine(
+      maybeMessageId = notification.maybeMessageId,
+      maybeThreadId = notification.maybeThreadId,
+      maybeSenderKey = notification.maybeSenderId ?: text.senderName,
+      senderName = text.senderName,
+      text = text.text,
+      sentAtMs = sentAtMs,
+      isPlaceholder = PushRetry.isPlaceholder(notification),
+    )
+  }
+
+  private fun title(notification: PushNotification): String? = text(notification).maybeConversationTitle
+
+  private fun text(notification: PushNotification): NotificationText =
+    NotificationText.from(
+      maybeConversationName = notification.maybeConversationName,
+      maybeSenderName = notification.maybeSenderName,
+      maybeText = notification.maybeText,
+      maybeFileName = notification.maybeFileName,
+      maybeAttachmentKind = notification.maybeAttachmentKind,
+      isDirect = notification.isDirect,
+      labels = labels(),
+    )
 
   private fun shown(): ShownNotifications =
     maybeShown ?: reconciled(store.read()).also { maybeShown = it }
@@ -247,68 +283,62 @@ class MessageNotifier(
 
   private fun post(entry: ConversationNotification, isAlerting: Boolean) {
     if (!canPost()) return
-    val newest = entry.lines.lastOrNull { !it.isOwn } ?: return
     val privacy = MessagePrivacy.of(contentPrefs.content.value, isAppLockOn(), entry.isVerified)
-    val channel = when {
-      entry.isMention -> NotificationChannels.MENTIONS
-      entry.isDirect -> NotificationChannels.DIRECT_MESSAGES
-      else -> NotificationChannels.MESSAGES
-    }
-    val builder = NotificationCompat.Builder(context, channel)
+    val spec = MessageNotificationSpecs.conversation(entry, privacy, isAlerting, labels()) ?: return
+    postSafely(entry.conversationId, MESSAGE_ID, build(spec))
+    spec.maybeShortcut?.let(::pushShortcut)
+    if (privacy.showsNames) fetchAvatars(entry)
+  }
+
+  private fun build(spec: MessageNotificationSpec): Notification {
+    val isAlerting = spec.alerting == NotificationAlerting.ALERT
+    val builder = NotificationCompat.Builder(context, spec.channel)
       .setSmallIcon(R.drawable.ic_notification)
       .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-      .setWhen(newest.sentAtMs)
+      // Also with MessagingStyle: watch bridges that read only title and text show these.
+      .setContentTitle(spec.title)
+      .setContentText(spec.text)
+      .setWhen(spec.whenMs)
       .setShowWhen(true)
       .setAutoCancel(true)
       .setOnlyAlertOnce(!isAlerting)
       .setSilent(!isAlerting)
+      // Bridged to watches (Wear OS, vendor apps): the default, stated so it stays.
+      .setLocalOnly(false)
       .setGroup(GROUP_MESSAGES)
       .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
-      .setContentIntent(openIntent(entry.conversationId))
-      .setDeleteIntent(actionIntent(NotificationActionReceiver.ACTION_DISMISSED, entry.conversationId, isMutable = false))
+      .setContentIntent(openIntent(spec.conversationId))
+      .setDeleteIntent(actionIntent(NotificationActionReceiver.ACTION_DISMISSED, spec.conversationId, isMutable = false))
       // The lock screen shows only "New message" unless the user unlocks.
       .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-      .setPublicVersion(publicVersion(channel))
-    when {
-      privacy.showsContent -> {
-        val me = Person.Builder().setName(context.getString(R.string.you)).setKey(SELF_KEY).build()
-        val style = NotificationCompat.MessagingStyle(me)
-          .setConversationTitle(entry.maybeTitle)
-          .setGroupConversation(entry.maybeTitle != null)
-        entry.lines.forEach { line -> style.addMessage(highlighted(line.text), line.sentAtMs, person(line)) }
-        builder.setStyle(style)
-      }
-      privacy.showsNames -> {
-        // Who wrote, not what (the setting, or the app lock): "New message from Alice".
-        val text = NotificationText.senderOnly(entry.lines, labels())
-        builder
-          .setContentTitle(entry.maybeTitle ?: newest.senderName.ifBlank { context.getString(R.string.app_name) })
-          .setContentText(text)
-          .setNumber(entry.lines.count { !it.isOwn })
-        val senderKey = newest.maybeSenderKey
-        if (entry.maybeTitle == null && senderKey != null) {
-          builder.setLargeIcon(avatars.maybeBitmap(senderKey) ?: PersonIcons.bitmap(senderKey, newest.senderName))
-        }
-      }
-      else -> {
-        // The same as the lock screen's public version, also in the unlocked shade.
-        builder
-          .setContentTitle(context.getString(R.string.app_name))
-          .setContentText(context.getString(R.string.notification_new_message))
-      }
+      .setPublicVersion(publicVersion(spec.channel, spec.messageCount))
+    if (spec.messageCount > 1) builder.setNumber(spec.messageCount)
+    spec.maybeConversation?.let { conversation -> builder.setStyle(messagingStyle(conversation)) }
+    spec.maybeLargeIconSender?.let { sender ->
+      builder.setLargeIcon(avatars.maybeBitmap(sender.key) ?: PersonIcons.bitmap(sender.key, sender.name))
     }
-    if (privacy.pushesShortcut) {
-      builder.setShortcutId(entry.conversationId).setLocusId(LocusIdCompat(entry.conversationId))
-      pushShortcut(entry, newest)
+    spec.maybeShortcut?.let { shortcut -> builder.setShortcutId(shortcut.id).setLocusId(LocusIdCompat(shortcut.id)) }
+    spec.actions.forEach { action ->
+      builder.addAction(
+        when (action) {
+          MessageAction.REPLY -> replyAction(spec.conversationId, spec.maybeReplyThreadId)
+          MessageAction.MARK_READ -> markReadAction(spec.conversationId)
+          MessageAction.MUTE -> muteAction(spec.conversationId)
+        },
+      )
     }
-    if (privacy.offersActions) {
-      builder
-        .addAction(replyAction(entry.conversationId, newest.maybeThreadId))
-        .addAction(markReadAction(entry.conversationId))
-        .addAction(muteAction(entry.conversationId))
+    return builder.build()
+  }
+
+  private fun messagingStyle(conversation: ConversationStyleSpec): NotificationCompat.MessagingStyle {
+    val me = Person.Builder().setName(context.getString(R.string.you)).setKey(SELF_KEY).build()
+    val style = NotificationCompat.MessagingStyle(me)
+      .setConversationTitle(conversation.maybeConversationTitle)
+      .setGroupConversation(conversation.isGroupConversation)
+    conversation.messages.forEach { message ->
+      style.addMessage(highlighted(message.text), message.sentAtMs, message.maybeSender?.let(::person))
     }
-    postSafely(entry.conversationId, MESSAGE_ID, builder.build())
-    if (privacy.showsNames) fetchAvatars(entry)
+    return style
   }
 
   /**
@@ -327,10 +357,12 @@ class MessageNotifier(
     }
   }
 
-  private fun person(line: NotificationLine): Person? {
-    val key = line.maybeSenderKey ?: return null
-    return Person.Builder().setName(line.senderName).setKey(key).setIcon(avatars.maybeIcon(key) ?: PersonIcons.of(key, line.senderName)).build()
-  }
+  private fun person(sender: NotificationSender): Person =
+    Person.Builder()
+      .setName(sender.name)
+      .setKey(sender.key)
+      .setIcon(avatars.maybeIcon(sender.key) ?: PersonIcons.of(sender.key, sender.name))
+      .build()
 
   /** `@mentions` in bold, as in the app. */
   private fun highlighted(text: String): CharSequence {
@@ -348,6 +380,7 @@ class MessageNotifier(
     newMessagesFrom = { count, names ->
       context.resources.getQuantityString(R.plurals.notification_new_messages_from, count, count, names)
     },
+    newMessages = { count -> context.resources.getQuantityString(R.plurals.notification_new_messages, count, count) },
     attachment = { kind, fileName ->
       when (kind) {
         NotificationAttachmentKind.IMAGE -> context.getString(R.string.notification_photo)
@@ -358,48 +391,74 @@ class MessageNotifier(
     },
   )
 
-  /** The summary that groups the conversations; never alerts, carries the badge count. */
+  /**
+   * The summary that groups the conversations once two or more show
+   * ([MessageNotificationSpecs.summary]); never alerts, carries the badge count, and is posted
+   * again only when it changed, so watch bridges that mirror summaries don't repeat it.
+   */
   private fun postSummary() {
     val shown = shown()
     if (shown.conversations.isEmpty()) {
+      maybeLastSummary = null
       manager.cancel(null, SUMMARY_ID)
       return
     }
     if (!canPost()) return
-    val count = shown.conversations.size
-    val title = context.resources.getQuantityString(R.plurals.notification_summary, count, count)
-    val inbox = NotificationCompat.InboxStyle().setBigContentTitle(title)
     // Names only (none when names are hidden): the summary may show where the text does not.
     val privacy = MessagePrivacy.of(contentPrefs.content.value, isAppLockOn(), isVerified = false)
-    MessagePrivacy.summaryLines(privacy, shown.conversations.values).forEach(inbox::addLine)
+    val isShown = isSummaryShown()
+    val spec = MessageNotificationSpecs.summary(
+      conversations = shown.conversations.values,
+      privacy = privacy,
+      maybeBadge = shown.maybeBadge,
+      isShown = isShown,
+      labels = labels(),
+      conversationsTitle = { count -> context.resources.getQuantityString(R.plurals.notification_summary, count, count) },
+    ) ?: return
+    if (isShown && spec == maybeLastSummary) return
+    val inbox = NotificationCompat.InboxStyle().setBigContentTitle(spec.title)
+    spec.lines.forEach(inbox::addLine)
+    val messageCount = shown.conversations.values.sumOf { entry -> entry.lines.count { !it.isOwn } }
     val summary = NotificationCompat.Builder(context, NotificationChannels.MESSAGES)
       .setSmallIcon(R.drawable.ic_notification)
-      .setContentTitle(title)
+      .setContentTitle(spec.title)
+      .setContentText(spec.text)
       .setStyle(inbox)
       .setCategory(NotificationCompat.CATEGORY_MESSAGE)
       .setGroup(GROUP_MESSAGES)
       .setGroupSummary(true)
       .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
       .setSilent(true)
+      .setOnlyAlertOnce(true)
+      .setLocalOnly(false)
       .setAutoCancel(true)
-      .setNumber(shown.maybeBadge ?: count)
+      .setNumber(spec.number)
       .setBadgeIconType(NotificationCompat.BADGE_ICON_SMALL)
       .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+      .setPublicVersion(publicVersion(NotificationChannels.MESSAGES, messageCount))
       .setContentIntent(launchIntent())
       .build()
     postSafely(null, SUMMARY_ID, summary)
+    maybeLastSummary = spec
+  }
+
+  /** Whether the system shows the summary now (the process may have restarted since it was posted). */
+  private fun isSummaryShown(): Boolean {
+    val system = context.getSystemService(NotificationManager::class.java) ?: return maybeLastSummary != null
+    return runCatching { system.activeNotifications.any { it.id == SUMMARY_ID && it.tag == null } }
+      .getOrElse { maybeLastSummary != null }
   }
 
   /** A long-lived shortcut per conversation: what makes Android treat the notification as one. */
-  private fun pushShortcut(entry: ConversationNotification, newest: NotificationLine) {
-    val label = entry.maybeTitle ?: newest.senderName
-    val shortcut = ShortcutInfoCompat.Builder(context, entry.conversationId)
-      .setShortLabel(label.ifBlank { context.getString(R.string.app_name) })
+  private fun pushShortcut(spec: ShortcutSpec) {
+    val label = spec.label.ifBlank { context.getString(R.string.app_name) }
+    val shortcut = ShortcutInfoCompat.Builder(context, spec.id)
+      .setShortLabel(label)
       .setLongLived(true)
-      .setLocusId(LocusIdCompat(entry.conversationId))
-      .setIcon(shortcutIcon(entry, newest, label))
-      .setIntent(openConversationIntent(entry.conversationId).setAction(Intent.ACTION_VIEW))
-      .apply { if (entry.maybeTitle == null) person(newest)?.let { setPerson(it) } }
+      .setLocusId(LocusIdCompat(spec.id))
+      .setIcon(shortcutIcon(spec, label))
+      .setIntent(openConversationIntent(spec.id).setAction(Intent.ACTION_VIEW))
+      .apply { spec.maybePerson?.let { setPerson(person(it)) } }
       .build()
     try {
       ShortcutManagerCompat.pushDynamicShortcut(context, shortcut)
@@ -410,12 +469,12 @@ class MessageNotifier(
   }
 
   /** A person's picture for a one-to-one chat, else the generated avatar of the conversation. */
-  private fun shortcutIcon(entry: ConversationNotification, newest: NotificationLine, label: String): IconCompat {
-    val senderKey = newest.maybeSenderKey.takeIf { entry.maybeTitle == null }
-    return senderKey?.let(avatars::maybeIcon) ?: PersonIcons.of(senderKey ?: entry.conversationId, label)
+  private fun shortcutIcon(spec: ShortcutSpec, label: String): IconCompat {
+    val maybeSender = spec.maybePerson
+    return maybeSender?.let { avatars.maybeIcon(it.key) } ?: PersonIcons.of(maybeSender?.key ?: spec.id, label)
   }
 
-  private fun postSafely(maybeTag: String?, id: Int, notification: android.app.Notification) {
+  private fun postSafely(maybeTag: String?, id: Int, notification: Notification) {
     try {
       manager.notify(maybeTag, id, notification)
     } catch (denied: SecurityException) {
@@ -426,10 +485,20 @@ class MessageNotifier(
 
   private fun isAppLockOn(): Boolean = AppLockPrefs.prefs(context).isEnabled
 
-  private fun publicVersion(channel: String) = NotificationCompat.Builder(context, channel)
+  /**
+   * What the lock screen shows while it hides sensitive content: no names, no text. Watch bridges
+   * that follow the lock screen's privacy show this too while the phone is locked.
+   */
+  private fun publicVersion(channel: String, messageCount: Int) = NotificationCompat.Builder(context, channel)
     .setSmallIcon(R.drawable.ic_notification)
     .setContentTitle(context.getString(R.string.app_name))
-    .setContentText(context.getString(R.string.notification_new_message))
+    .setContentText(
+      if (messageCount > 1) {
+        context.resources.getQuantityString(R.plurals.notification_new_messages, messageCount, messageCount)
+      } else {
+        context.getString(R.string.notification_new_message)
+      },
+    )
     .setCategory(NotificationCompat.CATEGORY_MESSAGE)
     .build()
 

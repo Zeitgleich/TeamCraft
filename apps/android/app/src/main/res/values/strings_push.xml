@@ -133,6 +133,10 @@
     <item quantity="one">%1$d new message from %2$s</item>
     <item quantity="other">%1$d new messages from %2$s</item>
   </plurals>
+  <plurals name="notification_new_messages">
+    <item quantity="one">%d new message</item>
+    <item quantity="other">%d new messages</item>
+  </plurals>
   <string name="notification_photo">Photo</string>
   <string name="notification_video">Video</string>
   <string name="notification_audio">Audio</string>
