@@ -330,6 +330,9 @@ pub enum FileFailure {
   Corrupted,
   /// Reading or writing the file on this device failed.
   LocalFile,
+  /// The file storage (or the server) answered "unavailable": an outage a later retry gets
+  /// through (#742).
+  StorageUnavailable,
 }
 
 /// The sender's preview of a link, inside the encrypted message (e2ee.md §12).

@@ -1348,6 +1348,7 @@ file-progress-percent = { $percent } %
 file-progress-bytes = { $done } / { $total }
 file-upload-retrying = Wird erneut versucht …
 file-upload-failed = Hochladen fehlgeschlagen
+file-upload-storage-unavailable = Der Dateispeicher ist gerade nicht erreichbar. Versuche es gleich noch einmal.
 file-upload-unreadable = Die Datei ließ sich nicht mehr lesen. Hänge sie erneut an.
 file-preview = Vorschau anzeigen
 preview-unavailable = Die Datei konnte nicht geladen werden. Prüfe deine Verbindung und versuche es erneut.

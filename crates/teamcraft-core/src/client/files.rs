@@ -122,13 +122,35 @@ pub enum UploadRetry {
   Fresh,
   /// Failed `attempts` times; not tried again before `retry_at_ms` (client clock: it only spaces
   /// out retries).
-  Waiting { attempts: u32, retry_at_ms: i64 },
+  Waiting {
+    attempts: u32,
+    retry_at_ms: i64,
+    #[serde(default, skip_serializing_if = "RetryCause::is_network")]
+    cause: RetryCause,
+  },
   /// Gave up retrying by itself; waits for the user's "Retry" ([`retry_stalled_upload`]).
-  Stalled { attempts: u32 },
+  Stalled {
+    attempts: u32,
+    #[serde(default, skip_serializing_if = "RetryCause::is_network")]
+    cause: RetryCause,
+  },
+}
+
+/// Why the last attempt of a file failed, so a stalled file can say so (#742).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryCause {
+  /// The transfer or the server failed (also every record stored before causes were kept).
+  #[default]
+  Network,
+  /// The file storage answered "unavailable" (503), directly or through the server: an outage of
+  /// the storage provider that a later retry gets through.
+  StorageUnavailable,
 }
 
 /// How uploads that failed on the network are retried. Configurable; the defaults give up after
-/// about eight minutes of failures and leave the file to the user's "Retry".
+/// about a minute of failures (2, 4, 8, 16 and 32 seconds apart) and leave the file to the user's
+/// "Retry", which says why it stopped (#742).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UploadRetrySettings {
   /// Wait after the first failed attempt; doubles with each further one.
@@ -156,8 +178,8 @@ impl Default for UploadRetrySettings {
   fn default() -> Self {
     Self {
       retry_after: std::time::Duration::from_secs(2),
-      retry_max: std::time::Duration::from_secs(5 * 60),
-      max_attempts: 8,
+      retry_max: std::time::Duration::from_secs(60),
+      max_attempts: 6,
     }
   }
 }
@@ -170,7 +192,15 @@ impl UploadRetry {
   pub fn failed_attempts(&self) -> u32 {
     match self {
       Self::Fresh => 0,
-      Self::Waiting { attempts, .. } | Self::Stalled { attempts } => *attempts,
+      Self::Waiting { attempts, .. } | Self::Stalled { attempts, .. } => *attempts,
+    }
+  }
+
+  /// Why it stalled, once it did.
+  pub fn stall_cause(&self) -> Option<RetryCause> {
+    match self {
+      Self::Stalled { cause, .. } => Some(*cause),
+      Self::Fresh | Self::Waiting { .. } => None,
     }
   }
 
@@ -184,14 +214,14 @@ impl UploadRetry {
   }
 
   /// Counts a failed attempt: the next one waits with exponential backoff, and after
-  /// [`UploadRetrySettings::max_attempts`] the file stalls.
-  pub fn record_failure(&mut self, now_ms: i64, settings: &UploadRetrySettings) {
+  /// [`UploadRetrySettings::max_attempts`] the file stalls, keeping `cause` for the user.
+  pub fn record_failure(&mut self, now_ms: i64, settings: &UploadRetrySettings, cause: RetryCause) {
     let attempts = match self {
       Self::Fresh => 1,
-      Self::Waiting { attempts, .. } | Self::Stalled { attempts } => attempts.saturating_add(1),
+      Self::Waiting { attempts, .. } | Self::Stalled { attempts, .. } => attempts.saturating_add(1),
     };
     if attempts >= settings.max_attempts {
-      *self = Self::Stalled { attempts };
+      *self = Self::Stalled { attempts, cause };
       return;
     }
     let base = millis(settings.retry_after);
@@ -201,11 +231,29 @@ impl UploadRetry {
     *self = Self::Waiting {
       attempts,
       retry_at_ms: now_ms.saturating_add(wait),
+      cause,
     };
   }
 
   fn is_fresh(&self) -> bool {
     *self == Self::Fresh
+  }
+}
+
+impl RetryCause {
+  /// What `error` says about the attempt: a 503 (or the server's `unavailable` code) is the storage
+  /// or the server being down for a while; anything else counts as a network failure.
+  pub fn of(error: &CoreError) -> Self {
+    match error {
+      CoreError::Api(api) if is_status(api, 503) || api.error_code() == Some(&ErrorCode::Unavailable) => {
+        Self::StorageUnavailable
+      },
+      _ => Self::Network,
+    }
+  }
+
+  fn is_network(&self) -> bool {
+    *self == Self::Network
   }
 }
 
@@ -738,7 +786,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           let now = self.now_ms();
           upload.files[index]
             .retry
-            .record_failure(now, &self.settings.upload_retry);
+            .record_failure(now, &self.settings.upload_retry, RetryCause::of(&error));
         }
         save_pending_upload(&self.store, upload)?;
         Err(error)
@@ -1544,7 +1592,7 @@ mod tests {
       assert!(retry.is_due(0));
       let waits: Vec<i64> = (0..4)
         .map(|_| {
-          retry.record_failure(1_000, &settings);
+          retry.record_failure(1_000, &settings, RetryCause::Network);
           let UploadRetry::Waiting { retry_at_ms, .. } = retry else {
             panic!("still retrying: {retry:?}");
           };
@@ -1558,9 +1606,80 @@ mod tests {
       );
       assert!(!retry.is_due(10_999));
       assert!(retry.is_due(11_000));
-      retry.record_failure(1_000, &settings);
-      assert_eq!(retry, UploadRetry::Stalled { attempts: 5 });
+      retry.record_failure(1_000, &settings, RetryCause::Network);
+      assert_eq!(
+        retry,
+        UploadRetry::Stalled {
+          attempts: 5,
+          cause: RetryCause::Network
+        }
+      );
       assert!(!retry.is_due(i64::MAX), "a stalled file waits for the user");
+    }
+
+    #[test]
+    fn the_defaults_give_up_after_about_a_minute_never_endlessly() {
+      let settings = UploadRetrySettings::default();
+      let mut retry = UploadRetry::default();
+      let mut now = 0;
+      let mut waited = 0;
+      while let UploadRetry::Fresh | UploadRetry::Waiting { .. } = retry {
+        retry.record_failure(now, &settings, RetryCause::StorageUnavailable);
+        if let UploadRetry::Waiting { retry_at_ms, .. } = retry {
+          waited += retry_at_ms - now;
+          now = retry_at_ms;
+        }
+      }
+      assert_eq!(retry.failed_attempts(), settings.max_attempts);
+      assert_eq!(waited, 62_000, "2 + 4 + 8 + 16 + 32 seconds");
+      assert_eq!(retry.stall_cause(), Some(RetryCause::StorageUnavailable));
+    }
+
+    #[test]
+    fn the_last_cause_is_the_one_the_stall_shows() {
+      let settings = UploadRetrySettings {
+        max_attempts: 2,
+        ..UploadRetrySettings::default()
+      };
+      let mut retry = UploadRetry::default();
+      retry.record_failure(0, &settings, RetryCause::StorageUnavailable);
+      assert_eq!(retry.stall_cause(), None, "still retrying");
+      retry.record_failure(0, &settings, RetryCause::Network);
+      assert_eq!(retry.stall_cause(), Some(RetryCause::Network));
+    }
+
+    #[test]
+    fn a_503_or_the_unavailable_code_is_the_storage_being_down() {
+      let unavailable = CoreError::Api(ApiError::status(503, ErrorCode::Unavailable, "storage"));
+      assert_eq!(RetryCause::of(&unavailable), RetryCause::StorageUnavailable);
+      let bare_503 = CoreError::Api(ApiError::Status {
+        status: 503,
+        maybe_body: None,
+      });
+      assert_eq!(RetryCause::of(&bare_503), RetryCause::StorageUnavailable);
+      let conflict = CoreError::Api(ApiError::status(409, ErrorCode::Conflict, "not uploaded"));
+      assert_eq!(RetryCause::of(&conflict), RetryCause::Network);
+      let offline = CoreError::Api(ApiError::Network("reset".into()));
+      assert_eq!(RetryCause::of(&offline), RetryCause::Network);
+    }
+
+    #[test]
+    fn stored_retries_without_a_cause_still_read_and_keep_their_form() {
+      let older: UploadRetry =
+        serde_json::from_str(r#"{"state":"stalled","attempts":8}"#).expect("an older record parses");
+      assert_eq!(older.stall_cause(), Some(RetryCause::Network));
+      assert_eq!(
+        serde_json::to_string(&older).expect("serialize"),
+        r#"{"state":"stalled","attempts":8}"#
+      );
+      let unavailable = UploadRetry::Stalled {
+        attempts: 6,
+        cause: RetryCause::StorageUnavailable,
+      };
+      assert_eq!(
+        serde_json::to_string(&unavailable).expect("serialize"),
+        r#"{"state":"stalled","attempts":6,"cause":"storage_unavailable"}"#
+      );
     }
 
     #[test]

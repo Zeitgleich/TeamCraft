@@ -454,7 +454,7 @@ async fn free_storage(store: &BlobStore, removed: &RemovedAttachment) {
 
 fn storage_unavailable(error: StorageError) -> ApiError {
   warn!(%error, "attachment storage request failed");
-  ApiError::Unavailable("attachment storage".into())
+  ApiError::storage_unavailable("attachment storage")
 }
 
 fn blob_store(state: &AppState) -> Result<&Arc<BlobStore>, ApiError> {
