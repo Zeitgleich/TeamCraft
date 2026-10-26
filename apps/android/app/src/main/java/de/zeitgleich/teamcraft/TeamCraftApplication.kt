@@ -36,9 +36,9 @@ class AppGraph(context: Context) {
   val managedConfig = ManagedConfig(context)
   // Profile pictures of the notifications belong to the signed-in account; `core` is only used when called.
   private val avatars = AvatarCache(context) { core.core() }
-  val auth = AuthRepository(context, servers, onSignedOut = avatars::clear)
+  val auth: AuthRepository = AuthRepository(context, servers, onSignedOut = avatars::clear)
   // Decrypted pictures leave memory with the account they belong to.
-  val core = CoreRepository(context, auth, onAccountClosed = {
+  val core: CoreRepository = CoreRepository(context, auth, onAccountClosed = {
     Pictures.clear()
     avatars.clear()
   })

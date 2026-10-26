@@ -595,6 +595,68 @@ mod rejection {
     }
   }
 
+  /// A directory that lists one user as a meeting guest.
+  struct GuestDirectory<'a> {
+    inner: &'a TestDirectory,
+    guest: UserId,
+  }
+
+  impl IdentityDirectory for GuestDirectory<'_> {
+    fn pinned_identity(&self, user_id: UserId) -> Option<crate::identity::IdentityPublicKey> {
+      self.inner.pinned_identity(user_id)
+    }
+
+    fn is_guest(&self, user_id: UserId) -> bool {
+      user_id == self.guest
+    }
+  }
+
+  /// An authority that lets every member change the group, as the client does for members.
+  struct EveryMember;
+
+  impl MembershipAuthority for EveryMember {
+    fn is_authorized(&self, _: UserId, _: ConversationId, _: &MembershipAction) -> bool {
+      true
+    }
+  }
+
+  #[test]
+  fn a_guests_commit_cannot_add_anybody_else() {
+    let mut world = World::new();
+    let change = world.signed_change(CAROL, add(DAVE, HistoryShare::FromJoin));
+    let commit = world
+      .carol_group
+      .commit_membership_change(
+        &world.carol.provider,
+        &world.carol.user.device,
+        &change,
+        &[world.dave.key_package()],
+        &world.directory,
+        &EveryMember,
+      )
+      .unwrap()
+      .commit;
+
+    // The same commit from a member is fine; from the guest it is refused.
+    let guest_view = GuestDirectory {
+      inner: &world.directory,
+      guest: UserId::new(CAROL),
+    };
+    let error = world
+      .alice_group
+      .process_message(&world.alice.provider, &commit, &guest_view, &EveryMember)
+      .unwrap_err();
+    assert!(matches!(error, MlsError::GuestOverreach), "{error}");
+    assert!(
+      !world
+        .alice_group
+        .members()
+        .unwrap()
+        .iter()
+        .any(|member| member.user_id == UserId::new(DAVE))
+    );
+  }
+
   #[test]
   fn member_rejects_change_for_other_conversation() {
     let mut world = World::new();

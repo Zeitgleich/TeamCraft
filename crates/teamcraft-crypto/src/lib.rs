@@ -11,6 +11,7 @@ pub mod backup;
 pub mod call_binding;
 pub mod content_key;
 pub mod device_list;
+pub mod guest_link;
 pub mod identity;
 pub mod ids;
 pub mod key_bag;

@@ -128,7 +128,7 @@ class AvatarCache(
     private const val DIRECTORY = "avatars"
     private const val TAG = "TeamCraftNotify"
     private const val SIZE_PX = 128
-    private const val MAX_PICTURE_BYTES = 2u * 1024u * 1024u
+    private const val MAX_PICTURE_BYTES = 2_097_152u // 2 MiB; unsigned arithmetic is not a constant expression
     private const val PICTURE_MAX_AGE_MS = 12L * 60 * 60 * 1000
     private const val MISSING_MAX_AGE_MS = 60L * 60 * 1000
 

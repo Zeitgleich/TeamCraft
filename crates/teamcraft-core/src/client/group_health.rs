@@ -64,6 +64,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.store.delete(Table::AppliedChanges, &key)?;
       return Ok(());
     }
+    self.queue_guest_removals(conversation, &leftovers)?;
     if group_leftovers(&self.store, conversation)? != leftovers {
       tracing::warn!(conversation_id = %conversation, count = leftovers.len(), "users in the encryption group whom the server no longer lists");
     }

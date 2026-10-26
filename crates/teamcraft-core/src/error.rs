@@ -114,6 +114,10 @@ pub enum CoreError {
   CallEncryptionPending(ConversationId),
   #[error("conversation {0} is not a meeting chat")]
   NotAMeetingChat(ConversationId),
+  /// Letting a guest into a meeting chat's group failed a check of the guest link (e2ee.md §4.6,
+  /// "Meeting guests"): nothing was added.
+  #[error("the guest cannot be let in: {0}")]
+  GuestRefused(GuestRefusal),
   /// The call of `from` should move into `to`, but that doesn't check out: no member of `from`'s
   /// group announced it, or `to`'s group holds people the announcement didn't name.
   #[error("moving the call of {from} into {to} refused: {reason}")]
@@ -257,4 +261,33 @@ mod tests {
       "{text}"
     );
   }
+}
+
+/// Why a guest was not let into a meeting chat's group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum GuestRefusal {
+  /// This device didn't make the guest link, so it has no secret to check the guest's proof with;
+  /// the host compares the key code instead.
+  #[error("this device holds no secret for the meeting's guest link")]
+  NoLinkSecret,
+  /// The guest sent no proof of the link secret.
+  #[error("the guest gave no proof that they hold the link")]
+  NoProof,
+  /// The proof doesn't match the guest's key and name: the server (or somebody without the link)
+  /// made this guest.
+  #[error("the guest's proof of the link does not match their key and name")]
+  BadProof,
+  /// The host's key code doesn't match the guest's identity key.
+  #[error("the key code does not match the guest's identity key")]
+  KeyCodeMismatch,
+  /// The server offers another identity key for the guest than the one that was checked.
+  #[error("the guest's identity key changed while they were let in")]
+  KeyChanged,
+  /// Only the meeting organizer's devices make guest links and let guests into the encryption: a
+  /// guest accepts a welcome from nobody else.
+  #[error("only the organizer's devices can let guests in")]
+  NotOrganizer,
+  /// The guest has not enrolled a device yet.
+  #[error("the guest has no identity key yet")]
+  NotEnrolled,
 }

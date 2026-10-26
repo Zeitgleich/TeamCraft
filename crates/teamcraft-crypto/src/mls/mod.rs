@@ -101,6 +101,8 @@ pub enum MlsError {
   StaleChange { signed_epoch: u64, current_epoch: u64 },
   #[error("commit does not match its signed membership change")]
   ChangeDoesNotMatchCommit,
+  #[error("a guest's commit may only change the guest's own devices")]
+  GuestOverreach,
   #[error("commit contains a proposal type TeamCraft does not use")]
   UnsupportedProposal,
   #[error("commit or message from a sender outside the group")]

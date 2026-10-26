@@ -421,11 +421,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     maybe_error.map_or(Ok(()), Err)
   }
 
-  fn pending_meeting_removals(&self, id: ConversationId) -> Result<Vec<UserId>, CoreError> {
+  pub(super) fn pending_meeting_removals(&self, id: ConversationId) -> Result<Vec<UserId>, CoreError> {
     Ok(records::get_json(&self.store, Table::SyncState, &meeting_removals_key(id))?.unwrap_or_default())
   }
 
-  fn save_meeting_removals(&self, id: ConversationId, users: &[UserId]) -> Result<(), CoreError> {
+  pub(super) fn save_meeting_removals(&self, id: ConversationId, users: &[UserId]) -> Result<(), CoreError> {
     if users.is_empty() {
       return Ok(self.store.delete(Table::SyncState, &meeting_removals_key(id))?);
     }
@@ -554,6 +554,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub(crate) async fn repair_dm_setups(&mut self) -> Result<usize, CoreError> {
     let mut repaired = 0;
     let mut maybe_first_error = None;
+    // Guests this device admitted whose access has ended leave the group even if the server's
+    // removal event never came.
+    self.queue_ended_guests()?;
     // Removals from meeting chats' groups that did not go through yet.
     let removals: Vec<(String, Vec<UserId>)> =
       records::list_json_with_prefix(&self.store, Table::SyncState, MEETING_REMOVALS_PREFIX)?;
@@ -2325,7 +2328,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Ok(group) => group,
       Err(error) => return Ok(WelcomeJoin::Rejected(error)),
     };
-    match self.is_founded_by_organizer(conversation, &group).await {
+    match self
+      .is_founded_by_organizer(conversation, &group, &directory, Some(welcome_sender))
+      .await
+    {
       Ok(true) => {},
       Ok(false) => {
         tracing::warn!(conversation_id = %conversation, "welcome into a meeting chat group its organizer didn't found; dropped");
@@ -2494,8 +2500,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .into_iter()
       .map(|member| member.user_id)
       .collect();
+    let guests = self.guest_users(
+      members
+        .iter()
+        .map(|member| convert::user_from_crypto(*member))
+        .collect::<Result<Vec<_>, _>>()?,
+    )?;
     let maybe_response: Option<teamcraft_proto::ConversationResponse> =
       records::get_json(&self.store, Table::Conversations, &conversation.to_string())?;
+    let is_meeting_chat = maybe_response
+      .as_ref()
+      .is_some_and(|response| response.kind == ConversationKind::Meeting);
+    let maybe_organizer = maybe_response
+      .as_ref()
+      .and_then(|response| response.maybe_organizer_user_id);
     let is_public_channel = maybe_response.is_some_and(|response| {
       response.kind == ConversationKind::Channel
         && response.visibility == teamcraft_proto::ConversationVisibility::Public
@@ -2509,10 +2527,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       tracing::warn!("the signed roster is stale; admins have no authority until an owner re-signs it");
       Vec::new()
     };
-    Ok(
-      WorkspaceAuthority::new(members, admins, workspace.policy.admin_self_join.clone())
-        .for_public_channel(is_public_channel),
-    )
+    let mut authority = WorkspaceAuthority::new(members, admins, workspace.policy.admin_self_join.clone())
+      .with_guests(guests)
+      .for_public_channel(is_public_channel);
+    if is_meeting_chat {
+      // In a meeting chat only the roster's members manage others: a guest the server calls a
+      // member still doesn't (the organizer is in the roster like any member).
+      authority = authority.for_meeting_chat(
+        workspace
+          .roster
+          .members
+          .iter()
+          .map(|member| member.user_id)
+          .chain(maybe_organizer),
+      );
+    }
+    Ok(authority)
   }
 
   /// The history to share when nobody chose: the signed workspace default, but full history only

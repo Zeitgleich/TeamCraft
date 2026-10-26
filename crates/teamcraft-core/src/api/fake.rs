@@ -396,6 +396,15 @@ impl FakeServer {
     self.lock().link_requests.len()
   }
 
+  /// Creates a meeting guest: a user of kind `guest`, as the server makes one for a redeemed link.
+  pub fn add_guest(&self, name: &str) -> FakeServerApi {
+    let api = self.add_user(name);
+    if let Some(user) = self.lock().users.get_mut(&api.user) {
+      user.kind = UserKind::Guest;
+    }
+    api
+  }
+
   /// While offline, every REST call of this user fails with a network error. Coming back online
   /// also disarms a network cut that hasn't hit yet.
   pub fn set_offline(&self, user: UserId, is_offline: bool) {
