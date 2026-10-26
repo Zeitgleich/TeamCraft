@@ -3952,6 +3952,12 @@ ol.md-list {
   font-size: var(--text-sm);
 }
 
+/* The camera's first picture takes over from the user's picture with a short fade (#442), an
+   opacity change that stays with reduced motion. */
+.prejoin-preview .live-video {
+  animation: motion-fade-in var(--dur-base) var(--ease-standard);
+}
+
 .preview-controls {
   position: absolute;
   left: 0;
