@@ -10,6 +10,7 @@ use crate::clock::{
   tomorrow_at,
 };
 use crate::components::avatar::{Avatar, AvatarSize, PresenceDot};
+use crate::components::emoji_picker::EmojiPicker;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::components::profile_views::status_until_label;
@@ -337,6 +338,7 @@ pub fn CustomStatusDialog() -> impl IntoView {
       .collect()
   };
   let has_presets = !presets.is_empty();
+  let text_input = NodeRef::<html::Input>::new();
 
   let save = move || {
     let status = CustomStatus {
@@ -376,21 +378,12 @@ pub fn CustomStatusDialog() -> impl IntoView {
           </Show>
           <Show when=move || can_write_own || !has_presets fallback=|| ()>
           <div class="field-row">
-            <label class="visually-hidden" for="status-emoji">{move || i18n.t("status-emoji")}</label>
-            <input
-              id="status-emoji"
-              class="input emoji-input"
-              name="emoji"
-              maxlength="8"
-              autocomplete="off"
-              prop:value=move || emoji.get()
-              readonly=!can_write_own
-              on:input=move |ev| emoji.set(event_target_value(&ev))
-            />
+            <StatusEmojiButton emoji=emoji is_enabled=can_write_own text_input=text_input />
             <label class="visually-hidden" for="status-text">{move || i18n.t("status-text")}</label>
             <input
               id="status-text"
               class="input grow"
+              node_ref=text_input
               name="status"
               data-autofocus
               autocomplete="off"
@@ -485,6 +478,69 @@ pub fn CustomStatusDialog() -> impl IntoView {
         </footer>
       </form>
     </Modal>
+  }
+}
+
+/// The status emoji as a compact square button (#705): it shows the chosen emoji, or a smiley while
+/// there is none, and opens the app's emoji picker. Picking closes it and moves on to the text;
+/// Backspace or Delete on the button removes the emoji.
+#[component]
+fn StatusEmojiButton(
+  emoji: RwSignal<String>,
+  is_enabled: bool,
+  text_input: NodeRef<html::Input>,
+) -> impl IntoView {
+  let i18n = use_i18n();
+  let button = NodeRef::<html::Button>::new();
+  let maybe_anchor = RwSignal::new_local(None::<web_sys::Element>);
+  let on_pick = move |picked: String| {
+    emoji.set(picked);
+    maybe_anchor.set(None);
+    if let Some(element) = text_input.get_untracked() {
+      drop(element.focus());
+    }
+  };
+  let on_close = move |()| {
+    maybe_anchor.set(None);
+    if let Some(element) = button.get_untracked() {
+      drop(element.focus());
+    }
+  };
+  view! {
+    <button
+      type="button"
+      id="status-emoji"
+      class="emoji-pick-btn"
+      node_ref=button
+      aria-label=move || i18n.t("status-emoji")
+      title=move || i18n.t("status-emoji")
+      aria-haspopup="dialog"
+      aria-expanded=move || maybe_anchor.with(Option::is_some).to_string()
+      disabled=!is_enabled
+      on:click=move |ev| maybe_anchor.set(Some(event_target::<web_sys::Element>(&ev)))
+      on:keydown=move |ev: web_sys::KeyboardEvent| {
+        if matches!(ev.key().as_str(), "Backspace" | "Delete") {
+          ev.prevent_default();
+          emoji.set(String::new());
+        }
+      }
+    >
+      {move || {
+        let chosen = emoji.get();
+        if chosen.trim().is_empty() {
+          view! { <Icon name=IconName::Smile /> }.into_any()
+        } else {
+          view! { <span class="emoji-pick-value" aria-hidden="true">{chosen}</span> }.into_any()
+        }
+      }}
+    </button>
+    {move || {
+      maybe_anchor.get().map(|anchor| {
+        view! {
+          <EmojiPicker anchor=anchor returns_focus=false on_pick=Callback::new(on_pick) on_close=Callback::new(on_close) />
+        }
+      })
+    }}
   }
 }
 

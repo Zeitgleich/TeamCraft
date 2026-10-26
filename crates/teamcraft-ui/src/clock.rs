@@ -83,12 +83,9 @@ pub fn format_time_seconds(ts: TimestampMs, locale: &str) -> String {
   {
     let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ts as f64));
     let options = js_sys::Object::new();
-    for (key, value) in [
-      ("hour", "2-digit"),
-      ("minute", "2-digit"),
-      ("second", "2-digit"),
-      ("hour12", "false"),
-    ] {
+    // The locale decides 12 or 24 hours, as for `format_time` (#702). No `hour12` option: set as
+    // the string "false" it is truthy and forced a 12-hour clock with AM/PM on every locale.
+    for (key, value) in [("hour", "2-digit"), ("minute", "2-digit"), ("second", "2-digit")] {
       // Setting a plain data property on a fresh object cannot fail.
       let _ = js_sys::Reflect::set(&options, &key.into(), &value.into());
     }
