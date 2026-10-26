@@ -44,9 +44,8 @@ use crate::components::modal::Modal;
 use crate::components::thread_panel::ThreadPanel;
 use crate::i18n::use_i18n;
 use crate::lightbox::{
-  Arrival, Command, Direction, Gesture, LightboxScope, MediaKey, MediaKind, ModifierStyle, Point, Pointers,
-  Release, Size, Viewport, album_len, append_older, images_in_scope, neighbor, position, prepend_newer,
-  wants_newer, wants_older, wheel_zoom_factor,
+  Arrival, Command, Direction, Gesture, LightboxScope, MediaKey, MediaKind, MediaPages, ModifierStyle, Point,
+  Pointers, Release, Size, Viewport, album_len, images_in_scope, neighbor, position, wheel_zoom_factor,
 };
 use crate::media_cache::{self, Rendition};
 use crate::model::{ConversationId, ConversationKind, thread_id_of};
@@ -95,23 +94,43 @@ struct Placeholder {
 pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  // The first page, read once when the lightbox opens; later pages are added as the user pages.
-  let first = untrack(|| {
+  // The first page around the opened file. A backend that asks the core has no answer the first
+  // time (#637): `None` until the core answered, then read again on the change notification. Read
+  // once it is there: rebuilding the list on every state change would stall a big channel.
+  let read_first = move || {
     state.read(|backend| {
       backend.conversation_media(conversation, MediaAnchor::Around(start.message), PAGE_MESSAGES)
     })
+  };
+  let pages = RwSignal::new(untrack(read_first).map(MediaPages::first));
+  Effect::new(move |_| {
+    if pages.with_untracked(Option::is_some) {
+      // Read: nothing tracked, so this doesn't run again.
+      return;
+    }
+    if let Some(first) = read_first() {
+      pages.set(Some(MediaPages::first(first)));
+    }
   });
-  let (has_older, has_newer) = (RwSignal::new(first.has_older), RwSignal::new(first.has_newer));
-  let files = RwSignal::new(first.files);
+  let is_listed = Memo::new(move |_| pages.with(Option::is_some));
   // `None` until the user picks one: then the album decides, once the files are known.
   let chosen_scope = RwSignal::new(None::<LightboxScope>);
-  let album_size = Memo::new(move |_| files.with(|files| album_len(files, start)));
+  let album_size =
+    Memo::new(move |_| pages.with(|pages| pages.as_ref().map_or(0, |pages| album_len(pages.files(), start))));
   let scope = Memo::new(move |_| {
     chosen_scope
       .get()
       .unwrap_or_else(|| LightboxScope::for_album_of(album_size.get()))
   });
-  let images = Memo::new(move |_| files.with(|files| images_in_scope(files, scope.get(), start)));
+  let images = Memo::new(move |_| {
+    let scope = scope.get();
+    pages.with(|pages| {
+      pages
+        .as_ref()
+        .map(|pages| images_in_scope(pages.files(), scope, start))
+        .unwrap_or_default()
+    })
+  });
   let current = RwSignal::new(start);
   let current_file = Memo::new(move |_| {
     let key = current.get();
@@ -119,7 +138,9 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
   });
   let at = Memo::new(move |_| images.with(|images| position(images, current.get())));
   // Near an end of what is loaded (in the whole conversation, not one message's album), the next
-  // page comes in: the neighbours keep their keys, so the view stays where it is.
+  // page comes in: the neighbours keep their keys, so the view stays where it is. Runs again after
+  // each page (the other end may be wanted too) and, while the core hasn't answered, on the change
+  // notification.
   Effect::new(move |_| {
     let Some(position) = at.get() else {
       return;
@@ -127,36 +148,20 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
     if scope.get_untracked() != LightboxScope::Conversation {
       return;
     }
-    if wants_older(position, PAGE_MARGIN, has_older.get_untracked()) {
-      let maybe_oldest = files.with_untracked(|files| files.last().map(|file| file.message));
-      let page = maybe_oldest.map(|oldest| {
-        state
-          .read(|backend| backend.conversation_media(conversation, MediaAnchor::Older(oldest), PAGE_MESSAGES))
+    let Some(anchor) = pages.with(|pages| {
+      pages
+        .as_ref()
+        .and_then(|pages| pages.wanted(position, PAGE_MARGIN))
+    }) else {
+      return;
+    };
+    if let Some(page) = state.read(|backend| backend.conversation_media(conversation, anchor, PAGE_MESSAGES))
+    {
+      pages.update(|pages| {
+        if let Some(pages) = pages {
+          pages.add(anchor, page);
+        }
       });
-      // A page without files ends the paging, so an unchanged edge isn't asked again.
-      has_older.set(
-        page
-          .as_ref()
-          .is_some_and(|page| page.has_older && !page.files.is_empty()),
-      );
-      if let Some(page) = page {
-        files.update(|files| append_older(files, page.files));
-      }
-    }
-    if wants_newer(position, PAGE_MARGIN, has_newer.get_untracked()) {
-      let maybe_newest = files.with_untracked(|files| files.first().map(|file| file.message));
-      let page = maybe_newest.map(|newest| {
-        state
-          .read(|backend| backend.conversation_media(conversation, MediaAnchor::Newer(newest), PAGE_MESSAGES))
-      });
-      has_newer.set(
-        page
-          .as_ref()
-          .is_some_and(|page| page.has_newer && !page.files.is_empty()),
-      );
-      if let Some(page) = page {
-        files.update(|files| prepend_newer(files, page.files));
-      }
     }
   });
   let full = RwSignal::new_local(FullMedia::Loading);
@@ -200,7 +205,7 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
     conversation,
     current,
     current_file,
-    images,
+    is_listed,
     kind,
     full,
     thumbnail,
@@ -471,7 +476,8 @@ struct LoadInputs {
   conversation: ConversationId,
   current: RwSignal<MediaKey>,
   current_file: Memo<Option<FileInfo>>,
-  images: Memo<Vec<FileInfo>>,
+  /// Whether the first page of files is there.
+  is_listed: Memo<bool>,
   kind: Memo<Option<MediaKind>>,
   full: RwSignal<FullMedia, LocalStorage>,
   thumbnail: RwSignal<Option<Placeholder>, LocalStorage>,
@@ -489,7 +495,7 @@ fn load_current(inputs: LoadInputs) {
     conversation,
     current,
     current_file,
-    images,
+    is_listed,
     kind,
     full,
     thumbnail,
@@ -510,8 +516,8 @@ fn load_current(inputs: LoadInputs) {
     let next_ticket = ticket.get_value() + 1;
     ticket.set_value(next_ticket);
     let Some(media_type) = media_type.get() else {
-      // An empty list is still loading; a list without the file lost it.
-      let is_gone = !images.with_untracked(Vec::is_empty);
+      // The list is still loading (it runs again when it is there), or it doesn't have the file.
+      let is_gone = is_listed.get();
       thumbnail.set(None);
       full.set(if is_gone {
         FullMedia::Gone

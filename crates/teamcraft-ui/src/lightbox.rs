@@ -14,7 +14,7 @@ pub mod physics;
 
 use std::ops::Range;
 
-use teamcraft_client_api::actions::FileInfo;
+use teamcraft_client_api::actions::{FileInfo, MediaAnchor, MediaPage};
 use teamcraft_proto::AttachmentId;
 
 use crate::model::MessageId;
@@ -694,6 +694,64 @@ pub fn images_in_scope(files: &[FileInfo], scope: LightboxScope, start: MediaKey
   images
 }
 
+/// What the lightbox has read of a conversation's pictures and videos, newest first: the page
+/// around the opened file, then pages further out as the user comes near an end (#274).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MediaPages {
+  files: Vec<FileInfo>,
+  has_older: bool,
+  has_newer: bool,
+}
+
+impl MediaPages {
+  /// The first page, read around the opened file.
+  pub fn first(page: MediaPage) -> Self {
+    Self {
+      files: page.files,
+      has_older: page.has_older,
+      has_newer: page.has_newer,
+    }
+  }
+
+  /// Newest first.
+  pub fn files(&self) -> &[FileInfo] {
+    &self.files
+  }
+
+  /// The page to read next at `position` of the viewer's list, if the user is within `margin`
+  /// images of an end that has more: the older end first.
+  pub fn wanted(&self, position: Position, margin: usize) -> Option<MediaAnchor> {
+    if wants_older(position, margin, self.has_older) {
+      return self.files.last().map(|oldest| MediaAnchor::Older(oldest.message));
+    }
+    if wants_newer(position, margin, self.has_newer) {
+      return self
+        .files
+        .first()
+        .map(|newest| MediaAnchor::Newer(newest.message));
+    }
+    None
+  }
+
+  /// Adds the page read at `anchor`. A page that brings nothing new ends the paging that way, so an
+  /// unchanged edge isn't asked again.
+  pub fn add(&mut self, anchor: MediaAnchor, page: MediaPage) {
+    let before = self.files.len();
+    match anchor {
+      MediaAnchor::Older(_) => {
+        append_older(&mut self.files, page.files);
+        self.has_older = page.has_older && self.files.len() > before;
+      },
+      MediaAnchor::Newer(_) => {
+        prepend_newer(&mut self.files, page.files);
+        self.has_newer = page.has_newer && self.files.len() > before;
+      },
+      // The first page comes through `first`; nothing else reads these.
+      MediaAnchor::Around(_) | MediaAnchor::Newest => {},
+    }
+  }
+}
+
 /// Whether the viewer, at `position` of its list, should read the next older page: the user is
 /// within `margin` images of the old end and the conversation has more (#274).
 pub fn wants_older(position: Position, margin: usize, has_older: bool) -> bool {
@@ -882,6 +940,42 @@ mod tests {
       );
       let messages: Vec<_> = files.iter().map(|file| file.file_id.as_str()).collect();
       assert_eq!(messages, ["70", "60", "50", "40", "30", "20", "10"]);
+    }
+
+    #[test]
+    fn pages_are_read_towards_the_end_the_user_comes_near() {
+      let mut pages = MediaPages::first(MediaPage {
+        files: vec![image(5, 50, "e"), image(4, 40, "d"), image(3, 30, "c")],
+        has_older: true,
+        has_newer: true,
+      });
+      let at = |index, len| Position { index, len };
+      assert_eq!(pages.wanted(at(0, 3), 8), Some(MediaAnchor::Older(id(3))));
+      pages.add(
+        MediaAnchor::Older(id(3)),
+        MediaPage {
+          files: vec![image(2, 20, "b")],
+          has_older: false,
+          has_newer: false,
+        },
+      );
+      assert_eq!(
+        pages.wanted(at(1, 4), 8),
+        Some(MediaAnchor::Newer(id(5))),
+        "the old end is reached: the newer one is next"
+      );
+      // A page that only repeats what is listed ends that way too, instead of asking again forever.
+      pages.add(
+        MediaAnchor::Newer(id(5)),
+        MediaPage {
+          files: vec![image(5, 50, "e")],
+          has_older: false,
+          has_newer: true,
+        },
+      );
+      assert_eq!(pages.wanted(at(1, 4), 8), None);
+      let ids: Vec<_> = pages.files().iter().map(|file| file.file_id.as_str()).collect();
+      assert_eq!(ids, ["50", "40", "30", "20"]);
     }
 
     #[test]
