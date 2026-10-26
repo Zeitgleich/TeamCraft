@@ -259,7 +259,7 @@ mod tests {
   use super::*;
 
   const OFFLINE: CoreConnection = CoreConnection::Offline {
-    retry_at_ms: 10_500,
+    retry_at_ms: 17_500,
     maybe_interception: None,
   };
 
@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn a_captive_portal_is_named_in_the_banner() {
       let portal = CoreConnection::Offline {
-        retry_at_ms: 5_000,
+        retry_at_ms: 12_000,
         maybe_interception: Some(NetworkInterception::CaptivePortal),
       };
       let unsettled = Unsettled::default().observe(portal, 0);
