@@ -12,6 +12,16 @@ final class ChatModelTests: XCTestCase {
       unreadCount: unread, mentionCount: mentions, isFavorite: favorite, isMuted: muted, canPost: true)
   }
 
+  func testRightsTheAppDoesNotSetAreOfferedAndTheServerDecides() {
+    let built = item("1", "general", space: "Team A")
+    XCTAssertTrue(built.canReact && built.canManageBookmarks && built.canManageChannel)
+    let reader = ConversationItem(
+      id: "2", maybeSpaceId: "9", maybeSpaceName: "Team A", kind: .public, name: "news", topic: "",
+      unreadCount: 0, mentionCount: 0, isFavorite: false, isMuted: false, canPost: false,
+      canReact: false, canManageBookmarks: false, canManageChannel: false)
+    XCTAssertFalse(reader.canPost || reader.canReact || reader.canManageBookmarks || reader.canManageChannel)
+  }
+
   func testChannelSectionsOrderFavoritesAndSpacesWithoutDirectMessages() {
     let sections = channelSections([
       item("1", "random", space: "Team B"),
