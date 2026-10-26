@@ -124,14 +124,20 @@ internal class CallUiState(
 )
 
 /** Somebody else in the call, as the tiles show them. */
-private class Person(val userId: String, val name: String, val isSpeaking: Boolean, val isRejoining: Boolean)
+private class Person(
+  val userId: String,
+  val name: String,
+  val isSpeaking: Boolean,
+  val isRejoining: Boolean,
+  val isMuted: Boolean = false,
+)
 
 private fun CallUiState.people(): List<Person> {
   val state = maybeState ?: return emptyList()
   val speaking = state.speakingUserIds
   // Speakers first, loudest first; the rest by name.
   return state.participantUserIds
-    .map { id -> Person(id, names[id].orEmpty(), id in speaking, id in state.reconnectingUserIds) }
+    .map { id -> Person(id, names[id].orEmpty(), id in speaking, id in state.reconnectingUserIds, id in state.mutedUserIds) }
     .sortedWith(compareBy({ speaking.indexOf(it.userId).let { index -> if (index < 0) Int.MAX_VALUE else index } }, { it.name.lowercase() }))
 }
 
@@ -248,20 +254,24 @@ private fun PersonAvatar(person: Person, size: Dp) {
     horizontalAlignment = Alignment.CenterHorizontally,
     verticalArrangement = Arrangement.spacedBy(8.dp),
   ) {
-    Box(
-      Modifier
-        .size(size)
-        .speakingRing(person.isSpeaking)
-        .background(Color.hsl(hue, 0.45f, 0.45f), CircleShape),
-      contentAlignment = Alignment.Center,
-    ) {
-      Text(
-        name.firstOrNull()?.uppercase() ?: "?",
-        color = Color.White,
-        fontSize = (size.value * 0.42f).sp,
-        fontWeight = FontWeight.Medium,
-      )
+    Box {
+      Box(
+        Modifier
+          .size(size)
+          .speakingRing(person.isSpeaking)
+          .background(Color.hsl(hue, 0.45f, 0.45f), CircleShape),
+        contentAlignment = Alignment.Center,
+      ) {
+        Text(
+          name.firstOrNull()?.uppercase() ?: "?",
+          color = Color.White,
+          fontSize = (size.value * 0.42f).sp,
+          fontWeight = FontWeight.Medium,
+        )
+      }
+      if (person.isMuted) MutedBadge(Modifier.align(Alignment.BottomEnd))
     }
+    val mutedName = stringResource(R.string.call_person_muted, name)
     Text(
       name,
       color = Color.White,
@@ -269,7 +279,20 @@ private fun PersonAvatar(person: Person, size: Dp) {
       maxLines = 1,
       overflow = TextOverflow.Ellipsis,
       textAlign = TextAlign.Center,
+      // Said as one: who, and that they are muted.
+      modifier = if (person.isMuted) Modifier.semantics { contentDescription = mutedName } else Modifier,
     )
+  }
+}
+
+/** A small crossed-out microphone on a muted person's avatar. */
+@Composable
+private fun MutedBadge(modifier: Modifier) {
+  Box(
+    modifier.size(26.dp).background(Color(0xFF1B2230), CircleShape).border(1.dp, Color.White.copy(alpha = 0.25f), CircleShape),
+    contentAlignment = Alignment.Center,
+  ) {
+    Icon(CallIcons.MicOff, contentDescription = null, tint = Color.White, modifier = Modifier.size(15.dp))
   }
 }
 
@@ -331,18 +354,28 @@ private fun VideoTile(
       )
     }
     if (maybeOwner != null && maybeOwner.name.isNotEmpty()) {
-      Text(
-        maybeOwner.name,
-        color = Color.White,
-        style = MaterialTheme.typography.labelMedium,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        modifier = Modifier
+      val mutedName = stringResource(R.string.call_person_muted, maybeOwner.name)
+      Row(
+        Modifier
           .align(Alignment.BottomStart)
           .padding(8.dp)
           .background(Color.Black.copy(alpha = 0.55f), CircleShape)
-          .padding(horizontal = 8.dp, vertical = 2.dp),
-      )
+          .padding(horizontal = 8.dp, vertical = 2.dp)
+          .then(if (maybeOwner.isMuted) Modifier.semantics { contentDescription = mutedName } else Modifier),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+      ) {
+        if (maybeOwner.isMuted) {
+          Icon(CallIcons.MicOff, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+        }
+        Text(
+          maybeOwner.name,
+          color = Color.White,
+          style = MaterialTheme.typography.labelMedium,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
+      }
     }
   }
 }

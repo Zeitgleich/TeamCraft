@@ -366,6 +366,7 @@ class CallController(
       participantUserIds = emptyList(),
       peers = emptyList(),
       speakingUserIds = emptyList(),
+      mutedUserIds = emptyList(),
       reconnectingCount = 0u,
       reconnectingUserIds = emptyList(),
       maybePrivacyCode = null,

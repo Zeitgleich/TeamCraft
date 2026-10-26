@@ -247,6 +247,7 @@ class StoreScreenshots {
       participantUserIds = PEOPLE.map { it.first },
       peers = tracks.zip(PEOPLE).map { (track, person) -> CallPeer(deviceId = track.deviceId, userId = person.first) },
       speakingUserIds = listOf(PEOPLE[1].first),
+      mutedUserIds = listOf(PEOPLE[2].first),
       reconnectingCount = 0u,
       reconnectingUserIds = emptyList(),
       maybePrivacyCode = "4821 9035 1176",

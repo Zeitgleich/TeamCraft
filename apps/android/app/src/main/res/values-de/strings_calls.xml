@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+  <string name="call_person_muted">%1$s, stummgeschaltet</string>
   <string name="call_more">Weitere Optionen</string>
   <string name="call_you_muted">Du bist stummgeschaltet</string>
   <string name="call_toggle_controls">Anruf-Steuerung ein- oder ausblenden</string>
