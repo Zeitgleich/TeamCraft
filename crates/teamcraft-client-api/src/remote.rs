@@ -16,8 +16,8 @@ use crate::admin::DeviceInfo;
 use crate::backend::{ChatBackend, LoadingList, SearchBackend};
 use crate::calls::{
   ActiveCall, BackgroundEffect, BackgroundImageInfo, CallEndReason, CallHistoryItem, CallMoveOffer,
-  CallRequest, CallStatusSounds, IncomingCall, JoinMedia, MediaDevices, OrgBackgroundRule, OrgBackgrounds,
-  PushToTalk, RemoteVideoTrack, RunningCall, ScreenContentMode,
+  CallPreview, CallRequest, CallStatusSounds, IncomingCall, JoinMedia, MediaDevices, OrgBackgroundRule,
+  OrgBackgrounds, PreviewCamera, PushToTalk, RemoteVideoTrack, RunningCall, ScreenContentMode,
 };
 use crate::live::LiveSnapshot;
 use crate::model::{
@@ -57,6 +57,9 @@ pub struct CallSnapshot {
   /// Set when the meeting host removed the user or ended the call; cleared on the next join.
   #[serde(default)]
   pub maybe_end_reason: Option<CallEndReason>,
+  /// The pre-join check's camera (#442).
+  #[serde(default)]
+  pub preview_camera: PreviewCamera,
 }
 
 /// Something the user did in or about a call.
@@ -139,6 +142,11 @@ pub enum CallAction {
   },
   /// Lists the cameras, microphones and speakers again (the pre-join screen opened).
   RefreshDevices,
+  /// Starts, changes or ends the pre-join check of the camera and microphone (#442). Refused
+  /// while a call runs on this device: the call has them.
+  SetPreview {
+    preview: CallPreview,
+  },
   /// Plays a short test sound on the speakers (`None`: the system default); finishes when it
   /// has played, fails when it can't play. The desktop shell's: the browser page plays it itself,
   /// since it has to start inside the click.
@@ -1664,6 +1672,48 @@ mod tests {
         is_camera_on: true,
       }
     );
+  }
+
+  /// #442: the pre-join check and its camera's state have stable wire names; a snapshot without
+  /// a preview (an older shell) has none running.
+  #[test]
+  fn the_pre_join_check_has_stable_wire_names() {
+    let action = CallAction::SetPreview {
+      preview: CallPreview {
+        is_camera_on: true,
+        is_mic_on: false,
+      },
+    };
+    let json = r#"{"action":"set_preview","preview":{"is_camera_on":true,"is_mic_on":false}}"#;
+    assert_eq!(serde_json::to_string(&action).expect("serialize"), json);
+    assert_eq!(serde_json::from_str::<CallAction>(json).expect("parse"), action);
+    assert_eq!(
+      serde_json::from_str::<CallAction>(r#"{"action":"set_preview","preview":{}}"#).expect("parse"),
+      CallAction::SetPreview {
+        preview: CallPreview::default()
+      }
+    );
+    for (camera, name) in [
+      (PreviewCamera::Off, r#""off""#),
+      (PreviewCamera::Starting, r#""starting""#),
+      (PreviewCamera::Live, r#""live""#),
+      (PreviewCamera::Failed, r#""failed""#),
+    ] {
+      assert_eq!(serde_json::to_string(&camera).expect("serialize"), name);
+      assert_eq!(
+        serde_json::from_str::<PreviewCamera>(name).expect("parse"),
+        camera
+      );
+    }
+    assert_eq!(
+      serde_json::from_str::<PreviewCamera>(r#""paused""#).expect("parse"),
+      PreviewCamera::Unknown
+    );
+    let without: CallSnapshot = serde_json::from_str(
+      r#"{"incoming":[],"running":[],"devices":{"cameras":[],"microphones":[],"speakers":[]}}"#,
+    )
+    .expect("parse");
+    assert_eq!(without.preview_camera, PreviewCamera::Off);
   }
 
   /// A call action answers `null`, or the failure of a part that didn't go through.

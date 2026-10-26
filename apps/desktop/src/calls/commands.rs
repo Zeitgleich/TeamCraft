@@ -75,6 +75,26 @@ pub fn call_unwatch_camera(calls: State<'_, Arc<CallHost>>, channel: u32) {
   calls.unwatch_camera(ChannelId(channel));
 }
 
+/// Sends the pre-join check's microphone level (0.0 to 1.0) through `levels`, about ten times a
+/// second while the check measures (#442).
+#[tauri::command(rename_all = "snake_case")]
+pub fn call_watch_level(calls: State<'_, Arc<CallHost>>, levels: Channel<f32>) {
+  let channel = ChannelId(levels.id());
+  calls.watch_level(channel, move |level| match levels.send(level) {
+    Ok(()) => true,
+    Err(error) => {
+      tracing::debug!(%error, "microphone level not delivered to the webview");
+      false
+    },
+  });
+}
+
+/// Stops the level; `channel` is the id of the `levels` channel it was started with.
+#[tauri::command(rename_all = "snake_case")]
+pub fn call_unwatch_level(calls: State<'_, Arc<CallHost>>, channel: u32) {
+  calls.unwatch_level(ChannelId(channel));
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn call_unwatch_video(
   calls: State<'_, Arc<CallHost>>,
@@ -247,6 +267,18 @@ pub async fn call_action(
     CallAction::SetTalking { is_talking } => calls.set_talking(is_talking).await,
     CallAction::SetStatusSounds { sounds } => calls.set_status_sounds(sounds).await,
     CallAction::RefreshDevices => drop(calls.refresh_devices().await?),
+    CallAction::SetPreview { preview } => {
+      // The current choice under the current rule, as for the call's camera: the check shows
+      // what the call would send. A failure still leaves the check running (a picture the
+      // organization requires that can't load: strong blur).
+      let applied = if preview.is_camera_on {
+        apply_background(&core, &calls, calls.background()).await
+      } else {
+        Ok(())
+      };
+      calls.set_preview(preview).await?;
+      applied?;
+    },
     CallAction::TestSpeakers { maybe_device } => calls.test_speakers(maybe_device).await?,
     CallAction::Unknown => return Err(CommandError::from("unknown call action".to_owned())),
   }

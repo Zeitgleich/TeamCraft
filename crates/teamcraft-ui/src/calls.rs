@@ -40,6 +40,8 @@ pub enum CallEvent {
   TestSpeakers(String),
   /// Lists the devices again.
   RefreshDevices,
+  /// Starts, changes or ends the pre-join check of the camera and microphone (#442).
+  Preview(CallPreview),
   Camera(bool),
   CameraDevice(String),
   Effect(BackgroundEffect),
@@ -118,7 +120,8 @@ impl CallState {
   /// the backend's change notification after the action re-runs the effect, which emits again: a
   /// loop of call actions and refreshes that kept the desktop app busy while idle (issue #399).
   pub fn emit(&self, event: CallEvent) {
-    if let Some(handler) = self.handler.get_value() {
+    // Gone only while the app itself is torn down (signing out): nothing left to tell.
+    if let Some(handler) = self.handler.try_get_value().flatten() {
       untrack(|| handler(event));
     }
   }

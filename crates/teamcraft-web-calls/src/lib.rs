@@ -23,8 +23,8 @@ use futures::future::{Either, select};
 use js_sys::{Function, Promise, Reflect, Uint8Array};
 use teamcraft_client_api::call_view::{CallSignal, CallView};
 use teamcraft_client_api::calls::{
-  ActiveCall, BackgroundEffect, BrowserPermission, CallEndReason, CallRequest, CallStatusSounds,
-  DevicePresence, JoinMedia, MediaDevice, MediaDevices, PushToTalk, ScreenShareSound,
+  ActiveCall, BackgroundEffect, BrowserPermission, CallEndReason, CallPreview, CallRequest, CallStatusSounds,
+  DevicePresence, JoinMedia, MediaDevice, MediaDevices, PreviewCamera, PushToTalk, ScreenShareSound,
 };
 use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
 use teamcraft_client_api::page_calls::PreparedCall;
@@ -38,8 +38,8 @@ use teamcraft_media::call_resilience::{
 };
 use teamcraft_media::call_view::{CallRoster, status_cues};
 use teamcraft_media::call_web::{
-  self, LocalTicketFuture, MediaAccessReason, MediaInput, WebCall, WebCallConfig, WebCallError,
-  WebJoinTicketSource,
+  self, LocalTicketFuture, MediaAccessReason, MediaInput, MicrophoneMeter, WebCall, WebCallConfig,
+  WebCallError, WebJoinTicketSource,
 };
 use teamcraft_media::jitter::JitterBufferConfig;
 use teamcraft_proto::{
@@ -101,10 +101,16 @@ struct State {
   maybe_camera: Option<String>,
   /// The workspace requires a background the browser can't apply (from the last preparation).
   requires_background: bool,
-  /// The stream the camera sends, shown as the self view.
+  /// The camera the self view shows: the one the call sends, or the pre-join check's.
   maybe_local_camera: Option<MediaStream>,
   /// The self view: one `<video>` for the whole session, playing whichever camera is on.
   maybe_camera_view: Option<HtmlVideoElement>,
+  /// What the pre-join screen asked to check (#442); an input starts when asked for, not again
+  /// with every request, so a refused one isn't asked for over and over.
+  preview: CallPreview,
+  preview_camera: PreviewCamera,
+  /// The pre-join check's microphone, for the meter.
+  maybe_preview_meter: Option<MicrophoneMeter>,
 }
 
 /// The task that owns the [`WebCall`].
@@ -268,6 +274,22 @@ pub fn camera_view() -> Option<HtmlVideoElement> {
   Some(video)
 }
 
+/// The microphone's level in the pre-join check, from 0 (silence, or no check) to 1.
+#[wasm_bindgen]
+pub fn preview_level() -> f32 {
+  host()
+    .ok()
+    .and_then(|host| {
+      host
+        .state
+        .borrow()
+        .maybe_preview_meter
+        .as_ref()
+        .map(MicrophoneMeter::level)
+    })
+    .unwrap_or(0.0)
+}
+
 /// The page's core saw the network come back or change, or the page woke up: a running call checks
 /// its session, or retries a rejoin at once.
 #[wasm_bindgen]
@@ -283,6 +305,7 @@ pub async fn stop() {
   ringtone::set_ringing(false);
   let maybe_host = HOST.with(|slot| slot.borrow_mut().take());
   if let Some(host) = maybe_host {
+    host.end_preview(false);
     host.leave().await;
   }
 }
@@ -296,11 +319,23 @@ impl Host {
     request: CallRequest,
     media: JoinMedia,
   ) -> Result<CallActionAnswer, ActionFailure> {
-    self.connect(request, media.is_muted).await?;
+    // The call opens the microphone itself; the check's camera goes on as the call's (no second
+    // prompt, no gap in the self view).
+    let maybe_checked_camera = self.end_preview(media.is_camera_on);
+    if let Err(failure) = self.connect(request, media.is_muted).await {
+      if let Some(stream) = &maybe_checked_camera {
+        stop_tracks(stream);
+        if let Some(view) = &self.state.borrow().maybe_camera_view {
+          view.set_src_object(None);
+        }
+      }
+      return Err(failure);
+    }
     if !media.is_camera_on {
       return Ok(None);
     }
-    Ok(self.start_camera().await.err().map(|failure| failure.to_wire()))
+    let started = self.start_camera_from(maybe_checked_camera).await;
+    Ok(started.err().map(|failure| failure.to_wire()))
   }
 
   /// Connects to the conversation's call, leaving a running call first.
@@ -416,6 +451,7 @@ impl Host {
       CallAction::SelectMicrophone { maybe_device } => {
         self.state.borrow_mut().microphone = device_choice(maybe_device);
         self.switch_audio().await?;
+        self.restart_preview_microphone().await?;
       },
       CallAction::SelectSpeakers { maybe_device } => {
         self.state.borrow_mut().speakers = device_choice(maybe_device);
@@ -429,6 +465,7 @@ impl Host {
         if self.state.borrow().view.is_camera_on() {
           self.start_camera().await?;
         }
+        self.restart_preview_camera().await?;
       },
       CallAction::StartScreenShare {
         has_sound,
@@ -496,6 +533,7 @@ impl Host {
           .await;
       },
       CallAction::RefreshDevices => self.refresh_devices(),
+      CallAction::SetPreview { preview } => self.set_preview(preview).await?,
       // The page plays the test itself: it has to start inside the click (teamcraft-ui speaker_test).
       CallAction::TestSpeakers { .. } => {
         return Err(ActionFailure::other("the page plays the speaker test itself"));
@@ -528,34 +566,32 @@ impl Host {
 
   /// Opens the camera (the browser may ask) and sends it; replaces a running camera.
   async fn start_camera(&self) -> Result<(), ActionFailure> {
+    self.start_camera_from(None).await
+  }
+
+  /// Sends the camera: `maybe_open`, one the pre-join check opened, or a newly opened one.
+  async fn start_camera_from(&self, maybe_open: Option<MediaStream>) -> Result<(), ActionFailure> {
     // Not in a call (its join failed and said why): nothing to send the camera to.
     if self.maybe_media.borrow().is_none() {
+      if let Some(stream) = &maybe_open {
+        stop_tracks(stream);
+      }
       return Ok(());
     }
     // admin.md §3.5: the browser can't put a background behind the camera image, so where the
     // organization requires one, the camera stays off.
     if self.state.borrow().requires_background {
+      if let Some(stream) = &maybe_open {
+        stop_tracks(stream);
+      }
       return Err(ActionFailure::new(
         FailureKind::Call(CallFailure::BackgroundRequired),
         "the organization requires a background, which the browser can't apply",
       ));
     }
-    let maybe_camera = self.state.borrow().maybe_camera.clone();
-    // Phones open one camera at a time: release the running one before asking for the other (the
-    // flip button), or the browser refuses the second.
-    let maybe_running = self.state.borrow_mut().maybe_local_camera.take();
-    if let Some(running) = &maybe_running {
-      stop_tracks(running);
-    }
-    let stream = match call_web::capture_camera(maybe_camera.as_deref()).await {
-      Ok(stream) => stream,
-      Err(error) => {
-        if maybe_running.is_some() {
-          // The old camera is gone, so don't claim it still sends.
-          self.stop_camera();
-        }
-        return Err(failure(error));
-      },
+    let stream = match maybe_open {
+      Some(stream) => stream,
+      None => self.reopen_camera().await?,
     };
     let sent = stream.clone();
     if let Err(error) = self.ask(|done| Control::Camera { stream: sent, done }).await {
@@ -571,6 +607,160 @@ impl Host {
     }
     self.update_active(|active| active.is_camera_on = true);
     Ok(())
+  }
+
+  /// Opens the chosen camera again (the browser may ask) for the call.
+  async fn reopen_camera(&self) -> Result<MediaStream, ActionFailure> {
+    let maybe_camera = self.state.borrow().maybe_camera.clone();
+    // Phones open one camera at a time: release the running one before asking for the other (the
+    // flip button), or the browser refuses the second.
+    let maybe_running = self.state.borrow_mut().maybe_local_camera.take();
+    if let Some(running) = &maybe_running {
+      stop_tracks(running);
+    }
+    call_web::capture_camera(maybe_camera.as_deref())
+      .await
+      .map_err(|error| {
+        if maybe_running.is_some() {
+          // The old camera is gone, so don't claim it still sends.
+          self.stop_camera();
+        }
+        failure(error)
+      })
+  }
+
+  /// Runs the pre-join check as asked (#442). A call on this device has the camera and
+  /// microphone; then there is nothing to check.
+  async fn set_preview(&self, preview: CallPreview) -> Result<(), ActionFailure> {
+    if self.maybe_media.borrow().is_some() {
+      return Ok(());
+    }
+    let previous = std::mem::replace(&mut self.state.borrow_mut().preview, preview);
+    // Both inputs, even when the first fails; the first failure is the answer.
+    let camera = match (previous.is_camera_on, preview.is_camera_on) {
+      (false, true) => self.start_preview_camera().await,
+      (true, false) => {
+        self.stop_preview_camera();
+        Ok(())
+      },
+      _ => Ok(()),
+    };
+    let microphone = match (previous.is_mic_on, preview.is_mic_on) {
+      (false, true) => self.start_preview_microphone().await,
+      (true, false) => {
+        self.state.borrow_mut().maybe_preview_meter = None;
+        Ok(())
+      },
+      _ => Ok(()),
+    };
+    camera.and(microphone)
+  }
+
+  /// Opens the camera for the self view only (the browser may ask).
+  async fn start_preview_camera(&self) -> Result<(), ActionFailure> {
+    self.set_preview_camera(PreviewCamera::Starting);
+    let maybe_camera = self.state.borrow().maybe_camera.clone();
+    let result = call_web::capture_camera(maybe_camera.as_deref()).await;
+    // Ended (or restarted) meanwhile: the screen closed, or a join took over.
+    if self.state.borrow().preview_camera != PreviewCamera::Starting {
+      if let Ok(stream) = &result {
+        stop_tracks(stream);
+      }
+      return Ok(());
+    }
+    match result {
+      Ok(stream) => {
+        {
+          let mut state = self.state.borrow_mut();
+          if let Some(view) = &state.maybe_camera_view {
+            view.set_src_object(Some(&stream));
+          }
+          state.maybe_local_camera = Some(stream);
+        }
+        self.set_preview_camera(PreviewCamera::Live);
+        Ok(())
+      },
+      Err(error) => {
+        self.set_preview_camera(PreviewCamera::Failed);
+        Err(failure(error))
+      },
+    }
+  }
+
+  fn stop_preview_camera(&self) {
+    {
+      let mut state = self.state.borrow_mut();
+      if let Some(stream) = state.maybe_local_camera.take() {
+        stop_tracks(&stream);
+      }
+      if let Some(view) = &state.maybe_camera_view {
+        view.set_src_object(None);
+      }
+    }
+    self.set_preview_camera(PreviewCamera::Off);
+  }
+
+  /// Another camera was chosen: the check shows it instead.
+  async fn restart_preview_camera(&self) -> Result<(), ActionFailure> {
+    let is_checking = self.maybe_media.borrow().is_none() && self.state.borrow().preview.is_camera_on;
+    if !is_checking {
+      return Ok(());
+    }
+    self.stop_preview_camera();
+    self.start_preview_camera().await
+  }
+
+  async fn start_preview_microphone(&self) -> Result<(), ActionFailure> {
+    let choice = self.state.borrow().microphone.clone();
+    let meter = MicrophoneMeter::open(&choice).await.map_err(failure)?;
+    // Not asked for any more (the screen closed, a join took over): the meter goes, and with it
+    // the microphone.
+    let is_wanted = self.maybe_media.borrow().is_none() && self.state.borrow().preview.is_mic_on;
+    if is_wanted {
+      self.state.borrow_mut().maybe_preview_meter = Some(meter);
+    }
+    Ok(())
+  }
+
+  /// Another microphone was chosen: the meter measures it instead.
+  async fn restart_preview_microphone(&self) -> Result<(), ActionFailure> {
+    let is_checking = self.maybe_media.borrow().is_none() && self.state.borrow().preview.is_mic_on;
+    if !is_checking {
+      return Ok(());
+    }
+    self.state.borrow_mut().maybe_preview_meter = None;
+    self.start_preview_microphone().await
+  }
+
+  /// Ends the pre-join check; with `keeps_camera` its running camera is handed back (for the
+  /// call) instead of stopped.
+  fn end_preview(&self, keeps_camera: bool) -> Option<MediaStream> {
+    let maybe_camera = {
+      let mut state = self.state.borrow_mut();
+      state.preview = CallPreview::default();
+      state.maybe_preview_meter = None;
+      let is_checking_camera = state.preview_camera != PreviewCamera::Off;
+      // Only the check's camera: a call's goes with the call.
+      if is_checking_camera && self.maybe_media.borrow().is_none() {
+        state.maybe_local_camera.take()
+      } else {
+        None
+      }
+    };
+    self.set_preview_camera(PreviewCamera::Off);
+    match maybe_camera {
+      Some(stream) if keeps_camera => Some(stream),
+      Some(stream) => {
+        stop_tracks(&stream);
+        None
+      },
+      None => None,
+    }
+  }
+
+  fn set_preview_camera(&self, camera: PreviewCamera) {
+    self.state.borrow_mut().preview_camera = camera;
+    self.changed();
   }
 
   fn stop_camera(&self) {
@@ -677,6 +867,7 @@ impl Host {
         video_tracks: state.view.video_tracks.values().cloned().collect(),
         push_to_talk: state.push_to_talk.clone(),
         maybe_end_reason: state.view.maybe_end_reason,
+        preview_camera: state.preview_camera,
       }
     };
     let Ok(json) = serde_json::to_string(&snapshot) else {

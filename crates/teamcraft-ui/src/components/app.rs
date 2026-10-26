@@ -954,6 +954,7 @@ pub(crate) fn connect_calls(state: AppState) {
       CallEvent::Speakers(device) => backend.select_speakers(Some(device)),
       CallEvent::TestSpeakers(device) => backend.test_speakers(Some(device)),
       CallEvent::RefreshDevices => backend.refresh_media_devices(),
+      CallEvent::Preview(preview) => backend.set_call_preview(preview),
       CallEvent::Camera(is_on) => backend.set_call_camera(is_on),
       CallEvent::CameraDevice(device) => backend.select_camera(Some(device)),
       CallEvent::Effect(effect) => backend.set_background_effect(effect),

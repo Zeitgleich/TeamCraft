@@ -133,6 +133,8 @@ impl FakeCalls {
       | CallAction::SelectCamera { .. }
       | CallAction::SetStatusSounds { .. }
       | CallAction::RefreshDevices
+      // No camera here, and nothing to measure.
+      | CallAction::SetPreview { .. }
       | CallAction::TestSpeakers { .. }
       | CallAction::Unknown => {},
     }

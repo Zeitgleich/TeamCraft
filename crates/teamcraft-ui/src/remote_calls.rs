@@ -15,7 +15,8 @@ use std::rc::Rc;
 use leptos::task::spawn_local;
 use serde_json::json;
 use teamcraft_client_api::calls::{
-  ActiveCall, CallRequest, HuddleInfo, IncomingCall, JoinMedia, MediaDevices, Participant, RemoteVideoTrack,
+  ActiveCall, CallPreview, CallRequest, HuddleInfo, IncomingCall, JoinMedia, MediaDevices, Participant,
+  PreviewCamera, RemoteVideoTrack,
 };
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::model::{ConversationId, UserId};
@@ -34,6 +35,9 @@ pub struct RemoteCalls {
   queue: Rc<RefCell<VecDeque<CallAction>>>,
   is_draining: Rc<Cell<bool>>,
   join_failures: Rc<Cell<u64>>,
+  /// The pre-join check's microphone level from the desktop shell (#442).
+  #[cfg(target_arch = "wasm32")]
+  shell_level: crate::shell_level::ShellLevel,
 }
 
 /// Where the media runs.
@@ -51,6 +55,11 @@ impl RemoteCalls {
   pub async fn connect() -> Result<Self, String> {
     let snapshot: CallSnapshot = call("call_snapshot", &json!({})).await?;
     let calls = Self::new(snapshot, CallLink::Shell);
+    // A check an earlier page left running (reloaded while the pre-join screen was open) ends:
+    // nothing on screen shows the camera or the meter now.
+    calls.act(CallAction::SetPreview {
+      preview: CallPreview::default(),
+    });
     let listener = calls.clone();
     listen(CALL_CHANGED_EVENT, move || listener.refresh());
     Ok(calls)
@@ -80,6 +89,8 @@ impl RemoteCalls {
       queue: Rc::default(),
       is_draining: Rc::default(),
       join_failures: Rc::default(),
+      #[cfg(target_arch = "wasm32")]
+      shell_level: crate::shell_level::ShellLevel::default(),
     }
   }
 
@@ -220,6 +231,32 @@ impl RemoteCalls {
     self.act(CallAction::join(request, media));
   }
 
+  /// Starts, changes or ends the pre-join check (#442), in order with the other actions: a join
+  /// right after it finds the check running and takes the camera and microphone over.
+  pub fn set_preview(&self, preview: CallPreview) {
+    #[cfg(target_arch = "wasm32")]
+    if let CallLink::Shell = self.link {
+      self.shell_level.follow(preview.is_mic_on);
+    }
+    self.act(CallAction::SetPreview { preview });
+  }
+
+  pub fn preview_camera(&self) -> PreviewCamera {
+    self.snapshot.borrow().preview_camera
+  }
+
+  /// The pre-join check's microphone level: the shell's newest reading, or the page's meter.
+  pub fn preview_level(&self) -> f32 {
+    match &self.link {
+      #[cfg(target_arch = "wasm32")]
+      CallLink::Shell => self.shell_level.get(),
+      #[cfg(not(target_arch = "wasm32"))]
+      CallLink::Shell => 0.0,
+      #[cfg(target_arch = "wasm32")]
+      CallLink::Page(_) => crate::web_calls::preview_level(),
+    }
+  }
+
   async fn carry_out(&self, action: CallAction) -> Result<CallActionAnswer, String> {
     match &self.link {
       CallLink::Shell => call::<CallActionAnswer>("call_action", &json!({ "action": action })).await,
@@ -335,6 +372,7 @@ mod tests {
       video_tracks: Vec::new(),
       push_to_talk: Default::default(),
       maybe_end_reason: None,
+      preview_camera: PreviewCamera::Off,
     };
     assert_eq!(roster_of(&snapshot, conversation), vec![carol, dave]);
     assert!(roster_of(&snapshot, id_from_raw(8)).is_empty());

@@ -9,9 +9,13 @@
 //!
 //! A lost connection (a laptop changing networks) doesn't end the call: the driver migrates or
 //! rejoins with a fresh token from the core, and the UI shows "reconnecting" meanwhile.
+//!
+//! Before a join, the pre-join screen checks the camera and microphone here (`preview`): the
+//! camera through the call's effects into the self view, the microphone into a level meter.
 
 mod codec_library;
 pub mod commands;
+mod preview;
 pub(crate) mod push_to_talk;
 mod self_view;
 pub(crate) mod video;
@@ -22,8 +26,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use teamcraft_client_api::call_view::CallView;
 use teamcraft_client_api::calls::{
-  ActiveCall, BackgroundEffect as UiBackgroundEffect, CallEndReason, CallRequest, CallStatusSounds,
-  DevicePresence, MediaDevice, MediaDevices, PushToTalk, ScreenShareSound,
+  ActiveCall, BackgroundEffect as UiBackgroundEffect, CallEndReason, CallPreview, CallRequest,
+  CallStatusSounds, DevicePresence, MediaDevice, MediaDevices, PreviewCamera, PushToTalk, ScreenShareSound,
 };
 use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
 use teamcraft_client_api::remote::CallSnapshot;
@@ -52,8 +56,10 @@ use teamcraft_proto::{
 use tokio::sync::{mpsc, oneshot};
 
 use self::codec_library::CodecLibrary;
+use self::preview::{CameraCheck, LevelWatch, MicrophoneCheck, Preview};
 use self::self_view::SelfView;
 pub(crate) use self::video::BUNDLED_MODEL;
+use self::video::OpenedCamera;
 use crate::core::{CallPreparation, CoreRuntime};
 
 pub use teamcraft_client_api::remote::CALL_CHANGED_EVENT;
@@ -73,6 +79,10 @@ pub struct CallHost {
   self_view: SelfView,
   codecs: CodecLibrary,
   maybe_segmentation_model: Option<PathBuf>,
+  /// The pre-join check (#442); a mutex across awaits, always taken after `media`.
+  preview: tokio::sync::Mutex<Preview>,
+  /// Where the pre-join check's microphone level goes.
+  levels: LevelWatch,
 }
 
 /// Files the calls need from the app's directories.
@@ -99,6 +109,9 @@ struct CallState {
   is_background_required: bool,
   /// Changes the effect of the running camera without restarting it.
   maybe_effect_handle: Option<EffectHandle>,
+  /// The same for the pre-join check's camera.
+  maybe_preview_effect: Option<EffectHandle>,
+  preview_camera: PreviewCamera,
   /// Lets the screen picker remember the last choice.
   maybe_screen_token: Option<String>,
   push_to_talk: PushToTalk,
@@ -171,6 +184,8 @@ impl CallHost {
       self_view: SelfView::default(),
       codecs: CodecLibrary::new(files.codec_directory),
       maybe_segmentation_model: files.maybe_segmentation_model,
+      preview: tokio::sync::Mutex::default(),
+      levels: LevelWatch::default(),
     }
   }
 
@@ -195,6 +210,7 @@ impl CallHost {
       video_tracks: state.view.video_tracks.values().cloned().collect(),
       push_to_talk: state.push_to_talk.clone(),
       maybe_end_reason: state.view.maybe_end_reason,
+      preview_camera: state.preview_camera,
     }
   }
 
@@ -256,6 +272,8 @@ impl CallHost {
     tickets: Arc<dyn JoinTicketSource>,
   ) -> Result<(), String> {
     let mut media = self.media.lock().await;
+    // The call opens the camera and microphone itself.
+    self.end_preview().await;
     if let Some(previous) = media.take() {
       previous.leave().await;
     }
@@ -369,6 +387,47 @@ impl CallHost {
     self.self_view.unwatch(channel);
   }
 
+  /// Sends the pre-join check's microphone level (0.0 to 1.0) to `send` about ten times a second
+  /// while the check measures; `send` answers whether the reading was delivered.
+  pub fn watch_level(&self, channel: ChannelId, send: impl Fn(f32) -> bool + Send + 'static) {
+    self.levels.watch(channel, send);
+  }
+
+  /// Stops sending the level, if `channel` is the one it goes through.
+  pub fn unwatch_level(&self, channel: ChannelId) {
+    self.levels.unwatch(channel);
+  }
+
+  /// Runs the pre-join check as asked (#442). An input starts when it is asked for and stops when
+  /// it no longer is. A running call has the camera and microphone; then there is nothing to
+  /// check. A failure is `ActionFailure` wire text; the other input still runs.
+  pub async fn set_preview(&self, wanted: CallPreview) -> Result<(), String> {
+    // The same order as a join: the call's lock, then the check's.
+    let media = self.media.lock().await;
+    if media.is_some() {
+      return Ok(());
+    }
+    let mut preview = self.preview.lock().await;
+    let previous = std::mem::replace(&mut preview.wanted, wanted);
+    let camera = if wanted.is_camera_on == previous.is_camera_on {
+      Ok(())
+    } else if wanted.is_camera_on {
+      self.start_preview_camera(&mut preview).await
+    } else {
+      self.stop_preview_camera(&mut preview).await;
+      Ok(())
+    };
+    let microphone = if wanted.is_mic_on == previous.is_mic_on {
+      Ok(())
+    } else if wanted.is_mic_on {
+      self.start_preview_microphone(&mut preview).await
+    } else {
+      preview.stop_microphone().await;
+      Ok(())
+    };
+    camera.and(microphone)
+  }
+
   /// Stops receiving a track, if `channel` is the one it is sent through.
   pub async fn unwatch_video(&self, stream_id: MediaStreamId, channel: ChannelId) {
     let is_removed = {
@@ -424,7 +483,8 @@ impl CallHost {
   /// the system default.
   pub async fn select_microphone(&self, maybe_device: Option<String>) -> Result<(), String> {
     lock(&self.state).microphone = device_choice(maybe_device);
-    self.switch_audio().await
+    self.switch_audio().await?;
+    self.restart_preview_microphone().await
   }
 
   pub async fn select_speakers(&self, maybe_device: Option<String>) -> Result<(), String> {
@@ -460,40 +520,12 @@ impl CallHost {
       lock(&self.state).maybe_effect_handle = None;
       return Ok(());
     }
-    let is_required = lock(&self.state).is_background_required;
-    if is_required && !matches!(lock(&self.state).background, UiBackgroundEffect::Org(_)) {
-      return Err("the organization requires one of its backgrounds for the camera".into());
-    }
     self.ensure_video_codec().await?;
-    let (maybe_camera, background, maybe_custom) = {
-      let state = lock(&self.state);
-      (
-        state.maybe_camera.clone(),
-        state.background,
-        state.maybe_custom_background.clone(),
-      )
-    };
-    let maybe_model = self.maybe_segmentation_model.clone();
-    let (capture, maybe_effects) = tokio::task::spawn_blocking(move || {
-      let capture = video::open_camera(maybe_camera.as_deref())?;
-      Ok::<_, String>((
-        capture,
-        video::effects_filter(background, maybe_custom.as_ref(), maybe_model.as_deref()),
-      ))
-    })
-    .await
-    .map_err(|error| error.to_string())??;
-    let (maybe_filter, maybe_handle) = match maybe_effects {
-      Some((filter, handle)) => (Some(filter), Some(handle)),
-      // Sending the room behind the person would break the organization's rule.
-      None if is_required => {
-        return Err(
-          "the organization requires a background, but background effects aren't available on this device"
-            .into(),
-        );
-      },
-      None => (None, None),
-    };
+    let OpenedCamera {
+      capture,
+      maybe_filter,
+      maybe_handle,
+    } = self.open_camera().await?;
     let config = VideoSendConfig {
       kind: VideoTrackKind::Camera,
       layers: video::camera_layers(capture.format()),
@@ -510,13 +542,18 @@ impl CallHost {
     Ok(())
   }
 
-  /// Remembers the camera and restarts a running one with it.
+  /// The background behind the camera, as last applied under the organization's rule.
+  pub fn background(&self) -> UiBackgroundEffect {
+    lock(&self.state).background
+  }
+
+  /// Remembers the camera and restarts a running one (or the pre-join check's) with it.
   pub async fn select_camera(&self, maybe_device: Option<String>) -> Result<(), String> {
     lock(&self.state).maybe_camera = maybe_device;
     if self.is_camera_on() {
       self.set_camera(true).await?;
     }
-    Ok(())
+    self.restart_preview_camera().await
   }
 
   /// `maybe_custom`: the decoded picture for [`UiBackgroundEffect::Custom`] or
@@ -529,12 +566,15 @@ impl CallHost {
     maybe_custom: Option<Arc<BackgroundImage>>,
     is_required: bool,
   ) {
-    let maybe_handle = {
+    let (maybe_handle, maybe_preview_handle) = {
       let mut state = lock(&self.state);
       state.background = effect;
       state.is_background_required = is_required;
       state.maybe_custom_background = maybe_custom.clone();
-      state.maybe_effect_handle.clone()
+      (
+        state.maybe_effect_handle.clone(),
+        state.maybe_preview_effect.clone(),
+      )
     };
     match maybe_handle {
       Some(handle) => handle.set(video::media_effect(effect, maybe_custom.as_ref())),
@@ -542,6 +582,10 @@ impl CallHost {
         tracing::warn!("background effects are unavailable (no segmentation model or GPU)");
       },
       None => {},
+    }
+    // The pre-join check shows the choice at once, as the call will send it.
+    if let Some(handle) = maybe_preview_handle {
+      handle.set(video::media_effect(effect, maybe_custom.as_ref()));
     }
     self.update_active(|active| active.background = effect);
   }
@@ -624,6 +668,132 @@ impl CallHost {
       // The call ended meanwhile.
       Err(_) => ScreenShareSound::Off,
     }
+  }
+
+  /// Opens the chosen camera with the background effects in front of it, as the call sends it
+  /// and the pre-join check shows it (blocking work on a blocking thread; the portal may ask).
+  async fn open_camera(&self) -> Result<OpenedCamera, String> {
+    let is_required = lock(&self.state).is_background_required;
+    if is_required && !matches!(lock(&self.state).background, UiBackgroundEffect::Org(_)) {
+      return Err("the organization requires one of its backgrounds for the camera".into());
+    }
+    let (maybe_camera, background, maybe_custom) = {
+      let state = lock(&self.state);
+      (
+        state.maybe_camera.clone(),
+        state.background,
+        state.maybe_custom_background.clone(),
+      )
+    };
+    let maybe_model = self.maybe_segmentation_model.clone();
+    let (capture, maybe_effects) = tokio::task::spawn_blocking(move || {
+      let capture = video::open_camera(maybe_camera.as_deref())?;
+      Ok::<_, String>((
+        capture,
+        video::effects_filter(background, maybe_custom.as_ref(), maybe_model.as_deref()),
+      ))
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    let (maybe_filter, maybe_handle) = match maybe_effects {
+      Some((filter, handle)) => (Some(filter), Some(handle)),
+      // Showing or sending the room behind the person would break the organization's rule.
+      None if is_required => {
+        return Err(
+          "the organization requires a background, but background effects aren't available on this device"
+            .into(),
+        );
+      },
+      None => (None, None),
+    };
+    Ok(OpenedCamera {
+      capture,
+      maybe_filter,
+      maybe_handle,
+    })
+  }
+
+  /// Opens the camera for the pre-join check: effects, then the self view; nothing is encoded.
+  async fn start_preview_camera(&self, preview: &mut Preview) -> Result<(), String> {
+    self.set_preview_camera(PreviewCamera::Starting);
+    let opened = match self.open_camera().await {
+      Ok(opened) => opened,
+      Err(error) => {
+        self.set_preview_camera(PreviewCamera::Failed);
+        return Err(error);
+      },
+    };
+    let filter = self.self_view.filter(opened.maybe_filter);
+    let (state, notify) = (Arc::clone(&self.state), Arc::clone(&self.notify));
+    let on_state = move |camera| {
+      lock(&state).preview_camera = camera;
+      notify();
+    };
+    let started = tokio::task::spawn_blocking(move || CameraCheck::start(opened.capture, filter, on_state))
+      .await
+      .map_err(|error| error.to_string())?;
+    match started {
+      Ok(check) => {
+        preview.maybe_camera = Some(check);
+        lock(&self.state).maybe_preview_effect = opened.maybe_handle;
+        Ok(())
+      },
+      Err(error) => {
+        self.set_preview_camera(PreviewCamera::Failed);
+        Err(video::camera_failure_wire(error))
+      },
+    }
+  }
+
+  /// Ends the check's camera and waits until it is released: a join may open it next.
+  async fn stop_preview_camera(&self, preview: &mut Preview) {
+    preview.stop_camera().await;
+    lock(&self.state).maybe_preview_effect = None;
+    self.set_preview_camera(PreviewCamera::Off);
+  }
+
+  async fn start_preview_microphone(&self, preview: &mut Preview) -> Result<(), String> {
+    let (choice, levels) = (lock(&self.state).microphone.clone(), self.levels.clone());
+    let check = tokio::task::spawn_blocking(move || MicrophoneCheck::start(choice, levels))
+      .await
+      .map_err(|error| error.to_string())??;
+    preview.maybe_microphone = Some(check);
+    Ok(())
+  }
+
+  /// Another camera was chosen: a running check shows it instead.
+  async fn restart_preview_camera(&self) -> Result<(), String> {
+    let media = self.media.lock().await;
+    let mut preview = self.preview.lock().await;
+    if media.is_some() || !preview.wanted.is_camera_on {
+      return Ok(());
+    }
+    self.stop_preview_camera(&mut preview).await;
+    self.start_preview_camera(&mut preview).await
+  }
+
+  /// Another microphone was chosen: a running check measures it instead.
+  async fn restart_preview_microphone(&self) -> Result<(), String> {
+    let media = self.media.lock().await;
+    let mut preview = self.preview.lock().await;
+    if media.is_some() || !preview.wanted.is_mic_on {
+      return Ok(());
+    }
+    preview.stop_microphone().await;
+    self.start_preview_microphone(&mut preview).await
+  }
+
+  /// Ends the pre-join check and waits until the camera and microphone are released.
+  async fn end_preview(&self) {
+    let mut preview = self.preview.lock().await;
+    preview.wanted = CallPreview::default();
+    self.stop_preview_camera(&mut preview).await;
+    preview.stop_microphone().await;
+  }
+
+  fn set_preview_camera(&self, camera: PreviewCamera) {
+    lock(&self.state).preview_camera = camera;
+    self.changed();
   }
 
   async fn start_video(&self, config: VideoSendConfig) -> Result<(), String> {
