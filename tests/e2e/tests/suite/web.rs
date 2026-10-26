@@ -20,6 +20,8 @@ pub(crate) const TEST_CSP: &str = "default-src 'self'; script-src 'self' 'wasm-u
   connect-src 'self' http://127.0.0.1:8080 ws: wss: https:; worker-src 'self' blob:; \
   frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 const WAIT: Duration = Duration::from_secs(30);
+/// Long enough for several open/close cycles of a flickering popover (#639 saw one every 0.5–1 s).
+const POPOVER_SETTLE: Duration = Duration::from_millis(1500);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_web_client_signs_in_through_keycloak_and_shows_the_accounts_channels() {
@@ -123,6 +125,45 @@ async fn the_web_client_offers_the_v1_chat_features() {
       click_text(&page, "People").await;
       wait_for_text(&page, "Release engineer").await;
       shot(&page, "v1-people").await;
+    })
+    .await;
+  rig.finish().await;
+}
+
+/// #639: a popover toggles exactly once per press. The send options open with a real mouse press
+/// and stay open while the pointer rests on their button; a second press on the button (it lands on
+/// the backdrop) closes them, and they stay closed. A watcher in the page counts every time the
+/// menu is added or removed, so a quick close and reopen between two checks is caught too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_popover_opened_once_stays_open_while_the_pointer_rests() {
+  let Some(rig) = Rig::start().await else { return };
+  rig
+    .browser
+    .screenshot_on_failure("web-popover-toggle", |page| async move {
+      sign_in_as_alice(&page).await;
+      wait_for_text(&page, "browser-channel").await;
+      click_text(&page, "browser-channel").await;
+      let button = wait_for_element(&page, ".send-menu-btn").await;
+      page
+        .evaluate(
+          "(() => { window.__menuToggles = { added: 0, removed: 0 }; \
+           const isMenu = n => n instanceof Element && n.matches('.popover.send-options:not(.motion-ghost)'); \
+           new MutationObserver(records => { for (const r of records) { \
+             for (const n of r.addedNodes) if (isMenu(n)) window.__menuToggles.added++; \
+             for (const n of r.removedNodes) if (isMenu(n)) window.__menuToggles.removed++; \
+           } }).observe(document.body, { childList: true, subtree: true }); })()",
+        )
+        .await
+        .unwrap();
+
+      button.click().await.unwrap();
+      tokio::time::sleep(POPOVER_SETTLE).await;
+      assert_eq!(menu_toggles(&page).await, (1, 0), "the menu must open once and stay open");
+      wait_for_element(&page, ".popover.send-options").await;
+
+      button.click().await.unwrap();
+      tokio::time::sleep(POPOVER_SETTLE).await;
+      assert_eq!(menu_toggles(&page).await, (1, 1), "a press on the button must close the menu once");
     })
     .await;
   rig.finish().await;
@@ -567,6 +608,20 @@ pub(crate) async fn shot(page: &Page, name: &str) {
       dir.join(format!("{name}.png")),
     )
     .await;
+}
+
+/// How often the send options were added to and removed from the page (`__menuToggles`).
+async fn menu_toggles(page: &Page) -> (u64, u64) {
+  let counts: serde_json::Value = page
+    .evaluate("window.__menuToggles")
+    .await
+    .unwrap()
+    .into_value()
+    .unwrap();
+  (
+    counts["added"].as_u64().unwrap_or(0),
+    counts["removed"].as_u64().unwrap_or(0),
+  )
 }
 
 async fn composer_text(page: &Page) -> String {

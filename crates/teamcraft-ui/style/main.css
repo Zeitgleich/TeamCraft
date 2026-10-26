@@ -9019,7 +9019,7 @@ ol.md-list {
   --popover-origin: bottom left;
 }
 
-.motion-ghost.is-leaving.popover {
+.motion-ghost.is-leaving:is(.popover, .emoji-picker) {
   animation: motion-popover-out var(--dur-exit) var(--ease-exit) forwards;
 }
 
@@ -9270,7 +9270,7 @@ ol.md-list {
   }
 
   .motion-ghost.is-leaving,
-  .motion-ghost.is-leaving:is(.popover, .toast),
+  .motion-ghost.is-leaving:is(.popover, .emoji-picker, .toast),
   .motion-ghost.is-leaving .modal {
     animation-name: motion-fade-out;
   }

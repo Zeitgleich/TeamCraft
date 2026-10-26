@@ -4,7 +4,7 @@ use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-use crate::components::sheet::Sheet;
+use crate::components::sheet::{PopoverBackdrop, Sheet};
 use crate::emoji_catalog::{search, shortcode};
 use crate::i18n::use_i18n;
 use crate::motion::PopoverSide;
@@ -35,6 +35,7 @@ pub fn EmojiPicker(
   let query = RwSignal::new(String::new());
   let active = RwSignal::new(0_usize);
   let input = NodeRef::<html::Input>::new();
+  let picker = NodeRef::<html::Div>::new();
   let (top, left, side) = placement(&anchor);
   if returns_focus {
     let anchor = StoredValue::new_local(anchor.clone());
@@ -172,9 +173,10 @@ pub fn EmojiPicker(
     .into_any();
   }
   view! {
-    <div class="popover-backdrop" on:mousedown=move |_| on_close.run(())></div>
+    <PopoverBackdrop on_close=on_close popover=picker />
     <div
       class=format!("emoji-picker {}", side.class())
+      node_ref=picker
       role="dialog"
       aria-label=move || i18n.t("emoji-picker-title")
       style:top=format!("{top}px")

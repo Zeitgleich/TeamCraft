@@ -18,7 +18,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::message_actions::{
   ActionContext, ActionSurface, MessageAction, message_actions, run_message_action, with_shortcut,
 };
-use crate::components::sheet::Sheet;
+use crate::components::sheet::{PopoverBackdrop, Sheet};
 use crate::i18n::use_i18n;
 use crate::model::{Message, MessageId, thread_id_of};
 use crate::motion::PopoverSide;
@@ -422,7 +422,7 @@ fn ToolbarBar(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
         <Icon name=IconName::More />
       </button>
       <Show when=move || host.open.get() == OpenMenu::More fallback=|| ()>
-        <div class="popover-backdrop" on:mousedown=move |_| host.close_menu()></div>
+        <PopoverBackdrop on_close=Callback::new(move |()| host.close_menu()) popover=menu />
         <div
           class=move || format!("popover msg-menu {}", placement().side.class())
           style:position="fixed"
