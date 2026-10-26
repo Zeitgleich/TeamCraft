@@ -110,7 +110,10 @@ version as the final 1.0.0 and as each other: reinstall once with `sudo dnf rein
    Markdown headings included. A lightweight tag (no message) is no error: the notes then have only
    the generated part. Check the message with `git tag -l --format='%(contents)' vX.Y.Z`.
 
-7. **Review the draft release**, then **publish** it in the GitHub UI. Publishing runs `packages.yml`:
+7. **Review the draft release**, then **publish** it in the GitHub UI. The draft appears once the
+   images, desktop packages and web client are built; the Android files join it when the
+   `android-release` job is done (see below). Wait for them before publishing if you can.
+   Publishing runs `packages.yml`:
    the Pages site with the update manifests and the APT/RPM repositories is rebuilt, and installed
    desktop apps see the release (stable: `releases/latest/download/latest.json`). It also runs
    `google-play.yml`, which uploads the App Bundle to Google Play's internal testing track
@@ -133,6 +136,17 @@ version as the final 1.0.0 and as each other: reinstall once with `sudo dnf rein
 
 A failed run can be re-run from the Actions UI; the last job uploads into the existing draft with
 `--clobber`. Never move a published tag. If a release is broken, publish a new patch version.
+
+Android doesn't hold up the rest (#696): the `release` job (draft release) needs the images and the
+desktop workflow only, so the server can be deployed (it reads the web bundle's line in
+`SHA256SUMS`) while the Android build runs or is re-run. `android-release` then uploads the APKs and
+the App Bundle into the release, draft or published, attests them, and merges their lines into
+`SHA256SUMS` (`scripts/merge-checksums.py`; a re-run of either job keeps the other's lines). When the
+release was already published by then, the publish event's `google-play.yml` and `packages.yml` ran
+without the Android files, so the job starts both again. The SDK install inside the Android build
+(`apps/android/scripts/build.sh`) checks every package and retries a corrupt download up to four
+times; the SDK isn't cached between runs (it is large, and the cache space is shared with the Rust
+jobs).
 
 ## Release notes
 
@@ -175,7 +189,7 @@ Dependabot's pull requests are left out. Edit the template when a known limitati
 | `teamcraft-android-X.Y.Z-{full,libre}-debug-signed.apk`         | `android` job; throwaway debug key, testing only |
 | `teamcraft-android-X.Y.Z-full-release.aab`                      | `android` job; the bundle for Google Play        |
 | `teamcraft-android-X.Y.Z-full-release-unsigned.aab`             | instead, when no upload key is configured        |
-| `SHA256SUMS`                                                    | over every file above                            |
+| `SHA256SUMS`                                                    | over every file above (Android lines added last) |
 
 ## Integrity: checksums, attestations, signatures
 
