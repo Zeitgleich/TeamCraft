@@ -3,9 +3,9 @@
 
 The mark sits on the platform's own backplate: a rounded square for desktop and web, the full
 square that Android, iOS and the web's maskable icon cut to shape themselves, and Apple's macOS
-grid for the .icns. Below 40 px the people get muddy, so small icons use the glyph: the speech
-bubble with its three dots on the brand blue. One-colour icons (Android notification and themed
-icon, macOS menu bar) are silhouettes.
+grid for the .icns. Every size shows the full mark (the product's logo, also in a taskbar at
+16-32 px); the speech-bubble glyph is only an asset of its own (glyph.svg). One-colour icons
+(Android notification and themed icon, macOS menu bar) are silhouettes.
 
 Needs python3 and either rsvg-convert or ImageMagick 7 built with librsvg (`magick`); the contact
 sheet needs ImageMagick. Run from the repository root:
@@ -90,27 +90,25 @@ def brand_masters() -> list[Path]:
 def desktop() -> list[Path]:
   """Tauri's bundle icons (Linux hicolor, Windows .ico, macOS .icns) and the tray icons."""
   icon = tile(LIGHT_BACKPLATE, "rounded")
-  small = glyph("rounded")
   out = []
   for name, size, svg in (
-    ("32x32.png", 32, small),
+    ("32x32.png", 32, icon),
     ("64x64.png", 64, icon),
     ("128x128.png", 128, icon),
     ("128x128@2x.png", 256, icon),
     ("icon.png", 512, icon),
     ("icon-1024.png", 1024, icon),
-    # The tray: the glyph in colour (Windows, Linux) and as a template image (macOS menu bar).
-    ("tray.png", 64, small),
-    ("tray-template.png", 44, glyph_silhouette("#000000", padding=0.06)),
+    # The tray: the mark in colour (Windows, Linux) and as a template image (macOS menu bar).
+    ("tray.png", 64, icon),
+    ("tray-template.png", 44, layer("", silhouette("#000000"), safe=0.96)),
   ):
     out.append(render(svg, size, DESKTOP / name))
-  ico_sizes = {16: small, 20: small, 24: small, 32: small, 40: icon, 48: icon, 64: icon, 256: icon}
+  ico_sizes = {size: icon for size in (16, 20, 24, 32, 40, 48, 64, 256)}
   write_ico({size: png_bytes(svg, size) for size, svg in ico_sizes.items()}, DESKTOP / "icon.ico")
   out.append(DESKTOP / "icon.ico")
   macos = tile(LIGHT_BACKPLATE, "macos")
-  macos_small = glyph("macos")
   icns_entries = {
-    "icp4": (16, macos_small), "icp5": (32, macos_small), "ic11": (32, macos_small),
+    "icp4": (16, macos), "icp5": (32, macos), "ic11": (32, macos),
     "ic12": (64, macos), "ic07": (128, macos), "ic13": (256, macos), "ic08": (256, macos),
     "ic14": (512, macos), "ic09": (512, macos), "ic10": (1024, macos),
   }
@@ -133,7 +131,7 @@ def web() -> list[Path]:
   mark = (BRAND / "mark.svg").read_text()
   (WEB / "favicon.svg").write_text(mark)
   (WEB / "favicon-unread.svg").write_text(with_unread_dot(mark))
-  write_ico({size: png_bytes(glyph("rounded"), size) for size in (16, 32, 48)}, WEB / "favicon.ico")
+  write_ico({size: png_bytes(tile(LIGHT_BACKPLATE, "rounded"), size) for size in (16, 32, 48)}, WEB / "favicon.ico")
   shutil.copy(BRAND / "mark.svg", WEB / "mark.svg")
   # The loading screen inlines the mark in index.html (its parts animate); update it there too.
   shutil.copy(BRAND / "wordmark.svg", WEB / "wordmark.svg")
