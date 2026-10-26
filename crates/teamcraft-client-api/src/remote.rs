@@ -1081,6 +1081,7 @@ pub enum ChatQuery {
     conversation: ConversationId,
   },
   UnconfirmedRemovals,
+  GroupLeftovers,
   Draft {
     conversation: ConversationId,
     #[serde(default)]
@@ -1290,6 +1291,9 @@ pub enum ChatAnswer {
   UnconfirmedRemovals {
     removals: Vec<(ConversationId, UserId)>,
   },
+  GroupLeftovers {
+    leftovers: Vec<(ConversationId, UserId)>,
+  },
   Unsupported,
 }
 
@@ -1338,6 +1342,9 @@ impl ChatQuery {
       },
       Self::UnconfirmedRemovals => ChatAnswer::UnconfirmedRemovals {
         removals: backend.unconfirmed_removals(),
+      },
+      Self::GroupLeftovers => ChatAnswer::GroupLeftovers {
+        leftovers: backend.group_leftovers(),
       },
       Self::FirstUnread { conversation } => ChatAnswer::Message {
         maybe_message: backend.first_unread(conversation),

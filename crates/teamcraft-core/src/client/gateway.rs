@@ -403,9 +403,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         } else {
           // Only a hint: the server's word doesn't make this device sign a removal (security
           // review A8). The remover's client, or an admin's signed change, removes them from the
-          // group; if neither comes, admins see who is left in the group.
+          // group; if neither comes, the admin console lists who is left in the group (#661).
           self.refresh_conversation(conversation_id).await?;
           self.note_group_leftovers(conversation_id)?;
+          if let Err(error) = self.check_group_leftovers(conversation_id).await {
+            tracing::debug!(conversation_id = %conversation_id, %error, "could not check users left in the group yet");
+          }
           // A meeting guest whose session ended: their leaves go with a signed removal (queued
           // above, only for guests the signed roster doesn't vouch for). A failure is retried on
           // the next sync.

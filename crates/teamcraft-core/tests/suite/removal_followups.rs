@@ -14,7 +14,8 @@ use common::{PASSPHRASE, Peer, options, settings, settle};
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::{FakeServer, NetworkCut};
 use teamcraft_core::client::{
-  RemovalStatus, group_leftovers, is_queue_refused, pending_removals, unconfirmed_removals,
+  RemovalStatus, all_group_leftovers, group_leftovers, is_queue_refused, pending_removals,
+  unconfirmed_removals,
 };
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::store::{
@@ -32,10 +33,11 @@ const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 mod left_in_group {
   use super::*;
 
-  /// The server drops Carol without any signed change: nobody signs her removal on its word (A8),
-  /// but every member notes her, and an admin's one click signs it.
+  /// The server drops Carol without any signed change: nobody signs her removal on its word (A8)
+  /// and members are never asked (#661); after two fresh member lists agree, she is listed for
+  /// the admin console.
   #[tokio::test]
-  async fn somebody_the_server_dropped_is_shown_and_removed_by_an_admin() {
+  async fn somebody_only_the_server_dropped_is_listed_for_admins_and_never_removed() {
     let server = FakeServer::new();
     let (mut alice, mut bob, mut carol) = three(&server).await;
     let alice_id = alice.client.user_id();
@@ -47,71 +49,85 @@ mod left_in_group {
     let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
     settle(&mut [&mut alice, &mut bob, &mut carol]).await;
     let commits_before = commits(&alice, channel).await;
+    let epoch_before = epoch(&mut alice, channel);
     let carol_id = carol.client.user_id();
 
     server.remove_member_as_admin(channel, carol_id);
     settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    // One mismatch is not enough.
+    assert!(group_leftovers(alice.store.as_ref(), channel).unwrap().is_empty());
 
+    alice.client.sync_mls(channel).await.unwrap();
+    bob.client.sync_mls(channel).await.unwrap();
     assert_eq!(commits(&alice, channel).await, commits_before);
     assert_eq!(
       group_leftovers(alice.store.as_ref(), channel).unwrap(),
       [carol_id]
     );
     assert_eq!(group_leftovers(bob.store.as_ref(), channel).unwrap(), [carol_id]);
+    assert_eq!(
+      all_group_leftovers(alice.store.as_ref()).unwrap(),
+      [(channel, carol_id)]
+    );
     #[cfg(feature = "ui")]
     {
       use teamcraft_client_api::backend::ChatBackend;
-      use teamcraft_client_api::model::MembershipIssue;
-      let issue = MembershipIssue::LeftInGroup { user: carol_id };
-      assert!(
-        common::backend_of(&alice)
-          .membership_issues(channel)
-          .contains(&issue)
-      );
-      // Only admins are asked.
-      assert!(
-        !common::backend_of(&bob)
-          .membership_issues(channel)
-          .contains(&issue)
+      assert!(common::backend_of(&alice).membership_issues(channel).is_empty());
+      assert!(common::backend_of(&bob).membership_issues(channel).is_empty());
+      assert_eq!(
+        common::backend_of(&alice).group_leftovers(),
+        [(channel, carol_id)]
       );
     }
-
-    alice.client.retry_removal(channel, carol_id).await.unwrap();
-    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
-
-    assert_eq!(commits(&alice, channel).await, commits_before + 1);
-    assert!(group_leftovers(alice.store.as_ref(), channel).unwrap().is_empty());
-    assert!(group_leftovers(bob.store.as_ref(), channel).unwrap().is_empty());
-    assert_eq!(epoch(&mut alice, channel), epoch(&mut bob, channel));
-    alice.client.send_text(channel, None, "after").await.unwrap();
-    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
-    assert_eq!(bob.texts(channel).last().map(String::as_str), Some("after"));
+    // There is nothing to click: no removal is signed on the server's word.
+    let error = alice.client.retry_removal(channel, carol_id).await.unwrap_err();
+    assert!(!error.is_transient(), "{error}");
+    alice.client.sync_mls(channel).await.unwrap();
+    assert_eq!(commits(&alice, channel).await, commits_before);
+    assert_eq!(epoch(&mut alice, channel), epoch_before);
   }
 
-  /// Only admins of the signed roster sign a removal of somebody left in the group.
+  /// Issue #661: a member who joined while this device's member list was stale is in the group
+  /// but not in the cached list. A fresh list shows them, so they never count as left over.
   #[tokio::test]
-  async fn a_member_who_is_no_admin_cannot_sign_it() {
+  async fn a_member_missing_only_from_a_stale_cache_is_never_a_leftover() {
     let server = FakeServer::new();
     let (mut alice, mut bob, mut carol) = three(&server).await;
-    let alice_id = alice.client.user_id();
-    alice
-      .client
-      .publish_roster(&[(alice_id, RosterRole::Owner)])
-      .await
-      .unwrap();
     let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
     settle(&mut [&mut alice, &mut bob, &mut carol]).await;
-    let commits_before = commits(&alice, channel).await;
     let carol_id = carol.client.user_id();
-    server.remove_member_as_admin(channel, carol_id);
-    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    let key = channel.to_string();
+    let cached = alice.store.get(Table::Members, &key).unwrap().unwrap();
+    let mut stale: serde_json::Value = serde_json::from_slice(&cached).unwrap();
+    stale["members"]
+      .as_array_mut()
+      .unwrap()
+      .retain(|member| member["user"]["id"] != serde_json::json!(carol_id));
+    alice
+      .store
+      .put(Table::Members, &key, &serde_json::to_vec(&stale).unwrap())
+      .unwrap();
 
-    let error = bob.client.retry_removal(channel, carol_id).await.unwrap_err();
+    for _ in 0..3 {
+      alice.client.sync_mls(channel).await.unwrap();
+    }
+
+    assert!(group_leftovers(alice.store.as_ref(), channel).unwrap().is_empty());
+    // The fresh list replaced the stale cache.
+    let refreshed: serde_json::Value =
+      serde_json::from_slice(&alice.store.get(Table::Members, &key).unwrap().unwrap()).unwrap();
     assert!(
-      matches!(error, teamcraft_core::CoreError::NotAnAdmin(_)),
-      "{error}"
+      refreshed["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|member| member["user"]["id"] == serde_json::json!(carol_id))
     );
-    assert_eq!(commits(&alice, channel).await, commits_before);
+    #[cfg(feature = "ui")]
+    {
+      use teamcraft_client_api::backend::ChatBackend;
+      assert!(common::backend_of(&alice).group_leftovers().is_empty());
+    }
   }
 
   /// Somebody the server lists again isn't removed by the click.

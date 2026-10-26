@@ -968,6 +968,13 @@ impl ChatBackend for RemoteChat {
     }
   }
 
+  fn group_leftovers(&self) -> Vec<(ConversationId, UserId)> {
+    match self.ask(ChatQuery::GroupLeftovers) {
+      Some(ChatAnswer::GroupLeftovers { leftovers }) => leftovers,
+      _ => Vec::new(),
+    }
+  }
+
   fn first_unread(&self, conversation: ConversationId) -> Option<MessageId> {
     match self.ask(ChatQuery::FirstUnread { conversation }) {
       Some(ChatAnswer::Message { maybe_message }) => maybe_message,

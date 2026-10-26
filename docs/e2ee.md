@@ -734,14 +734,19 @@ addition its device sees committed (which Freshness makes newer than the removal
 pending entry, and a server step tried again finds the user back in the remover's group and is
 dropped too, so a retry days later never undoes the new membership.
 
-Members notice anybody who is in the group but not in the server's member list and whose removal
-isn't on its way (no pending removal of their own, no admin's signed change waiting in their
-queue): a removal whose signed change got lost or was refused as stale. They never sign that
-removal on the server's word (security review A8). Admins see "X is still in the encrypted group of
-#channel" with a button that, after a confirmation naming the person and that it rests on the
-server's word, signs the removal themselves; the client checks the admin's role in the signed roster
-and asks the server again whether it still doesn't list the user. Members' clients don't claim key packages for a user the server lists
-but who has no device in the group.
+Removals backed by a signed change finish without anybody being asked: the remover's device, an
+admin's signed change in the group's queue, or a leaver's signed request is committed in the
+background by an authorised member's client, which rotates the keys (steps above). Nothing about
+somebody left in the group is ever shown to members (issue #661). A client notes users who are in
+the group but missing from its cached member list and whose removal isn't on its way, but the cache
+may be stale (a member who joined minutes ago, a missed event), so that is only a suspicion: the
+client fetches the member list afresh, drops everybody it lists and keeps the fresh list as its
+cache. Only a user missing from two fresh lists in a row counts as left in the group. Such a removal
+rests on the server's word alone (its signed change got lost, or the server removed the user
+without one, like a deactivated user removed from all chats by the server alone), so no client signs it (security review A8): meeting guests among them leave with their own
+signed leaves ("Meeting guests" below); everybody else is logged and listed for admins in the
+admin console as information, with no button. Members' clients don't claim key packages for a user
+the server lists but who has no device in the group.
 
 A device that joins from a welcome made before somebody's removal pins the identities of everybody
 the welcome's tree holds, not only of whom the server lists, and verifies every leaf as before; the

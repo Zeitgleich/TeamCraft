@@ -357,6 +357,12 @@ pub trait ChatBackend {
   fn unconfirmed_removals(&self) -> Vec<(ConversationId, UserId)> {
     Vec::new()
   }
+  /// Users still in an encryption group of this device whom the server no longer lists, confirmed
+  /// by fresh member lists and with no signed removal on its way: for the admin console only,
+  /// never shown to members (#661).
+  fn group_leftovers(&self) -> Vec<(ConversationId, UserId)> {
+    Vec::new()
+  }
 
   fn first_unread(&self, _conversation: ConversationId) -> Option<MessageId> {
     None

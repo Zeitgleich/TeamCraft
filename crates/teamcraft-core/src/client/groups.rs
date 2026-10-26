@@ -1107,7 +1107,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.mls_current.insert(conversation);
     }
     self.clear_queue_refused(conversation)?;
-    self.note_group_leftovers(conversation)
+    self.note_group_leftovers(conversation)?;
+    // Not a reason to fail the sync: the suspects stay and are checked on the next one.
+    if let Err(error) = self.check_group_leftovers(conversation).await {
+      tracing::debug!(conversation_id = %conversation, %error, "could not check users left in the group yet");
+    }
+    Ok(())
   }
 
   /// Catches up the conversation's MLS queue once per gateway connection before the outbox sends
