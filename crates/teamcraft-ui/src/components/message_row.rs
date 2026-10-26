@@ -445,7 +445,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
         let has_acknowledged = extras.acknowledged_by.contains(&me.id);
         view! {
           <button
-            class="btn btn-small"
+            class="btn btn-small msg-ack"
             prop:disabled=has_acknowledged
             on:click=move |_| state.write(|backend| backend.acknowledge(conversation, message_id))
           >
@@ -843,10 +843,13 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
             {rendered_body}
             {edited}
             {badges}
-            <time class="bubble-time" datetime=message.sent_at.to_string()>
-              {time.clone()}
-            </time>
-            {delivery_view}
+            // Time first, the ticks at the far end, as in messaging apps (#735).
+            <span class="bubble-meta">
+              <time class="bubble-time" datetime=message.sent_at.to_string()>
+                {time.clone()}
+              </time>
+              {delivery_view}
+            </span>
           </div> {attachments} {link_previews} {acknowledge}
         </div>
         {reaction_chips} {replies}
