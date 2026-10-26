@@ -117,6 +117,9 @@ pub struct LobbyRow {
 pub struct AttendeeDiff {
   pub added: Vec<StoredAttendee>,
   pub removed: Vec<StoredAttendee>,
+  /// Guest accounts that had redeemed the personal link of a removed e-mail invitee; their
+  /// sessions must end.
+  pub revoked_guests: Vec<UserId>,
 }
 
 /// Which invitee an answer belongs to.
@@ -358,6 +361,30 @@ impl Database {
           )
           .execute(&mut *tx)
           .await?;
+        }
+        if let Some(email) = &existing.maybe_email {
+          // The personal join link of a removed invitee must stop working: an unused invite is
+          // deleted (a later re-invitation gets a fresh one), a redeemed one is revoked and its
+          // guest account reported so the caller ends the session.
+          sqlx::query!(
+            "DELETE FROM meeting_invites WHERE meeting_id = $1 AND lower(email) = lower($2) AND redeemed_at IS NULL",
+            to_db(meeting.id),
+            email,
+          )
+          .execute(&mut *tx)
+          .await?;
+          let guests = sqlx::query_scalar!(
+            r#"UPDATE meeting_invites SET revoked_at = now()
+               WHERE meeting_id = $1 AND lower(email) = lower($2) AND redeemed_at IS NOT NULL AND revoked_at IS NULL
+               RETURNING guest_user_id"#,
+            to_db(meeting.id),
+            email,
+          )
+          .fetch_all(&mut *tx)
+          .await?;
+          for guest in guests.into_iter().flatten() {
+            diff.revoked_guests.push(from_db(guest)?);
+          }
         }
         diff.removed.push(existing.clone());
       }

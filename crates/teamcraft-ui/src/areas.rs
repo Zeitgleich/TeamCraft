@@ -44,6 +44,7 @@ use crate::model::{ConversationId, SpaceId};
 use crate::reactive::SetIfAlive;
 use crate::settings::Settings;
 use crate::state::AppState;
+use teamcraft_proto::MeetingId;
 
 /// Where an area shows: how its placeholder and its error sit in the page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,6 +103,7 @@ areas! {
   add_to_call(conversation: ConversationId) => calls: view! { <AddToCallDialog conversation=conversation /> };
   meetings(_unit: ()) => meetings: view! { <MeetingsView /> };
   schedule_meeting(_unit: ()) => meetings: view! { <ScheduleMeetingDialog /> };
+  edit_meeting(meeting: MeetingId) => meetings: view! { <ScheduleMeetingDialog maybe_edit=meeting /> };
   meeting_created(_unit: ()) => meetings: view! { <MeetingCreatedDialog /> };
   directory(_unit: ()) => directory: view! { <DirectoryView /> };
   search(_unit: ()) => search: view! { <SearchView /> };

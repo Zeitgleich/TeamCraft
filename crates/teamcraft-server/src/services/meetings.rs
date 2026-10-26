@@ -309,6 +309,7 @@ pub async fn update_meeting(
     Some(wanted) => state.database.replace_attendees(&updated, wanted).await?,
     None => AttendeeDiff::default(),
   };
+  super::meeting_guests::end_removed_guests(state, caller.user.id, &updated, &diff.revoked_guests).await?;
   sync_calendar(state, service, &updated).await?;
 
   let mut audience = users_before;
