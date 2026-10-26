@@ -342,6 +342,28 @@ mod tests {
     );
   }
 
+  // Trunk's copy-dir puts the directory's files *into* data-target-path; the thumbnails must land
+  // where photo_thumbnail_url looks (#636: they were one level up and every tile was broken).
+  #[test]
+  fn the_build_copies_the_thumbnails_where_the_picker_loads_them() {
+    let index = include_str!("../../index.html");
+    let url = photo_thumbnail_url("living-room");
+    let directory = url
+      .trim_start_matches('/')
+      .rsplit_once('/')
+      .map(|(dir, _)| dir)
+      .unwrap();
+    assert!(
+      index.contains(&format!(
+        r#"href="../../assets/backgrounds/thumbs" data-target-path="{directory}""#
+      )),
+      "index.html must copy the thumbnails to /{directory}"
+    );
+    let thumbs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+      .join("../../assets/backgrounds/thumbs/living-room.jpg");
+    assert!(thumbs.is_file(), "missing {}", thumbs.display());
+  }
+
   #[test]
   fn photos_get_thumbnails_and_groups_get_headings() {
     assert_eq!(
