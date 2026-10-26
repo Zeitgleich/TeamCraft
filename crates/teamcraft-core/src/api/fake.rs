@@ -6,25 +6,26 @@
 //! sequence numbers and resume. It never looks inside payloads, like the real server. Tests can take
 //! a client offline or drop its gateway to exercise retries and resume.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_util::StreamExt;
 use teamcraft_proto::{
   AddConversationMemberRequest, AddSpaceMemberRequest, Base64Bytes, ChannelModeration, ChannelRole,
-  ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ClaimedKeyPackage, ConversationId, ConversationKind,
-  ConversationMemberResponse, ConversationResponse, ConversationVisibility, CreateChannelRequest,
-  CreateDmRequest, CreateGroupDmRequest, DeviceId, DeviceResponse, ErrorCode, GatewayClientMessage,
-  GatewayEvent, GatewayServerMessage, GetMeResponse, HistoryPolicy, Id, IdempotencyKey, IdentityKeyResponse,
-  JoinPolicy, KeyBagResponse, KeyPackageStatusResponse, ListConversationMembersResponse,
+  ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ClaimedKeyPackage, ConversationHead, ConversationId,
+  ConversationKind, ConversationMemberResponse, ConversationResponse, ConversationVisibility,
+  CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, DeviceId, DeviceResponse, ErrorCode,
+  GatewayClientMessage, GatewayEvent, GatewayServerMessage, GetMeResponse, HistoryPolicy, Id, IdempotencyKey,
+  IdentityKeyResponse, JoinPolicy, KeyBagResponse, KeyPackageStatusResponse, ListConversationMembersResponse,
   ListConversationsResponse, ListDevicesResponse, ListMessagesQuery, ListMessagesResponse,
   ListMlsMessagesQuery, ListMlsMessagesResponse, ListSpaceMembersResponse, ListSpacesResponse, MessageId,
-  MessageResponse, MlsMessageKind, MlsMessageResponse, MoveChannelRequest, MyMembership, NotificationLevel,
-  PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest,
+  MessageResponse, MlsMessageId, MlsMessageKind, MlsMessageResponse, MoveChannelRequest, MyMembership,
+  NotificationLevel, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest,
   RegisterDeviceRequest, Role, SendMessageRequest, SetPresenceRequest, SetReadPositionRequest, Snowflake,
-  SpaceId, SpaceMemberResponse, SpaceResponse, SpaceRole, UnixMillis, UpdateConversationMemberRequest,
-  UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserKind, UserSummary,
+  SpaceHead, SpaceId, SpaceMemberResponse, SpaceResponse, SpaceRole, SyncHeadsResponse, UnixMillis,
+  UpdateConversationMemberRequest, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserKind,
+  UserSummary,
 };
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
@@ -102,6 +103,9 @@ pub struct FakeGateway {
 #[derive(Default)]
 struct State {
   next_id: i64,
+  /// `GET /sync/heads` answers a bare 404, like a server from before the endpoint (issue #714):
+  /// a full sync then reads everything.
+  lacks_sync_heads: bool,
   directory_searches: u64,
   /// Conversations whose history answers 403 (a removal the list doesn't show yet, a policy).
   forbidden_histories: HashSet<ConversationId>,
@@ -136,6 +140,11 @@ struct State {
   blob_refused_users: HashSet<UserId>,
   /// Users whose REST calls fail while their gateway still connects.
   rest_failing_users: HashSet<UserId>,
+  /// Users the server answers 503 with this `Retry-After` (seconds): a dependency outage or a
+  /// restart behind the proxy (`set_unavailable`).
+  unavailable_users: HashMap<UserId, u64>,
+  /// Gateway connects answered with that 503.
+  unavailable_connects: u64,
   /// Users whose access token the server rejects (401), as after an expired session.
   signed_out_users: HashSet<UserId>,
   /// Users whose REST calls a captive portal answers (`set_behind_captive_portal`).
@@ -161,6 +170,8 @@ struct State {
   next_connection: u64,
   /// Users with workspace admin rights (permission checks only; trust comes from the roster).
   admins: HashSet<UserId>,
+  /// Direct messages deleted with a deleted account, per remaining participant.
+  deleted_conversations: HashMap<UserId, Vec<ConversationId>>,
   attachments: HashMap<AttachmentId, FakeAttachment>,
   push_registrations: HashMap<DeviceId, RegisterPushRequest>,
   notification_settings: HashMap<UserId, NotificationSettings>,
@@ -383,6 +394,7 @@ impl FakeServer {
         maybe_organization: None,
         maybe_has_devices: None,
         is_deactivated: false,
+        is_deleted: false,
       },
     );
     drop(state);
@@ -558,6 +570,11 @@ impl FakeServer {
     self.lock().member_list_delays.insert(user, delay);
   }
 
+  /// Answers `GET /sync/heads` with a bare 404 from now on, like an older server (issue #714).
+  pub fn stop_serving_sync_heads(&self) {
+    self.lock().lacks_sync_heads = true;
+  }
+
   /// The user's `GET /conversations` answers only after `delay` (a long full sync).
   pub fn delay_conversation_list(&self, user: UserId, delay: std::time::Duration) {
     self.lock().conversation_list_delays.insert(user, delay);
@@ -587,6 +604,22 @@ impl FakeServer {
     } else {
       state.rest_failing_users.remove(&user);
     }
+  }
+
+  /// While set, the server answers this user's REST calls and gateway connects with 503, code
+  /// `unavailable` and `Retry-After: retry_after` (a dependency outage, a restart behind the proxy).
+  pub fn set_unavailable(&self, user: UserId, retry_after: std::time::Duration) {
+    self.lock().unavailable_users.insert(user, retry_after.as_secs());
+  }
+
+  /// Ends [`Self::set_unavailable`].
+  pub fn clear_unavailable(&self, user: UserId) {
+    self.lock().unavailable_users.remove(&user);
+  }
+
+  /// How many gateway connects [`Self::set_unavailable`] answered with 503.
+  pub fn unavailable_connects(&self) -> u64 {
+    self.lock().unavailable_connects
   }
 
   /// Serves another identity key for a user, as a server substituting its own would.
@@ -1205,6 +1238,9 @@ impl FakeServerApi {
     if state.offline_users.contains(&self.user) || state.rest_failing_users.contains(&self.user) {
       return Err(ApiError::Network("fake server: client is offline".into()));
     }
+    if let Some(error) = state.unavailable_answer(self.user) {
+      return Err(error);
+    }
     if state.signed_out_users.contains(&self.user) {
       return Err(ApiError::status(401, ErrorCode::Unauthorized, "token expired"));
     }
@@ -1307,7 +1343,8 @@ impl ServerApi for FakeServerApi {
   async fn user(&self, user: UserId) -> Result<UserSummary, ApiError> {
     self.with(|state, _| {
       let summary = state.user(user)?;
-      if summary.is_deactivated {
+      // Like the server: a deleted account's tombstone is shown, a deactivated one is not.
+      if summary.is_deactivated && !summary.is_deleted {
         return Err(ApiError::status(404, ErrorCode::UserNotFound, "unknown user"));
       }
       Ok(summary.clone())
@@ -1698,28 +1735,7 @@ impl ServerApi for FakeServerApi {
 
   /// Every known user is in every fake space, except the outsiders.
   async fn list_space_members(&self, space: SpaceId) -> Result<ListSpaceMembersResponse, ApiError> {
-    self.with(|state, _| {
-      state.default_space_entry();
-      if !state.spaces.contains_key(&space) {
-        return Err(ApiError::status(404, ErrorCode::SpaceNotFound, "no such space"));
-      }
-      let members = state
-        .users
-        .values()
-        .filter(|user| !state.space_outsiders.contains(&user.id))
-        .map(|user| SpaceMemberResponse {
-          user: user.clone(),
-          role: state
-            .space_roles
-            .get(&(space, user.id))
-            .cloned()
-            .unwrap_or(SpaceRole::Member),
-          maybe_expires_at: None,
-          maybe_sponsor_user_id: None,
-        })
-        .collect();
-      Ok(ListSpaceMembersResponse { members })
-    })
+    self.with(|state, _| state.space_members_answer(space))
   }
 
   async fn list_conversations(&self) -> Result<ListConversationsResponse, ApiError> {
@@ -1739,7 +1755,10 @@ impl ServerApi for FakeServerApi {
         .filter(|conversation| conversation.members.contains_key(&me))
         .map(|conversation| conversation.view(me))
         .collect();
-      Ok(ListConversationsResponse { conversations })
+      Ok(ListConversationsResponse {
+        conversations,
+        deleted_conversation_ids: state.deleted_conversations.get(&me).cloned().unwrap_or_default(),
+      })
     })
   }
 
@@ -1755,32 +1774,7 @@ impl ServerApi for FakeServerApi {
     if let Some(delay) = maybe_delay {
       crate::platform::sleep(delay).await;
     }
-    self.with(|state, me| {
-      if state.broken_member_lists.contains(&conversation) {
-        return Err(ApiError::Decode("fake server: unreadable member list".into()));
-      }
-      // Instance admins may list any conversation's members, like the server.
-      let entry = if state.admins.contains(&me) {
-        state.conversation(conversation)?
-      } else {
-        state.member_conversation(conversation, me)?
-      };
-      let members = entry
-        .members
-        .iter()
-        .map(|(user, (role, _))| (*user, role.clone()))
-        .collect::<Vec<_>>();
-      let members = members
-        .into_iter()
-        .map(|(user, role)| {
-          Ok(ConversationMemberResponse {
-            user: state.user(user)?.clone(),
-            role,
-          })
-        })
-        .collect::<Result<_, ApiError>>()?;
-      Ok(ListConversationMembersResponse { members })
-    })
+    self.with(|state, me| state.members_answer(conversation, me))
   }
 
   async fn create_channel(
@@ -1958,6 +1952,23 @@ impl ServerApi for FakeServerApi {
     for conversation in conversations {
       self.server.remove_member_as_admin(conversation, user);
     }
+    Ok(())
+  }
+
+  async fn admin_delete_user(&self, user: UserId) -> Result<(), ApiError> {
+    let me = self.user;
+    let mut state = self.server.lock();
+    if !state.admins.contains(&me) {
+      return Err(ApiError::status(403, ErrorCode::Forbidden, "administrators only"));
+    }
+    if user == me {
+      return Err(ApiError::status(
+        409,
+        ErrorCode::CannotDeleteSelf,
+        "admins can't delete their own account",
+      ));
+    }
+    state.delete_user(user);
     Ok(())
   }
 
@@ -2892,7 +2903,10 @@ impl ServerApi for FakeServerApi {
         })
         .map(|conversation| conversation.view(me))
         .collect();
-      Ok(ListConversationsResponse { conversations })
+      Ok(ListConversationsResponse {
+        conversations,
+        deleted_conversation_ids: Vec::new(),
+      })
     })
   }
 
@@ -2922,6 +2936,7 @@ impl ServerApi for FakeServerApi {
         can_add_members: true,
         can_invite_guests: true,
         can_manage_space: true,
+        can_create_channels: true,
       };
       state.spaces.insert(id, space.clone());
       if let Some(key) = request.maybe_idempotency_key {
@@ -3169,6 +3184,81 @@ impl ServerApi for FakeServerApi {
       let has_more = threads.len() > limit;
       threads.truncate(limit);
       Ok(ListThreadsResponse { threads, has_more })
+    })
+  }
+
+  /// Like the server: the newest message and MLS entry of each of the user's conversations (from
+  /// the join on), and digests of the member lists as `list_members` and `list_space_members`
+  /// would answer them.
+  async fn sync_heads(&self) -> Result<SyncHeadsResponse, ApiError> {
+    let spaces = self.with(|state, me| {
+      if state.lacks_sync_heads {
+        return Err(ApiError::Status {
+          status: 404,
+          maybe_body: None,
+          maybe_retry_after: None,
+        });
+      }
+      let _ = me;
+      state.default_space_entry();
+      Ok(
+        state
+          .spaces
+          .values()
+          .filter(|space| space.maybe_my_role.is_some())
+          .map(|space| space.id)
+          .collect::<Vec<_>>(),
+      )
+    })?;
+    let mut space_heads = Vec::new();
+    for space in spaces {
+      let answer = self.server.lock().space_members_answer(space);
+      if let Ok(members) = answer {
+        space_heads.push(SpaceHead {
+          space_id: space,
+          members_digest: fake_digest(&members),
+        });
+      }
+    }
+    let conversations: Vec<(ConversationId, Option<MessageId>, Option<MlsMessageId>)> =
+      self.with(|state, me| {
+        Ok(
+          state
+            .conversations
+            .values()
+            .filter_map(|entry| {
+              let (_, floor) = entry.members.get(&me)?;
+              let maybe_last_mls = entry
+                .mls
+                .iter()
+                .filter(|message| message.id.snowflake().get() > *floor)
+                .map(|message| message.id)
+                .max();
+              let maybe_last_message = entry.messages.iter().map(|message| message.id).max();
+              Some((entry.response.id, maybe_last_message, maybe_last_mls))
+            })
+            .collect(),
+        )
+      })?;
+    let mut heads = Vec::new();
+    for (conversation, maybe_last_message_id, maybe_last_mls_message_id) in conversations {
+      let mut state = self.server.lock();
+      // An unreadable list never matches, so the client reads it (and fails) every time.
+      let members_digest = match state.members_answer(conversation, self.user) {
+        Ok(members) => fake_digest(&members),
+        Err(_) => format!("unreadable-{}", state.next_id::<MessageId>()),
+      };
+      drop(state);
+      heads.push(ConversationHead {
+        conversation_id: conversation,
+        maybe_last_message_id,
+        maybe_last_mls_message_id,
+        members_digest,
+      });
+    }
+    Ok(SyncHeadsResponse {
+      conversations: heads,
+      spaces: space_heads,
     })
   }
 
@@ -3693,6 +3783,7 @@ impl ServerApi for FakeServerApi {
           return Err(ApiError::Status {
             status: 403,
             maybe_body: None,
+            maybe_retry_after: None,
           });
         }
         entry.maybe_blob = Some(bytes);
@@ -3706,6 +3797,7 @@ impl ServerApi for FakeServerApi {
           return Err(ApiError::Status {
             status: 403,
             maybe_body: None,
+            maybe_retry_after: None,
           });
         }
         entry.maybe_blob = Some(bytes);
@@ -3721,6 +3813,7 @@ impl ServerApi for FakeServerApi {
         return Err(ApiError::Status {
           status: 403,
           maybe_body: None,
+          maybe_retry_after: None,
         });
       }
       entry.maybe_blob = Some(bytes);
@@ -3745,6 +3838,7 @@ impl ServerApi for FakeServerApi {
           .ok_or(ApiError::Status {
             status: 404,
             maybe_body: None,
+            maybe_retry_after: None,
           })
       });
     }
@@ -3756,6 +3850,7 @@ impl ServerApi for FakeServerApi {
           .ok_or(ApiError::Status {
             status: 404,
             maybe_body: None,
+            maybe_retry_after: None,
           })
       });
     }
@@ -3766,6 +3861,7 @@ impl ServerApi for FakeServerApi {
         .ok_or(ApiError::Status {
           status: 404,
           maybe_body: None,
+          maybe_retry_after: None,
         })
     })
   }
@@ -3877,6 +3973,10 @@ impl ServerApi for FakeServerApi {
       let mut state = self.server.lock();
       if state.offline_users.contains(&self.user) {
         return Err(ApiError::Network("fake server: client is offline".into()));
+      }
+      if let Some(error) = state.unavailable_answer(self.user) {
+        state.unavailable_connects += 1;
+        return Err(error);
       }
       state.next_connection += 1;
       state.gateway_connects += 1;
@@ -4165,6 +4265,62 @@ impl FakeGateway {
 }
 
 impl State {
+  /// What `GET /spaces/{id}/members` answers.
+  fn space_members_answer(&mut self, space: SpaceId) -> Result<ListSpaceMembersResponse, ApiError> {
+    self.default_space_entry();
+    if !self.spaces.contains_key(&space) {
+      return Err(ApiError::status(404, ErrorCode::SpaceNotFound, "no such space"));
+    }
+    let members = self
+      .users
+      .values()
+      .filter(|user| !self.space_outsiders.contains(&user.id))
+      .map(|user| SpaceMemberResponse {
+        user: user.clone(),
+        role: self
+          .space_roles
+          .get(&(space, user.id))
+          .cloned()
+          .unwrap_or(SpaceRole::Member),
+        maybe_expires_at: None,
+        maybe_sponsor_user_id: None,
+      })
+      .collect();
+    Ok(ListSpaceMembersResponse { members })
+  }
+
+  /// What `GET …/members` answers `me`.
+  fn members_answer(
+    &self,
+    conversation: ConversationId,
+    me: UserId,
+  ) -> Result<ListConversationMembersResponse, ApiError> {
+    if self.broken_member_lists.contains(&conversation) {
+      return Err(ApiError::Decode("fake server: unreadable member list".into()));
+    }
+    // Instance admins may list any conversation's members, like the server.
+    let entry = if self.admins.contains(&me) {
+      self.conversation(conversation)?
+    } else {
+      self.member_conversation(conversation, me)?
+    };
+    let members = entry
+      .members
+      .iter()
+      .map(|(user, (role, _))| (*user, role.clone()))
+      .collect::<Vec<_>>();
+    let members = members
+      .into_iter()
+      .map(|(user, role)| {
+        Ok(ConversationMemberResponse {
+          user: self.user(user)?.clone(),
+          role,
+        })
+      })
+      .collect::<Result<_, ApiError>>()?;
+    Ok(ListConversationMembersResponse { members })
+  }
+
   /// Time-sortable like the server's: the server's clock in the time bits, so clients reading an
   /// ID's time get the server's time.
   fn next_id<T: Id>(&mut self) -> T {
@@ -4251,6 +4407,7 @@ impl State {
       can_add_members: false,
       can_invite_guests: false,
       can_manage_space: false,
+      can_create_channels: false,
     });
   }
 
@@ -4410,6 +4567,7 @@ impl State {
       is_integration: false,
       contains_guests: false,
       maybe_organizer_user_id: None,
+      maybe_my_permissions: None,
       maybe_my_membership: None,
       participants: Vec::new(),
       maybe_image: None,
@@ -4434,6 +4592,83 @@ impl State {
       },
     );
     id
+  }
+
+  /// What `DELETE /admin/users/{id}` does: 1:1 DMs (and group DMs that would keep one other
+  /// person) go, the user leaves every other conversation, their devices and keys go, and the
+  /// account becomes a tombstone. Idempotent.
+  fn delete_user(&mut self, user: UserId) {
+    let theirs: Vec<ConversationId> = self
+      .conversations
+      .iter()
+      .filter(|(_, entry)| entry.members.contains_key(&user))
+      .map(|(id, _)| *id)
+      .collect();
+    let mut co_members = BTreeSet::new();
+    for conversation in theirs {
+      let Some(entry) = self.conversations.get_mut(&conversation) else {
+        continue;
+      };
+      entry.members.remove(&user);
+      let remaining: Vec<UserId> = entry.members.keys().copied().collect();
+      co_members.extend(remaining.iter().copied());
+      let is_direct = matches!(
+        entry.response.kind,
+        ConversationKind::Dm | ConversationKind::Group
+      );
+      if is_direct && (entry.response.kind == ConversationKind::Dm || remaining.len() <= 1) {
+        self.conversations.remove(&conversation);
+        for other in &remaining {
+          self
+            .deleted_conversations
+            .entry(*other)
+            .or_default()
+            .push(conversation);
+        }
+        self.publish(
+          remaining,
+          &GatewayEvent::ConversationDelete {
+            conversation_id: conversation,
+          },
+        );
+      } else {
+        self.publish(
+          remaining,
+          &GatewayEvent::MembershipRemove {
+            conversation_id: conversation,
+            user_id: user,
+          },
+        );
+      }
+    }
+    let devices: Vec<DeviceId> = self
+      .devices
+      .iter()
+      .filter(|(_, device)| device.user == user)
+      .map(|(id, _)| *id)
+      .collect();
+    for device in devices {
+      self.devices.remove(&device);
+      self.key_packages.remove(&device);
+      self.publish(
+        co_members.iter().copied(),
+        &GatewayEvent::DeviceRemove {
+          user_id: user,
+          device_id: device,
+        },
+      );
+    }
+    self.identity_keys.remove(&user);
+    self.key_bags.remove(&user);
+    self.admins.remove(&user);
+    if let Some(summary) = self.users.get_mut(&user) {
+      summary.is_deactivated = true;
+      summary.is_deleted = true;
+      summary.display_name = "Deleted user".to_owned();
+      summary.maybe_username = None;
+    }
+    let everyone: Vec<UserId> = self.users.keys().copied().collect();
+    self.publish(everyone, &GatewayEvent::ProfileUpdate { user_id: user });
   }
 
   fn publish(&mut self, users: impl IntoIterator<Item = UserId>, event: &GatewayEvent) {
@@ -4489,6 +4724,22 @@ impl Conversation {
       is_notification_inherited: false,
     });
     response
+  }
+}
+
+impl State {
+  /// The 503 the server gives `user` while [`FakeServer::set_unavailable`] holds.
+  fn unavailable_answer(&self, user: UserId) -> Option<ApiError> {
+    let retry_after_secs = *self.unavailable_users.get(&user)?;
+    Some(ApiError::Status {
+      status: 503,
+      maybe_body: Some(
+        ErrorBody::new(ErrorCode::Unavailable, "fake server: a dependency is down")
+          .with_retry_after_secs(retry_after_secs),
+      ),
+      // The server sends it as a header too.
+      maybe_retry_after: Some(std::time::Duration::from_secs(retry_after_secs)),
+    })
   }
 }
 
@@ -4571,6 +4822,7 @@ fn org_background_blob<'a>(state: &'a mut State, raw: &str) -> Result<&'a mut Fa
     .ok_or(ApiError::Status {
       status: 404,
       maybe_body: None,
+      maybe_retry_after: None,
     })
 }
 
@@ -4598,6 +4850,7 @@ fn background_blob<'a>(state: &'a mut State, raw: &str) -> Result<&'a mut FakeBa
     .ok_or(ApiError::Status {
       status: 404,
       maybe_body: None,
+      maybe_retry_after: None,
     })
 }
 
@@ -4606,6 +4859,7 @@ fn store_fake_part(state: &mut State, url: &str, bytes: Vec<u8>) -> Result<Strin
   let refused = || ApiError::Status {
     status: 404,
     maybe_body: None,
+    maybe_retry_after: None,
   };
   let mut fields = url.strip_prefix(PART_SCHEME).ok_or_else(refused)?.split('/');
   let (Some(id), Some(number), Some(size)) = (fields.next(), fields.next(), fields.next()) else {
@@ -4622,6 +4876,7 @@ fn store_fake_part(state: &mut State, url: &str, bytes: Vec<u8>) -> Result<Strin
     return Err(ApiError::Status {
       status: 403,
       maybe_body: None,
+      maybe_retry_after: None,
     });
   }
   let is_discarding = state.is_discarding_parts;
@@ -4687,15 +4942,21 @@ fn blob_entry<'a>(state: &'a mut State, url: &str) -> Result<&'a mut FakeAttachm
     .ok_or(ApiError::Status {
       status: 404,
       maybe_body: None,
+      maybe_retry_after: None,
     })?;
   state.attachments.get_mut(&id).ok_or(ApiError::Status {
     status: 404,
     maybe_body: None,
+    maybe_retry_after: None,
   })
 }
 
 fn pending_session(connection: u64) -> String {
   format!("{PENDING_PREFIX}{connection}")
+}
+
+fn fake_digest(answer: &impl serde::Serialize) -> String {
+  teamcraft_crypto::change_digest::change_digest(&serde_json::to_vec(answer).unwrap_or_default())
 }
 
 fn page(

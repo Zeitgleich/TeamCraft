@@ -27,10 +27,12 @@ use teamcraft_proto::{
 
 use crate::auth::{ApiMethod, Authenticator};
 use crate::clock::{end_of_local_day, end_of_local_week};
+use crate::feedback::{ActionTicket, report_failure};
 use crate::model::{
   Conversation, ConversationId, CustomStatus, Message, MessageId, PresenceStatus, StatusExpiry,
   ThreadSummary as ThreadView, TimestampMs, UserId,
 };
+use crate::rest::RestClient;
 
 /// Wait before a refresh that a change triggered, so a burst of sync steps costs one request round.
 const REFRESH_DELAY: Duration = Duration::from_millis(400);
@@ -258,6 +260,26 @@ impl LiveServer {
       format!("/api/v1/announcement/{id}/dismiss"),
       Some("{}".to_owned()),
     );
+  }
+
+  /// "Leave on all devices": the server takes all of the user's devices out of the conversation's
+  /// call and tells everyone (a `call_update` or `call_end` event). A button waiting for it stays
+  /// pending until the server answered; a failure is shown (#322).
+  pub fn leave_call_everywhere(&self, conversation: ConversationId) {
+    let client = RestClient::new(self.auth.clone());
+    let path = format!("/api/v1/conversations/{conversation}/call/leave");
+    let maybe_ticket = ActionTicket::current();
+    spawn_local(async move {
+      if let Err(error) = client.send(ApiMethod::Post, &path, Some("{}".to_owned())).await {
+        let failure = error.to_failure();
+        if let Some(ticket) = &maybe_ticket {
+          ticket.fail(failure.clone());
+        }
+        report_failure(failure);
+      }
+      // Dropped only now, so the button stays pending until the answer is in.
+      drop(maybe_ticket);
+    });
   }
 
   /// Unread and mention counts of the conversation, once the server has answered.
@@ -942,6 +964,8 @@ mod tests {
       bookmarks: Vec::new(),
       is_catching_up: false,
       is_notes_to_self: false,
+      maybe_permissions: None,
+      has_only_deactivated_others: false,
       maybe_image_version: None,
     }
   }

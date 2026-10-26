@@ -12,6 +12,9 @@ pub mod downloads;
 pub mod error;
 pub mod integration_sources;
 pub mod link_preview;
+// The keys come from the UI contract (client-api), which the hosts of a UI build in.
+#[cfg(feature = "ui")]
+pub mod media_cache;
 pub mod notify_rules;
 pub mod picked_files;
 pub mod platform;
@@ -22,6 +25,7 @@ pub mod push_subscription;
 pub mod push_text;
 pub mod read_state;
 pub mod records;
+pub mod retry;
 pub mod runner;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod search;
@@ -58,6 +62,6 @@ pub use client::{
   AttestationSettings, CallEventSink, CallKeySigner, CallPreparation, Client, ClientSettings,
   EnrollmentOptions, EnrollmentSecret, FlushReport, GatewayOutcome, GroupAccess, HistoryScan, JwksSource,
   LinkAnnouncement, LinkOffer, LinkRequestInfo, LinkRequestList, MAX_VIEWER_BYTES, OrgRecoveryUnlock,
-  PendingEnrollment, TypingState,
+  PendingEnrollment, SyncPhase, TypingState,
 };
 pub use error::{CoreError, UnreadableStore};

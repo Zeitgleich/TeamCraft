@@ -21,6 +21,7 @@ use crate::api::ServerApi;
 use crate::convert;
 use crate::error::CoreError;
 use crate::records;
+use crate::retry::RetryPolicy;
 use crate::store::{ConversationEvent, LocalStore, MessageContent, Table};
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
@@ -57,6 +58,89 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// drop the rest (devices, direct messages, spaces). A channel that fails leaves the server step
   /// out, so "remove" again finishes it; channels already done are no longer listed.
   pub async fn admin_remove_from_all_chats(&mut self, user: UserId) -> Result<(), CoreError> {
+    self.sign_removals_from_all_chats(user).await?;
+    self.api.admin_remove_from_chats(user).await?;
+    Ok(())
+  }
+
+  /// "Delete account" (admin.md §3.2.1, issue #630): the same signed removals as
+  /// [`Self::admin_remove_from_all_chats`] first (the server never fakes a membership change), then
+  /// the server deletes the account (`DELETE /admin/users/{id}`): devices, key material and
+  /// memberships go, direct messages with them are deleted, a "Deleted user" tombstone stays. A
+  /// channel that fails leaves the server step out, so deleting again finishes it; both steps are
+  /// idempotent.
+  pub async fn admin_delete_user(&mut self, user: UserId) -> Result<(), CoreError> {
+    if user == self.account.user_id {
+      return Err(CoreError::InvalidRequest(
+        "admins can't delete their own account".into(),
+      ));
+    }
+    self.sign_removals_from_all_chats(user).await?;
+    self.remove_from_own_group_dms(user).await?;
+    self.api.admin_delete_user(user).await?;
+    Ok(())
+  }
+
+  /// Group DMs stay after a deletion when more than one other person remains, and admins don't
+  /// sign changes in DMs from outside (admin.md §3.2.1): where this admin is in such a group with
+  /// the user, its own device commits the removal, like any member's. 1:1 DMs are deleted anyway.
+  async fn remove_from_own_group_dms(&mut self, user: UserId) -> Result<(), CoreError> {
+    let groups: Vec<ConversationId> = self
+      .cached_conversations()?
+      .into_values()
+      .filter(|conversation| conversation.kind == teamcraft_proto::ConversationKind::Group)
+      .map(|conversation| conversation.id)
+      .collect();
+    for conversation in groups {
+      if !self.has_group(conversation)? || !self.group_users(conversation)?.contains(&user) {
+        continue;
+      }
+      let action = MembershipAction::RemoveUser {
+        user_id: convert::user(user),
+      };
+      self
+        .commit_change(conversation, ChangeSource::Own(action))
+        .await?;
+    }
+    Ok(())
+  }
+
+  /// "Remove from the group" on a leftover the admin console lists (issue #734): somebody still in
+  /// the encryption group of a conversation this device is in, whom fresh member lists no longer
+  /// show (confirmed twice, [`Self::check_group_leftovers`]). This admin decides, so this device
+  /// signs and commits the removal itself, which rotates the keys; the server has nothing left to
+  /// drop. Only users recorded as leftovers are removed this way, never on the server's word alone
+  /// (security review A8). Done when they are no longer in the group.
+  pub async fn admin_remove_group_leftover(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<(), CoreError> {
+    let me = self.account.user_id;
+    if !self.workspace()?.is_admin(me) {
+      return Err(CoreError::NotAnAdmin(me));
+    }
+    if !super::group_health::group_leftovers(&self.store, conversation)?.contains(&user) {
+      return Err(CoreError::InvalidRequest(
+        "the user is not left over in this group".into(),
+      ));
+    }
+    if self.has_group(conversation)? && self.group_users(conversation)?.contains(&user) {
+      let action = MembershipAction::RemoveUser {
+        user_id: convert::user(user),
+      };
+      self
+        .commit_change(conversation, ChangeSource::Own(action))
+        .await?;
+    }
+    self.forget_leftover(conversation, user)
+  }
+
+  /// This admin's device signs the user's removal from every channel the server lists them in
+  /// ([`Self::admin_remove_member`]; members commit it, keys rotate) and commits it in every group
+  /// of its own where the user is left over. A failure doesn't stop the others; the first one is
+  /// returned after all were tried, and channels already done are no longer listed.
+  async fn sign_removals_from_all_chats(&mut self, user: UserId) -> Result<(), CoreError> {
     let me = self.account.user_id;
     if !self.workspace()?.is_admin(me) {
       return Err(CoreError::NotAnAdmin(me));
@@ -68,11 +152,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         maybe_failure.get_or_insert(error);
       }
     }
-    if let Some(failure) = maybe_failure {
-      return Err(failure);
+    let leftovers: Vec<ConversationId> = super::group_health::all_group_leftovers(&self.store)?
+      .into_iter()
+      .filter(|(_, leftover)| *leftover == user)
+      .map(|(conversation, _)| conversation)
+      .collect();
+    for conversation in leftovers {
+      if let Err(error) = self.admin_remove_group_leftover(conversation, user).await {
+        tracing::warn!(conversation_id = %conversation, %error, "removing a leftover from the group failed");
+        maybe_failure.get_or_insert(error);
+      }
     }
-    self.api.admin_remove_from_chats(user).await?;
-    Ok(())
+    match maybe_failure {
+      Some(failure) => Err(failure),
+      None => Ok(()),
+    }
   }
 
   /// Says goodbye, then leaves: this device posts a signed request to remove its user, which the
@@ -834,12 +928,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
-  /// `removal_retry` doubled for each try after the first, at most `removal_retry_max`.
+  /// `removal_retry` doubled for each try after the first, at most `removal_retry_max` (the
+  /// shared backoff of `crate::retry`; without jitter: removals follow per-group events, not one
+  /// outage every device saw at once).
   fn backoff_ms(&self, tries: u32) -> i64 {
-    let base = millis(self.settings.removal_retry);
-    let ceiling = millis(self.settings.removal_retry_max).max(base);
-    let doublings = tries.saturating_sub(1).min(32);
-    base.saturating_mul(1_i64 << doublings).min(ceiling)
+    let policy = RetryPolicy::new(self.settings.removal_retry, self.settings.removal_retry_max);
+    millis(policy.backoff(tries.saturating_sub(1)))
   }
 
   /// Moves a stored removal to `step`, keeping its tries and announcement.

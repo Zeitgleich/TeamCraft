@@ -76,6 +76,28 @@ exists; clients can still read what they have stored locally.
   has begun. The images ship
   `teamcraft-server healthcheck [--ready]`, `teamcraft-sfu healthcheck` and `teamcraft-bridge
   healthcheck` for container health checks (no curl in the images).
+- **Dependencies** (`[dependencies]`, issue #743). Each backend (database, object storage, identity
+  provider, push gateway, SFU control) has a circuit breaker: after `failure_threshold` (3) failures
+  in a row it counts as down, requests that need it are answered at once with **503, `Retry-After`
+  and `error_code: "unavailable"`** instead of waiting for a timeout each, and after `open_secs`
+  (15) one request probes it again. Idempotent calls are retried twice within a request first
+  (200 ms, doubling, with jitter; timeouts are not repeated). `/readyz` lists every dependency's
+  state:
+
+  ```json
+  {"status": "degraded", "dependencies": [{"dependency": "database", "state": "ok"},
+    {"dependency": "object_storage", "state": "down"}]}
+  ```
+
+  Only the database makes `/readyz` answer 503, and only after the breaker opened (one slow ping,
+  bounded by `readiness_timeout_ms`, doesn't take the instance out of the load balancer). Another
+  dependency that is down makes it `degraded` with 200: every instance would meet the same outage,
+  and taking them out would turn a storage outage into a full one. Alert on `degraded` and on the
+  log lines `dependency is down` / `dependency is back`.
+- Every 503 of the server carries `Retry-After` (in the header and as `retry_after_secs` in the
+  body); the apps wait at least that long (one shared retry policy, capped exponential backoff
+  with jitter). A short database blip at startup — also between the connect and the migrations —
+  is waited for within `[database] startup_wait_secs` instead of exiting into a crash loop.
 - Logs are structured `tracing` output on stderr (`RUST_LOG` / `[logging]`). They never contain
   tokens, keys or message content (checked by tests); IDs of public objects are logged.
 - Watch: 5xx rate, 429 rate (rate limits, `docs/performance.md`), database connection saturation
@@ -113,6 +135,15 @@ exists; clients can still read what they have stored locally.
   about 5 s instead of at once. Rooms, locks and host removals live in the SFU's memory and start
   fresh; the server's meeting admission still applies to every rejoin. Desktop and mobile apps of
   version 1.0.2 and older end the call on "going away" (a browser tab rejoins).
+- The SFU reports its whole call roster to the server at start and every
+  `TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS` (default 30); the server drops participants the SFU no
+  longer has (after `[calls] roster_grace_secs`, default 60, while the SFU is fresh from a restart)
+  and ends calls with nobody left. If the SFU stops reporting for `[calls] roster_timeout_secs`
+  (default 120), the server ends its calls. Keep the timeout a few intervals long.
+- Restarting `teamcraft-server` doesn't end running calls either: at start it reads the SFU's
+  roster over `[calls] sfu_control_url` (and otherwise from the SFU's next roster) and takes over
+  the calls that kept running, without ringing again. Calls whose join tokens came from a server
+  before 1.0.8 can't be taken over (the tokens don't name the conversation).
 
 ### Company proxies, TLS inspection and captive portals (clients)
 

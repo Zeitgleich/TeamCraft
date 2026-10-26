@@ -5,6 +5,11 @@
 //! from a `blob:` URL (the page's CSP only lets images come from `blob:` and `data:`). Uploads are
 //! cropped and scaled to 256×256 in the crop dialog first (`image_crop`); the server checks and
 //! re-encodes them again.
+//!
+//! Pictures are also kept in the persistent media cache (#749, [`crate::persisted_media`]): the
+//! version the snapshot names comes from the cache without a download, also offline. A new version
+//! is downloaded in the background while the cached older one stays on screen, and stays there
+//! when the download fails (the server or its storage is down).
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -18,6 +23,8 @@ use crate::auth::{ApiMethod, Authenticator, BinaryBody};
 use crate::components::file_views::blob_url;
 use crate::feedback::{ActionFailure, FailureKind};
 use crate::model::{ConversationId, SpaceId};
+use crate::persisted_media::{self, CachedPicture, Freshness, MediaKey};
+use crate::reactive::UpdateIfAlive;
 
 /// What the client uploads after scaling.
 const UPLOAD_CONTENT_TYPE: &str = "image/png";
@@ -36,7 +43,7 @@ pub enum ImageOwner {
   Channel(ConversationId),
 }
 
-/// The loaded pictures: one `blob:` URL per owner, for the version it shows.
+/// The loaded pictures: one `blob:` URL per owner, with the version it shows.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ImageCache {
   entries: HashMap<ImageOwner, (String, String)>,
@@ -66,14 +73,24 @@ impl SpaceImageHub {
     }
   }
 
-  /// A `blob:` URL of the owner's picture in `maybe_version`, once it has loaded; the first call
-  /// for a version starts the download. Reactive.
+  /// A `blob:` URL of the owner's picture in `maybe_version` once it has loaded, or of an older
+  /// version until then; the first call for a version starts loading it. `None` as the version:
+  /// the owner has no picture (any more). Reactive.
   pub fn image_url(&self, owner: ImageOwner, maybe_version: Option<&str>) -> Option<String> {
-    let version = maybe_version?;
-    let maybe_url = self
-      .cache
-      .with(|cache| cache.url(owner, version).map(str::to_owned));
-    if maybe_url.is_none()
+    let Some(version) = maybe_version else {
+      if self.cache.with(|cache| cache.shows(owner)) {
+        // Removed: the letter tile again, and the cached copy goes too.
+        let hub = *self;
+        spawn_local(async move { hub.forget(owner) });
+        persisted_media::remove(owner.media_key());
+      }
+      return None;
+    };
+    let (maybe_url, is_current) = self.cache.with(|cache| {
+      let maybe_url = cache.best_url(owner).map(str::to_owned);
+      (maybe_url, cache.url(owner, version).is_some())
+    });
+    if !is_current
       && self
         .asked
         .try_update_value(|asked| asked.insert((owner, version.to_owned())))
@@ -100,6 +117,7 @@ impl SpaceImageHub {
       && let Some(url) = blob_url(&png, UPLOAD_CONTENT_TYPE)
     {
       self.remember(owner, image.version.clone(), url);
+      persisted_media::put(owner.media_key(), picture(image.version.clone(), png));
     }
     Ok(updated)
   }
@@ -133,22 +151,33 @@ impl SpaceImageHub {
       .map_err(|_| SpaceImageFailure::Refused("unreadable".to_owned()))
   }
 
+  /// The picture in `version`: from the persistent cache when it has that version, else
+  /// downloaded, with a cached older version shown meanwhile.
   fn load(&self, owner: ImageOwner, version: String) {
     let hub = *self;
     spawn_local(async move {
-      let path = owner.path();
-      let result = hub
-        .auth
-        .get_value()
-        .api_request_bytes(ApiMethod::Get, &path, None)
-        .await;
+      if let Some(cached) = persisted_media::get(owner.media_key()).await
+        && let Some(url) = blob_url(&cached.bytes, UPLOAD_CONTENT_TYPE)
+      {
+        if cached.freshness(Some(&version)) == Freshness::Current {
+          hub.remember(owner, version, url);
+          return;
+        }
+        hub.remember_if_none(owner, cached.version, url);
+      }
+      let Some(auth) = hub.auth.try_get_value() else {
+        return;
+      };
+      let result = auth.api_request_bytes(ApiMethod::Get, &owner.path(), None).await;
       match result {
         Ok(image) if image.status == 200 => {
           if let Some(url) = blob_url(&image.body, UPLOAD_CONTENT_TYPE) {
-            hub.remember(owner, version, url);
+            hub.remember(owner, version.clone(), url);
+            persisted_media::put(owner.media_key(), picture(version, image.body));
           }
         },
-        // The letter tile stays; the next version (or session) asks again.
+        // What is shown stays (an older cached picture, or the letter tile); the next version (or
+        // session) asks again.
         Ok(_) | Err(_) => tracing::debug!(?owner, "picture not downloaded"),
       }
     });
@@ -158,10 +187,37 @@ impl SpaceImageHub {
     let mut maybe_replaced = None;
     self
       .cache
-      .update(|cache| maybe_replaced = cache.insert(owner, version, url));
+      .update_if_alive(|cache| maybe_replaced = cache.insert(owner, version, url));
     if let Some(replaced) = maybe_replaced {
       revoke(&replaced);
     }
+  }
+
+  /// Shows a cached older picture while nothing else is shown.
+  fn remember_if_none(&self, owner: ImageOwner, version: String, url: String) {
+    let mut is_kept = false;
+    self.cache.update_if_alive(|cache| {
+      if !cache.shows(owner) {
+        is_kept = true;
+        cache.insert(owner, version, url.clone());
+      }
+    });
+    if !is_kept {
+      revoke(&url);
+    }
+  }
+
+  fn forget(&self, owner: ImageOwner) {
+    let mut maybe_removed = None;
+    self
+      .cache
+      .update_if_alive(|cache| maybe_removed = cache.remove(owner));
+    if let Some(removed) = maybe_removed {
+      revoke(&removed);
+    }
+    self
+      .asked
+      .try_update_value(|asked| asked.retain(|(asked_owner, _)| *asked_owner != owner));
   }
 }
 
@@ -173,6 +229,20 @@ impl ImageCache {
       .get(&owner)
       .filter(|(cached, _)| cached == version)
       .map(|(_, url)| url.as_str())
+  }
+
+  /// The URL for `owner` whatever version it shows: an older picture until the current one loads.
+  pub fn best_url(&self, owner: ImageOwner) -> Option<&str> {
+    self.entries.get(&owner).map(|(_, url)| url.as_str())
+  }
+
+  pub fn shows(&self, owner: ImageOwner) -> bool {
+    self.entries.contains_key(&owner)
+  }
+
+  /// Drops the picture of `owner`; returns its URL, which the caller releases.
+  pub fn remove(&mut self, owner: ImageOwner) -> Option<String> {
+    self.entries.remove(&owner).map(|(_, url)| url)
   }
 
   /// Keeps `url` for `space`; returns the URL it replaced, which the caller releases.
@@ -213,6 +283,13 @@ impl SpaceImageFailure {
 }
 
 impl ImageOwner {
+  fn media_key(self) -> MediaKey {
+    match self {
+      Self::Space(space) => MediaKey::SpaceImage(space),
+      Self::Channel(channel) => MediaKey::ChannelImage(channel),
+    }
+  }
+
   fn path(self) -> String {
     match self {
       Self::Space(space) => format!("/api/v1/spaces/{space}/image"),
@@ -221,7 +298,18 @@ impl ImageOwner {
   }
 }
 
-fn revoke(url: &str) {
+/// What the persistent cache keeps of a picture (always the PNG the server re-encoded or the crop
+/// dialog made).
+fn picture(version: String, png: Vec<u8>) -> CachedPicture {
+  CachedPicture {
+    version,
+    content_type: UPLOAD_CONTENT_TYPE.to_owned(),
+    bytes: png,
+  }
+}
+
+/// Frees a picture's `blob:` URL.
+pub(crate) fn revoke(url: &str) {
   #[cfg(target_arch = "wasm32")]
   if let Err(error) = web_sys::Url::revoke_object_url(url) {
     tracing::debug!(?error, "revoking a picture URL failed");
@@ -253,6 +341,39 @@ mod tests {
     );
     assert_eq!(cache.url(a, "v2"), Some("blob:2"));
     assert_eq!(cache.url(b, "v2"), None);
+  }
+
+  #[test]
+  fn an_older_cached_version_is_shown_until_the_current_one_loads_and_stays_if_it_does_not() {
+    let space = ImageOwner::Space(id_from_raw(1));
+    let mut cache = ImageCache::default();
+    assert_eq!(cache.best_url(space), None);
+    cache.insert(space, "v1".into(), "blob:cached".into());
+    // The snapshot names v2: v1 isn't current, but it is what the tile shows meanwhile (and during
+    // an outage, when v2 doesn't download).
+    assert_eq!(cache.url(space, "v2"), None);
+    assert_eq!(cache.best_url(space), Some("blob:cached"));
+    assert_eq!(
+      cache.insert(space, "v2".into(), "blob:new".into()),
+      Some("blob:cached".into())
+    );
+    assert_eq!(cache.url(space, "v2"), Some("blob:new"));
+    assert_eq!(
+      cache.remove(space),
+      Some("blob:new".into()),
+      "the picture was removed"
+    );
+    assert!(!cache.shows(space));
+  }
+
+  #[test]
+  fn each_owner_has_its_own_cache_entry() {
+    let (space, channel) = (id_from_raw(1), id_from_raw(1));
+    assert_eq!(ImageOwner::Space(space).media_key(), MediaKey::SpaceImage(space));
+    assert_eq!(
+      ImageOwner::Channel(channel).media_key(),
+      MediaKey::ChannelImage(channel)
+    );
   }
 
   #[test]

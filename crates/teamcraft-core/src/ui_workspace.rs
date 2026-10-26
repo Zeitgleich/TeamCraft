@@ -2,13 +2,14 @@
 //! browser and categories are read from the store and refreshed on first look.
 
 use teamcraft_client_api::actions::{
-  BrowsableChannel, CategoryChoice, CategoryInfo, ChannelChanges, NewChannel, NewSpace, SpaceChanges,
+  BrowsableChannel, BrowseJoin, CategoryChoice, CategoryInfo, ChannelChanges, NewChannel, NewSpace,
+  SpaceChanges,
 };
 use teamcraft_client_api::model::{ConversationId, SpaceId};
 use teamcraft_proto::{
-  ConversationKind, ConversationResponse, ConversationVisibility, CreateSpaceRequest, JoinPolicy,
-  ListCategoriesResponse, ListConversationsResponse, MoveChannelRequest, UpdateConversationRequest,
-  UpdateSpaceRequest,
+  AdminSelfJoin, ConversationKind, ConversationResponse, ConversationVisibility, CreateSpaceRequest,
+  JoinPolicy, ListCategoriesResponse, ListConversationsResponse, MoveChannelRequest,
+  UpdateConversationRequest, UpdateSpaceRequest,
 };
 
 use crate::client::workspace_admin::ChannelOptions;
@@ -119,11 +120,24 @@ impl<S: LocalStore> CoreChatBackend<S> {
         conversation.maybe_space_id == Some(space) && conversation.kind == ConversationKind::Channel
       })
       .map(|conversation| browsable(&conversation, space, true));
+    // Private channels come only to admins (the server's word); whether and how they may join
+    // follows the policy this device verified (admin.md §2.4).
+    let workspace: crate::workspace::WorkspaceState = self.read(
+      records::get_json(self.store_ref(), Table::Workspace, crate::client::WORKSPACE_KEY)
+        .map(Option::unwrap_or_default),
+    );
+    let self_join = workspace.policy.admin_self_join;
     let joinable = maybe_joinable
       .map(|list| list.conversations)
       .unwrap_or_default()
       .into_iter()
-      .map(|conversation| browsable(&conversation, space, false));
+      .filter_map(move |conversation| {
+        let join = browse_join(conversation.visibility.clone(), &self_join)?;
+        Some(BrowsableChannel {
+          join,
+          ..browsable(&conversation, space, false)
+        })
+      });
     let mut channels: Vec<BrowsableChannel> = joined.chain(joinable).collect();
     channels.sort_by_key(|channel| channel.name.to_lowercase());
     channels.dedup_by_key(|channel| channel.conversation);
@@ -165,6 +179,20 @@ fn browsable(conversation: &ConversationResponse, space: SpaceId, is_member: boo
     is_archived: conversation.is_archived,
     has_external_people: conversation.contains_guests,
     maybe_category: conversation.maybe_category_id,
+    join: BrowseJoin::Open,
+  }
+}
+
+/// How a channel the user isn't in can be joined; `None` hides it (a private channel the policy
+/// keeps admins out of).
+fn browse_join(visibility: ConversationVisibility, self_join: &AdminSelfJoin) -> Option<BrowseJoin> {
+  match visibility {
+    ConversationVisibility::Public => Some(BrowseJoin::Open),
+    ConversationVisibility::Private | ConversationVisibility::Unknown(_) => match self_join {
+      AdminSelfJoin::Visible => Some(BrowseJoin::AsAdmin),
+      AdminSelfJoin::OwnerApproval => Some(BrowseJoin::NeedsApproval),
+      AdminSelfJoin::Disabled | AdminSelfJoin::Unknown(_) => None,
+    },
   }
 }
 
@@ -173,5 +201,35 @@ fn join_policy(is_open: bool) -> JoinPolicy {
     JoinPolicy::Open
   } else {
     JoinPolicy::InviteOnly
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// admin.md §2.4: private channels in the browser follow the verified `admin_self_join`.
+  #[test]
+  fn private_channels_are_offered_as_the_signed_policy_says() {
+    let private = || ConversationVisibility::Private;
+    assert_eq!(
+      browse_join(private(), &AdminSelfJoin::Visible),
+      Some(BrowseJoin::AsAdmin)
+    );
+    assert_eq!(
+      browse_join(private(), &AdminSelfJoin::OwnerApproval),
+      Some(BrowseJoin::NeedsApproval)
+    );
+    assert_eq!(browse_join(private(), &AdminSelfJoin::Disabled), None);
+    assert_eq!(
+      browse_join(private(), &AdminSelfJoin::Unknown("later".into())),
+      None
+    );
+    for policy in [AdminSelfJoin::Visible, AdminSelfJoin::Disabled] {
+      assert_eq!(
+        browse_join(ConversationVisibility::Public, &policy),
+        Some(BrowseJoin::Open)
+      );
+    }
   }
 }

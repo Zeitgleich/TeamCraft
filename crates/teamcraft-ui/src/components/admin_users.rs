@@ -1,15 +1,19 @@
 use leptos::prelude::*;
 use teamcraft_proto::Role;
 
-use crate::admin::AdminUser;
+use crate::admin::{AdminUser, DeviceInfo};
 use crate::clock::{format_date_time, format_relative, now_ms};
 use crate::components::admin_console::SectionHeader;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
+use crate::components::pending_button::PendingButton;
 use crate::components::sliding_indicator::SlidingIndicator;
+use crate::components::workspace_dialogs::Dialog;
+use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
 use crate::model::{DeviceId, UserId};
-use crate::state::use_app_state;
+use crate::reactive::{items_by_key, keyed_item};
+use crate::state::{Overlay, use_app_state};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UserTab {
@@ -38,6 +42,31 @@ pub fn UsersSection() -> impl IntoView {
     selected
       .get()
       .and_then(|id| users.get().into_iter().find(|entry| entry.user.id == id))
+  });
+  // The detail is built again for another person or when what it offers changes; a refresh that
+  // brings new "last seen" times or a presence updates the device list in place, so the pane
+  // doesn't flicker and a started confirmation stays (issue #687).
+  let detail_key = Memo::new(move |_| {
+    selected_user.with(|maybe_entry| {
+      maybe_entry.as_ref().map(|entry| {
+        (
+          entry.user.id,
+          entry.user.display_name.clone(),
+          entry.user.username.clone(),
+          entry.is_active,
+          entry.is_in_chats,
+          entry.maybe_guest.is_some(),
+        )
+      })
+    })
+  });
+  let selected_devices = Memo::new(move |_| {
+    selected_user.with(|maybe_entry| {
+      maybe_entry
+        .as_ref()
+        .map(|entry| entry.devices.clone())
+        .unwrap_or_default()
+    })
   });
 
   view! {
@@ -95,8 +124,8 @@ pub fn UsersSection() -> impl IntoView {
         </Show>
       </div>
       <aside class="detail-pane" aria-label=move || i18n.t("admin-detail-label")>
-        {move || match selected_user.get() {
-          Some(entry) => view! { <UserDetail entry=entry now=now /> }.into_any(),
+        {move || match detail_key.with(Option::is_some).then(|| selected_user.get_untracked()).flatten() {
+          Some(entry) => view! { <UserDetail entry=entry devices=selected_devices now=now /> }.into_any(),
           None => view! { <p class="empty-state">{move || i18n.t("admin-user-select")}</p> }.into_any(),
         }}
       </aside>
@@ -134,13 +163,20 @@ fn UserRow(entry: AdminUser, selected: RwSignal<Option<UserId>>, now: i64, guest
     }
   });
 
+  let row_name = if entry.user.is_deleted {
+    view! { <span class="row-name">{move || i18n.t("user-deleted-name")}</span> }.into_any()
+  } else {
+    view! { <span class="row-name" translate="no">{entry.user.display_name.clone()}</span> }.into_any()
+  };
+
   view! {
     <tr class:selected=is_selected class:inactive=!entry.is_active>
       <th scope="row">
         <button class="row-button" aria-pressed=move || is_selected().to_string() on:click=move |_| selected.set(Some(id))>
           <Avatar user=entry.user.clone() size=AvatarSize::Small />
-          <span class="row-name" translate="no">{entry.user.display_name.clone()}</span>
-          {(!entry.is_active).then(|| view! { <span class="badge">{move || i18n.t("admin-deactivated")}</span> })}
+          {row_name}
+          {(!entry.is_active && !entry.user.is_deleted)
+            .then(|| view! { <span class="badge">{move || i18n.t("admin-deactivated")}</span> })}
         </button>
       </th>
       <td><span class="badge">{move || i18n.t(role)}</span></td>
@@ -156,10 +192,11 @@ fn UserRow(entry: AdminUser, selected: RwSignal<Option<UserId>>, now: i64, guest
 }
 
 #[component]
-fn UserDetail(entry: AdminUser, now: i64) -> impl IntoView {
+fn UserDetail(entry: AdminUser, devices: Memo<Vec<DeviceInfo>>, now: i64) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let user_id = entry.user.id;
+  let by_id = items_by_key(devices.into(), |device: &DeviceInfo| device.id);
   let pending_device = RwSignal::new(None::<DeviceId>);
   let confirm_deactivate = RwSignal::new(false);
   let confirm_removal = RwSignal::new(false);
@@ -180,28 +217,43 @@ fn UserDetail(entry: AdminUser, now: i64) -> impl IntoView {
     "admin-recovery-needs-second"
   };
   let is_active = entry.is_active;
-  let can_remove_from_chats = !entry.is_active && entry.is_in_chats;
+  if entry.user.is_deleted {
+    return view! { <DeletedUserDetail /> }.into_any();
+  }
+  // Still in an encryption group of this device although the server dropped them (#734): the
+  // signed removal is still to be done.
+  let has_leftovers = state.read(|backend| {
+    backend
+      .group_leftovers()
+      .iter()
+      .any(|(_, leftover)| *leftover == user_id)
+  });
+  let can_remove_from_chats = !entry.is_active && (entry.is_in_chats || has_leftovers);
   // The removals are signed by this client (admin.md §3.2.1); without its keys nothing is offered.
   let can_sign_removals = state.read(|backend| backend.can_remove_from_chats());
+  // Admins manage members and guests; only owners manage admins and owners (the server refuses
+  // the rest), so the console doesn't offer what would be refused.
+  let my_role = state.read(|backend| backend.my_role());
+  let may_delete = entry.role < Role::Admin || my_role >= Role::Owner;
+  let display_name = entry.user.display_name.clone();
+  let is_deleting = move || state.overlay.get() == Overlay::DeleteUser(user_id);
 
   view! {
     <h3 translate="no">{entry.user.display_name.clone()}</h3>
     <p class="muted-text" translate="no">{format!("@{}", entry.user.username)}</p>
     <h4 class="detail-heading">{move || i18n.t("admin-devices")}</h4>
     <ul class="device-list">
-      {entry
-        .devices
-        .iter()
-        .cloned()
-        .map(|device| {
+      <For each=move || devices.get() key=|device| device.id let:device>
+        {
           let device_id = device.id;
+          let device = keyed_item(by_id, device_id, device);
           let is_pending = move || pending_device.get() == Some(device_id);
-          let seen = move || format_relative(device.last_seen, now, i18n.locale().tag());
+          let seen = move || format_relative(device.with(|device| device.last_seen), now, i18n.locale().tag());
           view! {
             <li class="device">
               <Icon name=IconName::Smartphone />
               <div class="device-info">
-                <span translate="no">{device.name.clone()}</span>
+                <span translate="no">{move || device.with(|device| device.name.clone())}</span>
                 <span class="muted-text small">{seen}</span>
               </div>
               <Show
@@ -229,12 +281,9 @@ fn UserDetail(entry: AdminUser, now: i64) -> impl IntoView {
               </Show>
             </li>
           }
-        })
-        .collect_view()}
-      <Show when={
-        let none = entry.devices.is_empty();
-        move || none
-      } fallback=|| ()>
+        }
+      </For>
+      <Show when=move || devices.with(Vec::is_empty) fallback=|| ()>
         <li class="muted-text">{move || i18n.t("admin-no-devices")}</li>
       </Show>
     </ul>
@@ -303,7 +352,23 @@ fn UserDetail(entry: AdminUser, now: i64) -> impl IntoView {
       >
         {move || i18n.t("admin-recovery-start")}
       </button>
+      {may_delete
+        .then(|| {
+          view! {
+            <button
+              class="btn btn-danger"
+              disabled=!can_sign_removals
+              title=move || (!can_sign_removals).then(|| i18n.t("admin-delete-user-needs-keys"))
+              on:click=move |_| state.overlay.set(Overlay::DeleteUser(user_id))
+            >
+              {move || i18n.t("admin-delete-user")}
+            </button>
+          }
+        })}
     </div>
+    <Show when=is_deleting fallback=|| ()>
+      <DeleteUserDialog user=user_id name=display_name.clone() />
+    </Show>
     <p class="muted-text small">
       {move || {
         if confirm_deactivate.get() {
@@ -322,5 +387,72 @@ fn UserDetail(entry: AdminUser, now: i64) -> impl IntoView {
     <p class="status-line" role="status">
       {move || recovery_started.get().then(|| i18n.t("admin-recovery-started"))}
     </p>
+  }
+  .into_any()
+}
+
+/// A deleted account: only its tombstone is left, nothing to manage.
+#[component]
+fn DeletedUserDetail() -> impl IntoView {
+  let i18n = use_i18n();
+  view! {
+    <h3>{move || i18n.t("user-deleted-name")}</h3>
+    <p class="muted-text">{move || i18n.t("admin-user-deleted")}</p>
+  }
+}
+
+/// "Delete account" (admin.md §3.2.1): explains deactivating versus deleting and what happens to
+/// direct messages, and deletes only once the admin typed the account's name. Rendered by the
+/// console while the overlay is open, so it closes like every dialog (Escape, backdrop, Cancel).
+#[component]
+fn DeleteUserDialog(user: UserId, name: String) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let typed = RwSignal::new(String::new());
+  let pending = PendingAction::new();
+  let expected = name.trim().to_owned();
+  let is_confirmed = Signal::derive(move || !expected.is_empty() && typed.get().trim() == expected);
+  let prompt_name = name.clone();
+  view! {
+    <Dialog title_key="admin-delete-user-title" class="modal-small">
+      <p>{move || i18n.t("admin-delete-user-explain")}</p>
+      <p><strong>{move || i18n.t("admin-delete-user-dms")}</strong></p>
+      <label for="delete-user-name" translate="no">
+        {move || i18n.t_with("admin-delete-user-type-name", &[("name", &prompt_name)])}
+      </label>
+      <input
+        id="delete-user-name"
+        class="input"
+        data-autofocus
+        autocomplete="off"
+        spellcheck="false"
+        prop:value=move || typed.get()
+        on:input=move |ev| typed.set(event_target_value(&ev))
+      />
+      <footer class="modal-foot">
+        <span class="grow"></span>
+        <button type="button" class="btn" on:click=move |_| state.close_overlay()>{move || i18n.t("cancel")}</button>
+        <PendingButton
+          pending=pending
+          class="btn btn-danger"
+          is_disabled=Signal::derive(move || !is_confirmed.get())
+          on_click=move |_| {
+            if !is_confirmed.get_untracked() {
+              return;
+            }
+            pending.run_and_then(
+              || state.write(|backend| backend.delete_user(user)),
+              move || {
+                if state.overlay.try_get_untracked() == Some(Overlay::DeleteUser(user)) {
+                  state.close_overlay();
+                }
+              },
+            );
+          }
+        >
+          {move || i18n.t("admin-delete-user-confirm")}
+        </PendingButton>
+      </footer>
+    </Dialog>
   }
 }

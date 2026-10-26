@@ -12,6 +12,7 @@ use teamcraft_proto::{
 use crate::channel_access::ChannelAccess;
 use crate::components::admin_integrations::CopyButton;
 use crate::components::icons::{Icon, IconName};
+use crate::components::roster_banner::unsigned_reason;
 use crate::components::space_invites::web_origin;
 use crate::components::workspace_dialogs::FailureNote;
 use crate::feedback::PendingAction;
@@ -68,6 +69,7 @@ pub fn ChannelIntegrations(conversation: ConversationId) -> impl IntoView {
   };
 
   view! {
+    <div class="channel-integrations">
     <h3 class="detail-heading">{move || i18n.t("channel-mode")}</h3>
     <div class="segmented" role="radiogroup" aria-label=move || i18n.t("channel-mode")>
       <button
@@ -105,6 +107,7 @@ pub fn ChannelIntegrations(conversation: ConversationId) -> impl IntoView {
     <FailureNote pending=mode_pending />
     <BotMembers conversation=conversation can_manage=Signal::derive(can_manage) />
     <Sources conversation=conversation has_bot=Signal::from(has_bot) />
+    </div>
   }
 }
 
@@ -167,15 +170,17 @@ fn BotMembers(conversation: ConversationId, can_manage: Signal<bool>) -> impl In
       <p class="muted-text">{move || i18n.t("channel-bots-none")}</p>
     </Show>
     <Show when=move || can_manage.get() fallback=|| ()>
-      <label for="channel-bot-search">{move || i18n.t("channel-bots-add")}</label>
-      <input
-        id="channel-bot-search"
-        class="input"
-        type="search"
-        placeholder=move || i18n.t("channel-bots-search")
-        prop:value=move || query.get()
-        on:input=move |ev| query.set(event_target_value(&ev))
-      />
+      <div class="field">
+        <label for="channel-bot-search">{move || i18n.t("channel-bots-add")}</label>
+        <input
+          id="channel-bot-search"
+          class="input"
+          type="search"
+          placeholder=move || i18n.t("channel-bots-search")
+          prop:value=move || query.get()
+          on:input=move |ev| query.set(event_target_value(&ev))
+        />
+      </div>
       <ul class="settings-member-list">
         <For each=move || candidates.get() key=|bot| bot.id let:bot>
           <BotCandidateRow conversation=conversation bot=bot joins_space=joins_space />
@@ -284,7 +289,7 @@ fn Sources(conversation: ConversationId, has_bot: Signal<bool>) -> impl IntoView
         view! {
           <Show
             when=move || can_manage.get()
-            fallback=move || view! { <p class="hint">{move || i18n.t("channel-sources-admins-only")}</p> }
+            fallback=move || view! { <p class="hint">{move || who_adds_sources(i18n, state)}</p> }
           >
             <AddSource conversation=conversation has_bot=has_bot on_added=move |revealed| maybe_reveal.set(Some(revealed)) />
           </Show>
@@ -294,6 +299,41 @@ fn Sources(conversation: ConversationId, has_bot: Signal<bool>) -> impl IntoView
       {move || maybe_reveal.get().map(|revealed| view! { <RevealSource revealed=revealed on_done=move || maybe_reveal.set(None) /> })}
     </Show>
   }
+}
+
+/// Why the user can't add sources and whom to ask (issue #764): an admin role nobody signed yet
+/// says so; everybody else learns which workspace admins can.
+fn who_adds_sources(i18n: crate::i18n::I18n, state: crate::state::AppState) -> String {
+  if let Some(reason) = unsigned_reason(i18n, state) {
+    return reason;
+  }
+  let admins = state
+    .read(|backend| backend.owner_roster())
+    .map(|status| signed_admin_ids(&status))
+    .unwrap_or_default();
+  if admins.is_empty() {
+    return i18n.t("channel-sources-admins-only");
+  }
+  let names = admins
+    .iter()
+    .map(|user| {
+      state
+        .read(|backend| backend.user(*user))
+        .map_or_else(|| user.to_string(), |found| found.display_name)
+    })
+    .collect::<Vec<_>>()
+    .join(", ");
+  i18n.t_with("channel-sources-ask-admins", &[("admins", &names)])
+}
+
+/// Everybody with admin rights in the signed roster: owners, then admins.
+fn signed_admin_ids(status: &teamcraft_client_api::admin::OwnerRosterStatus) -> Vec<crate::model::UserId> {
+  status
+    .owners
+    .iter()
+    .map(|owner| owner.user)
+    .chain(status.admins.iter().copied())
+    .collect()
 }
 
 /// A source just added, with its token: shown once, kept only while this panel is open. The token
@@ -425,21 +465,23 @@ fn AddSource(
     }
   };
   view! {
-    <label for="channel-source-name">{move || i18n.t("channel-sources-name")}</label>
-    <input
-      id="channel-source-name"
-      class="input"
-      type="text"
-      maxlength=MAX_SOURCE_NAME_CHARS.to_string()
-      placeholder=move || i18n.t("channel-sources-name-placeholder")
-      prop:value=move || name.get()
-      on:input=move |ev| name.set(event_target_value(&ev))
-      on:keydown=move |ev| {
-        if ev.key() == "Enter" && can_add() {
-          add();
+    <div class="field">
+      <label for="channel-source-name">{move || i18n.t("channel-sources-name")}</label>
+      <input
+        id="channel-source-name"
+        class="input"
+        type="text"
+        maxlength=MAX_SOURCE_NAME_CHARS.to_string()
+        placeholder=move || i18n.t("channel-sources-name-placeholder")
+        prop:value=move || name.get()
+        on:input=move |ev| name.set(event_target_value(&ev))
+        on:keydown=move |ev| {
+          if ev.key() == "Enter" && can_add() {
+            add();
+          }
         }
-      }
-    />
+      />
+    </div>
     <div class="segmented" role="radiogroup" aria-label=move || i18n.t("channel-sources-kind")>
       {kind_button(SourceKind::Webhook, "channel-sources-kind-webhook")}
       {kind_button(SourceKind::Log, "channel-sources-kind-log")}

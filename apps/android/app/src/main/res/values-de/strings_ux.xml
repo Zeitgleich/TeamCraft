@@ -26,12 +26,22 @@
   <string name="connection_sign_in">Deine Sitzung ist abgelaufen. Nachrichten warten, bis du dich wieder anmeldest.</string>
   <string name="connection_sign_in_action">Erneut anmelden</string>
   <string name="connection_connecting">Verbindung zum Server wird aufgebaut…</string>
+  <string name="message_link_label">Link zu einer Nachricht</string>
+  <string name="message_sent">Gesendet</string>
+  <plurals name="conversation_members">
+    <item quantity="one">%d Mitglied</item>
+    <item quantity="other">%d Mitglieder</item>
+  </plurals>
 
   <!-- Conversation -->
   <string name="jump_down">Zur neuesten Nachricht springen</string>
   <plurals name="jump_down_new">
-    <item quantity="one">%d neuere Nachricht, nach unten springen</item>
-    <item quantity="other">%d neuere Nachrichten, nach unten springen</item>
+    <item quantity="one">%d neue Nachricht, nach unten springen</item>
+    <item quantity="other">%d neue Nachrichten, nach unten springen</item>
+  </plurals>
+  <plurals name="jump_down_unseen">
+    <item quantity="one">%s neue</item>
+    <item quantity="other">%s neue</item>
   </plurals>
   <string name="day_today">Heute</string>
   <string name="day_yesterday">Gestern</string>

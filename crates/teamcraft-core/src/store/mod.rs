@@ -52,7 +52,7 @@ pub use memory::MemoryStore;
 pub use sealed_sqlite::{SealedSqliteStore, SqliteRecords};
 #[cfg(all(feature = "sqlcipher", not(target_arch = "wasm32")))]
 pub use sqlite::SqlCipherStore;
-pub use tracked::{StoreChanges, TrackedStore};
+pub use tracked::{RemovedRendition, StoreChanges, TrackedStore};
 
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{ClientMessageId, ConversationId, MessageId, ThreadId, UserId};
@@ -269,6 +269,12 @@ pub enum ConversationEvent {
     /// The DM call that moves: an announcement of another call moves nothing.
     #[serde(rename = "call", default, skip_serializing_if = "Option::is_none")]
     maybe_call: Option<teamcraft_proto::CallId>,
+  },
+  /// A workspace admin added themselves to this private channel (admin.md §2.4). Sent by the
+  /// member whose client committed the admin's signed self-join, so the join is never silent;
+  /// shown whatever the join/leave setting says.
+  AdminJoined {
+    user: UserId,
   },
   /// From a newer client.
   #[serde(other)]

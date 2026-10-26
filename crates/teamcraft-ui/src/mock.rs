@@ -236,6 +236,7 @@ impl MockBackend {
           can_add_members: true,
           can_invite_guests: true,
           can_manage_space: true,
+          can_create_channels: true,
         },
         Space {
           id: space_b(),
@@ -251,6 +252,7 @@ impl MockBackend {
           can_add_members: false,
           can_invite_guests: false,
           can_manage_space: false,
+          can_create_channels: false,
         },
       ],
       conversations: demo_conversations(),
@@ -396,6 +398,7 @@ impl ChatBackend for MockBackend {
         is_archived: false,
         has_external_people: false,
         maybe_category: None,
+        join: teamcraft_client_api::actions::BrowseJoin::Open,
       })
       .collect();
     if space == space_a() {
@@ -408,6 +411,19 @@ impl ChatBackend for MockBackend {
         is_archived: false,
         has_external_people: true,
         maybe_category: None,
+        join: teamcraft_client_api::actions::BrowseJoin::Open,
+      });
+      // A private channel, as an admin's browser lists it (admin.md §2.4).
+      list.push(teamcraft_client_api::actions::BrowsableChannel {
+        conversation: id_from_raw(91),
+        space,
+        name: "leadership".into(),
+        topic: String::new(),
+        is_member: false,
+        is_archived: false,
+        has_external_people: false,
+        maybe_category: None,
+        join: teamcraft_client_api::actions::BrowseJoin::AsAdmin,
       });
     }
     list
@@ -503,6 +519,7 @@ impl ChatBackend for MockBackend {
         user: user.id,
         display_name: user.display_name.clone(),
         is_guest: user.is_guest,
+        is_bot: false,
         role: state
           .space_roles
           .get(&(space, user.id))
@@ -1274,6 +1291,7 @@ fn demo_users() -> Vec<User> {
       },
       // The last colleague hasn't set up the app yet.
       is_deactivated: false,
+      is_deleted: false,
       device_setup: if id == 8 {
         crate::model::DeviceSetup::NoDevices
       } else {
@@ -1305,6 +1323,7 @@ fn demo_users() -> Vec<User> {
     is_bot: true,
     maybe_organization: None,
     is_deactivated: false,
+    is_deleted: false,
     device_setup: crate::model::DeviceSetup::HasDevices,
     maybe_email: None,
   });
@@ -1339,6 +1358,8 @@ fn demo_conversations() -> Vec<Conversation> {
     bookmarks: Vec::new(),
     is_catching_up: false,
     is_notes_to_self: false,
+    maybe_permissions: None,
+    has_only_deactivated_others: false,
     maybe_image_version: None,
   };
   use ConversationKind::{Integration, Private, Public};
@@ -1516,6 +1537,8 @@ fn demo_conversations() -> Vec<Conversation> {
       bookmarks: Vec::new(),
       is_catching_up: false,
       is_notes_to_self: false,
+      maybe_permissions: None,
+      has_only_deactivated_others: false,
       maybe_image_version: None,
     });
   }

@@ -105,6 +105,8 @@ pub enum AuditAction {
   UserReactivated,
   /// A deactivated user's devices left every group and the user left every chat.
   UserRemovedFromChats,
+  /// An account was deleted; only its tombstone is left.
+  UserDeleted,
   RecoveryStarted,
   AdminJoinedChannel,
   OwnerAssigned,
@@ -133,13 +135,14 @@ pub enum AuditAction {
 }
 
 impl AuditAction {
-  pub const ALL: [AuditAction; 26] = [
+  pub const ALL: [AuditAction; 27] = [
     Self::PolicyChanged,
     Self::RetentionChanged,
     Self::DeviceRemoved,
     Self::UserDeactivated,
     Self::UserReactivated,
     Self::UserRemovedFromChats,
+    Self::UserDeleted,
     Self::RecoveryStarted,
     Self::AdminJoinedChannel,
     Self::OwnerAssigned,
@@ -170,6 +173,7 @@ impl AuditAction {
       Self::UserDeactivated => "user-deactivated",
       Self::UserReactivated => "user-reactivated",
       Self::UserRemovedFromChats => "user-removed-from-chats",
+      Self::UserDeleted => "user-deleted",
       Self::RecoveryStarted => "recovery-started",
       Self::AdminJoinedChannel => "admin-joined-channel",
       Self::OwnerAssigned => "owner-assigned",
@@ -220,6 +224,11 @@ pub struct OwnerRosterStatus {
   /// Admins of the verified roster (not owners).
   #[serde(default)]
   pub admins: Vec<UserId>,
+  /// Owners of the verified roster whose identity key this device can't use: they can't sign and
+  /// don't count as owners, but they stay in the roster until an owner removes them explicitly
+  /// (an edit never drops them silently).
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub unverifiable_owners: Vec<UserId>,
   /// When member clients stop accepting the admins unless an owner signs the roster again; `None`
   /// for a roster from before signing times.
   #[serde(rename = "expires_at", default, skip_serializing_if = "Option::is_none")]
@@ -289,12 +298,17 @@ pub fn normalized_roster(entries: &[RosterEntry]) -> Vec<RosterEntry> {
   unique
 }
 
-/// The entries of the signed roster in `status`.
+/// The entries of the signed roster in `status`, owners whose key can't be used included.
 pub fn signed_roster(status: &OwnerRosterStatus) -> Vec<RosterEntry> {
-  let owners = status.owners.iter().map(|owner| RosterEntry {
-    user: owner.user,
-    role: RosterRoleChoice::Owner,
-  });
+  let owners = status
+    .owners
+    .iter()
+    .map(|owner| owner.user)
+    .chain(status.unverifiable_owners.iter().copied())
+    .map(|user| RosterEntry {
+      user,
+      role: RosterRoleChoice::Owner,
+    });
   let admins = status.admins.iter().map(|user| RosterEntry {
     user: *user,
     role: RosterRoleChoice::Admin,
@@ -316,6 +330,44 @@ pub fn roster_from_roles(owners: &[UserId], admins: &[UserId]) -> Vec<RosterEntr
     }))
     .collect();
   normalized_roster(&entries)
+}
+
+/// What taking over the identity provider's roles proposes (issue #765): the signed roster plus
+/// everyone the provider lists as owner or admin, with promotions to owner. It never removes or
+/// demotes anybody: the server's role list can lag behind the provider (roles are read from
+/// tokens) or miss people, and a list like that once cost signed entries. Removals and demotions
+/// are the owner's explicit edit.
+pub fn idp_roster_proposal(signed: &[RosterEntry], owners: &[UserId], admins: &[UserId]) -> Vec<RosterEntry> {
+  let mut proposed: Vec<RosterEntry> = signed.to_vec();
+  for entry in roster_from_roles(owners, admins) {
+    match proposed.iter_mut().find(|existing| existing.user == entry.user) {
+      Some(existing) => existing.role = existing.role.min(entry.role),
+      None => proposed.push(entry),
+    }
+  }
+  normalized_roster(&proposed)
+}
+
+/// Owners and admins as the server lists them, for the roster proposals: each account once, and
+/// never a deactivated one (an old account of somebody who has a new one would be proposed twice).
+pub fn role_holders(users: &[AdminUser]) -> (Vec<UserId>, Vec<UserId>) {
+  let mut seen = std::collections::HashSet::new();
+  let mut owners = Vec::new();
+  let mut admins = Vec::new();
+  for user in users
+    .iter()
+    .filter(|user| user.is_active && !user.user.is_deactivated)
+  {
+    if !seen.insert(user.user.id) {
+      continue;
+    }
+    match user.role {
+      Role::Owner => owners.push(user.user.id),
+      Role::Admin => admins.push(user.user.id),
+      _ => {},
+    }
+  }
+  (owners, admins)
 }
 
 /// The first roster, proposed for the owner's confirmation before the first policy is signed
@@ -382,6 +434,76 @@ pub fn roster_problem(proposed: &[RosterEntry]) -> Option<RosterProblem> {
   (!proposed.iter().any(|entry| entry.role == RosterRoleChoice::Owner)).then_some(RosterProblem::NoOwner)
 }
 
+/// Where the signed-in user's admin role stands, as member clients see it (admin.md §2.3, issue
+/// #765). Only the signed, fresh roster gives admin authority; the identity provider's role alone
+/// gives none, and the UI says so wherever it matters.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RosterStanding {
+  /// Nothing to point out: no admin role, or one the fresh signed roster holds.
+  InForce,
+  /// The identity provider gives the user `role`, but no owner signed it yet.
+  NotSigned { role: Role, owners: Vec<UserId> },
+  /// No owner signed the roster within the accepted age: admin rights are paused for everybody.
+  /// `can_sign`: the user is an owner of the roster and can sign it again here.
+  Expired { can_sign: bool, owners: Vec<UserId> },
+  /// The workspace has no signed roster yet; the first policy save of an owner signs it.
+  NoRoster,
+  /// The user is a signed owner and the identity provider lists people the roster doesn't have:
+  /// they get no admin rights until this owner signs them.
+  AdditionsToSign { count: usize },
+}
+
+impl RosterStanding {
+  /// Whether the user's own admin actions are refused by other members' apps right now.
+  pub fn is_unsigned(&self) -> bool {
+    matches!(
+      self,
+      Self::NotSigned { .. } | Self::Expired { .. } | Self::NoRoster
+    )
+  }
+}
+
+/// The standing of `me` with the server role `server_role` against the verified roster in
+/// `maybe_status` at `now`. `idp_owners` and `idp_admins` are the provider's role holders (empty
+/// where this client doesn't know them); `can_sign` whether this device holds signing keys.
+pub fn roster_standing(
+  me: UserId,
+  server_role: &Role,
+  maybe_status: Option<&OwnerRosterStatus>,
+  (idp_owners, idp_admins): (&[UserId], &[UserId]),
+  can_sign: bool,
+  now: TimestampMs,
+) -> RosterStanding {
+  if !server_role.includes(&Role::Admin) {
+    return RosterStanding::InForce;
+  }
+  let Some(status) = maybe_status else {
+    return RosterStanding::NoRoster;
+  };
+  let owners: Vec<UserId> = status.owners.iter().map(|owner| owner.user).collect();
+  let is_owner = owners.contains(&me);
+  if !is_owner && !status.admins.contains(&me) {
+    return RosterStanding::NotSigned {
+      role: server_role.clone(),
+      owners,
+    };
+  }
+  if status.maybe_expires_at.is_some_and(|at| at <= now) {
+    return RosterStanding::Expired {
+      can_sign: is_owner && can_sign,
+      owners,
+    };
+  }
+  if is_owner && can_sign {
+    let signed = signed_roster(status);
+    let count = roster_changes(&signed, &idp_roster_proposal(&signed, idp_owners, idp_admins)).len();
+    if count > 0 {
+      return RosterStanding::AdditionsToSign { count };
+    }
+  }
+  RosterStanding::InForce
+}
+
 /// Something about the owners the console should point out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OwnerWarning {
@@ -403,6 +525,9 @@ pub fn admin_error_i18n_key(detail: &str) -> Option<&'static str> {
   if detail.contains(&format!("{ROSTER_BASE_CODE}:")) {
     return Some("admin-error-roster-changed");
   }
+  if detail.contains(&format!("{ROSTER_KEY_UNUSABLE_CODE}:")) {
+    return Some("admin-error-roster-key-unusable");
+  }
   detail
     .contains(&format!("{NOT_AN_OWNER_CODE}:"))
     .then_some("admin-error-not-an-owner")
@@ -410,6 +535,10 @@ pub fn admin_error_i18n_key(detail: &str) -> Option<&'static str> {
 
 /// Stable code that starts the core's refusal to sign a roster or policy for a non-owner.
 pub const NOT_AN_OWNER_CODE: &str = "not_an_owner";
+
+/// Stable code that starts the core's refusal to sign a roster that keeps an entry whose identity
+/// key can't be used on this device.
+pub const ROSTER_KEY_UNUSABLE_CODE: &str = "roster_key_unusable";
 
 /// Stable code that starts the core's refusal to sign a roster edited from an older version.
 pub const ROSTER_BASE_CODE: &str = "roster_changed";
@@ -708,6 +837,7 @@ mod tests {
         maybe_expires_at: None,
         recommended_minimum: 2,
         warning_lead_ms: 0,
+        unverifiable_owners: Vec::new(),
       };
       assert_eq!(
         roster_changes(&signed_roster(&status), &proposed),
@@ -720,6 +850,257 @@ mod tests {
         ]
       );
       assert!(roster_changes(&proposed, &proposed).is_empty());
+    }
+
+    mod standing {
+      use super::*;
+
+      const NOW: TimestampMs = 1_000_000;
+
+      #[test]
+      fn members_and_fresh_signed_admins_have_nothing_to_see() {
+        let status = roster(&[1], &[2], Some(NOW + 1));
+        assert_eq!(
+          standing(9, Role::Member, Some(&status), &[], true),
+          RosterStanding::InForce
+        );
+        assert_eq!(standing(9, Role::Guest, None, &[], true), RosterStanding::InForce);
+        assert_eq!(
+          standing(2, Role::Admin, Some(&status), &[], true),
+          RosterStanding::InForce
+        );
+        assert_eq!(
+          standing(1, Role::Owner, Some(&status), &[], true),
+          RosterStanding::InForce
+        );
+        // A roster from before signing times doesn't expire.
+        let unexpiring = roster(&[1], &[], None);
+        assert_eq!(
+          standing(1, Role::Owner, Some(&unexpiring), &[], true),
+          RosterStanding::InForce
+        );
+      }
+
+      #[test]
+      fn a_provider_role_nobody_signed_is_not_in_force() {
+        let status = roster(&[1, 2], &[], Some(NOW + 1));
+        let standing = standing(3, Role::Owner, Some(&status), &[], true);
+        assert_eq!(
+          standing,
+          RosterStanding::NotSigned {
+            role: Role::Owner,
+            owners: vec![user(1), user(2)]
+          }
+        );
+        assert!(standing.is_unsigned());
+      }
+
+      #[test]
+      fn an_expired_roster_pauses_everybody_and_owners_can_sign_again() {
+        let status = roster(&[1], &[2], Some(NOW));
+        assert_eq!(
+          standing(1, Role::Owner, Some(&status), &[], true),
+          RosterStanding::Expired {
+            can_sign: true,
+            owners: vec![user(1)]
+          }
+        );
+        // Without signing keys on this device, or as an admin: ask an owner.
+        assert!(matches!(
+          standing(1, Role::Owner, Some(&status), &[], false),
+          RosterStanding::Expired { can_sign: false, .. }
+        ));
+        assert!(matches!(
+          standing(2, Role::Admin, Some(&status), &[], true),
+          RosterStanding::Expired { can_sign: false, .. }
+        ));
+      }
+
+      #[test]
+      fn no_roster_yet_is_said_to_admins() {
+        assert_eq!(
+          standing(1, Role::Owner, None, &[], true),
+          RosterStanding::NoRoster
+        );
+        assert_eq!(
+          standing(1, Role::Admin, None, &[], true),
+          RosterStanding::NoRoster
+        );
+      }
+
+      #[test]
+      fn a_signing_owner_is_told_about_provider_roles_to_sign() {
+        let status = roster(&[1], &[2], Some(NOW + 1));
+        assert_eq!(
+          standing(1, Role::Owner, Some(&status), &[3, 4], true),
+          RosterStanding::AdditionsToSign { count: 2 }
+        );
+        // Signed already, or no keys to sign with here: nothing to do on this device.
+        assert_eq!(
+          standing(1, Role::Owner, Some(&status), &[1], true),
+          RosterStanding::InForce
+        );
+        assert_eq!(
+          standing(1, Role::Owner, Some(&status), &[3], false),
+          RosterStanding::InForce
+        );
+        // Admins can't sign; their own role is in force.
+        assert_eq!(
+          standing(2, Role::Admin, Some(&status), &[3], true),
+          RosterStanding::InForce
+        );
+      }
+
+      fn standing(
+        me: i64,
+        role: Role,
+        maybe_status: Option<&OwnerRosterStatus>,
+        idp_owners: &[i64],
+        can_sign: bool,
+      ) -> RosterStanding {
+        let owners: Vec<UserId> = idp_owners.iter().map(|raw| user(*raw)).collect();
+        roster_standing(user(me), &role, maybe_status, (&owners, &[]), can_sign, NOW)
+      }
+
+      fn roster(owners: &[i64], admins: &[i64], maybe_expires_at: Option<TimestampMs>) -> OwnerRosterStatus {
+        OwnerRosterStatus {
+          version: 3,
+          owners: owners
+            .iter()
+            .map(|raw| OwnerSigning {
+              user: user(*raw),
+              maybe_last_signed_at: None,
+            })
+            .collect(),
+          admins: admins.iter().map(|raw| user(*raw)).collect(),
+          unverifiable_owners: Vec::new(),
+          maybe_expires_at,
+          recommended_minimum: 1,
+          warning_lead_ms: 0,
+        }
+      }
+    }
+
+    /// Issue #765: taking over the provider's roles never drops a signed entry, whatever the
+    /// server's (lagging or partial) role list says.
+    #[test]
+    fn the_identity_provider_proposal_adds_and_promotes_but_never_removes() {
+      let signed = vec![owner(1), owner(2), admin(3), admin(4)];
+      // The server lists only 1 as owner and 5 as new admin; 3 is owner there now; 2 and 4 are
+      // missing (their stored role is stale).
+      let proposed = idp_roster_proposal(&signed, &[user(1), user(3)], &[user(5)]);
+      assert_eq!(proposed, vec![owner(1), owner(2), owner(3), admin(4), admin(5)]);
+      let changes = roster_changes(&signed, &proposed);
+      assert_eq!(
+        changes,
+        vec![
+          RosterChange::ChangeRole {
+            user: user(3),
+            role: RosterRoleChoice::Owner
+          },
+          RosterChange::Add {
+            user: user(5),
+            role: RosterRoleChoice::Admin
+          },
+        ]
+      );
+      assert!(
+        !changes
+          .iter()
+          .any(|change| matches!(change, RosterChange::Remove { .. }))
+      );
+      // An owner the provider lists only as admin stays owner.
+      assert_eq!(idp_roster_proposal(&[owner(1)], &[], &[user(1)]), vec![owner(1)]);
+      // Nothing listed: nothing changes.
+      assert_eq!(idp_roster_proposal(&signed, &[], &[]), normalized_roster(&signed));
+    }
+
+    /// An owner whose key this device can't use is part of the starting list: any other edit keeps
+    /// them, only an explicit removal takes them out.
+    #[test]
+    fn an_owner_with_an_unusable_key_is_never_dropped_by_an_edit() {
+      let status = OwnerRosterStatus {
+        version: 2,
+        owners: vec![OwnerSigning {
+          user: user(1),
+          maybe_last_signed_at: None,
+        }],
+        admins: vec![user(3)],
+        unverifiable_owners: vec![user(2)],
+        maybe_expires_at: None,
+        recommended_minimum: 2,
+        warning_lead_ms: 0,
+      };
+      let signed = signed_roster(&status);
+      assert_eq!(signed, vec![owner(1), owner(2), admin(3)]);
+      // Adding somebody else changes nothing about the owner.
+      let mut edited = signed.clone();
+      edited.push(admin(4));
+      assert_eq!(
+        roster_changes(&signed, &normalized_roster(&edited)),
+        vec![RosterChange::Add {
+          user: user(4),
+          role: RosterRoleChoice::Admin
+        }]
+      );
+      // So does taking over provider roles that don't list them.
+      let proposed = idp_roster_proposal(&signed, &[user(1)], &[]);
+      assert!(proposed.contains(&owner(2)));
+      // Removing them is a change the owner sees and confirms.
+      let removed: Vec<RosterEntry> = signed
+        .iter()
+        .copied()
+        .filter(|entry| entry.user != user(2))
+        .collect();
+      assert_eq!(
+        roster_changes(&signed, &removed),
+        vec![RosterChange::Remove { user: user(2) }]
+      );
+      assert_eq!(
+        admin_error_i18n_key("roster_key_unusable: the key of user 2 can't be used"),
+        Some("admin-error-roster-key-unusable")
+      );
+    }
+
+    #[test]
+    fn deactivated_and_repeated_accounts_are_not_role_holders() {
+      let users = [
+        admin_user(1, Role::Owner, true, false),
+        admin_user(2, Role::Admin, true, false),
+        // The old account of somebody who has a new one: deactivated, still with its role.
+        admin_user(3, Role::Admin, false, true),
+        admin_user(4, Role::Admin, false, false),
+        admin_user(2, Role::Admin, true, false),
+        admin_user(5, Role::Member, true, false),
+      ];
+      assert_eq!(role_holders(&users), (vec![user(1)], vec![user(2)]));
+    }
+
+    fn admin_user(raw: i64, role: Role, is_active: bool, is_deactivated: bool) -> AdminUser {
+      AdminUser {
+        user: User {
+          id: user(raw),
+          username: format!("person{raw}"),
+          display_name: "Person A".into(),
+          presence: crate::model::PresenceStatus::Offline,
+          maybe_custom_status: None,
+          avatar_hue: 0,
+          is_guest: false,
+          is_bot: false,
+          maybe_organization: None,
+          device_setup: crate::model::DeviceSetup::Unknown,
+          is_deactivated,
+          is_deleted: false,
+          maybe_email: None,
+        },
+        role,
+        devices: Vec::new(),
+        last_seen: 0,
+        space_names: Vec::new(),
+        is_active,
+        is_in_chats: false,
+        maybe_guest: None,
+      }
     }
 
     fn user(raw: i64) -> UserId {
@@ -799,6 +1180,7 @@ mod tests {
       OwnerRosterStatus {
         version: 1,
         admins: Vec::new(),
+        unverifiable_owners: Vec::new(),
         owners: (1..=owners)
           .map(|raw| OwnerSigning {
             user: UserId::from_snowflake(crate::model::Snowflake::new(raw).unwrap()),

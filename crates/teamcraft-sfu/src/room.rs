@@ -18,14 +18,14 @@ use std::{
     Arc, Mutex, MutexGuard, PoisonError,
     atomic::{AtomicBool, AtomicU64, Ordering},
   },
-  time::{Duration, Instant},
+  time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use teamcraft_media::{datagram::StreamId, dave::DaveEpoch};
 use teamcraft_proto::{
-  Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, DeviceId, ErrorBody, ErrorCode,
-  MediaCapabilities, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, SfuControlAction, TransportFeedback, UserId,
-  VideoCodec, VideoLayerInfo, VideoTrackKind,
+  Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallRosterEntry, ConversationId,
+  DeviceId, ErrorBody, ErrorCode, MediaCapabilities, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, SfuCallRoster,
+  SfuControlAction, TransportFeedback, UnixMillis, UserId, VideoCodec, VideoLayerInfo, VideoTrackKind,
 };
 use thiserror::Error;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
@@ -71,6 +71,11 @@ struct ControlState {
 /// One call.
 pub struct Room {
   call_id: CallId,
+  /// The call's conversation, from the first join token that named it (all come from the server).
+  maybe_conversation_id: Option<ConversationId>,
+  /// Who opened the room, and when: reported so a restarted server can show the call's start.
+  started_by: UserId,
+  started_at: UnixMillis,
   reconnect_grace: Duration,
   mute_report_burst: u32,
   mute_reports_per_second: u32,
@@ -300,9 +305,27 @@ impl Rooms {
         }
         room.close_everyone(CallEvent::EndedByHost { by_user_id });
       },
+      SfuControlAction::DisconnectUser { user_id } => room.disconnect_user(*user_id),
       SfuControlAction::Unknown => {},
     }
     Ok(())
+  }
+
+  /// Every call on this SFU and the devices in it, reconnecting ones included: what the server's
+  /// roster is reconciled with (`SfuRosterReport`).
+  pub fn roster(&self) -> Vec<SfuCallRoster> {
+    // Lock order: rooms, then room state; the rooms lock is released first.
+    let rooms: Vec<Arc<Room>> = lock(&self.rooms).values().cloned().collect();
+    rooms
+      .iter()
+      .map(|room| SfuCallRoster {
+        call_id: room.call_id,
+        participants: room.roster(),
+        maybe_conversation_id: room.maybe_conversation_id,
+        maybe_started_by: Some(room.started_by),
+        maybe_started_at: Some(room.started_at),
+      })
+      .collect()
   }
 
   /// Adds a participant to a call, creating the room on first join. A device that is already in
@@ -313,11 +336,23 @@ impl Rooms {
     capabilities: MediaCapabilities,
     handle: ParticipantHandle,
   ) -> Result<(Arc<Room>, SessionId, JoinOutcome), RoomError> {
-    let call_id = grant.call_id;
     let session = SessionId(self.next_session.fetch_add(1, Ordering::Relaxed));
     // The rooms lock is held across the join so `leave` can't drop the room in between.
     // Lock order everywhere: rooms, then control, then room state.
     let mut rooms = lock(&self.rooms);
+    let call_id = running_call_of(&rooms, &grant);
+    if call_id != grant.call_id {
+      // One conversation, one room: a server that lost track of the call (it restarted) handed out
+      // a new call id. The device joins the running call; its `joined` names the call id it is in,
+      // and the server learns it from the reports. The token was verified as usual; only the room
+      // it opens is the one its signed conversation already has.
+      info!(
+        token_call_id = %grant.call_id,
+        call_id = %call_id,
+        "join for a new call of a conversation that has one: joins the running call"
+      );
+    }
+    let grant = JoinGrant { call_id, ..grant };
     let has_slot = rooms
       .get(&call_id)
       .is_some_and(|room| room.has_participant(grant.device_id));
@@ -333,7 +368,7 @@ impl Rooms {
     let room = match rooms.get(&call_id) {
       Some(room) => Arc::clone(room),
       None => {
-        let room = Arc::new(Room::new(call_id, &self.config)?);
+        let room = Arc::new(Room::new(&grant, unix_now_millis(), &self.config)?);
         rooms.insert(call_id, Arc::clone(&room));
         info!(call_id = %call_id, "room created");
         room
@@ -374,7 +409,9 @@ impl Rooms {
 }
 
 impl Room {
-  fn new(call_id: CallId, config: &SfuConfig) -> Result<Self, RoomError> {
+  /// The room of `first`'s call, opened by its join at `now`.
+  fn new(first: &JoinGrant, now: UnixMillis, config: &SfuConfig) -> Result<Self, RoomError> {
+    let call_id = first.call_id;
     let state = RoomState {
       participants: HashMap::new(),
       latest_sessions: HashMap::new(),
@@ -384,6 +421,9 @@ impl Room {
     };
     Ok(Self {
       call_id,
+      maybe_conversation_id: first.maybe_conversation_id,
+      started_by: first.user_id,
+      started_at: now,
       reconnect_grace: config.reconnect_grace,
       mute_report_burst: config.mute_report_burst,
       mute_reports_per_second: config.mute_reports_per_second,
@@ -716,6 +756,17 @@ impl Room {
     }
   }
 
+  fn roster(&self) -> Vec<CallRosterEntry> {
+    lock(&self.state)
+      .participants
+      .iter()
+      .map(|(device_id, participant)| CallRosterEntry {
+        user_id: participant.user_id,
+        device_id: *device_id,
+      })
+      .collect()
+  }
+
   fn has_participant(&self, participant_id: DeviceId) -> bool {
     lock(&self.state).participants.contains_key(&participant_id)
   }
@@ -786,6 +837,33 @@ impl Room {
       CallEvent::ConnectionReplaced,
       REPLACED_BY_NEW_CONNECTION,
       b"call moved to another device",
+    );
+  }
+
+  /// The user left the call on all devices: each of them hears that its connection was replaced
+  /// (so it doesn't rejoin), then is closed; reconnecting ones lose their slot at once. Their
+  /// sessions then leave as usual, and the server hears about it.
+  fn disconnect_user(&self, user_id: UserId) {
+    let mut state = lock(&self.state);
+    let devices: Vec<DeviceId> = state
+      .participants
+      .iter()
+      .filter(|(_, participant)| participant.user_id == user_id)
+      .map(|(device_id, _)| *device_id)
+      .collect();
+    let mut handles = Vec::new();
+    for device_id in &devices {
+      match state.handle_of(*device_id) {
+        Some(handle) => handles.push(handle.clone()),
+        None => state.remove(self.call_id, *device_id, Instant::now()),
+      }
+    }
+    info!(call_id = %self.call_id, user_id = %user_id, devices = devices.len(), "user left on all devices");
+    close_after_event(
+      handles,
+      CallEvent::ConnectionReplaced,
+      REPLACED_BY_NEW_CONNECTION,
+      b"left the call on all devices",
     );
   }
 
@@ -1072,4 +1150,214 @@ fn send(handle: &ParticipantHandle, event: CallEvent) {
 /// Recovers from poisoning: room state stays consistent because no invariant spans a panic point.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
   mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The call `grant` joins: its own if it runs here, else the running call of its (signed)
+/// conversation, else its own (a new room).
+fn running_call_of(rooms: &HashMap<CallId, Arc<Room>>, grant: &JoinGrant) -> CallId {
+  if rooms.contains_key(&grant.call_id) {
+    return grant.call_id;
+  }
+  let Some(conversation_id) = grant.maybe_conversation_id else {
+    return grant.call_id;
+  };
+  rooms
+    .values()
+    .filter(|room| room.maybe_conversation_id == Some(conversation_id))
+    // Deterministic should there ever be two (rooms opened by tokens of an older server).
+    .map(|room| room.call_id)
+    .min()
+    .unwrap_or(grant.call_id)
+}
+
+/// The wall clock, only for the start time the roster reports (shown, never trusted for order).
+fn unix_now_millis() -> UnixMillis {
+  let millis = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .map_or(0, |elapsed| elapsed.as_millis());
+  UnixMillis(i64::try_from(millis).unwrap_or(i64::MAX))
+}
+
+#[cfg(test)]
+mod tests {
+  use teamcraft_proto::{Id, Snowflake};
+  use tokio::sync::mpsc::{self, Receiver};
+
+  use super::*;
+
+  const CALL: i64 = 9;
+  const CONVERSATION: i64 = 77;
+
+  #[test]
+  fn the_roster_lists_every_device_of_every_call() {
+    let rooms = Rooms::new(SfuConfig::default());
+    let (_alice_rx, _) = join(&rooms, 1, 10);
+    let (_bob_rx, _) = join(&rooms, 2, 20);
+
+    let roster = rooms.roster();
+
+    assert_eq!(roster.len(), 1);
+    assert_eq!(roster[0].call_id, id(CALL));
+    // What a restarted server needs to take the call over.
+    assert_eq!(roster[0].maybe_conversation_id, Some(id(CONVERSATION)));
+    assert_eq!(roster[0].maybe_started_by, Some(id(1)));
+    assert!(roster[0].maybe_started_at.is_some());
+    let mut participants = roster[0].participants.clone();
+    participants.sort_by_key(|entry| entry.device_id);
+    assert_eq!(participants, vec![entry(1, 10), entry(2, 20)]);
+  }
+
+  mod one_room_per_conversation {
+    use super::*;
+
+    #[test]
+    fn a_new_call_id_for_a_running_conversation_lands_in_its_room() {
+      let rooms = Rooms::new(SfuConfig::default());
+      let (_alice_rx, _) = join(&rooms, 1, 10);
+
+      // A restarted server handed out a fresh call id for the same conversation.
+      let (mut bob_rx, _, joined) = join_with(&rooms, grant(55, Some(CONVERSATION), 2, 20)).unwrap();
+
+      assert_eq!(joined, id(CALL));
+      let roster = rooms.roster();
+      assert_eq!(roster.len(), 1, "{roster:?}");
+      assert_eq!(roster[0].participants.len(), 2);
+      let events = drain(&mut bob_rx);
+      assert!(
+        events
+          .iter()
+          .any(|event| matches!(event, CallEvent::Joined { call_id, .. } if *call_id == id(CALL))),
+        "the client learns the call it is in: {events:?}"
+      );
+    }
+
+    #[test]
+    fn other_conversations_and_unnamed_tokens_get_their_own_room() {
+      let rooms = Rooms::new(SfuConfig::default());
+      join(&rooms, 1, 10);
+
+      let (_, _, other) = join_with(&rooms, grant(56, Some(78), 2, 20)).unwrap();
+      let (_, _, unnamed) = join_with(&rooms, grant(57, None, 3, 30)).unwrap();
+
+      assert_eq!((other, unnamed), (id(56), id(57)));
+      assert_eq!(rooms.roster().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn host_controls_of_the_running_call_still_apply() {
+      let rooms = Rooms::new(SfuConfig::default());
+      join(&rooms, 1, 10);
+      join(&rooms, 2, 20);
+      rooms
+        .control(
+          id(CALL),
+          id(1),
+          &SfuControlAction::RemoveParticipant { user_id: id(2) },
+        )
+        .unwrap();
+      rooms.control(id(CALL), id(1), &SfuControlAction::Lock).unwrap();
+
+      let removed = join_with(&rooms, grant(55, Some(CONVERSATION), 2, 21));
+      let locked_out = join_with(&rooms, grant(55, Some(CONVERSATION), 3, 30));
+
+      assert!(matches!(removed, Err(RoomError::Removed)));
+      assert!(matches!(locked_out, Err(RoomError::Locked)));
+    }
+  }
+
+  #[tokio::test]
+  async fn leaving_on_all_devices_replaces_only_that_users_connections() {
+    let rooms = Rooms::new(SfuConfig::default());
+    let (mut laptop_rx, _) = join(&rooms, 1, 10);
+    let (mut phone_rx, phone_session) = join(&rooms, 1, 11);
+    let (mut bob_rx, _) = join(&rooms, 2, 20);
+    let room = lock(&rooms.rooms).get(&id(CALL)).cloned().unwrap();
+    // The phone lost its connection: it holds its slot while it reconnects.
+    assert!(rooms.disconnect(&room, id(11), phone_session, Instant::now()));
+    drain(&mut laptop_rx);
+    drain(&mut phone_rx);
+    drain(&mut bob_rx);
+
+    rooms
+      .control(
+        id(CALL),
+        id(1),
+        &SfuControlAction::DisconnectUser { user_id: id(1) },
+      )
+      .unwrap();
+
+    assert!(drain(&mut laptop_rx).contains(&CallEvent::ConnectionReplaced));
+    assert!(
+      !drain(&mut bob_rx).contains(&CallEvent::ConnectionReplaced),
+      "the others stay"
+    );
+    let devices: Vec<DeviceId> = rooms.roster()[0]
+      .participants
+      .iter()
+      .map(|entry| entry.device_id)
+      .collect();
+    assert!(
+      !devices.contains(&id(11)),
+      "a reconnecting device loses its slot at once"
+    );
+    assert!(devices.contains(&id(20)));
+  }
+
+  /// Joins user `user` with device `device`; returns its signaling queue and session.
+  fn join(rooms: &Rooms, user: i64, device: i64) -> (Receiver<Outgoing>, SessionId) {
+    let (signal_rx, session, _) = join_with(rooms, grant(CALL, Some(CONVERSATION), user, device)).unwrap();
+    (signal_rx, session)
+  }
+
+  /// Joins with `grant`; also returns the call joined.
+  fn join_with(
+    rooms: &Rooms,
+    grant: JoinGrant,
+  ) -> Result<(Receiver<Outgoing>, SessionId, CallId), RoomError> {
+    let (signal_tx, signal_rx) = mpsc::channel(64);
+    let handle = ParticipantHandle {
+      link: Arc::new(QuietLink),
+      signal_tx,
+    };
+    let (room, session, _) = rooms.join(grant, MediaCapabilities::default(), handle)?;
+    Ok((signal_rx, session, room.call_id()))
+  }
+
+  fn grant(call: i64, maybe_conversation: Option<i64>, user: i64, device: i64) -> JoinGrant {
+    JoinGrant {
+      call_id: id(call),
+      user_id: id(user),
+      device_id: id(device),
+      maybe_conversation_id: maybe_conversation.map(id),
+    }
+  }
+
+  fn drain(rx: &mut Receiver<Outgoing>) -> Vec<CallEvent> {
+    let mut events = Vec::new();
+    while let Ok(outgoing) = rx.try_recv() {
+      if let Outgoing::Event(event) = outgoing {
+        events.push(event);
+      }
+    }
+    events
+  }
+
+  /// A link that drops everything.
+  struct QuietLink;
+
+  impl ParticipantLink for QuietLink {
+    fn send_datagram(&self, _bytes: &[u8]) {}
+    fn close(&self, _code: u32, _reason: &[u8]) {}
+  }
+
+  fn entry(user: i64, device: i64) -> CallRosterEntry {
+    CallRosterEntry {
+      user_id: id(user),
+      device_id: id(device),
+    }
+  }
+
+  fn id<T: Id>(raw: i64) -> T {
+    T::from_snowflake(Snowflake::new(raw).unwrap())
+  }
 }

@@ -48,6 +48,7 @@ pub mod session;
 pub mod shares;
 pub mod space_images;
 pub mod spaces;
+pub mod sync;
 pub mod system_events;
 pub mod threads;
 pub mod urgent;

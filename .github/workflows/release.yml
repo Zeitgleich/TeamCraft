@@ -8,7 +8,9 @@
 #   desktop updater manifest latest.json when the update artifacts are signed (docs/updates.md).
 # - Android APKs of both flavors: release builds (signed only when the upload key secrets exist,
 #   `-unsigned` otherwise) and `-debug-signed` builds for testers; the App Bundle of the `full`
-#   flavor, which google-play.yml uploads to Google Play once the release is published.
+#   flavor, which google-play.yml uploads to Google Play once the release is published. They don't
+#   hold up the rest: the draft release is created without them, and the `android-release` job
+#   attaches them (and their SHA256SUMS lines) when the Android build is done.
 # - SBOMs (SPDX and CycloneDX) of the source tree and the images, image digests, SHA256SUMS, and a
 #   build provenance attestation for every file.
 # - Notes rendered from .github/release-notes.md: the highlights from the annotated tag's message, generated notes
@@ -334,9 +336,12 @@ jobs:
             out/*.aab
           if-no-files-found: error
 
+  # Desktop, web and server files; Android joins in `android-release`, so a failed Android build
+  # (a flaky SDK download, #696) never holds up the draft and the server deploy, which reads the web
+  # bundle's line in SHA256SUMS.
   release:
     name: Draft release
-    needs: [version, image-manifest, desktop, android]
+    needs: [version, image-manifest, desktop]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -358,7 +363,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           REPO: ${{ github.repository }}
         run: |
-          patterns=(linux-packages-* 'teamcraft-desktop-*.flatpak*' 'macos-*' 'windows-*' ui-dist release-android 'release-image-*')
+          patterns=(linux-packages-* 'teamcraft-desktop-*.flatpak*' 'macos-*' 'windows-*' ui-dist 'release-image-*')
           args=()
           for pattern in "${patterns[@]}"; do args+=(--pattern "$pattern"); done
           for attempt in 1 2 3 4; do
@@ -400,7 +405,7 @@ jobs:
           find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
             -o -name '*.flatpak' -o -name '*.dmg' -o -name '*.msi' -o -name '*.exe' \
             -o -name '*.app.tar.gz' -o -name '*.sig' \
-            -o -name '*.apk' -o -name '*.aab' -o -name '*.spdx.json' -o -name '*.cdx.json' \) -exec cp {} dist/ \;
+            -o -name '*.spdx.json' -o -name '*.cdx.json' \) -exec cp {} dist/ \;
           # The web client: the same trunk build the desktop app embeds, served by the server
           # ([web] static_dir), plus precompressed .br/.gz variants the server picks by Accept-Encoding.
           # Never with demo data. Signed with the web release key when the secret exists: its service
@@ -461,7 +466,67 @@ jobs:
           flags=(--draft --verify-tag --title "TeamCraft ${VERSION}" --notes-file notes.md)
           [ "$IS_PRERELEASE" = true ] && flags+=(--prerelease)
           if gh release view "$TAG" >/dev/null 2>&1; then
+            # A re-run: keep the lines of the files android-release attached in the meantime.
+            existing="$RUNNER_TEMP/existing"
+            mkdir -p "$existing"
+            gh release download "$TAG" --pattern SHA256SUMS --dir "$existing" --clobber \
+              || echo "the release has no SHA256SUMS yet"
+            scripts/merge-checksums.py "$existing/SHA256SUMS" dist/SHA256SUMS > "$existing/merged"
+            mv "$existing/merged" dist/SHA256SUMS
             gh release upload "$TAG" dist/* --clobber
           else
             gh release create "$TAG" "${flags[@]}" dist/*
           fi
+
+  # Attaches the Android files to the release the `release` job created, draft or already published,
+  # and adds their lines to SHA256SUMS. A re-run after a failed Android build is all it takes.
+  android-release:
+    name: Attach Android files
+    needs: [version, android, release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      # Starts google-play.yml when the release was published before its bundle was attached.
+      actions: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-android
+          path: android
+      - name: Checksums of the Android files
+        run: |
+          (cd android && sha256sum -- *.apk *.aab > "$RUNNER_TEMP/android.sums")
+          cat "$RUNNER_TEMP/android.sums"
+      - name: Build provenance attestation of the Android files
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: ${{ runner.temp }}/android.sums
+      - name: Attach to the release
+        id: attach
+        run: |
+          # Published before this job? Then google-play.yml already ran without the bundle.
+          is_draft="$(gh release view "$TAG" --json isDraft --jq .isDraft)"
+          echo "was_published=$([ "$is_draft" = false ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          mkdir -p sums
+          gh release download "$TAG" --pattern SHA256SUMS --dir sums --clobber
+          scripts/merge-checksums.py sums/SHA256SUMS "$RUNNER_TEMP/android.sums" > android/SHA256SUMS
+          gh release upload "$TAG" android/* --clobber
+          cat android/SHA256SUMS
+      # The publish event's runs of google-play.yml and packages.yml found no Android files; run them
+      # again now that the files are there.
+      - name: Google Play and the package site, when already published
+        if: steps.attach.outputs.was_published == 'true'
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          echo "::notice::${TAG} was published before its Android files were attached; starting Google Play and Packages again"
+          gh workflow run google-play.yml --ref "$DEFAULT_BRANCH" -f tag="$TAG"
+          gh workflow run packages.yml --ref "$DEFAULT_BRANCH"

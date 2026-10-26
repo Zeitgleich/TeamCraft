@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT c.id AS \"id!\", c.kind AS \"kind!\", o.user_id AS \"other?\"\n         FROM memberships m\n         JOIN conversations c ON c.id = m.conversation_id AND c.kind IN ('dm', 'group')\n         LEFT JOIN memberships o ON o.conversation_id = c.id AND o.user_id <> m.user_id\n         WHERE m.user_id = $1\n         ORDER BY c.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "other?",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "ecc41a324d75c8ffe69fcd67a1400dfbbea91f3a5a9ba60c125fe5468e027b23"
+}

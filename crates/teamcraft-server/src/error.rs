@@ -2,10 +2,22 @@ use axum::Json;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use teamcraft_db::DbError;
-use teamcraft_proto::{ErrorBody, ErrorCode};
+use teamcraft_proto::{DependencyName, ErrorBody, ErrorCode};
 use tracing::error;
 
 use crate::auth::AuthError;
+use crate::dependencies::CircuitOpen;
+
+/// `Retry-After` of a 503 for a backend that is not reachable (issue #743): long enough that
+/// clients don't add load while it recovers, short enough that they notice its return soon.
+pub const UNAVAILABLE_RETRY_AFTER_SECS: u64 = 30;
+/// `Retry-After` of a 503 for a database that failed for a moment (pool timeout, reset).
+pub const DATABASE_RETRY_AFTER_SECS: u64 = 5;
+
+/// How long clients wait before they ask again when the object storage failed (an outage of the
+/// storage provider, #742). Clients back off further on their own; this keeps a storm of retries
+/// off the server and the storage while it recovers.
+const STORAGE_RETRY_AFTER_SECS: u64 = 30;
 
 /// Every error a handler can return; maps to a status code and the stable `error_code` body.
 #[derive(Debug, thiserror::Error)]
@@ -32,6 +44,12 @@ pub enum ApiError {
   /// A roster without an owner: nobody could ever sign a roster or policy again (admin.md §2.3).
   #[error("the roster must keep at least one owner")]
   LastOwner,
+  /// An admin tried to delete their own account.
+  #[error("admins can't delete their own account")]
+  CannotDeleteSelf,
+  /// Deleting the account would leave the workspace without an active admin.
+  #[error("the workspace must keep at least one active admin")]
+  LastAdmin,
   /// Channel members must belong to the channel's space; the user is not in it (yet).
   #[error("the user is not a member of the space")]
   NotSpaceMember,
@@ -48,8 +66,15 @@ pub enum ApiError {
   /// A needed backend (e.g. attachment storage) is not configured or not reachable.
   #[error("unavailable: {0}")]
   Unavailable(String),
-  /// The server is at its limit for this kind of work (e.g. image decoding); retry after this many
-  /// seconds. 503 with `Retry-After`.
+  /// A backend is down (its circuit breaker is open, see `dependencies.rs`): 503 with
+  /// `Retry-After` until its next probe.
+  #[error("{dependency} is unavailable, retry in {retry_after_secs} seconds")]
+  DependencyDown {
+    dependency: DependencyName,
+    retry_after_secs: u64,
+  },
+  /// The server is at its limit for this kind of work (e.g. image decoding), or the object storage
+  /// is down ([`Self::storage_unavailable`]); retry after this many seconds. 503 with `Retry-After`.
   #[error("busy: {what}, retry in {retry_after_secs} seconds")]
   Busy {
     what: &'static str,
@@ -72,6 +97,15 @@ pub enum ApiError {
 }
 
 impl ApiError {
+  /// The object storage failed or answered "unavailable" while it holds `what`: 503 with
+  /// `Retry-After`, so clients retry later instead of at once.
+  pub fn storage_unavailable(what: &'static str) -> Self {
+    Self::Busy {
+      what,
+      retry_after_secs: STORAGE_RETRY_AFTER_SECS,
+    }
+  }
+
   pub fn space_not_found() -> Self {
     Self::NotFound {
       code: ErrorCode::SpaceNotFound,
@@ -240,7 +274,8 @@ impl ApiError {
         | AuthError::InvalidToken(_)
         | AuthError::Expired(_)
         | AuthError::SessionEnded
-        | AuthError::SessionTimedOut,
+        | AuthError::SessionTimedOut
+        | AuthError::AccountDeleted,
       ) => StatusCode::UNAUTHORIZED,
       Self::Auth(AuthError::NoTeamcraftRole | AuthError::AccountDeactivated)
       | Self::Forbidden(_)
@@ -251,12 +286,16 @@ impl ApiError {
         StatusCode::BAD_REQUEST
       },
       Self::Conflict(_)
+      | Self::CannotDeleteSelf
+      | Self::LastAdmin
       | Self::KeyPackageExhausted
       | Self::EpochConflict { .. }
       | Self::VersionConflict { .. } => StatusCode::CONFLICT,
       Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
       Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
-      Self::Unavailable(_) | Self::Busy { .. } => StatusCode::SERVICE_UNAVAILABLE,
+      Self::Unavailable(_) | Self::Busy { .. } | Self::DependencyDown { .. } => {
+        StatusCode::SERVICE_UNAVAILABLE
+      },
       Self::Database(error) if error.is_transient() => StatusCode::SERVICE_UNAVAILABLE,
       Self::ShareUnavailable => StatusCode::GONE,
       Self::LocalAccountsDisabled => StatusCode::FORBIDDEN,
@@ -273,6 +312,7 @@ impl ApiError {
       Self::Auth(AuthError::SessionTimedOut) => ErrorCode::SessionTimedOut,
       Self::Auth(AuthError::NoTeamcraftRole) => ErrorCode::NoTeamcraftRole,
       Self::Auth(AuthError::AccountDeactivated) => ErrorCode::AccountDeactivated,
+      Self::Auth(AuthError::AccountDeleted) => ErrorCode::AccountDeleted,
       Self::Forbidden(_) => ErrorCode::Forbidden,
       Self::Auth(AuthError::KeysUnavailable(_)) => ErrorCode::Unavailable,
       Self::NotFound { code, .. } => code.clone(),
@@ -283,6 +323,8 @@ impl ApiError {
       Self::UnknownHost => ErrorCode::UnknownHost,
       Self::Conflict(_) => ErrorCode::Conflict,
       Self::LastOwner => ErrorCode::LastOwner,
+      Self::CannotDeleteSelf => ErrorCode::CannotDeleteSelf,
+      Self::LastAdmin => ErrorCode::LastAdmin,
       Self::NotSpaceMember => ErrorCode::NotSpaceMember,
       Self::KeyPackageExhausted => ErrorCode::KeyPackageExhausted,
       Self::InvalidKeyPackage(_) => ErrorCode::InvalidKeyPackage,
@@ -290,9 +332,22 @@ impl ApiError {
       Self::VersionConflict { .. } => ErrorCode::VersionConflict,
       Self::PayloadTooLarge(_) => ErrorCode::PayloadTooLarge,
       Self::RateLimited { .. } => ErrorCode::RateLimited,
-      Self::Unavailable(_) | Self::Busy { .. } => ErrorCode::Unavailable,
+      Self::Unavailable(_) | Self::Busy { .. } | Self::DependencyDown { .. } => ErrorCode::Unavailable,
       Self::Database(error) if error.is_transient() => ErrorCode::Unavailable,
       Self::Database(_) | Self::Internal(_) => ErrorCode::Internal,
+    }
+  }
+
+  /// `Retry-After` in seconds. Every 503 carries one (issue #743), so clients back off instead of
+  /// retrying at once while a backend recovers.
+  pub fn retry_after_secs(&self) -> Option<u64> {
+    match self {
+      Self::RateLimited { retry_after_secs }
+      | Self::Busy { retry_after_secs, .. }
+      | Self::DependencyDown { retry_after_secs, .. } => Some(*retry_after_secs),
+      Self::Database(error) if error.is_transient() => Some(DATABASE_RETRY_AFTER_SECS),
+      _ if self.status() == StatusCode::SERVICE_UNAVAILABLE => Some(UNAVAILABLE_RETRY_AFTER_SECS),
+      _ => None,
     }
   }
 
@@ -304,7 +359,17 @@ impl ApiError {
       Self::Database(_) | Self::Internal(_) => "internal server error".into(),
       Self::Unavailable(_) => "the service is not available".into(),
       Self::Busy { .. } => "the service is busy, try again".into(),
+      Self::DependencyDown { dependency, .. } => format!("{dependency} is unavailable, try again later"),
       other => other.to_string(),
+    }
+  }
+}
+
+impl From<CircuitOpen> for ApiError {
+  fn from(open: CircuitOpen) -> Self {
+    Self::DependencyDown {
+      dependency: open.dependency,
+      retry_after_secs: open.retry_after.as_secs().max(1),
     }
   }
 }
@@ -318,16 +383,20 @@ impl IntoResponse for ApiError {
       error!(error = %self, "request failed");
     }
     let mut body = ErrorBody::new(self.error_code(), self.public_message());
+    let maybe_retry_after_secs = self.retry_after_secs();
+    if let Some(seconds) = maybe_retry_after_secs {
+      body = body.with_retry_after_secs(seconds);
+    }
     match &self {
       Self::EpochConflict { current_epoch } => body = body.with_current_epoch(*current_epoch),
       Self::VersionConflict { current_version } => body = body.with_current_version(*current_version),
       _ => {},
     }
     let mut response = (self.status(), Json(body)).into_response();
-    if let Self::RateLimited { retry_after_secs } | Self::Busy { retry_after_secs, .. } = &self {
+    if let Some(seconds) = maybe_retry_after_secs {
       response
         .headers_mut()
-        .insert(header::RETRY_AFTER, HeaderValue::from(*retry_after_secs));
+        .insert(header::RETRY_AFTER, HeaderValue::from(seconds));
     }
     if self.status() == StatusCode::UNAUTHORIZED {
       response
@@ -381,6 +450,11 @@ mod tests {
         ErrorCode::AccountDeactivated,
       ),
       (
+        AuthError::AccountDeleted,
+        StatusCode::UNAUTHORIZED,
+        ErrorCode::AccountDeleted,
+      ),
+      (
         AuthError::KeysUnavailable("x".into()),
         StatusCode::SERVICE_UNAVAILABLE,
         ErrorCode::Unavailable,
@@ -401,6 +475,18 @@ mod tests {
     .into_response();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(response.headers()[header::RETRY_AFTER], "2");
+  }
+
+  #[test]
+  fn a_storage_outage_answers_503_unavailable_with_retry_after() {
+    let error = ApiError::storage_unavailable("attachment storage");
+    assert_eq!(error.error_code(), ErrorCode::Unavailable);
+    let response = error.into_response();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+      response.headers()[header::RETRY_AFTER],
+      STORAGE_RETRY_AFTER_SECS.to_string().as_str()
+    );
   }
 
   #[test]
@@ -473,6 +559,12 @@ mod tests {
       ),
       (ApiError::LastOwner, StatusCode::BAD_REQUEST, ErrorCode::LastOwner),
       (
+        ApiError::CannotDeleteSelf,
+        StatusCode::CONFLICT,
+        ErrorCode::CannotDeleteSelf,
+      ),
+      (ApiError::LastAdmin, StatusCode::CONFLICT, ErrorCode::LastAdmin),
+      (
         ApiError::NotSpaceMember,
         StatusCode::BAD_REQUEST,
         ErrorCode::NotSpaceMember,
@@ -496,6 +588,72 @@ mod tests {
     for (error, status, code) in cases {
       assert_eq!((error.status(), error.error_code()), (status, code), "{error}");
     }
+  }
+
+  #[tokio::test]
+  async fn every_503_carries_retry_after_in_header_and_body() {
+    let cases = [
+      (
+        ApiError::from(CircuitOpen {
+          dependency: DependencyName::Sfu,
+          retry_after: std::time::Duration::from_secs(12),
+        }),
+        12,
+      ),
+      (
+        ApiError::Unavailable("attachment storage".into()),
+        UNAVAILABLE_RETRY_AFTER_SECS,
+      ),
+      (
+        ApiError::from(AuthError::KeysUnavailable("x".into())),
+        UNAVAILABLE_RETRY_AFTER_SECS,
+      ),
+      (
+        ApiError::Busy {
+          what: "image decoding",
+          retry_after_secs: 2,
+        },
+        2,
+      ),
+    ];
+    for (error, seconds) in cases {
+      assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE, "{error}");
+      assert_eq!(error.error_code(), ErrorCode::Unavailable, "{error}");
+      let response = error.into_response();
+      assert_eq!(
+        response.headers()[header::RETRY_AFTER],
+        seconds.to_string().as_str()
+      );
+      let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+      let body: ErrorBody = serde_json::from_slice(&bytes).unwrap();
+      assert_eq!(body.maybe_retry_after_secs, Some(seconds));
+    }
+  }
+
+  #[test]
+  fn other_errors_carry_no_retry_after() {
+    let response = ApiError::Conflict("x".into()).into_response();
+    assert!(response.headers().get(header::RETRY_AFTER).is_none());
+    assert_eq!(ApiError::Internal("x".into()).retry_after_secs(), None);
+    assert_eq!(
+      ApiError::Database(teamcraft_db::DbError::InvalidStoredValue("x".into())).retry_after_secs(),
+      None
+    );
+  }
+
+  #[test]
+  fn a_dependency_outage_names_the_dependency_but_no_details() {
+    let error = ApiError::from(CircuitOpen {
+      dependency: DependencyName::ObjectStorage,
+      retry_after: std::time::Duration::from_millis(10),
+    });
+    assert_eq!(
+      error.public_message(),
+      "object_storage is unavailable, try again later"
+    );
+    assert_eq!(error.retry_after_secs(), Some(1), "at least a second");
   }
 
   #[tokio::test]

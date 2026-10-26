@@ -98,9 +98,13 @@ def desktop() -> list[Path]:
     ("128x128@2x.png", 256, icon),
     ("icon.png", 512, icon),
     ("icon-1024.png", 1024, icon),
-    # The tray: the mark in colour (Windows, Linux) and as a template image (macOS menu bar).
-    ("tray.png", 64, icon),
+    # The tray: the mark in colour without its backplate, filling the icon so it reads at tray
+    # size (Windows, Linux), and as a template image (macOS menu bar).
+    ("tray.png", 64, layer(f"{mark.defs('m-')}", mark.shapes("m-"), safe=0.98)),
     ("tray-template.png", 44, layer("", silhouette("#000000"), safe=0.96)),
+    # Monochrome tray icons for Linux panels, chosen in the app's settings.
+    ("tray-white.png", 64, layer("", silhouette("#ffffff"), safe=0.98)),
+    ("tray-black.png", 64, layer("", silhouette("#000000"), safe=0.98)),
   ):
     out.append(render(svg, size, DESKTOP / name))
   ico_sizes = {size: icon for size in (16, 20, 24, 32, 40, 48, 64, 256)}

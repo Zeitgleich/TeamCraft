@@ -110,6 +110,11 @@ pub enum GatewayEvent {
     conversation_id: ConversationId,
     user_id: UserId,
   },
+  /// A direct message was deleted with a deleted account (admin.md §3.2.1): the conversation is
+  /// gone on the server; devices drop it with its local history.
+  ConversationDelete {
+    conversation_id: ConversationId,
+  },
   /// The signed roster or policy log has a new entry; fetch entries after the known version.
   WorkspaceUpdate {
     kind: WorkspaceLogKind,
@@ -360,6 +365,16 @@ mod tests {
       serde_json::to_string(&GatewayEvent::NotificationSettingsUpdate).unwrap(),
       r#"{"type":"notification_settings_update"}"#
     );
+  }
+
+  #[test]
+  fn conversation_delete_has_a_stable_wire_format() {
+    let event = GatewayEvent::ConversationDelete {
+      conversation_id: conversation(),
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(json, r#"{"type":"conversation_delete","conversation_id":"7"}"#);
+    assert_eq!(serde_json::from_str::<GatewayEvent>(&json).unwrap(), event);
   }
 
   #[test]

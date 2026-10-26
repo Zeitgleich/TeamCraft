@@ -30,17 +30,17 @@ pub fn ConversationPortrait(
     })
     .flatten();
   match maybe_other {
-    // Presence arrives after the row is built, so the user is read reactively.
-    Some(other) => view! {
-      <span class="page-portrait">
-        {move || {
-          state
-            .read(|backend| backend.user(other))
-            .map(|user| view! { <Avatar user=user size=size show_presence=true /> })
-        }}
-      </span>
-    }
-    .into_any(),
+    // Presence arrives after the row is built, so the user is read reactively; through a memo, so
+    // other backend changes don't build the avatar again (issue #687).
+    Some(other) => {
+      let person = Memo::new(move |_| state.read(|backend| backend.user(other)));
+      view! {
+        <span class="page-portrait">
+          {move || person.get().map(|user| view! { <Avatar user=user size=size show_presence=true /> })}
+        </span>
+      }
+      .into_any()
+    },
     None => view! { <span class="page-portrait page-portrait-group"><Icon name=IconName::Users /></span> }
       .into_any(),
   }

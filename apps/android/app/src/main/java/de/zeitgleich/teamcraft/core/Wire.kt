@@ -184,6 +184,12 @@ data class FileTransfer(
   /** An own file still on its way up, or stopped: it can be cancelled. */
   val isCancellable: Boolean get() = state == "uploading" || state == "upload_stalled"
 
+  /** An upload whose attempts failed so far and that the core retries by itself (#742). */
+  val isRetrying: Boolean get() = state == "uploading" && doneBytes == 0L && failedAttempts > 0
+
+  /** It stopped because the file storage (or the server) is down, not this device's network. */
+  val isStorageUnavailable: Boolean get() = reason == "storage_unavailable"
+
   /** 0..1 while uploading or downloading. */
   val maybeProgress: Float?
     get() = if ((state == "uploading" || state == "downloading") && totalBytes > 0) doneBytes.toFloat() / totalBytes else null

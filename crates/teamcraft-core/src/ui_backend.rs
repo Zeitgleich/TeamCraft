@@ -493,6 +493,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       is_bot: summary.kind == UserKind::Bot,
       maybe_organization: summary.maybe_organization.clone(),
       is_deactivated: summary.is_deactivated,
+      is_deleted: summary.is_deleted,
       device_setup: match summary.maybe_has_devices {
         Some(true) => DeviceSetup::HasDevices,
         Some(false) => DeviceSetup::NoDevices,
@@ -590,10 +591,16 @@ impl<S: LocalStore> CoreChatBackend<S> {
       mention_count: self.mention_count(unread, users.get(&self.me), preferences),
       is_favorite,
       is_muted: self.is_muted(response),
-      can_post: true,
+      can_post: response.may_post(),
       bookmarks: self.bookmarks_of(response.id),
       is_catching_up: self.read(crate::client::is_catching_up(&self.store, response.id)),
       is_notes_to_self,
+      maybe_permissions: response.maybe_my_permissions.clone(),
+      has_only_deactivated_others: response.has_only_deactivated_others(self.me, |participant| {
+        users
+          .get(&participant.id)
+          .map_or(participant.is_deactivated, |user| user.is_deactivated)
+      }),
       maybe_image_version: response.maybe_image.as_ref().map(|image| image.version.clone()),
     }
   }
@@ -877,6 +884,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
         is_bot: false,
         maybe_organization: None,
         is_deactivated: false,
+        is_deleted: false,
         device_setup: DeviceSetup::HasDevices,
         maybe_email: None,
       })
@@ -924,6 +932,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
         can_add_members: space.can_add_members,
         can_invite_guests: space.can_invite_guests,
         can_manage_space: space.can_manage_space,
+        can_create_channels: space.can_create_channels,
       })
       .collect()
   }
@@ -1693,6 +1702,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       .map(|member| SpaceMember {
         user: member.user.id,
         is_guest: member.user.kind == UserKind::Guest,
+        is_bot: member.user.kind == UserKind::Bot,
         display_name: member.user.display_name,
         role: member.role,
       })
@@ -1836,6 +1846,7 @@ fn system_view(event: &ConversationEvent, sender: UserId) -> (MessageKind, UserI
     | ConversationEvent::MadePublic
     | ConversationEvent::Moved { .. }
     | ConversationEvent::CallMoved { .. }
+    | ConversationEvent::AdminJoined { .. }
     | ConversationEvent::Unknown => (MessageKind::User, sender),
   }
 }
@@ -2124,6 +2135,7 @@ mod tests {
       maybe_organization: None,
       maybe_has_devices: None,
       is_deactivated: false,
+      is_deleted: false,
     };
     let direct = ConversationResponse {
       id: id(10),
@@ -2140,6 +2152,7 @@ mod tests {
       is_integration: false,
       contains_guests: false,
       maybe_organizer_user_id: None,
+      maybe_my_permissions: None,
       maybe_my_membership: None,
       participants: vec![participant(1, "Alice Example"), participant(2, "Bob Example")],
       maybe_image: None,
@@ -2390,6 +2403,7 @@ mod tests {
         is_integration: false,
         contains_guests: false,
         maybe_organizer_user_id: None,
+        maybe_my_permissions: None,
         maybe_my_membership: None,
         participants: Vec::new(),
         maybe_image: None,
@@ -2406,6 +2420,7 @@ mod tests {
         maybe_organization: None,
         maybe_has_devices: None,
         is_deactivated: false,
+        is_deleted: false,
       };
       (backend, conversation, BTreeMap::from([(me.id, me)]))
     }

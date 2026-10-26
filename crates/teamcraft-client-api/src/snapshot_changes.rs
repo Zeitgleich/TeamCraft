@@ -556,6 +556,8 @@ mod tests {
       bookmarks: Vec::new(),
       is_catching_up: false,
       is_notes_to_self: false,
+      maybe_permissions: None,
+      has_only_deactivated_others: false,
       maybe_image_version: None,
     }
   }
@@ -572,6 +574,7 @@ mod tests {
       is_bot: false,
       maybe_organization: None,
       is_deactivated: false,
+      is_deleted: false,
       device_setup: DeviceSetup::Unknown,
       maybe_email: None,
     }

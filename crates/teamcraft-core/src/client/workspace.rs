@@ -7,8 +7,8 @@ use teamcraft_crypto::membership::{MembershipAction, MembershipChange, SignedMem
 use teamcraft_crypto::workspace::{WorkspaceLog, sign_log_entry};
 use teamcraft_proto::{
   AddConversationMemberRequest, AppendWorkspaceLogRequest, Base64Bytes, ClientMessageId, ConversationId,
-  DeviceId, ErrorCode, HistoryPolicy, Id, ListWorkspaceLogQuery, MlsMessageKind, PostMlsMessageRequest,
-  PresenceState, UserId, WorkspaceLogEntryResponse, WorkspaceLogKind, WorkspacePolicy,
+  DeviceId, ErrorCode, HistoryPolicy, Id, ListWorkspaceLogQuery, ListWorkspaceLogResponse, MlsMessageKind,
+  PostMlsMessageRequest, PresenceState, UserId, WorkspaceLogEntryResponse, WorkspaceLogKind, WorkspacePolicy,
 };
 
 use super::Client;
@@ -333,14 +333,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         identity_key,
       });
     }
-    let mut entries = self
-      .fetch_log(&WorkspaceLogKind::Roster, state.roster.version)
-      .await?;
-    entries.extend(
-      self
-        .fetch_log(&WorkspaceLogKind::Policy, state.policy_version)
-        .await?,
+    let roster_first = taken_at(self.read_ahead.roster.take(), state.roster.version);
+    let policy_first = taken_at(self.read_ahead.policy.take(), state.policy_version);
+    let (roster, policy) = futures_util::join!(
+      self.fetch_log(&WorkspaceLogKind::Roster, state.roster.version, roster_first),
+      self.fetch_log(&WorkspaceLogKind::Policy, state.policy_version, policy_first),
     );
+    let mut entries = roster?;
+    entries.extend(policy?);
     if let Err(error) = state.apply_entries(entries) {
       tracing::error!(%error, "rejected workspace log entry");
     }
@@ -376,6 +376,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// pinned; the first roster makes this user the first owner and the workspace root of trust.
   pub async fn publish_roster(&mut self, roles: &[(UserId, RosterRole)]) -> Result<(), CoreError> {
     self.sync_workspace().await?;
+    if let Some(user) = crate::workspace::kept_unusable_entry(&self.workspace()?.roster, roles) {
+      return Err(CoreError::RosterKeyUnusable(user));
+    }
     let directory_users: Vec<UserId> = roles.iter().map(|(user, _)| *user).collect();
     self.pin_identities(directory_users).await?;
     let pinned = records::pinned_identities(&self.store)?;
@@ -949,24 +952,32 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     })
   }
 
+  /// The log after `after`, its first page read ahead in `maybe_first` if it was.
+  #[allow(clippy::type_complexity)]
   async fn fetch_log(
     &self,
     kind: &WorkspaceLogKind,
     after: u64,
+    mut maybe_first: Option<Result<ListWorkspaceLogResponse, ApiError>>,
   ) -> Result<Vec<WorkspaceLogEntryResponse>, CoreError> {
     let mut entries = Vec::new();
     let mut cursor = after;
     loop {
-      let page = self
-        .api
-        .list_workspace_log(
-          kind,
-          &ListWorkspaceLogQuery {
-            maybe_after: Some(cursor),
-            maybe_limit: None,
-          },
-        )
-        .await?;
+      let page = match maybe_first.take() {
+        Some(first) => first?,
+        None => {
+          self
+            .api
+            .list_workspace_log(
+              kind,
+              &ListWorkspaceLogQuery {
+                maybe_after: Some(cursor),
+                maybe_limit: None,
+              },
+            )
+            .await?
+        },
+      };
       let has_more = page.has_more;
       if let Some(last) = page.entries.last() {
         cursor = last.version;
@@ -1014,6 +1025,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 }
 
 /// The previous entry's hash for a new document; zeros for a log's first chained entry.
+/// A log page read ahead, if it was read after the version the sync starts from.
+fn taken_at(
+  maybe_read: Option<(u64, Result<ListWorkspaceLogResponse, ApiError>)>,
+  after: u64,
+) -> Option<Result<ListWorkspaceLogResponse, ApiError>> {
+  maybe_read
+    .filter(|(read_after, _)| *read_after == after)
+    .map(|(_, page)| page)
+}
+
 fn head_or_genesis(maybe_head: Option<Base64Bytes>) -> Base64Bytes {
   maybe_head.unwrap_or_else(|| Base64Bytes::new(vec![0; 32]))
 }

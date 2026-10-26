@@ -5,6 +5,8 @@
 // Hides the console window on Windows release builds; harmless on macOS and Linux.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(target_os = "macos")]
+mod app_menu;
 #[cfg(target_os = "linux")]
 mod appindicator;
 mod attention;
@@ -12,22 +14,27 @@ mod auth;
 mod autostart;
 mod call_window;
 mod calls;
+mod clipboard;
+mod clipboard_paste;
 mod core;
 #[cfg(target_os = "linux")]
 mod desktop_entry;
+mod dropped_files;
 mod external_links;
-#[cfg(target_os = "linux")]
-mod file_portal;
 #[cfg(target_os = "linux")]
 mod freedesktop;
 mod notifications;
 mod ringtone;
 mod shell_prefs;
 mod single_instance;
+#[cfg(target_os = "linux")]
+mod startup_env;
 mod tray;
 mod updates;
+mod webview_downloads;
 #[cfg(target_os = "linux")]
 mod webview_memory;
+mod webview_menu;
 mod window_chrome;
 #[cfg(windows)]
 mod windows_shell;
@@ -39,7 +46,7 @@ use anyhow::Context;
 use tauri::path::BaseDirectory;
 use tauri::webview::NewWindowResponse;
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
-use tauri_plugin_window_state::StateFlags;
+use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 use teamcraft_client_api::remote::CORE_FAILED_EVENT;
 use tracing_subscriber::EnvFilter;
 
@@ -48,6 +55,7 @@ use crate::auth::{AuthService, DesktopConfig, KeyringStore};
 use crate::calls::{BUNDLED_MODEL, CALL_CHANGED_EVENT, CallHost, FailureReporter, MediaFiles};
 use crate::core::TokenCache;
 use crate::core::commands::CoreHost;
+use crate::dropped_files::DroppedFilesState;
 use crate::shell_prefs::ShellPrefsState;
 use crate::updates::UpdateHost;
 use crate::window_chrome::WindowChromeState;
@@ -56,9 +64,10 @@ use crate::window_chrome::WindowChromeState;
 const TOKEN_REFRESH: Duration = Duration::from_secs(2);
 
 fn main() -> anyhow::Result<()> {
-  // Before GTK starts: file pickers go through xdg-desktop-portal (the desktop's own dialog).
+  // Before GTK starts: file pickers through xdg-desktop-portal, WebKitGTK without the DMABUF
+  // renderer that flickers on some GPUs (startup_env.rs).
   #[cfg(target_os = "linux")]
-  file_portal::ensure_portal_choosers();
+  startup_env::ensure_startup_environment();
   tracing_subscriber::fmt()
     .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
     .init();
@@ -79,8 +88,16 @@ fn main() -> anyhow::Result<()> {
     tauri_plugin_autostart::MacosLauncher::LaunchAgent,
     Some(vec![autostart::AUTOSTART_ARG]),
   ));
+  // The menu bar, in the UI's language once it sends its texts (app_menu.rs, #712).
+  #[cfg(target_os = "macos")]
+  let builder = builder.menu(app_menu::initial);
+  // Pictures pasted from the clipboard when the webview's paste event carries none (#761).
+  #[cfg(any(target_os = "macos", windows))]
+  let builder = builder.plugin(tauri_plugin_clipboard_manager::init());
   builder
     .plugin(tauri_plugin_opener::init())
+    // The save dialog of "Save…" (core_save_attachment); the webview gets no dialog permission.
+    .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_global_shortcut::Builder::new().build())
     .plugin(tauri_plugin_notification::init())
     // The shell drives it (updates.rs); the webview gets no updater permission.
@@ -89,7 +106,7 @@ fn main() -> anyhow::Result<()> {
     // are the decorations (the title bar setting, window_chrome.rs).
     .plugin(
       tauri_plugin_window_state::Builder::default()
-        .with_state_flags(StateFlags::all() - StateFlags::VISIBLE - StateFlags::DECORATIONS)
+        .with_state_flags(window_state_flags())
         .build(),
     )
     .manage(service.clone())
@@ -99,6 +116,7 @@ fn main() -> anyhow::Result<()> {
     .manage(ringtone::RingtoneState::default())
     .manage(calls::push_to_talk::PushToTalkState::default())
     .manage(CoreHost::new(tokens))
+    .manage(Arc::new(DroppedFilesState::default()))
     .setup(move |app| {
       let servers = Arc::new(ServerState::new(
         ServerDirectory::load(&core::commands::base_dir(app.handle())?),
@@ -163,6 +181,16 @@ fn main() -> anyhow::Result<()> {
       {
         window_chrome::on_resized(window);
       }
+      // The plugin writes the window's size, place and maximized state only when the app exits;
+      // a session that ends with a logout (SIGTERM) never gets there. Written also when the window
+      // goes to the background or is closed, while it is still shown (#721).
+      if matches!(event, WindowEvent::Focused(false) | WindowEvent::CloseRequested { .. })
+        && window.label() == tray::MAIN_WINDOW
+        && window.is_visible().unwrap_or(false)
+        && let Err(error) = window.app_handle().save_window_state(window_state_flags())
+      {
+        tracing::debug!(%error, "could not save the window's size and place");
+      }
       // Closing keeps the app running in the tray (notifications keep coming) when the user wants it.
       // Without a tray icon it closes as usual, which quits the app.
       if let WindowEvent::CloseRequested { api, .. } = event
@@ -217,9 +245,18 @@ fn main() -> anyhow::Result<()> {
       core::commands::core_action,
       core::commands::core_query,
       core::commands::core_attachment,
+      core::commands::core_save_attachment,
       core::commands::core_stage_file,
       core::commands::core_stop,
+      core::media::core_media_get,
+      core::media::core_media_put,
+      core::media::core_media_remove,
+      core::media::core_media_clear,
       core::commands::core_reset_store,
+      dropped_files::dropped_files_take,
+      dropped_files::dropped_file_read,
+      clipboard_paste::clipboard_paste_files,
+      clipboard_paste::clipboard_read_image,
       calls::commands::call_snapshot,
       calls::commands::call_media_devices,
       calls::commands::call_action,
@@ -230,6 +267,7 @@ fn main() -> anyhow::Result<()> {
       calls::commands::call_watch_camera,
       calls::commands::call_unwatch_camera,
       external_links::open_external,
+      clipboard::clipboard_write_image,
       notifications::notify_user,
       notifications::withdraw_notifications,
       notifications::request_attention,
@@ -252,6 +290,7 @@ fn main() -> anyhow::Result<()> {
       updates::update_download,
       updates::update_restart,
       updates::update_with_package_manager,
+      updates::update_dismiss,
       window_chrome::window_chrome,
       window_chrome::window_action,
     ])
@@ -266,6 +305,13 @@ fn main() -> anyhow::Result<()> {
       _ => {},
     });
   Ok(())
+}
+
+/// What the window-state plugin keeps of the main window: size, position, maximized and full
+/// screen. Visibility is ours (start minimized to the tray), and so are the decorations (the title
+/// bar setting, window_chrome.rs).
+fn window_state_flags() -> StateFlags {
+  StateFlags::all() - StateFlags::VISIBLE - StateFlags::DECORATIONS
 }
 
 /// The window is created here, not in `tauri.conf.json`, so it can start hidden in the tray. Debug
@@ -288,8 +334,11 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     .min_inner_size(720.0, 520.0)
     // Files dragged onto the window reach the page as HTML5 drag and drop (#484), the same path as
     // in the browser: the UI gets `File` objects and attaches them like the + button. Tauri's own
-    // handler would swallow the drop on every platform and only report file paths.
+    // handler would swallow the drop on every platform and only report file paths. WebKitGTK hands
+    // the page no files, so on Linux the shell reads them for it (dropped_files.rs, #651).
     .disable_drag_drop_handler()
+    // A download the page starts itself lands in the downloads folder and is reported (#719).
+    .on_download(webview_downloads::on_download)
     .on_new_window({
       let app = app.handle().clone();
       move |url, _features| {
@@ -334,10 +383,25 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     )),
     _ => window,
   };
+  // `TEAMCRAFT_DEVTOOLS=1`: the webview's own context menu everywhere (webview_menu.rs).
+  let window = match webview_menu::is_devtools_requested() {
+    true => window.initialization_script(webview_menu::NATIVE_MENU_SCRIPT),
+    false => window,
+  };
   let window = window.build()?;
   #[cfg(target_os = "linux")]
-  if let Err(error) = window.with_webview(|webview| webview_memory::configure(&webview.inner())) {
-    tracing::warn!(%error, "could not set the webview's memory caches");
+  {
+    let dropped = app.state::<Arc<DroppedFilesState>>().inner().clone();
+    let handle = app.handle().clone();
+    let configured = window.with_webview(move |webview| {
+      let webview = webview.inner();
+      webview_memory::configure(&webview);
+      webview_menu::filter_menus(&webview);
+      dropped_files::watch(&webview, dropped, handle);
+    });
+    if let Err(error) = configured {
+      tracing::warn!(%error, "could not set up the webview's memory caches, menus and file drops");
+    }
   }
   tray::reveal_without_host(app.handle());
   if is_start_minimized

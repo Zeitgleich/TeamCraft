@@ -87,6 +87,9 @@ final class AppModel {
   private(set) var pushStatus: PushStatus = .unknown
   /// Where the core's gateway connection stands (`nil`: no core open); the banner follows it.
   private(set) var connection: ConnectionState?
+  /// Since when the connection (or the device's network) is down: the banner waits out its grace
+  /// period, the screens show the local store meanwhile (#713).
+  private(set) var connectionGrace = ConnectionGrace()
   /// New devices of this account waiting for a decision; the popup on every signed-in screen.
   private(set) var linkPrompts: [LinkPrompt] = []
   /// The request or scanned code this device is typing the confirmation for (see `LinkReview`).
@@ -116,6 +119,8 @@ final class AppModel {
   @ObservationIgnored private var maybeCore: TeamCraft?
   @ObservationIgnored private var isSyncing = false
   @ObservationIgnored private var maybePushToken: String?
+  @ObservationIgnored private var isPushUpkeepRunning = false
+  @ObservationIgnored private var maybeLastPushAttempt: Date?
   @ObservationIgnored private var maybeLinkExpiry: Task<Void, Never>?
   @ObservationIgnored private var maybeReconcile: Task<Void, Never>?
 
@@ -579,13 +584,16 @@ final class AppModel {
   // MARK: Scene and sync
 
   /// Foreground: this process syncs (it holds the cross-process lock, docs/e2ee.md §7).
+  /// The screens show the local store at once; syncing catches up in the background.
   func sceneBecameActive() async {
     guard case .ready = phase else { return }
+    // The time in the background doesn't count: the reconnect gets the whole grace period.
+    connectionGrace.appReturned(now: .now)
     await startSyncing()
     await reconcileNotifications()
     // APNs hands out the token once per launch, but the app may stay suspended for days: retry a
     // registration that failed (server unreachable) and re-seal the token when it is due.
-    if let token = maybePushToken { await registerPushIfNeeded(token: token) }
+    await pushUpkeep()
   }
 
   func sceneEnteredBackground() async {
@@ -599,6 +607,8 @@ final class AppModel {
   // "v2": sealed for the push gateway (docs/push-gateway.md); a registration made by an older version
   // (the raw token) is replaced at the first launch.
   private static let pushTokenKey = "apnsToken.v2"
+  /// When the registration was last registered or checked for its reseal (Unix seconds).
+  private static let pushCheckedAtKey = "apnsTokenCheckedAt"
   /// Search index segments kept on the phone by the background prefetch (newest months first).
   private static let segmentPrefetchCapBytes: UInt64 = 512 * 1024 * 1024
 
@@ -626,8 +636,9 @@ final class AppModel {
   func didRegister(deviceToken: Data) async {
     let token = deviceToken.hexString
     maybePushToken = token
-    guard case .ready = phase else { return }
-    await registerPushIfNeeded(token: token)
+    // A token APNs hands out anew is registered at once (once connected), not after the pause.
+    if UserDefaults.standard.string(forKey: Self.pushTokenKey) != token { maybeLastPushAttempt = nil }
+    await pushUpkeep()
   }
 
   /// Whether this device's push token is registered with the server (diagnostics).
@@ -721,7 +732,11 @@ final class AppModel {
   private func storeDidChange() {
     changeCount += 1
     calls.storeDidChange()
-    connection = maybeCore?.connectionState()
+    let wasConnected = connection == .connected
+    setConnection(maybeCore?.connectionState())
+    if connection == .connected && !wasConnected {
+      Task { [weak self] in await self?.pushUpkeep() }
+    }
     Task { [weak self] in await self?.refreshLinkRequests() }
     guard maybeReconcile == nil else { return }
     maybeReconcile = Task { [weak self] in
@@ -899,13 +914,31 @@ final class AppModel {
         Task { @MainActor in self?.storeDidChange() }
       })
     maybeCore = opened
-    connection = opened.connectionState()
+    setConnection(opened.connectionState())
     return opened
   }
 
-  /// The network changed: the open core checks its connection now. Opens no core.
+  /// "Try again" in the banner: the open core checks its connection now. Opens no core.
   func networkChanged() {
     maybeCore?.networkChanged()
+  }
+
+  /// The device's network path changed (Wi-Fi to cellular, a VPN, airplane mode off): the grace
+  /// period follows it, and on a change after the first path the core checks its connection now
+  /// instead of waiting for its own detection and backoff.
+  func networkPathChanged(isFirstPath: Bool) {
+    observeConnection()
+    if !isFirstPath { networkChanged() }
+  }
+
+  private func setConnection(_ maybeConnection: ConnectionState?) {
+    connection = maybeConnection
+    observeConnection()
+  }
+
+  private func observeConnection() {
+    let isDown = ConnectionNotice.isDown(isOnline: NetworkMonitor.shared.isOnline, connection: connection)
+    connectionGrace.observe(isDown: isDown, now: .now)
   }
 
   private func answer(_ query: ChatQuery) async -> ChatAnswer? {
@@ -966,7 +999,7 @@ final class AppModel {
       factory.deleteDatabaseKey(account: account)
     }
     maybeCore = nil
-    connection = nil
+    setConnection(nil)
     vault.clear()
     NotificationAuthenticator().removeKey()
     container.wipeDownloads()
@@ -974,6 +1007,8 @@ final class AppModel {
     container.activeAccount = nil
     container.displayName = nil
     UserDefaults.standard.removeObject(forKey: Self.pushTokenKey)
+    UserDefaults.standard.removeObject(forKey: Self.pushCheckedAtKey)
+    maybeLastPushAttempt = nil
   }
 
   private func refreshAccountState() async {
@@ -1047,20 +1082,38 @@ final class AppModel {
     }
   }
 
-  private func registerPushIfNeeded(token: String) async {
-    let defaults = UserDefaults.standard
-    guard let core = try? core() else { return }
-    guard defaults.string(forKey: Self.pushTokenKey) != token else {
-      // Registered already: seals the token again when that is due (it is bound to one server and
-      // expires), at most one request otherwise.
-      _ = try? await core.refreshPush()
+  /// Registers the APNs token, or re-seals a registered one when that is due. The core pauses
+  /// syncing for it and asks the server, so it never runs while the connection is down (it would
+  /// hold up every read of the local store until the request gives up) and at most once a day
+  /// otherwise; a failed attempt waits `PushUpkeepSchedule.retryPause`, not the next reconnect.
+  private func pushUpkeep() async {
+    guard case .ready = phase, connection == .connected, !isPushUpkeepRunning, let token = maybePushToken else {
       return
     }
+    let defaults = UserDefaults.standard
+    let isRegistered = defaults.string(forKey: Self.pushTokenKey) == token
+    let maybeLastCheck = (defaults.object(forKey: Self.pushCheckedAtKey) as? Double).map {
+      Date(timeIntervalSince1970: $0)
+    }
+    let now = Date.now
+    guard !isRegistered || PushUpkeepSchedule.isRefreshDue(lastCheckedAt: maybeLastCheck, now: now),
+      PushUpkeepSchedule.mayAttempt(lastAttemptAt: maybeLastPushAttempt, now: now),
+      let core = try? core()
+    else { return }
+    isPushUpkeepRunning = true
+    maybeLastPushAttempt = now
+    defer { isPushUpkeepRunning = false }
     do {
-      try await core.registerPush(service: .apns, token: token)
-      defaults.set(token, forKey: Self.pushTokenKey)
+      if isRegistered {
+        // Seals the token again when that is due (it is bound to one server and expires).
+        _ = try await core.refreshPush()
+      } else {
+        try await core.registerPush(service: .apns, token: token)
+        defaults.set(token, forKey: Self.pushTokenKey)
+      }
+      defaults.set(Date.now.timeIntervalSince1970, forKey: Self.pushCheckedAtKey)
     } catch {
-      // Not stored: the next foreground tries again.
+      // Not stored: tried again after the pause, once connected.
     }
   }
 

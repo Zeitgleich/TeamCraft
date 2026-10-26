@@ -37,6 +37,11 @@ pub struct UserSummary {
   /// #654). Absent (false) from older servers.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub is_deactivated: bool,
+  /// The account was deleted (issue #630): a tombstone without username that only names old
+  /// messages; clients show their own "Deleted user". Always deactivated too. Absent (false) from
+  /// older servers.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_deleted: bool,
 }
 
 /// `GET /api/v1/users?query=` – the directory. Guests only find people they share a conversation with.
@@ -353,6 +358,7 @@ impl PushWakeUp {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::{Id, Snowflake};
 
   #[test]
   fn enrollment_of_a_user_without_keys_is_an_empty_object() {
@@ -380,5 +386,27 @@ mod tests {
     assert_eq!(identity_key.public_key.as_slice(), [1, 2, 3]);
     assert_eq!(response.maybe_device_list.as_ref().unwrap().sequence, 3);
     assert_eq!(serde_json::to_value(&response).unwrap(), json);
+  }
+
+  #[test]
+  fn a_tombstone_says_deleted_and_older_servers_mean_not_deleted() {
+    let tombstone = UserSummary {
+      id: UserId::from_snowflake(Snowflake::new(3).unwrap()),
+      maybe_username: None,
+      display_name: "Deleted user".into(),
+      kind: UserKind::Member,
+      maybe_email: None,
+      maybe_organization: None,
+      maybe_has_devices: None,
+      is_deactivated: true,
+      is_deleted: true,
+    };
+    assert_eq!(
+      serde_json::to_string(&tombstone).unwrap(),
+      r#"{"id":"3","display_name":"Deleted user","kind":"member","is_deactivated":true,"is_deleted":true}"#
+    );
+    let older: UserSummary =
+      serde_json::from_str(r#"{"id":"3","display_name":"Carol","kind":"member"}"#).unwrap();
+    assert!(!older.is_deleted && !older.is_deactivated);
   }
 }

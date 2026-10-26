@@ -13,6 +13,7 @@ compile_error!(
 // The backend traits and view models live in `teamcraft-client-api`; the old paths keep working.
 pub use teamcraft_client_api::{admin, backend, model, search, security};
 
+pub mod activity_place;
 pub mod admin_live;
 pub mod areas;
 pub mod attention;
@@ -25,6 +26,8 @@ pub mod channel_access;
 pub mod channel_policy;
 pub mod clock;
 pub mod components;
+pub mod composer_focus;
+pub mod copy_image;
 pub mod delivery;
 pub mod diff;
 pub mod editor_doc;
@@ -43,9 +46,11 @@ pub mod image_crop;
 pub mod integrations;
 pub mod keys;
 pub mod large_files;
+pub mod last_place;
 pub mod lightbox;
 pub mod live;
-pub mod markdown;
+/// The message Markdown subset; shared with the mobile apps through teamcraft-client-api.
+pub use teamcraft_client_api::markdown;
 pub mod media_cache;
 pub mod media_formats;
 pub mod media_layout;
@@ -62,6 +67,8 @@ pub mod notify_sync;
 pub mod object_url;
 pub mod os_alerts;
 pub mod panic_overlay;
+pub mod paste;
+pub mod persisted_media;
 pub mod prefs;
 pub mod preview;
 pub mod profiles;
@@ -78,6 +85,7 @@ pub mod server_backend;
 pub mod session;
 pub mod settings;
 pub mod share_link;
+pub mod shell_drop;
 #[cfg(any(target_arch = "wasm32", test))]
 pub mod shell_video;
 pub mod sign_in_page;
@@ -88,6 +96,7 @@ pub mod speaker_test;
 pub mod startup;
 pub mod state;
 pub mod sync_reads;
+pub mod tab_handover;
 pub mod toast_motion;
 pub mod toast_timer;
 pub mod unread_divider;

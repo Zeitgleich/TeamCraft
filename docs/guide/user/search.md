@@ -7,7 +7,7 @@ devices (design: [docs/e2ee.md](../../e2ee.md) §10).
 ## Use it
 
 Press `Ctrl/Cmd+Shift+F` or choose Search in the sidebar. `Ctrl+Enter` in the quick switcher
-searches for what you typed, and `/search text` does the same from the composer.
+searches for what you typed.
 
 | Query               | Meaning                        |
 |---------------------|--------------------------------|

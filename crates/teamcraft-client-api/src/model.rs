@@ -136,6 +136,10 @@ pub struct User {
   /// lists, pickers or mentions (issue #654).
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub is_deactivated: bool,
+  /// The account was deleted (issue #630): only a tombstone naming old messages is left. The UI
+  /// shows its own "Deleted user" instead of the name; always deactivated too.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_deleted: bool,
   /// The e-mail address, only where the workspace's directory policy shows it to this viewer (the
   /// server leaves it out otherwise).
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -205,6 +209,18 @@ pub struct Space {
   /// server checks again).
   #[serde(default)]
   pub can_manage_space: bool,
+  /// Whether the user may create channels in the space (guests may not; the server checks
+  /// again).
+  #[serde(default)]
+  pub can_create_channels: bool,
+}
+
+impl Space {
+  /// Whether "Invite people" leads anywhere: adding members or guests, or sharing the link of an
+  /// open space, which guests don't do (issue #691).
+  pub fn can_invite(&self, is_guest: bool) -> bool {
+    self.can_add_members || self.can_invite_guests || (!is_guest && self.join_policy == JoinPolicy::Open)
+  }
 }
 
 /// A member of a channel with the role the member list holds.
@@ -241,6 +257,10 @@ pub struct SpaceMember {
   pub user: UserId,
   pub display_name: String,
   pub is_guest: bool,
+  /// An integration's bot account: listed as "Integration", without a role to change (issue
+  /// #764); it is added and removed in the channels' integration settings.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_bot: bool,
   pub role: SpaceRole,
 }
 
@@ -325,6 +345,7 @@ impl JoinableSpace {
       can_add_members: false,
       can_invite_guests: false,
       can_manage_space: false,
+      can_create_channels: false,
     }
   }
 }
@@ -426,9 +447,26 @@ pub struct Conversation {
   /// ([`teamcraft_proto::ConversationResponse::is_notes_to_self`]), not its current members.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub is_notes_to_self: bool,
+  /// The channel permissions the server says the user holds here
+  /// ([`teamcraft_proto::ConversationResponse::maybe_my_permissions`]); `None` when it didn't
+  /// say (an older server), and the client evaluates the built-in scheme instead
+  /// ([`crate::role_rules::RoleActor::maybe_granted`]). The UI offers an action only when it is
+  /// in here (issue #691); the server checks every request again.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_permissions: Option<Vec<teamcraft_proto::Permission>>,
+  /// A DM or group DM whose other people are all deactivated (issue #698): listed apart, after
+  /// the active conversations; its history stays readable.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub has_only_deactivated_others: bool,
 }
 
 impl Conversation {
+  /// Whether it is a channel of a space, the only kind with settings (topic, purpose, name): DMs,
+  /// group DMs and meeting chats live outside spaces and the server refuses settings for them.
+  pub fn has_channel_settings(&self) -> bool {
+    !self.kind.is_direct_like() && self.maybe_space.is_some()
+  }
+
   /// Whether anything in it waits to be read: the read marker has something to move past.
   pub fn has_unread(&self) -> bool {
     self.unread_count > 0 || self.mention_count > 0

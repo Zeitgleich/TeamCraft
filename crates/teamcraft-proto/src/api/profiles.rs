@@ -41,6 +41,10 @@ pub struct ProfileResponse {
   #[serde(rename = "working_hours", default, skip_serializing_if = "Option::is_none")]
   pub maybe_working_hours: Option<WorkingHours>,
   pub has_avatar: bool,
+  /// Changes with every new picture; clients key their cached copy by it (issue #749). Absent from
+  /// older servers and when there is no picture.
+  #[serde(rename = "avatar_version", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_avatar_version: Option<String>,
 }
 
 /// `PUT /api/v1/me/profile`: replaces the profile; fields left out are cleared.

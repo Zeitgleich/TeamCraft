@@ -33,6 +33,9 @@ pub struct User {
   pub kind: UserKind,
   pub created_at: OffsetDateTime,
   pub is_deactivated: bool,
+  /// The account was deleted (issue #630): a tombstone that only names old messages. Always
+  /// deactivated too.
+  pub is_deleted: bool,
   /// Display label from the identity provider; no permission depends on it.
   pub maybe_organization: Option<String>,
 }
@@ -85,7 +88,7 @@ impl Database {
                kind = EXCLUDED.kind,
                oidc_role = EXCLUDED.oidc_role,
                organization = CASE WHEN $9 THEN EXCLUDED.organization ELSE users.organization END
-         RETURNING id, username, display_name, kind, created_at, organization, deactivated_at IS NOT NULL AS "is_deactivated!",
+         RETURNING id, username, display_name, kind, created_at, organization, deactivated_at IS NOT NULL AS "is_deactivated!", deleted_at IS NOT NULL AS "is_deleted!",
                    default_memberships_at IS NULL AS "is_awaiting_defaults!""#,
       to_db(new_id),
       identity.issuer,
@@ -108,7 +111,10 @@ impl Database {
         row.kind,
         row.created_at,
         row.organization,
-        row.is_deactivated,
+        AccountFlags {
+          is_deactivated: row.is_deactivated,
+          is_deleted: row.is_deleted,
+        },
       )?,
       is_awaiting_default_memberships: row.is_awaiting_defaults,
     })
@@ -128,7 +134,7 @@ impl Database {
     new_id: UserId,
   ) -> Result<SyncedUser, DbError> {
     let existing = sqlx::query!(
-      r#"SELECT id, username, email, display_name, kind, oidc_role, created_at, organization, deactivated_at IS NOT NULL AS "is_deactivated!",
+      r#"SELECT id, username, email, display_name, kind, oidc_role, created_at, organization, deactivated_at IS NOT NULL AS "is_deactivated!", deleted_at IS NOT NULL AS "is_deleted!",
                 default_memberships_at IS NULL AS "is_awaiting_defaults!"
          FROM users WHERE oidc_issuer = $1 AND oidc_subject = $2"#,
       identity.issuer,
@@ -153,7 +159,10 @@ impl Database {
             row.kind,
             row.created_at,
             row.organization,
-            row.is_deactivated,
+            AccountFlags {
+              is_deactivated: row.is_deactivated,
+              is_deleted: row.is_deleted,
+            },
           )?,
           is_awaiting_default_memberships: row.is_awaiting_defaults,
         });
@@ -174,7 +183,7 @@ impl Database {
   pub async fn get_user(&self, id: UserId) -> Result<Option<User>, DbError> {
     let row = sqlx::query!(
       r#"SELECT id, username, display_name, kind, created_at, organization,
-                deactivated_at IS NOT NULL AS "is_deactivated!"
+                deactivated_at IS NOT NULL AS "is_deactivated!", deleted_at IS NOT NULL AS "is_deleted!"
          FROM users WHERE id = $1"#,
       to_db(id),
     )
@@ -189,7 +198,10 @@ impl Database {
           r.kind,
           r.created_at,
           r.organization,
-          r.is_deactivated,
+          AccountFlags {
+            is_deactivated: r.is_deactivated,
+            is_deleted: r.is_deleted,
+          },
         )
       })
       .transpose()
@@ -198,7 +210,7 @@ impl Database {
   pub async fn get_users(&self, ids: &[UserId]) -> Result<Vec<User>, DbError> {
     let rows = sqlx::query!(
       r#"SELECT id, username, display_name, kind, created_at, organization,
-                deactivated_at IS NOT NULL AS "is_deactivated!"
+                deactivated_at IS NOT NULL AS "is_deactivated!", deleted_at IS NOT NULL AS "is_deleted!"
          FROM users WHERE id = ANY($1) ORDER BY id"#,
       &to_db_all(ids),
     )
@@ -214,7 +226,10 @@ impl Database {
           r.kind,
           r.created_at,
           r.organization,
-          r.is_deactivated,
+          AccountFlags {
+            is_deactivated: r.is_deactivated,
+            is_deleted: r.is_deleted,
+          },
         )
       })
       .collect()
@@ -225,7 +240,7 @@ impl Database {
     let pattern = format!("%{}%", escape_like(search.query));
     let rows = sqlx::query!(
       r#"SELECT u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,
-                u.deactivated_at IS NOT NULL AS "is_deactivated!"
+                u.deactivated_at IS NOT NULL AS "is_deactivated!", u.deleted_at IS NOT NULL AS "is_deleted!"
          FROM users u
          WHERE u.deactivated_at IS NULL
            AND (u.display_name ILIKE $2 OR u.username ILIKE $2)
@@ -253,7 +268,10 @@ impl Database {
           r.kind,
           r.created_at,
           r.organization,
-          r.is_deactivated,
+          AccountFlags {
+            is_deactivated: r.is_deactivated,
+            is_deleted: r.is_deleted,
+          },
         )
       })
       .collect()
@@ -333,7 +351,7 @@ fn user_from_parts(
   kind: String,
   created_at: OffsetDateTime,
   maybe_organization: Option<String>,
-  is_deactivated: bool,
+  flags: AccountFlags,
 ) -> Result<User, DbError> {
   Ok(User {
     id: from_db(id)?,
@@ -341,9 +359,16 @@ fn user_from_parts(
     display_name,
     kind: UserKind::from(kind),
     created_at,
-    is_deactivated,
+    is_deactivated: flags.is_deactivated,
+    is_deleted: flags.is_deleted,
     maybe_organization,
   })
+}
+
+/// Whether an account is deactivated and whether it was deleted, as read from its row.
+struct AccountFlags {
+  is_deactivated: bool,
+  is_deleted: bool,
 }
 
 /// Escapes `%`, `_` and `\` so user input is matched literally by `ILIKE`.

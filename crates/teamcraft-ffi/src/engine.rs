@@ -132,6 +132,15 @@ struct PendingApproval {
   misses: u8,
 }
 
+/// Whether a push payload is opened as it arrives or again later to update its notification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PushOpening {
+  /// The push service delivered it now.
+  Received,
+  /// The app opens it again because the first try could not read the message in time.
+  Retry,
+}
+
 /// The app's [`TokenProvider`] as the core's token source.
 #[derive(Clone)]
 pub(crate) struct ForeignTokens(Arc<dyn TokenProvider>);
@@ -756,11 +765,15 @@ impl Engine {
     &mut self,
     payload: Vec<u8>,
     utc_offset_minutes: i16,
+    opening: PushOpening,
   ) -> Result<PushNotification, TeamCraftError> {
     let preview = self.push_preview_within_budget(&payload).await?;
     let now_ms = SystemClock.now_ms();
     let store = self.store.as_ref();
-    push_guard::record_received(store, &preview.wake_up, now_ms);
+    // A retry is the same push again: counting it would skew the received count and the delay.
+    if opening == PushOpening::Received {
+      push_guard::record_received(store, &preview.wake_up, now_ms);
+    }
     let is_duplicate = push_guard::is_duplicate(store, &preview.wake_up)?;
     let maybe_suppression =
       push_guard::local_suppression(store, &preview.wake_up, now_ms, utc_offset_minutes)?;

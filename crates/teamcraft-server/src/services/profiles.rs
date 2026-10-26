@@ -84,6 +84,8 @@ pub async fn create_avatar_upload(
     )));
   }
   let store = blob_store(state)?;
+  // While the storage is down, say "later" here instead of handing out a URL that fails.
+  store.check_available()?;
   let object: teamcraft_proto::AttachmentId = state.next_id()?;
   let key = format!("avatars/{}/{}", caller.user.id.snowflake(), object.snowflake());
   let previous = state
@@ -122,7 +124,7 @@ pub async fn complete_avatar_upload(
     .ok_or_else(|| ApiError::Conflict("no avatar upload is waiting".into()))?;
   let stored = store.object_size(&pending.key).await.map_err(|error| {
     warn!(%error, "avatar storage check failed");
-    ApiError::Unavailable("avatar storage".into())
+    ApiError::storage_unavailable("avatar storage")
   })?;
   match stored {
     None => return Err(ApiError::Conflict("the avatar has not been uploaded".into())),
@@ -183,7 +185,17 @@ async fn profile_of(state: &AppState, user: UserId) -> Result<ProfileResponse, A
     maybe_time_zone: profile.maybe_time_zone,
     maybe_working_hours: profile.maybe_working_hours.map(wire_hours),
     has_avatar: profile.maybe_avatar.is_some(),
+    maybe_avatar_version: profile
+      .maybe_avatar
+      .as_ref()
+      .map(|avatar| avatar_version(&avatar.key)),
   })
+}
+
+/// The version clients cache an avatar by: the last part of its object key, which is new with
+/// every upload (`avatars/{user}/{object}`) and says nothing about storage.
+fn avatar_version(key: &str) -> String {
+  key.rsplit('/').next().unwrap_or(key).to_owned()
 }
 
 async fn publish_update(state: &AppState, user: UserId) -> Result<(), ApiError> {
@@ -320,6 +332,13 @@ fn weekday_bit(day: &Weekday) -> Result<u8, ApiError> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn an_avatars_version_is_its_object_name_only() {
+    assert_eq!(avatar_version("avatars/7/123456789"), "123456789");
+    assert_ne!(avatar_version("avatars/7/1"), avatar_version("avatars/7/2"));
+    assert_eq!(avatar_version("flat"), "flat");
+  }
 
   mod text {
     use super::*;

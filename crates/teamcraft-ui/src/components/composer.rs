@@ -7,18 +7,17 @@ use teamcraft_client_api::admin::format_bytes;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::components::avatar::{Avatar, AvatarSize};
-use crate::components::composer_commands::{self, Notice, Outcome};
+use crate::components::composer_commands::{self, CommandButton, Notice, NoticeEvent, Outcome};
 use crate::components::composer_editor;
 use crate::components::composer_toolbar::{
   ActiveFormats, FormatAction, FormatToolbar, SendOptionsMenu, format_action_for, move_focus_vertical,
 };
 use crate::components::emoji_picker::EmojiPicker;
-use crate::components::file_drop::{
-  DroppedFiles, is_unreadable_file_drop, report_unreadable_drop, transfer_files,
-};
+use crate::components::file_drop::{DropContent, DroppedFiles, take_drop, transfer_files};
 use crate::components::file_views::blob_url;
 use crate::components::icons::{Icon, IconName};
 use crate::components::sheet::MenuSurface;
+use crate::composer_focus::{self, FocusSituation};
 use crate::editor_doc::{BlockFormat, InlineStyle};
 use crate::groups::use_groups;
 use crate::i18n::use_i18n;
@@ -29,13 +28,15 @@ use crate::media_formats::{displayable_type, essence, is_svg, media_type_for, ne
 use crate::media_layout::{APP_THUMBNAIL_SIDE, thumbnail_type};
 use crate::mention::{self, TriggerKind};
 use crate::model::{ConversationId, ThreadId};
-use crate::model::{ConversationKind, MessageKind, User};
+use crate::model::{MessageKind, User};
 use crate::notifier::needs_channel_confirmation;
+use crate::paste::{PasteKind, paste_from_shell};
 use crate::raster;
 use crate::reactive::SetIfAlive;
 use crate::settings::SendMode;
 use crate::slash::{self, Parsed};
-use crate::state::use_app_state;
+use crate::state::{Overlay, SidePanel, use_app_state};
+use crate::tab_handover::PERSIST_DRAFTS_EVENT;
 use crate::unread_divider::DividerEvent;
 use crate::viewport::is_touch_primary;
 
@@ -97,6 +98,11 @@ struct Suggestion {
 }
 
 const MAX_SUGGESTIONS: usize = 8;
+
+/// Whether `list` shows the same entries as `shown`, so the selected one stays selected.
+fn is_same_list(shown: &[Suggestion], list: &[Suggestion]) -> bool {
+  shown.len() == list.len() && shown.iter().zip(list).all(|(a, b)| a.label == b.label)
+}
 
 /// People and groups whose name starts with, or contains, what was typed after `@`.
 fn mention_suggestions(
@@ -197,7 +203,7 @@ pub fn Composer(
   let maybe_channel_name = move || {
     state
       .read(|backend| backend.conversation(conversation))
-      .filter(|conv| !matches!(conv.kind, ConversationKind::Direct | ConversationKind::Group))
+      .filter(|conv| conv.has_channel_settings())
       .map(|conv| format!("#{}", conv.name))
   };
   let editor = NodeRef::<html::Div>::new();
@@ -208,6 +214,11 @@ pub fn Composer(
   let attachments = RwSignal::new(Vec::<PendingFile>::new());
   let upload_error = RwSignal::new(None::<String>);
   let notice = RwSignal::new(None::<Notice>);
+  let close_notice = move |event: NoticeEvent| {
+    if notice.with_untracked(|shown| shown.as_ref().is_some_and(|shown| shown.closes_on(event))) {
+      notice.set(None);
+    }
+  };
   let suggestions = RwSignal::new(Vec::<Suggestion>::new());
   let selected_suggestion = RwSignal::new(0_usize);
   let indexed_suggestions = Memo::new(move |_| {
@@ -278,6 +289,28 @@ pub fn Composer(
     current
   });
 
+  // Opening a conversation (or a thread) lets the user type at once, with mouse and keyboard only
+  // (#722). Once, when the editor is in the page; nothing reactive is tracked.
+  let has_tried_focus = StoredValue::new(false);
+  Effect::new(move |_| {
+    let Some(element) = editor.get() else { return };
+    if has_tried_focus.get_value() {
+      return;
+    }
+    has_tried_focus.set_value(true);
+    let situation = untrack(|| FocusSituation {
+      is_fine_pointer: composer_focus::is_fine_pointer(),
+      can_post,
+      is_overlay_open: state.overlay.get_untracked() != Overlay::None,
+      is_focus_taken: composer_focus::is_focus_taken(),
+      is_thread_composer: maybe_thread.is_some(),
+      is_thread_open: matches!(state.panel.get_untracked(), SidePanel::Thread { .. }),
+    });
+    if composer_focus::should_focus(situation) {
+      drop(element.focus());
+    }
+  });
+
   // Drafts sync across devices: restore once the stored one arrives, store while typing.
   let is_draft_restored = RwSignal::new(false);
   let draft_generation = RwSignal::new(0_u32);
@@ -297,6 +330,14 @@ pub fn Composer(
     }
   });
   // Reads the whole draft, so only after typing pauses.
+  let store_draft_now = move || {
+    let text = editor
+      .try_get_untracked()
+      .flatten()
+      .map(|element| composer_editor::markdown(&element))
+      .unwrap_or_default();
+    state.try_write(|backend| backend.set_draft(conversation, maybe_thread, &text));
+  };
   let save_draft = move || {
     draft_generation.update(|generation| *generation += 1);
     let generation = draft_generation.get_untracked();
@@ -306,16 +347,22 @@ pub fn Composer(
         if draft_generation.try_get_untracked() != Some(generation) {
           return;
         }
-        let text = editor
-          .try_get_untracked()
-          .flatten()
-          .map(|element| composer_editor::markdown(&element))
-          .unwrap_or_default();
-        state.try_write(|backend| backend.set_draft(conversation, maybe_thread, &text));
+        store_draft_now();
       },
       DRAFT_SAVE_DELAY,
     );
   };
+  // Another tab takes the app over (#744): a draft still waiting for the typing pause is stored
+  // now, before this composer goes away with the app.
+  let on_persist = window_event_listener_untyped(PERSIST_DRAFTS_EVENT, move |_| {
+    if draft_generation
+      .try_update(|generation| *generation += 1)
+      .is_some()
+    {
+      store_draft_now();
+    }
+  });
+  on_cleanup(move || on_persist.remove());
   let refresh_formats = move || {
     if !show_formatting.get_untracked() {
       return;
@@ -472,6 +519,7 @@ pub fn Composer(
       });
     }
     clear_editor();
+    close_notice(NoticeEvent::Sent);
     also_send_to_channel.set(false);
     priority.set(MessagePriority::Normal);
     is_silent.set(false);
@@ -507,23 +555,29 @@ pub fn Composer(
       return;
     };
     let list = match found.kind {
-      TriggerKind::Command => slash::matching_commands(&found.query, maybe_channel_name().is_some())
-        .into_iter()
-        .map(|(name, usage)| Suggestion {
-          insert: name.to_owned(),
-          label: format!("/{name} {usage}").trim_end().to_owned(),
-          detail: String::new(),
-          person: None,
-          is_exact: name == found.query.to_lowercase(),
-        })
-        .collect(),
+      TriggerKind::Command => {
+        slash::matching_commands(&found.query, composer_commands::context(state, conversation))
+          .into_iter()
+          .map(|(name, usage)| Suggestion {
+            insert: name.to_owned(),
+            label: format!("/{name} {usage}").trim_end().to_owned(),
+            detail: String::new(),
+            person: None,
+            is_exact: name == found.query.to_lowercase(),
+          })
+          .collect()
+      },
       TriggerKind::Mention => {
         let people = state.read(|backend| backend.users());
         let groups = groups.map(|hub| hub.groups()).unwrap_or_default();
         mention_suggestions(&found.query, &people, &groups, &i18n.t("mention-channel"))
       },
     };
-    selected_suggestion.set(0);
+    // The caret moving inside the same query (arrow keys, a click) keeps the selection (#690); a
+    // new list starts at its first entry.
+    if !suggestions.with_untracked(|shown| is_same_list(shown, &list)) {
+      selected_suggestion.set(0);
+    }
     suggestions.set(list);
   };
   let after_edit = move || {
@@ -734,6 +788,11 @@ pub fn Composer(
       ev.prevent_default();
       return;
     }
+    // Esc closes a notice first.
+    if ev.key() == "Escape" && !has_modifier && notice.with_untracked(Option::is_some) {
+      close_notice(NoticeEvent::Escape);
+      return;
+    }
     // Esc in the empty composer of a conversation marks it read, as in the feed (#321); a reply
     // being quoted is cancelled first.
     if ev.key() == "Escape" && !has_modifier && maybe_thread.is_none() && is_empty.get_untracked() {
@@ -785,6 +844,9 @@ pub fn Composer(
       composer_editor::apply_typing_shortcut(&element, typed.encode_utf8(&mut [0; 4]));
     }
     is_empty.set(composer_editor::is_blank(&element));
+    if notice.with_untracked(|shown| matches!(shown, Some(Notice::Help))) {
+      close_notice(NoticeEvent::Edited(&composer_editor::markdown(&element)));
+    }
     save_draft();
     refresh_suggestions();
     refresh_formats();
@@ -882,16 +944,18 @@ pub fn Composer(
       element.click();
     }
   };
-  // Drops anywhere on the conversation or thread arrive through its drop zone (`FileDrop`).
-  if let Some(DroppedFiles(dropped)) = use_context::<DroppedFiles>() {
-    Effect::new(move |_| {
-      let files = dropped.get();
-      if !files.is_empty() {
-        dropped.set(Vec::new());
-        add_files(files);
-      }
-    });
-  }
+  // Drops anywhere on the conversation or thread arrive through its drop zone (`FileDrop`). A
+  // composer outside one has its own, for the files the desktop shell reads after a drop.
+  let drop_zone =
+    use_context::<DroppedFiles>().unwrap_or_else(|| DroppedFiles(RwSignal::new_local(Vec::new())));
+  let DroppedFiles(dropped) = drop_zone;
+  Effect::new(move |_| {
+    let files = dropped.get();
+    if !files.is_empty() {
+      dropped.set(Vec::new());
+      add_files(files);
+    }
+  });
   // Files are attached; dropped text goes in as plain text, never as the HTML that came with it.
   let on_drop = move |ev: web_sys::DragEvent| {
     // Marks the drop as handled, so the conversation around doesn't attach the files a second time.
@@ -899,12 +963,12 @@ pub fn Composer(
     let Some(transfer) = ev.data_transfer() else {
       return;
     };
-    let files = transfer_files(&transfer);
-    match files.is_empty() {
-      false => add_files(files),
-      // Files the webview handed over as addresses only: said so, not pasted in as text.
-      true if is_unreadable_file_drop(&transfer) => report_unreadable_drop(state, i18n),
-      true => {
+    // Files the webview handed over as addresses only come from the desktop shell, or an error says
+    // why not; they are never pasted in as text.
+    match take_drop(&transfer, Some(drop_zone), state, i18n) {
+      DropContent::Files(files) => add_files(files),
+      DropContent::FromShell | DropContent::Unreadable => {},
+      DropContent::NoFiles => {
         if let (Ok(text), Some(element)) = (transfer.get_data("text/plain"), editor.get_untracked())
           && !text.is_empty()
         {
@@ -923,14 +987,33 @@ pub fn Composer(
     };
     ev.prevent_default();
     let files = transfer_files(&data);
-    if !files.is_empty() {
-      add_files(files);
-      return;
+    let plain = data.get_data("text/plain").unwrap_or_default();
+    let maybe_uri_list = data
+      .get_data("text/uri-list")
+      .ok()
+      .filter(|list| !list.is_empty());
+    let maybe_html = data.get_data("text/html").ok().filter(|html| !html.is_empty());
+    // What the event didn't carry (a screenshot, copied files) the desktop shell reads (#761).
+    match PasteKind::classify(
+      !files.is_empty(),
+      crate::auth::tauri::is_available(),
+      maybe_uri_list.as_deref(),
+      &plain,
+      maybe_html.as_deref(),
+    ) {
+      PasteKind::Files => {
+        add_files(files);
+        return;
+      },
+      kind @ (PasteKind::CopiedFiles | PasteKind::Picture) => {
+        paste_from_shell(kind, drop_zone, state, i18n);
+        return;
+      },
+      PasteKind::Text => {},
     }
     let Some(element) = editor.get_untracked() else {
       return;
     };
-    let plain = data.get_data("text/plain").unwrap_or_default();
     let url = plain.trim();
     let has_selection = !composer_editor::selected_text().is_empty();
     if composer_editor::block_format(&element) == BlockFormat::CodeBlock {
@@ -956,6 +1039,8 @@ pub fn Composer(
     composer_editor::insert_text(&emoji);
     after_edit();
   };
+  let is_command_list_open =
+    move || suggestions.with(|list| list.first().is_some_and(|item| item.label.starts_with('/')));
   // `@` and `/` buttons type the marker and open the picker, as typing it would.
   let start_mention = move || {
     let Some(element) = focus_editor() else {
@@ -968,16 +1053,40 @@ pub fn Composer(
     after_edit();
     refresh_suggestions();
   };
+  // The `/` button types the slash, and the suggestion list that opens is the help; pressed
+  // again it closes the list (and takes back its slash).
+  // A press outside the composer closes its notice. Removed with the composer: a late event must
+  // not reach its disposed signals.
+  let composer_root = NodeRef::<html::Div>::new();
+  let outside_listener = window_event_listener(leptos::ev::pointerdown, move |ev| {
+    let is_inside = composer_root.try_get_untracked().flatten().is_some_and(|root| {
+      ev.target()
+        .and_then(|target| target.dyn_into::<web_sys::Node>().ok())
+        .is_some_and(|node| root.contains(Some(&node)))
+    });
+    if !is_inside && notice.try_with_untracked(Option::is_some).unwrap_or(false) {
+      close_notice(NoticeEvent::PointerOutside);
+    }
+  });
+  on_cleanup(move || outside_listener.remove());
   let start_command = move || {
     let Some(element) = focus_editor() else {
       return;
     };
-    if composer_editor::is_blank(&element) {
-      composer_editor::insert_text("/");
-      after_edit();
-      refresh_suggestions();
-    } else {
-      notice.set(Some(Notice::Help));
+    match CommandButton::of(composer_editor::is_blank(&element), is_command_list_open()) {
+      CommandButton::Open => {
+        composer_editor::insert_text("/");
+        after_edit();
+        refresh_suggestions();
+      },
+      CommandButton::Close => {
+        suggestions.set(Vec::new());
+        if composer_editor::markdown(&element).trim() == "/" {
+          composer_editor::clear(&element);
+          after_edit();
+        }
+      },
+      CommandButton::Unavailable => {},
     }
   };
   let send_flags = move || {
@@ -1002,6 +1111,7 @@ pub fn Composer(
   view! {
     <div
       class="composer"
+      node_ref=composer_root
       class:composer-disabled=!can_post
       // The drop zone around (`FileDrop`) shows where files go; this only accepts the drop.
       on:dragover=move |ev: web_sys::DragEvent| ev.prevent_default()
@@ -1080,9 +1190,20 @@ pub fn Composer(
             Notice::Text(message) => view! { <p class="composer-notice" role="status">{message}</p> }.into_any(),
             Notice::Help => view! {
               <div class="composer-notice composer-help" role="status">
-                <p>{move || i18n.t("slash-help-title")}</p>
+                <div class="composer-help-head">
+                  <p>{move || i18n.t("slash-help-title")}</p>
+                  <button
+                    type="button"
+                    class="icon-btn icon-btn-small"
+                    aria-label=move || i18n.t("close")
+                    on:mousedown=|ev| ev.prevent_default()
+                    on:click=move |_| close_notice(NoticeEvent::CloseButton)
+                  >
+                    <Icon name=IconName::Close />
+                  </button>
+                </div>
                 <ul>
-                  {slash::commands(maybe_channel_name().is_some())
+                  {slash::commands(composer_commands::context(state, conversation))
                     .map(|(name, usage)| view! { <li><code>{format!("/{name} {usage}").trim_end().to_owned()}</code></li> })
                     .collect_view()}
                 </ul>
@@ -1187,7 +1308,12 @@ pub fn Composer(
             translate="no"
             data-placeholder=move || {
               let name = conversation_name.get_value();
-              if name.is_empty() { i18n.t(placeholder_key) } else { i18n.t_with(placeholder_key, &[("name", &name)]) }
+              // Always with the argument: Fluent shows a missing one as "{$name}" (#699).
+              if name.is_empty() && placeholder_key == "composer-placeholder" {
+                i18n.t("composer-placeholder-untitled")
+              } else {
+                i18n.t_with(placeholder_key, &[("name", &name)])
+              }
             }
             node_ref=editor
             on:keydown=on_keydown
@@ -1333,6 +1459,8 @@ pub fn Composer(
               class="icon-btn"
               aria-label=move || i18n.t("composer-commands")
               title=move || i18n.t("composer-commands")
+              aria-expanded=move || is_command_list_open().to_string()
+              prop:disabled=move || CommandButton::of(is_empty.get(), is_command_list_open()) == CommandButton::Unavailable
               on:mousedown=|ev| ev.prevent_default()
               on:click=move |_| start_command()
             >
@@ -1469,6 +1597,34 @@ mod tests {
       Some(file("late.txt")),
       "a disposed list is not written"
     );
+  }
+
+  #[test]
+  fn the_selection_stays_while_the_list_is_unchanged() {
+    let shown = vec![suggestion("/shrug [text]"), suggestion("/shortcuts")];
+    assert!(
+      is_same_list(&shown, &shown.clone()),
+      "arrow keys refresh the same list"
+    );
+    assert!(
+      !is_same_list(&shown, &shown[..1]),
+      "a narrower query starts at the top"
+    );
+    assert!(!is_same_list(
+      &shown,
+      &[suggestion("/settings"), suggestion("/shortcuts")]
+    ));
+    assert!(!is_same_list(&[], &shown));
+  }
+
+  fn suggestion(label: &str) -> Suggestion {
+    Suggestion {
+      insert: label.trim_start_matches('/').into(),
+      label: label.into(),
+      detail: String::new(),
+      person: None,
+      is_exact: false,
+    }
   }
 
   fn file(name: &str) -> PendingFile {

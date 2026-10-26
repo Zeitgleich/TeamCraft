@@ -4,8 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{
-  CallHistoryEntry, LastSeenVisibility, ListCallHistoryQuery, PresenceState, PrivacyResponse,
-  UpdatePrivacyRequest, UserId, UserPresence, UserSummary,
+  CallHistoryEntry, LastSeenVisibility, ListCallHistoryQuery, ListPresenceResponse, PresenceState,
+  PrivacyResponse, UpdatePrivacyRequest, UserId, UserPresence, UserSummary,
 };
 
 use super::Client;
@@ -100,12 +100,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// missed while disconnected are repaired here, and the UI takes the result from the presence
   /// log instead of asking the server itself (issue #252).
   pub(crate) async fn refresh_known_presence(&mut self) -> Result<(), CoreError> {
-    let users: Vec<UserId> = self
+    let mut users: Vec<UserId> = self
       .store
       .list(Table::Users)?
       .into_iter()
       .filter_map(|(key, _)| key.parse().ok())
       .collect();
+    // Read ahead for the people known before the connection; only those learned since are asked.
+    if let Some((asked, answer)) = self.read_ahead.presence.take() {
+      self.store_presence(answer?)?;
+      users.retain(|user| !asked.contains(user));
+    }
     for batch in users.chunks(MAX_PRESENCE_BATCH) {
       self.refresh_presence(batch).await?;
     }
@@ -118,6 +123,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(());
     }
     let response = self.api.list_presence(users).await?;
+    self.store_presence(response)
+  }
+
+  fn store_presence(&mut self, response: ListPresenceResponse) -> Result<(), CoreError> {
     let fetched_at_ms = self.now_ms();
     for presence in response.presences {
       // The log carries state and status; last seen is read on its own (`ui_last_seen`).
@@ -299,6 +308,7 @@ mod tests {
       maybe_organization: None,
       maybe_has_devices: None,
       is_deactivated: false,
+      is_deleted: false,
     }
   }
 }

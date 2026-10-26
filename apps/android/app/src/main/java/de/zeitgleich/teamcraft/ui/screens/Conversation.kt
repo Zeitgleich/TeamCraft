@@ -24,6 +24,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -33,6 +34,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
@@ -62,6 +64,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -105,6 +108,7 @@ import de.zeitgleich.teamcraft.core.SendOptions
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.EmojiInput
+import de.zeitgleich.teamcraft.ui.FirstUnread
 import de.zeitgleich.teamcraft.ui.Mentions
 import de.zeitgleich.teamcraft.ui.PendingShare
 import de.zeitgleich.teamcraft.ui.TypingLine
@@ -135,11 +139,14 @@ fun ConversationScreen(
   var messages by remember { mutableStateOf<List<Message>>(emptyList()) }
   var extras by remember { mutableStateOf<Map<String, MessageExtras>>(emptyMap()) }
   var pinned by remember { mutableStateOf<List<Message>>(emptyList()) }
-  var maybeFirstUnread by remember { mutableStateOf<String?>(null) }
+  var firstUnread by remember { mutableStateOf<FirstUnread>(FirstUnread.Loading) }
+  // Counts sends from this screen's composer: each one brings the newest message into view.
+  var sentCount by remember { mutableIntStateOf(0) }
   var undecrypted by remember { mutableStateOf(0) }
   LaunchedEffect(conversationId) {
     // Where the user stopped reading, before marking the conversation read.
-    maybeFirstUnread = viewModel.readChat { query(ChatQueries.firstUnread(conversationId)).maybeMessage }
+    val maybeMessage = viewModel.readChat { query(ChatQueries.firstUnread(conversationId)).maybeMessage }
+    firstUnread = maybeMessage?.let { FirstUnread.At(it) } ?: FirstUnread.None
   }
   LaunchedEffect(changes, conversationId) {
     snapshot = viewModel.readChat { snapshot() }
@@ -154,11 +161,10 @@ fun ConversationScreen(
   val conversation = snapshot?.conversation(conversationId)
   ChatScaffold(
     viewModel = viewModel,
-    title = conversation?.name.orEmpty(),
-    maybeSubtitle = conversation?.topic,
-    onBack = onBack,
-    actions = {
-      ConversationMenu(viewModel, conversationId, conversation, onOpenFiles)
+    topBar = {
+      ConversationTopBar(snapshot, conversation, onBack) {
+        ConversationMenu(viewModel, conversationId, conversation, onOpenFiles)
+      }
     },
   ) {
     if (pinned.isNotEmpty()) PinnedBanner(pinned.last())
@@ -177,7 +183,8 @@ fun ConversationScreen(
       snapshot = snapshot,
       messages = messages,
       extras = extras,
-      maybeFirstUnread = maybeFirstUnread,
+      firstUnread = firstUnread,
+      sentCount = sentCount,
       onOpenThread = onOpenThread,
       maybeOnReply = { message -> ReplyTarget.set(conversationId, message, snapshot?.name(message.author).orEmpty()) },
       modifier = Modifier.weight(1f),
@@ -186,7 +193,7 @@ fun ConversationScreen(
     )
     TypingIndicator(viewModel, conversationId, snapshot, changes)
     if (conversation?.canPost != false) {
-      Composer(viewModel, conversationId, maybeThread = null, snapshot = snapshot)
+      Composer(viewModel, conversationId, maybeThread = null, snapshot = snapshot, onSent = { sentCount++ })
     } else {
       Text(
         stringResource(R.string.read_only_channel),
@@ -211,6 +218,7 @@ fun ThreadScreen(
   var messages by remember { mutableStateOf<List<Message>>(emptyList()) }
   var extras by remember { mutableStateOf<Map<String, MessageExtras>>(emptyMap()) }
   var isFollowed by remember { mutableStateOf(false) }
+  var sentCount by remember { mutableIntStateOf(0) }
   LaunchedEffect(changes, threadId) {
     snapshot = viewModel.readChat { snapshot() }
     messages = viewModel.readChat { query(ChatQueries.thread(conversationId, threadId)).messages } ?: emptyList()
@@ -219,14 +227,14 @@ fun ThreadScreen(
   }
   FollowTransfers(extras) { extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: extras }
   LaunchedEffect(threadId, messages.size) { viewModel.act(ChatActions.markThreadRead(conversationId, threadId)) }
+  val threadTitle = stringResource(R.string.thread_title)
   ChatScaffold(
     viewModel = viewModel,
-    title = stringResource(R.string.thread_title),
-    maybeSubtitle = snapshot?.conversation(conversationId)?.name,
-    onBack = onBack,
-    actions = {
-      TextButton(onClick = { viewModel.act(ChatActions.setThreadFollowed(conversationId, threadId, !isFollowed)) }) {
-        Text(stringResource(if (isFollowed) R.string.thread_unfollow else R.string.thread_follow))
+    topBar = {
+      ChromeTopBar(title = threadTitle, maybeSubtitle = snapshot?.conversation(conversationId)?.name, maybeOnBack = onBack) {
+        TextButton(onClick = { viewModel.act(ChatActions.setThreadFollowed(conversationId, threadId, !isFollowed)) }) {
+          Text(stringResource(if (isFollowed) R.string.thread_unfollow else R.string.thread_follow))
+        }
       }
     },
   ) {
@@ -236,7 +244,8 @@ fun ThreadScreen(
       snapshot = snapshot,
       messages = messages,
       extras = extras,
-      maybeFirstUnread = null,
+      firstUnread = FirstUnread.None,
+      sentCount = sentCount,
       onOpenThread = null,
       maybeOnReply = null,
       modifier = Modifier.weight(1f),
@@ -244,7 +253,7 @@ fun ThreadScreen(
       onOpenPermalink = onOpenPermalink,
     )
     TypingIndicator(viewModel, conversationId, snapshot, changes)
-    Composer(viewModel, conversationId, maybeThread = threadId, snapshot = snapshot)
+    Composer(viewModel, conversationId, maybeThread = threadId, snapshot = snapshot, onSent = { sentCount++ })
   }
 }
 
@@ -296,10 +305,7 @@ private fun TypingIndicator(viewModel: MainViewModel, conversationId: String, sn
 @Composable
 private fun ChatScaffold(
   viewModel: MainViewModel,
-  title: String,
-  maybeSubtitle: String?,
-  onBack: () -> Unit,
-  actions: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit,
+  topBar: @Composable () -> Unit,
   content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
 ) {
   val snackbars = remember { SnackbarHostState() }
@@ -313,7 +319,7 @@ private fun ChatScaffold(
   }
   Scaffold(
     contentWindowInsets = ScreenInsets,
-    topBar = { ChromeTopBar(title = title, maybeSubtitle = maybeSubtitle, maybeOnBack = onBack, actions = actions) },
+    topBar = topBar,
     snackbarHost = { SnackbarHost(snackbars) },
   ) { padding ->
     // The insets include the keyboard: the composer rides on top of it as it slides in (#309).
@@ -348,17 +354,25 @@ private fun ConversationMenu(
       viewModel.startCall(conversationId, name, options)
     }
   }
-  IconButton(onClick = { viewModel.act(ChatActions.setFavorite(conversationId, !isFavorite)) }) {
-    Icon(
-      Icons.Filled.Star,
-      contentDescription = stringResource(if (isFavorite) R.string.favorite_remove else R.string.favorite_add),
-      tint = if (isFavorite) MaterialTheme.colorScheme.tertiary else androidx.compose.ui.graphics.Color.Unspecified,
-    )
+  IconButton(onClick = { isNotifying = true }) {
+    if (maybeConversation?.isMuted == true) {
+      Icon(painterResource(R.drawable.ic_notifications_off), contentDescription = stringResource(R.string.notifications_conversation))
+    } else {
+      Icon(Icons.Filled.Notifications, contentDescription = stringResource(R.string.notifications_conversation))
+    }
   }
   IconButton(onClick = { isOpen = true }) {
     Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.more))
   }
   DropdownMenu(expanded = isOpen, onDismissRequest = { isOpen = false }) {
+    DropdownMenuItem(
+      text = { Text(stringResource(if (isFavorite) R.string.favorite_remove else R.string.favorite_add)) },
+      leadingIcon = { Icon(Icons.Filled.Star, contentDescription = null) },
+      onClick = {
+        isOpen = false
+        viewModel.act(ChatActions.setFavorite(conversationId, !isFavorite))
+      },
+    )
     DropdownMenuItem(text = { Text(stringResource(R.string.files_title)) }, onClick = {
       isOpen = false
       onOpenFiles()
@@ -366,10 +380,6 @@ private fun ConversationMenu(
     DropdownMenuItem(text = { Text(stringResource(R.string.channel_bookmarks)) }, onClick = {
       isOpen = false
       isShowingBookmarks = true
-    })
-    DropdownMenuItem(text = { Text(stringResource(R.string.notifications_conversation)) }, onClick = {
-      isOpen = false
-      isNotifying = true
     })
     if (isChannel) {
       DropdownMenuItem(text = { Text(stringResource(R.string.channel_archive)) }, onClick = {
@@ -505,7 +515,8 @@ private fun MessageList(
   snapshot: ChatSnapshot?,
   messages: List<Message>,
   extras: Map<String, MessageExtras>,
-  maybeFirstUnread: String?,
+  firstUnread: FirstUnread,
+  sentCount: Int,
   onOpenThread: ((String) -> Unit)?,
   maybeOnReply: ((Message) -> Unit)?,
   modifier: Modifier,
@@ -518,7 +529,8 @@ private fun MessageList(
     snapshot = snapshot,
     messages = messages,
     extras = extras,
-    maybeFirstUnread = maybeFirstUnread,
+    firstUnread = firstUnread,
+    sentCount = sentCount,
     onOpenThread = onOpenThread,
     maybeOnReply = maybeOnReply,
     onLongPress = { maybeSelected = it },
@@ -722,7 +734,13 @@ object ReplyTarget {
 /** The message field with its suggestions, reply line and attachments (internal: screenshots show it with sample data). */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-internal fun Composer(viewModel: MainViewModel, conversationId: String, maybeThread: String?, snapshot: ChatSnapshot?) {
+internal fun Composer(
+  viewModel: MainViewModel,
+  conversationId: String,
+  maybeThread: String?,
+  snapshot: ChatSnapshot?,
+  onSent: () -> Unit = {},
+) {
   val context = LocalContext.current
   var text by rememberSaveable(conversationId, maybeThread) { mutableStateOf("") }
   var isDraftLoaded by remember(conversationId, maybeThread) { mutableStateOf(false) }
@@ -787,6 +805,7 @@ internal fun Composer(viewModel: MainViewModel, conversationId: String, maybeThr
     wantsAcknowledgement = false
     isSilent = false
     ReplyTarget.current.value = null
+    onSent()
   }
   var isConfirmingChannel by remember { mutableStateOf(false) }
   if (isConfirmingChannel) {
@@ -874,6 +893,7 @@ internal fun Composer(viewModel: MainViewModel, conversationId: String, maybeThr
       isSendWithEnter = isSendWithEnter,
       focus = focus,
       onAttach = { isOptionsOpen = true },
+      onCamera = pickers.takePhoto,
       onSend = ::trySend,
     )
   }
@@ -894,8 +914,9 @@ internal fun Composer(viewModel: MainViewModel, conversationId: String, maybeThr
 }
 
 /**
- * The message field as in the reference chat apps (#315): one rounded pill with attach on the left
- * and send on the right inside it. Send is a filled button only while there is something to send.
+ * The message field as in the common messengers (#315, #704): a rounded pill with attach on the
+ * left and the camera on the right inside it, and a round accent send button beside it, disabled
+ * while there is nothing to send. Voice messages don't exist yet, so the button is always "send".
  */
 @Composable
 private fun ComposerField(
@@ -905,56 +926,70 @@ private fun ComposerField(
   isSendWithEnter: Boolean,
   focus: FocusRequester,
   onAttach: () -> Unit,
+  onCamera: () -> Unit,
   onSend: () -> Unit,
 ) {
-  Surface(
-    shape = RoundedCornerShape(COMPOSER_CORNER),
-    color = MaterialTheme.colorScheme.surfaceContainerHigh,
-    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+  Row(
+    Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 6.dp),
+    verticalAlignment = Alignment.Bottom,
   ) {
-    Row(Modifier.padding(horizontal = 4.dp), verticalAlignment = Alignment.Bottom) {
-      IconButton(onClick = onAttach, modifier = Modifier.padding(vertical = 4.dp)) {
-        Icon(Icons.Filled.Add, contentDescription = stringResource(R.string.attach))
+    Surface(
+      shape = RoundedCornerShape(COMPOSER_CORNER),
+      color = MaterialTheme.colorScheme.surfaceContainerHigh,
+      modifier = Modifier.weight(1f),
+    ) {
+      Row(Modifier.padding(horizontal = 4.dp), verticalAlignment = Alignment.Bottom) {
+        IconButton(onClick = onAttach, modifier = Modifier.padding(vertical = 4.dp)) {
+          Icon(painterResource(R.drawable.ic_attach_file), contentDescription = stringResource(R.string.attach))
+        }
+        TextField(
+          value = text,
+          onValueChange = onTextChange,
+          placeholder = { Text(stringResource(R.string.composer_hint), style = MaterialTheme.typography.bodyLarge) },
+          textStyle = MaterialTheme.typography.bodyLarge,
+          modifier = Modifier
+            .weight(1f)
+            .focusRequester(focus)
+            .onPreviewKeyEvent { event ->
+              // Hardware keyboards: Enter sends when the user chose so; Shift+Enter is a new line.
+              val isSendKey = isSendWithEnter && event.type == KeyEventType.KeyDown && event.key == Key.Enter && !event.isShiftPressed
+              if (isSendKey && canSend) onSend()
+              isSendKey
+            },
+          maxLines = 6,
+          colors = TextFieldDefaults.colors(
+            focusedContainerColor = Color.Transparent,
+            unfocusedContainerColor = Color.Transparent,
+            disabledContainerColor = Color.Transparent,
+            focusedIndicatorColor = Color.Transparent,
+            unfocusedIndicatorColor = Color.Transparent,
+            disabledIndicatorColor = Color.Transparent,
+          ),
+          keyboardOptions = KeyboardOptions(
+            capitalization = KeyboardCapitalization.Sentences,
+            imeAction = if (isSendWithEnter) ImeAction.Send else ImeAction.Default,
+          ),
+          keyboardActions = KeyboardActions(onSend = { if (canSend) onSend() }),
+        )
+        // While typing the field needs the room; the camera comes back when it is empty.
+        if (text.isEmpty()) {
+          IconButton(onClick = onCamera, modifier = Modifier.padding(vertical = 4.dp)) {
+            Icon(painterResource(R.drawable.ic_photo_camera), contentDescription = stringResource(R.string.attach_camera))
+          }
+        }
       }
-      TextField(
-        value = text,
-        onValueChange = onTextChange,
-        placeholder = { Text(stringResource(R.string.composer_hint)) },
-        modifier = Modifier
-          .weight(1f)
-          .focusRequester(focus)
-          .onPreviewKeyEvent { event ->
-            // Hardware keyboards: Enter sends when the user chose so; Shift+Enter is a new line.
-            val isSendKey = isSendWithEnter && event.type == KeyEventType.KeyDown && event.key == Key.Enter && !event.isShiftPressed
-            if (isSendKey && canSend) onSend()
-            isSendKey
-          },
-        maxLines = 6,
-        colors = TextFieldDefaults.colors(
-          focusedContainerColor = Color.Transparent,
-          unfocusedContainerColor = Color.Transparent,
-          disabledContainerColor = Color.Transparent,
-          focusedIndicatorColor = Color.Transparent,
-          unfocusedIndicatorColor = Color.Transparent,
-          disabledIndicatorColor = Color.Transparent,
-        ),
-        keyboardOptions = KeyboardOptions(
-          capitalization = KeyboardCapitalization.Sentences,
-          imeAction = if (isSendWithEnter) ImeAction.Send else ImeAction.Default,
-        ),
-        keyboardActions = KeyboardActions(onSend = { if (canSend) onSend() }),
-      )
-      FilledIconButton(
-        onClick = onSend,
-        enabled = canSend,
-        colors = IconButtonDefaults.filledIconButtonColors(
-          disabledContainerColor = Color.Transparent,
-          disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-        ),
-        modifier = Modifier.padding(4.dp),
-      ) {
-        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = stringResource(R.string.send))
-      }
+    }
+    FilledIconButton(
+      onClick = onSend,
+      enabled = canSend,
+      shape = CircleShape,
+      colors = IconButtonDefaults.filledIconButtonColors(
+        disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+      ),
+      modifier = Modifier.padding(start = 6.dp, bottom = 4.dp).size(SEND_BUTTON_SIZE),
+    ) {
+      Icon(Icons.AutoMirrored.Filled.Send, contentDescription = stringResource(R.string.send))
     }
   }
 }
@@ -1055,6 +1090,9 @@ internal fun PreJoinDialog(name: String, onDismiss: () -> Unit, onJoin: (CallOpt
 
 /** The composer pill's corner radius: fully round at one line, a soft box when it grows. */
 private val COMPOSER_CORNER = 28.dp
+
+/** The round send button beside the composer pill. */
+private val SEND_BUTTON_SIZE = 48.dp
 
 /** Emoji offered for a typed `:name`. */
 private const val MAX_EMOJI_SUGGESTIONS = 8

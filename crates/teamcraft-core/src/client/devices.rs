@@ -141,12 +141,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// The user's list from the server if it is at least as new as the stored one (then stored),
   /// else the stored one. `None` if the user never published one.
   pub(crate) async fn fetch_device_list(
-    &self,
+    &mut self,
     user: UserId,
     identity: &IdentityPublicKey,
   ) -> Result<Option<VerifiedDeviceList>, CoreError> {
     let maybe_stored = self.stored_device_list(user, identity)?;
-    let Some(response) = self.api.device_list(user).await? else {
+    let read = match self
+      .read_ahead
+      .own_device_list
+      .take()
+      .filter(|_| user == self.user_id())
+    {
+      Some(read) => read,
+      None => self.api.device_list(user).await,
+    };
+    let Some(response) = read? else {
       return Ok(maybe_stored);
     };
     let signed = SignedDeviceList::from_bytes(response.signed_list.as_slice())?;

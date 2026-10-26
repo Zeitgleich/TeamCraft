@@ -8,7 +8,35 @@ wire_enum! {
   /// Result of a health probe.
   pub enum HealthStatus {
     Ok => "ok",
+    /// Ready, but a dependency the server can do without for a while (object storage, identity
+    /// provider, push gateway, SFU) is failing: the features that need it answer 503 with
+    /// `Retry-After` until it is back. `/readyz` still answers 200, so the instance stays in the
+    /// load balancer (another instance would meet the same outage).
+    Degraded => "degraded",
     Unavailable => "unavailable",
+  }
+}
+
+wire_enum! {
+  /// A backend the server depends on (issue #743).
+  pub enum DependencyName {
+    Database => "database",
+    ObjectStorage => "object_storage",
+    IdentityProvider => "identity_provider",
+    PushGateway => "push_gateway",
+    Sfu => "sfu",
+  }
+}
+
+wire_enum! {
+  /// How a dependency is doing, by its circuit breaker.
+  pub enum DependencyState {
+    /// Answering (or not used yet).
+    Ok => "ok",
+    /// Failed several times in a row: calls fail fast until the next probe.
+    Down => "down",
+    /// Down until moments ago; the next call probes it.
+    Recovering => "recovering",
   }
 }
 
@@ -16,6 +44,26 @@ wire_enum! {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct HealthResponse {
   pub status: HealthStatus,
+  /// `/readyz` only: each configured dependency's state (names and states, no addresses or errors).
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub dependencies: Vec<DependencyHealth>,
+}
+
+/// One dependency in [`HealthResponse::dependencies`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct DependencyHealth {
+  pub dependency: DependencyName,
+  pub state: DependencyState,
+}
+
+impl HealthResponse {
+  /// A status without dependency details.
+  pub fn new(status: HealthStatus) -> Self {
+    Self {
+      status,
+      dependencies: Vec::new(),
+    }
+  }
 }
 
 /// `GET /api/v1/client-compatibility` (no sign-in): which clients this server still works with
@@ -45,11 +93,34 @@ mod tests {
 
   #[test]
   fn health_wire_format_is_stable() {
-    let json = serde_json::to_string(&HealthResponse {
-      status: HealthStatus::Ok,
-    })
-    .unwrap();
+    let json = serde_json::to_string(&HealthResponse::new(HealthStatus::Ok)).unwrap();
     assert_eq!(json, r#"{"status":"ok"}"#);
+  }
+
+  #[test]
+  fn readiness_lists_dependencies_and_tolerates_new_ones() {
+    let ready = HealthResponse {
+      status: HealthStatus::Degraded,
+      dependencies: vec![DependencyHealth {
+        dependency: DependencyName::ObjectStorage,
+        state: DependencyState::Down,
+      }],
+    };
+    assert_eq!(
+      serde_json::to_string(&ready).unwrap(),
+      r#"{"status":"degraded","dependencies":[{"dependency":"object_storage","state":"down"}]}"#
+    );
+    let newer: HealthResponse =
+      serde_json::from_str(r#"{"status":"ok","dependencies":[{"dependency":"search","state":"draining"}]}"#)
+        .unwrap();
+    assert_eq!(
+      newer.dependencies[0].dependency,
+      DependencyName::Unknown("search".into())
+    );
+    assert_eq!(
+      newer.dependencies[0].state,
+      DependencyState::Unknown("draining".into())
+    );
   }
 
   #[test]

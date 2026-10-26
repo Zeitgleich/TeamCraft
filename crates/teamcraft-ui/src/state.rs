@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use leptos::prelude::*;
 
+use crate::activity_place::ActivityFilter;
 use crate::admin::AdminSection;
 use crate::backend::Backend;
 use crate::calls::CallState;
@@ -105,14 +106,22 @@ pub enum RailEntry {
   Chats,
   /// The space in [`AppState::space`] (or all spaces, in the grouped sidebar).
   Space,
+  /// Activity (#752): mentions, reactions and followed threads; the sidebar is its list.
+  Activity,
+}
+
+/// A place in the app: the rail's entry, its space and what the main column showed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Place {
+  rail: RailEntry,
+  space: SpaceId,
+  view: MainView,
 }
 
 /// What fills the main column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MainView {
   Conversation(ConversationId),
-  /// The threads inbox, optionally with one thread open in the side panel.
-  Threads,
   /// The administration console (admins only).
   Admin(AdminSection),
   /// Message search; the query lives in [`AppState::search_query`].
@@ -208,6 +217,8 @@ pub enum Overlay {
   UserProfile(UserId),
   /// Calls aren't available in this client (the browser, for now): where the apps are.
   CallsUnavailable,
+  /// The admin console's "Delete account" confirmation for this user; the console renders it.
+  DeleteUser(UserId),
 }
 
 /// The sections of the settings dialog (PLAN.md §4 and §5, issue #327).
@@ -252,6 +263,10 @@ pub struct AppState {
   pub view: RwSignal<MainView>,
   pub panel: RwSignal<SidePanel>,
   pub overlay: RwSignal<Overlay>,
+  /// The filter of the activity list; "Threads" is one of them (#752).
+  pub activity_filter: RwSignal<ActivityFilter>,
+  /// Where the user was when they went to Activity, restored when they go back to it.
+  before_activity: StoredValue<Option<Place>>,
   /// The video playing inside its message row; one at a time (#483).
   pub active_inline_video: RwSignal<Option<MediaKey>>,
   /// The layout the window's size calls for (`viewport.rs`).
@@ -302,6 +317,12 @@ pub struct AppState {
   linked_message: RwSignal<Option<PermalinkTarget>>,
   /// A route that names something which hasn't loaded yet.
   pub pending_route: RwSignal<Option<Route>>,
+  /// The route being followed is the place the desktop app reopens (#721): if it is gone, the app
+  /// starts as usual without a notice.
+  is_restoring: StoredValue<bool>,
+  /// The message the user was reading in a conversation when the app closed; its feed starts there
+  /// (taken by the message list).
+  restored_reading: StoredValue<Option<crate::last_place::ReadingPosition>>,
   /// A meeting link (`/meeting/{id}`) the meetings screen has yet to open; it takes it.
   pub maybe_meeting_link: RwSignal<Option<MeetingId>>,
   /// Bumped when a route named something that doesn't exist or the user can't open.
@@ -351,16 +372,15 @@ fn compact_depth_for(view: MainView, panel: SidePanel) -> CompactDepth {
   match compact_pane_for(view, panel) {
     CompactPane::Panel => CompactDepth::Panel,
     CompactPane::List => CompactDepth::TopLevel,
-    CompactPane::Main if matches!(view, MainView::Activity | MainView::GettingStarted) => {
-      CompactDepth::TopLevel
-    },
+    CompactPane::Main if view == MainView::GettingStarted => CompactDepth::TopLevel,
     CompactPane::Main => CompactDepth::Page,
   }
 }
 
 fn compact_pane_for(view: MainView, panel: SidePanel) -> CompactPane {
   match view {
-    MainView::Home | MainView::Space => CompactPane::List,
+    // Activity's list is its sidebar, as for Home and a space.
+    MainView::Home | MainView::Space | MainView::Activity => CompactPane::List,
     MainView::Conversation(_) if panel != SidePanel::Closed => CompactPane::Panel,
     _ => CompactPane::Main,
   }
@@ -378,6 +398,8 @@ impl AppState {
       view: RwSignal::new(view),
       panel: RwSignal::new(SidePanel::Closed),
       overlay: RwSignal::new(Overlay::None),
+      activity_filter: RwSignal::new(ActivityFilter::default()),
+      before_activity: StoredValue::new(None),
       active_inline_video: RwSignal::new(None),
       layout: RwSignal::new(current_layout()),
       search_query: RwSignal::new(String::new()),
@@ -403,6 +425,8 @@ impl AppState {
       settings_page: RwSignal::new(SettingsPage::Section(SettingsTab::DEFAULT)),
       linked_message: RwSignal::new(None),
       pending_route: RwSignal::new(None),
+      is_restoring: StoredValue::new(false),
+      restored_reading: StoredValue::new(None),
       maybe_meeting_link: RwSignal::new(None),
       unavailable_routes: RwSignal::new(0),
       follows_url: StoredValue::new(false),
@@ -617,6 +641,9 @@ impl AppState {
   /// Switches the sidebar to a space (all spaces in the grouped sidebar). Lands in its first channel
   /// unless the open page isn't tied to a space (threads, search, …) or already belongs to it.
   pub fn open_space(&self, space: SpaceId) {
+    if self.return_from_activity(RailEntry::Space, Some(space)) {
+      return;
+    }
     self.space.set(space);
     self.rail.set(RailEntry::Space);
     let is_grouped = self
@@ -631,14 +658,14 @@ impl AppState {
             conversation.maybe_space.is_some() && (is_grouped || conversation.maybe_space == Some(space))
           })
       },
-      MainView::Threads
-      | MainView::Search
+      MainView::Search
       | MainView::Meetings
       | MainView::Saved
       | MainView::Files
-      | MainView::Activity
       | MainView::Calls
       | MainView::Directory => true,
+      // Activity's main column is its own; the space's channel comes back.
+      MainView::Activity => false,
       MainView::ChannelPreview(previewed, _) => is_grouped || previewed == space,
       MainView::Admin(_) | MainView::GettingStarted | MainView::Home | MainView::Space => false,
     };
@@ -651,6 +678,9 @@ impl AppState {
 
   /// Shows Chats: the DM it had open last (#498), or the page's start when there is none.
   pub fn open_chats(&self) {
+    if self.return_from_activity(RailEntry::Chats, None) {
+      return;
+    }
     self.rail.set(RailEntry::Chats);
     // Phones show the chat list (the welcome page while the workspace is empty); a conversation
     // opens from there.
@@ -685,6 +715,37 @@ impl AppState {
         self.panel.set(SidePanel::Closed);
       },
     }
+  }
+
+  /// Going from Activity back to the place the user came from (#752) shows what was open there.
+  /// `true` when that is where `rail` (and `maybe_space`) lead and it was restored. Phones open
+  /// their lists instead, as from any tab.
+  fn return_from_activity(&self, rail: RailEntry, maybe_space: Option<SpaceId>) -> bool {
+    if self.rail.get_untracked() != RailEntry::Activity || self.is_compact() {
+      return false;
+    }
+    let Some(place) = self.before_activity.get_value() else {
+      return false;
+    };
+    let is_same_place = place.rail == rail && maybe_space.is_none_or(|space| space == place.space);
+    if !is_same_place {
+      return false;
+    }
+    self.before_activity.set_value(None);
+    self.space.set(place.space);
+    self.rail.set(place.rail);
+    match place.view {
+      MainView::Conversation(id) if self.read(|backend| backend.conversation(id)).is_some() => {
+        self.open_conversation(id)
+      },
+      // A conversation that is gone meanwhile: the place opens as it would anyway.
+      MainView::Conversation(_) | MainView::Activity => return false,
+      view => {
+        self.view.set(view);
+        self.panel.set(SidePanel::Closed);
+      },
+    }
+    true
   }
 
   /// Whether switching to Home or a space reopens what was open there (the sidebar setting).
@@ -764,8 +825,7 @@ impl AppState {
   pub fn current_conversation_id(&self) -> Option<ConversationId> {
     match self.view.get() {
       MainView::Conversation(id) => Some(id),
-      MainView::Threads
-      | MainView::Admin(_)
+      MainView::Admin(_)
       | MainView::Search
       | MainView::Meetings
       | MainView::Saved
@@ -1298,10 +1358,40 @@ impl AppState {
     self.overlay.set(Overlay::None);
   }
 
+  /// Activity as a place (#752): its list takes the sidebar's place, like Chats or a space; the
+  /// main column waits for an entry. The place the user came from stays as it was for going back.
   pub fn open_activity(&self) {
+    let rail = self.rail.get_untracked();
+    if rail != RailEntry::Activity {
+      self.before_activity.set_value(Some(Place {
+        rail,
+        space: self.space.get_untracked(),
+        view: self.view.get_untracked(),
+      }));
+    }
+    self.rail.set(RailEntry::Activity);
     self.view.set(MainView::Activity);
     self.panel.set(SidePanel::Closed);
     self.overlay.set(Overlay::None);
+  }
+
+  /// Opens what an activity entry points at beside the activity list, which stays: the rail keeps
+  /// Activity selected and the space the user came from stays the one to go back to.
+  pub fn open_from_activity(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    maybe_thread: Option<ThreadId>,
+  ) {
+    self.keeping_activity(|| self.open_message(conversation, message, maybe_thread));
+  }
+
+  /// Runs `open` (which may switch the rail to the conversation's place) and stays in Activity.
+  fn keeping_activity(&self, open: impl FnOnce()) {
+    let space = self.space.get_untracked();
+    open();
+    self.rail.set(RailEntry::Activity);
+    self.space.set(space);
   }
 
   pub fn open_calls(&self) {
@@ -1363,10 +1453,10 @@ impl AppState {
     self.overlay.set(Overlay::None);
   }
 
+  /// The threads the user follows: Activity with its Threads filter (#752).
   pub fn open_threads(&self) {
-    self.view.set(MainView::Threads);
-    self.panel.set(SidePanel::Closed);
-    self.overlay.set(Overlay::None);
+    self.activity_filter.set(ActivityFilter::Threads);
+    self.open_activity();
   }
 
   pub fn open_thread(&self, conversation: ConversationId, thread: ThreadId) {
@@ -1401,6 +1491,11 @@ impl AppState {
   pub fn go_up(&self) {
     if self.panel.get_untracked() != SidePanel::Closed {
       self.panel.set(SidePanel::Closed);
+      return;
+    }
+    // An entry opened from Activity goes back to its list.
+    if self.rail.get_untracked() == RailEntry::Activity {
+      self.open_activity();
       return;
     }
     let maybe_space = match self.view.get_untracked() {
@@ -1506,11 +1601,11 @@ impl AppState {
     }
     match self.view.get() {
       MainView::Conversation(id) => self.conversation_route(id),
-      MainView::Threads => Route::Threads,
       MainView::Admin(section) => Route::Admin(section),
       MainView::Search => Route::Search,
       MainView::Saved => Route::Saved,
       MainView::Files => Route::Files,
+      MainView::Activity if self.activity_filter.get() == ActivityFilter::Threads => Route::Threads,
       MainView::Activity => Route::Activity,
       MainView::Calls => Route::Calls,
       MainView::Meetings => Route::Meetings,
@@ -1569,7 +1664,42 @@ impl AppState {
   /// loaded at all; anything else that can't be opened falls back to Home with a notice.
   pub fn follow_route(&self, route: Route) -> RouteOutcome {
     // Called from outside reactive scopes (start, popstate, data arriving), like event handlers.
-    untrack(|| self.follow_route_now(route))
+    let outcome = untrack(|| self.follow_route_now(route));
+    if outcome != RouteOutcome::Waiting {
+      self.is_restoring.set_value(false);
+    }
+    outcome
+  }
+
+  /// Reopens the place the desktop app was closed in (#721), and the message the user was reading
+  /// there. Like [`Self::follow_route`], except that a place that is gone or no longer allowed
+  /// falls back to the start without a notice.
+  pub fn restore_route(
+    &self,
+    route: Route,
+    maybe_reading: Option<crate::last_place::ReadingPosition>,
+  ) -> RouteOutcome {
+    self.is_restoring.set_value(true);
+    self.restored_reading.set_value(maybe_reading);
+    self.follow_route(route)
+  }
+
+  /// The index of the message the user was reading in `conversation` when the app closed, once:
+  /// its feed starts there. `None` if there was none or it isn't loaded.
+  pub fn take_restored_reading(&self, conversation: ConversationId) -> Option<usize> {
+    let reading = self
+      .restored_reading
+      .try_get_value()
+      .flatten()
+      .filter(|reading| reading.conversation == conversation)?;
+    self.restored_reading.set_value(None);
+    self.read(|backend| {
+      let count = backend.message_count(conversation);
+      backend
+        .messages(conversation, 0, count)
+        .iter()
+        .position(|message| message.id == reading.message)
+    })
   }
 
   fn follow_route_now(&self, route: Route) -> RouteOutcome {
@@ -1610,6 +1740,7 @@ impl AppState {
 
   /// Forgets a route that was still waiting, because the user went somewhere else meanwhile.
   pub fn cancel_pending_route(&self) {
+    self.is_restoring.set_value(false);
     if self.pending_route.get_untracked().is_some() {
       self.pending_route.set(None);
     }
@@ -1686,7 +1817,13 @@ impl AppState {
         self.open_message(conversation, message, maybe_thread);
       },
       Route::Threads => self.open_threads(),
-      Route::Activity => self.open_activity(),
+      Route::Activity => {
+        // The address of Activity is the one of every filter but Threads, which has its own.
+        if self.activity_filter.get_untracked() == ActivityFilter::Threads {
+          self.activity_filter.set(ActivityFilter::All);
+        }
+        self.open_activity();
+      },
       Route::Calls => self.open_calls(),
       Route::Meetings => self.open_meetings(),
       Route::Meeting(meeting) => {
@@ -1732,6 +1869,13 @@ impl AppState {
   }
 
   fn show_unavailable_route(&self) {
+    // A reopened place that is gone (left, deleted, no longer allowed): the usual start, quietly.
+    if self.is_restoring.get_value() {
+      self.is_restoring.set_value(false);
+      self.restored_reading.set_value(None);
+      self.open_start();
+      return;
+    }
     self.open_chats();
     self.unavailable_routes.update(|count| *count += 1);
   }
@@ -2093,6 +2237,55 @@ mod tests {
     }
 
     #[test]
+    fn a_reopened_place_that_is_gone_starts_quietly() {
+      let state = test_state();
+      let (space, channel) = first_channel(&state);
+      let unknown: ConversationId = id_from_raw(999_999_999);
+      state.open_threads();
+      assert_eq!(
+        state.restore_route(Route::Conversation(unknown), None),
+        RouteOutcome::Unavailable
+      );
+      assert_eq!(
+        state.unavailable_routes.get(),
+        0,
+        "no notice for a place that went"
+      );
+      assert_eq!(
+        state.route(),
+        Route::Channel { space, channel },
+        "the usual start"
+      );
+      // Only the reopened place is quiet: a link to something gone still says so.
+      state.follow_route(Route::Conversation(unknown));
+      assert_eq!(state.unavailable_routes.get(), 1);
+    }
+
+    #[test]
+    fn a_reopened_place_opens_with_its_reading_position() {
+      let state = test_state();
+      let (space, channel) = first_channel(&state);
+      let messages = state.read(|backend| backend.messages(channel, 0, backend.message_count(channel)));
+      let reading = crate::last_place::ReadingPosition {
+        conversation: channel,
+        message: messages[0].id,
+      };
+      state.open_threads();
+      assert_eq!(
+        state.restore_route(Route::Channel { space, channel }, Some(reading)),
+        RouteOutcome::Shown
+      );
+      assert_eq!(state.route(), Route::Channel { space, channel });
+      assert_eq!(
+        state.take_restored_reading(id_from_raw(999_999_999)),
+        None,
+        "another feed"
+      );
+      assert_eq!(state.take_restored_reading(channel), Some(0));
+      assert_eq!(state.take_restored_reading(channel), None, "taken once");
+    }
+
+    #[test]
     fn the_start_route_opens_the_first_channel() {
       let state = test_state();
       let (space, channel) = first_channel(&state);
@@ -2145,6 +2338,90 @@ mod tests {
 
   /// Issue #322: the core answers, a timer fires or the backend reports a change after the shell
   /// was unmounted (sign-out, a new session). Nothing may panic then.
+  mod activity_place {
+    use super::*;
+
+    #[test]
+    fn activity_is_a_place_of_its_own_in_the_rail() {
+      let state = test_state();
+      let (_, channel) = first_channel(&state);
+      state.open_conversation(channel);
+      state.open_activity();
+      assert_eq!(state.rail.get(), RailEntry::Activity);
+      assert_eq!(state.view.get(), MainView::Activity);
+      assert_eq!(state.route(), Route::Activity);
+    }
+
+    #[test]
+    fn threads_are_activity_with_its_threads_filter() {
+      let state = test_state();
+      state.open_threads();
+      assert_eq!(state.rail.get(), RailEntry::Activity);
+      assert_eq!(state.activity_filter.get(), ActivityFilter::Threads);
+      assert_eq!(state.route(), Route::Threads);
+      state.activity_filter.set(ActivityFilter::Mentions);
+      assert_eq!(state.route(), Route::Activity);
+    }
+
+    #[test]
+    fn an_entry_opens_beside_the_list_without_leaving_activity() {
+      let state = test_state();
+      let (space, channel) = first_channel(&state);
+      let other_space = state
+        .read(|backend| backend.spaces())
+        .into_iter()
+        .map(|candidate| candidate.id)
+        .find(|candidate| *candidate != space)
+        .expect("demo data has two spaces");
+      let elsewhere = state
+        .read(|backend| backend.space_conversations(other_space))
+        .first()
+        .map(|conversation| conversation.id)
+        .expect("the second space has a channel");
+      state.open_conversation(channel);
+      state.open_activity();
+      state.keeping_activity(|| state.open_conversation(elsewhere));
+      assert_eq!(state.rail.get(), RailEntry::Activity);
+      assert_eq!(state.view.get(), MainView::Conversation(elsewhere));
+      assert_eq!(state.space.get(), space, "the place to go back to stays");
+    }
+
+    #[test]
+    fn going_back_restores_what_was_open_before() {
+      let state = test_state();
+      let (space, channel) = first_channel(&state);
+      let dm = first_dm(&state);
+      state.open_conversation(channel);
+      state.open_activity();
+      state.keeping_activity(|| state.open_conversation(dm));
+      state.open_space(space);
+      assert_eq!(state.rail.get(), RailEntry::Space);
+      assert_eq!(state.view.get(), MainView::Conversation(channel));
+    }
+
+    #[test]
+    fn another_place_than_the_previous_one_opens_as_usual() {
+      let state = test_state();
+      let (_, channel) = first_channel(&state);
+      state.open_conversation(channel);
+      state.open_activity();
+      state.open_chats();
+      assert_eq!(state.rail.get(), RailEntry::Chats);
+      assert_ne!(state.view.get(), MainView::Conversation(channel));
+    }
+
+    #[test]
+    fn up_from_an_entry_goes_back_to_the_activity_list() {
+      let state = test_state();
+      let dm = first_dm(&state);
+      state.open_activity();
+      state.keeping_activity(|| state.open_conversation(dm));
+      state.go_up();
+      assert_eq!(state.view.get(), MainView::Activity);
+      assert_eq!(state.rail.get(), RailEntry::Activity);
+    }
+  }
+
   mod after_the_shell_is_gone {
     use super::*;
 
@@ -2293,6 +2570,11 @@ mod tests {
       assert_eq!(state.compact_depth(), CompactDepth::TopLevel);
       state.open_activity();
       assert_eq!(state.compact_depth(), CompactDepth::TopLevel);
+      assert_eq!(
+        state.compact_pane(),
+        CompactPane::List,
+        "Activity's list is its sidebar"
+      );
       state.open_conversation(conversation);
       assert_eq!(state.compact_depth(), CompactDepth::Page);
       state.panel.set(SidePanel::Pins);

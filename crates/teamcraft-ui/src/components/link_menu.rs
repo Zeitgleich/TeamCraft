@@ -25,17 +25,7 @@ pub fn LinkMenu() -> impl IntoView {
   };
   let node = NodeRef::<html::Div>::new();
   let close = move || menu.set(None);
-  Effect::new(move |_| {
-    if let Some(element) = node.get()
-      && let Some(first) = element
-        .query_selector("[role='menuitem']")
-        .ok()
-        .flatten()
-        .and_then(|item| item.dyn_into::<web_sys::HtmlElement>().ok())
-    {
-      drop(first.focus());
-    }
-  });
+  Effect::new(move |_| focus_first_item(node));
   let on_keydown = move |ev: web_sys::KeyboardEvent| match ev.key().as_str() {
     "Escape" | "Tab" => {
       ev.prevent_default();
@@ -85,8 +75,26 @@ pub fn LinkMenu() -> impl IntoView {
   .into_any()
 }
 
+/// Focuses the menu's first entry once it is shown, so the keyboard can go on from there.
+pub fn focus_first_item(menu: NodeRef<html::Div>) {
+  if let Some(element) = menu.get()
+    && let Some(first) = element
+      .query_selector("[role='menuitem']")
+      .ok()
+      .flatten()
+      .and_then(|item| item.dyn_into::<web_sys::HtmlElement>().ok())
+  {
+    drop(first.focus());
+  }
+}
+
 /// Where the menu's corner goes: at the pointer, moved back inside the window near its edges.
 pub fn placed(x: i32, y: i32) -> (i32, i32) {
+  placed_with(x, y, MENU_HEIGHT_PX)
+}
+
+/// [`placed`] for a menu of `height_px`.
+pub fn placed_with(x: i32, y: i32, height_px: i32) -> (i32, i32) {
   let (width, height) = web_sys::window()
     .map(|window| {
       let size =
@@ -94,18 +102,19 @@ pub fn placed(x: i32, y: i32) -> (i32, i32) {
       (size(window.inner_width()), size(window.inner_height()))
     })
     .unwrap_or_default();
-  clamp_into(x, y, width, height)
+  clamp_into(x, y, width, height, height_px)
 }
 
-fn clamp_into(x: i32, y: i32, width: i32, height: i32) -> (i32, i32) {
+fn clamp_into(x: i32, y: i32, width: i32, height: i32, menu_height: i32) -> (i32, i32) {
   let fit = |at: i32, extent: i32, menu: i32| {
     // A window too small for the menu keeps it at the start edge.
     at.min(extent - menu - EDGE_PX).max(EDGE_PX)
   };
-  (fit(x, width, MENU_WIDTH_PX), fit(y, height, MENU_HEIGHT_PX))
+  (fit(x, width, MENU_WIDTH_PX), fit(y, height, menu_height))
 }
 
-fn move_focus(menu: NodeRef<html::Div>, is_forward: bool) {
+/// Moves the focus to the next (or previous) entry of the menu, round the ends.
+pub fn move_focus(menu: NodeRef<html::Div>, is_forward: bool) {
   let Some(element) = menu.get_untracked() else {
     return;
   };
@@ -139,13 +148,15 @@ mod tests {
 
   #[test]
   fn menu_stays_inside_the_window() {
-    assert_eq!(clamp_into(100, 200, 1000, 800), (100, 200));
+    assert_eq!(clamp_into(100, 200, 1000, 800, MENU_HEIGHT_PX), (100, 200));
     assert_eq!(
-      clamp_into(990, 790, 1000, 800),
+      clamp_into(990, 790, 1000, 800, MENU_HEIGHT_PX),
       (1000 - MENU_WIDTH_PX - EDGE_PX, 800 - MENU_HEIGHT_PX - EDGE_PX)
     );
-    assert_eq!(clamp_into(-5, 0, 1000, 800), (EDGE_PX, EDGE_PX));
+    assert_eq!(clamp_into(-5, 0, 1000, 800, MENU_HEIGHT_PX), (EDGE_PX, EDGE_PX));
     // Smaller than the menu: the start edge wins.
-    assert_eq!(clamp_into(50, 50, 100, 60), (EDGE_PX, EDGE_PX));
+    assert_eq!(clamp_into(50, 50, 100, 60, MENU_HEIGHT_PX), (EDGE_PX, EDGE_PX));
+    // A taller menu opens upwards sooner.
+    assert_eq!(clamp_into(100, 700, 1000, 800, 236), (100, 800 - 236 - EDGE_PX));
   }
 }

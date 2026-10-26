@@ -1,6 +1,6 @@
 //! Preferences of the desktop shell itself, which it needs before the webview has loaded: whether
-//! closing the window keeps the app running in the tray, whether it starts without a window, and
-//! who draws the title bar.
+//! closing the window keeps the app running in the tray, whether it starts without a window, who
+//! draws the title bar, and how the tray icon looks.
 //! Stored as `shell.json` in the app's config directory; the UI edits them in Settings.
 
 use std::path::PathBuf;
@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
-use teamcraft_client_api::window_chrome::TitleBar;
+use teamcraft_client_api::window_chrome::{TitleBar, TrayIconStyle};
 
 use crate::tray::MAIN_WINDOW;
 use crate::window_chrome::{self, TITLE_BAR_ENV};
@@ -24,6 +24,8 @@ pub struct ShellPrefs {
   pub is_start_minimized: bool,
   /// TeamCraft's top bar as the title bar, or the system's ("Use the system title bar").
   pub title_bar: TitleBar,
+  /// The tray icon's look on Linux and Windows (#726).
+  pub tray_icon: TrayIconStyle,
 }
 
 impl Default for ShellPrefs {
@@ -33,6 +35,7 @@ impl Default for ShellPrefs {
       is_close_to_tray: !cfg!(target_os = "linux"),
       is_start_minimized: false,
       title_bar: default_title_bar(),
+      tray_icon: TrayIconStyle::default(),
     }
   }
 }
@@ -91,6 +94,9 @@ pub fn shell_prefs_set(
   {
     window_chrome::apply(&window, prefs.title_bar);
   }
+  if prefs.tray_icon != previous.tray_icon {
+    crate::tray::refresh_icon(&app);
+  }
   let path = path(&app).ok_or_else(|| ShellPrefsError {
     kind: "failed",
     message: "no config directory".to_owned(),
@@ -130,6 +136,8 @@ mod tests {
     assert!(prefs.is_start_minimized);
     assert_eq!(prefs.is_close_to_tray, ShellPrefs::default().is_close_to_tray);
     assert_eq!(parse(r#"{"title_bar": "system"}"#).title_bar, TitleBar::System);
+    assert_eq!(parse(r#"{"tray_icon": "black"}"#).tray_icon, TrayIconStyle::Black);
+    assert_eq!(parse("{}").tray_icon, TrayIconStyle::Colour);
   }
 
   #[test]
@@ -138,6 +146,7 @@ mod tests {
       is_close_to_tray: true,
       is_start_minimized: true,
       title_bar: TitleBar::System,
+      tray_icon: TrayIconStyle::White,
     };
     let text = serde_json::to_string(&prefs).unwrap_or_default();
     assert_eq!(parse(&text), prefs);

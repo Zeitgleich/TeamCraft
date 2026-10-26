@@ -26,6 +26,8 @@ pub async fn create_background_upload(
   request: CreateBackgroundUploadRequest,
 ) -> Result<CreateBackgroundUploadResponse, ApiError> {
   let store = blob_store(state)?;
+  // While the storage is down, say "later" here instead of handing out a URL that fails.
+  store.check_available()?;
   let limits = &state.settings.get().limits;
   if request.size_bytes == 0 {
     return Err(ApiError::InvalidRequest("size_bytes must be positive".into()));
@@ -70,7 +72,7 @@ pub async fn complete_background_upload(
   }
   let stored = store.object_size(&background.s3_key).await.map_err(|error| {
     warn!(%error, "checking the uploaded background failed");
-    ApiError::Unavailable("background storage".into())
+    ApiError::storage_unavailable("background storage")
   })?;
   match stored {
     None => Err(ApiError::Conflict("the background has not been uploaded".into())),
@@ -107,6 +109,12 @@ pub async fn sweep(state: &AppState, before: OffsetDateTime) -> Result<usize, Ap
   let Some(store) = state.maybe_blob_store.as_ref() else {
     return Ok(0);
   };
+  if store.check_available().is_err() {
+    // The rows go before their objects: while the storage is down the objects would stay behind
+    // for good. The next sweep tries again.
+    warn!("the storage is down; sweeping backgrounds later");
+    return Ok(0);
+  }
   let mut keys = state.database.sweep_user_backgrounds(before).await?;
   keys.extend(state.database.sweep_org_backgrounds(before).await?);
   for key in &keys {

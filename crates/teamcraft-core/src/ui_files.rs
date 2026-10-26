@@ -8,8 +8,9 @@ use teamcraft_client_api::model::{ConversationId, MessageId, ThreadId};
 use teamcraft_proto::{AttachmentId, Base64Bytes};
 
 use crate::client::files::{
-  PendingFile, PendingUpload, TransferFailure, TransferState, UploadRetry, UploadSource, attachments_of,
-  cancel_pending_file, failed_uploads, pending_upload, save_pending_upload, share_links, transfer_state,
+  PendingFile, PendingUpload, RetryCause, TransferFailure, TransferState, UploadRetry, UploadSource,
+  attachments_of, cancel_pending_file, failed_uploads, pending_upload, save_pending_upload, share_links,
+  transfer_state,
 };
 use crate::error::CoreError;
 use crate::records;
@@ -53,6 +54,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
             height: size.height,
           }),
           maybe_duration_ms: file.maybe_duration_ms,
+          maybe_content_sha256: None,
         })
         .collect();
     }
@@ -79,6 +81,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
         maybe_sent_at,
         maybe_dimensions: None,
         maybe_duration_ms: file.maybe_duration_ms,
+        maybe_content_sha256: None,
       });
     attachments_of(&stored.content)
       .into_iter()
@@ -124,6 +127,9 @@ impl<S: LocalStore> CoreChatBackend<S> {
           height: size.height,
         }),
         maybe_duration_ms: attachment.maybe_duration_ms,
+        maybe_content_sha256: <&[u8; 32]>::try_from(attachment.ciphertext_sha256.as_slice())
+          .ok()
+          .map(teamcraft_client_api::media::to_hex),
       })
       .chain(failed)
       .collect()
@@ -475,9 +481,15 @@ fn upload_transfer(file: &PendingFile, transfers: &Transfers) -> FileTransfer {
       reason: failure_view(reason),
     };
   }
-  if file.maybe_done.is_none() && file.retry.is_stalled() {
+  if file.maybe_done.is_none()
+    && let Some(cause) = file.retry.stall_cause()
+  {
+    // The stall says why (#742): an outage of the storage reads differently from a network failure.
     return FileTransfer::UploadStalled {
-      reason: FileFailure::Network,
+      reason: match cause {
+        RetryCause::Network => FileFailure::Network,
+        RetryCause::StorageUnavailable => FileFailure::StorageUnavailable,
+      },
     };
   }
   let done_bytes = match (&file.maybe_done, &file.maybe_slot) {

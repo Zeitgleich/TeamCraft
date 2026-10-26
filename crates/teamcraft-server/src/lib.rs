@@ -5,6 +5,7 @@
 pub mod auth;
 pub mod brand;
 pub mod config;
+pub mod dependencies;
 pub mod drain;
 pub mod error;
 pub mod extract;

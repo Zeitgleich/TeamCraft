@@ -19,8 +19,18 @@ pub enum AuthError {
   NoTeamcraftRole,
   #[error("the account is deactivated")]
   AccountDeactivated,
+  /// The token comes from a sign-in before the account was deleted; signing in again creates a
+  /// new account.
+  #[error("the account was deleted; sign in again")]
+  AccountDeleted,
   #[error("signing keys unavailable: {0}")]
   KeysUnavailable(String),
+}
+
+impl From<crate::dependencies::CircuitOpen> for AuthError {
+  fn from(open: crate::dependencies::CircuitOpen) -> Self {
+    Self::KeysUnavailable(open.to_string())
+  }
 }
 
 impl AuthError {

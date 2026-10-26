@@ -1,11 +1,11 @@
 //! The lightbox's controls: the toolbar at the bottom (rotate and zoom on the left; download, the
-//! thread panel, a new window and the "…" menu on the right), the file details, the thumbnail strip,
-//! and the browser parts behind them (clipboard, still frames, the new window).
+//! thread panel and the "…" menu on the right), the file details, the thumbnail strip, and the
+//! browser parts behind them (clipboard, still frames).
 //!
 //! The decrypted file only ever exists as the lightbox's in-memory `blob:` URL; copying draws it into
-//! a canvas in this page, and the new window is a blank window of this page that shows the same URL.
+//! a canvas in this page. There is no "open in a new window" (#728): a blank window with the picture
+//! at 100 % had none of the lightbox's zoom and pan, which the lightbox itself has.
 
-use std::rc::Rc;
 use std::time::Duration;
 
 use leptos::html;
@@ -17,12 +17,15 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
+use crate::channel_access::can_share_files;
 use crate::clock::format_date_time;
+use crate::components::file_views::save_attachment;
 use crate::components::icons::{Icon, IconName};
 use crate::components::lightbox::{FullMedia, sizes};
 use crate::components::lightbox_motion::StageMotion;
 use crate::components::message_actions::copy_to_clipboard;
 use crate::components::sheet::PopoverBackdrop;
+use crate::copy_image::{self, CopiedPicture, CopyRoute};
 use crate::i18n::{I18n, use_i18n};
 use crate::lightbox::{
   Command, KEY_ZOOM_STEP, MAX_STRIP_THUMBNAILS, MediaKey, MediaKind, ModifierStyle, Point, Viewport,
@@ -131,19 +134,6 @@ impl MediaActions {
     }
   }
 
-  pub fn open_in_window(self) {
-    let (FullMedia::Ready(url), Some(kind)) = (self.full.get_untracked(), self.kind.get_untracked()) else {
-      return;
-    };
-    let name = self
-      .current_file
-      .with_untracked(|file| file.as_ref().map(|file| file.file_name.clone()))
-      .unwrap_or_default();
-    if !open_in_window(url, &name, kind) {
-      self.notice.show(self.i18n.t("lightbox-window-blocked"));
-    }
-  }
-
   fn toggle_play(self) {
     match self.kind.get_untracked() {
       Some(MediaKind::Animated) => self.is_paused.update(|paused| *paused = !*paused),
@@ -168,12 +158,25 @@ impl MediaActions {
     self.state.open_message(self.conversation, message, None);
   }
 
-  /// The core downloads and decrypts the file again and saves it (the download folder on the
-  /// desktop, the browser's download on the web), with the same size cap as everywhere else.
+  /// The core downloads and decrypts the file again and saves it (where the user picks in the
+  /// desktop app's save dialog, the browser's download on the web), with the same size cap as
+  /// everywhere else.
   fn download(self) {
     let Some(file) = self.current_file.get_untracked() else {
       return;
     };
+    if crate::auth::tauri::is_available() {
+      // The save dialog comes first; a toast follows once the file is on its way.
+      save_attachment(
+        self.state,
+        self.i18n,
+        file.conversation,
+        file.message,
+        file.file_id,
+        file.file_name,
+      );
+      return;
+    }
     self
       .state
       .write(|backend| backend.download_attachment(file.conversation, file.message, &file.file_id));
@@ -183,10 +186,29 @@ impl MediaActions {
 
   fn copy_image(self) {
     let i18n = self.i18n;
+    let notice = self.notice;
+    // WebKitGTK's Clipboard API doesn't take pictures: the Linux app copies through the shell.
+    if CopyRoute::current() == CopyRoute::Shell
+      && let Some(file) = self.current_file.get_untracked()
+    {
+      let copying = copy_image::copy(CopiedPicture {
+        conversation: file.conversation,
+        message: file.message,
+        file_id: file.file_id,
+        media_type: file.media_type,
+      });
+      spawn_local(async move {
+        let key = match copying.await {
+          true => "lightbox-image-copied",
+          false => "lightbox-copy-failed",
+        };
+        notice.show(i18n.t(key));
+      });
+      return;
+    }
     let Some(image) = self.image.get_untracked() else {
       return;
     };
-    let notice = self.notice;
     spawn_local(async move {
       let key = match copy_image(&image).await {
         true => "lightbox-image-copied",
@@ -208,7 +230,6 @@ pub fn Controls(
   let viewport = actions.viewport;
   let can_transform = Signal::derive(move || actions.kind.get().is_some_and(MediaKind::can_transform));
   let is_animated = move || actions.kind.get() == Some(MediaKind::Animated);
-  let is_ready = Signal::derive(move || matches!(actions.full.get(), FullMedia::Ready(_)));
   let is_details_open = RwSignal::new(false);
   let zoom_label = move || format!("{:.0} %", viewport.get().scale() * 100.0);
   let on_slider = move |ev: web_sys::Event| {
@@ -306,15 +327,6 @@ pub fn Controls(
           is_active=Signal::derive(move || actions.is_thread_shown.get())
           on_click=on_toggle_thread
         />
-        <button
-          class="icon-btn"
-          aria-label=move || i18n.t("lightbox-open-window")
-          data-tip=move || i18n.t("lightbox-open-window")
-          disabled=move || !is_ready.get()
-          on:click=move |_| actions.open_in_window()
-        >
-          <Icon name=IconName::External />
-        </button>
         <MoreMenu actions=actions modifier=modifier is_details_open=is_details_open />
       </div>
       <Show when=move || is_details_open.get() fallback=|| ()>
@@ -376,6 +388,7 @@ fn MoreMenu(
   let trigger = NodeRef::<html::Button>::new();
   let menu = NodeRef::<html::Div>::new();
   let conversation = actions.conversation;
+  let can_share = can_share_files(state, conversation);
   let message = move || actions.current.get_untracked().message;
   let is_saved = Memo::new(move |_| {
     let message = actions.current.get().message;
@@ -502,10 +515,12 @@ fn MoreMenu(
             <Icon name=IconName::Link />
             <span class="menu-label">{move || i18n.t("lightbox-copy-link")}</span>
           </button>
-          <button class="menu-item" role="menuitem" on:click=share>
-            <Icon name=IconName::Link />
-            <span class="menu-label">{move || i18n.t("file-share")}</span>
-          </button>
+          {can_share.then(|| view! {
+            <button class="menu-item" role="menuitem" on:click=share>
+              <Icon name=IconName::Link />
+              <span class="menu-label">{move || i18n.t("file-share")}</span>
+            </button>
+          })}
           <Show when=can_copy_image fallback=|| ()>
             <button class="menu-item" role="menuitem" on:click=move |_| { actions.run(Command::CopyImage); close(); }>
               <Icon name=IconName::Copy />
@@ -764,68 +779,6 @@ fn png_of(image: &web_sys::HtmlImageElement) -> Option<js_sys::Promise> {
       drop(on_reject.call0(&JsValue::NULL));
     }
   }))
-}
-
-/// Shows the in-memory file in a blank window of this page (a new tab in a browser, a window of its
-/// own in the desktop app, which allows `about:blank` and nothing else): the window gets an `<img>`
-/// or `<video>` with the same `blob:` URL, and keeps the URL alive until it closes. `false` if the
-/// window was refused (a popup blocker).
-fn open_in_window(url: Rc<ObjectUrl>, title: &str, kind: MediaKind) -> bool {
-  let Some(window) = web_sys::window() else {
-    return false;
-  };
-  let Ok(Some(popup)) = window.open_with_url_and_target("about:blank", "_blank") else {
-    return false;
-  };
-  let Some(document) = popup.document() else {
-    return false;
-  };
-  let Some(body) = document.body() else {
-    return false;
-  };
-  document.set_title(title);
-  let tag = if kind == MediaKind::Video { "video" } else { "img" };
-  let Ok(element) = document.create_element(tag) else {
-    return false;
-  };
-  for (name, value) in [("src", url.as_str()), ("alt", title)] {
-    drop(element.set_attribute(name, value));
-  }
-  if kind == MediaKind::Video {
-    drop(element.set_attribute("controls", ""));
-  }
-  // CSSOM properties, not `style` attributes: the popup inherits the CSP (`style-src 'self'`),
-  // which blocks those.
-  let element_style = [
-    ("max-width", "100%"),
-    ("max-height", "100vh"),
-    ("object-fit", "contain"),
-  ];
-  if let Some(element) = element.dyn_ref::<web_sys::HtmlElement>() {
-    set_style(element, &element_style);
-  }
-  let body_style = [
-    ("margin", "0"),
-    ("min-height", "100vh"),
-    ("display", "grid"),
-    ("place-items", "center"),
-    ("background", "#111"),
-  ];
-  set_style(&body, &body_style);
-  if body.append_child(&element).is_err() {
-    return false;
-  }
-  // The window holds a reference to the bytes until it goes away.
-  let release = Closure::once_into_js(move || drop(url));
-  drop(popup.add_event_listener_with_callback("pagehide", release.unchecked_ref()));
-  true
-}
-
-fn set_style(element: &web_sys::HtmlElement, properties: &[(&str, &str)]) {
-  let style = element.style();
-  for (property, value) in properties {
-    drop(style.set_property(property, value));
-  }
 }
 
 fn focus_selector(selector: &str) {

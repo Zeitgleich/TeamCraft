@@ -1,7 +1,7 @@
 //! The persistent browser store (e2ee.md §9): encrypted records in IndexedDB.
 
 mod browser_key;
-mod idb;
+pub(crate) mod idb;
 mod indexed_db;
 pub(crate) mod picked;
 mod vault;

@@ -84,6 +84,16 @@ impl I18n {
     fluent_args.set("count", count);
     translate(get_if_observed(self.locale), key, Some(&fluent_args))
   }
+
+  /// Translates a message that selects a plural form from `$count` and has further arguments.
+  pub fn t_count_with(&self, key: &str, count: usize, args: &[(&str, &str)]) -> String {
+    let mut fluent_args = FluentArgs::new();
+    fluent_args.set("count", count);
+    for (name, value) in args {
+      fluent_args.set(name.to_string(), value.to_string());
+    }
+    translate(get_if_observed(self.locale), key, Some(&fluent_args))
+  }
 }
 
 pub fn provide_i18n(initial: Locale) -> I18n {
@@ -94,6 +104,13 @@ pub fn provide_i18n(initial: Locale) -> I18n {
 
 pub fn use_i18n() -> I18n {
   expect_context::<I18n>()
+}
+
+/// Translates a message without arguments in the UI's language, for code outside components that
+/// may run without the translator in reach (then English).
+pub fn translate_current(key: &str) -> String {
+  let locale = use_context::<I18n>().map_or(Locale::En, |i18n| i18n.locale());
+  translate(locale, key, None)
 }
 
 pub(crate) fn translate(locale: Locale, key: &str, maybe_args: Option<&FluentArgs>) -> String {
@@ -362,6 +379,114 @@ mod tests {
     for locale in [Locale::En, Locale::De] {
       for key in &keys {
         assert_ne!(&translate(locale, key, None), key, "{locale:?} lacks {key}");
+      }
+    }
+  }
+
+  /// Every key any component asks for exists in each language: the `.t`, `.t_with` and `.t_count`
+  /// calls, and the key props components hand on (`label="…"` of a toolbar button, `title_key`,
+  /// `body_key`, …). The per-area scans above miss keys that only travel through a prop, as
+  /// `file-copy-share` did (#742).
+  #[test]
+  fn every_key_the_code_names_exists() {
+    let mut sources = Vec::new();
+    collect_sources(
+      &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+      &mut sources,
+    );
+    assert!(sources.len() > 50, "the scan found the sources");
+    let mut missing = Vec::new();
+    for (path, source) in &sources {
+      // Test modules name keys that must not exist (`no-such-key`).
+      let code = source.split("#[cfg(test)]").next().unwrap_or_default();
+      for key in named_keys(code) {
+        for locale in [Locale::En, Locale::De] {
+          if translate(locale, &key, None) == key {
+            missing.push(format!("{} lacks {key} ({locale:?})", path.display()));
+          }
+        }
+      }
+    }
+    assert!(missing.is_empty(), "keys without a translation: {missing:#?}");
+  }
+
+  #[test]
+  fn the_key_scan_finds_calls_and_key_props() {
+    let source = r#"
+      i18n.t("a-key"); i18n.t_with(
+        "b-key", &[]); i18n.t_count("c-key", 2);
+      <ToolbarButton label="d-key" />
+      <EmptyState title_key="e-key" body_key="f-key" />
+      EmptyAction { label_key: "g-key" }
+      <input enterkeyhint="send" aria-label="plain words" />
+      i18n.t(&format!("level-{}", slug));
+    "#;
+    assert_eq!(
+      named_keys(source),
+      ["a-key", "b-key", "c-key", "d-key", "e-key", "f-key", "g-key"]
+    );
+  }
+
+  /// The literal i18n keys `source` names (built keys like `format!(…)` aren't literals).
+  fn named_keys(source: &str) -> Vec<String> {
+    let mut found: Vec<(usize, String)> = Vec::new();
+    for marker in [".t(", ".t_with(", ".t_count("] {
+      for (at, _) in source.match_indices(marker) {
+        let rest = source[at + marker.len()..].trim_start();
+        if let Some(quoted) = rest.strip_prefix('"')
+          && let Some(end) = quoted.find('"')
+        {
+          found.push((at, quoted[..end].to_owned()));
+        }
+      }
+    }
+    for marker in [
+      "label=\"",
+      "title_key=\"",
+      "body_key=\"",
+      "placeholder_key=\"",
+      "label_key: \"",
+      "title_key: \"",
+      "body_key: \"",
+      "heading_key: \"",
+    ] {
+      for (at, _) in source.match_indices(marker) {
+        // `aria-label="…"` or `enterkeyhint="…"` are no keys: only props that start a word count.
+        let starts_word = source[..at].ends_with(|c: char| c.is_whitespace() || c == '{');
+        let rest = &source[at + marker.len()..];
+        if let (true, Some(end)) = (starts_word, rest.find('"')) {
+          found.push((at, rest[..end].to_owned()));
+        }
+      }
+    }
+    found.sort();
+    found
+      .into_iter()
+      .map(|(_, key)| key)
+      .filter(|key| is_key_like(key))
+      .collect()
+  }
+
+  /// Keys are lowercase words joined by dashes; anything else is plain text or a value.
+  fn is_key_like(text: &str) -> bool {
+    text.contains('-')
+      && text
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+  }
+
+  fn collect_sources(directory: &std::path::Path, sources: &mut Vec<(std::path::PathBuf, String)>) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+      return;
+    };
+    for entry in entries.flatten() {
+      let path = entry.path();
+      if path.is_dir() {
+        collect_sources(&path, sources);
+      } else if path.extension().is_some_and(|extension| extension == "rs")
+        && let Ok(source) = std::fs::read_to_string(&path)
+      {
+        sources.push((path, source));
       }
     }
   }

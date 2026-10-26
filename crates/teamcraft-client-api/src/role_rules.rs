@@ -27,6 +27,11 @@ pub struct RoleActor {
   /// Decides whether a space admin outside the channel can reach it.
   pub visibility: ConversationVisibility,
   pub is_archived: bool,
+  /// What the server says the actor may do in the channel
+  /// ([`crate::model::Conversation::maybe_permissions`]). When known it decides, so a space's own
+  /// scheme and the channel's moderation count as the server counts them; `None`: the rules below
+  /// with the built-in scheme.
+  pub maybe_granted: Option<Vec<Permission>>,
 }
 
 /// Where a person stands in the channel's space, as far as this device knows.
@@ -84,8 +89,18 @@ pub fn scheme_of(response: &PermissionSchemeResponse) -> PermissionScheme {
   PermissionScheme::new(grants)
 }
 
+/// Whether someone with the instance `role` holds the workspace-wide `permission` (creating
+/// spaces, user groups, bots, ...). `scheme` is the instance scheme; people who may not read it
+/// get the built-in one from [`scheme_of`].
+pub fn can_in_workspace(scheme: &PermissionScheme, role: &Role, permission: &Permission) -> bool {
+  is_allowed(scheme, role, permission, &Target::Instance)
+}
+
 /// Whether the actor holds `permission` in this channel.
 pub fn can_in_channel(scheme: &PermissionScheme, actor: &RoleActor, permission: &Permission) -> bool {
+  if let Some(granted) = &actor.maybe_granted {
+    return granted.contains(permission);
+  }
   let space_role = if actor.is_space_admin {
     SpaceRole::SpaceAdmin
   } else {
@@ -202,6 +217,136 @@ mod tests {
       // No answer (people who may not read the scheme): the built-in one.
       let fallback = scheme_of(&PermissionSchemeResponse { roles: Vec::new() });
       assert!(can_manage_channel_roles(&fallback, &admin));
+    }
+  }
+
+  /// Issue #691: what the UI offers per role, in the built-in scheme, for the gated actions.
+  mod offered_actions {
+    use super::*;
+
+    const ACTIONS: [Permission; 8] = [
+      Permission::CreatePost,
+      Permission::AddReaction,
+      Permission::ManageBookmarks,
+      Permission::CreateShareLink,
+      Permission::ManageMembers,
+      Permission::ManageChannelRoles,
+      Permission::ManageChannelProperties,
+      Permission::ConvertChannelPrivacy,
+    ];
+
+    #[test]
+    fn every_role_gets_exactly_its_actions_in_a_channel_it_is_in() {
+      // post, react, bookmarks/pins, share links, members, roles, properties, privacy
+      let table: [(&str, RoleActor, [bool; 8]); 6] = [
+        (
+          "guest",
+          actor(Role::Guest, false, Some(ChannelRole::Member)),
+          [true, true, false, false, false, false, false, false],
+        ),
+        (
+          "member",
+          actor(Role::Member, false, Some(ChannelRole::Member)),
+          [true, true, true, true, false, false, false, false],
+        ),
+        (
+          "channel moderator",
+          actor(Role::Member, false, Some(ChannelRole::Moderator)),
+          [true, true, true, true, true, false, false, false],
+        ),
+        (
+          "channel admin",
+          actor(Role::Member, false, Some(ChannelRole::Admin)),
+          [true, true, true, true, true, true, true, true],
+        ),
+        (
+          "space admin",
+          actor(Role::Member, true, Some(ChannelRole::Member)),
+          [true, true, true, true, true, true, true, true],
+        ),
+        (
+          "workspace admin",
+          actor(Role::Admin, false, Some(ChannelRole::Member)),
+          [true, true, true, true, true, true, true, true],
+        ),
+      ];
+      for (name, actor, expected) in table {
+        for (permission, is_offered) in ACTIONS.iter().zip(expected) {
+          assert_eq!(
+            can_in_channel(&scheme(), &actor, permission),
+            is_offered,
+            "{name}: {permission}"
+          );
+        }
+      }
+    }
+
+    #[test]
+    fn a_guest_channel_admin_is_still_a_guest() {
+      let guest_admin = actor(Role::Guest, false, Some(ChannelRole::Admin));
+      for permission in [
+        Permission::ManageMembers,
+        Permission::ManageChannelProperties,
+        Permission::ManageBookmarks,
+      ] {
+        assert!(
+          !can_in_channel(&scheme(), &guest_admin, &permission),
+          "{permission}"
+        );
+      }
+    }
+
+    #[test]
+    fn a_workspace_admin_outside_a_channel_manages_it_but_posts_nothing() {
+      let outside = actor(Role::Admin, false, None);
+      assert!(can_in_channel(&scheme(), &outside, &Permission::ManageMembers));
+      assert!(can_in_channel(
+        &scheme(),
+        &outside,
+        &Permission::ManageChannelProperties
+      ));
+      assert!(!can_in_channel(&scheme(), &outside, &Permission::CreatePost));
+      assert!(!can_in_channel(&scheme(), &outside, &Permission::ManageBookmarks));
+    }
+
+    #[test]
+    fn the_servers_answer_decides_over_the_built_in_scheme() {
+      // An announcement channel takes posting from members; a space scheme gave them roles.
+      let announced = RoleActor {
+        maybe_granted: Some(vec![Permission::AddReaction, Permission::ManageChannelRoles]),
+        ..actor(Role::Member, false, Some(ChannelRole::Member))
+      };
+      assert!(!can_in_channel(&scheme(), &announced, &Permission::CreatePost));
+      assert!(can_manage_channel_roles(&scheme(), &announced));
+      // Nothing granted: nothing offered, whatever the role.
+      let admin = RoleActor {
+        maybe_granted: Some(Vec::new()),
+        ..actor(Role::Owner, true, Some(ChannelRole::Admin))
+      };
+      assert!(
+        ACTIONS
+          .iter()
+          .all(|permission| !can_in_channel(&scheme(), &admin, permission))
+      );
+      assert!(assignable_roles(&scheme(), &admin, &member(ChannelRole::Member), OTHERS).is_empty());
+    }
+
+    #[test]
+    fn creating_spaces_and_user_groups_is_for_admins_and_owners() {
+      for permission in [Permission::CreateSpace, Permission::CreateUserGroup] {
+        for (role, is_offered) in [
+          (Role::Guest, false),
+          (Role::Member, false),
+          (Role::Admin, true),
+          (Role::Owner, true),
+        ] {
+          assert_eq!(
+            can_in_workspace(&scheme(), &role, &permission),
+            is_offered,
+            "{role:?}: {permission}"
+          );
+        }
+      }
     }
   }
 
@@ -360,6 +505,7 @@ mod tests {
       maybe_own_role,
       visibility: ConversationVisibility::Private,
       is_archived: false,
+      maybe_granted: None,
     }
   }
 

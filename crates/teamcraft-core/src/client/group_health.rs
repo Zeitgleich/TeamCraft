@@ -17,6 +17,18 @@ use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, Table};
 
+/// Tables keyed by the conversation (`{conversation}` or `{conversation}/…`) that a deleted
+/// conversation leaves nothing in.
+const PER_CONVERSATION_TABLES: [Table; 8] = [
+  Table::ContentKeys,
+  Table::Outbox,
+  Table::Undecrypted,
+  Table::Threads,
+  Table::Unread,
+  Table::ReadReceipts,
+  Table::MessageAcks,
+  Table::SearchSegments,
+];
 /// Fresh member lists that must agree before a user still in the group counts as a leftover.
 const LEFTOVER_CONFIRMATIONS: u32 = 2;
 const LEFTOVERS_PREFIX: &str = "leftovers/";
@@ -171,6 +183,47 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .delete(Table::Conversations, &conversation.to_string())?;
     self.store.delete(Table::Members, &conversation.to_string())?;
     Ok(())
+  }
+
+  /// The conversation was deleted on the server (a direct message deleted with a deleted account,
+  /// admin.md §3.2.1): unlike a removal, its local history goes too, with everything this device
+  /// kept for it (keys, outbox, read state, search segments).
+  pub(crate) fn purge_conversation(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    self.forget_conversation(conversation)?;
+    self.clear_leftovers(conversation)?;
+    self.store.delete_messages(conversation)?;
+    let id = conversation.to_string();
+    let prefix = format!("{conversation}/");
+    for table in PER_CONVERSATION_TABLES {
+      for (key, _) in self.store.list(table)? {
+        if key == id || key.starts_with(&prefix) {
+          self.store.delete(table, &key)?;
+        }
+      }
+    }
+    tracing::info!(conversation_id = %conversation, "dropped a deleted conversation with its local history");
+    Ok(())
+  }
+
+  /// Drops `user` from the conversation's recorded leftovers (removed from the group now).
+  pub(crate) fn forget_leftover(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<(), CoreError> {
+    let remaining: Vec<UserId> = group_leftovers(&self.store, conversation)?
+      .into_iter()
+      .filter(|leftover| *leftover != user)
+      .collect();
+    if remaining.is_empty() {
+      return self.clear_leftovers(conversation);
+    }
+    records::put_json(
+      &self.store,
+      Table::AppliedChanges,
+      &leftovers_key(conversation),
+      &remaining,
+    )
   }
 
   /// Whether this device's user is leaving the conversation (a pending leave of this device).

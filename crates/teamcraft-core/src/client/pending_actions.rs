@@ -25,6 +25,7 @@
 
 use std::time::Duration;
 
+use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{
   ClientMessageId, ConversationId, CustomStatus, MessageId, SetCustomStatusRequest, SetPresenceRequest,
@@ -35,6 +36,7 @@ use super::Client;
 use crate::api::{ApiError, ServerApi};
 use crate::error::CoreError;
 use crate::records;
+use crate::retry::{Jitter, JitterMode, RetryPolicy, retry_after};
 use crate::store::{LocalStore, Table};
 
 /// An action waiting for the server.
@@ -89,10 +91,12 @@ pub struct PendingActionSettings {
   /// Entries kept at most; beyond it the oldest goes. Coalescing keeps real queues far below.
   pub max_entries: usize,
   /// Wait before an entry the server had trouble with (5xx, 429) is tried again; doubles with each
-  /// attempt.
+  /// attempt (the shared policy, `crate::retry`), at least the server's `Retry-After`.
   pub retry_after: Duration,
   /// The wait between attempts grows up to this.
   pub retry_max: Duration,
+  /// Spread of the waits, so a fleet of devices doesn't retry in waves after an outage.
+  pub jitter: JitterMode,
   /// Attempts the server had trouble with before the entry is dropped.
   pub max_attempts: u32,
   /// An entry not sent within this long after it was queued is dropped.
@@ -144,6 +148,7 @@ impl Default for PendingActionSettings {
       max_entries: 1000,
       retry_after: Duration::from_secs(30),
       retry_max: Duration::from_secs(60 * 60),
+      jitter: JitterMode::Equal,
       max_attempts: 30,
       max_age: Duration::from_secs(7 * 24 * 60 * 60),
     }
@@ -313,8 +318,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     now_ms.saturating_sub(queued.queued_at_ms) > max_age_ms
   }
 
-  /// After server trouble: the entry waits twice as long as last time, or goes once it ran out of
-  /// attempts.
+  /// After server trouble: the entry waits twice as long as last time (and at least what the
+  /// server asked for), or goes once it ran out of attempts.
   fn back_off(
     &self,
     key: &str,
@@ -329,10 +334,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return replace_if_unchanged(&self.store, key, queued, None).map(|_| ());
     }
     tracing::debug!(%error, kind = queued.action.kind(), attempts, "a queued action waits for the server");
-    let doubled = limits
-      .retry_after
-      .saturating_mul(2_u32.saturating_pow(attempts.saturating_sub(1)));
-    let wait_ms = duration_ms(doubled.min(limits.retry_max));
+    let policy = RetryPolicy::new(limits.retry_after, limits.retry_max).with_jitter(limits.jitter);
+    let wait = policy.delay(
+      attempts.saturating_sub(1),
+      &mut Jitter::new(OsRng.next_u64()),
+      retry_after(error),
+    );
+    let wait_ms = duration_ms(wait);
     let retried = QueuedAction {
       attempts,
       maybe_retry_at_ms: Some(now_ms.saturating_add(wait_ms)),

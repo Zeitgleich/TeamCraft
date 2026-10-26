@@ -9,8 +9,8 @@
 //! The access token is the page's own (the browser flow keeps tokens in memory, see `auth::browser`);
 //! a small loop keeps the copy the core reads fresh.
 //!
-//! Only one tab per account runs the core (`web_tabs`, e2ee.md §9.4); the others pass their calls
-//! to it.
+//! Only one tab per account runs the core (`web_tabs`, e2ee.md §9.4) and shows the app; the others
+//! show a notice and take over only when the user asks (#744, `tab_handover`).
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -65,6 +65,10 @@ use wasm_bindgen::JsCast;
 use crate::auth::{AuthError, Authenticator};
 use crate::settings::{load_string, store_string};
 use crate::sync_reads::{StoredWorkspace, SyncRead, SyncReadAnswer, answer_during_sync};
+use crate::tab_handover::{
+  Blocker, OnTaken, PERSIST_DRAFTS_EVENT, TabEvent, TabState, TakeoverAnswer, answer_takeover, keeps_lock,
+  on_taken,
+};
 use crate::web_tabs::{self, Follower, OwnerChannel, OwnerLock, Ownership};
 
 /// Wrong short codes allowed before a link approval is dropped.
@@ -94,6 +98,15 @@ const STORE_READY_PREFIX: &str = "teamcraft.store_ready.";
 const PUSH_CHECK_RETRY: Duration = Duration::from_secs(60);
 /// What the service worker posts when the browser changed the push subscription.
 const SUBSCRIPTION_CHANGED: &str = "push_subscription_changed";
+/// Session storage key (this tab, survives a reload) naming the user this tab was active for, so a
+/// reload of the active tab doesn't ask "use here?" (#744).
+const ACTIVE_TAB_KEY: &str = "teamcraft.active_tab_user";
+/// How long a reloaded active tab waits for the old page's lock before it shows the notice.
+const RELOAD_GRACE: Duration = Duration::from_secs(3);
+/// How long "Use here" waits for the active tab to let go: it persists the outbox first.
+const TAKEOVER_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long the active tab waits for IndexedDB before it hands over anyway.
+const HANDOVER_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 type Api = HttpServerApi<WebTokens>;
 /// Notes what each write changes, so the UI's snapshot is rebuilt per conversation (issue #246).
@@ -108,6 +121,11 @@ thread_local! {
   static LISTENERS: RefCell<Vec<Listener>> = const { RefCell::new(Vec::new()) };
   static IS_WATCHING_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
   static IS_WATCHING_LIFECYCLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+  static TAB: Cell<TabState> = Cell::new(TabState::default());
+  static TAB_LISTENERS: RefCell<Vec<Listener>> = const { RefCell::new(Vec::new()) };
+  /// Takeovers waiting for this tab to become the active one.
+  static ACTIVATIONS: RefCell<Vec<oneshot::Sender<()>>> = const { RefCell::new(Vec::new()) };
+  static IS_WATCHING_FOCUS: Cell<bool> = const { Cell::new(false) };
   /// The store whose queued writes the page lifecycle listener issues.
   static LIFECYCLE_STORE: RefCell<std::rc::Weak<IndexedDbStore>> =
     const { RefCell::new(std::rc::Weak::new()) };
@@ -183,6 +201,101 @@ pub fn is_notifying_tab() -> bool {
 /// Calls `callback` whenever the core's data changed.
 pub fn listen(callback: impl FnMut() + 'static) {
   LISTENERS.with(|listeners| listeners.borrow_mut().push(Rc::new(RefCell::new(callback))));
+}
+
+/// Whether this tab shows the app or the notice that another tab runs it (#744).
+pub fn tab_state() -> TabState {
+  TAB.with(Cell::get)
+}
+
+/// Calls `callback` whenever [`tab_state`] changed.
+pub fn listen_tab(callback: impl FnMut() + 'static) {
+  TAB_LISTENERS.with(|listeners| listeners.borrow_mut().push(Rc::new(RefCell::new(callback))));
+}
+
+/// "Use here": asks the active tab to hand the app over and runs the core here once it let go.
+/// After a refusal because of a call, the next press ends that call (the user saw the warning).
+pub async fn use_here() {
+  let Some(follower) = current_follower() else {
+    return;
+  };
+  let ends_call = tab_state().takeover.ends_call();
+  update_tab(TabEvent::UseHere);
+  // A tab that asked goes first when the lock comes free (`take_over_when_free`).
+  follower.set_claiming(true);
+  let activated = Box::pin(activation());
+  let refused = Box::pin(follower.request_takeover(ends_call));
+  let timeout = Box::pin(platform::sleep(TAKEOVER_TIMEOUT));
+  let outcome = select(activated, select(refused, timeout)).await;
+  follower.set_claiming(false);
+  match outcome {
+    Either::Left(_) => {},
+    Either::Right((Either::Left((Some(blocker), _)), _)) => update_tab(TabEvent::Refused(blocker)),
+    // The refusal channel closed or the time ran out: the active tab doesn't answer.
+    Either::Right(_) => update_tab(TabEvent::TimedOut),
+  }
+}
+
+/// Resolves when this tab becomes the active one.
+fn activation() -> impl Future<Output = ()> {
+  let (activated, receiver) = oneshot::channel();
+  ACTIVATIONS.with(|waiting| waiting.borrow_mut().push(activated));
+  async move {
+    // A dropped sender (never, the list lives as long as the page) also ends the wait.
+    let _ = receiver.await;
+  }
+}
+
+/// The user closed the warning about the call in the active tab.
+pub fn cancel_takeover() {
+  update_tab(TabEvent::Cancel);
+}
+
+fn update_tab(event: TabEvent) {
+  let (before, after) = TAB.with(|tab| {
+    let before = tab.get();
+    let after = before.apply(event);
+    tab.set(after);
+    (before, after)
+  });
+  if before == after {
+    return;
+  }
+  let listeners: Vec<_> = TAB_LISTENERS.with(|listeners| listeners.borrow().clone());
+  for listener in listeners {
+    if let Ok(mut callback) = listener.try_borrow_mut() {
+      (*callback)();
+    }
+  }
+}
+
+fn became_active(user: UserId) {
+  session_storage_set(ACTIVE_TAB_KEY, Some(&user.to_string()));
+  update_tab(TabEvent::BecameActive);
+  let waiting: Vec<_> = ACTIVATIONS.with(|waiting| waiting.borrow_mut().drain(..).collect());
+  for activated in waiting {
+    // The waiting takeover may have timed out already.
+    let _ = activated.send(());
+  }
+}
+
+fn session_storage_set(key: &str, maybe_value: Option<&str>) {
+  let Some(storage) = web_sys::window().and_then(|window| window.session_storage().ok().flatten()) else {
+    return;
+  };
+  let result = match maybe_value {
+    Some(value) => storage.set_item(key, value),
+    None => storage.remove_item(key),
+  };
+  if result.is_err() {
+    tracing::debug!(key, "could not write the session storage");
+  }
+}
+
+fn session_storage_get(key: &str) -> Option<String> {
+  web_sys::window()
+    .and_then(|window| window.session_storage().ok().flatten())
+    .and_then(|storage| storage.get_item(key).ok().flatten())
 }
 
 /// Whether the core runs in this tab (not in another tab this one follows). Calls need it: the
@@ -458,7 +571,8 @@ fn to_value<T: serde::Serialize>(value: T) -> Result<Value, String> {
 }
 
 /// Starts (or reuses) the core for `user` and reports where it stands. The core runs in this tab
-/// when it gets the store's lock; otherwise the tab follows the one that has it.
+/// when it gets the store's lock; otherwise this tab is inactive and follows the one that has it,
+/// unless it is the active tab coming back from a reload.
 async fn start(user: UserId) -> Result<CoreStatus, String> {
   let reuse = RUNNING.with(|running| {
     running
@@ -468,9 +582,12 @@ async fn start(user: UserId) -> Result<CoreStatus, String> {
   });
   if !reuse {
     match web_tabs::try_own(user).await {
-      Ownership::Owned(lock) => start_owner(user, Some(lock)).await?,
+      Ownership::Owned(lock) => {
+        start_owner(user, Some(lock)).await?;
+        became_active(user);
+      },
       Ownership::Unsupported => start_owner(user, None).await?,
-      Ownership::Taken => start_follower(user)?,
+      Ownership::Taken => start_where_taken(user).await?,
     }
   }
   match current_follower() {
@@ -502,7 +619,7 @@ async fn start_owner(user: UserId, maybe_lock: Option<OwnerLock>) -> Result<(), 
     *tokens.0.borrow_mut() = Some(first);
     let (sender, receiver) = mpsc::unbounded();
     let maybe_channel = match maybe_lock.is_some() {
-      true => Some(OwnerChannel::open(user, serve_follower)?),
+      true => Some(OwnerChannel::open(user, serve_follower, on_takeover_request)?),
       false => None,
     };
     let connection = ConnectionStatus::new();
@@ -528,35 +645,184 @@ async fn start_owner(user: UserId, maybe_lock: Option<OwnerLock>) -> Result<(), 
   Ok(())
 }
 
-/// Follows the tab that owns the store, and takes over once that tab is gone.
-fn start_follower(user: UserId) -> Result<(), String> {
-  tracing::info!("TeamCraft is open in another tab; following it");
-  let follower = Follower::join(user, notify_local)?;
+/// Another tab holds the store at this tab's start: this tab follows it, and takes over by itself
+/// when the lock comes free. A reloaded active tab claims it, so it wins that moment over the other
+/// inactive tabs, and waits briefly for it; any other tab shows the notice.
+async fn start_where_taken(user: UserId) -> Result<(), String> {
+  let follower = start_follower(user)?;
+  let maybe_was_active_for = session_storage_get(ACTIVE_TAB_KEY);
+  if on_taken(maybe_was_active_for.as_deref(), &user.to_string()) == OnTaken::WaitForOwnLock {
+    follower.set_claiming(true);
+    let waited = select(Box::pin(activation()), Box::pin(platform::sleep(RELOAD_GRACE))).await;
+    follower.set_claiming(false);
+    if matches!(waited, Either::Left(_)) {
+      return Ok(());
+    }
+  }
+  session_storage_set(ACTIVE_TAB_KEY, None);
+  update_tab(TabEvent::FoundActiveElsewhere);
+  Ok(())
+}
+
+/// Follows the tab that owns the store; takes over when the user asks ([`use_here`]) or the owner
+/// goes away ([`take_over_when_free`]).
+fn start_follower(user: UserId) -> Result<Rc<Follower>, String> {
+  tracing::info!("TeamCraft is open in another tab");
+  let follower = Rc::new(Follower::join(user, notify_local)?);
   RUNNING.with(|running| {
     *running.borrow_mut() = Some(Running::Follower {
       user,
-      follower: Rc::new(follower),
+      follower: follower.clone(),
     })
   });
-  wasm_bindgen_futures::spawn_local(async move {
+  watch_focus();
+  wasm_bindgen_futures::spawn_local(take_over_when_free(user));
+  Ok(follower)
+}
+
+/// Waits for the store's lock; once the owner let go (closed, crashed, discarded, or handed over),
+/// the tab that gets it asks the other inactive tabs and keeps it only if it is the one that
+/// should run the app: the one where "Use here" was pressed, else the one focused last. Otherwise
+/// it passes the lock on and waits again behind them.
+async fn take_over_when_free(user: UserId) {
+  let mut yields_in_row = 0;
+  loop {
     let Some(lock) = web_tabs::wait_to_own(user).await else {
       return;
     };
-    // async-ok: a thread-local, not a signal.
-    let is_still_following = RUNNING.with(|running| {
-      matches!(&*running.borrow(), Some(Running::Follower { user: following, .. }) if *following == user)
-    });
-    if !is_still_following {
-      // Dropping the lock hands it on.
+    // Signed out, another account, or active already: dropping the lock hands it on.
+    let Some(follower) = follower_of(user) else {
+      return;
+    };
+    let others = follower.roll_call().await;
+    if follower_of(user).is_none() {
       return;
     }
-    tracing::info!("the other tab closed; TeamCraft runs in this tab now");
+    if !keeps_lock(&follower.candidate(), &others, yields_in_row) {
+      yields_in_row += 1;
+      drop(lock);
+      // A moment for the tab it should go to, which waits in the queue already.
+      let jitter_ms = 50.0 + js_sys::Math::random() * 100.0;
+      platform::sleep(Duration::from_millis(jitter_ms as u64)).await;
+      continue;
+    }
     match start_owner(user, Some(lock)).await {
-      Ok(()) => notify_local(),
+      Ok(()) => {
+        tracing::info!("TeamCraft runs in this tab now");
+        became_active(user);
+        notify_local();
+      },
       Err(error) => tracing::error!(%error, "could not take over the local data"),
     }
+    return;
+  }
+}
+
+/// The follower of `user`'s owner, while this tab is one.
+fn follower_of(user: UserId) -> Option<Rc<Follower>> {
+  RUNNING.with(|running| match &*running.borrow() {
+    Some(Running::Follower {
+      user: following,
+      follower,
+    }) if *following == user => Some(follower.clone()),
+    _ => None,
+  })
+}
+
+/// Notes when this tab was last focused or shown, for the choice of the next active tab. Once per
+/// page.
+fn watch_focus() {
+  if IS_WATCHING_FOCUS.with(|is_watching| is_watching.replace(true)) {
+    return;
+  }
+  let Some(window) = web_sys::window() else {
+    return;
+  };
+  let on_focus = wasm_bindgen::closure::Closure::<dyn Fn()>::new(|| {
+    let is_visible = web_sys::window()
+      .and_then(|window| window.document())
+      .is_some_and(|document| !document.hidden());
+    if is_visible && let Some(follower) = current_follower() {
+      follower.mark_focused();
+    }
   });
-  Ok(())
+  let mut is_listening = window
+    .add_event_listener_with_callback("focus", on_focus.as_ref().unchecked_ref())
+    .is_ok();
+  if let Some(document) = window.document() {
+    is_listening &= document
+      .add_event_listener_with_callback("visibilitychange", on_focus.as_ref().unchecked_ref())
+      .is_ok();
+  }
+  if !is_listening {
+    tracing::debug!("could not watch the tab's focus");
+  }
+  // The listeners live as long as the page.
+  on_focus.forget();
+}
+
+/// Another tab asks for the app. A running call refuses it unless the user there agreed to end it.
+fn on_takeover_request(ends_call: bool) -> Option<Blocker> {
+  match answer_takeover(crate::web_calls::is_in_call(), ends_call) {
+    TakeoverAnswer::Refuse(blocker) => Some(blocker),
+    TakeoverAnswer::HandOver { ends_call } => {
+      wasm_bindgen_futures::spawn_local(hand_over(ends_call));
+      None
+    },
+  }
+}
+
+/// Lets another tab run the app: ends the call (when the user agreed), stores the drafts and waits
+/// for IndexedDB to have the outbox, then stops the core, whose lock goes to the waiting tab. This
+/// tab then follows it and says so.
+async fn hand_over(ends_call: bool) {
+  let Some(user) = RUNNING.with(|running| match &*running.borrow() {
+    Some(Running::Owner { user, .. }) => Some(*user),
+    _ => None,
+  }) else {
+    return;
+  };
+  if ends_call {
+    crate::web_calls::end_call().await;
+  }
+  persist_drafts().await;
+  let flushed = Box::pin(ask(Request::Flush));
+  match select(flushed, Box::pin(platform::sleep(HANDOVER_FLUSH_TIMEOUT))).await {
+    Either::Left((Ok(Ok(())), _)) => {},
+    Either::Left((Ok(Err(error)), _)) => tracing::warn!(%error, "local data not saved before handing over"),
+    Either::Left((Err(error), _)) => tracing::debug!(%error, "no core to save before handing over"),
+    Either::Right(_) => tracing::warn!("local data still being saved; handing over anyway"),
+  }
+  if !is_owner_of(user) {
+    return;
+  }
+  tracing::info!("TeamCraft moved to another tab");
+  session_storage_set(ACTIVE_TAB_KEY, None);
+  // Replacing the owner drops the core's requests, which stops it and releases the lock.
+  if let Err(error) = start_follower(user).map(drop) {
+    tracing::warn!(%error, "could not follow the other tab");
+    stop();
+  }
+  update_tab(TabEvent::HandedAway);
+  notify_local();
+}
+
+/// Whether this tab still runs the core of `user`.
+fn is_owner_of(user: UserId) -> bool {
+  RUNNING
+    .with(|running| matches!(&*running.borrow(), Some(Running::Owner { user: owner, .. }) if *owner == user))
+}
+
+/// Asks the composers to store their drafts now, then gives their writes a moment to reach the
+/// core's queue ahead of the flush.
+async fn persist_drafts() {
+  if let Some(window) = web_sys::window()
+    && let Ok(event) = web_sys::Event::new(PERSIST_DRAFTS_EVENT)
+    && window.dispatch_event(&event).is_err()
+  {
+    tracing::debug!("could not ask the composers for their drafts");
+  }
+  platform::sleep(Duration::from_millis(100)).await;
 }
 
 fn current_follower() -> Option<Rc<Follower>> {
@@ -639,6 +905,8 @@ fn notify_local() {
 enum Request {
   Status(oneshot::Sender<CoreStatus>),
   StoreHealth(oneshot::Sender<StoreHealth>),
+  /// Waits until IndexedDB has everything written so far (before another tab takes over).
+  Flush(oneshot::Sender<Result<(), String>>),
   /// The service worker saw the browser change the push subscription.
   CheckPush,
   Enroll(EnrollRequest, oneshot::Sender<Result<(), String>>),
@@ -1182,6 +1450,13 @@ impl Core {
         drop(reply.send(self.status.clone()));
       },
       Request::StoreHealth(reply) => drop(reply.send(self.store_health.clone())),
+      Request::Flush(reply) => {
+        let outcome = match self.store.as_ref() {
+          Some(store) => store.inner().flush().await.map_err(|error| error.to_string()),
+          None => Ok(()),
+        };
+        drop(reply.send(outcome));
+      },
       Request::CheckPush => self.maybe_push_check_at_ms = Some(i64::MIN),
       Request::Enroll(request, reply) => {
         let result = self.enroll(request).await;
@@ -1604,6 +1879,7 @@ impl Core {
     let (Some(backend), Some(store)) = (self.backend.as_ref(), self.store.as_ref()) else {
       return Err(not_set_up());
     };
+    crate::persisted_media::drop_renditions(store.take_removed_renditions());
     Ok(
       self
         .snapshots
@@ -1617,6 +1893,7 @@ impl Core {
       return Err(not_set_up());
     };
     let changes = store.take_changes();
+    crate::persisted_media::drop_renditions(store.take_removed_renditions());
     let mut maybe_security = None;
     let answer = self.snapshots.borrow_mut().changes_since(
       backend,
@@ -1747,6 +2024,15 @@ impl Core {
           .await
           .map_err(describe_failure);
       },
+      ChatAction::AdminDeleteUser { user } => {
+        return client.admin_delete_user(*user).await.map_err(describe_failure);
+      },
+      ChatAction::AdminRemoveGroupLeftover { conversation, user } => {
+        return client
+          .admin_remove_group_leftover(*conversation, *user)
+          .await
+          .map_err(describe_failure);
+      },
       _ => {},
     }
     let backend = self.backend.as_ref().ok_or_else(not_set_up)?;
@@ -1782,7 +2068,9 @@ impl Core {
       | ChatAction::PublishPolicy { .. }
       | ChatAction::PublishRoster { .. }
       | ChatAction::AdminJoinChannel { .. }
-      | ChatAction::AdminRemoveFromAllChats { .. } => {},
+      | ChatAction::AdminRemoveFromAllChats { .. }
+      | ChatAction::AdminDeleteUser { .. }
+      | ChatAction::AdminRemoveGroupLeftover { .. } => {},
       // Message actions, files and workspace management go to the backend, which queues what
       // needs the engine as commands.
       other => {

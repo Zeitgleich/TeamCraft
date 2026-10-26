@@ -21,8 +21,12 @@ enum Theme {
   static let badge = dynamic(light: 0xC8441F, dark: 0xC8441F)
   static let mentionBackground = dynamic(light: 0xFFF2CC, dark: 0x4A3B10)
   static let mentionText = dynamic(light: 0x6A4B00, dark: 0xFFD978)
-  /// Own messages.
-  static let ownBubble = accentSoft
+  /// Own message bubbles: the accent, a deeper shade of it in dark mode so white text stays
+  /// readable (4.5:1 and more in both).
+  static let ownBubble = dynamic(light: 0x005DFC, dark: 0x1F57C2)
+  static let onOwnBubble = Color.white
+  /// Other people's bubbles: a neutral tone that stands off the conversation's background.
+  static let otherBubble = dynamic(light: 0xE8EBF0, dark: 0x232B3B)
 
   static let radius: CGFloat = 12
   static let spacing: CGFloat = 12

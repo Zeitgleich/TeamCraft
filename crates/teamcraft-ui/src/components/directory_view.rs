@@ -2,12 +2,13 @@
 
 use leptos::prelude::*;
 use teamcraft_proto::{
-  CreateUserGroupRequest, ListUserGroupsResponse, Role, UserGroupDetailResponse, UserGroupId,
+  CreateUserGroupRequest, ListUserGroupsResponse, Permission, UserGroupDetailResponse, UserGroupId,
   UserGroupResponse,
 };
 
 use crate::auth::ApiMethod;
 use crate::calls::{CallKind, CallPhase, CallRequest};
+use crate::channel_access::can_in_workspace_now;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::compact_back::CompactBack;
 use crate::components::empty_state::EmptyState;
@@ -257,7 +258,10 @@ fn UserGroups() -> impl IntoView {
   let error = RwSignal::new(None::<String>);
   // Until the first answer the list shows placeholders, not "no groups".
   let is_loaded = RwSignal::new(false);
-  let is_admin = Memo::new(move |_| state.read(|backend| backend.my_role()).includes(&Role::Admin));
+  // The server asks for the workspace permissions `create_user_group` and
+  // `manage_user_group_members` (admins and owners in the built-in scheme).
+  let can_create = Memo::new(move |_| can_in_workspace_now(state, &Permission::CreateUserGroup));
+  let can_edit_members = Memo::new(move |_| can_in_workspace_now(state, &Permission::ManageUserGroupMembers));
 
   Effect::new(move |_| {
     reload.track();
@@ -320,7 +324,7 @@ fn UserGroups() -> impl IntoView {
                 {group.is_synced.then(|| view! { <span class="badge">{move || i18n.t("groups-synced")}</span> })}
               </button>
               <Show when=move || open.get() == Some(id) fallback=|| ()>
-                <GroupMembers group=id is_synced=group.is_synced can_edit=is_admin client=client reload=reload />
+                <GroupMembers group=id is_synced=group.is_synced can_edit=can_edit_members client=client reload=reload />
               </Show>
             </li>
           }
@@ -333,7 +337,7 @@ fn UserGroups() -> impl IntoView {
         <EmptyState icon=IconName::Users title_key="groups-empty-title" body_key="groups-empty" as_item=true />
       </Show>
     </ul>
-    <Show when=move || is_admin.get() fallback=|| ()>
+    <Show when=move || can_create.get() fallback=|| ()>
       <form class="inline-form" on:submit=create>
         <label class="visually-hidden" for="group-handle">{move || i18n.t("groups-handle")}</label>
         <input id="group-handle" class="input" placeholder=move || i18n.t("groups-handle") required pattern="[a-z0-9_-]+" prop:value=move || handle.get() on:input=move |ev| handle.set(event_target_value(&ev)) />

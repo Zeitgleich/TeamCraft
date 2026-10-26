@@ -188,6 +188,10 @@ impl PendingEnrollment {
       maybe_waiting_checked_at_ms: None,
       catch_up_focus: super::CatchUpFocus::default(),
       is_welcome_cursor_held: false,
+      sync_trace: Default::default(),
+      maybe_heads: None,
+      read_ahead: Default::default(),
+      maybe_last_heard_ms: None,
     };
     client.persist_sync()?;
     client.store_wrapped_keys_blob(&wrapped_keys)?;

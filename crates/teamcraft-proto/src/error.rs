@@ -18,6 +18,9 @@ wire_enum! {
     /// The account is deactivated (suspended by an admin or the identity provider); signing in is
     /// refused until it is reactivated.
     AccountDeactivated => "account_deactivated",
+    /// The token comes from a sign-in before the account was deleted (admin.md §3.2.1); signing
+    /// in again creates a new account.
+    AccountDeleted => "account_deleted",
     Forbidden => "forbidden",
     UserNotFound => "user_not_found",
     SpaceNotFound => "space_not_found",
@@ -50,6 +53,10 @@ wire_enum! {
     VersionConflict => "version_conflict",
     /// A roster change would leave the workspace without an owner (admin.md §2.3).
     LastOwner => "last_owner",
+    /// An admin can't delete their own account.
+    CannotDeleteSelf => "cannot_delete_self",
+    /// Deleting the account would leave the workspace without an active admin.
+    LastAdmin => "last_admin",
     /// A channel member must belong to the channel's space first (invite them to the space).
     NotSpaceMember => "not_space_member",
     KeyPackageExhausted => "key_package_exhausted",
@@ -114,6 +121,10 @@ pub struct ErrorBody {
   /// With `version_conflict`: the stored version of the versioned object (key bag, roster, policy).
   #[serde(rename = "current_version", default, skip_serializing_if = "Option::is_none")]
   pub maybe_current_version: Option<u64>,
+  /// With a 503 or 429: the `Retry-After` header's seconds, also in the body so every client
+  /// (including the browser, where a proxy may strip headers) can honour it.
+  #[serde(rename = "retry_after_secs", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_retry_after_secs: Option<u64>,
 }
 
 impl ErrorBody {
@@ -123,6 +134,7 @@ impl ErrorBody {
       message: message.into(),
       maybe_current_epoch: None,
       maybe_current_version: None,
+      maybe_retry_after_secs: None,
     }
   }
 
@@ -133,6 +145,11 @@ impl ErrorBody {
 
   pub fn with_current_version(mut self, version: u64) -> Self {
     self.maybe_current_version = Some(version);
+    self
+  }
+
+  pub fn with_retry_after_secs(mut self, seconds: u64) -> Self {
+    self.maybe_retry_after_secs = Some(seconds);
     self
   }
 }
@@ -165,6 +182,17 @@ mod tests {
     );
     let old: ErrorBody = serde_json::from_str(r#"{"error_code":"epoch_conflict","message":"x"}"#).unwrap();
     assert_eq!((old.maybe_current_epoch, old.maybe_current_version), (None, None));
+  }
+
+  #[test]
+  fn retry_after_is_in_the_body_only_when_set() {
+    let body = ErrorBody::new(ErrorCode::Unavailable, "later").with_retry_after_secs(30);
+    assert_eq!(
+      serde_json::to_string(&body).unwrap(),
+      r#"{"error_code":"unavailable","message":"later","retry_after_secs":30}"#
+    );
+    let old: ErrorBody = serde_json::from_str(r#"{"error_code":"unavailable","message":"x"}"#).unwrap();
+    assert_eq!(old.maybe_retry_after_secs, None);
   }
 
   #[test]
@@ -203,6 +231,7 @@ mod tests {
       ErrorCode::SessionTimedOut,
       ErrorCode::NoTeamcraftRole,
       ErrorCode::AccountDeactivated,
+      ErrorCode::AccountDeleted,
       ErrorCode::Forbidden,
       ErrorCode::UserNotFound,
       ErrorCode::SpaceNotFound,
@@ -232,6 +261,8 @@ mod tests {
       ErrorCode::EpochConflict,
       ErrorCode::VersionConflict,
       ErrorCode::LastOwner,
+      ErrorCode::CannotDeleteSelf,
+      ErrorCode::LastAdmin,
       ErrorCode::KeyPackageExhausted,
       ErrorCode::PayloadTooLarge,
       ErrorCode::RateLimited,

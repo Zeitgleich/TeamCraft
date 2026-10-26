@@ -683,6 +683,10 @@ impl RemoteChat {
           ticket.fail(failure.clone());
         }
         report_failure(failure);
+      } else {
+        // The user's own change shows as soon as the core has it (a sent message as pending),
+        // not after the debounce for the core's change events (#717).
+        backend.refresh().await;
       }
       backend.mark_answers_stale();
       backend.changed();
@@ -1442,6 +1446,14 @@ impl ChatBackend for RemoteChat {
 
   fn admin_remove_from_all_chats(&self, user: UserId) {
     self.act(ChatAction::AdminRemoveFromAllChats { user });
+  }
+
+  fn admin_delete_user(&self, user: UserId) {
+    self.act(ChatAction::AdminDeleteUser { user });
+  }
+
+  fn admin_remove_group_leftover(&self, conversation: ConversationId, user: UserId) {
+    self.act(ChatAction::AdminRemoveGroupLeftover { conversation, user });
   }
 
   fn last_action_error(&self) -> Option<String> {

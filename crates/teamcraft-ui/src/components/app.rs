@@ -9,15 +9,14 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
 use crate::areas::{self, Place, lazy_area};
-use crate::attention::{AttentionReporter, AttentionSignals, is_attentive, last_activity_at};
+use crate::attention::{AttentionReporter, AttentionSignals, LockReading, is_attentive, last_activity_at};
 use crate::auth::tauri;
 use crate::backend::Backend;
 use crate::calls::CallPhase;
 use crate::calls::{BackgroundEffect, CallEvent, CallRequest, CallStatusSounds};
 use crate::clock::now_ms;
-use crate::components::activity_view::ActivityView;
+use crate::components::activity_view::{ActivityHome, ActivitySidebar};
 use crate::components::announcement_banner::AnnouncementBanner;
-use crate::components::bookmarks::BookmarksDialog;
 use crate::components::bottom_nav::BottomNav;
 use crate::components::bundle_banner::{BundleBanner, ReleaseBanner};
 use crate::components::calls_unavailable::CallsUnavailableDialog;
@@ -34,26 +33,21 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::incoming_call::IncomingCallDialog;
 use crate::components::link_request_prompt::LinkRequestPrompt;
 use crate::components::members_panel::MembersPanel;
-use crate::components::message_actions::{EditHistoryDialog, ForwardDialog, PinsPanel, SavedView};
+use crate::components::message_actions::{PinsPanel, SavedView};
 use crate::components::notification_prompt::NotificationPrompt;
 use crate::components::offline_banner::OfflineBanner;
 use crate::components::profile_views::UserProfileDialog;
-use crate::components::quick_switcher::QuickSwitcher;
 use crate::components::rail::SpaceRail;
-use crate::components::security_ui::{
-  DeviceApprovalDialog, LinkDeviceDialog, VerifyContactDialog, VerifyKeyDialog,
-};
-use crate::components::settings_modal::ShortcutsModal;
+use crate::components::roster_banner::RosterBanner;
+use crate::components::security_ui::{DeviceApprovalDialog, LinkDeviceDialog};
 use crate::components::settings_tabs::apply_call_prefs;
 #[cfg(target_arch = "wasm32")]
 use crate::components::share_download::ShareDownloadPage;
-use crate::components::share_link_dialog::ShareLinkDialog;
 use crate::components::sidebar::Sidebar;
 use crate::components::status_menu::CustomStatusDialog;
 use crate::components::status_menu::StatusMenu;
 use crate::components::storage_banner::StorageBanner;
 use crate::components::thread_panel::ThreadPanel;
-use crate::components::threads_inbox::ThreadsInbox;
 use crate::components::top_bar::TopBar;
 use crate::components::update_notice::UpdateNotice;
 use crate::components::window_controls::{WindowControls, provide_window_chrome};
@@ -161,6 +155,12 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   let link_menu = RwSignal::new(None::<crate::external_links::LinkMenuTarget>);
   provide_context(link_menu);
   crate::external_links::start(link_menu);
+  provide_context(RwSignal::new(
+    None::<crate::components::attachment_menu::AttachmentMenuTarget>,
+  ));
+  if tauri::is_available() {
+    report_webview_downloads(state, i18n);
+  }
   if tauri::has_core() {
     crate::os_alerts::start(state, i18n);
   }
@@ -234,6 +234,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   // that sets the same view again (the router after a click, a notification of the open
   // conversation) would otherwise mount it anew and play its entrance from the start.
   let main_view = Memo::new(move |_| state.view.get());
+  // The sidebar mounts again only when the place changes, not on every conversation opened.
+  let rail = Memo::new(move |_| state.rail.get());
   let side_panel = Memo::new(move |_| state.panel.get());
   let open_conversation = Memo::new(move |_| match main_view.get() {
     MainView::Conversation(id) => Some(id),
@@ -248,7 +250,11 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       class="app"
       data-pane=move || state.compact_pane().slug()
       data-nav=move || pane_step.get().2.slug()
-      data-rail=move || if state.rail.get() == RailEntry::Chats { "home" } else { "space" }
+      data-rail=move || match state.rail.get() {
+        RailEntry::Chats => "home",
+        RailEntry::Space => "space",
+        RailEntry::Activity => "activity",
+      }
       class:has-bottom-nav=move || has_bottom_nav(state)
     >
       // One grid row for all banners, so the top bar and the body keep their own rows.
@@ -257,6 +263,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         <ReleaseBanner />
         <OfflineBanner />
         <StorageBanner />
+        <RosterBanner />
         <NotificationPrompt />
         <AnnouncementBanner />
         <UpdateNotice />
@@ -273,20 +280,22 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         // The administration console takes the whole window, like a system console.
         <Show when=move || !matches!(state.view.get(), MainView::Admin(_)) fallback=|| ()>
           <SpaceRail />
-          <Show when=move || state.rail.get() == RailEntry::Chats fallback=|| view! { <Sidebar /> }>
-            <HomeSidebar />
-          </Show>
+          // The sidebar is the selected place's list: Chats, a space or Activity (#752).
+          {move || match rail.get() {
+            RailEntry::Chats => view! { <HomeSidebar /> }.into_any(),
+            RailEntry::Space => view! { <Sidebar /> }.into_any(),
+            RailEntry::Activity => view! { <ActivitySidebar /> }.into_any(),
+          }}
         </Show>
         <main id="main-content" class="main" tabindex="-1">
           {move || match main_view.get() {
             MainView::Conversation(id) => view! { <ChannelView conversation=id /> }.into_any(),
-            MainView::Threads => view! { <ThreadsInbox /> }.into_any(),
             MainView::Admin(section) => lazy_area(Place::Pane, move || areas::admin_console(section)),
             MainView::Search => lazy_area(Place::Pane, || areas::search(())),
             MainView::Meetings => lazy_area(Place::Pane, || areas::meetings(())),
             MainView::Saved => view! { <SavedView /> }.into_any(),
             MainView::Files => view! { <FilesView /> }.into_any(),
-            MainView::Activity => view! { <ActivityView /> }.into_any(),
+            MainView::Activity => view! { <ActivityHome /> }.into_any(),
             MainView::Calls => view! { <CallsView /> }.into_any(),
             MainView::Directory => lazy_area(Place::Pane, || areas::directory(())),
             MainView::GettingStarted => view! { <GettingStarted /> }.into_any(),
@@ -321,6 +330,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         <StatusMenu />
       </Show>
       <crate::components::link_menu::LinkMenu />
+      <crate::components::attachment_menu::AttachmentMenu />
       {move || match state.call.phase.get() {
         CallPhase::PreJoin => {
           state.call.maybe_request.get().map(|request| lazy_area(Place::Screen, move || areas::call_prejoin(request)))
@@ -390,21 +400,21 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         </For>
       </div>
       {move || match state.overlay.get() {
-        Overlay::QuickSwitcher => view! { <QuickSwitcher /> }.into_any(),
+        Overlay::QuickSwitcher => lazy_area(Place::Overlay, || areas::quick_switcher(())),
         Overlay::CustomStatus => view! { <CustomStatusDialog /> }.into_any(),
         Overlay::Settings => lazy_area(Place::Overlay, || areas::settings(())),
-        Overlay::Shortcuts => view! { <ShortcutsModal /> }.into_any(),
+        Overlay::Shortcuts => lazy_area(Place::Overlay, || areas::shortcuts(())),
         Overlay::DeviceApproval => view! { <DeviceApprovalDialog /> }.into_any(),
         Overlay::LinkDevice => view! { <LinkDeviceDialog /> }.into_any(),
-        Overlay::VerifyContact(user) => view! { <VerifyContactDialog user=user /> }.into_any(),
-        Overlay::VerifyKey(conversation) => view! { <VerifyKeyDialog conversation=conversation /> }.into_any(),
+        Overlay::VerifyContact(user) => lazy_area(Place::Overlay, move || areas::verify_contact(user)),
+        Overlay::VerifyKey(conversation) => lazy_area(Place::Overlay, move || areas::verify_key(conversation)),
         Overlay::ScheduleMeeting => lazy_area(Place::Overlay, || areas::schedule_meeting(())),
         Overlay::EditMeeting(meeting) => lazy_area(Place::Overlay, move || areas::edit_meeting(meeting)),
         Overlay::MeetingCreated => lazy_area(Place::Overlay, || areas::meeting_created(())),
         Overlay::ShareFile(conversation, message, file) => {
-          view! { <ShareLinkDialog conversation=conversation message=message file=file /> }.into_any()
+          lazy_area(Place::Overlay, move || areas::share_file(conversation, message, file))
         },
-        Overlay::Forward(from, message) => view! { <ForwardDialog from=from message=message /> }.into_any(),
+        Overlay::Forward(from, message) => lazy_area(Place::Overlay, move || areas::forward(from, message)),
         Overlay::Lightbox(conversation, start) => lazy_area(Place::Overlay, move || areas::lightbox(conversation, start)),
         Overlay::FilePreview(conversation, key) => lazy_area(Place::Overlay, move || areas::file_preview(conversation, key)),
         Overlay::NewSpace => lazy_area(Place::Overlay, || areas::new_space(())),
@@ -417,11 +427,14 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::BrowseChannels(space) => lazy_area(Place::Overlay, move || areas::browse_channels(space)),
         Overlay::ChannelSettings(id) => lazy_area(Place::Overlay, move || areas::channel_settings(id)),
         Overlay::SpaceSettings(space) => lazy_area(Place::Overlay, move || areas::space_settings(space)),
-        Overlay::EditHistory(conversation, message) => view! { <EditHistoryDialog conversation=conversation message=message /> }.into_any(),
-        Overlay::Bookmarks(conversation) => view! { <BookmarksDialog conversation=conversation /> }.into_any(),
+        Overlay::EditHistory(conversation, message) => {
+          lazy_area(Place::Overlay, move || areas::edit_history(conversation, message))
+        },
+        Overlay::Bookmarks(conversation) => lazy_area(Place::Overlay, move || areas::bookmarks(conversation)),
         Overlay::UserProfile(user) => view! { <UserProfileDialog user=user /> }.into_any(),
         Overlay::CallsUnavailable => view! { <CallsUnavailableDialog /> }.into_any(),
-        Overlay::None | Overlay::StatusMenu => ().into_any(),
+        // The admin console renders its own dialog, in its part of the app.
+        Overlay::None | Overlay::StatusMenu | Overlay::DeleteUser(_) => ().into_any(),
       }}
     </div>
   }
@@ -766,8 +779,38 @@ fn sync_tray_labels(i18n: crate::i18n::I18n) {
   Effect::new(move |_| {
     let name = brand.0.with(|brand| brand.display_name.clone());
     let (show, quit) = (i18n.t("tray-show"), i18n.t("tray-quit"));
-    leptos::task::spawn_local(async move { tauri::tray_update(None, &name, &show, &quit).await });
+    let menu = menu_bar_labels(i18n, &name);
+    leptos::task::spawn_local(async move { tauri::tray_update(None, &name, &show, &quit, Some(menu)).await });
   });
+}
+
+/// The macOS menu bar's texts in the UI language (#712), as the desktop shell's `AppMenuLabels`.
+fn menu_bar_labels(i18n: crate::i18n::I18n, name: &str) -> serde_json::Value {
+  let plain = |key: &str| i18n.t(key);
+  let named = |key: &str| i18n.t_with(key, &[("name", name)]);
+  serde_json::json!({
+    "about": named("menubar-about"),
+    "services": plain("menubar-services"),
+    "hide": named("menubar-hide"),
+    "hide_others": plain("menubar-hide-others"),
+    "show_all": plain("menubar-show-all"),
+    "quit": named("menubar-quit"),
+    "file": plain("menubar-file"),
+    "close_window": plain("menubar-close-window"),
+    "edit": plain("menubar-edit"),
+    "undo": plain("menubar-undo"),
+    "redo": plain("menubar-redo"),
+    "cut": plain("menubar-cut"),
+    "copy": plain("menubar-copy"),
+    "paste": plain("menubar-paste"),
+    "select_all": plain("menubar-select-all"),
+    "view": plain("menubar-view"),
+    "fullscreen": plain("menubar-fullscreen"),
+    "window": plain("menubar-window"),
+    "minimize": plain("menubar-minimize"),
+    "zoom": plain("menubar-zoom"),
+    "help": plain("menubar-help"),
+  })
 }
 
 /// The browser tab's icon gets a red dot while the tray would show a count.
@@ -786,6 +829,29 @@ fn sync_favicon(state: AppState) {
       crate::brand::show_unread_in_favicon(has_unread);
     }
     has_unread
+  });
+}
+
+/// A download the webview started by itself (the shell saves it in the downloads folder, #719)
+/// says where it went, or that it failed, instead of vanishing.
+fn report_webview_downloads(state: AppState, i18n: crate::i18n::I18n) {
+  #[derive(serde::Deserialize)]
+  struct Outcome {
+    is_saved: bool,
+    maybe_name: Option<String>,
+  }
+  tauri::listen_text("webview-download-finished", move |text| {
+    let Ok(outcome) = serde_json::from_str::<Outcome>(&text) else {
+      return;
+    };
+    match (outcome.is_saved, outcome.maybe_name) {
+      (true, Some(name)) => state.show_brief_toast(i18n.t_with("webview-download-saved", &[("name", &name)])),
+      (true, None) => state.show_brief_toast(i18n.t("webview-download-saved-unnamed")),
+      (false, _) => state.show_error(
+        i18n.t("webview-download-failed"),
+        "the webview's download did not finish".to_owned(),
+      ),
+    }
   });
 }
 
@@ -816,9 +882,9 @@ fn sync_tray(state: AppState, i18n: crate::i18n::I18n) {
         ),
       };
       let (show, quit) = (i18n.t("tray-show"), i18n.t("tray-quit"));
-      leptos::task::spawn_local(
-        async move { tauri::tray_update(Some(unread), &tooltip, &show, &quit).await },
-      );
+      leptos::task::spawn_local(async move {
+        tauri::tray_update(Some(unread), &tooltip, &show, &quit, None).await
+      });
     }
     current
   });
@@ -1083,9 +1149,9 @@ const REMINDER_CHECK_MS: u64 = 15_000;
 /// Rounding noise in the OS idle time that is not new input.
 const OS_ACTIVITY_TOLERANCE_MS: TimestampMs = 1_000;
 const MS_PER_MINUTE: f64 = 60_000.0;
-/// While the window is in front, input repeats "active" at most this often: half the shortest
-/// away timeout the workspace policy allows (a minute), so a user who only scrolls or reads with
-/// the mouse never times out, and the next input after an automatic away ends it at once.
+/// Input repeats "active" at most this often: half the shortest away timeout the workspace policy
+/// allows (a minute), so a user who only scrolls or reads with the mouse never times out, and the
+/// next input after an automatic away ends it at once.
 const ACTIVE_REPEAT_MS: TimestampMs = 30_000;
 
 /// What the activity watcher keeps between events.
@@ -1098,6 +1164,7 @@ struct ActivityWatch {
   last_active_report_at: Cell<TimestampMs>,
   is_idle: Cell<bool>,
   maybe_os: Cell<Option<tauri::OsAttention>>,
+  lock: Cell<LockReading>,
   reporter: RefCell<AttentionReporter>,
 }
 
@@ -1113,6 +1180,7 @@ fn watch_activity(state: AppState) {
     last_active_report_at: Cell::new(now_ms()),
     is_idle: Cell::new(false),
     maybe_os: Cell::new(None),
+    lock: Cell::new(LockReading::default()),
     reporter: RefCell::new(AttentionReporter::default()),
   });
   for event in ["pointermove", "pointerdown", "keydown", "touchstart", "wheel"] {
@@ -1145,6 +1213,7 @@ fn watch_activity(state: AppState) {
       if let Some(os) = tauri::os_attention().await {
         // async-ok: a Cell the task shares, not a signal.
         watch.maybe_os.set(Some(os));
+        watch.update_lock(|lock| lock.observe(os.is_locked));
         watch.on_os_state();
         watch.check();
       }
@@ -1153,16 +1222,25 @@ fn watch_activity(state: AppState) {
 }
 
 impl ActivityWatch {
-  /// Pointer, key, wheel or touch input. Ends this device's idle at once; while the window is in
-  /// front it also repeats "active" now and then, which ends an away timeout of the server.
+  /// Pointer, key, wheel or touch input. Ends this device's idle at once and repeats "active" now
+  /// and then, which keeps the server's away timeout from striking. The repeat doesn't wait for
+  /// the window to count as in front: input that reaches it means the user is there, and a focus
+  /// state the webview reports wrongly made users away while they chatted (issue #720).
   fn on_input(&self) {
     let now = now_ms();
     self.last_input_at.set(now);
+    self.update_lock(LockReading::on_app_input);
     let is_repeat_due = now.saturating_sub(self.last_active_report_at.get()) >= ACTIVE_REPEAT_MS;
-    if self.is_idle.replace(false) || (is_repeat_due && is_in_front()) {
+    if self.is_idle.replace(false) || is_repeat_due {
       self.report_active(now);
     }
     self.check();
+  }
+
+  fn update_lock(&self, change: impl FnOnce(&mut LockReading)) {
+    let mut lock = self.lock.get();
+    change(&mut lock);
+    self.lock.set(lock);
   }
 
   /// The window was focused or became visible: the user turned to the app, which counts as input.
@@ -1187,7 +1265,7 @@ impl ActivityWatch {
     let idle = maybe_os
       .and_then(|os| os.maybe_idle_ms)
       .map(Duration::from_millis);
-    let is_locked = maybe_os.is_some_and(|os| os.is_locked);
+    let is_locked = self.lock.get().is_locked();
     let Some(active_at) = last_activity_at(now, self.last_input_at.get(), idle, is_locked) else {
       // Away at once, unless the user turned automatic away off.
       if self
@@ -1249,7 +1327,7 @@ impl ActivityWatch {
       maybe_os_idle: maybe_os
         .and_then(|os| os.maybe_idle_ms)
         .map(Duration::from_millis),
-      is_screen_locked: maybe_os.is_some_and(|os| os.is_locked),
+      is_screen_locked: self.lock.get().is_locked(),
     };
     let window = Duration::from_secs(u64::from(notes.attention_input_secs));
     self.report(is_attentive(&signals, now_ms(), window));

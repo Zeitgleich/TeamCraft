@@ -11,6 +11,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
+use crate::channel_access::ChannelAccess;
 use crate::clock::{format_date, now_ms};
 use crate::components::date_jump::{DateJumpMenu, DateJumpPopover, DatePill};
 use crate::components::empty_state::{EmptyAction, EmptyState};
@@ -22,7 +23,7 @@ use crate::feed_motion::{FeedMotion, Shown, newest_confirmed};
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, ConversationKind, Message, as_chat_message};
 use crate::reactive::SetIfAlive;
-use crate::state::{Overlay, use_app_state};
+use crate::state::{AppState, Overlay, use_app_state};
 use crate::unread_divider::{DividerEvent, DwellClock, ReadMarkerGate};
 
 /// Extra pixels rendered above and below the viewport.
@@ -167,6 +168,12 @@ pub fn MessageList(
     .get_untracked()
     .filter(|(target, _)| *target == conversation)
     .map(|(_, index)| index);
+  // The desktop app reopened where the reader was when it closed (#721).
+  if let Some(index) = state.take_restored_reading(conversation) {
+    state.scroll_anchors.update_value(|anchors| {
+      anchors.insert(conversation, index);
+    });
+  }
   // Otherwise return to where the reader was when they left this conversation scrolled up.
   let maybe_saved_anchor = maybe_marker
     .is_none()
@@ -459,6 +466,7 @@ pub fn MessageList(
       move || {
         if scroll_generation.try_get_value() == generation {
           is_scrolling.set_if_alive(false);
+          remember_reading(state, conversation, stick_to_bottom, window);
         }
       },
       FLOATING_DAY_LINGER,
@@ -513,6 +521,8 @@ pub fn MessageList(
       .read(|backend| backend.conversation(conversation))
       .is_some_and(|conv| conv.kind == ConversationKind::Direct)
   };
+  // Offered to people who may add members only.
+  let access = ChannelAccess::new(state, conversation);
   let is_alone_in_channel = move || {
     state
       .read(|backend| backend.conversation(conversation))
@@ -520,6 +530,7 @@ pub fn MessageList(
         matches!(conv.kind, ConversationKind::Public | ConversationKind::Private)
           && conv.member_ids.len() <= 1
       })
+      && access.can_add_members()
   };
 
   view! {
@@ -561,7 +572,16 @@ pub fn MessageList(
               label_key: "channel-add-people",
               on_click: Callback::new(move |()| state.overlay.set(Overlay::AddToChannel(conversation))),
             });
-            view! { <EmptyState icon=IconName::Smile title_key="channel-empty-title" body_key="channel-empty" maybe_action=maybe_action /> }
+            // The notes to self have nobody to greet (#699).
+            let is_notes = state
+              .read(|backend| backend.conversation(conversation))
+              .is_some_and(|conv| conv.is_notes_to_self);
+            let (icon, title_key, body_key) = if is_notes {
+              (IconName::Compose, "notes-empty-title", "notes-empty")
+            } else {
+              (IconName::Smile, "channel-empty-title", "channel-empty")
+            };
+            view! { <EmptyState icon=icon title_key=title_key body_key=body_key maybe_action=maybe_action /> }
           }}
         </Show>
         <div class="spacer" style:height=move || format!("{}px", window.get().pad_top)></div>
@@ -601,6 +621,34 @@ pub fn MessageList(
 /// remount of this list (layout change, thread pane) keeps it. One timer, only while the user sits
 /// at the bottom with a divider shown; it is cancelled when that ends or the list goes away. The
 /// read marker doesn't wait for the divider: see [`mark_read_while_watched`].
+/// The desktop app reopens at this position (#721): the top message while the reader is scrolled
+/// up, nothing while they follow the newest. Saved once scrolling has settled.
+fn remember_reading(
+  state: AppState,
+  conversation: ConversationId,
+  stick_to_bottom: RwSignal<bool>,
+  window: Memo<Window>,
+) {
+  if !crate::auth::tauri::is_available() {
+    return;
+  }
+  let (Some(is_following), Some(window)) = (stick_to_bottom.try_get_untracked(), window.try_get_untracked())
+  else {
+    return;
+  };
+  let maybe_message = match is_following {
+    true => None,
+    // async-ok: the app state outlives every feed.
+    false => state
+      .read(|backend| backend.messages(conversation, window.first_visible, 1))
+      .first()
+      .map(|message| message.id),
+  };
+  // async-ok: the app state outlives every feed.
+  let user = state.me().id;
+  crate::last_place::remember_reading(user, conversation, maybe_message);
+}
+
 fn track_unread_divider(conversation: ConversationId, count: Memo<usize>, is_at_bottom: RwSignal<bool>) {
   let state = use_app_state();
   let is_focused = RwSignal::new(is_window_focused());

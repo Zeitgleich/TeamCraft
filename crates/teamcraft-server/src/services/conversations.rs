@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::json;
 use teamcraft_db::{
@@ -8,12 +8,13 @@ use teamcraft_db::{
 use teamcraft_proto::{
   ConversationId, ConversationKind, ConversationResponse, ConversationVisibility, ConvertChannelRequest,
   CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, GatewayEvent, HistoryPolicy,
-  ListConversationsQuery, ListConversationsResponse, MoveChannelRequest, Permission, SpaceId,
+  ListConversationsQuery, ListConversationsResponse, MoveChannelRequest, Permission, SpaceId, SpaceRole,
   SystemEventKind, Target, UpdateConversationRequest, UserId,
 };
 
 use super::access::{
-  ConversationAccess, is_guest, is_instance_admin, load_conversation, load_space, require, space_target,
+  ConversationAccess, channel_permissions, channel_target, is_guest, is_instance_admin, load_conversation,
+  load_space, require, space_target,
 };
 use super::audit::{self, Target as AuditTarget};
 use super::convert::{ConversationExtras, conversation_response};
@@ -40,7 +41,8 @@ pub async fn list_conversations(
       .maybe_space_id
       .ok_or_else(|| ApiError::InvalidRequest("joinable needs space_id".into()))?;
     let access = load_space(state, caller, space).await?;
-    if is_guest(caller) || access.view.maybe_role.is_none() {
+    let is_admin = is_instance_admin(caller);
+    if is_guest(caller) || (access.view.maybe_role.is_none() && !is_admin) {
       return Err(ApiError::Forbidden(
         "the channel browser is for members of the space".into(),
       ));
@@ -48,6 +50,9 @@ pub async fn list_conversations(
     ConversationFilter {
       maybe_space: Some(space),
       only_joinable: true,
+      // Admins may join private channels by themselves (admin.md §2.4); members' clients decide by
+      // the signed policy and the signed roster whether that join is let in.
+      includes_private: is_admin,
       ..ConversationFilter::default()
     }
   } else {
@@ -58,8 +63,35 @@ pub async fn list_conversations(
     }
   };
   let views = state.database.list_conversations(caller.user.id, &filter).await?;
+  let mut conversations = respond_all(state, &views).await?;
+  let mut space_roles: HashMap<SpaceId, Option<SpaceRole>> = HashMap::new();
+  for (view, response) in views.iter().zip(conversations.iter_mut()) {
+    let maybe_space_role = match view.conversation.maybe_space_id {
+      Some(space) => match space_roles.get(&space) {
+        Some(role) => role.clone(),
+        None => {
+          let role = state.database.space_role(space, caller.user.id).await?;
+          space_roles.insert(space, role.clone());
+          role
+        },
+      },
+      None => None,
+    };
+    response.maybe_my_permissions = Some(channel_permissions(
+      state,
+      caller,
+      &channel_target(view, maybe_space_role),
+    ));
+  }
+  // Only with the user's own list: the channel browser lists other conversations.
+  let deleted_conversation_ids = if filter.only_joined {
+    state.database.deleted_conversations_of(caller.user.id).await?
+  } else {
+    Vec::new()
+  };
   Ok(ListConversationsResponse {
-    conversations: respond_all(state, &views).await?,
+    conversations,
+    deleted_conversation_ids,
   })
 }
 
@@ -70,6 +102,7 @@ pub async fn get_conversation(
 ) -> Result<ConversationResponse, ApiError> {
   let access = load_conversation(state, caller, id).await?;
   let mut response = respond(state, &access.view).await?;
+  response.maybe_my_permissions = Some(channel_permissions(state, caller, &access.target()));
   if response.kind == ConversationKind::Meeting {
     response.maybe_organizer_user_id = state
       .database
@@ -585,9 +618,8 @@ async fn open_participants_conversation(
       &GatewayEvent::ConversationUpdate { conversation_id: id },
     );
   }
-  let access = load_conversation(state, caller, id).await?;
   Ok(Created {
-    value: respond(state, &access.view).await?,
+    value: get_conversation(state, caller, id).await?,
     is_new,
   })
 }

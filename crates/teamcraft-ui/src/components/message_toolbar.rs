@@ -13,6 +13,7 @@ use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
+use crate::channel_access::ChannelAccess;
 use crate::components::emoji_picker::EmojiPicker;
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_actions::{
@@ -275,7 +276,10 @@ fn ToolbarBar(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
   });
   // Ask for the permalink now so that "Copy link" has it by the time it is used.
   state.read(|backend| drop(backend.permalink(conversation, id)));
-  let context = move || ActionContext::new(is_mine, in_thread, extras.get().as_ref());
+  let access = ChannelAccess::new(state, conversation);
+  let permissions = Memo::new(move |_| access.message_permissions());
+  let can_react = move || permissions.get().can_react;
+  let context = move || ActionContext::new(is_mine, in_thread, extras.get().as_ref(), permissions.get());
   let is_saved = move || extras.get().is_some_and(|extras| extras.is_saved);
   let react_button = NodeRef::<html::Button>::new();
   let more_button = NodeRef::<html::Button>::new();
@@ -294,6 +298,9 @@ fn ToolbarBar(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
     state.write(|backend| backend.toggle_reaction(conversation, id, emoji));
   };
   let quick_reactions = move || {
+    if !can_react() {
+      return Vec::new();
+    }
     let mut list = state.settings.recent_emoji.get();
     for emoji in DEFAULT_QUICK_REACTIONS {
       if !list.iter().any(|recent| recent == emoji) {
@@ -367,18 +374,20 @@ fn ToolbarBar(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
           }
         }
       </For>
-      <button
-        class="icon-btn"
-        node_ref=react_button
-        aria-label=label("action-react", Some("E"))
-        title=label("action-react", Some("E"))
-        aria-haspopup="dialog"
-        aria-expanded=move || (host.open.get() == OpenMenu::EmojiPicker).to_string()
-        on:click=move |_| host.open.set(OpenMenu::EmojiPicker)
-      >
-        <Icon name=IconName::Smile />
-      </button>
-      <span class="msg-toolbar-sep" aria-hidden="true"></span>
+      <Show when=can_react fallback=|| ()>
+        <button
+          class="icon-btn"
+          node_ref=react_button
+          aria-label=label("action-react", Some("E"))
+          title=label("action-react", Some("E"))
+          aria-haspopup="dialog"
+          aria-expanded=move || (host.open.get() == OpenMenu::EmojiPicker).to_string()
+          on:click=move |_| host.open.set(OpenMenu::EmojiPicker)
+        >
+          <Icon name=IconName::Smile />
+        </button>
+        <span class="msg-toolbar-sep" aria-hidden="true"></span>
+      </Show>
       {(!in_thread).then(|| view! {
         <button
           class="icon-btn"
@@ -597,30 +606,36 @@ fn ActionSheet(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
   }
   quick.truncate(QUICK_REACTION_COUNT + 2);
   let (is_mine, in_thread) = (active.is_mine, active.in_thread);
+  let access = ChannelAccess::new(state, conversation);
+  let permissions = Memo::new(move |_| access.message_permissions());
+  // Reactions only where the user may react (`add_reaction`, which channels can take away).
+  let can_react = untrack(|| permissions.get().can_react);
   let actions = NodeRef::<html::Div>::new();
   let picker_button = NodeRef::<html::Button>::new();
   let is_picking = RwSignal::new(false);
   view! {
     <Sheet class="action-sheet" label=Signal::derive(move || i18n.t("message-action-sheet")) on_close=Callback::new(move |()| close())>
-      <div class="sheet-reactions">
-        {quick
-          .into_iter()
-          .map(|emoji| {
-            let label = i18n.t_with("action-react-with", &[("emoji", &emoji)]);
-            let chosen = emoji.clone();
-            view! { <button class="sheet-reaction" aria-label=label on:click=move |_| react(&chosen)>{emoji}</button> }
-          })
-          .collect_view()}
-        <button
-          class="sheet-reaction"
-          node_ref=picker_button
-          aria-label=move || i18n.t("action-react")
-          aria-haspopup="dialog"
-          on:click=move |_| is_picking.set(true)
-        >
-          <Icon name=IconName::Smile />
-        </button>
-      </div>
+      {can_react.then(|| view! {
+        <div class="sheet-reactions">
+          {quick
+            .into_iter()
+            .map(|emoji| {
+              let label = i18n.t_with("action-react-with", &[("emoji", &emoji)]);
+              let chosen = emoji.clone();
+              view! { <button class="sheet-reaction" aria-label=label on:click=move |_| react(&chosen)>{emoji}</button> }
+            })
+            .collect_view()}
+          <button
+            class="sheet-reaction"
+            node_ref=picker_button
+            aria-label=move || i18n.t("action-react")
+            aria-haspopup="dialog"
+            on:click=move |_| is_picking.set(true)
+          >
+            <Icon name=IconName::Smile />
+          </button>
+        </div>
+      })}
       {move || {
         is_picking
           .get()
@@ -639,7 +654,7 @@ fn ActionSheet(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
       }}
       <div class="sheet-actions" role="menu" node_ref=actions on:keydown=move |ev| move_in_menu(&ev, actions)>
         {move || {
-          message_actions(ActionContext::new(is_mine, in_thread, extras.get().as_ref()), ActionSurface::Sheet)
+          message_actions(ActionContext::new(is_mine, in_thread, extras.get().as_ref(), permissions.get()), ActionSurface::Sheet)
             .into_iter()
             .map(|action| view! { <ActionItem action=action on_run=Callback::new(run) /> })
             .collect_view()

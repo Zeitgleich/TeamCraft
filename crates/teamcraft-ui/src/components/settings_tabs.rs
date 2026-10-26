@@ -5,7 +5,7 @@
 
 use leptos::prelude::*;
 use teamcraft_client_api::calls::CallStatusSounds;
-use teamcraft_client_api::window_chrome::TitleBar;
+use teamcraft_client_api::window_chrome::{TitleBar, TrayIconStyle, WindowPlatform};
 
 use crate::auth::tauri;
 use crate::components::background_picker::{BackgroundPicker, effect_from_slug, effect_slug};
@@ -21,8 +21,15 @@ use crate::i18n::{Locale, use_i18n};
 use crate::keys::t_with_shortcuts;
 use crate::prefs::{CallPrefs, Density, ImageSize, SidebarSort, TextSize, Zoom};
 use crate::reactive::SetIfAlive;
-use crate::settings::{SendMode, Theme};
+use crate::settings::{MediaCacheLimit, MediaCacheMaxAge, SendMode, Theme};
 use crate::state::use_app_state;
+
+/// The tray icon styles' values in the settings' choices (their wire names).
+const TRAY_ICON_SLUGS: [(TrayIconStyle, &str); 3] = [
+  (TrayIconStyle::Colour, "colour"),
+  (TrayIconStyle::White, "white"),
+  (TrayIconStyle::Black, "black"),
+];
 
 #[component]
 pub fn AppearanceSection() -> impl IntoView {
@@ -258,6 +265,8 @@ pub fn PreferencesSection() -> impl IntoView {
   let i18n = use_i18n();
   let settings = state.settings;
   let prefs = settings.prefs;
+  let media_cache_limit = RwSignal::new(MediaCacheLimit::load());
+  let media_cache_max_age = RwSignal::new(MediaCacheMaxAge::load());
   let language_options: Vec<(String, String)> = Locale::ALL
     .into_iter()
     .map(|locale| (locale.tag().to_owned(), format!("language-{}", locale.tag())))
@@ -338,6 +347,37 @@ pub fn PreferencesSection() -> impl IntoView {
         })
       />
     </SettingsCard>
+    <SettingsCard heading="settings-storage">
+      <SelectRow
+        label="settings-media-cache"
+        hint="settings-media-cache-hint"
+        options=slug_options(
+          &MediaCacheLimit::ALL.map(MediaCacheLimit::slug),
+          "settings-media-cache-",
+        )
+        value=Signal::derive(move || media_cache_limit.get().slug().to_owned())
+        on_change=Callback::new(move |slug: String| {
+          if let Some(limit) = MediaCacheLimit::from_slug(&slug) {
+            limit.save();
+            media_cache_limit.set(limit);
+          }
+        })
+      />
+      <SelectRow
+        label="settings-media-cache-age"
+        options=slug_options(
+          &MediaCacheMaxAge::ALL.map(MediaCacheMaxAge::slug),
+          "settings-media-cache-age-",
+        )
+        value=Signal::derive(move || media_cache_max_age.get().slug().to_owned())
+        on_change=Callback::new(move |slug: String| {
+          if let Some(age) = MediaCacheMaxAge::from_slug(&slug) {
+            age.save();
+            media_cache_max_age.set(age);
+          }
+        })
+      />
+    </SettingsCard>
     {tauri::is_available().then(|| view! { <DesktopCard /> })}
   }
 }
@@ -351,10 +391,16 @@ fn DesktopCard() -> impl IntoView {
   let autostart = RwSignal::new(None::<bool>);
   // Hidden where the system can't start the app at login; shown (and waiting) until that is known.
   let is_autostart_supported = RwSignal::new(true);
+  // The tray icon's look can be chosen on Linux and Windows; macOS colours its template icon itself.
+  let has_tray_icon_style = RwSignal::new(false);
   let saving_prefs = PendingAction::new();
   let saving_autostart = PendingAction::new();
   leptos::task::spawn_local(async move {
     prefs.set_if_alive(tauri::shell_prefs().await);
+    let is_mac = tauri::window_chrome()
+      .await
+      .is_none_or(|chrome| chrome.platform == WindowPlatform::Macos);
+    has_tray_icon_style.set_if_alive(!is_mac);
     match tauri::autostart().await {
       Ok(Some(is_on)) => autostart.set_if_alive(Some(is_on)),
       Ok(None) => is_autostart_supported.set_if_alive(false),
@@ -362,12 +408,12 @@ fn DesktopCard() -> impl IntoView {
       Err(error) => report_failure(ActionFailure::new(FailureKind::Other, error)),
     }
   });
-  let save = move |change: fn(&mut tauri::ShellPrefs, bool), value: bool| {
+  let save_with = move |change: &dyn Fn(&mut tauri::ShellPrefs)| {
     let Some(before) = prefs.get_untracked() else {
       return;
     };
     let mut next = before;
-    change(&mut next, value);
+    change(&mut next);
     prefs.set(Some(next));
     saving_prefs.spawn(async move {
       if let Err(error) = tauri::set_shell_prefs(next).await {
@@ -376,6 +422,9 @@ fn DesktopCard() -> impl IntoView {
       }
       Ok(())
     });
+  };
+  let save = move |change: fn(&mut tauri::ShellPrefs, bool), value: bool| {
+    save_with(&|prefs: &mut tauri::ShellPrefs| change(prefs, value));
   };
   let set_autostart = move |on: bool| {
     autostart.set(Some(on));
@@ -428,8 +477,38 @@ fn DesktopCard() -> impl IntoView {
           save(|prefs, on| prefs.title_bar = if on { TitleBar::System } else { TitleBar::Custom }, on)
         })
       />
+      <Show when=move || has_tray_icon_style.get()>
+        <SegmentedRow
+          label="settings-tray-icon"
+          hint="settings-tray-icon-hint"
+          options=TrayIconStyle::CHOICES
+            .iter()
+            .map(|style| (tray_icon_slug(*style).to_owned(), format!("settings-tray-icon-{}", tray_icon_slug(*style))))
+            .collect()
+          value=Signal::derive(move || tray_icon_slug(current().tray_icon).to_owned())
+          on_change=Callback::new(move |slug: String| {
+            let style = tray_icon_from_slug(&slug);
+            save_with(&move |prefs: &mut tauri::ShellPrefs| prefs.tray_icon = style);
+          })
+        />
+      </Show>
     </SettingsCard>
   }
+}
+
+/// The tray icon style's value in the settings' choices; a style of a newer app shows as colour.
+fn tray_icon_slug(style: TrayIconStyle) -> &'static str {
+  TRAY_ICON_SLUGS
+    .iter()
+    .find(|(known, _)| *known == style)
+    .map_or(TRAY_ICON_SLUGS[0].1, |(_, slug)| *slug)
+}
+
+fn tray_icon_from_slug(slug: &str) -> TrayIconStyle {
+  TRAY_ICON_SLUGS
+    .iter()
+    .find(|(_, known)| *known == slug)
+    .map_or_else(TrayIconStyle::default, |(style, _)| *style)
 }
 
 #[component]

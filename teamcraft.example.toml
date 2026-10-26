@@ -23,6 +23,22 @@ acquire_timeout_secs = 5
 # of exiting at once, so a restart policy does not turn a database restart into a crash loop.
 startup_wait_secs = 300
 
+[dependencies]
+# How the server treats a failing backend (database, object storage, identity provider, push
+# gateway, SFU), each with its own circuit breaker. After `failure_threshold` failures in a row the
+# backend counts as down: requests that need it are answered at once with 503 and Retry-After
+# instead of waiting for a timeout each, and /readyz lists it ("degraded"; the database makes it
+# 503). After `open_secs` one request probes it again; a success closes the breaker.
+failure_threshold = 3
+open_secs = 15
+# Extra attempts of an idempotent request that failed on the network or with a 5xx (timeouts are
+# not repeated), waiting `retry_initial_ms`, doubling up to `retry_max_ms`, with jitter.
+retries = 2
+retry_initial_ms = 200
+retry_max_ms = 2000
+# How long /readyz waits for the database; longer counts as a failure.
+readiness_timeout_ms = 2000
+
 [oidc]
 # Required. Issuer of the OIDC provider (reference setup: a Keycloak realm). Must equal the `iss`
 # claim of the tokens; the server fetches <issuer>/.well-known/openid-configuration for the keys.
@@ -106,6 +122,9 @@ default_channels = []
 # days to remove them from all chats automatically that long after the deactivation (their
 # devices leave every group, keys rotate). Unset (the default): never automatically.
 # remove_deactivated_after_days = 90
+# Direct messages deleted with a deleted account are remembered this many days for the other
+# participants, so a device offline that long still drops them with their local history.
+deleted_conversations_kept_days = 180
 
 [limits]
 max_ciphertext_bytes = 1048576
@@ -246,6 +265,10 @@ is_desktop_attention_enabled = true
 # How long an "attentive" report counts; the session's gateway heartbeats renew it (keep it above
 # twice [gateway] heartbeat_interval_secs).
 attention_lease_secs = 75
+# The user's own activity on a desktop or web session (input, a message sent from it) holds phone
+# pushes back like attention for this long, also with the window in the background: the user is at
+# the computer. Keep it above 30 s (how often clients repeat "active" during input); 0: attention only.
+desktop_activity_secs = 120
 # Pushes held per user while a desktop is attentive; beyond that the oldest goes out at once.
 max_held_pushes_per_user = 100
 
@@ -550,6 +573,12 @@ is_enabled = true
 # SHA-256 of the SFU's certificate (hex) when it is a short-lived self-signed one (tests, development):
 # join tokens carry it so browsers can connect. Leave unset with a certificate browsers trust.
 # sfu_certificate_sha256 = "ab:cd:..."
+# The SFU also reports its whole roster (at start and every TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS, default
+# 30) to /api/internal/v1/calls/roster; a device it no longer has leaves the call, a call with nobody left
+# ends. While the SFU is fresh from a restart, its devices get this long to rejoin first.
+# roster_grace_secs = 60
+# Once the SFU has sent a roster, none for this long ends every call (the SFU is gone or cut off).
+# roster_timeout_secs = 120
 
 # E-mail the server sends on its own: invitations, activations, digests and meeting invitations. The mail
 # server and the texts are the seed of Administration → Mail and → Settings; what an admin sets there

@@ -4,6 +4,12 @@
 //! [`CallJoinClaims`]); the SFU verifies them with the server's public key and never asks the
 //! server. Active calls are tracked in memory: a conversation keeps its call id while tokens are
 //! issued, and gets a new one after `call_idle_secs` without any.
+//!
+//! The roster follows the SFU's join and leave reports, and is reconciled with the whole roster the
+//! SFU reports at start and periodically (#684): a device the SFU no longer has is dropped (after
+//! `roster_grace_secs` while the SFU is fresh from a restart and its devices rejoin), a call left
+//! with nobody ends. When the SFU that sent rosters falls silent for `roster_timeout_secs`, every
+//! call ends: nothing confirms anybody is still in one.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -15,22 +21,35 @@ use secrecy::ExposeSecret;
 use subtle::ConstantTimeEq;
 use teamcraft_proto::{
   CALL_JOIN_TOKEN_AUDIENCE, CallId, CallJoinClaims, CallJoinTokenResponse, CallRosterEntry,
-  CallStateResponse, ChannelRole, ConversationId, ConversationKind, CreateCallJoinTokenRequest, DeviceId,
-  GatewayEvent, MoveCallRequest, SfuControlAction, SfuControlRequest, SfuParticipantReport, UnixMillis,
-  UserId,
+  CallStateResponse, ChannelRole, ConversationId, ConversationKind, CreateCallJoinTokenRequest,
+  DependencyName, DeviceId, GatewayEvent, MoveCallRequest, SfuControlAction, SfuControlRequest,
+  SfuParticipantReport, SfuRosterReport, UnixMillis, UserId,
 };
 use thiserror::Error;
 use time::OffsetDateTime;
 use tokio::time::sleep;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::access::load_conversation;
 use crate::auth::{AuthError, AuthenticatedUser};
 use crate::config::CallsConfig;
+use crate::dependencies::{DependencyGuard, Fault, Retries};
 use crate::error::ApiError;
 use crate::state::AppState;
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a join token waits for the SFU's roster when the conversation has no call here.
+const PRE_TOKEN_ROSTER_TIMEOUT: Duration = Duration::from_secs(1);
+/// Pauses before the background retries of a failed roster read at start. They stop early once a
+/// roster arrived; the SFU's periodic roster covers anything later.
+const STARTUP_ROSTER_RETRIES: [Duration; 6] = [
+  Duration::from_secs(1),
+  Duration::from_secs(2),
+  Duration::from_secs(4),
+  Duration::from_secs(8),
+  Duration::from_secs(15),
+  Duration::from_secs(30),
+];
 
 /// Signs join tokens and tracks the active call of each conversation.
 pub struct CallService {
@@ -51,6 +70,16 @@ pub struct CallService {
   maybe_control: Option<ControlTarget>,
   /// When the SFU last presented its registration token (Unix milliseconds, 0: never).
   last_sfu_contact_ms: AtomicI64,
+  /// How long a device may be missing from the rosters of an SFU fresh from a restart.
+  roster_grace: Duration,
+  /// Without a roster for this long, the SFU is taken to be gone with its calls.
+  roster_timeout: Duration,
+  /// When the last roster arrived; `None` until the first (an SFU that sends none keeps the roster
+  /// on its join and leave reports alone) and after the calls expired.
+  last_roster_at: Mutex<Option<Instant>>,
+  /// Calls that ended here lately, and when: a roster sent while the SFU was still closing them
+  /// must not bring them back. Forgotten after `roster_grace`.
+  recently_ended: Mutex<HashMap<CallId, Instant>>,
 }
 
 #[derive(Default)]
@@ -61,7 +90,11 @@ struct HostControls {
 
 struct ControlTarget {
   url: String,
+  /// Where a starting server reads the SFU's roster (`GET`).
+  roster_url: String,
   client: reqwest::Client,
+  /// The SFU's breaker (issue #743): host controls fail fast while it restarts.
+  guard: Arc<DependencyGuard>,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +104,9 @@ struct ActiveCall {
   /// Set when the first participant joined (reported by the SFU).
   maybe_started: Option<Started>,
   participants: Vec<CallRosterEntry>,
+  /// Participants missing from the SFU's rosters, and since when (only while the SFU is fresh from
+  /// a restart; otherwise a missing device is dropped at once).
+  missing_since: HashMap<CallRosterEntry, Instant>,
   is_ringing: bool,
   /// Set when a DM call moved into this meeting chat: the people added there ring when the call
   /// starts (or at once if it runs), and only they.
@@ -122,6 +158,18 @@ pub enum LeaveChange {
     conversation_id: ConversationId,
     call_id: CallId,
   },
+}
+
+/// What dropping participants (a roster, an expiry, leaving on all devices) changed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RosterChanges {
+  /// One per call that changed: [`LeaveChange::Updated`] or [`LeaveChange::Ended`].
+  pub changes: Vec<LeaveChange>,
+  /// Whose devices were dropped (their presence changes).
+  pub users: HashSet<UserId>,
+  /// Devices the SFU has in a call the server knows, without the server having heard of their
+  /// join: handled like a join report.
+  pub missing_joins: Vec<SfuParticipantReport>,
 }
 
 #[derive(Debug, Error)]
@@ -187,13 +235,19 @@ impl CallService {
       active: Mutex::new(HashMap::new()),
       controls: Mutex::new(HostControls::default()),
       last_sfu_contact_ms: AtomicI64::new(0),
+      roster_grace: Duration::from_secs(config.roster_grace_secs),
+      roster_timeout: Duration::from_secs(config.roster_timeout_secs),
+      last_roster_at: Mutex::new(None),
+      recently_ended: Mutex::new(HashMap::new()),
       maybe_control: config
         .maybe_sfu_control_url
         .as_ref()
         .map(|url| {
           Ok::<_, reqwest::Error>(ControlTarget {
             url: format!("{}/internal/v1/calls/control", url.trim_end_matches('/')),
+            roster_url: format!("{}/internal/v1/calls/roster", url.trim_end_matches('/')),
             client: reqwest::Client::builder().timeout(CONTROL_TIMEOUT).build()?,
+            guard: DependencyGuard::standalone(DependencyName::Sfu),
           })
         })
         .transpose()
@@ -274,21 +328,101 @@ impl CallService {
       .maybe_sfu_token
       .as_deref()
       .ok_or_else(|| ApiError::Unavailable("host controls need the SFU registration token".into()))?;
+    // Every host control is idempotent (mute all, lock, unlock, end, remove): safe to repeat
+    // while the SFU restarts.
+    target
+      .guard
+      .call(Retries::Idempotent, control_fault, || async {
+        let response = target
+          .client
+          .post(&target.url)
+          .bearer_auth(String::from_utf8_lossy(token))
+          .json(request)
+          .send()
+          .await
+          .map_err(|error| ApiError::Unavailable(format!("the SFU is not reachable: {error}")))?;
+        match response.status() {
+          status if status.is_success() => Ok(()),
+          reqwest::StatusCode::NOT_FOUND => Err(ApiError::call_not_found()),
+          status => Err(ApiError::Unavailable(format!(
+            "the SFU answered with status {status}"
+          ))),
+        }
+      })
+      .await
+  }
+
+  /// Host controls go through `guard`, the registry's breaker of the SFU.
+  pub fn with_dependency_guard(mut self, guard: Arc<DependencyGuard>) -> Self {
+    if let Some(target) = &mut self.maybe_control {
+      target.guard = guard;
+    }
+    self
+  }
+
+  /// Reads the SFU's roster (`GET /internal/v1/calls/roster`); a starting server takes over the
+  /// calls that kept running with it. `None` without host controls configured.
+  async fn fetch_sfu_roster(&self) -> Result<Option<SfuRosterReport>, ApiError> {
+    let (Some(target), Some(token)) = (self.maybe_control.as_ref(), self.maybe_sfu_token.as_deref()) else {
+      return Ok(None);
+    };
     let response = target
       .client
-      .post(&target.url)
+      .get(&target.roster_url)
       .bearer_auth(String::from_utf8_lossy(token))
-      .json(request)
       .send()
       .await
       .map_err(|error| ApiError::Unavailable(format!("the SFU is not reachable: {error}")))?;
-    match response.status() {
-      status if status.is_success() => Ok(()),
-      reqwest::StatusCode::NOT_FOUND => Err(ApiError::call_not_found()),
-      status => Err(ApiError::Unavailable(format!(
-        "the SFU answered with status {status}"
-      ))),
+    if !response.status().is_success() {
+      return Err(ApiError::Unavailable(format!(
+        "the SFU answered with status {}",
+        response.status()
+      )));
     }
+    response
+      .json()
+      .await
+      .map(Some)
+      .map_err(|error| ApiError::Unavailable(format!("the SFU's roster is unreadable: {error}")))
+  }
+
+  /// Reads the SFU's roster within `timeout` and takes over the calls it runs that the server
+  /// doesn't know (only that: a pulled snapshot is not in the order of the SFU's pushed reports, so
+  /// it neither drops anybody nor counts as the SFU's roster). `None` without host controls.
+  async fn pull_and_adopt(&self, timeout: Duration) -> Result<Option<RosterChanges>, ApiError> {
+    let report = tokio::time::timeout(timeout, self.fetch_sfu_roster())
+      .await
+      .map_err(|_| ApiError::Unavailable("the SFU's roster did not come in time".into()))??;
+    let Some(report) = report else {
+      return Ok(None);
+    };
+    Ok(Some(self.adopt_calls(
+      &report,
+      Instant::now(),
+      unix_now_millis()?,
+    )))
+  }
+
+  /// [`Self::pull_and_adopt`] again after each of `pauses`, until it worked or a roster arrived
+  /// from the SFU by itself (which takes the calls over too).
+  async fn retry_adoption(&self, pauses: &[Duration]) -> Option<RosterChanges> {
+    for pause in pauses {
+      sleep(*pause).await;
+      if self.last_roster().is_some() {
+        return None;
+      }
+      match self.pull_and_adopt(CONTROL_TIMEOUT).await {
+        Ok(maybe_changes) => return maybe_changes,
+        Err(error) => debug!(%error, "reading the SFU's roster failed again"),
+      }
+    }
+    warn!("the SFU's roster could not be read; its next roster takes the calls over");
+    None
+  }
+
+  /// Whether the conversation has a call here (running, or opened by a join token).
+  fn has_call(&self, conversation_id: ConversationId) -> bool {
+    self.lock().contains_key(&conversation_id)
   }
 
   /// The conversation's current call, or a new one from `new_call_id`.
@@ -316,6 +450,7 @@ impl CallService {
         last_token_at: now,
         maybe_started: None,
         participants: Vec::new(),
+        missing_since: HashMap::new(),
         is_ringing: false,
         maybe_added_ring: None,
         maybe_moved_to: None,
@@ -355,6 +490,8 @@ impl CallService {
     let Some(call) = active.get_mut(&conversation_id) else {
       return JoinChange::Unchanged;
     };
+    // The device is back (after an SFU restart): no longer missing.
+    call.missing_since.remove(&entry);
     if call.participants.contains(&entry) {
       return JoinChange::Unchanged;
     }
@@ -394,11 +531,13 @@ impl CallService {
       return LeaveChange::Unchanged;
     };
     call.participants.remove(position);
+    call.missing_since.remove(&entry);
     if call.participants.is_empty() {
       let call_id = call.call_id;
       active.remove(&conversation_id);
       drop(active);
       self.forget_controls(conversation_id);
+      self.note_ended(call_id, Instant::now());
       return LeaveChange::Ended {
         conversation_id,
         call_id,
@@ -408,6 +547,242 @@ impl CallService {
       Some(started) => LeaveChange::Updated(call.snapshot(conversation_id, started.by, started.at)),
       None => LeaveChange::Unchanged,
     }
+  }
+
+  /// Reconciles the roster with the SFU's whole roster (#684). The SFU sends it in the same ordered
+  /// queue as its join and leave reports, so it reflects everything reported before it. A device
+  /// it lacks is gone: at once once the SFU has run for `roster_grace` (it would have rejoined by
+  /// then), while it is fresh from a restart only after missing for `roster_grace`. Devices it has
+  /// that the server never heard of come back as [`RosterChanges::missing_joins`]. Calls it runs
+  /// that the server doesn't know (it restarted) are taken over ([`Self::adopt_calls`]); `now_ms`
+  /// is their start when the SFU names none.
+  fn reconcile(&self, report: &SfuRosterReport, now: Instant, now_ms: UnixMillis) -> RosterChanges {
+    *self.last_roster() = Some(now);
+    let adopted = self.adopt_calls(report, now, now_ms);
+    let on_sfu: HashMap<CallId, HashSet<CallRosterEntry>> = report
+      .calls
+      .iter()
+      .map(|call| (call.call_id, call.participants.iter().copied().collect()))
+      .collect();
+    let is_settled = Duration::from_secs(report.uptime_secs) >= self.roster_grace;
+    let grace = self.roster_grace;
+    let nobody = HashSet::new();
+    let mut changes = self.drop_participants(|_, call| {
+      let present = on_sfu.get(&call.call_id).unwrap_or(&nobody);
+      let mut gone = Vec::new();
+      for entry in &call.participants {
+        if present.contains(entry) {
+          call.missing_since.remove(entry);
+          continue;
+        }
+        let since = *call.missing_since.entry(*entry).or_insert(now);
+        if is_settled || now.saturating_duration_since(since) >= grace {
+          gone.push(*entry);
+        }
+      }
+      gone
+    });
+    let active = self.lock();
+    for call in active.values() {
+      let Some(present) = on_sfu.get(&call.call_id) else {
+        continue;
+      };
+      changes.missing_joins.extend(
+        present
+          .iter()
+          .filter(|entry| !call.participants.contains(entry))
+          .map(|entry| SfuParticipantReport {
+            call_id: call.call_id,
+            user_id: entry.user_id,
+            device_id: entry.device_id,
+          }),
+      );
+    }
+    drop(active);
+    changes.changes.extend(adopted.changes);
+    changes.users.extend(adopted.users);
+    changes
+  }
+
+  /// Takes over the calls the SFU runs that the server lost (it restarted; calls live in memory):
+  /// the SFU names each call's conversation from the server-signed join tokens, and its devices
+  /// joined with tokens this server signed. Nothing rings again, and the history entry written
+  /// when the call started is the one closed when it ends. Not taken over: calls without a
+  /// conversation (tokens of an older server), calls that ended here moments ago (a roster from
+  /// while the SFU was closing them), and a second call in a conversation whose call has people in
+  /// it.
+  fn adopt_calls(&self, report: &SfuRosterReport, now: Instant, now_ms: UnixMillis) -> RosterChanges {
+    let mut result = RosterChanges::default();
+    let mut recently_ended = self.recently_ended();
+    let grace = self.roster_grace;
+    recently_ended.retain(|_, at| now.saturating_duration_since(*at) < grace);
+    let mut active = self.lock();
+    for call in &report.calls {
+      let Some(conversation_id) = call.maybe_conversation_id else {
+        continue;
+      };
+      let Some(started_by) = call
+        .maybe_started_by
+        .or_else(|| call.participants.first().map(|entry| entry.user_id))
+      else {
+        continue;
+      };
+      if recently_ended.contains_key(&call.call_id)
+        || active.values().any(|known| known.call_id == call.call_id)
+      {
+        continue;
+      }
+      if active
+        .get(&conversation_id)
+        .is_some_and(|existing| !existing.participants.is_empty())
+      {
+        warn!(%conversation_id, call_id = %call.call_id, "the SFU runs a second call in a conversation");
+        continue;
+      }
+      let mut participants: Vec<CallRosterEntry> = Vec::new();
+      for entry in &call.participants {
+        if !participants.contains(entry) {
+          participants.push(*entry);
+        }
+      }
+      let started = Started {
+        by: started_by,
+        at: call.maybe_started_at.unwrap_or(now_ms),
+      };
+      let adopted = ActiveCall {
+        call_id: call.call_id,
+        last_token_at: now,
+        maybe_started: Some(started),
+        participants,
+        missing_since: HashMap::new(),
+        // Whoever was rung had their chance before the restart.
+        is_ringing: false,
+        maybe_added_ring: None,
+        maybe_moved_to: None,
+      };
+      info!(%conversation_id, call_id = %call.call_id, "call taken over from the SFU's roster");
+      result
+        .users
+        .extend(adopted.participants.iter().map(|entry| entry.user_id));
+      result.changes.push(LeaveChange::Updated(adopted.snapshot(
+        conversation_id,
+        started.by,
+        started.at,
+      )));
+      // A join token handed out since the restart opened an empty call there: the running one wins.
+      active.insert(conversation_id, adopted);
+    }
+    result
+  }
+
+  /// Remembers that the call ended here, so a late roster doesn't take it over again.
+  fn note_ended(&self, call_id: CallId, now: Instant) {
+    let grace = self.roster_grace;
+    let mut recently_ended = self.recently_ended();
+    // Bounded by the calls that end within one grace period.
+    recently_ended.retain(|_, at| now.saturating_duration_since(*at) < grace);
+    recently_ended.insert(call_id, now);
+  }
+
+  fn recently_ended(&self) -> std::sync::MutexGuard<'_, HashMap<CallId, Instant>> {
+    self.recently_ended.lock().unwrap_or_else(PoisonError::into_inner)
+  }
+
+  /// Ends every call when the SFU that sent rosters fell silent for `roster_timeout` (stopped, or
+  /// cut off from the server): nothing confirms anybody is still in a call. An SFU that never sent
+  /// a roster (an older one) is left alone.
+  fn expire_if_silent(&self, now: Instant) -> RosterChanges {
+    {
+      let mut last = self.last_roster();
+      match *last {
+        Some(at) if now.saturating_duration_since(at) >= self.roster_timeout => *last = None,
+        _ => return RosterChanges::default(),
+      }
+    }
+    let changes = self.drop_participants(|_, call| call.participants.clone());
+    if !changes.changes.is_empty() {
+      warn!(
+        calls = changes.changes.len(),
+        "no call roster from the SFU in time: its calls end"
+      );
+    }
+    changes
+  }
+
+  /// Drops every device of `user` from the conversation's call ("Leave on all devices").
+  fn drop_user(&self, conversation_id: ConversationId, user: UserId) -> RosterChanges {
+    self.drop_participants(|conversation, call| {
+      if conversation != conversation_id {
+        return Vec::new();
+      }
+      call
+        .participants
+        .iter()
+        .filter(|entry| entry.user_id == user)
+        .copied()
+        .collect()
+    })
+  }
+
+  /// Drops the participants `gone` picks from each running call; a call left with nobody ends.
+  fn drop_participants(
+    &self,
+    mut gone: impl FnMut(ConversationId, &mut ActiveCall) -> Vec<CallRosterEntry>,
+  ) -> RosterChanges {
+    let mut result = RosterChanges::default();
+    let mut ended = Vec::new();
+    let mut active = self.lock();
+    for (conversation_id, call) in active.iter_mut() {
+      let Some(started) = call.maybe_started else {
+        continue;
+      };
+      let dropped = gone(*conversation_id, call);
+      if dropped.is_empty() {
+        continue;
+      }
+      call.participants.retain(|entry| !dropped.contains(entry));
+      for entry in &dropped {
+        call.missing_since.remove(entry);
+        result.users.insert(entry.user_id);
+      }
+      info!(
+        conversation_id = %conversation_id,
+        call_id = %call.call_id,
+        dropped = dropped.len(),
+        "participants dropped from the call roster"
+      );
+      if call.participants.is_empty() {
+        ended.push((*conversation_id, call.call_id));
+      } else {
+        result.changes.push(LeaveChange::Updated(call.snapshot(
+          *conversation_id,
+          started.by,
+          started.at,
+        )));
+      }
+    }
+    for (conversation_id, _) in &ended {
+      active.remove(conversation_id);
+    }
+    drop(active);
+    for (conversation_id, call_id) in ended {
+      self.forget_controls(conversation_id);
+      self.note_ended(call_id, Instant::now());
+      result.changes.push(LeaveChange::Ended {
+        conversation_id,
+        call_id,
+      });
+    }
+    result
+  }
+
+  /// How often to check for a silent SFU: a few times per `roster_timeout`.
+  pub fn roster_sweep_interval(&self) -> Duration {
+    (self.roster_timeout / 4).max(Duration::from_secs(1))
+  }
+
+  fn last_roster(&self) -> std::sync::MutexGuard<'_, Option<Instant>> {
+    self.last_roster_at.lock().unwrap_or_else(PoisonError::into_inner)
   }
 
   /// Notes the people added to a call that moves into this meeting chat: they ring when its call
@@ -526,6 +901,7 @@ impl CallService {
   /// Claims for one device, valid from `now_unix_secs` for the configured lifetime.
   fn claims(
     &self,
+    conversation_id: ConversationId,
     call_id: CallId,
     user_id: UserId,
     device_id: DeviceId,
@@ -539,6 +915,7 @@ impl CallService {
       call_id,
       user_id,
       device_id,
+      maybe_conversation_id: Some(conversation_id),
     }
   }
 
@@ -578,8 +955,15 @@ pub async fn create_join_token(
   if access.view.conversation.kind == ConversationKind::Meeting {
     check_meeting_admission(state, calls, caller, conversation_id, request.device_id).await?;
   }
+  adopt_before_first_token(state, calls, conversation_id).await;
   let call_id = calls.call_for(conversation_id, Instant::now(), || state.next_id())?;
-  let claims = calls.claims(call_id, caller.user.id, request.device_id, unix_now_secs()?);
+  let claims = calls.claims(
+    conversation_id,
+    call_id,
+    caller.user.id,
+    request.device_id,
+    unix_now_secs()?,
+  );
   Ok(CallJoinTokenResponse {
     call_id,
     token: calls.sign(&claims)?,
@@ -868,6 +1252,138 @@ pub async fn report_left(state: &AppState, report: SfuParticipantReport) -> Resu
   if matches!(change, LeaveChange::Unchanged) {
     return Ok(());
   }
+  publish_leave(state, conversation_id, change).await?;
+  refresh_caller_presence(state, report.user_id).await;
+  Ok(())
+}
+
+/// The SFU reports its whole roster: devices it no longer has leave the server's roster, calls left
+/// with nobody end, and devices whose join the server missed join (#684).
+pub async fn report_roster(state: &AppState, report: SfuRosterReport) -> Result<(), ApiError> {
+  let calls = calls_of(state)?;
+  let changes = calls.reconcile(&report, Instant::now(), unix_now_millis()?);
+  publish_roster_changes(state, changes).await;
+  Ok(())
+}
+
+/// At start: reads the SFU's roster and takes over the calls that kept running while this server
+/// restarted, before people ask for join tokens (which would open a second call next to them). An
+/// SFU that can't be asked (no control URL, unreachable) delivers the same with its next roster.
+pub async fn adopt_running_calls(state: &AppState) {
+  let Some(calls) = state.maybe_calls.clone() else {
+    return;
+  };
+  match calls.pull_and_adopt(CONTROL_TIMEOUT).await {
+    Ok(Some(changes)) => publish_adopted(state, changes).await,
+    Ok(None) => {},
+    Err(error) => {
+      warn!(%error, "reading the SFU's roster at start failed; trying again in the background");
+      let state = state.clone();
+      tokio::spawn(async move {
+        if let Some(changes) = calls.retry_adoption(&STARTUP_ROSTER_RETRIES).await {
+          publish_adopted(&state, changes).await;
+        }
+      });
+    },
+  }
+}
+
+async fn publish_adopted(state: &AppState, changes: RosterChanges) {
+  if !changes.changes.is_empty() {
+    info!(calls = changes.changes.len(), "calls taken over from the SFU");
+  }
+  publish_roster_changes(state, changes).await;
+}
+
+/// Before the first join token of a conversation without a call: the SFU may run one the server
+/// lost (it restarted and couldn't read the roster yet). Asking first, for at most
+/// [`PRE_TOKEN_ROSTER_TIMEOUT`], keeps the token on the running call; without an answer the
+/// token opens a new call as before (and the SFU still puts the device into the running room).
+async fn adopt_before_first_token(state: &AppState, calls: &CallService, conversation_id: ConversationId) {
+  if calls.has_call(conversation_id) {
+    return;
+  }
+  match calls.pull_and_adopt(PRE_TOKEN_ROSTER_TIMEOUT).await {
+    Ok(Some(changes)) => publish_adopted(state, changes).await,
+    Ok(None) => {},
+    Err(error) => debug!(%conversation_id, %error, "no SFU roster before the first join token"),
+  }
+}
+
+/// Ends the calls of an SFU that stopped sending rosters ([`CallService::expire_if_silent`]).
+pub async fn expire_silent_sfu(state: &AppState) {
+  let Some(calls) = state.maybe_calls.as_ref() else {
+    return;
+  };
+  let changes = calls.expire_if_silent(Instant::now());
+  publish_roster_changes(state, changes).await;
+}
+
+/// "Leave on all devices": the caller's devices leave the conversation's call. The SFU is told to
+/// disconnect them (they don't rejoin); the server's roster drops them whatever the SFU says, so an
+/// entry only the server still had (a leave it never heard of) goes too. Idempotent: without a
+/// call, or with none of the caller's devices in it, nothing happens.
+pub async fn leave_call_everywhere(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  conversation_id: ConversationId,
+) -> Result<(), ApiError> {
+  let calls = calls_of(state)?;
+  let user = caller.user.id;
+  let Some(call_id) = calls.running_call(conversation_id) else {
+    return Ok(());
+  };
+  if !calls.is_user_in_call(conversation_id, user) {
+    return Ok(());
+  }
+  if calls.has_controls() {
+    let request = SfuControlRequest {
+      call_id,
+      by_user_id: user,
+      action: SfuControlAction::DisconnectUser { user_id: user },
+    };
+    // Not on the SFU (the stuck entry this is for) or the SFU unreachable: the roster below still
+    // drops the devices, and a device the SFU does have comes back with its next roster.
+    if let Err(error) = calls.send_control(&request).await {
+      info!(%conversation_id, %error, "the SFU did not disconnect the devices of a user leaving everywhere");
+    }
+  }
+  info!(%conversation_id, %call_id, "a user leaves the call on all devices");
+  publish_roster_changes(state, calls.drop_user(conversation_id, user)).await;
+  Ok(())
+}
+
+/// Tells the members what dropping participants changed, joins the devices the SFU had that the
+/// server missed, and refreshes the presence of those who left.
+async fn publish_roster_changes(state: &AppState, changes: RosterChanges) {
+  for change in changes.changes {
+    let conversation_id = match &change {
+      LeaveChange::Unchanged => continue,
+      LeaveChange::Updated(snapshot) => snapshot.conversation_id,
+      LeaveChange::Ended { conversation_id, .. } => *conversation_id,
+    };
+    if let Err(error) = publish_leave(state, conversation_id, change).await {
+      warn!(%conversation_id, %error, "publishing a call roster change failed");
+    }
+  }
+  for join in changes.missing_joins {
+    debug!(call_id = %join.call_id, "the SFU has a device the server missed the join of");
+    if let Err(error) = report_joined(state, join).await {
+      debug!(%error, "a join from the SFU's roster was not taken");
+    }
+  }
+  for user in changes.users {
+    refresh_caller_presence(state, user).await;
+  }
+}
+
+/// Tells the conversation's members about a leave; an ended call also stops ringing and closes its
+/// history entry.
+async fn publish_leave(
+  state: &AppState,
+  conversation_id: ConversationId,
+  change: LeaveChange,
+) -> Result<(), ApiError> {
   if let LeaveChange::Ended { call_id, .. } = &change {
     tokio::spawn(crate::push::routing::end_ring(state.clone(), *call_id));
     finish_history(state, *call_id).await;
@@ -890,7 +1406,6 @@ pub async fn report_left(state: &AppState, report: SfuParticipantReport) -> Resu
       );
     },
   }
-  refresh_caller_presence(state, report.user_id).await;
   Ok(())
 }
 
@@ -1053,12 +1568,29 @@ fn unix_now_secs() -> Result<u64, ApiError> {
     .map_err(|_| ApiError::Internal("system clock is before 1970".into()))
 }
 
+fn unix_now_millis() -> Result<UnixMillis, ApiError> {
+  Ok(UnixMillis(
+    unix_now_secs()?
+      .saturating_mul(1000)
+      .try_into()
+      .unwrap_or(i64::MAX),
+  ))
+}
+
+/// An unreachable SFU or a 5xx is an outage; "no such call" is an answer.
+fn control_fault(error: &ApiError) -> Fault {
+  match error {
+    ApiError::Unavailable(_) => Fault::Outage,
+    _ => Fault::Refusal,
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use std::path::PathBuf;
 
   use jsonwebtoken::{DecodingKey, Validation};
-  use teamcraft_proto::{Id, Snowflake};
+  use teamcraft_proto::{Id, SfuCallRoster, Snowflake};
 
   use super::*;
 
@@ -1096,7 +1628,7 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
     #[test]
     fn signed_token_verifies_with_the_public_key() {
       let service = service();
-      let claims = service.claims(id(7), id(4), id(5), NOW_UNIX_SECS);
+      let claims = service.claims(id(9), id(7), id(4), id(5), NOW_UNIX_SECS);
       let token = service.sign(&claims).unwrap();
 
       let mut validation = Validation::new(Algorithm::EdDSA);
@@ -1237,6 +1769,474 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
     }
   }
 
+  mod reconciliation {
+    use super::*;
+
+    /// Longer than the test config's `roster_grace_secs`: the SFU has settled.
+    const SETTLED: u64 = 600;
+
+    #[test]
+    fn a_device_the_sfu_no_longer_has_is_dropped() {
+      let service = service();
+      let now = Instant::now();
+      running_call(&service, id(1), id(100), &[entry(4, 40), entry(5, 50)]);
+
+      let changes = reconcile(&service, &roster(SETTLED, &[(100, &[entry(5, 50)])]), now);
+
+      assert_eq!(changes.changes.len(), 1);
+      assert!(matches!(
+        &changes.changes[0],
+        LeaveChange::Updated(snapshot) if snapshot.participants == vec![entry(5, 50)]
+      ));
+      assert_eq!(changes.users, HashSet::from([id(4)]));
+      assert!(changes.missing_joins.is_empty());
+      assert!(!service.is_device_in_call(id(1), id(40)));
+    }
+
+    #[test]
+    fn a_call_the_sfu_no_longer_has_ends() {
+      let service = service();
+      running_call(&service, id(1), id(100), &[entry(4, 40), entry(5, 50)]);
+
+      let changes = reconcile(&service, &roster(SETTLED, &[]), Instant::now());
+
+      assert_eq!(
+        changes.changes,
+        vec![LeaveChange::Ended {
+          conversation_id: id(1),
+          call_id: id(100),
+        }]
+      );
+      assert_eq!(service.running_call(id(1)), None);
+      assert_eq!(service.active_call_count(), 0);
+    }
+
+    #[test]
+    fn a_call_nobody_joined_yet_is_left_alone() {
+      let service = service();
+      service.call_for(id(1), Instant::now(), || Ok(id(100))).unwrap();
+
+      let changes = reconcile(&service, &roster(SETTLED, &[]), Instant::now());
+
+      assert_eq!(changes, RosterChanges::default());
+      assert_eq!(service.active_call_count(), 1);
+    }
+
+    #[test]
+    fn a_restarted_sfu_gives_its_devices_time_to_rejoin() {
+      let service = service();
+      let start = Instant::now();
+      running_call(&service, id(1), id(100), &[entry(4, 40), entry(5, 50)]);
+
+      // Fresh from a restart: nobody has rejoined yet.
+      let first = reconcile(&service, &roster(2, &[]), start);
+      assert_eq!(first.changes, Vec::new());
+      // One of them is back; the other one is still given time.
+      service.participant_joined(id(1), entry(5, 50), false, UnixMillis(1));
+      let meanwhile = reconcile(
+        &service,
+        &roster(32, &[(100, &[entry(5, 50)])]),
+        start + Duration::from_secs(30),
+      );
+      assert_eq!(meanwhile.changes, Vec::new());
+      assert!(service.is_device_in_call(id(1), id(40)));
+      let later = start + Duration::from_secs(61);
+      let second = reconcile(&service, &roster(63, &[(100, &[entry(5, 50)])]), later);
+
+      assert!(matches!(
+        &second.changes[..],
+        [LeaveChange::Updated(snapshot)] if snapshot.participants == vec![entry(5, 50)]
+      ));
+    }
+
+    #[test]
+    fn devices_the_server_missed_come_back_as_joins() {
+      let service = service();
+      running_call(&service, id(1), id(100), &[entry(4, 40)]);
+
+      let changes = reconcile(
+        &service,
+        &roster(
+          SETTLED,
+          &[(100, &[entry(4, 40), entry(6, 60)]), (999, &[entry(7, 70)])],
+        ),
+        Instant::now(),
+      );
+
+      assert!(changes.changes.is_empty());
+      assert_eq!(
+        changes.missing_joins,
+        vec![SfuParticipantReport {
+          call_id: id(100),
+          user_id: id(6),
+          device_id: id(60),
+        }],
+        "calls the server doesn't know are not made up"
+      );
+    }
+
+    #[test]
+    fn a_leave_that_overtook_its_join_is_repaired_by_the_next_roster() {
+      let service = service();
+      running_call(&service, id(1), id(100), &[entry(5, 50)]);
+      // A quick rejoin whose leave arrived first: the leave finds nothing, the join stays.
+      let leave = service.participant_left(id(1), entry(4, 40));
+      service.participant_joined(id(1), entry(4, 40), false, UnixMillis(1));
+      assert_eq!(leave, LeaveChange::Unchanged);
+      assert!(service.is_device_in_call(id(1), id(40)));
+
+      reconcile(
+        &service,
+        &roster(SETTLED, &[(100, &[entry(5, 50)])]),
+        Instant::now(),
+      );
+
+      assert!(!service.is_device_in_call(id(1), id(40)));
+      assert!(service.is_device_in_call(id(1), id(50)));
+    }
+
+    #[test]
+    fn a_silent_sfu_ends_its_calls_after_the_timeout() {
+      let service = service();
+      let start = Instant::now();
+      running_call(&service, id(1), id(100), &[entry(4, 40)]);
+      assert_eq!(
+        service.expire_if_silent(start + Duration::from_secs(3600)),
+        RosterChanges::default(),
+        "an SFU that never sent a roster keeps the old behaviour"
+      );
+
+      reconcile(&service, &roster(SETTLED, &[(100, &[entry(4, 40)])]), start);
+      let before = service.expire_if_silent(start + Duration::from_secs(119));
+      let after = service.expire_if_silent(start + Duration::from_secs(120));
+
+      assert_eq!(before, RosterChanges::default());
+      assert_eq!(
+        after.changes,
+        vec![LeaveChange::Ended {
+          conversation_id: id(1),
+          call_id: id(100),
+        }]
+      );
+      assert_eq!(after.users, HashSet::from([id(4)]));
+      assert_eq!(
+        service.expire_if_silent(start + Duration::from_secs(500)),
+        RosterChanges::default(),
+        "once"
+      );
+    }
+
+    #[test]
+    fn leaving_on_all_devices_drops_only_that_users_devices() {
+      let service = service();
+      running_call(
+        &service,
+        id(1),
+        id(100),
+        &[entry(4, 40), entry(4, 41), entry(5, 50)],
+      );
+      running_call(&service, id(2), id(200), &[entry(4, 42)]);
+
+      let changes = service.drop_user(id(1), id(4));
+
+      assert!(matches!(
+        &changes.changes[..],
+        [LeaveChange::Updated(snapshot)] if snapshot.participants == vec![entry(5, 50)]
+      ));
+      assert!(!service.is_user_in_call(id(1), id(4)));
+      assert!(service.is_user_in_call(id(2), id(4)), "other calls stay");
+    }
+
+    #[test]
+    fn leaving_on_all_devices_ends_a_call_with_nobody_else() {
+      let service = service();
+      running_call(&service, id(1), id(100), &[entry(4, 40), entry(4, 41)]);
+
+      let changes = service.drop_user(id(1), id(4));
+
+      assert_eq!(
+        changes.changes,
+        vec![LeaveChange::Ended {
+          conversation_id: id(1),
+          call_id: id(100),
+        }]
+      );
+      assert_eq!(
+        service.drop_user(id(1), id(4)),
+        RosterChanges::default(),
+        "a retry"
+      );
+    }
+
+    fn reconcile(service: &CallService, report: &SfuRosterReport, now: Instant) -> RosterChanges {
+      service.reconcile(report, now, UnixMillis(5_000))
+    }
+  }
+
+  mod roster_reads {
+    use std::sync::atomic::AtomicUsize;
+
+    use axum::Json;
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use axum::routing::get;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_failed_read_at_start_is_retried_and_tokens_name_the_running_call() {
+      let sfu = FakeSfu::start(1).await;
+      let service = service_with_sfu(&sfu.url);
+
+      // The read at start finds the SFU busy; the background retry gets the roster.
+      assert!(service.pull_and_adopt(Duration::from_secs(5)).await.is_err());
+      let adopted = service.retry_adoption(&[Duration::ZERO]).await;
+
+      assert!(matches!(&adopted, Some(changes) if changes.changes.len() == 1));
+      let call = service.call_for(id(1), Instant::now(), || Ok(id(999))).unwrap();
+      assert_eq!(call, id(100), "the join token names the running call");
+    }
+
+    #[tokio::test]
+    async fn the_first_join_token_of_a_conversation_asks_the_sfu_first() {
+      let sfu = FakeSfu::start(1).await;
+      let service = service_with_sfu(&sfu.url);
+      assert!(service.pull_and_adopt(Duration::from_secs(5)).await.is_err());
+
+      // What `create_join_token` does for a conversation without a call.
+      assert!(!service.has_call(id(1)));
+      let adopted = service
+        .pull_and_adopt(PRE_TOKEN_ROSTER_TIMEOUT)
+        .await
+        .unwrap()
+        .unwrap();
+      let call = service.call_for(id(1), Instant::now(), || Ok(id(999))).unwrap();
+
+      assert_eq!(adopted.changes.len(), 1);
+      assert_eq!(call, id(100));
+      assert_eq!(sfu.reads(), 2);
+    }
+
+    #[tokio::test]
+    async fn retries_stop_once_the_sfu_sent_a_roster_by_itself() {
+      let sfu = FakeSfu::start(0).await;
+      let service = service_with_sfu(&sfu.url);
+      service.reconcile(
+        &named_roster(600, 1, 100, &[entry(4, 40)]),
+        Instant::now(),
+        UnixMillis(5_000),
+      );
+
+      let adopted = service.retry_adoption(&[Duration::ZERO, Duration::ZERO]).await;
+
+      assert_eq!(adopted, None);
+      assert_eq!(sfu.reads(), 0);
+    }
+
+    /// The SFU's roster endpoint: refuses the first `failures` reads, then answers with call 100
+    /// of conversation 1.
+    struct FakeSfu {
+      url: String,
+      reads: Arc<AtomicUsize>,
+    }
+
+    impl FakeSfu {
+      async fn start(failures: usize) -> Self {
+        async fn roster(
+          State((reads, failures)): State<(Arc<AtomicUsize>, usize)>,
+        ) -> Result<Json<SfuRosterReport>, StatusCode> {
+          if reads.fetch_add(1, Ordering::SeqCst) < failures {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+          }
+          Ok(Json(named_roster(600, 1, 100, &[entry(4, 40), entry(5, 50)])))
+        }
+        let reads = Arc::new(AtomicUsize::new(0));
+        let router = axum::Router::new()
+          .route("/internal/v1/calls/roster", get(roster))
+          .with_state((Arc::clone(&reads), failures));
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0))
+          .await
+          .unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await });
+        Self { url, reads }
+      }
+
+      fn reads(&self) -> usize {
+        self.reads.load(Ordering::SeqCst)
+      }
+    }
+
+    fn service_with_sfu(url: &str) -> CallService {
+      let mut config = config();
+      config.maybe_sfu_control_url = Some(url.to_owned());
+      config.maybe_sfu_registration_token = Some("sfu-token-for-tests".to_owned().into());
+      CallService::new(&config, TEST_SIGNING_KEY_PEM.as_bytes()).unwrap()
+    }
+  }
+
+  mod restarts {
+    use super::*;
+
+    #[test]
+    fn a_restarted_server_takes_over_the_calls_the_sfu_runs() {
+      // A fresh server: it lost every call.
+      let service = service();
+      let report = named_roster(600, 1, 100, &[entry(4, 40), entry(5, 50)]);
+
+      let changes = service.reconcile(&report, Instant::now(), UnixMillis(5_000));
+
+      let [LeaveChange::Updated(snapshot)] = &changes.changes[..] else {
+        panic!("{changes:?}");
+      };
+      assert_eq!(snapshot.call_id, id(100));
+      assert_eq!(snapshot.participants, vec![entry(4, 40), entry(5, 50)]);
+      assert_eq!(
+        (snapshot.started_by, snapshot.started_at),
+        (id(4), UnixMillis(1234))
+      );
+      assert!(!snapshot.is_ringing, "nothing rings again");
+      assert_eq!(changes.users, HashSet::from([id(4), id(5)]));
+      assert!(changes.missing_joins.is_empty());
+      assert_eq!(service.running_call(id(1)), Some(id(100)));
+      // New joins get the running call, not a second one next to it.
+      let call = service.call_for(id(1), Instant::now(), || Ok(id(999))).unwrap();
+      assert_eq!(call, id(100));
+      // The next roster changes nothing.
+      let again = service.reconcile(&report, Instant::now(), UnixMillis(6_000));
+      assert_eq!(again, RosterChanges::default());
+    }
+
+    #[test]
+    fn a_join_token_handed_out_before_the_first_roster_gives_way_to_the_running_call() {
+      let service = service();
+      service.call_for(id(1), Instant::now(), || Ok(id(300))).unwrap();
+
+      service.reconcile(
+        &named_roster(600, 1, 100, &[entry(4, 40)]),
+        Instant::now(),
+        UnixMillis(5_000),
+      );
+
+      assert_eq!(service.running_call(id(1)), Some(id(100)));
+    }
+
+    #[test]
+    fn a_call_that_just_ended_is_not_taken_over_again() {
+      let service = service();
+      running_call(&service, id(1), id(100), &[entry(4, 40)]);
+      let ended = service.participant_left(id(1), entry(4, 40));
+      assert!(matches!(ended, LeaveChange::Ended { .. }));
+
+      // Sent while the SFU was still closing the last connection.
+      let changes = service.reconcile(
+        &named_roster(600, 1, 100, &[entry(4, 40)]),
+        Instant::now(),
+        UnixMillis(5_000),
+      );
+
+      assert_eq!(changes, RosterChanges::default());
+      assert_eq!(service.running_call(id(1)), None);
+    }
+
+    #[test]
+    fn a_call_with_people_in_it_is_not_replaced() {
+      let service = service();
+      running_call(&service, id(1), id(100), &[entry(4, 40)]);
+      let mut report = named_roster(600, 1, 200, &[entry(5, 50)]);
+      report.calls.push(SfuCallRoster {
+        call_id: id(100),
+        participants: vec![entry(4, 40)],
+        maybe_conversation_id: Some(id(1)),
+        maybe_started_by: Some(id(4)),
+        maybe_started_at: None,
+      });
+
+      let changes = service.reconcile(&report, Instant::now(), UnixMillis(5_000));
+
+      assert_eq!(changes.changes, Vec::new());
+      assert_eq!(service.running_call(id(1)), Some(id(100)));
+    }
+
+    #[test]
+    fn an_sfu_restart_keeps_the_call_while_everybody_rejoins() {
+      let service = service();
+      let start = Instant::now();
+      running_call(&service, id(1), id(100), &[entry(4, 40), entry(5, 50)]);
+      let mut all = Vec::new();
+
+      // The restarted SFU's first roster: its rooms are gone, nobody has rejoined yet.
+      all.extend(service.reconcile(&roster(0, &[]), start, UnixMillis(0)).changes);
+      // Both rejoin within seconds; the server already has them.
+      let first = service.participant_joined(id(1), entry(4, 40), false, UnixMillis(3));
+      let second = service.participant_joined(id(1), entry(5, 50), false, UnixMillis(4));
+      for later in [30, 61, 120] {
+        let report = named_roster(later, 1, 100, &[entry(4, 40), entry(5, 50)]);
+        all.extend(
+          service
+            .reconcile(&report, start + Duration::from_secs(later), UnixMillis(0))
+            .changes,
+        );
+      }
+
+      assert_eq!((first, second), (JoinChange::Unchanged, JoinChange::Unchanged));
+      assert_eq!(all, Vec::new(), "no update, no call_end");
+      assert_eq!(service.running_call(id(1)), Some(id(100)));
+      assert!(service.is_device_in_call(id(1), id(40)) && service.is_device_in_call(id(1), id(50)));
+    }
+  }
+
+  /// A running call of `conversation` with `entries` in it.
+  fn running_call(
+    service: &CallService,
+    conversation: ConversationId,
+    call: CallId,
+    entries: &[CallRosterEntry],
+  ) {
+    service
+      .call_for(conversation, Instant::now(), || Ok(call))
+      .unwrap();
+    for (at, entry) in entries.iter().enumerate() {
+      service.participant_joined(conversation, *entry, false, UnixMillis(at as i64));
+    }
+  }
+
+  /// An SFU roster of calls without the details only newer join tokens carry.
+  fn roster(uptime_secs: u64, calls: &[(i64, &[CallRosterEntry])]) -> SfuRosterReport {
+    SfuRosterReport {
+      uptime_secs,
+      calls: calls
+        .iter()
+        .map(|(call_id, participants)| SfuCallRoster {
+          call_id: id(*call_id),
+          participants: participants.to_vec(),
+          maybe_conversation_id: None,
+          maybe_started_by: None,
+          maybe_started_at: None,
+        })
+        .collect(),
+    }
+  }
+
+  /// A roster of the call `call` of `conversation`, with what the SFU knows from the join tokens.
+  fn named_roster(
+    uptime_secs: u64,
+    conversation: i64,
+    call: i64,
+    entries: &[CallRosterEntry],
+  ) -> SfuRosterReport {
+    SfuRosterReport {
+      uptime_secs,
+      calls: vec![SfuCallRoster {
+        call_id: id(call),
+        participants: entries.to_vec(),
+        maybe_conversation_id: Some(id(conversation)),
+        maybe_started_by: Some(id(4)),
+        maybe_started_at: Some(UnixMillis(1234)),
+      }],
+    }
+  }
+
   fn service() -> CallService {
     CallService::new(&config(), TEST_SIGNING_KEY_PEM.as_bytes()).unwrap()
   }
@@ -1252,6 +2252,8 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
       ring_timeout_secs: 30,
       maybe_sfu_control_url: None,
       maybe_sfu_certificate_sha256: None,
+      roster_grace_secs: 60,
+      roster_timeout_secs: 120,
     }
   }
 

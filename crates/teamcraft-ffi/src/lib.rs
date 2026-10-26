@@ -10,6 +10,7 @@ mod bridge;
 mod calls;
 mod engine;
 mod error;
+mod markup;
 mod server_entry;
 mod types;
 mod video;
@@ -22,6 +23,9 @@ pub use calls::{
   IncomingCallInfo, RemoteVideoFrame, RemoteVideoTrack, VideoListener, VideoTrackInfo,
 };
 pub use error::TeamCraftError;
+pub use markup::{
+  MarkupBlock, MarkupLine, MarkupListKind, MarkupRun, MarkupRunKind, is_long_message, message_markup,
+};
 pub use server_entry::{
   CheckedServer, ServerAddress, ServerEntryError, SignInOption, SignInPageInfo, StoredServer,
   check_server_info, normalize_server_address, sign_in_page, sso_only_sign_in_page, stored_server,
@@ -41,7 +45,7 @@ pub use types::{
 
 pub use video::{CameraFrame, VideoFrameRgba};
 
-use crate::engine::{Engine, Job};
+use crate::engine::{Engine, Job, PushOpening};
 
 uniffi::setup_scaffolding!();
 
@@ -323,7 +327,24 @@ impl TeamCraft {
     utc_offset_minutes: i16,
   ) -> Result<PushNotification, TeamCraftError> {
     self
-      .call(move |engine| Box::pin(engine.notification_for_push(payload, utc_offset_minutes)))
+      .call(move |engine| {
+        Box::pin(engine.notification_for_push(payload, utc_offset_minutes, PushOpening::Received))
+      })
+      .await
+  }
+
+  /// [`Self::notification_for_push`] again for a wake-up whose first try could not read the
+  /// message in time (`maybe_gap` timed out, not decrypted, no session): the app retries later to
+  /// update the notification it already shows. Not counted as a received push in the diagnostics.
+  pub async fn notification_for_push_retry(
+    &self,
+    payload: Vec<u8>,
+    utc_offset_minutes: i16,
+  ) -> Result<PushNotification, TeamCraftError> {
+    self
+      .call(move |engine| {
+        Box::pin(engine.notification_for_push(payload, utc_offset_minutes, PushOpening::Retry))
+      })
       .await
   }
 

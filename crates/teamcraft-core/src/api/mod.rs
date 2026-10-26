@@ -67,7 +67,7 @@ use teamcraft_proto::{GatewayInfoResponse, PushGatewayResponse, WebPushKeyRespon
 use teamcraft_proto::{
   ListCallHistoryQuery, ListCallHistoryResponse, ListPresenceResponse, PrivacyResponse, UpdatePrivacyRequest,
 };
-use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, UnreadResponse};
+use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, SyncHeadsResponse, UnreadResponse};
 use teamcraft_proto::{NotificationSettings, TestPushResponse};
 use teamcraft_proto::{RendezvousClientMessage, RendezvousServerMessage};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
@@ -196,6 +196,9 @@ pub trait ServerApi {
   /// Removes a deactivated user from what is left after the signed removals: devices, direct
   /// messages, spaces (`POST /admin/users/{id}/remove-from-chats`; idempotent).
   fn admin_remove_from_chats(&self, user: UserId) -> impl Future<Output = Result<(), ApiError>>;
+  /// Deletes the account after the signed removals (`DELETE /admin/users/{id}`, admin.md §3.2.1):
+  /// devices, key material, memberships and direct messages go, a tombstone stays; idempotent.
+  fn admin_delete_user(&self, user: UserId) -> impl Future<Output = Result<(), ApiError>>;
   /// Joins an open space (`POST /spaces/{id}/join`).
   fn join_space(&self, space: SpaceId) -> impl Future<Output = Result<SpaceResponse, ApiError>>;
   /// Adds a person to a space as member or guest (`POST /spaces/{id}/members`). On someone who is
@@ -366,6 +369,9 @@ pub trait ServerApi {
   ) -> impl Future<Output = Result<ListThreadsResponse, ApiError>>;
   /// Unread and mention counts (`GET /unread`).
   fn unread(&self) -> impl Future<Output = Result<UnreadResponse, ApiError>>;
+  /// Where each of the user's conversations and spaces stands (`GET /sync/heads`, issue #714); a
+  /// bare 404 from a server older than the endpoint.
+  fn sync_heads(&self) -> impl Future<Output = Result<SyncHeadsResponse, ApiError>>;
 
   fn post_mls_commit(
     &self,
@@ -583,6 +589,9 @@ impl std::fmt::Display for Interception {
   }
 }
 
+/// Longest `Retry-After` a client honours; a longer one (or a hostile server) waits this long.
+pub const MAX_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
   /// The server could not be reached; the request may be retried later.
@@ -596,6 +605,9 @@ pub enum ApiError {
   Status {
     status: u16,
     maybe_body: Option<ErrorBody>,
+    /// How long the server asked to wait (`Retry-After` in seconds, e.g. on a storage outage),
+    /// capped at [`MAX_RETRY_AFTER`].
+    maybe_retry_after: Option<std::time::Duration>,
   },
   #[error("unreadable server response: {0}")]
   Decode(String),
@@ -684,10 +696,45 @@ impl ApiError {
     self.error_code() == Some(&ErrorCode::AccountDeactivated)
   }
 
+  /// The wait the server asked for with `Retry-After`, if it did.
+  pub fn retry_after(&self) -> Option<std::time::Duration> {
+    match self {
+      Self::Status {
+        maybe_retry_after, ..
+      } => *maybe_retry_after,
+      _ => None,
+    }
+  }
+
   pub(crate) fn status(status: u16, code: ErrorCode, message: impl Into<String>) -> Self {
     Self::Status {
       status,
       maybe_body: Some(ErrorBody::new(code, message)),
+      maybe_retry_after: None,
     }
+  }
+}
+
+/// A `Retry-After` value in seconds, capped at [`MAX_RETRY_AFTER`]. The HTTP-date form is ignored:
+/// it would rest on this device's clock (robustness.md, "Time"); the backoff applies instead.
+pub(crate) fn parse_retry_after(value: &str) -> Option<std::time::Duration> {
+  let seconds: u64 = value.trim().parse().ok()?;
+  Some(std::time::Duration::from_secs(seconds).min(MAX_RETRY_AFTER))
+}
+
+#[cfg(test)]
+mod tests {
+  use std::time::Duration;
+
+  use super::*;
+
+  #[test]
+  fn retry_after_is_read_in_seconds_capped_and_dates_are_ignored() {
+    assert_eq!(parse_retry_after("30"), Some(Duration::from_secs(30)));
+    assert_eq!(parse_retry_after(" 0 "), Some(Duration::ZERO));
+    assert_eq!(parse_retry_after("999999999"), Some(MAX_RETRY_AFTER));
+    assert_eq!(parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT"), None);
+    assert_eq!(parse_retry_after("-5"), None);
+    assert_eq!(parse_retry_after(""), None);
   }
 }

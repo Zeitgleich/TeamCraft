@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-core-media-put"
+description = "Enables the core_media_put command without any pre-configured scope."
+commands.allow = ["core_media_put"]
+
+[[permission]]
+identifier = "deny-core-media-put"
+description = "Denies the core_media_put command without any pre-configured scope."
+commands.deny = ["core_media_put"]

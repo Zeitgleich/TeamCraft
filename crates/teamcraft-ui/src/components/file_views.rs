@@ -21,14 +21,16 @@ use teamcraft_client_api::links::{LINKS_PER_PAGE, LinkInfo};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
+use crate::areas::{self, Place, lazy_area};
+use crate::channel_access::can_share_files;
 use crate::clock::format_date_time;
+use crate::components::attachment_menu;
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::components::lightbox::prefers_reduced_motion;
 use crate::components::message_actions::copy_to_clipboard;
 use crate::components::sheet::PopoverBackdrop;
 use crate::components::sliding_indicator::SlidingIndicator;
-use crate::components::video_player::VideoPlayer;
 use crate::i18n::{I18n, use_i18n};
 use crate::lightbox::{MediaKey, MediaKind};
 use crate::media_cache::{self, Rendition};
@@ -205,17 +207,19 @@ fn UploadTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
       done_bytes,
       total_bytes,
       failed_attempts,
+    // Quiet while it goes up or retries by itself (#742): a small ring in the corner around the
+    // cancel button; the words are for screen readers.
     } if done_bytes < total_bytes || total_bytes == 0 => view! {
-      <span class="upload-state">
+      <span class="upload-progress">
         <TransferRing done_bytes=done_bytes total_bytes=total_bytes />
-        <span class="upload-label" role="status">{upload_label(i18n, done_bytes, total_bytes, failed_attempts)}</span>
+        <span class="visually-hidden" role="status">{upload_label(i18n, done_bytes, total_bytes, failed_attempts)}</span>
         <CancelUploadButton actions=actions />
       </span>
     }
     .into_any(),
-    FileTransfer::UploadStalled { .. } => view! {
+    FileTransfer::UploadStalled { reason } => view! {
       <span class="upload-state is-failed" role="alert">
-        <span>{move || i18n.t("file-upload-failed")}</span>
+        <span>{move || i18n.t(stall_key(reason, StallPlace::Tile))}</span>
         <span class="upload-actions">
           <button class="btn btn-small" on:click=move |_| actions.retry_upload()>
             <Icon name=IconName::Rotate />
@@ -366,6 +370,10 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
     conversation,
     key,
     media_type: StoredValue::new(file.media_type.clone()),
+    maybe_content_sha256: file
+      .maybe_content_sha256
+      .as_deref()
+      .and_then(teamcraft_client_api::media::sha256_from_hex),
     full: RwSignal::new_local(media_cache::cached(key, Rendition::Inline)),
     is_broken: RwSignal::new(false),
     is_unavailable: RwSignal::new(false),
@@ -405,6 +413,7 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
   // Long-press on touch screens opens the context menu event: it shows the actions instead.
   let is_pinned = RwSignal::new(false);
   let is_touch = StoredValue::new(false);
+  let maybe_menu = attachment_menu::use_attachment_menu();
   let file = StoredValue::new(file);
   let name = file.with_value(|file| file.file_name.clone());
   let label = name.clone();
@@ -481,10 +490,13 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
         style:--media-h=media_height
         on:pointerdown=move |ev: web_sys::PointerEvent| is_touch.set_value(ev.pointer_type() == "touch")
         on:contextmenu=move |ev: web_sys::MouseEvent| {
-          // A long-press shows the actions; a right click keeps the browser's menu ("Save image as").
+          // A long-press shows the actions. A right click opens the app's menu in the desktop app
+          // (#719); the browser keeps its own ("Save image as", "Copy image").
           if is_touch.get_value() {
             ev.prevent_default();
             is_pinned.update(|pinned| *pinned = !*pinned);
+          } else {
+            file.with_value(|file| attachment_menu::open_on_right_click(maybe_menu, &ev, file, false));
           }
         }
       >
@@ -613,7 +625,7 @@ impl InlinePlayback {
     let media_type = self.media_type.get_value();
     spawn_local(async move {
       let is_wanted = move || is_playing.try_get_untracked().unwrap_or(false);
-      match media_cache::load(conversation, key, &media_type, Rendition::Full, is_wanted).await {
+      match media_cache::load(conversation, key, &media_type, Rendition::Full, None, is_wanted).await {
         Ok(Some(loaded)) => drop(url.try_set(Some(loaded))),
         Ok(None) => {},
         Err(error) => {
@@ -641,24 +653,17 @@ fn InlineVideo(playback: InlinePlayback, label: String, on_expand: Callback<()>)
   let i18n = use_i18n();
   let video = NodeRef::<html::Video>::new();
   pause_when_hidden(video);
-  let on_error = move |()| {
-    // The browser can't play it (a codec it lacks): the lightbox explains.
-    on_expand.run(());
-  };
+  // The browser can't play it (a codec it lacks): the lightbox explains.
+  let on_error = Callback::new(move |()| on_expand.run(()));
   view! {
     <div class="media-video">
       {move || match playback.url.get() {
-        Some(url) => view! {
-          <VideoPlayer
-            src=url.as_str().to_owned()
-            video=video
-            label=label.clone()
-            class="media-video-player"
-            is_autoplay=true
-            on_error=Callback::new(on_error)
-          />
-        }
-        .into_any(),
+        Some(url) => {
+          // The player's code loads with its first use (areas.rs).
+          let src = url.as_str().to_owned();
+          let label = label.clone();
+          lazy_area(Place::Pane, move || areas::inline_video_player(src.clone(), video, label.clone(), on_error))
+        },
         None => view! { <span class="spinner" role="status" aria-label=move || i18n.t("loader-loading")></span> }.into_any(),
       }}
     </div>
@@ -706,6 +711,8 @@ struct InlineLoad {
   conversation: ConversationId,
   key: MediaKey,
   media_type: StoredValue<String>,
+  /// What the message names as the file's ciphertext hash: keys the persisted rendition (#749).
+  maybe_content_sha256: Option<[u8; 32]>,
   full: RwSignal<Option<Rc<ObjectUrl>>, LocalStorage>,
   /// This platform can't decode it: shown as a file card from then on.
   is_broken: RwSignal<bool>,
@@ -723,6 +730,7 @@ impl InlineLoad {
     let Self {
       conversation,
       key,
+      maybe_content_sha256,
       full,
       is_broken,
       is_unavailable,
@@ -732,7 +740,16 @@ impl InlineLoad {
     let media_type = self.media_type.get_value();
     spawn_local(async move {
       let is_wanted = move || full.try_with_untracked(|_| ()).is_some();
-      match media_cache::load(conversation, key, &media_type, Rendition::Inline, is_wanted).await {
+      match media_cache::load(
+        conversation,
+        key,
+        &media_type,
+        Rendition::Inline,
+        maybe_content_sha256,
+        is_wanted,
+      )
+      .await
+      {
         // The row may be gone by now: `try_set` drops the URL then.
         Ok(Some(url)) => drop(full.try_set(Some(url))),
         Ok(None) => {},
@@ -767,7 +784,7 @@ fn MediaToolbar(file: FileInfo, #[prop(optional, into)] on_expand: Option<Callba
         <ToolbarButton label="video-expand" icon=IconName::Maximize on_click=move || expand.run(()) />
       })}
       <ToolbarButton label="file-download" icon=IconName::Download on_click=move || actions.download() />
-      <ToolbarButton label="file-copy-share" icon=IconName::Link on_click=move || actions.share() />
+      {actions.can_share.then(|| view! { <ToolbarButton label="file-share" icon=IconName::Link on_click=move || actions.share() /> })}
       <ToolbarButton label="lightbox-forward" icon=IconName::Forward on_click=move || actions.forward() />
       <button
         class="icon-btn media-tool"
@@ -839,6 +856,12 @@ pub fn FileCard(file: FileInfo) -> impl IntoView {
     },
   };
   let status = transfer_status(&file.transfer, actions);
+  let maybe_menu = attachment_menu::use_attachment_menu();
+  let menu_file = StoredValue::new(file.clone());
+  let on_context_menu = move |ev: web_sys::MouseEvent| {
+    let is_touch = crate::viewport::is_touch_primary();
+    menu_file.with_value(|file| attachment_menu::open_on_right_click(maybe_menu, &ev, file, is_touch));
+  };
   // Markdown, HTML and PDF files open in the app (#557) unless they are too large.
   let maybe_document_key = MediaKey::for_file(&file).filter(|_| {
     is_on_server
@@ -851,7 +874,7 @@ pub fn FileCard(file: FileInfo) -> impl IntoView {
       FileTransfer::Uploading { .. } | FileTransfer::Downloading { .. }
     );
   view! {
-    <div class="file-card">
+    <div class="file-card" on:contextmenu=on_context_menu>
       {preview}
       <div class="file-meta">
         <span class="file-name" translate="no" title=file.file_name.clone()>{file.file_name.clone()}</span>
@@ -903,7 +926,10 @@ fn transfer_status(transfer: &FileTransfer, actions: FileActions) -> AnyView {
       }
       .into_any()
     },
-    FileTransfer::Downloading { done_bytes, total_bytes } => {
+    FileTransfer::Downloading {
+      done_bytes,
+      total_bytes,
+    } => {
       let (done, total) = (*done_bytes, *total_bytes);
       view! {
         <span class="file-transfer">
@@ -925,12 +951,15 @@ fn transfer_status(transfer: &FileTransfer, actions: FileActions) -> AnyView {
       }
       .into_any()
     },
-    FileTransfer::UploadStalled { .. } => view! {
-      <span class="file-error" role="alert">{move || i18n.t("file-upload-stalled")}</span>
+    FileTransfer::UploadStalled { reason } => {
+      let key = stall_key(*reason, StallPlace::Card);
+      view! {
+      <span class="file-error" role="alert">{move || i18n.t(key)}</span>
       <button class="link-btn" on:click=move |_| actions.retry_upload()>{move || i18n.t("file-retry")}</button>
       <button class="link-btn" on:click=move |_| actions.cancel_upload()>{move || i18n.t("file-cancel-upload")}</button>
-    }
-    .into_any(),
+      }
+      .into_any()
+    },
     FileTransfer::UploadFailed { reason } => {
       let key = match reason {
         FileFailure::TooLarge => "file-too-large",
@@ -997,10 +1026,12 @@ fn FileMenu(actions: FileActions) -> impl IntoView {
             <Icon name=IconName::Download />
             <span class="menu-label">{move || i18n.t("file-download")}</span>
           </button>
-          <button class="menu-item" role="menuitem" on:click=item(FileActions::share)>
-            <Icon name=IconName::Link />
-            <span class="menu-label">{move || i18n.t("file-share")}</span>
-          </button>
+          {actions.can_share.then(|| view! {
+            <button class="menu-item" role="menuitem" on:click=item(FileActions::share)>
+              <Icon name=IconName::Link />
+              <span class="menu-label">{move || i18n.t("file-share")}</span>
+            </button>
+          })}
           <button class="menu-item" role="menuitem" on:click=item(FileActions::forward)>
             <Icon name=IconName::Forward />
             <span class="menu-label">{move || i18n.t("lightbox-forward")}</span>
@@ -1022,24 +1053,62 @@ fn FileMenu(actions: FileActions) -> impl IntoView {
   }
 }
 
-/// What the toolbar, the card and the "…" menu do with one file.
+/// Saves one file of a message. In the desktop app the system's save dialog asks where, and the
+/// core decrypts the file to exactly that place (#719); the file's card shows the progress. In the
+/// browser the core hands the decrypted file to the browser's download. A failure says so.
+pub(crate) fn save_attachment(
+  state: AppState,
+  i18n: I18n,
+  conversation: ConversationId,
+  message: MessageId,
+  file_id: String,
+  file_name: String,
+) {
+  if !crate::auth::tauri::is_available() {
+    state.write(|backend| backend.download_attachment(conversation, message, &file_id));
+    return;
+  }
+  spawn_local(async move {
+    let args = serde_json::json!({
+      "conversation": conversation,
+      "message": message,
+      "file_id": file_id,
+      "file_name": file_name,
+    });
+    match crate::auth::tauri::call::<bool>("core_save_attachment", &args).await {
+      Ok(true) => state.show_brief_toast(i18n.t("lightbox-saving")),
+      // The user closed the dialog.
+      Ok(false) => {},
+      Err(error) => state.show_error(i18n.t("file-save-failed"), error),
+    }
+  });
+}
+
+/// What the toolbar, the card, the "…" menu and the right-click menu do with one file.
 #[derive(Clone, Copy)]
-struct FileActions {
+pub(crate) struct FileActions {
   state: AppState,
   i18n: I18n,
   conversation: ConversationId,
   message: MessageId,
   file_id: StoredValue<String>,
+  file_name: StoredValue<String>,
+  media_type: StoredValue<String>,
+  /// Share links are offered only to people who may make them (issue #691).
+  can_share: bool,
 }
 
 impl FileActions {
-  fn new(state: AppState, file: &FileInfo) -> Self {
+  pub(crate) fn new(state: AppState, file: &FileInfo) -> Self {
     Self {
       state,
       i18n: use_i18n(),
       conversation: file.conversation,
       message: file.message,
       file_id: StoredValue::new(file.file_id.clone()),
+      file_name: StoredValue::new(file.file_name.clone()),
+      media_type: StoredValue::new(file.media_type.clone()),
+      can_share: can_share_files(state, file.conversation),
     }
   }
 
@@ -1054,13 +1123,45 @@ impl FileActions {
     })
   }
 
-  /// The core downloads and decrypts the file again and saves it (the download folder on the
-  /// desktop, the browser's download on the web).
-  fn download(self) {
-    self.file_id.with_value(|file_id| {
-      self
-        .state
-        .write(|backend| backend.download_attachment(self.conversation, self.message, file_id));
+  /// Saves the file: in the desktop app where the user picks in the save dialog, in the browser as
+  /// its download (see [`save_attachment`]).
+  pub(crate) fn download(self) {
+    save_attachment(
+      self.state,
+      self.i18n,
+      self.conversation,
+      self.message,
+      self.file_id.get_value(),
+      self.file_name.get_value(),
+    );
+  }
+
+  /// Whether "Copy image" applies: a picture the webview can draw.
+  pub(crate) fn can_copy_image(self) -> bool {
+    self
+      .media_type
+      .with_value(|media_type| crate::copy_image::can_copy(media_type))
+  }
+
+  /// Puts the picture on the clipboard (see [`crate::copy_image`]) and says how it went. Starts
+  /// within the click: the web Clipboard API allows it only then.
+  pub(crate) fn copy_image(self) {
+    let picture = crate::copy_image::CopiedPicture {
+      conversation: self.conversation,
+      message: self.message,
+      file_id: self.file_id.get_value(),
+      media_type: self.media_type.get_value(),
+    };
+    let copying = crate::copy_image::copy(picture);
+    let (state, i18n) = (self.state, self.i18n);
+    spawn_local(async move {
+      match copying.await {
+        true => state.show_brief_toast(i18n.t("lightbox-image-copied")),
+        false => state.show_error(
+          i18n.t("lightbox-copy-failed"),
+          "the picture could not be put on the clipboard".to_owned(),
+        ),
+      }
     });
   }
 
@@ -1077,7 +1178,7 @@ impl FileActions {
     }
   }
 
-  fn forward(self) {
+  pub(crate) fn forward(self) {
     self
       .state
       .overlay
@@ -1101,13 +1202,13 @@ impl FileActions {
     self.state.show_brief_toast(self.i18n.t(key));
   }
 
-  fn prefetch_permalink(self) {
+  pub(crate) fn prefetch_permalink(self) {
     self
       .state
       .read(|backend| drop(backend.permalink(self.conversation, self.message)));
   }
 
-  fn copy_message_link(self) {
+  pub(crate) fn copy_message_link(self) {
     let key = match self
       .state
       .read(|backend| backend.permalink(self.conversation, self.message))
@@ -1330,6 +1431,23 @@ fn file_icon(maybe_kind: Option<MediaKind>) -> IconName {
   }
 }
 
+/// Where a stalled upload is shown: over its picture (short) or on a file card (with the note
+/// that the message waits).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StallPlace {
+  Tile,
+  Card,
+}
+
+/// Why an upload stopped retrying by itself, in words (#742).
+fn stall_key(reason: FileFailure, place: StallPlace) -> &'static str {
+  match (reason, place) {
+    (FileFailure::StorageUnavailable, _) => "file-upload-storage-unavailable",
+    (_, StallPlace::Tile) => "file-upload-failed",
+    (_, StallPlace::Card) => "file-upload-stalled",
+  }
+}
+
 fn failure_key(reason: FileFailure) -> &'static str {
   match reason {
     FileFailure::TooLarge => "file-too-large",
@@ -1345,4 +1463,27 @@ pub(crate) fn blob_url(bytes: &[u8], media_type: &str) -> Option<String> {
   options.set_type(media_type);
   let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &options).ok()?;
   web_sys::Url::create_object_url_with_blob(&blob).ok()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn a_stalled_upload_says_when_the_storage_is_down() {
+    for place in [StallPlace::Tile, StallPlace::Card] {
+      assert_eq!(
+        stall_key(FileFailure::StorageUnavailable, place),
+        "file-upload-storage-unavailable"
+      );
+    }
+    assert_eq!(
+      stall_key(FileFailure::Network, StallPlace::Tile),
+      "file-upload-failed"
+    );
+    assert_eq!(
+      stall_key(FileFailure::Network, StallPlace::Card),
+      "file-upload-stalled"
+    );
+  }
 }

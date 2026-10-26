@@ -24,6 +24,7 @@ use crate::components::bundle_banner::BundleBanner;
 use crate::components::icons::{Icon, IconName};
 use crate::components::pending_button::PendingButton;
 use crate::components::security_ui::QrImage;
+use crate::components::tab_elsewhere::TabGate;
 use crate::feedback::{PendingAction, failure_message};
 use crate::hybrid::Hybrid;
 use crate::i18n::{I18n, use_i18n};
@@ -81,7 +82,16 @@ pub fn SessionGate(settings: Settings) -> impl IntoView {
         view! { <EnrollScreen name=me.display_name has_existing_identity=has_existing_identity was_data_lost=was_data_lost control=control /> }.into_any()
       },
       SessionState::NeedsDeviceSetup(me) => view! { <WelcomeScreen name=me.display_name control=control /> }.into_any(),
-      SessionState::Ready(me) => view! { <DataGate me=me settings=settings control=control /> }.into_any(),
+      // A browser tab shows the app only while it is the account's active tab (#744).
+      SessionState::Ready(me) => view! {
+        <TabGate>
+          {
+            let me = me.clone();
+            move || view! { <DataGate me=me.clone() settings=settings control=control /> }
+          }
+        </TabGate>
+      }
+      .into_any(),
     }}
   }
 }
@@ -1193,6 +1203,7 @@ fn DataGate(me: GetMeResponse, settings: Settings, control: SessionControl) -> i
   let i18n = use_i18n();
   let backend = RwSignal::new_local(None::<Result<Rc<dyn Backend>, LoadError>>);
   let attempt = RwSignal::new(0_u32);
+  crate::persisted_media::use_account(me.id);
   let me = StoredValue::new(me);
 
   Effect::new(move |_| {

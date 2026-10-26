@@ -19,9 +19,9 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State, Url};
 use tauri_plugin_updater::{Update, UpdaterExt};
 use teamcraft_client_api::updates::{
-  CheckPlan, ClientVersion, Delivery, InstallKind, PackageManagerHint, PlanInputs, UpdatePlan,
-  UpdatePreference, UpdateState, UpdateStatus, is_offered, missing_version, next_check_delay, plan,
-  required_version,
+  CheckPlan, ClientVersion, Delivery, InstallKind, ManualUpdate, PackageManager, PackageManagerHint,
+  PackageSource, PlanInputs, UpdatePlan, UpdatePreference, UpdateState, UpdateStatus, is_offered,
+  missing_version, next_check_delay, plan, required_version,
 };
 use teamcraft_proto::{ClientCompatibilityResponse, ClientUpdatePolicy};
 use tokio::sync::Notify;
@@ -59,6 +59,9 @@ struct SavedUpdates {
   maybe_policy: Option<ClientUpdatePolicy>,
   #[serde(rename = "server_minimum", skip_serializing_if = "Option::is_none")]
   maybe_server_minimum: Option<String>,
+  /// The version whose hint the user dismissed (`Dismissal::ForVersion`).
+  #[serde(rename = "dismissed_version", skip_serializing_if = "Option::is_none")]
+  maybe_dismissed_version: Option<String>,
 }
 
 struct Inner {
@@ -68,7 +71,8 @@ struct Inner {
   maybe_found: Option<Update>,
   /// Downloaded and verified: installed on restart or quit.
   maybe_ready: Option<(Update, Vec<u8>)>,
-  maybe_package_manager: Option<PackageManagerHint>,
+  /// How the user installs an update the app can't (deb, rpm, Flatpak, a read-only AppImage).
+  maybe_manual: Option<ManualUpdate>,
 }
 
 #[derive(Debug, Serialize)]
@@ -94,7 +98,7 @@ impl UpdateHost {
         },
         maybe_found: None,
         maybe_ready: None,
-        maybe_package_manager: None,
+        maybe_manual: None,
       }),
       wake: Notify::new(),
     };
@@ -148,7 +152,8 @@ impl UpdateHost {
         .as_ref()
         .and_then(|current| missing_version(current, maybe_required.as_ref())),
       is_in_call: is_in_call(app),
-      maybe_package_manager: inner.maybe_package_manager.clone(),
+      maybe_manual: inner.maybe_manual.clone(),
+      maybe_dismissed_version: inner.saved.maybe_dismissed_version.clone(),
     }
   }
 
@@ -188,15 +193,7 @@ impl UpdateHost {
     self.set_state(app, UpdateState::Checking);
     let result = match check_plan.delivery {
       Delivery::SelfUpdate { is_automatic } => self.check_self_update(app, &check_plan, is_automatic).await,
-      Delivery::PackageManager(manager) => {
-        let hint = PackageManagerHint {
-          manager,
-          command: manager.command(),
-          has_package_kit: has_package_kit().await,
-        };
-        self.lock().maybe_package_manager = Some(hint);
-        self.check_package(app, &check_plan).await
-      },
+      Delivery::PackageManager(manager) => self.check_package(app, &check_plan, manager).await,
     };
     if let Err(message) = result {
       tracing::warn!(%message, "update check failed");
@@ -265,7 +262,16 @@ impl UpdateHost {
     let version = update.version.clone();
     let maybe_notes_url = release_page(update.body.as_deref());
     tracing::info!(%version, "update available");
-    self.lock().maybe_found = Some(update);
+    // An AppImage in a place the app can't write (#731): the user downloads the new one.
+    let is_replaceable = self.install != InstallKind::AppImage || can_replace_app_image();
+    {
+      let mut inner = self.lock();
+      inner.maybe_manual = (!is_replaceable).then(|| ManualUpdate::Download {
+        url: update.download_url.to_string(),
+        maybe_repository_setup_url: None,
+      });
+      inner.maybe_found = is_replaceable.then_some(update);
+    }
     self.set_state(
       app,
       UpdateState::Available {
@@ -273,22 +279,46 @@ impl UpdateHost {
         maybe_notes_url,
       },
     );
-    if is_automatic && !is_in_call(app) {
+    if is_replaceable && is_automatic && !is_in_call(app) {
       self.download(app).await?;
     }
     Ok(())
   }
 
-  async fn check_package(&self, app: &AppHandle, check_plan: &CheckPlan) -> Result<(), String> {
+  /// deb, rpm and Flatpak: reads the feed like the other installs and tells the user how to get a
+  /// new version, which depends on where the package came from (#731).
+  async fn check_package(
+    &self,
+    app: &AppHandle,
+    check_plan: &CheckPlan,
+    manager: PackageManager,
+  ) -> Result<(), String> {
     let Some(current) = self.maybe_current.clone() else {
       return Err("this build has no readable version".to_owned());
     };
+    let source = match tokio::task::spawn_blocking(move || feed::package_source(manager)).await {
+      Ok(source) => source,
+      Err(error) => {
+        tracing::debug!(%error, "could not read the package sources");
+        PackageSource::File
+      },
+    };
+    // Set before the feed answers, so "too old" can say what to do even when the check fails.
+    let hint = manual_update(manager, source, None, check_plan).await;
+    self.lock().maybe_manual = Some(hint);
     let summary = fetch_manifest(&feed::manifest_url(check_plan)).await?;
     let remote = ClientVersion::parse(&summary.version).map_err(|error| error.to_string())?;
     let state = if is_offered(&current, &remote, check_plan.maybe_pinned.as_ref()) {
+      let maybe_notes_url = release_page(summary.notes.as_deref());
+      let target = DownloadTarget {
+        version: &remote,
+        maybe_notes_url: maybe_notes_url.as_deref(),
+      };
+      let hint = manual_update(manager, source, Some(target), check_plan).await;
+      self.lock().maybe_manual = Some(hint);
       UpdateState::Available {
         version: summary.version,
-        maybe_notes_url: release_page(summary.notes.as_deref()),
+        maybe_notes_url,
       }
     } else {
       idle_now()
@@ -474,6 +504,23 @@ pub fn update_restart(app: AppHandle, host: State<'_, Arc<UpdateHost>>) -> Resul
   app.restart()
 }
 
+/// Hides the hint for `version` for good (`Dismissal::ForVersion`): the app can't install it, and
+/// the user knows (#731).
+#[tauri::command(rename_all = "snake_case")]
+pub fn update_dismiss(app: AppHandle, host: State<'_, Arc<UpdateHost>>, version: String) {
+  {
+    let mut inner = host.lock();
+    if inner.saved.maybe_dismissed_version.as_ref() == Some(&version) {
+      return;
+    }
+    inner.saved.maybe_dismissed_version = Some(version);
+    save(&app, &inner.saved);
+  }
+  if let Err(error) = app.emit(UPDATE_CHANGED_EVENT, ()) {
+    tracing::debug!(%error, "could not notify the webview");
+  }
+}
+
 /// deb/rpm: asks PackageKit to install the update (docs/updates.md §4.5).
 #[tauri::command(rename_all = "snake_case")]
 pub async fn update_with_package_manager(
@@ -541,6 +588,81 @@ async fn has_package_kit() -> bool {
 
 #[cfg(not(target_os = "linux"))]
 async fn has_package_kit() -> bool {
+  false
+}
+
+/// The version a hint points to, once the feed named one.
+#[derive(Clone, Copy)]
+struct DownloadTarget<'a> {
+  version: &'a ClientVersion,
+  maybe_notes_url: Option<&'a str>,
+}
+
+/// What the user does to get a new version onto a deb, rpm or Flatpak install: the package
+/// manager's command (and PackageKit) from a repository, or the new file and how to add the
+/// repository when the package was installed from a file.
+async fn manual_update(
+  manager: PackageManager,
+  source: PackageSource,
+  maybe_target: Option<DownloadTarget<'_>>,
+  check_plan: &CheckPlan,
+) -> ManualUpdate {
+  match source {
+    PackageSource::Repository => ManualUpdate::PackageManager(PackageManagerHint {
+      manager,
+      command: manager.command(),
+      has_package_kit: manager.is_package_kit_managed() && has_package_kit().await,
+    }),
+    PackageSource::File => {
+      let url = match maybe_target {
+        // A mirrored feed (policy): its release page, not GitHub's assets.
+        Some(target) if check_plan.maybe_feed_url.is_some() => target
+          .maybe_notes_url
+          .map_or_else(feed::releases_url, str::to_owned),
+        Some(target) => feed::package_download_url(manager, target.version),
+        None => feed::releases_url(),
+      };
+      ManualUpdate::Download {
+        url,
+        maybe_repository_setup_url: Some(feed::repository_setup_url()),
+      }
+    },
+  }
+}
+
+/// AppImage: whether the updater can replace the file. It moves the running AppImage aside and
+/// writes the new one next to it, so its directory must be writable (not, say, `/opt` owned by
+/// root or a read-only mount).
+#[cfg(target_os = "linux")]
+fn can_replace_app_image() -> bool {
+  let Some(path) = std::env::var_os("APPIMAGE").map(PathBuf::from) else {
+    return false;
+  };
+  let Some(dir) = path.parent() else {
+    return false;
+  };
+  let probe = dir.join(format!(".teamcraft-update-probe-{}", std::process::id()));
+  match std::fs::OpenOptions::new()
+    .write(true)
+    .create_new(true)
+    .open(&probe)
+  {
+    Ok(_) => {
+      if let Err(error) = std::fs::remove_file(&probe) {
+        // Harmless: an empty hidden file next to the AppImage.
+        tracing::debug!(%error, "could not remove the write probe");
+      }
+      true
+    },
+    Err(error) => {
+      tracing::info!(%error, "the AppImage can't be replaced; the update is offered as a download");
+      false
+    },
+  }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn can_replace_app_image() -> bool {
   false
 }
 
@@ -678,6 +800,10 @@ mod tests {
     let saved: SavedUpdates = serde_json::from_str(r#"{"preference":"notify_only"}"#).unwrap_or_default();
     assert_eq!(saved.preference, UpdatePreference::NotifyOnly);
     assert_eq!(saved.maybe_policy, None);
+    assert_eq!(saved.maybe_dismissed_version, None);
+    let dismissed: SavedUpdates =
+      serde_json::from_str(r#"{"dismissed_version":"1.0.8"}"#).unwrap_or_default();
+    assert_eq!(dismissed.maybe_dismissed_version.as_deref(), Some("1.0.8"));
     let empty: SavedUpdates = serde_json::from_str("{}").unwrap_or_default();
     assert_eq!(empty, SavedUpdates::default());
   }

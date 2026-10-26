@@ -18,6 +18,26 @@ Status: design draft. Builds on [e2ee.md](e2ee.md).
 Permissions follow the scheme in PLAN.md §13 (instance / space / channel scope; a channel can only
 restrict). Custom roles: later.
 
+### 1.1 What the clients offer
+
+Every action in the UI (button, toggle, menu entry, editable field) is shown only to people whose
+rights allow it; nobody gets a "Change" that ends in an error (issue #691). Read-only information
+stays visible, and where hiding a control would confuse, it is disabled with an explanation (for
+example the channel name for non-admins). The clients decide from the same facts the server
+enforces, which the server hands out as hints:
+
+| Fact                                   | Where                                    | Gates                                                                                            |
+|----------------------------------------|------------------------------------------|--------------------------------------------------------------------------------------------------|
+| `my_permissions`                       | `ConversationResponse` (list and single) | posting, reactions, pins and bookmarks, share links, members, roles, channel properties, privacy |
+| `can_add_members`, `can_invite_guests` | `SpaceResponse`                          | "Invite people"                                                                                  |
+| `can_manage_space`                     | `SpaceResponse`                          | space settings, moving channels between spaces                                                   |
+| `can_create_channels`                  | `SpaceResponse`                          | "New channel"                                                                                    |
+| instance role (guest, member, admin)   | the signed roster                        | browsing channels and spaces, meetings, admin console                                            |
+
+`my_permissions` is evaluated with the conversation's space scheme and its moderation, so an
+announcement channel takes "post" from its members in the UI too. A server that doesn't send it
+leaves the client on the built-in scheme. The server checks every request again.
+
 ## 2. Managing rooms without reading them
 
 ### 2.1 What an admin sees for every conversation
@@ -117,9 +137,18 @@ signature (freshness above).
   started from (`publish_roster_based_on`); if another owner signed meanwhile, nothing is signed
   (`roster_changed`) and the owner edits the new roster.
 - **Identity provider roles.** The `owner` and `admin` roles in the identity provider don't change
-  the signed roster by themselves: the server can't sign. When they differ from it, the console
-  lists the difference, and an owner signs the identity provider's role holders through the same
-  confirmation.
+  the signed roster by themselves: the server can't sign. When the provider lists owners or admins
+  the roster doesn't have, the console lists them (with each account, so two accounts with one name
+  differ), and an owner signs them through the same confirmation. This only adds people and
+  promotes admins to owners: it never removes or demotes anybody, because the server's role list is
+  the role each account last showed in a token and can lag behind the provider; removing someone
+  is the owner's explicit edit (issue #765). Deactivated accounts are never proposed.
+- **Unsigned roles are said, not hidden.** Admin rights hold only through the fresh signed roster,
+  so an admin or owner whose provider role nobody signed yet is a member on everybody else's app.
+  A banner above the app and on every console page says so, with the owners to ask; a signing
+  owner sees there that provider roles wait for their signature, and after the freshness window
+  ran out an owner signs the unchanged roster again from the banner. Actions refused for this
+  reason (integration sources, joining private channels) say it where they are.
 - **Admins can't sign.** For admins the form is read-only; the core refuses to sign a roster or
   policy for anyone who isn't an owner of the verified roster (`not_an_owner`), and every client
   would refuse such an entry anyway.
@@ -145,6 +174,13 @@ history. That is allowed, but never silent:
   - `disabled`.
 - Member clients enforce this setting themselves (it's part of the signed workspace policy), so the
   server can't bypass it.
+- **Where admins join.** The channel browser lists a space's private channels to workspace admins,
+  marked private, as the verified policy allows: "Join as admin" for `visible`, a note to ask a
+  channel admin for `owner_approval` (there is no request flow yet), nothing for `disabled`. The
+  admin's app signs the self-join; the member whose app commits it then posts the encrypted
+  "joined as a workspace admin" message (`AdminJoined`), shown to everybody whatever their
+  join/leave setting. Members' apps let the admin in only while their role is in the fresh signed
+  roster.
 
 ### 2.5 Orphaned channels
 
@@ -175,6 +211,7 @@ remaining members. The admin doesn't need to be a member for that.
 | User list with status, devices, last seen, role, spaces                                                          | v1   |
 | Deactivate (suspend) user, also automatically when disabled in the OIDC provider; reactivate restores everything | v1   |
 | Remove a deactivated user from all chats (devices leave every group, keys rotate); optionally after a set period | v1   |
+| Delete an account: a tombstone stays on old messages, direct messages go, the sign-in is released                | v1   |
 | Remove a single device (lost phone)                                                                              | v1   |
 | Start org recovery for a user (needs a second admin, see e2ee.md §6.3)                                           | v1   |
 | Invite guests, set expiry and sponsor, see all guests and where they are                                         | v1   |
@@ -182,14 +219,55 @@ remaining members. The admin doesn't need to be a member for that.
 | OIDC group → role/space mapping                                                                                  | v1   |
 | User groups (`@devteam`)                                                                                         | v1   |
 
-#### 3.2.1 Deactivating and removing users
+#### 3.2.1 Deactivating, reactivating, removing and deleting users
 
-Deactivation and removal are two steps (issue #631):
+Deactivation and removal are two steps (issue #631); deletion is the final one (issue #630):
 
-| Step                      | What happens                                                                                                                                                                                                                                                                       | Reversible                                  |
-|---------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------|
-| **Deactivate** (suspend)  | Gateway connections close and can't resume, local sessions end, every request and sign-in (SSO and local) is refused with `account_deactivated`, no pushes are sent (registrations are kept). Memberships, space memberships and devices stay; others see the user as deactivated. | Yes: reactivate, same devices sign in again |
-| **Remove from all chats** | Only for deactivated users. The admin's client signs the user's removal from every channel they are in; members' clients commit it, which rotates the keys (e2ee.md §4.6). Then the server revokes the devices and drops direct messages and spaces.                               | No: they have to be added again             |
+| Step                      | What happens                                                                                                                                                                                                                                                                                                                                                                                                          | Reversible                                  |
+|---------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------|
+| **Deactivate** (suspend)  | Gateway connections close and can't resume, local sessions end, every request and sign-in (SSO and local) is refused with `account_deactivated`, no pushes are sent (registrations are kept). Memberships, space memberships and devices stay; others see the user as deactivated.                                                                                                                                    | Yes: reactivate, same devices sign in again |
+| **Reactivate**            | Lifts a deactivation: the same account signs in again with its devices and whatever memberships it still has. Not possible after a deletion.                                                                                                                                                                                                                                                                          | –                                           |
+| **Remove from all chats** | Only for deactivated users. The admin's client signs the user's removal from every channel they are in; members' clients commit it, which rotates the keys (e2ee.md §4.6). Then the server revokes the devices and drops direct messages and spaces.                                                                                                                                                                  | No: they have to be added again             |
+| **Delete account**        | The removal from all chats, then: devices revoked (push registrations and key packages go), identity key, key bag, local account, sessions, profile and recovery shares removed, the OIDC identity released (signing in again creates a new, empty account), 1:1 direct messages deleted. The row stays as a tombstone named "Deleted user" because messages, reactions, the audit log and call history reference it. | No: final                                   |
+
+- **Delete account** (`DELETE /admin/users/{id}`, audit `user_deleted`). Like "Remove from all
+  chats", it runs on the admin's client, which needs its device keys: it signs the user's removal
+  from every channel (`GET /admin/conversations?user_id=`) and commits the removal in every group of
+  its own where the user is left over, and only then calls the server. The console asks for the
+  account's name to be typed and explains deactivating versus deleting. Rules:
+  - Admins delete members and guests; only owners delete admins and owners (403). Nobody deletes
+    their own account (409 `cannot_delete_self`), and deleting the last active owner (400
+    `last_owner`) or admin (409 `last_admin`) is refused.
+  - Idempotent: a retry after a lost answer finishes what is left and answers 204; the console's
+    second try after a failed channel does the same.
+  - **Direct messages.** A 1:1 DM with the deleted user is deleted entirely: the conversation, its
+    messages and ciphertext, attachments (also in storage) and MLS group state. A group DM stays
+    like a channel unless only one other person would remain; then it is deleted like a 1:1 DM. In
+    a group DM that stays, the admin's device commits the removal if it is in the group; elsewhere
+    the user is listed as left in the group for an admin who is (below). The
+    remaining participants' devices drop it with its local history when the gateway announces
+    `conversation_delete`, or on their next full sync (`deleted_conversation_ids` of
+    `GET /conversations`, remembered for `[policy] deleted_conversations_kept_days`, default 180).
+  - **Channels.** The user's messages stay; clients show the author as "Deleted user" (in their own
+    language) in messages, profiles and member lists, and leave the tombstone out of people lists,
+    the DM list and the mention picker. Optionally deleting their messages is out of scope: the
+    server can't read them.
+  - **The identity.** The OIDC issuer of the row gets a `deleted:{id}:` prefix, so the issuer and
+    subject pair is free and the identity provider sync no longer sees the account. Only a sign-in
+    after the deletion creates the new account: tokens from an earlier sign-in (`auth_time`, else
+    `iat`, at or before the deletion), also ones refreshed since, are refused on REST, the gateway
+    and device linking with 401 `account_deleted`. To keep the person out for good, disable them at
+    the identity provider too.
+  - **Signed roster.** A deleted admin or owner stays in the signed roster until an owner signs a
+    new one; their devices are revoked, so the entry grants nothing.
+- **Users left in encryption groups** (issue #734). The console's "Spaces and channels" lists, as one
+  compact list, users still in the encryption group of a conversation the admin's device is in,
+  whom the server no longer lists (issue #661): with the account's current name (marked when it is
+  deactivated) and where (`#channel`, the direct message with someone, or a deleted conversation).
+  "Remove from the group" (and "Remove from all" for several) makes the admin's device sign and
+  commit the removal, which rotates the keys; nothing is removed on the server's word alone. The
+  admin page of a deactivated user offers "Remove from all chats" also when only such leftovers
+  remain.
 
 - **Who triggers what.** An admin deactivates in the console (`POST /admin/users/{id}/deactivate`) and
   removes in a second, explicit step. "Remove from all chats" runs on the admin's client, which
@@ -209,6 +287,9 @@ Deactivation and removal are two steps (issue #631):
   provider) are left out of the automatic removal; an admin decides.
 - **Direct messages.** Admins don't sign changes in DMs and group DMs; the server's removal drops
   the user there, and the participants' clients list them for admins like any server-only removal.
+- **Their direct messages** leave the participants' main list: a DM or group DM whose other people
+  are all deactivated is listed last under "Deactivated accounts", never cut off by "show more",
+  and its history stays readable (issue #698).
 - **Share links** of a deactivated user are paused (they answer like an unknown link) and work again
   after a reactivation if they haven't expired.
 - **Per reason** (`deactivation_reason`): `admin` and `oidc` only suspend; the OIDC sync reactivates a
@@ -310,6 +391,7 @@ What the server offers for the features above (all under `/api/v1`; instance adm
 | Calendar (§6.2)                          | `GET/PUT/DELETE /admin/settings/calendar`, `POST /admin/settings/calendar/test`    |
 | Instance settings (§6.3)                 | `GET/PUT /admin/settings`, `DELETE /admin/settings/{section}`                      |
 | Deactivate, reactivate, remove (§3.2.1)  | `POST /admin/users/{id}/deactivate`, `.../reactivate`, `.../remove-from-chats`      |
+| Delete an account (§3.2.1)               | `DELETE /admin/users/{id}`                                                         |
 
 Session length, idle timeout, required second factor, display name format and the privacy of names and
 e-mail addresses, and the presence switches (statuses on/off, custom status on/off, presets, away

@@ -46,6 +46,7 @@ use teamcraft_proto::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+use super::media::{KeptKey, MediaSlot};
 use crate::auth::{AuthService, TokenPeek, TokenStore};
 
 /// Wrong short codes allowed before a link approval is dropped.
@@ -76,6 +77,8 @@ pub struct CoreConfig {
   /// Keystore namespace, so several servers do not share database keys.
   pub keystore_scope: String,
   pub argon2: Argon2Settings,
+  /// Where "Download" puts files without asking (the user's downloads folder); `None` refuses.
+  pub maybe_download_dir: Option<PathBuf>,
 }
 
 /// The access token the core sends, with the server (origin) it belongs to. With a live source
@@ -259,6 +262,14 @@ enum Request {
     reply: oneshot::Sender<Result<SecretBytes, String>>,
   },
   OrgBackgroundPicture(OrgBackgroundId, oneshot::Sender<Result<Vec<u8>, String>>),
+  /// "Save…" (#719): the file goes to the path the user picked in the save dialog.
+  SaveAttachment {
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: String,
+    path: PathBuf,
+    reply: oneshot::Sender<Result<(), String>>,
+  },
   LinkStart {
     device_name: String,
     reply: oneshot::Sender<Result<(), String>>,
@@ -303,6 +314,8 @@ pub struct CoreRuntime {
   connection: ConnectionStatus,
   /// Shared with the client: the conversation the user opened, set while the core thread syncs.
   focus: CatchUpFocus,
+  /// The media cache (#749), opened with the store; read without asking the core thread.
+  media: MediaSlot,
   /// Taken by [`CoreRuntime::shutdown`] or on drop.
   thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
@@ -326,6 +339,8 @@ impl CoreRuntime {
     let status = connection.clone();
     let focus = CatchUpFocus::default();
     let shared_focus = focus.clone();
+    let media = MediaSlot::default();
+    let shared_media = media.clone();
     let thread = std::thread::Builder::new()
       .name("teamcraft-core".to_owned())
       .spawn(move || {
@@ -341,7 +356,16 @@ impl CoreRuntime {
           on_failure,
           on_call_event,
         };
-        let core = Core::new(config, user, key, tokens, hooks, status, shared_focus);
+        let core = Core::new(
+          config,
+          user,
+          key,
+          tokens,
+          hooks,
+          status,
+          shared_focus,
+          shared_media,
+        );
         // A panic ends the core for good: logged here, and `status` then answers `Stopped`, so the
         // UI shows an internal error instead of a keystore problem.
         let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| runtime.block_on(core.run(receiver))));
@@ -355,8 +379,14 @@ impl CoreRuntime {
       staging_dir,
       connection,
       focus,
+      media,
       thread: Mutex::new(thread),
     }
+  }
+
+  /// The media cache once the store is open (#749).
+  pub fn media(&self) -> &MediaSlot {
+    &self.media
   }
 
   pub fn staging_dir(&self) -> &std::path::Path {
@@ -586,6 +616,27 @@ impl CoreRuntime {
       .unwrap_or_else(|| Err(stopped()))
   }
 
+  /// Saves one file of a message to `path`, which the user picked in a save dialog. It downloads
+  /// beside the loop; the file's transfer state shows the progress and where it went.
+  pub async fn save_attachment(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: String,
+    path: PathBuf,
+  ) -> Result<(), String> {
+    self
+      .ask(|reply| Request::SaveAttachment {
+        conversation,
+        message,
+        file_id,
+        path,
+        reply,
+      })
+      .await
+      .unwrap_or_else(|| Err(stopped()))
+  }
+
   /// One of the user's own background pictures, downloaded and decrypted.
   pub async fn background_picture(&self, id: BackgroundId) -> Result<Vec<u8>, String> {
     self
@@ -704,6 +755,8 @@ struct Core {
   maybe_reported_bytes: Option<u64>,
   /// Attachment downloads, running beside the loop (issue #491).
   downloads: Downloads,
+  /// Filled when the store opens, with the store's key (#749).
+  media: MediaSlot,
 }
 
 /// Why the client could not be opened.
@@ -742,6 +795,8 @@ struct LinkRun {
 }
 
 impl Core {
+  // The shell shares four handles with the core thread; bundling them would only rename them.
+  #[allow(clippy::too_many_arguments)]
   fn new(
     config: CoreConfig,
     user: UserId,
@@ -750,6 +805,7 @@ impl Core {
     hooks: Hooks,
     status: ConnectionStatus,
     catch_up_focus: CatchUpFocus,
+    media: MediaSlot,
   ) -> Self {
     let Hooks {
       on_change,
@@ -789,6 +845,7 @@ impl Core {
       is_upload_due: true,
       maybe_reported_bytes: None,
       downloads: Downloads::default(),
+      media,
     }
   }
 
@@ -796,7 +853,12 @@ impl Core {
     self.open().await;
     let mut flush = tokio::time::interval(FLUSH_INTERVAL);
     loop {
-      self.connect().await;
+      if self.connect(&mut requests).await == Flow::Stop {
+        break;
+      }
+      if std::mem::take(&mut self.has_queued_sends) && self.send_queued(&mut requests).await == Flow::Stop {
+        break;
+      }
       let maybe_deadline = self.connection_deadline();
       tokio::select! {
         request = requests.recv() => match request {
@@ -831,8 +893,8 @@ impl Core {
           self.changed();
         },
       }
-      if std::mem::take(&mut self.has_queued_sends) {
-        self.send_queued().await;
+      if std::mem::take(&mut self.has_queued_sends) && self.send_queued(&mut requests).await == Flow::Stop {
+        break;
       }
       self.start_upload().await;
       self.start_downloads().await;
@@ -890,10 +952,14 @@ impl Core {
     let store = match &self.store {
       Some(store) => store.clone(),
       None => {
+        let key = KeptKey::new(&self.key);
         let store = TrackedStore::new(Arc::new(
-          SqlCipherStore::open(&path, &self.key).map_err(|error| open_error(error.into()))?,
+          SqlCipherStore::open(&path, &key).map_err(|error| open_error(error.into()))?,
         ));
         self.store = Some(store.clone());
+        if let Some(database_key) = key.take() {
+          self.media.open(&self.config.data_dir, self.user, &database_key);
+        }
         store
       },
     };
@@ -1000,6 +1066,7 @@ impl Core {
   fn client_settings(&self) -> ClientSettings {
     ClientSettings {
       maybe_upload_staging_dir: Some(staging_dir(&self.config, self.user)),
+      maybe_download_dir: self.config.maybe_download_dir.clone(),
       creates_notes_to_self: true,
       ..ClientSettings::default()
     }
@@ -1180,7 +1247,33 @@ impl Core {
         reply,
       } => self.queue_attachment(conversation, message, &file_id, priority, reply),
       Request::OrgBackgroundPicture(id, reply) => drop(reply.send(self.org_background_picture(id).await)),
+      Request::SaveAttachment {
+        conversation,
+        message,
+        file_id,
+        path,
+        reply,
+      } => drop(reply.send(self.queue_save(conversation, message, &file_id, path))),
     }
+  }
+
+  /// Queues saving one file to the path the user picked; it downloads beside the loop.
+  fn queue_save(
+    &mut self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+    path: PathBuf,
+  ) -> Result<(), String> {
+    let reference = self
+      .backend
+      .as_ref()
+      .and_then(|backend| backend.attachment_ref(conversation, message, file_id))
+      .ok_or_else(|| "no such file in this conversation".to_owned())?;
+    self
+      .downloads
+      .save_to(conversation, reference.attachment_id, path);
+    Ok(())
   }
 
   /// Queues one file, decrypted, for the image viewer or an inline picture; it downloads beside
@@ -1531,6 +1624,15 @@ impl Core {
           .await
           .map_err(describe_failure);
       },
+      ChatAction::AdminDeleteUser { user } => {
+        return client.admin_delete_user(*user).await.map_err(describe_failure);
+      },
+      ChatAction::AdminRemoveGroupLeftover { conversation, user } => {
+        return client
+          .admin_remove_group_leftover(*conversation, *user)
+          .await
+          .map_err(describe_failure);
+      },
       _ => {},
     }
     let backend = self.backend.as_ref().ok_or("this device is not set up yet")?;
@@ -1546,7 +1648,9 @@ impl Core {
       | ChatAction::PublishPolicy { .. }
       | ChatAction::PublishRoster { .. }
       | ChatAction::AdminJoinChannel { .. }
-      | ChatAction::AdminRemoveFromAllChats { .. } => {},
+      | ChatAction::AdminRemoveFromAllChats { .. }
+      | ChatAction::AdminDeleteUser { .. }
+      | ChatAction::AdminRemoveGroupLeftover { .. } => {},
       // Everything else goes to the backend, which queues what needs the engine as commands.
       other => {
         if let Some(unhandled) = other.apply_to(backend) {
@@ -1568,31 +1672,14 @@ impl Core {
     let Some(client) = self.client.as_mut() else {
       return Ok(0);
     };
-    let count = commands.len();
-    let mut maybe_failure = None;
-    for command in commands {
-      // A command can take long (a big history page); heartbeats go on meanwhile.
-      let result = self
-        .connection
-        .keep_alive(SystemClock.now_ms(), client.run_ui_command(command))
-        .await;
-      if let Err(error) = result {
-        tracing::warn!(%error, "UI command failed");
-        maybe_failure.get_or_insert(error);
-      }
-    }
-    maybe_failure.map_or(Ok(count), Err)
+    run_commands(&mut self.connection, client, commands).await
   }
 
   async fn flush(&mut self) {
     let Some(client) = self.client.as_mut() else {
       return;
     };
-    if self
-      .connection
-      .keep_alive(SystemClock.now_ms(), upkeep::flush_sends(client))
-      .await
-    {
+    if flush_sends_of(&mut self.connection, client).await {
       self.changed();
     }
   }
@@ -1627,12 +1714,46 @@ impl Core {
 
   /// Sends what [`Request::Action`] put into the outbox (link previews first). A failure was not
   /// the action's (that was answered already): it is shown by itself.
-  async fn send_queued(&mut self) {
-    if let Err(error) = self.run_queued_commands().await {
+  /// Runs what the UI queued and sends the outbox. Reads are answered meanwhile, so a message just
+  /// written to the outbox shows as pending while it goes out, not after the server answered (#717).
+  async fn send_queued(&mut self, requests: &mut mpsc::UnboundedReceiver<Request>) -> Flow {
+    let commands = self.drain_commands();
+    let Self {
+      client: Some(client),
+      connection,
+      backend,
+      store,
+      snapshots,
+      status,
+      catch_up_focus,
+      on_change,
+      ..
+    } = self
+    else {
+      return Flow::Go;
+    };
+    let mut reads = ReadsWhileBusy {
+      backend: backend.as_ref(),
+      store: store.as_ref(),
+      snapshots,
+      status,
+      focus: catch_up_focus,
+      maybe_security: security_of(client).ok(),
+      on_change: on_change.as_ref(),
+    };
+    let work = Box::pin(async {
+      let ran = run_commands(connection, client, commands).await;
+      let flushed = flush_sends_of(connection, client).await;
+      (ran, flushed)
+    });
+    let served = serve_reads_during(work, requests, &mut reads).await;
+    self.has_queued_sends |= served.has_queued;
+    let (ran, _) = served.output;
+    if let Err(error) = ran {
       (self.on_failure)(describe_failure(error));
     }
-    self.flush().await;
     self.changed();
+    self.handle_later(served.later, served.is_closed).await
   }
 
   /// Starts the next due upload, if none runs: the file is encrypted and announced, then goes up
@@ -1715,17 +1836,59 @@ impl Core {
     }
   }
 
-  async fn connect(&mut self) {
-    let Some(client) = self.client.as_mut() else {
-      return;
+  /// Connects the gateway if it is due. The connection and the sync after it can take a while (a
+  /// server far away, one that is unreachable until the handshake times out): meanwhile the UI's
+  /// reads are answered from the store and new messages go to the outbox, so the window shows what
+  /// this device has at once (#717). Everything else waits for the connection, in its order.
+  async fn connect(&mut self, requests: &mut mpsc::UnboundedReceiver<Request>) -> Flow {
+    let Self {
+      client: Some(client),
+      connection,
+      backend,
+      store,
+      snapshots,
+      status,
+      catch_up_focus,
+      on_change,
+      ..
+    } = self
+    else {
+      return Flow::Go;
     };
-    if self.connection.connect_if_due(client).await.is_some() {
+    let mut reads = ReadsWhileBusy {
+      backend: backend.as_ref(),
+      store: store.as_ref(),
+      snapshots,
+      status,
+      focus: catch_up_focus,
+      // Taken before the connection borrows the client; a later snapshot reads it afresh.
+      maybe_security: security_of(client).ok(),
+      on_change: on_change.as_ref(),
+    };
+    // On the heap: the connection's future holds the whole sync, too big for the core thread's stack.
+    let connecting = Box::pin(connection.connect_if_due(client));
+    let served = serve_reads_during(connecting, requests, &mut reads).await;
+    self.has_queued_sends |= served.has_queued;
+    if served.output.is_some() {
       self.repeat_reports().await;
       // Back online: what waited goes out now, not on the next tick.
       self.has_queued_sends = true;
       self.is_upload_due = true;
       self.changed();
     }
+    self.handle_later(served.later, served.is_closed).await
+  }
+
+  /// Handles what waited for long work, in its order; [`Flow::Stop`] when one of them (or the
+  /// closed channel) ends the loop.
+  async fn handle_later(&mut self, later: Vec<Request>, is_closed: bool) -> Flow {
+    for request in later {
+      if matches!(request, Request::Shutdown) {
+        return Flow::Stop;
+      }
+      self.handle(request).await;
+    }
+    if is_closed { Flow::Stop } else { Flow::Go }
   }
 
   /// How long until the connection needs the loop (`None`: it doesn't, or there is no client yet).
@@ -1782,7 +1945,204 @@ impl Core {
   }
 
   fn changed(&self) {
+    self.drop_removed_renditions();
     (self.on_change)();
+  }
+
+  /// The renditions whose message went away (deleted, or its conversation gone): out of the media
+  /// cache (#749).
+  fn drop_removed_renditions(&self) {
+    let Some(store) = &self.store else {
+      return;
+    };
+    let removed = store.take_removed_renditions();
+    let Some(cache) = self.media.get() else {
+      return;
+    };
+    for rendition in removed {
+      if let Err(error) = cache.remove(&rendition.into()) {
+        tracing::debug!(%error, "could not drop a cached rendition");
+      }
+    }
+  }
+}
+
+/// Whether the core loop goes on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Flow {
+  Go,
+  Stop,
+}
+
+/// What the core thread can answer while the client is busy (connecting, sending): everything that
+/// only reads the store, and new messages, which only write the outbox (they go out next).
+struct ReadsWhileBusy<'a> {
+  backend: Option<&'a CoreChatBackend<Store>>,
+  store: Option<&'a Store>,
+  snapshots: &'a mut SnapshotCache,
+  status: &'a CoreStatus,
+  focus: &'a CatchUpFocus,
+  maybe_security: Option<SecuritySnapshot>,
+  on_change: &'a (dyn Fn() + Send + Sync),
+}
+
+/// What [`serve_reads_during`] leaves to its caller.
+struct Served<T> {
+  output: T,
+  /// Requests that need the client, in their order.
+  later: Vec<Request>,
+  /// A new message went to the outbox meanwhile.
+  has_queued: bool,
+  /// Every sender is gone: the core loop ends.
+  is_closed: bool,
+}
+
+/// Runs `work` to its end, answering what [`ReadsWhileBusy`] can answer meanwhile.
+async fn serve_reads_during<T>(
+  work: impl Future<Output = T>,
+  requests: &mut mpsc::UnboundedReceiver<Request>,
+  reads: &mut ReadsWhileBusy<'_>,
+) -> Served<T> {
+  let mut later = Vec::new();
+  let mut has_queued = false;
+  let mut is_closed = false;
+  let mut work = std::pin::pin!(work);
+  let output = loop {
+    tokio::select! {
+      // Work that has nothing to do (no connection due) is done at once, nothing is read beside it.
+      biased;
+      output = &mut work => break output,
+      maybe_request = requests.recv(), if !is_closed => {
+        let Some(request) = maybe_request else {
+          is_closed = true;
+          continue;
+        };
+        match reads.answer(request) {
+          Answered::Done => {},
+          Answered::Queued => {
+            has_queued = true;
+            (reads.on_change)();
+          },
+          Answered::Later(request) => later.push(request),
+        }
+      },
+    }
+  };
+  Served {
+    output,
+    later,
+    has_queued,
+    is_closed,
+  }
+}
+
+/// Runs the UI's queued commands; heartbeats go on meanwhile (a command can take long, a big
+/// history page). Returns how many ran, or the first failure.
+async fn run_commands(
+  connection: &mut ConnectionSupervisor<Gateway>,
+  client: &mut Client<Api, Store>,
+  commands: Vec<CoreCommand>,
+) -> Result<usize, CoreError> {
+  let count = commands.len();
+  let mut maybe_failure = None;
+  for command in commands {
+    let result = connection
+      .keep_alive(SystemClock.now_ms(), client.run_ui_command(command))
+      .await;
+    if let Err(error) = result {
+      tracing::warn!(%error, "UI command failed");
+      maybe_failure.get_or_insert(error);
+    }
+  }
+  maybe_failure.map_or(Ok(count), Err)
+}
+
+/// Sends the outbox with heartbeats going on; whether anything changed.
+async fn flush_sends_of(
+  connection: &mut ConnectionSupervisor<Gateway>,
+  client: &mut Client<Api, Store>,
+) -> bool {
+  connection
+    .keep_alive(SystemClock.now_ms(), upkeep::flush_sends(client))
+    .await
+}
+
+/// How [`ReadsWhileConnecting`] dealt with a request.
+enum Answered {
+  Done,
+  /// A new message is in the outbox.
+  Queued,
+  /// Needs the client: handled once the connection is up (or failed).
+  Later(Request),
+}
+
+impl ReadsWhileBusy<'_> {
+  fn answer(&mut self, request: Request) -> Answered {
+    let not_set_up = || "this device is not set up yet".to_owned();
+    match request {
+      Request::Status(reply) => drop(reply.send(self.status.clone())),
+      Request::Snapshot(reply) => {
+        let result = match (self.backend, self.store, &self.maybe_security) {
+          (Some(backend), Some(store), Some(security)) => Ok(self.snapshots.snapshot(
+            backend,
+            store.take_changes(),
+            || Some(security.clone()),
+          )),
+          _ => Err(not_set_up()),
+        };
+        drop(reply.send(result));
+      },
+      Request::SnapshotChanges(maybe_since, reply) => {
+        let result = match (self.backend, self.store) {
+          (Some(backend), Some(store)) => Ok(self.snapshots.changes_since(
+            backend,
+            store.take_changes(),
+            || self.maybe_security.clone(),
+            maybe_since,
+          )),
+          _ => Err(not_set_up()),
+        };
+        drop(reply.send(result));
+      },
+      Request::Messages {
+        conversation,
+        start,
+        len,
+        reply,
+      } => {
+        // The catch-up running now takes the conversation the user opened next (issue #247).
+        self.focus.set(conversation);
+        let result = self
+          .backend
+          .map(|backend| MessageWindow::read(backend, conversation, start, len))
+          .ok_or_else(not_set_up);
+        drop(reply.send(result));
+      },
+      Request::Thread {
+        conversation,
+        thread,
+        reply,
+      } => {
+        let result = self
+          .backend
+          .map(|backend| backend.thread(conversation, thread))
+          .ok_or_else(not_set_up);
+        drop(reply.send(result));
+      },
+      Request::Action(action, reply) if action.is_new_message() => {
+        let Some(backend) = self.backend else {
+          drop(reply.send(Err(not_set_up())));
+          return Answered::Done;
+        };
+        if let Some(unhandled) = action.apply_to(backend) {
+          tracing::warn!(?unhandled, "chat action not handled");
+        }
+        drop(reply.send(Ok(())));
+        return Answered::Queued;
+      },
+      other => return Answered::Later(other),
+    }
+    Answered::Done
   }
 }
 

@@ -230,7 +230,8 @@ pub fn rem_px() -> f64 {
 /// stays above it. Chrome resizes the layout itself (`interactive-widget=resizes-content` in
 /// index.html); Safari only reports the visual viewport.
 ///
-/// Without the keyboard the properties are removed and the shell fills `100dvh` (#663): iOS reports
+/// Without the keyboard the properties are removed and the shell is pinned to the window's edges
+/// (#663, #709; iOS also computes `100dvh` short in an installed web app): iOS reports
 /// a visual viewport shorter than the screen in an installed web app and under Safari's floating
 /// toolbar, and keeps a shrunken one after the keyboard closed. The shell then ended above the
 /// screen's bottom, and the page showed through below the tab bar.
@@ -310,7 +311,7 @@ pub fn track_visual_viewport() {
 }
 
 /// The part of the window the compact layout fits into while the keyboard is up, as height and
-/// offset from the top in CSS pixels, or `None` when the shell should fill `100dvh`: no text field
+/// offset from the top in CSS pixels, or `None` when the shell should fill the window: no text field
 /// has the focus (no keyboard), the page is pinch-zoomed (the visual viewport is a zoomed window
 /// then, not the free area), or the visual viewport is about as tall as the layout.
 fn keyboard_free_area(

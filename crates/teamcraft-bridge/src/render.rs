@@ -71,13 +71,15 @@ pub struct WebhookMessage {
 }
 
 /// Parses a request body: JSON, or `application/x-www-form-urlencoded` with the JSON in `payload`
-/// (the original Slack form).
+/// (the original Slack form). A form-typed body that is itself a JSON object is read as JSON, as
+/// Slack does: `curl -d '{...}'` sends the form type unless a header says otherwise.
 pub fn parse_webhook(
   content_type: &str,
   body: &[u8],
   danger_is_alert: bool,
 ) -> Result<WebhookMessage, PayloadError> {
-  let json = if content_type.starts_with("application/x-www-form-urlencoded") {
+  let is_form = content_type.starts_with("application/x-www-form-urlencoded");
+  let json = if is_form && !body.trim_ascii_start().starts_with(b"{") {
     url::form_urlencoded::parse(body)
       .find(|(key, _)| key == "payload")
       .map(|(_, value)| value.into_owned())
@@ -376,6 +378,13 @@ mod tests {
         parse_webhook("application/x-www-form-urlencoded", b"other=1", false),
         Err(PayloadError::MissingFormPayload)
       );
+    }
+
+    #[test]
+    fn json_sent_with_the_form_type_is_read_as_json() {
+      let body = br#" {"text":"Deploy finished"}"#;
+      let message = parse_webhook("application/x-www-form-urlencoded", body, false).unwrap();
+      assert_eq!(message.text, "Deploy finished");
     }
 
     #[test]

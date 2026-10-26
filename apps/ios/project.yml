@@ -22,8 +22,8 @@ settings:
     SWIFT_VERSION: "5.0"
     SWIFT_STRICT_CONCURRENCY: minimal
     TARGETED_DEVICE_FAMILY: "1,2"
-    MARKETING_VERSION: "1.0.7"
-    CURRENT_PROJECT_VERSION: "1000799"
+    MARKETING_VERSION: "1.0.8"
+    CURRENT_PROJECT_VERSION: "1000899"
     # Strings come from the String Catalogs in Resources.
     LOCALIZATION_PREFERS_STRING_CATALOGS: "YES"
     SWIFT_EMIT_LOC_STRINGS: "YES"
@@ -112,7 +112,7 @@ targets:
         BGTaskSchedulerPermittedIdentifiers: [de.zeitgleich.teamcraft.segment-prefetch]
         ITSAppUsesNonExemptEncryption: true
         NSMicrophoneUsageDescription: "TeamCraft uses the microphone for calls."
-        NSCameraUsageDescription: "TeamCraft uses the camera for video calls and to scan the code of a new device you link."
+        NSCameraUsageDescription: "TeamCraft uses the camera for video calls, for photos you send and to scan the code of a new device you link."
         NSFaceIDUsageDescription: "TeamCraft uses Face ID to unlock the app when the app lock is on."
         NSUserActivityTypes: [INSendMessageIntent, INStartCallIntent]
         # CFBundleURLTypes: the OIDC redirect (ASWebAuthenticationSession handles it itself, but a

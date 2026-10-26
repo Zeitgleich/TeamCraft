@@ -205,6 +205,10 @@ pub struct FileInfo {
   /// How long a video plays, from the sender.
   #[serde(default)]
   pub maybe_duration_ms: Option<u64>,
+  /// SHA-256 of the file's ciphertext as the message names it (64 hex digits); keys the persistent
+  /// cache of its rendition (`media::MediaKey::Rendition`). Absent for files still going up.
+  #[serde(rename = "content_sha256", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_content_sha256: Option<String>,
 }
 
 impl FileInfo {
@@ -330,6 +334,9 @@ pub enum FileFailure {
   Corrupted,
   /// Reading or writing the file on this device failed.
   LocalFile,
+  /// The file storage (or the server) answered "unavailable": an outage a later retry gets
+  /// through (#742).
+  StorageUnavailable,
 }
 
 /// The sender's preview of a link, inside the encrypted message (e2ee.md §12).
@@ -547,6 +554,25 @@ pub struct BrowsableChannel {
   /// The category the channel is listed under in its space.
   #[serde(default)]
   pub maybe_category: Option<CategoryId>,
+  /// How the user gets in: public channels are joined, private ones only by workspace admins as
+  /// the signed policy allows (admin.md §2.4).
+  #[serde(default)]
+  pub join: BrowseJoin,
+}
+
+/// How the user can join a channel from the browser.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowseJoin {
+  /// A private channel a workspace admin joins by themselves (`admin_self_join: visible`); the
+  /// members see that an admin joined.
+  AsAdmin,
+  /// A private channel whose owners have to approve an admin (`admin_self_join: owner_approval`).
+  NeedsApproval,
+  /// A public channel: anyone in the space joins.
+  #[default]
+  #[serde(other)]
+  Open,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -605,6 +631,10 @@ pub enum WorkspaceEvent {
   Pinned {
     message: MessageId,
     by: UserId,
+  },
+  /// A workspace admin added themselves to the private channel (admin.md §2.4): always shown.
+  AdminJoined {
+    user: UserId,
   },
   #[serde(other)]
   Unknown,

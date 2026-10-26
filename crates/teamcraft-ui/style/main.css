@@ -15,7 +15,8 @@
      Android's outline. --border stays for dividers and cards, which need no contrast. */
   --border-strong: #848ea0;
   --text: #1b2230;
-  --text-muted: #566175;
+  /* Secondary text (#725): 5.6:1 on --surface-3, the darkest surface it sits on. */
+  --text-muted: #4f5a6d;
   --accent: #005dfc;
   --accent-strong: #004bd3;
   --on-accent: #ffffff;
@@ -35,11 +36,13 @@
   --sb-hover: rgba(255, 255, 255, 0.07);
   /* 3:1 against --sb-bg in both themes and 4.5:1 with white text. */
   --sb-current: #0064fc;
-  --sb-muted: #8793a8;
+  --sb-muted: #9aa6ba;
   /* Muted channels: dimmer than --sb-muted but still 4.5:1 on --sb-bg; the bell-off icon says why. */
-  --sb-dim: #808ca1;
+  --sb-dim: #8d99ae;
   /* White text on it needs 4.5:1 (WCAG AA). */
   --badge-bg: #c8441d;
+  /* The system red of Apple's badges (#715): the rail's space tiles. */
+  --dock-red: #ff3b30;
 
   --lvl-debug: #7c8798;
   --lvl-info: #1b6fb4;
@@ -145,6 +148,20 @@
   --call-surface-solid: #141a26;
   --lightbox-text: #f2f2f2;
   --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.05), 0 16px 40px rgba(16, 24, 40, 0.1);
+  /* Dialogs (#706): a raised panel on a dimming scrim. Depth comes from a hairline edge and a
+     layered shadow (a tight contact shadow under a wide soft one); fields are filled, not boxed,
+     and every control in a dialog shares one height and radius. */
+  --scrim: rgba(8, 12, 20, 0.42);
+  --dialog-surface: var(--surface);
+  --dialog-edge: rgba(16, 24, 40, 0.07);
+  --dialog-highlight: transparent;
+  --dialog-shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 12px 24px -8px rgba(16, 24, 40, 0.16), 0 32px 72px -16px rgba(16, 24, 40, 0.28);
+  --dialog-radius: 20px;
+  --dialog-pad: var(--space-6);
+  --field-bg: var(--surface-2);
+  --field-bg-hover: var(--surface-3);
+  --control-h: 2.5rem;
+  --control-radius: 10px;
 }
 
 /* Reduced motion means gentler, not none (#360): fades that explain a change stay, a little
@@ -169,13 +186,14 @@
     --border: #28324a;
     --border-strong: #626d86;
     --text: #e4e9f2;
-    --text-muted: #9aa6ba;
+    --text-muted: #aab5c7;
     --accent: #5c9dff;
     --accent-strong: #8ab8ff;
     --on-accent: #04122e;
     --accent-soft: #13284a;
     --focus: #8ab8ff;
     --danger: #ff7a6b;
+    --dock-red: #ff453a;
     --warn-soft: #4a2a14;
     --warn-text: #ffb27a;
     --on-danger: #2a0905;
@@ -185,6 +203,14 @@
     --code-bg: #1d2535;
     --shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
     --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 16px 40px rgba(0, 0, 0, 0.45);
+    /* A raised surface is lighter in the dark, and its top edge catches the light. */
+    --scrim: rgba(0, 0, 0, 0.56);
+    --dialog-surface: #1a2130;
+    --dialog-edge: rgba(255, 255, 255, 0.08);
+    --dialog-highlight: rgba(255, 255, 255, 0.06);
+    --dialog-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 24px -8px rgba(0, 0, 0, 0.5), 0 32px 72px -16px rgba(0, 0, 0, 0.7);
+    --field-bg: #232c3d;
+    --field-bg-hover: #2a3448;
     --chrome: #0a0e15;
     --sb-bg: #0f1520;
     --sb-current: #0064fc;
@@ -204,13 +230,14 @@
   --border: #28324a;
   --border-strong: #626d86;
   --text: #e4e9f2;
-  --text-muted: #9aa6ba;
+  --text-muted: #aab5c7;
   --accent: #5c9dff;
   --accent-strong: #8ab8ff;
   --on-accent: #04122e;
   --accent-soft: #13284a;
   --focus: #8ab8ff;
   --danger: #ff7a6b;
+  --dock-red: #ff453a;
   --warn-soft: #4a2a14;
   --warn-text: #ffb27a;
   --on-danger: #2a0905;
@@ -220,6 +247,14 @@
   --code-bg: #1d2535;
   --shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 16px 40px rgba(0, 0, 0, 0.45);
+  /* A raised surface is lighter in the dark, and its top edge catches the light. */
+  --scrim: rgba(0, 0, 0, 0.56);
+  --dialog-surface: #1a2130;
+  --dialog-edge: rgba(255, 255, 255, 0.08);
+  --dialog-highlight: rgba(255, 255, 255, 0.06);
+  --dialog-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 24px -8px rgba(0, 0, 0, 0.5), 0 32px 72px -16px rgba(0, 0, 0, 0.7);
+  --field-bg: #232c3d;
+  --field-bg-hover: #2a3448;
   --chrome: #0a0e15;
   --sb-bg: #0f1520;
   --sb-current: #0064fc;
@@ -431,31 +466,60 @@ kbd {
   min-width: 0;
 }
 
-.search-btn {
+/* The global search (#724): a field with the open conversation as a scope chip (picture or glyph,
+   name, x to search everywhere) before a plain placeholder and the shortcut. The button is the
+   control; a press anywhere on the field opens the search too. */
+.search-field {
   grid-column: 2;
   justify-self: center;
   width: min(560px, 100%);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   height: 28px;
-  padding: 0 10px;
+  padding: 0 0 0 10px;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: var(--radius-sm);
   background: rgba(255, 255, 255, 0.07);
   color: var(--chrome-text);
-  text-align: left;
+  cursor: pointer;
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .search-btn:hover {
+  .search-field:hover {
     background: rgba(255, 255, 255, 0.12);
   }
 }
 
-/* Only the label grows; the shortcut's own spans (`.shortcut`, `.shortcut-plus`) stay compact. */
-.search-btn > span:not(.shortcut) {
+.search-field-icon {
+  flex: none;
+  display: grid;
+}
+
+.search-btn {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 100%;
+  padding: 0 10px 0 2px;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+/* The field shows its icon outside the button; a phone shows the button as the icon alone. */
+.search-btn > .icon {
+  display: none;
+}
+
+/* Only the label grows; the shortcut's own spans (`.shortcut`, `.shortcut-plus`) stay compact. */
+.search-btn-label {
+  flex: 1;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -466,6 +530,85 @@ kbd {
   color: inherit;
   border-color: rgba(255, 255, 255, 0.25);
   opacity: 0.8;
+}
+
+/* The scope: a small tinted capsule, the conversation's picture and name, a round x. */
+.search-field-scope {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 50%;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 2px 0 3px;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.14);
+  color: var(--chrome-strong);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  font-weight: var(--weight-semibold);
+  cursor: default;
+}
+
+.search-field-scope > .icon,
+.search-field-scope > .channel-glyph,
+.search-field-scope > .avatar {
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+
+.search-field-scope > .icon {
+  margin-left: 2px;
+}
+
+.search-field-scope > .avatar .avatar-initials {
+  font-size: var(--text-2xs);
+  transform: scale(0.65);
+}
+
+.search-field-scope-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Small to look at, a finger's size to hit: the ring around it takes the press too. */
+.search-field-scope-clear {
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.16);
+  color: inherit;
+}
+
+.search-field-scope-clear::before {
+  content: "";
+  position: absolute;
+  inset: -6px;
+}
+
+.search-field-scope-clear .icon {
+  width: 10px;
+  height: 10px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .search-field-scope-clear:hover {
+    background: rgba(255, 255, 255, 0.3);
+  }
+}
+
+.search-field-scope-clear:active {
+  transform: scale(var(--press-scale));
 }
 
 .top-actions {
@@ -584,6 +727,14 @@ kbd {
 .input:focus-visible {
   outline-offset: 0;
   border-color: var(--focus);
+}
+
+/* Placeholders in the secondary text colour at full strength (#725): the browsers' default is a
+   faded grey under 4.5:1. */
+.input::placeholder,
+textarea::placeholder {
+  color: var(--text-muted);
+  opacity: 1;
 }
 
 select.input {
@@ -1196,32 +1347,35 @@ select.input {
   transform: scaleY(1);
 }
 
+/* Unread on a space tile (#715), as on the macOS Dock: mentions as a white bold number in a round
+   system-red bubble on the top-right corner, overlapping the tile, with a thin ring in the rail's
+   colour that cuts it out of the tile. The number is capped (rail.rs), so the bubble stays round
+   or nearly so. Unread messages without a mention are a small neutral dot in the same place. */
 .space-btn .badge-count {
   position: absolute;
-  right: -6px;
-  top: -6px;
+  right: -5px;
+  top: -5px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  background: var(--dock-red);
+  color: #fff;
+  font-size: var(--text-2xs);
+  letter-spacing: 0;
+  font-weight: var(--weight-bold);
+  line-height: 18px;
   box-shadow: 0 0 0 2px var(--chrome);
 }
 
 .space-btn .dot-unread {
   position: absolute;
-  left: -16px;
-  top: 17px;
-  width: 4px;
-  height: 6px;
-  border-radius: 0 3px 3px 0;
-  background: var(--on-fill);
-}
-
-/* The current space already has the long indicator. */
-.space-btn.current .dot-unread {
-  display: none;
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .space-btn:hover .dot-unread {
-    display: none;
-  }
+  right: -3px;
+  top: -3px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--chrome-strong);
+  box-shadow: 0 0 0 2px var(--chrome);
 }
 
 .rail-add {
@@ -1443,7 +1597,7 @@ select.input {
 }
 
 /* However narrow the window, some of the title bar stays free to grab beside the search. */
-:root[data-titlebar="custom"] .search-btn {
+:root[data-titlebar="custom"] .search-field {
   width: min(560px, calc(100% - 32px));
 }
 
@@ -1836,8 +1990,10 @@ select.input {
   overflow: hidden;
   white-space: nowrap;
   color: var(--text-muted);
-  font-size: var(--text-xs);
-  letter-spacing: var(--tracking-xs);
+  /* Status, last seen and local time are read, not glanced at (#725): body-adjacent size and a
+     little weight, so they hold up in the dark. */
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
   line-height: 1.3;
 }
 
@@ -2172,8 +2328,8 @@ select.input {
   display: block;
   visibility: hidden;
   padding-top: 3px;
-  font-size: var(--text-2xs);
-  letter-spacing: var(--tracking-2xs);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
   text-align: center;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
@@ -2297,9 +2453,16 @@ select.input {
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .reaction:hover {
+  .reaction:not(:disabled):hover {
     border-color: var(--text-muted);
   }
+}
+
+/* Counts for people who may not react (issue #691): readable, not pressable. */
+.reaction:disabled {
+  cursor: default;
+  opacity: 1;
+  color: inherit;
 }
 
 .reaction-mine {
@@ -2534,6 +2697,24 @@ select.input {
   padding: 6px 16px;
   color: var(--text-muted);
   font-size: var(--text-sm);
+}
+
+/* The log reads like a terminal (#702): a short log sits on the composer, where the next entry
+   arrives, instead of floating in an empty pane; a long one scrolls as before. The leading
+   pseudo-element takes the free space and none once the log overflows; nothing else may shrink,
+   or the virtual list's spacers would. */
+.message-list.log-view {
+  display: flex;
+  flex-direction: column;
+}
+
+.message-list.log-view::before {
+  content: "";
+  flex: 1 0 0;
+}
+
+.message-list.log-view > * {
+  flex-shrink: 0;
 }
 
 /* Compact log view for integration channels. Rows have a fixed height so the estimate is exact. */
@@ -3152,28 +3333,7 @@ ol.md-list {
   box-shadow: 0 0 0 2px var(--surface);
 }
 
-/* ---- Threads inbox ---- */
-
-.threads-view {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-}
-
-.threads-list-col {
-  flex: none;
-  width: 380px;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  border-right: 1px solid var(--border);
-}
-
-.threads-detail-col {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-}
+/* Segmented controls and stacked avatars. */
 
 .segmented {
   position: relative;
@@ -3200,109 +3360,9 @@ ol.md-list {
   color: var(--text);
 }
 
-.thread-card {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  width: 100%;
-  padding: 12px 16px;
-  border: 0;
-  border-bottom: 1px solid var(--border);
-  background: transparent;
-  text-align: left;
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .thread-card:hover {
-    background: var(--surface-2);
-  }
-}
-
-.thread-card.selected {
-  background: var(--accent-soft);
-}
-
-.thread-card-top,
-.thread-card-bottom {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.thread-author {
-  font-weight: var(--weight-bold);
-}
-
-.thread-card.unread .thread-author::before {
-  content: "";
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  margin-right: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-}
-
-.thread-channel,
-.thread-time,
-.thread-count {
-  font-size: var(--text-xs);
-  letter-spacing: var(--tracking-xs);
-  color: var(--text-muted);
-}
-
-.thread-time {
-  margin-left: auto;
-}
-
-.thread-preview .md-p + .md-p {
-  margin-top: 0;
-}
-
-.thread-preview {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  overflow-wrap: anywhere;
-}
-
 .avatar-stack {
   display: inline-flex;
   padding-left: 6px;
-}
-
-.unread-pill {
-  padding: 0 7px;
-  border-radius: var(--radius-pill);
-  background: var(--accent);
-  color: var(--on-accent);
-  font-size: var(--text-2xs);
-  letter-spacing: var(--tracking-2xs);
-  font-weight: var(--weight-bold);
-}
-
-.unread-pill.mention {
-  background: var(--badge-bg);
-  color: var(--on-fill);
-}
-
-.empty-detail {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  color: var(--text-muted);
-}
-
-/* Not the shared `.empty-icon` tile: a plain glyph, 3:1 on the surface. */
-.threads-empty-icon {
-  width: 40px;
-  height: 40px;
-  color: var(--border-strong);
 }
 
 /* ---- Popover (status menu) ---- */
@@ -3406,8 +3466,8 @@ ol.md-list {
 
 .menu-label small {
   display: block;
-  font-size: var(--text-2xs);
-  letter-spacing: var(--tracking-2xs);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
   color: var(--text-muted);
 }
 
@@ -3418,6 +3478,10 @@ ol.md-list {
 
 /* ---- Modals ---- */
 
+/* Dialogs (#706): one raised panel on a dimming scrim, without bars. The title leads in a larger
+   weight, the content follows on one spacing rhythm (--dialog-pad around, --space-* inside), and
+   the actions sit at the bottom edge: filled primary, tinted secondary, filled destructive. On a
+   phone the panel is a bottom sheet (see "Dialogs and the search" under the compact layout). */
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -3426,19 +3490,19 @@ ol.md-list {
   align-items: flex-start;
   justify-content: center;
   padding: 12vh 16px 16px;
-  background: rgba(8, 12, 20, 0.55);
+  background: var(--scrim);
   overscroll-behavior: contain;
 }
 
 .modal {
   width: min(560px, 100%);
-  max-height: 80vh;
+  max-height: min(80vh, 760px);
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--surface);
-  box-shadow: var(--shadow);
+  border: 0;
+  border-radius: var(--dialog-radius);
+  background: var(--dialog-surface);
+  box-shadow: inset 0 1px 0 var(--dialog-highlight), 0 0 0 1px var(--dialog-edge), var(--dialog-shadow);
   overflow: hidden;
   /* Takes focus only from code to hold the focus trap; its controls show the ring. */
   outline: none;
@@ -3461,27 +3525,193 @@ ol.md-list {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px 16px;
+  gap: var(--space-2);
 }
 
+/* No rule under the title: its weight and the space around it set it apart from the content. */
 .modal-head {
-  border-bottom: 1px solid var(--border);
+  align-items: flex-start;
   justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-5) var(--space-4) var(--space-2) var(--dialog-pad);
 }
 
 .modal-head h2 {
-  font-size: var(--text-lg);
-  letter-spacing: var(--tracking-lg);
+  min-width: 0;
+  padding-top: var(--space-1);
+  font-size: var(--text-xl);
+  letter-spacing: var(--tracking-xl);
+  line-height: var(--leading-xl);
+  font-weight: var(--weight-bold);
+  overflow-wrap: anywhere;
 }
 
+/* Close and the other header buttons: small filled circles, quieter than any action. */
+.modal-head > .icon-btn {
+  flex: none;
+  border-radius: var(--radius-pill);
+  background: var(--field-bg);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .modal-head > .icon-btn:hover:not(:disabled) {
+    background: var(--field-bg-hover);
+  }
+}
+
+/* No rule above the actions either; inside a form's body they follow its last field. */
 .modal-foot {
-  border-top: 1px solid var(--border);
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  padding: var(--space-2) var(--dialog-pad) var(--dialog-pad);
 }
 
 .modal-body {
-  padding: 16px;
+  padding: var(--space-2) var(--dialog-pad) var(--dialog-pad);
   overflow-y: auto;
+}
+
+.modal-body:first-child {
+  padding-top: var(--dialog-pad);
+}
+
+.modal-body + .modal-foot {
+  padding-top: 0;
+}
+
+.modal-body .modal-foot {
+  margin-top: var(--space-3);
+  padding: var(--space-2) 0 0;
+}
+
+/* Actions: one height and radius, the hierarchy in the fill. A plain `.btn` is the secondary
+   action (a tint, no outline); `.btn-primary` and `.btn-danger` are filled; `.btn-quiet` is text. */
+.modal-foot .btn {
+  min-height: var(--control-h);
+  padding: 0 var(--space-5);
+  border: 0;
+  border-radius: var(--control-radius);
+  background: var(--field-bg);
+  font-weight: var(--weight-semibold);
+}
+
+.modal-foot .btn-primary {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.modal-foot .btn-danger {
+  background: var(--danger);
+  color: var(--on-danger);
+}
+
+.modal-foot .btn-quiet {
+  background: transparent;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .modal-foot .btn:hover:not(:disabled) {
+    background: var(--field-bg-hover);
+  }
+
+  .modal-foot .btn-primary:hover:not(:disabled) {
+    background: var(--accent-strong);
+  }
+
+  .modal-foot .btn-danger:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--danger) 85%, black);
+  }
+
+  .modal-foot .btn-quiet:hover:not(:disabled) {
+    background: var(--danger-soft);
+  }
+}
+
+.modal-foot .btn:disabled {
+  opacity: 0.45;
+}
+
+/* Buttons inside the content (upload a picture, reset a colour) are secondary actions too: the
+   same tint and radius, at their own height. `:where` keeps pressed toggles and the filled kinds
+   in charge. */
+.modal-body :where(.btn:not(.btn-primary, .btn-danger, .btn-quiet)) {
+  border-color: transparent;
+  border-radius: var(--control-radius);
+  background: var(--field-bg);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .modal-body :where(.btn:not(.btn-primary, .btn-danger, .btn-quiet)):hover:not(:disabled) {
+    background: var(--field-bg-hover);
+  }
+}
+
+/* Fields: filled and rounded, not boxed; the label above names them, focus draws the edge and
+   the ring. */
+.modal-body .input:not(.input-small) {
+  min-height: var(--control-h);
+  padding: 0 var(--space-3);
+  border-color: transparent;
+  border-radius: var(--control-radius);
+  background: var(--field-bg);
+}
+
+.modal-body textarea.input {
+  padding: var(--space-2) var(--space-3);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .modal-body .input:hover:not(:focus-visible, :disabled) {
+    border-color: transparent;
+    background: var(--field-bg-hover);
+  }
+}
+
+.modal-body .input:focus-visible {
+  border-color: var(--focus);
+  background: var(--dialog-surface);
+}
+
+/* Checkboxes in a dialog are rows of one group: filled, a hairline between neighbours. */
+.modal-body .check-row {
+  min-height: var(--control-h);
+  margin: var(--space-1) 0;
+  padding: var(--space-2) var(--space-3);
+  gap: var(--space-3);
+  border-radius: var(--control-radius);
+  background: var(--field-bg);
+  cursor: pointer;
+}
+
+.modal-body .check-row:has(+ .check-row) {
+  margin-bottom: 0;
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.modal-body .check-row + .check-row {
+  margin-top: 0;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  box-shadow: inset 0 1px 0 var(--dialog-edge);
+}
+
+/* More contrast: a solid edge around the panel and the fields instead of tints alone. Forced
+   colours drop shadows, so the panel keeps an outline there. */
+@media (prefers-contrast: more) {
+  .modal {
+    border: 1px solid var(--border-strong);
+  }
+
+  .modal-body .input {
+    border-color: var(--border-strong);
+  }
+}
+
+@media (forced-colors: active) {
+  .modal {
+    border: 1px solid CanvasText;
+  }
 }
 
 .emoji-input {
@@ -3490,6 +3720,44 @@ ol.md-list {
   font-size: var(--text-xl);
   letter-spacing: var(--tracking-xl);
   line-height: var(--leading-xl);
+}
+
+/* The status emoji (#705): a square as tall as the text field beside it, which takes the rest of
+   the row. It opens the emoji picker; the press answers at once. */
+.emoji-pick-btn {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: var(--text-xl);
+  line-height: 1;
+  transition: transform var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
+}
+
+.emoji-pick-btn:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.emoji-pick-btn:disabled {
+  opacity: 0.6;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .emoji-pick-btn:hover:not(:disabled) {
+    border-color: var(--text-muted);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .emoji-pick-btn:active:not(:disabled) {
+    transform: none;
+  }
 }
 
 .preset-list {
@@ -3772,14 +4040,6 @@ ol.md-list {
     --sidebar-w: 210px;
   }
 
-  .threads-list-col {
-    width: 100%;
-  }
-
-  .threads-detail-col {
-    display: none;
-  }
-
   .header-topic,
   .header-divider,
   .composer-hint {
@@ -3849,6 +4109,24 @@ ol.md-list {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+/* In the call on another device: three choices don't fit next to the names on a phone; they move
+   to their own row, the main one last (nearest the thumb). */
+@media (max-width: 600px) {
+  .huddle-bar-choices {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .huddle-bar-choices .huddle-info {
+    flex-basis: calc(100% - 40px);
+  }
+
+  .huddle-bar-choices .huddle-controls {
+    flex-basis: 100%;
+    justify-content: flex-end;
+  }
 }
 
 .call-pill {
@@ -4223,6 +4501,8 @@ ol.md-list {
   color: var(--on-fill);
   font-size: clamp(18px, 3vw, 36px);
   font-weight: var(--weight-semibold);
+  /* The profile picture fills the same circle. */
+  overflow: hidden;
 }
 
 .silhouette {
@@ -5268,6 +5548,34 @@ html.call-window body {
   color: inherit;
 }
 
+/* The admin console's users left in encryption groups (#734): one banner, a compact row each. */
+.leftover-list {
+  align-items: flex-start;
+}
+
+.leftover-rows {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.leftover-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0;
+}
+
+.leftover-row + .leftover-row {
+  border-top: 1px solid var(--border);
+}
+
+.leftover-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .fingerprint {
   padding: 10px 12px;
   border-radius: var(--radius-sm);
@@ -5477,6 +5785,28 @@ html.call-window body {
 .auth-actions .btn {
   height: 40px;
   padding: 0 18px;
+}
+
+/* Another tab runs the app (#744, components/tab_elsewhere.rs): the title, one sentence, the choice. */
+.tab-elsewhere h1 {
+  text-wrap: balance;
+}
+
+.tab-elsewhere-body {
+  margin: 8px 0 0;
+  color: var(--text-muted);
+}
+
+.tab-elsewhere-error {
+  margin: 12px 0 0;
+  color: var(--danger);
+  font-size: var(--text-sm);
+}
+
+.tab-elsewhere-hint {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
 }
 
 .auth-alert {
@@ -6420,6 +6750,12 @@ html.call-window body {
   display: none;
 }
 
+/* In a conversation of two, left and right already say who wrote it: no name either (#735).
+   Group DMs and channels keep name and avatar per sender group. */
+:root[data-density="bubbles"] .is-dm .msg-header {
+  display: none;
+}
+
 :root[data-density="bubbles"] .hover-time {
   display: none;
 }
@@ -6473,10 +6809,13 @@ html.call-window body {
   display: none;
 }
 
-/* Time (and the delivery state) sit in the bottom corner of the bubble. */
-:root[data-density="bubbles"] .bubble-time,
-:root[data-density="bubbles"] .msg-delivery:not(.msg-failed) {
+/* Time, then the delivery state, in the bottom corner of the bubble (#735): the body is the
+   bubble's last part, so its trailing float ends the bubble. */
+:root[data-density="bubbles"] .bubble-meta {
   float: inline-end;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   margin: 8px 0 -3px;
   margin-inline-start: 8px;
   color: var(--text-muted);
@@ -6490,7 +6829,78 @@ html.call-window body {
 }
 
 :root[data-density="bubbles"] .msg-delivery:not(.msg-failed) {
-  margin-inline-start: 4px;
+  margin: 0;
+  font-size: inherit;
+  letter-spacing: inherit;
+}
+
+/* A refused message says so with its actions: on a line of its own, not squeezed in the corner. */
+:root[data-density="bubbles"] .bubble-meta:has(> .msg-failed) {
+  float: none;
+  display: flex;
+  flex-wrap: wrap;
+  margin-inline-start: 0;
+}
+
+/* Media first, the text below as their caption, the time at the very bottom (#735). Link
+   previews and the acknowledge button come between the media and the caption. */
+:root[data-density="bubbles"] .msg-bubble {
+  display: flex;
+  flex-direction: column;
+}
+
+:root[data-density="bubbles"] .msg-bubble > .msg-files {
+  order: 1;
+}
+
+:root[data-density="bubbles"] .msg-bubble > :is(.link-card, .linked-message, .msg-ack) {
+  order: 2;
+}
+
+:root[data-density="bubbles"] .msg-bubble > .msg-ack {
+  align-self: flex-start;
+}
+
+:root[data-density="bubbles"] .msg-bubble > .msg-body {
+  order: 3;
+}
+
+/* With media, the bubble is as wide as they are and frames them evenly; the caption wraps to that
+   width instead of widening the bubble. Inner corners are the bubble's radius minus the frame. */
+:root[data-density="bubbles"] .msg-bubble:has(> .msg-files) {
+  --bubble-frame: 4px;
+  padding: var(--bubble-frame);
+}
+
+:root[data-density="bubbles"] .msg-bubble:has(> .msg-files) > .msg-files {
+  align-items: stretch;
+  margin-top: 0;
+}
+
+:root[data-density="bubbles"] .msg-bubble:has(> .msg-files) > :not(.msg-files) {
+  margin-inline: 8px;
+}
+
+:root[data-density="bubbles"] .msg-bubble:has(> .msg-files) > .msg-header {
+  margin-top: 2px;
+}
+
+:root[data-density="bubbles"] .msg-bubble:has(> .msg-files) > .msg-body {
+  padding-block: 2px;
+}
+
+/* Pictures and videos set the width; file cards let a longer caption widen the bubble. */
+:root[data-density="bubbles"] .msg-bubble:has(> .msg-files .media-tile) > .msg-body {
+  inline-size: 0;
+  min-inline-size: calc(100% - 16px);
+}
+
+:root[data-density="bubbles"] .msg-bubble > .msg-files :is(.media-tile, .media-grid, .file-card) {
+  border-radius: calc(18px - var(--bubble-frame, 0px));
+}
+
+:root[data-density="bubbles"] .msg-bubble > .msg-files .media-grid .media-tile {
+  border-radius: var(--radius-sm);
 }
 
 :root[data-density="bubbles"] .msg-body::after {
@@ -6818,6 +7228,9 @@ html.call-window body {
 /* The player of a video playing in its row (#483) covers the tile; the tile's own button stays below it. */
 .media-video { position: absolute; inset: 0; display: grid; place-items: center; border-radius: inherit; overflow: hidden; background: var(--media-backdrop); }
 .media-video .video-player { width: 100%; height: 100%; }
+/* While the player's chunk loads (areas.rs), or when it can't: centred in the tile. */
+.media-video > .lazy-area { width: 100%; height: 100%; }
+.media-video > .lazy-area-failed { overflow: auto; }
 
 /* The app's own video player (#638), inline and in the lightbox, the same on every platform: the
    video letterboxed in the player's box, a translucent bar floating over its bottom edge. With a
@@ -6870,6 +7283,16 @@ html.call-window body {
 .upload-actions { display: inline-flex; align-items: center; gap: 4px; }
 /* How far a transfer got: a ring filled to --media-progress percent */
 .transfer-ring { flex: none; width: 22px; height: 22px; border-radius: 50%; background: conic-gradient(var(--on-fill) calc(var(--media-progress, 0) * 1%), rgba(255, 255, 255, .35) 0); mask: radial-gradient(farthest-side, transparent calc(100% - 3px), black calc(100% - 2px)); }
+/* A picture going up (or retrying by itself, #742): a thin ring in the corner around its cancel
+   button, so the picture stays readable; the words are for screen readers only. */
+.upload-progress { position: absolute; right: 8px; bottom: 8px; z-index: 1; display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: rgba(0, 0, 0, .45); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); color: var(--on-fill); }
+.upload-progress > * { grid-area: 1 / 1; }
+.upload-progress .transfer-ring, .upload-progress .spinner { width: 28px; height: 28px; }
+.upload-progress .transfer-ring { mask: radial-gradient(farthest-side, transparent calc(100% - 2px), black calc(100% - 1.5px)); }
+.upload-progress .spinner { border-width: 2px; border-color: rgba(255, 255, 255, .3); border-top-color: var(--on-fill); }
+.upload-progress .upload-cancel { width: 22px; height: 22px; padding: 0; color: var(--on-fill); }
+.upload-progress .upload-cancel svg { width: 12px; height: 12px; }
+@media (prefers-reduced-transparency: reduce) { .upload-progress { background: rgba(0, 0, 0, .7); -webkit-backdrop-filter: none; backdrop-filter: none; } }
 .upload-state.is-failed { flex-direction: column; max-width: calc(100% - 16px); padding: 10px 12px; border-radius: var(--radius-md); font-size: var(--text-sm); text-align: center; }
 .media-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px; width: min(360px, 100%); }
 .media-grid .media-tile { aspect-ratio: 1; border-radius: var(--radius-sm); }
@@ -6900,7 +7323,7 @@ html.call-window body {
 .file-thumb img { display: block; width: 36px; height: 36px; object-fit: cover; border-radius: var(--radius-sm); }
 .file-meta { display: flex; flex-direction: column; min-width: 0; flex: 1; line-height: 1.3; }
 .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: var(--weight-medium); }
-.file-size, .file-state { color: var(--text-muted); font-size: var(--text-2xs); letter-spacing: var(--tracking-2xs); }
+.file-size, .file-state { color: var(--text-muted); font-size: var(--text-xs); letter-spacing: var(--tracking-xs); }
 .file-progress { width: 100%; height: 4px; margin-top: 4px; }
 /* The preview of a Markdown, HTML or PDF file (#557) */
 .modal.file-preview { width: min(960px, 100%); height: min(88vh, 900px); max-height: none; }
@@ -6971,8 +7394,19 @@ html.call-window body {
 .lightbox.with-thread { grid-template-columns: minmax(0, 1fr) clamp(320px, 28vw, 420px); }
 /* Takes focus only from code for the arrow keys; its controls show the (white) ring. */
 .lightbox:focus { outline: none; }
-.lightbox-backdrop { position: absolute; inset: -10%; z-index: -1; background-color: var(--lightbox-bg); background-position: center; background-size: cover; filter: blur(48px) saturate(1.3) brightness(.4); transform: translateZ(0); }
+/* The backdrop is opaque (#711): a solid layer the size of the window, the picture's blurred tint
+   on it, a dimming scrim on top. The blur alone, on a layer only 10% larger than the window, faded
+   to transparent at the edges, and the app showed through at the top. The element keeps the
+   picture (`background-image`, set from Rust) but doesn't paint it (`background-size: 0 0`); its
+   `::before` takes it over and is the one that is blurred. Its opacity is what a lift-off fades. */
+.lightbox-backdrop { position: absolute; inset: 0; z-index: -1; overflow: hidden; background-color: var(--lightbox-bg); background-repeat: no-repeat; background-size: 0 0; transform: translateZ(0); }
+.lightbox-backdrop::before { content: ""; position: absolute; inset: -10%; background-image: inherit; background-position: center; background-size: cover; filter: blur(48px) saturate(1.3) brightness(.4); }
 .lightbox-backdrop::after { content: ""; position: absolute; inset: 0; background: rgba(8, 10, 16, .55); }
+/* The desktop app's own title bar (#711): the window controls and a strip that moves the window
+   keep the top of the window; the picture, its header and the thread panel start below it. */
+:root[data-titlebar="custom"]:not([data-window="fullscreen"]) .lightbox { padding-top: var(--topbar-h); }
+:root[data-titlebar="custom"]:not([data-window="fullscreen"]) .lightbox-thread { top: var(--topbar-h); }
+:root[data-titlebar="custom"]:not([data-window="fullscreen"]):has(.modal-lightbox) .window-drag-strip { display: block; }
 .lightbox-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; position: relative; }
 .lightbox-top { display: flex; align-items: center; gap: 12px; padding: 10px 14px; }
 .lightbox-origin { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; }
@@ -6997,7 +7431,9 @@ html.call-window body {
 .lightbox-stage.zoomed { cursor: grab; }
 .lightbox-stage.zoomed:active { cursor: grabbing; }
 .lightbox-stage.is-video { cursor: default; touch-action: auto; }
-.lightbox-image { max-width: 100%; max-height: 100%; transform-origin: center; will-change: transform; -webkit-user-drag: none; box-shadow: 0 8px 40px rgba(0, 0, 0, .45); transition: transform var(--dur-fast) var(--ease-out); }
+/* No box behind the picture (#727): a transparent PNG or SVG floats on the backdrop. Its shadow is a
+   `drop-shadow`, which follows the picture's alpha, not a `box-shadow` around its rectangle. */
+.lightbox-image { max-width: 100%; max-height: 100%; background: none; transform-origin: center; will-change: transform; -webkit-user-drag: none; filter: drop-shadow(0 8px 28px rgba(0, 0, 0, .4)); transition: transform var(--dur-fast) var(--ease-out); }
 .lightbox-stage.zoomed .lightbox-image, .lightbox-stage.is-live .lightbox-image { transition: none; }
 /* The previous, current and next picture side by side; the track moves as one while paging, and
    carries the picture into and out of its tile. Its transform and opacity are written per frame. */
@@ -7165,12 +7601,40 @@ html.call-window body {
 .settings-form label { font-weight: var(--weight-semibold); font-size: var(--text-sm); }
 .settings-row { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2); }
 .settings-member-list { list-style: none; margin: 0; padding: 0; }
+
+/* Channel settings, Integrations (issue #764): label above each field, hints spaced from what
+   follows. */
+.channel-integrations {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.channel-integrations .detail-heading {
+  margin: var(--space-4) 0 0;
+}
+
+.channel-integrations .detail-heading:first-child {
+  margin-top: 0;
+}
+
+.channel-integrations .field {
+  margin: 0;
+}
+
+.channel-integrations .hint {
+  margin: 0 0 var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
 .settings-member .member-name { flex: none; }
 .settings-member { display: flex; align-items: center; gap: var(--space-2); padding: 6px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
 /* A bridge source: its name over who added it when (channel settings, Integrations). */
 .source-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .source-meta > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.source-meta .muted-text { font-size: var(--text-2xs); letter-spacing: var(--tracking-2xs); }
+.source-meta .muted-text { font-size: var(--text-xs); letter-spacing: var(--tracking-xs); }
 .plain-fieldset { border: 0; margin: 0; padding: 0; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .plain-fieldset:disabled { opacity: .7; }
 .radio-explained { align-items: flex-start; }
@@ -7189,7 +7653,7 @@ html.call-window body {
 /* Browse spaces and invitations */
 .space-row .space-tile { width: 36px; height: 36px; flex: none; font-size: 14px; }
 .space-row.highlighted { background: var(--accent-soft); border-radius: 6px; padding-inline: .4rem; }
-.browse-meta { font-size: var(--text-2xs); letter-spacing: var(--tracking-2xs); }
+.browse-meta { font-size: var(--text-xs); letter-spacing: var(--tracking-xs); }
 .radio-group { border: 0; margin: .5rem 0; padding: 0; }
 .radio-group legend { padding: 0; font-weight: var(--weight-semibold); }
 .invite-form h3, .modal-body > h3 { margin: 1rem 0 .25rem; font-size: var(--text-md); }
@@ -7242,6 +7706,8 @@ html.call-window body {
 
 /* Profiles and directory */
 .avatar-img { width: 100%; height: 100%; border-radius: inherit; object-fit: cover; display: block; }
+/* Without a picture the element stays (avatar.rs), hidden; `display: block` above beats `[hidden]`. */
+.avatar-img[hidden] { display: none; }
 
 /* Space pictures: the rail button, the sidebar head and the quick switcher; letters until loaded. */
 .space-image { width: 100%; height: 100%; border-radius: inherit; object-fit: cover; display: block; }
@@ -7733,7 +8199,10 @@ html.call-window body {
 @media (hover: hover) and (pointer: fine) { .suggestion:hover { background: var(--surface-2); } }
 .suggestion-detail { color: var(--text-muted); font-size: var(--text-xs); letter-spacing: var(--tracking-xs); margin-inline-start: auto; }
 .composer-notice { margin: .25rem 0; padding: .3rem .6rem; border-inline-start: 3px solid var(--accent); color: var(--text-muted); }
-.composer-help ul { columns: 2; margin: .25rem 0 0; padding-inline-start: 1.1rem; }
+/* The commands of /help: one grid of equal cells read row by row, as many columns as fit. */
+.composer-help-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.composer-help ul { display: grid; grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr)); gap: 2px var(--space-4); margin: .25rem 0 0; padding: 0; list-style: none; }
+.composer-help li { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .toasts { position: fixed; inset-inline-end: var(--space-4); bottom: var(--space-4); display: flex; flex-direction: column; gap: var(--space-2); z-index: 1100; /* above dialogs: an error must show over the dialog that caused it */ }
 .toast { display: flex; align-items: center; gap: var(--space-2); padding: 10px var(--space-3); border-radius: var(--radius-md); background: var(--surface); color: var(--text); border: 1px solid var(--border); box-shadow: var(--shadow); }
@@ -7741,7 +8210,7 @@ html.call-window body {
 /* A failed action (issue #322): stays until closed, with the details behind a toggle. */
 .toast-error { border-color: var(--danger); border-inline-start-width: 4px; }
 .toast-details summary { cursor: pointer; font-size: var(--text-xs); letter-spacing: var(--tracking-xs); color: var(--text-muted); }
-.toast-detail-text { display: block; margin-top: .25rem; font-size: var(--text-2xs); letter-spacing: var(--tracking-2xs); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.toast-detail-text { display: block; margin-top: .25rem; font-size: var(--text-xs); letter-spacing: var(--tracking-xs); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
 
 /* A button whose work runs (PendingAction): disabled, with a spinner in front of its label. */
 .btn[aria-busy="true"] { cursor: progress; }
@@ -7865,6 +8334,13 @@ html.call-window body {
   border-bottom: 1px solid var(--border);
 }
 .update-banner[role="alert"] { background: var(--mention-bg); color: var(--mention-text); }
+/* A ready update (#729): the accent colour, the restart as a white button on it. It stays until
+   the restart; in a call the button waits, disabled, and says so. */
+.update-banner.is-ready { background: var(--accent); color: var(--on-accent); border-bottom-color: transparent; font-weight: var(--weight-semibold); }
+.update-banner.is-ready a { color: inherit; text-decoration: underline; }
+.update-banner.is-ready .update-banner-restart { border: 0; background: var(--on-accent); color: var(--accent); font-weight: var(--weight-semibold); }
+.update-banner.is-ready .update-banner-restart:disabled { opacity: 0.75; cursor: default; }
+@media (hover: hover) and (pointer: fine) { .update-banner.is-ready .update-banner-restart:hover:not(:disabled) { background: color-mix(in srgb, var(--on-accent) 88%, var(--accent)); } }
 .update-command {
   padding: 2px 6px;
   border-radius: var(--radius);
@@ -7906,14 +8382,20 @@ html.call-window body {
 .badge-failing, .badge-unknown { background: var(--warn-soft); color: var(--warn-text); }
 .badge-not-configured { background: var(--surface-3); color: var(--text-muted); }
 
-/* Activity feed, call history and last seen */
-.activity-view,
+/* Activity (#752): its list is a sidebar like a space's, on the sidebar's dark material. Each entry
+   says what happened and where in two lines, the start of the message below, the time last; the
+   one open beside it is marked like the current channel. Call history and last seen below. */
+.activity-home,
 .calls-view {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+
+.activity-home {
+  justify-content: center;
 }
 
 .activity-list,
@@ -7923,26 +8405,44 @@ html.call-window body {
   padding: 0;
 }
 
+.activity-list {
+  padding: 0 var(--space-2);
+}
+
 .activity-item {
+  position: relative;
   display: flex;
   align-items: flex-start;
   gap: 10px;
   width: 100%;
-  padding: 12px 16px;
+  margin: 1px 0;
+  padding: 8px 8px 8px 8px;
   border: 0;
-  border-bottom: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   background: transparent;
+  color: var(--sb-muted);
   text-align: left;
 }
 
 @media (hover: hover) and (pointer: fine) {
   .activity-item:hover {
-    background: var(--surface-2);
+    background: var(--sb-hover);
+    color: var(--chrome-strong);
   }
 }
 
 .activity-item.unread {
-  background: var(--accent-soft);
+  color: var(--chrome-strong);
+}
+
+.activity-item.current {
+  background: var(--sb-current);
+  color: var(--on-fill);
+}
+
+.activity-avatar {
+  flex: none;
+  padding-top: 1px;
 }
 
 .activity-body {
@@ -7954,31 +8454,78 @@ html.call-window body {
 }
 
 .activity-summary {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font-size: var(--text-sm);
+  line-height: 1.3;
+}
+
+.activity-item.unread .activity-summary {
   font-weight: var(--weight-semibold);
 }
 
 .activity-excerpt {
-  color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.activity-time {
-  flex: none;
-  color: var(--text-muted);
+  color: var(--sb-muted);
   font-size: var(--text-xs);
   letter-spacing: var(--tracking-xs);
 }
 
-.activity-kind {
-  flex: none;
-  color: var(--text-muted);
+/* A thread's first message as rich text, kept to one line. */
+.activity-excerpt .md-p {
+  display: inline;
+  margin: 0;
 }
 
+.activity-item.current .activity-excerpt,
+.activity-item.current .activity-time {
+  color: color-mix(in srgb, var(--on-fill) 80%, transparent);
+}
 
+.activity-time {
+  color: var(--sb-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  font-variant-numeric: tabular-nums;
+}
 
+.activity-item .unread-dot {
+  flex: none;
+  margin-top: 6px;
+  background: var(--accent);
+}
 
+.activity-item .unread-dot.mention {
+  background: var(--badge-bg);
+}
+
+/* The filters' row: the kinds, a thin rule, then "Unread" on its own. */
+.home-chips-divider {
+  flex: none;
+  width: 1px;
+  margin: 4px 2px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+/* The empty state sits in the dark sidebar: the shared card, in the sidebar's colours. */
+.activity-empty {
+  padding: var(--space-6) var(--space-3);
+  color: var(--sb-muted);
+}
+
+.activity-empty .empty-title {
+  color: var(--chrome-strong);
+}
+
+.activity-empty .empty-body {
+  color: var(--sb-muted);
+}
 
 .call-detail,
 .last-seen {
@@ -8121,17 +8668,97 @@ html.call-window body {
   line-height: 1;
 }
 
-.offline-banner {
+/* The connection state (#718). Reconnecting is the app's job: a slim muted line along the lower
+   edge of the top bar (or the page header in its place on a phone), out of the layout so nothing
+   moves when it comes or goes, and out of the pointer's way. A light sweeps along it while the app
+   works on it; offline it rests. Only what the user must act on, or a connection down long, is a
+   notice in the banner row (offline_banner.rs). */
+.connection-hint {
+  position: fixed;
+  top: calc(var(--banners-h, 0px) + var(--topbar-h) - 2px);
+  left: 0;
+  right: 0;
+  z-index: 55;
+  height: 2px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  pointer-events: none;
+}
+
+/* It fades in where it is; the banners' slide would move it off the edge it marks. */
+.app-banners > .connection-hint {
+  animation: motion-fade-in var(--dur-base) var(--ease-standard);
+}
+
+.connection-hint::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 80%, transparent), transparent);
+  transform: translateX(-100%);
+  animation: connection-hint-sweep 1.6s var(--ease-standard) infinite;
+}
+
+.connection-hint.is-offline {
+  background: color-mix(in srgb, var(--chrome-text) 35%, transparent);
+}
+
+.connection-hint.is-offline::after {
+  display: none;
+}
+
+/* The title bar is the window's top edge: the banners are below it, the line at its foot. */
+:root[data-titlebar="custom"] .connection-hint {
+  top: calc(var(--topbar-h) - 2px);
+}
+
+:root[data-layout="compact"] .connection-hint {
+  top: calc(env(safe-area-inset-top) + var(--banners-h, 0px) + var(--topbar-h) - 2px);
+}
+
+@keyframes connection-hint-sweep {
+  to {
+    transform: translateX(250%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .connection-hint::after {
+    display: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .connection-hint {
+    background: Highlight;
+    forced-color-adjust: none;
+  }
+}
+
+.connection-notice {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 6px 16px;
-  background: var(--mention-bg);
-  color: var(--mention-text);
-  font-size: var(--text-sm);
-  font-weight: var(--weight-semibold);
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
   border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+
+.connection-notice > .icon {
+  flex: none;
+  color: var(--star);
+}
+
+.connection-notice-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.connection-notice > .btn {
+  flex: none;
 }
 
 /* Long messages start collapsed; "Show more" expands them. */
@@ -8330,12 +8957,17 @@ html.call-window body {
 /* Comfortable and Compact: the tick or clock sits at the body's trailing edge on its last line, in
    space the body keeps free for it, never on a row of its own (#634). It takes the body's font and
    line height so `1lh` is one line of text; the icon has a fixed size. Bubbles float it instead. */
-:root:not([data-density="bubbles"]) .msg-body:has(> .msg-delivery.is-sent, > .msg-delivery.is-pending:not(.msg-delayed)) {
+/* The meta wrapper only groups time and ticks for the bubbles; here it adds no box. */
+:root:not([data-density="bubbles"]) .bubble-meta {
+  display: contents;
+}
+
+:root:not([data-density="bubbles"]) .msg-body:has(> .bubble-meta > .msg-delivery.is-sent, > .bubble-meta > .msg-delivery.is-pending:not(.msg-delayed)) {
   position: relative;
   padding-inline-end: 22px;
 }
 
-:root:not([data-density="bubbles"]) .msg-body > .msg-delivery:is(.is-sent, .is-pending:not(.msg-delayed)) {
+:root:not([data-density="bubbles"]) .msg-body > .bubble-meta > .msg-delivery:is(.is-sent, .is-pending:not(.msg-delayed)) {
   position: absolute;
   inset-inline-end: 0;
   bottom: 0;
@@ -8445,9 +9077,14 @@ html.call-window body {
   gap: 6px;
 }
 
+/* Labels are captions of the field below: smaller and muted, so the fields carry the form. */
 .modal-body > form > label:not(.check-row) {
-  margin-top: 8px;
+  margin-top: var(--space-3);
+  padding-inline: 2px;
+  font-size: var(--text-sm);
+  letter-spacing: 0;
   font-weight: var(--weight-semibold);
+  color: var(--text-muted);
 }
 
 .modal-body > form > label:first-child {
@@ -9415,9 +10052,8 @@ html.call-window body {
     background: var(--call-surface-solid);
   }
 
-  .lightbox-backdrop {
-    filter: none;
-    background-image: none !important;
+  .lightbox-backdrop::before {
+    display: none;
   }
 }
 
@@ -9444,15 +10080,22 @@ html.call-window body {
 
 :root[data-layout="compact"] body {
   overflow: hidden;
+  /* Behind the shell: should any edge of the screen ever be left uncovered (#709), it shows the
+     tab bar's colour, not a band of page background. */
+  background: var(--chrome);
 }
 
-/* The visible part of the window: it ends at the on-screen keyboard (viewport.rs). */
+/* The visible part of the window: it ends at the on-screen keyboard (viewport.rs). Without the
+   keyboard it is pinned to all four edges, not given a height (#709): in an installed web app iOS
+   computes `100dvh` (and `100vh`) shorter than the screen, which left an empty band under the tab
+   bar; the edges of the fixed containing block are the screen's in Safari and standalone alike. */
 :root[data-layout="compact"] .app {
   position: fixed;
   top: var(--vv-top, 0px);
+  bottom: 0;
   left: 0;
   right: 0;
-  height: var(--vv-height, 100dvh);
+  height: var(--vv-height, auto);
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
   background: var(--chrome);
@@ -9499,17 +10142,30 @@ html.call-window body {
   max-width: none;
 }
 
-:root[data-layout="compact"] .search-btn {
+:root[data-layout="compact"] .search-field {
   grid-column: 2;
   justify-self: end;
-  justify-content: center;
-  width: var(--touch);
+  width: auto;
   height: var(--touch);
   padding: 0;
   border: 0;
   background: transparent;
 }
 
+:root[data-layout="compact"] .search-btn {
+  flex: none;
+  justify-content: center;
+  width: var(--touch);
+  height: var(--touch);
+  padding: 0;
+}
+
+:root[data-layout="compact"] .search-btn > .icon {
+  display: block;
+}
+
+:root[data-layout="compact"] .search-field-icon,
+:root[data-layout="compact"] .search-field-scope,
 :root[data-layout="compact"] .search-btn > span,
 :root[data-layout="compact"] .search-btn kbd,
 :root[data-layout="compact"] .search-btn .shortcut,
@@ -9731,6 +10387,8 @@ html.call-window body {
 @media (pointer: coarse) {
   :root {
     --touch: 44px;
+    /* Controls in dialogs (#706) grow to the touch size too. */
+    --control-h: var(--touch);
   }
 
   .icon-btn,
@@ -9861,44 +10519,59 @@ html.call-window body {
   background: var(--surface-2);
 }
 
-/* Dialogs and the search become full-screen sheets. */
+/* Dialogs on a phone (#706) are bottom sheets that leave what opened them visible above; the big
+   ones (settings, the meeting form, file preview, the search, the lightbox) fill the screen. The
+   backdrop is the visual viewport, so a sheet with a field rides on top of the keyboard; without
+   the keyboard it is pinned to the edges like the shell (#709). */
 :root[data-layout="compact"] .modal-backdrop {
-  align-items: stretch;
+  inset: var(--vv-top, 0px) 0 0;
+  height: var(--vv-height, auto);
+  align-items: flex-end;
   padding: 0;
 }
 
-:root[data-layout="compact"] .modal,
-:root[data-layout="compact"] .modal-switcher {
+:root[data-layout="compact"] .modal {
   width: 100%;
   max-width: none;
-  height: var(--vv-height, 100dvh);
+  max-height: calc(100% - max(env(safe-area-inset-top), var(--space-3)) - var(--space-8));
+  padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  border-radius: var(--dialog-radius) var(--dialog-radius) 0 0;
+}
+
+:root[data-layout="compact"] .modal:is(.set-modal, .modal-settings, .modal-wide, .file-preview, .modal-switcher, .modal-lightbox) {
+  height: 100%;
   max-height: none;
-  margin-top: var(--vv-top, 0px);
-  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
-  border: 0;
+  padding-top: env(safe-area-inset-top);
   border-radius: 0;
+  box-shadow: none;
 }
 
-/* The profile card is a sheet that leaves the conversation visible above it, not a full screen. */
-:root[data-layout="compact"] .modal-backdrop:has(> .modal-profile) {
-  align-items: flex-end;
+/* A sheet's actions share its width (the longer label takes more) and grow to a thumb's size. */
+:root[data-layout="compact"] .modal-foot .btn {
+  flex: 1 1 auto;
+  min-height: 3rem;
+  white-space: nowrap;
 }
 
-:root[data-layout="compact"] .modal.modal-profile {
-  height: auto;
-  max-height: calc(var(--vv-height, 100dvh) - 48px);
-  margin-top: 0;
-  padding-top: 0;
-  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+:root[data-layout="compact"] .modal-foot > .grow {
+  display: none;
 }
 
-/* They rise as sheets and fall back out (the lightbox fades, the switcher doesn't move). */
+/* They rise as sheets and fall back out (the lightbox fades, the switcher doesn't move). A sheet
+   travels further than a centred dialog, so it takes the slower duration. */
 :root[data-layout="compact"] .modal:not(.modal-switcher, .modal-lightbox) {
   animation-name: sheet-in;
+  animation-duration: var(--dur-slow);
 }
 
 :root[data-layout="compact"] .motion-ghost.is-leaving .modal:not(.modal-lightbox) {
   animation-name: sheet-out;
+}
+
+/* The crop dialog opens over another sheet and comes up the same way. */
+:root[data-layout="compact"] .crop-backdrop {
+  align-items: flex-end;
+  padding: 0;
 }
 
 /* Popovers that stay popovers on a phone (the lightbox's menus) dim what is behind them. */
@@ -10094,11 +10767,21 @@ html.call-window body {
 }
 
 :root[data-layout="compact"] .modal.modal-notice {
-  height: auto;
-  margin-top: 0;
+  max-height: 100%;
   padding: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: var(--dialog-radius);
+}
+
+/* A card in the middle appears like a dialog, not like a sheet from the bottom edge. */
+@media (prefers-reduced-motion: no-preference) {
+  :root[data-layout="compact"] .modal.modal-notice {
+    animation-name: motion-dialog-in;
+    animation-duration: var(--dur-base);
+  }
+
+  :root[data-layout="compact"] .motion-ghost.is-leaving .modal.modal-notice {
+    animation-name: motion-dialog-out;
+  }
 }
 
 /* Previews of linked messages (#319). */
@@ -11491,7 +12174,6 @@ html.call-window body {
 /* Phones: the section list is a page of its own, a section opens over it with Back. */
 :root[data-layout="compact"] .set-modal {
   --set-row-min-h: 56px;
-  height: var(--vv-height, 100dvh);
 }
 
 :root[data-layout="compact"] .set-nav {
@@ -11846,8 +12528,8 @@ html.call-window body {
 
 .person-note {
   margin-left: auto;
-  font-size: var(--text-2xs);
-  letter-spacing: var(--tracking-2xs);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
 }
 
 .person-check {
@@ -11879,6 +12561,125 @@ html.call-window body {
 
 .chats-filter .input {
   width: 100%;
+}
+
+/* The top of a sidebar on a phone (#703): the list should start near the top, not halfway down.
+   The global entries become one row of pills that scrolls sideways (as the filter chips do), and
+   the filter waits behind the search button in the header until it is used (sidebar.rs,
+   `ListFilter`). Wide layouts keep the list of entries and the visible field. */
+.sidebar-head .sb-filter-toggle {
+  display: none;
+}
+
+:root[data-layout="compact"] .sidebar-head .sb-filter-toggle {
+  display: inline-grid;
+}
+
+:root[data-layout="compact"] .sidebar-head .sb-filter-toggle[aria-expanded="true"] {
+  background: var(--sb-hover);
+  color: var(--chrome-strong);
+}
+
+/* The chevron right after the title folds the entries away (and back), remembered on the device:
+   down while they show, pointing at the title's end while they are folded, like a disclosure row. */
+.sidebar-head .sb-entries-toggle {
+  display: none;
+}
+
+:root[data-layout="compact"] .sidebar-head .space-name {
+  flex: 0 1 auto;
+}
+
+/* A space's head holds five buttons beside its name next to the rail: they sit closer (still the
+   full touch height), and the name keeps one line. */
+:root[data-layout="compact"] .sidebar-head {
+  gap: 0;
+  padding-inline: 12px 4px;
+}
+
+:root[data-layout="compact"] .sidebar-head > .icon-btn:not(.sb-entries-toggle) {
+  min-width: 40px;
+  width: 40px;
+}
+
+:root[data-layout="compact"] .sidebar-head .space-name > span:not(.space-tile) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:root[data-layout="compact"] .sidebar-head .sb-entries-toggle {
+  display: inline-grid;
+  min-width: 32px;
+  margin-inline-end: auto;
+  color: var(--chrome-text);
+}
+
+:root[data-layout="compact"] .sb-entries-toggle .icon {
+  width: 18px;
+  height: 18px;
+  transition: transform var(--dur-base) var(--ease-emphasized);
+}
+
+:root[data-layout="compact"] .sb-entries-toggle.is-collapsed .icon {
+  transform: rotate(-90deg);
+}
+
+:root[data-layout="compact"] .sb-entries.is-collapsed {
+  display: none;
+}
+
+:root[data-layout="compact"] .sb-entries:not(.is-collapsed) {
+  animation: motion-fade-in var(--dur-fast) var(--ease-standard);
+}
+
+:root[data-layout="compact"] .chats-filter:not(.is-open, .has-query) {
+  display: none;
+}
+
+:root[data-layout="compact"] .chats-filter {
+  margin-bottom: var(--space-2);
+  animation: motion-fade-in var(--dur-fast) var(--ease-standard);
+}
+
+:root[data-layout="compact"] .sb-entries {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: var(--space-2);
+  padding: 0 12px var(--space-2);
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+
+:root[data-layout="compact"] .sb-entries .sb-item {
+  flex: none;
+  width: auto;
+  margin: 0;
+  padding: 0 var(--space-3);
+  gap: var(--space-2);
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--chrome-text);
+  font-size: var(--text-sm);
+  letter-spacing: 0;
+  font-weight: var(--weight-semibold);
+}
+
+:root[data-layout="compact"] .sb-entries .sb-item.current {
+  background: var(--sb-current);
+  color: var(--on-fill);
+}
+
+:root[data-layout="compact"] .sb-entries .sb-item .icon {
+  width: 16px;
+  height: 16px;
+}
+
+/* Pills shrink like the chips beside them, not like the slight press of a full-width row. */
+:root[data-layout="compact"] .sb-entries .sb-item:active:not(:disabled) {
+  transform: scale(var(--press-scale));
 }
 
 .skeleton-list {

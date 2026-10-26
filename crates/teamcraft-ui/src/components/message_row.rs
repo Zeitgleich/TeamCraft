@@ -6,6 +6,7 @@ use teamcraft_client_api::log::{LogEntry, log_entries};
 use teamcraft_proto::HistoryPolicy;
 use wasm_bindgen::JsCast;
 
+use crate::channel_access::can_react_in;
 use crate::clock::{format_relative_short, format_time, format_time_seconds, local_day, now_ms};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::date_jump::DatePill;
@@ -445,7 +446,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
         let has_acknowledged = extras.acknowledged_by.contains(&me.id);
         view! {
           <button
-            class="btn btn-small"
+            class="btn btn-small msg-ack"
             prop:disabled=has_acknowledged
             on:click=move |_| state.write(|backend| backend.acknowledge(conversation, message_id))
           >
@@ -456,6 +457,8 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
   };
 
   let reaction_chips = (!reactions.is_empty()).then(|| {
+    // The counts stay readable for everybody; adding to them takes `add_reaction` (issue #691).
+    let can_react = can_react_in(state, conversation);
     let chips: Vec<_> = reactions
       .into_iter()
       .map(|reaction| {
@@ -473,6 +476,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
             style:animation-delay=pop_delay
             class:reaction-mine=reaction.reacted_by_me
             aria-pressed=reaction.reacted_by_me.to_string()
+            prop:disabled=!can_react
             aria-label=move || i18n.t_with("reaction-label", &[("emoji", &label_emoji), ("count", &count.to_string())])
             on:click=move |_| state.write(|backend| backend.toggle_reaction(conversation, message_id, &emoji))
           >
@@ -829,10 +833,30 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
       on:pointermove=move |ev| long_press.track(&ev)
       on:pointerup=move |_| long_press.cancel()
       on:pointercancel=move |_| long_press.cancel()
-      on:contextmenu=move |ev| {
+      on:contextmenu=move |ev: web_sys::MouseEvent| {
         // The browser's own long-press menu would cover the action sheet.
         if long_press.has_fired() || is_touch_primary() {
           ev.prevent_default();
+          return;
+        }
+        // A right click in the desktop app shows the message's actions (#719); text keeps the text
+        // menu, links the link menu, files their own (they stop the event before it gets here).
+        let is_on_link = event_target::<web_sys::Element>(&ev).closest("a[href]").ok().flatten().is_some();
+        if !crate::auth::tauri::is_available()
+          || is_on_link
+          || crate::external_links::is_on_text(&ev)
+          || crate::external_links::wants_native_menu()
+        {
+          return;
+        }
+        let is_deleted = extras
+          .try_with_untracked(|extras| extras.as_ref().is_some_and(|extras| extras.is_deleted))
+          .unwrap_or(true);
+        if let Some(host) = maybe_host
+          && !is_deleted
+        {
+          ev.prevent_default();
+          host.open_more(active.get_value());
         }
       }
     >
@@ -843,10 +867,13 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
             {rendered_body}
             {edited}
             {badges}
-            <time class="bubble-time" datetime=message.sent_at.to_string()>
-              {time.clone()}
-            </time>
-            {delivery_view}
+            // Time first, the ticks at the far end, as in messaging apps (#735).
+            <span class="bubble-meta">
+              <time class="bubble-time" datetime=message.sent_at.to_string()>
+                {time.clone()}
+              </time>
+              {delivery_view}
+            </span>
           </div> {attachments} {link_previews} {acknowledge}
         </div>
         {reaction_chips} {replies}
@@ -981,6 +1008,7 @@ fn workspace_event_text(
     WorkspaceEvent::MadePrivate { by } => ("ws-made-private", vec![("by", name_of(*by))]),
     WorkspaceEvent::MadePublic { by } => ("ws-made-public", vec![("by", name_of(*by))]),
     WorkspaceEvent::Pinned { by, .. } => ("ws-pinned", vec![("by", name_of(*by))]),
+    WorkspaceEvent::AdminJoined { user } => ("ws-admin-joined", vec![("name", name_of(*user))]),
     WorkspaceEvent::Moved { by, space } if space.is_empty() => {
       ("ws-moved-unnamed", vec![("by", name_of(*by))])
     },

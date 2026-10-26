@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use teamcraft_client_api::window_chrome::{TitleBar, WindowAction, WindowChrome};
+use teamcraft_client_api::window_chrome::{TitleBar, TrayIconStyle, WindowAction, WindowChrome};
 use teamcraft_proto::{AvatarContentType, UserId};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
@@ -521,12 +521,25 @@ pub async fn os_attention() -> Option<OsAttention> {
 }
 
 /// Desktop only: unread count (`None` keeps the badge) and menu texts for the tray icon and the dock/taskbar badge.
-pub async fn tray_update(maybe_unread: Option<u32>, tooltip: &str, show_label: &str, quit_label: &str) {
+/// `maybe_menu` are the macOS menu bar's texts (the shell's `AppMenuLabels`); `None` leaves them.
+pub async fn tray_update(
+  maybe_unread: Option<u32>,
+  tooltip: &str,
+  show_label: &str,
+  quit_label: &str,
+  maybe_menu: Option<serde_json::Value>,
+) {
   if !is_available() {
     return;
   }
   let args = serde_json::json!({
-    "update": { "maybe_unread": maybe_unread, "tooltip": tooltip, "show_label": show_label, "quit_label": quit_label }
+    "update": {
+      "maybe_unread": maybe_unread,
+      "tooltip": tooltip,
+      "show_label": show_label,
+      "quit_label": quit_label,
+      "menu": maybe_menu,
+    }
   });
   if let Err(error) = call::<()>("tray_update", &args).await {
     tracing::debug!(%error, "could not update the tray");
@@ -544,14 +557,16 @@ pub async fn set_zoom(percent: u16) {
   }
 }
 
-/// The desktop shell's own preferences (closing to the tray, starting minimized, the title bar).
-/// Sent back whole, so every field the shell has must be here.
+/// The desktop shell's own preferences (closing to the tray, starting minimized, the title bar,
+/// the tray icon's look). Sent back whole, so every field the shell has must be here.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellPrefs {
   pub is_close_to_tray: bool,
   pub is_start_minimized: bool,
   #[serde(default)]
   pub title_bar: TitleBar,
+  #[serde(default)]
+  pub tray_icon: TrayIconStyle,
 }
 
 /// Desktop only: who draws the title bar and which window controls the UI shows.
@@ -640,6 +655,11 @@ pub async fn update_restart() -> Result<(), String> {
 /// deb/rpm: asks PackageKit to install the update.
 pub async fn update_with_package_manager() -> Result<(), String> {
   call::<()>("update_with_package_manager", &serde_json::json!({})).await
+}
+
+/// Hides the hint for this version for good (deb, rpm, Flatpak: the app can't install it).
+pub async fn update_dismiss(version: &str) -> Result<(), String> {
+  call::<()>("update_dismiss", &serde_json::json!({ "version": version })).await
 }
 
 /// Calls a desktop command with JSON arguments and reads its JSON answer. Errors come back as text.

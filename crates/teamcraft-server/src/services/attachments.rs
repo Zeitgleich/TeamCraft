@@ -53,6 +53,11 @@ pub async fn sweep_unfinished_before(
   let Some(store) = state.maybe_blob_store.as_ref() else {
     return Ok(0);
   };
+  if store.check_available().is_err() {
+    // As for backgrounds: rows go first, so nothing is swept while the storage is known to be down.
+    warn!("the storage is down; sweeping unfinished attachments later");
+    return Ok(0);
+  }
   let removed = state
     .database
     .sweep_unfinished_attachments(before, multipart_before)
@@ -69,6 +74,8 @@ pub async fn create_attachment(
   request: CreateAttachmentRequest,
 ) -> Result<CreateAttachmentResponse, ApiError> {
   let store = blob_store(state)?;
+  // While the storage is down, say "later" here instead of handing out a URL that fails.
+  store.check_available()?;
   check_announcement(state, caller, &request).await?;
   let id: AttachmentId = state.next_id()?;
   let key = object_key(id);
@@ -137,6 +144,8 @@ pub async fn presign_part(
   request: PresignAttachmentPartRequest,
 ) -> Result<AttachmentPartUrlResponse, ApiError> {
   let store = blob_store(state)?;
+  // While the storage is down, say "later" here instead of handing out a URL that fails.
+  store.check_available()?;
   let attachment = own_attachment(state, caller, id).await?;
   if attachment.is_complete {
     return Err(ApiError::Conflict("the upload has been completed".into()));
@@ -249,6 +258,8 @@ pub async fn download_attachment(
   id: AttachmentId,
 ) -> Result<AttachmentDownloadResponse, ApiError> {
   let store = blob_store(state)?;
+  // While the storage is down, say "later" here instead of handing out a URL that fails.
+  store.check_available()?;
   let (attachment, _) = readable_attachment(state, caller, id).await?;
   Ok(AttachmentDownloadResponse {
     download_url: store.presign_download(&attachment.s3_key).to_string(),
@@ -454,7 +465,7 @@ async fn free_storage(store: &BlobStore, removed: &RemovedAttachment) {
 
 fn storage_unavailable(error: StorageError) -> ApiError {
   warn!(%error, "attachment storage request failed");
-  ApiError::Unavailable("attachment storage".into())
+  ApiError::storage_unavailable("attachment storage")
 }
 
 fn blob_store(state: &AppState) -> Result<&Arc<BlobStore>, ApiError> {

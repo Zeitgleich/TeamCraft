@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s3_key AS \"key!\" FROM attachments WHERE conversation_id = $1\n         UNION ALL\n         SELECT ciphertext_s3_key AS \"key!\" FROM messages\n           WHERE conversation_id = $1 AND ciphertext_s3_key IS NOT NULL\n         UNION ALL\n         SELECT s3_key AS \"key!\" FROM index_segments WHERE conversation_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "key!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "b94a5f9927fe82e19422f925222a055fa24d3a9783e1494928c680b8b43a318d"
+}

@@ -53,7 +53,7 @@ use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest, UserEnrollmentRe
 use teamcraft_proto::{
   ListCallHistoryQuery, ListCallHistoryResponse, ListPresenceResponse, PrivacyResponse, UpdatePrivacyRequest,
 };
-use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, UnreadResponse};
+use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, SyncHeadsResponse, UnreadResponse};
 use teamcraft_proto::{NotificationSettings, TestPushResponse};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
 
@@ -64,6 +64,7 @@ use super::{
   RendezvousConnection, RendezvousFrame, ServerApi,
 };
 use crate::clock::{Clock, SystemClock};
+use crate::retry::parse_retry_after;
 use crate::transfers::ByteCounter;
 use teamcraft_proto::{CreateDeviceLinkRequest, DeviceLinkRequest, ListDeviceLinksResponse};
 
@@ -80,6 +81,11 @@ const KEEPALIVE_RETRIES: u32 = 3;
 /// gives up: keepalive only probes idle sockets and there is no `TCP_USER_TIMEOUT`.
 #[cfg(not(target_arch = "wasm32"))]
 const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a blob upload may go without handing a byte to the connection (or, once all is handed
+/// over, without an answer) before it counts as dead. Generous: the socket's send buffer (up to a
+/// few MB) still drains after the last byte was handed over, slowly on a slow uplink.
+#[cfg(not(target_arch = "wasm32"))]
+const TRANSFER_STALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long sent data may stay unacknowledged before the connection counts as dead.
 #[cfg(any(target_os = "android", target_os = "linux"))]
 const UNACKNOWLEDGED_TIMEOUT: Duration = Duration::from_secs(45);
@@ -481,6 +487,12 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
         &format!("/admin/users/{user}/remove-from-chats"),
         None,
       )
+      .await
+  }
+
+  async fn admin_delete_user(&self, user: UserId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/admin/users/{user}"), None)
       .await
   }
 
@@ -892,6 +904,10 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self.get("/unread").await
   }
 
+  async fn sync_heads(&self) -> Result<SyncHeadsResponse, ApiError> {
+    self.get("/sync/heads").await
+  }
+
   async fn key_bag(&self) -> Result<KeyBagResponse, ApiError> {
     self.get("/me/key-bag").await
   }
@@ -1050,8 +1066,11 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .client
       .put(url)
       .header(reqwest::header::CONTENT_LENGTH, bytes.len())
-      .body(counted_body(bytes, sent));
-    Box::pin(async move { send(request).await.map(|_| ()) })
+      .body(counted_body(bytes, sent.clone()));
+    Box::pin(unless_stalled(
+      sent,
+      async move { send(request).await.map(|_| ()) },
+    ))
   }
 
   #[cfg(target_arch = "wasm32")]
@@ -1066,8 +1085,8 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .client
       .put(url)
       .header(reqwest::header::CONTENT_LENGTH, bytes.len())
-      .body(counted_body(bytes, sent));
-    Box::pin(async move {
+      .body(counted_body(bytes, sent.clone()));
+    Box::pin(unless_stalled(sent, async move {
       let response = send(request).await?;
       response
         .headers()
@@ -1075,7 +1094,7 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
         .ok_or_else(|| ApiError::Decode("the storage answered a part without an ETag".into()))
-    })
+    }))
   }
 
   #[cfg(target_arch = "wasm32")]
@@ -1319,6 +1338,44 @@ fn counted_body(bytes: Vec<u8>, sent: ByteCounter) -> reqwest::Body {
     Ok::<_, std::io::Error>(chunk)
   }));
   reqwest::Body::wrap_stream(chunks)
+}
+
+/// Fails `transfer` once `moved` hasn't grown for [`TRANSFER_STALL_TIMEOUT`] (#742). Blob
+/// transfers have no total timeout (a big file on a slow link is slow, not dead), and on macOS and
+/// Windows a connection that died mid-upload is never noticed by the socket (no
+/// `TCP_USER_TIMEOUT`, keepalive only probes idle sockets): the upload would hang for good and
+/// the message wait forever. A transfer that stops moving is a network failure the retry handles.
+#[cfg(not(target_arch = "wasm32"))]
+async fn unless_stalled<T>(
+  moved: ByteCounter,
+  transfer: impl std::future::Future<Output = Result<T, ApiError>>,
+) -> Result<T, ApiError> {
+  watch_progress(moved, TRANSFER_STALL_TIMEOUT, transfer).await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn watch_progress<T>(
+  moved: ByteCounter,
+  stall_after: Duration,
+  transfer: impl std::future::Future<Output = Result<T, ApiError>>,
+) -> Result<T, ApiError> {
+  let mut transfer = std::pin::pin!(transfer);
+  let mut last_moved = moved.get();
+  loop {
+    match tokio::time::timeout(stall_after, transfer.as_mut()).await {
+      Ok(result) => return result,
+      Err(_) => {
+        let now_moved = moved.get();
+        if now_moved == last_moved {
+          return Err(ApiError::Network(format!(
+            "the transfer made no progress for {} s",
+            stall_after.as_secs()
+          )));
+        }
+        last_moved = now_moved;
+      },
+    }
+  }
 }
 
 /// The browser's fetch has no chunked reads in reqwest, so the body is read whole; the
@@ -1716,10 +1773,25 @@ async fn send(request: RequestBuilder) -> Result<Response, ApiError> {
   if status.is_success() {
     return Ok(response);
   }
-  let maybe_body = response.json::<ErrorBody>().await.ok();
+  let maybe_header = response
+    .headers()
+    .get(reqwest::header::RETRY_AFTER)
+    .and_then(|value| value.to_str().ok())
+    .map(str::to_owned);
+  let maybe_header_wait = maybe_header.as_deref().and_then(parse_retry_after);
+  // Uploads read the capped header wait from the error (#772); the retry policy reads the body,
+  // filled from the header when only that was sent (#743).
+  let maybe_retry_after = maybe_header.as_deref().and_then(super::parse_retry_after);
+  let maybe_body = response.json::<ErrorBody>().await.ok().map(|body| {
+    match (body.maybe_retry_after_secs, maybe_header_wait) {
+      (None, Some(wait)) => body.with_retry_after_secs(wait.as_secs()),
+      _ => body,
+    }
+  });
   Err(ApiError::Status {
     status: status.as_u16(),
     maybe_body,
+    maybe_retry_after,
   })
 }
 
@@ -1898,6 +1970,36 @@ mod tests {
 
   #[cfg(not(target_arch = "wasm32"))]
   #[tokio::test(start_paused = true)]
+  async fn an_upload_that_stops_moving_fails_instead_of_hanging() {
+    let moved = ByteCounter::new();
+    let stalled = watch_progress(
+      moved,
+      Duration::from_secs(120),
+      std::future::pending::<Result<(), ApiError>>(),
+    )
+    .await;
+    assert!(matches!(stalled, Err(ApiError::Network(message)) if message.contains("no progress")));
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  #[tokio::test(start_paused = true)]
+  async fn a_slow_upload_that_keeps_moving_is_left_alone() {
+    let moved = ByteCounter::new();
+    let counter = moved.clone();
+    // 64 KiB every 100 s: slow, but alive for longer than one stall window.
+    let transfer = async move {
+      for _ in 0..5 {
+        tokio::time::sleep(Duration::from_secs(100)).await;
+        counter.add(64 * 1024);
+      }
+      Ok::<_, ApiError>("done")
+    };
+    let answer = watch_progress(moved, Duration::from_secs(120), transfer).await;
+    assert!(matches!(answer, Ok("done")));
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  #[tokio::test(start_paused = true)]
   async fn a_server_that_never_answers_the_websocket_handshake_times_out() {
     let listener = loopback_listener().await;
     let address = listener.local_addr().unwrap();
@@ -2002,6 +2104,22 @@ mod tests {
       let error = api.me().await.unwrap_err();
       assert!(matches!(error, ApiError::Status { status: 502, .. }), "{error}");
       assert!(error.is_transient());
+      assert_eq!(error.retry_after(), None, "no Retry-After, no wait asked for");
+    }
+
+    #[tokio::test]
+    async fn a_storage_outage_says_when_to_come_back() {
+      let base = canned_server(
+        "503 Service Unavailable\r\nretry-after: 30",
+        "application/json",
+        r#"{"error_code":"unavailable","message":"storage"}"#,
+      )
+      .await;
+      let api = HttpServerApi::new(base, StaticToken("t".into()));
+      let error = api.me().await.unwrap_err();
+      assert!(matches!(error, ApiError::Status { status: 503, .. }), "{error}");
+      assert_eq!(error.retry_after(), Some(Duration::from_secs(30)));
+      assert_eq!(error.error_code(), Some(&teamcraft_proto::ErrorCode::Unavailable));
     }
 
     #[tokio::test]

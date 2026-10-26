@@ -28,6 +28,7 @@ pub fn user_summary(state: &AppState, user: &User) -> UserSummary {
     maybe_organization: user.maybe_organization.clone(),
     maybe_has_devices: None,
     is_deactivated: user.is_deactivated,
+    is_deleted: user.is_deleted,
   }
 }
 
@@ -107,6 +108,7 @@ pub fn space_response(view: &SpaceView) -> SpaceResponse {
     can_add_members: false,
     can_invite_guests: false,
     can_manage_space: false,
+    can_create_channels: false,
   }
 }
 
@@ -181,6 +183,7 @@ pub fn conversation_response(
     }),
     contains_guests: extras.with_guests.contains(&conversation.id),
     maybe_organizer_user_id: None,
+    maybe_my_permissions: None,
     maybe_my_membership: view.maybe_membership.as_ref().map(my_membership),
     participants: extras
       .participants

@@ -147,7 +147,7 @@ pub async fn get_channel_image(
     .await
     .map_err(|error| {
       warn!(%error, conversation_id = %id, "reading a channel picture failed");
-      ApiError::Unavailable("picture storage".into())
+      ApiError::storage_unavailable("picture storage")
     })?
     .ok_or_else(ApiError::channel_image_not_found)?;
   Ok(SpaceImageFile {

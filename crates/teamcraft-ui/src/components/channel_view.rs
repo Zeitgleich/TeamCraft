@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 
 use crate::calls::{CallKind, CallPhase, CallRequest};
+use crate::channel_access::ChannelAccess;
 use crate::components::avatar::{Avatar, AvatarSize, PresenceDot};
 use crate::components::bookmarks::BookmarksBar;
 use crate::components::channel_glyph::ChannelGlyph;
@@ -17,7 +18,7 @@ use crate::components::sheet::MenuSurface;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::components::tab_list::{on_tab_keys, roving_tabindex};
 use crate::delivery::ReadIndicator;
-use crate::i18n::use_i18n;
+use crate::i18n::{I18n, use_i18n};
 use crate::keys::{SEARCH_IN_CONVERSATION, shortcut_text};
 use crate::model::{Conversation, ConversationId, ConversationKind, MembershipIssue, UserId};
 use crate::prefs::MuteFor;
@@ -71,8 +72,14 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
   move || {
     // Everything below is recreated per conversation, which resets scroll state and drafts.
     let conv = info.get_untracked()?;
-    let name = conv.name.clone();
-    let label_name = conv.name;
+    let name = shown_name(i18n, &conv);
+    let label_name = name.clone();
+    // The notes to self have nobody to write to (#699).
+    let placeholder_key = if conv.is_notes_to_self {
+      "composer-placeholder-notes"
+    } else {
+      "composer-placeholder"
+    };
     let can_post = conv.can_post;
     // Files dropped anywhere on the conversation go to its composer.
     let zone = FileDrop::provide(can_post);
@@ -112,7 +119,7 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
                 <ChannelFeed conversation=conversation />
                 <SeenLine conversation=conversation />
                 <DropStrip zone=zone />
-                <Composer conversation=conversation can_post=can_post conversation_name=name />
+                <Composer conversation=conversation can_post=can_post conversation_name=name placeholder_key=placeholder_key />
               </div>
             }
               .into_any()
@@ -132,6 +139,15 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
         }}
       </section>
     })
+  }
+}
+
+/// The name a conversation is shown with: the notes to self have none of their own (#699).
+pub fn shown_name(i18n: I18n, conversation: &Conversation) -> String {
+  if conversation.is_notes_to_self {
+    i18n.t("notes-title")
+  } else {
+    conversation.name.clone()
   }
 }
 
@@ -365,11 +381,31 @@ fn ChannelHeader(
   let state = use_app_state();
   let i18n = use_i18n();
 
+  // What the title shows: it is built again only when this changes, not with every message, which
+  // would reload the channel picture (issue #687).
+  let identity = Memo::new(move |_| {
+    info.with(|maybe_conv| {
+      maybe_conv.as_ref().map(|conv| {
+        let maybe_peer = (conv.kind == ConversationKind::Direct)
+          .then(|| conv.member_ids.iter().copied().find(|id| *id != state.me().id))
+          .flatten();
+        (conv.kind, shown_name(i18n, conv), maybe_peer)
+      })
+    })
+  });
+  // The other person of a direct conversation.
+  let maybe_peer = Memo::new(move |_| identity.with(|maybe| maybe.as_ref().and_then(|(_, _, peer)| *peer)));
+  let peer_presence = Memo::new(move |_| {
+    maybe_peer
+      .get()
+      .and_then(|id| state.read(|backend| backend.user(id)))
+      .map(|user| user.presence)
+  });
   let title = move || {
-    let conv = info.get()?;
-    let icon = match conv.kind {
+    let (kind, name, maybe_person) = identity.get()?;
+    let icon = match kind {
       ConversationKind::Public | ConversationKind::Private => {
-        let fallback = if conv.kind == ConversationKind::Public {
+        let fallback = if kind == ConversationKind::Public {
           IconName::Hash
         } else {
           IconName::Lock
@@ -381,26 +417,18 @@ fn ChannelHeader(
         view! { <Icon name=IconName::Terminal class="header-icon" /> }.into_any()
       },
       ConversationKind::Group => view! { <Icon name=IconName::Users class="header-icon" /> }.into_any(),
-      ConversationKind::Direct => {
-        let me = state.me();
-        let other = conv.member_ids.iter().copied().find(|id| *id != me.id);
-        let presence = other
-          .and_then(|id| state.read(|backend| backend.user(id)))
-          .map(|user| user.presence);
-        match presence {
-          Some(presence) => view! { <PresenceDot presence=presence /> }.into_any(),
-          None => ().into_any(),
-        }
-      },
+      ConversationKind::Direct => (move || {
+        peer_presence
+          .get()
+          .map(|presence| view! { <PresenceDot presence=presence /> })
+      })
+      .into_any(),
     };
-    let full_name = conv.name.clone();
+    let full_name = name.clone();
     // A direct conversation's name is the person: it opens their profile card.
-    let maybe_person = (conv.kind == ConversationKind::Direct)
-      .then(|| conv.member_ids.iter().copied().find(|id| *id != state.me().id))
-      .flatten();
     Some(match maybe_person {
       Some(person) => {
-        let label = i18n.t_with("profile-open", &[("name", &conv.name)]);
+        let label = i18n.t_with("profile-open", &[("name", &name)]);
         view! {
           <h1 class="header-title" translate="no">
             <button
@@ -411,7 +439,7 @@ fn ChannelHeader(
               on:click=move |_| state.overlay.set(Overlay::UserProfile(person))
             >
               {icon}
-              <span class="header-name">{conv.name}</span>
+              <span class="header-name">{name}</span>
             </button>
           </h1>
         }
@@ -420,7 +448,7 @@ fn ChannelHeader(
       None => view! {
         <h1 class="header-title" translate="no" title=full_name>
           {icon}
-          <span class="header-name">{conv.name}</span>
+          <span class="header-name">{name}</span>
         </h1>
       }
       .into_any(),
@@ -489,11 +517,34 @@ fn ChannelHeader(
   });
   let is_favorite = move || info.get().is_some_and(|conv| conv.is_favorite);
   let member_count = move || info.get().map_or(0, |conv| conv.member_ids.len());
-  // Channels take people in from the header; direct messages start a new group instead.
-  let is_channel = move || {
+  // The first members' avatars; read again only when one of them changes, not on every backend
+  // change (issue #687).
+  let header_people = Memo::new(move |_| {
+    let ids = info
+      .get()
+      .map(|conv| {
+        conv
+          .member_ids
+          .into_iter()
+          .take(HEADER_AVATARS)
+          .collect::<Vec<_>>()
+      })
+      .unwrap_or_default();
+    state.read(|backend| {
+      ids
+        .into_iter()
+        .filter_map(|id| backend.user(id))
+        .collect::<Vec<_>>()
+    })
+  });
+  // Channels take people in from the header, for people who may add members; direct messages
+  // start a new group instead.
+  let access = ChannelAccess::new(state, conversation);
+  let can_add_people = move || {
     info
       .get()
       .is_some_and(|conv| matches!(conv.kind, ConversationKind::Public | ConversationKind::Private))
+      && access.can_add_members()
   };
   let members_open = move || state.panel.get() == SidePanel::Members;
   let search_label = move || {
@@ -510,20 +561,15 @@ fn ChannelHeader(
           {title}
           // A direct conversation: the other person's status under the name, as messengers do.
           {move || {
-            info.get().and_then(|conv| {
-              (conv.kind == crate::model::ConversationKind::Direct)
-                .then(|| conv.member_ids.iter().copied().find(|id| *id != state.me().id))
-                .flatten()
-                .map(|other| {
-                  view! {
-                    <div class="header-sub">
-                      <HeaderStatus user=other />
-                      <crate::components::profile_views::InMeetingBadge user=other />
-                      <crate::components::profile_views::LastSeen user=other is_compact=true />
-                      {move || local_time().map(|label| view! { <span class="header-local-time" title=move || i18n.t("profile-local-time")>{label}</span> })}
-                    </div>
-                  }
-                })
+            maybe_peer.get().map(|other| {
+              view! {
+                <div class="header-sub">
+                  <HeaderStatus user=other />
+                  <crate::components::profile_views::InMeetingBadge user=other />
+                  <crate::components::profile_views::LastSeen user=other is_compact=true />
+                  {move || local_time().map(|label| view! { <span class="header-local-time" title=move || i18n.t("profile-local-time")>{label}</span> })}
+                </div>
+              }
             })
           }}
         </div>
@@ -584,7 +630,7 @@ fn ChannelHeader(
         >
           <Icon name=IconName::Search />
         </button>
-        <Show when=is_channel fallback=|| ()>
+        <Show when=can_add_people fallback=|| ()>
           <button
             class="header-btn"
             aria-label=move || i18n.t("channel-add-people")
@@ -629,12 +675,8 @@ fn ChannelHeader(
           <Icon name=IconName::Users class="header-members-icon" />
           <span class="avatar-stack header-avatars" aria-hidden="true">
             {move || {
-              let ids = info
+              header_people
                 .get()
-                .map(|conv| conv.member_ids.into_iter().take(HEADER_AVATARS).collect::<Vec<_>>())
-                .unwrap_or_default();
-              state
-                .read(|backend| ids.into_iter().filter_map(|id| backend.user(id)).collect::<Vec<_>>())
                 .into_iter()
                 .map(|user| view! { <Avatar user=user size=AvatarSize::Small /> })
                 .collect_view()
@@ -695,10 +737,12 @@ fn ConversationMore(
   let is_open = RwSignal::new(false);
   let is_favorite = move || info.get().is_some_and(|conv| conv.is_favorite);
   let member_count = move || info.get().map_or(0, |conv| conv.member_ids.len());
-  let is_channel = move || {
+  let access = ChannelAccess::new(state, conversation);
+  let can_add_people = move || {
     info
       .get()
       .is_some_and(|conv| matches!(conv.kind, ConversationKind::Public | ConversationKind::Private))
+      && access.can_add_members()
   };
   let choose = move |action: fn(AppState, ConversationId, RwSignal<ChannelTab>)| {
     is_open.set(false);
@@ -729,7 +773,7 @@ fn ConversationMore(
             <Icon name=IconName::File />
             {move || if tab.get() == ChannelTab::Files { i18n.t("channel-tab-messages") } else { i18n.t("channel-tab-files") }}
           </button>
-          <Show when=is_channel fallback=|| ()>
+          <Show when=can_add_people fallback=|| ()>
             <button type="button" class="menu-item" role="menuitem" on:click=move |_| choose(|state, conversation, _| state.overlay.set(Overlay::AddToChannel(conversation)))>
               <Icon name=IconName::UserPlus />
               {move || i18n.t("channel-add-people")}
@@ -786,11 +830,14 @@ fn ConversationMore(
 #[component]
 fn HeaderStatus(user: crate::model::UserId) -> impl IntoView {
   let state = use_app_state();
-  move || {
+  // Read again only when the status changes, not on every backend change (issue #687).
+  let maybe_status = Memo::new(move |_| {
     state
       .read(|backend| backend.user(user))
       .and_then(|person| person.maybe_custom_status)
-      .map(|status| {
+  });
+  move || {
+    maybe_status.get().map(|status| {
         let full = format!("{} {}", status.emoji, status.text).trim().to_owned();
         view! {
           <span class="header-status" title=full translate="no">

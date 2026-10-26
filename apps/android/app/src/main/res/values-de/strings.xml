@@ -146,6 +146,7 @@
   <string name="file_cancel_upload">Abbrechen</string>
   <string name="file_upload_retrying">Wird erneut versucht …</string>
   <string name="file_upload_stalled">Hochladen fehlgeschlagen. Die Nachricht wartet auf die Datei.</string>
+  <string name="file_upload_storage_unavailable">Der Dateispeicher ist gerade nicht erreichbar. Versuche es gleich noch einmal.</string>
   <string name="priority_normal">Normale Priorität</string>
   <string name="priority_important">Wichtig</string>
   <string name="priority_urgent">Dringend</string>

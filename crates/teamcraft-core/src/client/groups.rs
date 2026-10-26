@@ -27,6 +27,7 @@ use crate::api::{ApiError, ServerApi};
 use crate::convert;
 use crate::error::CoreError;
 use crate::records;
+use crate::retry::{RetryPolicy, millis};
 use crate::store::{ConversationEvent, LocalStore, Table};
 use crate::trust::{PinnedDirectory, WorkspaceAuthority};
 
@@ -1451,6 +1452,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       tracing::warn!(conversation_id = %conversation, "refused a self-add with full history");
       return Ok(());
     }
+    // An admin's self-join to a private channel: announced once this device committed it.
+    let maybe_self_joiner = match (&source, action) {
+      (ChangeSource::Delegated(signed), MembershipAction::AddUser { user_id, .. })
+        if signed.signer_user() == user_id =>
+      {
+        Some(convert::user_from_crypto(user_id)?)
+      },
+      _ => None,
+    };
     let attempts = self.settings.max_commit_attempts.max(1);
     for _ in 0..attempts {
       if !self.has_group(conversation)? {
@@ -1519,10 +1529,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       let is_founding_commit = group.epoch() == 0;
       if let Some(own) = self.post_commit(conversation, output, &recipients).await? {
         self.remember_member_keys(conversation, &directory, own.at_ms)?;
-        return match self.after_own_commit(conversation, &own.update, own.at_ms)? {
-          Some(share) => self.share_history_or_queue(conversation, share).await,
-          None => Ok(()),
-        };
+        if let Some(share) = self.after_own_commit(conversation, &own.update, own.at_ms)? {
+          self.share_history_or_queue(conversation, share).await?;
+        }
+        // After the keys went out, so the admin reads it too.
+        if let Some(user) = maybe_self_joiner {
+          self.announce_admin_join(conversation, user).await?;
+        }
+        return Ok(());
       }
       if is_founding_commit {
         // Another founding won the epoch, says the server (a DM opened on both sides at once).
@@ -1699,7 +1713,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
-  fn has_pending_commit(&mut self, conversation: ConversationId) -> Result<bool, CoreError> {
+  pub(super) fn has_pending_commit(&mut self, conversation: ConversationId) -> Result<bool, CoreError> {
     Ok(
       self
         .group(conversation)?
@@ -2492,6 +2506,26 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(users)
   }
 
+  /// Tells the members that a workspace admin joined a private channel by themselves (admin.md
+  /// §2.4). A self-join to a public channel is an ordinary join and says nothing here.
+  async fn announce_admin_join(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<(), CoreError> {
+    let maybe_response: Option<teamcraft_proto::ConversationResponse> =
+      records::get_json(&self.store, Table::Conversations, &conversation.to_string())?;
+    let is_public = maybe_response.is_some_and(|response| {
+      response.visibility == teamcraft_proto::ConversationVisibility::Public && !response.is_archived
+    });
+    if is_public || !self.workspace()?.is_admin(user) {
+      return Ok(());
+    }
+    self
+      .announce(conversation, ConversationEvent::AdminJoined { user })
+      .await
+  }
+
   fn group_authority(
     &mut self,
     conversation: ConversationId,
@@ -2658,12 +2692,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// How long after a rejoin request this device waits before asking again: `rejoin_retry`, for a
   /// device without a group doubled with every request up to `rejoin_retry_max`.
   fn rejoin_wait_ms(&self, attempts: u32) -> i64 {
-    let base = i64::try_from(self.settings.rejoin_retry.as_millis()).unwrap_or(i64::MAX);
-    let ceiling = i64::try_from(self.settings.rejoin_retry_max.as_millis())
-      .unwrap_or(i64::MAX)
-      .max(base);
-    let doublings = attempts.saturating_sub(1).min(32);
-    base.saturating_mul(1_i64 << doublings).min(ceiling)
+    // The shared backoff (`crate::retry`), without jitter: one DM's rejoin requests, not a fleet.
+    let policy = RetryPolicy::new(self.settings.rejoin_retry, self.settings.rejoin_retry_max);
+    millis(policy.backoff(attempts.saturating_sub(1)))
   }
 
   /// Posts the signed rejoin request; `Ok(false)` when the group moved on meanwhile.

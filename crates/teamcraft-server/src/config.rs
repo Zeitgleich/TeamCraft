@@ -77,6 +77,9 @@ pub struct Config {
   /// The key that encrypts passwords entered in the admin console (admin.md §6.2).
   #[serde(default)]
   pub secrets: SecretsConfig,
+  /// Circuit breakers and retries of the backends (issue #743).
+  #[serde(default)]
+  pub dependencies: crate::dependencies::DependenciesConfig,
 }
 
 /// Where the settings key comes from: inline (base64, 32 bytes) or a file the server creates on
@@ -224,6 +227,10 @@ pub struct PolicyConfig {
   /// after the deactivation. None (the default): only when an admin removes them (admin.md §3.4).
   #[serde(rename = "remove_deactivated_after_days", default)]
   pub maybe_remove_deactivated_after_days: Option<u32>,
+  /// Days a direct message deleted with a deleted account is remembered for the remaining
+  /// participants, so their devices that were offline that long still drop it with its local
+  /// history on the next sync (admin.md §3.2.1). After that it only leaves the list.
+  pub deleted_conversations_kept_days: u32,
 }
 
 /// Size limits of requests and results.
@@ -1071,6 +1078,11 @@ pub struct NotificationsConfig {
   /// heartbeats renew it, so keep it above twice `[gateway] heartbeat_interval_secs`; a session that
   /// stops (sleep, crash, lost network) no longer holds pushes back.
   pub attention_lease_secs: u64,
+  /// The user's own activity on a desktop or web session (input it reported, a message sent from
+  /// it) holds phone pushes back like an attentive report for this long, also when its window is
+  /// not in front: the user is at the computer (notifications.md, "Attention"). Keep it above the
+  /// 30 s the clients repeat "active" during input. `0`: only attention counts.
+  pub desktop_activity_secs: u64,
   /// Pushes held for an attentive desktop per user at most; beyond that the oldest goes out at once.
   pub max_held_pushes_per_user: usize,
   /// E-mail digest of missed mentions.
@@ -1196,6 +1208,16 @@ pub struct CallsConfig {
   /// Leave unset with a certificate browsers trust.
   #[serde(rename = "sfu_certificate_sha256", default)]
   pub maybe_sfu_certificate_sha256: Option<String>,
+  /// The SFU reports its whole roster now and then (`/api/internal/v1/calls/roster`); a device it
+  /// no longer has leaves the call. While the SFU is fresh from a restart, its devices get this
+  /// long to rejoin first.
+  #[serde(default = "default_roster_grace_secs")]
+  pub roster_grace_secs: u64,
+  /// Once the SFU has sent a roster, no roster for this long ends every call: the SFU is gone or
+  /// cut off, and nothing confirms anybody is still in a call. Keep it a few SFU roster intervals
+  /// (`TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS`, default 30).
+  #[serde(default = "default_roster_timeout_secs")]
+  pub roster_timeout_secs: u64,
 }
 
 /// Device-linking relay at /api/v1/rendezvous.
@@ -1309,6 +1331,7 @@ impl Default for PolicyConfig {
       default_spaces: Vec::new(),
       default_channels: Vec::new(),
       maybe_remove_deactivated_after_days: None,
+      deleted_conversations_kept_days: 180,
     }
   }
 }
@@ -1448,6 +1471,7 @@ impl Default for NotificationsConfig {
       mobile_push_delay_secs: 120,
       is_desktop_attention_enabled: true,
       attention_lease_secs: 75,
+      desktop_activity_secs: 120,
       max_held_pushes_per_user: 100,
       email_digest: EmailDigestConfig::default(),
     }
@@ -1540,6 +1564,14 @@ fn default_caldav_timeout_secs() -> u64 {
 
 fn default_ring_timeout_secs() -> u64 {
   30
+}
+
+fn default_roster_grace_secs() -> u64 {
+  60
+}
+
+fn default_roster_timeout_secs() -> u64 {
+  120
 }
 
 fn default_call_idle_secs() -> u64 {
@@ -1737,6 +1769,10 @@ mod tests {
   fn example_file_parses_and_matches_the_defaults() {
     let text = include_str!("../../../teamcraft.example.toml");
     let config = Config::from_toml(text).unwrap();
+    assert_eq!(
+      config.dependencies,
+      crate::dependencies::DependenciesConfig::default()
+    );
     assert_eq!(config.limits.max_page_size, LimitsConfig::default().max_page_size);
     assert_eq!(
       config.gateway.resume_buffer_events,

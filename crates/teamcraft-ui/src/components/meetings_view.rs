@@ -13,6 +13,7 @@ use teamcraft_proto::{
 };
 
 use crate::calls::{CallKind, CallRequest};
+use crate::channel_access::is_guest;
 use crate::clock::{format_date, format_local_datetime_input, format_time, local_day, now_ms};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::compact_back::CompactBack;
@@ -109,6 +110,7 @@ pub fn MeetingsView() -> impl IntoView {
     }
   });
 
+  let can_create = !is_guest(state);
   view! {
     <section class="meetings-view page-view" aria-label=move || i18n.t("meetings-title")>
       <header class="panel-header">
@@ -116,14 +118,17 @@ pub fn MeetingsView() -> impl IntoView {
         <div class="panel-title">
           <h1>{move || i18n.t("meetings-title")}</h1>
         </div>
-        <button class="btn" prop:disabled=move || is_starting.get() on:click=start_now>
-          <Icon name=IconName::Video />
-          <span>{move || i18n.t("meetings-start-now")}</span>
-        </button>
-        <button class="btn btn-primary" on:click=move |_| state.overlay.set(Overlay::ScheduleMeeting)>
-          <Icon name=IconName::Plus />
-          <span>{move || i18n.t("meetings-schedule")}</span>
-        </button>
+        // Guests join meetings but create none (the server refuses them, docs/meetings.md).
+        <Show when=move || can_create fallback=|| ()>
+          <button class="btn" prop:disabled=move || is_starting.get() on:click=start_now>
+            <Icon name=IconName::Video />
+            <span>{move || i18n.t("meetings-start-now")}</span>
+          </button>
+          <button class="btn btn-primary" on:click=move |_| state.overlay.set(Overlay::ScheduleMeeting)>
+            <Icon name=IconName::Plus />
+            <span>{move || i18n.t("meetings-schedule")}</span>
+          </button>
+        </Show>
       </header>
       {move || {
         hub.maybe_error.get().map(|message| {
@@ -147,7 +152,7 @@ pub fn MeetingsView() -> impl IntoView {
             icon=IconName::Calendar
             title_key="meetings-empty-title"
             body_key="meetings-empty"
-            maybe_action=Some(EmptyAction {
+            maybe_action=can_create.then(|| EmptyAction {
               label_key: "meetings-schedule",
               on_click: Callback::new(move |()| state.overlay.set(Overlay::ScheduleMeeting)),
             })

@@ -155,8 +155,9 @@ For each recipient without a live connection the server decides from metadata it
    applies: the sender is on the user's allow list, or the message is urgent and the user lets urgent
    messages through. Overrides apply to manual and scheduled DND alike.
 3. **Attention**: no push while a phone of the user is in the foreground (it gets the event live). While
-   a desktop or web session of the user is *attentive* (see below), pushes to phones wait for the grace
-   delay and go out only if the message is still unread then. Push mode `always` skips both.
+   the user is *at a desktop or web session* (attentive, or recently active on it; see below), pushes to
+   phones wait for the grace delay and go out only if the message is still unread then. Push mode
+   `always` skips both.
 4. **Level**: mentions, DMs and replies in followed threads push; other messages only in `all`
    conversations; integration channels only for mentions.
 
@@ -214,6 +215,7 @@ remembers per process which devices show what (for withdrawals and rings) and th
 |---------------------------------------------------|-------------|---------------------------------------------------------------------------------|
 | `notifications.mobile_push_delay_secs`            | 120         | Grace delay while a desktop is attentive; `0` sends nothing meanwhile           |
 | `notifications.attention_lease_secs`              | 75          | How long an `attention` report counts without being repeated                    |
+| `notifications.desktop_activity_secs`             | 120         | Activity on a desktop holds pushes like attention this long; `0`: off           |
 | `notifications.is_desktop_attention_enabled`      | true        | Off: sessions report no attention; an active desktop holds pushes like presence |
 | `notifications.max_held_pushes_per_user`          | 100         | Held pushes per user; beyond that the oldest goes out at once                   |
 | `push.ttl_secs`                                   | 86400       | TTL of message and mention wake-ups                                             |
@@ -257,6 +259,19 @@ logs it.
 | Windows  | `GetLastInputInfo`                   | not read; locking takes focus from the window  |
 | Web      | none (in-app input only)             | none                                           |
 
+**At the desktop (issue #756).** Attention alone missed users who sat at the computer: with the app's
+window behind another one, or a webview that reported focus wrongly (#720), the phone was pushed at
+once while the user chatted at the desktop, and when the user turned to the window a moment later the
+next messages were held, so the phone showed only the first message of a burst. So the server also
+counts the device's own activity (gateway.md, "Presence"): a desktop or web session whose device
+renewed its activity after its last "away" report holds phone pushes like an attentive one for
+`notifications.desktop_activity_secs` (120 s). The device renews it with every `active` report (input
+in the window, and on the desktop input anywhere on the computer, repeated at most every 30 s), with
+`typing`, and, with #732, with every message sent from it. An `idle` report (screen locked, "Away
+after") ends it at once and releases the held pushes; an "away" report after the last activity (tab
+hidden or closed) ends it too. Every message is routed on its own: nothing collapses or throttles
+pushes per conversation, and the apps add each message to the conversation's notification.
+
 **Urgent and DND.** With "urgent messages break through" on, an urgent message reaches the user during
 DND only in DMs and group DMs by default (`urgent_scope: direct`); `everywhere` includes channels.
 
@@ -293,7 +308,25 @@ Whatever is known by then is shown: "New message" under the sender's name when t
 read, never nothing. `PushNotification.maybe_gap` says why less was shown (no session, not decrypted,
 timed out, not showable, workspace policy, device setting); the diagnostics show the last reason and
 the app logs it, never the content. A high-priority FCM wake-up that can't be opened at all shows a
-plain "New message".
+plain "New message". When the text could not be read in time (timed out, not decrypted, no session),
+the app opens the same wake-up again after 30 s and 60 s once a network is there
+(`notification_for_push_retry`, not counted as a received push) and fills the line in, silently and
+under the same notification ID; a notification read or swiped away meanwhile is not brought back.
+
+**Android on watches (issue #739).** Wear OS and vendor bridges (Garmin Connect, Galaxy Wearable)
+mirror the phone's notifications. A message is posted once, after the wake-up was opened, and every
+later change (more messages, a late decryption, an avatar, a setting) replaces it under the same tag
+and ID with `setOnlyAlertOnce`, so a watch alerts once per message. The notification carries
+MessagingStyle (a `Person` per sender with name and avatar, conversation title, group conversation
+for channels and chats with several senders) and also plain title and text for bridges that read
+only those; it is not local-only, has the conversation's shortcut and `LocusId`, and offers reply
+(remote input), mark as read and mute. The group summary is posted only while two or more
+conversations show (bridges mirror a summary as a second notification), never alerts
+(`GROUP_ALERT_CHILDREN`), names the conversations ("Project A, Bob") or counts the messages when names
+are hidden, and is posted again only when it changed. With "sender only" or the app lock, the watch
+shows "New message from Alice"; with "nothing", "New message". Bridges that follow the lock screen's
+privacy show the public version while the phone is locked and Android hides sensitive content: the
+sender ("New message from Alice", "Project A: 2 new messages from Alice, Bob"), never the text.
 
 **iOS message content (issue #331).** The notification service extension opens the wake-up with the
 same core call and shows the same texts: sender and conversation, the text, a label for photos, videos
@@ -308,7 +341,9 @@ of the two applies (the core applies both when it opens the wake-up; the setting
 so a notification extension reads it too). The app lock caps it at "sender only" and removes reply,
 mark read and the conversation shortcut. Changing either re-posts what is in the shade. "Sender only"
 reads "New message from Alice" or "3 new messages from Alice, Bob". The lock screen's public version
-stays "New message" for devices set to hide sensitive content.
+(shown when the device hides sensitive content on the lock screen, and by watch bridges that follow
+it) names who wrote but never the text: "New message from Alice" under the sender's or conversation's
+name, and the summary's names the conversations. With "nothing" it stays "New message".
 
 **iOS.** `call` arrives as a mutable alert through the notification service extension; without the
 filtering entitlement it shows as a time-sensitive "incoming call" alert with answer and decline, with

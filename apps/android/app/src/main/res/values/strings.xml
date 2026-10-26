@@ -147,6 +147,7 @@
   <string name="file_cancel_upload">Cancel</string>
   <string name="file_upload_retrying">Retrying…</string>
   <string name="file_upload_stalled">Upload failed. The message waits for the file.</string>
+  <string name="file_upload_storage_unavailable">The file storage is unavailable right now. Try again in a moment.</string>
   <string name="priority_normal">Normal priority</string>
   <string name="priority_important">Important</string>
   <string name="priority_urgent">Urgent</string>

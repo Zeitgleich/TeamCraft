@@ -48,6 +48,50 @@ All of them download Cisco's OpenH264 on first video use (see `crates/teamcraft-
 and use the desktop's portals for screen sharing, the camera, push-to-talk on Wayland, file dialogs
 and opening the login page.
 
+## Start-up environment
+
+Before GTK starts, the shell checks two variables that GTK and WebKitGTK read only once
+(`apps/desktop/src/startup_env.rs`). If one is missing, the app restarts itself once with it set,
+so this works the same for every package (deb, rpm, AppImage, Flatpak) and from a terminal. A value
+you set yourself is never changed.
+
+| Variable                           | Set to | Why                                                                                     |
+|------------------------------------|--------|-----------------------------------------------------------------------------------------|
+| `GTK_USE_PORTAL`                   | `1`    | File dialogs through xdg-desktop-portal, the desktop's own dialog (not in Flatpak, which does this anyway) |
+| `WEBKIT_DISABLE_DMABUF_RENDERER`   | `1`    | Rendering, see below                                                                    |
+
+### Rendering
+
+WebKitGTK's DMABUF renderer makes transitions and animations flicker, or flash the whole window
+dark, on some GPU drivers and compositors (seen with AMD GPUs on KDE Plasma, #687). TeamCraft
+therefore starts WebKitGTK with `WEBKIT_DISABLE_DMABUF_RENDERER=1`: pages are handed to the
+compositor through shared memory instead. It looks the same and costs a little more CPU time while
+something moves.
+
+To keep the DMABUF renderer (for example to compare, or where it works well), start the app with
+either variable:
+
+```sh
+TEAMCRAFT_WEBKIT_DMABUF=1 teamcraft-desktop          # the app leaves WebKit's default alone
+WEBKIT_DISABLE_DMABUF_RENDERER=0 teamcraft-desktop   # WebKit's own switch, kept as you set it
+TEAMCRAFT_WEBKIT_DMABUF=1 ./TeamCraft_amd64.AppImage    # the same for the AppImage
+flatpak run --env=TEAMCRAFT_WEBKIT_DMABUF=1 de.zeitgleich.teamcraft
+```
+
+For a permanent choice, put the variable into the `.desktop` file's `Exec=env …` line or
+`~/.config/environment.d/`, or use `flatpak override --user --env=TEAMCRAFT_WEBKIT_DMABUF=1
+de.zeitgleich.teamcraft`.
+
+### Dropped files
+
+WebKitGTK hands the page a file dragged from a file manager (Dolphin, GNOME Files) without its
+contents: no `File` objects, at most the `file://` addresses. The shell watches the same drop on
+the GTK widget (X11 and Wayland alike), keeps the dropped paths, and the page reads exactly those
+files from it in chunks when its `drop` arrives (`apps/desktop/src/dropped_files.rs`, #651). Should
+no `drop` reach the page, the shell tells it after half a second and the files go to the
+conversation or thread the pointer was over. A dropped file larger than 512 MiB is not read this
+way (the page would hold it in memory); attach it with the + button.
+
 ## Flatpak
 
 ### Build and run locally

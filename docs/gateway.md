@@ -19,6 +19,31 @@ types are ignored on both sides, so new ones can be added without breaking old c
    `heartbeat_timeout_secs` is closed. After `connection_max_age_secs` the server closes it so a
    fresh token is checked; clients reconnect with `resume`.
 
+### The sync after `ready` (issue #714)
+
+A fresh session costs what changed since the device was last caught up, not what the workspace holds:
+
+- Right after `ready` the client sends its first reads at once: `GET /sync/heads`, the spaces and
+  conversations, the roster and policy log, the first page of welcomes, threads and unread counts,
+  notification settings, key package status, key bag, its own device list, presence of the people it
+  knows and the open link requests. None needs another's answer; each step of the sync takes its answer
+  instead of asking again. Reads wait for `ready`, so a change after a read always arrives as an event.
+- `GET /sync/heads` names per conversation the newest message and MLS entry the caller can read and a
+  digest of the member list, per space a digest of its member list. The client keeps the heads it caught
+  up to (one record in its store) and reads member lists, MLS queues and history only where a head moved,
+  or where local work needs a read anyway (no group yet, a commit of its own not landed, messages waiting
+  for keys, an earlier failure). The heads only let the client skip reads; nothing read is trusted
+  because of them. A server without the endpoint (404) makes the client read everything, as before.
+- A resume reads the once-per-connection data (counts and threads, presence, link requests, its own
+  summary) at once, and when the connection was heard from within the last minute (a network blip, not
+  an app started again) already while the server answers `resume`: the session kept every event in
+  between, so nothing read then can be missed. With events to replay the counts are read only after the
+  replay (`counted_through`).
+
+The client logs where the time of each connection went (`gateway connection caught up` with the phases;
+`Client::last_connection_phases`); docs/performance.md, "Coming back: requests and round trips", has the
+numbers.
+
 ## Events and resume
 
 Every `event` frame has a `seq` that grows by one per session. The server keeps the last
@@ -70,21 +95,27 @@ The workspace's away timeout (`presence.away_timeout_minutes`, 15 for a new work
 stored policies with less are applied as 5, absent lets the devices decide) marks a device that said
 `active` but showed no sign of life for that long as timed out (away). Unlike a device's own `idle`,
 which only the device ends, any sign of life ends a timeout at once: `set_activity active`, `typing`,
-an attentive `attention` report or a heartbeat while attentive. A `set_activity` that makes an idle or
-timed-out device active always goes through; other activity changes are throttled to one per second,
-and a repeated report only counts for the timeout (no presence refresh). Desktop and web report
-`active` on input while their window is focused and visible (at most every 30 s), when the window
-comes to the front, after every reconnect or resume (a resumed session keeps what the server last
-knew; a new one identifies with the last report), and when the user picks "Online". Their own "Away
-after" (privacy settings) defaults to 15 minutes without input. The desktop app counts input anywhere
-on the computer (the OS idle time, polled every 5 s, also while the window is in the background or in
-the tray) as input and treats a locked screen as away at once, unless automatic away is off; only the
-idle duration and the lock state leave the OS layer, no key or pointer data.
+an attentive `attention` report or a heartbeat while attentive. Sending a message goes further: it
+makes the sending device active at once, also when it said `idle` (a stale lock or idle reading can't
+keep somebody away who is writing), until the device's next report or the timeout. A `set_activity`
+that makes an idle or timed-out device active always goes through; other activity changes are
+throttled to one per second, and a repeated report only counts for the timeout (no presence refresh).
+Desktop and web report `active` on input in their window (at most every 30 s, whether or not the
+webview counts the window as focused), when the window comes to the front, after every reconnect or
+resume (a resumed session keeps what the server last knew; a new one identifies with the last report),
+and when the user picks "Online". Their own "Away after" (privacy settings) defaults to 15 minutes
+without input. The desktop app counts input anywhere on the computer (the OS idle time, polled every
+5 s, also while the window is in the background or in the tray) as input and treats a locked screen as
+away at once, unless automatic away is off; only the idle duration and the lock state leave the OS
+layer, no key or pointer data. A lock reading that input in the window contradicts (a locked screen
+passes none) is stale and ignored until the OS reports the screen unlocked.
 
-Changes are sent as `presence_update` to everybody who shares a conversation with the user (and to the
-user's own devices). A disconnected device counts as gone only after `presence_offline_grace_secs`, so
-reconnects don't flicker. `GET /api/v1/presence?user_ids=…` returns the last known state; guests only
-learn about people they share a conversation with.
+The server recomputes a user's presence one refresh at a time, each from the devices' current state,
+so overlapping refreshes (two devices, the periodic refresh, a disconnect) never announce an older
+state last. Changes are sent as `presence_update` to everybody who shares a conversation with the user
+(and to the user's own devices). A disconnected device counts as gone only after
+`presence_offline_grace_secs`, so reconnects don't flicker. `GET /api/v1/presence?user_ids=…` returns
+the last known state; guests only learn about people they share a conversation with.
 
 ## Limits of M1
 

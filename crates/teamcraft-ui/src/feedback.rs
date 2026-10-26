@@ -138,13 +138,15 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
     FailureKind::Server(code) => match code {
       ErrorCode::NotSpaceMember => "error-not-space-member",
       ErrorCode::Forbidden | ErrorCode::NoTeamcraftRole => "error-forbidden",
-      ErrorCode::Unauthorized | ErrorCode::InvalidToken => "error-signed-out",
+      ErrorCode::Unauthorized | ErrorCode::InvalidToken | ErrorCode::AccountDeleted => "error-signed-out",
       ErrorCode::AccountDeactivated => "error-account-deactivated",
       ErrorCode::RateLimited => "error-rate-limited",
       ErrorCode::PayloadTooLarge => "error-too-large",
       ErrorCode::Unavailable | ErrorCode::Internal => "error-server-trouble",
       ErrorCode::Conflict | ErrorCode::EpochConflict | ErrorCode::VersionConflict => "error-conflict",
       ErrorCode::LastOwner => "admin-error-last-owner",
+      ErrorCode::CannotDeleteSelf => "admin-error-cannot-delete-self",
+      ErrorCode::LastAdmin => "admin-error-last-admin",
       // All `*_not_found` codes, including ones this version doesn't know yet.
       other if other.as_str().ends_with("_not_found") => "error-not-found",
       _ => "error-generic",

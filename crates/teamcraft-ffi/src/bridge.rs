@@ -100,7 +100,9 @@ impl Engine {
       ChatAction::PublishPolicy { .. }
       | ChatAction::PublishRoster { .. }
       | ChatAction::AdminJoinChannel { .. }
-      | ChatAction::AdminRemoveFromAllChats { .. } => Err(TeamCraftError::InvalidInput(
+      | ChatAction::AdminRemoveFromAllChats { .. }
+      | ChatAction::AdminDeleteUser { .. }
+      | ChatAction::AdminRemoveGroupLeftover { .. } => Err(TeamCraftError::InvalidInput(
         "workspace administration is on desktop and web".into(),
       )),
       other => {
