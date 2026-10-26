@@ -3,12 +3,13 @@
 
 use leptos::prelude::*;
 use teamcraft_client_api::updates::{
-  AvailableAction, PackageManagerHint, SelfUpdateStep, TooOldAction, UpdateBanner, UpdateBlocker,
-  UpdatePreference, UpdateState, UpdateStatus,
+  AvailableAction, Dismissal, InstallKind, ManualUpdate, PackageManager, PackageManagerHint, SelfUpdateStep,
+  TooOldAction, UpdateBanner, UpdateBlocker, UpdatePreference, UpdateState, UpdateStatus,
 };
 
 use crate::auth::tauri;
 use crate::components::icons::{Icon, IconName};
+use crate::components::message_actions::copy_to_clipboard;
 use crate::i18n::{I18n, use_i18n};
 use crate::reactive::{SetIfAlive, use_interval_while_visible};
 
@@ -24,7 +25,9 @@ const PREFERENCES: [UpdatePreference; 3] = [
 ];
 
 /// Above the app: "ready, restart", "available", or "too old". Renders nothing outside the
-/// desktop app. "Later" hides a version until the next launch; "too old" can't be hidden.
+/// desktop app. How it can be hidden is the status's [`Dismissal`]: "Later" until the next launch,
+/// "Dismiss" for good for a version the app can't install (deb, rpm, Flatpak), and not at all when
+/// too old or when a self-installed update waits for its restart.
 #[component]
 pub fn UpdateNotice() -> impl IntoView {
   let i18n = use_i18n();
@@ -32,7 +35,8 @@ pub fn UpdateNotice() -> impl IntoView {
   let dismissed = RwSignal::new(None::<String>);
   let error = RwSignal::new(None::<String>);
   move || {
-    let banner = status.get()?.banner()?;
+    let current = status.get()?;
+    let banner = current.banner()?;
     let version = banner_version(&banner);
     if dismissed
       .get()
@@ -41,18 +45,12 @@ pub fn UpdateNotice() -> impl IntoView {
       return None;
     }
     let is_alert = matches!(banner, UpdateBanner::TooOld { .. });
-    let later = version.map(|version| {
-      view! {
-        <button class="btn btn-small" on:click=move |_| dismissed.set(Some(version.clone()))>
-          {move || i18n.t("update-later")}
-        </button>
-      }
-    });
+    let hide = dismiss_button(i18n, current.dismissal(), version, dismissed, error);
     Some(view! {
       <div class="update-banner" role=if is_alert { "alert" } else { "status" }>
         <Icon name=if is_alert { IconName::Alert } else { IconName::Download } />
-        {banner_body(i18n, banner, status, error)}
-        {later}
+        {banner_body(i18n, banner, current.install, status, error)}
+        {hide}
         {move || error.get().map(|message| view! { <span class="small composer-error">{message}</span> })}
       </div>
     })
@@ -82,7 +80,6 @@ pub fn UpdatesSection() -> impl IntoView {
         UpdateState::Off {
           reason: UpdateBlocker::Policy
             | UpdateBlocker::Machine
-            | UpdateBlocker::Flatpak
             | UpdateBlocker::Unpackaged
             | UpdateBlocker::NotConfigured
         }
@@ -148,9 +145,49 @@ fn use_update_status() -> RwSignal<Option<UpdateStatus>> {
   status
 }
 
+/// "Later" (this launch) or "Dismiss" (this version, remembered by the shell); nothing for a banner
+/// that has to stay.
+fn dismiss_button(
+  i18n: I18n,
+  dismissal: Dismissal,
+  maybe_version: Option<String>,
+  dismissed: RwSignal<Option<String>>,
+  error: RwSignal<Option<String>>,
+) -> Option<AnyView> {
+  match dismissal {
+    Dismissal::Never => None,
+    Dismissal::UntilRelaunch => maybe_version.map(|version| {
+      view! {
+        <button class="btn btn-small" on:click=move |_| dismissed.set(Some(version.clone()))>
+          {move || i18n.t("update-later")}
+        </button>
+      }
+      .into_any()
+    }),
+    Dismissal::ForVersion(version) => Some(
+      view! {
+        <button
+          class="btn btn-small"
+          on:click=move |_| {
+            dismissed.set(Some(version.clone()));
+            let version = version.clone();
+            leptos::task::spawn_local(async move {
+              error.set_if_alive(tauri::update_dismiss(&version).await.err());
+            });
+          }
+        >
+          {move || i18n.t("update-dismiss")}
+        </button>
+      }
+      .into_any(),
+    ),
+  }
+}
+
 fn banner_body(
   i18n: I18n,
   banner: UpdateBanner,
+  install: InstallKind,
   status: RwSignal<Option<UpdateStatus>>,
   error: RwSignal<Option<String>>,
 ) -> AnyView {
@@ -174,7 +211,7 @@ fn banner_body(
       {notes_link(i18n, maybe_notes_url)}
       {match action {
         AvailableAction::Download { can_download } => download_button(i18n, can_download, status, error),
-        AvailableAction::PackageManager(hint) => package_manager(i18n, hint, status, error),
+        AvailableAction::Manual(manual) => manual_update(i18n, manual, install, status, error),
       }}
     }
     .into_any(),
@@ -192,7 +229,7 @@ fn banner_body(
           <span class="small">{i18n.t("update-too-old-self")}</span>
         }
         .into_any(),
-        TooOldAction::PackageManager(hint) => package_manager(i18n, hint, status, error),
+        TooOldAction::Manual(manual) => manual_update(i18n, manual, install, status, error),
         TooOldAction::Elsewhere => view! {
           <span class="small">{i18n.t("update-too-old-elsewhere")}</span>
         }
@@ -240,16 +277,66 @@ fn download_button(
   .into_any()
 }
 
-/// The command to copy, and "Update now" when PackageKit runs.
+/// What the user does where the app can't install the update itself (#731).
+fn manual_update(
+  i18n: I18n,
+  manual: ManualUpdate,
+  install: InstallKind,
+  status: RwSignal<Option<UpdateStatus>>,
+  error: RwSignal<Option<String>>,
+) -> AnyView {
+  match manual {
+    ManualUpdate::PackageManager(hint) => package_manager(i18n, hint, status, error),
+    ManualUpdate::Download {
+      url,
+      maybe_repository_setup_url,
+    } => {
+      let label = if install == InstallKind::AppImage {
+        "update-download-appimage"
+      } else {
+        "update-download-package"
+      };
+      view! {
+        <a href=url target="_blank" rel="noopener noreferrer" class="btn btn-primary btn-small">
+          {move || i18n.t(label)}
+        </a>
+        {maybe_repository_setup_url.map(|setup| view! {
+          <a href=setup target="_blank" rel="noopener noreferrer" class="small">
+            {move || i18n.t("update-add-repository")}
+          </a>
+        })}
+      }
+      .into_any()
+    },
+  }
+}
+
+/// The command with a copy button, and "Update now" when PackageKit runs.
 fn package_manager(
   i18n: I18n,
   hint: PackageManagerHint,
   status: RwSignal<Option<UpdateStatus>>,
   error: RwSignal<Option<String>>,
 ) -> AnyView {
+  let is_copied = RwSignal::new(false);
+  let command = hint.command.clone();
+  let intro = match hint.manager {
+    PackageManager::Flatpak => "update-flatpak",
+    PackageManager::Apt | PackageManager::Dnf => "update-package-manager",
+  };
   view! {
-    <span class="small">{i18n.t("update-package-manager")}</span>
+    <span class="small">{move || i18n.t(intro)}</span>
     <code class="update-command" translate="no">{hint.command}</code>
+    <button
+      class="btn btn-small"
+      on:click=move |_| {
+        copy_to_clipboard(&command);
+        is_copied.set(true);
+      }
+    >
+      <Icon name=IconName::Copy />
+      {move || i18n.t(if is_copied.get() { "update-command-copied" } else { "update-copy-command" })}
+    </button>
     {hint.has_package_kit.then(|| view! {
       <button
         class="btn btn-primary btn-small"
@@ -329,7 +416,6 @@ fn blocker_slug(blocker: UpdateBlocker) -> &'static str {
     UpdateBlocker::Machine => "machine",
     UpdateBlocker::Preference => "preference",
     UpdateBlocker::NotConfigured => "not_configured",
-    UpdateBlocker::Flatpak => "flatpak",
     UpdateBlocker::Unpackaged => "unpackaged",
   }
 }
@@ -338,12 +424,11 @@ fn blocker_slug(blocker: UpdateBlocker) -> &'static str {
 mod tests {
   use super::*;
 
-  pub(crate) const BLOCKERS: [UpdateBlocker; 6] = [
+  pub(crate) const BLOCKERS: [UpdateBlocker; 5] = [
     UpdateBlocker::Policy,
     UpdateBlocker::Machine,
     UpdateBlocker::Preference,
     UpdateBlocker::NotConfigured,
-    UpdateBlocker::Flatpak,
     UpdateBlocker::Unpackaged,
   ];
 
@@ -361,6 +446,13 @@ mod tests {
       keys.push(format!("settings-update-{slug}-hint"));
     }
     for key in [
+      "update-dismiss",
+      "update-flatpak",
+      "update-copy-command",
+      "update-command-copied",
+      "update-download-package",
+      "update-download-appimage",
+      "update-add-repository",
       "update-state-idle",
       "update-state-unchecked",
       "update-state-checking",
