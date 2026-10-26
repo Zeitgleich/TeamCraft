@@ -35,6 +35,11 @@
     <display_length compare="ge">720</display_length>
   </requires>
   <releases>
+    <release version="1.0.8" date="2026-10-26" type="stable">
+      <description>
+        <p>Faster start and sync, sturdier calls and presence, file drop and paste on Linux, redesigned dialogs, Activity view, account deletion for admins, and better handling of storage outages.</p>
+      </description>
+    </release>
     <release version="1.0.7" date="2026-10-26" type="stable">
       <description>
         <p>Devices stay signed in, calls open any common microphone format, deactivated users keep their chats, start at login on Linux and macOS, and many fixes to the message list, files and icons.</p>
