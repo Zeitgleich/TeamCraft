@@ -79,6 +79,7 @@ pub mod server_backend;
 pub mod session;
 pub mod settings;
 pub mod share_link;
+pub mod shell_drop;
 #[cfg(any(target_arch = "wasm32", test))]
 pub mod shell_video;
 pub mod sign_in_page;

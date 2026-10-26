@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-dropped-files-take"
+description = "Enables the dropped_files_take command without any pre-configured scope."
+commands.allow = ["dropped_files_take"]
+
+[[permission]]
+identifier = "deny-dropped-files-take"
+description = "Denies the dropped_files_take command without any pre-configured scope."
+commands.deny = ["dropped_files_take"]
