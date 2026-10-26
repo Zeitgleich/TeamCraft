@@ -11,6 +11,7 @@ mod calls;
 mod engine;
 mod error;
 mod markup;
+mod media_viewer;
 mod server_entry;
 mod types;
 mod video;
@@ -26,6 +27,10 @@ pub use calls::{
 pub use error::TeamCraftError;
 pub use markup::{
   MarkupBlock, MarkupLine, MarkupListKind, MarkupRun, MarkupRunKind, is_long_message, message_markup,
+};
+pub use media_viewer::{
+  AlbumLayout, MediaScope, MediaViewer, MediaViewerItem, MediaViewerLimits, MediaViewerState,
+  OriginalDownload, album_layout, fetches_original_automatically, media_viewer_limits,
 };
 pub use server_entry::{
   CheckedServer, ServerAddress, ServerEntryError, SignInOption, SignInPageInfo, StoredServer,
