@@ -6,7 +6,8 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_client_api::actions::{
-  BrowsableChannel, CategoryChoice, CategoryInfo, ChannelChanges, NewChannel, NewSpace, SpaceChanges,
+  BrowsableChannel, BrowseJoin, CategoryChoice, CategoryInfo, ChannelChanges, NewChannel, NewSpace,
+  SpaceChanges,
 };
 use teamcraft_client_api::model::{ChannelMember, ChannelRole};
 use teamcraft_client_api::role_rules::{
@@ -25,6 +26,7 @@ use crate::components::image_crop_dialog::{
   CropTarget, CropUpload, ImageCropDialog, allow_image_drop, dropped_file,
 };
 use crate::components::modal::Modal;
+use crate::components::roster_banner::{current_standing, unsigned_reason};
 use crate::components::section_tabs::{Section, SectionTabs};
 use crate::components::space_tile::SpaceTile;
 use crate::feedback::{PendingAction, failure_message};
@@ -268,7 +270,8 @@ pub fn NewChannelDialog(space: SpaceId) -> impl IntoView {
   }
 }
 
-/// All public channels of a space, joined or not.
+/// All public channels of a space, joined or not; for workspace admins also the private ones they
+/// may join by themselves (admin.md §2.4), marked private.
 #[component]
 pub fn BrowseChannelsDialog(space: SpaceId) -> impl IntoView {
   let state = use_app_state();
@@ -293,6 +296,13 @@ pub fn BrowseChannelsDialog(space: SpaceId) -> impl IntoView {
         <input type="checkbox" prop:checked=move || show_archived.get() on:change=move |ev| show_archived.set(event_target_checked(&ev)) />
         <span>{move || i18n.t("browse-archived")}</span>
       </label>
+      {move || {
+        let has_private = channels.with(|list| list.iter().any(|channel| channel.join != BrowseJoin::Open));
+        has_private
+          .then(|| unsigned_reason(i18n, state))
+          .flatten()
+          .map(|reason| view! { <p class="auth-alert" role="status">{reason}</p> })
+      }}
       <ul class="browse-list">
         <For each=move || channels.get() key=|channel| (channel.conversation, channel.is_member, channel.is_archived) let:channel>
           <BrowseRow channel=channel />
@@ -310,10 +320,15 @@ fn BrowseRow(channel: BrowsableChannel) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let id = channel.conversation;
+  let is_private = channel.join != BrowseJoin::Open;
   view! {
     <li class="browse-row">
       <div class="browse-text">
-        <span class="browse-name" translate="no"><Icon name=IconName::Hash />{channel.name.clone()}</span>
+        <span class="browse-name" translate="no">
+          <Icon name=if is_private { IconName::Lock } else { IconName::Hash } />
+          {channel.name.clone()}
+        </span>
+        {is_private.then(|| view! { <span class="badge">{move || i18n.t("badge-private")}</span> })}
         {channel.has_external_people.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-external")}</span> })}
         {channel.is_archived.then(|| view! { <span class="badge">{move || i18n.t("badge-archived")}</span> })}
         <span class="browse-topic" translate="no">{channel.topic.clone()}</span>
@@ -326,15 +341,37 @@ fn BrowseRow(channel: BrowsableChannel) -> impl IntoView {
         .into_any()
       } else {
         let space = channel.space;
-        view! {
-          <button class="btn btn-small" on:click=move |_| state.open_channel_preview(space, id)>
-            {move || i18n.t("browse-preview")}
-          </button>
-          <button class="btn btn-small btn-primary" prop:disabled=channel.is_archived on:click=move |_| state.write(|backend| backend.join_channel(id))>
-            {move || i18n.t("browse-join")}
-          </button>
+        match channel.join {
+          BrowseJoin::Open => view! {
+            <button class="btn btn-small" on:click=move |_| state.open_channel_preview(space, id)>
+              {move || i18n.t("browse-preview")}
+            </button>
+            <button class="btn btn-small btn-primary" prop:disabled=channel.is_archived on:click=move |_| state.write(|backend| backend.join_channel(id))>
+              {move || i18n.t("browse-join")}
+            </button>
+          }
+          .into_any(),
+          // No preview: an admin outside the channel can't read it. Members see the join
+          // (admin.md §2.4); their apps let the admin in only with a signed, fresh role.
+          BrowseJoin::AsAdmin => view! {
+            <button
+              class="btn btn-small btn-primary"
+              title=move || i18n.t("browse-join-admin-hint")
+              prop:disabled=move || current_standing(state).is_unsigned()
+              on:click=move |_| {
+                state.write(|backend| backend.admin_add_self(id));
+                state.close_overlay();
+              }
+            >
+              {move || i18n.t("browse-join-admin")}
+            </button>
+          }
+          .into_any(),
+          BrowseJoin::NeedsApproval => view! {
+            <span class="muted-text small">{move || i18n.t("browse-join-needs-approval")}</span>
+          }
+          .into_any(),
         }
-        .into_any()
       }}
     </li>
   }
@@ -1389,15 +1426,21 @@ fn SpaceMemberRow(space: SpaceId, member: SpaceMember, can_manage: bool) -> impl
   let maybe_avatar = state.read(|backend| backend.user(user));
   let name = member.display_name.clone();
   let role = member.role.clone();
-  // Guest accounts stay guests; members and space admins can be switched.
-  let can_change_role = can_manage && !is_me && !member.is_guest;
+  // Guest accounts stay guests; members and space admins can be switched. Bots are integrations:
+  // no role, and they leave through the channels' integration settings (issue #764).
+  let is_bot = member.is_bot;
+  let can_change_role = can_manage && !is_me && !member.is_guest && !is_bot;
   view! {
     <li class="settings-member">
       {maybe_avatar.map(|user| view! { <Avatar user=user size=AvatarSize::Small show_presence=true /> })}
       <span class="member-name" translate="no">{member.display_name.clone()}</span>
       {is_me.then(|| view! { <span class="muted-text">{move || i18n.t("settings-member-you")}</span> })}
       <span class="grow"></span>
-      {if can_change_role {
+      {if is_bot {
+        view! {
+          <span class="badge" title=move || i18n.t("space-member-integration-hint")>{move || i18n.t("space-member-integration")}</span>
+        }.into_any()
+      } else if can_change_role {
         view! {
           <RoleSelect
             id=format!("ss-role-{user}")
@@ -1419,7 +1462,7 @@ fn SpaceMemberRow(space: SpaceId, member: SpaceMember, can_manage: bool) -> impl
         let role = role.clone();
         view! { <span class="badge">{move || i18n.t(role_key(&role))}</span> }.into_any()
       }}
-      {(can_manage && !is_me).then(|| view! {
+      {(can_manage && !is_me && !is_bot).then(|| view! {
         <Show
           when=move || is_confirming.get()
           fallback=move || view! {
@@ -1865,6 +1908,7 @@ mod tests {
       user: crate::model::id_from_raw(user),
       display_name: String::new(),
       is_guest,
+      is_bot: false,
       role,
     };
     let roster = SpaceRoster::Loaded(vec![

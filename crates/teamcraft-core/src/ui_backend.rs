@@ -1693,6 +1693,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       .map(|member| SpaceMember {
         user: member.user.id,
         is_guest: member.user.kind == UserKind::Guest,
+        is_bot: member.user.kind == UserKind::Bot,
         display_name: member.user.display_name,
         role: member.role,
       })
@@ -1836,6 +1837,7 @@ fn system_view(event: &ConversationEvent, sender: UserId) -> (MessageKind, UserI
     | ConversationEvent::MadePublic
     | ConversationEvent::Moved { .. }
     | ConversationEvent::CallMoved { .. }
+    | ConversationEvent::AdminJoined { .. }
     | ConversationEvent::Unknown => (MessageKind::User, sender),
   }
 }

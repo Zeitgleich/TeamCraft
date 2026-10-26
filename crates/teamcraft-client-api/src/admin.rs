@@ -420,6 +420,76 @@ pub fn roster_problem(proposed: &[RosterEntry]) -> Option<RosterProblem> {
   (!proposed.iter().any(|entry| entry.role == RosterRoleChoice::Owner)).then_some(RosterProblem::NoOwner)
 }
 
+/// Where the signed-in user's admin role stands, as member clients see it (admin.md §2.3, issue
+/// #765). Only the signed, fresh roster gives admin authority; the identity provider's role alone
+/// gives none, and the UI says so wherever it matters.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RosterStanding {
+  /// Nothing to point out: no admin role, or one the fresh signed roster holds.
+  InForce,
+  /// The identity provider gives the user `role`, but no owner signed it yet.
+  NotSigned { role: Role, owners: Vec<UserId> },
+  /// No owner signed the roster within the accepted age: admin rights are paused for everybody.
+  /// `can_sign`: the user is an owner of the roster and can sign it again here.
+  Expired { can_sign: bool, owners: Vec<UserId> },
+  /// The workspace has no signed roster yet; the first policy save of an owner signs it.
+  NoRoster,
+  /// The user is a signed owner and the identity provider lists people the roster doesn't have:
+  /// they get no admin rights until this owner signs them.
+  AdditionsToSign { count: usize },
+}
+
+impl RosterStanding {
+  /// Whether the user's own admin actions are refused by other members' apps right now.
+  pub fn is_unsigned(&self) -> bool {
+    matches!(
+      self,
+      Self::NotSigned { .. } | Self::Expired { .. } | Self::NoRoster
+    )
+  }
+}
+
+/// The standing of `me` with the server role `server_role` against the verified roster in
+/// `maybe_status` at `now`. `idp_owners` and `idp_admins` are the provider's role holders (empty
+/// where this client doesn't know them); `can_sign` whether this device holds signing keys.
+pub fn roster_standing(
+  me: UserId,
+  server_role: &Role,
+  maybe_status: Option<&OwnerRosterStatus>,
+  (idp_owners, idp_admins): (&[UserId], &[UserId]),
+  can_sign: bool,
+  now: TimestampMs,
+) -> RosterStanding {
+  if !server_role.includes(&Role::Admin) {
+    return RosterStanding::InForce;
+  }
+  let Some(status) = maybe_status else {
+    return RosterStanding::NoRoster;
+  };
+  let owners: Vec<UserId> = status.owners.iter().map(|owner| owner.user).collect();
+  let is_owner = owners.contains(&me);
+  if !is_owner && !status.admins.contains(&me) {
+    return RosterStanding::NotSigned {
+      role: server_role.clone(),
+      owners,
+    };
+  }
+  if status.maybe_expires_at.is_some_and(|at| at <= now) {
+    return RosterStanding::Expired {
+      can_sign: is_owner && can_sign,
+      owners,
+    };
+  }
+  if is_owner && can_sign {
+    let signed = signed_roster(status);
+    let count = roster_changes(&signed, &idp_roster_proposal(&signed, idp_owners, idp_admins)).len();
+    if count > 0 {
+      return RosterStanding::AdditionsToSign { count };
+    }
+  }
+  RosterStanding::InForce
+}
+
 /// Something about the owners the console should point out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OwnerWarning {
@@ -758,6 +828,134 @@ mod tests {
         ]
       );
       assert!(roster_changes(&proposed, &proposed).is_empty());
+    }
+
+    mod standing {
+      use super::*;
+
+      const NOW: TimestampMs = 1_000_000;
+
+      #[test]
+      fn members_and_fresh_signed_admins_have_nothing_to_see() {
+        let status = roster(&[1], &[2], Some(NOW + 1));
+        assert_eq!(
+          standing(9, Role::Member, Some(&status), &[], true),
+          RosterStanding::InForce
+        );
+        assert_eq!(standing(9, Role::Guest, None, &[], true), RosterStanding::InForce);
+        assert_eq!(
+          standing(2, Role::Admin, Some(&status), &[], true),
+          RosterStanding::InForce
+        );
+        assert_eq!(
+          standing(1, Role::Owner, Some(&status), &[], true),
+          RosterStanding::InForce
+        );
+        // A roster from before signing times doesn't expire.
+        let unexpiring = roster(&[1], &[], None);
+        assert_eq!(
+          standing(1, Role::Owner, Some(&unexpiring), &[], true),
+          RosterStanding::InForce
+        );
+      }
+
+      #[test]
+      fn a_provider_role_nobody_signed_is_not_in_force() {
+        let status = roster(&[1, 2], &[], Some(NOW + 1));
+        let standing = standing(3, Role::Owner, Some(&status), &[], true);
+        assert_eq!(
+          standing,
+          RosterStanding::NotSigned {
+            role: Role::Owner,
+            owners: vec![user(1), user(2)]
+          }
+        );
+        assert!(standing.is_unsigned());
+      }
+
+      #[test]
+      fn an_expired_roster_pauses_everybody_and_owners_can_sign_again() {
+        let status = roster(&[1], &[2], Some(NOW));
+        assert_eq!(
+          standing(1, Role::Owner, Some(&status), &[], true),
+          RosterStanding::Expired {
+            can_sign: true,
+            owners: vec![user(1)]
+          }
+        );
+        // Without signing keys on this device, or as an admin: ask an owner.
+        assert!(matches!(
+          standing(1, Role::Owner, Some(&status), &[], false),
+          RosterStanding::Expired { can_sign: false, .. }
+        ));
+        assert!(matches!(
+          standing(2, Role::Admin, Some(&status), &[], true),
+          RosterStanding::Expired { can_sign: false, .. }
+        ));
+      }
+
+      #[test]
+      fn no_roster_yet_is_said_to_admins() {
+        assert_eq!(
+          standing(1, Role::Owner, None, &[], true),
+          RosterStanding::NoRoster
+        );
+        assert_eq!(
+          standing(1, Role::Admin, None, &[], true),
+          RosterStanding::NoRoster
+        );
+      }
+
+      #[test]
+      fn a_signing_owner_is_told_about_provider_roles_to_sign() {
+        let status = roster(&[1], &[2], Some(NOW + 1));
+        assert_eq!(
+          standing(1, Role::Owner, Some(&status), &[3, 4], true),
+          RosterStanding::AdditionsToSign { count: 2 }
+        );
+        // Signed already, or no keys to sign with here: nothing to do on this device.
+        assert_eq!(
+          standing(1, Role::Owner, Some(&status), &[1], true),
+          RosterStanding::InForce
+        );
+        assert_eq!(
+          standing(1, Role::Owner, Some(&status), &[3], false),
+          RosterStanding::InForce
+        );
+        // Admins can't sign; their own role is in force.
+        assert_eq!(
+          standing(2, Role::Admin, Some(&status), &[3], true),
+          RosterStanding::InForce
+        );
+      }
+
+      fn standing(
+        me: i64,
+        role: Role,
+        maybe_status: Option<&OwnerRosterStatus>,
+        idp_owners: &[i64],
+        can_sign: bool,
+      ) -> RosterStanding {
+        let owners: Vec<UserId> = idp_owners.iter().map(|raw| user(*raw)).collect();
+        roster_standing(user(me), &role, maybe_status, (&owners, &[]), can_sign, NOW)
+      }
+
+      fn roster(owners: &[i64], admins: &[i64], maybe_expires_at: Option<TimestampMs>) -> OwnerRosterStatus {
+        OwnerRosterStatus {
+          version: 3,
+          owners: owners
+            .iter()
+            .map(|raw| OwnerSigning {
+              user: user(*raw),
+              maybe_last_signed_at: None,
+            })
+            .collect(),
+          admins: admins.iter().map(|raw| user(*raw)).collect(),
+          maybe_expires_at,
+          recommended_minimum: 1,
+          warning_lead_ms: 0,
+        }
+      }
     }
 
     /// Issue #765: taking over the provider's roles never drops a signed entry, whatever the

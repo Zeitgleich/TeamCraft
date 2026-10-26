@@ -829,6 +829,14 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.owner_roster()
   }
 
+  fn can_sign_workspace(&self) -> bool {
+    self.chat.can_sign_workspace()
+  }
+
+  fn admin_add_self(&self, conversation: ConversationId) {
+    self.chat.admin_add_self(conversation);
+  }
+
   fn current_announcement(&self) -> Option<AnnouncementResponse> {
     self.maybe_live.as_ref().and_then(LiveServer::announcement)
   }

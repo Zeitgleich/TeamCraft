@@ -91,6 +91,7 @@ pub mod quick_switcher;
 pub mod rail;
 pub mod rail_menus;
 pub mod rich_text;
+pub mod roster_banner;
 pub mod search_view;
 pub mod section_tabs;
 pub mod security_ui;

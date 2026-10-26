@@ -981,6 +981,7 @@ fn workspace_event_text(
     WorkspaceEvent::MadePrivate { by } => ("ws-made-private", vec![("by", name_of(*by))]),
     WorkspaceEvent::MadePublic { by } => ("ws-made-public", vec![("by", name_of(*by))]),
     WorkspaceEvent::Pinned { by, .. } => ("ws-pinned", vec![("by", name_of(*by))]),
+    WorkspaceEvent::AdminJoined { user } => ("ws-admin-joined", vec![("name", name_of(*user))]),
     WorkspaceEvent::Moved { by, space } if space.is_empty() => {
       ("ws-moved-unnamed", vec![("by", name_of(*by))])
     },

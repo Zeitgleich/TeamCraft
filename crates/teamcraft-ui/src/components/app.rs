@@ -40,6 +40,7 @@ use crate::components::offline_banner::OfflineBanner;
 use crate::components::profile_views::UserProfileDialog;
 use crate::components::quick_switcher::QuickSwitcher;
 use crate::components::rail::SpaceRail;
+use crate::components::roster_banner::RosterBanner;
 use crate::components::security_ui::{
   DeviceApprovalDialog, LinkDeviceDialog, VerifyContactDialog, VerifyKeyDialog,
 };
@@ -257,6 +258,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         <ReleaseBanner />
         <OfflineBanner />
         <StorageBanner />
+        <RosterBanner />
         <NotificationPrompt />
         <AnnouncementBanner />
         <UpdateNotice />

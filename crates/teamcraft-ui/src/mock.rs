@@ -396,6 +396,7 @@ impl ChatBackend for MockBackend {
         is_archived: false,
         has_external_people: false,
         maybe_category: None,
+        join: teamcraft_client_api::actions::BrowseJoin::Open,
       })
       .collect();
     if space == space_a() {
@@ -408,6 +409,19 @@ impl ChatBackend for MockBackend {
         is_archived: false,
         has_external_people: true,
         maybe_category: None,
+        join: teamcraft_client_api::actions::BrowseJoin::Open,
+      });
+      // A private channel, as an admin's browser lists it (admin.md §2.4).
+      list.push(teamcraft_client_api::actions::BrowsableChannel {
+        conversation: id_from_raw(91),
+        space,
+        name: "leadership".into(),
+        topic: String::new(),
+        is_member: false,
+        is_archived: false,
+        has_external_people: false,
+        maybe_category: None,
+        join: teamcraft_client_api::actions::BrowseJoin::AsAdmin,
       });
     }
     list
@@ -503,6 +517,7 @@ impl ChatBackend for MockBackend {
         user: user.id,
         display_name: user.display_name.clone(),
         is_guest: user.is_guest,
+        is_bot: false,
         role: state
           .space_roles
           .get(&(space, user.id))

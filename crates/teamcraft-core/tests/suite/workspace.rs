@@ -7,6 +7,7 @@ use crate::common;
 
 use common::{Peer, settle};
 use teamcraft_core::api::fake::FakeServer;
+use teamcraft_core::store::LocalStore;
 use teamcraft_core::workspace::RosterRole;
 use teamcraft_proto::{AdminSelfJoin, HistoryPolicy, PolicyDocument, WorkspaceLogKind, WorkspacePolicy};
 
@@ -574,6 +575,20 @@ async fn admin_self_join_follows_the_signed_policy() {
   bob.client.admin_add_member(channel, bob_id).await.unwrap();
   settle(&mut [&mut alice, &mut bob, &mut carol]).await;
   assert!(bob.client.has_group(channel).unwrap(), "self-join is visible");
+  // Never silent (admin.md §2.4): the committing member tells everybody, once.
+  let joined = teamcraft_core::store::ConversationEvent::AdminJoined { user: bob_id };
+  for peer in [&carol, &bob] {
+    let shown = peer
+      .store
+      .messages(channel, teamcraft_core::store::MessageFilter::TopLevel)
+      .unwrap()
+      .into_iter()
+      .filter(|message| {
+        matches!(&message.content, teamcraft_core::store::MessageContent::Event { event } if *event == joined)
+      })
+      .count();
+    assert_eq!(shown, 1, "{}", peer.name);
+  }
 }
 
 #[tokio::test]

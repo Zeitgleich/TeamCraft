@@ -547,6 +547,25 @@ pub struct BrowsableChannel {
   /// The category the channel is listed under in its space.
   #[serde(default)]
   pub maybe_category: Option<CategoryId>,
+  /// How the user gets in: public channels are joined, private ones only by workspace admins as
+  /// the signed policy allows (admin.md §2.4).
+  #[serde(default)]
+  pub join: BrowseJoin,
+}
+
+/// How the user can join a channel from the browser.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowseJoin {
+  /// A private channel a workspace admin joins by themselves (`admin_self_join: visible`); the
+  /// members see that an admin joined.
+  AsAdmin,
+  /// A private channel whose owners have to approve an admin (`admin_self_join: owner_approval`).
+  NeedsApproval,
+  /// A public channel: anyone in the space joins.
+  #[default]
+  #[serde(other)]
+  Open,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -605,6 +624,10 @@ pub enum WorkspaceEvent {
   Pinned {
     message: MessageId,
     by: UserId,
+  },
+  /// A workspace admin added themselves to the private channel (admin.md §2.4): always shown.
+  AdminJoined {
+    user: UserId,
   },
   #[serde(other)]
   Unknown,
