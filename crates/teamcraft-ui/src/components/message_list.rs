@@ -12,6 +12,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
 use crate::clock::{format_date, now_ms};
+use crate::components::date_jump::{DateJumpMenu, DateJumpPopover, DatePill};
 use crate::components::empty_state::{EmptyAction, EmptyState};
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_row::MessageRow;
@@ -20,6 +21,7 @@ use crate::components::skeleton::MessageSkeleton;
 use crate::feed_motion::{FeedMotion, Shown, newest_confirmed};
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, ConversationKind, Message, as_chat_message};
+use crate::reactive::SetIfAlive;
 use crate::state::{Overlay, use_app_state};
 use crate::unread_divider::{DividerEvent, DwellClock, ReadMarkerGate};
 
@@ -33,6 +35,8 @@ const ESTIMATED_LOG_HEIGHT: f32 = 22.0;
 const MAX_NEW_SCAN: usize = 50;
 /// Measure passes after a jump that keep the target row in place while heights settle.
 const ALIGN_PASSES: u8 = 6;
+/// How long the floating day stays after scrolling stops.
+const FLOATING_DAY_LINGER: Duration = Duration::from_millis(1_000);
 /// Space kept above the "New messages" divider when a conversation opens there.
 const DIVIDER_CONTEXT_PX: f64 = 48.0;
 /// Heights differing by less than this are treated as equal, which ends the measure loop.
@@ -405,6 +409,11 @@ pub fn MessageList(
       .first()
       .map(|message| format_date(message.sent_at, locale))
   });
+  // The day pills open one menu per feed; the floating one fades out while the feed rests.
+  let date_menu = DateJumpMenu(RwSignal::new(None));
+  provide_context(date_menu);
+  let is_scrolling = RwSignal::new(false);
+  let scroll_generation = StoredValue::new(0_u32);
   let new_below = move || away_from.get().map_or(0, |from| count.get().saturating_sub(from));
   // Rows grow after they were measured (reactions, edits, late-loading content). While following,
   // stay at the bottom so the newest line is never cut off.
@@ -431,6 +440,20 @@ pub fn MessageList(
     let bottom_gap = f64::from(element.scroll_height()) - top - f64::from(element.client_height());
     scroll_top.set(top);
     viewport.set(f64::from(element.client_height()));
+    // Fades the floating day out 1 s after the last scroll event (opacity only).
+    is_scrolling.set(true);
+    let generation = scroll_generation.try_update_value(|generation| {
+      *generation += 1;
+      *generation
+    });
+    set_timeout(
+      move || {
+        if scroll_generation.try_get_value() == generation {
+          is_scrolling.set_if_alive(false);
+        }
+      },
+      FLOATING_DAY_LINGER,
+    );
     // Only an upward move counts as the user leaving the bottom; programmatic scrolls to the bottom
     // can fire late scroll events while row heights are still settling.
     if bottom_gap <= STICK_THRESHOLD_PX {
@@ -475,7 +498,16 @@ pub fn MessageList(
 
   view! {
     <div class="message-list-wrap">
-      {move || floating_day.get().map(|label| view! { <div class="floating-day" aria-hidden="true">{label}</div> })}
+      {move || {
+        floating_day.get().map(|label| {
+          view! {
+            <div class="floating-day" class:is-idle=move || !is_scrolling.get() && date_menu.0.get().is_none()>
+              <DatePill label=label />
+            </div>
+          }
+        })
+      }}
+      <DateJumpPopover conversation=conversation menu=date_menu />
       <div
         class="message-list"
         class:log-view=is_log

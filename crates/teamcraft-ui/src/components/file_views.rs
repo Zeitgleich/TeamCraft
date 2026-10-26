@@ -47,6 +47,21 @@ const LARGE_TRANSFER_BYTES: u64 = 1024 * 1024;
 /// thumbnail.
 #[component]
 pub fn MessageFiles(files: Vec<FileInfo>) -> impl IntoView {
+  // Files that finished uploading and are not transferring right now can be saved together.
+  let downloadable: Vec<FileInfo> = files
+    .iter()
+    .filter(|file| {
+      file.file_id.parse::<u64>().is_ok()
+        && !matches!(
+          file.transfer,
+          FileTransfer::Uploading { .. }
+            | FileTransfer::UploadStalled { .. }
+            | FileTransfer::Downloading { .. }
+        )
+    })
+    .cloned()
+    .collect();
+  let download_all = (downloadable.len() > 1).then(|| view! { <DownloadAll files=downloadable /> });
   let (media, cards): (Vec<FileInfo>, Vec<FileInfo>) = files
     .into_iter()
     .partition(|file| MediaKey::of(file).is_some() || is_media_upload(file));
@@ -63,6 +78,29 @@ pub fn MessageFiles(files: Vec<FileInfo>) -> impl IntoView {
     <div class="msg-files">
       {media}
       {cards.into_iter().map(|file| view! { <FileCard file=file /> }).collect_view()}
+      {download_all}
+    </div>
+  }
+}
+
+/// "3 files · Download all" under several attachments, once more than one is on the server.
+#[component]
+fn DownloadAll(files: Vec<FileInfo>) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let count = files.len();
+  let download = move |_| {
+    for file in &files {
+      FileActions::new(state, file).download();
+    }
+  };
+  view! {
+    <div class="files-bar">
+      <span class="files-count">{move || i18n.t_count("files-count", count)}</span>
+      <button type="button" class="link-btn" on:click=download>
+        <Icon name=IconName::Download />
+        {move || i18n.t("files-download-all")}
+      </button>
     </div>
   }
 }
