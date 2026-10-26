@@ -68,6 +68,7 @@ mod space_images;
 mod status;
 mod threads;
 mod unread_events;
+mod user_deletion;
 mod user_groups;
 mod web;
 mod workspace;

@@ -143,6 +143,8 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       ErrorCode::Unavailable | ErrorCode::Internal => "error-server-trouble",
       ErrorCode::Conflict | ErrorCode::EpochConflict | ErrorCode::VersionConflict => "error-conflict",
       ErrorCode::LastOwner => "admin-error-last-owner",
+      ErrorCode::CannotDeleteSelf => "admin-error-cannot-delete-self",
+      ErrorCode::LastAdmin => "admin-error-last-admin",
       // All `*_not_found` codes, including ones this version doesn't know yet.
       other if other.as_str().ends_with("_not_found") => "error-not-found",
       _ => "error-generic",

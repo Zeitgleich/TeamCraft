@@ -1444,6 +1444,14 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::AdminRemoveFromAllChats { user });
   }
 
+  fn admin_delete_user(&self, user: UserId) {
+    self.act(ChatAction::AdminDeleteUser { user });
+  }
+
+  fn admin_remove_group_leftover(&self, conversation: ConversationId, user: UserId) {
+    self.act(ChatAction::AdminRemoveGroupLeftover { conversation, user });
+  }
+
   fn last_action_error(&self) -> Option<String> {
     self.maybe_error.borrow().clone()
   }

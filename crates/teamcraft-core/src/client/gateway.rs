@@ -394,6 +394,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       | GatewayEvent::ConversationUpdate { conversation_id } => {
         self.refresh_conversation(conversation_id).await
       },
+      GatewayEvent::ConversationDelete { conversation_id } => self.purge_conversation(conversation_id),
       GatewayEvent::MembershipRemove {
         conversation_id,
         user_id,

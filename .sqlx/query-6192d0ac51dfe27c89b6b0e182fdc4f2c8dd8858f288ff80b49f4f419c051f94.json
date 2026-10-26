@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM session_activity s USING users u\n         WHERE u.id = $1\n           AND ((s.issuer = u.oidc_issuer AND s.subject = u.oidc_subject)\n             OR (s.issuer = $2 AND s.subject = $1::bigint::text))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6192d0ac51dfe27c89b6b0e182fdc4f2c8dd8858f288ff80b49f4f419c051f94"
+}

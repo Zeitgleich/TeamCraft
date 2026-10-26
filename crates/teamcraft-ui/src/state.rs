@@ -208,6 +208,8 @@ pub enum Overlay {
   UserProfile(UserId),
   /// Calls aren't available in this client (the browser, for now): where the apps are.
   CallsUnavailable,
+  /// The admin console's "Delete account" confirmation for this user; the console renders it.
+  DeleteUser(UserId),
 }
 
 /// The sections of the settings dialog (PLAN.md §4 and §5, issue #327).

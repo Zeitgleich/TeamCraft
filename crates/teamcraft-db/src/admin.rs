@@ -46,6 +46,8 @@ pub struct AdminConversationRow {
   pub member_count: i64,
   pub guest_count: i64,
   pub message_count: i64,
+  /// Bytes of the channel's attachments and search index segments in storage (ciphertext).
+  pub storage_bytes: i64,
   pub created_at: OffsetDateTime,
   /// Creation time of the newest message, derived from its Snowflake ID.
   pub maybe_last_message_millis: Option<i64>,
@@ -66,6 +68,8 @@ pub struct AdminUserRow {
   pub kind: UserKind,
   pub maybe_oidc_role: Option<String>,
   pub is_deactivated: bool,
+  /// A deleted account's tombstone (issue #630).
+  pub is_deleted: bool,
   pub maybe_deactivation_reason: Option<String>,
   pub device_count: i64,
   pub space_count: i64,
@@ -154,14 +158,19 @@ impl Database {
     let rows = sqlx::query!(
       r#"SELECT t.id AS "id!", t.space_id, t.name, t.visibility AS "visibility!", t.is_archived AS "is_archived!",
                 t.created_at AS "created_at!", t.member_count AS "member_count!", t.guest_count AS "guest_count!",
-                t.message_count AS "message_count!", t.last_message_id
+                t.message_count AS "message_count!", t.last_message_id, t.storage_bytes AS "storage_bytes!"
          FROM (
            SELECT c.id, c.space_id, c.name, c.visibility, c.archived_at IS NOT NULL AS is_archived, c.created_at,
                   (SELECT count(*) FROM memberships m WHERE m.conversation_id = c.id) AS member_count,
                   (SELECT count(*) FROM memberships m JOIN users u ON u.id = m.user_id
                     WHERE m.conversation_id = c.id AND u.kind = 'guest') AS guest_count,
                   (SELECT count(*) FROM messages x WHERE x.conversation_id = c.id) AS message_count,
-                  (SELECT max(x.id) FROM messages x WHERE x.conversation_id = c.id) AS last_message_id
+                  (SELECT max(x.id) FROM messages x WHERE x.conversation_id = c.id) AS last_message_id,
+                  -- Ciphertext sizes: what the channel's files and search index take up in storage.
+                  ((SELECT COALESCE(sum(a.size_bytes), 0) FROM attachments a
+                     WHERE a.conversation_id = c.id AND a.completed_at IS NOT NULL)
+                   + (SELECT COALESCE(sum(s.size_bytes), 0) FROM index_segments s
+                     WHERE s.conversation_id = c.id))::bigint AS storage_bytes
            FROM conversations c
            WHERE c.kind = 'channel'
              AND ($1::bigint IS NULL OR c.space_id = $1)
@@ -204,6 +213,7 @@ impl Database {
           member_count: row.member_count,
           guest_count: row.guest_count,
           message_count: row.message_count,
+          storage_bytes: row.storage_bytes,
           created_at: row.created_at,
           maybe_last_message_millis: row
             .last_message_id
@@ -234,7 +244,7 @@ impl Database {
     };
     let rows = sqlx::query!(
       r#"SELECT u.id, u.username, u.display_name, u.kind, u.oidc_role, u.deactivated_at IS NOT NULL AS "is_deactivated!",
-                u.deactivation_reason, u.created_at,
+                u.deleted_at IS NOT NULL AS "is_deleted!", u.deactivation_reason, u.created_at,
                 (SELECT count(*) FROM devices d WHERE d.user_id = u.id AND d.revoked_at IS NULL) AS "device_count!",
                 (SELECT count(*) FROM space_members m WHERE m.user_id = u.id) AS "space_count!",
                 (SELECT count(*) FROM memberships m WHERE m.user_id = u.id) AS "conversation_count!",
@@ -266,6 +276,7 @@ impl Database {
           kind: UserKind::from(row.kind),
           maybe_oidc_role: row.oidc_role,
           is_deactivated: row.is_deactivated,
+          is_deleted: row.is_deleted,
           maybe_deactivation_reason: row.deactivation_reason,
           device_count: row.device_count,
           space_count: row.space_count,
@@ -454,10 +465,11 @@ impl Database {
   }
 
   /// Lifts the deactivation. Memberships and devices the user still has work again as before; after
-  /// a removal from all chats they stay removed.
+  /// a removal from all chats they stay removed. A deleted account stays deleted (`false`).
   pub async fn reactivate_user(&self, user: UserId) -> Result<bool, DbError> {
     let result = sqlx::query!(
-      "UPDATE users SET deactivated_at = NULL, deactivation_reason = NULL WHERE id = $1 AND deactivated_at IS NOT NULL",
+      "UPDATE users SET deactivated_at = NULL, deactivation_reason = NULL
+       WHERE id = $1 AND deactivated_at IS NOT NULL AND deleted_at IS NULL",
       to_db(user),
     )
     .execute(self.pool())

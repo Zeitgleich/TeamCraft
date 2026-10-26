@@ -1,10 +1,21 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,\n                u.deactivated_at IS NOT NULL AS \"is_deactivated!\"\n         FROM users u\n         WHERE u.deactivated_at IS NULL\n           AND (u.display_name ILIKE $2 OR u.username ILIKE $2)\n           AND ($5::text IS NULL OR u.organization = $5)\n           AND (NOT $3 OR EXISTS (\n                 SELECT 1 FROM memberships a JOIN memberships b ON a.conversation_id = b.conversation_id\n                 WHERE a.user_id = $1 AND b.user_id = u.id))\n         ORDER BY u.display_name, u.id\n         LIMIT $4",
+  "query": "SELECT c.id AS conversation_id, u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,\n                u.deactivated_at IS NOT NULL AS \"is_deactivated!\", u.deleted_at IS NOT NULL AS \"is_deleted!\"\n         FROM conversations c JOIN users u\n           ON (c.kind = 'dm' AND u.id = ANY(string_to_array(c.participants_key, '-')::bigint[]))\n           OR (c.kind = 'group'\n               AND EXISTS (SELECT 1 FROM memberships m WHERE m.conversation_id = c.id AND m.user_id = u.id))\n         WHERE c.id = ANY($1) AND c.kind IN ('dm', 'group')\n         ORDER BY u.display_name, u.id",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
+        "name": "conversation_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
         "name": "id",
         "type_info": "Int8",
         "origin": {
@@ -15,7 +26,7 @@
         }
       },
       {
-        "ordinal": 1,
+        "ordinal": 2,
         "name": "username",
         "type_info": "Text",
         "origin": {
@@ -26,7 +37,7 @@
         }
       },
       {
-        "ordinal": 2,
+        "ordinal": 3,
         "name": "display_name",
         "type_info": "Text",
         "origin": {
@@ -37,7 +48,7 @@
         }
       },
       {
-        "ordinal": 3,
+        "ordinal": 4,
         "name": "kind",
         "type_info": "Text",
         "origin": {
@@ -48,7 +59,7 @@
         }
       },
       {
-        "ordinal": 4,
+        "ordinal": 5,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -59,7 +70,7 @@
         }
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "organization",
         "type_info": "Text",
         "origin": {
@@ -70,30 +81,34 @@
         }
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "is_deactivated!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 8,
+        "name": "is_deleted!",
         "type_info": "Bool",
         "origin": "Expression"
       }
     ],
     "parameters": {
       "Left": [
-        "Int8",
-        "Text",
-        "Bool",
-        "Int8",
-        "Text"
+        "Int8Array"
       ]
     },
     "nullable": [
       false,
-      true,
-      false,
-      false,
       false,
       true,
+      false,
+      false,
+      false,
+      true,
+      null,
       null
     ]
   },
-  "hash": "8fc95103bf3f7101b653e0a5115f9c470dda4cf5850344a20fcdf8c3a504dcfd"
+  "hash": "ddd7e3772a201925d97f2732b9fe4eebd81fb4b7a755fccfc9ab6c9a12e1e0d4"
 }

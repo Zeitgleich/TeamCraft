@@ -43,6 +43,7 @@ use crate::calls::{
   Participant,
 };
 use crate::clock::now_ms;
+use crate::i18n::translate_current;
 use crate::live::{LiveScope, LiveServer, REST_ONLY_POLL_INTERVAL_MS, thread_summary, with_local_expiry};
 use crate::model::{
   Conversation, ConversationId, ConversationKind, CustomStatus, DeviceId, Message, MessageId, PresenceStatus,
@@ -101,6 +102,16 @@ impl<C: ChatBackend + 'static> Hybrid<C> {
       calls_unavailable: CallsUnavailableReason::NotInThisApp,
     }
   }
+}
+
+/// A deleted account (issue #630) is shown as "Deleted user" in the UI's language wherever its
+/// name appears (profile, members, messages); it has no username to show either.
+fn named_if_deleted(mut user: User) -> User {
+  if user.is_deleted {
+    user.display_name = translate_current("user-deleted-name");
+    user.username.clear();
+  }
+  user
 }
 
 impl<C: ChatBackend> Hybrid<C> {
@@ -192,7 +203,7 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self
       .chat
       .user(id)
-      .map(|user| self.with_live_presence(user, &self.chat.presence_policy(), now_ms()))
+      .map(|user| self.with_live_presence(named_if_deleted(user), &self.chat.presence_policy(), now_ms()))
   }
 
   fn users(&self) -> Vec<User> {
@@ -1233,6 +1244,22 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
 
   fn can_remove_from_chats(&self) -> bool {
     self.chat.can_sign_workspace()
+  }
+
+  fn delete_user(&self, user: UserId) {
+    // The signed removals come first, in the client (security review A8).
+    if self.can_remove_from_chats() {
+      self.chat.admin_delete_user(user);
+      if let Some(admin) = &self.maybe_admin {
+        admin.queue_refresh_after_publish();
+      }
+    }
+  }
+
+  fn remove_group_leftover(&self, conversation: ConversationId, user: UserId) {
+    if self.can_remove_from_chats() {
+      self.chat.admin_remove_group_leftover(conversation, user);
+    }
   }
 
   /// Organization recovery needs the recovery key ceremony of the core, which the console does not

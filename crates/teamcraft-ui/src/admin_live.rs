@@ -1083,8 +1083,8 @@ fn channel_from_wire(
     maybe_owner: details.maybe_owner,
     last_activity: summary.maybe_last_activity_at.unwrap_or(summary.created_at).0,
     message_count: summary.message_count,
-    // The server cannot see attachments' sizes in ciphertext it does not index; shown as unknown (0).
-    storage_bytes: 0,
+    // Ciphertext bytes of the channel's files and search index in storage.
+    storage_bytes: summary.storage_bytes,
     retention,
     history,
     is_archived: summary.is_archived,
@@ -1117,6 +1117,7 @@ fn user_from_wire(
       is_bot: false,
       maybe_organization: None,
       is_deactivated: false,
+      is_deleted: summary.is_deleted,
       device_setup: crate::model::DeviceSetup::Unknown,
       maybe_email: None,
     },
@@ -1149,6 +1150,7 @@ pub fn action_from_wire(action: &str) -> AuditAction {
     "user_deactivated" => AuditAction::UserDeactivated,
     "user_reactivated" => AuditAction::UserReactivated,
     "user_removed_from_chats" => AuditAction::UserRemovedFromChats,
+    "user_deleted" => AuditAction::UserDeleted,
     "invite_created" => AuditAction::GuestInvited,
     "conversation_member_added" | "space_member_added" => AuditAction::MemberAdded,
     "conversation_member_removed" | "space_member_removed" => AuditAction::MemberRemoved,
@@ -1296,6 +1298,7 @@ mod tests {
       kind: UserKind::Member,
       maybe_oidc_role: Some("admin".into()),
       is_deactivated: true,
+      is_deleted: false,
       maybe_deactivation_reason: Some(DeactivationReason::Admin),
       device_count: 2,
       space_count: 1,
@@ -1409,6 +1412,7 @@ mod tests {
       member_count: 3,
       guest_count: 1,
       message_count: 40,
+      storage_bytes: 2048,
       created_at: UnixMillis(100),
       maybe_last_activity_at: None,
     };
@@ -1435,6 +1439,10 @@ mod tests {
     assert_eq!(channel.retention.maybe_days, Some(30));
     assert!(!channel.retention.keeps_pinned);
     assert_eq!(channel.last_activity, 100);
+    assert_eq!(
+      channel.storage_bytes, 2048,
+      "the storage column shows what the server counted"
+    );
     assert_eq!(channel.maybe_owner, Some(id_from_raw(1)));
   }
 }

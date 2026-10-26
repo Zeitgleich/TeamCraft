@@ -745,8 +745,19 @@ cache. Only a user missing from two fresh lists in a row counts as left in the g
 rests on the server's word alone (its signed change got lost, or the server removed the user
 without one, like a deactivated user removed from all chats by the server alone), so no client signs it (security review A8): meeting guests among them leave with their own
 signed leaves ("Meeting guests" below); everybody else is logged and listed for admins in the
-admin console as information, with no button. Members' clients don't claim key packages for a user
-the server lists but who has no device in the group.
+admin console. There an admin decides (issue #734): "Remove from the group" makes the admin's own
+device, a member of that group, sign and commit the removal, which rotates the keys like any member's
+removal; the server's word only put the user on the list. Members' clients don't claim key packages
+for a user the server lists but who has no device in the group.
+
+Deleting an account (admin.md §3.2.1) follows the same rule: the admin's client signs the removal
+from every channel first, then the server deletes. Direct messages with nobody left to talk to (1:1
+DMs, group DMs that would keep one other person) are deleted on the server with their ciphertext,
+attachments and MLS state; the remaining participants' devices drop them with their local history
+on the gateway's `conversation_delete` or, offline, on the next full sync
+(`deleted_conversation_ids`). A compromised server could claim such a deletion to make a device drop
+a direct message's local history; it can already withhold or delete the ciphertext it stores, so
+this adds no access to content.
 
 A device that joins from a welcome made before somebody's removal pins the identities of everybody
 the welcome's tree holds, not only of whom the server lists, and verifies every leaf as before; the

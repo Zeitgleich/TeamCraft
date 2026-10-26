@@ -28,6 +28,7 @@ async fn addresses_kept_from_earlier_answers_go_when_the_policy_does_not_show_th
     maybe_organization: None,
     maybe_has_devices: None,
     is_deactivated: false,
+    is_deleted: false,
   };
   records::put_json(&alice.store, Table::Users, &bob_id.to_string(), &bob).unwrap();
 
@@ -370,5 +371,6 @@ fn server_summary(id: teamcraft_proto::UserId, name: &str) -> UserSummary {
     maybe_organization: None,
     maybe_has_devices: None,
     is_deactivated: false,
+    is_deleted: false,
   }
 }

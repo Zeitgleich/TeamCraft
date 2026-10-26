@@ -32,6 +32,12 @@ pub enum ApiError {
   /// A roster without an owner: nobody could ever sign a roster or policy again (admin.md §2.3).
   #[error("the roster must keep at least one owner")]
   LastOwner,
+  /// An admin tried to delete their own account.
+  #[error("admins can't delete their own account")]
+  CannotDeleteSelf,
+  /// Deleting the account would leave the workspace without an active admin.
+  #[error("the workspace must keep at least one active admin")]
+  LastAdmin,
   /// Channel members must belong to the channel's space; the user is not in it (yet).
   #[error("the user is not a member of the space")]
   NotSpaceMember,
@@ -251,6 +257,8 @@ impl ApiError {
         StatusCode::BAD_REQUEST
       },
       Self::Conflict(_)
+      | Self::CannotDeleteSelf
+      | Self::LastAdmin
       | Self::KeyPackageExhausted
       | Self::EpochConflict { .. }
       | Self::VersionConflict { .. } => StatusCode::CONFLICT,
@@ -283,6 +291,8 @@ impl ApiError {
       Self::UnknownHost => ErrorCode::UnknownHost,
       Self::Conflict(_) => ErrorCode::Conflict,
       Self::LastOwner => ErrorCode::LastOwner,
+      Self::CannotDeleteSelf => ErrorCode::CannotDeleteSelf,
+      Self::LastAdmin => ErrorCode::LastAdmin,
       Self::NotSpaceMember => ErrorCode::NotSpaceMember,
       Self::KeyPackageExhausted => ErrorCode::KeyPackageExhausted,
       Self::InvalidKeyPackage(_) => ErrorCode::InvalidKeyPackage,
@@ -472,6 +482,12 @@ mod tests {
         ErrorCode::Conflict,
       ),
       (ApiError::LastOwner, StatusCode::BAD_REQUEST, ErrorCode::LastOwner),
+      (
+        ApiError::CannotDeleteSelf,
+        StatusCode::CONFLICT,
+        ErrorCode::CannotDeleteSelf,
+      ),
+      (ApiError::LastAdmin, StatusCode::CONFLICT, ErrorCode::LastAdmin),
       (
         ApiError::NotSpaceMember,
         StatusCode::BAD_REQUEST,

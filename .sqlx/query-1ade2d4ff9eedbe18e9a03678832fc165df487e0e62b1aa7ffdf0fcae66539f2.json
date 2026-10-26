@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,\n                u.deactivated_at IS NOT NULL AS \"is_deactivated!\", m.role\n         FROM memberships m JOIN users u ON u.id = m.user_id\n         WHERE m.conversation_id = $1 ORDER BY u.display_name, u.id",
+  "query": "SELECT u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,\n                u.deactivated_at IS NOT NULL AS \"is_deactivated!\", u.deleted_at IS NOT NULL AS \"is_deleted!\", m.role, m.expires_at, m.sponsor_user_id\n         FROM space_members m JOIN users u ON u.id = m.user_id\n         WHERE m.space_id = $1 AND (m.expires_at IS NULL OR m.expires_at > now())\n         ORDER BY u.display_name, u.id",
   "describe": {
     "columns": [
       {
@@ -77,12 +77,40 @@
       },
       {
         "ordinal": 7,
+        "name": "is_deleted!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 8,
         "name": "role",
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "memberships",
+            "table": "space_members",
             "name": "role"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "expires_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "sponsor_user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "sponsor_user_id"
           }
         }
       }
@@ -100,8 +128,11 @@
       false,
       true,
       null,
-      false
+      null,
+      false,
+      true,
+      true
     ]
   },
-  "hash": "898374ae2e167b5e14d7f3275bc6b3a090d577f1fe20d812b457ccc07c13e58f"
+  "hash": "1ade2d4ff9eedbe18e9a03678832fc165df487e0e62b1aa7ffdf0fcae66539f2"
 }

@@ -50,6 +50,10 @@ wire_enum! {
     VersionConflict => "version_conflict",
     /// A roster change would leave the workspace without an owner (admin.md §2.3).
     LastOwner => "last_owner",
+    /// An admin can't delete their own account.
+    CannotDeleteSelf => "cannot_delete_self",
+    /// Deleting the account would leave the workspace without an active admin.
+    LastAdmin => "last_admin",
     /// A channel member must belong to the channel's space first (invite them to the space).
     NotSpaceMember => "not_space_member",
     KeyPackageExhausted => "key_package_exhausted",
@@ -232,6 +236,8 @@ mod tests {
       ErrorCode::EpochConflict,
       ErrorCode::VersionConflict,
       ErrorCode::LastOwner,
+      ErrorCode::CannotDeleteSelf,
+      ErrorCode::LastAdmin,
       ErrorCode::KeyPackageExhausted,
       ErrorCode::PayloadTooLarge,
       ErrorCode::RateLimited,

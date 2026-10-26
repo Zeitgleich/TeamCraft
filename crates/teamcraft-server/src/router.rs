@@ -10,10 +10,10 @@ use crate::handlers::{
   add_space_member_handler, add_user_group_member_handler, admin_assign_channel_owner_handler,
   admin_clear_announcement_handler, admin_create_bot_handler, admin_create_brand_handler,
   admin_deactivate_user_handler, admin_delete_brand_asset_handler, admin_delete_brand_handler,
-  admin_get_brand_asset_handler, admin_get_calendar_settings_handler, admin_get_channel_moderation_handler,
-  admin_get_mail_settings_handler, admin_get_permission_scheme_handler, admin_get_push_health_handler,
-  admin_get_settings_handler, admin_get_space_permission_scheme_handler, admin_instance_handler,
-  admin_list_audit_handler, admin_list_bots_handler, admin_list_brands_handler,
+  admin_delete_user_handler, admin_get_brand_asset_handler, admin_get_calendar_settings_handler,
+  admin_get_channel_moderation_handler, admin_get_mail_settings_handler, admin_get_permission_scheme_handler,
+  admin_get_push_health_handler, admin_get_settings_handler, admin_get_space_permission_scheme_handler,
+  admin_instance_handler, admin_list_audit_handler, admin_list_bots_handler, admin_list_brands_handler,
   admin_list_conversation_members_handler, admin_list_conversations_handler,
   admin_list_space_members_handler, admin_list_spaces_handler, admin_list_user_devices_handler,
   admin_list_users_handler, admin_put_brand_asset_handler, admin_put_calendar_settings_handler,
@@ -467,6 +467,7 @@ pub fn router(state: AppState) -> Router {
       get(admin_list_conversation_members_handler),
     )
     .route("/admin/users", get(admin_list_users_handler))
+    .route("/admin/users/{user_id}", delete(admin_delete_user_handler))
     .route(
       "/admin/users/{user_id}/devices",
       get(admin_list_user_devices_handler),
