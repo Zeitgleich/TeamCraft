@@ -249,6 +249,7 @@ fn main() -> anyhow::Result<()> {
       updates::update_download,
       updates::update_restart,
       updates::update_with_package_manager,
+      updates::update_dismiss,
       window_chrome::window_chrome,
       window_chrome::window_action,
     ])

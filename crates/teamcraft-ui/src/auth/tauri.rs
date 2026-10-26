@@ -655,6 +655,11 @@ pub async fn update_with_package_manager() -> Result<(), String> {
   call::<()>("update_with_package_manager", &serde_json::json!({})).await
 }
 
+/// Hides the hint for this version for good (deb, rpm, Flatpak: the app can't install it).
+pub async fn update_dismiss(version: &str) -> Result<(), String> {
+  call::<()>("update_dismiss", &serde_json::json!({ "version": version })).await
+}
+
 /// Calls a desktop command with JSON arguments and reads its JSON answer. Errors come back as text.
 pub async fn call<T: for<'de> Deserialize<'de>>(
   command: &str,
