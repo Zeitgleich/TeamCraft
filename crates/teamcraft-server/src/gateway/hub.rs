@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use teamcraft_proto::{CustomStatus, DeviceActivity, DeviceId, GatewayEvent, PresenceState, UserId};
+use teamcraft_proto::{CustomStatus, DeviceActivity, DeviceId, GatewayEvent, Id, PresenceState, UserId};
 use time::OffsetDateTime;
 use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
@@ -15,6 +15,9 @@ const CHANNEL_CAPACITY: usize = 1024;
 /// to whoever is connected right now. Clients keep the highest number they saw, so `0` never moves
 /// their resume position (docs/gateway.md, "Resume").
 pub const EPHEMERAL_SEQ: u64 = 0;
+/// Locks that serialize presence refreshes: users map onto them by ID, so memory stays fixed
+/// however many users there are, and two users rarely share one.
+const PRESENCE_REFRESH_LOCKS: usize = 64;
 
 /// What was last broadcast about a user's presence.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +54,8 @@ pub struct Hub {
   /// attentive (the held pushes go out then). Only that user's waiter wakes. One entry per user who
   /// ever had a held push since the start, so bounded by the users.
   attention_watchers: Mutex<HashMap<UserId, Arc<Notify>>>,
+  /// One presence refresh per user at a time (see [`Hub::presence_refresh_lock`]).
+  presence_refresh_locks: Vec<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -205,6 +210,9 @@ impl Hub {
       options,
       inner: Mutex::new(Inner::default()),
       attention_watchers: Mutex::default(),
+      presence_refresh_locks: (0..PRESENCE_REFRESH_LOCKS)
+        .map(|_| tokio::sync::Mutex::new(()))
+        .collect(),
     }
   }
 
@@ -440,6 +448,40 @@ impl Hub {
       .sessions
       .get_mut(session_id)?
       .show_sign_of_life(Instant::now())
+  }
+
+  /// The user did something on `device` themselves (sent a message): every connected session of
+  /// that device is active from now on, also one that said it is idle or that the away timeout
+  /// made away. The device's own idle report may be stale (a screen lock that was not reported
+  /// over, an idle time that is wrong); a message the user just sent is not. Returns the user if
+  /// a session changed (the caller refreshes the presence).
+  pub fn note_user_action(&self, user: UserId, device: DeviceId) -> Option<UserId> {
+    let now = Instant::now();
+    let mut inner = self.lock();
+    let inner = &mut *inner;
+    let mut has_changed = false;
+    for session_id in inner.by_user.get(&user).into_iter().flatten() {
+      let Some(session) = inner.sessions.get_mut(session_id) else {
+        continue;
+      };
+      if session.device != device || session.maybe_connection.is_none() {
+        continue;
+      }
+      session.last_active_at = now;
+      has_changed |=
+        std::mem::replace(&mut session.activity, SessionActivity::Active) != SessionActivity::Active;
+    }
+    has_changed.then_some(user)
+  }
+
+  /// Held while a user's presence is recomputed and announced. Without it two refreshes that
+  /// overlap (a device report, the periodic refresh, a disconnect) could announce in the wrong
+  /// order: the one that read the devices first would win and leave the user "away" while a
+  /// device is in use, until something else changes.
+  pub fn presence_refresh_lock(&self, user: UserId) -> &tokio::sync::Mutex<()> {
+    let stripe = user.snowflake().get().unsigned_abs() % PRESENCE_REFRESH_LOCKS as u64;
+    // Invariant: the remainder is below the number of locks, which fits a usize.
+    &self.presence_refresh_locks[usize::try_from(stripe).unwrap_or(0)]
   }
 
   /// Turns devices that reported active but have not shown a sign since `cutoff` into timed-out
@@ -1207,6 +1249,85 @@ mod tests {
     hub.detach(&phone.session_id, phone.connection_id);
     hub.detach(&desktop.session_id, desktop.connection_id);
     assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::NoDevice);
+  }
+
+  mod several_devices {
+    use super::*;
+
+    const TIMEOUT: Duration = Duration::from_secs(300);
+
+    #[tokio::test(start_paused = true)]
+    async fn the_device_in_use_wins_over_idle_and_timed_out_ones() {
+      let hub = Hub::new(OPTIONS);
+      let desktop = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      let phone = hub.open_session(user(1), device(2), DeviceActivity::Active);
+      let laptop = hub.open_session(user(1), device(3), DeviceActivity::Active);
+      // The phone lies untouched until the away timeout, the laptop went idle by itself.
+      tokio::time::advance(TIMEOUT - Duration::from_secs(10)).await;
+      hub.set_activity(&desktop.session_id, DeviceActivity::Active);
+      hub.set_activity(&laptop.session_id, DeviceActivity::Idle);
+      tokio::time::advance(Duration::from_secs(20)).await;
+      assert_eq!(hub.demote_idle(Instant::now() - TIMEOUT), vec![user(1)]);
+      assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::Active);
+
+      // Only when the desktop stops too is the user away; gone when the last device is.
+      hub.set_activity(&desktop.session_id, DeviceActivity::Idle);
+      assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::Idle);
+      for session in [&desktop, &phone, &laptop] {
+        hub.detach(&session.session_id, session.connection_id);
+      }
+      assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::NoDevice);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sending_from_a_device_makes_it_active_whatever_it_reported() {
+      let hub = Hub::new(OPTIONS);
+      let desktop = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      let phone = hub.open_session(user(1), device(2), DeviceActivity::Idle);
+      hub.set_activity(&desktop.session_id, DeviceActivity::Idle);
+      assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::Idle);
+
+      assert_eq!(hub.note_user_action(user(1), device(1)), Some(user(1)));
+      assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::Active);
+      // Already active: nobody needs to hear about it again, but it counts for the timeout.
+      tokio::time::advance(TIMEOUT - Duration::from_secs(1)).await;
+      assert_eq!(hub.note_user_action(user(1), device(1)), None);
+      tokio::time::advance(Duration::from_secs(2)).await;
+      hub.set_activity(&phone.session_id, DeviceActivity::Idle);
+      assert!(hub.demote_idle(Instant::now() - TIMEOUT).is_empty());
+      assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::Active);
+
+      // A timed-out device wakes up the same way.
+      tokio::time::advance(TIMEOUT + Duration::from_secs(1)).await;
+      assert_eq!(hub.demote_idle(Instant::now() - TIMEOUT), vec![user(1)]);
+      assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::Idle);
+      assert_eq!(hub.note_user_action(user(1), device(1)), Some(user(1)));
+      assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::Active);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sending_touches_only_the_connected_sessions_of_that_device() {
+      let hub = Hub::new(OPTIONS);
+      let desktop = hub.open_session(user(1), device(1), DeviceActivity::Idle);
+      let _other_user = hub.open_session(user(2), device(1), DeviceActivity::Idle);
+      // Sent from a device without a gateway connection: nothing to change.
+      assert_eq!(hub.note_user_action(user(1), device(2)), None);
+      assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::Idle);
+      hub.detach(&desktop.session_id, desktop.connection_id);
+      assert_eq!(hub.note_user_action(user(1), device(1)), None);
+      assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::NoDevice);
+      assert_eq!(hub.device_aggregate(user(2)), DeviceAggregate::Idle);
+    }
+
+    #[tokio::test]
+    async fn refreshes_of_one_user_share_a_lock() {
+      let hub = Hub::new(OPTIONS);
+      let held = hub.presence_refresh_lock(user(1)).lock().await;
+      assert!(hub.presence_refresh_lock(user(1)).try_lock().is_err());
+      assert!(hub.presence_refresh_lock(user(2)).try_lock().is_ok());
+      drop(held);
+      assert!(hub.presence_refresh_lock(user(1)).try_lock().is_ok());
+    }
   }
 
   mod away_timeout {

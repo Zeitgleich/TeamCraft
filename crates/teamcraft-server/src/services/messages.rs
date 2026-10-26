@@ -5,10 +5,11 @@ use teamcraft_proto::{
   ConversationId, GatewayEvent, HistoryPolicy, Id, ListMessagesQuery, ListMessagesResponse, MessageId,
   MessageResponse, Permission, SendMessageRequest,
 };
+use tracing::warn;
 
 use super::access::{is_guest, load_conversation, require};
 use super::convert::message_response;
-use super::{threads, urgent};
+use super::{presence, threads, urgent};
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -143,6 +144,11 @@ pub async fn send_message(
         is_integration: access.view.conversation.is_integration,
       },
     ));
+    // Sending is the surest sign the user is there (gateway.md, "Presence"). A failure here
+    // doesn't fail the send: the message is stored and delivered.
+    if let Err(error) = presence::note_user_action(state, caller.user.id, request.device_id).await {
+      warn!(%error, "presence refresh after a sent message failed");
+    }
   }
   Ok(Sent {
     message: response,

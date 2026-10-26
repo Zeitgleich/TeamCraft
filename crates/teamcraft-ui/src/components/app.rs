@@ -9,7 +9,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
 use crate::areas::{self, Place, lazy_area};
-use crate::attention::{AttentionReporter, AttentionSignals, is_attentive, last_activity_at};
+use crate::attention::{AttentionReporter, AttentionSignals, LockReading, is_attentive, last_activity_at};
 use crate::auth::tauri;
 use crate::backend::Backend;
 use crate::calls::CallPhase;
@@ -1083,9 +1083,9 @@ const REMINDER_CHECK_MS: u64 = 15_000;
 /// Rounding noise in the OS idle time that is not new input.
 const OS_ACTIVITY_TOLERANCE_MS: TimestampMs = 1_000;
 const MS_PER_MINUTE: f64 = 60_000.0;
-/// While the window is in front, input repeats "active" at most this often: half the shortest
-/// away timeout the workspace policy allows (a minute), so a user who only scrolls or reads with
-/// the mouse never times out, and the next input after an automatic away ends it at once.
+/// Input repeats "active" at most this often: half the shortest away timeout the workspace policy
+/// allows (a minute), so a user who only scrolls or reads with the mouse never times out, and the
+/// next input after an automatic away ends it at once.
 const ACTIVE_REPEAT_MS: TimestampMs = 30_000;
 
 /// What the activity watcher keeps between events.
@@ -1098,6 +1098,7 @@ struct ActivityWatch {
   last_active_report_at: Cell<TimestampMs>,
   is_idle: Cell<bool>,
   maybe_os: Cell<Option<tauri::OsAttention>>,
+  lock: Cell<LockReading>,
   reporter: RefCell<AttentionReporter>,
 }
 
@@ -1113,6 +1114,7 @@ fn watch_activity(state: AppState) {
     last_active_report_at: Cell::new(now_ms()),
     is_idle: Cell::new(false),
     maybe_os: Cell::new(None),
+    lock: Cell::new(LockReading::default()),
     reporter: RefCell::new(AttentionReporter::default()),
   });
   for event in ["pointermove", "pointerdown", "keydown", "touchstart", "wheel"] {
@@ -1145,6 +1147,7 @@ fn watch_activity(state: AppState) {
       if let Some(os) = tauri::os_attention().await {
         // async-ok: a Cell the task shares, not a signal.
         watch.maybe_os.set(Some(os));
+        watch.update_lock(|lock| lock.observe(os.is_locked));
         watch.on_os_state();
         watch.check();
       }
@@ -1153,16 +1156,25 @@ fn watch_activity(state: AppState) {
 }
 
 impl ActivityWatch {
-  /// Pointer, key, wheel or touch input. Ends this device's idle at once; while the window is in
-  /// front it also repeats "active" now and then, which ends an away timeout of the server.
+  /// Pointer, key, wheel or touch input. Ends this device's idle at once and repeats "active" now
+  /// and then, which keeps the server's away timeout from striking. The repeat doesn't wait for
+  /// the window to count as in front: input that reaches it means the user is there, and a focus
+  /// state the webview reports wrongly made users away while they chatted (issue #720).
   fn on_input(&self) {
     let now = now_ms();
     self.last_input_at.set(now);
+    self.update_lock(LockReading::on_app_input);
     let is_repeat_due = now.saturating_sub(self.last_active_report_at.get()) >= ACTIVE_REPEAT_MS;
-    if self.is_idle.replace(false) || (is_repeat_due && is_in_front()) {
+    if self.is_idle.replace(false) || is_repeat_due {
       self.report_active(now);
     }
     self.check();
+  }
+
+  fn update_lock(&self, change: impl FnOnce(&mut LockReading)) {
+    let mut lock = self.lock.get();
+    change(&mut lock);
+    self.lock.set(lock);
   }
 
   /// The window was focused or became visible: the user turned to the app, which counts as input.
@@ -1187,7 +1199,7 @@ impl ActivityWatch {
     let idle = maybe_os
       .and_then(|os| os.maybe_idle_ms)
       .map(Duration::from_millis);
-    let is_locked = maybe_os.is_some_and(|os| os.is_locked);
+    let is_locked = self.lock.get().is_locked();
     let Some(active_at) = last_activity_at(now, self.last_input_at.get(), idle, is_locked) else {
       // Away at once, unless the user turned automatic away off.
       if self
@@ -1249,7 +1261,7 @@ impl ActivityWatch {
       maybe_os_idle: maybe_os
         .and_then(|os| os.maybe_idle_ms)
         .map(Duration::from_millis),
-      is_screen_locked: maybe_os.is_some_and(|os| os.is_locked),
+      is_screen_locked: self.lock.get().is_locked(),
     };
     let window = Duration::from_secs(u64::from(notes.attention_input_secs));
     self.report(is_attentive(&signals, now_ms(), window));
