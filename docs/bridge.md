@@ -20,11 +20,11 @@ the VPS that runs the server.
   gateway. It keeps the gateway connection so welcomes, commits and key updates reach it.
 - Two local endpoints (loopback on IPv4 and IPv6 by default, configurable; dual stack with `[::]`):
 
-| Endpoint               | Accepts                                                                                                      |
-|------------------------|--------------------------------------------------------------------------------------------------------------|
-| `POST /hooks/<token>`  | Slack/Mattermost incoming-webhook JSON (`text`, `username`, `attachments`, ...) or the form `payload=<json>` |
-| `POST /ingest/<token>` | Log lines: plain text, or NDJSON with `Content-Type: application/x-ndjson`                                   |
-| `GET /healthz`         | `200 ok`, for the container health check                                                                     |
+| Endpoint               | Accepts                                                                                                                                                         |
+|------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `POST /hooks/<token>`  | Slack/Mattermost incoming-webhook JSON (`text`, `username`, `attachments`, ...) or the form `payload=<json>`; with files as `multipart/form-data` (see "Files") |
+| `POST /ingest/<token>` | Log lines: plain text, or NDJSON with `Content-Type: application/x-ndjson`                                                                                      |
+| `GET /healthz`         | `200 ok`, for the container health check                                                                                                                        |
 
   `icon_url`, `channel` and blocks of the Slack format are ignored: the source's token decides the
   conversation. Slack markup (`<url|label>`, `<@user>`, `<!here>`) becomes Markdown. A source added
@@ -42,7 +42,8 @@ journalctl -f | curl -T - -H 'Content-Type: text/plain' http://127.0.0.1:8088/in
   Webhooks are sent one message per request.
 - **Rate limits** per source (token bucket, default 600 per minute): webhooks over the limit get
   `429` with `Retry-After`; log lines over it are dropped and reported in the channel
-  ("dropped N lines from nas-logs"), the response says how many were accepted.
+  ("dropped N lines from nas-logs"), the response says how many were accepted. Webhooks with files
+  also count their bytes against the bridge-wide `files.total_bytes_per_minute` (see "Files").
 - **Alerts** can @mention people: a webhook with `"mention": true` (an extension), webhook
   attachments with `color: "danger"` (if the source enables `danger_is_alert`), and log lines whose
   level is in `alert_levels`. The mentioned user IDs travel as message metadata, so they are notified
@@ -55,6 +56,109 @@ journalctl -f | curl -T - -H 'Content-Type: text/plain' http://127.0.0.1:8088/in
 - Tokens are part of the URL, so treat the URL as the credential: unknown tokens get `404`, the
   bridge knows only their SHA-256 and compares it in constant time, and the listener is loopback
   unless you open it.
+
+## Files
+
+A webhook may carry files, the way Discord's and Slack's take them: `POST /hooks/<token>` as
+`multipart/form-data`, with the message as JSON in a `payload_json` (or `payload`) part, or in
+plain `text` and `username` fields, and the files in parts that have a file name (`file`,
+`files[0]`, `files[1]`, ...; any field name with a file name is a file). A message with files needs
+no text of its own.
+
+```sh
+# A report with a line of text.
+curl --fail-with-body -F 'text=Nightly tests failed' -F 'file=@report.pdf' \
+  http://127.0.0.1:8088/hooks/<token>
+
+# The webhook JSON and two files, as Discord takes them.
+curl --fail-with-body \
+  --form-string 'payload_json={"text":"Release 2.4 built","username":"ci"}' \
+  -F 'files[0]=@dist/app.tar.gz' -F 'files[1]=@dist/SHA256SUMS' \
+  http://127.0.0.1:8088/hooks/<token>
+```
+
+`--form-string` sends the value as it is; with `-F`, curl reads a value starting with `@` or `<` as
+a file and cuts it at `;`.
+
+GitHub Actions, the test report of a failed run (`TEAMCRAFT_HOOK` is a repository secret with the
+source's URL; `--retry` repeats the request on `429`, `502` and `503` and honours `Retry-After`):
+
+```yaml
+- name: Report to TeamCraft
+  if: failure()
+  run: |
+    run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+    payload=$(jq -n --arg text "${GITHUB_WORKFLOW} failed on ${GITHUB_REF_NAME}: ${run_url}" \
+      '{text: $text, username: "GitHub Actions", mention: true}')
+    curl --fail-with-body --retry 3 --form-string "payload_json=${payload}" \
+      -F "file=@target/test-report.html" "$TEAMCRAFT_HOOK"
+  env:
+    TEAMCRAFT_HOOK: ${{ secrets.TEAMCRAFT_HOOK }}
+```
+
+CI artefacts, every file of a directory in one message (at most the source's files per message):
+
+```sh
+args=()
+for artefact in build/artefacts/*; do args+=(-F "files[]=@${artefact}"); done
+curl --fail-with-body -F "text=Build ${CI_PIPELINE_ID}: artefacts" "${args[@]}" "$TEAMCRAFT_HOOK"
+```
+
+What happens:
+
+- The form is read as it arrives. Each file is written to the spool directory (the server needs a
+  file's size before its upload starts, and a form doesn't say it); the limits below apply while it
+  arrives, so a file over one is refused before the rest is read.
+- The bridge then encrypts each file like a client upload (e2ee.md §4.5): a fresh key per file,
+  files larger than 8 MiB in parts through presigned part URLs, read and encrypted one part at a
+  time, so memory stays at a part however large the file. Pictures get a thumbnail and their size.
+  Then it sends **one** message with all files into the source's channel.
+- The answer comes once every file is up and the message is in the encrypted outbox: `200 ok`. A
+  failed upload answers `413`, `502` or `503` (see "Answers") and sends nothing, so there is never a
+  message with files missing; retry the request. Files that were up already stay on the server as
+  ciphertext whose key nobody has, until the channel's retention removes them.
+- One message's files upload at a time, beside logs and other webhooks; up to 32 more wait in line.
+  A request whose producer hangs up before its files are up is dropped.
+- The spool directory holds the plaintext only for the time of a request, readable by the bridge's
+  user alone (`0600` in a `0700` directory), and is emptied whatever the answer; files a stopped
+  bridge left there are deleted at the next start.
+
+Limits:
+
+| Setting                        | Default                      | What                                                                                                                                                                |
+|--------------------------------|------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `files.max_file_bytes`         | 100 MiB                      | Largest file. The server's attachment limit (`max_attachment_bytes`, encrypted size) applies too                                                                    |
+| `files.max_files_per_message`  | 10                           | Files per message for sources that don't set their own (`max_files_per_message` of a `[[sources]]` block or of an app source's options, at most 50); `0` takes none |
+| `files.total_bytes_per_minute` | 1 GiB                        | Bytes of webhooks with files per minute, all sources together; part of the bridge-wide rate limit                                                                   |
+| `listen.max_body_bytes`        | 1 MiB                        | The form's fields besides files together (the message), at most 32 of them                                                                                          |
+| `files.spool_dir`              | `spool` next to the database | Where files wait while they go up                                                                                                                                   |
+
+A reverse proxy in front of the bridge (the deployment's, "Where producers reach the bridge") must
+let bodies of that size through.
+
+## Answers
+
+`200` with `ok` for an accepted request (`/ingest` says how many lines it took), `404` without a
+body for an unknown token. Every other refusal is JSON with a stable `error_code`:
+`{"error_code": "too_many_files", "message": "more than 10 files"}`.
+
+| Status | `error_code`         | When                                                                                                                              |
+|--------|----------------------|-----------------------------------------------------------------------------------------------------------------------------------|
+| 400    | `invalid_payload`    | The message JSON or text is invalid or empty (a message with files needs no text)                                                 |
+| 400    | `invalid_multipart`  | The form is malformed: no or a wrong boundary, broken part headers, cut off                                                       |
+| 413    | `file_too_large`     | A file is larger than `files.max_file_bytes`, or the server refused its size (its limit, or the bot's attachment storage is full) |
+| 413    | `too_many_files`     | More files than the source takes                                                                                                  |
+| 413    | `payload_too_large`  | The fields besides files, or a body without files, are larger than `listen.max_body_bytes`                                        |
+| 413    | `too_many_fields`    | More than 32 fields besides files                                                                                                 |
+| 413    | `request_too_large`  | The request (`Content-Length`) is larger than `files.total_bytes_per_minute`: it can never pass                                   |
+| 429    | `rate_limited`       | Requests over the source's or the bridge's limit; `Retry-After` says when to try again                                            |
+| 429    | `file_rate_limited`  | File bytes over `files.total_bytes_per_minute`; `Retry-After` says when the request fits                                          |
+| 500    | `spool_failed`       | A file could not be written to or read from the spool directory (a full disk)                                                     |
+| 500    | `internal_error`     | The files are up, but the bridge's database could not keep the message                                                            |
+| 502    | `upload_failed`      | The server or the storage refused or failed an upload                                                                             |
+| 503    | `server_unreachable` | The server can't be reached                                                                                                       |
+| 503    | `bridge_busy`        | Too many requests wait already (32 messages with files, or the send queue is full)                                                |
+| 503    | `shutting_down`      | The bridge is stopping                                                                                                            |
 
 ## Setup
 
@@ -156,7 +260,10 @@ loopback only: `-p 127.0.0.1:8088:8088`.
 
 ## Limits of the current version
 
-- The bridge sends text. File attachments of webhooks (Slack `files`) are ignored.
+- Files come only as uploads in a form ("Files"); file links in a webhook's JSON (Slack `files`)
+  are ignored. An upload that fails is not resumed: the producer sends the request again.
+- The app has no field for a source's files per message yet; app sources take the bridge's
+  `files.max_files_per_message` unless their options say otherwise.
 - `[[sources]]` in the configuration file are read at start; changing one needs a restart. Sources
   added in the app don't.
 - Sources added in the app have no alert mentions yet (the file's `mentions` has no app equivalent)

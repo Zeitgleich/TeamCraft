@@ -90,7 +90,7 @@ pub struct BlobUpload {
 }
 
 /// What a [`BlobUpload`] sends.
-enum UploadTarget {
+pub(super) enum UploadTarget {
   /// A file in one blob, into its announced slot.
   Whole {
     slot: UploadSlot,
@@ -677,7 +677,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Starts the file's next upload step: a large file's next part, any other file whole.
-  async fn start_file(
+  pub(super) async fn start_file(
     &mut self,
     conversation: ConversationId,
     file: &mut PendingFile,
@@ -758,7 +758,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Completes the slot after its blob upload. A storage refusal (expired URL) or an upload that
   /// went missing drops the slot, so the next attempt announces a fresh one.
-  async fn confirm_blob(
+  pub(super) async fn confirm_blob(
     &self,
     slot: &UploadSlot,
     sent: Result<(), ApiError>,
@@ -1097,7 +1097,7 @@ impl UploadTarget {
 }
 
 /// A blob or part request beside the host's loop; a part answers with its `ETag`.
-type BlobRequest = Pin<Box<dyn Future<Output = Result<Option<String>, ApiError>>>>;
+pub(super) type BlobRequest = Pin<Box<dyn Future<Output = Result<Option<String>, ApiError>>>>;
 
 /// The first file of `upload` that is neither done nor failed and whose attempt is due.
 fn next_due_file(upload: &PendingUpload, now_ms: i64) -> Option<usize> {
@@ -1210,7 +1210,7 @@ pub fn cancel_pending_file(
 }
 
 /// The attachment the server announced for a file that isn't up yet, if any.
-fn announced_attachment(file: &PendingFile) -> Option<AttachmentId> {
+pub(super) fn announced_attachment(file: &PendingFile) -> Option<AttachmentId> {
   file
     .maybe_parts
     .as_ref()

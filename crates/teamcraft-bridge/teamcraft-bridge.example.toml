@@ -47,6 +47,20 @@ max_body_bytes = 1048576
 # Webhook requests and log lines per minute of all sources together (each source has its own limit too).
 total_rate_limit_per_minute = 12000
 
+# Webhooks with files (multipart/form-data, docs/bridge.md "Files"): each file is encrypted with its
+# own key and uploaded before the message is sent. The form's other fields count against
+# listen.max_body_bytes.
+[files]
+# Files per message for sources that don't set their own (at most 50); 0 takes none.
+max_files_per_message = 10
+# Largest file in bytes; the server's attachment limit applies too.
+max_file_bytes = 104857600
+# Bytes of webhooks with files per minute, all sources together.
+total_bytes_per_minute = 1073741824
+# Where files wait while they go up (plaintext, for the bridge's user only, deleted after the
+# request). Default: "spool" next to store.path.
+# spool_dir = "/var/lib/teamcraft-bridge/spool"
+
 # Log lines are collected into one message per conversation.
 [batching]
 interval_ms = 1000
@@ -63,6 +77,8 @@ interval_secs = 3600
 #
 #   Slack/Mattermost-compatible webhook (JSON, or form with `payload=`):
 #     curl -d '{"text":"Deploy finished","username":"ci"}' http://127.0.0.1:8088/hooks/<token>
+#   With files (multipart/form-data, like Discord's and Slack's webhooks):
+#     curl -F 'text=Nightly report' -F 'file=@report.pdf' http://127.0.0.1:8088/hooks/<token>
 #   Log lines (plain text; NDJSON with Content-Type application/x-ndjson):
 #     journalctl -f | curl -T - -H 'Content-Type: text/plain' http://127.0.0.1:8088/ingest/<token>
 [app_sources]
@@ -82,5 +98,7 @@ history_pages = 200
 # alert_levels = ["error", "fatal", "critical"]
 # # Webhook attachments with color "danger" are alerts too.
 # danger_is_alert = true
+# # Files one webhook message may carry (default: files.max_files_per_message).
+# max_files_per_message = 10
 # # People mentioned by alerts (the mention reaches them even though integration channels push nothing else).
 # mentions = [{ user_id = "123456789012345679", name = "alice" }]
