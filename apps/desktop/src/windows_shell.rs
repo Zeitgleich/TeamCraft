@@ -21,7 +21,10 @@ pub use teamcraft_client_api::remote::DEEP_LINK_EVENT;
 pub fn plugins(builder: tauri::Builder<Wry>) -> tauri::Builder<Wry> {
   builder
     .plugin(tauri_plugin_deep_link::init())
-    .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
+    .plugin(tauri_plugin_autostart::init(
+      MacosLauncher::LaunchAgent,
+      Some(vec![crate::autostart::AUTOSTART_ARG]),
+    ))
 }
 
 /// Forwards links to the webview, including the one the app was started with.
