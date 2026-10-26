@@ -2,6 +2,7 @@ use leptos::ev;
 use leptos::html;
 use leptos::prelude::*;
 
+use crate::channel_access::is_guest;
 use crate::components::count_badge::{BadgeTone, CountBadge};
 use crate::components::icons::{Icon, IconName};
 use crate::components::rail_menus::{RailCreateMenu, RailFocusMenu};
@@ -78,10 +79,13 @@ pub fn SpaceRail() -> impl IntoView {
             }
           }}
         </ul>
-        // Browsing lists the open spaces to join and has the button to create a new one.
-        <button class="rail-add" on:click=move |_| state.overlay.set(Overlay::BrowseSpaces(None)) aria-label=move || i18n.t("rail-add-space") title=move || i18n.t("rail-add-space")>
-          <Icon name=IconName::Plus />
-        </button>
+        // Browsing lists the open spaces to join and has the button to create a new one. Guests
+        // join no spaces themselves: they are invited (admin.md §1).
+        <Show when=move || !is_guest(state) fallback=|| ()>
+          <button class="rail-add" on:click=move |_| state.overlay.set(Overlay::BrowseSpaces(None)) aria-label=move || i18n.t("rail-add-space") title=move || i18n.t("rail-add-space")>
+            <Icon name=IconName::Plus />
+          </button>
+        </Show>
       </div>
       <div class="rail-bottom">
         <RailFocusMenu />

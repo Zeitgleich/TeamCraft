@@ -2,8 +2,9 @@
 //! can chat, each one a button that opens the right dialog.
 
 use leptos::prelude::*;
-use teamcraft_proto::Role;
+use teamcraft_proto::Permission;
 
+use crate::channel_access::{can_create_channel_in, can_in_workspace_now, can_invite_to, is_guest};
 use crate::components::icons::{Icon, IconName};
 use crate::components::space_invites::JoinableSpaceList;
 use crate::i18n::use_i18n;
@@ -13,7 +14,9 @@ use crate::state::{Overlay, use_app_state};
 pub fn GettingStarted() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let is_guest = Memo::new(move |_| state.read(|backend| backend.my_role()) == Role::Guest);
+  let is_guest = Memo::new(move |_| is_guest(state));
+  // `create_space`: admins and owners in the built-in scheme.
+  let can_create_space = Memo::new(move |_| can_in_workspace_now(state, &Permission::CreateSpace));
   // The current space, if the user is in any.
   let space = Memo::new(move |_| {
     let current = state.space.get();
@@ -61,18 +64,25 @@ pub fn GettingStarted() -> impl IntoView {
           let mut steps = Vec::new();
           match space.get() {
             None => {
-              if !is_guest.get() {
+              if can_create_space.get() {
                 steps.push(step(IconName::Plus, "start-create-space", "start-create-space-hint", move || state.overlay.set(Overlay::NewSpace)).into_any());
+              }
+              if !is_guest.get() {
                 steps.push(step(IconName::Grid, "start-browse-spaces", "start-browse-spaces-hint", move || state.overlay.set(Overlay::BrowseSpaces(None))).into_any());
               }
             },
             Some((id, _)) => {
-              if !has_channels.get() && !is_guest.get() {
+              if !has_channels.get() && can_create_channel_in(state, id) {
                 steps.push(step(IconName::Hash, "start-create-channel", "start-create-channel-hint", move || state.overlay.set(Overlay::NewChannel(id))).into_any());
               }
-              steps.push(step(IconName::List, "start-browse-channels", "start-browse-channels-hint", move || state.overlay.set(Overlay::BrowseChannels(id))).into_any());
+              // The channel browser is for members of the space; guests are added to channels.
               if !is_guest.get() {
+                steps.push(step(IconName::List, "start-browse-channels", "start-browse-channels-hint", move || state.overlay.set(Overlay::BrowseChannels(id))).into_any());
+              }
+              if can_invite_to(state, id) {
                 steps.push(step(IconName::UserPlus, "start-invite", "start-invite-hint", move || state.overlay.set(Overlay::InvitePeople(id))).into_any());
+              }
+              if !is_guest.get() {
                 steps.push(step(IconName::Grid, "start-browse-spaces", "start-browse-spaces-hint", move || state.overlay.set(Overlay::BrowseSpaces(None))).into_any());
               }
             },

@@ -346,6 +346,7 @@ mod tests {
       can_add_members: false,
       can_invite_guests: false,
       can_manage_space: false,
+      can_create_channels: false,
     };
     records::put_json(&store, Table::Spaces, &space.to_string(), &project).unwrap();
     let conversation = ConversationResponse {
@@ -363,6 +364,7 @@ mod tests {
       is_integration: false,
       contains_guests: false,
       maybe_organizer_user_id: None,
+      maybe_my_permissions: None,
       maybe_my_membership: None,
       participants: Vec::new(),
       maybe_image: None,

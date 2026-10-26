@@ -6,6 +6,7 @@ use teamcraft_client_api::log::{LogEntry, log_entries};
 use teamcraft_proto::HistoryPolicy;
 use wasm_bindgen::JsCast;
 
+use crate::channel_access::can_react_in;
 use crate::clock::{format_relative_short, format_time, format_time_seconds, local_day, now_ms};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::date_jump::DatePill;
@@ -456,6 +457,8 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
   };
 
   let reaction_chips = (!reactions.is_empty()).then(|| {
+    // The counts stay readable for everybody; adding to them takes `add_reaction` (issue #691).
+    let can_react = can_react_in(state, conversation);
     let chips: Vec<_> = reactions
       .into_iter()
       .map(|reaction| {
@@ -473,6 +476,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
             style:animation-delay=pop_delay
             class:reaction-mine=reaction.reacted_by_me
             aria-pressed=reaction.reacted_by_me.to_string()
+            prop:disabled=!can_react
             aria-label=move || i18n.t_with("reaction-label", &[("emoji", &label_emoji), ("count", &count.to_string())])
             on:click=move |_| state.write(|backend| backend.toggle_reaction(conversation, message_id, &emoji))
           >

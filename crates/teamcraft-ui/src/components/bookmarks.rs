@@ -4,6 +4,7 @@
 
 use leptos::prelude::*;
 
+use crate::channel_access::ChannelAccess;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::i18n::use_i18n;
@@ -29,7 +30,9 @@ pub fn BookmarksBar(conversation: ConversationId, info: Memo<Option<Conversation
   let state = use_app_state();
   let i18n = use_i18n();
   let bookmarks = move || info.get().map(|conv| conv.bookmarks).unwrap_or_default();
-  let can_edit = move || info.get().is_some_and(|conv| conv.can_post);
+  // The bar is a message (posting) and changing it takes `manage_bookmarks` (guests have none).
+  let access = ChannelAccess::new(state, conversation);
+  let can_edit = move || access.message_permissions().can_manage_bookmarks;
   view! {
     <div class="bookmarks-bar" role="toolbar" aria-label=move || i18n.t("bookmarks-label")>
       <For each=bookmarks key=|bookmark| (bookmark.title.clone(), bookmark.url.clone(), bookmark.maybe_message) let:bookmark>

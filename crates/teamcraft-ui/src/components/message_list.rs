@@ -11,6 +11,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
+use crate::channel_access::ChannelAccess;
 use crate::clock::{format_date, now_ms};
 use crate::components::date_jump::{DateJumpMenu, DateJumpPopover, DatePill};
 use crate::components::empty_state::{EmptyAction, EmptyState};
@@ -520,6 +521,8 @@ pub fn MessageList(
       .read(|backend| backend.conversation(conversation))
       .is_some_and(|conv| conv.kind == ConversationKind::Direct)
   };
+  // Offered to people who may add members only.
+  let access = ChannelAccess::new(state, conversation);
   let is_alone_in_channel = move || {
     state
       .read(|backend| backend.conversation(conversation))
@@ -527,6 +530,7 @@ pub fn MessageList(
         matches!(conv.kind, ConversationKind::Public | ConversationKind::Private)
           && conv.member_ids.len() <= 1
       })
+      && access.can_add_members()
   };
 
   view! {
