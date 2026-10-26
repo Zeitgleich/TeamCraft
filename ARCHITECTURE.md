@@ -429,6 +429,13 @@ call here" joins and then sends `move_here`: the SFU closes the account's *other
 call with `connection_replaced`, which they treat as a final leave; it never touches another
 user's device. The server's ringing already stops for everybody once any device of a callee joins.
 
+**Mute indicator.** A device reports its microphone state with `set_muted` (after joining if it
+starts muted, on every change, and again after a rejoin whenever it could differ); the SFU keeps it
+per device and tells the others with `participant_muted`, and sends one for each muted device right
+after `joined`. It is metadata for the tiles only: the SFU forwards audio exactly as before (a muted
+client sends none). A person shows as muted when all their devices in the call are. Older clients
+ignore the new messages.
+
 Rejoin attempts back off exponentially (250 ms doubling to 2 s) with jitter (each pause between
 half and all of its interval), so clients that lost the SFU together don't come back in lockstep.
 

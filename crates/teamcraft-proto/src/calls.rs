@@ -93,6 +93,12 @@ pub enum CallClientMessage {
     stream_id: MediaStreamId,
     maybe_max_layer: Option<u8>,
   },
+  /// This device muted or unmuted its microphone; the SFU tells the others
+  /// ([`CallEvent::ParticipantMuted`]). Sent again after every (re)join. Metadata only: it changes
+  /// nothing about what the SFU forwards.
+  SetMuted {
+    is_muted: bool,
+  },
   /// Takes the call over to this device: the SFU closes the account's other devices in the call
   /// with [`CallEvent::ConnectionReplaced`] (#505). Only the account's own devices are affected.
   MoveHere,
@@ -148,6 +154,12 @@ pub enum CallEvent {
   /// A reconnecting device is back on a new connection (same slot and audio stream).
   ParticipantReconnected {
     device_id: DeviceId,
+  },
+  /// Another device muted or unmuted its microphone. After `joined` the SFU sends one for each
+  /// device that is muted; a client forgets what it knew when it rejoins.
+  ParticipantMuted {
+    device_id: DeviceId,
+    is_muted: bool,
   },
   /// Devices whose audio the SFU currently forwards, loudest first.
   ActiveSpeakers {
@@ -324,6 +336,7 @@ impl fmt::Debug for CallClientMessage {
         .field("maybe_max_layer", maybe_max_layer)
         .finish(),
       Self::MoveHere => f.write_str("MoveHere"),
+      Self::SetMuted { is_muted } => f.debug_struct("SetMuted").field("is_muted", is_muted).finish(),
       Self::Unknown => f.write_str("Unknown"),
     }
   }
@@ -481,6 +494,24 @@ mod tests {
       serde_json::to_string(&message).unwrap(),
       r#"{"type":"error","error":{"error_code":"invalid_join_token","message":"expired"}}"#
     );
+  }
+
+  #[test]
+  fn mute_wire_format() {
+    assert_eq!(
+      serde_json::to_string(&CallClientMessage::SetMuted { is_muted: true }).unwrap(),
+      r#"{"type":"set_muted","is_muted":true}"#
+    );
+    let event = CallEvent::ParticipantMuted {
+      device_id: "7".parse().unwrap(),
+      is_muted: false,
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"participant_muted","device_id":"7","is_muted":false}"#
+    );
+    assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), event);
   }
 
   #[test]

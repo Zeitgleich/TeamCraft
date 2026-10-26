@@ -131,6 +131,8 @@ struct Release {
 
 struct Participant {
   user_id: UserId,
+  /// The device's microphone is muted (its own report; metadata for the others' tiles).
+  is_muted: bool,
   audio_stream_id: StreamId,
   session: SessionId,
   presence: Presence,
@@ -446,6 +448,10 @@ impl Room {
         participant_id,
         self.subscribe(participant_id, stream_id, maybe_max_layer, now),
       ),
+      CallClientMessage::SetMuted { is_muted } => {
+        self.set_muted(participant_id, is_muted);
+        Ok(())
+      },
       CallClientMessage::MoveHere => {
         self.close_other_devices_of(participant_id);
         Ok(())
@@ -621,6 +627,7 @@ impl Room {
           participant_id,
           Participant {
             user_id: grant.user_id,
+            is_muted: false,
             audio_stream_id,
             session,
             presence: Presence::Connected(handle),
@@ -709,6 +716,19 @@ impl Room {
     self.close(&mut state, &devices, event);
   }
 
+  /// Records the device's mute state and tells the others when it changed.
+  fn set_muted(&self, device_id: DeviceId, is_muted: bool) {
+    let mut state = lock(&self.state);
+    let Some(participant) = state.participants.get_mut(&device_id) else {
+      return;
+    };
+    if participant.is_muted == is_muted {
+      return;
+    }
+    participant.is_muted = is_muted;
+    state.broadcast_except(device_id, CallEvent::ParticipantMuted { device_id, is_muted });
+  }
+
   /// The account's other devices leave for `device_id` (the call moves there). Reconnecting
   /// ones lose their slot at once; the DAVE group removes them like any leaver.
   fn close_other_devices_of(&self, device_id: DeviceId) {
@@ -793,6 +813,17 @@ impl RoomState {
         maybe_reconnect_grace_ms: Some(u64::try_from(reconnect_grace.as_millis()).unwrap_or(u64::MAX)),
       },
     );
+    for (device_id, other) in &self.participants {
+      if *device_id != participant_id && other.is_muted {
+        self.send_to(
+          participant_id,
+          CallEvent::ParticipantMuted {
+            device_id: *device_id,
+            is_muted: true,
+          },
+        );
+      }
+    }
     self.send_to(
       participant_id,
       CallEvent::DaveExternalSender {
