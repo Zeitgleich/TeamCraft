@@ -130,9 +130,7 @@ pub async fn enforce(state: &AppState, identity: &TokenIdentity) -> Result<(), A
     .await?
   {
     SessionState::Active => Ok(()),
-    SessionState::Expired | SessionState::Unknown => {
-      Err(AuthError::Expired("the session timed out; sign in again".into()).into())
-    },
+    SessionState::Expired | SessionState::Unknown => Err(AuthError::SessionTimedOut.into()),
   }
 }
 

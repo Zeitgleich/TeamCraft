@@ -194,7 +194,9 @@ struct OidcClient {
       let status = (response as? HTTPURLResponse)?.statusCode ?? 0
       switch status {
       case 200: return try JSONDecoder().decode(TokenResponse.self, from: data)
-      case 400, 401: throw OidcError.sessionExpired
+      // Only a refused grant (an expired, revoked or reused refresh token) ends the session; any
+      // other answer keeps it for the next try (issue #667).
+      case 400 where Self.isInvalidGrant(data): throw OidcError.sessionExpired
       default: throw OidcError.tokenRequestFailed(status: status)
       }
     } catch let error as OidcError {
@@ -202,6 +204,12 @@ struct OidcClient {
     } catch {
       throw OidcError.network(error.localizedDescription)
     }
+  }
+
+  /// Whether a token endpoint error answer says `invalid_grant` (RFC 6749 §5.2).
+  static func isInvalidGrant(_ data: Data) -> Bool {
+    struct ErrorAnswer: Decodable { let error: String }
+    return (try? JSONDecoder().decode(ErrorAnswer.self, from: data))?.error == "invalid_grant"
   }
 
   static func formEncoded(_ fields: [String: String]) -> String {
@@ -239,13 +247,21 @@ final class SessionVault {
   private static let accountPrefix = "oidc-session."
   private static let localAccountPrefix = "local-session."
 
+  /// How long a process waits for the other one's refresh before it gives up for now.
+  private static let refreshLockTimeout: TimeInterval = 20
+
   private let keychain: KeychainStore
   private let servers: ServerStore
+  private let refreshLockURL: URL?
   private let queue = DispatchQueue(label: "de.zeitgleich.teamcraft.session")
 
-  init(keychain: KeychainStore = KeychainStore(), servers: ServerStore = ServerStore()) {
+  init(
+    keychain: KeychainStore = KeychainStore(), servers: ServerStore = ServerStore(),
+    refreshLockURL: URL? = SharedContainer().refreshLockFileURL
+  ) {
     self.keychain = keychain
     self.servers = servers
+    self.refreshLockURL = refreshLockURL
   }
 
   func load() -> OidcSession? {
@@ -292,6 +308,13 @@ final class SessionVault {
         // No refresh for local sessions: past its expiry the account is signed out.
         return local.isUsable() ? local.accessToken : nil
       }
+      guard let stale = load() else { return nil }
+      if stale.isFresh() { return stale.accessToken }
+      // One refresh across the app and the notification extension (issue #667): whoever waited
+      // reads the keychain again and takes the token the other one got.
+      let lock = refreshLockURL.map { ProcessLock(fileURL: $0) }
+      if let lock, !lock.acquire(timeout: Self.refreshLockTimeout) { return nil }
+      defer { lock?.release() }
       guard let session = load() else { return nil }
       if session.isFresh() { return session.accessToken }
       guard session.refreshToken != nil else { return nil }

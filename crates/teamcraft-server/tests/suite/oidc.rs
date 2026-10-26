@@ -136,7 +136,7 @@ mod backchannel_logout {
     );
     assert!(is_closed(&mut laptop_socket).await);
     assert!(!is_closed(&mut phone_socket).await, "the other session must stay");
-    assert_eq!(app.get(&laptop, "/me").await.error_code(), "invalid_token");
+    assert_eq!(app.get(&laptop, "/me").await.error_code(), "session_ended");
     assert_eq!(app.get(&phone, "/me").await.status, StatusCode::OK);
     app.stop().await;
   }
@@ -159,7 +159,7 @@ mod backchannel_logout {
     assert_eq!(post_logout(&app, &token).await.status(), StatusCode::OK);
 
     assert!(is_closed(&mut phone_socket).await);
-    assert_eq!(app.get(&phone, "/me").await.error_code(), "invalid_token");
+    assert_eq!(app.get(&phone, "/me").await.error_code(), "session_ended");
     assert!(
       !is_closed(&mut desktop_socket).await,
       "the desktop's gateway connection must stay"

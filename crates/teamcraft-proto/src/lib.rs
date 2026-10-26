@@ -29,7 +29,7 @@ pub use calls::{
   DaveKeyBinding, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, ScreenAudioTrack, ScreenContentMode,
 };
 pub use conversation::{ConversationKind, ConversationVisibility, HistoryPolicy};
-pub use error::{ErrorBody, ErrorCode};
+pub use error::{ErrorBody, ErrorCode, SignInReason};
 pub use gateway::{ATTENTION_AWAY_DELAY_SECS, GatewayClientMessage, GatewayEvent, GatewayServerMessage};
 pub use id::{
   AnnouncementId, AttachmentId, AuditEntryId, BackgroundId, CallId, CategoryId, ConversationId, DeviceId, Id,

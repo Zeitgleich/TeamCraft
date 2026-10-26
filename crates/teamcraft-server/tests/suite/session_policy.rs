@@ -90,7 +90,7 @@ mod limits {
     let reply = app.get(&carol, "/me").await;
     assert_eq!(
       (reply.status, reply.error_code()),
-      (StatusCode::UNAUTHORIZED, "invalid_token")
+      (StatusCode::UNAUTHORIZED, "session_timed_out")
     );
     // Another session of the same person is not affected.
     let other = member("carol").with_session("sid-2");

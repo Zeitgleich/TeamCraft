@@ -235,9 +235,13 @@ impl ApiError {
 
   pub fn status(&self) -> StatusCode {
     match self {
-      Self::Auth(AuthError::MissingToken | AuthError::InvalidToken(_) | AuthError::Expired(_)) => {
-        StatusCode::UNAUTHORIZED
-      },
+      Self::Auth(
+        AuthError::MissingToken
+        | AuthError::InvalidToken(_)
+        | AuthError::Expired(_)
+        | AuthError::SessionEnded
+        | AuthError::SessionTimedOut,
+      ) => StatusCode::UNAUTHORIZED,
       Self::Auth(AuthError::NoTeamcraftRole | AuthError::AccountDeactivated)
       | Self::Forbidden(_)
       | Self::MfaRequired => StatusCode::FORBIDDEN,
@@ -265,6 +269,8 @@ impl ApiError {
     match self {
       Self::Auth(AuthError::MissingToken) => ErrorCode::Unauthorized,
       Self::Auth(AuthError::InvalidToken(_) | AuthError::Expired(_)) => ErrorCode::InvalidToken,
+      Self::Auth(AuthError::SessionEnded) => ErrorCode::SessionEnded,
+      Self::Auth(AuthError::SessionTimedOut) => ErrorCode::SessionTimedOut,
       Self::Auth(AuthError::NoTeamcraftRole) => ErrorCode::NoTeamcraftRole,
       Self::Auth(AuthError::AccountDeactivated) => ErrorCode::AccountDeactivated,
       Self::Forbidden(_) => ErrorCode::Forbidden,
@@ -353,6 +359,16 @@ mod tests {
         AuthError::Expired("x".into()),
         StatusCode::UNAUTHORIZED,
         ErrorCode::InvalidToken,
+      ),
+      (
+        AuthError::SessionEnded,
+        StatusCode::UNAUTHORIZED,
+        ErrorCode::SessionEnded,
+      ),
+      (
+        AuthError::SessionTimedOut,
+        StatusCode::UNAUTHORIZED,
+        ErrorCode::SessionTimedOut,
       ),
       (
         AuthError::NoTeamcraftRole,

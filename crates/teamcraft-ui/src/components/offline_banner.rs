@@ -12,6 +12,7 @@ use leptos::ev;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_client_api::remote::{CORE_CHANGED_EVENT, CoreConnection, NetworkInterception};
+use teamcraft_proto::SignInReason;
 
 use crate::auth::tauri;
 use crate::clock::now_ms;
@@ -40,7 +41,8 @@ enum Notice {
     retry_in_secs: i64,
     maybe_interception: Option<NetworkInterception>,
   },
-  SignInRequired,
+  /// The token was refused; says why when the server did (issue #667).
+  SignInRequired(SignInReason),
 }
 
 /// Since when the connection is down, for the grace period. A page that comes back (from the
@@ -114,7 +116,11 @@ pub fn OfflineBanner() -> impl IntoView {
           },
           &[("seconds", &retry_in_secs.to_string())],
         ),
-        Notice::SignInRequired => i18n.t("connection-banner-sign-in"),
+        Notice::SignInRequired(reason) => i18n.t(match reason {
+          SignInReason::SessionEnded => "connection-banner-session-ended",
+          SignInReason::SessionTimedOut => "connection-banner-session-timed-out",
+          SignInReason::Unknown => "connection-banner-sign-in",
+        }),
       };
       let action = match notice {
         Notice::Unreachable { .. } => Some(
@@ -125,7 +131,7 @@ pub fn OfflineBanner() -> impl IntoView {
           }
           .into_any(),
         ),
-        Notice::SignInRequired => Some(
+        Notice::SignInRequired(_) => Some(
           view! {
             <button
               class="link-btn"
@@ -199,7 +205,7 @@ impl Unsettled {
       CoreConnection::Connecting | CoreConnection::Offline { .. } => {
         Some(self.maybe_since_ms.unwrap_or(now_ms))
       },
-      CoreConnection::Connected | CoreConnection::SignInRequired => None,
+      CoreConnection::Connected | CoreConnection::SignInRequired { .. } => None,
     };
     Self { maybe_since_ms }
   }
@@ -240,7 +246,7 @@ fn notice_for(
       retry_in_secs: retry_at_ms.saturating_sub(now).max(0).saturating_add(999) / 1000,
       maybe_interception,
     }),
-    CoreConnection::SignInRequired => Some(Notice::SignInRequired),
+    CoreConnection::SignInRequired { reason } => Some(Notice::SignInRequired(reason)),
   }
 }
 
@@ -279,11 +285,13 @@ mod tests {
     assert_eq!(
       notice_for(
         true,
-        Some(CoreConnection::SignInRequired),
+        Some(CoreConnection::SignInRequired {
+          reason: SignInReason::SessionEnded
+        }),
         Unsettled::default(),
         0
       ),
-      Some(Notice::SignInRequired)
+      Some(Notice::SignInRequired(SignInReason::SessionEnded))
     );
   }
 

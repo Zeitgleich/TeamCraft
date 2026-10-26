@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use teamcraft_proto::{BackgroundId, Base64Bytes, CategoryId, HistoryPolicy, OrgBackgroundId};
+use teamcraft_proto::{BackgroundId, Base64Bytes, CategoryId, HistoryPolicy, OrgBackgroundId, SignInReason};
 
 use crate::actions::{
   BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, LinkedMessage, MediaAnchor, MediaPage,
@@ -377,8 +377,11 @@ pub enum CoreConnection {
     #[serde(rename = "interception", default, skip_serializing_if = "Option::is_none")]
     maybe_interception: Option<NetworkInterception>,
   },
-  /// The server refused the access token: the user has to sign in again.
-  SignInRequired,
+  /// The server refused the access token: the user has to sign in again, for `reason`.
+  SignInRequired {
+    #[serde(default, skip_serializing_if = "SignInReason::is_unknown")]
+    reason: SignInReason,
+  },
 }
 
 /// Something on the network that answered instead of the server (issue #157).

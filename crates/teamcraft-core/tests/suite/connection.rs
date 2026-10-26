@@ -142,12 +142,12 @@ async fn a_refused_token_asks_to_sign_in_and_stops_retrying() {
     .drive(|rig| async move {
       rig
         .wait_for(
-          |state| state == ConnectionState::SignInRequired,
+          |state| matches!(state, ConnectionState::SignInRequired { .. }),
           Duration::from_secs(5),
         )
         .await;
       tokio::time::sleep(Duration::from_secs(10 * 60)).await;
-      assert_eq!(rig.status.get(), ConnectionState::SignInRequired);
+      assert!(matches!(rig.status.get(), ConnectionState::SignInRequired { .. }));
       assert_eq!(
         rig.server.gateway_refusal_count(),
         1,

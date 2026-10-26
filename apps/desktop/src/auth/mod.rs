@@ -1031,14 +1031,22 @@ pub struct OAuthHttpError(String);
 
 type TokenError = RequestTokenError<OAuthHttpError, StandardErrorResponse<BasicErrorResponseType>>;
 
+/// Only `invalid_grant` (the refresh token expired, was revoked or reused) ends the session
+/// (issue #667); any other answer of the provider (`temporarily_unavailable`, `server_error`, a
+/// misconfigured client) keeps the refresh token for the next try.
 fn map_token_error(error: TokenError) -> AuthError {
   match error {
-    RequestTokenError::ServerResponse(response) => AuthError::Denied(
-      response
+    RequestTokenError::ServerResponse(response) => {
+      let description = response
         .error_description()
         .cloned()
-        .unwrap_or_else(|| response.error().to_string()),
-    ),
+        .unwrap_or_else(|| response.error().to_string());
+      if *response.error() == BasicErrorResponseType::InvalidGrant {
+        AuthError::Denied(description)
+      } else {
+        AuthError::InvalidResponse(description)
+      }
+    },
     RequestTokenError::Request(error) => AuthError::Network(error.to_string()),
     RequestTokenError::Parse(error, _) => AuthError::InvalidResponse(error.to_string()),
     RequestTokenError::Other(message) => AuthError::InvalidResponse(message),
@@ -1207,6 +1215,26 @@ fn reqwest_method(method: ApiMethod) -> reqwest::Method {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn only_a_refused_refresh_token_ends_the_session() {
+    let answer = |kind| {
+      map_token_error(RequestTokenError::ServerResponse(StandardErrorResponse::new(
+        kind, None, None,
+      )))
+    };
+    assert!(matches!(
+      answer(BasicErrorResponseType::InvalidGrant),
+      AuthError::Denied(_)
+    ));
+    for kept in [
+      BasicErrorResponseType::Extension("temporarily_unavailable".into()),
+      BasicErrorResponseType::Extension("server_error".into()),
+      BasicErrorResponseType::InvalidClient,
+    ] {
+      assert!(!matches!(answer(kept), AuthError::Denied(_)));
+    }
+  }
 
   mod server_typos {
     use super::*;
