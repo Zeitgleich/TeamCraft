@@ -54,6 +54,8 @@
     "allow-core-reset-store",
     "allow-dropped-files-take",
     "allow-dropped-file-read",
+    "allow-clipboard-paste-files",
+    "allow-clipboard-read-image",
     "allow-call-snapshot",
     "allow-call-media-devices",
     "allow-call-action",

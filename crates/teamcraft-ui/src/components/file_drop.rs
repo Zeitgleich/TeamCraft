@@ -223,7 +223,7 @@ pub fn take_drop(
 /// Reads the files the desktop shell saw dropped and hands them to `maybe_target`'s composer. Says
 /// so when a file is too large, or when `lists_files` (the page saw file addresses) and the shell
 /// knew of no drop.
-async fn attach_from_shell(
+pub(crate) async fn attach_from_shell(
   maybe_target: Option<DroppedFiles>,
   lists_files: bool,
   state: AppState,

@@ -15,6 +15,7 @@ mod autostart;
 mod call_window;
 mod calls;
 mod clipboard;
+mod clipboard_paste;
 mod core;
 #[cfg(target_os = "linux")]
 mod desktop_entry;
@@ -89,6 +90,9 @@ fn main() -> anyhow::Result<()> {
   // The menu bar, in the UI's language once it sends its texts (app_menu.rs, #712).
   #[cfg(target_os = "macos")]
   let builder = builder.menu(app_menu::initial);
+  // Pictures pasted from the clipboard when the webview's paste event carries none (#761).
+  #[cfg(any(target_os = "macos", windows))]
+  let builder = builder.plugin(tauri_plugin_clipboard_manager::init());
   builder
     .plugin(tauri_plugin_opener::init())
     // The save dialog of "Save…" (core_save_attachment); the webview gets no dialog permission.
@@ -230,6 +234,8 @@ fn main() -> anyhow::Result<()> {
       core::commands::core_reset_store,
       dropped_files::dropped_files_take,
       dropped_files::dropped_file_read,
+      clipboard_paste::clipboard_paste_files,
+      clipboard_paste::clipboard_read_image,
       calls::commands::call_snapshot,
       calls::commands::call_media_devices,
       calls::commands::call_action,
