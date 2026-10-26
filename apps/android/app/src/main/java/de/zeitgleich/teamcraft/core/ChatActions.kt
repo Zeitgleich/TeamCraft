@@ -139,6 +139,13 @@ object ChatActions {
     put("message", message)
   }
 
+  /** One file of a message: the image viewer fetches only the picture on screen. */
+  fun downloadAttachment(conversation: String, message: String, fileId: String) = action("download_attachment") {
+    put("conversation", conversation)
+    put("message", message)
+    put("file_id", fileId)
+  }
+
   fun setFavorite(conversation: String, isFavorite: Boolean) = action("set_favorite") {
     put("conversation", conversation)
     put("is_favorite", isFavorite)

@@ -233,6 +233,9 @@ data class FileInfo(
   /** The sender's preview of an image (PNG or JPEG; decoders read the format from the bytes). */
   @SerialName("maybe_thumbnail_png") val maybeThumbnail: ImageBytes? = null,
   val transfer: FileTransfer,
+  /** Who sent the message and when (Unix milliseconds), for the image viewer. */
+  @SerialName("maybe_sender") val maybeSender: String? = null,
+  @SerialName("maybe_sent_at") val maybeSentAt: Long? = null,
 ) {
   val isImage: Boolean get() = mediaType.startsWith("image/")
 }

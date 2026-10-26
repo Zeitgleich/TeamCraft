@@ -99,6 +99,24 @@ class WireTest {
   }
 
   @Test
+  fun aFileNamesItsSenderAndTimeForTheViewer() {
+    val decoded = WireJson.decodeFromString(
+      FileInfo.serializer(),
+      """{"conversation":"7","message":"10","file_id":"3","file_name":"a.jpg","media_type":"image/jpeg",
+          "size_bytes":9,"transfer":{"state":"remote"},"maybe_sender":"42","maybe_sent_at":1700000000000}""",
+    )
+    assertEquals("42", decoded.maybeSender)
+    assertEquals(1_700_000_000_000L, decoded.maybeSentAt)
+    val older = WireJson.decodeFromString(
+      FileInfo.serializer(),
+      """{"conversation":"7","message":"10","file_id":"3","file_name":"a.jpg","media_type":"image/jpeg",
+          "size_bytes":9,"transfer":{"state":"remote"}}""",
+    )
+    assertEquals(null, older.maybeSender)
+    assertEquals(null, older.maybeSentAt)
+  }
+
+  @Test
   fun aFileWithoutThumbnailHasNone() {
     val decoded = WireJson.decodeFromString(
       FileInfo.serializer(),
