@@ -208,6 +208,7 @@ sudo tee /etc/yum.repos.d/teamcraft.repo >/dev/null <<'EOF'
 name=TeamCraft
 baseurl=https://zeitgleich.github.io/TeamCraft/rpm/stable
 enabled=1
+metadata_expire=1h
 gpgcheck=1
 repo_gpgcheck=1
 gpgkey=https://zeitgleich.github.io/TeamCraft/teamcraft-archive-keyring.asc
@@ -215,9 +216,33 @@ EOF
 sudo dnf install team-craft
 ```
 
-(openSUSE: put the same file into `/etc/zypp/repos.d/` and `zypper install team-craft`.) For release
-candidates use the suite or directory `prerelease`, shown as "Beta" on the site and in the app; it
-also receives every stable release.
+(openSUSE: put the same file into `/etc/zypp/repos.d/`, add `autorefresh=1`, and `zypper install
+team-craft`.) For release candidates use the suite or directory `prerelease`, shown as "Beta" on the
+site and in the app; it also receives every stable release.
+
+How soon a new version reaches the package manager (#694):
+
+| Package manager | Reads the repository metadata                                   | Without a manual refresh    |
+|-----------------|-----------------------------------------------------------------|-----------------------------|
+| dnf             | when its cached copy is older than `metadata_expire`            | within 1 hour               |
+| apt             | only on `apt update` (PackageKit and unattended-upgrades daily) | after the next daily run    |
+| zypper          | before each command with `autorefresh=1`, else `zypper ref`     | at once with `autorefresh`  |
+
+- dnf's default `metadata_expire` is 48 hours, so up to 1.0.7 a new version showed only after
+  `dnf upgrade --refresh` or two days. The `.repo` files on the site set `metadata_expire=1h`, and
+  the rpm's `%post` (`apps/desktop/packaging/linux/rpm-post-install.sh`) adds it to TeamCraft
+  repository files written before, so existing installs pick it up with their next update. It
+  leaves a file alone that sets its own `metadata_expire` or defines other repositories too. The rpm
+  doesn't ship the `.repo` file itself: Tauri's rpm bundler can't mark it `%config(noreplace)`, and a
+  plain file would undo the user's changes on every update (and add a repository to installs from a
+  downloaded rpm).
+- apt has no expiry of its own: the `Release` file carries no `Valid-Until`, so a cached index never
+  goes stale or fails as expired, and apt sees a new version as soon as `apt update` runs. The
+  in-app command therefore starts with `apt update`; the "Update now" button refreshes through
+  PackageKit first (§4.5), which on dnf systems honours `metadata_expire`.
+- The host is not the cause: GitHub Pages (and Cloudflare Pages alike) let caches keep a file for
+  minutes (`Cache-Control: max-age=600` on GitHub Pages), not days. Moving the site would not change
+  it.
 
 - Candidate packages carry the release version (`1.0.0` for `v1.0.0-rc.2`), so the package manager
   doesn't move from a candidate to the release with the same number; reinstall in that case.
