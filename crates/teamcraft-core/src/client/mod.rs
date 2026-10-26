@@ -19,6 +19,7 @@ mod gateway;
 mod group_health;
 mod groups;
 mod guest;
+mod heads;
 mod key_history;
 mod key_packages;
 mod linking;
@@ -31,11 +32,13 @@ mod pending_actions;
 mod pending_add;
 pub mod people;
 pub mod previews;
+mod read_ahead;
 mod removal;
 #[cfg(not(target_arch = "wasm32"))]
 mod segments;
 mod sources;
 mod sync;
+mod sync_trace;
 #[cfg(feature = "ui")]
 mod ui_commands;
 pub mod upload_parts;
@@ -83,6 +86,7 @@ pub use pending_add::{UserAddWait, pending_user_additions};
 #[cfg(not(target_arch = "wasm32"))]
 pub use segments::SegmentPrefetch;
 pub use sources::HistoryScan;
+pub use sync_trace::SyncPhase;
 use teamcraft_crypto::membership::ChangeId;
 use teamcraft_crypto::mls::{ChangeHistory, ConversationGroup, PendingCommit};
 use teamcraft_proto::{Base64Bytes, ConversationId, ConversationResponse, DeviceActivity, UserId};
@@ -277,6 +281,15 @@ pub struct Client<A, S> {
   /// Cleared right after each such join; a catch-up future dropped in between leaves it set until
   /// the next catch-up, which clears it before anything else (only welcomes are affected).
   is_welcome_cursor_held: bool,
+  /// Where the time of the last gateway connection went (issue #714).
+  sync_trace: sync_trace::SyncTrace,
+  /// The heads of the full sync in progress, to skip what didn't change (issue #714).
+  maybe_heads: Option<heads::HeadsInSync>,
+  /// The first reads of a gateway connection, read at once and waiting for their steps (#714).
+  read_ahead: read_ahead::ReadAhead,
+  /// When this process last heard from the gateway (any frame): a reconnect soon after reads its
+  /// once-per-connection data while the server answers `resume`.
+  maybe_last_heard_ms: Option<i64>,
 }
 
 impl Default for ClientSettings {
@@ -370,6 +383,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_waiting_checked_at_ms: None,
       catch_up_focus: CatchUpFocus::default(),
       is_welcome_cursor_held: false,
+      sync_trace: Default::default(),
+      maybe_heads: None,
+      read_ahead: Default::default(),
+      maybe_last_heard_ms: None,
     };
     // A catch-up the app was closed during left its marks; the next one sets them again.
     catch_up::clear_marks(&client.store)?;

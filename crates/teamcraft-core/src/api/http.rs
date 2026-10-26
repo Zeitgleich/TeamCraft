@@ -53,7 +53,7 @@ use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest, UserEnrollmentRe
 use teamcraft_proto::{
   ListCallHistoryQuery, ListCallHistoryResponse, ListPresenceResponse, PrivacyResponse, UpdatePrivacyRequest,
 };
-use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, UnreadResponse};
+use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, SyncHeadsResponse, UnreadResponse};
 use teamcraft_proto::{NotificationSettings, TestPushResponse};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
 
@@ -902,6 +902,10 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
 
   async fn unread(&self) -> Result<UnreadResponse, ApiError> {
     self.get("/unread").await
+  }
+
+  async fn sync_heads(&self) -> Result<SyncHeadsResponse, ApiError> {
+    self.get("/sync/heads").await
   }
 
   async fn key_bag(&self) -> Result<KeyBagResponse, ApiError> {

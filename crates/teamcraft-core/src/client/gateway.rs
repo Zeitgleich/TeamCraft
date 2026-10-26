@@ -31,6 +31,11 @@ pub enum GatewayOutcome {
   Fresh,
 }
 
+/// A connection heard from this recently is resumed with its first reads beside the answer; after
+/// longer (an app started again, a laptop that slept) the session is likely gone and the reads wait
+/// for the answer, so a refused resume costs no reads. Well under the server's default window.
+const LIKELY_RESUMABLE_MS: i64 = 60_000;
+
 /// How long each step of the handshake (socket and `hello`, the answer to `resume` or `identify`)
 /// may take when the caller doesn't say: a server that accepts the socket and then stays silent must
 /// not hold the reconnect loop forever.
@@ -111,7 +116,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     &mut self,
     timing: GatewayTiming,
   ) -> Result<GatewayStart<A::Gateway>, CoreError> {
-    let handshake_timeout = timing.handshake_timeout;
     // Events may have been missed while disconnected: every group is caught up again before the
     // outbox sends into it, and the welcomes are read again before a spent key package goes
     // (issue #395).
@@ -119,20 +123,59 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.are_welcomes_synced = false;
     // A replay cut short by the drop is not waited for; this connection brings its own.
     self.maybe_replay_left = None;
-    let (mut connection, mut heartbeat_interval) = self.open_gateway(handshake_timeout).await?;
-    // A resumed session skips the full sync; the own name may still be missing from older stores.
-    self.refresh_own_summary().await;
+    self.drop_read_ahead();
+    self.trace_start();
+    let outcome = self.start_gateway_traced(timing).await;
+    // Answers no step took this time must not stand in for a later read.
+    self.drop_read_ahead();
+    if outcome.is_ok() {
+      self.maybe_last_heard_ms = Some(self.now_ms());
+    }
+    outcome
+  }
+
+  async fn start_gateway_traced(
+    &mut self,
+    timing: GatewayTiming,
+  ) -> Result<GatewayStart<A::Gateway>, CoreError> {
+    let handshake_timeout = timing.handshake_timeout;
     if let Some(session) = self.sync.maybe_gateway_session.clone() {
-      connection
-        .send(&GatewayClientMessage::Resume {
-          token: self.api.gateway_token()?,
-          session_id: session.session_id,
-          last_seq: session.last_seq,
-          device_id: self.account.device_id,
-        })
-        .await?;
-      match receive(&mut connection, handshake_timeout).await? {
+      let resume = GatewayClientMessage::Resume {
+        token: self.api.gateway_token()?,
+        session_id: session.session_id,
+        last_seq: session.last_seq,
+        device_id: self.account.device_id,
+      };
+      let (mut connection, heartbeat_interval) = self.open_gateway(handshake_timeout, &resume).await?;
+      self.trace_lap("socket and hello");
+      // The reads once per connection go out while the server answers: the session kept every
+      // event since the device was last connected, so nothing read now can miss a change (#714).
+      let is_likely_resumable = self
+        .maybe_last_heard_ms
+        .is_some_and(|heard| self.now_ms().saturating_sub(heard) < LIKELY_RESUMABLE_MS);
+      let known = self.known_people_ahead()?;
+      let (answer, maybe_read_ahead) =
+        futures_util::join!(receive(&mut connection, handshake_timeout), async {
+          if is_likely_resumable {
+            Some(self.read_resumed(known.clone()).await)
+          } else {
+            None
+          }
+        },);
+      match answer? {
         GatewayServerMessage::Resumed { replayed } => {
+          self.read_ahead = match maybe_read_ahead {
+            Some(read_ahead) => read_ahead,
+            None => self.read_resumed(known).await,
+          };
+          if replayed > 0 {
+            // `GET /unread` already counts the replayed messages (see `resync_live_state`).
+            self.read_ahead.read_state = None;
+          }
+          self.trace_lap("resume answer and first reads");
+          // A resumed session skips the full sync; the own name may still be missing from older
+          // stores.
+          self.refresh_own_summary().await;
           let mut held = HeldFrames::default();
           if replayed == 0 {
             let heartbeat = heartbeat_interval.min(timing.max_heartbeat);
@@ -149,6 +192,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
             self.maybe_replay_left = Some(replayed);
           }
           self.refresh_link_requests().await;
+          self.trace_lap("link requests");
+          self.trace_finish("resumed");
           return Ok(GatewayStart {
             connection,
             outcome: GatewayOutcome::Resumed,
@@ -161,7 +206,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           // connection. Forget it here too, or every reconnect would try it again forever.
           self.sync.maybe_gateway_session = None;
           self.persist_sync()?;
-          (connection, heartbeat_interval) = self.open_gateway(handshake_timeout).await?;
+          self.trace_lap("resume refused");
         },
         GatewayServerMessage::Error { error } => return Err(rejected(error)),
         other => {
@@ -171,15 +216,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         },
       }
     }
-    connection
-      .send(&GatewayClientMessage::Identify {
-        token: self.api.gateway_token()?,
-        device_id: self.account.device_id,
-        activity: self.device_activity.clone(),
-      })
-      .await?;
+    // The first reads wait for `ready`: a change between a read and the new session would reach
+    // neither (#714).
+    let identify = GatewayClientMessage::Identify {
+      token: self.api.gateway_token()?,
+      device_id: self.account.device_id,
+      activity: self.device_activity.clone(),
+    };
+    let (mut connection, heartbeat_interval) = self.open_gateway(handshake_timeout, &identify).await?;
+    self.trace_lap("socket and hello");
     let session_id = match receive(&mut connection, handshake_timeout).await? {
-      GatewayServerMessage::Ready { session_id, .. } => session_id,
+      GatewayServerMessage::Ready { session_id, .. } => {
+        self.trace_lap("identify answer");
+        session_id
+      },
       GatewayServerMessage::Error { error } => return Err(rejected(error)),
       other => {
         return Err(CoreError::Gateway(format!(
@@ -199,6 +249,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
     .await?;
     self.refresh_link_requests().await;
+    self.trace_lap("link requests");
+    self.trace_finish("fresh");
     Ok(GatewayStart {
       connection,
       outcome: GatewayOutcome::Fresh,
@@ -231,6 +283,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if let Err(error) = self.refresh_read_state().await {
       tracing::warn!(%error, "could not read the unread counts after resuming");
     }
+    self.trace_lap("read state");
     self.finish_connection().await
   }
 
@@ -241,6 +294,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if let Err(error) = self.refresh_known_presence().await {
       tracing::warn!(%error, "could not read presence after connecting");
     }
+    self.trace_lap("presence");
     read_state::update_marks(&self.store, |marks| {
       marks.connections += 1;
       // Meeting updates in between may have been lost.
@@ -276,8 +330,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.api.gateway_token()
   }
 
-  /// A new gateway connection after the server's `hello`, and the heartbeat interval it asked for.
-  async fn open_gateway(&self, handshake_timeout: Duration) -> Result<(A::Gateway, Duration), CoreError> {
+  /// A new gateway connection after the server's `hello`, with `first` (`identify` or `resume`)
+  /// sent, and the heartbeat interval the server asked for.
+  async fn open_gateway(
+    &self,
+    handshake_timeout: Duration,
+    first: &GatewayClientMessage,
+  ) -> Result<(A::Gateway, Duration), CoreError> {
     let opened = within(handshake_timeout, async {
       let mut connection = self.api.connect_gateway().await?;
       let hello = receive(&mut connection, handshake_timeout).await?;
@@ -286,11 +345,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     .await??;
     match opened {
       (
-        connection,
+        mut connection,
         GatewayServerMessage::Hello {
           heartbeat_interval_ms,
         },
-      ) => Ok((connection, Duration::from_millis(heartbeat_interval_ms))),
+      ) => {
+        connection.send(first).await?;
+        Ok((connection, Duration::from_millis(heartbeat_interval_ms)))
+      },
       (_, other) => Err(CoreError::Gateway(format!("expected hello, got {other:?}"))),
     }
   }
@@ -315,6 +377,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Applies one frame from the server.
   pub async fn handle_frame(&mut self, frame: GatewayServerMessage) -> Result<(), CoreError> {
+    self.maybe_last_heard_ms = Some(self.now_ms());
     match frame {
       GatewayServerMessage::Event { seq, event } => {
         self.handle_event(event).await?;
