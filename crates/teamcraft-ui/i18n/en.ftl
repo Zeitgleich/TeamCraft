@@ -64,11 +64,9 @@ rail-space-unread = { $name }, unread messages
 rail-chats-unread = Chats, { $count } unread
 rail-chats = Chats
 rail-activity = Activity
-rail-threads = Threads
+rail-activity-tip = Mentions of you, replies in threads you follow and reactions to your messages
 rail-activity-unread = Activity, { $count } unread
-rail-threads-unread = Threads, { $count } with unread replies
 rail-activity-mentions = Activity, { $count } unread, including mentions
-rail-threads-mentions = Threads, { $count } with unread replies, including mentions
 chats-title = Chats
 chats-filter = Filter chats
 home-filters = Show
@@ -213,13 +211,6 @@ date-jump-today = Today
 date-jump-yesterday = Yesterday
 date-jump-last-week = A week ago
 date-jump-pick = Pick a day
-threads-title = Threads
-threads-filter = Filter threads
-threads-all = All your threads
-threads-unread = Unreads
-threads-empty = Threads you start, reply to or follow show up here.
-threads-empty-title = No threads yet
-threads-select = Select a thread to read it here.
 
 ## Quick switcher
 switcher-title = Search
@@ -1973,11 +1964,24 @@ activity-filter = Filter activity
 activity-all = All
 activity-unread = Unread
 activity-mentions = Mentions
-activity-direct = DMs
 activity-threads = Threads
 activity-empty-title = You're all caught up
 activity-mark-read = Mark all as read
 activity-empty = Mentions, reactions to your messages and replies in your threads show up here.
+activity-reactions = Reactions
+activity-empty-mentions-title = No mentions
+activity-empty-mentions = When someone mentions you with @ in a channel or a chat, it shows up here.
+activity-empty-threads-title = No threads you follow
+activity-empty-threads = Threads you start, reply to or follow show up here, with their new replies.
+activity-empty-reactions-title = No reactions
+activity-empty-reactions = When someone reacts to one of your messages, it shows up here.
+activity-thread-new = { $count ->
+    [one] { $count } new reply in { $channel }, in a thread you follow
+   *[other] { $count } new replies in { $channel }, in a thread you follow
+  }
+activity-thread-quiet = A thread you follow in { $channel }
+activity-place-title = What happened while you were away
+activity-place-body = Choose an entry on the left to open it here: mentions of you, replies in threads you follow and reactions to your messages.
 activity-unread-mark = Unread
 activity-mentioned = { $name } mentioned you in { $channel }
 activity-reacted = { $name } reacted { $emoji } to your message in { $channel }

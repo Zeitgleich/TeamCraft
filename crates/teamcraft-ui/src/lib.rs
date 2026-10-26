@@ -13,6 +13,7 @@ compile_error!(
 // The backend traits and view models live in `teamcraft-client-api`; the old paths keep working.
 pub use teamcraft_client_api::{admin, backend, model, search, security};
 
+pub mod activity_place;
 pub mod admin_live;
 pub mod areas;
 pub mod attention;

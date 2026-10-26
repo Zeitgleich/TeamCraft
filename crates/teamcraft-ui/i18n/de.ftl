@@ -64,11 +64,9 @@ rail-space-unread = { $name }, ungelesene Nachrichten
 rail-chats-unread = Chats, { $count } ungelesen
 rail-chats = Chats
 rail-activity = Aktivität
-rail-threads = Threads
+rail-activity-tip = Erwähnungen, Antworten in Threads, denen du folgst, und Reaktionen auf deine Nachrichten
 rail-activity-unread = Aktivität, { $count } ungelesen
-rail-threads-unread = Threads, { $count } mit ungelesenen Antworten
 rail-activity-mentions = Aktivität, { $count } ungelesen, auch Erwähnungen
-rail-threads-mentions = Threads, { $count } mit ungelesenen Antworten, auch Erwähnungen
 chats-title = Chats
 chats-filter = Chats filtern
 home-filters = Anzeigen
@@ -213,13 +211,6 @@ date-jump-yesterday = Gestern
 date-jump-last-week = Vor einer Woche
 date-jump-pick = Tag wählen
 thread-replies-divider = Antworten
-threads-title = Threads
-threads-filter = Threads filtern
-threads-all = Alle deine Threads
-threads-unread = Ungelesen
-threads-empty = Threads, die du beginnst, beantwortest oder verfolgst, erscheinen hier.
-threads-empty-title = Noch keine Threads
-threads-select = Wähle einen Thread, um ihn hier zu lesen.
 
 ## Schnellwechsler
 switcher-title = Suche
@@ -1973,11 +1964,24 @@ activity-filter = Aktivität filtern
 activity-all = Alle
 activity-unread = Ungelesen
 activity-mentions = Erwähnungen
-activity-direct = Direktnachrichten
 activity-threads = Threads
 activity-empty-title = Alles erledigt
 activity-mark-read = Alle als gelesen markieren
 activity-empty = Erwähnungen, Reaktionen auf deine Nachrichten und Antworten in deinen Threads erscheinen hier.
+activity-reactions = Reaktionen
+activity-empty-mentions-title = Keine Erwähnungen
+activity-empty-mentions = Wenn dich jemand in einem Kanal oder Chat mit @ erwähnt, erscheint das hier.
+activity-empty-threads-title = Keine Threads, denen du folgst
+activity-empty-threads = Threads, die du beginnst, in denen du antwortest oder denen du folgst, erscheinen hier mit ihren neuen Antworten.
+activity-empty-reactions-title = Keine Reaktionen
+activity-empty-reactions = Wenn jemand auf eine deiner Nachrichten reagiert, erscheint das hier.
+activity-thread-new = { $count ->
+    [one] { $count } neue Antwort in { $channel }, in einem Thread, dem du folgst
+   *[other] { $count } neue Antworten in { $channel }, in einem Thread, dem du folgst
+  }
+activity-thread-quiet = Thread in { $channel }, dem du folgst
+activity-place-title = Was passiert ist, während du weg warst
+activity-place-body = Wähle links einen Eintrag, um ihn hier zu öffnen: Erwähnungen, Antworten in Threads, denen du folgst, und Reaktionen auf deine Nachrichten.
 activity-unread-mark = Ungelesen
 activity-mentioned = { $name } hat dich in { $channel } erwähnt
 activity-reacted = { $name } hat mit { $emoji } auf deine Nachricht in { $channel } reagiert
