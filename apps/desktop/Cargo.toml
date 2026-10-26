@@ -137,3 +137,6 @@ integration = []
 reqwest = { workspace = true, features = ["cookies"] }
 # Tests encode and decode without downloading Cisco's OpenH264 (release builds load that instead).
 teamcraft-media = { path = "../../crates/teamcraft-media", features = ["openh264-source"] }
+# The media task's tests run a real call against a local SFU (as the SFU's own call tests do).
+teamcraft-sfu = { path = "../../crates/teamcraft-sfu" }
+wtransport = { version = "0.7.2", features = ["self-signed"] }

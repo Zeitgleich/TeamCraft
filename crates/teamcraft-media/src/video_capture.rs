@@ -62,6 +62,9 @@ pub enum CaptureError {
   NoDevice(&'static str),
   #[error("the user or the system denied access to the {0}")]
   Denied(&'static str),
+  /// The user closed the picker (screen or window) without choosing: nothing to report.
+  #[error("the {0} choice was cancelled")]
+  Cancelled(&'static str),
   #[error("capture: {0}")]
   Device(String),
   #[error("unsupported pixel format {0}")]

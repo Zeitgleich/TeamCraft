@@ -346,6 +346,7 @@ mod tests {
         maybe_organization: None,
         maybe_has_devices: None,
         is_deactivated,
+        is_deleted: false,
       })
       .collect();
     ConversationResponse {

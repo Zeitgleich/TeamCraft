@@ -145,6 +145,11 @@ pub enum CallFailure {
   CameraUnsupported,
   /// The screen could not be shared (not offered by the browser, or refused by a policy).
   ScreenUnavailable,
+  /// The camera started, but no picture of it could be sent (it delivered nothing, or nothing
+  /// could be encoded).
+  CameraNoPicture,
+  /// The screen share started, but no picture of it could be sent.
+  ScreenNoPicture,
   /// The browser lacks what calls need (WebTransport, WebCodecs, AudioWorklet).
   Unsupported,
   /// The call server (SFU) can't be reached, while the chat server can: often a network that
@@ -169,7 +174,7 @@ pub enum CallFailure {
 }
 
 impl CallFailure {
-  const ALL: [Self; 16] = [
+  const ALL: [Self; 18] = [
     Self::MicrophoneDenied,
     Self::MicrophoneMissing,
     Self::MicrophoneInUse,
@@ -178,6 +183,8 @@ impl CallFailure {
     Self::CameraInUse,
     Self::CameraUnsupported,
     Self::ScreenUnavailable,
+    Self::CameraNoPicture,
+    Self::ScreenNoPicture,
     Self::Unsupported,
     Self::ServerUnreachable,
     Self::BackgroundRequired,
@@ -199,6 +206,8 @@ impl CallFailure {
       Self::CameraInUse => "camera_in_use",
       Self::CameraUnsupported => "camera_unsupported",
       Self::ScreenUnavailable => "screen_unavailable",
+      Self::CameraNoPicture => "camera_no_picture",
+      Self::ScreenNoPicture => "screen_no_picture",
       Self::Unsupported => "unsupported",
       Self::ServerUnreachable => "server_unreachable",
       Self::BackgroundRequired => "background_required",
