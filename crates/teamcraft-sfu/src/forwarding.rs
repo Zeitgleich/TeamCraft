@@ -35,10 +35,8 @@ use thiserror::Error;
 use crate::layers::{LayerAllocationConfig, LayerAllocator, TrackDemand, full_demand_bps};
 use crate::speakers::{SpeakerSelectionConfig, SpeakerSelector};
 
-/// Keyframe requests per track and layer are sent at most this often.
 /// Video tracks (camera, screen share) one participant may publish at the same time.
 const MAX_VIDEO_TRACKS_PER_PARTICIPANT: usize = 4;
-const KEYFRAME_REQUEST_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Routing state of one room.
 #[derive(Debug)]
@@ -56,6 +54,18 @@ pub struct ForwardingConfig {
   pub speakers: SpeakerSelectionConfig,
   pub layers: LayerAllocationConfig,
   pub bwe: BweConfig,
+  pub keyframes: KeyframeRequestConfig,
+}
+
+/// How often publishers are asked for keyframes. Keyframes are large: a receiver that keeps
+/// losing pictures must not turn a track into keyframes only.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KeyframeRequestConfig {
+  /// One request per track and layer at most this often, whoever asks (layer switches,
+  /// subscriptions, receivers' requests).
+  pub per_layer_interval: Duration,
+  /// One request per receiver and track at most this often ([`Forwarder::request_keyframe`]).
+  pub per_receiver_interval: Duration,
 }
 
 /// What to do with one incoming datagram.
@@ -122,6 +132,8 @@ struct VideoSubscription {
   target: Option<u8>,
   /// Layer being forwarded; changes to `target` on a keyframe.
   current: Option<u8>,
+  /// When this receiver last asked for a keyframe of the track.
+  maybe_last_request: Option<Instant>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -144,6 +156,15 @@ pub enum ForwardError {
   Rtp(#[from] RtpError),
   #[error("invalid video fragment: {0}")]
   Fragment(#[from] FragmentError),
+}
+
+impl Default for KeyframeRequestConfig {
+  fn default() -> Self {
+    Self {
+      per_layer_interval: Duration::from_millis(500),
+      per_receiver_interval: Duration::from_secs(1),
+    }
+  }
 }
 
 impl Forwarder {
@@ -237,6 +258,7 @@ impl Forwarder {
     for stream_id in &owned {
       self.video_tracks.remove(stream_id);
     }
+    self.forget_keyframe_requests();
     let subscribed: Vec<StreamId> = self
       .video_tracks
       .iter_mut()
@@ -356,6 +378,7 @@ impl Forwarder {
       return Err(ForwardError::ForeignStream(stream_id));
     }
     self.video_tracks.remove(&stream_id);
+    self.forget_keyframe_requests();
     Ok(())
   }
 
@@ -388,6 +411,7 @@ impl Forwarder {
           max_layer,
           target: None,
           current: None,
+          maybe_last_request: None,
         });
         subscription.max_layer = max_layer;
       },
@@ -396,8 +420,41 @@ impl Forwarder {
       },
     }
     let mut effects = self.reallocate(receiver, now);
+    // Subscribing again (a video shown anew) brings a new decoder that needs a keyframe, also
+    // when the layer stays the same and the allocation asked for none.
+    if let Some((publisher, layer)) = self.received_layer(receiver, stream_id) {
+      effects.extend(self.keyframe_request(publisher, stream_id, layer, now));
+    }
     effects.extend(self.update_layers_needed(stream_id));
     Ok(effects)
+  }
+
+  /// `receiver` can't decode `stream_id` until its next keyframe (a lost fragment, a frame that
+  /// didn't decrypt, a failed decoder): asks the publisher for one on the layer the receiver
+  /// gets. Rate-limited per receiver and per layer; nothing for a track it doesn't receive.
+  pub fn request_keyframe(&mut self, receiver: DeviceId, stream_id: StreamId, now: Instant) -> Vec<Effect> {
+    let interval = self.config.keyframes.per_receiver_interval;
+    let Some(subscription) = self
+      .video_tracks
+      .get_mut(&stream_id)
+      .and_then(|route| route.subscribers.get_mut(&receiver))
+    else {
+      return Vec::new();
+    };
+    let is_due = subscription
+      .maybe_last_request
+      .is_none_or(|last| now.saturating_duration_since(last) >= interval);
+    if !is_due {
+      return Vec::new();
+    }
+    subscription.maybe_last_request = Some(now);
+    let Some((publisher, layer)) = self.received_layer(receiver, stream_id) else {
+      return Vec::new();
+    };
+    self
+      .keyframe_request(publisher, stream_id, layer, now)
+      .into_iter()
+      .collect()
   }
 
   /// Decides where one datagram from `sender` goes.
@@ -608,24 +665,54 @@ impl Forwarder {
       match target {
         None => subscription.current = None,
         Some(layer) if subscription.current != Some(layer) => {
-          let key = (stream_id, layer);
-          let is_due = self
-            .last_keyframe_requests
-            .get(&key)
-            .is_none_or(|last| now.saturating_duration_since(*last) >= KEYFRAME_REQUEST_INTERVAL);
-          if is_due {
-            self.last_keyframe_requests.insert(key, now);
-            effects.push(Effect::KeyframeRequest {
-              publisher: route.track.device_id,
-              stream_id,
-              layer,
-            });
-          }
+          let publisher = route.track.device_id;
+          effects.extend(self.keyframe_request(publisher, stream_id, layer, now));
         },
         Some(_) => {},
       }
     }
     effects
+  }
+
+  /// The publisher of `stream_id` and the layer `receiver` gets (or is about to get) of it.
+  fn received_layer(&self, receiver: DeviceId, stream_id: StreamId) -> Option<(DeviceId, u8)> {
+    let route = self.video_tracks.get(&stream_id)?;
+    let subscription = route.subscribers.get(&receiver)?;
+    let layer = subscription.current.or(subscription.target)?;
+    Some((route.track.device_id, layer))
+  }
+
+  /// Asks `publisher` for a keyframe on `layer`, unless one was asked for within the interval.
+  fn keyframe_request(
+    &mut self,
+    publisher: DeviceId,
+    stream_id: StreamId,
+    layer: u8,
+    now: Instant,
+  ) -> Option<Effect> {
+    let interval = self.config.keyframes.per_layer_interval;
+    let key = (stream_id, layer);
+    let is_due = self
+      .last_keyframe_requests
+      .get(&key)
+      .is_none_or(|last| now.saturating_duration_since(*last) >= interval);
+    if !is_due {
+      return None;
+    }
+    self.last_keyframe_requests.insert(key, now);
+    Some(Effect::KeyframeRequest {
+      publisher,
+      stream_id,
+      layer,
+    })
+  }
+
+  /// Drops the request times of tracks that are gone, so the map stays as small as the room.
+  fn forget_keyframe_requests(&mut self) {
+    let tracks = &self.video_tracks;
+    self
+      .last_keyframe_requests
+      .retain(|(stream_id, _), _| tracks.contains_key(stream_id));
   }
 
   fn update_layers_needed(&mut self, stream_id: StreamId) -> Option<Effect> {
@@ -826,11 +913,89 @@ mod tests {
     }
 
     #[test]
+    fn a_receivers_request_reaches_the_publisher_on_its_layer_rate_limited() {
+      let (mut forwarder, now) = video_room();
+      forwarder.subscribe(device(2), VIDEO, Some(0), now).unwrap();
+      send_frame(&mut forwarder, 0, true, now);
+      let later = now + Duration::from_secs(2);
+      // A lost fragment: the receiver can't decode until the next keyframe.
+      assert_eq!(
+        forwarder.request_keyframe(device(2), VIDEO, later),
+        vec![keyframe_request(0)]
+      );
+      // Asking again at once does nothing: keyframes are large.
+      let soon = later + Duration::from_millis(300);
+      assert!(forwarder.request_keyframe(device(2), VIDEO, soon).is_empty());
+      let after_interval = later + KeyframeRequestConfig::default().per_receiver_interval;
+      assert_eq!(
+        forwarder.request_keyframe(device(2), VIDEO, after_interval),
+        vec![keyframe_request(0)]
+      );
+    }
+
+    #[test]
+    fn requests_for_tracks_not_received_do_nothing() {
+      let (mut forwarder, now) = video_room();
+      assert!(forwarder.request_keyframe(device(2), VIDEO, now).is_empty());
+      assert!(
+        forwarder
+          .request_keyframe(device(2), StreamId(999), now)
+          .is_empty()
+      );
+    }
+
+    #[test]
+    fn subscribing_again_with_the_same_layer_asks_for_a_keyframe() {
+      let (mut forwarder, now) = video_room();
+      forwarder.subscribe(device(2), VIDEO, Some(0), now).unwrap();
+      send_frame(&mut forwarder, 0, true, now);
+      // The video was shown anew: same layer, so no switch, but a new decoder.
+      let later = now + Duration::from_secs(2);
+      let effects = forwarder.subscribe(device(2), VIDEO, Some(0), later).unwrap();
+      assert!(effects.contains(&keyframe_request(0)), "{effects:?}");
+      // Still forwarded on the layer it had: nothing waits for a switch.
+      assert_eq!(send_frame(&mut forwarder, 0, false, later), devices(&[2]));
+    }
+
+    #[test]
+    fn requests_of_two_receivers_on_one_layer_are_merged() {
+      // Device 3 of the test room decodes no AV1: four participants, 2 and 4 receive.
+      let (mut forwarder, now) = room(4);
+      forwarder
+        .publish_video(
+          device(1),
+          VIDEO,
+          VideoTrackKind::Camera,
+          VideoCodec::Av1,
+          three_layers(),
+        )
+        .unwrap();
+      forwarder.subscribe(device(2), VIDEO, Some(0), now).unwrap();
+      forwarder.subscribe(device(4), VIDEO, Some(0), now).unwrap();
+      send_frame(&mut forwarder, 0, true, now);
+      let later = now + Duration::from_secs(2);
+      assert_eq!(
+        forwarder.request_keyframe(device(2), VIDEO, later),
+        vec![keyframe_request(0)]
+      );
+      // The keyframe on its way serves both.
+      assert!(forwarder.request_keyframe(device(4), VIDEO, later).is_empty());
+    }
+
+    #[test]
     fn publisher_leaving_removes_the_track() {
       let (mut forwarder, now) = video_room();
       let removal = forwarder.remove_participant(device(1), now);
       assert_eq!(removal.video_tracks, vec![VIDEO]);
       assert!(forwarder.video_tracks().is_empty());
+    }
+
+    fn keyframe_request(layer: u8) -> Effect {
+      Effect::KeyframeRequest {
+        publisher: device(1),
+        stream_id: VIDEO,
+        layer,
+      }
     }
   }
 
