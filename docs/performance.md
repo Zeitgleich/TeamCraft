@@ -563,6 +563,17 @@ module (each chunk imports what it uses from the app, which keeps those function
 156 requests instead of one; in exchange a guest loads half and everything an area alone uses
 waits until it opens.
 
+Back under the budget (#695): the quick switcher, the keyboard shortcuts, the inline video player and
+the dialogs a first visit doesn't open (forward, edit history, bookmarks, share link, verifying a key
+or a contact) moved into areas. Release `trunk build` in the local CI image, gzip -9:
+
+| Web wasm       | Before (`a8778a26`) | After       | Delta     |
+|----------------|---------------------|-------------|-----------|
+| App            | 2,356,306 B         | 2,358,852 B | +2,546 B  |
+| Signed-in app  | 1,999,066 B         | 1,936,659 B | −62,407 B |
+| Service worker | 375,193 B           | 375,193 B   | 0 B       |
+| Total          | 4,730,565 B         | 4,670,704 B | −59,861 B |
+
 Release `trunk build` in the CI image (Rust 1.99.1, trunk 0.22.0, wasm-opt 131), `main` c55b2e58:
 
 | Web wasm       | Uncompressed | gzip -9     | brotli -11  |
