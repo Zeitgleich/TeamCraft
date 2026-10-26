@@ -82,6 +82,14 @@ struct MessageExtras: Decodable, Equatable, Sendable {
   let isSaved: Bool?
   /// Earlier versions, oldest first (empty if never edited).
   let edits: [MessageEdit]?
+  /// Deleted for everyone: a placeholder instead of the body.
+  let isDeleted: Bool?
+  let maybeForwarded: ForwardedFrom?
+}
+
+/// Where a forwarded message came from.
+struct ForwardedFrom: Decodable, Equatable, Sendable {
+  let authorName: String
 }
 
 /// The quoted message of a reply, as much as the reader can see of it.

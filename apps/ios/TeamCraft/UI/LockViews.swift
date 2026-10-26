@@ -107,78 +107,65 @@ struct DeviceSecuritySection: View {
 }
 
 /// A thin bar while the app can't reach the server: the device is offline, the server is unreachable
-/// although the device is online, or the session expired. Follows the core's connection state; new
-/// messages wait, sent ones stay in the outbox.
+/// although the device is online, or the session expired. The screens show the local store
+/// meanwhile; new messages wait, sent ones stay in the outbox. A connection that comes back within
+/// the grace period never shows the bar (`ConnectionNotice`, issue #713).
 struct OfflineBanner: View {
   @Environment(AppModel.self) private var model
   private let network = NetworkMonitor.shared
-  @State private var maybeConnectingSince: Date?
-
-  /// "Connecting" only shows when it takes longer than this; a quick reconnect needs no banner.
-  private static let connectingGrace: TimeInterval = 3
 
   var body: some View {
-    TimelineView(.periodic(from: .now, by: 1)) { timeline in
-      if let notice = notice(at: timeline.date) {
-        HStack {
-          notice.text
-            .font(.footnote)
-            .foregroundStyle(Theme.danger)
-            .frame(maxWidth: .infinity, alignment: .leading)
-          if let action = notice.action {
-            Button(action.label, action: action.run)
-              .font(.footnote.weight(.semibold))
-          }
-        }
-        .padding(.horizontal).padding(.vertical, 6)
-        .background(Theme.danger.opacity(0.12))
+    // A clock only while the connection is down: a connected app doesn't wake up every second.
+    if ConnectionNotice.isDown(isOnline: network.isOnline, connection: model.connection) {
+      TimelineView(.periodic(from: .now, by: 1)) { timeline in
+        bar(at: timeline.date)
       }
-    }
-    .onChange(of: model.connection, initial: true) { _, connection in
-      if case .connecting = connection {
-        if maybeConnectingSince == nil { maybeConnectingSince = .now }
-      } else {
-        maybeConnectingSince = nil
-      }
+    } else {
+      bar(at: .now)
     }
   }
 
-  private struct Notice {
-    let text: Text
-    let action: Action?
-  }
-
-  private struct Action {
-    let label: LocalizedStringKey
-    let run: () -> Void
-  }
-
-  private func notice(at now: Date) -> Notice? {
-    if !network.isOnline { return Notice(text: Text("offline_banner"), action: nil) }
-    switch model.connection {
-    case .offline(let retryAtMs, let maybeInterception):
-      let seconds = max(0, Int((Double(retryAtMs) / 1000 - now.timeIntervalSince1970).rounded(.up)))
-      let text: Text =
-        switch maybeInterception {
-        case .captivePortal: Text("connection_captive_portal \(seconds)")
-        case .untrustedCertificate: Text("connection_untrusted_certificate \(seconds)")
-        case nil: Text("connection_unreachable \(seconds)")
+  @ViewBuilder
+  private func bar(at now: Date) -> some View {
+    if let notice = ConnectionNotice.current(
+      isOnline: network.isOnline, connection: model.connection, grace: model.connectionGrace, now: now)
+    {
+      HStack {
+        text(of: notice)
+          .font(.footnote)
+          .foregroundStyle(Theme.danger)
+          .frame(maxWidth: .infinity, alignment: .leading)
+        switch notice {
+        case .unreachable:
+          Button("connection_retry") { model.networkChanged() }
+            .font(.footnote.weight(.semibold))
+        case .signInRequired:
+          Button("connection_sign_in_action") { Task { await model.signOut() } }
+            .font(.footnote.weight(.semibold))
+        case .deviceOffline, .connecting:
+          EmptyView()
         }
-      return Notice(
-        text: text,
-        action: Action(label: "connection_retry") { model.networkChanged() })
-    case .signInRequired:
-      return Notice(
-        text: Text("connection_sign_in"),
-        action: Action(label: "connection_sign_in_action") { Task { await model.signOut() } })
+      }
+      .padding(.horizontal).padding(.vertical, 6)
+      .background(Theme.danger.opacity(0.12))
+      .accessibilityElement(children: .combine)
+    }
+  }
+
+  private func text(of notice: ConnectionNotice) -> Text {
+    switch notice {
+    case .deviceOffline:
+      return Text("offline_banner")
     case .connecting:
-      guard let since = maybeConnectingSince, now.timeIntervalSince(since) >= Self.connectingGrace
-      else {
-        return nil
+      return Text("connection_connecting")
+    case .unreachable(let seconds, let maybeInterception):
+      switch maybeInterception {
+      case .captivePortal: return Text("connection_captive_portal \(seconds)")
+      case .untrustedCertificate: return Text("connection_untrusted_certificate \(seconds)")
+      case nil: return Text("connection_unreachable \(seconds)")
       }
-      return Notice(text: Text("connection_connecting"), action: nil)
-    case .connected, nil:
-      return nil
+    case .signInRequired:
+      return Text("connection_sign_in")
     }
   }
 }
