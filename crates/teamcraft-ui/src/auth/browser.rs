@@ -253,8 +253,10 @@ impl BrowserAuth {
         Ok(())
       },
       Err(error) => {
-        // An expired or revoked refresh token ends the session; other errors may be transient.
-        if matches!(error, RequestTokenError::ServerResponse(_)) {
+        // Only an expired, revoked or reused refresh token (`invalid_grant`) ends the session;
+        // other answers (`temporarily_unavailable`, `server_error`) and network errors keep it for
+        // the next try (issue #667).
+        if is_session_over(&error) {
           self.tokens.replace(None);
           if is_shared {
             token_vault::forget().await;
@@ -656,6 +658,15 @@ async fn http_client(request: oauth2::HttpRequest) -> Result<oauth2::HttpRespons
 
 type TokenError =
   RequestTokenError<HttpError, oauth2::StandardErrorResponse<oauth2::basic::BasicErrorResponseType>>;
+
+/// The provider refused the refresh token itself (`invalid_grant`): the session is over.
+fn is_session_over(error: &TokenError) -> bool {
+  matches!(
+    error,
+    RequestTokenError::ServerResponse(response)
+      if *response.error() == oauth2::basic::BasicErrorResponseType::InvalidGrant
+  )
+}
 
 fn map_token_error(error: TokenError) -> AuthError {
   match error {

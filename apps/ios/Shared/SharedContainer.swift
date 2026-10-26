@@ -73,6 +73,13 @@ struct SharedContainer {
     return containerRoot.appendingPathComponent("process.lock")
   }
 
+  /// The lock both processes take to refresh the access token (see `SessionVault`): with
+  /// refresh-token rotation a refresh token used twice ends the whole session (issue #667).
+  var refreshLockFileURL: URL {
+    _ = serversDirectory
+    return containerRoot.appendingPathComponent("token-refresh.lock")
+  }
+
   /// Settings both processes read (which server and account are signed in).
   var defaults: UserDefaults {
     ServerStore.sharedDefaults(environment: environment)

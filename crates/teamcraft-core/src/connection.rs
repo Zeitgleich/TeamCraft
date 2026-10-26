@@ -21,6 +21,7 @@ use crate::api::{ApiError, GatewayConnection, Interception, ServerApi};
 use crate::client::{Client, GatewayOutcome, GatewayTiming, HeldFrames, HeldLimits, keep_alive};
 use crate::error::CoreError;
 use crate::store::LocalStore;
+use teamcraft_proto::SignInReason;
 
 /// Where the gateway connection stands. The shells show it ("connecting", "offline, retrying at",
 /// "sign in again") instead of guessing from the operating system's connectivity: a device can be
@@ -39,9 +40,12 @@ pub enum ConnectionState {
     #[serde(rename = "interception", default, skip_serializing_if = "Option::is_none")]
     maybe_interception: Option<Interception>,
   },
-  /// The server refused the access token. Tried again when the app has another token, or when the
-  /// network changes.
-  SignInRequired,
+  /// The server refused the access token, for `reason` if it said. Tried again when the app has
+  /// another token, or when the network changes.
+  SignInRequired {
+    #[serde(default, skip_serializing_if = "SignInReason::is_unknown")]
+    reason: SignInReason,
+  },
 }
 
 /// Timing of the supervisor. The defaults suit every shell.
@@ -226,7 +230,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
   pub fn next_deadline_ms(&self) -> Option<i64> {
     if self.maybe_gateway.is_none() {
       return match self.state() {
-        ConnectionState::SignInRequired => None,
+        ConnectionState::SignInRequired { .. } => None,
         _ => Some(self.next_attempt_ms),
       };
     }
@@ -277,7 +281,14 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
       Err(error) if error.is_sign_in_required() => {
         tracing::warn!(%error, "the gateway refused the access token");
         self.maybe_refused_token = token_fingerprint(client);
-        self.set_state(ConnectionState::SignInRequired);
+        let reason = match &error {
+          CoreError::Api(api) => api
+            .error_code()
+            .map(SignInReason::from_error_code)
+            .unwrap_or_default(),
+          _ => SignInReason::Unknown,
+        };
+        self.set_state(ConnectionState::SignInRequired { reason });
         None
       },
       Err(error) => {
@@ -434,7 +445,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     }
     self.maybe_refused_token = None;
     self.next_attempt_ms = now_ms;
-    if self.state() == ConnectionState::SignInRequired {
+    if matches!(self.state(), ConnectionState::SignInRequired { .. }) {
       self.set_state(ConnectionState::Offline {
         retry_at_ms: now_ms,
         maybe_interception: None,
@@ -459,7 +470,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
   fn is_attempt_due<A: ServerApi, S: LocalStore>(&self, client: &Client<A, S>) -> bool {
     match self.state() {
       // Only another token can change the answer.
-      ConnectionState::SignInRequired => token_fingerprint(client) != self.maybe_refused_token,
+      ConnectionState::SignInRequired { .. } => token_fingerprint(client) != self.maybe_refused_token,
       _ => client.now_ms() >= self.next_attempt_ms,
     }
   }
@@ -540,7 +551,7 @@ impl From<ConnectionState> for teamcraft_client_api::remote::CoreConnection {
           },
         }),
       },
-      ConnectionState::SignInRequired => Self::SignInRequired,
+      ConnectionState::SignInRequired { reason } => Self::SignInRequired { reason },
     }
   }
 }
@@ -624,7 +635,18 @@ mod tests {
       portal,
       Some(serde_json::json!({ "state": "offline", "retry_at_ms": 5, "interception": "captive_portal" }))
     );
-    let sign_in = serde_json::to_value(ConnectionState::SignInRequired).ok();
+    let sign_in = serde_json::to_value(ConnectionState::SignInRequired {
+      reason: SignInReason::Unknown,
+    })
+    .ok();
     assert_eq!(sign_in, Some(serde_json::json!({ "state": "sign_in_required" })));
+    let ended = serde_json::to_value(ConnectionState::SignInRequired {
+      reason: SignInReason::SessionEnded,
+    })
+    .ok();
+    assert_eq!(
+      ended,
+      Some(serde_json::json!({ "state": "sign_in_required", "reason": "session_ended" }))
+    );
   }
 }

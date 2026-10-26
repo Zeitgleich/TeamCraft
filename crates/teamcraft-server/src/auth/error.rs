@@ -8,6 +8,13 @@ pub enum AuthError {
   /// someone guessing. Same answer on the wire as [`Self::InvalidToken`].
   #[error("invalid token: {0}")]
   Expired(String),
+  /// The session was ended before its token ran out: signed out at the identity provider
+  /// (back-channel logout), on another device, or by a password change. Clients say so.
+  #[error("the session has ended")]
+  SessionEnded,
+  /// The session policy's idle timeout or longest session ran out (admin console, security).
+  #[error("the session timed out; sign in again")]
+  SessionTimedOut,
   #[error("the user has none of the TeamCraft roles")]
   NoTeamcraftRole,
   #[error("the account is deactivated")]
@@ -33,6 +40,8 @@ mod tests {
     assert!(AuthError::MissingToken.is_guess());
     assert!(AuthError::InvalidToken("bad signature".into()).is_guess());
     assert!(!AuthError::Expired("token expired".into()).is_guess());
+    assert!(!AuthError::SessionEnded.is_guess());
+    assert!(!AuthError::SessionTimedOut.is_guess());
     assert!(!AuthError::NoTeamcraftRole.is_guess());
     assert!(!AuthError::AccountDeactivated.is_guess());
     assert!(!AuthError::KeysUnavailable("down".into()).is_guess());

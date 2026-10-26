@@ -683,7 +683,7 @@ impl From<teamcraft_core::connection::ConnectionState> for ConnectionState {
           Interception::UntrustedCertificate => NetworkInterception::UntrustedCertificate,
         }),
       },
-      Core::SignInRequired => Self::SignInRequired,
+      Core::SignInRequired { .. } => Self::SignInRequired,
     }
   }
 }

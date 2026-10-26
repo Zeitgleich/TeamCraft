@@ -145,4 +145,10 @@ final class OidcTests: XCTestCase {
     XCTAssertFalse(session.isFresh(leeway: 30, now: now))
     XCTAssertTrue(session.isFresh(leeway: 10, now: now))
   }
+
+  func testOnlyARefusedGrantEndsTheSession() {
+    XCTAssertTrue(OidcClient.isInvalidGrant(Data(#"{"error":"invalid_grant"}"#.utf8)))
+    XCTAssertFalse(OidcClient.isInvalidGrant(Data(#"{"error":"temporarily_unavailable"}"#.utf8)))
+    XCTAssertFalse(OidcClient.isInvalidGrant(Data("<html>".utf8)))
+  }
 }

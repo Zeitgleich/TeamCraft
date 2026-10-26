@@ -260,8 +260,10 @@ class AuthRepository(
 
   private suspend fun refresh(session: Session, current: AuthState): String? =
     suspendCancellableCoroutine { continuation ->
+      // AppAuth runs one refresh per AuthState and hands its result to every caller waiting
+      // meanwhile, so the engine and other threads never use a rotated refresh token twice.
       current.performActionWithFreshTokens(session.service) { accessToken, _, exception ->
-        if (exception != null && exception.type == AuthorizationException.TYPE_OAUTH_TOKEN_ERROR) {
+        if (exception != null && isRefreshTokenRefused(exception)) {
           // The refresh token is no longer valid: the user has to sign in again.
           signOut(session)
         } else {
@@ -349,6 +351,14 @@ class AuthRepository(
   }
 
   private companion object {
+    /**
+     * Only `invalid_grant` (an expired, revoked or reused refresh token) ends the session; any
+     * other answer of the provider and network errors keep it for the next try (issue #667).
+     */
+    fun isRefreshTokenRefused(exception: AuthorizationException): Boolean =
+      exception.type == AuthorizationException.TYPE_OAUTH_TOKEN_ERROR &&
+        exception.error == AuthorizationException.TokenRequestErrors.INVALID_GRANT.error
+
     const val SESSION_KEY_ALIAS = "teamcraft_session"
     const val REFRESH_TIMEOUT_SECONDS = 10L
   }

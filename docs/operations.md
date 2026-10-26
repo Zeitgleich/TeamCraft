@@ -322,6 +322,31 @@ token without `sid` ends all sessions of the user (OIDC Back-Channel Logout 1.0 
 
 (¹) With it, a sign-in on one device ends the oldest session of the user, another device's.
 
+**Signed out too often?** (issue #667) Each app runs exactly one token refresh at a time per server
+and account and hands its result to everyone waiting: the browser's tabs through a Web Lock and the
+shared token vault, the desktop app in its shell (the core only reads the token), iOS across the app
+and its notification extension through a lock file in the App Group, Android in its process. A
+refresh token is only dropped when the provider answers `invalid_grant`; network errors and other
+answers (`temporarily_unavailable`, `server_error`) keep it for the next try. When the session
+really ends the apps say why: signed out at the provider or on another device (`session_ended`,
+usually a back-channel logout), or the workspace's session policy timed it out
+(`session_timed_out`, Admin → Security → session length and idle timeout).
+
+Recommended provider settings (Keycloak):
+
+| Setting                                                | Recommendation                                                                                     |
+|--------------------------------------------------------|----------------------------------------------------------------------------------------------------|
+| Client scopes → `offline_access`                       | Assigned to the client (optional is enough); without it devices fall back to browser sessions      |
+| Realm settings → Sessions → Offline session idle       | At least 30 days (default); how long an unused device stays signed in                              |
+| Realm settings → Sessions → Offline session max        | Off, or as long as the organization's policy wants a sign-in at most                               |
+| Realm settings → Tokens → Revoke Refresh Token         | Off, or on with "Refresh token max reuse" at least 1: a reused token then doesn't end the session  |
+| Realm settings → Tokens → Access token lifespan        | 5 to 15 minutes; the apps refresh a minute ahead                                                   |
+
+To find out why someone was signed out: the client log names the error code (`session_ended`,
+`session_timed_out`, or a refresh refused with `invalid_grant`); the server logs back-channel logouts
+and the audit log records them (`oidc_backchannel_logout`); Keycloak's events (Realm settings →
+Events, "Save events" on) show `REFRESH_TOKEN_ERROR` with `invalid_refresh_token` for a reused token.
+
 Up to 1.0.3 the server ended every session of the user on any back-channel logout, since Keycloak
 names the subject in each logout token as well: signing out (or "sign in again", which signs out
 first) on one device signed the others out. To end all sessions of a user, sign them out in the

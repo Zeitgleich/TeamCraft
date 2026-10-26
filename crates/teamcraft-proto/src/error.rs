@@ -9,6 +9,11 @@ wire_enum! {
     InvalidRequest => "invalid_request",
     Unauthorized => "unauthorized",
     InvalidToken => "invalid_token",
+    /// The session was ended before its token ran out (signed out at the identity provider or on
+    /// another device). Like `invalid_token`, but the client can say why.
+    SessionEnded => "session_ended",
+    /// The session policy's idle timeout or longest session ran out.
+    SessionTimedOut => "session_timed_out",
     NoTeamcraftRole => "no_teamcraft_role",
     /// The account is deactivated (suspended by an admin or the identity provider); signing in is
     /// refused until it is reactivated.
@@ -64,6 +69,35 @@ wire_enum! {
     BrandNotFound => "brand_not_found",
     Internal => "internal",
     Unavailable => "unavailable",
+  }
+}
+
+/// Why a client has to sign in again, as far as the server said (issue #667), so the app can tell
+/// the user instead of showing a bare sign-in screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignInReason {
+  /// Signed out at the identity provider or on another device.
+  SessionEnded,
+  /// The session policy's idle timeout or longest session ran out.
+  SessionTimedOut,
+  /// The token was refused without a reason (expired, invalid), or by an older server.
+  #[default]
+  #[serde(other)]
+  Unknown,
+}
+
+impl SignInReason {
+  pub fn from_error_code(code: &ErrorCode) -> Self {
+    match code {
+      ErrorCode::SessionEnded => Self::SessionEnded,
+      ErrorCode::SessionTimedOut => Self::SessionTimedOut,
+      _ => Self::Unknown,
+    }
+  }
+
+  pub fn is_unknown(&self) -> bool {
+    *self == Self::Unknown
   }
 }
 
@@ -134,6 +168,26 @@ mod tests {
   }
 
   #[test]
+  fn sign_in_reasons_come_from_the_error_code_and_tolerate_new_ones() {
+    assert_eq!(
+      SignInReason::from_error_code(&ErrorCode::SessionEnded),
+      SignInReason::SessionEnded
+    );
+    assert_eq!(
+      SignInReason::from_error_code(&ErrorCode::SessionTimedOut),
+      SignInReason::SessionTimedOut
+    );
+    assert_eq!(
+      SignInReason::from_error_code(&ErrorCode::InvalidToken),
+      SignInReason::Unknown
+    );
+    assert_eq!(
+      serde_json::from_str::<SignInReason>(r#""from_a_newer_server""#).unwrap(),
+      SignInReason::Unknown
+    );
+  }
+
+  #[test]
   fn unknown_error_code_is_tolerated() {
     let body: ErrorBody = serde_json::from_str(r#"{"error_code":"quota_exceeded","message":"x"}"#).unwrap();
     assert_eq!(body.error_code, ErrorCode::Unknown("quota_exceeded".into()));
@@ -145,6 +199,8 @@ mod tests {
       ErrorCode::InvalidRequest,
       ErrorCode::Unauthorized,
       ErrorCode::InvalidToken,
+      ErrorCode::SessionEnded,
+      ErrorCode::SessionTimedOut,
       ErrorCode::NoTeamcraftRole,
       ErrorCode::AccountDeactivated,
       ErrorCode::Forbidden,
