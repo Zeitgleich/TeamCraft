@@ -15,6 +15,9 @@ pub const COMPACT_BELOW_PX: u32 = 768;
 pub const COMPACT_BELOW_HEIGHT_PX: u32 = 500;
 /// Below this width the sidebar shows but side panels lie over the conversation.
 pub const MEDIUM_BELOW_PX: u32 = 1100;
+/// A visual viewport at least this much shorter than the layout has the keyboard below it; less is
+/// browser chrome or the home indicator (#663).
+const KEYBOARD_MIN_HEIGHT_PX: f64 = 120.0;
 
 /// The layouts the shell switches between, mirrored into `data-layout` on `<html>` for the CSS.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -222,10 +225,15 @@ pub fn rem_px() -> f64 {
     .unwrap_or(16.0)
 }
 
-/// Mirrors the visible part of the window into `--vv-height` and `--vv-top` on `<html>`, so the
-/// compact layout ends at the on-screen keyboard and the composer stays above it. Chrome resizes
-/// the layout itself (`interactive-widget=resizes-content` in index.html); Safari only reports the
-/// visual viewport.
+/// Mirrors the visible part of the window into `--vv-height` and `--vv-top` on `<html>` while the
+/// on-screen keyboard covers part of it, so the compact layout ends at the keyboard and the composer
+/// stays above it. Chrome resizes the layout itself (`interactive-widget=resizes-content` in
+/// index.html); Safari only reports the visual viewport.
+///
+/// Without the keyboard the properties are removed and the shell fills `100dvh` (#663): iOS reports
+/// a visual viewport shorter than the screen in an installed web app and under Safari's floating
+/// toolbar, and keeps a shrunken one after the keyboard closed. The shell then ended above the
+/// screen's bottom, and the page showed through below the tab bar.
 pub fn track_visual_viewport() {
   thread_local! {
     static IS_TRACKING: Cell<bool> = const { Cell::new(false) };
@@ -248,10 +256,29 @@ pub fn track_visual_viewport() {
         return;
       };
       let style = root.style();
-      let height = format!("{}px", viewport.height().round());
-      let top = format!("{}px", viewport.offset_top().max(0.0).round());
-      if style.set_property("--vv-height", &height).is_err() || style.set_property("--vv-top", &top).is_err()
-      {
+      let layout_height = web_sys::window()
+        .and_then(|window| window.inner_height().ok())
+        .and_then(|height| height.as_f64())
+        .unwrap_or_else(|| viewport.height());
+      let maybe_area = keyboard_free_area(
+        layout_height,
+        viewport.height(),
+        viewport.offset_top(),
+        viewport.scale(),
+        is_text_field_focused(),
+      );
+      let is_applied = match maybe_area {
+        Some((height, top)) => {
+          style
+            .set_property("--vv-height", &format!("{}px", height.round()))
+            .is_ok()
+            && style
+              .set_property("--vv-top", &format!("{}px", top.round()))
+              .is_ok()
+        },
+        None => style.remove_property("--vv-height").is_ok() && style.remove_property("--vv-top").is_ok(),
+      };
+      if !is_applied {
         tracing::debug!("could not apply the visual viewport size");
       }
     }
@@ -266,8 +293,48 @@ pub fn track_visual_viewport() {
       tracing::debug!(event, "could not watch the visual viewport");
     }
   }
+  // A keyboard that closes without a resize (iOS) still gives the full height back. Focus moving
+  // between two fields passes `focusout` then `focusin` in one task, before anything is drawn.
+  if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+    for event in ["focusin", "focusout"] {
+      if document
+        .add_event_listener_with_callback(event, handler.as_ref().unchecked_ref())
+        .is_err()
+      {
+        tracing::debug!(event, "could not watch the focus for the visual viewport");
+      }
+    }
+  }
   // The listeners live as long as the page.
   handler.forget();
+}
+
+/// The part of the window the compact layout fits into while the keyboard is up, as height and
+/// offset from the top in CSS pixels, or `None` when the shell should fill `100dvh`: no text field
+/// has the focus (no keyboard), the page is pinch-zoomed (the visual viewport is a zoomed window
+/// then, not the free area), or the visual viewport is about as tall as the layout.
+fn keyboard_free_area(
+  layout_height: f64,
+  visible_height: f64,
+  visible_top: f64,
+  scale: f64,
+  is_text_field_focused: bool,
+) -> Option<(f64, f64)> {
+  let is_zoomed = scale > 1.01;
+  let is_covered = layout_height - visible_height > KEYBOARD_MIN_HEIGHT_PX;
+  (is_text_field_focused && !is_zoomed && is_covered).then_some((visible_height, visible_top.max(0.0)))
+}
+
+/// Whether the focus is in something the on-screen keyboard types into.
+fn is_text_field_focused() -> bool {
+  web_sys::window()
+    .and_then(|window| window.document())
+    .and_then(|document| document.active_element())
+    .is_some_and(|element| {
+      element
+        .matches("input, textarea, [contenteditable]:not([contenteditable=false])")
+        .unwrap_or(false)
+    })
 }
 
 /// Sets `<meta name="theme-color">` (the phone's status bar, an installed app's title bar) to the
@@ -316,6 +383,39 @@ fn apply_theme_color() {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  mod keyboard_free_area {
+    use super::*;
+
+    #[test]
+    fn follows_the_visual_viewport_while_the_keyboard_is_up() {
+      assert_eq!(
+        keyboard_free_area(844.0, 508.0, 0.0, 1.0, true),
+        Some((508.0, 0.0))
+      );
+      assert_eq!(
+        keyboard_free_area(844.0, 508.0, -3.0, 1.0, true),
+        Some((508.0, 0.0))
+      );
+    }
+
+    #[test]
+    fn fills_the_screen_without_a_focused_text_field() {
+      // iOS keeps a shrunken visual viewport after the keyboard closed.
+      assert_eq!(keyboard_free_area(844.0, 508.0, 0.0, 1.0, false), None);
+    }
+
+    #[test]
+    fn ignores_browser_chrome_and_the_home_indicator() {
+      assert_eq!(keyboard_free_area(844.0, 778.0, 0.0, 1.0, true), None);
+      assert_eq!(keyboard_free_area(844.0, 844.0, 0.0, 1.0, true), None);
+    }
+
+    #[test]
+    fn ignores_a_pinch_zoomed_page() {
+      assert_eq!(keyboard_free_area(844.0, 422.0, 200.0, 2.0, true), None);
+    }
+  }
 
   #[test]
   fn deeper_is_a_push_shallower_a_pop_and_same_depth_lateral() {
