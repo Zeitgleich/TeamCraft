@@ -18,6 +18,7 @@ use leptos::task::spawn_local;
 use teamcraft_client_api::actions::{FileFailure, FileInfo, FileTransfer, LinkPreview, PixelSize};
 use teamcraft_client_api::admin::format_bytes;
 use teamcraft_client_api::links::{LINKS_PER_PAGE, LinkInfo};
+use teamcraft_client_api::media_viewer::{AlbumGrid, MAX_ALBUM_TILES};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
@@ -44,8 +45,6 @@ use crate::prefs::ImageSize;
 use crate::preview::{self, PreviewKind};
 use crate::state::{AppState, Overlay, use_app_state};
 
-/// Most tiles a grid shows; the last one counts the pictures it doesn't show ("+3").
-const MAX_GRID_TILES: usize = 4;
 /// From this size on, a transfer's progress is told in bytes ("12 MB / 48 MB"), below in percent.
 const LARGE_TRANSFER_BYTES: u64 = 1024 * 1024;
 
@@ -124,21 +123,24 @@ enum TileLayout {
 /// Several pictures of a message as a grid; each tile has its own actions.
 #[component]
 fn MediaGrid(files: Vec<FileInfo>) -> impl IntoView {
-  let count = files.len();
-  let hidden = count.saturating_sub(MAX_GRID_TILES);
+  // The same album on every platform: two to four tiles, "+N" on the last (#240).
+  let grid = AlbumGrid::of(files.len()).unwrap_or(AlbumGrid {
+    tiles: files.len().min(MAX_ALBUM_TILES),
+    hidden: 0,
+  });
   let tiles = files
     .into_iter()
-    .take(MAX_GRID_TILES)
+    .take(grid.tiles)
     .enumerate()
     .map(|(index, file)| {
       let layout = TileLayout::Grid {
-        maybe_hidden: (index + 1 == MAX_GRID_TILES && hidden > 0).then_some(hidden),
+        maybe_hidden: grid.hidden_at(index),
       };
       tile(file, layout)
     })
     .collect_view();
   view! {
-    <div class="media-grid" data-tiles=count.min(MAX_GRID_TILES).to_string()>
+    <div class="media-grid" data-tiles=grid.tiles.to_string()>
       {tiles}
     </div>
   }
