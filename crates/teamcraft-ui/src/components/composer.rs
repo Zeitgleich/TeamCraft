@@ -7,7 +7,7 @@ use teamcraft_client_api::admin::format_bytes;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::components::avatar::{Avatar, AvatarSize};
-use crate::components::composer_commands::{self, Notice, Outcome};
+use crate::components::composer_commands::{self, CommandButton, Notice, NoticeEvent, Outcome};
 use crate::components::composer_editor;
 use crate::components::composer_toolbar::{
   ActiveFormats, FormatAction, FormatToolbar, SendOptionsMenu, format_action_for, move_focus_vertical,
@@ -214,6 +214,11 @@ pub fn Composer(
   let attachments = RwSignal::new(Vec::<PendingFile>::new());
   let upload_error = RwSignal::new(None::<String>);
   let notice = RwSignal::new(None::<Notice>);
+  let close_notice = move |event: NoticeEvent| {
+    if notice.with_untracked(|shown| shown.as_ref().is_some_and(|shown| shown.closes_on(event))) {
+      notice.set(None);
+    }
+  };
   let suggestions = RwSignal::new(Vec::<Suggestion>::new());
   let selected_suggestion = RwSignal::new(0_usize);
   let indexed_suggestions = Memo::new(move |_| {
@@ -500,6 +505,7 @@ pub fn Composer(
       });
     }
     clear_editor();
+    close_notice(NoticeEvent::Sent);
     also_send_to_channel.set(false);
     priority.set(MessagePriority::Normal);
     is_silent.set(false);
@@ -768,6 +774,11 @@ pub fn Composer(
       ev.prevent_default();
       return;
     }
+    // Esc closes a notice first.
+    if ev.key() == "Escape" && !has_modifier && notice.with_untracked(Option::is_some) {
+      close_notice(NoticeEvent::Escape);
+      return;
+    }
     // Esc in the empty composer of a conversation marks it read, as in the feed (#321); a reply
     // being quoted is cancelled first.
     if ev.key() == "Escape" && !has_modifier && maybe_thread.is_none() && is_empty.get_untracked() {
@@ -819,6 +830,9 @@ pub fn Composer(
       composer_editor::apply_typing_shortcut(&element, typed.encode_utf8(&mut [0; 4]));
     }
     is_empty.set(composer_editor::is_blank(&element));
+    if notice.with_untracked(|shown| matches!(shown, Some(Notice::Help))) {
+      close_notice(NoticeEvent::Edited(&composer_editor::markdown(&element)));
+    }
     save_draft();
     refresh_suggestions();
     refresh_formats();
@@ -990,6 +1004,8 @@ pub fn Composer(
     composer_editor::insert_text(&emoji);
     after_edit();
   };
+  let is_command_list_open =
+    move || suggestions.with(|list| list.first().is_some_and(|item| item.label.starts_with('/')));
   // `@` and `/` buttons type the marker and open the picker, as typing it would.
   let start_mention = move || {
     let Some(element) = focus_editor() else {
@@ -1002,16 +1018,40 @@ pub fn Composer(
     after_edit();
     refresh_suggestions();
   };
+  // The `/` button types the slash, and the suggestion list that opens is the help; pressed
+  // again it closes the list (and takes back its slash).
+  // A press outside the composer closes its notice. Removed with the composer: a late event must
+  // not reach its disposed signals.
+  let composer_root = NodeRef::<html::Div>::new();
+  let outside_listener = window_event_listener(leptos::ev::pointerdown, move |ev| {
+    let is_inside = composer_root.try_get_untracked().flatten().is_some_and(|root| {
+      ev.target()
+        .and_then(|target| target.dyn_into::<web_sys::Node>().ok())
+        .is_some_and(|node| root.contains(Some(&node)))
+    });
+    if !is_inside && notice.try_with_untracked(Option::is_some).unwrap_or(false) {
+      close_notice(NoticeEvent::PointerOutside);
+    }
+  });
+  on_cleanup(move || outside_listener.remove());
   let start_command = move || {
     let Some(element) = focus_editor() else {
       return;
     };
-    if composer_editor::is_blank(&element) {
-      composer_editor::insert_text("/");
-      after_edit();
-      refresh_suggestions();
-    } else {
-      notice.set(Some(Notice::Help));
+    match CommandButton::of(composer_editor::is_blank(&element), is_command_list_open()) {
+      CommandButton::Open => {
+        composer_editor::insert_text("/");
+        after_edit();
+        refresh_suggestions();
+      },
+      CommandButton::Close => {
+        suggestions.set(Vec::new());
+        if composer_editor::markdown(&element).trim() == "/" {
+          composer_editor::clear(&element);
+          after_edit();
+        }
+      },
+      CommandButton::Unavailable => {},
     }
   };
   let send_flags = move || {
@@ -1036,6 +1076,7 @@ pub fn Composer(
   view! {
     <div
       class="composer"
+      node_ref=composer_root
       class:composer-disabled=!can_post
       // The drop zone around (`FileDrop`) shows where files go; this only accepts the drop.
       on:dragover=move |ev: web_sys::DragEvent| ev.prevent_default()
@@ -1114,7 +1155,18 @@ pub fn Composer(
             Notice::Text(message) => view! { <p class="composer-notice" role="status">{message}</p> }.into_any(),
             Notice::Help => view! {
               <div class="composer-notice composer-help" role="status">
-                <p>{move || i18n.t("slash-help-title")}</p>
+                <div class="composer-help-head">
+                  <p>{move || i18n.t("slash-help-title")}</p>
+                  <button
+                    type="button"
+                    class="icon-btn icon-btn-small"
+                    aria-label=move || i18n.t("close")
+                    on:mousedown=|ev| ev.prevent_default()
+                    on:click=move |_| close_notice(NoticeEvent::CloseButton)
+                  >
+                    <Icon name=IconName::Close />
+                  </button>
+                </div>
                 <ul>
                   {slash::commands(composer_commands::context(state, conversation))
                     .map(|(name, usage)| view! { <li><code>{format!("/{name} {usage}").trim_end().to_owned()}</code></li> })
@@ -1372,6 +1424,8 @@ pub fn Composer(
               class="icon-btn"
               aria-label=move || i18n.t("composer-commands")
               title=move || i18n.t("composer-commands")
+              aria-expanded=move || is_command_list_open().to_string()
+              prop:disabled=move || CommandButton::of(is_empty.get(), is_command_list_open()) == CommandButton::Unavailable
               on:mousedown=|ev| ev.prevent_default()
               on:click=move |_| start_command()
             >

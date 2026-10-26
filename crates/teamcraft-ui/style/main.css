@@ -7789,7 +7789,10 @@ html.call-window body {
 @media (hover: hover) and (pointer: fine) { .suggestion:hover { background: var(--surface-2); } }
 .suggestion-detail { color: var(--text-muted); font-size: var(--text-xs); letter-spacing: var(--tracking-xs); margin-inline-start: auto; }
 .composer-notice { margin: .25rem 0; padding: .3rem .6rem; border-inline-start: 3px solid var(--accent); color: var(--text-muted); }
-.composer-help ul { columns: 2; margin: .25rem 0 0; padding-inline-start: 1.1rem; }
+/* The commands of /help: one grid of equal cells read row by row, as many columns as fit. */
+.composer-help-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.composer-help ul { display: grid; grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr)); gap: 2px var(--space-4); margin: .25rem 0 0; padding: 0; list-style: none; }
+.composer-help li { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .toasts { position: fixed; inset-inline-end: var(--space-4); bottom: var(--space-4); display: flex; flex-direction: column; gap: var(--space-2); z-index: 1100; /* above dialogs: an error must show over the dialog that caused it */ }
 .toast { display: flex; align-items: center; gap: var(--space-2); padding: 10px var(--space-3); border-radius: var(--radius-md); background: var(--surface); color: var(--text); border: 1px solid var(--border); box-shadow: var(--shadow); }

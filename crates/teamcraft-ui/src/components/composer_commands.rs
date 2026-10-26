@@ -29,6 +29,55 @@ pub enum Notice {
   Help,
 }
 
+/// Something that may close the notice above the composer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoticeEvent<'a> {
+  Escape,
+  /// A press anywhere outside the composer.
+  PointerOutside,
+  /// A message went out.
+  Sent,
+  CloseButton,
+  /// The user changed the text; this is what it reads now.
+  Edited(&'a str),
+}
+
+impl Notice {
+  /// Whether `event` closes the notice. The command list of `/help` also goes once the text no
+  /// longer asks for it; a short answer stays while the user types on.
+  pub fn closes_on(&self, event: NoticeEvent) -> bool {
+    match event {
+      NoticeEvent::Escape | NoticeEvent::PointerOutside | NoticeEvent::Sent | NoticeEvent::CloseButton => {
+        true
+      },
+      NoticeEvent::Edited(text) => match self {
+        Self::Help => !text.trim_start().to_lowercase().starts_with("/help"),
+        Self::Text(_) => false,
+      },
+    }
+  }
+}
+
+/// What the composer's `/` button does: it types the slash that opens the command list (the list
+/// is the help), or closes the list again. Commands only work at the start of a message, so with
+/// text in the composer it has nothing to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandButton {
+  Open,
+  Close,
+  Unavailable,
+}
+
+impl CommandButton {
+  pub fn of(is_blank: bool, is_command_list_open: bool) -> Self {
+    match (is_command_list_open, is_blank) {
+      (true, _) => Self::Close,
+      (false, true) => Self::Open,
+      (false, false) => Self::Unavailable,
+    }
+  }
+}
+
 /// What running a command asks of the composer.
 pub enum Outcome {
   /// Nothing to send; show this.
@@ -311,4 +360,53 @@ pub fn left_text(state: AppState, i18n: I18n, conversation: ConversationId) -> S
     .map(|conv| conv.name)
     .unwrap_or_default();
   i18n.t_with("channel-left-toast", &[("name", &name)])
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  mod notice {
+    use super::*;
+
+    #[test]
+    fn every_notice_closes_on_escape_outside_press_send_and_its_button() {
+      for notice in [Notice::Help, Notice::Text("Status set.".into())] {
+        for event in [
+          NoticeEvent::Escape,
+          NoticeEvent::PointerOutside,
+          NoticeEvent::Sent,
+          NoticeEvent::CloseButton,
+        ] {
+          assert!(notice.closes_on(event), "{notice:?} on {event:?}");
+        }
+      }
+    }
+
+    #[test]
+    fn the_command_list_stays_while_the_text_asks_for_it() {
+      assert!(!Notice::Help.closes_on(NoticeEvent::Edited("/help")));
+      assert!(!Notice::Help.closes_on(NoticeEvent::Edited("  /HELP")));
+      assert!(Notice::Help.closes_on(NoticeEvent::Edited("/hel")));
+      assert!(Notice::Help.closes_on(NoticeEvent::Edited("hello")));
+      assert!(Notice::Help.closes_on(NoticeEvent::Edited("")));
+    }
+
+    #[test]
+    fn a_short_answer_stays_while_typing() {
+      assert!(!Notice::Text("Status set.".into()).closes_on(NoticeEvent::Edited("hello")));
+    }
+  }
+
+  #[test]
+  fn the_command_button_toggles_the_list_and_needs_an_empty_composer() {
+    assert_eq!(CommandButton::of(true, false), CommandButton::Open);
+    assert_eq!(
+      CommandButton::of(false, true),
+      CommandButton::Close,
+      "the slash it typed"
+    );
+    assert_eq!(CommandButton::of(true, true), CommandButton::Close);
+    assert_eq!(CommandButton::of(false, false), CommandButton::Unavailable);
+  }
 }
