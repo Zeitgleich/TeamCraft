@@ -59,7 +59,10 @@ status-presets-only = Your workspace offers these statuses to choose from.
 ## Space rail
 rail-label = Spaces
 rail-add-space = Browse or create spaces
-rail-space-mentions = { $name }, { $count } mentions
+rail-space-mentions = { $name }, { $count ->
+    [one] { $count } unread mention
+   *[other] { $count } unread mentions
+  }
 rail-space-unread = { $name }, unread messages
 rail-chats-unread = Chats, { $count } unread
 rail-chats = Chats
@@ -2058,6 +2061,9 @@ connection-banner-connecting = Connecting to the server…
 connection-banner-unreachable = The server can't be reached. Messages wait until it is back. Next attempt in { $seconds } s.
 connection-banner-captive-portal = This network wants you to sign in first (a login page answered instead of the server). Open a web page to sign in; messages wait. Next attempt in { $seconds } s.
 connection-banner-untrusted-certificate = The server's certificate isn't trusted. On a network that inspects encrypted traffic, use another network or ask your IT to install the company certificate on this device; if it happens everywhere, the server's certificate may be broken: tell your administrator. Next attempt in { $seconds } s.
+connection-hint-offline = Offline
+connection-hint-connecting = Connecting…
+connection-hint-reconnecting = Reconnecting…
 connection-banner-retry = Try now
 connection-banner-sign-in = Your session has expired. Messages wait until you sign in again.
 connection-banner-sign-in-action = Sign in again
@@ -2728,6 +2734,7 @@ focus-30-minutes = For 30 minutes
 
 # Files view and setup checklist (issue #301)
 sidebar-files = Files
+sidebar-shortcuts = Shortcuts
 files-title = Files
 files-filter = Filter files
 files-filter-all = All

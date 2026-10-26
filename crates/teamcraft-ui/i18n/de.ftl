@@ -59,7 +59,10 @@ status-presets-only = Dein Arbeitsbereich bietet diese Status zur Auswahl an.
 ## Space-Leiste
 rail-label = Spaces
 rail-add-space = Spaces durchsuchen oder anlegen
-rail-space-mentions = { $name }, { $count } Erwähnungen
+rail-space-mentions = { $name }, { $count ->
+    [one] { $count } ungelesene Erwähnung
+   *[other] { $count } ungelesene Erwähnungen
+  }
 rail-space-unread = { $name }, ungelesene Nachrichten
 rail-chats-unread = Chats, { $count } ungelesen
 rail-chats = Chats
@@ -2058,6 +2061,9 @@ connection-banner-connecting = Verbindung zum Server wird aufgebaut…
 connection-banner-unreachable = Der Server ist nicht erreichbar. Nachrichten warten, bis er wieder da ist. Nächster Versuch in { $seconds } s.
 connection-banner-captive-portal = Dieses Netzwerk verlangt zuerst eine Anmeldung (statt des Servers hat eine Anmeldeseite geantwortet). Öffne eine Webseite, um dich anzumelden; Nachrichten warten. Nächster Versuch in { $seconds } s.
 connection-banner-untrusted-certificate = Dem Zertifikat des Servers wird nicht vertraut. In einem Netzwerk, das verschlüsselten Verkehr prüft: Nutze ein anderes Netzwerk oder bitte deine IT, das Firmenzertifikat auf diesem Gerät zu installieren. Passiert es überall, ist vielleicht das Zertifikat des Servers fehlerhaft: Sag deiner Administration Bescheid. Nächster Versuch in { $seconds } s.
+connection-hint-offline = Offline
+connection-hint-connecting = Verbinden…
+connection-hint-reconnecting = Neu verbinden…
 connection-banner-retry = Jetzt versuchen
 connection-banner-sign-in = Deine Sitzung ist abgelaufen. Nachrichten warten, bis du dich wieder anmeldest.
 connection-banner-sign-in-action = Erneut anmelden
@@ -2728,6 +2734,7 @@ focus-30-minutes = Für 30 Minuten
 
 # Dateien-Ansicht und Einrichtungs-Checkliste (Issue #301)
 sidebar-files = Dateien
+sidebar-shortcuts = Schnellzugriffe
 files-title = Dateien
 files-filter = Dateien filtern
 files-filter-all = Alle

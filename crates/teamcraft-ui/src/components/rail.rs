@@ -11,6 +11,9 @@ use crate::model::{ConversationKind, Space};
 use crate::sections::{RailBadge, badge_count, has_urgent_activity};
 use crate::state::{AppState, MainView, Overlay, RailEntry, use_app_state};
 
+/// The largest count a space tile's badge shows; more reads "9+".
+const RAIL_BADGE_CAP: u32 = 9;
+
 /// Space switcher on the far left (Mattermost "team sidebar"). On top the global destinations with
 /// a label under each icon: Home (the DMs, which live outside spaces), Activity and Threads. In the
 /// grouped sidebar one entry stands for all spaces.
@@ -279,11 +282,17 @@ fn AllSpacesButton() -> impl IntoView {
   }
 }
 
-/// Mentions as a number, other unread messages as a dot.
+/// Mentions as a number in a red bubble on the tile's corner (up to 9, then "9+", so it always fits
+/// the bubble), other unread messages as a small neutral dot there (#715). The memo per space keeps
+/// a change elsewhere from touching this tile.
 #[component]
 fn RailBadgeView(badge: Memo<RailBadge>) -> impl IntoView {
   view! {
-    <CountBadge count=Signal::derive(move || badge.get().mention_count) is_decorative=true />
+    <CountBadge
+      count=Signal::derive(move || badge.get().mention_count)
+      is_decorative=true
+      maybe_cap=RAIL_BADGE_CAP
+    />
     <Show when=move || { let current = badge.get(); current.mention_count == 0 && current.has_unread } fallback=|| ()>
       <span class="dot-unread" aria-hidden="true"></span>
     </Show>
@@ -313,9 +322,10 @@ fn SpaceButton(space: Space) -> impl IntoView {
     move || {
       let current = badge.get();
       if current.mention_count > 0 {
-        i18n.t_with(
+        i18n.t_count_with(
           "rail-space-mentions",
-          &[("name", &name), ("count", &current.mention_count.to_string())],
+          current.mention_count as usize,
+          &[("name", &name)],
         )
       } else if current.has_unread {
         i18n.t_with("rail-space-unread", &[("name", &name)])

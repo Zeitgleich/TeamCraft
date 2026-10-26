@@ -29,6 +29,8 @@ Nothing in the first pass was feel-breaking; #639 later found two HIGH faults in
 | Compact navigation    | `pane-push/pop/leave`, edge swipe                    | keyframes + ghost + Rust drag               | high       |
 | Lightbox              | `lightbox_motion.rs`, `physics.rs`                   | rAF driver, springs, `will-change` (listed) | low        |
 | Crop dialog           | `.crop-stage.is-animated`                            | transform transition                        | rare       |
+| Connection hint       | `.connection-hint::after` `connection-hint-sweep`    | looping `transform`, only while down (#718) | rare       |
+| Sidebar entries       | `.sb-entries-toggle` chevron, `motion-fade-in`       | transform transition, opacity (#703)        | low        |
 | Incoming call         | `.incoming-ring`                                     | looping keyframes                           | rare       |
 | Loader hand-over      | `loader.js`, `style/loader.css`                      | WAAPI, `.is-gone` before removal            | once       |
 | iOS                   | `LoadingMarkView.swift`, `ChatPane.swift`            | Canvas timeline, `withAnimation`            | once, high |
@@ -49,6 +51,8 @@ Nothing in the first pass was feel-breaking; #639 later found two HIGH faults in
 | 9  | HIGH   | Exit          | `MenuSurface` popovers, lightbox, file, link, date and message menus, emoji picker    | No ghost: the popover vanished in one frame (only the status menu had one)                                      | `PopoverBackdrop` leaves the popover's ghost                  | fixed                                                      |
 | 10 | MEDIUM | Interaction   | `.modal-backdrop`                                                                     | Same as 8: closed on `mousedown`, the `click` reached what was under it                                         | Closes on a press that starts and ends on the backdrop        | fixed                                                      |
 | 11 | MEDIUM | Focus         | popover backdrops                                                                     | The press moved the focus to the page before the menu closed: the composer's focus ring blinked off and on      | `mousedown` default prevented; the owner gives the focus back | fixed                                                      |
+| 12 | LOW    | Physicality   | `.modal` on a phone                                                                   | Every dialog filled the screen; a short confirmation rose as tall as settings (#706)                            | Bottom sheet sized to its content, `--dur-slow` for the rise  | fixed                                                      |
+| 13 | LOW    | Purpose       | connection banners                                                                    | Each reconnect slid a full-width banner in and pushed the layout down (#718)                                    | Fixed 2 px line, `transform` sweep, none if reduced motion    | fixed                                                      |
 
 ## Popovers on WebKit (#639)
 

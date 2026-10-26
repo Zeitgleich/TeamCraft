@@ -1,4 +1,4 @@
-//! A banner while the app can't reach the server: the device is offline, the server is unreachable
+//! The connection state while the app can't reach the server: the device is offline, the server is unreachable
 //! ("online but disconnected": server down, a proxy blocking WebSockets) or the session expired.
 //! It follows the core's connection state, not only the browser's idea of connectivity. Messages
 //! wait in the outbox meanwhile.
@@ -7,6 +7,11 @@
 //! visible or focused again or being resumed after it was frozen. Each one makes the core check its
 //! connection at once instead of after its backoff, and gives the reconnect a grace period before
 //! the banner shows: coming back from the camera or another app is silent when it reconnects quickly.
+//!
+//! Reconnecting is the app's job, not the user's (#718): while it works on it the state is a small,
+//! muted line along the top bar's lower edge, without moving anything. Only when the user has to act
+//! (sign in again, sign in to the network, a certificate to sort out) or the connection stays down
+//! long does it become a notice, with an action where there is one.
 
 use leptos::ev;
 use leptos::prelude::*;
@@ -21,13 +26,16 @@ use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 use crate::reactive::{SetIfAlive, use_interval_while};
 use crate::remote_backend;
-use crate::session::use_session;
+use crate::session::{SessionControl, use_session};
 
 /// "Connecting" and "unreachable" only show when the connection stays down longer than this, counted
 /// from the page's return when it was hidden or frozen: a quick reconnect needs no banner.
 const CONNECTING_GRACE_MS: i64 = 3_000;
 /// How often the countdown to the next attempt updates.
 const COUNTDOWN_MS: u64 = 1_000;
+/// A connection that stays down this long (counted like the grace period) becomes a notice; an
+/// unreachable server's has "Try now".
+const ESCALATE_AFTER_MS: i64 = 60_000;
 
 /// What the banner says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,6 +53,15 @@ enum Notice {
   SignInRequired(SignInReason),
 }
 
+/// How much room a notice takes (#718).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Prominence {
+  /// The app is on it: a quiet line, nothing to do.
+  Hint,
+  /// The user can or must do something: a card with the full text and an action.
+  Notice,
+}
+
 /// Since when the connection is down, for the grace period. A page that comes back (from the
 /// camera, another app, a frozen tab) starts it again: the time it was away doesn't count, and the
 /// reconnect it starts gets the whole grace period.
@@ -53,10 +70,9 @@ struct Unsettled {
   maybe_since_ms: Option<i64>,
 }
 
-/// Shown at the top while the app can't reach the server.
+/// Shown while the app can't reach the server: a hint along the top bar, or a notice to act on.
 #[component]
 pub fn OfflineBanner() -> impl IntoView {
-  let i18n = use_i18n();
   let is_online = RwSignal::new(navigator_online());
   let connection = RwSignal::new(None::<CoreConnection>);
   let unsettled = RwSignal::new(Unsettled::default());
@@ -100,62 +116,96 @@ pub fn OfflineBanner() -> impl IntoView {
   report_network_changes(is_online, unsettled);
 
   let notice = Memo::new(move |_| notice_for(is_online.get(), connection.get(), unsettled.get(), now.get()));
+  let prominence = Memo::new(move |_| {
+    notice
+      .get()
+      .map(|notice| prominence_of(notice, unsettled.get(), now.get()))
+  });
   move || {
-    notice.get().map(|notice| {
-      let text = match notice {
-        Notice::DeviceOffline => i18n.t("offline-banner"),
-        Notice::Connecting => i18n.t("connection-banner-connecting"),
-        Notice::Unreachable {
-          retry_in_secs,
-          maybe_interception,
-        } => i18n.t_with(
-          match maybe_interception {
-            None => "connection-banner-unreachable",
-            Some(NetworkInterception::CaptivePortal) => "connection-banner-captive-portal",
-            Some(NetworkInterception::UntrustedCertificate) => "connection-banner-untrusted-certificate",
-          },
-          &[("seconds", &retry_in_secs.to_string())],
-        ),
-        Notice::SignInRequired(reason) => i18n.t(match reason {
-          SignInReason::SessionEnded => "connection-banner-session-ended",
-          SignInReason::SessionTimedOut => "connection-banner-session-timed-out",
-          SignInReason::Unknown => "connection-banner-sign-in",
-        }),
-      };
-      let action = match notice {
-        Notice::Unreachable { .. } => Some(
-          view! {
-            <button class="link-btn" on:click=move |_| network_changed()>
-              {move || i18n.t("connection-banner-retry")}
-            </button>
-          }
-          .into_any(),
-        ),
-        Notice::SignInRequired(_) => Some(
-          view! {
-            <button
-              class="link-btn"
-              on:click=move |_| {
-                if let Some(control) = maybe_session {
-                  control.sign_out();
-                }
-              }
-            >
-              {move || i18n.t("connection-banner-sign-in-action")}
-            </button>
-          }
-          .into_any(),
-        ),
-        Notice::DeviceOffline | Notice::Connecting => None,
-      };
-      view! {
-        <div class="offline-banner" role="status">
-          <Icon name=IconName::Alert />
-          <span>{text}</span>
-          {action}
-        </div>
-      }
+    let notice = notice.get()?;
+    Some(match prominence.get()? {
+      Prominence::Hint => view! { <ConnectionHint notice=notice /> }.into_any(),
+      Prominence::Notice => {
+        view! { <ConnectionNotice notice=notice maybe_session=maybe_session /> }.into_any()
+      },
     })
+  }
+}
+
+/// The quiet hint while the app reconnects by itself: a slim line along the top bar's lower edge,
+/// moving while the app works on it and resting while the device is offline. Screen readers hear
+/// the short state; there is no countdown and nothing to do.
+#[component]
+fn ConnectionHint(notice: Notice) -> impl IntoView {
+  let i18n = use_i18n();
+  let key = match notice {
+    Notice::DeviceOffline => "connection-hint-offline",
+    Notice::Connecting => "connection-hint-connecting",
+    Notice::Unreachable { .. } | Notice::SignInRequired(_) => "connection-hint-reconnecting",
+  };
+  view! {
+    <div class="connection-hint" class:is-offline=notice == Notice::DeviceOffline role="status">
+      <span class="visually-hidden">{move || i18n.t(key)}</span>
+    </div>
+  }
+}
+
+/// The card when the user can do something about it: what happened, and the action.
+#[component]
+fn ConnectionNotice(notice: Notice, maybe_session: Option<SessionControl>) -> impl IntoView {
+  let i18n = use_i18n();
+  let text = move || match notice {
+    Notice::DeviceOffline => i18n.t("offline-banner"),
+    Notice::Connecting => i18n.t("connection-banner-connecting"),
+    Notice::Unreachable {
+      retry_in_secs,
+      maybe_interception,
+    } => i18n.t_with(
+      match maybe_interception {
+        None => "connection-banner-unreachable",
+        Some(NetworkInterception::CaptivePortal) => "connection-banner-captive-portal",
+        Some(NetworkInterception::UntrustedCertificate) => "connection-banner-untrusted-certificate",
+      },
+      &[("seconds", &retry_in_secs.to_string())],
+    ),
+    Notice::SignInRequired(reason) => i18n.t(match reason {
+      SignInReason::SessionEnded => "connection-banner-session-ended",
+      SignInReason::SessionTimedOut => "connection-banner-session-timed-out",
+      SignInReason::Unknown => "connection-banner-sign-in",
+    }),
+  };
+  let action = match notice {
+    Notice::Unreachable { .. } => Some(
+      view! {
+        <button class="btn btn-small" on:click=move |_| network_changed()>
+          {move || i18n.t("connection-banner-retry")}
+        </button>
+      }
+      .into_any(),
+    ),
+    Notice::SignInRequired(_) => Some(
+      view! {
+        <button
+          class="btn btn-small btn-primary"
+          on:click=move |_| {
+            if let Some(control) = maybe_session {
+              control.sign_out();
+            }
+          }
+        >
+          {move || i18n.t("connection-banner-sign-in-action")}
+        </button>
+      }
+      .into_any(),
+    ),
+    Notice::DeviceOffline | Notice::Connecting => None,
+  };
+  view! {
+    <div class="connection-notice" role="status">
+      <Icon name=IconName::Alert />
+      <span class="connection-notice-text">{text}</span>
+      {action}
+    </div>
   }
 }
 
@@ -247,6 +297,25 @@ fn notice_for(
       maybe_interception,
     }),
     CoreConnection::SignInRequired { reason } => Some(Notice::SignInRequired(reason)),
+  }
+}
+
+/// A notice where the user has to act (sign in again, sign in to the network, a certificate) or the
+/// connection stayed down long; a hint while the app reconnects by itself.
+fn prominence_of(notice: Notice, unsettled: Unsettled, now_ms: i64) -> Prominence {
+  let is_down_long = unsettled
+    .maybe_since_ms
+    .is_some_and(|since| now_ms.saturating_sub(since) >= ESCALATE_AFTER_MS);
+  match notice {
+    Notice::SignInRequired(_)
+    | Notice::Unreachable {
+      maybe_interception: Some(_),
+      ..
+    } => Prominence::Notice,
+    Notice::DeviceOffline | Notice::Connecting | Notice::Unreachable { .. } if is_down_long => {
+      Prominence::Notice
+    },
+    Notice::DeviceOffline | Notice::Connecting | Notice::Unreachable { .. } => Prominence::Hint,
   }
 }
 
@@ -380,6 +449,68 @@ mod tests {
         notice_for(true, Some(CoreConnection::Connecting), unsettled, 1_000),
         None
       );
+    }
+  }
+
+  mod prominence {
+    use super::*;
+
+    #[test]
+    fn reconnecting_by_itself_is_only_a_hint() {
+      let unsettled = Unsettled::default().observe(OFFLINE, 0);
+      for notice in [
+        Notice::DeviceOffline,
+        Notice::Connecting,
+        Notice::Unreachable {
+          retry_in_secs: 5,
+          maybe_interception: None,
+        },
+      ] {
+        assert_eq!(prominence_of(notice, unsettled, 30_000), Prominence::Hint);
+      }
+    }
+
+    #[test]
+    fn what_the_user_must_act_on_is_a_notice() {
+      let unsettled = Unsettled::default().observe(OFFLINE, 0);
+      assert_eq!(
+        prominence_of(
+          Notice::SignInRequired(SignInReason::SessionEnded),
+          Unsettled::default(),
+          0
+        ),
+        Prominence::Notice
+      );
+      assert_eq!(
+        prominence_of(
+          Notice::Unreachable {
+            retry_in_secs: 5,
+            maybe_interception: Some(NetworkInterception::CaptivePortal)
+          },
+          unsettled,
+          0
+        ),
+        Prominence::Notice
+      );
+    }
+
+    #[test]
+    fn a_connection_down_long_becomes_a_notice() {
+      let unsettled = Unsettled::default().observe(OFFLINE, 1_000);
+      let unreachable = Notice::Unreachable {
+        retry_in_secs: 5,
+        maybe_interception: None,
+      };
+      assert_eq!(
+        prominence_of(unreachable, unsettled, ESCALATE_AFTER_MS),
+        Prominence::Hint
+      );
+      for notice in [unreachable, Notice::Connecting, Notice::DeviceOffline] {
+        assert_eq!(
+          prominence_of(notice, unsettled, 1_000 + ESCALATE_AFTER_MS),
+          Prominence::Notice
+        );
+      }
     }
   }
 

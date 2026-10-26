@@ -10,7 +10,9 @@ use crate::components::huddle_bar::CallPill;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::components::setup_checklist::SetupChecklist;
-use crate::components::sidebar::GlobalEntries;
+use crate::components::sidebar::{
+  EntriesDisclosure, EntriesToggle, GlobalEntries, ListFilter, ListFilterField, ListFilterToggle,
+};
 
 use crate::components::people_picker::PeoplePicker;
 use crate::i18n::use_i18n;
@@ -30,7 +32,9 @@ pub fn HomeSidebar() -> impl IntoView {
   let show_all = RwSignal::new(false);
   let show_options = RwSignal::new(false);
   let chip = RwSignal::new(HomeFilter::All);
-  let query = RwSignal::new(String::new());
+  let filter = ListFilter::new();
+  let query = filter.query;
+  let entries = EntriesDisclosure::new();
   let list = Memo::new(move |_| {
     let (sort, limit) = state
       .settings
@@ -45,6 +49,8 @@ pub fn HomeSidebar() -> impl IntoView {
     <nav class="sidebar dm-sidebar" aria-label=move || i18n.t("chats-title")>
       <div class="sidebar-head">
         <h2 class="space-name">{move || i18n.t("chats-title")}</h2>
+        <EntriesToggle entries=entries controls="chats-entries" />
+        <ListFilterToggle filter=filter field_id="chats-filter" label_key="chats-filter" />
         <button
           class="icon-btn"
           aria-label=move || i18n.t("dm-options")
@@ -67,26 +73,8 @@ pub fn HomeSidebar() -> impl IntoView {
       <Show when=move || show_options.get() fallback=|| ()>
         <DirectOptions />
       </Show>
-      <GlobalEntries />
-      <div class="chats-filter">
-        <label class="visually-hidden" for="chats-filter">{move || i18n.t("chats-filter")}</label>
-        <input
-          id="chats-filter"
-          class="input"
-          type="search"
-          autocomplete="off"
-          spellcheck="false"
-          placeholder=move || i18n.t("chats-filter")
-          prop:value=move || query.get()
-          on:input=move |ev| query.set(event_target_value(&ev))
-          on:keydown=move |ev| {
-            if ev.key() == "Escape" && !query.with_untracked(String::is_empty) {
-              ev.stop_propagation();
-              query.set(String::new());
-            }
-          }
-        />
-      </div>
+      <GlobalEntries entries=entries id="chats-entries" />
+      <ListFilterField filter=filter id="chats-filter" label_key="chats-filter" />
       <div class="home-chips" role="group" aria-label=move || i18n.t("home-filters")>
         {HomeFilter::CHIPS
           .into_iter()
