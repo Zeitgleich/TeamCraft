@@ -15,7 +15,7 @@ use crate::backend::Backend;
 use crate::calls::CallPhase;
 use crate::calls::{BackgroundEffect, CallEvent, CallRequest, CallStatusSounds};
 use crate::clock::now_ms;
-use crate::components::activity_view::ActivityView;
+use crate::components::activity_view::{ActivityHome, ActivitySidebar};
 use crate::components::announcement_banner::AnnouncementBanner;
 use crate::components::bottom_nav::BottomNav;
 use crate::components::bundle_banner::{BundleBanner, ReleaseBanner};
@@ -47,7 +47,6 @@ use crate::components::status_menu::CustomStatusDialog;
 use crate::components::status_menu::StatusMenu;
 use crate::components::storage_banner::StorageBanner;
 use crate::components::thread_panel::ThreadPanel;
-use crate::components::threads_inbox::ThreadsInbox;
 use crate::components::top_bar::TopBar;
 use crate::components::update_notice::UpdateNotice;
 use crate::components::window_controls::{WindowControls, provide_window_chrome};
@@ -234,6 +233,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   // that sets the same view again (the router after a click, a notification of the open
   // conversation) would otherwise mount it anew and play its entrance from the start.
   let main_view = Memo::new(move |_| state.view.get());
+  // The sidebar mounts again only when the place changes, not on every conversation opened.
+  let rail = Memo::new(move |_| state.rail.get());
   let side_panel = Memo::new(move |_| state.panel.get());
   let open_conversation = Memo::new(move |_| match main_view.get() {
     MainView::Conversation(id) => Some(id),
@@ -248,7 +249,11 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       class="app"
       data-pane=move || state.compact_pane().slug()
       data-nav=move || pane_step.get().2.slug()
-      data-rail=move || if state.rail.get() == RailEntry::Chats { "home" } else { "space" }
+      data-rail=move || match state.rail.get() {
+        RailEntry::Chats => "home",
+        RailEntry::Space => "space",
+        RailEntry::Activity => "activity",
+      }
       class:has-bottom-nav=move || has_bottom_nav(state)
     >
       // One grid row for all banners, so the top bar and the body keep their own rows.
@@ -273,20 +278,22 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         // The administration console takes the whole window, like a system console.
         <Show when=move || !matches!(state.view.get(), MainView::Admin(_)) fallback=|| ()>
           <SpaceRail />
-          <Show when=move || state.rail.get() == RailEntry::Chats fallback=|| view! { <Sidebar /> }>
-            <HomeSidebar />
-          </Show>
+          // The sidebar is the selected place's list: Chats, a space or Activity (#752).
+          {move || match rail.get() {
+            RailEntry::Chats => view! { <HomeSidebar /> }.into_any(),
+            RailEntry::Space => view! { <Sidebar /> }.into_any(),
+            RailEntry::Activity => view! { <ActivitySidebar /> }.into_any(),
+          }}
         </Show>
         <main id="main-content" class="main" tabindex="-1">
           {move || match main_view.get() {
             MainView::Conversation(id) => view! { <ChannelView conversation=id /> }.into_any(),
-            MainView::Threads => view! { <ThreadsInbox /> }.into_any(),
             MainView::Admin(section) => lazy_area(Place::Pane, move || areas::admin_console(section)),
             MainView::Search => lazy_area(Place::Pane, || areas::search(())),
             MainView::Meetings => lazy_area(Place::Pane, || areas::meetings(())),
             MainView::Saved => view! { <SavedView /> }.into_any(),
             MainView::Files => view! { <FilesView /> }.into_any(),
-            MainView::Activity => view! { <ActivityView /> }.into_any(),
+            MainView::Activity => view! { <ActivityHome /> }.into_any(),
             MainView::Calls => view! { <CallsView /> }.into_any(),
             MainView::Directory => lazy_area(Place::Pane, || areas::directory(())),
             MainView::GettingStarted => view! { <GettingStarted /> }.into_any(),
