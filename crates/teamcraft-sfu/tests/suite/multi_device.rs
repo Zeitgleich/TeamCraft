@@ -161,6 +161,34 @@ async fn others_see_who_muted_also_when_they_join_later() {
   .await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_flood_of_mute_toggles_is_not_relayed_to_everybody() {
+  let (port, hash) = start_sfu().await;
+  let mut laptop = join(port, hash, ALICE, ALICE_LAPTOP).await;
+  let mut bob = join(port, hash, BOB, BOB_DEVICE).await;
+  wait_for(&mut laptop, |event| {
+    matches!(event, CallEngineEvent::Secured { .. })
+  })
+  .await;
+  wait_for(&mut bob, |event| matches!(event, CallEngineEvent::Secured { .. })).await;
+
+  let defaults = SfuConfig::default();
+  let toggles = 10 * defaults.mute_report_burst;
+  for index in 0..toggles {
+    bob.set_muted(index % 2 == 0);
+  }
+  let events = collect(&mut laptop, Duration::from_secs(1)).await;
+  let relayed = events
+    .iter()
+    .filter(|event| matches!(event, CallEngineEvent::ParticipantMuted { .. }))
+    .count();
+  assert!(relayed > 0, "the first changes pass");
+  assert!(
+    relayed <= (defaults.mute_report_burst + defaults.mute_reports_per_second * 2) as usize,
+    "{relayed} of {toggles} relayed"
+  );
+}
+
 async fn join(port: u16, certificate_hash: [u8; 32], user: u64, device: u64) -> NativeCall {
   let engine = CallEngineConfig {
     user_id: id_of::<UserId>(user),
