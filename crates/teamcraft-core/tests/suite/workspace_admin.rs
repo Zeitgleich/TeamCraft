@@ -147,6 +147,7 @@ async fn a_retried_create_makes_one_space_and_one_channel() {
       maybe_topic: None,
       maybe_category: None,
       maybe_history: None,
+      is_integration: false,
     });
     run_commands(&mut alice, &ui).await;
   }
@@ -530,6 +531,7 @@ async fn create_public_channel(peer: &mut Peer, space: SpaceId, name: &str) -> C
     maybe_topic: Some("Daily operations".into()),
     maybe_category: None,
     maybe_history: None,
+    is_integration: false,
   });
   run_commands(peer, &ui).await;
   ui.space_conversations(space)

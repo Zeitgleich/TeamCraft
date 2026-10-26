@@ -54,6 +54,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
         maybe_topic: channel.maybe_topic,
         maybe_category: channel.maybe_category,
         maybe_history: channel.maybe_history,
+        is_integration: channel.is_integration,
         maybe_idempotency_key: channel.maybe_idempotency_key,
       }),
     });
@@ -93,6 +94,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
           }
         }),
         maybe_is_archived: changes.maybe_is_archived,
+        maybe_is_integration: changes.maybe_is_integration,
         maybe_category_id,
         clear_category,
         ..UpdateConversationRequest::default()

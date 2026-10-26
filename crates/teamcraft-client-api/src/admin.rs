@@ -506,11 +506,13 @@ pub enum AdminSection {
   Updates,
   /// Media server, push providers, storage and telephony.
   Instance,
+  /// Bots for the integration bridge (docs/bridge.md).
+  Integrations,
   Audit,
 }
 
 impl AdminSection {
-  pub const ALL: [AdminSection; 15] = [
+  pub const ALL: [AdminSection; 16] = [
     Self::Channels,
     Self::Users,
     Self::Permissions,
@@ -525,6 +527,7 @@ impl AdminSection {
     Self::Retention,
     Self::Updates,
     Self::Instance,
+    Self::Integrations,
     Self::Audit,
   ];
 
@@ -544,6 +547,7 @@ impl AdminSection {
       Self::Retention => "retention",
       Self::Updates => "updates",
       Self::Instance => "instance",
+      Self::Integrations => "integrations",
       Self::Audit => "audit",
     }
   }
