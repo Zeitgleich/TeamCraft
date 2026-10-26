@@ -64,6 +64,7 @@ pub mod notify_sync;
 pub mod object_url;
 pub mod os_alerts;
 pub mod panic_overlay;
+pub mod paste;
 pub mod prefs;
 pub mod preview;
 pub mod profiles;

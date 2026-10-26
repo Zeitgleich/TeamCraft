@@ -50,6 +50,8 @@ const COMMANDS: &[&str] = &[
   "core_reset_store",
   "dropped_files_take",
   "dropped_file_read",
+  "clipboard_paste_files",
+  "clipboard_read_image",
   "call_snapshot",
   "call_media_devices",
   "call_action",
