@@ -280,6 +280,11 @@ enum Input {
     timestamp_us: f64,
   },
   VideoEnded(VideoTrackKind),
+  /// The decoder of a watched track failed: a new one starts at the next keyframe.
+  VideoDecodeFailed {
+    stream_id: MediaStreamId,
+    message: String,
+  },
   Command(Command),
 }
 
@@ -887,6 +892,13 @@ impl CallState<'_> {
         timestamp_us,
       } => self.send_video_frame(engine, &kind, layer, data, is_keyframe, timestamp_us),
       Input::VideoEnded(kind) => self.stop_video(engine, &kind),
+      Input::VideoDecodeFailed { stream_id, message } => {
+        warn!(%message, stream_id = stream_id.0, "video decoder failed; waiting for a keyframe");
+        if let Some(view) = self.views.get_mut(&stream_id) {
+          view.reset_decoder();
+          engine.request_keyframe(stream_id, Instant::now());
+        }
+      },
       Input::Command(command) => return self.on_command(command, engine, audio).await,
     }
     Ok(Flow::Continue)
@@ -1209,7 +1221,7 @@ impl CallState<'_> {
         }
       },
       Command::WatchVideo { stream_id, canvas } => {
-        let view = VideoView::new(canvas, self.inputs);
+        let view = VideoView::new(stream_id, canvas, self.inputs);
         self.views.insert(stream_id, view);
         engine.subscribe_video(stream_id, Some(0));
       },

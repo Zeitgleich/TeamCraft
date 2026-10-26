@@ -46,6 +46,10 @@ use crate::video::EncodedVideoFrame;
 const OPUS_FRAME_TICKS: u32 = 960;
 /// Largest datagram the engine produces; audio frames are far below it.
 const MAX_DATAGRAM_BYTES: usize = 1200;
+/// Keyframe requests per received track go out at most this often: the SFU's default limit per
+/// receiver and track (`KeyframeRequestConfig`), so none is wasted. A keyframe of a big screen
+/// takes a while to arrive; asking faster would only produce more of them.
+const KEYFRAME_REQUEST_INTERVAL: Duration = Duration::from_secs(1);
 
 /// One call from this device's point of view.
 pub struct CallEngine {
@@ -610,10 +614,27 @@ impl CallEngine {
       Some(max_layer) => self.subscriptions.insert(stream, max_layer),
       None => self.subscriptions.remove(&stream),
     };
+    // A new subscription feeds a new decoder: deltas wait for the keyframe the SFU asks for.
+    if maybe_max_layer.is_some()
+      && let Some(track) = self.remote_video.get_mut(&stream)
+    {
+      track.wait_for_keyframe();
+    }
     self.signal(CallClientMessage::Subscribe {
       stream_id,
       maybe_max_layer,
     });
+  }
+
+  /// The app's decoder of a received track failed or was replaced: deltas are dropped until the
+  /// next keyframe, which is asked for (rate-limited).
+  pub fn request_keyframe(&mut self, stream_id: MediaStreamId, now: Instant) {
+    let stream = StreamId(stream_id.0);
+    let Some(track) = self.remote_video.get_mut(&stream) else {
+      return;
+    };
+    track.wait_for_keyframe();
+    self.ask_for_keyframe(stream, now);
   }
 
   /// Encrypts, splits and sends one encoded frame of an own track. Dropped before DAVE is ready,
@@ -1278,7 +1299,12 @@ impl CallEngine {
       return Ok(());
     }
     if self.remote_video.contains_key(&datagram.header.stream_id) {
-      return self.receive_video(datagram.header.stream_id, datagram.header.layer, datagram.rtp);
+      return self.receive_video(
+        datagram.header.stream_id,
+        datagram.header.layer,
+        datagram.rtp,
+        now,
+      );
     }
     let Some(&(sender, origin)) = self.audio_streams.get(&datagram.header.stream_id) else {
       return Ok(());
@@ -1311,28 +1337,58 @@ impl CallEngine {
         .is_some_and(|participant| participant.user_id == self.config.user_id)
   }
 
+  /// Reassembles and decrypts a received track's frames. After a lost packet or a frame that
+  /// didn't decrypt, its deltas are dropped until the next keyframe, which is asked for.
   fn receive_video(
     &mut self,
     stream: StreamId,
     layer: SimulcastLayer,
     rtp: &[u8],
+    now: Instant,
   ) -> Result<(), CallEngineError> {
     let packet = RtpPacket::parse(rtp).map_err(|_| CallEngineError::Protocol("bad RTP"))?;
     let Some(track) = self.remote_video.get_mut(&stream) else {
       return Ok(());
     };
-    let Some(complete) = track
+    let maybe_complete = track
       .push(layer, &packet)
-      .map_err(|_| CallEngineError::Protocol("bad video fragment"))?
-    else {
-      return Ok(());
+      .map_err(|_| CallEngineError::Protocol("bad video fragment"))?;
+    let mut needs_keyframe = track.take_loss();
+    let maybe_frame = match maybe_complete {
+      Some(complete) if track.accepts(complete.is_keyframe) => {
+        // A keyframe makes whatever went missing before it irrelevant.
+        needs_keyframe &= !complete.is_keyframe;
+        Some(complete)
+      },
+      // A delta whose reference went missing: the decoder can't use it.
+      Some(_) => {
+        needs_keyframe = true;
+        None
+      },
+      None => None,
     };
     let (sender, codec) = (track.sender, track.codec.clone());
-    let data = self.dave()?.decrypt_frame(
+    if needs_keyframe {
+      self.ask_for_keyframe(stream, now);
+    }
+    let Some(complete) = maybe_frame else {
+      return Ok(());
+    };
+    let decrypted = self.dave()?.decrypt_frame(
       DaveParticipantId::from_device(sender),
       MediaKind::Video,
       &complete.data,
-    )?;
+    );
+    let data = match decrypted {
+      Ok(data) => data,
+      Err(error) => {
+        if let Some(track) = self.remote_video.get_mut(&stream) {
+          track.wait_for_keyframe();
+        }
+        self.ask_for_keyframe(stream, now);
+        return Err(error.into());
+      },
+    };
     self.event(CallEngineEvent::VideoFrame(ReceivedVideoFrame {
       sender,
       stream_id: MediaStreamId(stream.0),
@@ -1343,6 +1399,21 @@ impl CallEngine {
       data,
     }));
     Ok(())
+  }
+
+  /// Asks the SFU for a keyframe of a received track, at most once per
+  /// [`KEYFRAME_REQUEST_INTERVAL`].
+  fn ask_for_keyframe(&mut self, stream: StreamId, now: Instant) {
+    let Some(track) = self.remote_video.get_mut(&stream) else {
+      return;
+    };
+    if !track.is_keyframe_request_due(now, KEYFRAME_REQUEST_INTERVAL) {
+      return;
+    }
+    debug!(stream_id = stream.0, "asking for a keyframe");
+    self.signal(CallClientMessage::RequestKeyframe {
+      stream_id: MediaStreamId(stream.0),
+    });
   }
 
   fn add_video_track(&mut self, track: VideoTrack) {
@@ -1670,6 +1741,167 @@ mod tests {
       engine.join("t".into());
       let result = engine.handle_signal(event(1, joined(2, &[])), now);
       assert!(matches!(result, Err(CallEngineError::Protocol(_))));
+    }
+  }
+
+  /// Received video that can't be decoded until the next keyframe asks for one (issue #683).
+  mod keyframe_recovery {
+    use super::*;
+
+    const STREAM: MediaStreamId = MediaStreamId(50);
+
+    #[test]
+    fn a_lost_keyframe_fragment_drops_the_deltas_and_asks_once() {
+      let now = Instant::now();
+      let (mut alice, mut bob) = watching_pair(now);
+      let mut keyframe = datagrams_of(&mut alice, true, now);
+      assert!(keyframe.len() >= 3);
+      keyframe.remove(1);
+      deliver(&mut bob, &keyframe, now);
+      deliver(&mut bob, &datagrams_of(&mut alice, false, now), now);
+      let outputs = drain(&mut bob);
+      assert!(frames(&outputs).is_empty(), "nothing decodable yet");
+      assert_eq!(requests(&outputs), vec![STREAM]);
+      // More deltas before the interval passed: still dropped, no second request.
+      let soon = now + Duration::from_millis(300);
+      deliver(&mut bob, &datagrams_of(&mut alice, false, soon), soon);
+      let outputs = drain(&mut bob);
+      assert!(frames(&outputs).is_empty());
+      assert!(requests(&outputs).is_empty());
+      // The keyframe that answers the request, and the deltas after it, go to the decoder.
+      deliver(&mut bob, &datagrams_of(&mut alice, true, soon), soon);
+      deliver(&mut bob, &datagrams_of(&mut alice, false, soon), soon);
+      let decoded = frames(&drain(&mut bob));
+      assert_eq!(decoded, vec![true, false]);
+    }
+
+    #[test]
+    fn a_wholly_lost_delta_is_noticed_from_the_sequence_numbers() {
+      let now = Instant::now();
+      let (mut alice, mut bob) = watching_pair(now);
+      deliver(&mut bob, &datagrams_of(&mut alice, true, now), now);
+      drain(&mut bob);
+      // One delta never arrives at all; the next one can't follow it.
+      datagrams_of(&mut alice, false, now);
+      deliver(&mut bob, &datagrams_of(&mut alice, false, now), now);
+      let outputs = drain(&mut bob);
+      assert!(frames(&outputs).is_empty());
+      assert_eq!(requests(&outputs), vec![STREAM]);
+    }
+
+    #[test]
+    fn reordered_fragments_of_a_frame_are_no_loss() {
+      let now = Instant::now();
+      let (mut alice, mut bob) = watching_pair(now);
+      let mut keyframe = datagrams_of(&mut alice, true, now);
+      keyframe.swap(1, 2);
+      deliver(&mut bob, &keyframe, now);
+      deliver(&mut bob, &datagrams_of(&mut alice, false, now), now);
+      let outputs = drain(&mut bob);
+      assert_eq!(frames(&outputs), vec![true, false]);
+      assert!(requests(&outputs).is_empty());
+    }
+
+    #[test]
+    fn an_app_whose_decoder_failed_asks_at_most_once_per_interval() {
+      let now = Instant::now();
+      let (mut alice, mut bob) = watching_pair(now);
+      deliver(&mut bob, &datagrams_of(&mut alice, true, now), now);
+      drain(&mut bob);
+      bob.request_keyframe(STREAM, now);
+      bob.request_keyframe(STREAM, now + Duration::from_millis(500));
+      assert_eq!(requests(&drain(&mut bob)), vec![STREAM]);
+      // Its deltas wait for the keyframe too.
+      deliver(&mut bob, &datagrams_of(&mut alice, false, now), now);
+      assert!(frames(&drain(&mut bob)).is_empty());
+      bob.request_keyframe(STREAM, now + KEYFRAME_REQUEST_INTERVAL);
+      assert_eq!(requests(&drain(&mut bob)), vec![STREAM]);
+    }
+
+    #[test]
+    fn subscribing_again_waits_for_the_keyframe_the_sfu_asks_for() {
+      let now = Instant::now();
+      let (mut alice, mut bob) = watching_pair(now);
+      deliver(&mut bob, &datagrams_of(&mut alice, true, now), now);
+      drain(&mut bob);
+      bob.subscribe_video(STREAM, Some(0));
+      deliver(&mut bob, &datagrams_of(&mut alice, false, now), now);
+      let outputs = drain(&mut bob);
+      assert!(frames(&outputs).is_empty(), "a new decoder starts at a keyframe");
+      // The SFU asked the publisher on the subscribe already and merges this one with it.
+      assert_eq!(requests(&outputs), vec![STREAM]);
+      deliver(&mut bob, &datagrams_of(&mut alice, true, now), now);
+      assert_eq!(frames(&drain(&mut bob)), vec![true]);
+    }
+
+    /// Alice publishes a screen track (one layer) that Bob receives.
+    fn watching_pair(now: Instant) -> (CallEngine, CallEngine) {
+      let (mut alice, mut bob) = secured_pair(now);
+      let track = VideoTrack {
+        stream_id: STREAM,
+        device_id: device(1),
+        kind: VideoTrackKind::Screen,
+        codec: VideoCodec::H264,
+        layers: Vec::new(),
+      };
+      alice.publish_video(VideoTrackKind::Screen, VideoCodec::H264, Vec::new());
+      let published = CallEvent::VideoPublished { track };
+      alice.handle_signal(event(6, published.clone()), now).unwrap();
+      bob.handle_signal(event(4, published), now).unwrap();
+      drain(&mut alice);
+      drain(&mut bob);
+      (alice, bob)
+    }
+
+    /// The datagrams of one frame Alice sends: keyframes in several fragments, deltas in one.
+    fn datagrams_of(alice: &mut CallEngine, is_keyframe: bool, now: Instant) -> Vec<Vec<u8>> {
+      let size = if is_keyframe { 4000 } else { 300 };
+      let frame = EncodedVideoFrame {
+        codec: VideoCodec::H264,
+        layer: SimulcastLayer::BASE,
+        timestamp: RtpTimestamp(0),
+        is_keyframe,
+        data: [
+          &[0, 0, 0, 1, if is_keyframe { 0x65 } else { 0x41 }][..],
+          &vec![0x88; size],
+        ]
+        .concat(),
+      };
+      assert_eq!(alice.send_video(STREAM, &frame, now), VideoSendOutcome::Sent);
+      drain(alice)
+        .into_iter()
+        .filter_map(|output| match output {
+          EngineOutput::Datagram(bytes) => Some(bytes),
+          _ => None,
+        })
+        .collect()
+    }
+
+    fn deliver(bob: &mut CallEngine, datagrams: &[Vec<u8>], now: Instant) {
+      for datagram in datagrams {
+        bob.handle_datagram(datagram, now);
+      }
+    }
+
+    /// Whether each frame given to the app was a keyframe.
+    fn frames(outputs: &[EngineOutput]) -> Vec<bool> {
+      outputs
+        .iter()
+        .filter_map(|output| match output {
+          EngineOutput::Event(CallEngineEvent::VideoFrame(frame)) => Some(frame.is_keyframe),
+          _ => None,
+        })
+        .collect()
+    }
+
+    fn requests(outputs: &[EngineOutput]) -> Vec<MediaStreamId> {
+      outputs
+        .iter()
+        .filter_map(|output| match output {
+          EngineOutput::Signal(CallClientMessage::RequestKeyframe { stream_id }) => Some(*stream_id),
+          _ => None,
+        })
+        .collect()
     }
   }
 

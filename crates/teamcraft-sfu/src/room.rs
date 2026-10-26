@@ -495,6 +495,10 @@ impl Room {
         participant_id,
         self.subscribe(participant_id, stream_id, maybe_max_layer, now),
       ),
+      CallClientMessage::RequestKeyframe { stream_id } => {
+        self.request_keyframe(participant_id, stream_id, now);
+        Ok(())
+      },
       CallClientMessage::SetMuted { is_muted } => {
         self.set_muted(participant_id, is_muted, now);
         Ok(())
@@ -589,6 +593,16 @@ impl Room {
       .subscribe(receiver, StreamId(stream_id.0), maybe_max_layer, now)?;
     state.apply(effects);
     Ok(())
+  }
+
+  /// A receiver can't decode a track until its next keyframe; a request for a track it doesn't
+  /// receive (unpublished meanwhile) is no error, there is just nothing to ask for.
+  pub fn request_keyframe(&self, receiver: DeviceId, stream_id: MediaStreamId, now: Instant) {
+    let mut state = lock(&self.state);
+    let effects = state
+      .forwarder
+      .request_keyframe(receiver, StreamId(stream_id.0), now);
+    state.apply(effects);
   }
 
   pub fn on_transport_feedback(&self, receiver: DeviceId, feedback: &TransportFeedback, now: Instant) {

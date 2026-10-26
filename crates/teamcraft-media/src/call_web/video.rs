@@ -67,6 +67,7 @@ struct LayerEncoder {
 
 /// Decodes one remote track into a canvas; the decoder is set up for the codec of the first frame.
 pub(super) struct VideoView {
+  stream_id: MediaStreamId,
   canvas: HtmlCanvasElement,
   inputs: mpsc::UnboundedSender<Input>,
   maybe_decoder: Option<Decoder>,
@@ -296,12 +297,22 @@ impl LayerEncoder {
 }
 
 impl VideoView {
-  pub fn new(canvas: HtmlCanvasElement, inputs: &mpsc::UnboundedSender<Input>) -> Self {
+  pub fn new(
+    stream_id: MediaStreamId,
+    canvas: HtmlCanvasElement,
+    inputs: &mpsc::UnboundedSender<Input>,
+  ) -> Self {
     Self {
+      stream_id,
       canvas,
       inputs: inputs.clone(),
       maybe_decoder: None,
     }
+  }
+
+  /// Drops a failed decoder (WebCodecs closes it on an error); the next keyframe starts a new one.
+  pub fn reset_decoder(&mut self) {
+    self.maybe_decoder = None;
   }
 
   /// Decodes a frame; deltas before the first keyframe can't be decoded and are skipped.
@@ -311,7 +322,12 @@ impl VideoView {
       .as_ref()
       .is_none_or(|decoder| decoder.codec != frame.codec)
     {
-      self.maybe_decoder = Some(Decoder::new(&frame.codec, self.canvas.clone(), &self.inputs)?);
+      self.maybe_decoder = Some(Decoder::new(
+        self.stream_id,
+        &frame.codec,
+        self.canvas.clone(),
+        &self.inputs,
+      )?);
     }
     let Some(decoder) = &mut self.maybe_decoder else {
       return Ok(());
@@ -342,6 +358,7 @@ impl VideoView {
 
 impl Decoder {
   fn new(
+    stream_id: MediaStreamId,
     codec: &VideoCodec,
     canvas: HtmlCanvasElement,
     inputs: &mpsc::UnboundedSender<Input>,
@@ -368,7 +385,15 @@ impl Decoder {
       }
       frame.close();
     });
-    let error = super::codec_error_callback(inputs);
+    // A failed decoder is closed for good: the view builds a new one at the next keyframe, which
+    // is asked for.
+    let failure_sender = inputs.clone();
+    let error = Closure::<dyn FnMut(JsValue)>::new(move |error: JsValue| {
+      let _ = failure_sender.unbounded_send(Input::VideoDecodeFailed {
+        stream_id,
+        message: js_message(&error),
+      });
+    });
     let decoder = VideoDecoder::new(
       &dictionary(&[
         ("output", output.as_ref().clone()),

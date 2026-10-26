@@ -202,6 +202,8 @@ mod view {
     channel_generation: Cell<u64>,
     maybe_decoder: RefCell<Option<Decoder>>,
     is_waiting_for_keyframe: Cell<bool>,
+    /// The shell was asked for a keyframe since the wait for one began.
+    has_asked_for_keyframe: Cell<bool>,
     /// The decoder reported an error; the next keyframe gets a new one.
     is_decoder_broken: Cell<bool>,
     decoder_errors: Cell<u32>,
@@ -243,6 +245,7 @@ mod view {
         channel_generation: Cell::new(0),
         maybe_decoder: RefCell::new(None),
         is_waiting_for_keyframe: Cell::new(true),
+        has_asked_for_keyframe: Cell::new(false),
         is_decoder_broken: Cell::new(false),
         decoder_errors: Cell::new(0),
         is_vp9_unsupported: Cell::new(false),
@@ -359,8 +362,8 @@ mod view {
       };
       let payload = bytes.subarray(HEADER_BYTES as u32, bytes.length());
       if is_after_gap {
-        // The SFU sends keyframes regularly; there is no receiver-side request to ask sooner.
         self.is_waiting_for_keyframe.set(true);
+        self.ask_for_keyframe();
       }
       match header.codec {
         FrameCodec::Jpeg => self.draw_image(payload),
@@ -437,9 +440,11 @@ mod view {
       if !header.is_keyframe && decoder.decoder.decode_queue_size() > MAX_DECODE_QUEUE {
         tracing::debug!("the video decoder is behind; waiting for a keyframe");
         self.is_waiting_for_keyframe.set(true);
+        self.ask_for_keyframe();
         return;
       }
       self.is_waiting_for_keyframe.set(false);
+      self.has_asked_for_keyframe.set(false);
       let chunk = dictionary(&[
         (
           "type",
@@ -466,7 +471,30 @@ mod view {
       tracing::debug!(errors, "video decoder error; rebuilding it");
       if errors >= MAX_DECODER_ERRORS && codec == FrameCodec::H264 {
         self.fall_back_to_images();
+      } else {
+        // A new failure, maybe of the keyframe asked for before: ask again.
+        self.has_asked_for_keyframe.set(false);
+        self.ask_for_keyframe();
       }
+    }
+
+    /// Asks the shell for a keyframe of a remote track, once per wait (the call limits the rate
+    /// as well). Without one a track would wait for the publisher's periodic keyframe, and for
+    /// a still screen there is none.
+    fn ask_for_keyframe(&self) {
+      let VideoSource::Remote(stream_id) = self.source else {
+        return;
+      };
+      if self.is_stopped.get() || self.has_asked_for_keyframe.replace(true) {
+        return;
+      }
+      spawn_local(async move {
+        let args = json!({ "stream_id": stream_id });
+        if let Err(error) = call::<()>("call_request_keyframe", &args).await {
+          // The call may have ended meanwhile; the next keyframe comes anyway.
+          tracing::debug!(%error, "keyframe not requested");
+        }
+      });
     }
 
     /// No decoder for `codec` here: H.264 comes as JPEG images from now on (for this track and

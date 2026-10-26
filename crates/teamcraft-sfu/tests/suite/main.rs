@@ -13,3 +13,4 @@ mod reporting;
 mod session_close;
 mod sfu_restart;
 mod video_call;
+mod video_recovery;

@@ -77,6 +77,12 @@ impl VideoFrame {
     self.timestamp_us
   }
 
+  /// The same picture at another time (a still screen's picture sent again).
+  pub fn with_timestamp_us(mut self, timestamp_us: u64) -> Self {
+    self.timestamp_us = timestamp_us;
+    self
+  }
+
   /// Y, U and V planes.
   pub fn planes(&self) -> (&[u8], &[u8], &[u8]) {
     let luma = usize::from(self.resolution.width) * usize::from(self.resolution.height);
