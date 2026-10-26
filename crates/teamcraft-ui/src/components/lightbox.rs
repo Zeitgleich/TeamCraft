@@ -42,6 +42,7 @@ use crate::components::lightbox_controls::{
 use crate::components::lightbox_motion::{MotionHooks, MotionNodes, StageMotion};
 use crate::components::modal::Modal;
 use crate::components::thread_panel::ThreadPanel;
+use crate::components::video_player::VideoPlayer;
 use crate::i18n::use_i18n;
 use crate::lightbox::{
   Arrival, Command, Direction, Gesture, LightboxScope, MediaKey, MediaKind, MediaPages, ModifierStyle, Point,
@@ -759,20 +760,17 @@ fn Stage(
             (FullMedia::Ready(url), Some(MediaKind::Video)) => {
               let key = arrival.with_untracked(|arrival| arrival.key());
               view! {
-                <video
-                  class="lightbox-video"
+                <VideoPlayer
                   src=url.as_str().to_owned()
-                  controls
-                  playsinline
-                  preload="metadata"
-                  aria-label=name
-                  node_ref=video
-                  on:loadedmetadata=move |_| {
+                  video=video
+                  label=Signal::derive(name)
+                  class="lightbox-video"
+                  maybe_on_loaded=Callback::new(move |()| {
                     mark_shown(arrival, key);
                     motion.shown();
-                  }
-                  on:error=move |_| full.set(FullMedia::Failed)
-                ></video>
+                  })
+                  on_error=Callback::new(move |()| drop(full.try_set(FullMedia::Failed)))
+                />
               }
               .into_any()
             },
@@ -1046,8 +1044,8 @@ pub fn sizes(image: NodeRef<html::Img>, stage: NodeRef<html::Div>) -> (Size, Siz
   (image, stage)
 }
 
-/// Keys typed into the thread's composer, a text field or the zoom slider are theirs, the "…" menu
-/// handles its own, and a focused video seeks with the arrow keys.
+/// Keys typed into the thread's composer, a text field or the zoom slider are theirs, and the "…"
+/// menu handles its own.
 fn is_typing_target(ev: &web_sys::KeyboardEvent) -> bool {
   let Some(element) = ev
     .target()
@@ -1055,8 +1053,12 @@ fn is_typing_target(ev: &web_sys::KeyboardEvent) -> bool {
   else {
     return false;
   };
+  // The video player takes the keys it uses itself; the rest (Escape, T, J) are the lightbox's.
+  if element.closest(".video-player").ok().flatten().is_some() {
+    return false;
+  }
   let tag = element.tag_name().to_ascii_lowercase();
-  matches!(tag.as_str(), "input" | "textarea" | "select" | "video")
+  matches!(tag.as_str(), "input" | "textarea" | "select")
     || element
       .closest("[contenteditable], .lightbox-thread, [role=menu]")
       .ok()

@@ -2486,6 +2486,15 @@ lightbox-thumbnail = Show { $name }
 media-open = Open { $name }
 video-play = Play { $name }
 video-expand = Open larger
+video-play-button = Play
+video-pause = Pause
+video-seek = Playback position
+video-position = { $current } of { $total }
+video-mute = Mute
+video-unmute = Unmute
+video-volume = Volume
+video-fullscreen = Full screen
+video-exit-fullscreen = Exit full screen
 
 ## Failed actions (an error toast) and the panic overlay
 

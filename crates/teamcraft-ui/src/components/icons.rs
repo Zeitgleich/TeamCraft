@@ -50,6 +50,7 @@ pub enum IconName {
   Image,
   Camera,
   Volume,
+  VolumeOff,
   Shield,
   Clock,
   List,
@@ -181,6 +182,7 @@ impl IconName {
         "M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z M12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"
       },
       Self::Volume => "M11 5L6 9H2v6h4l5 4z M15.5 8.5a5 5 0 0 1 0 7 M19 5a10 10 0 0 1 0 14",
+      Self::VolumeOff => "M11 5L6 9H2v6h4l5 4z M22 9l-6 6 M16 9l6 6",
       Self::Shield => "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z",
       Self::Clock => "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z M12 7v5l3 3",
       Self::List => "M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01",

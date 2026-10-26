@@ -38,9 +38,9 @@ const WHEEL_END_MS: u64 = 120;
 const ARRIVED_PX: f64 = 1.0;
 const ARRIVED_FRACTION: f64 = 0.01;
 /// What the current slot's picture is, whichever is shown (the file once decoded, else its
-/// placeholder, or a video). The file comes first in the slot.
+/// placeholder, or a video in its player). The file comes first in the slot.
 const CURRENT_MEDIA: &str = ".lightbox-slot.is-current .lightbox-image:not(.is-arriving):not(.is-hidden), \
-                             .lightbox-slot.is-current .lightbox-video";
+                             .lightbox-slot.is-current .lightbox-video > video";
 
 /// Drives the stage. Cheap to copy into event handlers; its state lives with the lightbox.
 #[derive(Clone, Copy)]
