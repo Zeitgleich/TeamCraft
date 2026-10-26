@@ -59,6 +59,6 @@ pub use client::{
   AttestationSettings, CallEventSink, CallKeySigner, CallPreparation, Client, ClientSettings,
   EnrollmentOptions, EnrollmentSecret, FlushReport, GatewayOutcome, GroupAccess, HistoryScan, JwksSource,
   LinkAnnouncement, LinkOffer, LinkRequestInfo, LinkRequestList, MAX_VIEWER_BYTES, OrgRecoveryUnlock,
-  PendingEnrollment, TypingState,
+  PendingEnrollment, SyncPhase, TypingState,
 };
 pub use error::{CoreError, UnreadableStore};

@@ -2,14 +2,17 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use futures_util::future::join_all;
 use teamcraft_crypto::mls::{create_key_package, create_last_resort_key_package};
 use teamcraft_proto::{
   Base64Bytes, ConversationId, ConversationKind, ConversationResponse, ListConversationMembersResponse,
-  ListThreadsQuery, SpaceId, UploadKeyPackagesRequest, UserId, UserSummary,
+  ListConversationsResponse, ListSpacesResponse, SpaceResponse, UploadKeyPackagesRequest, UserId,
+  UserSummary,
 };
 
 use super::Client;
 use super::catch_up::FirstPages;
+use super::read_ahead::FirstListing;
 use crate::api::{ApiError, ServerApi};
 use crate::clock::{Clock, SystemClock};
 use crate::error::CoreError;
@@ -43,7 +46,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// messages (the conversation the user looks at first, several at once, issue #247), then the
   /// outbox, key packages and the key bag.
   pub async fn full_sync(&mut self) -> Result<(), CoreError> {
-    let started_ms = self.now_ms();
     // Welcomes may have come in while this device was away: no spent key package goes before they
     // are read again (issue #395).
     self.are_welcomes_synced = false;
@@ -52,14 +54,51 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.apply_shared_removals()?;
     self.share_removed_senders()?;
     self.finish_enrollment().await?;
+    self.trace_lap("enrollment");
+    // The reads that need nothing from each other go out at once (issue #714): one round trip
+    // instead of one per step and conversation.
+    let listing = self.read_ahead_fresh().await?;
+    self.trace_lap("first reads");
+    let outcome = self.sync_from_first_reads(listing).await;
+    // Answers read for the connection after the sync (presence, link requests) stay for it.
+    self.read_ahead.drop_sync_answers();
+    outcome
+  }
+
+  async fn sync_from_first_reads(&mut self, listing: FirstListing) -> Result<(), CoreError> {
+    self.begin_heads(listing.heads)?;
+    let outcome = self.sync_listed(listing.spaces, listing.conversations).await;
+    // What was caught up is kept also when the sync failed half way; the rest is read next time.
+    self.finish_heads()?;
+    outcome?;
+    // With the queues read, the newest server time is known (issues #186, #391).
+    self.prune_removed_senders()?;
+    self.prune_readded_records()?;
+    self.refresh_read_state().await?;
+    self.trace_lap("read state");
+    self.finish_full_sync().await
+  }
+
+  /// The part of [`Self::full_sync`] that works from the listings read at once: the workspace log,
+  /// spaces and their members, people no list names, then the conversations, of which only those
+  /// whose heads moved are caught up.
+  async fn sync_listed(
+    &mut self,
+    spaces: Result<ListSpacesResponse, ApiError>,
+    conversations: Result<ListConversationsResponse, ApiError>,
+  ) -> Result<(), CoreError> {
+    let started_ms = self.now_ms();
     self.sync_workspace().await?;
-    let listed = self.refresh_spaces_listing().await?;
+    self.trace_lap("workspace log");
     self.refresh_own_summary().await;
+    let listed = self.store_spaces(spaces?.spaces).await?;
+    self.trace_lap("space members");
     if let Err(error) = self.recheck_unlisted_people(&listed).await {
       // Not fatal: names stay as they were until the next sync.
       tracing::warn!(%error, "could not recheck people no list mentions");
     }
-    let listing = self.api.list_conversations().await?;
+    self.trace_lap("unlisted people");
+    let listing = conversations?;
     // Direct messages deleted with a deleted account while this device was away: they go with
     // their local history, as on the gateway's `conversation_delete`.
     for deleted in &listing.deleted_conversation_ids {
@@ -96,17 +135,38 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       ms = self.now_ms().saturating_sub(started_ms),
       "full sync: conversation list stored"
     );
-    let ids: Vec<ConversationId> = conversations.iter().map(|conversation| conversation.id).collect();
-    self
-      .catch_up_conversations(&ids, &members_order(&conversations))
-      .await?;
-    // With the queues read, the newest server time is known (issues #186, #391).
-    self.prune_removed_senders()?;
-    self.prune_readded_records()?;
-    self.refresh_read_state().await?;
+    // Only what moved since the last sync (issue #714); everything when the server gave no heads.
+    let parked = self.parked_conversations()?;
+    let mut content_due = Vec::new();
+    for conversation in &conversations {
+      if self.is_content_due(conversation.id, &parked)? {
+        content_due.push(conversation.id);
+      }
+    }
+    let mut members_due = Vec::new();
+    for conversation in members_order(&conversations) {
+      if self.are_members_due(conversation)? {
+        members_due.push(conversation);
+      }
+    }
+    tracing::info!(
+      conversations = conversations.len(),
+      members_due = members_due.len(),
+      content_due = content_due.len(),
+      "full sync: reading what changed"
+    );
+    self.keep_listed_heads(conversations.iter().map(|conversation| conversation.id));
+    self.catch_up_conversations(&content_due, &members_due).await
+  }
+
+  /// The rest of [`Self::full_sync`]: settings, waiting additions and revocations, what was queued
+  /// offline, key packages and account data.
+  async fn finish_full_sync(&mut self) -> Result<(), CoreError> {
     self.refresh_notification_settings().await?;
+    self.trace_lap("notification settings");
     // A `device_add` missed while offline beyond the resume window would leave them waiting.
     self.recheck_waiting_additions().await?;
+    self.trace_lap("waiting additions");
     // A revocation the revoking device couldn't finish while this one was away (#232). A list
     // that doesn't verify is the server's problem, not a reason to stop syncing.
     if let Err(error) = self.finish_listed_revocations().await {
@@ -115,13 +175,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }
       tracing::warn!(%error, "could not check the signed device list for unfinished revocations");
     }
+    self.trace_lap("revocations");
     self.apply_pending_changes().await?;
     self.flush_outbox().await?;
     // Read positions, acknowledgements and pins taken offline (issue #159).
     self.flush_pending_actions().await?;
+    self.trace_lap("outbox and pending actions");
     self.top_up_key_packages().await?;
+    self.trace_lap("key packages");
     // Also picks up saved items and drafts other devices changed while this one was away.
-    self.sync_account_data().await
+    self.sync_account_data().await?;
+    self.trace_lap("account data");
+    Ok(())
   }
 
   /// Catches one conversation up for a push that arrived while the sync loop wasn't running
@@ -253,14 +318,25 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(records::get_json(&self.store, Table::SyncState, part.key())?.unwrap_or_default())
   }
 
+  pub(super) fn is_marked_for_resync(
+    &self,
+    conversation: ConversationId,
+    part: ResyncPart,
+  ) -> Result<bool, CoreError> {
+    Ok(self.marked_for_resync(part)?.contains(&conversation))
+  }
+
   /// Followed threads and unread counts (after `thread_update` and on fresh sessions). The threads'
   /// last replies are decrypted into the message store like any message.
   pub async fn refresh_read_state(&mut self) -> Result<(), CoreError> {
-    let query = ListThreadsQuery {
-      maybe_limit: Some(self.settings.history_page_size),
-      ..ListThreadsQuery::default()
+    let (threads, unread) = match self.read_ahead.read_state.take() {
+      Some(answers) => answers,
+      None => {
+        let query = self.threads_query();
+        futures_util::join!(self.api.list_threads(&query), self.api.unread())
+      },
     };
-    let threads = self.api.list_threads(&query).await?.threads;
+    let threads = threads?.threads;
     for reply in threads
       .iter()
       .filter_map(|thread| thread.maybe_last_reply.clone())
@@ -268,8 +344,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.receive_message(reply)?;
     }
     read_state::save_threads(&self.store, &threads)?;
-    let unread = self.api.unread().await?;
-    read_state::save_unread(&self.store, &unread)
+    read_state::save_unread(&self.store, &unread?)
   }
 
   /// Checks the key packages on the server once [`ClientSettings::key_package_check_interval`]
@@ -302,7 +377,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// renewal window as "expiring soon", not as available, and an expiring last-resort package as
   /// missing, so this also replaces packages before they expire.
   pub async fn top_up_key_packages(&mut self) -> Result<(), CoreError> {
-    let status = self.api.key_package_status(self.account.device_id).await?;
+    let status = match self.read_ahead.key_packages.take() {
+      Some(status) => status?,
+      None => self.api.key_package_status(self.account.device_id).await?,
+    };
     self.last_key_package_check_ms = self.now_ms();
     let missing = if status.available < self.settings.key_package_low_water {
       self.settings.key_package_target.saturating_sub(status.available)
@@ -361,11 +439,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// who is in no conversation yet would otherwise have no name in the app. Fetched at every full
   /// sync, so a name changed at the identity provider shows (issue #654).
   pub(crate) async fn refresh_own_summary(&mut self) {
-    let me = self.user_id();
-    let key = me.to_string();
-    match self.api.user(me).await {
+    let read = match self.read_ahead.own.take() {
+      Some(read) => read,
+      None => self.api.user(self.user_id()).await,
+    };
+    self.store_own_summary(read);
+  }
+
+  fn store_own_summary(&mut self, read: Result<UserSummary, ApiError>) {
+    match read {
       Ok(summary) => {
-        if let Err(error) = records::put_json(&self.store, Table::Users, &key, &summary) {
+        if let Err(error) = records::put_json(&self.store, Table::Users, &summary.id.to_string(), &summary) {
           tracing::debug!(%error, "could not store the own user summary");
         }
       },
@@ -382,27 +466,43 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// [`Self::refresh_spaces`], returning the people the space member lists named.
   async fn refresh_spaces_listing(&mut self) -> Result<HashSet<UserId>, CoreError> {
-    let mut listed = HashSet::new();
-    for space in self.api.list_spaces().await?.spaces {
-      records::put_json(&self.store, Table::Spaces, &space.id.to_string(), &space)?;
-      if space.maybe_my_role.is_some() {
-        listed.extend(self.refresh_space_members(space.id).await?);
-      }
-    }
-    Ok(listed)
+    let spaces = self.api.list_spaces().await?.spaces;
+    self.store_spaces(spaces).await
   }
 
-  async fn refresh_space_members(&mut self, space: SpaceId) -> Result<Vec<UserId>, CoreError> {
-    match self.api.list_space_members(space).await {
-      Ok(members) => members
-        .members
-        .iter()
-        .map(|member| self.remember_user(&member.user).map(|()| member.user.id))
-        .collect(),
-      // Guests may not list a space's members; they find the people of their conversations.
-      Err(error) if error.is_forbidden() || error.is_not_found() => Ok(Vec::new()),
-      Err(error) => Err(error.into()),
+  /// Stores the spaces and reads the member lists of those the user is in, all at once; during a
+  /// full sync only those whose heads moved (issue #714). Returns the people the lists named.
+  async fn store_spaces(&mut self, spaces: Vec<SpaceResponse>) -> Result<HashSet<UserId>, CoreError> {
+    let mut listed = HashSet::new();
+    let mut due = Vec::new();
+    for space in spaces {
+      records::put_json(&self.store, Table::Spaces, &space.id.to_string(), &space)?;
+      if space.maybe_my_role.is_none() || self.is_space_unlisted(space.id) {
+        continue;
+      }
+      match self.unchanged_space_members(space.id) {
+        Some(members) => listed.extend(members),
+        None => due.push(space.id),
+      }
     }
+    let api = &self.api;
+    let reads = join_all(due.iter().map(|space| api.list_space_members(*space))).await;
+    for (space, read) in due.into_iter().zip(reads) {
+      let members = match read {
+        Ok(members) => members,
+        // Guests may not list a space's members; they find the people of their conversations.
+        Err(error) if error.is_forbidden() || error.is_not_found() => continue,
+        Err(error) => return Err(error.into()),
+      };
+      let mut ids = Vec::with_capacity(members.members.len());
+      for member in &members.members {
+        self.remember_user(&member.user)?;
+        ids.push(member.user.id);
+      }
+      listed.extend(ids.iter().copied());
+      self.note_space_seen(space, ids);
+    }
+    Ok(listed)
   }
 
   /// Fetches a person again, after a profile change or because no list names them any more: a new
@@ -505,7 +605,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     for member in &members.members {
       self.remember_user(&member.user)?;
     }
-    records::put_json(&self.store, Table::Members, &conversation.to_string(), &members)
+    records::put_json(&self.store, Table::Members, &conversation.to_string(), &members)?;
+    self.note_members_seen(conversation);
+    Ok(())
   }
 
   fn remember_user(&self, user: &UserSummary) -> Result<(), CoreError> {

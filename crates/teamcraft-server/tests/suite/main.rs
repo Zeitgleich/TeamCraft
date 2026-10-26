@@ -67,6 +67,7 @@ mod space_discovery;
 mod space_features;
 mod space_images;
 mod status;
+mod sync_heads;
 mod threads;
 mod unread_events;
 mod user_deletion;

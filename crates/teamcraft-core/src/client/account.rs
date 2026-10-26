@@ -47,7 +47,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Brings the account data up to date with the user's other devices: merges a newer key bag
   /// from the server, and uploads local changes.
   pub async fn sync_account_data(&mut self) -> Result<(), CoreError> {
-    let remote = self.api.key_bag().await?;
+    let remote = match self.read_ahead.key_bag.take() {
+      Some(remote) => remote?,
+      None => self.api.key_bag().await?,
+    };
     if remote.version > self.sync.key_bag_version {
       self.merge_key_bag(
         remote.encrypted_key_bag.as_slice(),

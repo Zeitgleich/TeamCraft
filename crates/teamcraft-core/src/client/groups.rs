@@ -1713,7 +1713,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
-  fn has_pending_commit(&mut self, conversation: ConversationId) -> Result<bool, CoreError> {
+  pub(super) fn has_pending_commit(&mut self, conversation: ConversationId) -> Result<bool, CoreError> {
     Ok(
       self
         .group(conversation)?

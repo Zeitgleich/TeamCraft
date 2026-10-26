@@ -295,7 +295,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Fetches the user's notification settings for the device's own DND check (on fresh sessions
   /// and when another device changed them).
   pub async fn refresh_notification_settings(&mut self) -> Result<(), CoreError> {
-    let settings = self.api.notification_settings().await?;
+    let settings = match self.read_ahead.notification_settings.take() {
+      Some(settings) => settings?,
+      None => self.api.notification_settings().await?,
+    };
     push_guard::save_notification_settings(&self.store, &settings)
   }
 

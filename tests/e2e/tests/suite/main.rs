@@ -37,6 +37,7 @@ mod moderator;
 mod perf;
 mod retention_limits;
 mod server_robustness;
+mod sync_perf;
 mod threads_policy;
 #[cfg(feature = "browser")]
 mod web;
