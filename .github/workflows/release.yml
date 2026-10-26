@@ -1,15 +1,15 @@
 # Release (docs/release.md): a tag `v*` builds everything a release ships and attaches it to a
 # **draft** GitHub release, which a maintainer reviews and publishes by hand.
 #
-# - Server and SFU images, multi-arch (amd64 + arm64, each built on a native runner), pushed to
-#   ghcr.io/<owner>/teamcraft-server and -sfu: the version tag, X.Y and `latest` for releases, only
+# - Server, SFU and integration bridge images, multi-arch (amd64 + arm64, each built on a native
+#   runner), pushed to ghcr.io/<owner>/teamcraft-server, -sfu and -bridge: the version tag, X.Y and `latest` for releases, only
 #   the version for prereleases. Signed with cosign (keyless) and with a build provenance attestation.
 # - Desktop packages from desktop-release.yml (called, not copied), the web client bundle, and the
 #   desktop updater manifest latest.json when the update artifacts are signed (docs/updates.md).
 # - Android APKs of both flavors: release builds (signed only when the upload key secrets exist,
 #   `-unsigned` otherwise) and `-debug-signed` builds for testers; the App Bundle of the `full`
 #   flavor, which google-play.yml uploads to Google Play once the release is published.
-# - SBOMs (SPDX and CycloneDX) of the source tree and both images, image digests, SHA256SUMS, and a
+# - SBOMs (SPDX and CycloneDX) of the source tree and the images, image digests, SHA256SUMS, and a
 #   build provenance attestation for every file.
 # - Notes rendered from .github/release-notes.md: the highlights from the annotated tag's message, generated notes
 #   (.github/release.yml categories), install and verification instructions.
@@ -69,7 +69,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [teamcraft-server, teamcraft-sfu]
+        image: [teamcraft-server, teamcraft-sfu, teamcraft-bridge]
         platform: [linux/amd64, linux/arm64]
         include:
           - platform: linux/amd64
@@ -128,7 +128,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [teamcraft-server, teamcraft-sfu]
+        image: [teamcraft-server, teamcraft-sfu, teamcraft-bridge]
     runs-on: ubuntu-latest
     permissions:
       contents: read

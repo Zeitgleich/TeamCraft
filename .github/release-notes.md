@@ -87,8 +87,8 @@ cosign verify ghcr.io/zeitgleich/teamcraft-server:{{version}} \
 gh attestation verify oci://ghcr.io/zeitgleich/teamcraft-server:{{version}} --repo {{repo}}
 ```
 
-SBOMs: `teamcraft-source-{{version}}.{spdx,cdx}.json` for the source tree, `teamcraft-server-*` and
-`teamcraft-sfu-*` for the images.
+SBOMs: `teamcraft-source-{{version}}.{spdx,cdx}.json` for the source tree, `teamcraft-server-*`,
+`teamcraft-sfu-*` and `teamcraft-bridge-*` for the images.
 
 ## What's changed
 
