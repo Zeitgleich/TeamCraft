@@ -2738,3 +2738,5 @@ channel-sources-hint = Point Grafana, CI or journalctl at the bridge. Paste this
 channel-sources-block = Source for the bridge configuration
 channel-sources-webhook = Webhook (Slack-compatible)
 channel-sources-logs = Log lines
+
+notes-title = Notes

@@ -519,7 +519,15 @@ impl<S: LocalStore> CoreChatBackend<S> {
     preferences: &MentionPreferences,
     unread: &[StoredMessage],
   ) -> Conversation {
-    let member_ids = self.members(response.id);
+    let mut member_ids = self.members(response.id);
+    // Notes to self (a DM of one): known from the conversation itself before any member list.
+    if member_ids.is_empty()
+      && response.kind == ConversationKindProto::Dm
+      && response.participants.len() == 1
+      && response.participants.iter().all(|user| user.id == self.me)
+    {
+      member_ids = vec![self.me];
+    }
     let kind = match (&response.kind, &response.visibility) {
       (ConversationKindProto::Dm, _) => ConversationKind::Direct,
       (ConversationKindProto::Group, _) => ConversationKind::Group,

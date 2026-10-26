@@ -1071,6 +1071,7 @@ impl Engine {
       maybe_download_dir: Some(self.download_dir.clone()),
       maybe_push_gateway_url: self.maybe_push_gateway_url.clone(),
       maybe_upload_staging_dir: Some(self.upload_staging_dir.clone()),
+      creates_notes_to_self: true,
       ..ClientSettings::default()
     }
   }

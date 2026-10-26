@@ -978,7 +978,7 @@ impl Core {
       self.api(),
       store.clone(),
       Box::new(SystemClock),
-      ClientSettings::default(),
+      ClientSettings::default().with_notes_to_self(),
     ) {
       Ok(maybe_client) => maybe_client,
       Err(error) => return unreadable_status(error),
@@ -1003,7 +1003,7 @@ impl Core {
       self.api(),
       store,
       Box::new(SystemClock),
-      ClientSettings::default(),
+      ClientSettings::default().with_notes_to_self(),
       Argon2Settings::default(),
     )
     .await;
@@ -1282,7 +1282,7 @@ impl Core {
         self.api(),
         store,
         Box::new(SystemClock),
-        ClientSettings::default(),
+        ClientSettings::default().with_notes_to_self(),
         options,
       )
       .await

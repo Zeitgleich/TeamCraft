@@ -1000,6 +1000,7 @@ impl Core {
   fn client_settings(&self) -> ClientSettings {
     ClientSettings {
       maybe_upload_staging_dir: Some(staging_dir(&self.config, self.user)),
+      creates_notes_to_self: true,
       ..ClientSettings::default()
     }
   }

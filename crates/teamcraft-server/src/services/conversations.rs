@@ -154,10 +154,14 @@ pub async fn create_dm(
   request: CreateDmRequest,
 ) -> Result<Created<ConversationResponse>, ApiError> {
   require(state, caller, Permission::CreateDm, &Target::Instance)?;
-  if request.user_id == caller.user.id {
-    return Err(ApiError::InvalidRequest("can't open a DM with yourself".into()));
-  }
-  open_participants_conversation(state, caller, ConversationKind::Dm, vec![request.user_id]).await
+  // A DM with oneself is the user's notes: its only participant is the caller, whose own devices
+  // make up its encryption group. Opening it again returns the same conversation.
+  let others = if request.user_id == caller.user.id {
+    Vec::new()
+  } else {
+    vec![request.user_id]
+  };
+  open_participants_conversation(state, caller, ConversationKind::Dm, others).await
 }
 
 pub async fn create_group_dm(

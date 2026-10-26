@@ -27,6 +27,7 @@ async fn an_open_space_is_found_joined_and_its_channel_read() {
       ChannelOptions {
         name: "general".into(),
         is_private: false,
+        is_integration: false,
         maybe_topic: None,
         maybe_category: None,
         maybe_history: None,

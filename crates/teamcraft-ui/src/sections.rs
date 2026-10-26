@@ -3,7 +3,9 @@
 
 use teamcraft_client_api::activity::{ActivityItem, ActivityKind};
 
-use crate::model::{Conversation, ConversationId, ConversationKind, SidebarCategory, SpaceId, TimestampMs};
+use crate::model::{
+  Conversation, ConversationId, ConversationKind, SidebarCategory, SpaceId, TimestampMs, UserId,
+};
 use crate::prefs::{DmSort, SidebarSort};
 
 /// Sidebar sections of a space in display order.
@@ -109,6 +111,8 @@ pub fn build_sections(conversations: &[Conversation], options: &SidebarOptions) 
 /// The sections of Home, in display order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DirectSectionKind {
+  /// The user's notes to themself, pinned above everything (no heading).
+  Notes,
   Favorites,
   Conversations,
 }
@@ -117,6 +121,7 @@ impl DirectSectionKind {
   /// i18n key of the section title.
   pub fn title_key(self) -> &'static str {
     match self {
+      Self::Notes => "notes-title",
       Self::Favorites => "sidebar-favorites",
       Self::Conversations => "sidebar-direct-messages",
     }
@@ -182,6 +187,7 @@ pub struct DirectList {
 /// visible beyond it.
 pub fn build_direct(
   conversations: Vec<(Conversation, Option<TimestampMs>)>,
+  me: UserId,
   sort: DmSort,
   limit: usize,
   filter: &str,
@@ -201,9 +207,12 @@ pub fn build_direct(
     }),
     DmSort::Alphabetical => list.sort_by_key(|(conversation, _)| conversation.name.to_lowercase()),
   }
-  let (favorites, rest): (Vec<Conversation>, Vec<Conversation>) = list
+  let (notes, list): (Vec<_>, Vec<_>) = list
     .into_iter()
     .map(|(conversation, _)| conversation)
+    .partition(|conversation| conversation.is_notes_to_self(me));
+  let (favorites, rest): (Vec<Conversation>, Vec<Conversation>) = list
+    .into_iter()
     .partition(|conversation| conversation.is_favorite);
   let mut hidden_count = 0;
   let is_filtering = !needle.is_empty() || chip != HomeFilter::All;
@@ -218,6 +227,7 @@ pub fn build_direct(
     rest
   };
   let sections = [
+    (DirectSectionKind::Notes, notes),
     (DirectSectionKind::Favorites, favorites),
     (DirectSectionKind::Conversations, rest),
   ]
@@ -551,8 +561,20 @@ mod tests {
     }
 
     #[test]
+    fn notes_to_self_are_pinned_above_everything() {
+      let mut notes = direct(9, 0, None);
+      notes.0.name = "Zoe".into();
+      notes.0.member_ids = vec![me()];
+      let mut conversations = sample();
+      conversations.push(notes);
+      let list = build_direct(conversations, me(), DmSort::Recent, 0, "", HomeFilter::All);
+      assert_eq!(list.sections[0].kind, DirectSectionKind::Notes);
+      assert_eq!(names(&list)[0], ["Zoe"]);
+    }
+
+    #[test]
     fn newest_first_without_channels() {
-      let list = build_direct(sample(), DmSort::Recent, 0, "", HomeFilter::All);
+      let list = build_direct(sample(), me(), DmSort::Recent, 0, "", HomeFilter::All);
       assert_eq!(names(&list), [vec!["zed", "Amy, bob", "Amy", "bob"]]);
       assert_eq!(list.hidden_count, 0);
     }
@@ -561,7 +583,7 @@ mod tests {
     fn alphabetical_with_favorites_first() {
       let mut conversations = sample();
       conversations[1].0.is_favorite = true;
-      let list = build_direct(conversations, DmSort::Alphabetical, 0, "", HomeFilter::All);
+      let list = build_direct(conversations, me(), DmSort::Alphabetical, 0, "", HomeFilter::All);
       assert_eq!(names(&list), [vec!["zed"], vec!["Amy", "Amy, bob", "bob"]]);
       assert_eq!(list.sections[0].kind, DirectSectionKind::Favorites);
     }
@@ -570,7 +592,7 @@ mod tests {
     fn the_limit_keeps_unread_ones() {
       let mut conversations = sample();
       conversations[2].0.unread_count = 1;
-      let list = build_direct(conversations, DmSort::Recent, 1, "", HomeFilter::All);
+      let list = build_direct(conversations, me(), DmSort::Recent, 1, "", HomeFilter::All);
       assert_eq!(names(&list), [vec!["zed", "bob"]]);
       assert_eq!(list.hidden_count, 2);
     }
@@ -581,25 +603,39 @@ mod tests {
       conversations[2].0.unread_count = 1;
       conversations[0].0.unread_count = 3;
       conversations[0].0.is_muted = true;
-      let unread = build_direct(conversations.clone(), DmSort::Recent, 1, "", HomeFilter::Unread);
+      let unread = build_direct(
+        conversations.clone(),
+        me(),
+        DmSort::Recent,
+        1,
+        "",
+        HomeFilter::Unread,
+      );
       assert_eq!(
         names(&unread),
         [vec!["bob"]],
         "muted without a mention isn't unread; no limit"
       );
-      let people = build_direct(conversations.clone(), DmSort::Recent, 0, "", HomeFilter::People);
+      let people = build_direct(
+        conversations.clone(),
+        me(),
+        DmSort::Recent,
+        0,
+        "",
+        HomeFilter::People,
+      );
       assert_eq!(names(&people), [vec!["zed", "Amy", "bob"]]);
-      let groups = build_direct(conversations, DmSort::Recent, 0, "", HomeFilter::Groups);
+      let groups = build_direct(conversations, me(), DmSort::Recent, 0, "", HomeFilter::Groups);
       assert_eq!(names(&groups), [vec!["Amy, bob"]]);
     }
 
     #[test]
     fn filtering_ignores_case_and_the_limit() {
-      let list = build_direct(sample(), DmSort::Recent, 1, " AMY ", HomeFilter::All);
+      let list = build_direct(sample(), me(), DmSort::Recent, 1, " AMY ", HomeFilter::All);
       assert_eq!(names(&list), [vec!["Amy, bob", "Amy"]]);
       assert_eq!(list.hidden_count, 0);
       assert!(
-        build_direct(sample(), DmSort::Recent, 0, "nobody", HomeFilter::All)
+        build_direct(sample(), me(), DmSort::Recent, 0, "nobody", HomeFilter::All)
           .sections
           .is_empty()
       );
@@ -662,6 +698,11 @@ mod tests {
       build_sections(&list, &SidebarOptions::plain(false))[0].kind,
       SectionKind::Channels
     );
+  }
+
+  /// The signed-in user of the tests.
+  fn me() -> UserId {
+    id_from_raw(7)
   }
 
   fn direct(id: u64, unread: u32, maybe_at: Option<TimestampMs>) -> (Conversation, Option<TimestampMs>) {

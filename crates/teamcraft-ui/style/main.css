@@ -12318,6 +12318,7 @@ ol.md-list {
   display: flex;
   align-items: center;
   gap: var(--space-3);
+}
 
 /* ---- Files view (issue #301) ---- */
 

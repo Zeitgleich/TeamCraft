@@ -199,6 +199,17 @@ pub struct ClientSettings {
   /// How many conversations a catch-up reads from the server at once (issue #247): member lists
   /// and the first page of each queue and history. The MLS work itself stays one at a time.
   pub catch_up_concurrency: usize,
+  /// Make the user's notes to self (a DM with themself) once a sync finds there is none. Off by
+  /// default; the apps turn it on with [`ClientSettings::with_notes_to_self`].
+  pub creates_notes_to_self: bool,
+}
+
+impl ClientSettings {
+  /// The settings of an app: the defaults, and every user gets notes to self.
+  pub fn with_notes_to_self(mut self) -> Self {
+    self.creates_notes_to_self = true;
+    self
+  }
 }
 
 pub struct Client<A, S> {
@@ -303,6 +314,7 @@ impl Default for ClientSettings {
       pending_actions: PendingActionSettings::default(),
       upload_retry: files::UploadRetrySettings::default(),
       catch_up_concurrency: 6,
+      creates_notes_to_self: false,
     }
   }
 }
