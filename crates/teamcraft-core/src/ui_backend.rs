@@ -1747,6 +1747,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_integration_sources(conversation)
   }
 
+  fn can_manage_integration_sources(&self) -> bool {
+    self.ui_can_manage_integration_sources()
+  }
+
   fn add_integration_source(
     &self,
     conversation: ConversationId,
@@ -1966,36 +1970,32 @@ mod tests {
   }
 
   #[test]
-  fn a_channel_admin_adds_and_revokes_sources_and_the_announcements_stay_out_of_the_feed() {
+  fn a_roster_admin_adds_and_revokes_sources_and_the_announcements_stay_out_of_the_feed() {
     use teamcraft_client_api::model::NewIntegrationSource;
-    use teamcraft_proto::{SourceId, SourceKind, SourceOptions, SourceTokenHash};
+    use teamcraft_proto::{SourceChange, SourceId, SourceKind, SourceOptions, SourceTokenHash};
+
+    use crate::workspace::{RosterMember, RosterRole, WorkspaceState};
 
     let store = std::sync::Arc::new(MemoryStore::new());
     let (me, colleague) = (id::<UserId>(1), id::<UserId>(2));
     let conversation = id::<ConversationId>(10);
-    let summary = |user: UserId| UserSummary {
-      id: user,
-      maybe_username: None,
-      display_name: format!("user {user}"),
-      kind: teamcraft_proto::UserKind::Member,
-      maybe_email: None,
-      maybe_organization: None,
-      maybe_has_devices: None,
-    };
-    let members = ListConversationMembersResponse {
-      members: vec![
-        teamcraft_proto::ConversationMemberResponse {
-          user: summary(me),
-          role: teamcraft_proto::ChannelRole::Admin,
-        },
-        teamcraft_proto::ConversationMemberResponse {
-          user: summary(colleague),
-          role: teamcraft_proto::ChannelRole::Member,
-        },
-      ],
-    };
-    records::put_json(&*store, Table::Members, &conversation.to_string(), &members).unwrap();
     let backend = CoreChatBackend::new(store.clone(), me, Box::new(ManualClock::new(1_000)));
+    assert!(!backend.can_manage_integration_sources(), "no roster, no sources");
+    let mut workspace = WorkspaceState::default();
+    workspace.roster.members.push(RosterMember {
+      user_id: me,
+      role: RosterRole::Admin,
+      identity_key: teamcraft_proto::Base64Bytes::new(vec![0; 32]),
+    });
+    records::put_json(
+      &*store,
+      Table::Workspace,
+      crate::client::WORKSPACE_KEY,
+      &workspace,
+    )
+    .unwrap();
+    assert!(backend.can_manage_integration_sources());
+
     let source = SourceId::random();
     backend.add_integration_source(
       conversation,
@@ -2024,27 +2024,20 @@ mod tests {
       "on its way to the members"
     );
 
-    // The same announcement from a member who is no channel admin is not in force.
-    let mut ledger = crate::integration_sources::SourceLedger::load(&*store, conversation).unwrap();
-    ledger.apply(
-      colleague,
-      &teamcraft_proto::SourceChange::Created {
+    // A member outside the roster announces one and revokes the admin's: neither counts.
+    for change in [
+      SourceChange::Created {
         source: SourceId::random(),
         name: "sneaky".into(),
         kind: SourceKind::Log,
         token_sha256: SourceTokenHash::from_bytes([4; 32]),
         options: SourceOptions::default(),
       },
-      2_000,
-      None,
-    );
-    records::put_json(
-      &*store,
-      Table::Account,
-      &format!("integration_sources/{conversation}"),
-      &ledger,
-    )
-    .unwrap();
+      SourceChange::Revoked { source },
+    ] {
+      crate::integration_sources::apply_source_change(&*store, conversation, colleague, &change, 2_000, None)
+        .unwrap();
+    }
     assert_eq!(backend.integration_sources(conversation).len(), 1);
 
     backend.revoke_integration_source(conversation, source);

@@ -2760,6 +2760,7 @@ channel-sources-danger-alert = Attachments marked "danger" mention people
 channel-sources-add = Add source
 channel-sources-hint = Point Grafana, CI or journalctl at the bridge. A new source reaches the bridge as an encrypted message in this channel; there is nothing to configure or restart.
 channel-sources-needs-bot = Add a bot to this channel first: the bridge learns about sources from the channel.
+channel-sources-admins-only = Only workspace admins can add sources for now: the bridge trusts their signed role, and channel roles aren't signed yet.
 channel-sources-no-random = No random source is available, so no token could be made. Try another browser.
 channel-sources-created = { $name } is ready. Copy its address now: it is shown only once.
 channel-sources-url = Address

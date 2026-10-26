@@ -67,7 +67,7 @@ In the app:
    in the channel's space yet it joins it as a guest first (space admins), then its device is
    committed into the channel's encryption group from the client and handed the content keys. A bot
    can be added to **any** channel; a bot's messages carry a bot badge.
-3. **Channel settings → Integrations → Sources** (channel admins): "Add source" with a name and a
+3. **Channel settings → Integrations → Sources** (workspace admins): "Add source" with a name and a
    kind (webhook or log lines) shows the URL once, to point Grafana, CI or `journalctl` at; the
    bridge serves it within a second, with no configuration change and no restart (see "Sources"
    below).
@@ -88,7 +88,7 @@ after the first display (only their hashes are kept).
 A source is a token that posts into one channel. Channel admins manage them in the app; the bridge
 reads them from the channel itself (e2ee.md §13.1):
 
-1. "Add source" generates the token in the app (256 random bits, `tcs_...`) and sends an encrypted,
+1. "Add source" (workspace admins) generates the token in the app (256 random bits, `tcs_...`) and sends an encrypted,
    hidden control message into the channel: source ID, name, kind, the token's SHA-256 and the
    options (webhooks: attachments with `color: "danger"` mention people; log lines: the default alert
    levels; 600 per minute). The token and its URL are shown once, with a copy button.
@@ -99,10 +99,17 @@ reads them from the channel itself (e2ee.md §13.1):
    and a revoked source never comes back. The list shows the sources in force with who added them
    and when; to replace a leaked URL, revoke the source and add a new one.
 
-Who may: the bridge accepts a source only from a current, non-guest member of the channel's
-encryption group who is a channel admin or a workspace admin of the verified roster, judged when
-the source is used (a creator who loses the role or leaves takes their sources out of force). Any
-member may revoke. The server only carries ciphertext, so it can neither add nor change a source.
+Who may: **workspace admins** of the verified roster (admin.md §2.3). Channel roles aren't signed
+yet (issue #380), so the bridge doesn't take the server's word for them, and the app offers "Add
+source" only to workspace admins. The creator must also be a member of the channel, and stay an
+admin: a creator who loses the role or leaves takes their sources out of force. Admins and the
+source's creator may revoke; changes from anybody else are ignored before they are stored. The
+server only carries ciphertext, so it can neither add nor change a source. It can withhold
+messages, though: a bridge with a new database may miss a revocation the server leaves out of the
+history; one that read it keeps it (e2ee.md §13.1).
+
+Limits: at most 50 sources in force per channel (the oldest), each with its rate limit, and all
+sources together at most `listen.total_rate_limit_per_minute` (12000) requests and lines a minute.
 
 The bridge learns of sources through the channel, so the bot must be in the channel before a source
 is added (the app offers "Add source" only then): a bot added later reads history from its join on.

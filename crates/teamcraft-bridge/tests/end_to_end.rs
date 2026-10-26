@@ -19,6 +19,7 @@ use teamcraft_bridge::worker::Worker;
 use teamcraft_core::api::{HttpGateway, HttpServerApi, StaticToken};
 use teamcraft_core::clock::SystemClock;
 use teamcraft_core::store::{LocalStore, MemoryStore, MessageContent, MessageFilter};
+use teamcraft_core::workspace::RosterRole;
 use teamcraft_core::{Client, ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::SecretBytes;
@@ -381,15 +382,27 @@ async fn sources_added_in_the_app_work_without_configuration_and_survive_a_resta
   let bob_id = setup.bob.user_id().to_string();
   let config = bridge_config(&setup.app, &setup.bot_token, channel, &bob_id, false);
   assert!(config.sources.is_empty(), "no source in the file");
+  // alice signs the workspace roster as its first owner: only roster admins manage sources.
+  let alice_id = setup.alice.user_id();
+  setup
+    .alice
+    .publish_roster(&[(alice_id, RosterRole::Owner)])
+    .await
+    .unwrap();
 
-  // bob is a member but no channel admin: his source must not open.
+  // bob is a member, but not in the roster: his source must not open.
   let bobs_token = SourceToken::generate(&mut OsRng);
   let (_, bobs_change) = created("bob's", SourceKind::Webhook, &bobs_token);
   setup.bob.send_source_change(channel, bobs_change).await.unwrap();
-  // alice created the channel, so she is its admin: hers opens.
+  // alice is a roster admin: hers opens, and bob can't revoke it.
   let token = SourceToken::generate(&mut OsRng);
   let (source, change) = created("ci", SourceKind::Webhook, &token);
   setup.alice.send_source_change(channel, change).await.unwrap();
+  setup
+    .bob
+    .send_source_change(channel, SourceChange::Revoked { source })
+    .await
+    .unwrap();
 
   let (endpoints, base, worker) = start_bridge(&setup, &config).await;
   let hook = format!("{base}/hooks/{}", token.expose_secret());

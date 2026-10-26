@@ -666,6 +666,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.integration_sources(conversation)
   }
 
+  fn can_manage_integration_sources(&self) -> bool {
+    self.chat.can_manage_integration_sources()
+  }
+
   fn add_integration_source(
     &self,
     conversation: ConversationId,

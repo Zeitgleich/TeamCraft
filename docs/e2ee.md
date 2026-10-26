@@ -1870,7 +1870,7 @@ logs are encrypted by `teamcraft-bridge`, which runs next to the source (ARCHITE
 
 ### 13.1 Bridge sources announced in the channel
 
-A channel admin adds a webhook or log source in the app (docs/bridge.md, "Sources") without
+A workspace admin adds a webhook or log source in the app (docs/bridge.md, "Sources") without
 touching the bridge's configuration. The app generates the source token (256 random bits,
 `teamcraft-crypto::source_token`), shows the URL once and sends an encrypted control message into
 the channel: `MessageContent::IntegrationSource` with a `SourceChange` (`teamcraft-proto`):
@@ -1886,26 +1886,32 @@ The message is hidden from the timeline; older clients that don't know the kind 
 the bridge hashes the token of each request and compares it with every known hash in constant time.
 
 **Trust rule.** The server sees ciphertext only and can't write in the channel's group, so it can
-neither create nor alter a source. Each member device (the bridge included) keeps a bounded ledger
-per channel (`teamcraft-core::integration_sources`, at most 1024 sources) and decides at use which
-sources are in force:
+neither create nor alter a source. Who may manage sources is decided from signed data only: the
+verified workspace roster (admin.md §2.3). Channel roles are still the server's word (signed channel
+roles: issue #380) and count for nothing here, so a server can't promote a channel member into a
+source admin. Each member device (the bridge included) keeps a bounded ledger per channel
+(`teamcraft-core::integration_sources`):
 
-- A source counts only if its creator is, at that moment, a member of the channel's MLS group
-  (the bridge checks its own group; decrypting proved the creator wrote as a member), not a guest
-  or bot, and a workspace admin of the verified, fresh roster (admin.md §2.3) **or** a channel
-  admin. Channel roles are still the server's word (signed channel roles: issue #380), so they only
-  choose among the group's members, the same people who may already change the group's
-  membership (§4.6). A compromised server can't make a non-member a source admin, and a source
-  always posts into the channel whose group announced it, never elsewhere. A creator who loses the
-  role or leaves the channel takes their sources out of force.
-- A revocation counts from any member of the group and is final: a revoked source never comes
-  back, whatever arrives later or in which order. Revoking fails safe.
-- A rename counts from somebody who may manage sources; the newest by server order wins.
-- Of two announcements with the same source ID the first the server numbered wins, so a member
-  can't take over another's source by reusing its ID.
+- **Taking in.** A `created` or `renamed` reaches the ledger only from an admin of the verified
+  roster, fresh at the message's server time; a `revoked` only from such an admin or from the
+  source's creator. Changes from anybody else are dropped before the ledger, so a member (or a
+  guest) can't fill its 1024 entries and crowd out later sources.
+- **In force.** A source counts only if its creator is, at that moment, an admin of the fresh
+  roster and a member of the channel's MLS group (the bridge checks its own group), and not a guest
+  or bot (the server's account kind can only take rights away). At most 50 per channel, the oldest.
+  A creator who loses the role or leaves the channel takes their sources out of force. A source
+  always posts into the channel whose group announced it, never elsewhere.
+- A revocation is final: a revoked source never comes back, whatever arrives later or in which
+  order. A rename's newest by server order wins. Of two announcements with the same source ID the
+  first the server numbered wins.
 
-The bridge reads the ledgers from its encrypted store once a second, reads the channel roles again
-when a ledger changed, and looks back once through older history (bounded) when its database is
+**What the server can still do.** It can withhold or drop messages, as for any content: hold back
+an announcement (the source doesn't work), or, for a bridge whose database is new, leave a
+`revoked` out of the history it serves, so that bridge serves a revoked source again. A bridge that
+once read a revocation keeps it in its store; the server can't take it back. Revoke and add a new
+source when in doubt, and keep the bridge's database volume (docs/bridge.md, "Container").
+
+The bridge reads the ledgers from its encrypted store once a second and looks back once through older history (bounded) when its database is
 new. A bot added after a source was announced can't read the announcement (history from its join
 only), so the app offers "Add source" only once a bot is in the channel.
 

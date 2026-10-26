@@ -490,6 +490,11 @@ pub trait ChatBackend {
   fn integration_sources(&self, _conversation: ConversationId) -> Vec<crate::model::IntegrationSource> {
     Vec::new()
   }
+  /// Whether sources the user adds would be in force: they need an admin of the verified
+  /// workspace roster (channel roles aren't signed yet, issue #380).
+  fn can_manage_integration_sources(&self) -> bool {
+    false
+  }
   /// Announces a new source in the channel: an encrypted, hidden control message the bridge reads.
   fn add_integration_source(
     &self,

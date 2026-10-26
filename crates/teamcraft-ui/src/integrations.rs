@@ -151,7 +151,7 @@ pub fn ingest_url(base_url: &str, source_token: &str) -> String {
 
 /// A source token made for "Add source": the token to show once, and the hash that is announced.
 pub struct NewSource {
-  pub token: String,
+  pub token: SourceToken,
   pub token_sha256: SourceTokenHash,
 }
 
@@ -161,7 +161,7 @@ impl NewSource {
     let token = SourceToken::random()?;
     Some(Self {
       token_sha256: SourceTokenHash::from_bytes(token.sha256()),
-      token: token.expose_secret().to_owned(),
+      token,
     })
   }
 }
@@ -195,12 +195,13 @@ mod tests {
   #[test]
   fn a_new_source_announces_the_hash_of_the_token_it_shows() {
     let source = NewSource::generate().unwrap();
-    assert!(source.token.starts_with("tcs_"));
+    let token = source.token.expose_secret();
+    assert!(token.starts_with("tcs_"));
     assert_eq!(
       source.token_sha256,
-      SourceTokenHash::from_bytes(teamcraft_crypto::source_token::source_token_sha256(&source.token))
+      SourceTokenHash::from_bytes(teamcraft_crypto::source_token::source_token_sha256(token))
     );
-    assert_ne!(NewSource::generate().unwrap().token, source.token);
+    assert_ne!(NewSource::generate().unwrap().token.expose_secret(), token);
   }
 
   #[test]

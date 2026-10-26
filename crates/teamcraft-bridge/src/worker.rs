@@ -51,8 +51,6 @@ struct Waiting {
 pub struct Worker<A: ServerApi, S: LocalStore> {
   client: Client<A, S>,
   sources: SourceRegistry,
-  /// Per channel: the source ledger revision the member roles were last read for.
-  seen_revisions: BTreeMap<ConversationId, u64>,
   /// Per channel: older history pages read so far, until the look back is done.
   history_scans: BTreeMap<ConversationId, u32>,
   scanned: HashSet<ConversationId>,
@@ -79,7 +77,6 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
     Self {
       client,
       sources,
-      seen_revisions: BTreeMap::new(),
       history_scans: BTreeMap::new(),
       scanned: HashSet::new(),
       receiver,
@@ -184,9 +181,9 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
   }
 
   /// Brings the sources announced in the app up to date with the bot's store, which the gateway
-  /// keeps current: reads the channel roles again when a source change arrived, looks back once
-  /// through each channel's older history, and swaps the endpoints' managed set when it changed.
-  /// Runs once a second; it reads the local store only, apart from those one-off requests.
+  /// keeps current (messages and the signed roster): looks back once through each channel's older
+  /// history, and swaps the endpoints' managed set when it changed. Runs once a second; it reads
+  /// the local store only, apart from the one-off history pages.
   async fn refresh_sources(&mut self) {
     let Some(app_sources) = self.settings.maybe_app_sources else {
       return;
@@ -203,7 +200,7 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
       if self.gateway.is_some() {
         self.scan_history(conversation, app_sources.history_pages).await;
       }
-      match self.channel_sources(conversation).await {
+      match self.channel_sources(conversation) {
         Ok(sources) => active.extend(sources),
         Err(error) => warn!(%error, %conversation, "reading the channel's sources failed"),
       }
@@ -220,26 +217,12 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
     }
   }
 
-  async fn channel_sources(
+  fn channel_sources(
     &mut self,
     conversation: ConversationId,
   ) -> Result<Vec<Source>, teamcraft_core::CoreError> {
-    let mut sources = self.client.integration_sources(conversation)?;
-    let is_new = self
-      .seen_revisions
-      .get(&conversation)
-      .is_none_or(|seen| *seen != sources.revision);
-    if is_new && sources.revision > 0 && self.gateway.is_some() {
-      // Somebody announced, renamed or revoked a source: judge it by the current channel roles. Once
-      // per change, also when it fails (the gateway's member events keep the roles current too), so a
-      // refusing server isn't asked every second.
-      self.seen_revisions.insert(conversation, sources.revision);
-      if let Err(error) = self.client.refresh_source_authority(conversation).await {
-        debug!(%error, %conversation, "reading the channel roles failed; using the stored ones");
-      }
-      sources = self.client.integration_sources(conversation)?;
-    }
-    Ok(sources.active.iter().filter_map(Source::from_managed).collect())
+    let active = self.client.integration_sources(conversation)?;
+    Ok(active.iter().filter_map(Source::from_managed).collect())
   }
 
   /// Reads one more page of the channel's older history until the look back is done.

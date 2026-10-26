@@ -1,4 +1,4 @@
-//! Integration-bridge sources managed in the app (docs/bridge.md, "Sources"): a channel admin's
+//! Integration-bridge sources managed in the app (docs/bridge.md, "Sources"): a workspace admin's
 //! client announces a source with an encrypted control message in the channel, and the bridge, a
 //! member of that channel, reads it from there. Only members can write in the channel's encryption
 //! group, so the server can neither create nor alter a source; it sees ciphertext only (e2ee.md

@@ -1,8 +1,10 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use leptos::prelude::*;
 use teamcraft_client_api::actions::ChannelChanges;
 use teamcraft_client_api::model::{IntegrationSource, NewIntegrationSource};
+use teamcraft_crypto::source_token::SourceToken;
 use teamcraft_proto::{
   HistoryPolicy, MAX_SOURCE_NAME_CHARS, Permission, SourceId, SourceKind, SourceOptions,
 };
@@ -102,7 +104,7 @@ pub fn ChannelIntegrations(conversation: ConversationId) -> impl IntoView {
     </p>
     <FailureNote pending=mode_pending />
     <BotMembers conversation=conversation can_manage=Signal::derive(can_manage) />
-    <Sources conversation=conversation can_manage=Signal::derive(can_manage) has_bot=Signal::from(has_bot) />
+    <Sources conversation=conversation has_bot=Signal::from(has_bot) />
   }
 }
 
@@ -256,12 +258,15 @@ fn BotCandidateRow(conversation: ConversationId, bot: User, joins_space: bool) -
 /// The channel's bridge sources (docs/bridge.md, "Sources"): the ones in force with revoke, and
 /// adding one. Adding generates the token here, announces only its hash in the channel (an
 /// encrypted control message the bridge reads) and shows the URL once; nothing goes into the
-/// bridge's configuration.
+/// bridge's configuration. Only admins of the verified workspace roster manage sources (the bridge
+/// accepts no others while channel roles aren't signed, e2ee.md §13.1); a creator may revoke their
+/// own.
 #[component]
-fn Sources(conversation: ConversationId, can_manage: Signal<bool>, has_bot: Signal<bool>) -> impl IntoView {
+fn Sources(conversation: ConversationId, has_bot: Signal<bool>) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let sources = Memo::new(move |_| state.read(|backend| backend.integration_sources(conversation)));
+  let can_manage = Signal::derive(move || state.read(|backend| backend.can_manage_integration_sources()));
   let maybe_reveal: RwSignal<Option<Revealed>> = RwSignal::new(None);
   view! {
     <h3 class="detail-heading">{move || i18n.t("channel-sources")}</h3>
@@ -277,7 +282,10 @@ fn Sources(conversation: ConversationId, can_manage: Signal<bool>, has_bot: Sign
       when=move || maybe_reveal.with(Option::is_some)
       fallback=move || {
         view! {
-          <Show when=move || can_manage.get() fallback=|| ()>
+          <Show
+            when=move || can_manage.get()
+            fallback=move || view! { <p class="hint">{move || i18n.t("channel-sources-admins-only")}</p> }
+          >
             <AddSource conversation=conversation has_bot=has_bot on_added=move |revealed| maybe_reveal.set(Some(revealed)) />
           </Show>
         }
@@ -288,12 +296,19 @@ fn Sources(conversation: ConversationId, can_manage: Signal<bool>, has_bot: Sign
   }
 }
 
-/// A source just added, with its token: shown once, kept only while this panel is open.
-#[derive(Clone, PartialEq)]
+/// A source just added, with its token: shown once, kept only while this panel is open. The token
+/// is zeroized when the panel closes (the last reference goes).
+#[derive(Clone)]
 struct Revealed {
   name: String,
   kind: SourceKind,
-  token: String,
+  token: Arc<SourceToken>,
+}
+
+impl PartialEq for Revealed {
+  fn eq(&self, other: &Self) -> bool {
+    Arc::ptr_eq(&self.token, &other.token)
+  }
 }
 
 #[component]
@@ -306,6 +321,8 @@ fn SourceRow(
   let i18n = use_i18n();
   let is_confirming = RwSignal::new(false);
   let id = source.id;
+  let is_own = source.created_by == state.me().id;
+  let can_revoke = move || can_manage.get() || is_own;
   let creator = state
     .read(|backend| backend.user(source.created_by))
     .map(|user| user.display_name)
@@ -321,7 +338,7 @@ fn SourceRow(
         </span>
       </span>
       <span class="badge">{move || i18n.t(kind_key)}</span>
-      <Show when=move || can_manage.get() fallback=|| ()>
+      <Show when=can_revoke fallback=|| ()>
         <Show
           when=move || is_confirming.get()
           fallback=move || {
@@ -387,7 +404,7 @@ fn AddSource(
     on_added.run(Revealed {
       name: source_name,
       kind: source_kind,
-      token: new_source.token,
+      token: Arc::new(new_source.token),
     });
   };
   let kind_button = move |value: SourceKind, key: &'static str| {
@@ -457,16 +474,16 @@ fn RevealSource(revealed: Revealed, #[prop(into)] on_done: Callback<()>) -> impl
   let i18n = use_i18n();
   let server = web_origin().unwrap_or_default();
   let location = RwSignal::new(BridgeLocation::Instance);
-  let token = StoredValue::new(revealed.token.clone());
+  let token = StoredValue::new(Arc::clone(&revealed.token));
   let kind = revealed.kind.clone();
   let is_webhook = kind == SourceKind::Webhook;
   let url = Memo::new(move |_| {
     let base = bridge_base_url(location.get(), &server);
     token.with_value(|token| {
       if is_webhook {
-        webhook_url(&base, token)
+        webhook_url(&base, token.expose_secret())
       } else {
-        ingest_url(&base, token)
+        ingest_url(&base, token.expose_secret())
       }
     })
   });

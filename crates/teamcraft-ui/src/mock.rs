@@ -542,6 +542,10 @@ impl ChatBackend for MockBackend {
       .collect()
   }
 
+  fn can_manage_integration_sources(&self) -> bool {
+    true
+  }
+
   fn add_integration_source(
     &self,
     conversation: ConversationId,

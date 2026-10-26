@@ -93,6 +93,9 @@ pub struct ListenSection {
   /// Both families on loopback by default. `[::]:8088` is a dual-stack socket for all interfaces.
   pub addrs: Vec<SocketAddr>,
   pub max_body_bytes: usize,
+  /// Webhook requests and log lines per minute of all sources together; more are refused or
+  /// dropped like a single source's.
+  pub total_rate_limit_per_minute: u32,
 }
 
 /// How log lines are collected into messages.
@@ -115,7 +118,7 @@ pub struct IndexSection {
   pub interval_secs: u64,
 }
 
-/// Sources that channel admins add in the app (docs/bridge.md, "Sources").
+/// Sources that workspace admins add in the app (docs/bridge.md, "Sources").
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct AppSourcesSection {
@@ -201,6 +204,9 @@ impl BridgeConfig {
     }
     if self.listen.addrs.is_empty() {
       return invalid("listen.addrs is empty".into());
+    }
+    if self.listen.total_rate_limit_per_minute == 0 {
+      return invalid("listen.total_rate_limit_per_minute must be above 0".into());
     }
     let mut tokens = HashSet::new();
     let mut names = HashSet::new();
@@ -334,6 +340,7 @@ impl Default for ListenSection {
         SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 8088)),
       ],
       max_body_bytes: 1024 * 1024,
+      total_rate_limit_per_minute: 12_000,
     }
   }
 }

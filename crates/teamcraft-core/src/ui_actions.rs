@@ -280,17 +280,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     if ledger.revision == 0 {
       return Vec::new();
     }
-    let workspace: crate::workspace::WorkspaceState = self.read(
-      records::get_json(self.store_ref(), Table::Workspace, crate::client::WORKSPACE_KEY)
-        .map(Option::unwrap_or_default),
-    );
-    let max_age_ms =
-      i64::try_from(crate::ClientSettings::default().workspace_max_age.as_millis()).unwrap_or(i64::MAX);
-    let is_fresh = workspace.is_roster_fresh(self.now_ms(), max_age_ms);
-    let authority = self.read(
-      SourceAuthority::from_store(self.store_ref(), conversation, &workspace, is_fresh, None, []).map(Some),
-    );
-    let Some(authority) = authority else {
+    let Some(authority) = self.source_authority() else {
       return Vec::new();
     };
     ledger
@@ -304,6 +294,24 @@ impl<S: LocalStore> CoreChatBackend<S> {
         created_at_ms: source.created_at_ms,
       })
       .collect()
+  }
+
+  /// Whether the user's sources would be in force: an admin of the verified, fresh roster.
+  pub(crate) fn ui_can_manage_integration_sources(&self) -> bool {
+    self
+      .source_authority()
+      .is_some_and(|authority| authority.may_manage(self.me_id()))
+  }
+
+  fn source_authority(&self) -> Option<SourceAuthority> {
+    let workspace: crate::workspace::WorkspaceState = self.read(
+      records::get_json(self.store_ref(), Table::Workspace, crate::client::WORKSPACE_KEY)
+        .map(Option::unwrap_or_default),
+    );
+    let max_age_ms =
+      i64::try_from(crate::ClientSettings::default().workspace_max_age.as_millis()).unwrap_or(i64::MAX);
+    let is_fresh = workspace.is_roster_fresh(self.now_ms(), max_age_ms);
+    self.read(SourceAuthority::from_store(self.store_ref(), &workspace, is_fresh, None, []).map(Some))
   }
 
   pub(crate) fn ui_add_integration_source(&self, conversation: ConversationId, source: NewIntegrationSource) {

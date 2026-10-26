@@ -1208,6 +1208,13 @@ impl ChatBackend for RemoteChat {
     }
   }
 
+  fn can_manage_integration_sources(&self) -> bool {
+    matches!(
+      self.ask(ChatQuery::CanManageIntegrationSources),
+      Some(ChatAnswer::CanManageIntegrationSources { can_manage: true })
+    )
+  }
+
   fn add_integration_source(
     &self,
     conversation: ConversationId,

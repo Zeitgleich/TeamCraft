@@ -1,20 +1,19 @@
 //! Integration-bridge sources managed in the app (docs/bridge.md, "Sources"; e2ee.md §13.1).
 //!
-//! A channel admin's client announces a source with a hidden, encrypted control message in the
+//! A workspace admin's client announces a source with a hidden, encrypted control message in the
 //! channel ([`MessageContent::IntegrationSource`](crate::store::MessageContent)). Every member
 //! device that reads it, the bridge's included, keeps what it learned in a [`SourceLedger`] per
-//! conversation. Which sources are in force is decided when they are used, from the ledger and the
-//! [`SourceAuthority`] of that moment:
+//! conversation. Only signed data decides who may manage sources: the verified, fresh workspace
+//! roster (admin.md §2.3). Channel roles are the server's word until they are signed (issue #380),
+//! so they count for nothing here; neither do the server's account kinds, except to take rights
+//! away (guests and bots manage nothing).
 //!
-//! - **Created** counts only from somebody who may manage the channel's sources now: a current
-//!   member of the channel's encryption group (decrypting the message proved it was one when it
-//!   wrote), not a guest or bot, and a workspace admin of the verified roster or a channel admin.
-//!   The channel role is the server's word (signed channel roles: issue #380), so it only picks
-//!   among the group's members: the server can't make anybody outside the group a source admin, and
-//!   a source can only post into the channel whose group announced it.
-//! - **Revoked** counts from any member of the group, for good: revoking fails safe, and a revoked
-//!   source never comes back, whatever arrives later.
-//! - **Renamed** counts from somebody who may manage the sources; the newest wins.
+//! - **Taking in** ([`SourceLedger::apply`]): a creation or rename counts only from a roster admin
+//!   at the message's server time; a revocation from a roster admin or the source's creator.
+//!   Anything else never reaches the ledger, so a member can't fill it.
+//! - **In force** ([`SourceLedger::active`]): created by somebody who is a roster admin now and in
+//!   the channel's encryption group, not revoked, of a known kind; at most
+//!   [`MAX_ACTIVE_SOURCES`] per channel. A revoked source never comes back.
 //!
 //! The ledger is bounded ([`MAX_LEDGER_ENTRIES`]) and order-independent: history loads newest
 //! first, so a revocation may arrive before the creation it revokes.
@@ -23,8 +22,8 @@ use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{
-  ChannelRole, ConversationId, ListConversationMembersResponse, MAX_SOURCE_NAME_CHARS, MessageId,
-  SourceChange, SourceId, SourceKind, SourceOptions, SourceTokenHash, UserId, UserKind, UserSummary,
+  ConversationId, MAX_SOURCE_NAME_CHARS, MessageId, SourceChange, SourceId, SourceKind, SourceOptions,
+  SourceTokenHash, UserId, UserKind, UserSummary,
 };
 
 use crate::error::CoreError;
@@ -33,8 +32,10 @@ use crate::store::{LocalStore, Table};
 use crate::workspace::WorkspaceState;
 
 /// Sources (revoked ones included) a device remembers per conversation; changes about further
-/// sources are ignored, so a member can't grow every device's store without bound.
+/// sources are ignored, so not even an admin can grow every device's store without bound.
 pub const MAX_LEDGER_ENTRIES: usize = 1024;
+/// Sources in force per conversation; the oldest ones count.
+pub const MAX_ACTIVE_SOURCES: usize = 50;
 
 /// Everything this device learned about a conversation's sources.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,7 +67,7 @@ pub struct SourceAuthority {
   /// The users in the conversation's encryption group; `None` where this device can't look into
   /// the group (the UI process), which then relies on decryption alone.
   maybe_group_users: Option<HashSet<UserId>>,
-  /// Verified workspace admins and the channel's admins.
+  /// Admins of the verified, fresh workspace roster.
   managers: HashSet<UserId>,
   /// Guests and bots: they manage no sources, whatever their role.
   excluded: HashSet<UserId>,
@@ -78,7 +79,7 @@ struct LedgerEntry {
   maybe_created: Option<CreatedRecord>,
   #[serde(rename = "renamed", default, skip_serializing_if = "Option::is_none")]
   maybe_renamed: Option<RenamedRecord>,
-  /// Members who revoked the source; any one of them is enough.
+  /// Admins (or the creator) who revoked the source; any one of them is enough.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   revoked_by: Vec<UserId>,
 }
@@ -111,10 +112,13 @@ impl SourceLedger {
   }
 
   /// Takes in one change that `sender` wrote in the conversation (`maybe_server_id`: its server ID,
-  /// `None` for an own change not sent yet). Returns whether the ledger changed.
+  /// `None` for an own change not sent yet). `is_manager`: the sender was a roster admin when the
+  /// change was written. Without it only the creator's revocation counts. Returns whether the
+  /// ledger changed.
   pub fn apply(
     &mut self,
     sender: UserId,
+    is_manager: bool,
     change: &SourceChange,
     at_ms: i64,
     maybe_server_id: Option<MessageId>,
@@ -122,6 +126,16 @@ impl SourceLedger {
     let Some(source) = change.source() else {
       return false;
     };
+    let is_creator = self
+      .entries
+      .get(&source)
+      .and_then(|entry| entry.maybe_created.as_ref())
+      .is_some_and(|created| created.by == sender);
+    let is_allowed = is_manager || (is_creator && matches!(change, SourceChange::Revoked { .. }));
+    if !is_allowed {
+      tracing::debug!("ignored a source change from somebody who may not manage sources");
+      return false;
+    }
     if !self.entries.contains_key(&source) && self.entries.len() >= MAX_LEDGER_ENTRIES {
       tracing::warn!("ignored a source change: the conversation has too many sources");
       return false;
@@ -225,38 +239,33 @@ impl SourceLedger {
       })
       .collect();
     active.sort_by_key(|source| (source.created_at_ms, source.id));
+    if active.len() > MAX_ACTIVE_SOURCES {
+      tracing::warn!(conversation_id = %conversation, count = active.len(), "too many sources; the newest are not served");
+      active.truncate(MAX_ACTIVE_SOURCES);
+    }
     active
   }
 }
 
 impl SourceAuthority {
-  /// The authority as this device's store knows it: `workspace` (its roster counts only while
-  /// `is_roster_fresh`), the conversation's member list with the server's roles, and the server's
-  /// account kinds. `extra_guests` adds guests the caller knows of otherwise (meeting guests).
+  /// The authority as this device's store knows it: the admins of `workspace` while
+  /// `is_roster_fresh`, minus anybody the server calls a guest or bot (which only takes rights
+  /// away). `extra_guests` adds guests the caller knows of otherwise (meeting guests).
   pub fn from_store(
     store: &impl LocalStore,
-    conversation: ConversationId,
     workspace: &WorkspaceState,
     is_roster_fresh: bool,
     maybe_group_users: Option<HashSet<UserId>>,
     extra_guests: impl IntoIterator<Item = UserId>,
   ) -> Result<Self, CoreError> {
-    let members: ListConversationMembersResponse =
-      records::get_json(store, Table::Members, &conversation.to_string())?
-        .unwrap_or(ListConversationMembersResponse { members: Vec::new() });
-    let mut managers: HashSet<UserId> = members
-      .members
-      .iter()
-      .filter(|member| member.role == ChannelRole::Admin)
-      .map(|member| member.user.id)
-      .collect();
-    if is_roster_fresh {
-      managers.extend(workspace.admins());
-    }
+    let managers: HashSet<UserId> = if is_roster_fresh {
+      workspace.admins().collect()
+    } else {
+      HashSet::new()
+    };
     let mut excluded: HashSet<UserId> = extra_guests.into_iter().collect();
-    for user in managers.iter().chain(maybe_group_users.iter().flatten()) {
-      let maybe_summary: Option<UserSummary> = records::get_json(store, Table::Users, &user.to_string())?;
-      if maybe_summary.is_some_and(|summary| matches!(summary.kind, UserKind::Guest | UserKind::Bot)) {
+    for user in &managers {
+      if is_guest_or_bot(store, *user)? {
         excluded.insert(*user);
       }
     }
@@ -287,10 +296,30 @@ pub(crate) fn apply_source_change(
   maybe_server_id: Option<MessageId>,
 ) -> Result<(), CoreError> {
   let mut ledger = SourceLedger::load(store, conversation)?;
-  if ledger.apply(sender, change, at_ms, maybe_server_id) {
+  let is_manager = was_manager(store, sender, at_ms)?;
+  if ledger.apply(sender, is_manager, change, at_ms, maybe_server_id) {
     records::put_json(store, Table::Account, &ledger_key(conversation), &ledger)?;
   }
   Ok(())
+}
+
+/// Whether `user` was a source manager at `at_ms` (the message's server time): an admin of the
+/// verified roster this device holds, fresh at that time, and no guest or bot.
+fn was_manager(store: &impl LocalStore, user: UserId, at_ms: i64) -> Result<bool, CoreError> {
+  let workspace: WorkspaceState =
+    records::get_json(store, Table::Workspace, crate::client::WORKSPACE_KEY)?.unwrap_or_default();
+  let max_age_ms =
+    i64::try_from(crate::ClientSettings::default().workspace_max_age.as_millis()).unwrap_or(i64::MAX);
+  Ok(
+    workspace.is_roster_fresh(at_ms, max_age_ms)
+      && workspace.is_admin(user)
+      && !is_guest_or_bot(store, user)?,
+  )
+}
+
+fn is_guest_or_bot(store: &impl LocalStore, user: UserId) -> Result<bool, CoreError> {
+  let maybe_summary: Option<UserSummary> = records::get_json(store, Table::Users, &user.to_string())?;
+  Ok(maybe_summary.is_some_and(|summary| matches!(summary.kind, UserKind::Guest | UserKind::Bot)))
 }
 
 fn ledger_key(conversation: ConversationId) -> String {
@@ -325,14 +354,14 @@ mod tests {
   const MEMBER: i64 = 2;
   const OTHER_ADMIN: i64 = 3;
 
-  mod creation {
+  mod taking_in {
     use super::*;
 
     #[test]
-    fn a_source_from_an_admin_is_active_and_one_from_a_member_is_not() {
+    fn a_source_from_an_admin_is_active_and_one_from_a_member_never_reaches_the_ledger() {
       let mut ledger = SourceLedger::default();
-      assert!(ledger.apply(user(ADMIN), &created(1, "ci"), 10, Some(message(100))));
-      assert!(ledger.apply(user(MEMBER), &created(2, "sneaky"), 11, Some(message(101))));
+      assert!(take(&mut ledger, ADMIN, &created(1, "ci"), 100));
+      assert!(!take(&mut ledger, MEMBER, &created(2, "sneaky"), 101));
       let active = ledger.active(conversation(), &authority());
       assert_eq!(active.len(), 1);
       assert_eq!(
@@ -340,6 +369,29 @@ mod tests {
         ("ci", user(ADMIN))
       );
       assert_eq!(active[0].conversation, conversation());
+      assert_eq!(ledger.revision, 1);
+    }
+
+    #[test]
+    fn a_member_cannot_fill_the_ledger_with_revocations_or_renames() {
+      let mut ledger = SourceLedger::default();
+      for index in 1..2001 {
+        assert!(!take(&mut ledger, MEMBER, &revoked(index), index));
+        assert!(!take(&mut ledger, MEMBER, &renamed(index, "x"), index));
+      }
+      assert_eq!(ledger, SourceLedger::default());
+      assert!(take(&mut ledger, ADMIN, &created(1, "ci"), 5000));
+    }
+
+    #[test]
+    fn the_creator_may_revoke_but_a_member_may_not() {
+      let mut ledger = SourceLedger::default();
+      take(&mut ledger, ADMIN, &created(1, "ci"), 1);
+      assert!(!take(&mut ledger, MEMBER, &revoked(1), 2));
+      assert_eq!(ledger.active(conversation(), &authority()).len(), 1);
+      // The creator, even after losing the admin role, can still take back their own source.
+      assert!(ledger.apply(user(ADMIN), false, &revoked(1), 0, Some(message(3))));
+      assert!(ledger.active(conversation(), &authority()).is_empty());
     }
 
     #[test]
@@ -349,7 +401,7 @@ mod tests {
       for order in [[(&first, 100), (&copy, 200)], [(&copy, 200), (&first, 100)]] {
         let mut ledger = SourceLedger::default();
         for (change, id) in order {
-          ledger.apply(user(ADMIN), change, 0, Some(message(id)));
+          take(&mut ledger, OTHER_ADMIN, change, id);
         }
         let active = ledger.active(conversation(), &authority());
         assert_eq!(active[0].name, "real");
@@ -360,11 +412,11 @@ mod tests {
     #[test]
     fn an_own_pending_announcement_is_settled_by_its_echo() {
       let mut ledger = SourceLedger::default();
-      ledger.apply(user(ADMIN), &created(1, "ci"), 10, None);
+      ledger.apply(user(ADMIN), true, &created(1, "ci"), 10, None);
       assert_eq!(ledger.active(conversation(), &authority()).len(), 1);
-      assert!(ledger.apply(user(ADMIN), &created(1, "ci"), 10, Some(message(100))));
+      assert!(take(&mut ledger, ADMIN, &created(1, "ci"), 100));
       assert!(
-        !ledger.apply(user(ADMIN), &created(1, "ci"), 10, Some(message(100))),
+        !take(&mut ledger, ADMIN, &created(1, "ci"), 100),
         "a duplicate changes nothing"
       );
     }
@@ -372,9 +424,9 @@ mod tests {
     #[test]
     fn bad_names_unknown_kinds_and_unknown_changes_are_ignored() {
       let mut ledger = SourceLedger::default();
-      assert!(!ledger.apply(user(ADMIN), &created(1, "  "), 0, Some(message(1))));
-      assert!(!ledger.apply(user(ADMIN), &created(2, &"x".repeat(81)), 0, Some(message(2))));
-      assert!(!ledger.apply(user(ADMIN), &SourceChange::Unknown, 0, Some(message(3))));
+      assert!(!take(&mut ledger, ADMIN, &created(1, "  "), 1));
+      assert!(!take(&mut ledger, ADMIN, &created(2, &"x".repeat(81)), 2));
+      assert!(!take(&mut ledger, ADMIN, &SourceChange::Unknown, 3));
       let SourceChange::Created {
         source,
         name,
@@ -392,9 +444,9 @@ mod tests {
         token_sha256,
         options,
       };
-      assert!(ledger.apply(user(ADMIN), &future, 0, Some(message(4))));
+      assert!(take(&mut ledger, ADMIN, &future, 4));
       assert!(ledger.active(conversation(), &authority()).is_empty());
-      assert!(ledger.apply(user(ADMIN), &created(5, "a\u{7}b "), 0, Some(message(5))));
+      assert!(take(&mut ledger, ADMIN, &created(5, "a\u{7}b "), 5));
       assert_eq!(ledger.active(conversation(), &authority())[0].name, "ab");
     }
 
@@ -421,7 +473,7 @@ mod tests {
         },
       };
       let mut ledger = SourceLedger::default();
-      ledger.apply(user(ADMIN), &change, 0, Some(message(1)));
+      take(&mut ledger, ADMIN, &change, 1);
       assert_eq!(
         ledger.active(conversation(), &authority())[0]
           .options
@@ -434,13 +486,30 @@ mod tests {
     fn the_ledger_is_bounded() {
       let mut ledger = SourceLedger::default();
       for index in 0..MAX_LEDGER_ENTRIES as i64 {
-        ledger.apply(user(ADMIN), &created(index + 1, "s"), 0, Some(message(index + 1)));
+        take(&mut ledger, ADMIN, &created(index + 1, "s"), index + 1);
       }
-      assert!(!ledger.apply(user(ADMIN), &created(5000, "one more"), 0, Some(message(5000))));
+      assert!(!take(&mut ledger, ADMIN, &created(5000, "one more"), 5000));
       assert!(
-        ledger.apply(user(ADMIN), &revoked(1), 0, Some(message(5001))),
+        take(&mut ledger, ADMIN, &revoked(1), 5001),
         "known sources still change"
       );
+    }
+
+    #[test]
+    fn at_most_the_oldest_fifty_sources_are_in_force() {
+      let mut ledger = SourceLedger::default();
+      for index in 0..60 {
+        ledger.apply(
+          user(ADMIN),
+          true,
+          &created(index + 1, "s"),
+          index,
+          Some(message(index + 1)),
+        );
+      }
+      let active = ledger.active(conversation(), &authority());
+      assert_eq!(active.len(), MAX_ACTIVE_SOURCES);
+      assert_eq!(active[0].created_at_ms, 0);
     }
   }
 
@@ -450,7 +519,7 @@ mod tests {
     #[test]
     fn a_creator_who_lost_the_role_or_left_the_group_has_no_active_sources() {
       let mut ledger = SourceLedger::default();
-      ledger.apply(user(ADMIN), &created(1, "ci"), 0, Some(message(1)));
+      take(&mut ledger, ADMIN, &created(1, "ci"), 1);
       let demoted = SourceAuthority {
         managers: HashSet::from([user(OTHER_ADMIN)]),
         ..authority()
@@ -483,28 +552,61 @@ mod tests {
     }
 
     #[test]
-    fn the_store_gives_channel_admins_fresh_roster_admins_and_excludes_guests() {
+    fn only_a_fresh_signed_roster_makes_managers_and_the_server_can_only_take_rights_away() {
       let store = crate::store::MemoryStore::new();
-      let members = ListConversationMembersResponse {
-        members: vec![
-          member(ADMIN, ChannelRole::Admin, UserKind::Member),
-          member(MEMBER, ChannelRole::Member, UserKind::Member),
-          member(5, ChannelRole::Admin, UserKind::Guest),
-        ],
-      };
-      records::put_json(&store, Table::Members, &conversation().to_string(), &members).unwrap();
-      for entry in &members.members {
-        records::put_json(&store, Table::Users, &entry.user.id.to_string(), &entry.user).unwrap();
-      }
-      let authority =
-        SourceAuthority::from_store(&store, conversation(), &WorkspaceState::default(), true, None, [])
-          .unwrap();
+      let workspace = workspace_with_admins(&[ADMIN, 5]);
+      records::put_json(
+        &store,
+        Table::Users,
+        &user(5).to_string(),
+        &summary(5, UserKind::Guest),
+      )
+      .unwrap();
+      let authority = SourceAuthority::from_store(&store, &workspace, true, None, []).unwrap();
       assert!(authority.may_manage(user(ADMIN)));
-      assert!(!authority.may_manage(user(MEMBER)));
+      assert!(
+        !authority.may_manage(user(MEMBER)),
+        "no channel role makes a manager"
+      );
       assert!(
         !authority.may_manage(user(5)),
-        "a guest stays a guest whatever the role"
+        "a guest stays a guest whatever the roster"
       );
+      let stale = SourceAuthority::from_store(&store, &workspace, false, None, []).unwrap();
+      assert!(!stale.may_manage(user(ADMIN)), "a stale roster grants nothing");
+    }
+
+    #[test]
+    fn a_change_counts_from_whoever_the_stored_roster_names_at_the_message_time() {
+      let store = crate::store::MemoryStore::new();
+      records::put_json(
+        &store,
+        Table::Workspace,
+        crate::client::WORKSPACE_KEY,
+        &workspace_with_admins(&[ADMIN]),
+      )
+      .unwrap();
+      apply_source_change(
+        &store,
+        conversation(),
+        user(MEMBER),
+        &created(1, "m"),
+        0,
+        Some(message(1)),
+      )
+      .unwrap();
+      apply_source_change(
+        &store,
+        conversation(),
+        user(ADMIN),
+        &created(2, "a"),
+        0,
+        Some(message(2)),
+      )
+      .unwrap();
+      let ledger = SourceLedger::load(&store, conversation()).unwrap();
+      assert_eq!(ledger.revision, 1);
+      assert_eq!(ledger.active(conversation(), &authority())[0].name, "a");
     }
   }
 
@@ -512,12 +614,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn any_member_revokes_for_good_even_before_the_creation_arrives() {
+    fn an_admin_revokes_for_good_even_before_the_creation_arrives() {
       let mut ledger = SourceLedger::default();
-      ledger.apply(user(MEMBER), &revoked(1), 0, Some(message(200)));
-      ledger.apply(user(ADMIN), &created(1, "ci"), 0, Some(message(100)));
+      take(&mut ledger, OTHER_ADMIN, &revoked(1), 200);
+      take(&mut ledger, ADMIN, &created(1, "ci"), 100);
       assert!(ledger.active(conversation(), &authority()).is_empty());
-      ledger.apply(user(ADMIN), &created(1, "ci"), 0, Some(message(50)));
+      take(&mut ledger, ADMIN, &created(1, "ci"), 50);
       assert!(
         ledger.active(conversation(), &authority()).is_empty(),
         "never comes back"
@@ -531,34 +633,26 @@ mod tests {
     #[test]
     fn the_newest_rename_by_a_manager_names_the_source() {
       let mut ledger = SourceLedger::default();
-      ledger.apply(user(ADMIN), &created(1, "ci"), 0, Some(message(1)));
-      ledger.apply(user(OTHER_ADMIN), &renamed(1, "builds"), 0, Some(message(3)));
-      ledger.apply(user(ADMIN), &renamed(1, "older"), 0, Some(message(2)));
+      take(&mut ledger, ADMIN, &created(1, "ci"), 1);
+      take(&mut ledger, OTHER_ADMIN, &renamed(1, "builds"), 3);
+      take(&mut ledger, ADMIN, &renamed(1, "older"), 2);
       assert_eq!(ledger.active(conversation(), &authority())[0].name, "builds");
-      ledger.apply(user(MEMBER), &renamed(1, "mine"), 0, Some(message(4)));
+      let demoted = SourceAuthority {
+        managers: HashSet::from([user(ADMIN)]),
+        ..authority()
+      };
       assert_eq!(
-        ledger.active(conversation(), &authority())[0].name,
+        ledger.active(conversation(), &demoted)[0].name,
         "ci",
-        "a rename by a member falls back to the original name"
+        "a rename by somebody no longer allowed falls back to the original name"
       );
     }
   }
 
-  #[test]
-  fn the_stored_ledger_survives_a_reload() {
-    let store = crate::store::MemoryStore::new();
-    apply_source_change(
-      &store,
-      conversation(),
-      user(ADMIN),
-      &created(1, "ci"),
-      0,
-      Some(message(1)),
-    )
-    .unwrap();
-    let ledger = SourceLedger::load(&store, conversation()).unwrap();
-    assert_eq!(ledger.revision, 1);
-    assert_eq!(ledger.active(conversation(), &authority()).len(), 1);
+  /// Applies `change` from `who` (admins are managers) with server ID `id`.
+  fn take(ledger: &mut SourceLedger, who: i64, change: &SourceChange, id: i64) -> bool {
+    let is_manager = who != MEMBER;
+    ledger.apply(user(who), is_manager, change, 0, Some(message(id)))
   }
 
   fn authority() -> SourceAuthority {
@@ -567,6 +661,20 @@ mod tests {
       managers: HashSet::from([user(ADMIN), user(OTHER_ADMIN)]),
       excluded: HashSet::new(),
     }
+  }
+
+  fn workspace_with_admins(admins: &[i64]) -> WorkspaceState {
+    use crate::workspace::{RosterMember, RosterRole};
+    let mut workspace = WorkspaceState::default();
+    workspace.roster.members = admins
+      .iter()
+      .map(|id| RosterMember {
+        user_id: user(*id),
+        role: RosterRole::Admin,
+        identity_key: teamcraft_proto::Base64Bytes::new(vec![0; 32]),
+      })
+      .collect();
+    workspace
   }
 
   fn created(id: i64, name: &str) -> SourceChange {
@@ -600,8 +708,8 @@ mod tests {
     SourceId::from_bytes(bytes)
   }
 
-  fn member(id: i64, role: ChannelRole, kind: UserKind) -> teamcraft_proto::ConversationMemberResponse {
-    let summary = UserSummary {
+  fn summary(id: i64, kind: UserKind) -> UserSummary {
+    UserSummary {
       id: user(id),
       maybe_username: None,
       display_name: format!("user {id}"),
@@ -609,8 +717,7 @@ mod tests {
       maybe_email: None,
       maybe_organization: None,
       maybe_has_devices: None,
-    };
-    teamcraft_proto::ConversationMemberResponse { user: summary, role }
+    }
   }
 
   fn user(id: i64) -> UserId {

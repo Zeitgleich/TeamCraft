@@ -15,14 +15,6 @@ use crate::integration_sources::{ActiveSource, SourceAuthority, SourceLedger};
 use crate::records;
 use crate::store::{LocalStore, MessageContent, Table};
 
-/// The sources of one conversation.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct IntegrationSources {
-  /// [`SourceLedger::revision`]: changes when a source change arrived.
-  pub revision: u64,
-  pub active: Vec<ActiveSource>,
-}
-
 /// Where the look back through a conversation's history stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HistoryScan {
@@ -45,36 +37,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// The conversation's sources in force (e2ee.md §13.1): created by a current, non-guest member
-  /// of its encryption group who is a verified workspace admin or a channel admin, and not revoked.
-  /// Reads the store only; [`Self::refresh_source_authority`] brings the member roles up to date.
+  /// of its encryption group who is an admin of the verified, fresh workspace roster, and not
+  /// revoked. Reads the store only.
   pub fn integration_sources(
     &mut self,
     conversation: ConversationId,
-  ) -> Result<IntegrationSources, CoreError> {
+  ) -> Result<Vec<ActiveSource>, CoreError> {
     let ledger = SourceLedger::load(&self.store, conversation)?;
     if ledger.revision == 0 || !self.has_group(conversation)? {
-      return Ok(IntegrationSources {
-        revision: ledger.revision,
-        active: Vec::new(),
-      });
+      return Ok(Vec::new());
     }
     let group_users: HashSet<_> = self.group_users(conversation)?.into_iter().collect();
     let guests = self.guest_users(group_users.iter().copied())?;
     let workspace = self.workspace()?;
     let max_age_ms = i64::try_from(self.settings.workspace_max_age.as_millis()).unwrap_or(i64::MAX);
     let is_fresh = workspace.is_roster_fresh(self.now_ms(), max_age_ms);
-    let authority = SourceAuthority::from_store(
-      &self.store,
-      conversation,
-      &workspace,
-      is_fresh,
-      Some(group_users),
-      guests,
-    )?;
-    Ok(IntegrationSources {
-      revision: ledger.revision,
-      active: ledger.active(conversation, &authority),
-    })
+    let authority =
+      SourceAuthority::from_store(&self.store, &workspace, is_fresh, Some(group_users), guests)?;
+    Ok(ledger.active(conversation, &authority))
   }
 
   /// Announces a change to the conversation's sources: an encrypted, hidden message for the
@@ -95,11 +75,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )?;
     self.flush_outbox().await?;
     Ok(())
-  }
-
-  /// Reads the conversation's member list (with the channel roles) from the server again.
-  pub async fn refresh_source_authority(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    self.refresh_members(conversation).await
   }
 
   /// Loads one more page of older history of `conversation`, so source announcements from before

@@ -2,7 +2,7 @@
 //!
 //! Two kinds live side by side:
 //!
-//! - **Managed** sources come from the app (docs/bridge.md, "Sources"): a channel admin announces
+//! - **Managed** sources come from the app (docs/bridge.md, "Sources"): a workspace admin announces
 //!   one with an encrypted control message in the channel, the worker reads it from the bot's store
 //!   and replaces the managed set when something changed. Only the token's SHA-256 is known.
 //! - **Static** sources are the optional `[[sources]]` of the configuration, for a bridge whose
@@ -64,16 +64,18 @@ pub enum Endpoint {
 }
 
 /// The shared table; cloning shares it.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SourceRegistry {
   inner: Arc<RwLock<Registry>>,
 }
 
-#[derive(Default)]
 struct Registry {
   statics: Vec<Arc<Source>>,
   managed: Vec<Arc<Source>>,
   limiters: HashMap<SourceKey, RateLimiter>,
+  /// All sources together (`listen.total_rate_limit_per_minute`), so many sources can't add up
+  /// to more than the bridge and the channels should take.
+  total: RateLimiter,
 }
 
 /// What [`SourceRegistry::replace_managed`] changed, for the log.
@@ -131,16 +133,19 @@ impl Source {
 impl SourceRegistry {
   /// The static sources of the configuration; managed ones arrive from the worker.
   pub fn new(config: &BridgeConfig) -> Self {
-    let registry = Self::default();
-    {
-      let mut inner = registry.write();
-      inner.statics = config
+    let registry = Registry {
+      statics: config
         .sources
         .iter()
         .map(|source| Arc::new(Source::from_config(source)))
-        .collect();
+        .collect(),
+      managed: Vec::new(),
+      limiters: HashMap::new(),
+      total: RateLimiter::new(config.listen.total_rate_limit_per_minute, Instant::now()),
+    };
+    Self {
+      inner: Arc::new(RwLock::new(registry)),
     }
-    registry
   }
 
   /// The source whose token matches and that serves `endpoint`. A token of another kind's source
@@ -194,27 +199,44 @@ impl SourceRegistry {
     self.len() == 0
   }
 
-  /// Takes `count` events from the source's bucket, all or nothing.
+  /// Takes `count` events from the source's bucket and the bridge's total, all or nothing.
   pub fn try_take(&self, source: &Source, count: u32, now: Instant) -> bool {
-    self.with_limiter(source, now, |limiter| limiter.try_take(count, now))
+    self.with_limiters(source, now, |limiter, total| {
+      // The total is asked first, so a refusal there costs the source nothing.
+      if !total.try_take(count, now) {
+        return false;
+      }
+      limiter.try_take(count, now)
+    })
   }
 
-  /// Takes as many of `count` events as the bucket allows.
+  /// Takes as many of `count` events as both buckets allow.
   pub fn take_up_to(&self, source: &Source, count: u32, now: Instant) -> u32 {
-    self.with_limiter(source, now, |limiter| limiter.take_up_to(count, now))
+    self.with_limiters(source, now, |limiter, total| {
+      let allowed = total.take_up_to(count, now);
+      limiter.take_up_to(allowed, now)
+    })
   }
 
+  /// How long until both buckets have room again.
   pub fn retry_after(&self, source: &Source, now: Instant) -> Duration {
-    self.with_limiter(source, now, |limiter| limiter.retry_after())
+    self.with_limiters(source, now, |limiter, total| {
+      limiter.retry_after().max(total.retry_after())
+    })
   }
 
-  fn with_limiter<T>(&self, source: &Source, now: Instant, run: impl FnOnce(&mut RateLimiter) -> T) -> T {
+  fn with_limiters<T>(
+    &self,
+    source: &Source,
+    now: Instant,
+    run: impl FnOnce(&mut RateLimiter, &mut RateLimiter) -> T,
+  ) -> T {
     let mut inner = self.write();
-    let limiter = inner
-      .limiters
+    let Registry { limiters, total, .. } = &mut *inner;
+    let limiter = limiters
       .entry(source.key.clone())
       .or_insert_with(|| RateLimiter::new(source.rate_limit_per_minute, now));
-    run(limiter)
+    run(limiter, total)
   }
 
   fn read(&self) -> std::sync::RwLockReadGuard<'_, Registry> {
@@ -284,13 +306,37 @@ mod tests {
     assert_eq!(registry.len(), 1);
   }
 
+  #[test]
+  fn all_sources_together_stay_under_the_bridge_total() {
+    let registry = registry_with_total(100);
+    registry.replace_managed(vec![
+      managed(1, "a", SourceKind::Webhook, "tcs_a"),
+      managed(2, "b", SourceKind::Webhook, "tcs_b"),
+    ]);
+    let (a, b) = (
+      registry.find("tcs_a", Endpoint::Webhook).unwrap(),
+      registry.find("tcs_b", Endpoint::Webhook).unwrap(),
+    );
+    let now = Instant::now();
+    assert_eq!(registry.take_up_to(&a, 60, now), 60);
+    assert_eq!(registry.take_up_to(&b, 60, now), 40, "the total has 40 left");
+    assert!(!registry.try_take(&b, 1, now));
+    assert!(registry.retry_after(&b, now) >= Duration::from_millis(500));
+  }
+
   fn registry_with_static() -> SourceRegistry {
+    registry_with_total(100_000)
+  }
+
+  fn registry_with_total(total: u32) -> SourceRegistry {
     let config = BridgeConfig::from_toml(&format!(
       r#"
       [server]
       url = "http://localhost"
       [store]
       path = "x.db"
+      [listen]
+      total_rate_limit_per_minute = {total}
       [[sources]]
       name = "static"
       token = "{STATIC_TOKEN}"

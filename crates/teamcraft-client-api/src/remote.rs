@@ -1105,6 +1105,7 @@ pub enum ChatQuery {
   IntegrationSources {
     conversation: ConversationId,
   },
+  CanManageIntegrationSources,
   SpaceInvites {
     space: SpaceId,
   },
@@ -1225,6 +1226,10 @@ pub enum ChatAnswer {
   IntegrationSources {
     #[serde(default)]
     sources: Vec<crate::model::IntegrationSource>,
+  },
+  CanManageIntegrationSources {
+    #[serde(default)]
+    can_manage: bool,
   },
   SpaceInvites {
     invites: Vec<crate::model::PendingInvite>,
@@ -1366,6 +1371,9 @@ impl ChatQuery {
       },
       Self::IntegrationSources { conversation } => ChatAnswer::IntegrationSources {
         sources: backend.integration_sources(conversation),
+      },
+      Self::CanManageIntegrationSources => ChatAnswer::CanManageIntegrationSources {
+        can_manage: backend.can_manage_integration_sources(),
       },
       Self::SpaceMembers { space } => ChatAnswer::SpaceMembers {
         roster: backend.space_members(space),

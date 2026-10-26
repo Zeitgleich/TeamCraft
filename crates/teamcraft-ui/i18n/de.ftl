@@ -2760,6 +2760,7 @@ channel-sources-danger-alert = Als „danger“ markierte Anhänge erwähnen Per
 channel-sources-add = Quelle hinzufügen
 channel-sources-hint = Grafana, CI oder journalctl auf die Bridge richten. Eine neue Quelle erfährt die Bridge verschlüsselt über diesen Kanal; nichts muss konfiguriert oder neu gestartet werden.
 channel-sources-needs-bot = Zuerst einen Bot zu diesem Kanal hinzufügen: Die Bridge erfährt von Quellen über den Kanal.
+channel-sources-admins-only = Quellen können vorerst nur Workspace-Admins hinzufügen: Die Bridge vertraut ihrer signierten Rolle, Kanalrollen sind noch nicht signiert.
 channel-sources-no-random = Kein Zufallsgenerator verfügbar, daher konnte kein Token erzeugt werden. Einen anderen Browser versuchen.
 channel-sources-created = { $name } ist bereit. Die Adresse jetzt kopieren: Sie wird nur einmal angezeigt.
 channel-sources-url = Adresse
