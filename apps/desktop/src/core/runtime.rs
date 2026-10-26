@@ -799,6 +799,9 @@ impl Core {
       if self.connect(&mut requests).await == Flow::Stop {
         break;
       }
+      if std::mem::take(&mut self.has_queued_sends) && self.send_queued(&mut requests).await == Flow::Stop {
+        break;
+      }
       let maybe_deadline = self.connection_deadline();
       tokio::select! {
         request = requests.recv() => match request {
@@ -833,8 +836,8 @@ impl Core {
           self.changed();
         },
       }
-      if std::mem::take(&mut self.has_queued_sends) {
-        self.send_queued().await;
+      if std::mem::take(&mut self.has_queued_sends) && self.send_queued(&mut requests).await == Flow::Stop {
+        break;
       }
       self.start_upload().await;
       self.start_downloads().await;
@@ -1570,31 +1573,14 @@ impl Core {
     let Some(client) = self.client.as_mut() else {
       return Ok(0);
     };
-    let count = commands.len();
-    let mut maybe_failure = None;
-    for command in commands {
-      // A command can take long (a big history page); heartbeats go on meanwhile.
-      let result = self
-        .connection
-        .keep_alive(SystemClock.now_ms(), client.run_ui_command(command))
-        .await;
-      if let Err(error) = result {
-        tracing::warn!(%error, "UI command failed");
-        maybe_failure.get_or_insert(error);
-      }
-    }
-    maybe_failure.map_or(Ok(count), Err)
+    run_commands(&mut self.connection, client, commands).await
   }
 
   async fn flush(&mut self) {
     let Some(client) = self.client.as_mut() else {
       return;
     };
-    if self
-      .connection
-      .keep_alive(SystemClock.now_ms(), upkeep::flush_sends(client))
-      .await
-    {
+    if flush_sends_of(&mut self.connection, client).await {
       self.changed();
     }
   }
@@ -1629,12 +1615,46 @@ impl Core {
 
   /// Sends what [`Request::Action`] put into the outbox (link previews first). A failure was not
   /// the action's (that was answered already): it is shown by itself.
-  async fn send_queued(&mut self) {
-    if let Err(error) = self.run_queued_commands().await {
+  /// Runs what the UI queued and sends the outbox. Reads are answered meanwhile, so a message just
+  /// written to the outbox shows as pending while it goes out, not after the server answered (#717).
+  async fn send_queued(&mut self, requests: &mut mpsc::UnboundedReceiver<Request>) -> Flow {
+    let commands = self.drain_commands();
+    let Self {
+      client: Some(client),
+      connection,
+      backend,
+      store,
+      snapshots,
+      status,
+      catch_up_focus,
+      on_change,
+      ..
+    } = self
+    else {
+      return Flow::Go;
+    };
+    let mut reads = ReadsWhileBusy {
+      backend: backend.as_ref(),
+      store: store.as_ref(),
+      snapshots,
+      status,
+      focus: catch_up_focus,
+      maybe_security: security_of(client).ok(),
+      on_change: on_change.as_ref(),
+    };
+    let work = async {
+      let ran = run_commands(connection, client, commands).await;
+      let flushed = flush_sends_of(connection, client).await;
+      (ran, flushed)
+    };
+    let served = serve_reads_during(work, requests, &mut reads).await;
+    self.has_queued_sends |= served.has_queued;
+    let (ran, _) = served.output;
+    if let Err(error) = ran {
       (self.on_failure)(describe_failure(error));
     }
-    self.flush().await;
     self.changed();
+    self.handle_later(served.later, served.is_closed).await
   }
 
   /// Starts the next due upload, if none runs: the file is encrypted and announced, then goes up
@@ -1730,57 +1750,38 @@ impl Core {
       snapshots,
       status,
       catch_up_focus,
-      has_queued_sends,
       on_change,
       ..
     } = self
     else {
       return Flow::Go;
     };
-    // Taken before the connection borrows the client; a later snapshot reads it afresh.
-    let maybe_security = security_of(client).ok();
-    let mut deferred = Vec::new();
-    let mut is_closed = false;
-    let connected = {
-      let mut connecting = std::pin::pin!(connection.connect_if_due(client));
-      loop {
-        tokio::select! {
-          // Not due (the usual case): done at once, nothing read on the side.
-          biased;
-          connected = &mut connecting => break connected,
-          maybe_request = requests.recv(), if !is_closed => {
-            let Some(request) = maybe_request else {
-              is_closed = true;
-              continue;
-            };
-            let reads = ReadsWhileConnecting {
-              backend: backend.as_ref(),
-              store: store.as_ref(),
-              snapshots: &mut *snapshots,
-              status,
-              focus: catch_up_focus,
-              maybe_security: maybe_security.as_ref(),
-            };
-            match reads.answer(request) {
-              Answered::Done => {},
-              Answered::Queued => {
-                *has_queued_sends = true;
-                on_change();
-              },
-              Answered::Later(request) => deferred.push(request),
-            }
-          },
-        }
-      }
+    let mut reads = ReadsWhileBusy {
+      backend: backend.as_ref(),
+      store: store.as_ref(),
+      snapshots,
+      status,
+      focus: catch_up_focus,
+      // Taken before the connection borrows the client; a later snapshot reads it afresh.
+      maybe_security: security_of(client).ok(),
+      on_change: on_change.as_ref(),
     };
-    if connected.is_some() {
+    let served = serve_reads_during(connection.connect_if_due(client), requests, &mut reads).await;
+    self.has_queued_sends |= served.has_queued;
+    if served.output.is_some() {
       self.repeat_reports().await;
       // Back online: what waited goes out now, not on the next tick.
       self.has_queued_sends = true;
       self.is_upload_due = true;
       self.changed();
     }
-    for request in deferred {
+    self.handle_later(served.later, served.is_closed).await
+  }
+
+  /// Handles what waited for long work, in its order; [`Flow::Stop`] when one of them (or the
+  /// closed channel) ends the loop.
+  async fn handle_later(&mut self, later: Vec<Request>, is_closed: bool) -> Flow {
+    for request in later {
       if matches!(request, Request::Shutdown) {
         return Flow::Stop;
       }
@@ -1854,15 +1855,97 @@ enum Flow {
   Stop,
 }
 
-/// What the core thread can answer while the client is busy connecting: everything that only reads
-/// the store, and new messages, which only write the outbox (they are sent once connected).
-struct ReadsWhileConnecting<'a> {
+/// What the core thread can answer while the client is busy (connecting, sending): everything that
+/// only reads the store, and new messages, which only write the outbox (they go out next).
+struct ReadsWhileBusy<'a> {
   backend: Option<&'a CoreChatBackend<Store>>,
   store: Option<&'a Store>,
   snapshots: &'a mut SnapshotCache,
   status: &'a CoreStatus,
   focus: &'a CatchUpFocus,
-  maybe_security: Option<&'a SecuritySnapshot>,
+  maybe_security: Option<SecuritySnapshot>,
+  on_change: &'a (dyn Fn() + Send + Sync),
+}
+
+/// What [`serve_reads_during`] leaves to its caller.
+struct Served<T> {
+  output: T,
+  /// Requests that need the client, in their order.
+  later: Vec<Request>,
+  /// A new message went to the outbox meanwhile.
+  has_queued: bool,
+  /// Every sender is gone: the core loop ends.
+  is_closed: bool,
+}
+
+/// Runs `work` to its end, answering what [`ReadsWhileBusy`] can answer meanwhile.
+async fn serve_reads_during<T>(
+  work: impl Future<Output = T>,
+  requests: &mut mpsc::UnboundedReceiver<Request>,
+  reads: &mut ReadsWhileBusy<'_>,
+) -> Served<T> {
+  let mut later = Vec::new();
+  let mut has_queued = false;
+  let mut is_closed = false;
+  let mut work = std::pin::pin!(work);
+  let output = loop {
+    tokio::select! {
+      // Work that has nothing to do (no connection due) is done at once, nothing is read beside it.
+      biased;
+      output = &mut work => break output,
+      maybe_request = requests.recv(), if !is_closed => {
+        let Some(request) = maybe_request else {
+          is_closed = true;
+          continue;
+        };
+        match reads.answer(request) {
+          Answered::Done => {},
+          Answered::Queued => {
+            has_queued = true;
+            (reads.on_change)();
+          },
+          Answered::Later(request) => later.push(request),
+        }
+      },
+    }
+  };
+  Served {
+    output,
+    later,
+    has_queued,
+    is_closed,
+  }
+}
+
+/// Runs the UI's queued commands; heartbeats go on meanwhile (a command can take long, a big
+/// history page). Returns how many ran, or the first failure.
+async fn run_commands(
+  connection: &mut ConnectionSupervisor<Gateway>,
+  client: &mut Client<Api, Store>,
+  commands: Vec<CoreCommand>,
+) -> Result<usize, CoreError> {
+  let count = commands.len();
+  let mut maybe_failure = None;
+  for command in commands {
+    let result = connection
+      .keep_alive(SystemClock.now_ms(), client.run_ui_command(command))
+      .await;
+    if let Err(error) = result {
+      tracing::warn!(%error, "UI command failed");
+      maybe_failure.get_or_insert(error);
+    }
+  }
+  maybe_failure.map_or(Ok(count), Err)
+}
+
+/// Sends the outbox with heartbeats going on; whether anything changed.
+async fn flush_sends_of(
+  connection: &mut ConnectionSupervisor<Gateway>,
+  client: &mut Client<Api, Store>,
+) -> bool {
+  connection
+    .keep_alive(SystemClock.now_ms(), upkeep::flush_sends(client))
+    .await
 }
 
 /// How [`ReadsWhileConnecting`] dealt with a request.
@@ -1874,13 +1957,13 @@ enum Answered {
   Later(Request),
 }
 
-impl ReadsWhileConnecting<'_> {
-  fn answer(self, request: Request) -> Answered {
+impl ReadsWhileBusy<'_> {
+  fn answer(&mut self, request: Request) -> Answered {
     let not_set_up = || "this device is not set up yet".to_owned();
     match request {
       Request::Status(reply) => drop(reply.send(self.status.clone())),
       Request::Snapshot(reply) => {
-        let result = match (self.backend, self.store, self.maybe_security) {
+        let result = match (self.backend, self.store, &self.maybe_security) {
           (Some(backend), Some(store), Some(security)) => Ok(self.snapshots.snapshot(
             backend,
             store.take_changes(),
@@ -1895,7 +1978,7 @@ impl ReadsWhileConnecting<'_> {
           (Some(backend), Some(store)) => Ok(self.snapshots.changes_since(
             backend,
             store.take_changes(),
-            || self.maybe_security.cloned(),
+            || self.maybe_security.clone(),
             maybe_since,
           )),
           _ => Err(not_set_up()),

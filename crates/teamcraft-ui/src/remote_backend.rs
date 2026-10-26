@@ -683,6 +683,10 @@ impl RemoteChat {
           ticket.fail(failure.clone());
         }
         report_failure(failure);
+      } else {
+        // The user's own change shows as soon as the core has it (a sent message as pending),
+        // not after the debounce for the core's change events (#717).
+        backend.refresh().await;
       }
       backend.mark_answers_stale();
       backend.changed();
