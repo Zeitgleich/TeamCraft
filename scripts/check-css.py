@@ -40,7 +40,7 @@ import sys
 DEFAULT_DIR = pathlib.Path("crates/teamcraft-ui/style")
 DEFAULT_RUST_DIR = pathlib.Path("crates/teamcraft-ui/src")
 # Set on elements at runtime: from Rust (`style:--x=…`, `style.setProperty`) or loader.js.
-RUNTIME_VARIABLES = re.compile(r"^--(vv-.*|indicator-.*|hue|media-.*|cols|banners-h|window-controls-.*|tok-.*|tc-loader-.*|link-menu-.*|date-jump-.*)$")
+RUNTIME_VARIABLES = re.compile(r"^--(vv-.*|indicator-.*|hue|media-.*|cols|banners-h|window-controls-.*|tok-.*|tc-loader-.*|link-menu-.*|date-jump-.*|rail-menu-.*)$")
 # Keyframes that are known duplicates, each with the issue that removes it.
 KNOWN_DUPLICATE_KEYFRAMES = {
 }

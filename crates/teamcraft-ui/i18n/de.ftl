@@ -2662,3 +2662,11 @@ link-new-ask = Meine anderen Geräte fragen
 link-new-ask-hint = Statt zu scannen zeigen deine anderen Geräte eine Anfrage. Der Server sieht dann den Schlüssel in diesem Code; du gibst den hier angezeigten Code trotzdem auf dem anderen Gerät ein, ohne dich wird also nichts bestätigt.
 link-new-asked = Deine anderen Geräte zeigen jetzt eine Anfrage.
 link-new-ask-failed = Die anderen Geräte konnten nicht gefragt werden.
+
+# Shell (Issue #299)
+sidebar-filter = Unterhaltungen filtern
+rail-create = Erstellen
+rail-create-short = Neu
+rail-focus = Fokusmodus: Benachrichtigungen pausieren
+rail-focus-short = Fokus
+focus-30-minutes = Für 30 Minuten

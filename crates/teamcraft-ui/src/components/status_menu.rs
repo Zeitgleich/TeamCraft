@@ -20,8 +20,8 @@ use crate::session::use_session;
 use crate::state::{Overlay, SettingsTab, use_app_state};
 
 /// "Until tomorrow morning" means 08:00 local time.
-const MORNING_MINUTE: u16 = 8 * 60;
-const MS_PER_HOUR: TimestampMs = 3_600_000;
+pub(crate) const MORNING_MINUTE: u16 = 8 * 60;
+pub(crate) const MS_PER_HOUR: TimestampMs = 3_600_000;
 
 /// Suggestions while the workspace configured no presets of its own; the label is an i18n key.
 const STATUS_PRESETS: [(&str, &str); 4] = [

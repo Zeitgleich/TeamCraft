@@ -2662,3 +2662,11 @@ link-new-ask = Ask my other devices
 link-new-ask-hint = Instead of scanning, your other devices show a prompt. The server then sees the key in this code; you still type the code shown here on the other device, so nothing is approved without you.
 link-new-asked = Your other devices show a prompt now.
 link-new-ask-failed = The other devices could not be asked.
+
+# Shell (issue #299)
+sidebar-filter = Filter conversations
+rail-create = Create
+rail-create-short = Create
+rail-focus = Focus mode: pause notifications
+rail-focus-short = Focus
+focus-30-minutes = For 30 minutes

@@ -85,6 +85,7 @@ pub mod people_picker;
 pub mod profile_views;
 pub mod quick_switcher;
 pub mod rail;
+pub mod rail_menus;
 pub mod rich_text;
 pub mod search_view;
 pub mod section_tabs;

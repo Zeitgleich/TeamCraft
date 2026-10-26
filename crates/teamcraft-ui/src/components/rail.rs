@@ -2,6 +2,7 @@ use leptos::prelude::*;
 
 use crate::components::count_badge::{BadgeTone, CountBadge};
 use crate::components::icons::{Icon, IconName};
+use crate::components::rail_menus::{RailCreateMenu, RailFocusMenu};
 use crate::components::space_tile::SpaceTileContent;
 use crate::i18n::use_i18n;
 use crate::model::{ConversationKind, Space};
@@ -29,6 +30,7 @@ pub fn SpaceRail() -> impl IntoView {
         <ChatsButton />
         <ActivityButton />
         <ThreadsButton />
+        <RailCreateMenu />
       </div>
       <span class="rail-divider" aria-hidden="true"></span>
       <ul>
@@ -50,6 +52,7 @@ pub fn SpaceRail() -> impl IntoView {
           }
         }}
       </ul>
+      <RailFocusMenu />
       // Browsing lists the open spaces to join and has the button to create a new one.
       <button class="rail-add" on:click=move |_| state.overlay.set(Overlay::BrowseSpaces(None)) aria-label=move || i18n.t("rail-add-space") title=move || i18n.t("rail-add-space")>
         <Icon name=IconName::Plus />
