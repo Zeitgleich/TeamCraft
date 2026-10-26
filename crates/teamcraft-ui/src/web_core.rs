@@ -1604,6 +1604,7 @@ impl Core {
     let (Some(backend), Some(store)) = (self.backend.as_ref(), self.store.as_ref()) else {
       return Err(not_set_up());
     };
+    crate::persisted_media::drop_renditions(store.take_removed_renditions());
     Ok(
       self
         .snapshots
@@ -1617,6 +1618,7 @@ impl Core {
       return Err(not_set_up());
     };
     let changes = store.take_changes();
+    crate::persisted_media::drop_renditions(store.take_removed_renditions());
     let mut maybe_security = None;
     let answer = self.snapshots.borrow_mut().changes_since(
       backend,

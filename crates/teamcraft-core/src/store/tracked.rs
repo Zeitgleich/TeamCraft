@@ -7,13 +7,19 @@
 //! reads, the live state (counts, threads, presence log, receipts), the security part, or what
 //! every conversation may depend on (names, spaces, preferences). Tables the snapshot doesn't read
 //! (MLS state, sync cursors, search segments, …) are not noted at all.
+//!
+//! It also notes the image attachments whose message went away – deleted, withdrawn by its sender,
+//! or its conversation no longer listed for this user – so the host drops their renditions from the
+//! persistent media cache (#749, [`TrackedStore::take_removed_renditions`]).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use teamcraft_proto::{ClientMessageId, ConversationId, MessageId, UserId};
+use teamcraft_proto::{AttachmentId, ClientMessageId, ConversationId, MessageId, UserId};
 
-use super::{LocalStore, MediaRange, MessageFilter, StoreError, StoredMessage, Table};
+use super::{
+  AttachmentRef, LocalStore, MediaRange, MessageContent, MessageFilter, StoreError, StoredMessage, Table,
+};
 
 /// Records of [`Table::Account`] every conversation entry reads (unread marks, mention rules).
 const SHARED_ACCOUNT_RECORDS: [&str; 2] = [
@@ -22,12 +28,28 @@ const SHARED_ACCOUNT_RECORDS: [&str; 2] = [
 ];
 /// The key prefix of a conversation's bookmarks in [`Table::Account`].
 const BOOKMARKS_PREFIX: &str = "bookmarks/";
+/// Removed renditions kept until the host takes them; a host that never does (one without a media
+/// cache) doesn't make them grow, the oldest go (the cache's age limit covers what is lost).
+const MAX_REMOVED_RENDITIONS: usize = 4096;
+/// Messages read per page when a conversation goes away.
+const REMOVED_CONVERSATION_PAGE: usize = 256;
 
 /// A [`LocalStore`] that notes what its writes changed. Clones share the notes.
 #[derive(Clone)]
 pub struct TrackedStore<S> {
   inner: S,
   changes: Arc<Mutex<StoreChanges>>,
+  removed_renditions: Arc<Mutex<VecDeque<RemovedRendition>>>,
+}
+
+/// An image attachment whose message went away: its cached rendition goes too. Identifies the entry
+/// like `teamcraft_client_api::media::MediaKey::Rendition`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RemovedRendition {
+  pub conversation: ConversationId,
+  pub message: MessageId,
+  pub attachment: AttachmentId,
+  pub content_sha256: [u8; 32],
 }
 
 /// What changed since the changes were last taken.
@@ -69,7 +91,17 @@ impl<S: LocalStore> TrackedStore<S> {
     Self {
       inner,
       changes: Arc::default(),
+      removed_renditions: Arc::default(),
     }
+  }
+
+  /// The image attachments whose message went away since the last call.
+  pub fn take_removed_renditions(&self) -> Vec<RemovedRendition> {
+    let mut removed = self
+      .removed_renditions
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner);
+    removed.drain(..).collect()
   }
 
   /// The wrapped store (for what only it offers, like flushing to disk).
@@ -108,6 +140,55 @@ impl<S: LocalStore> TrackedStore<S> {
     }
   }
 
+  /// Notes the image attachments of `messages`, which are going away.
+  fn note_removed(&self, messages: impl IntoIterator<Item = StoredMessage>) {
+    let mut removed = self
+      .removed_renditions
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner);
+    for message in messages {
+      let Some(server_id) = message.maybe_server_id else {
+        continue;
+      };
+      for attachment in attachments(&message.content) {
+        let Ok(content_sha256) = <[u8; 32]>::try_from(attachment.ciphertext_sha256.as_slice()) else {
+          continue;
+        };
+        if !attachment.media_type.starts_with("image/") {
+          continue;
+        }
+        if removed.len() >= MAX_REMOVED_RENDITIONS {
+          removed.pop_front();
+        }
+        removed.push_back(RemovedRendition {
+          conversation: message.conversation_id,
+          message: server_id,
+          attachment: attachment.attachment_id,
+          content_sha256,
+        });
+      }
+    }
+  }
+
+  /// The messages with media of `conversation`, which went away for this user.
+  fn note_removed_conversation(&self, conversation: ConversationId) -> Result<(), StoreError> {
+    let mut range = MediaRange::Older(None);
+    loop {
+      let page = self
+        .inner
+        .media_messages(conversation, range, REMOVED_CONVERSATION_PAGE)?;
+      let is_last = page.len() < REMOVED_CONVERSATION_PAGE;
+      let Some(oldest) = page.last().and_then(|message| message.maybe_server_id) else {
+        return Ok(());
+      };
+      self.note_removed(page);
+      if is_last {
+        return Ok(());
+      }
+      range = MediaRange::Older(Some(oldest));
+    }
+  }
+
   fn lock(&self) -> std::sync::MutexGuard<'_, StoreChanges> {
     // Invariant-free data: a panic elsewhere leaves a usable (at worst incomplete) set of notes.
     self.changes.lock().unwrap_or_else(PoisonError::into_inner)
@@ -132,6 +213,13 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   }
 
   fn delete(&self, table: Table, key: &str) -> Result<(), StoreError> {
+    if table == Table::Conversations
+      && let Ok(conversation) = key.parse::<ConversationId>()
+      && let Err(error) = self.note_removed_conversation(conversation)
+    {
+      // Only the cache's cleanup is lost; its age limit still ends the renditions.
+      tracing::debug!(%error, "could not list the pictures of a conversation that went away");
+    }
     self.inner.delete(table, key)?;
     self.note(classify(table, key));
     Ok(())
@@ -142,6 +230,14 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   }
 
   fn upsert_message(&self, message: &StoredMessage) -> Result<(), StoreError> {
+    // Only a deletion takes files away (an edit changes the text); only then is the old one read.
+    if matches!(message.content, MessageContent::Deleted)
+      && let Some(old) = self
+        .inner
+        .message(message.conversation_id, message.client_message_id)?
+    {
+      self.note_removed([old]);
+    }
     self.inner.upsert_message(message)?;
     self.note(Change::Conversation(message.conversation_id));
     Ok(())
@@ -181,6 +277,7 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   }
 
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {
+    self.note_removed(self.inner.messages(conversation, MessageFilter::All)?);
     self.inner.delete_messages(conversation)?;
     self.note(Change::Conversation(conversation));
     Ok(())
@@ -191,6 +288,9 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     conversation: ConversationId,
     client_message_id: ClientMessageId,
   ) -> Result<(), StoreError> {
+    if let Some(old) = self.inner.message(conversation, client_message_id)? {
+      self.note_removed([old]);
+    }
     self.inner.delete_message(conversation, client_message_id)?;
     self.note(Change::Conversation(conversation));
     Ok(())
@@ -218,6 +318,15 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
 }
 
 /// What a write to `table` under `key` may change in the snapshot.
+/// The files a message carries.
+fn attachments(content: &MessageContent) -> &[AttachmentRef] {
+  match content {
+    MessageContent::File { attachment } => std::slice::from_ref(attachment),
+    MessageContent::Text { meta, .. } => &meta.attachments,
+    _ => &[],
+  }
+}
+
 fn classify(table: Table, key: &str) -> Change {
   match table {
     Table::Spaces | Table::Conversations | Table::Users | Table::Categories => Change::Everything,
@@ -326,6 +435,105 @@ mod tests {
     store.put(Table::Account, "push_session", b"{}").unwrap();
     store.put(Table::SyncState, "sync", b"{}").unwrap();
     assert_eq!(store.take_changes(), StoreChanges::default());
+  }
+
+  mod removed_renditions {
+    use base64::Engine;
+
+    use super::*;
+
+    #[test]
+    fn a_deleted_message_gives_up_its_pictures() {
+      let store = TrackedStore::new(MemoryStore::new());
+      let picture = file_message(1, Some(10), "image/png");
+      store.upsert_message(&picture).unwrap();
+      store
+        .upsert_message(&file_message(2, Some(11), "application/pdf"))
+        .unwrap();
+      assert!(
+        store.take_removed_renditions().is_empty(),
+        "nothing went away yet"
+      );
+      store
+        .upsert_message(&StoredMessage {
+          content: MessageContent::Deleted,
+          ..picture
+        })
+        .unwrap();
+      assert_eq!(store.take_removed_renditions(), vec![removed(10)]);
+      assert!(store.take_removed_renditions().is_empty(), "taken");
+    }
+
+    #[test]
+    fn a_message_or_a_conversation_that_goes_away_gives_up_its_pictures() {
+      let store = TrackedStore::new(MemoryStore::new());
+      store
+        .upsert_message(&file_message(1, Some(10), "image/png"))
+        .unwrap();
+      store
+        .upsert_message(&file_message(2, Some(11), "image/jpeg"))
+        .unwrap();
+      // An outbox message has no rendition in the cache (it has no server ID yet).
+      store.upsert_message(&file_message(3, None, "image/png")).unwrap();
+      store
+        .delete_message(id(7), ClientMessageId::from_bytes([1; 16]))
+        .unwrap();
+      assert_eq!(store.take_removed_renditions(), vec![removed(10)]);
+      store.put(Table::Conversations, "7", b"{}").unwrap();
+      store.delete(Table::Conversations, "7").unwrap();
+      assert_eq!(
+        store.take_removed_renditions(),
+        vec![removed(11)],
+        "no longer listed"
+      );
+    }
+
+    #[test]
+    fn notes_nobody_takes_stay_bounded() {
+      let store = TrackedStore::new(MemoryStore::new());
+      let extra = 10;
+      store.note_removed(
+        (0..MAX_REMOVED_RENDITIONS + extra).map(|n| file_message(1, Some(1_000 + n as i64), "image/png")),
+      );
+      let kept = store.take_removed_renditions();
+      assert_eq!(kept.len(), MAX_REMOVED_RENDITIONS);
+      assert_eq!(kept[0].message, id(1_000 + extra as i64), "the oldest went");
+    }
+
+    fn removed(message: i64) -> RemovedRendition {
+      RemovedRendition {
+        conversation: id(7),
+        message: id(message),
+        attachment: id(message),
+        content_sha256: [9; 32],
+      }
+    }
+
+    fn file_message(client: u8, maybe_server: Option<i64>, media_type: &str) -> StoredMessage {
+      let attachment = serde_json::json!({
+        "attachment_id": id::<AttachmentId>(maybe_server.unwrap_or(1)),
+        "key": "",
+        "ciphertext_sha256": base64::engine::general_purpose::STANDARD.encode([9u8; 32]),
+        "file_name": "f",
+        "media_type": media_type,
+        "size_bytes": 1,
+      });
+      StoredMessage {
+        conversation_id: id(7),
+        client_message_id: ClientMessageId::from_bytes([client; 16]),
+        maybe_server_id: maybe_server.map(id),
+        sender_user_id: id(1),
+        maybe_thread_id: None,
+        sent_at_ms: maybe_server.unwrap_or(0),
+        content: MessageContent::File {
+          attachment: serde_json::from_value(attachment).unwrap(),
+        },
+        is_edited: false,
+        edits: Vec::new(),
+        maybe_edit_id: None,
+        is_pinned: false,
+      }
+    }
   }
 
   fn id<T: Id>(raw: i64) -> T {

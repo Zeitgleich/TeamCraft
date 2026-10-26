@@ -23,13 +23,14 @@ use wasm_bindgen::JsCast;
 
 use crate::auth::tauri;
 use crate::model::UserId;
-use crate::settings::MediaCacheLimit;
+use crate::settings::{MediaCacheLimit, MediaCacheMaxAge};
 
 /// Headers of the shell's `core_media_put`; the shell reads the same names.
 const KEY_HEADER: &str = "x-media-key";
 const VERSION_HEADER: &str = "x-media-version";
 const TYPE_HEADER: &str = "x-media-type";
 const BUDGET_HEADER: &str = "x-media-budget";
+const MAX_AGE_HEADER: &str = "x-media-max-age";
 
 #[cfg(target_arch = "wasm32")]
 thread_local! {
@@ -93,15 +94,16 @@ pub fn use_account(user: UserId) {
   let _ = user;
 }
 
-/// The cached picture of `key`, whatever its version.
+/// The cached picture of `key`, whatever its version, unless it is older than the settings keep.
 pub async fn get(key: MediaKey) -> Option<CachedPicture> {
   if is_demo() {
     return None;
   }
+  let max_age = MediaCacheMaxAge::load().duration();
   if tauri::is_available() {
-    return get_from_shell(key).await;
+    return get_from_shell(key, max_age).await;
   }
-  get_from_page(key).await
+  get_from_page(key, max_age).await
 }
 
 /// Keeps a picture just downloaded or made, within the size limit of the settings. In the
@@ -110,12 +112,15 @@ pub fn put(key: MediaKey, picture: CachedPicture) {
   if is_demo() {
     return;
   }
-  let budget_bytes = MediaCacheLimit::load().bytes();
+  let policy = Policy {
+    budget_bytes: MediaCacheLimit::load().bytes(),
+    max_age: MediaCacheMaxAge::load().duration(),
+  };
   leptos::task::spawn_local(async move {
     let result = if tauri::is_available() {
-      put_to_shell(key, picture, budget_bytes).await
+      put_to_shell(key, picture, policy).await
     } else {
-      put_to_page(key, picture, budget_bytes).await
+      put_to_page(key, picture, policy).await
     };
     if let Err(error) = result {
       tracing::debug!(%error, "could not cache a picture");
@@ -140,23 +145,52 @@ pub fn remove(key: MediaKey) {
   });
 }
 
-/// Sign-out: deletes the cache (desktop: of every account; browser: of the signed-in one).
-pub async fn clear() {
+/// Sign-out: deletes the cache. Desktop: of every server and account. Browser: of
+/// `maybe_user` (the session's account) by name, whether or not this tab opened it, and of every
+/// other account the browser lists.
+pub async fn clear(maybe_user: Option<UserId>) {
   let result = if tauri::is_available() {
     tauri::invoke("core_media_clear", wasm_bindgen::JsValue::UNDEFINED)
       .await
       .map(|_| ())
       .map_err(|error| error.to_string())
   } else {
-    clear_page().await
+    clear_page(maybe_user).await
   };
   if let Err(error) = result {
     tracing::warn!(%error, "could not delete the media cache");
   }
 }
 
-async fn get_from_shell(key: MediaKey) -> Option<CachedPicture> {
-  let args = js_sys::JSON::parse(&serde_json::json!({ "key": key }).to_string()).ok()?;
+/// Signed out at start: deletes cache databases a sign-out in a closed tab may have left (browser;
+/// the desktop shell finishes an interrupted deletion itself).
+pub async fn sweep_signed_out() {
+  if tauri::is_available() || is_demo() {
+    return;
+  }
+  if let Err(error) = sweep_page().await {
+    tracing::warn!(%error, "could not delete leftover media caches");
+  }
+}
+
+/// The renditions whose message went away (the core in the page notes them): out of the cache.
+#[cfg(target_arch = "wasm32")]
+pub fn drop_renditions(removed: Vec<teamcraft_core::store::RemovedRendition>) {
+  for rendition in removed {
+    remove(MediaKey::from(rendition));
+  }
+}
+
+/// The settings a write goes with.
+#[derive(Clone, Copy)]
+struct Policy {
+  budget_bytes: u64,
+  max_age: std::time::Duration,
+}
+
+async fn get_from_shell(key: MediaKey, max_age: std::time::Duration) -> Option<CachedPicture> {
+  let args = serde_json::json!({ "key": key, "max_age_secs": max_age.as_secs() });
+  let args = js_sys::JSON::parse(&args.to_string()).ok()?;
   let answer = match tauri::invoke("core_media_get", args).await {
     Ok(answer) => answer,
     Err(error) => {
@@ -168,13 +202,14 @@ async fn get_from_shell(key: MediaKey) -> Option<CachedPicture> {
   unframe(&js_sys::Uint8Array::new(&buffer).to_vec())
 }
 
-async fn put_to_shell(key: MediaKey, picture: CachedPicture, budget_bytes: u64) -> Result<(), String> {
+async fn put_to_shell(key: MediaKey, picture: CachedPicture, policy: Policy) -> Result<(), String> {
   let key = serde_json::to_string(&key).map_err(|error| error.to_string())?;
   let headers = [
     (KEY_HEADER, key),
     (VERSION_HEADER, picture.version),
     (TYPE_HEADER, picture.content_type),
-    (BUDGET_HEADER, budget_bytes.to_string()),
+    (BUDGET_HEADER, policy.budget_bytes.to_string()),
+    (MAX_AGE_HEADER, policy.max_age.as_secs().to_string()),
   ];
   let body = js_sys::Uint8Array::from(picture.bytes.as_slice());
   tauri::invoke_raw("core_media_put", &body, &headers)
@@ -222,9 +257,9 @@ fn is_demo() -> bool {
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn get_from_page(key: MediaKey) -> Option<CachedPicture> {
+async fn get_from_page(key: MediaKey, max_age: std::time::Duration) -> Option<CachedPicture> {
   let cache = browser_cache().await?;
-  let media = cache.get(&key).await?;
+  let media = cache.get(&key, max_age).await?;
   Some(CachedPicture {
     version: media.version,
     content_type: media.content_type,
@@ -233,7 +268,7 @@ async fn get_from_page(key: MediaKey) -> Option<CachedPicture> {
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn put_to_page(key: MediaKey, picture: CachedPicture, budget_bytes: u64) -> Result<(), String> {
+async fn put_to_page(key: MediaKey, picture: CachedPicture, policy: Policy) -> Result<(), String> {
   let Some(cache) = browser_cache().await else {
     return Ok(());
   };
@@ -242,8 +277,12 @@ async fn put_to_page(key: MediaKey, picture: CachedPicture, budget_bytes: u64) -
     content_type: picture.content_type,
     bytes: picture.bytes.into(),
   };
+  let policy = teamcraft_core::media_cache::CachePolicy {
+    budget_bytes: policy.budget_bytes,
+    max_age: policy.max_age,
+  };
   cache
-    .put(&key, &media, budget_bytes)
+    .put(&key, &media, policy)
     .await
     .map_err(|error| error.to_string())
 }
@@ -257,14 +296,30 @@ async fn remove_in_page(key: MediaKey) -> Result<(), String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn clear_page() -> Result<(), String> {
-  let Some(account) = BROWSER.with_borrow_mut(Option::take) else {
-    return Ok(());
-  };
-  if let Some(Some(cache)) = account.maybe_opening.as_ref().and_then(|opening| opening.peek()) {
-    cache.close();
+async fn clear_page(maybe_user: Option<UserId>) -> Result<(), String> {
+  let mut users: Vec<UserId> = maybe_user.into_iter().collect();
+  if let Some(account) = BROWSER.with_borrow_mut(Option::take) {
+    if let Some(Some(cache)) = account.maybe_opening.as_ref().and_then(|opening| opening.peek()) {
+      cache.close();
+    }
+    users.push(account.user);
   }
-  BrowserMediaCache::delete(&database_name(account.user))
+  users.dedup();
+  let mut maybe_failure = None;
+  for user in users {
+    if let Err(error) = BrowserMediaCache::delete(&BrowserMediaCache::database_name(user)).await {
+      maybe_failure = Some(error.to_string());
+    }
+  }
+  if let Err(error) = sweep_page().await {
+    maybe_failure = Some(error);
+  }
+  maybe_failure.map_or(Ok(()), Err)
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn sweep_page() -> Result<(), String> {
+  BrowserMediaCache::delete_every()
     .await
     .map_err(|error| error.to_string())
 }
@@ -285,7 +340,7 @@ async fn browser_cache() -> Option<Rc<BrowserMediaCache>> {
 
 #[cfg(target_arch = "wasm32")]
 async fn open_browser_cache(user: UserId) -> Option<Rc<BrowserMediaCache>> {
-  match BrowserMediaCache::open(&database_name(user)).await {
+  match BrowserMediaCache::open(&BrowserMediaCache::database_name(user)).await {
     Ok(cache) => Some(Rc::new(cache)),
     Err(error) => {
       tracing::info!(%error, "no media cache in this browser");
@@ -294,18 +349,13 @@ async fn open_browser_cache(user: UserId) -> Option<Rc<BrowserMediaCache>> {
   }
 }
 
-#[cfg(target_arch = "wasm32")]
-fn database_name(user: UserId) -> String {
-  format!("teamcraft-media-{user}")
-}
-
 #[cfg(not(target_arch = "wasm32"))]
-async fn get_from_page(_key: MediaKey) -> Option<CachedPicture> {
+async fn get_from_page(_key: MediaKey, _max_age: std::time::Duration) -> Option<CachedPicture> {
   None
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn put_to_page(_key: MediaKey, _picture: CachedPicture, _budget_bytes: u64) -> Result<(), String> {
+async fn put_to_page(_key: MediaKey, _picture: CachedPicture, _policy: Policy) -> Result<(), String> {
   Ok(())
 }
 
@@ -315,7 +365,12 @@ async fn remove_in_page(_key: MediaKey) -> Result<(), String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn clear_page() -> Result<(), String> {
+async fn clear_page(_maybe_user: Option<UserId>) -> Result<(), String> {
+  Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn sweep_page() -> Result<(), String> {
   Ok(())
 }
 

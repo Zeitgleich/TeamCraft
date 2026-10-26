@@ -24,6 +24,7 @@ const KEY_RECENT_CONVERSATIONS: &str = "teamcraft.recent_conversations";
 const KEY_RECENT_EMOJI: &str = "teamcraft.recent_emoji";
 const KEY_FAVORITE_ORDER: &str = "teamcraft.favorite_order";
 const KEY_MEDIA_CACHE_LIMIT: &str = "teamcraft.media_cache_limit";
+const KEY_MEDIA_CACHE_MAX_AGE: &str = "teamcraft.media_cache_max_age";
 /// Per account: `teamcraft.last_open.<user id>`, a [`LastOpen`].
 const KEY_LAST_OPEN_PREFIX: &str = "teamcraft.last_open.";
 /// Conversations the quick switcher remembers as recently visited.
@@ -148,7 +149,7 @@ impl MediaCacheLimit {
       Self::Mib100 => 100 * MIB,
       Self::Mib200 => teamcraft_client_api::media::DEFAULT_MEDIA_CACHE_BYTES,
       Self::Mib500 => 500 * MIB,
-      Self::Gib1 => 1024 * MIB,
+      Self::Gib1 => teamcraft_client_api::media::MAX_MEDIA_CACHE_BYTES,
     }
   }
 
@@ -159,6 +160,50 @@ impl MediaCacheLimit {
 
   pub fn save(self) {
     store_string(KEY_MEDIA_CACHE_LIMIT, self.slug());
+  }
+}
+
+/// How long the persistent media cache keeps a picture after it was stored (#749): a backstop, so
+/// nothing stays on the device for good once nobody shows it (or its message went away).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaCacheMaxAge {
+  Days7,
+  Days30,
+  Days90,
+}
+
+impl MediaCacheMaxAge {
+  pub const ALL: [MediaCacheMaxAge; 3] = [Self::Days7, Self::Days30, Self::Days90];
+  pub const DEFAULT: MediaCacheMaxAge = Self::Days30;
+
+  pub fn slug(self) -> &'static str {
+    match self {
+      Self::Days7 => "7d",
+      Self::Days30 => "30d",
+      Self::Days90 => "90d",
+    }
+  }
+
+  pub fn from_slug(slug: &str) -> Option<Self> {
+    Self::ALL.into_iter().find(|age| age.slug() == slug)
+  }
+
+  pub fn duration(self) -> std::time::Duration {
+    const DAY: u64 = 24 * 60 * 60;
+    match self {
+      Self::Days7 => std::time::Duration::from_secs(7 * DAY),
+      Self::Days30 => teamcraft_client_api::media::DEFAULT_MEDIA_MAX_AGE,
+      Self::Days90 => std::time::Duration::from_secs(90 * DAY),
+    }
+  }
+
+  /// The stored choice, else the default.
+  pub fn load() -> Self {
+    load(KEY_MEDIA_CACHE_MAX_AGE, Self::from_slug).unwrap_or(Self::DEFAULT)
+  }
+
+  pub fn save(self) {
+    store_string(KEY_MEDIA_CACHE_MAX_AGE, self.slug());
   }
 }
 

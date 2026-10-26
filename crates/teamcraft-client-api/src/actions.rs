@@ -205,6 +205,10 @@ pub struct FileInfo {
   /// How long a video plays, from the sender.
   #[serde(default)]
   pub maybe_duration_ms: Option<u64>,
+  /// SHA-256 of the file's ciphertext as the message names it (64 hex digits); keys the persistent
+  /// cache of its rendition (`media::MediaKey::Rendition`). Absent for files still going up.
+  #[serde(rename = "content_sha256", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_content_sha256: Option<String>,
 }
 
 impl FileInfo {

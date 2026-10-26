@@ -111,19 +111,26 @@ struct Permits {
 struct Permit;
 
 /// The image, from the cache or downloaded and decrypted. An inline load first waits for a slot and
-/// gives up (`Ok(None)`) when `is_wanted` says the preview is gone by then.
+/// gives up (`Ok(None)`) when `is_wanted` says the preview is gone by then. With the ciphertext's
+/// SHA-256 the message names (`maybe_content_sha256`), an inline rendition is also kept in, and
+/// read from, the persistent cache.
 pub async fn load(
   conversation: ConversationId,
   key: MediaKey,
   media_type: &str,
   rendition: Rendition,
+  maybe_content_sha256: Option<[u8; 32]>,
   is_wanted: impl Fn() -> bool,
 ) -> Result<Option<Rc<ObjectUrl>>, FetchError> {
   if let Some(hit) = cached(key, rendition) {
     return Ok(Some(hit));
   }
-  if rendition == Rendition::Inline
-    && let Some(hit) = persisted(key).await
+  let maybe_persisted_key = match rendition {
+    Rendition::Inline => maybe_content_sha256.map(|digest| rendition_key(conversation, key, digest)),
+    Rendition::Full => None,
+  };
+  if let Some(persisted_key) = maybe_persisted_key
+    && let Some(hit) = persisted(key, persisted_key).await
   {
     return Ok(Some(hit));
   }
@@ -150,8 +157,8 @@ pub async fn load(
     .await?;
     let url = Rc::new(url_for(&bytes, media_type, maybe_max_side).await?);
     CACHE.with_borrow_mut(|cache| cache.insert((key, rendition), url.clone(), url.byte_len()));
-    if rendition == Rendition::Inline {
-      persist(key, &url);
+    if let Some(persisted_key) = maybe_persisted_key {
+      persist(persisted_key, &url);
     }
     Ok(url)
   })
@@ -189,9 +196,21 @@ where
   }
 }
 
+/// The persistent cache's key of a rendition: bound to the message showing it and the ciphertext it
+/// names, so a message that references another's attachment ID never gets that picture from the
+/// cache; it downloads, and the core checks the hash and key its own message names.
+fn rendition_key(conversation: ConversationId, key: MediaKey, content_sha256: [u8; 32]) -> CacheKey {
+  CacheKey::Rendition {
+    conversation,
+    message: key.message,
+    attachment: key.attachment,
+    content_sha256,
+  }
+}
+
 /// The inline rendition from the persistent cache, now also in the session's.
-async fn persisted(key: MediaKey) -> Option<Rc<ObjectUrl>> {
-  let picture = persisted_media::get(CacheKey::Rendition(key.attachment)).await?;
+async fn persisted(key: MediaKey, persisted_key: CacheKey) -> Option<Rc<ObjectUrl>> {
+  let picture = persisted_media::get(persisted_key).await?;
   if picture.version != RENDITION_VERSION {
     return None;
   }
@@ -202,7 +221,7 @@ async fn persisted(key: MediaKey) -> Option<Rc<ObjectUrl>> {
 
 /// Keeps a rendition just made in the persistent cache: still pictures only (an animation is the
 /// whole file), within [`MAX_PERSISTED_RENDITION_BYTES`].
-fn persist(key: MediaKey, url: &ObjectUrl) {
+fn persist(persisted_key: CacheKey, url: &ObjectUrl) {
   let blob = url.blob().clone();
   if url.is_animated()
     || url.byte_len() > MAX_PERSISTED_RENDITION_BYTES
@@ -220,7 +239,7 @@ fn persist(key: MediaKey, url: &ObjectUrl) {
       content_type: blob.type_(),
       bytes: js_sys::Uint8Array::new(&buffer).to_vec(),
     };
-    persisted_media::put(CacheKey::Rendition(key.attachment), picture);
+    persisted_media::put(persisted_key, picture);
   });
 }
 
@@ -390,6 +409,34 @@ mod tests {
 
   thread_local! {
     static TEST_LOADS: RefCell<InFlight<u32, u32>> = RefCell::new(InFlight::default());
+  }
+
+  #[test]
+  fn another_message_referencing_the_same_attachment_misses_the_cached_rendition() {
+    let conversation = crate::model::id_from_raw(1);
+    let own = MediaKey {
+      message: crate::model::id_from_raw(10),
+      attachment: crate::model::id_from_raw(20),
+    };
+    let foreign = MediaKey {
+      message: crate::model::id_from_raw(11),
+      ..own
+    };
+    let digest = [7; 32];
+    assert_ne!(
+      rendition_key(conversation, own, digest).name(),
+      rendition_key(conversation, foreign, digest).name()
+    );
+    assert_ne!(
+      rendition_key(conversation, own, digest).name(),
+      rendition_key(crate::model::id_from_raw(2), own, digest).name(),
+      "nor one in another conversation"
+    );
+    assert_ne!(
+      rendition_key(conversation, own, digest).name(),
+      rendition_key(conversation, own, [8; 32]).name(),
+      "nor one naming another ciphertext"
+    );
   }
 
   #[test]

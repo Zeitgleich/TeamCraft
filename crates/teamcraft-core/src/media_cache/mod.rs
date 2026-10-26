@@ -33,14 +33,33 @@ pub use entry::MediaSealer;
 pub use files::FileMediaCache;
 pub use index::CacheIndex;
 
-pub use teamcraft_client_api::media::{DEFAULT_MEDIA_CACHE_BYTES, MediaKey};
+pub use teamcraft_client_api::media::{
+  DEFAULT_MEDIA_CACHE_BYTES, DEFAULT_MEDIA_MAX_AGE, MAX_MEDIA_CACHE_BYTES, MAX_MEDIA_MAX_AGE, MediaKey,
+};
 use teamcraft_crypto::secret::SecretBytes;
 
 use crate::store::StoreError;
 
-/// Largest entry kept. An avatar is at most 2 MiB by default and a rendition a few hundred KiB; a
+/// Largest picture kept. An avatar is at most 2 MiB by default and a rendition a few hundred KiB; a
 /// bigger file is shown but not cached.
 pub const MAX_ENTRY_BYTES: u64 = 8 * 1024 * 1024;
+/// Largest sealed entry read back: the picture plus its names and the seal. A bigger file is not
+/// this cache's and isn't read into memory.
+const MAX_SEALED_BYTES: u64 = MAX_ENTRY_BYTES + 16 * 1024;
+
+/// Whether an entry written at `written_ms` is past `max_age_ms` at `now_ms`. One written "in the
+/// future" (the clock went back) counts as new; the last-use expiry still bounds it.
+fn is_too_old(written_ms: u64, now_ms: u64, max_age_ms: u64) -> bool {
+  now_ms.saturating_sub(written_ms) > max_age_ms
+}
+
+/// The limits the page passes with each read and write: the size limit and the longest an entry is
+/// kept after it was written. Hosts clamp what they get ([`Self::clamped`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CachePolicy {
+  pub budget_bytes: u64,
+  pub max_age: std::time::Duration,
+}
 
 /// One cached picture, decrypted.
 pub struct CachedMedia {
@@ -60,6 +79,42 @@ pub enum MediaCacheError {
   /// An entry that doesn't open (tampered with, another key, another format): dropped.
   #[error("a media cache entry is unreadable")]
   BadEntry,
+}
+
+impl CachePolicy {
+  /// Within what the settings offer: a page can't make the cache grow past the largest limit or
+  /// keep entries longer than the longest age.
+  pub fn clamped(self) -> Self {
+    Self {
+      budget_bytes: self.budget_bytes.min(MAX_MEDIA_CACHE_BYTES),
+      max_age: self.max_age.min(MAX_MEDIA_MAX_AGE),
+    }
+  }
+
+  fn max_age_ms(&self) -> u64 {
+    u64::try_from(self.max_age.as_millis()).unwrap_or(u64::MAX)
+  }
+}
+
+impl Default for CachePolicy {
+  fn default() -> Self {
+    Self {
+      budget_bytes: DEFAULT_MEDIA_CACHE_BYTES,
+      max_age: DEFAULT_MEDIA_MAX_AGE,
+    }
+  }
+}
+
+/// The cache entry of a rendition whose message went away.
+impl From<crate::store::RemovedRendition> for MediaKey {
+  fn from(removed: crate::store::RemovedRendition) -> Self {
+    MediaKey::Rendition {
+      conversation: removed.conversation,
+      message: removed.message,
+      attachment: removed.attachment,
+      content_sha256: removed.content_sha256,
+    }
+  }
 }
 
 impl std::fmt::Debug for CachedMedia {

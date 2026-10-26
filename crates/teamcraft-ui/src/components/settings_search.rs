@@ -58,6 +58,7 @@ const ENTRIES: &[(SettingsTab, &str)] = &[
   (SettingsTab::Preferences, "settings-reopen-last"),
   (SettingsTab::Preferences, "settings-sidebar-sort"),
   (SettingsTab::Preferences, "settings-media-cache"),
+  (SettingsTab::Preferences, "settings-media-cache-age"),
   (SettingsTab::Preferences, "settings-autostart"),
   (SettingsTab::Preferences, "settings-close-to-tray"),
   (SettingsTab::Preferences, "settings-start-minimized"),

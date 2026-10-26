@@ -1812,7 +1812,25 @@ impl Core {
   }
 
   fn changed(&self) {
+    self.drop_removed_renditions();
     (self.on_change)();
+  }
+
+  /// The renditions whose message went away (deleted, or its conversation gone): out of the media
+  /// cache (#749).
+  fn drop_removed_renditions(&self) {
+    let Some(store) = &self.store else {
+      return;
+    };
+    let removed = store.take_removed_renditions();
+    let Some(cache) = self.media.get() else {
+      return;
+    };
+    for rendition in removed {
+      if let Err(error) = cache.remove(&rendition.into()) {
+        tracing::debug!(%error, "could not drop a cached rendition");
+      }
+    }
   }
 }
 

@@ -21,7 +21,7 @@ use crate::i18n::{Locale, use_i18n};
 use crate::keys::t_with_shortcuts;
 use crate::prefs::{CallPrefs, Density, ImageSize, SidebarSort, TextSize, Zoom};
 use crate::reactive::SetIfAlive;
-use crate::settings::{MediaCacheLimit, SendMode, Theme};
+use crate::settings::{MediaCacheLimit, MediaCacheMaxAge, SendMode, Theme};
 use crate::state::use_app_state;
 
 #[component]
@@ -259,6 +259,7 @@ pub fn PreferencesSection() -> impl IntoView {
   let settings = state.settings;
   let prefs = settings.prefs;
   let media_cache_limit = RwSignal::new(MediaCacheLimit::load());
+  let media_cache_max_age = RwSignal::new(MediaCacheMaxAge::load());
   let language_options: Vec<(String, String)> = Locale::ALL
     .into_iter()
     .map(|locale| (locale.tag().to_owned(), format!("language-{}", locale.tag())))
@@ -352,6 +353,20 @@ pub fn PreferencesSection() -> impl IntoView {
           if let Some(limit) = MediaCacheLimit::from_slug(&slug) {
             limit.save();
             media_cache_limit.set(limit);
+          }
+        })
+      />
+      <SelectRow
+        label="settings-media-cache-age"
+        options=slug_options(
+          &MediaCacheMaxAge::ALL.map(MediaCacheMaxAge::slug),
+          "settings-media-cache-age-",
+        )
+        value=Signal::derive(move || media_cache_max_age.get().slug().to_owned())
+        on_change=Callback::new(move |slug: String| {
+          if let Some(age) = MediaCacheMaxAge::from_slug(&slug) {
+            age.save();
+            media_cache_max_age.set(age);
           }
         })
       />

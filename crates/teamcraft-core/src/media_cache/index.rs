@@ -75,6 +75,22 @@ impl CacheIndex {
     evicted
   }
 
+  /// Takes out the entries not used for `max_age_ms` (so also written longer ago); returns them for
+  /// the backend to delete.
+  pub fn take_expired(&mut self, now_ms: u64, max_age_ms: u64) -> Vec<LookupId> {
+    let oldest_kept = now_ms.saturating_sub(max_age_ms);
+    let expired: Vec<LookupId> = self
+      .entries
+      .iter()
+      .filter(|(_, entry)| entry.last_used_ms < oldest_kept)
+      .map(|(id, _)| *id)
+      .collect();
+    for id in &expired {
+      self.remove(id);
+    }
+    expired
+  }
+
   pub fn contains(&self, id: &LookupId) -> bool {
     self.entries.contains_key(id)
   }
@@ -138,6 +154,16 @@ mod tests {
     let evicted = index.evict_to(25, None);
     assert_eq!(evicted, (0..8).map(id).collect::<Vec<_>>(), "oldest first");
     assert_eq!(index.used_bytes(), 20);
+  }
+
+  #[test]
+  fn entries_unused_for_the_max_age_expire() {
+    let mut index = CacheIndex::default();
+    index.insert(id(1), 10, 1_000);
+    index.insert(id(2), 10, 5_000);
+    assert_eq!(index.take_expired(6_000, 2_000), vec![id(1)]);
+    assert!(index.contains(&id(2)));
+    assert_eq!(index.used_bytes(), 10);
   }
 
   fn id(n: u8) -> LookupId {

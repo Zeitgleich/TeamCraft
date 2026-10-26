@@ -1802,17 +1802,32 @@ Avatars, space and channel pictures and the inline renditions of image attachmen
 device across restarts (issue #749, `teamcraft-core` `media_cache`), so they show at once after a
 start and remain visible while the server or its object storage is unavailable.
 
-- **Sealed like the local store.** From the local database key, `teamcraft-crypto::local_store`
-  derives the lookup and record keys; each entry is sealed (XChaCha20-Poly1305) under the lookup ID of
-  its name in the namespace `media_cache`, with that ID as associated data. The name inside
-  (`avatar/{user}`, `space_image/{space}`, `channel_image/{channel}`, `rendition/{attachment}`) is
-  checked again on opening, so an entry can't be moved to another picture unnoticed. Neither the
-  pictures nor whose they are can be read from the cache: files and records are named by the
-  pseudorandom ID. Renditions are end-to-end encrypted content; avatars and space or channel pictures
-  are directory data the server holds in plain text (§4.4), but follow the same rule.
+- **Sealed like the local store, with keys of its own.** HKDF-SHA256 derives a media cache root key
+  from the local database key (info `TeamCraft-v1 media cache root key`), and from that root
+  `teamcraft-crypto::local_store` derives the lookup and record keys
+  (`LocalStoreKeys::derive_media_cache`), so the database key itself is never the HKDF input of
+  both the store and the cache. Each entry is sealed (XChaCha20-Poly1305) under the lookup ID of its
+  name in the namespace `media_cache`, with that ID as associated data. The name inside
+  (`avatar/{user}`, `space_image/{space}`, `channel_image/{channel}`,
+  `rendition/{conversation}/{message}/{attachment}/{ciphertext SHA-256}`) is checked again on
+  opening, so an entry can't be moved to another picture unnoticed. Neither the pictures nor whose
+  they are can be read from the cache: files and records are named by the pseudorandom ID.
+  Renditions are end-to-end encrypted content; avatars and space or channel pictures are directory
+  data the server holds in plain text (§4.4), but follow the same rule.
+- **Renditions are bound to their message.** A cached rendition is only found for the message that
+  shows it and the ciphertext hash that message names. A cached picture comes back without
+  `fetch_decrypted`'s hash and key check, so a message of someone else that references the same
+  attachment ID gets another key, misses, and downloads: the core then checks the file against the
+  hash and key of that message.
+- **Renditions go with their message.** When a message with pictures is deleted (by its sender or
+  locally) or its conversation is no longer listed for the user, the store notes its image
+  attachments (`TrackedStore::take_removed_renditions`, bounded) and the host drops their renditions
+  from the cache.
 - **Desktop:** one sealed file per entry under the app's data directory, a folder per server and
   user beside the encrypted database, with keys derived from the SQLCipher key from the OS keystore.
-  The shell opens it together with the store; the webview reads and fills it through the shell.
+  The shell opens it together with the store; the webview reads and fills it through the shell,
+  which clamps the limits the page passes and refuses pictures larger than an entry. A file larger
+  than any entry is deleted without being read.
 - **Web:** an IndexedDB database per account (`teamcraft-media-{user}`), apart from the store, with a
   database key of its own wrapped by a non-extractable Web Crypto key exactly like the store's (§9.1).
   Deleting it can't touch the store, and two tabs racing to create its key only lose cached entries.
@@ -1820,8 +1835,15 @@ start and remain visible while the server or its object storage is unavailable.
   an avatar's `avatar_version` (absent from older servers: the cached avatar is shown and refreshed
   once per session), or what a rendition was made with. The app shows a cached older version while
   it downloads the one the server names, and keeps showing it when that download fails.
-- **Bounded.** The least recently used entries go once the cache is larger than its limit, a setting
-  on the device (200 MB by default); one entry is at most 8 MiB. Everything is deleted at sign-out.
+- **Bounded in size and age.** The least recently used entries go once the cache is larger than its
+  limit, a setting on the device (200 MB by default, at most 1 GB); one picture is at most 8 MiB. An
+  entry is kept at most as long as the age setting says after it was written (30 days by default,
+  at most a year), however often it is shown, and entries nobody used for that long are swept with
+  the next write.
+- **Sign-out deletes it.** Desktop: the caches of every server and user; one that can't be deleted
+  now is deleted at the next start (a marker remembers it). Web: the session account's database by
+  name, and every `teamcraft-media-*` database the browser lists (`indexedDB.databases()`), also at
+  a start while signed out.
 - An entry that doesn't open (tampered with, another key) is deleted and counts as missing.
 - The mobile apps don't use it: Android keeps avatars in its own file cache and opens pictures from
   the decrypted downloads (§4.5).

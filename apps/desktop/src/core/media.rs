@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::Serialize;
 use tauri::{AppHandle, State};
-use teamcraft_core::media_cache::{CachedMedia, FileMediaCache, MediaKey};
+use teamcraft_core::media_cache::{CachePolicy, CachedMedia, FileMediaCache, MAX_ENTRY_BYTES, MediaKey};
 use teamcraft_core::store::{DatabaseKeySource, KeySourceError};
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::UserId;
@@ -28,6 +28,10 @@ const KEY_HEADER: &str = "x-media-key";
 const VERSION_HEADER: &str = "x-media-version";
 const TYPE_HEADER: &str = "x-media-type";
 const BUDGET_HEADER: &str = "x-media-budget";
+const MAX_AGE_HEADER: &str = "x-media-max-age";
+/// Written in the core directory before a sign-out deletes the caches and removed once all are
+/// gone; found at the next start, the deletion is finished then.
+const PENDING_CLEAR_MARKER: &str = "media-cache-clear-pending";
 
 /// The open cache of the running core, shared by the core thread (which opens it) and the commands.
 #[derive(Clone, Default)]
@@ -88,16 +92,25 @@ impl DatabaseKeySource for KeptKey<'_> {
   }
 }
 
-/// The cached picture of `key` (any version; the webview compares it), or an empty answer.
+/// The cached picture of `key` (any version; the webview compares it) unless it is older than
+/// `max_age_secs` (clamped to the longest age the settings offer), or an empty answer.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn core_media_get(
   host: State<'_, CoreHost>,
   key: MediaKey,
+  // A webview from before ages sends none: the default.
+  max_age_secs: Option<u64>,
 ) -> Result<tauri::ipc::Response, CommandError> {
   let Some(cache) = running_cache(&host) else {
     return Ok(tauri::ipc::Response::new(Vec::new()));
   };
-  let maybe_media = tauri::async_runtime::spawn_blocking(move || cache.get(&key))
+  let max_age = CachePolicy {
+    max_age: max_age_secs.map_or(CachePolicy::default().max_age, std::time::Duration::from_secs),
+    ..CachePolicy::default()
+  }
+  .clamped()
+  .max_age;
+  let maybe_media = tauri::async_runtime::spawn_blocking(move || cache.get(&key, max_age))
     .await
     .map_err(|error| CommandError::from(error.to_string()))?;
   Ok(tauri::ipc::Response::new(
@@ -105,7 +118,8 @@ pub async fn core_media_get(
   ))
 }
 
-/// Keeps a picture the webview just loaded, within the size limit it passes.
+/// Keeps a picture the webview just loaded, within the size limit and age it passes (clamped to
+/// what the settings offer). A body larger than any entry is refused before it is sealed.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn core_media_put(
   host: State<'_, CoreHost>,
@@ -114,6 +128,9 @@ pub async fn core_media_put(
   let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
     return Err(CommandError::from("a picture is sent as raw bytes".to_owned()));
   };
+  if bytes.len() as u64 > MAX_ENTRY_BYTES {
+    return Err(CommandError::from("the picture is too large to cache".to_owned()));
+  }
   let header = |name: &str| {
     request
       .headers()
@@ -127,6 +144,19 @@ pub async fn core_media_put(
   let budget_bytes: u64 = header(BUDGET_HEADER)?
     .parse()
     .map_err(|_| CommandError::from("the size limit is not a number".to_owned()))?;
+  let max_age = match header(MAX_AGE_HEADER) {
+    Ok(secs) => std::time::Duration::from_secs(
+      secs
+        .parse()
+        .map_err(|_| CommandError::from("the age is not a number".to_owned()))?,
+    ),
+    Err(_) => CachePolicy::default().max_age,
+  };
+  let policy = CachePolicy {
+    budget_bytes,
+    max_age,
+  }
+  .clamped();
   let media = CachedMedia {
     version: header(VERSION_HEADER)?,
     content_type: header(TYPE_HEADER)?,
@@ -135,7 +165,7 @@ pub async fn core_media_put(
   let Some(cache) = running_cache(&host) else {
     return Ok(());
   };
-  tauri::async_runtime::spawn_blocking(move || cache.put(&key, &media, budget_bytes))
+  tauri::async_runtime::spawn_blocking(move || cache.put(&key, &media, policy))
     .await
     .map_err(|error| CommandError::from(error.to_string()))?
     .map_err(|error| CommandError::from(error.to_string()))
@@ -153,7 +183,8 @@ pub async fn core_media_remove(host: State<'_, CoreHost>, key: MediaKey) -> Resu
     .map_err(|error| CommandError::from(error.to_string()))
 }
 
-/// Sign-out: closes the running core's cache and deletes the caches of every server and user.
+/// Sign-out: closes the running core's cache and deletes the caches of every server and user. A
+/// cache that can't be deleted now (a file in use, a permission) is deleted at the next start.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn core_media_clear(app: AppHandle, host: State<'_, CoreHost>) -> Result<(), CommandError> {
   if let Ok(runtime) = host.current() {
@@ -163,6 +194,20 @@ pub async fn core_media_clear(app: AppHandle, host: State<'_, CoreHost>) -> Resu
   tauri::async_runtime::spawn_blocking(move || delete_all(&core_dir))
     .await
     .map_err(|error| CommandError::from(error.to_string()))?
+}
+
+/// Finishes a sign-out's deletion that didn't complete (the app quit, a file was in use). Called
+/// before a core starts, so no cache of it is open.
+pub fn finish_pending_clear(core_dir: &Path) {
+  if !core_dir.join(PENDING_CLEAR_MARKER).exists() {
+    return;
+  }
+  if let Err(error) = delete_all(core_dir) {
+    tracing::warn!(
+      ?error,
+      "media caches of a sign-out are still not deleted; trying at the next start"
+    );
+  }
 }
 
 fn running_cache(host: &CoreHost) -> Option<Arc<FileMediaCache>> {
@@ -184,18 +229,43 @@ fn frame(media: &CachedMedia) -> Vec<u8> {
   framed
 }
 
-/// Deletes the media cache folder of every server under `core_dir`.
+/// Deletes the media cache folder of every server under `core_dir`, going on past one that fails.
+/// Until all are gone, a marker beside them says so ([`finish_pending_clear`]).
 fn delete_all(core_dir: &Path) -> Result<(), CommandError> {
   let servers = match std::fs::read_dir(core_dir) {
     Ok(servers) => servers,
     Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
     Err(error) => return Err(CommandError::from(error.to_string())),
   };
-  for server in servers.flatten() {
+  let marker = core_dir.join(PENDING_CLEAR_MARKER);
+  std::fs::write(&marker, b"").map_err(|error| CommandError::from(error.to_string()))?;
+  let mut failures = Vec::new();
+  for server in servers {
+    let server = match server {
+      Ok(server) => server,
+      Err(error) => {
+        failures.push(error.to_string());
+        continue;
+      },
+    };
+    // The marker and anything else beside the server folders isn't one.
+    if !server.file_type().is_ok_and(|kind| kind.is_dir()) {
+      continue;
+    }
     let dir: PathBuf = server.path().join(MEDIA_CACHE_DIR);
-    FileMediaCache::delete_all(&dir).map_err(|error| CommandError::from(error.to_string()))?;
+    if let Err(error) = FileMediaCache::delete_all(&dir) {
+      tracing::warn!(%error, "could not delete a media cache");
+      failures.push(error.to_string());
+    }
   }
-  Ok(())
+  if !failures.is_empty() {
+    return Err(CommandError::from(format!(
+      "{} media caches are not deleted yet (retried at the next start): {}",
+      failures.len(),
+      failures.join("; ")
+    )));
+  }
+  std::fs::remove_file(&marker).map_err(|error| CommandError::from(error.to_string()))
 }
 
 #[cfg(test)]
@@ -247,7 +317,49 @@ mod tests {
     assert!(!root.join("server-a").join(MEDIA_CACHE_DIR).exists());
     assert!(!root.join("server-b").join(MEDIA_CACHE_DIR).exists());
     assert!(store.exists(), "the store stays");
+    assert!(!root.join(PENDING_CLEAR_MARKER).exists(), "done, nothing pending");
     delete_all(&root.join("missing")).expect("nothing there is fine");
+    drop(std::fs::remove_dir_all(&root));
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn a_cache_that_fails_to_delete_does_not_stop_the_others_and_is_retried_at_the_next_start() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let unique = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .map(|elapsed| elapsed.as_nanos())
+      .unwrap_or_default();
+    let root = std::env::temp_dir().join(format!(
+      "teamcraft-desktop-media-fail-{}-{unique}",
+      std::process::id()
+    ));
+    let stuck = root.join("server-a").join(MEDIA_CACHE_DIR).join("1");
+    let other = root.join("server-b").join(MEDIA_CACHE_DIR).join("2");
+    std::fs::create_dir_all(&stuck).expect("dirs");
+    std::fs::create_dir_all(&other).expect("dirs");
+    std::fs::write(stuck.join("entry"), b"sealed").expect("entry");
+    // A folder whose entries can't be removed (as a file held open on Windows would be).
+    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o500)).expect("lock");
+    let is_enforced = std::fs::remove_file(stuck.join("entry")).is_err();
+
+    let outcome = delete_all(&root);
+    assert!(
+      !root.join("server-b").join(MEDIA_CACHE_DIR).exists(),
+      "went on to the next"
+    );
+    if is_enforced {
+      assert!(outcome.is_err(), "the failure is reported");
+      assert!(root.join(PENDING_CLEAR_MARKER).exists(), "and remembered");
+    }
+    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o700)).expect("unlock");
+    finish_pending_clear(&root);
+    assert!(
+      !root.join("server-a").join(MEDIA_CACHE_DIR).exists(),
+      "finished at the next start"
+    );
+    assert!(!root.join(PENDING_CLEAR_MARKER).exists());
     drop(std::fs::remove_dir_all(&root));
   }
 }

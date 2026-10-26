@@ -366,6 +366,10 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
     conversation,
     key,
     media_type: StoredValue::new(file.media_type.clone()),
+    maybe_content_sha256: file
+      .maybe_content_sha256
+      .as_deref()
+      .and_then(teamcraft_client_api::media::sha256_from_hex),
     full: RwSignal::new_local(media_cache::cached(key, Rendition::Inline)),
     is_broken: RwSignal::new(false),
     is_unavailable: RwSignal::new(false),
@@ -613,7 +617,7 @@ impl InlinePlayback {
     let media_type = self.media_type.get_value();
     spawn_local(async move {
       let is_wanted = move || is_playing.try_get_untracked().unwrap_or(false);
-      match media_cache::load(conversation, key, &media_type, Rendition::Full, is_wanted).await {
+      match media_cache::load(conversation, key, &media_type, Rendition::Full, None, is_wanted).await {
         Ok(Some(loaded)) => drop(url.try_set(Some(loaded))),
         Ok(None) => {},
         Err(error) => {
@@ -706,6 +710,8 @@ struct InlineLoad {
   conversation: ConversationId,
   key: MediaKey,
   media_type: StoredValue<String>,
+  /// What the message names as the file's ciphertext hash: keys the persisted rendition (#749).
+  maybe_content_sha256: Option<[u8; 32]>,
   full: RwSignal<Option<Rc<ObjectUrl>>, LocalStorage>,
   /// This platform can't decode it: shown as a file card from then on.
   is_broken: RwSignal<bool>,
@@ -723,6 +729,7 @@ impl InlineLoad {
     let Self {
       conversation,
       key,
+      maybe_content_sha256,
       full,
       is_broken,
       is_unavailable,
@@ -732,7 +739,16 @@ impl InlineLoad {
     let media_type = self.media_type.get_value();
     spawn_local(async move {
       let is_wanted = move || full.try_with_untracked(|_| ()).is_some();
-      match media_cache::load(conversation, key, &media_type, Rendition::Inline, is_wanted).await {
+      match media_cache::load(
+        conversation,
+        key,
+        &media_type,
+        Rendition::Inline,
+        maybe_content_sha256,
+        is_wanted,
+      )
+      .await
+      {
         // The row may be gone by now: `try_set` drops the URL then.
         Ok(Some(url)) => drop(full.try_set(Some(url))),
         Ok(None) => {},

@@ -147,7 +147,9 @@ pub async fn core_start(
     .active_server()
     .ok_or_else(|| "no server is chosen".to_owned())?;
   // Everything local is per server: the store (with the workspace root it pinned) and its key.
-  let data_dir = base_dir(&app)?.join("core").join(server.storage_key()?);
+  let core_dir = base_dir(&app)?.join("core");
+  super::media::finish_pending_clear(&core_dir);
+  let data_dir = core_dir.join(server.storage_key()?);
   let status = host
     .start(&**service, &server.server_url, user, |tokens| {
       let config = CoreConfig {

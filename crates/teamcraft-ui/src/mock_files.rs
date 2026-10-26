@@ -118,6 +118,7 @@ pub(super) fn demo_files(conversation: ConversationId, messages: &[Message]) -> 
       maybe_sent_at: Some(message.sent_at),
       maybe_dimensions: None,
       maybe_duration_ms: None,
+      maybe_content_sha256: None,
     }));
   }
   files

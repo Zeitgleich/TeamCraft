@@ -1,10 +1,11 @@
 //! Sealing and opening cache entries.
 //!
-//! An entry's plaintext is `format (1) || name || version || content type || bytes`, each of the
-//! three strings prefixed with its length (u32, big-endian). It is sealed by
-//! `teamcraft-crypto::local_store` under the lookup ID of the key's name in the media cache's own
-//! namespace, so the entry can't be moved to another key unnoticed. The name inside is checked
-//! again on opening.
+//! An entry's plaintext is `format (1) || name || version || content type || written (u64 ms) ||
+//! bytes`, each of the three strings prefixed with its length (u32, big-endian). It is sealed by
+//! `teamcraft-crypto::local_store` with the media cache's own keys
+//! ([`LocalStoreKeys::derive_media_cache`]) under the lookup ID of the key's name, so the entry
+//! can't be moved to another key unnoticed. The name inside is checked again on opening; the time
+//! it was written bounds its age ([`super::CachePolicy::max_age`]).
 
 use rand_core::OsRng;
 use teamcraft_crypto::local_store::{LOOKUP_ID_LEN, LocalStoreKeys, LookupId};
@@ -27,7 +28,7 @@ pub struct MediaSealer {
 impl MediaSealer {
   pub fn new(database_key: &SymmetricKey) -> Self {
     Self {
-      keys: LocalStoreKeys::derive(database_key),
+      keys: LocalStoreKeys::derive_media_cache(database_key),
     }
   }
 
@@ -36,8 +37,13 @@ impl MediaSealer {
     self.keys.lookup_id(NAMESPACE, key.name().as_bytes())
   }
 
-  /// The sealed entry for `media` under `key`.
-  pub fn seal(&self, key: &MediaKey, media: &CachedMedia) -> Result<Vec<u8>, MediaCacheError> {
+  /// The sealed entry for `media` under `key`, written at `written_ms` (Unix milliseconds).
+  pub fn seal(
+    &self,
+    key: &MediaKey,
+    media: &CachedMedia,
+    written_ms: u64,
+  ) -> Result<Vec<u8>, MediaCacheError> {
     let name = key.name();
     let fields = [
       name.as_bytes(),
@@ -48,7 +54,7 @@ impl MediaSealer {
       return Err(MediaCacheError::BadEntry);
     }
     let mut plaintext = Zeroizing::new(Vec::with_capacity(
-      1 + fields.iter().map(|field| 4 + field.len()).sum::<usize>() + media.bytes.len(),
+      1 + fields.iter().map(|field| 4 + field.len()).sum::<usize>() + 8 + media.bytes.len(),
     ));
     plaintext.push(FORMAT);
     for field in fields {
@@ -56,6 +62,7 @@ impl MediaSealer {
       plaintext.extend_from_slice(&u32::try_from(field.len()).unwrap_or(u32::MAX).to_be_bytes());
       plaintext.extend_from_slice(field);
     }
+    plaintext.extend_from_slice(&written_ms.to_be_bytes());
     plaintext.extend_from_slice(media.bytes.expose_secret());
     self
       .keys
@@ -63,9 +70,9 @@ impl MediaSealer {
       .map_err(|_| MediaCacheError::BadEntry)
   }
 
-  /// The entry of `key` in `sealed`; [`MediaCacheError::BadEntry`] when it was tampered with, was
-  /// sealed with another key or for another name.
-  pub fn open(&self, key: &MediaKey, sealed: &[u8]) -> Result<CachedMedia, MediaCacheError> {
+  /// The entry of `key` in `sealed` and when it was written; [`MediaCacheError::BadEntry`] when it
+  /// was tampered with, was sealed with another key or for another name.
+  pub fn open(&self, key: &MediaKey, sealed: &[u8]) -> Result<(CachedMedia, u64), MediaCacheError> {
     let plaintext = self
       .keys
       .open(&self.lookup_id(key), sealed)
@@ -83,11 +90,13 @@ impl MediaSealer {
     }
     let version = take_field(&mut rest)?;
     let content_type = take_field(&mut rest)?;
-    Ok(CachedMedia {
+    let (written, rest) = rest.split_first_chunk::<8>().ok_or(MediaCacheError::BadEntry)?;
+    let media = CachedMedia {
       version,
       content_type,
       bytes: SecretBytes::new(rest.to_vec()),
-    })
+    };
+    Ok((media, u64::from_be_bytes(*written)))
   }
 }
 
@@ -134,7 +143,7 @@ mod tests {
   fn an_entry_round_trips_and_its_bytes_are_not_readable_sealed() {
     let sealer = sealer(1);
     let key = MediaKey::Avatar(id::<UserId>(1));
-    let sealed = sealer.seal(&key, &media("v1")).expect("seal");
+    let sealed = sealer.seal(&key, &media("v1"), 5).expect("seal");
     assert!(
       !sealed.windows(PICTURE.len()).any(|window| window == PICTURE),
       "the picture is encrypted at rest"
@@ -143,7 +152,8 @@ mod tests {
       !sealed.windows(2).any(|window| window == b"v1"),
       "so is its version"
     );
-    let opened = sealer.open(&key, &sealed).expect("open");
+    let (opened, written_ms) = sealer.open(&key, &sealed).expect("open");
+    assert_eq!(written_ms, 5);
     assert_eq!(
       (
         opened.version.as_str(),
@@ -158,7 +168,7 @@ mod tests {
   fn an_entry_does_not_open_under_another_key_name_or_database_key() {
     let sealer = sealer(1);
     let key = MediaKey::Avatar(id::<UserId>(1));
-    let sealed = sealer.seal(&key, &media("v1")).expect("seal");
+    let sealed = sealer.seal(&key, &media("v1"), 5).expect("seal");
     let other_user = MediaKey::Avatar(id::<UserId>(2));
     assert!(matches!(
       sealer.open(&other_user, &sealed),

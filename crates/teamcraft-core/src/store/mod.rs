@@ -52,7 +52,7 @@ pub use memory::MemoryStore;
 pub use sealed_sqlite::{SealedSqliteStore, SqliteRecords};
 #[cfg(all(feature = "sqlcipher", not(target_arch = "wasm32")))]
 pub use sqlite::SqlCipherStore;
-pub use tracked::{StoreChanges, TrackedStore};
+pub use tracked::{RemovedRendition, StoreChanges, TrackedStore};
 
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{ClientMessageId, ConversationId, MessageId, ThreadId, UserId};

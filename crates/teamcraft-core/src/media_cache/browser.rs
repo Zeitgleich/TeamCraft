@@ -15,7 +15,10 @@ use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{IdbDatabase, IdbKeyRange, IdbObjectStore, IdbTransaction, IdbTransactionMode};
 
 use super::entry::{hex_name, lookup_id_of};
-use super::{CacheIndex, CachedMedia, MAX_ENTRY_BYTES, MediaCacheError, MediaKey, MediaSealer};
+use super::{
+  CacheIndex, CachePolicy, CachedMedia, MAX_ENTRY_BYTES, MAX_SEALED_BYTES, MediaCacheError, MediaKey,
+  MediaSealer, is_too_old,
+};
 use crate::store::browser::idb::{self, RECORDS};
 use crate::store::{StoreError, browser_database_key};
 
@@ -23,6 +26,8 @@ const DATA_PREFIX: &str = "d:";
 const META_PREFIX: &str = "m:";
 /// The key right after every `m:` key, the end of their range.
 const META_END: &str = "m;";
+/// Every account's database is named this followed by the user ID.
+const DATABASE_PREFIX: &str = "teamcraft-media-";
 
 /// See the module docs.
 pub struct BrowserMediaCache {
@@ -52,19 +57,46 @@ impl BrowserMediaCache {
     })
   }
 
+  /// The database name of `user`'s cache.
+  pub fn database_name(user: teamcraft_proto::UserId) -> String {
+    format!("{DATABASE_PREFIX}{user}")
+  }
+
   /// Deletes the database `name` (sign-out); a handle to it must be [`Self::close`]d first.
   pub async fn delete(name: &str) -> Result<(), MediaCacheError> {
     Ok(idb::delete_database(name).await?)
+  }
+
+  /// Deletes every account's cache database this browser lists (sign-out, or a start while signed
+  /// out picking up one a closed tab left). Browsers without `indexedDB.databases()` list none;
+  /// the caller deletes the signed-in account's by name anyway.
+  pub async fn delete_every() -> Result<(), MediaCacheError> {
+    let mut maybe_failure = None;
+    for name in listed_databases().await {
+      if !name.starts_with(DATABASE_PREFIX) {
+        continue;
+      }
+      if let Err(error) = Self::delete(&name).await {
+        tracing::warn!(%error, "could not delete a media cache database");
+        maybe_failure = Some(error);
+      }
+    }
+    maybe_failure.map_or(Ok(()), Err)
   }
 
   pub fn close(&self) {
     self.database.close();
   }
 
-  /// The cached entry of `key`, whatever its version. An unreadable entry is deleted and missing.
-  pub async fn get(&self, key: &MediaKey) -> Option<CachedMedia> {
+  /// The cached entry of `key`, whatever its version, unless it is older than `max_age`. An
+  /// unreadable or too old entry is deleted and missing.
+  pub async fn get(&self, key: &MediaKey, max_age: std::time::Duration) -> Option<CachedMedia> {
     let id = self.sealer.lookup_id(key);
     let sealed = match self.read(&id).await {
+      Ok(Some(sealed)) if sealed.len() as u64 > MAX_SEALED_BYTES => {
+        self.drop_logged(id).await;
+        return None;
+      },
       Ok(Some(sealed)) => sealed,
       Ok(None) => {
         self.index.borrow_mut().remove(&id);
@@ -75,9 +107,14 @@ impl BrowserMediaCache {
         return None;
       },
     };
+    let now = now_ms();
+    let max_age_ms = u64::try_from(max_age.as_millis()).unwrap_or(u64::MAX);
     match self.sealer.open(key, &sealed) {
-      Ok(media) => {
-        let now = now_ms();
+      Ok((_, written_ms)) if is_too_old(written_ms, now, max_age_ms) => {
+        self.drop_logged(id).await;
+        None
+      },
+      Ok((media, _)) => {
         self.index.borrow_mut().touch(&id, now);
         // Only the eviction order rests on it.
         if let Err(error) = self.write_meta(&id, sealed.len() as u64, now).await {
@@ -87,33 +124,44 @@ impl BrowserMediaCache {
       },
       Err(error) => {
         tracing::warn!(%error, "dropping an unreadable media cache entry");
-        if let Err(error) = self.delete_entries(&[id]).await {
-          tracing::warn!(%error, "could not delete an unreadable media cache entry");
-        }
+        self.drop_logged(id).await;
         None
       },
     }
   }
 
-  /// Keeps `media` as the entry of `key` (replacing an older version) and evicts the least recently
-  /// used entries beyond `budget_bytes`. An entry too big to keep only removes the older one.
+  async fn drop_logged(&self, id: LookupId) {
+    if let Err(error) = self.delete_entries(&[id]).await {
+      tracing::warn!(%error, "could not delete a media cache entry");
+    }
+  }
+
+  /// Keeps `media` as the entry of `key` (replacing an older version), then drops the entries past
+  /// the policy's age and the least recently used ones beyond its size limit. A picture too big to
+  /// keep only removes the older version.
   pub async fn put(
     &self,
     key: &MediaKey,
     media: &CachedMedia,
-    budget_bytes: u64,
+    policy: CachePolicy,
   ) -> Result<(), MediaCacheError> {
-    let sealed = self.sealer.seal(key, media)?;
-    let size_bytes = sealed.len() as u64;
+    let policy = policy.clamped();
     let id = self.sealer.lookup_id(key);
-    if size_bytes > budget_bytes.min(MAX_ENTRY_BYTES) {
+    if media.bytes.len() as u64 > MAX_ENTRY_BYTES.min(policy.budget_bytes) {
       return self.delete_entries(&[id]).await;
     }
     let now = now_ms();
+    let sealed = self.sealer.seal(key, media, now)?;
+    let size_bytes = sealed.len() as u64;
+    if size_bytes > policy.budget_bytes {
+      return self.delete_entries(&[id]).await;
+    }
     let evicted = {
       let mut index = self.index.borrow_mut();
       index.insert(id, size_bytes, now);
-      index.evict_to(budget_bytes, Some(&id))
+      let mut evicted = index.take_expired(now, policy.max_age_ms());
+      evicted.extend(index.evict_to(policy.budget_bytes, Some(&id)));
+      evicted
     };
     let (transaction, store) = self.transaction(IdbTransactionMode::Readwrite)?;
     let data = js_sys::Uint8Array::from(sealed.as_slice());
@@ -248,6 +296,34 @@ fn meta_value(size_bytes: u64, last_used_ms: u64) -> JsValue {
 fn parse_meta(value: &str) -> Option<(u64, u64)> {
   let (size, used) = value.split_once(',')?;
   Some((size.parse().ok()?, used.parse().ok()?))
+}
+
+/// The names `indexedDB.databases()` lists; none where the browser lacks it.
+async fn listed_databases() -> Vec<String> {
+  let Ok(factory) = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("indexedDB")) else {
+    return Vec::new();
+  };
+  let Ok(list) = js_sys::Reflect::get(&factory, &JsValue::from_str("databases")) else {
+    return Vec::new();
+  };
+  let Some(list) = list.dyn_ref::<js_sys::Function>() else {
+    return Vec::new();
+  };
+  let Ok(promise) = list.call0(&factory) else {
+    return Vec::new();
+  };
+  let Ok(databases) = wasm_bindgen_futures::JsFuture::from(promise.unchecked_into::<js_sys::Promise>()).await
+  else {
+    return Vec::new();
+  };
+  js_sys::Array::from(&databases)
+    .iter()
+    .filter_map(|info| {
+      js_sys::Reflect::get(&info, &JsValue::from_str("name"))
+        .ok()?
+        .as_string()
+    })
+    .collect()
 }
 
 fn now_ms() -> u64 {
