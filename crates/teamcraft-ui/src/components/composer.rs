@@ -36,6 +36,7 @@ use crate::reactive::SetIfAlive;
 use crate::settings::SendMode;
 use crate::slash::{self, Parsed};
 use crate::state::{Overlay, SidePanel, use_app_state};
+use crate::tab_handover::PERSIST_DRAFTS_EVENT;
 use crate::unread_divider::DividerEvent;
 use crate::viewport::is_touch_primary;
 
@@ -329,6 +330,14 @@ pub fn Composer(
     }
   });
   // Reads the whole draft, so only after typing pauses.
+  let store_draft_now = move || {
+    let text = editor
+      .try_get_untracked()
+      .flatten()
+      .map(|element| composer_editor::markdown(&element))
+      .unwrap_or_default();
+    state.try_write(|backend| backend.set_draft(conversation, maybe_thread, &text));
+  };
   let save_draft = move || {
     draft_generation.update(|generation| *generation += 1);
     let generation = draft_generation.get_untracked();
@@ -338,16 +347,22 @@ pub fn Composer(
         if draft_generation.try_get_untracked() != Some(generation) {
           return;
         }
-        let text = editor
-          .try_get_untracked()
-          .flatten()
-          .map(|element| composer_editor::markdown(&element))
-          .unwrap_or_default();
-        state.try_write(|backend| backend.set_draft(conversation, maybe_thread, &text));
+        store_draft_now();
       },
       DRAFT_SAVE_DELAY,
     );
   };
+  // Another tab takes the app over (#744): a draft still waiting for the typing pause is stored
+  // now, before this composer goes away with the app.
+  let on_persist = window_event_listener_untyped(PERSIST_DRAFTS_EVENT, move |_| {
+    if draft_generation
+      .try_update(|generation| *generation += 1)
+      .is_some()
+    {
+      store_draft_now();
+    }
+  });
+  on_cleanup(move || on_persist.remove());
   let refresh_formats = move || {
     if !show_formatting.get_untracked() {
       return;

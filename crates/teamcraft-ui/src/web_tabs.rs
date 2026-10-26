@@ -4,8 +4,12 @@
 //! core: own MLS state, own gateway session, own outbox. MLS state forks and outbox entries go out
 //! twice. The tab holding the Web Lock `teamcraft-core-<user>` owns the store and runs the core;
 //! every other tab of that account is a follower: its `core_*` calls go over the BroadcastChannel of
-//! the same name to the owner, which answers them and tells every tab when data changed. When the
-//! owner closes, the browser hands the lock to a waiting follower, which then opens the store.
+//! the same name to the owner, which answers them and tells every tab when data changed.
+//!
+//! Only the owner shows the app (#744, tab_handover.rs): a follower shows a notice instead. "Use
+//! here" asks the owner over the channel to hand over; the owner lets go or refuses (a running
+//! call). Every follower waits for the lock; the one that gets it holds a roll call on the channel
+//! and passes the lock on unless it is the tab that should run the app.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
@@ -18,6 +22,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use teamcraft_core::platform;
 use teamcraft_proto::UserId;
+
+use crate::tab_handover::{Blocker, Candidate};
 use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 
@@ -31,6 +37,8 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(90);
 const RESEND_INTERVAL: Duration = Duration::from_secs(1);
 /// Calls the owner remembers, so one sent twice runs once.
 const SEEN_CALLS: usize = 256;
+/// How long a tab that got the free lock listens for the other inactive tabs' answers.
+const ROLL_CALL_WINDOW: Duration = Duration::from_millis(150);
 
 /// A follower's calls waiting for the owner, by call ID.
 type PendingCalls = Rc<RefCell<Calls>>;
@@ -62,6 +70,12 @@ pub struct Follower {
   tab: String,
   next_call: Cell<u64>,
   pending: PendingCalls,
+  /// Told when the owner refuses this tab's takeover.
+  refusals: Rc<RefCell<Option<oneshot::Sender<Blocker>>>>,
+  /// How this tab answers a roll call: its last focus and a running "Use here".
+  me: Rc<RefCell<Candidate>>,
+  /// The answers of a roll call this tab holds, while it listens.
+  roll_call: Rc<RefCell<Option<Vec<Candidate>>>>,
   _on_message: Closure<dyn FnMut(web_sys::MessageEvent)>,
 }
 
@@ -93,6 +107,15 @@ enum TabMessage {
   },
   /// The core's data changed: read again.
   Changed,
+  /// The follower `tab` asks to run the app itself; `ends_call` when the user agreed to end a call
+  /// the owner is in.
+  TakeOver { tab: String, ends_call: bool },
+  /// The owner keeps the store: something needs the user's say first.
+  TakeOverRefused { tab: String, blocker: Blocker },
+  /// The tab that got the free lock asks the other inactive tabs who should run the app.
+  RollCall,
+  /// An inactive tab's answer to a roll call.
+  Present(Candidate),
 }
 
 impl Drop for OwnerLock {
@@ -182,25 +205,33 @@ async fn request_lock(name: &str, if_available: bool) -> Result<Option<OwnerLock
 }
 
 impl OwnerChannel {
-  /// Answers followers' calls with `serve` until dropped.
-  pub fn open<F, Fut>(user: UserId, serve: F) -> Result<Self, String>
+  /// Answers followers' calls with `serve` until dropped. `on_takeover` decides a follower's
+  /// request to take over (its argument: whether the user agreed to end a call); `Some` refuses.
+  pub fn open<F, Fut, T>(user: UserId, serve: F, on_takeover: T) -> Result<Self, String>
   where
     F: Fn(String, Value) -> Fut + 'static,
     Fut: std::future::Future<Output = Result<Value, String>> + 'static,
+    T: Fn(bool) -> Option<Blocker> + 'static,
   {
     let channel = open_channel(user)?;
     let serve = Rc::new(serve);
     let replies = channel.clone();
     let mut seen = VecDeque::<(String, u64)>::new();
     let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
-      let Some(TabMessage::Call {
-        id,
-        tab,
-        command,
-        args,
-      }) = read(&event)
-      else {
-        return;
+      let (id, tab, command, args) = match read(&event) {
+        Some(TabMessage::Call {
+          id,
+          tab,
+          command,
+          args,
+        }) => (id, tab, command, args),
+        Some(TabMessage::TakeOver { tab, ends_call }) => {
+          if let Some(blocker) = on_takeover(ends_call) {
+            post(&replies, &TabMessage::TakeOverRefused { tab, blocker });
+          }
+          return;
+        },
+        _ => return,
       };
       post(&replies, &TabMessage::Ack { id, tab: tab.clone() });
       let call = (tab.clone(), id);
@@ -244,8 +275,21 @@ impl Follower {
     let channel = open_channel(user)?;
     let tab = tab_id();
     let pending = PendingCalls::default();
+    let refusals = Rc::new(RefCell::new(None::<oneshot::Sender<Blocker>>));
+    let candidate = Rc::new(RefCell::new(Candidate {
+      tab: tab.clone(),
+      // A tab the user just opened has the focus; one that just handed over (the user is in
+      // another tab) counts as not focused yet.
+      focused_at_ms: if has_focus() { js_sys::Date::now() } else { 0.0 },
+      maybe_claimed_at_ms: None,
+    }));
+    let roll_call = Rc::new(RefCell::new(None::<Vec<Candidate>>));
+    let answers = channel.clone();
     let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new({
       let pending = pending.clone();
+      let refusals = refusals.clone();
+      let candidate = candidate.clone();
+      let roll_call = roll_call.clone();
       let me = tab.clone();
       move |event: web_sys::MessageEvent| match read(&event) {
         Some(TabMessage::Ack { id, tab }) if tab == me => {
@@ -261,6 +305,18 @@ impl Follower {
           }
         },
         Some(TabMessage::Changed) => on_change(),
+        Some(TabMessage::RollCall) => post(&answers, &TabMessage::Present(candidate.borrow().clone())),
+        Some(TabMessage::Present(other)) => {
+          if let Some(answers) = roll_call.borrow_mut().as_mut() {
+            answers.push(other);
+          }
+        },
+        Some(TabMessage::TakeOverRefused { tab, blocker }) if tab == me => {
+          if let Some(refusal) = refusals.borrow_mut().take() {
+            // The takeover may have ended meanwhile (the lock came, or it timed out).
+            let _ = refusal.send(blocker);
+          }
+        },
         _ => {},
       }
     });
@@ -270,8 +326,50 @@ impl Follower {
       tab,
       next_call: Cell::new(0),
       pending,
+      refusals,
+      me: candidate,
+      roll_call,
       _on_message: on_message,
     })
+  }
+
+  /// The user focused this tab or it became visible: it is the likelier one to take over.
+  pub fn mark_focused(&self) {
+    self.me.borrow_mut().focused_at_ms = js_sys::Date::now();
+  }
+
+  /// "Use here" runs (`true`) or ended (`false`): this tab goes first when the lock comes free.
+  pub fn set_claiming(&self, is_claiming: bool) {
+    self.me.borrow_mut().maybe_claimed_at_ms = is_claiming.then(js_sys::Date::now);
+  }
+
+  /// How this tab answers a roll call.
+  pub fn candidate(&self) -> Candidate {
+    self.me.borrow().clone()
+  }
+
+  /// Asks the other inactive tabs who they are and collects the answers for a moment. Only tabs
+  /// that are alive answer, so a crashed one never wins.
+  pub async fn roll_call(&self) -> Vec<Candidate> {
+    *self.roll_call.borrow_mut() = Some(Vec::new());
+    post(&self.channel, &TabMessage::RollCall);
+    platform::sleep(ROLL_CALL_WINDOW).await;
+    self.roll_call.borrow_mut().take().unwrap_or_default()
+  }
+
+  /// Asks the owner to hand the store to this tab. The answer is the owner's refusal; when it lets
+  /// go instead, the lock comes (`wait_to_own`) and this never resolves.
+  pub async fn request_takeover(&self, ends_call: bool) -> Option<Blocker> {
+    let (refusal, refused) = oneshot::channel();
+    *self.refusals.borrow_mut() = Some(refusal);
+    post(
+      &self.channel,
+      &TabMessage::TakeOver {
+        tab: self.tab.clone(),
+        ends_call,
+      },
+    );
+    refused.await.ok()
   }
 
   /// Runs a `core_*` command in the owning tab.
@@ -358,6 +456,13 @@ fn post(channel: &web_sys::BroadcastChannel, message: &TabMessage) {
 
 fn read(event: &web_sys::MessageEvent) -> Option<TabMessage> {
   serde_json::from_str(&event.data().as_string()?).ok()
+}
+
+fn has_focus() -> bool {
+  web_sys::window()
+    .and_then(|window| window.document())
+    .and_then(|document| document.has_focus().ok())
+    .unwrap_or(false)
 }
 
 /// A name for this tab, only to address replies: random, not a secret.
