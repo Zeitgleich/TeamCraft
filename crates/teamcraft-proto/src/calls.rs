@@ -16,8 +16,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-  Base64Bytes, CallId, DeviceId, ErrorBody, MediaCapabilities, TransportFeedback, UserId, VideoCodec,
-  VideoLayerInfo, VideoTrack, VideoTrackKind,
+  Base64Bytes, CallId, ConversationId, DeviceId, ErrorBody, MediaCapabilities, TransportFeedback, UserId,
+  VideoCodec, VideoLayerInfo, VideoTrack, VideoTrackKind,
 };
 
 /// `aud` of call join tokens.
@@ -43,6 +43,11 @@ pub struct CallJoinClaims {
   pub call_id: CallId,
   pub user_id: UserId,
   pub device_id: DeviceId,
+  /// The conversation the call belongs to. The SFU reports it with its roster, so a restarted
+  /// server takes over the calls that kept running (`SfuCallRoster`). Signed like the rest, so the
+  /// SFU can't make it up; tokens of older servers lack it.
+  #[serde(rename = "conversation_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_conversation_id: Option<ConversationId>,
 }
 
 /// Messages from the client to the SFU.
@@ -549,11 +554,16 @@ mod tests {
       call_id: CallId::from_snowflake(Snowflake::new(7).unwrap()),
       user_id: UserId::from_snowflake(Snowflake::new(4).unwrap()),
       device_id: DeviceId::from_snowflake(Snowflake::new(5).unwrap()),
+      maybe_conversation_id: Some(ConversationId::from_snowflake(Snowflake::new(9).unwrap())),
     };
+    let json = serde_json::to_string(&claims).unwrap();
     assert_eq!(
-      serde_json::to_string(&claims).unwrap(),
-      r#"{"iss":"https://chat.example.com","aud":"teamcraft-sfu","iat":100,"exp":160,"call_id":"7","user_id":"4","device_id":"5"}"#
+      json,
+      r#"{"iss":"https://chat.example.com","aud":"teamcraft-sfu","iat":100,"exp":160,"call_id":"7","user_id":"4","device_id":"5","conversation_id":"9"}"#
     );
+    let older = json.replace(r#","conversation_id":"9""#, "");
+    let parsed: CallJoinClaims = serde_json::from_str(&older).unwrap();
+    assert_eq!(parsed.maybe_conversation_id, None, "tokens of older servers");
   }
 
   #[test]

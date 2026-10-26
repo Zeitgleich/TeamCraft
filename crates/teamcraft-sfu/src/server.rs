@@ -12,6 +12,11 @@
 //! [`SFU_GOING_AWAY_CLOSE_CODE`] ([`Sfu::run_until`]). Clients rejoin with a fresh join token; the
 //! restarted SFU (or another instance at the same address) creates the room again and DAVE founds a
 //! new group. Leaves are not reported to the server while going away, so the call stays up there.
+//!
+//! Besides joins and leaves the SFU reports its whole roster: at start, every
+//! [`SfuConfig::roster_interval`] and right after a call moved between a user's devices. The server
+//! drops what the SFU no longer has, so a lost leave (or one never sent while going away, by a
+//! client that didn't come back) can't keep a device in a call for good.
 
 use std::{
   future::Future,
@@ -22,10 +27,11 @@ use std::{
 
 use teamcraft_proto::{
   CallClientMessage, CallEvent, CallServerMessage, ErrorBody, ErrorCode, SFU_GOING_AWAY_CLOSE_CODE,
-  SfuControlRequest,
+  SfuControlRequest, SfuRosterReport,
 };
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
+use tokio::time::MissedTickBehavior;
 use tracing::{Instrument, debug, info, info_span, warn};
 use wtransport::{
   Connection, Endpoint, Identity, RecvStream, SendStream, ServerConfig,
@@ -49,6 +55,8 @@ const PERIODIC_INTERVAL: Duration = Duration::from_millis(100);
 
 /// HTTP path of the WebTransport session.
 const PRE_JOIN_LIMIT: u32 = 0x4803;
+/// Rosters never go out more often than this, whatever the configuration says.
+const MIN_ROSTER_INTERVAL: Duration = Duration::from_millis(100);
 
 pub const CALL_PATH: &str = "/call";
 
@@ -65,6 +73,10 @@ struct Shared {
   verifier: Arc<dyn JoinTokenVerifier>,
   reporter: Arc<dyn ParticipantReporter>,
   prejoin: Arc<PreJoinLimiter>,
+  /// When this SFU started: the roster tells the server how fresh its rooms are.
+  started_at: Instant,
+  /// Wakes the roster reporter before its interval (a call moved between devices).
+  roster_now: Arc<Notify>,
 }
 
 /// Carries out meeting host controls on this SFU's calls (see [`crate::control`]).
@@ -80,6 +92,7 @@ struct ParticipantSession {
   grant: JoinGrant,
   signal_tx: mpsc::Sender<Outgoing>,
   max_bytes: usize,
+  roster_now: Arc<Notify>,
 }
 
 /// How a participant's session ended.
@@ -151,6 +164,8 @@ impl Sfu {
         verifier,
         reporter: Arc::new(NoReporter),
         prejoin: Arc::new(PreJoinLimiter::default()),
+        started_at: Instant::now(),
+        roster_now: Arc::new(Notify::new()),
       }),
     })
   }
@@ -189,10 +204,13 @@ impl Sfu {
   /// closed with [`SFU_GOING_AWAY_CLOSE_CODE`], so its client rejoins instead of ending the call,
   /// and the closes get up to [`SfuConfig::shutdown_drain`] to reach the clients.
   pub async fn run_until(self, shutdown: impl Future<Output = ()>) {
+    let rosters = tokio::spawn(report_rosters(Arc::clone(&self.shared)));
     tokio::select! {
       () = self.accept_sessions() => {},
       () = shutdown => {},
     }
+    // Going away empties the rooms; that is no roster to tell the server.
+    rosters.abort();
     self.go_away().await;
   }
 
@@ -227,6 +245,32 @@ impl Sfu {
       warn!("not every client confirmed the close in time");
     }
     info!("went away");
+  }
+}
+
+/// Reports the roster at start, every [`SfuConfig::roster_interval`] and when woken early, until
+/// the SFU goes away. A tick missed under load is not caught up: one current roster is enough.
+async fn report_rosters(shared: Arc<Shared>) {
+  let mut interval = tokio::time::interval(shared.config.roster_interval.max(MIN_ROSTER_INTERVAL));
+  interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+  loop {
+    tokio::select! {
+      _ = interval.tick() => {},
+      () = shared.roster_now.notified() => {},
+    }
+    if shared.rooms.is_going_away() {
+      return;
+    }
+    shared.reporter.roster(shared.roster());
+  }
+}
+
+impl Shared {
+  fn roster(&self) -> SfuRosterReport {
+    SfuRosterReport {
+      uptime_secs: self.started_at.elapsed().as_secs(),
+      calls: self.rooms.roster(),
+    }
   }
 }
 
@@ -293,6 +337,11 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
   };
 
   drop(prejoin_slot);
+  // The call the device is in: the running call of its conversation when the token named another.
+  let grant = JoinGrant {
+    call_id: room.call_id(),
+    ..grant
+  };
   // A device taking its slot back is still in the server's roster.
   if outcome == JoinOutcome::Joined {
     shared.reporter.joined(grant);
@@ -303,6 +352,7 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
     grant,
     signal_tx,
     max_bytes,
+    roster_now: Arc::clone(&shared.roster_now),
   };
   let (end, result) = session.run(send, recv, signal_rx).await;
   drop(session);
@@ -333,6 +383,11 @@ async fn release_slot(
 }
 
 impl SfuControl {
+  /// Every call on this SFU and who is in it, for a server that starts and takes them over.
+  pub fn roster(&self) -> SfuRosterReport {
+    self.shared.roster()
+  }
+
   pub fn apply(&self, request: &SfuControlRequest) -> Result<(), RoomError> {
     self
       .shared
@@ -416,12 +471,19 @@ impl ParticipantSession {
   }
 
   fn handle_client_message(&self, message: CallClientMessage) {
+    // The account's other devices leave for this one; one of them may be in the server's roster
+    // only (its leave got lost), which a roster right after repairs at once instead of within the
+    // interval.
+    let is_move_here = matches!(message, CallClientMessage::MoveHere);
     if let Err(error) = self
       .room
       .on_client_message(self.grant.device_id, message, Instant::now())
     {
       // Fails only when the writer task ended, i.e. the session is closing anyway.
       let _ = self.signal_tx.try_send(Outgoing::Error(error));
+    }
+    if is_move_here {
+      self.roster_now.notify_one();
     }
   }
 }

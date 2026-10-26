@@ -6,10 +6,10 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
-use teamcraft_proto::{CALL_JOIN_TOKEN_AUDIENCE, CallId, CallJoinClaims, DeviceId, UserId};
+use teamcraft_proto::{CALL_JOIN_TOKEN_AUDIENCE, CallId, CallJoinClaims, ConversationId, DeviceId, UserId};
 use thiserror::Error;
 
-/// Prefix of development tokens: `dev:<call id>:<user id>:<device id>`.
+/// Prefix of development tokens: `dev:<call id>:<user id>:<device id>[:<conversation id>]`.
 const DEV_TOKEN_PREFIX: &str = "dev";
 
 /// Decides whether a token lets its holder into a call, and as whom.
@@ -23,6 +23,9 @@ pub struct JoinGrant {
   pub call_id: CallId,
   pub user_id: UserId,
   pub device_id: DeviceId,
+  /// The call's conversation, as the server signed it; reported with the roster so a restarted
+  /// server takes the call over. `None` from tokens of older servers.
+  pub maybe_conversation_id: Option<ConversationId>,
 }
 
 /// Verifies join tokens signed by `teamcraft-server` (EdDSA JWT with [`CallJoinClaims`]).
@@ -114,6 +117,7 @@ impl JwtJoinTokenVerifier {
       call_id: claims.call_id,
       user_id: claims.user_id,
       device_id: claims.device_id,
+      maybe_conversation_id: claims.maybe_conversation_id,
     })
   }
 }
@@ -132,7 +136,8 @@ impl JoinTokenVerifier for JwtJoinTokenVerifier {
 impl JoinTokenVerifier for DevTokenVerifier {
   fn verify(&self, token: &str) -> Result<JoinGrant, JoinTokenError> {
     let mut parts = token.split(':');
-    let (Some(DEV_TOKEN_PREFIX), Some(call), Some(user), Some(device), None) = (
+    let (Some(DEV_TOKEN_PREFIX), Some(call), Some(user), Some(device), maybe_conversation, None) = (
+      parts.next(),
       parts.next(),
       parts.next(),
       parts.next(),
@@ -145,6 +150,9 @@ impl JoinTokenVerifier for DevTokenVerifier {
       call_id: call.parse().map_err(|_| JoinTokenError::Malformed)?,
       user_id: user.parse().map_err(|_| JoinTokenError::Malformed)?,
       device_id: device.parse().map_err(|_| JoinTokenError::Malformed)?,
+      maybe_conversation_id: maybe_conversation
+        .map(|conversation| conversation.parse().map_err(|_| JoinTokenError::Malformed))
+        .transpose()?,
     })
   }
 }
@@ -190,6 +198,7 @@ MC4CAQAwBQYDK2VwBCIEIIsW2rzm2L3/SlRvzIsu6493OAsvVJHwPVx2J+Nb2LsN
           call_id: claims.call_id,
           user_id: claims.user_id,
           device_id: claims.device_id,
+          maybe_conversation_id: claims.maybe_conversation_id,
         })
       );
     }
@@ -286,6 +295,7 @@ MC4CAQAwBQYDK2VwBCIEIIsW2rzm2L3/SlRvzIsu6493OAsvVJHwPVx2J+Nb2LsN
         call_id: "7".parse().unwrap(),
         user_id: "3".parse().unwrap(),
         device_id: "42".parse().unwrap(),
+        maybe_conversation_id: Some("9".parse().unwrap()),
       }
     }
 
@@ -303,7 +313,14 @@ MC4CAQAwBQYDK2VwBCIEIIsW2rzm2L3/SlRvzIsu6493OAsvVJHwPVx2J+Nb2LsN
         call_id: "7".parse().unwrap(),
         user_id: "3".parse().unwrap(),
         device_id: "42".parse().unwrap(),
+        maybe_conversation_id: None,
       })
+    );
+    assert_eq!(
+      DevTokenVerifier
+        .verify("dev:7:3:42:9")
+        .map(|grant| grant.maybe_conversation_id),
+      Ok(Some("9".parse().unwrap()))
     );
   }
 
@@ -313,7 +330,8 @@ MC4CAQAwBQYDK2VwBCIEIIsW2rzm2L3/SlRvzIsu6493OAsvVJHwPVx2J+Nb2LsN
       "",
       "dev",
       "dev:7:3",
-      "dev:7:3:42:1",
+      "dev:7:3:42:9:1",
+      "dev:7:3:42:x",
       "prod:7:3:42",
       "dev:x:3:42",
       "dev:7:3:-1",

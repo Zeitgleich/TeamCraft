@@ -453,6 +453,30 @@ notice the dead path after the stall timeout (5 s) and rejoin the same way. Host
 the SFU (locks, removals) start fresh; the server's meeting admission still applies to every join
 ticket.
 
+**Roster reconciliation** (#684). Join and leave reports alone can leave a device in the server's
+roster for good: a report given up, a leave never sent while going away by a client that didn't
+come back. So the SFU also reports its whole roster (`POST /api/internal/v1/calls/roster`) at
+start, every `TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS` (30 s) and right after a call moved between a
+user's devices, in the same ordered queue as the join and leave reports. The server drops the
+devices it lacks – at once, or, while the SFU has run for less than `[calls] roster_grace_secs`
+(60 s, so it is fresh from a restart and its devices are rejoining), once they were missing that
+long – ends calls left with nobody, and takes devices it never heard join as joins. Once an SFU has
+sent a roster, none for `roster_timeout_secs` (120 s) ends every call. A restart of
+`teamcraft-server` loses its in-memory calls but not the calls themselves: join tokens carry the
+conversation id (signed), the SFU names it per call in its roster, and the server takes over the
+calls it doesn't know – at start it reads the roster from the SFU (`GET
+{sfu_control_url}/internal/v1/calls/roster`) before it serves, otherwise from the next pushed
+roster. Nothing rings again, and the history entry written at the call's start is the one closed at
+its end. Calls that ended here within `roster_grace_secs` are not taken over again. A failed read
+at start is retried in the background (1, 2, 4, 8, 15, 30 s, until a roster came in), and the
+first join token of a conversation without a call asks the SFU first (at most 1 s). Should a
+token still name a new call id for a conversation the SFU runs a call for, the SFU puts the
+device into the running room (one conversation, one room); its `joined` event names the call id
+it is in, and the reports tell the server. A user can also clear their
+own devices from a call at once ("Leave on all devices", `POST
+/api/v1/conversations/{id}/call/leave`): the SFU closes them with `connection_replaced`, so they
+don't rejoin, and the server drops them whatever the SFU answered.
+
 **Browsers** can't migrate a WebTransport session to another network; when it closes, the
 browser driver rejoins as above, spreading the first attempt when the session's close code
 (`closed`'s `closeCode`) is `SFU_GOING_AWAY_CLOSE_CODE`. Where the browser reports the session's

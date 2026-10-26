@@ -674,6 +674,9 @@ pub trait CallBackend {
   fn set_call_deafened(&self, _is_deafened: bool) {}
   /// Takes the active call over from the account's other devices, which leave it (#505).
   fn move_call_here(&self) {}
+  /// Takes all of the user's devices out of the conversation's call ("Leave on all devices"),
+  /// also one only the server still lists (#684).
+  fn leave_call_everywhere(&self, _conversation: ConversationId) {}
   /// Which call status sounds play on this device, for this and later calls.
   fn set_call_status_sounds(&self, _sounds: CallStatusSounds) {}
   /// A [`crate::calls::MediaDevice::id`]; `None` follows the system default.
