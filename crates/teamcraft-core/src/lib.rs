@@ -19,6 +19,7 @@ pub mod prefetch;
 pub mod push_guard;
 pub mod push_preview;
 pub mod push_subscription;
+pub mod push_text;
 pub mod read_state;
 pub mod records;
 pub mod runner;

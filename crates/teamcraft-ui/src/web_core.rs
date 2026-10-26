@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use fluent_bundle::FluentArgs;
 use futures_channel::{mpsc, oneshot};
 use futures_util::future::{Either, pending, poll_immediate, select};
 use futures_util::{FutureExt, StreamExt};
@@ -41,6 +42,7 @@ use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor};
 use teamcraft_core::downloads::{Downloads, Finished};
 use teamcraft_core::push_preview::{PushSession, save_push_session};
+use teamcraft_core::push_text::{NAME_PLACEHOLDER, NotificationLabels};
 use teamcraft_core::records;
 use teamcraft_core::store::{IndexedDbStore, StoreError, TrackedStore, browser_database_key};
 use teamcraft_core::transfers::Transfers;
@@ -2502,8 +2504,30 @@ fn request_persistent_storage() {
   });
 }
 
-/// Tells the service worker which database holds this account's keys, so it can open pushes. It
-/// cannot ask the page later (no page may be open), so it keeps the name in its own cache.
+/// The notification texts the service worker shows in `locale` (issue #644): it has no translations
+/// of its own, and no page may be open when a push arrives.
+fn notification_labels(locale: crate::i18n::Locale) -> NotificationLabels {
+  let translate = |key: &str| Some(crate::i18n::translate(locale, key, None));
+  let mut name = FluentArgs::new();
+  name.set("name", NAME_PLACEHOLDER);
+  let with_name = |key: &str| Some(crate::i18n::translate(locale, key, Some(&name)));
+  NotificationLabels {
+    maybe_new_message: translate("notify-new-message"),
+    maybe_new_message_from: with_name("notify-new-message-from"),
+    maybe_photo: translate("notify-photo"),
+    maybe_video: translate("notify-video"),
+    maybe_audio: translate("notify-audio"),
+    maybe_call_title: translate("incoming-title"),
+    maybe_call_from: with_name("notify-call-from"),
+    maybe_call_unknown: translate("notify-call-unknown"),
+    maybe_test_body: translate("notify-test-body"),
+    maybe_mark_read: translate("notify-action-mark-read"),
+  }
+}
+
+/// Tells the service worker which database holds this account's keys, so it can open pushes, and
+/// the notification texts in the user's language. It cannot ask the page later (no page may be
+/// open), so it keeps both in its own cache.
 fn announce_database(name: &str) {
   let name = name.to_owned();
   wasm_bindgen_futures::spawn_local(async move {
@@ -2520,10 +2544,17 @@ fn announce_database(name: &str) {
     };
     let message = js_sys::Object::new();
     let set = |key: &str, value: &str| js_sys::Reflect::set(&message, &key.into(), &value.into());
-    let label = crate::i18n::translate(crate::settings::stored_locale(), "notify-action-mark-read", None);
+    let labels = match serde_json::to_string(&notification_labels(crate::settings::stored_locale())) {
+      Ok(labels) => labels,
+      Err(error) => {
+        // The worker then shows English texts; nothing the user must act on.
+        tracing::warn!(%error, "notification texts not serialized");
+        String::new()
+      },
+    };
     if set("type", "push_database")
       .and_then(|_| set("name", &name))
-      .and_then(|_| set("mark_read_label", &label))
+      .and_then(|_| set("labels", &labels))
       .is_ok()
     {
       drop(worker.post_message(&message));

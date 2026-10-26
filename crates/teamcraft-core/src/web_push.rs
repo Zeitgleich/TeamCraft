@@ -130,12 +130,11 @@ mod service_worker {
   use crate::api::{HttpServerApi, ServerApi, StaticToken, change_web_push_subscription};
   use crate::clock::{Clock, SystemClock};
   use crate::error::CoreError;
-  use crate::push_preview::{PreviewContent, PushPreview, push_preview, push_session};
+  use crate::push_preview::{PushPreview, push_preview, push_session};
   use crate::push_subscription::{subscription_change, subscription_change_from};
+  use crate::push_text::{NotificationLabels, notification_text};
   use crate::store::{IndexedDbStore, browser_database_key};
 
-  /// Shown when nothing else is known: the product name, which isn't translated.
-  const FALLBACK_TITLE: &str = "TeamCraft";
   /// Key of the conversation ID in a notification's `data`.
   const CONVERSATION_FIELD: &str = "conversation_id";
   /// Key of the tag in the `data` of notifications the page showed (`teamcraft-ui`).
@@ -148,21 +147,35 @@ mod service_worker {
   const MESSAGE_FIELD: &str = "message_id";
 
   /// The service worker's `push` handler: decrypts the wake-up and shows the notification.
-  /// Browsers require a notification for every push, so failures still show one, without content.
-  /// `maybe_mark_read_label` is the translated "Mark as read" (the page leaves it next to the
-  /// database name); without it the notification has no button.
+  /// Browsers require a notification for every push, so failures still show one that says a
+  /// message came. `maybe_labels` is the JSON of [`NotificationLabels`], the translated texts the
+  /// page leaves next to the database name (the worker has no translations, and no page may be
+  /// open); without them the texts are English and the notification has no "Mark as read" button.
   #[wasm_bindgen(js_name = handlePush)]
   pub async fn handle_push(
     database_name: String,
     payload: Vec<u8>,
-    maybe_mark_read_label: Option<String>,
+    maybe_labels: Option<String>,
   ) -> Result<(), JsValue> {
     let scope: ServiceWorkerGlobalScope = js_sys::global().unchecked_into();
+    let labels = maybe_labels
+      .as_deref()
+      .map(NotificationLabels::from_json)
+      .unwrap_or_default();
     let (title, options) = match preview(&database_name, &payload).await {
-      Ok(preview) => notification(&preview, maybe_mark_read_label.as_deref()),
+      Ok(preview) => {
+        if let Some(gap) = preview.maybe_gap {
+          // Why the notification shows less than the message; never what the message says.
+          tracing::info!(?gap, "push shown without the full message");
+        }
+        notification(&preview, &labels)
+      },
       Err(error) => {
         tracing::warn!(%error, "push could not be opened");
-        (FALLBACK_TITLE.to_string(), NotificationOptions::new())
+        let text = labels.generic();
+        let options = NotificationOptions::new();
+        options.set_body(&text.body);
+        (text.title, options)
       },
     };
     let promise = scope
@@ -338,31 +351,12 @@ mod service_worker {
     push_preview(&store, maybe_api.as_ref(), payload).await
   }
 
-  /// Title and body from data only (names and message text), so nothing here needs translating.
-  fn notification(
-    preview: &PushPreview,
-    maybe_mark_read_label: Option<&str>,
-  ) -> (String, NotificationOptions) {
-    let sender = preview.maybe_sender_name.clone();
-    let title = if preview.is_direct {
-      sender.clone().or_else(|| preview.maybe_conversation_name.clone())
-    } else {
-      preview.maybe_conversation_name.clone().or_else(|| sender.clone())
-    }
-    .unwrap_or_else(|| FALLBACK_TITLE.to_string());
-    let maybe_text = match &preview.content {
-      PreviewContent::Text(text) => Some(text.clone()),
-      PreviewContent::File { file_name, .. } => Some(file_name.clone()),
-      PreviewContent::Unavailable => None,
-    };
-    let body = match (preview.is_direct, sender, maybe_text) {
-      (false, Some(sender), Some(text)) => format!("{sender}: {text}"),
-      (_, _, Some(text)) => text,
-      (false, Some(sender), None) => sender,
-      (_, _, None) => String::new(),
-    };
+  /// Title and body from the preview's names and text and the page's translated labels
+  /// ([`notification_text`]).
+  fn notification(preview: &PushPreview, labels: &NotificationLabels) -> (String, NotificationOptions) {
+    let text = notification_text(preview, labels);
     let options = NotificationOptions::new();
-    options.set_body(&body);
+    options.set_body(&text.body);
     // One notification per conversation; a newer push replaces the older one.
     let conversation: ConversationId = preview.wake_up.conversation_id;
     options.set_tag(&conversation.to_string());
@@ -379,7 +373,7 @@ mod service_worker {
       .wake_up
       .maybe_message_id
       .filter(|_| preview.wake_up.maybe_thread_id.is_none() && preview.is_conversation_verified);
-    if let (Some(label), Some(message)) = (maybe_mark_read_label, maybe_message) {
+    if let (Some(label), Some(message)) = (labels.maybe_mark_read.as_deref(), maybe_message) {
       let _ = js_sys::Reflect::set(&data, &MESSAGE_FIELD.into(), &message.to_string().into());
       let button = js_sys::Object::new();
       let _ = js_sys::Reflect::set(&button, &"action".into(), &MARK_READ_ACTION.into());
@@ -389,7 +383,7 @@ mod service_worker {
       let _ = js_sys::Reflect::set(&options, &"actions".into(), &actions);
     }
     options.set_data(&data);
-    (title, options)
+    (text.title, options)
   }
 }
 
