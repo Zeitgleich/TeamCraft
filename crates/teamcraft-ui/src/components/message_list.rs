@@ -22,7 +22,7 @@ use crate::feed_motion::{FeedMotion, Shown, newest_confirmed};
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, ConversationKind, Message, as_chat_message};
 use crate::reactive::SetIfAlive;
-use crate::state::{Overlay, use_app_state};
+use crate::state::{AppState, Overlay, use_app_state};
 use crate::unread_divider::{DividerEvent, DwellClock, ReadMarkerGate};
 
 /// Extra pixels rendered above and below the viewport.
@@ -167,6 +167,12 @@ pub fn MessageList(
     .get_untracked()
     .filter(|(target, _)| *target == conversation)
     .map(|(_, index)| index);
+  // The desktop app reopened where the reader was when it closed (#721).
+  if let Some(index) = state.take_restored_reading(conversation) {
+    state.scroll_anchors.update_value(|anchors| {
+      anchors.insert(conversation, index);
+    });
+  }
   // Otherwise return to where the reader was when they left this conversation scrolled up.
   let maybe_saved_anchor = maybe_marker
     .is_none()
@@ -459,6 +465,7 @@ pub fn MessageList(
       move || {
         if scroll_generation.try_get_value() == generation {
           is_scrolling.set_if_alive(false);
+          remember_reading(state, conversation, stick_to_bottom, window);
         }
       },
       FLOATING_DAY_LINGER,
@@ -601,6 +608,34 @@ pub fn MessageList(
 /// remount of this list (layout change, thread pane) keeps it. One timer, only while the user sits
 /// at the bottom with a divider shown; it is cancelled when that ends or the list goes away. The
 /// read marker doesn't wait for the divider: see [`mark_read_while_watched`].
+/// The desktop app reopens at this position (#721): the top message while the reader is scrolled
+/// up, nothing while they follow the newest. Saved once scrolling has settled.
+fn remember_reading(
+  state: AppState,
+  conversation: ConversationId,
+  stick_to_bottom: RwSignal<bool>,
+  window: Memo<Window>,
+) {
+  if !crate::auth::tauri::is_available() {
+    return;
+  }
+  let (Some(is_following), Some(window)) = (stick_to_bottom.try_get_untracked(), window.try_get_untracked())
+  else {
+    return;
+  };
+  let maybe_message = match is_following {
+    true => None,
+    // async-ok: the app state outlives every feed.
+    false => state
+      .read(|backend| backend.messages(conversation, window.first_visible, 1))
+      .first()
+      .map(|message| message.id),
+  };
+  // async-ok: the app state outlives every feed.
+  let user = state.me().id;
+  crate::last_place::remember_reading(user, conversation, maybe_message);
+}
+
 fn track_unread_divider(conversation: ConversationId, count: Memo<usize>, is_at_bottom: RwSignal<bool>) {
   let state = use_app_state();
   let is_focused = RwSignal::new(is_window_focused());

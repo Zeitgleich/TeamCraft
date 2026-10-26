@@ -39,7 +39,7 @@ use anyhow::Context;
 use tauri::path::BaseDirectory;
 use tauri::webview::NewWindowResponse;
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
-use tauri_plugin_window_state::StateFlags;
+use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 use tracing_subscriber::EnvFilter;
 
 use crate::auth::servers::{ManagedServer, ServerDirectory, ServerState};
@@ -88,7 +88,7 @@ fn main() -> anyhow::Result<()> {
     // are the decorations (the title bar setting, window_chrome.rs).
     .plugin(
       tauri_plugin_window_state::Builder::default()
-        .with_state_flags(StateFlags::all() - StateFlags::VISIBLE - StateFlags::DECORATIONS)
+        .with_state_flags(window_state_flags())
         .build(),
     )
     .manage(service.clone())
@@ -155,6 +155,16 @@ fn main() -> anyhow::Result<()> {
         && window.label() == tray::MAIN_WINDOW
       {
         window_chrome::on_resized(window);
+      }
+      // The plugin writes the window's size, place and maximized state only when the app exits;
+      // a session that ends with a logout (SIGTERM) never gets there. Written also when the window
+      // goes to the background or is closed, while it is still shown (#721).
+      if matches!(event, WindowEvent::Focused(false) | WindowEvent::CloseRequested { .. })
+        && window.label() == tray::MAIN_WINDOW
+        && window.is_visible().unwrap_or(false)
+        && let Err(error) = window.app_handle().save_window_state(window_state_flags())
+      {
+        tracing::debug!(%error, "could not save the window's size and place");
       }
       // Closing keeps the app running in the tray (notifications keep coming) when the user wants it.
       // Without a tray icon it closes as usual, which quits the app.
@@ -258,6 +268,13 @@ fn main() -> anyhow::Result<()> {
       _ => {},
     });
   Ok(())
+}
+
+/// What the window-state plugin keeps of the main window: size, position, maximized and full
+/// screen. Visibility is ours (start minimized to the tray), and so are the decorations (the title
+/// bar setting, window_chrome.rs).
+fn window_state_flags() -> StateFlags {
+  StateFlags::all() - StateFlags::VISIBLE - StateFlags::DECORATIONS
 }
 
 /// The window is created here, not in `tauri.conf.json`, so it can start hidden in the tray. Debug
