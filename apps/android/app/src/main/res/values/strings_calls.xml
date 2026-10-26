@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+  <string name="call_person_muted">%1$s, muted</string>
   <string name="call_more">More options</string>
   <string name="call_you_muted">You\'re muted</string>
   <string name="call_toggle_controls">Show or hide the call controls</string>

@@ -24,6 +24,10 @@ pub struct SfuConfig {
   pub max_prejoin_sessions_per_ip: usize,
   /// Signaling events queued for one slow participant before it is disconnected.
   pub signaling_queue_len: usize,
+  /// Mute changes one participant may report at once; more are ignored until the rate refills.
+  pub mute_report_burst: u32,
+  /// Mute changes one participant may report per second, beyond the burst.
+  pub mute_reports_per_second: u32,
   /// Upper bound for one signaling message.
   pub max_signaling_message_bytes: usize,
   /// Tolerated clock difference to the server when checking join token times.
@@ -53,6 +57,8 @@ impl Default for SfuConfig {
       join_timeout: Duration::from_secs(10),
       max_prejoin_sessions_per_ip: 16,
       signaling_queue_len: 256,
+      mute_report_burst: 10,
+      mute_reports_per_second: 2,
       max_signaling_message_bytes: 256 * 1024,
       join_token_leeway: Duration::from_secs(5),
       max_join_token_lifetime: Duration::from_secs(300),

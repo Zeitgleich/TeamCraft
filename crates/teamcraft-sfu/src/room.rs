@@ -37,6 +37,7 @@ use crate::{
   config::SfuConfig,
   dave_coordinator::{DaveCoordinator, DaveCoordinatorError, Outbound},
   forwarding::{Effect, ForwardError, Forwarder},
+  rate_limit::TokenBucket,
   signaling::Outgoing,
 };
 
@@ -71,6 +72,8 @@ struct ControlState {
 pub struct Room {
   call_id: CallId,
   reconnect_grace: Duration,
+  mute_report_burst: u32,
+  mute_reports_per_second: u32,
   state: Mutex<RoomState>,
 }
 
@@ -133,6 +136,8 @@ struct Participant {
   user_id: UserId,
   /// The device's microphone is muted (its own report; metadata for the others' tiles).
   is_muted: bool,
+  /// Limits how often the device may change it.
+  mute_limit: TokenBucket,
   audio_stream_id: StreamId,
   session: SessionId,
   presence: Presence,
@@ -380,6 +385,8 @@ impl Room {
     Ok(Self {
       call_id,
       reconnect_grace: config.reconnect_grace,
+      mute_report_burst: config.mute_report_burst,
+      mute_reports_per_second: config.mute_reports_per_second,
       state: Mutex::new(state),
     })
   }
@@ -449,7 +456,7 @@ impl Room {
         self.subscribe(participant_id, stream_id, maybe_max_layer, now),
       ),
       CallClientMessage::SetMuted { is_muted } => {
-        self.set_muted(participant_id, is_muted);
+        self.set_muted(participant_id, is_muted, now);
         Ok(())
       },
       CallClientMessage::MoveHere => {
@@ -628,6 +635,7 @@ impl Room {
           Participant {
             user_id: grant.user_id,
             is_muted: false,
+            mute_limit: TokenBucket::new(self.mute_report_burst, self.mute_reports_per_second, now),
             audio_stream_id,
             session,
             presence: Presence::Connected(handle),
@@ -717,12 +725,17 @@ impl Room {
   }
 
   /// Records the device's mute state and tells the others when it changed.
-  fn set_muted(&self, device_id: DeviceId, is_muted: bool) {
+  fn set_muted(&self, device_id: DeviceId, is_muted: bool, now: Instant) {
     let mut state = lock(&self.state);
     let Some(participant) = state.participants.get_mut(&device_id) else {
       return;
     };
     if participant.is_muted == is_muted {
+      return;
+    }
+    // A flood of toggles is ignored, not stored: honest clients never come near the limit.
+    if !participant.mute_limit.allow(now) {
+      debug!(call_id = %self.call_id, device_id = %device_id, "mute report over the limit");
       return;
     }
     participant.is_muted = is_muted;

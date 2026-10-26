@@ -7496,6 +7496,22 @@
           }
         }
       }
+    },
+    "call_person_muted %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@, muted"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@, stummgeschaltet"
+          }
+        }
+      }
     }
   },
   "version": "1.0"
