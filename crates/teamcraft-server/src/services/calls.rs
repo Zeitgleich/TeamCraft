@@ -21,9 +21,9 @@ use secrecy::ExposeSecret;
 use subtle::ConstantTimeEq;
 use teamcraft_proto::{
   CALL_JOIN_TOKEN_AUDIENCE, CallId, CallJoinClaims, CallJoinTokenResponse, CallRosterEntry,
-  CallStateResponse, ChannelRole, ConversationId, ConversationKind, CreateCallJoinTokenRequest, DeviceId,
-  GatewayEvent, MoveCallRequest, SfuControlAction, SfuControlRequest, SfuParticipantReport, SfuRosterReport,
-  UnixMillis, UserId,
+  CallStateResponse, ChannelRole, ConversationId, ConversationKind, CreateCallJoinTokenRequest,
+  DependencyName, DeviceId, GatewayEvent, MoveCallRequest, SfuControlAction, SfuControlRequest,
+  SfuParticipantReport, SfuRosterReport, UnixMillis, UserId,
 };
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -33,6 +33,7 @@ use tracing::{debug, info, warn};
 use super::access::load_conversation;
 use crate::auth::{AuthError, AuthenticatedUser};
 use crate::config::CallsConfig;
+use crate::dependencies::{DependencyGuard, Fault, Retries};
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -92,6 +93,8 @@ struct ControlTarget {
   /// Where a starting server reads the SFU's roster (`GET`).
   roster_url: String,
   client: reqwest::Client,
+  /// The SFU's breaker (issue #743): host controls fail fast while it restarts.
+  guard: Arc<DependencyGuard>,
 }
 
 #[derive(Debug, Clone)]
@@ -244,6 +247,7 @@ impl CallService {
             url: format!("{}/internal/v1/calls/control", url.trim_end_matches('/')),
             roster_url: format!("{}/internal/v1/calls/roster", url.trim_end_matches('/')),
             client: reqwest::Client::builder().timeout(CONTROL_TIMEOUT).build()?,
+            guard: DependencyGuard::standalone(DependencyName::Sfu),
           })
         })
         .transpose()
@@ -324,21 +328,36 @@ impl CallService {
       .maybe_sfu_token
       .as_deref()
       .ok_or_else(|| ApiError::Unavailable("host controls need the SFU registration token".into()))?;
-    let response = target
-      .client
-      .post(&target.url)
-      .bearer_auth(String::from_utf8_lossy(token))
-      .json(request)
-      .send()
+    // Every host control is idempotent (mute all, lock, unlock, end, remove): safe to repeat
+    // while the SFU restarts.
+    target
+      .guard
+      .call(Retries::Idempotent, control_fault, || async {
+        let response = target
+          .client
+          .post(&target.url)
+          .bearer_auth(String::from_utf8_lossy(token))
+          .json(request)
+          .send()
+          .await
+          .map_err(|error| ApiError::Unavailable(format!("the SFU is not reachable: {error}")))?;
+        match response.status() {
+          status if status.is_success() => Ok(()),
+          reqwest::StatusCode::NOT_FOUND => Err(ApiError::call_not_found()),
+          status => Err(ApiError::Unavailable(format!(
+            "the SFU answered with status {status}"
+          ))),
+        }
+      })
       .await
-      .map_err(|error| ApiError::Unavailable(format!("the SFU is not reachable: {error}")))?;
-    match response.status() {
-      status if status.is_success() => Ok(()),
-      reqwest::StatusCode::NOT_FOUND => Err(ApiError::call_not_found()),
-      status => Err(ApiError::Unavailable(format!(
-        "the SFU answered with status {status}"
-      ))),
+  }
+
+  /// Host controls go through `guard`, the registry's breaker of the SFU.
+  pub fn with_dependency_guard(mut self, guard: Arc<DependencyGuard>) -> Self {
+    if let Some(target) = &mut self.maybe_control {
+      target.guard = guard;
     }
+    self
   }
 
   /// Reads the SFU's roster (`GET /internal/v1/calls/roster`); a starting server takes over the
@@ -1556,6 +1575,14 @@ fn unix_now_millis() -> Result<UnixMillis, ApiError> {
       .try_into()
       .unwrap_or(i64::MAX),
   ))
+}
+
+/// An unreachable SFU or a 5xx is an outage; "no such call" is an answer.
+fn control_fault(error: &ApiError) -> Fault {
+  match error {
+    ApiError::Unavailable(_) => Fault::Outage,
+    _ => Fault::Refusal,
+  }
 }
 
 #[cfg(test)]

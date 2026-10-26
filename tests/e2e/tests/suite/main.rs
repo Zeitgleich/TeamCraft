@@ -21,6 +21,7 @@ mod admin;
 mod bridge;
 mod calls;
 mod conversion;
+mod dependency_outages;
 mod deployed;
 mod devices;
 mod display_names;

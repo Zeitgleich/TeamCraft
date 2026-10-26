@@ -44,6 +44,9 @@ pub struct AppState {
   pub rendezvous: Arc<RendezvousHub>,
   /// Shutdown in progress: readiness fails and WebSockets close with 1012.
   pub drain: Arc<crate::drain::Drain>,
+  /// Circuit breakers of the backends (storage, identity provider, push gateway, SFU, database):
+  /// fail fast while one is down, and `/readyz` reports them.
+  pub dependencies: Arc<crate::dependencies::Dependencies>,
   pub push: Arc<PushDispatcher>,
   /// What was pushed to which device: withdrawals, rings, delivery counts, test limits.
   pub push_tracker: Arc<PushTracker>,

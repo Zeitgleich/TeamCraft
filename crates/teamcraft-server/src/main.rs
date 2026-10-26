@@ -8,16 +8,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use rand_core::{OsRng, RngCore};
 use secrecy::{ExposeSecret, SecretString};
-use teamcraft_db::{Database, DatabaseOptions, SnowflakeGenerator};
+use teamcraft_db::{Database, DatabaseOptions, DbError, SnowflakeGenerator};
+use teamcraft_net::retry::{Jitter, RetryPolicy as RetryPolicyNet};
 use teamcraft_ops::{DEFAULT_TIMEOUT, probe, probe_target, shutdown_signal};
-use teamcraft_proto::PushProvider;
+use teamcraft_proto::{DependencyName, PushProvider};
 use teamcraft_server::auth::{
   HttpJwkSource, JwksCache, JwksCacheOptions, Revocations, RoleMapping, TokenValidator, ValidatorOptions,
 };
 use teamcraft_server::brand::{BrandInputs, BrandStore};
 use teamcraft_server::config::{CONFIG_PATH_ENV, Config, DatabaseConfig};
+use teamcraft_server::dependencies::{Dependencies, DependencyOptions, TokioClock};
 use teamcraft_server::drain::Drain;
+use teamcraft_server::error::ApiError;
 use teamcraft_server::gateway::{Hub, HubOptions};
 use teamcraft_server::listener::bind_listener;
 use teamcraft_server::logging;
@@ -56,9 +60,9 @@ const BACKGROUND_SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 const DEFAULT_MAX_ATTACHMENT_BYTES: u64 = 100 * 1024 * 1024;
 /// Message partitions are created months ahead; checking twice a day is plenty.
 const PARTITION_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(12 * 3600);
-/// Backoff while the database is unreachable at startup.
-const DATABASE_RETRY_FIRST: Duration = Duration::from_secs(1);
-const DATABASE_RETRY_MAX: Duration = Duration::from_secs(15);
+/// Backoff while the database is unreachable at startup (the shared policy, with jitter, so a
+/// fleet restarted together doesn't knock in lock-step).
+const STARTUP_RETRY: RetryPolicyNet = RetryPolicyNet::new(Duration::from_secs(1), Duration::from_secs(15));
 
 fn main() -> ExitCode {
   if std::env::args().nth(1).as_deref() == Some("healthcheck") {
@@ -126,22 +130,38 @@ async fn run() -> anyhow::Result<()> {
     );
   }
 
-  let database = connect_database(&config.database)
+  let dependencies = Arc::new(Dependencies::new(
+    DependencyOptions::from(&config.dependencies),
+    Arc::new(TokioClock),
+  ));
+  // Listed first in /readyz: it decides readiness.
+  dependencies.guard(DependencyName::Database);
+  // One deadline for the whole start: a database that comes and goes while the server starts
+  // (a failover, a restart) is waited for instead of exiting into a crash loop.
+  let startup_deadline = tokio::time::Instant::now() + config.database.startup_wait();
+  let database = connect_database(&config.database, startup_deadline)
     .await
     .context("connecting to the database")?;
-  database.migrate().await.context("running migrations")?;
-  database
-    .ensure_partitions(config.server.partitions_ahead_months)
-    .await
-    .context("creating message partitions")?;
+  with_startup_retries("running migrations", startup_deadline, || async {
+    Ok(database.migrate().await?)
+  })
+  .await?;
+  with_startup_retries("creating message partitions", startup_deadline, || async {
+    Ok(
+      database
+        .ensure_partitions(config.server.partitions_ahead_months)
+        .await?,
+    )
+  })
+  .await?;
 
   // Filled from the admin console's settings or the configuration once the database is read.
   let mailer: Arc<Slot<dyn Mailer>> = Arc::default();
   let state = AppState {
     database,
-    validator: Arc::new(build_validator(&config)?),
+    validator: Arc::new(build_validator(&config, &dependencies)?),
     ids: Arc::new(SnowflakeGenerator::new(config.server.worker_id).context("invalid server.worker_id")?),
-    push: Arc::new(build_push(&config)?),
+    push: Arc::new(build_push(&config, &dependencies)?),
     push_tracker: Arc::default(),
     revocations: Arc::new(Revocations::default()),
     hub: Arc::new(Hub::new(HubOptions {
@@ -156,20 +176,21 @@ async fn run() -> anyhow::Result<()> {
     })),
     rendezvous: Arc::new(RendezvousHub::new(&config.rendezvous)),
     drain: Arc::default(),
+    dependencies: dependencies.clone(),
     maybe_blob_store: config
       .storage
       .as_ref()
       .map(BlobStore::new)
       .transpose()
       .context("configuring attachment storage")?
-      .map(Arc::new),
+      .map(|store| Arc::new(store.with_guard(dependencies.guard(DependencyName::ObjectStorage)))),
     maybe_calls: config
       .calls
       .as_ref()
       .map(CallService::from_config)
       .transpose()
       .context("configuring calls")?
-      .map(Arc::new),
+      .map(|calls| Arc::new(calls.with_dependency_guard(dependencies.guard(DependencyName::Sfu)))),
     maybe_meetings: build_meetings(&config, &mailer)?.map(Arc::new),
     maybe_local: build_local_auth(&config)?.map(Arc::new),
     mailer,
@@ -235,7 +256,10 @@ async fn run() -> anyhow::Result<()> {
       config.limits.max_concurrent_image_decodes.max(1),
     )),
   };
-  load_runtime_settings(&state).await?;
+  with_startup_retries("loading the settings", startup_deadline, || {
+    load_runtime_settings(&state)
+  })
+  .await?;
   spawn_session_sweeper(state.clone());
   if state.settings.get().maybe_oidc_sync.is_some() {
     spawn_oidc_sync(
@@ -247,12 +271,14 @@ async fn run() -> anyhow::Result<()> {
   if config.retention.is_enabled {
     spawn_retention_job(state.clone());
   }
-  permission_scheme::load_scheme(&state)
-    .await
-    .context("loading the permission scheme")?;
-  session::load_policy(&state)
-    .await
-    .context("loading the workspace policy")?;
+  with_startup_retries("loading the permission scheme", startup_deadline, || async {
+    Ok(permission_scheme::load_scheme(&state).await?)
+  })
+  .await?;
+  with_startup_retries("loading the workspace policy", startup_deadline, || async {
+    Ok(session::load_policy(&state).await?)
+  })
+  .await?;
   spawn_urgent_scheduler(state.clone());
   spawn_email_digests(state.clone());
   spawn_account_housekeeping(state.clone());
@@ -304,24 +330,65 @@ async fn begin_drain(drain: Arc<Drain>) {
 /// Connects to Postgres, waiting up to `startup_wait_secs` while it is unreachable (it may be
 /// restarting, or start after the server): exiting at once would make a restart policy loop.
 /// Configuration errors (wrong password, unknown database) fail at once.
-async fn connect_database(config: &DatabaseConfig) -> Result<Database, teamcraft_db::DbError> {
+async fn connect_database(
+  config: &DatabaseConfig,
+  give_up_at: tokio::time::Instant,
+) -> Result<Database, DbError> {
   let options = DatabaseOptions {
     max_connections: config.max_connections,
     acquire_timeout: config.acquire_timeout(),
   };
-  let give_up_at = tokio::time::Instant::now() + config.startup_wait();
-  let mut delay = DATABASE_RETRY_FIRST;
+  let mut jitter = Jitter::new(OsRng.next_u64());
+  let mut failures = 0;
   loop {
+    let delay = STARTUP_RETRY.delay(failures, &mut jitter, None);
     match Database::connect(config.url.expose_secret(), &options).await {
       Ok(database) => return Ok(database),
       Err(error) if error.is_transient() && tokio::time::Instant::now() + delay < give_up_at => {
-        warn!(%error, retry_in_secs = delay.as_secs(), "the database is unreachable, retrying");
+        warn!(%error, retry_in_ms = delay.as_millis(), "the database is unreachable, retrying");
         tokio::time::sleep(delay).await;
-        delay = (delay * 2).min(DATABASE_RETRY_MAX);
+        failures += 1;
       },
       Err(error) => return Err(error),
     }
   }
+}
+
+/// Runs a startup step that reads the database, again while it fails for a transient reason (the
+/// database restarted right after the connect), until `give_up_at`. Other errors fail at once.
+async fn with_startup_retries<T, F, Fut>(
+  what: &'static str,
+  give_up_at: tokio::time::Instant,
+  mut step: F,
+) -> anyhow::Result<T>
+where
+  F: FnMut() -> Fut,
+  Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+  let mut jitter = Jitter::new(OsRng.next_u64());
+  let mut failures = 0;
+  loop {
+    match step().await {
+      Ok(value) => return Ok(value),
+      Err(error) => {
+        let delay = STARTUP_RETRY.delay(failures, &mut jitter, None);
+        if !is_transient(&error) || tokio::time::Instant::now() + delay >= give_up_at {
+          return Err(error.context(what));
+        }
+        warn!(error = %format!("{error:#}"), step = what, retry_in_ms = delay.as_millis(), "a startup step failed, retrying");
+        tokio::time::sleep(delay).await;
+        failures += 1;
+      },
+    }
+  }
+}
+
+/// Whether a startup step failed because the database was briefly unavailable.
+fn is_transient(error: &anyhow::Error) -> bool {
+  error.chain().any(|cause| {
+    cause.downcast_ref::<DbError>().is_some_and(DbError::is_transient)
+      || matches!(cause.downcast_ref::<ApiError>(), Some(ApiError::Database(error)) if error.is_transient())
+  })
 }
 
 /// Removes deleted and abandoned call backgrounds and unfinished attachments once their upload URLs
@@ -643,7 +710,7 @@ fn spawn_oidc_sync(state: AppState, initial_delay: Duration, interval: Duration)
 }
 
 /// The push senders: each provider whose credentials are configured, UnifiedPush unless disabled.
-fn build_push(config: &Config) -> anyhow::Result<PushDispatcher> {
+fn build_push(config: &Config, dependencies: &Dependencies) -> anyhow::Result<PushDispatcher> {
   let push = &config.push;
   let timeout = Duration::from_secs(push.request_timeout_secs);
   let mut dispatcher = PushDispatcher::new(push.max_concurrent_sends)
@@ -662,7 +729,7 @@ fn build_push(config: &Config) -> anyhow::Result<PushDispatcher> {
       .with_sender(&PushProvider::WebPush, Arc::new(sender))
       .with_web_public_key(public_key);
   }
-  let maybe_gateway = build_gateway(config)?;
+  let maybe_gateway = build_gateway(config, dependencies)?;
   if let Some(settings) = apns_settings(config)? {
     let sender = ApnsSender::new(settings).context("push.apns")?;
     info!("APNs enabled (direct)");
@@ -729,7 +796,7 @@ fn build_push(config: &Config) -> anyhow::Result<PushDispatcher> {
 
 /// The push gateway client, if `push.gateway.url` is set. The first push registers the server key
 /// anyway; registering at startup surfaces a wrong URL or a refusing gateway in the log early.
-fn build_gateway(config: &Config) -> anyhow::Result<Option<Arc<GatewayClient>>> {
+fn build_gateway(config: &Config, dependencies: &Dependencies) -> anyhow::Result<Option<Arc<GatewayClient>>> {
   let push = &config.push;
   let gateway = &push.gateway;
   let Some(url) = gateway.maybe_url.clone().filter(|url| !url.is_empty()) else {
@@ -754,6 +821,7 @@ fn build_gateway(config: &Config) -> anyhow::Result<Option<Arc<GatewayClient>>> 
     accept_unbound_tokens: gateway.accept_unbound_tokens,
   })
   .context("push.gateway")?;
+  client.watch_health(dependencies.guard(DependencyName::PushGateway));
   info!(server_id = %client.server_id(), "push gateway enabled");
   let registering = client.clone();
   tokio::spawn(async move {
@@ -841,7 +909,7 @@ fn secret_from_config(
   Ok(Some(SecretString::from(text)))
 }
 
-fn build_validator(config: &Config) -> anyhow::Result<TokenValidator> {
+fn build_validator(config: &Config, dependencies: &Dependencies) -> anyhow::Result<TokenValidator> {
   let oidc = &config.oidc;
   let source = HttpJwkSource::new(
     oidc.issuer.clone(),
@@ -855,7 +923,8 @@ fn build_validator(config: &Config) -> anyhow::Result<TokenValidator> {
       ttl: Duration::from_secs(oidc.jwks_cache_ttl_secs),
       min_refresh_interval: Duration::from_secs(oidc.jwks_min_refresh_interval_secs),
     },
-  );
+  )
+  .with_guard(dependencies.guard(DependencyName::IdentityProvider));
   let algorithms = TokenValidator::parse_algorithms(&oidc.algorithms)
     .map_err(|e| anyhow::anyhow!("oidc.algorithms: {e}"))?;
   Ok(TokenValidator::new(

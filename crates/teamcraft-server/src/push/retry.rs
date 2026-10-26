@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use rand_core::{OsRng, RngCore};
 use teamcraft_db::{DbError, NewPushRetry, PushDeviceRow};
+use teamcraft_net::retry::RetryPolicy as RetryPolicyNet;
 use teamcraft_proto::{DeviceId, PushKind, PushWakeUp, UserId};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -98,13 +99,10 @@ pub(super) fn next_delay(
   if attempts > policy.max_retries {
     return None;
   }
-  let exponent = attempts.saturating_sub(1).min(31);
-  let backoff = policy
-    .initial_delay
-    .saturating_mul(1u32 << exponent)
-    .min(policy.max_delay);
-  let half = backoff / 2;
-  let jittered = half + half.mul_f64(jitter.clamp(0.0, 1.0));
+  // The shared policy; a push service's `Retry-After` stays binding beyond the cap, so it is
+  // applied here and not by the policy.
+  let jittered =
+    RetryPolicyNet::new(policy.initial_delay, policy.max_delay).jittered(attempts.saturating_sub(1), jitter);
   let delay = maybe_retry_after.map_or(jittered, |asked| jittered.max(asked));
   (delay < remaining_ttl).then_some(delay)
 }

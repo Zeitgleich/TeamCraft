@@ -471,7 +471,7 @@ impl Stack {
   }
 }
 
-async fn deliver(
+pub(crate) async fn deliver(
   stack: &Stack,
   provider: PushProvider,
   token: &str,

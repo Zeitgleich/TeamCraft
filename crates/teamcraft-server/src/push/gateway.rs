@@ -5,7 +5,7 @@
 
 use std::io::Write as _;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -23,6 +23,7 @@ use zeroize::Zeroizing;
 
 use super::sender::{PushError, PushMessage, PushSender, PushTarget, Urgency, retry_after};
 use crate::auth::BoxFuture;
+use crate::dependencies::DependencyGuard;
 
 /// How long to hold back after the gateway said "too many" without saying how long.
 const DEFAULT_BACKOFF: Duration = Duration::from_secs(60);
@@ -57,6 +58,8 @@ pub struct GatewayClient {
   paused_until: Mutex<Option<Instant>>,
   /// One registration at a time; after a refusal, none before the time stored.
   registration: tokio::sync::Mutex<Option<Instant>>,
+  /// The gateway's breaker, once [`Self::watch_health`] set it.
+  guard: OnceLock<Arc<DependencyGuard>>,
 }
 
 /// The sender of one provider (APNs or FCM) behind a [`GatewayClient`].
@@ -81,6 +84,7 @@ impl GatewayClient {
       http,
       paused_until: Mutex::new(None),
       registration: tokio::sync::Mutex::new(None),
+      guard: OnceLock::new(),
     }))
   }
 
@@ -128,8 +132,35 @@ impl GatewayClient {
         Some(until.saturating_duration_since(Instant::now())),
       ));
     }
+    let maybe_guard = self.guard.get();
+    if let Some(guard) = maybe_guard {
+      // Down: not even sent; the durable retry queue tries again after `Retry-After`.
+      guard
+        .check()
+        .map_err(|open| PushError::unavailable_for(open.to_string(), Some(open.retry_after)))?;
+    }
     let body = serde_json::to_vec(request)
       .map_err(|_| PushError::Invalid("encoding the gateway request failed".into()))?;
+    let result = self.push_body(body).await;
+    if let Some(guard) = maybe_guard {
+      match &result {
+        Err(PushError::Unavailable { .. }) => guard.record_failure(),
+        // Delivered, or an answer about this push or this server: the gateway works.
+        Ok(()) | Err(_) => guard.record_success(),
+      }
+    }
+    result
+  }
+
+  /// The push's health is reported to `guard` from now on (issue #743): `/readyz` shows the
+  /// gateway as down after several failures, and pushes fail fast (into the retry queue) until it
+  /// is probed again. Set once; later calls are ignored.
+  pub fn watch_health(&self, guard: Arc<DependencyGuard>) {
+    // Ignored if already set: one registry per process.
+    let _ = self.guard.set(guard);
+  }
+
+  async fn push_body(&self, body: Vec<u8>) -> Result<(), PushError> {
     let first = self.post(GATEWAY_PUSH_PATH, body.clone()).await;
     let result = match first {
       // The gateway lost us (new database) or this is the first push: register and try once more.

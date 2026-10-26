@@ -1,6 +1,6 @@
 [package]
 name = "teamcraft-net"
-description = "Connection racing for the native clients: Happy Eyeballs (RFC 8305) over any transport"
+description = "Network helpers shared by clients and server: the retry policy, Happy Eyeballs (RFC 8305)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,7 +11,8 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# Native only (TCP for the core's WebSockets, QUIC for calls); the browser does this itself.
+# Happy Eyeballs is native only (TCP for the core's WebSockets, QUIC for calls); the browser does
+# this itself. The retry policy has no dependencies.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 thiserror.workspace = true

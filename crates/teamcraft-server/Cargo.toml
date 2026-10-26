@@ -24,6 +24,8 @@ teamcraft-crypto.workspace = true
 teamcraft-proto.workspace = true
 teamcraft-db.workspace = true
 teamcraft-ops.workspace = true
+# The retry policy shared with the clients (src/dependencies.rs).
+teamcraft-net.workspace = true
 anyhow.workspace = true
 aws-lc-rs.workspace = true
 time.workspace = true
