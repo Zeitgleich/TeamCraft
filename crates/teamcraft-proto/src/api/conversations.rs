@@ -63,7 +63,8 @@ pub struct ConversationResponse {
   /// Absent if the caller is not a member (public channels they could join).
   #[serde(rename = "my_membership", default, skip_serializing_if = "Option::is_none")]
   pub maybe_my_membership: Option<MyMembership>,
-  /// The other participants of DMs and group DMs; empty for channels.
+  /// The participants of DMs and group DMs, the caller included; empty for channels. A DM's are
+  /// the people it was opened for, also once one of them is deactivated.
   #[serde(default)]
   pub participants: Vec<UserSummary>,
   /// The channel's picture (`PUT /api/v1/conversations/{id}/image`, `manage_channel_properties`).
@@ -78,6 +79,17 @@ pub struct ConversationResponse {
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_organizer_user_id: Option<UserId>,
+}
+
+impl ConversationResponse {
+  /// The user's notes to themself: a DM opened with oneself (e2ee.md, "Notes to self"). Decided by
+  /// the DM's participants, never by its current members: a DM whose other person was
+  /// deactivated has only the user left as member and is still not their notes (issue #643).
+  pub fn is_notes_to_self(&self, me: UserId) -> bool {
+    self.kind == ConversationKind::Dm
+      && !self.participants.is_empty()
+      && self.participants.iter().all(|user| user.id == me)
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

@@ -158,20 +158,44 @@ impl Database {
     new: &NewConversation<'_>,
     participants: &[UserId],
   ) -> Result<(ConversationId, bool), DbError> {
-    let mut tx = self.pool().begin().await?;
     let key = new.maybe_participants_key.as_deref();
-    let existing = sqlx::query_scalar!("SELECT id FROM conversations WHERE participants_key = $1", key)
-      .fetch_optional(&mut *tx)
-      .await?;
-    if let Some(id) = existing {
-      return Ok((from_db(id)?, false));
+    if let Some(id) = self.participants_conversation(key).await? {
+      return Ok((id, false));
     }
+    match self.insert_participants_conversation(new, participants).await {
+      Ok(()) => Ok((new.id, true)),
+      // Two requests for the same people at once (two devices making the notes to self, a retry
+      // after a lost response): the unique key lets one insert win; the other returns its
+      // conversation instead of failing (issue #643).
+      Err(DbError::Query(sqlx::Error::Database(error))) if error.is_unique_violation() => {
+        let maybe_winner = self.participants_conversation(key).await?;
+        maybe_winner
+          .map(|id| (id, false))
+          .ok_or_else(|| DbError::InvalidStoredValue("participants conversation vanished".to_owned()))
+      },
+      Err(error) => Err(error),
+    }
+  }
+
+  async fn participants_conversation(&self, key: Option<&str>) -> Result<Option<ConversationId>, DbError> {
+    let existing = sqlx::query_scalar!("SELECT id FROM conversations WHERE participants_key = $1", key)
+      .fetch_optional(self.pool())
+      .await?;
+    from_db_opt(existing)
+  }
+
+  async fn insert_participants_conversation(
+    &self,
+    new: &NewConversation<'_>,
+    participants: &[UserId],
+  ) -> Result<(), DbError> {
+    let mut tx = self.pool().begin().await?;
     insert_conversation(&mut tx, new).await?;
     for participant in participants {
       insert_membership(&mut tx, new.id, *participant, ChannelRole::Member).await?;
     }
     tx.commit().await?;
-    Ok((new.id, true))
+    Ok(())
   }
 
   pub async fn get_conversation(
@@ -498,17 +522,22 @@ impl Database {
     Ok(())
   }
 
-  /// Participants of DMs / group DMs, by conversation.
+  /// Participants of DMs / group DMs, by conversation. A DM's participants are the two people
+  /// (or the one, for notes to self) it was opened for, from its [`participants_key`]: a
+  /// deactivated user loses their memberships, yet the DM with them stays the DM with them and
+  /// never turns into a conversation of the user alone (issue #643). A group DM's are its members.
   pub async fn participants_of(
     &self,
     conversations: &[ConversationId],
   ) -> Result<HashMap<ConversationId, Vec<User>>, DbError> {
     let rows = sqlx::query!(
-      r#"SELECT m.conversation_id, u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,
+      r#"SELECT c.id AS conversation_id, u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,
                 u.deactivated_at IS NOT NULL AS "is_deactivated!"
-         FROM memberships m JOIN users u ON u.id = m.user_id
-         JOIN conversations c ON c.id = m.conversation_id
-         WHERE m.conversation_id = ANY($1) AND c.kind IN ('dm', 'group')
+         FROM conversations c JOIN users u
+           ON (c.kind = 'dm' AND u.id = ANY(string_to_array(c.participants_key, '-')::bigint[]))
+           OR (c.kind = 'group'
+               AND EXISTS (SELECT 1 FROM memberships m WHERE m.conversation_id = c.id AND m.user_id = u.id))
+         WHERE c.id = ANY($1) AND c.kind IN ('dm', 'group')
          ORDER BY u.display_name, u.id"#,
       &to_db_all(conversations),
     )

@@ -1,11 +1,11 @@
 //! Pure grouping of conversations into sidebar sections: the channels of a space, and the
 //! Home (DMs and group DMs live outside spaces).
 
+use std::collections::HashSet;
+
 use teamcraft_client_api::activity::{ActivityItem, ActivityKind};
 
-use crate::model::{
-  Conversation, ConversationId, ConversationKind, SidebarCategory, SpaceId, TimestampMs, UserId,
-};
+use crate::model::{Conversation, ConversationId, ConversationKind, SidebarCategory, SpaceId, TimestampMs};
 use crate::prefs::{DmSort, SidebarSort};
 
 /// Sidebar sections of a space in display order.
@@ -187,15 +187,17 @@ pub struct DirectList {
 /// visible beyond it.
 pub fn build_direct(
   conversations: Vec<(Conversation, Option<TimestampMs>)>,
-  me: UserId,
   sort: DmSort,
   limit: usize,
   filter: &str,
   chip: HomeFilter,
 ) -> DirectList {
   let needle = filter.trim().to_lowercase();
+  let mut seen = HashSet::new();
   let mut list: Vec<(Conversation, Option<TimestampMs>)> = conversations
     .into_iter()
+    // Each conversation is one row, however often a caller hands it over (issue #643).
+    .filter(|(conversation, _)| seen.insert(conversation.id))
     .filter(|(conversation, _)| conversation.kind.is_direct_like() && chip.matches(conversation))
     .filter(|(conversation, _)| needle.is_empty() || conversation.name.to_lowercase().contains(&needle))
     .collect();
@@ -210,7 +212,7 @@ pub fn build_direct(
   let (notes, list): (Vec<_>, Vec<_>) = list
     .into_iter()
     .map(|(conversation, _)| conversation)
-    .partition(|conversation| conversation.is_notes_to_self(me));
+    .partition(|conversation| conversation.is_notes_to_self);
   let (favorites, rest): (Vec<Conversation>, Vec<Conversation>) = list
     .into_iter()
     .partition(|conversation| conversation.is_favorite);
@@ -370,6 +372,7 @@ pub fn build_grouped(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::model::UserId;
 
   #[test]
   fn badge_counts_mentions_and_unread_direct_messages() {
@@ -565,16 +568,50 @@ mod tests {
       let mut notes = direct(9, 0, None);
       notes.0.name = "Zoe".into();
       notes.0.member_ids = vec![me()];
+      notes.0.is_notes_to_self = true;
       let mut conversations = sample();
       conversations.push(notes);
-      let list = build_direct(conversations, me(), DmSort::Recent, 0, "", HomeFilter::All);
+      let list = build_direct(conversations, DmSort::Recent, 0, "", HomeFilter::All);
       assert_eq!(list.sections[0].kind, DirectSectionKind::Notes);
       assert_eq!(names(&list)[0], ["Zoe"]);
     }
 
     #[test]
+    fn a_dm_left_with_only_the_user_is_not_a_second_notes() {
+      // The other person was deactivated: the user is the DM's only member, yet it stays a DM.
+      let mut notes = direct(9, 0, None);
+      notes.0.name = "Zoe".into();
+      notes.0.is_notes_to_self = true;
+      let mut orphan = direct(10, 0, None);
+      orphan.0.name = "Former colleague".into();
+      orphan.0.member_ids = vec![me()];
+      let mut conversations = sample();
+      conversations.extend([notes, orphan]);
+      let list = build_direct(conversations, DmSort::Recent, 0, "", HomeFilter::All);
+      assert_eq!(names(&list)[0], ["Zoe"]);
+      assert!(names(&list)[1].contains(&"Former colleague"));
+    }
+
+    #[test]
+    fn a_conversation_handed_over_twice_is_one_row() {
+      let mut notes = direct(9, 0, None);
+      notes.0.is_notes_to_self = true;
+      let mut conversations = sample();
+      conversations.extend([notes.clone(), notes]);
+      let list = build_direct(conversations, DmSort::Recent, 0, "", HomeFilter::All);
+      assert_eq!(list.sections[0].conversations.len(), 1);
+      let rows: Vec<_> = list
+        .sections
+        .iter()
+        .flat_map(|section| &section.conversations)
+        .collect();
+      let ids: HashSet<_> = rows.iter().map(|conversation| conversation.id).collect();
+      assert_eq!(ids.len(), rows.len());
+    }
+
+    #[test]
     fn newest_first_without_channels() {
-      let list = build_direct(sample(), me(), DmSort::Recent, 0, "", HomeFilter::All);
+      let list = build_direct(sample(), DmSort::Recent, 0, "", HomeFilter::All);
       assert_eq!(names(&list), [vec!["zed", "Amy, bob", "Amy", "bob"]]);
       assert_eq!(list.hidden_count, 0);
     }
@@ -583,7 +620,7 @@ mod tests {
     fn alphabetical_with_favorites_first() {
       let mut conversations = sample();
       conversations[1].0.is_favorite = true;
-      let list = build_direct(conversations, me(), DmSort::Alphabetical, 0, "", HomeFilter::All);
+      let list = build_direct(conversations, DmSort::Alphabetical, 0, "", HomeFilter::All);
       assert_eq!(names(&list), [vec!["zed"], vec!["Amy", "Amy, bob", "bob"]]);
       assert_eq!(list.sections[0].kind, DirectSectionKind::Favorites);
     }
@@ -592,7 +629,7 @@ mod tests {
     fn the_limit_keeps_unread_ones() {
       let mut conversations = sample();
       conversations[2].0.unread_count = 1;
-      let list = build_direct(conversations, me(), DmSort::Recent, 1, "", HomeFilter::All);
+      let list = build_direct(conversations, DmSort::Recent, 1, "", HomeFilter::All);
       assert_eq!(names(&list), [vec!["zed", "bob"]]);
       assert_eq!(list.hidden_count, 2);
     }
@@ -603,39 +640,25 @@ mod tests {
       conversations[2].0.unread_count = 1;
       conversations[0].0.unread_count = 3;
       conversations[0].0.is_muted = true;
-      let unread = build_direct(
-        conversations.clone(),
-        me(),
-        DmSort::Recent,
-        1,
-        "",
-        HomeFilter::Unread,
-      );
+      let unread = build_direct(conversations.clone(), DmSort::Recent, 1, "", HomeFilter::Unread);
       assert_eq!(
         names(&unread),
         [vec!["bob"]],
         "muted without a mention isn't unread; no limit"
       );
-      let people = build_direct(
-        conversations.clone(),
-        me(),
-        DmSort::Recent,
-        0,
-        "",
-        HomeFilter::People,
-      );
+      let people = build_direct(conversations.clone(), DmSort::Recent, 0, "", HomeFilter::People);
       assert_eq!(names(&people), [vec!["zed", "Amy", "bob"]]);
-      let groups = build_direct(conversations, me(), DmSort::Recent, 0, "", HomeFilter::Groups);
+      let groups = build_direct(conversations, DmSort::Recent, 0, "", HomeFilter::Groups);
       assert_eq!(names(&groups), [vec!["Amy, bob"]]);
     }
 
     #[test]
     fn filtering_ignores_case_and_the_limit() {
-      let list = build_direct(sample(), me(), DmSort::Recent, 1, " AMY ", HomeFilter::All);
+      let list = build_direct(sample(), DmSort::Recent, 1, " AMY ", HomeFilter::All);
       assert_eq!(names(&list), [vec!["Amy, bob", "Amy"]]);
       assert_eq!(list.hidden_count, 0);
       assert!(
-        build_direct(sample(), me(), DmSort::Recent, 0, "nobody", HomeFilter::All)
+        build_direct(sample(), DmSort::Recent, 0, "nobody", HomeFilter::All)
           .sections
           .is_empty()
       );
@@ -727,6 +750,7 @@ mod tests {
       can_post: true,
       bookmarks: Vec::new(),
       is_catching_up: false,
+      is_notes_to_self: false,
       maybe_image_version: None,
     }
   }

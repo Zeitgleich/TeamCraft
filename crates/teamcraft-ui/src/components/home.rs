@@ -37,14 +37,7 @@ pub fn HomeSidebar() -> impl IntoView {
       .prefs
       .with(|prefs| (prefs.sidebar.dm_sort, prefs.sidebar.dm_limit as usize));
     let limit = if show_all.get() { 0 } else { limit };
-    build_direct(
-      state.direct_entries(),
-      state.me().id,
-      sort,
-      limit,
-      &query.get(),
-      chip.get(),
-    )
+    build_direct(state.direct_entries(), sort, limit, &query.get(), chip.get())
   });
   let has_any = Memo::new(move |_| state.read(|backend| !backend.direct_conversations().is_empty()));
 
@@ -278,7 +271,7 @@ fn DirectItem(conversation: Conversation) -> impl IntoView {
         .find(|member| *member != me)
     })
     .flatten();
-  let is_notes = conversation.is_notes_to_self(me);
+  let is_notes = conversation.is_notes_to_self;
   let leading = match maybe_other {
     _ if is_notes => {
       view! { <span class="home-avatar home-avatar-group"><Icon name=IconName::Compose /></span> }.into_any()

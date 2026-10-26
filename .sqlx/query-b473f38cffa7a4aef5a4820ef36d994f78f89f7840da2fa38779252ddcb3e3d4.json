@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT m.conversation_id, u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,\n                u.deactivated_at IS NOT NULL AS \"is_deactivated!\"\n         FROM memberships m JOIN users u ON u.id = m.user_id\n         JOIN conversations c ON c.id = m.conversation_id\n         WHERE m.conversation_id = ANY($1) AND c.kind IN ('dm', 'group')\n         ORDER BY u.display_name, u.id",
+  "query": "SELECT c.id AS conversation_id, u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,\n                u.deactivated_at IS NOT NULL AS \"is_deactivated!\"\n         FROM conversations c JOIN users u\n           ON (c.kind = 'dm' AND u.id = ANY(string_to_array(c.participants_key, '-')::bigint[]))\n           OR (c.kind = 'group'\n               AND EXISTS (SELECT 1 FROM memberships m WHERE m.conversation_id = c.id AND m.user_id = u.id))\n         WHERE c.id = ANY($1) AND c.kind IN ('dm', 'group')\n         ORDER BY u.display_name, u.id",
   "describe": {
     "columns": [
       {
@@ -9,8 +9,8 @@
         "type_info": "Int8",
         "origin": {
           "Table": {
-            "table": "memberships",
-            "name": "conversation_id"
+            "table": "conversations",
+            "name": "id"
           }
         }
       },
@@ -103,5 +103,5 @@
       null
     ]
   },
-  "hash": "e2f51e59e0fde4cdc226a3670697c0a012df63162b16a786be09e11b9ea0e7c7"
+  "hash": "b473f38cffa7a4aef5a4820ef36d994f78f89f7840da2fa38779252ddcb3e3d4"
 }

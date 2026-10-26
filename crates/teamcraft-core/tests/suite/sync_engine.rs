@@ -611,6 +611,6 @@ async fn every_user_gets_one_notes_to_self() {
   alice.gateway = gateway;
   let notes = common::backend_of(&alice).direct_conversations();
   assert_eq!(notes.len(), 1);
-  assert!(notes[0].is_notes_to_self(me), "its only member is the user");
+  assert!(notes[0].is_notes_to_self, "its only member is the user");
   assert_eq!(alice.client.open_dm(me).await.unwrap(), id);
 }

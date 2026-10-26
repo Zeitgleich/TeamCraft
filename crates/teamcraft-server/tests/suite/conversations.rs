@@ -559,13 +559,63 @@ mod direct_messages {
         .status,
       StatusCode::NOT_FOUND
     );
-    assert_eq!(
-      app
-        .post(&carol, "/dms", json!({"user_id": carol_id}))
-        .await
-        .status,
-      StatusCode::BAD_REQUEST
+    // A DM with oneself is the user's notes to self, with the user as its only participant.
+    let notes = app.post(&carol, "/dms", json!({"user_id": carol_id})).await;
+    assert_eq!(notes.status, StatusCode::CREATED, "{}", notes.body);
+    assert_eq!(notes.body["participants"].as_array().unwrap().len(), 1);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn notes_to_self_opened_by_two_devices_at_once_are_one_conversation() {
+    let app = app!();
+    let carol = member("carol");
+    let carol_id = user_id(&app, &carol).await;
+
+    let body = json!({"user_id": carol_id});
+    let (first, second) = tokio::join!(
+      app.post(&carol, "/dms", body.clone()),
+      app.post(&carol, "/dms", body)
     );
+    assert!(first.status.is_success(), "{}", first.body);
+    assert!(second.status.is_success(), "{}", second.body);
+    assert_eq!(first.id(), second.id());
+    let list = app.get(&carol, "/conversations").await;
+    let dms = list.body["conversations"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .filter(|conversation| conversation["kind"] == "dm")
+      .count();
+    assert_eq!(dms, 1);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_dm_keeps_its_participants_when_one_is_deactivated() {
+    let app = app!();
+    let (bob, carol, dave) = (admin(), member("carol"), member("dave"));
+    let (carol_id, dave_id) = (user_id(&app, &carol).await, user_id(&app, &dave).await);
+    let dm = app.post(&carol, "/dms", json!({"user_id": dave_id})).await;
+    assert_eq!(dm.status, StatusCode::CREATED, "{}", dm.body);
+
+    let done = app
+      .post(&bob, &format!("/admin/users/{dave_id}/deactivate"), json!({}))
+      .await;
+    assert_eq!(done.status, StatusCode::NO_CONTENT, "{}", done.body);
+
+    // Issue #643: with Dave's membership gone the DM must not look like Carol's notes to self.
+    let reply = app.get(&carol, &format!("/conversations/{}", dm.id())).await;
+    let mut participants: Vec<String> = reply.body["participants"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .map(|user| user["id"].as_str().unwrap().to_owned())
+      .collect();
+    participants.sort();
+    let mut expected = vec![carol_id, dave_id];
+    expected.sort();
+    assert_eq!(participants, expected);
     app.stop().await;
   }
 

@@ -240,11 +240,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(());
     }
     let me = self.user_id();
-    let has_notes = self.cached_conversations()?.values().any(|conversation| {
-      conversation.kind == ConversationKind::Dm
-        && conversation.participants.len() == 1
-        && conversation.participants.iter().all(|user| user.id == me)
-    });
+    let has_notes = self
+      .cached_conversations()?
+      .values()
+      .any(|conversation| conversation.is_notes_to_self(me));
     if has_notes {
       return Ok(());
     }
