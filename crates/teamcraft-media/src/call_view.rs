@@ -24,6 +24,8 @@ pub struct CallRoster {
   maybe_own_screen: Option<MediaStreamId>,
   /// Others' devices whose connection was lost and who are rejoining.
   reconnecting: BTreeSet<DeviceId>,
+  /// Others' devices whose microphone is muted (their own report).
+  muted: BTreeSet<DeviceId>,
 }
 
 impl CallRoster {
@@ -62,10 +64,20 @@ impl CallRoster {
         roster.users_by_device.remove(&device_id);
         roster.sharing_screen.remove(&device_id);
         roster.reconnecting.remove(&device_id);
+        roster.muted.remove(&device_id);
         active.reconnecting = roster.reconnecting_users();
+      },
+      CallEngineEvent::ParticipantMuted { device_id, is_muted } => {
+        if is_muted {
+          roster.muted.insert(device_id);
+        } else {
+          roster.muted.remove(&device_id);
+        }
       },
       CallEngineEvent::Reconnecting => {
         active.is_reconnecting = true;
+        // The SFU's answer to the rejoin names the muted devices again.
+        roster.muted.clear();
         // Who else is away comes again with the SFU's answer to the rejoin.
         roster.reconnecting.clear();
         active.reconnecting.clear();
@@ -223,12 +235,13 @@ impl CallRoster {
     for (device, user) in &self.users_by_device {
       let participant = by_user.entry(*user).or_insert(Participant {
         user: *user,
-        // The SFU doesn't report others' mute state yet; silence shows as not speaking.
-        is_muted: false,
+        // Muted when every device of the person in the call is.
+        is_muted: true,
         is_camera_on: false,
         has_hand_raised: false,
         is_sharing_screen: false,
       });
+      participant.is_muted &= self.muted.contains(device);
       participant.is_sharing_screen |= self.sharing_screen.contains(device);
       participant.is_camera_on |= self
         .video_devices
@@ -304,6 +317,35 @@ mod tests {
       );
       assert!(active.is_secured);
       assert_eq!(active.maybe_privacy_code.as_deref(), Some("123"));
+    }
+
+    #[test]
+    fn a_person_shows_muted_when_every_device_of_them_in_the_call_is() {
+      let mut view = active_view();
+      let mut roster = CallRoster::new(device(10));
+      for event in [
+        CallEngineEvent::ParticipantJoined(participant(2, 20)),
+        CallEngineEvent::ParticipantJoined(participant(2, 21)),
+        CallEngineEvent::ParticipantMuted {
+          device_id: device(20),
+          is_muted: true,
+        },
+      ] {
+        roster.apply(&mut view, event);
+      }
+      let is_muted = |view: &CallView| view.maybe_active.as_ref().unwrap().participants[0].is_muted;
+      assert!(!is_muted(&view), "the second device is not muted");
+      roster.apply(
+        &mut view,
+        CallEngineEvent::ParticipantMuted {
+          device_id: device(21),
+          is_muted: true,
+        },
+      );
+      assert!(is_muted(&view));
+      roster.apply(&mut view, CallEngineEvent::Reconnecting);
+      roster.apply(&mut view, CallEngineEvent::ParticipantJoined(participant(2, 20)));
+      assert!(!is_muted(&view), "forgotten until the SFU says it again");
     }
 
     #[test]

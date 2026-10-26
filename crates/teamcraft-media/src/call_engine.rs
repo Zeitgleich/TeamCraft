@@ -94,6 +94,8 @@ pub struct CallEngine {
   screen_rtp: AudioRtpState,
   last_event_seq: u64,
   is_muted: bool,
+  /// The mute state the SFU was last told (it starts a slot unmuted).
+  is_mute_announced: bool,
   is_deafened: bool,
   outputs: VecDeque<EngineOutput>,
 }
@@ -136,6 +138,11 @@ pub enum CallEngineEvent {
   ParticipantReconnecting(DeviceId),
   ParticipantReconnected(DeviceId),
   ActiveSpeakers(Vec<DeviceId>),
+  /// Another device muted or unmuted its microphone.
+  ParticipantMuted {
+    device_id: DeviceId,
+    is_muted: bool,
+  },
   /// The DAVE group (re)keyed; media is end-to-end encrypted. Compare `privacy_code` out of band.
   Secured {
     epoch: u64,
@@ -305,6 +312,7 @@ impl CallEngine {
       screen_rtp: AudioRtpState::new(),
       last_event_seq: 0,
       is_muted: false,
+      is_mute_announced: false,
       is_deafened: false,
       outputs: VecDeque::new(),
     }
@@ -404,6 +412,17 @@ impl CallEngine {
     if self.is_muted != is_muted {
       self.is_muted = is_muted;
       self.event(CallEngineEvent::MuteChanged(is_muted));
+      self.announce_mute();
+    }
+  }
+
+  /// Tells the SFU (and through it the others) whether this device is muted, once in the call.
+  fn announce_mute(&mut self) {
+    if matches!(self.phase, Phase::Joined { .. }) && self.is_muted != self.is_mute_announced {
+      self.is_mute_announced = self.is_muted;
+      self.signal(CallClientMessage::SetMuted {
+        is_muted: self.is_muted,
+      });
     }
   }
 
@@ -663,6 +682,10 @@ impl CallEngine {
         self.event(CallEngineEvent::ParticipantReconnected(device_id));
         Ok(())
       },
+      CallEvent::ParticipantMuted { device_id, is_muted } => {
+        self.event(CallEngineEvent::ParticipantMuted { device_id, is_muted });
+        Ok(())
+      },
       CallEvent::ActiveSpeakers { device_ids } => {
         self.event(CallEngineEvent::ActiveSpeakers(device_ids));
         Ok(())
@@ -773,6 +796,8 @@ impl CallEngine {
       call_id,
       audio_stream: StreamId(participant.audio_stream_id.0),
     };
+    // Muted from the start: the others see it from the first moment.
+    self.announce_mute();
     self.maybe_dave = Some(DaveParticipant::new(
       DaveParticipantId::from_device(self.config.device_id),
       DaveCallId::from_call(call_id),
@@ -806,6 +831,12 @@ impl CallEngine {
       call_id,
       audio_stream: StreamId(participant.audio_stream_id.0),
     };
+    // The slot is the SFU's last state of this device, or a fresh unmuted one after an SFU
+    // restart: say the current state whenever either could differ from it.
+    if self.is_muted || self.is_mute_announced {
+      self.is_mute_announced = !self.is_muted;
+      self.announce_mute();
+    }
     self.maybe_dave = Some(DaveParticipant::new(
       DaveParticipantId::from_device(self.config.device_id),
       DaveCallId::from_call(call_id),

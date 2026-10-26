@@ -129,6 +129,38 @@ async fn moving_the_call_here_closes_only_the_accounts_other_devices() {
   );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn others_see_who_muted_also_when_they_join_later() {
+  let (port, hash) = start_sfu().await;
+  let mut laptop = join(port, hash, ALICE, ALICE_LAPTOP).await;
+  let mut bob = join(port, hash, BOB, BOB_DEVICE).await;
+  wait_for(&mut laptop, |event| {
+    matches!(event, CallEngineEvent::Secured { .. })
+  })
+  .await;
+  wait_for(&mut bob, |event| matches!(event, CallEngineEvent::Secured { .. })).await;
+  let bob_device: DeviceId = id_of(BOB_DEVICE);
+
+  bob.set_muted(true);
+  wait_for(&mut laptop, |event| {
+    matches!(event, CallEngineEvent::ParticipantMuted { device_id, is_muted: true } if *device_id == bob_device)
+  })
+  .await;
+
+  // Somebody joining now learns it with the call's state.
+  let mut phone = join(port, hash, ALICE, ALICE_PHONE).await;
+  wait_for(&mut phone, |event| {
+    matches!(event, CallEngineEvent::ParticipantMuted { device_id, is_muted: true } if *device_id == bob_device)
+  })
+  .await;
+
+  bob.set_muted(false);
+  wait_for(&mut laptop, |event| {
+    matches!(event, CallEngineEvent::ParticipantMuted { device_id, is_muted: false } if *device_id == bob_device)
+  })
+  .await;
+}
+
 async fn join(port: u16, certificate_hash: [u8; 32], user: u64, device: u64) -> NativeCall {
   let engine = CallEngineConfig {
     user_id: id_of::<UserId>(user),
