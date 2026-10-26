@@ -43,6 +43,7 @@ mod sending;
 mod snapshot_cache;
 mod store_integrity;
 mod sync_engine;
+mod sync_heads;
 mod upkeep;
 mod upload_parts;
 mod workspace;

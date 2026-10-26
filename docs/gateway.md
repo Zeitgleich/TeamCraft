@@ -19,6 +19,31 @@ types are ignored on both sides, so new ones can be added without breaking old c
    `heartbeat_timeout_secs` is closed. After `connection_max_age_secs` the server closes it so a
    fresh token is checked; clients reconnect with `resume`.
 
+### The sync after `ready` (issue #714)
+
+A fresh session costs what changed since the device was last caught up, not what the workspace holds:
+
+- Right after `ready` the client sends its first reads at once: `GET /sync/heads`, the spaces and
+  conversations, the roster and policy log, the first page of welcomes, threads and unread counts,
+  notification settings, key package status, key bag, its own device list, presence of the people it
+  knows and the open link requests. None needs another's answer; each step of the sync takes its answer
+  instead of asking again. Reads wait for `ready`, so a change after a read always arrives as an event.
+- `GET /sync/heads` names per conversation the newest message and MLS entry the caller can read and a
+  digest of the member list, per space a digest of its member list. The client keeps the heads it caught
+  up to (one record in its store) and reads member lists, MLS queues and history only where a head moved,
+  or where local work needs a read anyway (no group yet, a commit of its own not landed, messages waiting
+  for keys, an earlier failure). The heads only let the client skip reads; nothing read is trusted
+  because of them. A server without the endpoint (404) makes the client read everything, as before.
+- A resume reads the once-per-connection data (counts and threads, presence, link requests, its own
+  summary) at once, and when the connection was heard from within the last minute (a network blip, not
+  an app started again) already while the server answers `resume`: the session kept every event in
+  between, so nothing read then can be missed. With events to replay the counts are read only after the
+  replay (`counted_through`).
+
+The client logs where the time of each connection went (`gateway connection caught up` with the phases;
+`Client::last_connection_phases`); docs/performance.md, "Coming back: requests and round trips", has the
+numbers.
+
 ## Events and resume
 
 Every `event` frame has a `seq` that grows by one per session. The server keeps the last

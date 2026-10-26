@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,6 +17,9 @@ const REFRESH_AFTER: Duration = Duration::from_secs(150);
 pub struct UserTokens {
   user: String,
   cache: Arc<Mutex<Option<(String, Instant)>>>,
+  /// How often a client asked for the token: once per API request and gateway handshake, so the
+  /// perf tests count a client's requests with it.
+  uses: Arc<AtomicU64>,
 }
 
 impl UserTokens {
@@ -23,7 +27,13 @@ impl UserTokens {
     Self {
       user: user.to_owned(),
       cache: Arc::default(),
+      uses: Arc::default(),
     }
+  }
+
+  /// Requests made with these tokens so far (API calls and gateway handshakes).
+  pub fn uses(&self) -> u64 {
+    self.uses.load(Ordering::Relaxed)
   }
 
   pub fn user(&self) -> &str {
@@ -55,6 +65,7 @@ impl UserTokens {
 
 impl AccessTokenSource for UserTokens {
   fn access_token(&self) -> Result<String, ApiError> {
+    self.uses.fetch_add(1, Ordering::Relaxed);
     // `block_in_place` needs the multi-thread runtime, which every e2e test uses.
     tokio::task::block_in_place(|| self.token()).map_err(ApiError::Token)
   }

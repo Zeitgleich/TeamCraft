@@ -40,6 +40,7 @@ mod share_link;
 mod snowflake;
 mod space;
 mod status;
+mod sync_heads;
 mod system_event;
 #[cfg(feature = "integration")]
 pub mod testing;
@@ -100,6 +101,7 @@ pub use space::{
   SpaceMember, SpaceView, StoredSpaceImage,
 };
 pub use status::StoredStatus;
+pub use sync_heads::ConversationHeadRow;
 pub use system_event::{NewSystemEvent, StoredSystemEvent};
 pub use thread::{ConversationUnreadRow, FollowedThread, ThreadActivity, ThreadQuery, ThreadUnreadTotals};
 pub use urgent::{Acknowledgement, DueReminder};

@@ -421,7 +421,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Replaces the list with what the server holds (after a (re)connect: events in between were
   /// lost). Failures are only logged; the next connect tries again.
   pub(super) async fn refresh_link_requests(&mut self) {
-    let requests = match self.api.device_links().await {
+    let read = match self.read_ahead.link_requests.take() {
+      Some(read) => read,
+      None => self.api.device_links().await,
+    };
+    let requests = match read {
       Ok(requests) => requests,
       Err(error) => {
         tracing::debug!(%error, "could not read the open device link requests");

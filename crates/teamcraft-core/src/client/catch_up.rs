@@ -179,11 +179,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .refresh_members_around_focus(members_order, &mut ahead, &phases)
       .await?;
     phases.lap("member lists", self.now_ms());
+    self.trace_lap("catch-up: member lists");
     self.sync_welcomes_around_focus(&mut ahead, &phases).await?;
     phases.lap("welcomes", self.now_ms());
+    self.trace_lap("catch-up: welcomes");
     // After the welcomes: a member's add (with a Welcome) wins over claiming the place ourselves.
     self.join_missing_groups().await?;
     phases.lap("missing groups", self.now_ms());
+    self.trace_lap("catch-up: missing groups");
     if let Err(error) = self.ensure_notes_to_self().await {
       // Not fatal: the next catch-up tries again.
       tracing::warn!(%error, "could not make the notes to self");
@@ -195,6 +198,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .collect();
     self.catch_up_each(waiting, &phases).await?;
     phases.lap("content", self.now_ms());
+    self.trace_lap("catch-up: content");
     tracing::info!(
       conversations = conversations.len(),
       total_ms = phases.total_ms(),
@@ -269,12 +273,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   ) -> Result<(), CoreError> {
     // As in `sync_welcomes`: spent key packages wait until every welcome was read (#395).
     self.are_welcomes_synced = false;
+    let mut maybe_first = self
+      .read_ahead
+      .welcomes
+      .take()
+      .filter(|(after, _)| *after == self.sync.maybe_welcome_cursor)
+      .map(|(_, page)| page);
     loop {
       let query = ListMlsMessagesQuery {
         maybe_after: self.sync.maybe_welcome_cursor,
         maybe_limit: None,
       };
-      let page = self.api.list_welcomes(self.account.device_id, &query).await?;
+      let page = match maybe_first.take() {
+        Some(first) => first?,
+        None => self.api.list_welcomes(self.account.device_id, &query).await?,
+      };
       for welcome in &page.messages {
         self.catch_up_focus_ahead(ahead, phases).await?;
         self.join_from_welcome(welcome).await?;
@@ -405,7 +418,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .await?;
     self.retry_undecrypted(conversation)?;
     // Senders this device has no verified key for yet (it isn't in the group, or just joined).
-    self.learn_sender_keys(conversation).await
+    self.learn_sender_keys(conversation).await?;
+    self.note_content_seen(conversation);
+    Ok(())
   }
 
   /// Reads the first page of each conversation's MLS queue and messages at once. Failures are
@@ -428,13 +443,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let reads = queries
       .iter()
       .map(|(conversation, maybe_mls, messages)| async move {
-        let maybe_mls = match maybe_mls {
-          Some(query) => Some(api.list_mls_messages(*conversation, query).await),
-          None => None,
+        // Both pages at once: one round trip per conversation, not two (#714).
+        let mls = async {
+          match maybe_mls {
+            Some(query) => Some(api.list_mls_messages(*conversation, query).await),
+            None => None,
+          }
         };
+        let (maybe_mls, messages) = futures_util::join!(mls, api.list_messages(*conversation, messages));
         FirstPages {
           maybe_mls,
-          maybe_messages: Some(api.list_messages(*conversation, messages).await),
+          maybe_messages: Some(messages),
         }
       });
     Ok(join_all(reads).await)

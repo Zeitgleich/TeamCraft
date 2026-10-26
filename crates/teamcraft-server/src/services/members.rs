@@ -1,5 +1,5 @@
 use serde_json::json;
-use teamcraft_db::MembershipChanges;
+use teamcraft_db::{ConversationMember, MembershipChanges};
 use teamcraft_proto::{
   AddConversationMemberRequest, ChannelRole, ConversationId, ConversationMemberResponse,
   ConversationVisibility, GatewayEvent, ListConversationMembersResponse, Permission, SetReadPositionRequest,
@@ -30,7 +30,12 @@ pub async fn list_members(
     ));
   }
   let members = state.database.list_conversation_members(id).await?;
-  Ok(ListConversationMembersResponse {
+  Ok(members_response(state, &members))
+}
+
+/// The answer of `GET …/members` for these members (also what `GET /sync/heads` digests).
+pub fn members_response(state: &AppState, members: &[ConversationMember]) -> ListConversationMembersResponse {
+  ListConversationMembersResponse {
     members: members
       .iter()
       .map(|member| ConversationMemberResponse {
@@ -38,7 +43,7 @@ pub async fn list_members(
         role: member.role.clone(),
       })
       .collect(),
-  })
+  }
 }
 
 /// Joins a public channel of one of the caller's spaces. Guests are added by someone with `manage_members`.

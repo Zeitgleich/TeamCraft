@@ -67,7 +67,7 @@ use teamcraft_proto::{GatewayInfoResponse, PushGatewayResponse, WebPushKeyRespon
 use teamcraft_proto::{
   ListCallHistoryQuery, ListCallHistoryResponse, ListPresenceResponse, PrivacyResponse, UpdatePrivacyRequest,
 };
-use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, UnreadResponse};
+use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, SyncHeadsResponse, UnreadResponse};
 use teamcraft_proto::{NotificationSettings, TestPushResponse};
 use teamcraft_proto::{RendezvousClientMessage, RendezvousServerMessage};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
@@ -369,6 +369,9 @@ pub trait ServerApi {
   ) -> impl Future<Output = Result<ListThreadsResponse, ApiError>>;
   /// Unread and mention counts (`GET /unread`).
   fn unread(&self) -> impl Future<Output = Result<UnreadResponse, ApiError>>;
+  /// Where each of the user's conversations and spaces stands (`GET /sync/heads`, issue #714); a
+  /// bare 404 from a server older than the endpoint.
+  fn sync_heads(&self) -> impl Future<Output = Result<SyncHeadsResponse, ApiError>>;
 
   fn post_mls_commit(
     &self,
