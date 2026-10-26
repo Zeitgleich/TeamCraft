@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 
 use crate::calls::{CallKind, CallPhase, CallRequest};
+use crate::channel_access::ChannelAccess;
 use crate::components::avatar::{Avatar, AvatarSize, PresenceDot};
 use crate::components::bookmarks::BookmarksBar;
 use crate::components::channel_glyph::ChannelGlyph;
@@ -505,11 +506,14 @@ fn ChannelHeader(
   });
   let is_favorite = move || info.get().is_some_and(|conv| conv.is_favorite);
   let member_count = move || info.get().map_or(0, |conv| conv.member_ids.len());
-  // Channels take people in from the header; direct messages start a new group instead.
-  let is_channel = move || {
+  // Channels take people in from the header, for people who may add members; direct messages
+  // start a new group instead.
+  let access = ChannelAccess::new(state, conversation);
+  let can_add_people = move || {
     info
       .get()
       .is_some_and(|conv| matches!(conv.kind, ConversationKind::Public | ConversationKind::Private))
+      && access.can_add_members()
   };
   let members_open = move || state.panel.get() == SidePanel::Members;
   let search_label = move || {
@@ -600,7 +604,7 @@ fn ChannelHeader(
         >
           <Icon name=IconName::Search />
         </button>
-        <Show when=is_channel fallback=|| ()>
+        <Show when=can_add_people fallback=|| ()>
           <button
             class="header-btn"
             aria-label=move || i18n.t("channel-add-people")
@@ -711,10 +715,12 @@ fn ConversationMore(
   let is_open = RwSignal::new(false);
   let is_favorite = move || info.get().is_some_and(|conv| conv.is_favorite);
   let member_count = move || info.get().map_or(0, |conv| conv.member_ids.len());
-  let is_channel = move || {
+  let access = ChannelAccess::new(state, conversation);
+  let can_add_people = move || {
     info
       .get()
       .is_some_and(|conv| matches!(conv.kind, ConversationKind::Public | ConversationKind::Private))
+      && access.can_add_members()
   };
   let choose = move |action: fn(AppState, ConversationId, RwSignal<ChannelTab>)| {
     is_open.set(false);
@@ -745,7 +751,7 @@ fn ConversationMore(
             <Icon name=IconName::File />
             {move || if tab.get() == ChannelTab::Files { i18n.t("channel-tab-messages") } else { i18n.t("channel-tab-files") }}
           </button>
-          <Show when=is_channel fallback=|| ()>
+          <Show when=can_add_people fallback=|| ()>
             <button type="button" class="menu-item" role="menuitem" on:click=move |_| choose(|state, conversation, _| state.overlay.set(Overlay::AddToChannel(conversation)))>
               <Icon name=IconName::UserPlus />
               {move || i18n.t("channel-add-people")}

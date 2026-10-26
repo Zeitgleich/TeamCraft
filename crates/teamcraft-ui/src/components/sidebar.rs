@@ -4,6 +4,7 @@ use std::time::Duration;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
+use crate::channel_access::{can_create_channel_in, can_invite_to, is_guest};
 use crate::components::avatar::PresenceDot;
 use crate::components::channel_glyph::ChannelGlyph;
 use crate::components::huddle_bar::CallPill;
@@ -120,16 +121,22 @@ pub fn Sidebar() -> impl IntoView {
             }
           }}
         </h2>
-        <button class="icon-btn" aria-label=move || i18n.t("browse-title") title=move || i18n.t("browse-title") on:click=move |_| state.overlay.set(Overlay::BrowseChannels(state.space.get_untracked()))>
-          <Icon name=IconName::List />
-        </button>
-        <button class="icon-btn" aria-label=move || i18n.t("channel-new-title") title=move || i18n.t("channel-new-title") on:click=move |_| state.overlay.set(Overlay::NewChannel(state.space.get_untracked()))>
-          <Icon name=IconName::Plus />
-        </button>
-        <Show when=move || !is_grouped.get() fallback=|| ()>
-          <button class="icon-btn" aria-label=move || i18n.t("invite-title") title=move || i18n.t("invite-title") on:click=move |_| state.overlay.set(Overlay::InvitePeople(state.space.get_untracked()))>
-            <Icon name=IconName::UserPlus />
+        <Show when=move || !is_guest(state) fallback=|| ()>
+          <button class="icon-btn" aria-label=move || i18n.t("browse-title") title=move || i18n.t("browse-title") on:click=move |_| state.overlay.set(Overlay::BrowseChannels(state.space.get_untracked()))>
+            <Icon name=IconName::List />
           </button>
+        </Show>
+        <Show when=move || can_create_channel_in(state, state.space.get()) fallback=|| ()>
+          <button class="icon-btn" aria-label=move || i18n.t("channel-new-title") title=move || i18n.t("channel-new-title") on:click=move |_| state.overlay.set(Overlay::NewChannel(state.space.get_untracked()))>
+            <Icon name=IconName::Plus />
+          </button>
+        </Show>
+        <Show when=move || !is_grouped.get() fallback=|| ()>
+          <Show when=move || can_invite_to(state, state.space.get()) fallback=|| ()>
+            <button class="icon-btn" aria-label=move || i18n.t("invite-title") title=move || i18n.t("invite-title") on:click=move |_| state.overlay.set(Overlay::InvitePeople(state.space.get_untracked()))>
+              <Icon name=IconName::UserPlus />
+            </button>
+          </Show>
           <button class="icon-btn" aria-label=move || i18n.t("space-settings-title") title=move || i18n.t("space-settings-title") on:click=move |_| state.overlay.set(Overlay::SpaceSettings(state.space.get_untracked()))>
             <Icon name=IconName::Sliders />
           </button>
@@ -354,14 +361,16 @@ fn SpaceGroupSection(group: SpaceGroup, collapsed: RwSignal<HashSet<SpaceId>>) -
         >
           <Icon name=IconName::Bell />
         </button>
-        <button
-          class="icon-btn icon-btn-small"
-          aria-label=move || i18n.t("invite-title")
-          title=move || i18n.t("invite-title")
-          on:click=move |_| state.overlay.set(Overlay::InvitePeople(space))
-        >
-          <Icon name=IconName::UserPlus />
-        </button>
+        <Show when=move || can_invite_to(state, space) fallback=|| ()>
+          <button
+            class="icon-btn icon-btn-small"
+            aria-label=move || i18n.t("invite-title")
+            title=move || i18n.t("invite-title")
+            on:click=move |_| state.overlay.set(Overlay::InvitePeople(space))
+          >
+            <Icon name=IconName::UserPlus />
+          </button>
+        </Show>
         <button
           class="icon-btn icon-btn-small"
           aria-label=move || i18n.t("space-settings-title")
@@ -470,7 +479,7 @@ fn SidebarSection(
         }}
       </ul>
       // The end of the channel list says where the others are.
-      {(kind == SectionKind::Channels)
+      {(kind == SectionKind::Channels && !is_guest(state))
         .then(|| {
           view! {
             <button

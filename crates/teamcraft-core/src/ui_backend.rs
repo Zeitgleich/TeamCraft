@@ -591,10 +591,16 @@ impl<S: LocalStore> CoreChatBackend<S> {
       mention_count: self.mention_count(unread, users.get(&self.me), preferences),
       is_favorite,
       is_muted: self.is_muted(response),
-      can_post: true,
+      can_post: response.may_post(),
       bookmarks: self.bookmarks_of(response.id),
       is_catching_up: self.read(crate::client::is_catching_up(&self.store, response.id)),
       is_notes_to_self,
+      maybe_permissions: response.maybe_my_permissions.clone(),
+      has_only_deactivated_others: response.has_only_deactivated_others(self.me, |participant| {
+        users
+          .get(&participant.id)
+          .map_or(participant.is_deactivated, |user| user.is_deactivated)
+      }),
       maybe_image_version: response.maybe_image.as_ref().map(|image| image.version.clone()),
     }
   }
@@ -926,6 +932,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
         can_add_members: space.can_add_members,
         can_invite_guests: space.can_invite_guests,
         can_manage_space: space.can_manage_space,
+        can_create_channels: space.can_create_channels,
       })
       .collect()
   }
@@ -2143,6 +2150,7 @@ mod tests {
       is_integration: false,
       contains_guests: false,
       maybe_organizer_user_id: None,
+      maybe_my_permissions: None,
       maybe_my_membership: None,
       participants: vec![participant(1, "Alice Example"), participant(2, "Bob Example")],
       maybe_image: None,
@@ -2393,6 +2401,7 @@ mod tests {
         is_integration: false,
         contains_guests: false,
         maybe_organizer_user_id: None,
+        maybe_my_permissions: None,
         maybe_my_membership: None,
         participants: Vec::new(),
         maybe_image: None,

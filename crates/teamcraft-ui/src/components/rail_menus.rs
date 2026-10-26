@@ -6,6 +6,7 @@ use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
+use crate::channel_access::{can_create_channel_in, can_invite_to, is_guest};
 use crate::clock::{now_ms, tomorrow_at};
 use crate::components::icons::{Icon, IconName};
 use crate::components::sheet::MenuSurface;
@@ -64,7 +65,7 @@ impl MenuAnchor {
   }
 }
 
-/// "+": new message, meeting, channel and invitation in one place.
+/// "+": new message, meeting, channel and invitation in one place, each for people who may.
 #[component]
 pub fn RailCreateMenu() -> impl IntoView {
   let state = use_app_state();
@@ -72,10 +73,8 @@ pub fn RailCreateMenu() -> impl IntoView {
   let anchor = MenuAnchor::new();
   let has_meetings = use_context::<MeetingsHub>().is_some();
   let space = move || state.space.get_untracked();
-  let can_manage = Memo::new(move |_| {
-    state.read(|backend| backend.my_role()) != teamcraft_proto::Role::Guest
-      && state.read(|backend| !backend.spaces().is_empty())
-  });
+  let can_create_channel = Memo::new(move |_| can_create_channel_in(state, state.space.get()));
+  let can_invite = Memo::new(move |_| can_invite_to(state, state.space.get()));
   let item = move |icon: IconName, key: &'static str, open: Callback<()>| {
     view! {
       <button
@@ -118,10 +117,12 @@ pub fn RailCreateMenu() -> impl IntoView {
       >
         <div class="rail-menu-body">
           {item(IconName::Compose, "dm-new", Callback::new(move |()| state.overlay.set(Overlay::NewMessage)))}
-          {has_meetings
+          {(has_meetings && !is_guest(state))
             .then(|| item(IconName::Calendar, "meetings-schedule", Callback::new(move |()| state.overlay.set(Overlay::ScheduleMeeting))))}
-          <Show when=move || can_manage.get() fallback=|| ()>
+          <Show when=move || can_create_channel.get() fallback=|| ()>
             {item(IconName::Hash, "channel-new-title", Callback::new(move |()| state.overlay.set(Overlay::NewChannel(space()))))}
+          </Show>
+          <Show when=move || can_invite.get() fallback=|| ()>
             {item(IconName::UserPlus, "invite-title", Callback::new(move |()| state.overlay.set(Overlay::InvitePeople(space()))))}
           </Show>
         </div>

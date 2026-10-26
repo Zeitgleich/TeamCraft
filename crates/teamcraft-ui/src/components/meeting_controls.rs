@@ -3,7 +3,7 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use teamcraft_proto::{MeetingAttendeeResponse, MeetingControlAction, MeetingId, RsvpStatus};
+use teamcraft_proto::{ChannelRole, MeetingAttendeeResponse, MeetingControlAction, MeetingId, RsvpStatus};
 
 use crate::i18n::use_i18n;
 use crate::meetings::MeetingsHub;
@@ -22,12 +22,20 @@ pub fn HostControls(meeting: MeetingId, conversation: ConversationId) -> impl In
   let is_confirming_end = RwSignal::new(false);
   let notice = RwSignal::new(None::<String>);
   let me = state.me().id;
+  // Hosts (the organizer and the meeting chat's admins) can't be removed (docs/meetings.md): they
+  // get no "Remove".
   let participants = Memo::new(move |_| {
     state.read(|backend| {
+      let hosts = backend
+        .channel_roles(conversation)
+        .into_iter()
+        .filter(|member| member.role == ChannelRole::Admin)
+        .map(|member| member.user)
+        .collect::<Vec<_>>();
       backend
         .call_participants(conversation)
         .into_iter()
-        .filter(|participant| participant.user != me)
+        .filter(|participant| participant.user != me && !hosts.contains(&participant.user))
         .filter_map(|participant| backend.user(participant.user))
         .collect::<Vec<_>>()
     })

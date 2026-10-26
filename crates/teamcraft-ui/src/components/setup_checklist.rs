@@ -5,6 +5,7 @@
 use leptos::prelude::*;
 
 use crate::brand::Brand;
+use crate::channel_access::{can_invite_to, is_guest};
 use crate::components::calls_unavailable::DEFAULT_DOWNLOAD_PAGE_URL;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
@@ -65,20 +66,27 @@ pub fn SetupChecklist() -> impl IntoView {
     (step == SetupStep::ProfilePicture && has_picture())
       || prefs.with(|all| all.onboarding.done.contains(&step))
   };
-  let done_count = move || STEPS.iter().filter(|step| is_done(**step)).count();
-  let mark_done = move |step: SetupStep| {
-    prefs.update(|all| {
-      if !all.onboarding.done.contains(&step) {
-        all.onboarding.done.push(step);
-      }
-    });
-  };
   // The first space the user is in: where browsing and inviting happen.
   let space = move || {
     state
       .read(|backend| backend.spaces())
       .first()
       .map(|space| space.id)
+  };
+  // Only the steps the user can take (issue #691): guests browse no channels, and inviting takes
+  // a space that lets them.
+  let steps = StoredValue::new(offered_steps(
+    !is_guest(state),
+    untrack(space).is_some_and(|space| can_invite_to(state, space)),
+  ));
+  let step_count = steps.with_value(Vec::len);
+  let done_count = move || steps.with_value(|steps| steps.iter().filter(|step| is_done(**step)).count());
+  let mark_done = move |step: SetupStep| {
+    prefs.update(|all| {
+      if !all.onboarding.done.contains(&step) {
+        all.onboarding.done.push(step);
+      }
+    });
   };
   let take = move |step: SetupStep| {
     mark_done(step);
@@ -97,7 +105,7 @@ pub fn SetupChecklist() -> impl IntoView {
       SetupStep::InstallApp | SetupStep::Unknown => {},
     }
   };
-  let is_visible = move || !prefs.with(|all| all.onboarding.is_dismissed) && done_count() < STEPS.len();
+  let is_visible = move || !prefs.with(|all| all.onboarding.is_dismissed) && done_count() < step_count;
 
   view! {
     <Show when=is_visible fallback=|| ()>
@@ -105,7 +113,7 @@ pub fn SetupChecklist() -> impl IntoView {
         <header class="setup-head">
           <h2 id="setup-title">{move || i18n.t("setup-title")}</h2>
           <span class="setup-progress-text">
-            {move || i18n.t_with("setup-progress", &[("done", &done_count().to_string()), ("total", &STEPS.len().to_string())])}
+            {move || i18n.t_with("setup-progress", &[("done", &done_count().to_string()), ("total", &step_count.to_string())])}
           </span>
           <button
             class="icon-btn"
@@ -120,14 +128,15 @@ pub fn SetupChecklist() -> impl IntoView {
           class="setup-progress"
           role="progressbar"
           aria-valuemin="0"
-          aria-valuemax=STEPS.len()
+          aria-valuemax=step_count
           aria-valuenow=done_count
           aria-label=move || i18n.t("setup-title")
         >
-          <span class="setup-progress-bar" style:--setup-done=move || format!("{}", done_count() as f64 / STEPS.len() as f64)></span>
+          <span class="setup-progress-bar" style:--setup-done=move || format!("{}", done_count() as f64 / step_count.max(1) as f64)></span>
         </div>
         <ul class="setup-steps">
-          {STEPS
+          {steps
+            .get_value()
             .into_iter()
             .map(|step| {
               let body = view! {
@@ -168,5 +177,32 @@ pub fn SetupChecklist() -> impl IntoView {
         </ul>
       </section>
     </Show>
+  }
+}
+
+/// The checklist's steps for someone who can browse channels and invite people, or not.
+fn offered_steps(can_browse_channels: bool, can_invite: bool) -> Vec<SetupStep> {
+  STEPS
+    .into_iter()
+    .filter(|step| match step {
+      SetupStep::BrowseChannels => can_browse_channels,
+      SetupStep::InvitePeople => can_invite,
+      _ => true,
+    })
+    .collect()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn guests_get_no_steps_they_cannot_take() {
+    assert_eq!(offered_steps(true, true), STEPS);
+    assert_eq!(
+      offered_steps(false, false),
+      [SetupStep::ProfilePicture, SetupStep::InstallApp]
+    );
+    assert!(!offered_steps(true, false).contains(&SetupStep::InvitePeople));
   }
 }

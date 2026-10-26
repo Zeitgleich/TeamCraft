@@ -8,6 +8,7 @@ use leptos::prelude::*;
 use teamcraft_client_api::actions::MessageExtras;
 use wasm_bindgen::JsCast;
 
+use crate::channel_access::{ChannelAccess, MessagePermissions};
 use crate::clock::format_date_time;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::compact_back::CompactBack;
@@ -65,12 +66,20 @@ pub struct ActionContext {
   pub is_pinned: bool,
   pub is_saved: bool,
   pub has_files: bool,
+  /// What the conversation lets the user do (issue #691): nothing else is offered.
+  pub permissions: MessagePermissions,
 }
 
 impl ActionContext {
-  pub fn new(is_mine: bool, in_thread: bool, maybe_extras: Option<&MessageExtras>) -> Self {
+  pub fn new(
+    is_mine: bool,
+    in_thread: bool,
+    maybe_extras: Option<&MessageExtras>,
+    permissions: MessagePermissions,
+  ) -> Self {
     Self {
       is_mine,
+      permissions,
       in_thread,
       is_pinned: maybe_extras.is_some_and(|extras| extras.is_pinned),
       is_saved: maybe_extras.is_some_and(|extras| extras.is_saved),
@@ -79,14 +88,18 @@ impl ActionContext {
   }
 }
 
-/// The actions of a message, in menu order; edit and delete (own messages) come last.
+/// The actions of a message, in menu order; edit and delete (own messages) come last. Quoting,
+/// editing and deleting take posting, pinning and file bookmarks `manage_bookmarks` as well.
 pub fn message_actions(context: ActionContext, surface: ActionSurface) -> Vec<MessageAction> {
   let is_sheet = surface == ActionSurface::Sheet;
+  let permissions = context.permissions;
   let mut actions = Vec::new();
   if is_sheet && !context.in_thread {
     actions.push(MessageAction::Thread);
   }
-  actions.push(MessageAction::Quote);
+  if permissions.can_post {
+    actions.push(MessageAction::Quote);
+  }
   if is_sheet {
     actions.push(MessageAction::Forward);
     actions.push(if context.is_saved {
@@ -100,15 +113,17 @@ pub fn message_actions(context: ActionContext, surface: ActionSurface) -> Vec<Me
     MessageAction::CopyText,
     MessageAction::MarkUnread,
   ]);
-  actions.push(if context.is_pinned {
-    MessageAction::Unpin
-  } else {
-    MessageAction::Pin
-  });
-  if context.has_files {
-    actions.push(MessageAction::BookmarkFile);
+  if permissions.can_manage_bookmarks {
+    actions.push(if context.is_pinned {
+      MessageAction::Unpin
+    } else {
+      MessageAction::Pin
+    });
+    if context.has_files {
+      actions.push(MessageAction::BookmarkFile);
+    }
   }
-  if context.is_mine {
+  if context.is_mine && permissions.can_post {
     actions.extend([MessageAction::Edit, MessageAction::Delete]);
   }
   actions
@@ -535,6 +550,8 @@ pub fn PinsPanel(conversation: ConversationId) -> impl IntoView {
   let i18n = use_i18n();
   let locale = i18n.locale().tag();
   let pinned = Memo::new(move |_| state.read(|backend| backend.pinned_messages(conversation)));
+  let access = ChannelAccess::new(state, conversation);
+  let can_unpin = move || access.message_permissions().can_manage_bookmarks;
   view! {
     <aside class="side-panel" aria-label=move || i18n.t("pins-title")>
       <header class="panel-header">
@@ -559,9 +576,11 @@ pub fn PinsPanel(conversation: ConversationId) -> impl IntoView {
                   <button class="btn btn-small" on:click=move |_| state.open_message(conversation, id, None)>
                     {move || i18n.t("pins-jump")}
                   </button>
-                  <button class="btn btn-small" on:click=move |_| state.write(|backend| backend.set_pinned(conversation, id, false))>
-                    {move || i18n.t("action-unpin")}
-                  </button>
+                  <Show when=can_unpin fallback=|| ()>
+                    <button class="btn btn-small" on:click=move |_| state.write(|backend| backend.set_pinned(conversation, id, false))>
+                      {move || i18n.t("action-unpin")}
+                    </button>
+                  </Show>
                 </div>
               </li>
             }
@@ -581,7 +600,7 @@ mod tests {
 
   #[test]
   fn the_more_menu_leaves_out_the_toolbar_buttons() {
-    let actions = message_actions(ActionContext::default(), ActionSurface::MoreMenu);
+    let actions = message_actions(allowed(), ActionSurface::MoreMenu);
     assert_eq!(
       actions,
       [
@@ -600,7 +619,7 @@ mod tests {
       is_mine: true,
       is_pinned: true,
       has_files: true,
-      ..ActionContext::default()
+      ..allowed()
     };
     let actions = message_actions(context, ActionSurface::MoreMenu);
     assert!(actions.contains(&MessageAction::Unpin) && actions.contains(&MessageAction::BookmarkFile));
@@ -608,7 +627,7 @@ mod tests {
       actions[actions.len() - 2..],
       [MessageAction::Edit, MessageAction::Delete]
     );
-    let others = message_actions(ActionContext::default(), ActionSurface::Sheet);
+    let others = message_actions(allowed(), ActionSurface::Sheet);
     assert!(!others.contains(&MessageAction::Edit) && !others.contains(&MessageAction::Delete));
   }
 
@@ -616,7 +635,7 @@ mod tests {
   fn the_sheet_has_everything_but_threads_inside_a_thread() {
     let saved = ActionContext {
       is_saved: true,
-      ..ActionContext::default()
+      ..allowed()
     };
     let sheet = message_actions(saved, ActionSurface::Sheet);
     assert_eq!(
@@ -630,7 +649,7 @@ mod tests {
     );
     let in_thread = ActionContext {
       in_thread: true,
-      ..ActionContext::default()
+      ..allowed()
     };
     assert!(!message_actions(in_thread, ActionSurface::Sheet).contains(&MessageAction::Thread));
   }
@@ -639,5 +658,64 @@ mod tests {
   fn excerpts_are_one_line_and_bounded() {
     assert_eq!(excerpt("a\n\n b"), "a b");
     assert_eq!(excerpt(&"x".repeat(500)).chars().count(), EXCERPT_CHARS + 1);
+  }
+
+  mod permissions {
+    use super::*;
+
+    #[test]
+    fn without_posting_nothing_that_posts_is_offered() {
+      // An announcement channel for its members, an archived channel for everybody.
+      let context = ActionContext {
+        is_mine: true,
+        has_files: true,
+        permissions: MessagePermissions {
+          can_post: false,
+          can_react: true,
+          can_manage_bookmarks: false,
+        },
+        ..allowed()
+      };
+      for surface in [ActionSurface::MoreMenu, ActionSurface::Sheet] {
+        let actions = message_actions(context, surface);
+        for refused in [
+          MessageAction::Quote,
+          MessageAction::Pin,
+          MessageAction::BookmarkFile,
+          MessageAction::Edit,
+          MessageAction::Delete,
+        ] {
+          assert!(!actions.contains(&refused), "{refused:?} on {surface:?}");
+        }
+        // Reading actions stay.
+        assert!(actions.contains(&MessageAction::CopyLink) && actions.contains(&MessageAction::MarkUnread));
+      }
+    }
+
+    #[test]
+    fn guests_post_but_pin_nothing() {
+      // The built-in scheme gives guests no `manage_bookmarks`.
+      let guest = ActionContext {
+        is_mine: true,
+        is_pinned: true,
+        has_files: true,
+        permissions: MessagePermissions {
+          can_post: true,
+          can_react: true,
+          can_manage_bookmarks: false,
+        },
+        ..allowed()
+      };
+      let actions = message_actions(guest, ActionSurface::MoreMenu);
+      assert!(!actions.contains(&MessageAction::Unpin) && !actions.contains(&MessageAction::BookmarkFile));
+      assert!(actions.contains(&MessageAction::Quote) && actions.contains(&MessageAction::Edit));
+    }
+  }
+
+  fn allowed() -> ActionContext {
+    ActionContext {
+      permissions: MessagePermissions::ALL,
+      ..ActionContext::default()
+    }
   }
 }
