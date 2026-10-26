@@ -405,7 +405,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           // review A8). The remover's client, or an admin's signed change, removes them from the
           // group; if neither comes, admins see who is left in the group.
           self.refresh_conversation(conversation_id).await?;
-          self.note_group_leftovers(conversation_id)
+          self.note_group_leftovers(conversation_id)?;
+          // A meeting guest whose session ended: their leaves go with a signed removal (queued
+          // above, only for guests the signed roster doesn't vouch for). A failure is retried on
+          // the next sync.
+          if let Err(error) = self.apply_meeting_removals(conversation_id).await {
+            tracing::warn!(conversation_id = %conversation_id, %error, "removing a guest from the meeting chat's group did not go through yet");
+          }
+          Ok(())
         }
       },
       GatewayEvent::PresenceUpdate {

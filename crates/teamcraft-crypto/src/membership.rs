@@ -41,6 +41,15 @@ pub trait IdentityDirectory {
     let _ = device;
     false
   }
+
+  /// Whether the user is a meeting guest (the server's word about the account's kind). A guest
+  /// may commit changes to their own devices only: never add or remove anybody else, whatever
+  /// the roster says (e2ee.md §4.6, "Meeting guests"). Wrongly answering `false` costs nothing
+  /// the roster doesn't already decide; answering `true` for a member only restricts them.
+  fn is_guest(&self, user_id: UserId) -> bool {
+    let _ = user_id;
+    false
+  }
 }
 
 /// Decides whether a user may make a membership change in a conversation (admin.md §2.3).

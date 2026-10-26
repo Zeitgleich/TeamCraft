@@ -18,6 +18,7 @@ pub mod files;
 mod gateway;
 mod group_health;
 mod groups;
+mod guest;
 mod key_history;
 mod key_packages;
 mod linking;
@@ -62,6 +63,7 @@ pub use group_health::{
   RemovalStatus, group_leftovers, is_queue_refused, pending_removals, unconfirmed_removals,
 };
 pub use groups::{DmSetupStatus, dm_setup_status};
+pub use guest::{GuestAdmission, GuestLinkMaterial};
 pub use linking::{
   LinkAnnouncement, LinkApproval, LinkOffer, LinkRequestInfo, LinkRequestList, LinkedSecrets, NewDeviceLink,
 };
@@ -690,9 +692,45 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       records::pin_identity(&self.store, user, &entry)?;
       pinned.insert(user, entry);
     }
-    let directory = PinnedDirectory::new(&pinned, &self.workspace()?.roster_identities());
+    let directory = PinnedDirectory::new(&pinned, &self.workspace()?.roster_identities())
+      .with_guests(self.guest_users(users.iter().copied())?);
     let lists = self.stored_device_lists(&directory, &users);
     Ok(directory.with_device_lists(lists))
+  }
+
+  /// The users among `users` this device treats as meeting guests: those the server's user kind
+  /// says are guests or this device itself let in as guests, unless the signed roster vouches for
+  /// them or they organize a meeting (a hostile server can't make a host a guest, e2ee.md §4.6).
+  /// Guests manage nobody's membership but their own.
+  pub(crate) fn guest_users(
+    &self,
+    users: impl IntoIterator<Item = UserId>,
+  ) -> Result<Vec<UserId>, CoreError> {
+    let admitted = self.admitted_guests()?;
+    let organizers: Vec<UserId> = self
+      .cached_conversations()?
+      .values()
+      .filter_map(|conversation| conversation.maybe_organizer_user_id)
+      .collect();
+    let workspace = self.workspace()?;
+    let mut guests = Vec::new();
+    for user in users {
+      let maybe_summary =
+        records::get_json::<teamcraft_proto::UserSummary>(&self.store, Table::Users, &user.to_string())?;
+      let is_listed_as_guest =
+        maybe_summary.is_some_and(|summary| summary.kind == teamcraft_proto::UserKind::Guest);
+      let is_vouched = workspace
+        .roster
+        .members
+        .iter()
+        .any(|member| member.user_id == user)
+        || organizers.contains(&user)
+        || user == self.account.user_id && !self.is_guest_device()?;
+      if (is_listed_as_guest || admitted.contains(&user)) && !is_vouched {
+        guests.push(user);
+      }
+    }
+    Ok(guests)
   }
 
   fn cached_conversations(&self) -> Result<BTreeMap<ConversationId, ConversationResponse>, CoreError> {

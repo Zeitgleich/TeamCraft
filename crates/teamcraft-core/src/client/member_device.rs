@@ -20,6 +20,7 @@ use crate::convert;
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, Table};
+use crate::trust::PinnedDirectory;
 
 /// Where enrollment notes whether the key bag came over the link ([`Client::has_key_bag_from_link`]).
 pub(crate) const KEY_BAG_FROM_LINK_KEY: &str = "key_bag_from_link";
@@ -190,7 +191,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         return Ok(MemberDeviceJoin::Unjoinable);
       },
     };
-    if !self.is_founded_by_organizer(conversation, &group).await? {
+    if !self
+      .is_founded_by_organizer(conversation, &group, &directory, None)
+      .await?
+    {
       group.delete(&self.provider)?;
       self.request_device_addition(conversation).await?;
       return Ok(MemberDeviceJoin::Unjoinable);
@@ -580,7 +584,33 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     &mut self,
     conversation: ConversationId,
     group: &ConversationGroup,
+    directory: &PinnedDirectory,
+    maybe_welcome_sender: Option<GroupMember>,
   ) -> Result<bool, CoreError> {
+    // A guest holds the organizer's key from the link, which no server saw. The group is accepted
+    // only if the device that added the guest (the welcome's sender) is a device the organizer's
+    // identity key signed: a group the server made with devices of its own, even one holding the
+    // organizer's published key package, comes from one of those and fails here. A guest device
+    // with no anchor joins nothing, and one that joins by external commit (no welcome sender)
+    // neither. The check looks at the sender, not at where a leaf sits in the tree.
+    // e2ee.md §4.6, "Meeting guests".
+    if self.is_guest_device()? {
+      let Some(anchor) = self.guest_organizer_anchor(conversation)? else {
+        tracing::warn!(conversation_id = %conversation, "a guest's device was offered a group without the organizer's key from a link; dropped");
+        return Ok(false);
+      };
+      let Some(sender) = maybe_welcome_sender else {
+        tracing::warn!(conversation_id = %conversation, "a guest's device was offered a group without a welcome from the organizer; dropped");
+        return Ok(false);
+      };
+      let is_organizers = group
+        .verified_member(sender, directory)?
+        .is_some_and(|device| device.identity_key().fingerprint().to_string() == anchor);
+      if !is_organizers {
+        tracing::warn!(conversation_id = %conversation, "the guest's welcome did not come from the organizer's key in the link; dropped");
+        return Ok(false);
+      }
+    }
     let maybe_cached_kind = self
       .cached_conversations()?
       .get(&conversation)

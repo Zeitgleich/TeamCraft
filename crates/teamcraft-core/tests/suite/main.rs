@@ -20,6 +20,7 @@ mod devices;
 mod dm_setup;
 mod enrollment;
 mod files;
+mod guest_meetings;
 mod key_packages;
 mod link_previews;
 mod linking;

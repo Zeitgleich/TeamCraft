@@ -874,6 +874,7 @@ impl ConversationGroup {
     authority: &impl MembershipAuthority,
   ) -> Result<(MembershipUpdate, Option<ChangeId>), MlsError> {
     let proposed = self.verify_commit_contents(staged, sender_index, directory)?;
+    self.check_guest_commit(sender_index, &proposed, directory)?;
     if let Some(request) = authenticated_data.strip_prefix(REJOIN_AAD_MAGIC) {
       let verified = SignedRejoinRequest::from_bytes(request)?.verify(directory)?;
       let (_, member) = self.check_verified_rejoin(&verified)?;
@@ -1159,6 +1160,30 @@ impl ConversationGroup {
       Some(device) => Err(MlsError::RemovedDevice(device.device_id())),
       None => Ok(()),
     }
+  }
+
+  /// A guest's commit may add or remove the guest's own devices and nothing else (e2ee.md §4.6,
+  /// "Meeting guests"): no signed change and no role makes a guest a member who manages others.
+  fn check_guest_commit(
+    &self,
+    sender_index: LeafNodeIndex,
+    proposed: &ProposedMembership,
+    directory: &impl IdentityDirectory,
+  ) -> Result<(), MlsError> {
+    let sender = self
+      .group
+      .member(sender_index)
+      .ok_or(MlsError::ChangeDoesNotMatchCommit)?;
+    let sender = credential::member_of(sender)?.user_id;
+    if !directory.is_guest(sender) {
+      return Ok(());
+    }
+    let touches_others = proposed.added.iter().any(|device| device.user_id() != sender)
+      || proposed.removed.iter().any(|member| member.user_id != sender);
+    if touches_others {
+      return Err(MlsError::GuestOverreach);
+    }
+    Ok(())
   }
 
   /// Unsigned additions are only allowed for further devices of users who are already members.

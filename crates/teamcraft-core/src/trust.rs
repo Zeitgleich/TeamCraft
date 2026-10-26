@@ -20,6 +20,8 @@ pub(crate) struct PinnedDirectory {
   /// The newest verified device list per user. A user without one never published a list (older
   /// clients); their certified devices are accepted as before.
   device_lists: BTreeMap<crypto::UserId, VerifiedDeviceList>,
+  /// Users the server lists as meeting guests (e2ee.md §4.6, "Meeting guests").
+  guests: HashSet<crypto::UserId>,
 }
 
 /// Who may change a group's membership (e2ee.md §4.6, admin.md §2.3):
@@ -31,6 +33,11 @@ pub(crate) struct PinnedDirectory {
 pub(crate) struct WorkspaceAuthority {
   members: HashSet<crypto::UserId>,
   admins: HashSet<crypto::UserId>,
+  /// Meeting guests are members of the group but manage nobody (e2ee.md §4.6, "Meeting guests").
+  guests: HashSet<crypto::UserId>,
+  /// In a meeting chat: the users the signed roster vouches for. Anybody else in the group is
+  /// treated as a guest, whatever the server says their kind is.
+  maybe_vouched_in_meeting: Option<HashSet<crypto::UserId>>,
   self_join: AdminSelfJoin,
   is_public_channel: bool,
 }
@@ -52,7 +59,13 @@ impl PinnedDirectory {
     Self {
       keys,
       device_lists: BTreeMap::new(),
+      guests: HashSet::new(),
     }
+  }
+
+  pub(crate) fn with_guests(mut self, guests: impl IntoIterator<Item = UserId>) -> Self {
+    self.guests = guests.into_iter().map(convert::user).collect();
+    self
   }
 
   pub(crate) fn with_device_lists(mut self, lists: impl IntoIterator<Item = VerifiedDeviceList>) -> Self {
@@ -85,6 +98,10 @@ impl IdentityDirectory for PinnedDirectory {
       .get(&device.user_id())
       .is_some_and(|list| list.is_active(device))
   }
+
+  fn is_guest(&self, user_id: crypto::UserId) -> bool {
+    self.guests.contains(&user_id)
+  }
 }
 
 impl WorkspaceAuthority {
@@ -96,9 +113,28 @@ impl WorkspaceAuthority {
     Self {
       members: members.into_iter().collect(),
       admins: admins.into_iter().map(convert::user).collect(),
+      guests: HashSet::new(),
+      maybe_vouched_in_meeting: None,
       self_join,
       is_public_channel: false,
     }
+  }
+
+  /// The group's meeting guests: they are not allowed to change anybody's membership but their own.
+  pub(crate) fn with_guests(mut self, guests: impl IntoIterator<Item = UserId>) -> Self {
+    self.guests = guests.into_iter().map(convert::user).collect();
+    self
+  }
+
+  /// For a meeting chat: only users in `vouched` (the signed roster's members) may manage anybody
+  /// else's membership; everybody else in the group is a guest. An empty roster vouches for nobody
+  /// and changes nothing (an instance without a roster keeps the old rule).
+  pub(crate) fn for_meeting_chat(mut self, vouched: impl IntoIterator<Item = UserId>) -> Self {
+    let vouched: HashSet<crypto::UserId> = vouched.into_iter().map(convert::user).collect();
+    if !vouched.is_empty() {
+      self.maybe_vouched_in_meeting = Some(vouched);
+    }
+    self
   }
 
   /// A public, unarchived channel: members joining by themselves is fine.
@@ -115,6 +151,18 @@ impl MembershipAuthority for WorkspaceAuthority {
     _conversation_id: crypto::ConversationId,
     action: &MembershipAction,
   ) -> bool {
+    let is_unvouched = self
+      .maybe_vouched_in_meeting
+      .as_ref()
+      .is_some_and(|vouched| !vouched.contains(&actor));
+    if self.guests.contains(&actor) || is_unvouched {
+      return match *action {
+        MembershipAction::RemoveUser { user_id } | MembershipAction::RemoveDevice { user_id, .. } => {
+          user_id == actor
+        },
+        MembershipAction::AddUser { .. } => false,
+      };
+    }
     if self.members.contains(&actor) {
       return true;
     }
@@ -170,6 +218,43 @@ mod tests {
       );
       assert!(!authority.is_authorized(stranger, conversation, &add(stranger)));
     }
+  }
+
+  #[test]
+  fn a_guest_manages_nobody_but_their_own_leaves() {
+    let (member, guest, other) = (
+      crypto::UserId::new(1),
+      crypto::UserId::new(5),
+      crypto::UserId::new(6),
+    );
+    let conversation = crypto::ConversationId::new(9);
+    let authority = WorkspaceAuthority::new(
+      [member, guest, other],
+      Vec::<UserId>::new(),
+      AdminSelfJoin::Visible,
+    )
+    .with_guests([convert::user_from_crypto(guest).unwrap()]);
+
+    let add = |user| MembershipAction::AddUser {
+      user_id: user,
+      history: HistoryShare::FromJoin,
+    };
+    assert!(!authority.is_authorized(guest, conversation, &add(other)));
+    assert!(!authority.is_authorized(guest, conversation, &add(guest)));
+    assert!(!authority.is_authorized(
+      guest,
+      conversation,
+      &MembershipAction::RemoveUser { user_id: other }
+    ));
+    assert!(authority.is_authorized(
+      guest,
+      conversation,
+      &MembershipAction::RemoveUser { user_id: guest }
+    ));
+    assert!(
+      authority.is_authorized(member, conversation, &add(other)),
+      "members are unaffected"
+    );
   }
 
   #[test]

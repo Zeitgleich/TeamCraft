@@ -892,8 +892,8 @@ never by the server's member list:
     guest's key or name: it never learns the secret. The same holds in meetings without a lobby
     (the server admits at once, but the device adds nobody without a valid proof). A host device
     that doesn't hold the secret (another device of a co-host) adds a guest only after the host
-    compared the guest's **key code** (the first 8 hex digits of the identity key fingerprint, shown
-    on the lobby entry and on the guest's screen) and confirmed it. A valid proof is a bearer proof of
+    compared the guest's **key code** (the first 64 bits of the identity key fingerprint, as
+    `1a2b-3c4d-5e6f-7a8b`, shown on the lobby entry and on the guest's screen) and confirmed it. A valid proof is a bearer proof of
     the link: anybody with the link can be the guest, which is what a link is; the shared link's guest
     limit and the lobby bound that. Members pin the identity key on first use, mark the user "Guest
     (unverified)" in the chat, the member list and the call, and verify the certificate chain
@@ -902,19 +902,25 @@ never by the server's member list:
   - *How the guest verifies members.* The guest's client treats the members' identity keys like a
     member's client does: attested ones (§3.1; the issuer and client come from the server info, the
     JWKS from the identity provider directly) are pinned as attested, the rest on first use. The
-    guest joins a group only if its first member (the founder's leaf) carries the identity key whose
-    fingerprint is the organizer's in the link, so neither a hostile server nor a member can found a
-    group the guest then joins ("Whose group", above, plus a trust anchor the server doesn't hold).
-    A guest link made without the fingerprint (an older client) gives the guest nothing to check
-    against: the guest page then shows the organizer's key code and says the room is unverified.
-  - *Admission.* The host's "admit" makes the guest a member on the server, and the host's device
-    then adds the guest's device as above (`let_into_meeting_chat`), always with history from the
-    join on. The guest's device was enrolled and had key packages published while it waited in the
-    lobby, so the add finds it; the welcome reaches it through its normal welcome queue. A guest
-    admitted without a device yet (page still loading) is added when it appears: the host's device
-    that admitted keeps the admitted guests of that meeting in its sync state and adds a guest
-    device that shows up, only if the guest's proof of the link secret verifies, the guest's signed
-    device list names the device and the guest is still admitted on the server's lobby; it adds nothing for guests that were turned away.
+    guest's device is marked as a guest device when it enrolls, and a guest device accepts a group only from a
+    welcome sent by a device the organizer's identity key signed (the fingerprint in the link), so
+    only the organizer's devices make guest links and let guests in; a co-host's app refuses
+    ("only the organizer's devices can let guests in"). A guest device with no fingerprint (a link
+    of an older client) or offered a group by external commit joins nothing: it fails closed. The
+    check is about who added the guest, not about who is in the group (a group the server made
+    with devices of its own can hold the organizer's published key package) and not about where a
+    leaf sits in the tree, so a hostile server can't put keys of its own in for the people the
+    guest talks to. Remaining gap: the guest still pins the other members' keys on first use
+    where there is no attestation, and the member path (§4.6, "Whose group") still trusts the
+    server's naming of the organizer.
+  - *Admission.* A host's "admit" makes the guest a member on the server, and the host's device
+    then adds the guest's device as above (`let_guest_into_meeting_chat`: the proof or the
+    confirmed key code is checked first, then the key is pinned and the add is signed like any
+    addition), always with history from the join on. The guest's page enrolls its device and sends
+    its proof while it waits in the lobby, so the host's app offers "admit" once the lobby entry
+    carries the proof (or the key code is shown); a guest admitted without a device is not added
+    later unattended (§4.6, "Admission", above). The welcome reaches the guest through its normal
+    welcome queue, and the current key follows from a member as for any new member.
   - *Removal.* A guest's session ends when the guest leaves (`POST /meetings/{id}/leave`), is
     turned away, or the meeting's access ends: the server then deactivates the guest and reports
     the removal (`membership_remove`, `device_remove`). The sweep that ends sessions of guests whose
@@ -924,15 +930,26 @@ never by the server's member list:
     `membership_remove` for a user it knows as a guest of that meeting (admitted by a host's
     device, which is recorded in the group's signed adds as the guest's add) commits the signed
     removal of the guest's leaves, ranked as for device removals so normally one commits; a device
-    that was offline does it on its next sync, and any member's device does it once the meeting is
-    over (`ends_at` plus `guest_grace_secs`) for every guest leaf still in the group. The guest's
+    that was offline does it on its next sync, and the device that admitted a guest also removes them when the meeting's access ends by its own
+    clock (the end the host's app showed it at the admission), whether or not the server reports
+    anything. The guest's
     page removes itself first where it can (a signed leave before wiping the store). Until the
     commit, a guest device that is gone for good stays a leaf and could decrypt what the group sends
     in that time; the commit moves the group to an epoch it has no keys for.
-  - *What a guest may commit.* Members merge a commit made by a guest's device only if its signed
-    change and its proposals concern that guest's own devices (updating its own leaf keys, adding
-    or removing its own devices). A guest can't add or remove anybody else, whatever role the
-    server shows.
+  - *What a guest may commit, and who counts as a guest.* Members merge a commit made by a
+    guest's device only if it concerns that guest's own devices, and a guest's signed change is
+    authorized only for their own removal. Who is a guest is not the server's word alone: in a
+    meeting chat everyone the signed roster doesn't vouch for is treated as a guest for signed
+    changes; a device that admitted a guest records it and treats the user as a guest from then
+    on; and a roster member or an organizer is never treated as a guest, whatever kind the server
+    shows. Remaining gap: a hostile server that relabels a guest as a member to the devices that
+    did not admit them can't give them signed authority (the roster rule), but can let them add
+    further devices of users who are already members, which those users' identity keys have
+    signed anyway.
+  - *Proof scope.* The proof binds meeting, user, identity key and display name, not the device or
+    an expiry: the host checks the guest's device against the signed device list, and the link is
+    only good for the meeting's lifetime plus the grace time. Binding the device ID would only
+    matter if a second guest device were allowed, which a guest session does not need.
   - *Calls.* The guest's call key binding (§8) is signed by the guest's device key; members verify
     it like any other and show the guest as unverified.
   - *Scope.* A guest session token is accepted only on the routes a guest needs (chat, key
