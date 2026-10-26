@@ -15,8 +15,11 @@ import androidx.core.telecom.CallEndpointCompat
 import androidx.core.telecom.CallsManager
 import java.nio.ByteBuffer
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -65,6 +68,10 @@ class CallController(
   @Volatile private var maybeRingTimeout: Job? = null
   private val ringing = MutableStateFlow<IncomingRing?>(null)
   private val joining = MutableStateFlow(false)
+  /** The engine's join while it connects; hanging up cancels it. */
+  @Volatile private var maybePendingJoin: Deferred<CallSession>? = null
+  /** Hang up came while joining: a join that finishes anyway leaves at once. */
+  @Volatile private var isJoinAbandoned = false
   private val incomingNotifier = IncomingCallNotifier(context)
   /** The DM whose call this device left for a meeting room: its late states are not ours any more. */
   @Volatile private var maybeLeftConversation: String? = null
@@ -152,22 +159,25 @@ class CallController(
 
   /**
    * Answers from the notification or the call screen. Also works when the ring is gone (the
-   * process restarted in between): joining needs only the conversation.
+   * process restarted in between): joining needs only the conversation. The join is claimed before
+   * the ring is cleared, so the call screen goes straight from ringing to joining (it never sees an
+   * idle moment and closes), and a late duplicate ring can't ring again meanwhile.
    */
   fun answer(conversationId: String) {
+    if (maybeSession != null || !joining.compareAndSet(expect = false, update = true)) return
     val maybeCall = maybeTelecomCall
     clearRing()
     scope.launch {
       if (maybeCall != null) {
         runCatching { maybeCall.answer(CallAttributesCompat.CALL_TYPE_AUDIO_CALL) }
           .onFailure { Log.w(TAG, "Telecom refused the answer", it) }
-        if (!join(conversationId)) maybeCall.disconnect(DisconnectCause(DisconnectCause.ERROR))
+        if (!join(conversationId, isClaimed = true)) endCall(maybeCall)
       } else if (maybeTelecomJob?.isActive == true) {
         // Telecom is still adding the ring: join without waiting for it.
-        join(conversationId)
+        if (!join(conversationId, isClaimed = true)) endCall(null)
       } else {
         options = CallOptions()
-        addTelecomCall(conversationId, displayNameOf(conversationId), CallAttributesCompat.DIRECTION_OUTGOING)
+        addTelecomCall(conversationId, displayNameOf(conversationId), CallAttributesCompat.DIRECTION_OUTGOING, isJoinClaimed = true)
       }
     }
   }
@@ -194,6 +204,7 @@ class CallController(
 
   /** Starts (or joins) the conversation's call, with the choices of the pre-join dialog. */
   fun startCall(conversationId: String, displayName: String, callOptions: CallOptions = CallOptions()) {
+    if (maybeSession != null || joining.value) return
     options = callOptions
     addTelecomCall(conversationId, displayName, CallAttributesCompat.DIRECTION_OUTGOING)
   }
@@ -247,19 +258,35 @@ class CallController(
     scope.launch { call.requestEndpointChange(target) }
   }
 
-  /** Leaves the call; the engine's ended state then ends the Telecom call. */
+  /**
+   * Leaves the call; the engine's ended state then ends the Telecom call and the ongoing-call
+   * notification. While still joining it cancels the join; while ringing it declines.
+   */
   fun hangUp() {
     val session = maybeSession
-    if (session == null) {
-      clearRing()
-      maybeTelecomJob?.cancel()
-    } else {
-      session.leave()
+    when {
+      session != null -> session.leave()
+      joining.value -> {
+        isJoinAbandoned = true
+        maybePendingJoin?.cancel()
+        // A join still waiting for the microphone permission gives up too.
+        maybePermission?.complete(false)
+      }
+      else -> decline()
     }
   }
 
-  private fun addTelecomCall(conversationId: String, displayName: String, direction: Int) {
-    if (maybeTelecomJob?.isActive == true) return
+  /**
+   * Adds the call to Telecom. With [isJoinClaimed] the caller (answering) already claimed the join,
+   * and gives it up here if the call never gets that far.
+   */
+  private fun addTelecomCall(conversationId: String, displayName: String, direction: Int, isJoinClaimed: Boolean = false) {
+    if (maybeTelecomJob?.isActive == true) {
+      if (isJoinClaimed) joining.value = false
+      return
+    }
+    // The previous call's ended state would end this one right away (see endWithEngine).
+    if (state.value?.phase == CallPhase.ENDED) state.value = null
     val isVideo = direction == CallAttributesCompat.DIRECTION_OUTGOING && options.isCameraOn
     val attributes = CallAttributesCompat(
       displayName = displayName,
@@ -269,6 +296,7 @@ class CallController(
       callCapabilities = CallAttributesCompat.SUPPORTS_SET_INACTIVE,
     )
     maybeTelecomJob = scope.launch {
+      var isClaimPending = isJoinClaimed
       try {
         callsManager.addCall(
           attributes,
@@ -283,8 +311,9 @@ class CallController(
         ) {
           maybeTelecomCall = this
           if (direction == CallAttributesCompat.DIRECTION_OUTGOING) {
+            isClaimPending = false
             launch {
-              if (join(conversationId)) setActive() else disconnect(DisconnectCause(DisconnectCause.ERROR))
+              if (join(conversationId, isJoinClaimed)) setActive() else disconnect(DisconnectCause(DisconnectCause.ERROR))
             }
           }
           launch { endWithEngine(this@addCall) }
@@ -293,8 +322,12 @@ class CallController(
           launch { currentCallEndpoint.collect { speaker.value = it.type == CallEndpointCompat.TYPE_SPEAKER } }
         }
       } catch (error: Exception) {
-        Log.w(TAG, "the Telecom call failed", error)
+        // Also a cancellation: declined, rang out or ended elsewhere.
+        if (error !is CancellationException) Log.w(TAG, "the Telecom call failed", error)
         leave()
+      } finally {
+        // An answer that never got as far as joining gives its claim up.
+        if (isClaimPending) joining.value = false
       }
     }
   }
@@ -311,8 +344,11 @@ class CallController(
   }
 
   /** Joins in the engine and shows the call; `false` if joining failed. */
-  private suspend fun join(conversationId: String): Boolean {
-    if (maybeSession != null || !joining.compareAndSet(expect = false, update = true)) return maybeSession != null
+  private suspend fun join(conversationId: String, isClaimed: Boolean = false): Boolean {
+    if (!isClaimed && (maybeSession != null || !joining.compareAndSet(expect = false, update = true))) {
+      return maybeSession != null
+    }
+    isJoinAbandoned = false
     try {
       return joinOnce(conversationId)
     } finally {
@@ -326,11 +362,23 @@ class CallController(
     if (!hasMicrophone() && !requestMicrophone()) return false
     // Receiving video needs Cisco's OpenH264; without it the call is audio-only for this device.
     VideoCodecInstaller.ensure(context)
+    if (isJoinAbandoned) return false
+    // Muted from the first frame (a muted call moving into a meeting room): no audio slips out.
+    val isMuted = options.isMuted
+    val pending = scope.async { core.core().joinCall(conversationId, isMuted) }
+    maybePendingJoin = pending
     val session = try {
-      // Muted from the first frame (a muted call moving into a meeting room): no audio slips out.
-      core.core().joinCall(conversationId, options.isMuted)
+      pending.await()
     } catch (error: Exception) {
-      Log.w(TAG, "joining the call failed", error)
+      if (error !is CancellationException) Log.w(TAG, "joining the call failed", error)
+      return false
+    } finally {
+      maybePendingJoin = null
+    }
+    if (isJoinAbandoned) {
+      // Hung up while it connected.
+      session.leave()
+      session.close()
       return false
     }
     maybeSession = session
@@ -373,6 +421,7 @@ class CallController(
     )
     if (join(to)) return true
     state.update { it?.copy(phase = CallPhase.ENDED, maybeEndReason = CallEndReason.FAILED) }
+    endCall(maybeTelecomCall)
     return false
   }
 
@@ -426,6 +475,17 @@ class CallController(
     }
   }
 
+  /**
+   * Ends a call that didn't (or no longer) runs in the engine: the Telecom call if there is one,
+   * and everything [leave] cleans up, also when there is no Telecom call to end.
+   */
+  private suspend fun endCall(maybeCall: CallControlScope?) {
+    if (maybeCall != null) runCatching { maybeCall.disconnect(DisconnectCause(DisconnectCause.ERROR)) }
+    maybeTelecomJob?.cancel()
+    leave()
+  }
+
+  /** Cleans up after a call; safe to call more than once. */
   private fun leave() {
     maybeSession?.let { session ->
       session.leave()
@@ -446,6 +506,10 @@ class CallController(
       // The DM's call this device left for a meeting room ends after the room's call began.
       if (state.conversationId == maybeLeftConversation) return
       this@CallController.state.value = state
+      // The engine is the source of truth: once its call ended, the session, the service and its
+      // notification go too, whether or not Telecom reports its disconnect back (endWithEngine
+      // ends the Telecom call). Not on the engine's thread, which reports this.
+      if (state.phase == CallPhase.ENDED && maybeSession != null) scope.launch { leave() }
     }
 
     override fun onIncomingCall(call: IncomingCallInfo) {
