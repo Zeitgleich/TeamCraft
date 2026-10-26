@@ -796,7 +796,9 @@ impl Core {
     self.open().await;
     let mut flush = tokio::time::interval(FLUSH_INTERVAL);
     loop {
-      self.connect().await;
+      if self.connect(&mut requests).await == Flow::Stop {
+        break;
+      }
       let maybe_deadline = self.connection_deadline();
       tokio::select! {
         request = requests.recv() => match request {
@@ -1715,17 +1717,76 @@ impl Core {
     }
   }
 
-  async fn connect(&mut self) {
-    let Some(client) = self.client.as_mut() else {
-      return;
+  /// Connects the gateway if it is due. The connection and the sync after it can take a while (a
+  /// server far away, one that is unreachable until the handshake times out): meanwhile the UI's
+  /// reads are answered from the store and new messages go to the outbox, so the window shows what
+  /// this device has at once (#717). Everything else waits for the connection, in its order.
+  async fn connect(&mut self, requests: &mut mpsc::UnboundedReceiver<Request>) -> Flow {
+    let Self {
+      client: Some(client),
+      connection,
+      backend,
+      store,
+      snapshots,
+      status,
+      catch_up_focus,
+      has_queued_sends,
+      on_change,
+      ..
+    } = self
+    else {
+      return Flow::Go;
     };
-    if self.connection.connect_if_due(client).await.is_some() {
+    // Taken before the connection borrows the client; a later snapshot reads it afresh.
+    let maybe_security = security_of(client).ok();
+    let mut deferred = Vec::new();
+    let mut is_closed = false;
+    let connected = {
+      let mut connecting = std::pin::pin!(connection.connect_if_due(client));
+      loop {
+        tokio::select! {
+          // Not due (the usual case): done at once, nothing read on the side.
+          biased;
+          connected = &mut connecting => break connected,
+          maybe_request = requests.recv(), if !is_closed => {
+            let Some(request) = maybe_request else {
+              is_closed = true;
+              continue;
+            };
+            let reads = ReadsWhileConnecting {
+              backend: backend.as_ref(),
+              store: store.as_ref(),
+              snapshots: &mut *snapshots,
+              status,
+              focus: catch_up_focus,
+              maybe_security: maybe_security.as_ref(),
+            };
+            match reads.answer(request) {
+              Answered::Done => {},
+              Answered::Queued => {
+                *has_queued_sends = true;
+                on_change();
+              },
+              Answered::Later(request) => deferred.push(request),
+            }
+          },
+        }
+      }
+    };
+    if connected.is_some() {
       self.repeat_reports().await;
       // Back online: what waited goes out now, not on the next tick.
       self.has_queued_sends = true;
       self.is_upload_due = true;
       self.changed();
     }
+    for request in deferred {
+      if matches!(request, Request::Shutdown) {
+        return Flow::Stop;
+      }
+      self.handle(request).await;
+    }
+    if is_closed { Flow::Stop } else { Flow::Go }
   }
 
   /// How long until the connection needs the loop (`None`: it doesn't, or there is no client yet).
@@ -1783,6 +1844,103 @@ impl Core {
 
   fn changed(&self) {
     (self.on_change)();
+  }
+}
+
+/// Whether the core loop goes on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Flow {
+  Go,
+  Stop,
+}
+
+/// What the core thread can answer while the client is busy connecting: everything that only reads
+/// the store, and new messages, which only write the outbox (they are sent once connected).
+struct ReadsWhileConnecting<'a> {
+  backend: Option<&'a CoreChatBackend<Store>>,
+  store: Option<&'a Store>,
+  snapshots: &'a mut SnapshotCache,
+  status: &'a CoreStatus,
+  focus: &'a CatchUpFocus,
+  maybe_security: Option<&'a SecuritySnapshot>,
+}
+
+/// How [`ReadsWhileConnecting`] dealt with a request.
+enum Answered {
+  Done,
+  /// A new message is in the outbox.
+  Queued,
+  /// Needs the client: handled once the connection is up (or failed).
+  Later(Request),
+}
+
+impl ReadsWhileConnecting<'_> {
+  fn answer(self, request: Request) -> Answered {
+    let not_set_up = || "this device is not set up yet".to_owned();
+    match request {
+      Request::Status(reply) => drop(reply.send(self.status.clone())),
+      Request::Snapshot(reply) => {
+        let result = match (self.backend, self.store, self.maybe_security) {
+          (Some(backend), Some(store), Some(security)) => Ok(self.snapshots.snapshot(
+            backend,
+            store.take_changes(),
+            || Some(security.clone()),
+          )),
+          _ => Err(not_set_up()),
+        };
+        drop(reply.send(result));
+      },
+      Request::SnapshotChanges(maybe_since, reply) => {
+        let result = match (self.backend, self.store) {
+          (Some(backend), Some(store)) => Ok(self.snapshots.changes_since(
+            backend,
+            store.take_changes(),
+            || self.maybe_security.cloned(),
+            maybe_since,
+          )),
+          _ => Err(not_set_up()),
+        };
+        drop(reply.send(result));
+      },
+      Request::Messages {
+        conversation,
+        start,
+        len,
+        reply,
+      } => {
+        // The catch-up running now takes the conversation the user opened next (issue #247).
+        self.focus.set(conversation);
+        let result = self
+          .backend
+          .map(|backend| MessageWindow::read(backend, conversation, start, len))
+          .ok_or_else(not_set_up);
+        drop(reply.send(result));
+      },
+      Request::Thread {
+        conversation,
+        thread,
+        reply,
+      } => {
+        let result = self
+          .backend
+          .map(|backend| backend.thread(conversation, thread))
+          .ok_or_else(not_set_up);
+        drop(reply.send(result));
+      },
+      Request::Action(action, reply) if action.is_new_message() => {
+        let Some(backend) = self.backend else {
+          drop(reply.send(Err(not_set_up())));
+          return Answered::Done;
+        };
+        if let Some(unhandled) = action.apply_to(backend) {
+          tracing::warn!(?unhandled, "chat action not handled");
+        }
+        drop(reply.send(Ok(())));
+        return Answered::Queued;
+      },
+      other => return Answered::Later(other),
+    }
+    Answered::Done
   }
 }
 
