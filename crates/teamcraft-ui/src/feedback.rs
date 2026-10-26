@@ -19,7 +19,9 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_proto::ErrorCode;
 
-pub use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind, NotificationFailure};
+pub use teamcraft_client_api::failure::{
+  ActionFailure, CallFailure, FailureKind, LinkFailure, NotificationFailure,
+};
 
 use crate::i18n::I18n;
 use crate::model::TimestampMs;
@@ -98,6 +100,16 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
     FailureKind::CaptivePortal => "error-captive-portal",
     FailureKind::UntrustedCertificate => "error-untrusted-certificate",
     FailureKind::Other => "error-generic",
+    FailureKind::Link(failure) => match failure {
+      LinkFailure::CodeInvalid => "error-link-code-invalid",
+      LinkFailure::OtherVersion => "error-link-other-version",
+      LinkFailure::PeerGone => "error-link-peer-gone",
+      LinkFailure::TimedOut => "error-link-timed-out",
+      LinkFailure::CodeExpired => "error-link-code-expired",
+      LinkFailure::Denied => "error-link-denied",
+      LinkFailure::NotConfirmed => "error-link-not-confirmed",
+      LinkFailure::RequestGone => "error-link-request-gone",
+    },
     FailureKind::Notification(failure) => match failure {
       NotificationFailure::NotAllowed => "error-notification-not-allowed",
       NotificationFailure::Unsupported => "error-notification-unsupported",

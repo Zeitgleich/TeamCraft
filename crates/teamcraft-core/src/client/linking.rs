@@ -43,6 +43,9 @@ const OFFER_PREFIX: &str = "tclink";
 /// How long the existing device waits for the receipt after sending the keys. The new device
 /// answers as soon as it opened the key bag, which takes well under a second.
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long the approving device waits for the new device's part of the handshake once both are
+/// in the relay. The new device answers at once; anything slower is a device that went away.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// What the QR code carries: where to meet (relay ID) and the handshake's authentication key.
 #[derive(Debug)]
@@ -210,8 +213,11 @@ impl LinkOffer {
     Ok(())
   }
 
+  /// Reads a scanned or typed code. Text of another app is [`CoreError::LinkCodeInvalid`]; a code
+  /// of another linking version is [`CoreError::LinkVersionMismatch`], so the app can say which
+  /// side to update instead of doing nothing (issue #645).
   pub fn parse(code: &str) -> Result<Self, CoreError> {
-    let invalid = || CoreError::Corrupt("not a device link code".into());
+    let invalid = || CoreError::LinkCodeInvalid;
     let mut parts = code.trim().split(':');
     let version = parts
       .next()
@@ -245,7 +251,12 @@ impl<R: RendezvousConnection> NewDeviceLink<R> {
     let user = api.me().await?.id;
     let mut connection = join(api, offer).await?;
     let initiator = Initiator::new(&offer.key, &mut OsRng);
-    let hello = next_binary(&mut connection).await?;
+    // Waits for the approving device as long as the relay lives; when it ends unused, the code
+    // expired and the app offers a new one.
+    let hello = next_binary(&mut connection).await.map_err(|error| match error {
+      CoreError::Gateway(_) => CoreError::LinkCodeExpired,
+      other => other,
+    })?;
     let (awaiting, auth_hello) = initiator.receive_hello(&hello, &mut OsRng).map_err(link_error)?;
     connection.send_binary(auth_hello).await?;
     let auth = next_binary(&mut connection).await?;
@@ -441,11 +452,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.approve_offer(&offer).await
   }
 
+  /// Joins the new device's relay as the approving device. The new device joined first and waits
+  /// there; a relay without it (expired, or the new device went away) fails at once with
+  /// [`CoreError::LinkPeerGone`] instead of waiting for nobody (issue #645).
   async fn approve_offer(&self, offer: &LinkOffer) -> Result<LinkApproval<A::Rendezvous>, CoreError> {
     let mut connection = join(&self.api, offer).await?;
+    if !with_timeout(wait_joined(&mut connection)).await? {
+      return Err(CoreError::LinkPeerGone);
+    }
     let (responder, hello) = Responder::new(&offer.key, &mut OsRng).map_err(link_error)?;
     connection.send_binary(hello).await?;
-    let auth_hello = next_binary(&mut connection).await?;
+    let auth_hello = with_timeout(next_binary(&mut connection)).await?;
     let (channel, auth) = responder
       .receive_auth_hello(&auth_hello, &mut OsRng)
       .map_err(link_error)?;
@@ -538,6 +555,30 @@ async fn join<A: ServerApi>(api: &A, offer: &LinkOffer) -> Result<A::Rendezvous,
   Ok(connection)
 }
 
+/// Whether the other device was in the relay when this one joined (the server's `joined` answer).
+async fn wait_joined<R: RendezvousConnection>(connection: &mut R) -> Result<bool, CoreError> {
+  match connection.receive().await {
+    Some(Ok(RendezvousFrame::Control(RendezvousServerMessage::Joined { peer_present }))) => Ok(peer_present),
+    Some(Ok(RendezvousFrame::Control(RendezvousServerMessage::Error { error }))) => {
+      Err(CoreError::Gateway(error.message))
+    },
+    Some(Ok(RendezvousFrame::Control(other))) => Err(CoreError::Gateway(format!("relay ended: {other:?}"))),
+    Some(Ok(RendezvousFrame::Binary(_))) => Err(CoreError::Gateway("relay sent data before the join".into())),
+    Some(Err(error)) => Err(error.into()),
+    None => Err(CoreError::Gateway("relay closed".into())),
+  }
+}
+
+/// `step`, or [`CoreError::LinkTimedOut`] after [`HANDSHAKE_TIMEOUT`].
+async fn with_timeout<T>(step: impl Future<Output = Result<T, CoreError>>) -> Result<T, CoreError> {
+  let step = Box::pin(step);
+  let timeout = Box::pin(platform::sleep(HANDSHAKE_TIMEOUT));
+  match select(step, timeout).await {
+    Either::Left((result, _)) => result,
+    Either::Right(((), _)) => Err(CoreError::LinkTimedOut),
+  }
+}
+
 /// The next binary frame, skipping control frames that only report progress.
 async fn next_binary<R: RendezvousConnection>(connection: &mut R) -> Result<Vec<u8>, CoreError> {
   loop {
@@ -613,7 +654,7 @@ mod tests {
       &format!("{}:extra", offer.to_code()),
     ] {
       assert!(
-        matches!(LinkOffer::parse(garbage), Err(CoreError::Corrupt(_))),
+        matches!(LinkOffer::parse(garbage), Err(CoreError::LinkCodeInvalid)),
         "{garbage}"
       );
     }

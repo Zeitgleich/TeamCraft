@@ -1110,6 +1110,18 @@ Implemented as (`teamcraft-crypto::rendezvous`, `teamcraft-core` linking):
   changes `AK` cannot complete a link: the handshake with the real new device would not produce the
   code the user types. Not yet: a notification on a backgrounded phone (needs a push for the
   request).
+- **Failures are visible, never a silent wait (issue #645).** The relay belongs to whoever joins
+  first. A device that scans a code after the new device left its relay (the code's lifetime ran
+  out, the new device slept or went offline) would otherwise open an empty relay and wait for nobody.
+  So the responder looks at the server's `joined` answer: without the new device present it fails at
+  once (`LinkPeerGone`, "show a new code and scan again"). It also gives the new device 30 s to answer
+  each handshake step (`LinkTimedOut`). Text that is no link code (another QR code) is
+  `LinkCodeInvalid`, and a code of another protocol version is `LinkVersionMismatch` ("update
+  TeamCraft"). A new device whose relay ends unused reports `LinkCodeExpired` and offers "Try again"
+  with a fresh code. The apps word these as typed failures (`FailureKind::Link`), and the new
+  device's screen says to scan in TeamCraft, since the camera app alone can't use the code. Without
+  another signed-in device, the screen points to the recovery passphrase or organization recovery
+  (§6). None of this changes what crosses the relay or the server.
 - The transfer carries the backup key and the encrypted key bag (and the protocol version). The new
   device checks that the bag opens with the backup key and answers with a sealed **receipt**
   (`received` or `rejected`); the existing device reports success only on `received`. A lost

@@ -3,9 +3,11 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use qrcode::{Color, QrCode};
+use teamcraft_client_api::failure::{ActionFailure, FailureKind};
 
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
+use crate::feedback::failure_message;
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, UserId};
 use crate::reactive::SetIfAlive;
@@ -270,9 +272,17 @@ fn ApproveLinkDialog() -> impl IntoView {
           ApprovePhase::Sending => view! { <p role="status">{move || i18n.t("approve-link-sending")}</p> }.into_any(),
           ApprovePhase::Done => view! { <p role="status">{move || i18n.t("approval-approved")}</p> }.into_any(),
           ApprovePhase::Failed(message) => {
+            // Say what went wrong and what to do (issue #645); the raw text only when unknown.
+            let failure = ActionFailure::from_wire(&message);
+            let is_known = !matches!(failure.kind, FailureKind::Other);
             view! {
-              <p class="field-error" role="alert">{move || i18n.t("approve-link-failed")}</p>
-              <p class="small mono" translate="no">{message}</p>
+              <p class="field-error" role="alert">
+                {move || if is_known { failure_message(i18n, &failure) } else { i18n.t("approve-link-failed") }}
+              </p>
+              {(!is_known).then(|| view! { <p class="small mono" translate="no">{message.clone()}</p> })}
+              <button type="button" class="btn" on:click=move |_| phase.set(ApprovePhase::EnterCode)>
+                {move || i18n.t("approve-link-retry")}
+              </button>
             }
             .into_any()
           },
