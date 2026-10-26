@@ -29,7 +29,7 @@ use crate::media_formats::{displayable_type, essence, is_svg, media_type_for, ne
 use crate::media_layout::{APP_THUMBNAIL_SIDE, thumbnail_type};
 use crate::mention::{self, TriggerKind};
 use crate::model::{ConversationId, ThreadId};
-use crate::model::{ConversationKind, MessageKind, User};
+use crate::model::{MessageKind, User};
 use crate::notifier::needs_channel_confirmation;
 use crate::raster;
 use crate::reactive::SetIfAlive;
@@ -197,7 +197,7 @@ pub fn Composer(
   let maybe_channel_name = move || {
     state
       .read(|backend| backend.conversation(conversation))
-      .filter(|conv| !matches!(conv.kind, ConversationKind::Direct | ConversationKind::Group))
+      .filter(|conv| conv.has_channel_settings())
       .map(|conv| format!("#{}", conv.name))
   };
   let editor = NodeRef::<html::Div>::new();
@@ -523,8 +523,15 @@ pub fn Composer(
         mention_suggestions(&found.query, &people, &groups, &i18n.t("mention-channel"))
       },
     };
-    selected_suggestion.set(0);
-    suggestions.set(list);
+    // The caret moving inside the same query (arrow keys, a click) keeps the selection; a new list
+    // starts at its first entry.
+    let is_same_list = suggestions.with_untracked(|shown| {
+      shown.len() == list.len() && shown.iter().zip(&list).all(|(a, b)| a.label == b.label)
+    });
+    if !is_same_list {
+      selected_suggestion.set(0);
+      suggestions.set(list);
+    }
   };
   let after_edit = move || {
     if let Some(element) = editor.get_untracked() {

@@ -4,7 +4,7 @@
 use crate::model::PresenceStatus;
 
 /// Every command with its arguments, for `/help` and the autocomplete list.
-pub const COMMANDS: [(&str, &str); 24] = [
+pub const COMMANDS: [(&str, &str); 23] = [
   ("away", ""),
   ("online", ""),
   ("dnd", ""),
@@ -24,7 +24,6 @@ pub const COMMANDS: [(&str, &str); 24] = [
   ("me", "text"),
   ("shrug", "[text]"),
   ("code", "text"),
-  ("search", "text"),
   ("settings", ""),
   ("shortcuts", ""),
   ("remind", "in 10m|at 14:30 text"),
@@ -57,7 +56,6 @@ pub enum SlashCommand {
   Me(String),
   Shrug(String),
   Code(String),
-  Search(String),
   Settings,
   Shortcuts,
   Help,
@@ -177,7 +175,6 @@ pub fn parse(input: &str) -> Parsed {
     "me" => return wrap(need("text"), SlashCommand::Me),
     "shrug" => SlashCommand::Shrug(args.to_owned()),
     "code" => return wrap(need("text"), SlashCommand::Code),
-    "search" => return wrap(need("text"), SlashCommand::Search),
     "settings" => SlashCommand::Settings,
     "shortcuts" => SlashCommand::Shortcuts,
     "help" => SlashCommand::Help,

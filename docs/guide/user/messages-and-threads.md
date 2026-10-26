@@ -73,7 +73,6 @@ slash, type `//`.
 | `/msg @person [text]` `/groupmsg ...`     | Opens a direct or group conversation         |
 | `/mute`                                   | Mutes the conversation                       |
 | `/me` `/shrug` `/code`                    | Action message, shrug, code block            |
-| `/search text`                            | Opens search                                 |
 | `/remind in 10m` or `at 14:30` + text     | A reminder in this conversation              |
 | `/meet`                                   | Starts an instant meeting                    |
 | `/settings` `/shortcuts` `/help`          | Opens settings or the lists                  |

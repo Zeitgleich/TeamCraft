@@ -429,6 +429,12 @@ pub struct Conversation {
 }
 
 impl Conversation {
+  /// Whether it is a channel of a space, the only kind with settings (topic, purpose, name): DMs,
+  /// group DMs and meeting chats live outside spaces and the server refuses settings for them.
+  pub fn has_channel_settings(&self) -> bool {
+    !self.kind.is_direct_like() && self.maybe_space.is_some()
+  }
+
   /// Whether anything in it waits to be read: the read marker has something to move past.
   pub fn has_unread(&self) -> bool {
     self.unread_count > 0 || self.mention_count > 0

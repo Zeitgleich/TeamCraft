@@ -46,11 +46,12 @@ pub fn explain_error(i18n: I18n, error: &SlashError) -> String {
 
 pub fn run(state: AppState, i18n: I18n, conversation: ConversationId, command: SlashCommand) -> Outcome {
   let text = |key: &str| Outcome::Notice(Notice::Text(i18n.t(key)));
-  // Typed in a DM anyway: the server would refuse it (#648), so say why instead.
-  let is_direct = state
+  // Typed outside a channel anyway (DM, group DM, meeting chat): the server would refuse it
+  // (#648), so say why instead.
+  let has_channel_settings = state
     .read(|backend| backend.conversation(conversation))
-    .is_some_and(|conv| conv.kind.is_direct_like());
-  if is_direct && command.is_channel_only() {
+    .is_some_and(|conv| conv.has_channel_settings());
+  if !has_channel_settings && command.is_channel_only() {
     return text("slash-channel-only");
   }
   match command {
@@ -175,10 +176,6 @@ pub fn run(state: AppState, i18n: I18n, conversation: ConversationId, command: S
       format!("{body} {SHRUG}")
     }),
     SlashCommand::Code(code) => Outcome::Send(format!("```\n{code}\n```")),
-    SlashCommand::Search(query) => {
-      state.open_search(Some(&query));
-      Outcome::Done
-    },
     SlashCommand::Settings => {
       state.open_settings();
       Outcome::Done
