@@ -7,12 +7,33 @@
 //! becomes inactive itself ("TeamCraft was opened in another tab"). A call running there blocks the
 //! takeover until the user agrees to end it.
 //!
+//! When the active tab closes, crashes or is discarded, its lock comes free and one of the inactive
+//! tabs takes over by itself: the one the user pressed "Use here" in, otherwise the one focused
+//! most recently ([`keeps_lock`]). Every inactive tab waits for the lock; the tab that gets it asks
+//! the others who they are and passes the lock on when another one should have it.
+//!
 //! This module is the decision logic, free of the browser, so it is tested natively; web_core.rs
 //! drives it.
 
 /// The window event that asks every composer to store its draft now, before the tab hands over
 /// (instead of after the typing pause, which an unmounted composer never reaches).
 pub const PERSIST_DRAFTS_EVENT: &str = "teamcraft-persist-drafts";
+
+/// A tab that passed the lock on this many times in a row keeps it the next time: the tab it
+/// passed it to doesn't take it (gone without saying so).
+pub const MAX_YIELDS: u32 = 5;
+
+/// An inactive tab, as it answers when the lock came free.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Candidate {
+  /// A random name for the tab (web_tabs.rs); also breaks ties.
+  pub tab: String,
+  /// When the tab was last focused or became visible (ms since the epoch, this browser's clock).
+  pub focused_at_ms: f64,
+  /// When the user pressed "Use here" there, while that takeover runs.
+  #[serde(rename = "claimed_at_ms", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_claimed_at_ms: Option<f64>,
+}
 
 /// Where this tab stands, as the page shows it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -165,6 +186,37 @@ pub fn on_taken(maybe_was_active_for: Option<&str>, user: &str) -> OnTaken {
   }
 }
 
+/// The tab that should run the app next: a tab where the user pressed "Use here" (the latest
+/// press), otherwise the one focused most recently.
+pub fn successor(candidates: &[Candidate]) -> Option<&Candidate> {
+  candidates.iter().max_by(|a, b| {
+    let rank = |candidate: &Candidate| {
+      (
+        candidate.maybe_claimed_at_ms.is_some(),
+        candidate.maybe_claimed_at_ms.unwrap_or(0.0),
+      )
+    };
+    let (claimed_a, at_a) = rank(a);
+    let (claimed_b, at_b) = rank(b);
+    claimed_a
+      .cmp(&claimed_b)
+      .then(at_a.total_cmp(&at_b))
+      .then(a.focused_at_ms.total_cmp(&b.focused_at_ms))
+      .then_with(|| a.tab.cmp(&b.tab))
+  })
+}
+
+/// Whether the tab `me`, which just got the free lock, keeps it, given the other inactive tabs that
+/// answered and how often in a row it already passed the lock on.
+pub fn keeps_lock(me: &Candidate, others: &[Candidate], yields_in_row: u32) -> bool {
+  if yields_in_row >= MAX_YIELDS {
+    return true;
+  }
+  let mut all = others.to_vec();
+  all.push(me.clone());
+  successor(&all).is_none_or(|next| next.tab == me.tab)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -274,6 +326,62 @@ mod tests {
     }
   }
 
+  mod auto_takeover {
+    use super::*;
+
+    #[test]
+    fn the_most_recently_focused_tab_takes_over() {
+      let me = candidate("a", 1_000.0, None);
+      let newer = candidate("b", 2_000.0, None);
+      assert!(!keeps_lock(&me, std::slice::from_ref(&newer), 0));
+      assert!(keeps_lock(&newer, std::slice::from_ref(&me), 0));
+    }
+
+    #[test]
+    fn use_here_wins_over_focus() {
+      let focused = candidate("a", 9_000.0, None);
+      let claimed = candidate("b", 1_000.0, Some(5_000.0));
+      assert!(!keeps_lock(&focused, std::slice::from_ref(&claimed), 0));
+      assert!(keeps_lock(&claimed, std::slice::from_ref(&focused), 0));
+    }
+
+    #[test]
+    fn the_latest_use_here_wins_among_several() {
+      let early = candidate("a", 1_000.0, Some(3_000.0));
+      let late = candidate("b", 500.0, Some(4_000.0));
+      assert_eq!(successor(&[early, late.clone()]), Some(&late));
+    }
+
+    #[test]
+    fn alone_a_tab_keeps_the_lock() {
+      assert!(keeps_lock(&candidate("a", 1.0, None), &[], 0));
+    }
+
+    #[test]
+    fn equal_focus_times_pick_one_tab_everywhere() {
+      let (a, b) = (candidate("a", 1_000.0, None), candidate("b", 1_000.0, None));
+      assert!(keeps_lock(&b, std::slice::from_ref(&a), 0));
+      assert!(!keeps_lock(&a, std::slice::from_ref(&b), 0));
+    }
+
+    #[test]
+    fn a_tab_that_passed_the_lock_on_too_often_keeps_it() {
+      let me = candidate("a", 1_000.0, None);
+      let newer = candidate("b", 2_000.0, None);
+      assert!(!keeps_lock(&me, std::slice::from_ref(&newer), MAX_YIELDS - 1));
+      assert!(keeps_lock(&me, std::slice::from_ref(&newer), MAX_YIELDS));
+    }
+
+    #[test]
+    fn candidates_cross_tabs_as_stable_json() {
+      let json = serde_json::to_string(&candidate("a", 1.0, None)).unwrap();
+      assert_eq!(json, r#"{"tab":"a","focused_at_ms":1.0}"#);
+      let claimed: Candidate =
+        serde_json::from_str(r#"{"tab":"b","focused_at_ms":2.0,"claimed_at_ms":3.0}"#).unwrap();
+      assert_eq!(claimed.maybe_claimed_at_ms, Some(3.0));
+    }
+  }
+
   mod reload {
     use super::*;
 
@@ -286,6 +394,14 @@ mod tests {
     fn a_new_tab_or_another_account_shows_the_notice() {
       assert_eq!(on_taken(None, "42"), OnTaken::ShowNotice);
       assert_eq!(on_taken(Some("7"), "42"), OnTaken::ShowNotice);
+    }
+  }
+
+  fn candidate(tab: &str, focused_at_ms: f64, maybe_claimed_at_ms: Option<f64>) -> Candidate {
+    Candidate {
+      tab: tab.to_owned(),
+      focused_at_ms,
+      maybe_claimed_at_ms,
     }
   }
 }

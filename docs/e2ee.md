@@ -1727,10 +1727,14 @@ So exactly one core owns a device's store at a time:
   channel to hand over and waits for the lock. The owner refuses while it is in a call (the user can
   then end the call and ask again); otherwise it has the composers store their drafts, waits for
   IndexedDB to hold everything written (the outbox included, at most 5 s), stops its core, which
-  releases the lock, and shows "TeamCraft was opened in another tab". No tab takes the lock on its
-  own: a tab whose owner closed takes it on "Use here". A reload of the active tab finds its own
-  account in the tab's session storage and waits up to 3 s for the old page's lock instead of
-  asking. Browsers without Web Locks run one core per tab, as before. The service worker only reads
+  releases the lock, and shows "TeamCraft was opened in another tab". Every inactive tab waits for
+  the lock, so when the active tab closes, crashes or is discarded one of them takes over by
+  itself: the tab that gets the lock holds a roll call on the channel (150 ms; only live tabs
+  answer) and keeps it only if it should run the app — the tab where "Use here" was pressed, else
+  the one focused or shown last. Otherwise it passes the lock on and queues again after a short
+  jitter; after five passes in a row it keeps it. A reload of the active tab finds its own account
+  in the tab's session storage, claims the lock like "Use here" and waits up to 3 s for it instead
+  of asking. Browsers without Web Locks run one core per tab, as before. The service worker only reads
   the store (push previews, §7).
 - **Desktop.** One running instance on every OS (Tauri's single-instance plugin: a named mutex on
   Windows, D-Bus on Linux, a Unix socket on macOS); a second launch shows the first instance's window
