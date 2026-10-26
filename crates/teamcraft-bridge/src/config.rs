@@ -15,7 +15,8 @@ use serde::Deserialize;
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{
-  ConversationId, DEFAULT_SOURCE_ALERT_LEVELS, DEFAULT_SOURCE_RATE_LIMIT_PER_MINUTE, UserId,
+  ConversationId, DEFAULT_SOURCE_ALERT_LEVELS, DEFAULT_SOURCE_RATE_LIMIT_PER_MINUTE,
+  MAX_SOURCE_FILES_PER_MESSAGE, UserId,
 };
 
 use crate::batch::{BatchLimits, Mentions};
@@ -42,6 +43,8 @@ pub struct BridgeConfig {
   pub index: IndexSection,
   #[serde(default)]
   pub app_sources: AppSourcesSection,
+  #[serde(default)]
+  pub files: FilesSection,
   /// Optional: sources written into this file. Sources added in the app need none.
   #[serde(default)]
   pub sources: Vec<SourceConfig>,
@@ -130,6 +133,22 @@ pub struct AppSourcesSection {
   pub history_pages: u32,
 }
 
+/// Webhooks with files (docs/bridge.md, "Files").
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct FilesSection {
+  /// Files one webhook message may carry, for sources that don't set their own; `0` takes none.
+  pub max_files_per_message: u32,
+  /// Largest file, in bytes. The server's attachment limit (`max_attachment_bytes`) applies too.
+  pub max_file_bytes: u64,
+  /// Bytes of webhooks with files per minute, all sources together; more get `429`.
+  pub total_bytes_per_minute: u64,
+  /// Where files wait while they go up (plaintext, readable only by the bridge, deleted after the
+  /// request). Default: `spool` next to `store.path`.
+  #[serde(rename = "spool_dir")]
+  pub maybe_spool_dir: Option<PathBuf>,
+}
+
 /// One producer: a token that selects a conversation, with its limits and alert rules.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -151,6 +170,9 @@ pub struct SourceConfig {
   /// Webhook attachments with `color: "danger"` are alerts.
   #[serde(default)]
   pub danger_is_alert: bool,
+  /// Files one webhook message may carry; default: `files.max_files_per_message`.
+  #[serde(rename = "max_files_per_message", default)]
+  pub maybe_max_files_per_message: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -234,7 +256,17 @@ impl BridgeConfig {
           source.name
         ));
       }
+      if source
+        .maybe_max_files_per_message
+        .is_some_and(|files| files > MAX_SOURCE_FILES_PER_MESSAGE)
+      {
+        return invalid(format!(
+          "source {}: max_files_per_message is at most {MAX_SOURCE_FILES_PER_MESSAGE}",
+          source.name
+        ));
+      }
     }
+    self.files.validate()?;
     if self.batching.max_bytes < self.batching.max_line_bytes + 16 {
       return invalid("batching.max_bytes must exceed batching.max_line_bytes".into());
     }
@@ -275,12 +307,47 @@ impl BridgeConfig {
     SymmetricKey::from_slice(&bytes).ok_or(ConfigError::BadStoreKey)
   }
 
+  /// Where files wait while they go up: `files.spool_dir`, or `spool` next to the database.
+  pub fn spool_dir(&self) -> PathBuf {
+    self.files.maybe_spool_dir.clone().unwrap_or_else(|| {
+      self
+        .store
+        .path
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join("spool")
+    })
+  }
+
   pub fn argon2(&self) -> Argon2Settings {
     Argon2Settings {
       memory_kib: self.identity.argon2_memory_kib,
       iterations: self.identity.argon2_iterations,
       parallelism: 1,
     }
+  }
+}
+
+impl FilesSection {
+  fn validate(&self) -> Result<(), ConfigError> {
+    let invalid = |message: String| Err(ConfigError::Invalid(message));
+    if self.max_files_per_message > MAX_SOURCE_FILES_PER_MESSAGE {
+      return invalid(format!(
+        "files.max_files_per_message is at most {MAX_SOURCE_FILES_PER_MESSAGE}"
+      ));
+    }
+    if self.max_file_bytes == 0 || self.total_bytes_per_minute == 0 {
+      return invalid("files.max_file_bytes and files.total_bytes_per_minute must be above 0".into());
+    }
+    // The core reads the files by path, which it keeps as text.
+    if self
+      .maybe_spool_dir
+      .as_ref()
+      .is_some_and(|path| path.to_str().is_none())
+    {
+      return invalid("files.spool_dir must be valid UTF-8".into());
+    }
+    Ok(())
   }
 }
 
@@ -355,6 +422,17 @@ impl Default for BatchingSection {
   }
 }
 
+impl Default for FilesSection {
+  fn default() -> Self {
+    Self {
+      max_files_per_message: 10,
+      max_file_bytes: 100 * 1024 * 1024,
+      total_bytes_per_minute: 1024 * 1024 * 1024,
+      maybe_spool_dir: None,
+    }
+  }
+}
+
 impl Default for AppSourcesSection {
   fn default() -> Self {
     Self {
@@ -406,6 +484,19 @@ mod tests {
       assert!(config.sources[0].alert_levels.contains(&"error".to_owned()));
       assert_eq!(config.batch_limits().interval, Duration::from_secs(1));
       assert_eq!(config.store_key().unwrap().expose_secret()[1], 1);
+      assert_eq!(config.files.max_files_per_message, 10);
+      assert_eq!(config.sources[0].maybe_max_files_per_message, None);
+      assert_eq!(config.spool_dir(), Path::new("spool"), "next to the database");
+    }
+
+    #[test]
+    fn the_spool_directory_can_be_set() {
+      let text = format!("{MINIMAL}\n[files]\nspool_dir = \"/tmp/bridge-spool\"\n");
+      let config = BridgeConfig::from_toml(&text).unwrap();
+      assert_eq!(config.spool_dir(), Path::new("/tmp/bridge-spool"));
+      let nested = MINIMAL.replace("path = \"bridge.db\"", "path = \"/var/lib/bridge/bridge.db\"");
+      let config = BridgeConfig::from_toml(&nested).unwrap();
+      assert_eq!(config.spool_dir(), Path::new("/var/lib/bridge/spool"));
     }
 
     #[test]
@@ -473,6 +564,20 @@ mod tests {
           with_source(
             "name = \"b\"\ntoken = \"another-token-0123456\"\nconversation_id = \"1\"\nrate_limit_per_minute = 0",
           ),
+        ),
+        (
+          "too many files per message",
+          with_source(
+            "name = \"b\"\ntoken = \"another-token-0123456\"\nconversation_id = \"1\"\nmax_files_per_message = 51",
+          ),
+        ),
+        (
+          "too many files by default",
+          format!("{MINIMAL}\n[files]\nmax_files_per_message = 51\n"),
+        ),
+        (
+          "no file bytes",
+          format!("{MINIMAL}\n[files]\ntotal_bytes_per_minute = 0\n"),
         ),
       ] {
         assert!(BridgeConfig::from_toml(&text).is_err(), "{what}");

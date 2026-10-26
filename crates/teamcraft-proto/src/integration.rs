@@ -20,6 +20,8 @@ use crate::wire_enum::wire_enum;
 pub const DEFAULT_SOURCE_RATE_LIMIT_PER_MINUTE: u32 = 600;
 /// Highest rate limit a source may ask for; a bigger value is clamped to it.
 pub const MAX_SOURCE_RATE_LIMIT_PER_MINUTE: u32 = 60_000;
+/// Most files one webhook message of a source may carry; a bigger value is clamped to it.
+pub const MAX_SOURCE_FILES_PER_MESSAGE: u32 = 50;
 /// Longest source name, in characters (it shows in the bridge's logs and its notices).
 pub const MAX_SOURCE_NAME_CHARS: usize = 80;
 /// Most alert levels a source may list, and the longest level name.
@@ -78,6 +80,14 @@ pub struct SourceOptions {
   pub alert_levels: Vec<String>,
   #[serde(default = "default_rate_limit")]
   pub rate_limit_per_minute: u32,
+  /// Files one webhook message may carry (`0`: none). Absent: the bridge's default
+  /// (`files.max_files_per_message`).
+  #[serde(
+    rename = "max_files_per_message",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_max_files_per_message: Option<u32>,
 }
 
 /// Random 128-bit name of a source, chosen by the client that creates it. Wire format: 32 lowercase
@@ -122,6 +132,9 @@ impl SourceOptions {
       rate_limit_per_minute: self
         .rate_limit_per_minute
         .clamp(1, MAX_SOURCE_RATE_LIMIT_PER_MINUTE),
+      maybe_max_files_per_message: self
+        .maybe_max_files_per_message
+        .map(|files| files.min(MAX_SOURCE_FILES_PER_MESSAGE)),
     }
   }
 }
@@ -132,6 +145,7 @@ impl Default for SourceOptions {
       danger_is_alert: false,
       alert_levels: default_alert_levels(),
       rate_limit_per_minute: default_rate_limit(),
+      maybe_max_files_per_message: None,
     }
   }
 }
@@ -248,6 +262,7 @@ mod tests {
           danger_is_alert: true,
           alert_levels: vec!["error".into()],
           rate_limit_per_minute: 60,
+          maybe_max_files_per_message: None,
         },
       };
       let value = serde_json::to_value(&change).unwrap();
@@ -340,16 +355,36 @@ mod tests {
           .chain([String::new(), "x".repeat(33)])
           .collect(),
         rate_limit_per_minute: u32::MAX,
+        maybe_max_files_per_message: Some(u32::MAX),
       }
       .bounded();
       assert_eq!(options.rate_limit_per_minute, MAX_SOURCE_RATE_LIMIT_PER_MINUTE);
       assert_eq!(options.alert_levels.len(), MAX_SOURCE_ALERT_LEVELS);
       assert_eq!(options.alert_levels[0], "level0");
+      assert_eq!(
+        options.maybe_max_files_per_message,
+        Some(MAX_SOURCE_FILES_PER_MESSAGE)
+      );
       let zero = SourceOptions {
         rate_limit_per_minute: 0,
+        maybe_max_files_per_message: Some(0),
         ..SourceOptions::default()
-      };
-      assert_eq!(zero.bounded().rate_limit_per_minute, 1);
+      }
+      .bounded();
+      assert_eq!(zero.rate_limit_per_minute, 1);
+      assert_eq!(zero.maybe_max_files_per_message, Some(0), "no files at all");
+    }
+
+    #[test]
+    fn the_files_limit_travels_only_when_set() {
+      let options: SourceOptions = serde_json::from_value(json!({"max_files_per_message": 3})).unwrap();
+      assert_eq!(options.maybe_max_files_per_message, Some(3));
+      assert_eq!(
+        serde_json::to_value(&options).unwrap()["max_files_per_message"],
+        json!(3)
+      );
+      let unset = serde_json::to_value(SourceOptions::default()).unwrap();
+      assert!(unset.get("max_files_per_message").is_none());
     }
   }
 }

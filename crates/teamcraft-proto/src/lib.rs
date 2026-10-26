@@ -39,8 +39,9 @@ pub use id::{
 };
 pub use integration::{
   DEFAULT_SOURCE_ALERT_LEVELS, DEFAULT_SOURCE_RATE_LIMIT_PER_MINUTE, MAX_SOURCE_ALERT_LEVEL_CHARS,
-  MAX_SOURCE_ALERT_LEVELS, MAX_SOURCE_NAME_CHARS, MAX_SOURCE_RATE_LIMIT_PER_MINUTE, SourceChange, SourceId,
-  SourceKind, SourceOptions, SourceTokenHash, SourceTokenHashError,
+  MAX_SOURCE_ALERT_LEVELS, MAX_SOURCE_FILES_PER_MESSAGE, MAX_SOURCE_NAME_CHARS,
+  MAX_SOURCE_RATE_LIMIT_PER_MINUTE, SourceChange, SourceId, SourceKind, SourceOptions, SourceTokenHash,
+  SourceTokenHashError,
 };
 pub use permission::{
   ALL_KNOWN as ALL_PERMISSIONS, ChannelContext, ChannelModeration, ChannelRole, Permission, PermissionScheme,

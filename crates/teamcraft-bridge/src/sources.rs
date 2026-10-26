@@ -35,6 +35,8 @@ pub struct Source {
   pub rules: LogRules,
   pub danger_is_alert: bool,
   pub rate_limit_per_minute: u32,
+  /// Files one webhook message may carry; `None`: the bridge's default (`files.max_files_per_message`).
+  pub maybe_max_files_per_message: Option<u32>,
   pub mentions: Mentions,
   token_sha256: [u8; 32],
 }
@@ -76,6 +78,18 @@ struct Registry {
   /// All sources together (`listen.total_rate_limit_per_minute`), so many sources can't add up
   /// to more than the bridge and the channels should take.
   total: RateLimiter,
+  /// Bytes of webhooks with files, all sources together (`files.total_bytes_per_minute`).
+  file_bytes: RateLimiter,
+}
+
+/// Whether the byte budget for files had room ([`SourceRegistry::try_take_file_bytes`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileBytes {
+  Taken,
+  /// Not now; there is room again after this long.
+  Wait(Duration),
+  /// More than the budget of a whole minute: never.
+  NeverFits,
 }
 
 /// What [`SourceRegistry::replace_managed`] changed, for the log.
@@ -95,6 +109,7 @@ impl Source {
       rules: config.log_rules(),
       danger_is_alert: config.danger_is_alert,
       rate_limit_per_minute: config.rate_limit_per_minute,
+      maybe_max_files_per_message: config.maybe_max_files_per_message,
       mentions: config.mentions(),
       token_sha256: source_token_sha256(config.token.expose_secret()),
     }
@@ -117,6 +132,7 @@ impl Source {
       },
       danger_is_alert: source.options.danger_is_alert,
       rate_limit_per_minute: source.options.rate_limit_per_minute,
+      maybe_max_files_per_message: source.options.maybe_max_files_per_message,
       mentions: Mentions::default(),
       token_sha256: *source.token_sha256.as_bytes(),
     })
@@ -142,6 +158,7 @@ impl SourceRegistry {
       managed: Vec::new(),
       limiters: HashMap::new(),
       total: RateLimiter::new(config.listen.total_rate_limit_per_minute, Instant::now()),
+      file_bytes: RateLimiter::per_minute(config.files.total_bytes_per_minute, Instant::now()),
     };
     Self {
       inner: Arc::new(RwLock::new(registry)),
@@ -223,6 +240,19 @@ impl SourceRegistry {
     self.with_limiters(source, now, |limiter, total| {
       limiter.retry_after().max(total.retry_after())
     })
+  }
+
+  /// Takes `bytes` of a webhook with files from the bridge's byte budget, all or nothing.
+  pub fn try_take_file_bytes(&self, bytes: u64, now: Instant) -> FileBytes {
+    let mut inner = self.write();
+    if !inner.file_bytes.can_ever_take(bytes) {
+      return FileBytes::NeverFits;
+    }
+    if inner.file_bytes.try_take_amount(bytes, now) {
+      FileBytes::Taken
+    } else {
+      FileBytes::Wait(inner.file_bytes.retry_after_for(bytes))
+    }
   }
 
   fn with_limiters<T>(
@@ -324,10 +354,38 @@ mod tests {
     assert!(registry.retry_after(&b, now) >= Duration::from_millis(500));
   }
 
+  #[test]
+  fn file_bytes_come_from_one_budget_for_the_whole_bridge() {
+    let registry = registry_with_total(100);
+    let now = Instant::now();
+    assert_eq!(registry.try_take_file_bytes(600, now), FileBytes::Taken);
+    assert!(matches!(
+      registry.try_take_file_bytes(600, now),
+      FileBytes::Wait(retry_after) if retry_after >= Duration::from_secs(1)
+    ));
+    assert_eq!(registry.try_take_file_bytes(1001, now), FileBytes::NeverFits);
+  }
+
+  #[test]
+  fn sources_carry_their_own_file_limit() {
+    let unset = managed(1, "ci", SourceKind::Webhook, "tcs_a");
+    assert_eq!(unset.maybe_max_files_per_message, None, "the bridge's default");
+    let limited = Source::from_managed(&ActiveSource {
+      options: SourceOptions {
+        maybe_max_files_per_message: Some(2),
+        ..SourceOptions::default()
+      },
+      ..active(1, "ci", SourceKind::Webhook, "tcs_a")
+    })
+    .unwrap();
+    assert_eq!(limited.maybe_max_files_per_message, Some(2));
+  }
+
   fn registry_with_static() -> SourceRegistry {
     registry_with_total(100_000)
   }
 
+  /// Requests and lines: `total` a minute; file bytes: ten times that.
   fn registry_with_total(total: u32) -> SourceRegistry {
     let config = BridgeConfig::from_toml(&format!(
       r#"
@@ -337,18 +395,25 @@ mod tests {
       path = "x.db"
       [listen]
       total_rate_limit_per_minute = {total}
+      [files]
+      total_bytes_per_minute = {file_bytes}
       [[sources]]
       name = "static"
       token = "{STATIC_TOKEN}"
       conversation_id = "1"
-      "#
+      "#,
+      file_bytes = u64::from(total) * 10
     ))
     .unwrap();
     SourceRegistry::new(&config)
   }
 
   fn managed(id: u8, name: &str, kind: SourceKind, token: &str) -> Source {
-    Source::from_managed(&ActiveSource {
+    Source::from_managed(&active(id, name, kind, token)).unwrap()
+  }
+
+  fn active(id: u8, name: &str, kind: SourceKind, token: &str) -> ActiveSource {
+    ActiveSource {
       id: SourceId::from_bytes([id; 16]),
       conversation: ConversationId::from_snowflake(Snowflake::new(7).unwrap()),
       name: name.into(),
@@ -360,7 +425,6 @@ mod tests {
       },
       created_by: UserId::from_snowflake(Snowflake::new(1).unwrap()),
       created_at_ms: 0,
-    })
-    .unwrap()
+    }
   }
 }

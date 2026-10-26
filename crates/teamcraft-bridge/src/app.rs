@@ -17,6 +17,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::config::BridgeConfig;
+use crate::file_hooks::FileSettings;
 use crate::http::{HttpState, Submission, router};
 use crate::sources::SourceRegistry;
 use crate::worker::{AppSourceSettings, Worker, WorkerSettings};
@@ -57,7 +58,7 @@ pub async fn enroll_or_open<A: ServerApi, S: LocalStore>(
         api,
         store,
         Box::new(SystemClock),
-        ClientSettings::default(),
+        client_settings(config),
         options,
       )
       .await
@@ -65,8 +66,16 @@ pub async fn enroll_or_open<A: ServerApi, S: LocalStore>(
     info!(user_id = %client.user_id(), device_id = %client.device_id(), "enrolled");
     return Ok(client);
   }
-  Client::open(api, store, Box::new(SystemClock), ClientSettings::default())?
+  Client::open(api, store, Box::new(SystemClock), client_settings(config))?
     .context("the local database has an account but it could not be opened")
+}
+
+/// The core's defaults, with the bridge's file size limit.
+fn client_settings(config: &BridgeConfig) -> ClientSettings {
+  ClientSettings {
+    max_upload_bytes: config.files.max_file_bytes,
+    ..ClientSettings::default()
+  }
 }
 
 /// The running endpoints.
@@ -87,13 +96,20 @@ impl Endpoints {
 }
 
 /// Binds every configured address and serves the endpoints on them. Failing to bind an IPv6 address
-/// is tolerated if another one worked (hosts without IPv6).
+/// is tolerated if another one worked (hosts without IPv6). Files an earlier run left in the spool
+/// directory are deleted first.
 pub async fn start_endpoints(
   config: &BridgeConfig,
   sources: SourceRegistry,
   sender: mpsc::Sender<Submission>,
 ) -> anyhow::Result<Endpoints> {
-  let state = HttpState::new(sources, sender);
+  let files = FileSettings::from_config(config);
+  match files.spool.sweep() {
+    Ok(0) => {},
+    Ok(count) => info!(count, "deleted files an earlier run left in the spool directory"),
+    Err(error) => warn!(%error, "the spool directory could not be cleaned up"),
+  }
+  let state = HttpState::new(sources, sender, files);
   let (stop, stopped) = watch::channel(false);
   let mut listeners: Vec<TcpListener> = Vec::new();
   for addr in &config.listen.addrs {
@@ -161,7 +177,8 @@ where
     () = shutdown => {},
   }
   info!("shutting down");
-  endpoints.shutdown().await;
-  // All senders are gone now, so the worker drains its queue and finishes.
-  Ok(work.await)
+  // The worker keeps going while the endpoints drain: a request with files waits for its answer.
+  // Once the endpoints are gone, so are all senders, and the worker drains its queue and finishes.
+  let ((), client) = tokio::join!(endpoints.shutdown(), work);
+  Ok(client)
 }
