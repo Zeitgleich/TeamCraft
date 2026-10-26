@@ -260,6 +260,8 @@ data class MessageExtras(
   @SerialName("maybe_workspace_event") val maybeWorkspaceEvent: JsonObject? = null,
   /** The server rejected this own message; it waits for "retry" or "delete". */
   @SerialName("is_send_failed") val isSendFailed: Boolean = false,
+  /** An own message the other member of a DM read: two ticks instead of one (issue #769). */
+  @SerialName("is_read") val isRead: Boolean = false,
 )
 
 @Serializable

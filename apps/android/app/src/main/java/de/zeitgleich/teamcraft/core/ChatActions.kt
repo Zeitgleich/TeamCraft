@@ -96,6 +96,9 @@ object ChatActions {
 
   fun markRead(conversation: String) = action("mark_read") { put("conversation", conversation) }
 
+  /** Reads again how far the others read: receipts sent while the app was offline never arrive. */
+  fun refreshReadReceipts(conversation: String) = action("refresh_read_receipts") { put("conversation", conversation) }
+
   fun markUnread(conversation: String, from: String) = action("mark_unread") {
     put("conversation", conversation)
     put("from", from)
