@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.notifications
 
+import uniffi.teamcraft_ffi.NotificationGap
 import uniffi.teamcraft_ffi.PushNotification
 import uniffi.teamcraft_ffi.PushNotificationKind
 
@@ -73,6 +74,32 @@ sealed interface PushDecision {
       )
     }
   }
+}
+
+/**
+ * A message notification shown before its text could be read (the fetch timed out, decryption
+ * failed or no session): the app opens the same wake-up again later and updates the notification
+ * under the same ID, silently (issue #739). Policy or setting cuts are not retried.
+ */
+object PushRetry {
+  /** Retries after the first try; each waits for a network. */
+  const val MAX_ATTEMPTS = 2
+
+  private const val FIRST_DELAY_MS = 30_000L
+  private val READABLE_LATER = setOf(NotificationGap.TIMED_OUT, NotificationGap.NOT_DECRYPTED, NotificationGap.NO_SESSION)
+
+  /** The notification shows a placeholder for a message that may be readable later. */
+  fun isPlaceholder(notification: PushNotification): Boolean =
+    notification.kind == PushNotificationKind.MESSAGE &&
+      notification.maybeMessageId != null &&
+      notification.maybeGap in READABLE_LATER
+
+  /** Whether `attempt` (1 = the first retry) should be made for what this try showed. */
+  fun isWanted(notification: PushNotification, attempt: Int): Boolean =
+    attempt <= MAX_ATTEMPTS && notification.maybeSuppression == null && isPlaceholder(notification)
+
+  /** Waits 30 s before the first retry, 60 s before the second. */
+  fun delayMs(attempt: Int): Long = FIRST_DELAY_MS shl (attempt - 1).coerceIn(0, MAX_ATTEMPTS)
 }
 
 enum class IgnoreReason {

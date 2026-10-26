@@ -13,6 +13,8 @@ import de.zeitgleich.teamcraft.core.CoreRepository
 import de.zeitgleich.teamcraft.notifications.MentionPrefs
 import de.zeitgleich.teamcraft.notifications.NotificationContentPrefs
 import de.zeitgleich.teamcraft.notifications.PushHandler
+import de.zeitgleich.teamcraft.notifications.PushRetry
+import uniffi.teamcraft_ffi.PushNotification
 import uniffi.teamcraft_ffi.PushService
 
 /**
@@ -128,11 +130,43 @@ class PushManager(
       core.notificationForPush(payload, utcOffsetMinutes())
     }
       // Checked again: sign-out may have started while the wake-up was being opened.
-      .onSuccess { if (!isSigningOut) handler.handle(it) }
+      .onSuccess {
+        if (isSigningOut) return@onSuccess
+        handler.handle(it)
+        scheduleRetry(payload, it, attempt = 1)
+      }
       .onFailure {
         Log.w(TAG, "wake-up could not be opened: ${it.javaClass.simpleName}")
         if (isVisible && !isSigningOut) handler.handleUnreadable() else handler.recordUnreadable()
       }
+  }
+
+  /**
+   * Opens a wake-up again whose message was shown as a placeholder ([PushRetry]) and fills in the
+   * notification, silently and under the same ID; schedules the next attempt while it still can't
+   * be read. Shows nothing new: a notification read or swiped away meanwhile stays gone.
+   */
+  suspend fun retryWakeUp(payload: ByteArray, attempt: Int) {
+    if (isSigningOut) return
+    val core = runCatching { core.core() }.getOrNull() ?: return
+    runCatching {
+      core.setMentionSettings(mentionPrefs.settings.value)
+      core.setNotificationContent(contentPrefs.content.value)
+      core.notificationForPushRetry(payload, utcOffsetMinutes())
+    }
+      .onSuccess {
+        if (isSigningOut) return@onSuccess
+        handler.handleRetry(it)
+        scheduleRetry(payload, it, attempt = attempt + 1)
+      }
+      .onFailure { Log.w(TAG, "wake-up retry failed: ${it.javaClass.simpleName}") }
+  }
+
+  private fun scheduleRetry(payload: ByteArray, shown: PushNotification, attempt: Int) {
+    if (!PushRetry.isWanted(shown, attempt) || !handler.isShowing(shown.conversationId)) return
+    // The gap is logged, never the content (notifications.md, "Mobile push delivery").
+    Log.i(TAG, "message not read in time (${shown.maybeGap}); retry $attempt scheduled")
+    WakeUpWork.enqueueRetry(context, payload, attempt)
   }
 
   private companion object {
