@@ -2897,3 +2897,17 @@ notes-title = Notes
 notes-empty-title = Nothing noted yet
 notes-empty = Keep ideas, links and files here. Only your own devices can read them.
 composer-placeholder-notes = Note something for yourself
+
+## One active tab (#744)
+tab-elsewhere-title = TeamCraft is already open in another tab
+tab-elsewhere-body = Use it here instead? The other tab becomes inactive.
+tab-moved-title = TeamCraft was opened in another tab
+tab-moved-body = This tab is inactive now. Use it here to continue in this tab.
+tab-call-title = A call is running in the other tab
+tab-call-body = Using TeamCraft here ends the call there.
+tab-timed-out = The other tab didn’t respond. Try again.
+tab-use-here = Use here
+tab-end-call-use-here = End call and use here
+tab-cancel = Cancel
+tab-close = Close
+tab-close-hint = You can close this tab now.
