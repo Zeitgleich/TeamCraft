@@ -35,6 +35,11 @@
     <display_length compare="ge">720</display_length>
   </requires>
   <releases>
+    <release version="1.0.6" date="2026-10-26" type="stable">
+      <description>
+        <p>Webhook and log sources for integration channels are created and revoked in the app; the bridge picks them up without any configuration.</p>
+      </description>
+    </release>
     <release version="1.0.5" date="2026-10-26" type="stable">
       <description>
         <p>Everything in 1.0.4 (new message layouts with read ticks, redesigned home pages, search in a conversation, meeting guests in the browser, notifications on every platform, multi-device calls, resumable uploads, file previews and share links, integrations, QR device linking), with a fix that lets the server update its database.</p>
