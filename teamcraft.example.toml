@@ -23,6 +23,22 @@ acquire_timeout_secs = 5
 # of exiting at once, so a restart policy does not turn a database restart into a crash loop.
 startup_wait_secs = 300
 
+[dependencies]
+# How the server treats a failing backend (database, object storage, identity provider, push
+# gateway, SFU), each with its own circuit breaker. After `failure_threshold` failures in a row the
+# backend counts as down: requests that need it are answered at once with 503 and Retry-After
+# instead of waiting for a timeout each, and /readyz lists it ("degraded"; the database makes it
+# 503). After `open_secs` one request probes it again; a success closes the breaker.
+failure_threshold = 3
+open_secs = 15
+# Extra attempts of an idempotent request that failed on the network or with a 5xx (timeouts are
+# not repeated), waiting `retry_initial_ms`, doubling up to `retry_max_ms`, with jitter.
+retries = 2
+retry_initial_ms = 200
+retry_max_ms = 2000
+# How long /readyz waits for the database; longer counts as a failure.
+readiness_timeout_ms = 2000
+
 [oidc]
 # Required. Issuer of the OIDC provider (reference setup: a Keycloak realm). Must equal the `iss`
 # claim of the tokens; the server fetches <issuer>/.well-known/openid-configuration for the keys.

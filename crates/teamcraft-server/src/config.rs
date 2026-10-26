@@ -77,6 +77,9 @@ pub struct Config {
   /// The key that encrypts passwords entered in the admin console (admin.md §6.2).
   #[serde(default)]
   pub secrets: SecretsConfig,
+  /// Circuit breakers and retries of the backends (issue #743).
+  #[serde(default)]
+  pub dependencies: crate::dependencies::DependenciesConfig,
 }
 
 /// Where the settings key comes from: inline (base64, 32 bytes) or a file the server creates on
@@ -1737,6 +1740,10 @@ mod tests {
   fn example_file_parses_and_matches_the_defaults() {
     let text = include_str!("../../../teamcraft.example.toml");
     let config = Config::from_toml(text).unwrap();
+    assert_eq!(
+      config.dependencies,
+      crate::dependencies::DependenciesConfig::default()
+    );
     assert_eq!(config.limits.max_page_size, LimitsConfig::default().max_page_size);
     assert_eq!(
       config.gateway.resume_buffer_events,

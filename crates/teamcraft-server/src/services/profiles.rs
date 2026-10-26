@@ -84,6 +84,8 @@ pub async fn create_avatar_upload(
     )));
   }
   let store = blob_store(state)?;
+  // While the storage is down, say "later" here instead of handing out a URL that fails.
+  store.check_available()?;
   let object: teamcraft_proto::AttachmentId = state.next_id()?;
   let key = format!("avatars/{}/{}", caller.user.id.snowflake(), object.snowflake());
   let previous = state

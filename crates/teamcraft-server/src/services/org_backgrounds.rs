@@ -28,6 +28,8 @@ pub async fn create_upload(
 ) -> Result<CreateOrgBackgroundUploadResponse, ApiError> {
   require(state, caller, Permission::ManageWorkspace, &Target::Instance)?;
   let store = blob_store(state)?;
+  // While the storage is down, say "later" here instead of handing out a URL that fails.
+  store.check_available()?;
   let max_bytes = state.settings.get().limits.max_background_bytes;
   if request.size_bytes == 0 {
     return Err(ApiError::InvalidRequest("size_bytes must be positive".into()));

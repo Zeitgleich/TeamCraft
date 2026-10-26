@@ -10703,6 +10703,7 @@ dependencies = [
  "teamcraft-crypto",
  "teamcraft-db",
  "teamcraft-media",
+ "teamcraft-net",
  "teamcraft-ops",
  "teamcraft-proto",
  "teamcraft-sfu",
