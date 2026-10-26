@@ -324,6 +324,7 @@ mod tests {
         maybe_email: None,
         maybe_organization: None,
         maybe_has_devices: None,
+        is_deactivated: false,
       };
       records::put_json(&store, Table::Users, &user.to_string(), &summary).unwrap();
     }

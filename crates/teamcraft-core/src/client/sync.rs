@@ -1,11 +1,11 @@
 //! Full state sync over REST, key package top-up and key bag upload.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use teamcraft_crypto::mls::{create_key_package, create_last_resort_key_package};
 use teamcraft_proto::{
   Base64Bytes, ConversationId, ConversationKind, ConversationResponse, ListConversationMembersResponse,
-  ListThreadsQuery, SpaceId, UploadKeyPackagesRequest, UserSummary,
+  ListThreadsQuery, SpaceId, UploadKeyPackagesRequest, UserId, UserSummary,
 };
 
 use super::Client;
@@ -22,6 +22,13 @@ const NEEDS_RESYNC_KEY: &str = "needs_resync";
 /// Conversations whose member list an earlier sync couldn't refresh; tracked apart from the
 /// content, so a content sync that works doesn't clear a member refresh that failed.
 const NEEDS_MEMBER_RESYNC_KEY: &str = "needs_member_resync";
+/// Most people a full sync asks the server about because no list mentions them any more (issue
+/// #654): one request each, so a sync after a long absence stays short; the rest follow next time.
+const MAX_UNLISTED_RECHECKS: usize = 25;
+/// When each unlisted person was last asked about, so a person who stays unlisted (only in a DM's
+/// participants, say) is asked once a day, not at every sync.
+const UNLISTED_RECHECKED_KEY: &str = "unlisted_rechecked";
+const UNLISTED_RECHECK_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// The part of a conversation's sync that failed and waits for another try.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,8 +53,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.share_removed_senders()?;
     self.finish_enrollment().await?;
     self.sync_workspace().await?;
-    self.refresh_spaces().await?;
+    let listed = self.refresh_spaces_listing().await?;
     self.refresh_own_summary().await;
+    if let Err(error) = self.recheck_unlisted_people(&listed).await {
+      // Not fatal: names stay as they were until the next sync.
+      tracing::warn!(%error, "could not recheck people no list mentions");
+    }
     let conversations = self.api.list_conversations().await?.conversations;
     let known: Vec<ConversationId> = self.cached_conversations()?.into_keys().collect();
     for stale in known
@@ -335,18 +346,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// The user's own name and kind. Other people's summaries come with the member lists, but someone
-  /// who is in no conversation yet would otherwise have no name in the app.
+  /// who is in no conversation yet would otherwise have no name in the app. Fetched at every full
+  /// sync, so a name changed at the identity provider shows (issue #654).
   pub(crate) async fn refresh_own_summary(&mut self) {
     let me = self.user_id();
     let key = me.to_string();
-    match records::get_json::<UserSummary>(&self.store, Table::Users, &key) {
-      Ok(Some(_)) => return,
-      Ok(None) => {},
-      Err(error) => {
-        tracing::debug!(%error, "could not read the own user summary");
-        return;
-      },
-    }
     match self.api.user(me).await {
       Ok(summary) => {
         if let Err(error) = records::put_json(&self.store, Table::Users, &key, &summary) {
@@ -361,25 +365,90 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// The user's spaces, and their members as the people the user can find and message (a new
   /// member shares no conversation with anyone yet).
   pub(crate) async fn refresh_spaces(&mut self) -> Result<(), CoreError> {
+    self.refresh_spaces_listing().await.map(drop)
+  }
+
+  /// [`Self::refresh_spaces`], returning the people the space member lists named.
+  async fn refresh_spaces_listing(&mut self) -> Result<HashSet<UserId>, CoreError> {
+    let mut listed = HashSet::new();
     for space in self.api.list_spaces().await?.spaces {
       records::put_json(&self.store, Table::Spaces, &space.id.to_string(), &space)?;
       if space.maybe_my_role.is_some() {
-        self.refresh_space_members(space.id).await?;
+        listed.extend(self.refresh_space_members(space.id).await?);
       }
     }
-    Ok(())
+    Ok(listed)
   }
 
-  async fn refresh_space_members(&mut self, space: SpaceId) -> Result<(), CoreError> {
+  async fn refresh_space_members(&mut self, space: SpaceId) -> Result<Vec<UserId>, CoreError> {
     match self.api.list_space_members(space).await {
       Ok(members) => members
         .members
         .iter()
-        .try_for_each(|member| self.remember_user(&member.user)),
+        .map(|member| self.remember_user(&member.user).map(|()| member.user.id))
+        .collect(),
       // Guests may not list a space's members; they find the people of their conversations.
-      Err(error) if error.is_forbidden() || error.is_not_found() => Ok(()),
+      Err(error) if error.is_forbidden() || error.is_not_found() => Ok(Vec::new()),
       Err(error) => Err(error.into()),
     }
+  }
+
+  /// Fetches a person again, after a profile change or because no list names them any more: a new
+  /// name replaces the cached one. One the server no longer shows (deactivated, or a guest's
+  /// contact who left every shared conversation) stays cached for the names of old messages, but
+  /// marked deactivated, so it is offered nowhere (issue #654).
+  pub(crate) async fn refresh_user(&mut self, user: UserId) -> Result<(), CoreError> {
+    match self.api.user(user).await {
+      Ok(summary) => self.remember_user(&summary),
+      Err(error) if error.is_not_found() => {
+        let key = user.to_string();
+        match records::get_json::<UserSummary>(&self.store, Table::Users, &key)? {
+          Some(mut summary) if !summary.is_deactivated => {
+            summary.is_deactivated = true;
+            records::put_json(&self.store, Table::Users, &key, &summary)
+          },
+          _ => Ok(()),
+        }
+      },
+      Err(error) => Err(error.into()),
+    }
+  }
+
+  /// Cached people that neither a space member list (`listed`) nor a stored conversation member
+  /// list names are asked about one by one, at most [`MAX_UNLISTED_RECHECKS`] per sync and each
+  /// at most once per [`UNLISTED_RECHECK_INTERVAL_MS`]: a deactivated account drops out of every
+  /// list, and without this its old name stayed in the people lists forever (issue #654). Those
+  /// already marked deactivated are not asked again.
+  async fn recheck_unlisted_people(&mut self, listed: &HashSet<UserId>) -> Result<(), CoreError> {
+    let me = self.user_id();
+    let now = self.now_ms();
+    let mut rechecked: HashMap<UserId, i64> =
+      records::get_json(&self.store, Table::SyncState, UNLISTED_RECHECKED_KEY)?.unwrap_or_default();
+    let member_lists: Vec<ListConversationMembersResponse> = records::list_json(&self.store, Table::Members)?;
+    let in_conversations: HashSet<UserId> = member_lists
+      .iter()
+      .flat_map(|list| list.members.iter().map(|member| member.user.id))
+      .collect();
+    let cached: Vec<UserSummary> = records::list_json(&self.store, Table::Users)?;
+    let unlisted: Vec<UserId> = cached
+      .iter()
+      .filter(|user| !user.is_deactivated && user.id != me)
+      .map(|user| user.id)
+      .filter(|user| !listed.contains(user) && !in_conversations.contains(user))
+      .filter(|user| {
+        rechecked
+          .get(user)
+          .is_none_or(|at| now.saturating_sub(*at) >= UNLISTED_RECHECK_INTERVAL_MS)
+      })
+      .take(MAX_UNLISTED_RECHECKS)
+      .collect();
+    // Only people still cached are remembered, so the record stays as small as the cache.
+    rechecked.retain(|user, _| cached.iter().any(|known| known.id == *user));
+    for user in unlisted {
+      self.refresh_user(user).await?;
+      rechecked.insert(user, now);
+    }
+    records::put_json(&self.store, Table::SyncState, UNLISTED_RECHECKED_KEY, &rechecked)
   }
 
   pub(crate) async fn refresh_conversation(&mut self, conversation: ConversationId) -> Result<(), CoreError> {

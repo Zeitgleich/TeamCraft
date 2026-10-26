@@ -509,11 +509,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       GatewayEvent::LobbyJoin { .. }
       | GatewayEvent::GuestExpired { .. }
-      | GatewayEvent::ProfileUpdate { .. }
       | GatewayEvent::OrgRecoveryUpdate { .. }
       | GatewayEvent::SystemEvent { .. }
       | GatewayEvent::UserGroupUpdate { .. }
       | GatewayEvent::LobbyDecision { .. } => Ok(()),
+      // A new name, username or avatar, or the account was deactivated: the cached summary goes.
+      GatewayEvent::ProfileUpdate { user_id } => {
+        if let Err(error) = self.refresh_user(user_id).await {
+          // Not fatal: the next full sync rechecks the people no list names.
+          tracing::warn!(%error, "could not refresh a changed profile");
+        }
+        Ok(())
+      },
       GatewayEvent::DeviceLinkRequested { request } => {
         self.note_link_request(request);
         Ok(())

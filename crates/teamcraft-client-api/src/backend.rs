@@ -59,7 +59,10 @@ pub trait ChatBackend {
 
   /// The signed-in user, including the presence and custom status they chose.
   fn me(&self) -> User;
+  /// Anyone known, deactivated accounts included (the authors of old messages).
   fn user(&self, id: UserId) -> Option<User>;
+  /// The people to offer in lists, pickers and mentions: deactivated accounts are left out
+  /// (issue #654).
   fn users(&self) -> Vec<User>;
   /// People whose name or username contains `query` (any case): the people the backend knows and,
   /// for a backend that reads the server, the server's directory, so colleagues who share nothing
@@ -873,10 +876,47 @@ impl<T: ChatBackend + CallBackend + AdminBackend + SecurityBackend + SearchBacke
 pub fn filter_people(mut people: Vec<User>, query: &str) -> Vec<User> {
   let needle = query.trim().to_lowercase();
   people.retain(|user| {
-    needle.is_empty()
-      || user.display_name.to_lowercase().contains(&needle)
-      || user.username.to_lowercase().contains(&needle)
+    // Nobody picks a deactivated account (issue #654).
+    !user.is_deactivated
+      && (needle.is_empty()
+        || user.display_name.to_lowercase().contains(&needle)
+        || user.username.to_lowercase().contains(&needle))
   });
   people.sort_by_key(|user| (user.display_name.to_lowercase(), user.id));
   people
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::model::{DeviceSetup, PresenceStatus, id_from_raw};
+
+  #[test]
+  fn deactivated_accounts_are_never_offered() {
+    let people = vec![
+      person(1, "Alice", "alice", false),
+      person(2, "Alice (old)", "alice-old", true),
+    ];
+    let found = filter_people(people.clone(), "alice");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].username, "alice");
+    assert_eq!(filter_people(people, "").len(), 1);
+  }
+
+  fn person(id: u64, display_name: &str, username: &str, is_deactivated: bool) -> User {
+    User {
+      id: id_from_raw(id),
+      username: username.into(),
+      display_name: display_name.into(),
+      presence: PresenceStatus::Offline,
+      maybe_custom_status: None,
+      avatar_hue: 0,
+      is_guest: false,
+      is_bot: false,
+      maybe_organization: None,
+      is_deactivated,
+      device_setup: DeviceSetup::Unknown,
+      maybe_email: None,
+    }
+  }
 }

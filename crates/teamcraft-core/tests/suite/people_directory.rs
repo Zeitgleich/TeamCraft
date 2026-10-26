@@ -27,6 +27,7 @@ async fn addresses_kept_from_earlier_answers_go_when_the_policy_does_not_show_th
     maybe_email: Some("bob@example.com".into()),
     maybe_organization: None,
     maybe_has_devices: None,
+    is_deactivated: false,
   };
   records::put_json(&alice.store, Table::Users, &bob_id.to_string(), &bob).unwrap();
 
@@ -298,5 +299,76 @@ mod directory_search {
     let found = ui.search_people("bob");
     assert_eq!(found.len(), 1, "Bob is listed once");
     assert_eq!(found[0].device_setup, DeviceSetup::HasDevices);
+  }
+}
+
+#[tokio::test]
+async fn a_renamed_person_shows_the_new_name_without_a_reload() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let bob_id = bob.client.user_id();
+  alice.client.open_dm(bob_id).await.unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+
+  server.rename_user(bob_id, "Bob (old)", "bob-old");
+  settle(&mut [&mut alice, &mut bob]).await;
+
+  let cached = summary(&alice, bob_id);
+  assert_eq!(cached.display_name, "Bob (old)");
+  assert_eq!(cached.maybe_username.as_deref(), Some("bob-old"));
+}
+
+#[tokio::test]
+async fn a_deactivated_person_is_kept_for_old_messages_but_offered_nowhere() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let bob_id = bob.client.user_id();
+  alice.client.open_dm(bob_id).await.unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+
+  server.deactivate_user(bob_id);
+  settle(&mut [&mut alice]).await;
+
+  let cached = summary(&alice, bob_id);
+  assert!(cached.is_deactivated, "marked, not forgotten");
+  assert_eq!(
+    cached.display_name, "Bob",
+    "old messages keep their author's name"
+  );
+}
+
+#[tokio::test]
+async fn a_full_sync_rechecks_people_no_list_names() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let carol_id = server.add_user("Carol").user_id();
+  // Carol was cached from a list long ago and is in none now; she was deactivated meanwhile.
+  let carol = server_summary(carol_id, "Carol");
+  records::put_json(&alice.store, Table::Users, &carol_id.to_string(), &carol).unwrap();
+  server.deactivate_user(carol_id);
+
+  alice.client.full_sync().await.unwrap();
+
+  assert!(summary(&alice, carol_id).is_deactivated);
+}
+
+fn summary(peer: &Peer, user: teamcraft_proto::UserId) -> UserSummary {
+  records::get_json(&peer.store, Table::Users, &user.to_string())
+    .unwrap()
+    .unwrap()
+}
+
+fn server_summary(id: teamcraft_proto::UserId, name: &str) -> UserSummary {
+  UserSummary {
+    id,
+    maybe_username: Some(name.to_lowercase()),
+    display_name: name.into(),
+    kind: UserKind::Member,
+    maybe_email: None,
+    maybe_organization: None,
+    maybe_has_devices: None,
+    is_deactivated: false,
   }
 }

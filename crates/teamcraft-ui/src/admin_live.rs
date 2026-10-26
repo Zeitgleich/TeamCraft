@@ -1116,6 +1116,7 @@ fn user_from_wire(
       is_guest: summary.kind == UserKind::Guest,
       is_bot: false,
       maybe_organization: None,
+      is_deactivated: false,
       device_setup: crate::model::DeviceSetup::Unknown,
       maybe_email: None,
     },

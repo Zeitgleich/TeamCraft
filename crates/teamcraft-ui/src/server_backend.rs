@@ -159,6 +159,7 @@ pub fn build_snapshot(
     is_guest: summary.kind == UserKind::Guest,
     is_bot: false,
     maybe_organization: summary.maybe_organization.clone(),
+    is_deactivated: false,
     device_setup: crate::model::DeviceSetup::Unknown,
     maybe_email: summary.maybe_email.clone(),
   };
@@ -174,6 +175,7 @@ pub fn build_snapshot(
     is_guest: me.role == Role::Guest,
     is_bot: false,
     maybe_organization: None,
+    is_deactivated: false,
     device_setup: crate::model::DeviceSetup::Unknown,
     maybe_email: None,
   };

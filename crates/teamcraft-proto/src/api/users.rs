@@ -33,6 +33,10 @@ pub struct UserSummary {
   /// older servers and from member lists.
   #[serde(rename = "has_devices", default, skip_serializing_if = "Option::is_none")]
   pub maybe_has_devices: Option<bool>,
+  /// The account is deactivated: still named on its old messages, never offered to pick (issue
+  /// #654). Absent (false) from older servers.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_deactivated: bool,
 }
 
 /// `GET /api/v1/users?query=` – the directory. Guests only find people they share a conversation with.
