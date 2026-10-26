@@ -3333,28 +3333,7 @@ ol.md-list {
   box-shadow: 0 0 0 2px var(--surface);
 }
 
-/* ---- Threads inbox ---- */
-
-.threads-view {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-}
-
-.threads-list-col {
-  flex: none;
-  width: 380px;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  border-right: 1px solid var(--border);
-}
-
-.threads-detail-col {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-}
+/* Segmented controls and stacked avatars. */
 
 .segmented {
   position: relative;
@@ -3381,109 +3360,9 @@ ol.md-list {
   color: var(--text);
 }
 
-.thread-card {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  width: 100%;
-  padding: 12px 16px;
-  border: 0;
-  border-bottom: 1px solid var(--border);
-  background: transparent;
-  text-align: left;
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .thread-card:hover {
-    background: var(--surface-2);
-  }
-}
-
-.thread-card.selected {
-  background: var(--accent-soft);
-}
-
-.thread-card-top,
-.thread-card-bottom {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.thread-author {
-  font-weight: var(--weight-bold);
-}
-
-.thread-card.unread .thread-author::before {
-  content: "";
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  margin-right: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-}
-
-.thread-channel,
-.thread-time,
-.thread-count {
-  font-size: var(--text-xs);
-  letter-spacing: var(--tracking-xs);
-  color: var(--text-muted);
-}
-
-.thread-time {
-  margin-left: auto;
-}
-
-.thread-preview .md-p + .md-p {
-  margin-top: 0;
-}
-
-.thread-preview {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  overflow-wrap: anywhere;
-}
-
 .avatar-stack {
   display: inline-flex;
   padding-left: 6px;
-}
-
-.unread-pill {
-  padding: 0 7px;
-  border-radius: var(--radius-pill);
-  background: var(--accent);
-  color: var(--on-accent);
-  font-size: var(--text-2xs);
-  letter-spacing: var(--tracking-2xs);
-  font-weight: var(--weight-bold);
-}
-
-.unread-pill.mention {
-  background: var(--badge-bg);
-  color: var(--on-fill);
-}
-
-.empty-detail {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  color: var(--text-muted);
-}
-
-/* Not the shared `.empty-icon` tile: a plain glyph, 3:1 on the surface. */
-.threads-empty-icon {
-  width: 40px;
-  height: 40px;
-  color: var(--border-strong);
 }
 
 /* ---- Popover (status menu) ---- */
@@ -4159,14 +4038,6 @@ ol.md-list {
 @media (max-width: 760px) {
   :root {
     --sidebar-w: 210px;
-  }
-
-  .threads-list-col {
-    width: 100%;
-  }
-
-  .threads-detail-col {
-    display: none;
   }
 
   .header-topic,
@@ -8483,14 +8354,20 @@ html.call-window body {
 .badge-failing, .badge-unknown { background: var(--warn-soft); color: var(--warn-text); }
 .badge-not-configured { background: var(--surface-3); color: var(--text-muted); }
 
-/* Activity feed, call history and last seen */
-.activity-view,
+/* Activity (#752): its list is a sidebar like a space's, on the sidebar's dark material. Each entry
+   says what happened and where in two lines, the start of the message below, the time last; the
+   one open beside it is marked like the current channel. Call history and last seen below. */
+.activity-home,
 .calls-view {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+
+.activity-home {
+  justify-content: center;
 }
 
 .activity-list,
@@ -8500,26 +8377,44 @@ html.call-window body {
   padding: 0;
 }
 
+.activity-list {
+  padding: 0 var(--space-2);
+}
+
 .activity-item {
+  position: relative;
   display: flex;
   align-items: flex-start;
   gap: 10px;
   width: 100%;
-  padding: 12px 16px;
+  margin: 1px 0;
+  padding: 8px 8px 8px 8px;
   border: 0;
-  border-bottom: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   background: transparent;
+  color: var(--sb-muted);
   text-align: left;
 }
 
 @media (hover: hover) and (pointer: fine) {
   .activity-item:hover {
-    background: var(--surface-2);
+    background: var(--sb-hover);
+    color: var(--chrome-strong);
   }
 }
 
 .activity-item.unread {
-  background: var(--accent-soft);
+  color: var(--chrome-strong);
+}
+
+.activity-item.current {
+  background: var(--sb-current);
+  color: var(--on-fill);
+}
+
+.activity-avatar {
+  flex: none;
+  padding-top: 1px;
 }
 
 .activity-body {
@@ -8531,31 +8426,78 @@ html.call-window body {
 }
 
 .activity-summary {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font-size: var(--text-sm);
+  line-height: 1.3;
+}
+
+.activity-item.unread .activity-summary {
   font-weight: var(--weight-semibold);
 }
 
 .activity-excerpt {
-  color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.activity-time {
-  flex: none;
-  color: var(--text-muted);
+  color: var(--sb-muted);
   font-size: var(--text-xs);
   letter-spacing: var(--tracking-xs);
 }
 
-.activity-kind {
-  flex: none;
-  color: var(--text-muted);
+/* A thread's first message as rich text, kept to one line. */
+.activity-excerpt .md-p {
+  display: inline;
+  margin: 0;
 }
 
+.activity-item.current .activity-excerpt,
+.activity-item.current .activity-time {
+  color: color-mix(in srgb, var(--on-fill) 80%, transparent);
+}
 
+.activity-time {
+  color: var(--sb-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  font-variant-numeric: tabular-nums;
+}
 
+.activity-item .unread-dot {
+  flex: none;
+  margin-top: 6px;
+  background: var(--accent);
+}
 
+.activity-item .unread-dot.mention {
+  background: var(--badge-bg);
+}
+
+/* The filters' row: the kinds, a thin rule, then "Unread" on its own. */
+.home-chips-divider {
+  flex: none;
+  width: 1px;
+  margin: 4px 2px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+/* The empty state sits in the dark sidebar: the shared card, in the sidebar's colours. */
+.activity-empty {
+  padding: var(--space-6) var(--space-3);
+  color: var(--sb-muted);
+}
+
+.activity-empty .empty-title {
+  color: var(--chrome-strong);
+}
+
+.activity-empty .empty-body {
+  color: var(--sb-muted);
+}
 
 .call-detail,
 .last-seen {
