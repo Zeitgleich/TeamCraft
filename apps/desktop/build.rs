@@ -78,6 +78,7 @@ const COMMANDS: &[&str] = &[
   "update_download",
   "update_restart",
   "update_with_package_manager",
+  "update_dismiss",
   "window_chrome",
   "window_action",
 ];

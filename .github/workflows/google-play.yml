@@ -85,7 +85,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/play"
           cd "$RUNNER_TEMP/play"
           if ! gh release download "$TAG" --repo "$REPO" --pattern "$bundle" --pattern SHA256SUMS; then
-            echo "::error::the release ${TAG} has no ${bundle} (an -unsigned bundle means the upload key secrets were missing when it was built)"
+            echo "::error::the release ${TAG} has no ${bundle} (not attached yet: release.yml's android-release job runs this again when it attaches it; an -unsigned bundle means the upload key secrets were missing when it was built)"
             exit 1
           fi
           grep -F "  ${bundle}" SHA256SUMS | sha256sum -c -

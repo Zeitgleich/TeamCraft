@@ -5,6 +5,8 @@
 // Hides the console window on Windows release builds; harmless on macOS and Linux.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(target_os = "macos")]
+mod app_menu;
 #[cfg(target_os = "linux")]
 mod appindicator;
 mod attention;
@@ -78,6 +80,9 @@ fn main() -> anyhow::Result<()> {
     tauri_plugin_autostart::MacosLauncher::LaunchAgent,
     Some(vec![autostart::AUTOSTART_ARG]),
   ));
+  // The menu bar, in the UI's language once it sends its texts (app_menu.rs, #712).
+  #[cfg(target_os = "macos")]
+  let builder = builder.menu(app_menu::initial);
   builder
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -244,6 +249,7 @@ fn main() -> anyhow::Result<()> {
       updates::update_download,
       updates::update_restart,
       updates::update_with_package_manager,
+      updates::update_dismiss,
       window_chrome::window_chrome,
       window_chrome::window_action,
     ])

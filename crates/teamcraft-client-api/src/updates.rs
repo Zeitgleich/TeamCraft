@@ -18,6 +18,10 @@ const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const CHECK_JITTER: Duration = Duration::from_secs(2 * 60 * 60);
 /// The name of the deb and rpm packages.
 pub const LINUX_PACKAGE_NAME: &str = "team-craft";
+/// The Flatpak's application ID.
+pub const FLATPAK_APP_ID: &str = "de.zeitgleich.teamcraft";
+/// How the bundler starts the names of the deb and rpm files of a release (the product name).
+const LINUX_PACKAGE_FILE_PREFIX: &str = "TeamCraft";
 
 /// How this copy of the app was installed, which decides how it updates (docs/updates.md §2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,12 +50,24 @@ pub enum UpdatePreference {
   Off,
 }
 
-/// The system package manager that updates a deb or rpm install.
+/// What updates an install that doesn't replace itself: the system package manager of a deb or rpm
+/// install, or Flatpak.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PackageManager {
   Apt,
   Dnf,
+  Flatpak,
+}
+
+/// Where a deb or rpm install came from, which decides what the update hint says (#731).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageSource {
+  /// TeamCraft's APT or RPM repository is configured: the package manager brings new versions.
+  Repository,
+  /// Installed from a downloaded file: the package manager doesn't know where new versions are.
+  File,
 }
 
 /// A release version: `1.2.3`, `1.2.3-rc.1`, `1.2.3-beta.2`. Ordered by semantic versioning, so a
@@ -71,8 +87,6 @@ pub enum UpdateBlocker {
   Preference,
   /// This build has no update key, so it couldn't verify an update.
   NotConfigured,
-  /// Flatpak updates the app.
-  Flatpak,
   /// A development build.
   Unpackaged,
 }
@@ -82,7 +96,7 @@ pub enum UpdateBlocker {
 pub enum Delivery {
   /// The app replaces itself; `is_automatic` downloads without asking.
   SelfUpdate { is_automatic: bool },
-  /// The package manager installs it; the app only tells (and may ask PackageKit).
+  /// The package manager or Flatpak installs it; the app only tells (and may ask PackageKit).
   PackageManager(PackageManager),
 }
 
@@ -129,9 +143,37 @@ pub struct UpdateStatus {
   /// A call is running: nothing downloads, nothing restarts.
   #[serde(default)]
   pub is_in_call: bool,
-  /// deb/rpm: how to update by hand, and whether PackageKit can do it.
-  #[serde(rename = "package_manager", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_package_manager: Option<PackageManagerHint>,
+  /// Linux installs the app can't update itself (deb, rpm, Flatpak, an AppImage it can't replace):
+  /// how the user gets the new version.
+  #[serde(rename = "manual", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_manual: Option<ManualUpdate>,
+  /// The version whose hint the user dismissed ([`Dismissal::ForVersion`]); kept across launches.
+  #[serde(
+    rename = "dismissed_version",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_dismissed_version: Option<String>,
+}
+
+/// How a new version gets onto a Linux install that doesn't replace itself (docs/updates.md §4.3).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ManualUpdate {
+  /// deb/rpm from TeamCraft's repository, or Flatpak: the command to run, and PackageKit's
+  /// "Update now" where it runs.
+  PackageManager(PackageManagerHint),
+  /// A deb/rpm installed from a file, or an AppImage in a place the app can't write: download the
+  /// new file. `maybe_repository_setup_url` explains how to add the repository (deb/rpm).
+  Download {
+    url: String,
+    #[serde(
+      rename = "repository_setup_url",
+      default,
+      skip_serializing_if = "Option::is_none"
+    )]
+    maybe_repository_setup_url: Option<String>,
+  },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,20 +244,33 @@ pub enum UpdateBanner {
   },
 }
 
+/// Whether and how the user can hide the banner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Dismissal {
+  /// It stays until acted on: the version is too old, or a self-installed update waits for the
+  /// restart that applies it (#729).
+  Never,
+  /// "Later" hides it until the app starts again (an update the app installs itself, not
+  /// downloaded yet).
+  UntilRelaunch,
+  /// Hidden for this version, also after a restart: the app can't install it itself (deb, rpm,
+  /// Flatpak, a read-only AppImage), so a hint the user has seen must not nag (#731).
+  ForVersion(String),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AvailableAction {
   /// Download now (disabled during a call).
-  Download {
-    can_download: bool,
-  },
-  PackageManager(PackageManagerHint),
+  Download { can_download: bool },
+  /// The app can't install it: what the user does instead.
+  Manual(ManualUpdate),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TooOldAction {
   /// The app can update itself; what the user can do about it right now.
   SelfUpdate(SelfUpdateStep),
-  PackageManager(PackageManagerHint),
+  Manual(ManualUpdate),
   /// Updates are off here (policy, machine, Flatpak): IT or the store has to do it.
   Elsewhere,
 }
@@ -270,6 +325,7 @@ impl InstallKind {
     match self {
       Self::Deb => Some(PackageManager::Apt),
       Self::Rpm => Some(PackageManager::Dnf),
+      Self::Flatpak => Some(PackageManager::Flatpak),
       _ => None,
     }
   }
@@ -281,17 +337,159 @@ impl PackageManager {
     match self {
       Self::Apt => format!("sudo apt update && sudo apt install --only-upgrade {LINUX_PACKAGE_NAME}"),
       Self::Dnf => format!("sudo dnf upgrade --refresh {LINUX_PACKAGE_NAME}"),
+      Self::Flatpak => format!("flatpak update {FLATPAK_APP_ID}"),
     }
+  }
+
+  /// Whether PackageKit can install the update (deb and rpm; Flatpak has its own tools).
+  pub fn is_package_kit_managed(self) -> bool {
+    matches!(self, Self::Apt | Self::Dnf)
   }
 }
 
+/// The release asset of a deb or rpm for `version` on `arch` (Rust's `std::env::consts::ARCH`), as
+/// the release names it: `TeamCraft_1.0.8_amd64.deb`, `TeamCraft-1.0.8-1.x86_64.rpm`. `None` for
+/// candidates (their package versions are mapped, scripts/linux-package-version.sh, so the release
+/// page is the safer link), for Flatpak and for architectures without packages.
+pub fn linux_package_file(manager: PackageManager, version: &ClientVersion, arch: &str) -> Option<String> {
+  if version.is_prerelease() {
+    return None;
+  }
+  match (manager, arch) {
+    (PackageManager::Apt, "x86_64") => Some(format!("{LINUX_PACKAGE_FILE_PREFIX}_{version}_amd64.deb")),
+    (PackageManager::Apt, "aarch64") => Some(format!("{LINUX_PACKAGE_FILE_PREFIX}_{version}_arm64.deb")),
+    (PackageManager::Dnf, "x86_64" | "aarch64") => {
+      Some(format!("{LINUX_PACKAGE_FILE_PREFIX}-{version}-1.{arch}.rpm"))
+    },
+    _ => None,
+  }
+}
+
+/// Whether a dnf or zypper `.repo` file enables TeamCraft's repository: a section named
+/// `teamcraft…` (as docs/updates.md §5 writes it) or one whose URL starts with `repository_url`,
+/// unless it says `enabled=0`.
+pub fn rpm_repo_has_teamcraft(text: &str, repository_url: &str) -> bool {
+  let repository_url = repository_url.to_ascii_lowercase();
+  let mut sections: Vec<RepoEntry> = Vec::new();
+  for line in text.lines().map(str::trim) {
+    if line.starts_with(['#', ';']) {
+      continue;
+    }
+    if let Some(name) = line.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+      sections.push(RepoEntry::new(is_teamcraft_name(name)));
+      continue;
+    }
+    let (Some(section), Some((key, value))) = (sections.last_mut(), line.split_once('=')) else {
+      continue;
+    };
+    let value = value.trim().to_ascii_lowercase();
+    match key.trim().to_ascii_lowercase().as_str() {
+      "enabled" => section.is_enabled = value != "0",
+      "baseurl" | "mirrorlist" | "metalink" => {
+        section.has_url |= value
+          .split([',', ' '])
+          .any(|url| url.starts_with(&repository_url));
+      },
+      _ => {},
+    }
+  }
+  sections.iter().any(RepoEntry::is_teamcraft)
+}
+
+/// Whether an APT source file enables TeamCraft's repository: an entry for `repository_url`, or any
+/// entry in a file named `teamcraft…`. Reads one-line `.list` files and deb822 `.sources` files.
+pub fn apt_source_has_teamcraft(file_name: &str, text: &str, repository_url: &str) -> bool {
+  let repository_url = repository_url.to_ascii_lowercase();
+  let is_named = is_teamcraft_name(file_name);
+  let entries = if file_name.ends_with(".sources") {
+    deb822_entries(text, &repository_url, is_named)
+  } else {
+    one_line_entries(text, &repository_url, is_named)
+  };
+  entries.iter().any(RepoEntry::is_teamcraft)
+}
+
+/// One repository of a source file, as far as finding TeamCraft's goes.
+struct RepoEntry {
+  is_named: bool,
+  is_enabled: bool,
+  has_url: bool,
+}
+
+impl RepoEntry {
+  fn new(is_named: bool) -> Self {
+    Self {
+      is_named,
+      is_enabled: true,
+      has_url: false,
+    }
+  }
+
+  fn is_teamcraft(&self) -> bool {
+    self.is_enabled && (self.is_named || self.has_url)
+  }
+}
+
+/// `deb [options] URI suite components` lines; `deb-src` and comments don't count.
+fn one_line_entries(text: &str, repository_url: &str, is_named: bool) -> Vec<RepoEntry> {
+  text
+    .lines()
+    .map(str::trim)
+    .filter(|line| line.split_whitespace().next() == Some("deb"))
+    .map(|line| RepoEntry {
+      has_url: line
+        .split_whitespace()
+        .any(|word| word.to_ascii_lowercase().starts_with(repository_url)),
+      ..RepoEntry::new(is_named)
+    })
+    .collect()
+}
+
+/// deb822 stanzas (separated by blank lines) with `Types: deb`; `Enabled: no` turns one off.
+fn deb822_entries(text: &str, repository_url: &str, is_named: bool) -> Vec<RepoEntry> {
+  let mut entries = Vec::new();
+  let mut maybe_current: Option<(RepoEntry, bool)> = None;
+  for line in text.lines().chain(std::iter::once("")) {
+    let line = line.trim();
+    if line.is_empty() {
+      if let Some((entry, true)) = maybe_current.take() {
+        entries.push(entry);
+      }
+      continue;
+    }
+    if line.starts_with('#') {
+      continue;
+    }
+    let Some((key, value)) = line.split_once(':') else {
+      continue;
+    };
+    let (entry, is_deb) = maybe_current.get_or_insert_with(|| (RepoEntry::new(is_named), false));
+    let value = value.trim().to_ascii_lowercase();
+    match key.trim().to_ascii_lowercase().as_str() {
+      "types" => *is_deb = value.split_whitespace().any(|kind| kind == "deb"),
+      "uris" => {
+        entry.has_url |= value
+          .split_whitespace()
+          .any(|url| url.starts_with(repository_url))
+      },
+      "enabled" => entry.is_enabled = value != "no",
+      _ => {},
+    }
+  }
+  entries
+}
+
+fn is_teamcraft_name(name: &str) -> bool {
+  name.trim().to_ascii_lowercase().starts_with("teamcraft")
+}
+
 /// Decides whether and how to check (docs/updates.md §4.2, §4.4). The machine switch and the
-/// policy win over the user's preference; a deb/rpm install still checks so it can tell the user.
+/// policy win over the user's preference; deb, rpm and Flatpak installs still check so they can
+/// tell the user, on the same schedule as the installs that update themselves.
 pub fn plan(inputs: PlanInputs<'_>) -> UpdatePlan {
   let policy = inputs.maybe_policy.cloned().unwrap_or_default();
   let maybe_blocker = match inputs.install {
     InstallKind::Unpackaged => Some(UpdateBlocker::Unpackaged),
-    InstallKind::Flatpak => Some(UpdateBlocker::Flatpak),
     _ if inputs.is_disabled_on_machine => Some(UpdateBlocker::Machine),
     // Unknown modes from a newer policy are treated like "disabled": the stricter reading.
     _ if policy.mode != ClientUpdateMode::Allowed => Some(UpdateBlocker::Policy),
@@ -364,8 +562,35 @@ pub fn next_check_delay(is_first: bool, jitter: f64) -> Duration {
 }
 
 impl UpdateStatus {
-  /// The banner for this status. Dismissing is the UI's business; [`UpdateBanner::TooOld`] can't be.
+  /// The banner for this status, unless the user dismissed its version ([`Self::dismissal`]).
   pub fn banner(&self) -> Option<UpdateBanner> {
+    if let Dismissal::ForVersion(version) = self.dismissal()
+      && self.maybe_dismissed_version.as_ref() == Some(&version)
+    {
+      return None;
+    }
+    self.undismissed_banner()
+  }
+
+  /// How the banner can be hidden: never while too old or while a self-installed update waits for
+  /// its restart (#729); for good per version where the app can't install the update (#731);
+  /// otherwise until the next launch.
+  pub fn dismissal(&self) -> Dismissal {
+    if self.maybe_required_version.is_some() {
+      return Dismissal::Never;
+    }
+    match &self.state {
+      UpdateState::Ready { .. } if self.install.updates_itself() => Dismissal::Never,
+      UpdateState::Ready { version, .. } => Dismissal::ForVersion(version.clone()),
+      UpdateState::Available { version, .. } if self.maybe_manual.is_some() => {
+        Dismissal::ForVersion(version.clone())
+      },
+      UpdateState::Available { .. } => Dismissal::UntilRelaunch,
+      _ => Dismissal::Never,
+    }
+  }
+
+  fn undismissed_banner(&self) -> Option<UpdateBanner> {
     if let Some(required_version) = &self.maybe_required_version {
       return Some(UpdateBanner::TooOld {
         required_version: required_version.clone(),
@@ -387,8 +612,8 @@ impl UpdateStatus {
       } => Some(UpdateBanner::Available {
         version: version.clone(),
         maybe_notes_url: maybe_notes_url.clone(),
-        action: match &self.maybe_package_manager {
-          Some(hint) => AvailableAction::PackageManager(hint.clone()),
+        action: match &self.maybe_manual {
+          Some(manual) => AvailableAction::Manual(manual.clone()),
           None => AvailableAction::Download {
             can_download: !self.is_in_call,
           },
@@ -404,9 +629,9 @@ impl UpdateStatus {
   }
 
   fn too_old_action(&self) -> TooOldAction {
-    match (&self.state, &self.maybe_package_manager) {
+    match (&self.state, &self.maybe_manual) {
       (UpdateState::Off { .. }, _) => TooOldAction::Elsewhere,
-      (_, Some(hint)) => TooOldAction::PackageManager(hint.clone()),
+      (_, Some(manual)) => TooOldAction::Manual(manual.clone()),
       (state, None) if self.install.updates_itself() => TooOldAction::SelfUpdate(match state {
         UpdateState::Ready { .. } => SelfUpdateStep::Restart {
           can_restart: !self.is_in_call,
@@ -577,7 +802,7 @@ mod tests {
           None,
           true,
           true,
-          UpdateBlocker::Flatpak,
+          UpdateBlocker::Machine,
         ),
         (
           InstallKind::AppImage,
@@ -661,10 +886,11 @@ mod tests {
     }
 
     #[test]
-    fn deb_and_rpm_check_without_an_update_key_and_hand_over_to_the_package_manager() {
+    fn deb_rpm_and_flatpak_check_without_an_update_key_and_hand_over_to_the_package_manager() {
       for (install, manager) in [
         (InstallKind::Deb, PackageManager::Apt),
         (InstallKind::Rpm, PackageManager::Dnf),
+        (InstallKind::Flatpak, PackageManager::Flatpak),
       ] {
         let actual = plan(PlanInputs {
           has_update_key: false,
@@ -730,6 +956,115 @@ mod tests {
         PackageManager::Dnf.command(),
         "sudo dnf upgrade --refresh team-craft"
       );
+      assert_eq!(
+        PackageManager::Flatpak.command(),
+        "flatpak update de.zeitgleich.teamcraft"
+      );
+      assert!(PackageManager::Dnf.is_package_kit_managed());
+      assert!(!PackageManager::Flatpak.is_package_kit_managed());
+    }
+
+    #[test]
+    fn package_files_are_named_like_the_release_assets() {
+      let release = version("1.0.8");
+      assert_eq!(
+        linux_package_file(PackageManager::Apt, &release, "x86_64").as_deref(),
+        Some("TeamCraft_1.0.8_amd64.deb")
+      );
+      assert_eq!(
+        linux_package_file(PackageManager::Apt, &release, "aarch64").as_deref(),
+        Some("TeamCraft_1.0.8_arm64.deb")
+      );
+      assert_eq!(
+        linux_package_file(PackageManager::Dnf, &release, "x86_64").as_deref(),
+        Some("TeamCraft-1.0.8-1.x86_64.rpm")
+      );
+      assert_eq!(
+        linux_package_file(PackageManager::Dnf, &release, "aarch64").as_deref(),
+        Some("TeamCraft-1.0.8-1.aarch64.rpm")
+      );
+      assert_eq!(linux_package_file(PackageManager::Dnf, &release, "riscv64"), None);
+      assert_eq!(
+        linux_package_file(PackageManager::Flatpak, &release, "x86_64"),
+        None
+      );
+      assert_eq!(
+        linux_package_file(PackageManager::Apt, &version("1.1.0-rc.1"), "x86_64"),
+        None
+      );
+    }
+  }
+
+  mod repositories {
+    use super::*;
+
+    const RPM_URL: &str = "https://example-org.github.io/TeamCraft/rpm/";
+    const APT_URL: &str = "https://example-org.github.io/TeamCraft/apt";
+
+    #[test]
+    fn the_documented_rpm_repository_counts_by_name_or_url() {
+      let documented = "[teamcraft]\nname=TeamCraft\nbaseurl=https://example-org.github.io/TeamCraft/rpm/stable\nenabled=1\n";
+      assert!(rpm_repo_has_teamcraft(documented, RPM_URL));
+      let renamed = "[company-chat]\nbaseurl = HTTPS://Example-Org.github.io/TeamCraft/rpm/prerelease\n";
+      assert!(rpm_repo_has_teamcraft(renamed, RPM_URL));
+      let mirror = "[teamcraft-prerelease]\nbaseurl=https://mirror.example.com/teamcraft/\n";
+      assert!(rpm_repo_has_teamcraft(mirror, RPM_URL));
+    }
+
+    #[test]
+    fn disabled_commented_and_other_rpm_repositories_do_not_count() {
+      let disabled = "[teamcraft]\nbaseurl=https://example-org.github.io/TeamCraft/rpm/stable\nenabled=0\n";
+      assert!(!rpm_repo_has_teamcraft(disabled, RPM_URL));
+      let commented = "#[teamcraft]\n#baseurl=https://example-org.github.io/TeamCraft/rpm/stable\n";
+      assert!(!rpm_repo_has_teamcraft(commented, RPM_URL));
+      let fedora = "[fedora]\nmetalink=https://mirrors.example.org/metalink?repo=fedora-43\nenabled=1\n";
+      assert!(!rpm_repo_has_teamcraft(fedora, RPM_URL));
+      // Only the TeamCraft section of a shared file counts, and only while it is enabled.
+      let shared = format!("{fedora}\n[teamcraft]\nbaseurl={RPM_URL}stable\nenabled=0\n");
+      assert!(!rpm_repo_has_teamcraft(&shared, RPM_URL));
+      assert!(!rpm_repo_has_teamcraft("", RPM_URL));
+      assert!(!rpm_repo_has_teamcraft(
+        "baseurl=https://example-org.github.io/TeamCraft/rpm/\n",
+        RPM_URL
+      ));
+    }
+
+    #[test]
+    fn deb822_sources_count_unless_disabled() {
+      let documented =
+        "Types: deb\nURIs: https://example-org.github.io/TeamCraft/apt\nSuites: stable\nComponents: main\n";
+      assert!(apt_source_has_teamcraft("teamcraft.sources", documented, APT_URL));
+      assert!(apt_source_has_teamcraft("chat.sources", documented, APT_URL));
+      let disabled = format!("{documented}Enabled: no\n");
+      assert!(!apt_source_has_teamcraft("teamcraft.sources", &disabled, APT_URL));
+      let source_only = "Types: deb-src\nURIs: https://example-org.github.io/TeamCraft/apt\n";
+      assert!(!apt_source_has_teamcraft(
+        "teamcraft.sources",
+        source_only,
+        APT_URL
+      ));
+      let other = "Types: deb\nURIs: http://archive.example.org/ubuntu\nSuites: noble\n\n";
+      assert!(!apt_source_has_teamcraft("ubuntu.sources", other, APT_URL));
+      assert!(apt_source_has_teamcraft(
+        "ubuntu.sources",
+        &format!("{other}{documented}"),
+        APT_URL
+      ));
+    }
+
+    #[test]
+    fn one_line_sources_count_by_url_or_file_name() {
+      let line = "deb [signed-by=/usr/share/keyrings/teamcraft-archive-keyring.gpg] https://example-org.github.io/TeamCraft/apt stable main\n";
+      assert!(apt_source_has_teamcraft("sources.list", line, APT_URL));
+      let mirror = "deb https://mirror.example.com/apt stable main\n";
+      assert!(apt_source_has_teamcraft("teamcraft.list", mirror, APT_URL));
+      assert!(!apt_source_has_teamcraft("other.list", mirror, APT_URL));
+      assert!(!apt_source_has_teamcraft(
+        "teamcraft.list",
+        &format!("# {line}"),
+        APT_URL
+      ));
+      assert!(!apt_source_has_teamcraft("teamcraft.list", "", APT_URL));
     }
   }
 
@@ -824,15 +1159,80 @@ mod tests {
         })
       ));
       current.install = InstallKind::Deb;
-      current.maybe_package_manager = Some(apt_hint());
+      current.maybe_manual = Some(ManualUpdate::PackageManager(apt_hint()));
       assert_eq!(
         current.banner(),
         Some(UpdateBanner::Available {
           version: "1.0.1".into(),
           maybe_notes_url: None,
-          action: AvailableAction::PackageManager(apt_hint()),
+          action: AvailableAction::Manual(ManualUpdate::PackageManager(apt_hint())),
         })
       );
+    }
+
+    #[test]
+    fn hints_the_app_cannot_act_on_are_dismissed_per_version() {
+      let mut current = status(UpdateState::Available {
+        version: "1.0.8".into(),
+        maybe_notes_url: None,
+      });
+      current.install = InstallKind::Rpm;
+      current.maybe_manual = Some(file_download());
+      assert_eq!(current.dismissal(), Dismissal::ForVersion("1.0.8".into()));
+      current.maybe_dismissed_version = Some("1.0.7".into());
+      assert!(
+        current.banner().is_some(),
+        "an older dismissal doesn't hide a new version"
+      );
+      current.maybe_dismissed_version = Some("1.0.8".into());
+      assert_eq!(current.banner(), None);
+      // The next version shows again.
+      current.state = UpdateState::Available {
+        version: "1.0.9".into(),
+        maybe_notes_url: None,
+      };
+      assert!(current.banner().is_some());
+      // After PackageKit installed it, the restart hint is dismissable too.
+      current.state = UpdateState::Ready {
+        version: "1.0.9".into(),
+        maybe_notes_url: None,
+      };
+      assert_eq!(current.dismissal(), Dismissal::ForVersion("1.0.9".into()));
+      // A version that is too old can't be hidden, whatever was dismissed.
+      current.maybe_dismissed_version = Some("1.0.9".into());
+      current.maybe_required_version = Some("1.0.9".into());
+      assert_eq!(current.dismissal(), Dismissal::Never);
+      assert!(matches!(
+        current.banner(),
+        Some(UpdateBanner::TooOld {
+          action: TooOldAction::Manual(_),
+          ..
+        })
+      ));
+    }
+
+    #[test]
+    fn a_self_installed_update_waits_for_its_restart_and_a_found_one_for_the_next_launch() {
+      let mut current = status(UpdateState::Ready {
+        version: "1.0.8".into(),
+        maybe_notes_url: None,
+      });
+      assert_eq!(current.dismissal(), Dismissal::Never);
+      current.maybe_dismissed_version = Some("1.0.8".into());
+      assert!(current.banner().is_some());
+      current.state = UpdateState::Available {
+        version: "1.0.8".into(),
+        maybe_notes_url: None,
+      };
+      assert_eq!(current.dismissal(), Dismissal::UntilRelaunch);
+      assert!(current.banner().is_some());
+      // An AppImage in a read-only place: the app can't install it, so it is a hint.
+      current.maybe_manual = Some(ManualUpdate::Download {
+        url: "https://example.com/TeamCraft_1.0.8_amd64.AppImage".into(),
+        maybe_repository_setup_url: None,
+      });
+      assert_eq!(current.dismissal(), Dismissal::ForVersion("1.0.8".into()));
+      assert_eq!(current.banner(), None);
     }
 
     #[test]
@@ -886,17 +1286,17 @@ mod tests {
         maybe_checked_at: None,
       };
       current.install = InstallKind::Rpm;
-      current.maybe_package_manager = Some(apt_hint());
+      current.maybe_manual = Some(ManualUpdate::PackageManager(apt_hint()));
       assert!(matches!(
         current.banner(),
         Some(UpdateBanner::TooOld {
-          action: TooOldAction::PackageManager(_),
+          action: TooOldAction::Manual(_),
           ..
         })
       ));
 
       current.install = InstallKind::Unpackaged;
-      current.maybe_package_manager = None;
+      current.maybe_manual = None;
       assert!(matches!(
         current.banner(),
         Some(UpdateBanner::TooOld {
@@ -912,7 +1312,8 @@ mod tests {
         version: "1.0.1".into(),
         maybe_percent: Some(12),
       });
-      current.maybe_package_manager = Some(apt_hint());
+      current.maybe_manual = Some(ManualUpdate::PackageManager(apt_hint()));
+      current.maybe_dismissed_version = Some("1.0.0".into());
       let json = serde_json::to_value(&current).unwrap_or_default();
       assert_eq!(
         json,
@@ -922,16 +1323,29 @@ mod tests {
           "preference": "automatic",
           "state": {"kind": "downloading", "version": "1.0.1", "percent": 12},
           "is_in_call": false,
-          "package_manager": {
+          "manual": {
+            "kind": "package_manager",
             "manager": "apt",
             "command": "sudo apt update && sudo apt install --only-upgrade team-craft",
             "has_package_kit": true,
           },
+          "dismissed_version": "1.0.0",
         })
       );
       let parsed: UpdateStatus =
         serde_json::from_value(json).unwrap_or_else(|_| status(UpdateState::Checking));
       assert_eq!(parsed, current);
+
+      current.maybe_manual = Some(file_download());
+      let json = serde_json::to_value(&current).unwrap_or_default();
+      assert_eq!(
+        json["manual"],
+        serde_json::json!({
+          "kind": "download",
+          "url": "https://example.com/TeamCraft-1.0.8-1.x86_64.rpm",
+          "repository_setup_url": "https://example.com/",
+        })
+      );
     }
   }
 
@@ -961,7 +1375,15 @@ mod tests {
       state,
       maybe_required_version: None,
       is_in_call: false,
-      maybe_package_manager: None,
+      maybe_manual: None,
+      maybe_dismissed_version: None,
+    }
+  }
+
+  fn file_download() -> ManualUpdate {
+    ManualUpdate::Download {
+      url: "https://example.com/TeamCraft-1.0.8-1.x86_64.rpm".into(),
+      maybe_repository_setup_url: Some("https://example.com/".into()),
     }
   }
 
