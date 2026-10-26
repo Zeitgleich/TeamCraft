@@ -22,13 +22,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "TeamCraft uses the camera for video calls."
+            "value": "TeamCraft uses the camera for video calls and to scan the code of a new device you link."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "TeamCraft verwendet die Kamera für Videoanrufe."
+            "value": "TeamCraft verwendet die Kamera für Videoanrufe und zum Scannen des Codes eines neuen Geräts, das du verknüpfst."
           }
         }
       }

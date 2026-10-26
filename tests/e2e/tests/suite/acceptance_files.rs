@@ -31,7 +31,6 @@ async fn files_are_encrypted_for_members_and_share_links_are_limited_and_revocab
         file_name: "numbers.txt".into(),
         media_type: "text/plain".into(),
         content: content.clone(),
-        maybe_duration_ms: None,
       },
     )
     .await

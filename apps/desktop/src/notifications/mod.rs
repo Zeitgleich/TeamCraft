@@ -7,13 +7,15 @@
 //! |----------|--------------------------------------|-------------------|---------|------------------------------|
 //! | Linux    | freedesktop notification service     | yes               | yes     | where the server offers one  |
 //! | Windows  | WinRT toasts (tag and group)         | yes               | yes     | yes                          |
-//! | macOS    | `UNUserNotificationCenter` (bundled) | yes               | no      | no                           |
+//! | macOS    | `UNUserNotificationCenter` (bundled) | yes               | yes     | yes                          |
 //!
 //! Where none of these is available (no notification service, an unbundled macOS build) the
 //! notification plugin shows title and text only.
 
 #[cfg(target_os = "macos")]
 pub(crate) mod mac_center;
+#[cfg(any(target_os = "macos", test))]
+mod mac_response;
 #[cfg(any(windows, test))]
 mod toast_xml;
 #[cfg(windows)]
@@ -136,17 +138,23 @@ pub fn request_attention(app: AppHandle, is_wanted: bool) {
   }
 }
 
-/// macOS asks the user once whether the app may notify; elsewhere there is nothing to ask.
-pub fn prepare() {
+/// macOS asks the user once whether the app may notify and hears what the user does with the
+/// notifications; elsewhere there is nothing to prepare.
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+pub fn prepare(app: &AppHandle) {
   #[cfg(target_os = "macos")]
   if mac_center::is_available() {
+    let reporter = app.clone();
+    teamcraft_desktop_native::install_notification_delegate(move |response| {
+      if let Some(event) = mac_response::action_event(response) {
+        report(&reporter, event);
+      }
+    });
     mac_center::request_permission();
   }
 }
 
 /// Hands what the user did to the webview, bringing the window up first where the action needs it.
-// macOS notifications have no buttons yet (see mac_center), so nothing reports there.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn report(app: &AppHandle, event: NotificationActionEvent) {
   if event.action.brings_window_up() {
     crate::tray::show_main_window(app);

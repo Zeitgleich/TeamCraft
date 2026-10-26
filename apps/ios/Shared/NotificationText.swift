@@ -14,9 +14,15 @@ struct NotificationText: Equatable {
   /// A subtitle naming the sender when the title is the conversation.
   var maybeSubtitle: String? { maybeConversationTitle == nil ? nil : senderName }
 
+  /// - `kindText`: the label of a photo, video or audio message (its file name is not shown).
+  /// - `fromSenderText`: the fallback when nothing of the message is shown but the sender is known
+  ///   ("New message from Alex"); without it `fallbackText` is used.
   init(
     maybeConversationName: String?, maybeSenderName: String?, maybeText: String?, maybeFileName: String?,
-    isDirect: Bool, fallbackSender: String, fallbackText: String, fileText: (String) -> String
+    maybeAttachmentKind: NotificationAttachmentKind? = nil,
+    isDirect: Bool, fallbackSender: String, fallbackText: String, fileText: (String) -> String,
+    kindText: (NotificationAttachmentKind) -> String = { _ in "" },
+    fromSenderText: ((String) -> String)? = nil
   ) {
     func nonBlank(_ value: String?) -> String? {
       guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
@@ -25,8 +31,12 @@ struct NotificationText: Equatable {
     senderName = nonBlank(maybeSenderName) ?? maybeConversationName ?? fallbackSender
     if let text = nonBlank(maybeText) {
       self.text = text
+    } else if let kind = maybeAttachmentKind, kind != .file, let label = nonBlank(kindText(kind)) {
+      self.text = label
     } else if let file = nonBlank(maybeFileName) {
       self.text = fileText(file)
+    } else if let sender = nonBlank(maybeSenderName), let fromSenderText {
+      self.text = fromSenderText(sender)
     } else {
       self.text = fallbackText
     }

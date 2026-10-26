@@ -19,6 +19,9 @@ pub struct LiveMarks {
   pub announcements: u64,
   #[serde(default)]
   pub meetings: u64,
+  /// The open device link requests changed (e2ee.md §5): the UI reads them from the core.
+  #[serde(default)]
+  pub link_requests: u64,
 }
 
 /// How far another member of a DM has read, from `read_receipt` events.

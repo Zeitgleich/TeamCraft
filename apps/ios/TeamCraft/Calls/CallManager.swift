@@ -28,6 +28,8 @@ struct ActiveCall: Identifiable, Equatable {
   var speakingUserIds: [String] = []
   /// The users all of whose devices are rejoining.
   var reconnectingUserIds: [String] = []
+  /// The users who muted their microphone.
+  var mutedUserIds: [String] = []
   /// The code participants compare to rule out a man in the middle (once secured).
   var maybePrivacyCode: String?
   /// Put on hold from the system's call UI: nothing is sent or played.
@@ -299,6 +301,7 @@ final class CallManager: NSObject, @unchecked Sendable {
     call.userIdByDevice = [:]
     call.speakingUserIds = []
     call.reconnectingUserIds = []
+    call.mutedUserIds = []
     call.maybePrivacyCode = nil
     activeCall = call
     camera.stop()
@@ -670,6 +673,7 @@ extension CallManager: CallListener {
         state.peers.map { ($0.deviceId, $0.userId) }, uniquingKeysWith: { first, _ in first })
       call.speakingUserIds = state.speakingUserIds
       call.reconnectingUserIds = state.reconnectingUserIds
+      call.mutedUserIds = state.mutedUserIds
       if hasNewPeople { Task { @MainActor in self.names = await AppModel.shared.displayNames() } }
       call.maybePrivacyCode = state.maybePrivacyCode
       switch state.phase {

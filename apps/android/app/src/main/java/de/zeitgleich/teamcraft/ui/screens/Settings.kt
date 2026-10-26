@@ -54,6 +54,7 @@ import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.CustomStatus
 import de.zeitgleich.teamcraft.security.ScreenPrefs
 import de.zeitgleich.teamcraft.ui.AppState
+import de.zeitgleich.teamcraft.ui.LinkConfirmation
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import uniffi.teamcraft_ffi.Presence
 import uniffi.teamcraft_ffi.PushService
@@ -190,20 +191,21 @@ private fun SecurityPage(viewModel: MainViewModel, account: AppState.Ready) {
   ChangePassphrase(viewModel)
 }
 
-/** This device approves a new one: enter its code, compare the short codes, confirm. */
+/** This device approves a new one: scan or enter its link code, then type the code it shows. */
 @Composable
 private fun ApproveDevice(viewModel: MainViewModel) {
   val scope = rememberCoroutineScope()
   // Not saveable: a restored screen must never confirm an approval the user left.
   var code by remember { mutableStateOf("") }
-  var maybeShortCode by remember { mutableStateOf<String?>(null) }
+  var isTyping by remember { mutableStateOf(false) }
+  var maybeError by remember { mutableStateOf<Int?>(null) }
   var isDone by rememberSaveable { mutableStateOf(false) }
   var hasFailed by rememberSaveable { mutableStateOf(false) }
   var isScanning by rememberSaveable { mutableStateOf(false) }
   val approve: (String) -> Unit = { linkCode ->
     hasFailed = false
     scope.launch {
-      viewModel.approveLink(linkCode).onSuccess { maybeShortCode = it }.onFailure { hasFailed = true }
+      viewModel.approveLink(linkCode).onSuccess { isTyping = true }.onFailure { hasFailed = true }
     }
   }
   if (isScanning) {
@@ -220,29 +222,41 @@ private fun ApproveDevice(viewModel: MainViewModel) {
       }
     }
   }
-  val isComparing = maybeShortCode != null && !isDone
-  // Leaving the comparison unconfirmed drops the approval, so syncing resumes.
-  DisposableEffect(isComparing) {
-    onDispose { if (isComparing) viewModel.cancelLinkApproval() }
+  val isOpen = isTyping && !isDone
+  // Leaving the code step unconfirmed drops the approval, so syncing resumes.
+  DisposableEffect(isOpen) {
+    onDispose { if (isOpen) viewModel.cancelLinkApproval() }
   }
   Heading(R.string.approve_title)
   when {
     isDone -> Text(stringResource(R.string.approve_done))
-    maybeShortCode != null -> {
-      Text(stringResource(R.string.approve_compare))
-      Text(maybeShortCode.orEmpty(), style = MaterialTheme.typography.displaySmall, fontFamily = FontFamily.Monospace)
-      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Button(onClick = {
-          scope.launch {
-            viewModel.confirmLink().onSuccess { isDone = true }.onFailure { hasFailed = true }
+    isTyping -> LinkCodeStep(
+      maybeError = maybeError,
+      onApprove = { typed ->
+        scope.launch {
+          when (viewModel.confirmLink(typed)) {
+            LinkConfirmation.CONFIRMED -> {
+              maybeError = null
+              isDone = true
+            }
+            LinkConfirmation.WRONG_CODE -> maybeError = R.string.approve_code_wrong
+            LinkConfirmation.ATTEMPT_ENDED -> {
+              // The new device has to start again: back to the first step.
+              isTyping = false
+              code = ""
+              hasFailed = false
+              maybeError = R.string.approve_attempt_ended
+            }
+            LinkConfirmation.FAILED -> maybeError = R.string.error_generic
           }
-        }) { Text(stringResource(R.string.approve_confirm)) }
-        OutlinedButton(onClick = {
-          maybeShortCode = null
-          code = ""
-        }) { Text(stringResource(R.string.cancel)) }
-      }
-    }
+        }
+      },
+      onCancel = {
+        isTyping = false
+        maybeError = null
+        code = ""
+      },
+    )
     else -> {
       Text(stringResource(R.string.approve_hint), style = MaterialTheme.typography.bodySmall)
       OutlinedTextField(
@@ -253,9 +267,16 @@ private fun ApproveDevice(viewModel: MainViewModel) {
         modifier = Modifier.fillMaxWidth(),
       )
       Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Button(onClick = { approve(code) }, enabled = code.isNotBlank()) { Text(stringResource(R.string.approve_start)) }
-        OutlinedButton(onClick = { isScanning = true }) { Text(stringResource(R.string.link_scan_qr)) }
+        Button(onClick = {
+          maybeError = null
+          approve(code)
+        }, enabled = code.isNotBlank()) { Text(stringResource(R.string.approve_start)) }
+        OutlinedButton(onClick = {
+          maybeError = null
+          isScanning = true
+        }) { Text(stringResource(R.string.link_scan_qr)) }
       }
+      maybeError?.let { Text(stringResource(it), color = MaterialTheme.colorScheme.error) }
     }
   }
   if (hasFailed) Text(stringResource(R.string.error_generic), color = MaterialTheme.colorScheme.error)

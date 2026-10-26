@@ -103,12 +103,14 @@ struct CallScreen: View {
       StagePerson(
         id: id, name: model.calls.names[id] ?? "",
         isSpeaking: call.speakingUserIds.contains(id),
-        isRejoining: call.reconnectingUserIds.contains(id))
+        isRejoining: call.reconnectingUserIds.contains(id),
+        isMuted: call.mutedUserIds.contains(id))
     }
     // Alone in the call (or still connecting): the one being called.
     let shown =
       people.isEmpty
-      ? [StagePerson(id: "", name: call.displayName, isSpeaking: false, isRejoining: false)] : people
+      ? [StagePerson(id: "", name: call.displayName, isSpeaking: false, isRejoining: false, isMuted: false)]
+      : people
     let size: CGFloat = shown.count <= 1 ? 128 : (shown.count <= 4 ? 96 : 72)
     return ScrollView {
       LazyVGrid(
@@ -121,17 +123,37 @@ struct CallScreen: View {
               .overlay(
                 Circle().stroke(Theme.accent, lineWidth: person.isSpeaking ? 3 : 0)
               )
+              .overlay(alignment: .bottomTrailing) {
+                if person.isMuted { mutedBadge }
+              }
               .animation(.easeOut(duration: 0.15), value: person.isSpeaking)
             Text(person.name).font(.footnote.weight(.medium)).foregroundStyle(.white).lineLimit(1)
           }
           .opacity(person.isRejoining ? 0.5 : 1)
-          .accessibilityElement(children: .combine)
+          .accessibilityElement(children: .ignore)
+          .accessibilityLabel(
+            person.isMuted
+              ? Text("call_person_muted \(person.name)") : Text(verbatim: person.name))
         }
       }
       .padding(32)
       .frame(maxWidth: .infinity, minHeight: UIScreen.main.bounds.height * 0.6)
     }
     .scrollBounceBehavior(.basedOnSize)
+  }
+
+  /// A small crossed-out microphone on a muted person's avatar.
+  private var mutedBadge: some View {
+    Image(systemName: "mic.slash.fill")
+      .font(.caption.weight(.semibold))
+      .foregroundStyle(.white)
+      .frame(width: 26, height: 26)
+      .background(Color(red: 0.106, green: 0.133, blue: 0.188), in: Circle())
+      .overlay(Circle().stroke(.white.opacity(0.25)))
+  }
+
+  private func isMuted(_ stream: RemoteVideoStream) -> Bool {
+    call.userIdByDevice[stream.deviceId].map { call.mutedUserIds.contains($0) } ?? false
   }
 
   /// The name of the person whose device sends `stream`, once known.
@@ -168,14 +190,20 @@ struct CallScreen: View {
   @ViewBuilder
   private func nameTag(for stream: RemoteVideoStream) -> some View {
     if let name = ownerName(of: stream) {
-      Text(name)
-        .font(.caption.weight(.medium))
-        .foregroundStyle(.white)
-        .lineLimit(1)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 2)
-        .background(.black.opacity(0.55), in: Capsule())
-        .padding(8)
+      HStack(spacing: 4) {
+        if isMuted(stream) { Image(systemName: "mic.slash.fill").font(.caption2) }
+        Text(name).lineLimit(1)
+      }
+      .font(.caption.weight(.medium))
+      .foregroundStyle(.white)
+      .accessibilityElement(children: .ignore)
+      .accessibilityLabel(
+        isMuted(stream) ? Text("call_person_muted \(name)") : Text(verbatim: name)
+      )
+      .padding(.horizontal, 8)
+      .padding(.vertical, 2)
+      .background(.black.opacity(0.55), in: Capsule())
+      .padding(8)
     }
   }
 
@@ -414,6 +442,7 @@ private struct StagePerson: Identifiable {
   let name: String
   let isSpeaking: Bool
   let isRejoining: Bool
+  let isMuted: Bool
 }
 
 private struct AutoHideKey: Hashable {

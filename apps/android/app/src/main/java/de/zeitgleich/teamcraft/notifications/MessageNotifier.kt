@@ -21,9 +21,14 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.LocusIdCompat
 import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
+import androidx.core.graphics.drawable.IconCompat
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.security.AppLockPrefs
 import de.zeitgleich.teamcraft.ui.MainActivity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import uniffi.teamcraft_ffi.NotificationAttachmentKind
 import uniffi.teamcraft_ffi.PushNotification
 
@@ -36,11 +41,13 @@ import uniffi.teamcraft_ffi.PushNotification
 class MessageNotifier(
   private val context: Context,
   private val contentPrefs: NotificationContentPrefs,
+  private val avatars: AvatarCache,
   private val store: NotificationStore = NotificationStore(context),
 ) {
   private val manager = NotificationManagerCompat.from(context)
   private val lock = Any()
   private var maybeShown: ShownNotifications? = null
+  private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
   init {
     NotificationChannels.create(context)
@@ -213,6 +220,7 @@ class MessageNotifier(
       maybeShown = ShownNotifications()
       store.delete()
       manager.cancelAll()
+      avatars.clear()
       runCatching { ShortcutManagerCompat.removeAllDynamicShortcuts(context) }
     }
   }
@@ -278,7 +286,9 @@ class MessageNotifier(
           .setContentText(text)
           .setNumber(entry.lines.count { !it.isOwn })
         val senderKey = newest.maybeSenderKey
-        if (entry.maybeTitle == null && senderKey != null) builder.setLargeIcon(PersonIcons.bitmap(senderKey, newest.senderName))
+        if (entry.maybeTitle == null && senderKey != null) {
+          builder.setLargeIcon(avatars.maybeBitmap(senderKey) ?: PersonIcons.bitmap(senderKey, newest.senderName))
+        }
       }
       else -> {
         // The same as the lock screen's public version, also in the unlocked shade.
@@ -298,11 +308,28 @@ class MessageNotifier(
         .addAction(muteAction(entry.conversationId))
     }
     postSafely(entry.conversationId, MESSAGE_ID, builder.build())
+    if (privacy.showsNames) fetchAvatars(entry)
+  }
+
+  /**
+   * Fetches the senders' pictures in the background (never from the push); a picture that arrives
+   * replaces the initials in the notification already shown, silently.
+   */
+  private fun fetchAvatars(entry: ConversationNotification) {
+    val senders = entry.lines.mapNotNull { it.maybeSenderKey }.distinct()
+    senders.forEach { sender ->
+      scope.launch {
+        if (!avatars.refresh(sender)) return@launch
+        synchronized(lock) {
+          shown().conversations[entry.conversationId]?.let { current -> post(current, isAlerting = false) }
+        }
+      }
+    }
   }
 
   private fun person(line: NotificationLine): Person? {
     val key = line.maybeSenderKey ?: return null
-    return Person.Builder().setName(line.senderName).setKey(key).setIcon(PersonIcons.of(key, line.senderName)).build()
+    return Person.Builder().setName(line.senderName).setKey(key).setIcon(avatars.maybeIcon(key) ?: PersonIcons.of(key, line.senderName)).build()
   }
 
   /** `@mentions` in bold, as in the app. */
@@ -370,7 +397,7 @@ class MessageNotifier(
       .setShortLabel(label.ifBlank { context.getString(R.string.app_name) })
       .setLongLived(true)
       .setLocusId(LocusIdCompat(entry.conversationId))
-      .setIcon(PersonIcons.of(newest.maybeSenderKey.takeIf { entry.maybeTitle == null } ?: entry.conversationId, label))
+      .setIcon(shortcutIcon(entry, newest, label))
       .setIntent(openConversationIntent(entry.conversationId).setAction(Intent.ACTION_VIEW))
       .apply { if (entry.maybeTitle == null) person(newest)?.let { setPerson(it) } }
       .build()
@@ -380,6 +407,12 @@ class MessageNotifier(
       // Rate-limited or refused by the launcher: the notification still shows, just not as a conversation.
       Log.w(TAG, "conversation shortcut not pushed: ${failure.javaClass.simpleName}")
     }
+  }
+
+  /** A person's picture for a one-to-one chat, else the generated avatar of the conversation. */
+  private fun shortcutIcon(entry: ConversationNotification, newest: NotificationLine, label: String): IconCompat {
+    val senderKey = newest.maybeSenderKey.takeIf { entry.maybeTitle == null }
+    return senderKey?.let(avatars::maybeIcon) ?: PersonIcons.of(senderKey ?: entry.conversationId, label)
   }
 
   private fun postSafely(maybeTag: String?, id: Int, notification: android.app.Notification) {

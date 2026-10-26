@@ -1405,6 +1405,8 @@ fn LinkScreen(device_name: String, control: SessionControl, on_back: Callback<()
   let i18n = use_i18n();
   let status = RwSignal::new(LinkStatus::Idle);
   let device_name = StoredValue::new(device_name);
+  // Asking the other devices hands the code's key to the server: only on the user's click.
+  let asking = RwSignal::new(AskState::Idle);
 
   spawn_local(async move {
     if let Err(message) = remote_backend::link_start(&device_name.get_value()).await {
@@ -1431,6 +1433,15 @@ fn LinkScreen(device_name: String, control: SessionControl, on_back: Callback<()
     spawn_local(async { drop(remote_backend::link_cancel().await) });
     on_back.run(());
   };
+  let ask = move |_| {
+    asking.set(AskState::Asking);
+    spawn_local(async move {
+      asking.set_if_alive(match remote_backend::link_announce().await {
+        Ok(()) => AskState::Asked,
+        Err(_) => AskState::Failed,
+      });
+    });
+  };
 
   view! {
     <AuthFrame>
@@ -1446,6 +1457,16 @@ fn LinkScreen(device_name: String, control: SessionControl, on_back: Callback<()
             <p class="muted-text">{move || i18n.t("link-new-steps")}</p>
             <div class="link-qr"><QrImage data=code.clone() /></div>
             <p class="small mono link-code" translate="no">{code}</p>
+            {move || match asking.get() {
+              AskState::Asked => view! { <p role="status">{move || i18n.t("link-new-asked")}</p> }.into_any(),
+              state => view! {
+                <p class="muted-text small">{move || i18n.t("link-new-ask-hint")}</p>
+                <button type="button" class="btn" prop:disabled=move || asking.get() == AskState::Asking on:click=ask>
+                  {move || i18n.t("link-new-ask")}
+                </button>
+                {(state == AskState::Failed).then(|| view! { <p class="field-error" role="alert">{move || i18n.t("link-new-ask-failed")}</p> })}
+              }.into_any(),
+            }}
             {match short {
               Some(short_code) => {
                 view! {
@@ -1475,6 +1496,15 @@ fn LinkScreen(device_name: String, control: SessionControl, on_back: Callback<()
 }
 
 const LINK_POLL_MS: u64 = 1000;
+
+/// Whether the user asked the account's other devices to approve this one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AskState {
+  Idle,
+  Asking,
+  Asked,
+  Failed,
+}
 
 /// Short passphrases are cheap to guess offline; the minimum is a UI rule, the cost of the key
 /// derivation (Argon2id) does the rest.

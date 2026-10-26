@@ -198,7 +198,7 @@ on real devices.
 | Duplicates and order | The apps remember the message IDs they showed (per conversation) and ignore a second wake-up for the same message; MessagingStyle and iOS threads sort by the message time, not by arrival.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | Badge                | The wake-up carries the user's unread count (conversations with unread mentions or DMs plus unread thread mentions); iOS sets it on the notification, Android on the notification (`setNumber`) and launcher.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | Android channels     | `direct_messages` (high), `mentions` (high), `messages` (default: channel messages), `incoming_calls` (high, full-screen intent, ringtone; importance can't be raised after creation, so the older `calls` stays the ongoing-call channel), `meetings` (high: reminders), `other` (low: test pushes). Users change sound and importance in the system settings; the app links there.                                                                                                                                                                                                                                                                                                                       |
-| Android extras       | MessagingStyle per conversation with long-lived conversation shortcuts and a group summary, inline reply, mark read and mute (8 hours, the server's per-conversation setting), battery state in the diagnostics (no exemption request; with UnifiedPush the distributor's), UnifiedPush distributor detection and choice. Avatars are generated initials; profile pictures and bubbles follow in v1.0.5.                                                                                                                                                                                                                                                                                                   |
+| Android extras       | MessagingStyle per conversation with long-lived conversation shortcuts and a group summary, inline reply, mark read and mute (8 hours, the server's per-conversation setting), battery state in the diagnostics (no exemption request; with UnifiedPush the distributor's), UnifiedPush distributor detection and choice. Senders show their profile picture (circle, fetched in the background through the core, cached; never from the push) or generated initials; bubbles follow in v1.0.5.                                                                                                                                                                                                            |
 | iOS extras           | Mutable-content alerts through the NSE as communication notifications, thread identifier per conversation, relevance score, time-sensitive for urgent, badge.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | Diagnostics          | Mobile screen: test push (the server sends a sealed `test` wake-up end to end), provider, last push received, notification permission, battery optimisation, channel settings, DND state. Admins see per user and device how many pushes were sent, failed and suppressed (counts only).                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
@@ -293,6 +293,13 @@ timed out, not showable, workspace policy, device setting); the diagnostics show
 the app logs it, never the content. A high-priority FCM wake-up that can't be opened at all shows a
 plain "New message".
 
+**iOS message content (issue #331).** The notification service extension opens the wake-up with the
+same core call and shows the same texts: sender and conversation, the text, a label for photos, videos
+and audio ("📷 Photo", "🎬 Video", "🎤 Audio", otherwise "📎 file name"), and "New message from <name>"
+when only the sender is known. The setting is Settings → Notifications → Notification content. Still
+open: avatars as a communication notification, the extension's catch-up (design: e2ee.md §7.2) and the
+last gap in the diagnostics.
+
 **Notification content.** Each device chooses "sender and message" (default), "sender only" or
 "nothing" (Settings → Notifications); the workspace policy `push_content` limits it, and the stricter
 of the two applies (the core applies both when it opens the wake-up; the setting is kept in the store
@@ -330,15 +337,16 @@ history, and replacing that one only updates the history entry, without a popup 
 |----------|----------------------------------------|-------------------|---------|---------------------------------|-------------------------------------------|
 | Linux    | freedesktop notification service       | yes               | yes     | servers with `inline-reply`     | yes; quiet in GNOME/KDE do-not-disturb    |
 | Windows  | WinRT toasts (tag, group `teamcraft`)  | yes               | yes     | yes                             | yes; taskbar flash                        |
-| macOS    | `UNUserNotificationCenter` (bundled)   | yes               | no      | no                              | yes; dock bounce                          |
+| macOS    | `UNUserNotificationCenter` (bundled)   | yes               | yes     | yes                             | yes; dock bounce                          |
 | Web      | service worker registration, else page | yes               | yes     | no (browsers have none)         | yes, in the tab that runs the calls¹      |
 
 ¹ Browsers play sound only in a tab the user has interacted with; a tab untouched since it loaded
 shows the incoming call card and the notification without the ringtone.
 
-macOS buttons need a notification center delegate, an Objective-C class the shell cannot define
-without `unsafe`; a click brings the app to the front, where the conversation or the call card is
-(#189). An unbundled macOS build and a Linux session without a notification service fall back to the
+macOS buttons and the reply field need a notification category (registered as notifications arrive,
+since the labels are translated) and a notification center delegate, an Objective-C class that
+`teamcraft-desktop-native` defines (the one crate with `unsafe`, code-style.md "Native FFI"); the
+delegate also lets banners show while the app is in front. An unbundled macOS build and a Linux session without a notification service fall back to the
 notification plugin (title and text only, no withdrawal).
 
 **Messages.** Mentions, DMs and followed thread replies by the rules above, the text only as far as

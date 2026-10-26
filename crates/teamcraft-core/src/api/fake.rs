@@ -47,6 +47,7 @@ use teamcraft_proto::{
   InviteResponse, ListCategoriesResponse, UpdateCategoryRequest, UpdateConversationRequest,
   UpdateSpaceRequest,
 };
+use teamcraft_proto::{CreateDeviceLinkRequest, DeviceLinkClosedReason, DeviceLinkRequest};
 use teamcraft_proto::{CreateInstantMeetingRequest, MeetingKind, MeetingResponse, MeetingStatus};
 use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest};
 use teamcraft_proto::{ErrorBody, RendezvousClientMessage, RendezvousServerMessage};
@@ -169,6 +170,8 @@ struct State {
   revoked_gateway_tokens: Vec<Vec<u8>>,
   revoked_gateway_urls: Vec<String>,
   relays: HashMap<String, Relay>,
+  /// Open device link requests by relay ID (the server keeps them next to the relays).
+  link_requests: HashMap<String, FakeLinkRequest>,
   /// Relayed binary frames still to be lost on the way (a flaky connection during linking).
   relay_frames_to_lose: u32,
   /// Like the server: a repeated idempotency key returns the first space / channel.
@@ -281,6 +284,11 @@ struct Relay {
   held: Vec<(u64, Vec<u8>)>,
 }
 
+struct FakeLinkRequest {
+  user: UserId,
+  request: DeviceLinkRequest,
+}
+
 /// One device's end of a fake relay.
 pub struct FakeRendezvous {
   server: FakeServer,
@@ -381,6 +389,11 @@ impl FakeServer {
       server: self.clone(),
       user: id,
     }
+  }
+
+  /// How many device link requests the server holds.
+  pub fn link_requests_held(&self) -> usize {
+    self.lock().link_requests.len()
   }
 
   /// While offline, every REST call of this user fails with a network error. Coming back online
@@ -1413,6 +1426,113 @@ impl ServerApi for FakeServerApi {
         return Err(ApiError::status(404, ErrorCode::DeviceNotFound, "no such device"));
       }
       state.revoke_device(me, device);
+      Ok(())
+    })
+  }
+
+  async fn announce_device_link(
+    &self,
+    request: &CreateDeviceLinkRequest,
+  ) -> Result<DeviceLinkRequest, ApiError> {
+    self.with(|state, me| {
+      let is_waiting = state.relays.get(&request.rendezvous_id).is_some_and(|relay| {
+        relay.endpoints.len() == 1 && relay.endpoints.iter().all(|(_, user, _)| *user == me)
+      });
+      if !is_waiting || state.link_requests.contains_key(&request.rendezvous_id) {
+        return Err(ApiError::status(
+          409,
+          ErrorCode::Conflict,
+          "no device is waiting at that rendezvous",
+        ));
+      }
+      let announced = DeviceLinkRequest {
+        id: request.rendezvous_id.clone(),
+        key: request.key.clone(),
+        device_name: request.device_name.clone(),
+        platform: request.platform.clone(),
+        expires_in_secs: 300,
+      };
+      state.link_requests.insert(
+        announced.id.clone(),
+        FakeLinkRequest {
+          user: me,
+          request: announced.clone(),
+        },
+      );
+      state.publish(
+        [me],
+        &GatewayEvent::DeviceLinkRequested {
+          request: announced.clone(),
+        },
+      );
+      Ok(announced)
+    })
+  }
+
+  async fn device_links(&self) -> Result<Vec<DeviceLinkRequest>, ApiError> {
+    self.with(|state, me| {
+      Ok(
+        state
+          .link_requests
+          .values()
+          .filter(|entry| entry.user == me)
+          .map(|entry| entry.request.clone())
+          .collect(),
+      )
+    })
+  }
+
+  async fn reject_device_link(&self, request_id: &str) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      if state
+        .link_requests
+        .get(request_id)
+        .is_none_or(|entry| entry.user != me)
+      {
+        return Err(ApiError::status(
+          404,
+          ErrorCode::DeviceLinkNotFound,
+          "no such link request",
+        ));
+      }
+      state.link_requests.remove(request_id);
+      if let Some(relay) = state.relays.get(request_id) {
+        for (_, _, waiting) in &relay.endpoints {
+          let _ = waiting.unbounded_send(RendezvousFrame::Control(RendezvousServerMessage::Rejected));
+        }
+      }
+      state.publish(
+        [me],
+        &GatewayEvent::DeviceLinkClosed {
+          request_id: request_id.to_owned(),
+          reason: DeviceLinkClosedReason::Rejected,
+        },
+      );
+      Ok(())
+    })
+  }
+
+  async fn withdraw_device_link(&self, request_id: &str) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      if state
+        .link_requests
+        .get(request_id)
+        .is_none_or(|entry| entry.user != me)
+      {
+        return Err(ApiError::status(
+          404,
+          ErrorCode::DeviceLinkNotFound,
+          "no such link request",
+        ));
+      }
+      state.link_requests.remove(request_id);
+      state.publish(
+        [me],
+        &GatewayEvent::DeviceLinkClosed {
+          request_id: request_id.to_owned(),
+          reason: DeviceLinkClosedReason::Withdrawn,
+        },
+      );
       Ok(())
     })
   }
@@ -3857,6 +3977,7 @@ impl RendezvousConnection for FakeRendezvous {
       return Ok(());
     }
     let is_peer_present = !relay.endpoints.is_empty();
+    let is_claim = is_peer_present;
     for (_, _, peer) in &relay.endpoints {
       let _ = peer.unbounded_send(RendezvousFrame::Control(RendezvousServerMessage::PeerJoined));
     }
@@ -3877,6 +3998,16 @@ impl RendezvousConnection for FakeRendezvous {
       }
     }
     self.maybe_rendezvous_id = Some(rendezvous_id.clone());
+    // Like the server: the second device takes the request up, the prompts go.
+    if is_claim && state.link_requests.remove(rendezvous_id).is_some() {
+      state.publish(
+        [self.user],
+        &GatewayEvent::DeviceLinkClosed {
+          request_id: rendezvous_id.clone(),
+          reason: DeviceLinkClosedReason::Claimed,
+        },
+      );
+    }
     Ok(())
   }
 
@@ -3916,6 +4047,15 @@ impl Drop for FakeRendezvous {
       return;
     };
     let mut state = self.server.lock();
+    if state.link_requests.remove(&id).is_some() {
+      state.publish(
+        [self.user],
+        &GatewayEvent::DeviceLinkClosed {
+          request_id: id.clone(),
+          reason: DeviceLinkClosedReason::Withdrawn,
+        },
+      );
+    }
     if let Some(relay) = state.relays.remove(&id) {
       for (connection, _, peer) in relay.endpoints {
         if connection != self.connection {

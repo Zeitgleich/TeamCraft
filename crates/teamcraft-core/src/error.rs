@@ -65,6 +65,12 @@ pub enum CoreError {
   /// The new device never confirmed the transfer (a lost frame, a closed relay or a timeout).
   #[error("the new device did not confirm that it received the keys; link it again")]
   LinkNotConfirmed,
+  /// The link request is gone: another device took it up, the new device gave up, or it expired.
+  #[error("this device link request is no longer open")]
+  LinkRequestGone,
+  /// A device of the user denied this device's link request.
+  #[error("a device of this account denied the request to link this device")]
+  LinkDenied,
   /// The new device received the transfer but could not open the key bag in it.
   #[error("the new device could not open the keys it received; link it again")]
   LinkRejected,

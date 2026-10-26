@@ -25,6 +25,8 @@ struct RootView: View {
         OrgRecoveryView(progress: progress, failure: failure)
       case .ready(let account):
         ConversationListView(account: account)
+          // A new device asks to be linked: a card on every signed-in device (docs/e2ee.md §5).
+          .overlay(alignment: .top) { LinkPromptOverlay() }
       case .failed(let failure):
         FailureView(failure: failure)
       }

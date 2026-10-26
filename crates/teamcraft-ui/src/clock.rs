@@ -23,6 +23,15 @@ pub fn local_day(ts: TimestampMs) -> i64 {
   (ts + local_offset_ms(ts)).div_euclid(MS_PER_DAY)
 }
 
+/// Midnight in the user's time zone that starts the local day `days_back` days before `ts`.
+pub fn local_day_start(ts: TimestampMs, days_back: i64) -> TimestampMs {
+  let day = local_day(ts) - days_back;
+  // The offset is read around midday of that day, so a daylight saving change at night cannot
+  // shift it onto the wrong side.
+  let midday = day * MS_PER_DAY + MS_PER_DAY / 2 - local_offset_ms(ts);
+  day * MS_PER_DAY - local_offset_ms(midday)
+}
+
 /// Offset of the user's time zone from UTC in minutes (east is positive).
 pub fn local_utc_offset_minutes(ts: TimestampMs) -> i16 {
   i16::try_from(local_offset_ms(ts) / MS_PER_MINUTE).unwrap_or(0)
@@ -361,6 +370,16 @@ mod tests {
   fn tomorrow_morning_is_on_the_next_day() {
     let afternoon = 1_792_828_800_000 + 7 * 3_600_000;
     assert_eq!(tomorrow_at(afternoon, 8 * 60), 1_792_828_800_000 + 24 * 3_600_000);
+  }
+
+  #[test]
+  fn day_starts_are_midnights_counted_back_from_today() {
+    let afternoon = 1_792_828_800_000 + 7 * 3_600_000;
+    let today = local_day_start(afternoon, 0);
+    assert_eq!(local_day(today), local_day(afternoon));
+    assert!(today <= afternoon && afternoon - today < MS_PER_DAY);
+    assert_eq!(local_day(local_day_start(afternoon, 1)), local_day(afternoon) - 1);
+    assert_eq!(local_day(local_day_start(afternoon, 7)), local_day(afternoon) - 7);
   }
 
   #[test]

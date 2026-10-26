@@ -101,6 +101,8 @@ enum CoreFailure: Equatable {
   case network, signedOut, notEnrolled, wrongPassphrase, storage, recoveryPending
   /// A move of the call into a meeting room didn't check out (docs/meetings.md): stay in the call.
   case callMoveRefused
+  /// Device linking: the typed code is not the one on the new device (try again), or the last try failed.
+  case linkCodeRejected, linkAttemptEnded
   case other
 
   init(_ error: Error) {
@@ -119,6 +121,10 @@ enum CoreFailure: Equatable {
       self = .recoveryPending
     } else if name.hasPrefix("callmoverefused") {
       self = .callMoveRefused
+    } else if name.hasPrefix("linkcoderejected") {
+      self = .linkCodeRejected
+    } else if name.hasPrefix("linkattemptended") {
+      self = .linkAttemptEnded
     } else {
       self = .other
     }

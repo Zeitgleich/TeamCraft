@@ -209,38 +209,6 @@
         }
       }
     },
-    "approve_compare": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Does the new device show this number?"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Zeigt das neue Gerät diese Zahl an?"
-          }
-        }
-      }
-    },
-    "approve_confirm": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Yes, link it"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ja, verknüpfen"
-          }
-        }
-      }
-    },
     "approve_done": {
       "localizations": {
         "en": {
@@ -262,13 +230,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Enter the code the new device shows."
+            "value": "Scan the code the new device shows, or type it."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Gib den Code ein, den das neue Gerät anzeigt."
+            "value": "Scanne den Code, den das neue Gerät anzeigt, oder gib ihn ein."
           }
         }
       }
@@ -3398,13 +3366,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Check that the other device shows the same number:"
+            "value": "Type this number on your other device:"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Prüfe, dass das andere Gerät dieselbe Zahl anzeigt:"
+            "value": "Gib diese Zahl auf deinem anderen Gerät ein:"
           }
         }
       }
@@ -3414,13 +3382,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Confirm on the other device to finish."
+            "value": "Then wait here until it finishes."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bestätige auf dem anderen Gerät, um abzuschließen."
+            "value": "Warte dann hier, bis es fertig ist."
           }
         }
       }
@@ -3862,13 +3830,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sent a file: %@"
+            "value": "File: %@"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Hat eine Datei gesendet: %@"
+            "value": "Datei: %@"
           }
         }
       }
@@ -6901,6 +6869,646 @@
           "stringUnit": {
             "state": "translated",
             "value": "Nur die Personen in diesem Anruf können ihn hören und sehen, nicht einmal der Server. Damit sicher niemand dazwischensitzt, vergleiche den Code mit den anderen."
+          }
+        }
+      }
+    },
+    "notification_photo": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Photo"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Foto"
+          }
+        }
+      }
+    },
+    "notification_video": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Video"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Video"
+          }
+        }
+      }
+    },
+    "notification_audio": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Audio"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Audio"
+          }
+        }
+      }
+    },
+    "notification_new_message_from %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New message from %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Neue Nachricht von %@"
+          }
+        }
+      }
+    },
+    "notification_content_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notification content"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Inhalt von Benachrichtigungen"
+          }
+        }
+      }
+    },
+    "notification_content_full": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sender and message"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Absender und Nachricht"
+          }
+        }
+      }
+    },
+    "notification_content_sender_only": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sender only"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nur Absender"
+          }
+        }
+      }
+    },
+    "notification_content_nothing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nothing"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nichts"
+          }
+        }
+      }
+    },
+    "notification_content_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "What notifications show on this device. Your workspace can limit it further."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Was Benachrichtigungen auf diesem Gerät zeigen. Dein Arbeitsbereich kann es weiter einschränken."
+          }
+        }
+      }
+    },
+    "notification_content_limit %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your workspace limits this to: %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dein Arbeitsbereich begrenzt das auf: %@"
+          }
+        }
+      }
+    },
+    "approve_scan": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scan code"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code scannen"
+          }
+        }
+      }
+    },
+    "scan_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scan the code"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code scannen"
+          }
+        }
+      }
+    },
+    "scan_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Point the camera at the code on the new device."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Richte die Kamera auf den Code auf dem neuen Gerät."
+          }
+        }
+      }
+    },
+    "scan_denied": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft has no access to the camera. Allow it in Settings, or type the code instead."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft hat keinen Zugriff auf die Kamera. Erlaube ihn in den Einstellungen oder gib den Code stattdessen ein."
+          }
+        }
+      }
+    },
+    "scan_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device can't scan codes with the camera. Type the code instead."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Gerät kann Codes nicht mit der Kamera scannen. Gib den Code stattdessen ein."
+          }
+        }
+      }
+    },
+    "scan_open_settings": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Settings"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Einstellungen öffnen"
+          }
+        }
+      }
+    },
+    "scan_type_instead": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Type the code instead"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code stattdessen eingeben"
+          }
+        }
+      }
+    },
+    "link_type_code_generic": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Type the code that the new device shows."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gib den Code ein, den das neue Gerät anzeigt."
+          }
+        }
+      }
+    },
+    "link_typed_code": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code"
+          }
+        }
+      }
+    },
+    "link_approve": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Approve"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Genehmigen"
+          }
+        }
+      }
+    },
+    "link_wrong_code": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That is not the code on the new device. Check it and try again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das ist nicht der Code auf dem neuen Gerät. Prüfe ihn und versuche es erneut."
+          }
+        }
+      }
+    },
+    "link_attempt_ended": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Too many wrong codes. Start again on the new device."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zu viele falsche Codes. Beginne auf dem neuen Gerät von vorn."
+          }
+        }
+      }
+    },
+    "link_prompt_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A new device wants to join"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ein neues Gerät möchte beitreten"
+          }
+        }
+      }
+    },
+    "link_prompt_warning": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only continue if you are setting up this device right now. Otherwise deny."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fahre nur fort, wenn du dieses Gerät gerade selbst einrichtest. Sonst lehne ab."
+          }
+        }
+      }
+    },
+    "link_deny": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deny"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ablehnen"
+          }
+        }
+      }
+    },
+    "link_review": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Review"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Prüfen"
+          }
+        }
+      }
+    },
+    "link_platform_android": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android"
+          }
+        }
+      }
+    },
+    "link_platform_ios": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iPhone or iPad"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iPhone oder iPad"
+          }
+        }
+      }
+    },
+    "link_platform_macos": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mac"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mac"
+          }
+        }
+      }
+    },
+    "link_platform_windows": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Windows"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Windows"
+          }
+        }
+      }
+    },
+    "link_platform_linux": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linux"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linux"
+          }
+        }
+      }
+    },
+    "link_platform_web": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Web browser"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Webbrowser"
+          }
+        }
+      }
+    },
+    "link_platform_other": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Other device"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anderes Gerät"
+          }
+        }
+      }
+    },
+    "link_prompt_says %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Says it is %1$@ (%2$@)"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gibt sich als %1$@ (%2$@) aus"
+          }
+        }
+      }
+    },
+    "link_prompt_unverified": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not verified: the new device chose this name."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nicht überprüft: Das neue Gerät hat sich diesen Namen selbst gegeben."
+          }
+        }
+      }
+    },
+    "link_ask": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ask my other devices"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Meine anderen Geräte fragen"
+          }
+        }
+      }
+    },
+    "link_ask_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Instead of scanning, your other devices show a prompt. The server then sees the key in this code; you still type the code shown here on the other device, so nothing is approved without you."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Statt zu scannen zeigen deine anderen Geräte eine Anfrage. Der Server sieht dann den Schlüssel in diesem Code; du gibst den hier angezeigten Code trotzdem auf dem anderen Gerät ein, ohne dich wird also nichts bestätigt."
+          }
+        }
+      }
+    },
+    "link_asked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your other devices show a prompt now."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine anderen Geräte zeigen jetzt eine Anfrage."
+          }
+        }
+      }
+    },
+    "link_ask_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The other devices could not be asked."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die anderen Geräte konnten nicht gefragt werden."
+          }
+        }
+      }
+    },
+    "call_person_muted %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@, muted"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@, stummgeschaltet"
           }
         }
       }

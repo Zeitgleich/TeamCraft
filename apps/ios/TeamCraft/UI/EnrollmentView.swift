@@ -139,6 +139,11 @@ struct LinkThisDeviceView: View {
   @Environment(AppModel.self) private var model
   let progress: LinkProgress
 
+  /// Not kept across screens: asking hands the code's key to the server and is a fresh choice.
+  @State private var askState = AskState.idle
+
+  private enum AskState { case idle, asking, asked, failed }
+
   var body: some View {
     ScrollView {
       VStack(spacing: Theme.spacing) {
@@ -161,6 +166,20 @@ struct LinkThisDeviceView: View {
             .padding()
             .background(Theme.surface)
             .clipShape(RoundedRectangle(cornerRadius: Theme.radius))
+          if askState == .asked {
+            Text("link_asked").foregroundStyle(Theme.textMuted)
+          } else {
+            Text("link_ask_hint").font(.footnote).foregroundStyle(Theme.textMuted)
+            Button("link_ask") {
+              askState = .asking
+              Task { askState = await model.askOtherDevices() ? .asked : .failed }
+            }
+            .buttonStyle(.bordered)
+            .disabled(askState == .asking)
+            if askState == .failed {
+              Text("link_ask_failed").font(.footnote).foregroundStyle(Theme.danger)
+            }
+          }
           ProgressView("link_waiting")
         }
         Button("cancel") { model.cancelLinking() }.padding(.top, 16)

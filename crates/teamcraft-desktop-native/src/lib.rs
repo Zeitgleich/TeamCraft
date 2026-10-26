@@ -6,7 +6,11 @@
 //! |-----------------------------------------|----------|------------|
 //! | [`watch_resume`]: the computer woke up  | macOS    | `resume`   |
 //! | [`watch_resume`]: the computer woke up  | Windows  | `resume`   |
+//! | [`install_notification_delegate`]       | macOS    | `notification_delegate` |
 
+mod notification_delegate;
 mod resume;
+
+pub use notification_delegate::{NotificationResponse, ResponseAction, install_notification_delegate};
 
 pub use resume::{ResumeWatchError, watch_resume};

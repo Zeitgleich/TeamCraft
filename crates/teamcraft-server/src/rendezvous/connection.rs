@@ -1,7 +1,10 @@
 use std::time::Duration;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
-use teamcraft_proto::{ErrorBody, ErrorCode, RendezvousClientMessage, RendezvousServerMessage};
+use teamcraft_proto::{
+  DeviceLinkClosedReason, ErrorBody, ErrorCode, GatewayEvent, RendezvousClientMessage,
+  RendezvousServerMessage, UserId,
+};
 use tokio::time::{Instant, sleep_until, timeout};
 use tracing::debug;
 
@@ -69,11 +72,18 @@ pub async fn run(state: AppState, mut socket: WebSocket, ip: String) {
   .await
   .is_err()
   {
-    state.rendezvous.leave(&rendezvous_id, slot);
+    end_relay(&state, &rendezvous_id, slot, DeviceLinkClosedReason::Withdrawn);
     return;
+  }
+  // The second device is the one that takes the request up: the others drop their prompts.
+  if slot == 1
+    && let Some(owner) = state.rendezvous.close_request(&rendezvous_id)
+  {
+    publish_closed(&state, owner, &rendezvous_id, DeviceLinkClosedReason::Claimed);
   }
 
   let expires = Instant::now() + Duration::from_secs(config.ttl_secs);
+  let mut reason = DeviceLinkClosedReason::Withdrawn;
   loop {
     tokio::select! {
       incoming = socket.recv() => match incoming {
@@ -104,6 +114,11 @@ pub async fn run(state: AppState, mut socket: WebSocket, ip: String) {
             break;
           }
         }
+        Some(Signal::Rejected) => {
+          let _ = send(&mut socket, &RendezvousServerMessage::Rejected).await;
+          close(&mut socket, CLOSE_NORMAL, "rejected").await;
+          break;
+        }
         Some(Signal::PeerLeft) => {
           let _ = send(&mut socket, &RendezvousServerMessage::PeerLeft).await;
           close(&mut socket, CLOSE_NORMAL, "peer left").await;
@@ -117,13 +132,32 @@ pub async fn run(state: AppState, mut socket: WebSocket, ip: String) {
         break;
       }
       () = sleep_until(expires) => {
+        reason = DeviceLinkClosedReason::Expired;
         let _ = send(&mut socket, &RendezvousServerMessage::Expired).await;
         close(&mut socket, CLOSE_NORMAL, "expired").await;
         break;
       }
     }
   }
-  state.rendezvous.leave(&rendezvous_id, slot);
+  end_relay(&state, &rendezvous_id, slot, reason);
+}
+
+/// Ends the relay; a link request still open for it goes with it, and the user's devices drop it.
+fn end_relay(state: &AppState, rendezvous_id: &str, slot: usize, reason: DeviceLinkClosedReason) {
+  if let Some(owner) = state.rendezvous.leave(rendezvous_id, slot) {
+    publish_closed(state, owner, rendezvous_id, reason);
+  }
+}
+
+/// Tells the user's connected devices that the request is gone.
+pub fn publish_closed(state: &AppState, user: UserId, request_id: &str, reason: DeviceLinkClosedReason) {
+  state.hub.publish(
+    [user],
+    &GatewayEvent::DeviceLinkClosed {
+      request_id: request_id.to_owned(),
+      reason,
+    },
+  );
 }
 
 async fn authenticate(state: &AppState, token: &str) -> Result<teamcraft_proto::UserId, ErrorBody> {

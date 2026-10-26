@@ -14,6 +14,7 @@ import de.zeitgleich.teamcraft.auth.AuthRepository
 import de.zeitgleich.teamcraft.calls.CallController
 import de.zeitgleich.teamcraft.core.CoreRepository
 import de.zeitgleich.teamcraft.core.NetworkTrust
+import de.zeitgleich.teamcraft.notifications.AvatarCache
 import de.zeitgleich.teamcraft.notifications.MentionPrefs
 import de.zeitgleich.teamcraft.notifications.MessageNotifier
 import de.zeitgleich.teamcraft.notifications.NotificationContentPrefs
@@ -37,7 +38,7 @@ class AppGraph(context: Context) {
   // Decrypted pictures leave memory with the account they belong to.
   val core = CoreRepository(context, auth, onAccountClosed = Pictures::clear)
   val notificationContent = NotificationContentPrefs(context)
-  val notifier = MessageNotifier(context, notificationContent)
+  val notifier = MessageNotifier(context, notificationContent, AvatarCache(context) { core.core() })
   val mentionPrefs = MentionPrefs(context)
   val calls = CallController(context, core, scope)
   val pushStats = PushStats(context)

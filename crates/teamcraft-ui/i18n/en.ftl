@@ -200,6 +200,18 @@ thread-follow = Follow
 thread-following = Following
 thread-messages-label = Thread messages
 thread-replies-divider = Replies
+thread-last-reply = last reply { $time }
+files-count = { $count ->
+    [one] { $count } file
+   *[other] { $count } files
+  }
+files-download-all = Download all
+date-jump-label = Jump to a day
+date-jump-open = { $date }, jump to a day
+date-jump-today = Today
+date-jump-yesterday = Yesterday
+date-jump-last-week = A week ago
+date-jump-pick = Pick a day
 threads-title = Threads
 threads-filter = Filter threads
 threads-all = All your threads
@@ -1202,8 +1214,8 @@ control-deafen = Mute the call audio
 control-undeafen = Unmute the call audio
 enroll-link = Link with another device
 link-new-title = Link this device
-link-new-steps = On a device you are already signed in on, open Settings, then Devices and security, choose Link a new device and enter this code.
-link-new-compare = Check that the other device shows the same code, then approve it there.
+link-new-steps = On a device you are already signed in on, open Settings, then Devices and security, choose Link a new device and enter or scan this code.
+link-new-compare = On the other device, type this code to approve. Do not approve if you did not start this.
 link-new-failed = Linking did not work.
 link-new-back = Back
 approve-link-title = Link a new device
@@ -2622,3 +2634,23 @@ saved-count = { $count ->
   }
 meetings-live = Now
 meetings-empty-title = No meetings coming up
+
+link-request-region = Requests to link a new device
+link-request-title = New device wants to join your account
+link-request-device = Says it is { $device } ({ $platform }). Not verified.
+link-request-warning = Only continue if you are setting up this device right now. Otherwise deny it.
+link-request-review = Review
+link-request-deny = Deny
+link-request-joining = Connecting to the new device…
+link-request-type-code = Type the code that the new device shows. If it shows none, deny the request.
+link-platform-android = Android
+link-platform-ios = iPhone or iPad
+link-platform-macos = Mac
+link-platform-windows = Windows
+link-platform-linux = Linux
+link-platform-web = Web browser
+link-platform-other = Unknown system
+link-new-ask = Ask my other devices
+link-new-ask-hint = Instead of scanning, your other devices show a prompt. The server then sees the key in this code; you still type the code shown here on the other device, so nothing is approved without you.
+link-new-asked = Your other devices show a prompt now.
+link-new-ask-failed = The other devices could not be asked.

@@ -114,6 +114,13 @@ impl ApiError {
     }
   }
 
+  pub fn device_link_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::DeviceLinkNotFound,
+      what: "link request",
+    }
+  }
+
   pub fn category_not_found() -> Self {
     Self::NotFound {
       code: ErrorCode::CategoryNotFound,

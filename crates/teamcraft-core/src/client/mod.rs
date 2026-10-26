@@ -62,7 +62,9 @@ pub use group_health::{
   RemovalStatus, group_leftovers, is_queue_refused, pending_removals, unconfirmed_removals,
 };
 pub use groups::{DmSetupStatus, dm_setup_status};
-pub use linking::{LinkApproval, LinkOffer, LinkedSecrets, NewDeviceLink};
+pub use linking::{
+  LinkAnnouncement, LinkApproval, LinkOffer, LinkRequestInfo, LinkRequestList, LinkedSecrets, NewDeviceLink,
+};
 pub use member_device::{GroupAccess, is_waiting_for_device};
 pub use messaging::FlushReport;
 pub(crate) use messaging::{REMOVED_SENDER_GRACE_MS, decrypt_content};
@@ -220,6 +222,9 @@ pub struct Client<A, S> {
   /// upload finished).
   is_picked_sweep_due: bool,
   maybe_call_sink: Option<CallEventSink>,
+  /// New devices of the user that ask to be linked ([`Client::link_requests`]); in memory only,
+  /// the server lists the open ones again on every gateway connection.
+  link_requests: linking::LinkRequestList,
   /// The call this device last prepared to join per conversation: a call move is followed only
   /// when announced for that very call (docs/meetings.md, "A call becomes a meeting").
   call_ids: HashMap<ConversationId, teamcraft_proto::CallId>,
@@ -334,6 +339,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       held_upload_progress: None,
       is_picked_sweep_due: true,
       maybe_call_sink: None,
+      link_requests: Default::default(),
       call_ids: HashMap::new(),
       maybe_preview_fetcher,
       maybe_jwks_source,

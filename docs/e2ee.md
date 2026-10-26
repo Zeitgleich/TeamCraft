@@ -1041,6 +1041,28 @@ Implemented as (`teamcraft-crypto::rendezvous`, `teamcraft-core` linking):
 - Not a port of libthreema's `d2d_rendezvous`: its path nomination isn't needed with one relay, and
   the construction above uses only primitives already in the crate. It still needs the security
   review security.md asks for.
+- **Prompt on every device (the user's choice).** A scanned or typed code never involves the
+  server beyond the relay: `AK` stays between the two devices. The new device offers a second way
+  next to the QR code, a button "Ask my other devices". Only when the user taps it, the new device
+  announces itself (`POST /device-links`, after it joined the relay) with name, platform and `AK`,
+  which the server passes to the user's other devices as it would in the approve-prompt variant
+  above. **This is the one step that gives the server `AK`**, and the screen says so. The gateway
+  sends the request to every connected device of the user (unnumbered, never in the replay buffer,
+  because it holds `AK`); a device that connects reads the open ones (`GET /device-links`). Every
+  signed-in device (desktop, web, phones) shows a corner prompt. Name and platform are the new
+  device's own claim and the prompt says so ("says it is …, not verified"). **The prompt never
+  approves and never shows the verification code**: the user takes the request up (*Review*), which
+  joins the relay as the responder, and types the code the *new* device shows; the core checks it
+  (three wrong codes end the attempt), as for a scanned code. A failed join leaves the request
+  listed, so the user can try again. The first device that joins the relay owns the request: the
+  server closes it (`device_link_closed`, reason `claimed`) and the other prompts go, so approving on
+  one device completes it everywhere. *Deny* closes the request and tells the waiting device
+  (`rejected`), which stops. The request ends with the relay (the new device gave up or its
+  lifetime, `rendezvous.ttl_secs`, ran out); prompts count the time left from when they arrived, so
+  a wrong local clock changes nothing the server enforces. A server that invents a request or
+  changes `AK` cannot complete a link: the handshake with the real new device would not produce the
+  code the user types. Not yet: a notification on a backgrounded phone (needs a push for the
+  request).
 - The transfer carries the backup key and the encrypted key bag (and the protocol version). The new
   device checks that the bag opens with the backup key and answers with a sealed **receipt**
   (`received` or `rejected`); the existing device reports success only on `received`. A lost
@@ -1338,6 +1360,31 @@ exactly what Apple and Google handle: a device token and ciphertext. Threat mode
   store app uses the gateway it was built for, so a server can't swap in a key of its own.
 - The server authenticates to the gateway with an Ed25519 key pair of its own (not related to any
   user, device or MLS key); that key authenticates the *server* only and protects no content.
+
+### 7.2 iOS: catching a conversation up for a notification (design, not implemented)
+
+The Android app catches a conversation up itself when a push names a sender the store does not know
+(`Client::catch_up_for_push`, §7 above). The iOS notification extension must not do that on its own:
+catching up advances MLS state (a welcome spends its key package; a commit moves the epoch), and an
+extension that is killed by the system at an arbitrary point, next to an app that may start at any time,
+could leave the shared store half-advanced or fork it from the app's copy. So today the extension stops
+after fetching and decrypting the one message and shows "New message from <name>" when that fails.
+Two options, in order of preference:
+
+1. **The app catches up, the notification is updated.** The extension keeps the sealed wake-up in the
+   delivered notification's `userInfo`. When the app next runs (foreground, background refresh, or the
+   next push) it takes the cross-process lock, runs the normal sync, finds the pending wake-ups of
+   its delivered notifications, reopens them with the core and replaces the notification content with
+   the text. No new rights for the extension; the cost is that the text appears when the app runs.
+2. **The extension catches up under the lock.** The extension takes the cross-process lock for the whole
+   catch-up and the store records an "advance in progress" marker that a started app finishes or rolls
+   back before it syncs. Needs a crash-safe store protocol (each step idempotent, the welcome's key
+   package spent only after the join is stored), a time budget below the extension's 30 s with
+   `serviceExtensionTimeWillExpire` handled, and a memory check against the extension's limit. This
+   handles decryption keys in the extension, so it needs a security review before it ships.
+
+Both keep the push content-free and the keys in the shared Keychain access group; neither changes what
+the server sees.
 
 ## 8. Calls
 

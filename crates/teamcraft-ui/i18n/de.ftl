@@ -199,6 +199,18 @@ thread-title = Thread
 thread-follow = Folgen
 thread-following = Folge ich
 thread-messages-label = Nachrichten im Thread
+thread-last-reply = letzte Antwort { $time }
+files-count = { $count ->
+    [one] { $count } Datei
+   *[other] { $count } Dateien
+  }
+files-download-all = Alle herunterladen
+date-jump-label = Zu einem Tag springen
+date-jump-open = { $date }, zu einem Tag springen
+date-jump-today = Heute
+date-jump-yesterday = Gestern
+date-jump-last-week = Vor einer Woche
+date-jump-pick = Tag wählen
 thread-replies-divider = Antworten
 threads-title = Threads
 threads-filter = Threads filtern
@@ -1202,8 +1214,8 @@ control-deafen = Anrufton stummschalten
 control-undeafen = Anrufton einschalten
 enroll-link = Mit anderem Gerät verknüpfen
 link-new-title = Dieses Gerät verknüpfen
-link-new-steps = Öffne auf einem Gerät, auf dem du schon angemeldet bist, Einstellungen, dann Geräte und Sicherheit, wähle Neues Gerät verknüpfen und gib diesen Code ein.
-link-new-compare = Prüfe, dass das andere Gerät denselben Code zeigt, und bestätige es dort.
+link-new-steps = Öffne auf einem Gerät, auf dem du schon angemeldet bist, Einstellungen, dann Geräte und Sicherheit, wähle Neues Gerät verknüpfen und gib diesen Code ein oder scanne ihn.
+link-new-compare = Gib auf dem anderen Gerät diesen Code ein, um zu bestätigen. Bestätige nicht, wenn du das nicht selbst gestartet hast.
 link-new-failed = Das Verknüpfen hat nicht geklappt.
 link-new-back = Zurück
 approve-link-title = Neues Gerät verknüpfen
@@ -2622,3 +2634,23 @@ saved-count = { $count ->
   }
 meetings-live = Läuft
 meetings-empty-title = Keine Meetings geplant
+
+link-request-region = Anfragen, ein neues Gerät zu verknüpfen
+link-request-title = Ein neues Gerät möchte sich mit deinem Konto verbinden
+link-request-device = Gibt sich als { $device } ({ $platform }) aus. Nicht überprüft.
+link-request-warning = Fahre nur fort, wenn du dieses Gerät gerade selbst einrichtest. Lehne die Anfrage sonst ab.
+link-request-review = Ansehen
+link-request-deny = Ablehnen
+link-request-joining = Verbindung zum neuen Gerät wird aufgebaut …
+link-request-type-code = Gib den Code ein, den das neue Gerät anzeigt. Wird keiner angezeigt, lehne die Anfrage ab.
+link-platform-android = Android
+link-platform-ios = iPhone oder iPad
+link-platform-macos = Mac
+link-platform-windows = Windows
+link-platform-linux = Linux
+link-platform-web = Webbrowser
+link-platform-other = Unbekanntes System
+link-new-ask = Meine anderen Geräte fragen
+link-new-ask-hint = Statt zu scannen zeigen deine anderen Geräte eine Anfrage. Der Server sieht dann den Schlüssel in diesem Code; du gibst den hier angezeigten Code trotzdem auf dem anderen Gerät ein, ohne dich wird also nichts bestätigt.
+link-new-asked = Deine anderen Geräte zeigen jetzt eine Anfrage.
+link-new-ask-failed = Die anderen Geräte konnten nicht gefragt werden.

@@ -6,8 +6,9 @@ use teamcraft_client_api::log::{LogEntry, log_entries};
 use teamcraft_proto::HistoryPolicy;
 use wasm_bindgen::JsCast;
 
-use crate::clock::{format_time, format_time_seconds, local_day, now_ms};
+use crate::clock::{format_relative_short, format_time, format_time_seconds, local_day, now_ms};
 use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::date_jump::DatePill;
 use crate::components::file_views::{LinkPreviewCard, MessageFiles};
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_actions::{MessageAction, run_message_action};
@@ -20,7 +21,7 @@ use crate::feed_motion::{Entrance, RowMotion};
 use crate::i18n::use_i18n;
 use crate::markdown;
 use crate::message_links::{as_permalink, own_hosts};
-use crate::model::{LogLevel, Message, MessageKind, SystemEvent, User, is_pending, thread_id_of};
+use crate::model::{LogLevel, Message, MessageKind, SystemEvent, User, UserId, is_pending, thread_id_of};
 use crate::reactive::{SetIfAlive, use_interval};
 use crate::state::{Overlay, use_app_state};
 use crate::viewport::is_touch_primary;
@@ -33,6 +34,8 @@ const HOVER_CARD_DELAY: Duration = Duration::from_millis(450);
 const HOVER_CARD_HEIGHT_PX: f64 = 130.0;
 /// How long the card stays after the pointer left, so it can move into the card.
 const HOVER_CARD_GRACE: Duration = Duration::from_millis(250);
+/// Avatars shown in the thread summary under a message.
+const MAX_THREAD_AVATARS: usize = 3;
 /// How often a message in the outbox re-checks whether it counts as delayed.
 const DELIVERY_TICK_MS: u64 = 2_000;
 /// A finger that moves further than this is scrolling, not pressing the message.
@@ -60,7 +63,7 @@ pub fn MessageRow(
   let divider_view = divider.map(|label| {
     view! {
       <div class="date-divider" role="separator">
-        <span>{label}</span>
+        <DatePill label=label />
       </div>
     }
   });
@@ -482,11 +485,36 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
     view! { <div class="reactions">{chips}</div> }
   });
 
+  // Thread summary under the root: who replied, how many replies, when the last one came (#300).
   let replies = (!in_thread && reply_count > 0).then(|| {
+    let summary = Memo::new(move |_| {
+      state.read(|backend| {
+        let replies: Vec<Message> = backend
+          .thread(conversation, thread_root)
+          .into_iter()
+          .filter(|reply| reply.maybe_thread.is_some())
+          .collect();
+        let maybe_last = replies.iter().map(|reply| reply.sent_at).max();
+        let mut participants: Vec<UserId> = Vec::new();
+        for reply in replies.iter().rev() {
+          if !participants.contains(&reply.author) {
+            participants.push(reply.author);
+          }
+        }
+        participants.truncate(MAX_THREAD_AVATARS);
+        let users: Vec<User> = participants.into_iter().filter_map(|id| backend.user(id)).collect();
+        (users, maybe_last)
+      })
+    });
     view! {
       <button class="reply-count" on:click=move |_| state.open_thread(conversation, thread_root)>
-        <Icon name=IconName::Threads />
+        <span class="reply-avatars">
+          {move || summary.get().0.into_iter().map(|user| view! { <Avatar user=user size=AvatarSize::Small /> }).collect_view()}
+        </span>
         <span>{move || i18n.t_count("thread-replies", reply_count as usize)}</span>
+        {move || summary.get().1.map(|last| view! {
+          <span class="reply-last">{i18n.t_with("thread-last-reply", &[("time", &format_relative_short(last, now_ms(), locale))])}</span>
+        })}
       </button>
     }
   });

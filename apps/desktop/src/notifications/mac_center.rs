@@ -3,24 +3,45 @@
 //!
 //! Only a bundled, signed app may use the notification center (an unbundled development binary
 //! crashes asking for it), so [`is_available`] checks for a bundle first and the caller falls back
-//! to the notification plugin. Buttons and a reply field need a notification center delegate, an
-//! Objective-C class this crate cannot define without `unsafe`; until then a click brings the app to
-//! the front, where the conversation or the ringing call's card is.
+//! to the notification plugin. Buttons and the reply field come from a category registered for the
+//! notification (labels are translated, so categories are built as notifications arrive); clicks,
+//! buttons and replies come back through the delegate of `teamcraft-desktop-native`, which is also
+//! why banners show while the app is in front.
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use block2::RcBlock;
+use objc2::rc::Retained;
 use objc2::runtime::Bool;
-use objc2_foundation::{NSArray, NSBundle, NSError, NSString};
+use objc2_foundation::{NSArray, NSBundle, NSError, NSSet, NSString};
 use objc2_user_notifications::{
-  UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest, UNNotificationSound,
-  UNUserNotificationCenter,
+  UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationAction, UNNotificationActionOptions,
+  UNNotificationCategory, UNNotificationCategoryOptions, UNNotificationRequest, UNNotificationSound,
+  UNTextInputNotificationAction, UNUserNotificationCenter,
 };
-use teamcraft_client_api::os_notify::{OsNotification, TagTarget};
+use teamcraft_client_api::os_notify::{NotificationAction, OsNotification, TagTarget};
+
+/// Categories kept registered: one per combination of buttons and labels, which changes with the
+/// language only.
+const MAX_CATEGORIES: usize = 32;
 
 /// The unread count last asked for, so a badge set before the user answered the permission prompt is
 /// applied once they allow it.
 static WANTED_BADGE: AtomicU32 = AtomicU32::new(0);
+
+/// The buttons and reply field of a notification, which macOS wants registered as a category
+/// before a notification of that category is shown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CategorySpec {
+  id: String,
+  /// The reply field first: its action's title and placeholder.
+  maybe_reply: Option<(String, String)>,
+  buttons: Vec<(NotificationAction, String)>,
+}
+
+/// Every category registered so far; `setNotificationCategories` replaces the whole set.
+static CATEGORIES: Mutex<Vec<CategorySpec>> = Mutex::new(Vec::new());
 
 /// Whether the app runs from a bundle, which the notification center requires.
 pub fn is_available() -> bool {
@@ -79,6 +100,10 @@ pub fn show(notification: &OsNotification) {
   if !notification.kind.is_ringing() {
     content.setSound(Some(&UNNotificationSound::defaultSound()));
   }
+  if let Some(spec) = category_spec(notification) {
+    register_category(&spec);
+    content.setCategoryIdentifier(&NSString::from_str(&spec.id));
+  }
   let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
     &NSString::from_str(notification.tag.as_str()),
     &content,
@@ -94,4 +119,92 @@ pub fn withdraw(tags: &[String]) {
   let identifiers = NSArray::from_retained_slice(&identifiers);
   UNUserNotificationCenter::currentNotificationCenter()
     .removeDeliveredNotificationsWithIdentifiers(&identifiers);
+}
+
+fn category_spec(notification: &OsNotification) -> Option<CategorySpec> {
+  if notification.actions.is_empty() && notification.maybe_reply.is_none() {
+    return None;
+  }
+  let maybe_reply = notification
+    .maybe_reply
+    .as_ref()
+    .map(|reply| (reply.send_label.clone(), reply.placeholder.clone()));
+  let buttons: Vec<_> = notification
+    .actions
+    .iter()
+    .map(|button| (button.action, button.label.clone()))
+    .collect();
+  let id = category_id(maybe_reply.as_ref(), &buttons);
+  Some(CategorySpec {
+    id,
+    maybe_reply,
+    buttons,
+  })
+}
+
+/// The same buttons with the same labels always give the same identifier.
+fn category_id(maybe_reply: Option<&(String, String)>, buttons: &[(NotificationAction, String)]) -> String {
+  let mut id = String::from("teamcraft");
+  if let Some((title, placeholder)) = maybe_reply {
+    id.push_str(&format!("|reply={title}={placeholder}"));
+  }
+  for (action, label) in buttons {
+    id.push_str(&format!("|{}={label}", action.key()));
+  }
+  id
+}
+
+/// Makes the category known to the notification center, with all the earlier ones.
+fn register_category(spec: &CategorySpec) {
+  let specs = {
+    let mut specs = CATEGORIES
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if specs.contains(spec) {
+      return;
+    }
+    if specs.len() >= MAX_CATEGORIES {
+      specs.remove(0);
+    }
+    specs.push(spec.clone());
+    specs.clone()
+  };
+  let categories: Vec<Retained<UNNotificationCategory>> = specs.iter().map(category).collect();
+  UNUserNotificationCenter::currentNotificationCenter()
+    .setNotificationCategories(&NSSet::from_retained_slice(&categories));
+}
+
+fn category(spec: &CategorySpec) -> Retained<UNNotificationCategory> {
+  let mut actions: Vec<Retained<UNNotificationAction>> = Vec::new();
+  if let Some((title, placeholder)) = &spec.maybe_reply {
+    actions.push(
+      UNTextInputNotificationAction::actionWithIdentifier_title_options_textInputButtonTitle_textInputPlaceholder(
+        &NSString::from_str(NotificationAction::Reply.key()),
+        &NSString::from_str(title),
+        UNNotificationActionOptions::empty(),
+        &NSString::from_str(title),
+        &NSString::from_str(placeholder),
+      )
+      .into_super(),
+    );
+  }
+  for (action, label) in &spec.buttons {
+    // Answering or joining brings the window up; marking read and declining stay in the background.
+    let options = if action.brings_window_up() {
+      UNNotificationActionOptions::Foreground
+    } else {
+      UNNotificationActionOptions::empty()
+    };
+    actions.push(UNNotificationAction::actionWithIdentifier_title_options(
+      &NSString::from_str(action.key()),
+      &NSString::from_str(label),
+      options,
+    ));
+  }
+  UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
+    &NSString::from_str(&spec.id),
+    &NSArray::from_retained_slice(&actions),
+    &NSArray::new(),
+    UNNotificationCategoryOptions::empty(),
+  )
 }

@@ -5,7 +5,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use teamcraft_ffi::{AppConfig, EventListener, TeamCraft, TeamCraftError, TokenProvider, login_brand};
+use teamcraft_ffi::{
+  AppConfig, EventListener, LinkPlatform, TeamCraft, TeamCraftError, TokenProvider, login_brand,
+};
 
 /// A brand answer as the server sends it, with one asset path and one link that must be dropped.
 const BRAND_JSON: &str = r##"{
@@ -39,7 +41,10 @@ async fn a_fresh_device_needs_enrollment_and_reports_the_network() {
     teamcraft.wait_for_link_peer().await,
     Err(TeamCraftError::NoLinkInProgress)
   ));
-  let code = teamcraft.start_device_link().await.unwrap();
+  let code = teamcraft
+    .start_device_link("Test phone".into(), LinkPlatform::Android)
+    .await
+    .unwrap();
   assert!(code.starts_with("tclink2:"));
   std::fs::remove_dir_all(&directory).unwrap();
 }

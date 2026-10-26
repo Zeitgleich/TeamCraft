@@ -131,7 +131,7 @@ fn main() -> anyhow::Result<()> {
         tracing::warn!(%error, "no tray icon");
       }
       create_main_window(app)?;
-      notifications::prepare();
+      notifications::prepare(app.handle());
       #[cfg(target_os = "linux")]
       notifications::watch_notifications(app.handle());
       #[cfg(target_os = "linux")]
@@ -193,6 +193,10 @@ fn main() -> anyhow::Result<()> {
       core::commands::core_approval_start,
       core::commands::core_approval_confirm,
       core::commands::core_approval_cancel,
+      core::commands::core_link_announce,
+      core::commands::core_link_requests,
+      core::commands::core_link_request_review,
+      core::commands::core_link_request_reject,
       core::commands::core_messages,
       core::commands::core_thread,
       core::commands::core_action,
