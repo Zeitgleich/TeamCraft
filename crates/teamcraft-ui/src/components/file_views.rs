@@ -28,6 +28,7 @@ use crate::components::lightbox::prefers_reduced_motion;
 use crate::components::message_actions::copy_to_clipboard;
 use crate::components::sheet::PopoverBackdrop;
 use crate::components::sliding_indicator::SlidingIndicator;
+use crate::components::video_player::VideoPlayer;
 use crate::i18n::{I18n, use_i18n};
 use crate::lightbox::{MediaKey, MediaKind};
 use crate::media_cache::{self, Rendition};
@@ -467,6 +468,7 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
   };
   let tile = move || {
     let (name, label, badge) = (name.clone(), label.clone(), badge.clone());
+    let player_label = label.clone();
     let maybe_duration = maybe_duration.clone();
     let src = src.clone();
     view! {
@@ -537,7 +539,7 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
             <span class="upload-label" role="status">{transfer_label(i18n, done, total)}</span>
           </span>
         })}
-        {move || playback.is_playing.get().then(|| view! { <InlineVideo playback=playback on_expand=Callback::new(move |()| open_lightbox()) /> })}
+        {move || playback.is_playing.get().then(|| view! { <InlineVideo playback=playback label=player_label.clone() on_expand=Callback::new(move |()| open_lightbox()) /> })}
         {match playback.is_inline {
           true => view! { <MediaToolbar file=file.get_value() on_expand=Callback::new(move |()| open_lightbox()) /> }.into_any(),
           false => view! { <MediaToolbar file=file.get_value() /> }.into_any(),
@@ -635,11 +637,11 @@ impl InlinePlayback {
 
 /// The player over a video tile; "expand" opens the lightbox.
 #[component]
-fn InlineVideo(playback: InlinePlayback, on_expand: Callback<()>) -> impl IntoView {
+fn InlineVideo(playback: InlinePlayback, label: String, on_expand: Callback<()>) -> impl IntoView {
   let i18n = use_i18n();
   let video = NodeRef::<html::Video>::new();
   pause_when_hidden(video);
-  let on_error = move |_| {
+  let on_error = move |()| {
     // The browser can't play it (a codec it lacks): the lightbox explains.
     on_expand.run(());
   };
@@ -647,15 +649,14 @@ fn InlineVideo(playback: InlinePlayback, on_expand: Callback<()>) -> impl IntoVi
     <div class="media-video">
       {move || match playback.url.get() {
         Some(url) => view! {
-          <video
-            node_ref=video
+          <VideoPlayer
             src=url.as_str().to_owned()
-            prop:controls=true
-            prop:autoplay=true
-            playsinline=""
-            preload="auto"
-            on:error=on_error
-          ></video>
+            video=video
+            label=label.clone()
+            class="media-video-player"
+            is_autoplay=true
+            on_error=Callback::new(on_error)
+          />
         }
         .into_any(),
         None => view! { <span class="spinner" role="status" aria-label=move || i18n.t("loader-loading")></span> }.into_any(),

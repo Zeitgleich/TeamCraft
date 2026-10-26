@@ -119,5 +119,6 @@ pub mod thread_panel;
 pub mod threads_inbox;
 pub mod top_bar;
 pub mod update_notice;
+pub mod video_player;
 pub mod window_controls;
 pub mod workspace_dialogs;
