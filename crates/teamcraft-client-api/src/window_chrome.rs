@@ -27,6 +27,26 @@ pub enum TitleBar {
   System,
 }
 
+/// How the tray icon looks on Linux and Windows (#726): the coloured mark, or a white or black
+/// silhouette that matches a panel the colour doesn't suit. macOS always shows a template icon in
+/// the menu bar's own colour.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrayIconStyle {
+  #[default]
+  Colour,
+  White,
+  Black,
+  /// A style of a newer app; shown as the colour mark.
+  #[serde(other)]
+  Unknown,
+}
+
+impl TrayIconStyle {
+  /// The styles offered in the settings, in their order.
+  pub const CHOICES: [Self; 3] = [Self::Colour, Self::White, Self::Black];
+}
+
 /// What the UI needs to draw the title bar. `None` in the browser.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowChrome {
@@ -228,6 +248,22 @@ fn buttons(side: &str) -> Vec<WindowButton> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn tray_icon_styles_keep_their_wire_names() {
+    for (style, name) in [
+      (TrayIconStyle::Colour, "\"colour\""),
+      (TrayIconStyle::White, "\"white\""),
+      (TrayIconStyle::Black, "\"black\""),
+    ] {
+      assert_eq!(serde_json::to_string(&style).ok().as_deref(), Some(name));
+      assert_eq!(serde_json::from_str::<TrayIconStyle>(name).ok(), Some(style));
+    }
+    assert_eq!(
+      serde_json::from_str::<TrayIconStyle>("\"rainbow\"").ok(),
+      Some(TrayIconStyle::Unknown)
+    );
+  }
 
   mod decoration_layout {
     use super::*;

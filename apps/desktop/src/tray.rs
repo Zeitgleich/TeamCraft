@@ -23,6 +23,7 @@ use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, State, Wry};
+use teamcraft_client_api::window_chrome::TrayIconStyle;
 
 pub const MAIN_WINDOW: &str = "main";
 const TRAY_ID: &str = "main";
@@ -135,7 +136,7 @@ pub fn install(app: &tauri::App) -> tauri::Result<()> {
         show_main_window(tray.app_handle());
       }
     });
-  builder = builder.icon(tray_icon(false));
+  builder = builder.icon(tray_icon(current_style(app.handle()), false));
   // macOS draws the menu bar icon as a template in the bar's own colour.
   #[cfg(target_os = "macos")]
   {
@@ -327,16 +328,43 @@ pub fn tray_update(app: AppHandle, last_unread: State<'_, LastUnread>, update: T
     if had_unread != (unread > 0)
       && let Some(tray) = app.tray_by_id(TRAY_ID)
     {
-      if let Err(error) = tray.set_icon(Some(tray_icon(unread > 0))) {
-        tracing::debug!(%error, "could not change the tray icon");
-      }
-      // A new image drops the template flag, and macOS then draws it black in a dark menu bar (#632).
-      #[cfg(target_os = "macos")]
-      if let Err(error) = tray.set_icon_as_template(true) {
-        tracing::debug!(%error, "could not keep the tray icon a template");
-      }
+      set_icon(&tray, current_style(&app), unread > 0);
     }
   }
+}
+
+/// Shows the tray icon in the style just chosen in the settings, keeping the unread dot.
+pub fn refresh_icon(app: &AppHandle) {
+  let Some(tray) = app.tray_by_id(TRAY_ID) else {
+    return;
+  };
+  let has_unread = app.try_state::<LastUnread>().is_some_and(|last| {
+    last
+      .count
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .is_some_and(|count| count > 0)
+  });
+  set_icon(&tray, current_style(app), has_unread);
+}
+
+fn set_icon(tray: &tauri::tray::TrayIcon, style: TrayIconStyle, has_unread: bool) {
+  if let Err(error) = tray.set_icon(Some(tray_icon(style, has_unread))) {
+    tracing::debug!(%error, "could not change the tray icon");
+  }
+  // A new image drops the template flag, and macOS then draws it black in a dark menu bar (#632).
+  #[cfg(target_os = "macos")]
+  if let Err(error) = tray.set_icon_as_template(true) {
+    tracing::debug!(%error, "could not keep the tray icon a template");
+  }
+}
+
+/// The style from the shell's preferences (the colour mark before they are loaded).
+fn current_style(app: &AppHandle) -> TrayIconStyle {
+  app
+    .try_state::<crate::shell_prefs::ShellPrefsState>()
+    .map(|prefs| prefs.get().tray_icon)
+    .unwrap_or_default()
 }
 
 fn update_tray(app: &AppHandle, menu: &TrayMenu, update: &TrayUpdate) {
@@ -419,14 +447,26 @@ fn set_badge(app: &AppHandle, _unread: u32) {
   });
 }
 
-/// The tray icon, with the unread dot while anything is unread. The app icon is too detailed at
-/// tray size; the glyph (icons/tray*.png, scripts/brand) is not.
-fn tray_icon(has_unread: bool) -> Image<'static> {
-  #[cfg(target_os = "macos")]
-  let icon = tauri::include_image!("icons/tray-template.png");
-  #[cfg(not(target_os = "macos"))]
-  let icon = tauri::include_image!("icons/tray.png");
+/// The tray icon in `style`, with the unread dot while anything is unread. The app icon is too
+/// detailed at tray size; the mark (icons/tray*.png, scripts/brand/icons.py) is not. macOS always
+/// uses its template icon, which the menu bar colours itself.
+fn tray_icon(style: TrayIconStyle, has_unread: bool) -> Image<'static> {
+  let icon = icon_for(style);
   if has_unread { with_unread_dot(&icon) } else { icon }
+}
+
+#[cfg(target_os = "macos")]
+fn icon_for(_style: TrayIconStyle) -> Image<'static> {
+  tauri::include_image!("icons/tray-template.png")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn icon_for(style: TrayIconStyle) -> Image<'static> {
+  match style {
+    TrayIconStyle::White => tauri::include_image!("icons/tray-white.png"),
+    TrayIconStyle::Black => tauri::include_image!("icons/tray-black.png"),
+    TrayIconStyle::Colour | TrayIconStyle::Unknown => tauri::include_image!("icons/tray.png"),
+  }
 }
 
 /// `icon` with the unread dot in its top right, set off the glyph by a transparent ring.
@@ -510,9 +550,35 @@ mod tests {
   }
 
   #[test]
-  fn the_unread_icon_has_a_red_dot_top_right_and_keeps_the_rest() {
-    let plain = tray_icon(false);
-    let unread = tray_icon(true);
+  fn every_style_has_its_own_square_icon() {
+    let icons: Vec<Image<'_>> = TrayIconStyle::CHOICES
+      .iter()
+      .map(|style| tray_icon(*style, false))
+      .collect();
+    for icon in &icons {
+      assert!(
+        icon.width() >= 32 && icon.width() == icon.height(),
+        "a square icon"
+      );
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+      assert_ne!(icons[0].rgba(), icons[1].rgba(), "white differs from colour");
+      assert_ne!(icons[1].rgba(), icons[2].rgba(), "black differs from white");
+      assert_eq!(tray_icon(TrayIconStyle::Unknown, false).rgba(), icons[0].rgba());
+    }
+  }
+
+  #[test]
+  fn the_unread_icon_has_a_red_dot_top_right_in_every_style() {
+    for style in TrayIconStyle::CHOICES {
+      assert_unread_dot(style);
+    }
+  }
+
+  fn assert_unread_dot(style: TrayIconStyle) {
+    let plain = tray_icon(style, false);
+    let unread = tray_icon(style, true);
     assert_eq!((unread.width(), unread.height()), (plain.width(), plain.height()));
     let width = plain.width() as usize;
     let pixel = |image: &Image<'_>, x: usize, y: usize| {
