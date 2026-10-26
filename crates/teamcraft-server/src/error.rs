@@ -7,6 +7,11 @@ use tracing::error;
 
 use crate::auth::AuthError;
 
+/// How long clients wait before they ask again when the object storage failed (an outage of the
+/// storage provider, #742). Clients back off further on their own; this keeps a storm of retries
+/// off the server and the storage while it recovers.
+const STORAGE_RETRY_AFTER_SECS: u64 = 30;
+
 /// Every error a handler can return; maps to a status code and the stable `error_code` body.
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -48,8 +53,8 @@ pub enum ApiError {
   /// A needed backend (e.g. attachment storage) is not configured or not reachable.
   #[error("unavailable: {0}")]
   Unavailable(String),
-  /// The server is at its limit for this kind of work (e.g. image decoding); retry after this many
-  /// seconds. 503 with `Retry-After`.
+  /// The server is at its limit for this kind of work (e.g. image decoding), or the object storage
+  /// is down ([`Self::storage_unavailable`]); retry after this many seconds. 503 with `Retry-After`.
   #[error("busy: {what}, retry in {retry_after_secs} seconds")]
   Busy {
     what: &'static str,
@@ -72,6 +77,15 @@ pub enum ApiError {
 }
 
 impl ApiError {
+  /// The object storage failed or answered "unavailable" while it holds `what`: 503 with
+  /// `Retry-After`, so clients retry later instead of at once.
+  pub fn storage_unavailable(what: &'static str) -> Self {
+    Self::Busy {
+      what,
+      retry_after_secs: STORAGE_RETRY_AFTER_SECS,
+    }
+  }
+
   pub fn space_not_found() -> Self {
     Self::NotFound {
       code: ErrorCode::SpaceNotFound,
@@ -401,6 +415,18 @@ mod tests {
     .into_response();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(response.headers()[header::RETRY_AFTER], "2");
+  }
+
+  #[test]
+  fn a_storage_outage_answers_503_unavailable_with_retry_after() {
+    let error = ApiError::storage_unavailable("attachment storage");
+    assert_eq!(error.error_code(), ErrorCode::Unavailable);
+    let response = error.into_response();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+      response.headers()[header::RETRY_AFTER],
+      STORAGE_RETRY_AFTER_SECS.to_string().as_str()
+    );
   }
 
   #[test]

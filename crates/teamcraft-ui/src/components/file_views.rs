@@ -205,17 +205,19 @@ fn UploadTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
       done_bytes,
       total_bytes,
       failed_attempts,
+    // Quiet while it goes up or retries by itself (#742): a small ring in the corner around the
+    // cancel button; the words are for screen readers.
     } if done_bytes < total_bytes || total_bytes == 0 => view! {
-      <span class="upload-state">
+      <span class="upload-progress">
         <TransferRing done_bytes=done_bytes total_bytes=total_bytes />
-        <span class="upload-label" role="status">{upload_label(i18n, done_bytes, total_bytes, failed_attempts)}</span>
+        <span class="visually-hidden" role="status">{upload_label(i18n, done_bytes, total_bytes, failed_attempts)}</span>
         <CancelUploadButton actions=actions />
       </span>
     }
     .into_any(),
-    FileTransfer::UploadStalled { .. } => view! {
+    FileTransfer::UploadStalled { reason } => view! {
       <span class="upload-state is-failed" role="alert">
-        <span>{move || i18n.t("file-upload-failed")}</span>
+        <span>{move || i18n.t(stall_key(reason, StallPlace::Tile))}</span>
         <span class="upload-actions">
           <button class="btn btn-small" on:click=move |_| actions.retry_upload()>
             <Icon name=IconName::Rotate />
@@ -767,7 +769,7 @@ fn MediaToolbar(file: FileInfo, #[prop(optional, into)] on_expand: Option<Callba
         <ToolbarButton label="video-expand" icon=IconName::Maximize on_click=move || expand.run(()) />
       })}
       <ToolbarButton label="file-download" icon=IconName::Download on_click=move || actions.download() />
-      <ToolbarButton label="file-copy-share" icon=IconName::Link on_click=move || actions.share() />
+      <ToolbarButton label="file-share" icon=IconName::Link on_click=move || actions.share() />
       <ToolbarButton label="lightbox-forward" icon=IconName::Forward on_click=move || actions.forward() />
       <button
         class="icon-btn media-tool"
@@ -903,7 +905,10 @@ fn transfer_status(transfer: &FileTransfer, actions: FileActions) -> AnyView {
       }
       .into_any()
     },
-    FileTransfer::Downloading { done_bytes, total_bytes } => {
+    FileTransfer::Downloading {
+      done_bytes,
+      total_bytes,
+    } => {
       let (done, total) = (*done_bytes, *total_bytes);
       view! {
         <span class="file-transfer">
@@ -925,12 +930,15 @@ fn transfer_status(transfer: &FileTransfer, actions: FileActions) -> AnyView {
       }
       .into_any()
     },
-    FileTransfer::UploadStalled { .. } => view! {
-      <span class="file-error" role="alert">{move || i18n.t("file-upload-stalled")}</span>
+    FileTransfer::UploadStalled { reason } => {
+      let key = stall_key(*reason, StallPlace::Card);
+      view! {
+      <span class="file-error" role="alert">{move || i18n.t(key)}</span>
       <button class="link-btn" on:click=move |_| actions.retry_upload()>{move || i18n.t("file-retry")}</button>
       <button class="link-btn" on:click=move |_| actions.cancel_upload()>{move || i18n.t("file-cancel-upload")}</button>
-    }
-    .into_any(),
+      }
+      .into_any()
+    },
     FileTransfer::UploadFailed { reason } => {
       let key = match reason {
         FileFailure::TooLarge => "file-too-large",
@@ -1330,6 +1338,23 @@ fn file_icon(maybe_kind: Option<MediaKind>) -> IconName {
   }
 }
 
+/// Where a stalled upload is shown: over its picture (short) or on a file card (with the note
+/// that the message waits).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StallPlace {
+  Tile,
+  Card,
+}
+
+/// Why an upload stopped retrying by itself, in words (#742).
+fn stall_key(reason: FileFailure, place: StallPlace) -> &'static str {
+  match (reason, place) {
+    (FileFailure::StorageUnavailable, _) => "file-upload-storage-unavailable",
+    (_, StallPlace::Tile) => "file-upload-failed",
+    (_, StallPlace::Card) => "file-upload-stalled",
+  }
+}
+
 fn failure_key(reason: FileFailure) -> &'static str {
   match reason {
     FileFailure::TooLarge => "file-too-large",
@@ -1345,4 +1370,27 @@ pub(crate) fn blob_url(bytes: &[u8], media_type: &str) -> Option<String> {
   options.set_type(media_type);
   let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &options).ok()?;
   web_sys::Url::create_object_url_with_blob(&blob).ok()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn a_stalled_upload_says_when_the_storage_is_down() {
+    for place in [StallPlace::Tile, StallPlace::Card] {
+      assert_eq!(
+        stall_key(FileFailure::StorageUnavailable, place),
+        "file-upload-storage-unavailable"
+      );
+    }
+    assert_eq!(
+      stall_key(FileFailure::Network, StallPlace::Tile),
+      "file-upload-failed"
+    );
+    assert_eq!(
+      stall_key(FileFailure::Network, StallPlace::Card),
+      "file-upload-stalled"
+    );
+  }
 }

@@ -158,7 +158,7 @@ pub async fn get_space_image(
     .await
     .map_err(|error| {
       warn!(%error, space_id = %id, "reading a space picture failed");
-      ApiError::Unavailable("picture storage".into())
+      ApiError::storage_unavailable("picture storage")
     })?
     .ok_or_else(ApiError::space_image_not_found)?;
   Ok(SpaceImageFile {
