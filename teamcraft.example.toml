@@ -31,7 +31,9 @@ issuer = "http://127.0.0.1:8080/realms/teamcraft-dev"
 # roles are read from `resource_access.<client_id>.roles`.
 client_id = "teamcraft"
 # Scopes the apps ask for at sign-in (announced in GET /api/v1/server-info; `openid` is always added).
-app_scopes = ["openid", "profile", "email"]
+# `offline_access` gives each device a long-lived refresh token: without it a device's sign-in ends
+# with the provider's browser session (Keycloak: 8-10 hours by default) and people sign in daily.
+app_scopes = ["openid", "profile", "email", "offline_access"]
 # Optional: the redirect URIs registered for `client_id`. When set, an app whose redirect URI is not
 # listed tells its user the server is not set up for it. The released apps use
 # `http://127.0.0.1/callback` (desktop, any port) and `de.zeitgleich.teamcraft:/oauth/callback`

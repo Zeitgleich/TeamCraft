@@ -302,6 +302,12 @@ In Keycloak, `http://127.0.0.1/*` as a valid redirect URI covers the desktop app
 `app_redirect_uris` lists them, an app built with another redirect URI (a self-build with its own app
 ID) tells its user that the server is not set up for it instead of failing at the provider.
 
+**Staying signed in.** The apps ask for `offline_access` (`[oidc] app_scopes`), so each device gets a
+long-lived refresh token and stays signed in; the provider's client must allow that scope (Keycloak:
+Clients → client → Client scopes → `offline_access`, optional is enough) and its offline session idle
+time decides how long an unused device stays signed in (Realm settings → Sessions, 30 days by
+default). Without the scope a device's sign-in ends with the provider's browser session.
+
 **Several devices per account.** Every device signs in with its own provider session, and all of
 them stay signed in side by side. Signing out on one device ends that device's provider session; the
 provider's back-channel logout names it (`sid`), and the server ends only that session. A logout
