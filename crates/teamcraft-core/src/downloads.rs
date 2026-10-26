@@ -5,6 +5,7 @@
 
 use std::collections::VecDeque;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 
 use futures_util::StreamExt;
@@ -72,6 +73,8 @@ enum Job {
   Save {
     conversation: ConversationId,
     attachment: AttachmentId,
+    /// The file the user picked; `None`: a new name in the download directory.
+    maybe_target: Option<PathBuf>,
   },
 }
 
@@ -140,6 +143,16 @@ impl Downloads {
     self.waiting.push_back(Job::Save {
       conversation,
       attachment,
+      maybe_target: None,
+    });
+  }
+
+  /// Queues saving a file to `path`, which the user picked in a save dialog.
+  pub fn save_to(&mut self, conversation: ConversationId, attachment: AttachmentId, path: PathBuf) {
+    self.waiting.push_back(Job::Save {
+      conversation,
+      attachment,
+      maybe_target: Some(path),
     });
   }
 
@@ -178,9 +191,14 @@ impl Downloads {
         Job::Save {
           conversation,
           attachment,
+          maybe_target,
         } => {
           is_changed = true;
-          match client.start_download_to_disk(conversation, attachment).await {
+          let started = client.start_download_to_disk(conversation, attachment).await;
+          match started.map(|download| match maybe_target {
+            Some(path) => download.to_path(path),
+            None => download,
+          }) {
             Ok(download) => self.running.push(Box::pin(async move {
               Finished::Saved {
                 attachment,

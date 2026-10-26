@@ -76,6 +76,8 @@ pub struct CoreConfig {
   /// Keystore namespace, so several servers do not share database keys.
   pub keystore_scope: String,
   pub argon2: Argon2Settings,
+  /// Where "Download" puts files without asking (the user's downloads folder); `None` refuses.
+  pub maybe_download_dir: Option<PathBuf>,
 }
 
 /// The access token the core sends, with the server (origin) it belongs to. With a live source
@@ -259,6 +261,14 @@ enum Request {
     reply: oneshot::Sender<Result<SecretBytes, String>>,
   },
   OrgBackgroundPicture(OrgBackgroundId, oneshot::Sender<Result<Vec<u8>, String>>),
+  /// "Save…" (#719): the file goes to the path the user picked in the save dialog.
+  SaveAttachment {
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: String,
+    path: PathBuf,
+    reply: oneshot::Sender<Result<(), String>>,
+  },
   LinkStart {
     device_name: String,
     reply: oneshot::Sender<Result<(), String>>,
@@ -580,6 +590,27 @@ impl CoreRuntime {
         message,
         file_id,
         priority,
+        reply,
+      })
+      .await
+      .unwrap_or_else(|| Err(stopped()))
+  }
+
+  /// Saves one file of a message to `path`, which the user picked in a save dialog. It downloads
+  /// beside the loop; the file's transfer state shows the progress and where it went.
+  pub async fn save_attachment(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: String,
+    path: PathBuf,
+  ) -> Result<(), String> {
+    self
+      .ask(|reply| Request::SaveAttachment {
+        conversation,
+        message,
+        file_id,
+        path,
         reply,
       })
       .await
@@ -1000,6 +1031,7 @@ impl Core {
   fn client_settings(&self) -> ClientSettings {
     ClientSettings {
       maybe_upload_staging_dir: Some(staging_dir(&self.config, self.user)),
+      maybe_download_dir: self.config.maybe_download_dir.clone(),
       creates_notes_to_self: true,
       ..ClientSettings::default()
     }
@@ -1180,7 +1212,33 @@ impl Core {
         reply,
       } => self.queue_attachment(conversation, message, &file_id, priority, reply),
       Request::OrgBackgroundPicture(id, reply) => drop(reply.send(self.org_background_picture(id).await)),
+      Request::SaveAttachment {
+        conversation,
+        message,
+        file_id,
+        path,
+        reply,
+      } => drop(reply.send(self.queue_save(conversation, message, &file_id, path))),
     }
+  }
+
+  /// Queues saving one file to the path the user picked; it downloads beside the loop.
+  fn queue_save(
+    &mut self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+    path: PathBuf,
+  ) -> Result<(), String> {
+    let reference = self
+      .backend
+      .as_ref()
+      .and_then(|backend| backend.attachment_ref(conversation, message, file_id))
+      .ok_or_else(|| "no such file in this conversation".to_owned())?;
+    self
+      .downloads
+      .save_to(conversation, reference.attachment_id, path);
+    Ok(())
   }
 
   /// Queues one file, decrypted, for the image viewer or an inline picture; it downloads beside

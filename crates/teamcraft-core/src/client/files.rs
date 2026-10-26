@@ -537,6 +537,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Ok(download) => Ok(DiskDownload {
         download,
         maybe_directory: self.settings.maybe_download_dir.clone(),
+        maybe_target: None,
       }),
       Err(error) => {
         let failed = TransferState::Failed {
@@ -954,7 +955,15 @@ impl DiskDownload {
     let Self {
       download,
       maybe_directory,
+      maybe_target,
     } = self;
+    if let Some(path) = maybe_target {
+      // The user picked this file in a save dialog, which asked before replacing one.
+      let plaintext = download.open().await?;
+      std::fs::write(&path, plaintext.expose_secret())
+        .map_err(|error| CoreError::Corrupt(error.to_string()))?;
+      return Ok(path.to_string_lossy().into_owned());
+    }
     let directory =
       maybe_directory.ok_or_else(|| CoreError::Corrupt("no download directory configured".into()))?;
     let file_name = download.reference().file_name.clone();
@@ -1002,6 +1011,20 @@ pub struct DiskDownload {
   download: BlobDownload,
   #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
   maybe_directory: Option<std::path::PathBuf>,
+  /// The exact file to write (picked in a save dialog) instead of a new name in the directory.
+  #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+  maybe_target: Option<std::path::PathBuf>,
+}
+
+impl DiskDownload {
+  /// Writes the file to `path` (the user's choice in a save dialog) instead of the download
+  /// directory. The browser has no paths and saves to its download folder anyway.
+  pub fn to_path(self, path: std::path::PathBuf) -> Self {
+    Self {
+      maybe_target: Some(path),
+      ..self
+    }
+  }
 }
 
 /// What became of a finished blob upload.

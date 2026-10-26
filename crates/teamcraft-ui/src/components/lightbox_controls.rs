@@ -18,11 +18,13 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
 use crate::clock::format_date_time;
+use crate::components::file_views::save_attachment;
 use crate::components::icons::{Icon, IconName};
 use crate::components::lightbox::{FullMedia, sizes};
 use crate::components::lightbox_motion::StageMotion;
 use crate::components::message_actions::copy_to_clipboard;
 use crate::components::sheet::PopoverBackdrop;
+use crate::copy_image::{self, CopiedPicture, CopyRoute};
 use crate::i18n::{I18n, use_i18n};
 use crate::lightbox::{
   Command, KEY_ZOOM_STEP, MAX_STRIP_THUMBNAILS, MediaKey, MediaKind, ModifierStyle, Point, Viewport,
@@ -168,12 +170,25 @@ impl MediaActions {
     self.state.open_message(self.conversation, message, None);
   }
 
-  /// The core downloads and decrypts the file again and saves it (the download folder on the
-  /// desktop, the browser's download on the web), with the same size cap as everywhere else.
+  /// The core downloads and decrypts the file again and saves it (where the user picks in the
+  /// desktop app's save dialog, the browser's download on the web), with the same size cap as
+  /// everywhere else.
   fn download(self) {
     let Some(file) = self.current_file.get_untracked() else {
       return;
     };
+    if crate::auth::tauri::is_available() {
+      // The save dialog comes first; a toast follows once the file is on its way.
+      save_attachment(
+        self.state,
+        self.i18n,
+        file.conversation,
+        file.message,
+        file.file_id,
+        file.file_name,
+      );
+      return;
+    }
     self
       .state
       .write(|backend| backend.download_attachment(file.conversation, file.message, &file.file_id));
@@ -183,10 +198,29 @@ impl MediaActions {
 
   fn copy_image(self) {
     let i18n = self.i18n;
+    let notice = self.notice;
+    // WebKitGTK's Clipboard API doesn't take pictures: the Linux app copies through the shell.
+    if CopyRoute::current() == CopyRoute::Shell
+      && let Some(file) = self.current_file.get_untracked()
+    {
+      let copying = copy_image::copy(CopiedPicture {
+        conversation: file.conversation,
+        message: file.message,
+        file_id: file.file_id,
+        media_type: file.media_type,
+      });
+      spawn_local(async move {
+        let key = match copying.await {
+          true => "lightbox-image-copied",
+          false => "lightbox-copy-failed",
+        };
+        notice.show(i18n.t(key));
+      });
+      return;
+    }
     let Some(image) = self.image.get_untracked() else {
       return;
     };
-    let notice = self.notice;
     spawn_local(async move {
       let key = match copy_image(&image).await {
         true => "lightbox-image-copied",
