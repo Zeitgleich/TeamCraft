@@ -94,7 +94,9 @@ token that outlives its revocation. Everything is audited.
 
 ## Container
 
-`containers/teamcraft-bridge.Containerfile` (see `containers/README.md`). Mount the configuration
+Each release publishes `ghcr.io/zeitgleich/teamcraft-bridge:X.Y.Z` (multi-arch, signed, like the
+server image; docs/release.md), built from `containers/teamcraft-bridge.Containerfile` (see
+`containers/README.md`). The deployment playbook runs it with `teamcraft_bridge_enabled`. Mount the configuration
 and the secrets, keep a volume at `/var/lib/teamcraft-bridge` for the database, publish the port on
 loopback only: `-p 127.0.0.1:8088:8088`.
 

@@ -158,8 +158,9 @@ Dependabot's pull requests are left out. Edit the template when a known limitati
 |-----------------------------------------------------------------|--------------------------------------------------|
 | `ghcr.io/zeitgleich/teamcraft-server:X.Y.Z` (+ `X.Y`, `latest`) | `image` jobs (amd64 + arm64, native runners)     |
 | `ghcr.io/zeitgleich/teamcraft-sfu:X.Y.Z` (+ `X.Y`, `latest`)    | `image` jobs                                     |
+| `ghcr.io/zeitgleich/teamcraft-bridge:X.Y.Z` (+ `X.Y`, `latest`) | `image` jobs                                     |
 | `images.txt`                                                    | image references with their digests              |
-| `teamcraft-{server,sfu}-X.Y.Z.{spdx,cdx}.json`                  | SBOMs of the images (syft; SPDX, CycloneDX)      |
+| `teamcraft-{server,sfu,bridge}-X.Y.Z.{spdx,cdx}.json`           | SBOMs of the images (syft; SPDX, CycloneDX)      |
 | `teamcraft-source-X.Y.Z.{spdx,cdx}.json`                        | SBOMs of the source tree (Cargo, Gradle)         |
 | `TeamCraft_X.Y.Z_*.deb`, `.rpm`, `.AppImage`                    | `desktop-release.yml`, x86_64 and aarch64        |
 | `teamcraft-desktop-<arch>.flatpak`                              | `desktop-release.yml`                            |
