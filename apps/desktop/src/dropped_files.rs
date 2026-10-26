@@ -22,6 +22,7 @@ use tauri::State;
 use tauri::ipc::Response;
 
 /// Tells the page that files were dropped but it didn't ask for them (no `drop` reached it).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub const FILES_DROPPED_EVENT: &str = "files-dropped";
 /// How long the page has to ask for a drop's files after the native drop before the shell sends
 /// [`FILES_DROPPED_EVENT`]; its own `drop` follows within milliseconds.
@@ -62,6 +63,7 @@ struct DropStore {
 struct PendingDrop {
   paths: Vec<PathBuf>,
   dropped_at: Instant,
+  #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
   generation: u64,
 }
 
@@ -122,6 +124,7 @@ impl DroppedFilesState {
   }
 
   /// Whether the drop of `generation` still waits for the page.
+  #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
   pub fn is_pending(&self, generation: u64) -> bool {
     self
       .lock()
@@ -190,6 +193,7 @@ fn read_chunk(path: &Path, offset: u64) -> std::io::Result<Vec<u8>> {
 
 /// The local paths a `text/uri-list` names (RFC 2483: one URI per line, `#` comments, CRLF), in
 /// order. Other URIs (web addresses, `trash:`, files on another host) are left out.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn paths_from_uri_list(uri_list: &str) -> Vec<PathBuf> {
   local_paths(
     uri_list
