@@ -4,19 +4,40 @@ use leptos::ev;
 use leptos::prelude::*;
 use wasm_bindgen::{JsCast, JsValue};
 
+use teamcraft_client_api::admin::format_bytes;
+
+use crate::auth::tauri;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::{I18n, use_i18n};
+use crate::reactive::SetIfAlive;
+use crate::shell_drop::{self, FILES_DROPPED_EVENT};
 use crate::state::{AppState, use_app_state};
 
 thread_local! {
   /// A drag that started in this page (text, a link, a picture of the conversation) is under way:
   /// its `text/uri-list` is not a file from outside.
   static IS_PAGE_DRAG: Cell<bool> = const { Cell::new(false) };
+  /// The drop zone the last drag from outside was over (none while it is outside every zone): where
+  /// files go that the desktop shell saw dropped without a `drop` reaching the page.
+  static HOVERED_ZONE: Cell<Option<DroppedFiles>> = const { Cell::new(None) };
 }
 
 /// Files dropped on a conversation or thread, handed to its composer (provided by [`FileDrop`]).
 #[derive(Clone, Copy)]
 pub struct DroppedFiles(pub RwSignal<Vec<web_sys::File>, LocalStorage>);
+
+/// What a drop brings (see [`take_drop`]).
+pub enum DropContent {
+  /// Files to attach now.
+  Files(Vec<web_sys::File>),
+  /// Files the desktop shell reads; they reach the drop zone's composer shortly, or an error says
+  /// why not.
+  FromShell,
+  /// Files that can't be read; an error said so.
+  Unreadable,
+  /// No files: text or a link.
+  NoFiles,
+}
 
 /// Drop zone for files over a conversation or a thread panel (#484): while files are dragged over
 /// it the [`DropStrip`] shows, and dropped files go to the composer inside, which attaches them
@@ -80,6 +101,7 @@ impl FileDrop {
   pub fn on_dragover(self, ev: &web_sys::DragEvent) {
     if self.can_post && carries_files(ev) {
       ev.prevent_default();
+      HOVERED_ZONE.set(Some(self.dropped));
     }
   }
 
@@ -93,17 +115,22 @@ impl FileDrop {
     let Some(transfer) = ev.data_transfer() else {
       return false;
     };
-    let files = transfer_files(&transfer);
-    if files.is_empty() {
-      if is_unreadable_file_drop(&transfer) {
+    match take_drop(&transfer, Some(self.dropped), self.state, self.i18n) {
+      DropContent::Files(files) => {
         ev.prevent_default();
-        report_unreadable_drop(self.state, self.i18n);
-      }
-      return false;
+        self.dropped.0.set(files);
+        true
+      },
+      DropContent::FromShell => {
+        ev.prevent_default();
+        true
+      },
+      DropContent::Unreadable => {
+        ev.prevent_default();
+        false
+      },
+      DropContent::NoFiles => false,
     }
-    ev.prevent_default();
-    self.dropped.0.set(files);
-    true
   }
 }
 
@@ -126,11 +153,16 @@ pub fn DropStrip(zone: FileDrop) -> impl IntoView {
 /// Keeps files (and links) dropped outside every drop zone from opening in the window, which would
 /// replace the app (#651): the browser navigates to the file, and so does the desktop webview, as
 /// Tauri's own handler is off. Only text fields keep their own drop (dropped text goes in).
+///
+/// In the desktop app it also takes the files the shell saw dropped when no `drop` reached the page
+/// (WebKitGTK, #651): they go to the drop zone the drag was last over.
 pub fn block_stray_file_drops() {
   let on_start = window_event_listener(ev::dragstart, |_| IS_PAGE_DRAG.set(true));
   let on_end = window_event_listener(ev::dragend, |_| IS_PAGE_DRAG.set(false));
   let on_over = window_event_listener(ev::dragover, |ev| {
     if !ev.default_prevented() && carries_files(&ev) {
+      // Outside every drop zone (a zone cancels the event first).
+      HOVERED_ZONE.set(None);
       ev.prevent_default();
       if let Some(transfer) = ev.data_transfer() {
         transfer.set_drop_effect("none");
@@ -149,10 +181,84 @@ pub fn block_stray_file_drops() {
     on_over.remove();
     on_drop.remove();
   });
+  if tauri::is_available() {
+    let state = use_app_state();
+    let i18n = use_i18n();
+    tauri::listen(FILES_DROPPED_EVENT, move || {
+      // A drop beside every zone attaches nothing; the shell's copy is dropped all the same.
+      let maybe_zone = HOVERED_ZONE.take();
+      leptos::task::spawn_local(attach_from_shell(maybe_zone, false, state, i18n));
+    });
+  }
+}
+
+/// The files of a drop on a zone (or its composer, which passes the zone it sits in). Files the
+/// webview didn't hand over are read by the desktop shell and reach `maybe_target` shortly.
+pub fn take_drop(
+  transfer: &web_sys::DataTransfer,
+  maybe_target: Option<DroppedFiles>,
+  state: AppState,
+  i18n: I18n,
+) -> DropContent {
+  let is_desktop = tauri::is_available();
+  let files = transfer_files(transfer);
+  if !files.is_empty() {
+    if is_desktop {
+      shell_drop::forget();
+    }
+    return DropContent::Files(files);
+  }
+  let lists_files = is_unreadable_file_drop(transfer);
+  if is_desktop && (lists_files || is_addressless_file_drag(transfer)) {
+    leptos::task::spawn_local(attach_from_shell(maybe_target, lists_files, state, i18n));
+    return DropContent::FromShell;
+  }
+  if lists_files {
+    report_unreadable_drop(state, i18n);
+    return DropContent::Unreadable;
+  }
+  DropContent::NoFiles
+}
+
+/// Reads the files the desktop shell saw dropped and hands them to `maybe_target`'s composer. Says
+/// so when a file is too large, or when `lists_files` (the page saw file addresses) and the shell
+/// knew of no drop.
+async fn attach_from_shell(
+  maybe_target: Option<DroppedFiles>,
+  lists_files: bool,
+  state: AppState,
+  i18n: I18n,
+) {
+  let maybe_upload_limit = state.read(|backend| backend.max_upload_bytes());
+  let limit = maybe_upload_limit.map_or(shell_drop::READ_MAX_BYTES, |upload| {
+    upload.min(shell_drop::READ_MAX_BYTES)
+  });
+  let taken = match shell_drop::take(limit).await {
+    Ok(taken) => taken,
+    Err(error) => {
+      tracing::warn!(%error, "could not read the dropped files");
+      state.show_error(i18n.t("drop-files-unreadable"), error);
+      return;
+    },
+  };
+  // The upload limit has its own message; a file only too large to drop says how to attach it.
+  let too_large_key = match maybe_upload_limit.is_some_and(|upload| upload <= shell_drop::READ_MAX_BYTES) {
+    true => "composer-file-too-large",
+    false => "drop-file-too-large",
+  };
+  for name in &taken.too_large {
+    let text = i18n.t_with(too_large_key, &[("name", name), ("limit", &format_bytes(limit))]);
+    state.show_error(text, "the dropped file is larger than the limit".to_owned());
+  }
+  match maybe_target {
+    Some(DroppedFiles(target)) if !taken.files.is_empty() => target.set_if_alive(taken.files),
+    _ if !taken.was_dropped && lists_files => report_unreadable_drop(state, i18n),
+    _ => {},
+  }
 }
 
 /// Files were dropped, but the webview handed over only their addresses, not their contents.
-pub fn is_unreadable_file_drop(transfer: &web_sys::DataTransfer) -> bool {
+fn is_unreadable_file_drop(transfer: &web_sys::DataTransfer) -> bool {
   transfer
     .get_data("text/uri-list")
     .is_ok_and(|uris| lists_local_files(&uris))
@@ -160,7 +266,7 @@ pub fn is_unreadable_file_drop(transfer: &web_sys::DataTransfer) -> bool {
 
 /// Says that dropped files couldn't be read, instead of attaching nothing (or their address as
 /// text), and how to attach them anyway.
-pub fn report_unreadable_drop(state: AppState, i18n: I18n) {
+fn report_unreadable_drop(state: AppState, i18n: I18n) {
   tracing::warn!("dropped files arrived as file addresses without their contents");
   state.show_error(
     i18n.t("drop-files-unreadable"),
@@ -196,6 +302,21 @@ fn carries_files(ev: &web_sys::DragEvent) -> bool {
   let types = transfer.types();
   let has = |kind: &str| types.includes(&JsValue::from_str(kind), 0);
   has("Files") || (has("text/uri-list") && !IS_PAGE_DRAG.get())
+}
+
+/// A drag from outside that says it carries files but hands the page neither the files nor their
+/// addresses (WebKitGTK while dragging from a file manager).
+fn is_addressless_file_drag(transfer: &web_sys::DataTransfer) -> bool {
+  if IS_PAGE_DRAG.get() {
+    return false;
+  }
+  let types = transfer.types();
+  let has = |kind: &str| types.includes(&JsValue::from_str(kind), 0);
+  has("Files")
+    || (has("text/uri-list")
+      && transfer
+        .get_data("text/uri-list")
+        .is_ok_and(|uris| uris.trim().is_empty()))
 }
 
 /// A `text/uri-list` (lines of URIs, `#` comments) that names local files.

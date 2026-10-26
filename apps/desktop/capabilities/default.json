@@ -51,6 +51,8 @@
     "allow-core-focus",
     "allow-core-stop",
     "allow-core-reset-store",
+    "allow-dropped-files-take",
+    "allow-dropped-file-read",
     "allow-call-snapshot",
     "allow-call-media-devices",
     "allow-call-action",
