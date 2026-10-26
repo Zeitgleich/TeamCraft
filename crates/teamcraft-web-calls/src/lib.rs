@@ -24,11 +24,11 @@ use js_sys::{Function, Promise, Reflect, Uint8Array};
 use teamcraft_client_api::call_view::{CallSignal, CallView};
 use teamcraft_client_api::calls::{
   ActiveCall, BackgroundEffect, BrowserPermission, CallEndReason, CallRequest, CallStatusSounds,
-  DevicePresence, MediaDevice, MediaDevices, PushToTalk, ScreenShareSound,
+  DevicePresence, JoinMedia, MediaDevice, MediaDevices, PushToTalk, ScreenShareSound,
 };
 use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
 use teamcraft_client_api::page_calls::PreparedCall;
-use teamcraft_client_api::remote::{CallAction, CallSnapshot};
+use teamcraft_client_api::remote::{CallAction, CallActionAnswer, CallSnapshot};
 use teamcraft_media::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInfo, AudioSink, AudioSource};
 use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{CallKeyAuthenticator, CallKeyError};
@@ -186,13 +186,15 @@ pub fn start(callbacks: JsValue) -> Result<(), JsValue> {
   Ok(())
 }
 
-/// Carries out a `CallAction` (JSON).
+/// Carries out a `CallAction` (JSON); resolves with nothing, or with the failure of a part of it
+/// that didn't go through (`CallActionAnswer`).
 #[wasm_bindgen]
-pub async fn act(action: String) -> Result<(), JsValue> {
+pub async fn act(action: String) -> Result<JsValue, JsValue> {
   let host = host()?;
   let action: CallAction = serde_json::from_str(&action)
     .map_err(|error| failure_value(ActionFailure::other(format!("unreadable call action: {error}"))))?;
-  host.act(action).await.map_err(failure_value)
+  let answer = host.act(action).await.map_err(failure_value)?;
+  Ok(answer.map_or(JsValue::UNDEFINED, |partial| JsValue::from_str(&partial)))
 }
 
 /// A call event from the gateway (`CallSignal` JSON).
@@ -286,8 +288,23 @@ pub async fn stop() {
 }
 
 impl Host {
-  /// Joins the conversation's call with what the page's core prepared, leaving a running call.
-  async fn join(self: &Rc<Self>, request: CallRequest, is_muted: bool) -> Result<(), ActionFailure> {
+  /// Joins the conversation's call with what the page's core prepared, leaving a running call, and
+  /// starts the camera with it when chosen. A camera that can't start leaves the call running; the
+  /// answer says why.
+  async fn join(
+    self: &Rc<Self>,
+    request: CallRequest,
+    media: JoinMedia,
+  ) -> Result<CallActionAnswer, ActionFailure> {
+    self.connect(request, media.is_muted).await?;
+    if !media.is_camera_on {
+      return Ok(None);
+    }
+    Ok(self.start_camera().await.err().map(|failure| failure.to_wire()))
+  }
+
+  /// Connects to the conversation's call, leaving a running call first.
+  async fn connect(self: &Rc<Self>, request: CallRequest, is_muted: bool) -> Result<(), ActionFailure> {
     self.leave().await;
     let prepared = self.prepare(request.conversation).await?;
     let (microphone, speakers, sounds) = {
@@ -390,7 +407,7 @@ impl Host {
     });
   }
 
-  async fn act(self: &Rc<Self>, action: CallAction) -> Result<(), ActionFailure> {
+  async fn act(self: &Rc<Self>, action: CallAction) -> Result<CallActionAnswer, ActionFailure> {
     match action {
       CallAction::Leave => self.leave().await,
       CallAction::SetMuted { is_muted } => self.control(Control::Mute(is_muted)),
@@ -454,7 +471,7 @@ impl Host {
         {
           let mut state = self.state.borrow_mut();
           if !state.push_to_talk.is_enabled || state.push_to_talk.is_talking == is_talking {
-            return Ok(());
+            return Ok(None);
           }
           state.push_to_talk.is_talking = is_talking;
         }
@@ -463,7 +480,21 @@ impl Host {
       },
       // The browser has no background effects (the UI offers none) and no system effects panel.
       CallAction::SetBackgroundEffect { .. } | CallAction::OpenSystemVideoEffects => {},
-      CallAction::Join { request, is_muted } => self.join(request, is_muted).await?,
+      CallAction::Join {
+        request,
+        is_muted,
+        is_camera_on,
+      } => {
+        return self
+          .join(
+            request,
+            JoinMedia {
+              is_muted,
+              is_camera_on,
+            },
+          )
+          .await;
+      },
       CallAction::RefreshDevices => self.refresh_devices(),
       // The page plays the test itself: it has to start inside the click (teamcraft-ui speaker_test).
       CallAction::TestSpeakers { .. } => {
@@ -471,7 +502,7 @@ impl Host {
       },
       CallAction::Unknown => return Err(ActionFailure::other("unknown call action")),
     }
-    Ok(())
+    Ok(None)
   }
 
   async fn leave(&self) {

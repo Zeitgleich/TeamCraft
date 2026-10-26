@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, State};
 use teamcraft_client_api::calls::{BackgroundEffect as UiBackgroundEffect, MediaDevices, OrgBackgrounds};
-use teamcraft_client_api::remote::{CallAction, CallSnapshot};
+use teamcraft_client_api::remote::{CallAction, CallActionAnswer, CallSnapshot};
 use teamcraft_client_api::remote::{ChatAnswer, ChatQuery};
 use teamcraft_media::effects::BackgroundImage;
 use teamcraft_proto::MediaStreamId;
@@ -91,7 +91,7 @@ async fn apply_background(
   core: &CoreHost,
   calls: &CallHost,
   requested: UiBackgroundEffect,
-) -> Result<(), CommandError> {
+) -> Result<(), String> {
   let org = org_backgrounds(core).await;
   let effect = org.effective(requested);
   match load_background_picture(core, effect).await {
@@ -103,10 +103,22 @@ async fn apply_background(
     // anyway (strong blur, or the camera goes off) rather than send it.
     Err(error) if org.is_required() => {
       calls.fail_closed_background().await;
-      Err(error.into())
+      Err(error)
     },
-    Err(error) => Err(error.into()),
+    Err(error) => Err(error),
   }
+}
+
+/// Turns the camera on behind the current background choice under the current rule (it may have
+/// changed since the choice was made).
+async fn start_camera(core: &CoreHost, calls: &CallHost) -> Result<(), String> {
+  let current = calls
+    .snapshot()
+    .maybe_active
+    .map(|active| active.background)
+    .unwrap_or_default();
+  apply_background(core, calls, current).await?;
+  calls.set_camera(true).await
 }
 
 /// Opens the system's video effects panel (macOS 14+: Portrait, background replacement, Studio
@@ -187,13 +199,22 @@ pub async fn call_action(
   core: State<'_, CoreHost>,
   calls: State<'_, Arc<CallHost>>,
   action: CallAction,
-) -> Result<(), CommandError> {
+) -> Result<CallActionAnswer, CommandError> {
   match action {
-    CallAction::Join { request, is_muted } => {
+    CallAction::Join {
+      request,
+      is_muted,
+      is_camera_on,
+    } => {
       let runtime = core.current()?;
       let preparation = runtime.prepare_call(request.conversation).await?;
       let tickets = Arc::new(CoreJoinTickets::new(runtime, request.conversation));
       calls.join(request, is_muted, preparation, tickets).await?;
+      // The camera starts with the call (#453). One that can't start leaves the call running; the
+      // answer says why.
+      if is_camera_on {
+        return Ok(start_camera(&core, &calls).await.err());
+      }
     },
     CallAction::Leave => calls.leave().await,
     CallAction::Decline { conversation } => calls.decline(conversation),
@@ -202,18 +223,8 @@ pub async fn call_action(
     CallAction::MoveHere => calls.move_here().await,
     CallAction::SelectMicrophone { maybe_device } => calls.select_microphone(maybe_device).await?,
     CallAction::SelectSpeakers { maybe_device } => calls.select_speakers(maybe_device).await?,
-    CallAction::SetCamera { is_on } => {
-      if is_on {
-        // The current choice under the current rule (it may have changed since it was made).
-        let current = calls
-          .snapshot()
-          .maybe_active
-          .map(|active| active.background)
-          .unwrap_or_default();
-        apply_background(&core, &calls, current).await?;
-      }
-      calls.set_camera(is_on).await?;
-    },
+    CallAction::SetCamera { is_on: true } => start_camera(&core, &calls).await?,
+    CallAction::SetCamera { is_on: false } => calls.set_camera(false).await?,
     CallAction::SelectCamera { maybe_device } => calls.select_camera(maybe_device).await?,
     CallAction::SetBackgroundEffect { effect } => apply_background(&core, &calls, effect).await?,
     CallAction::StartScreenShare {
@@ -239,5 +250,5 @@ pub async fn call_action(
     CallAction::TestSpeakers { maybe_device } => calls.test_speakers(maybe_device).await?,
     CallAction::Unknown => return Err(CommandError::from("unknown call action".to_owned())),
   }
-  Ok(())
+  Ok(None)
 }

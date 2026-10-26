@@ -39,8 +39,8 @@ use crate::admin_live::AdminLive;
 use crate::auth::Authenticator;
 use crate::backend::{AdminBackend, CallBackend, ChatBackend, SearchBackend, SecurityBackend};
 use crate::calls::{
-  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallRequest, HuddleInfo, IncomingCall, MediaDevices,
-  Participant,
+  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallRequest, HuddleInfo, IncomingCall, JoinMedia,
+  MediaDevices, Participant,
 };
 use crate::clock::now_ms;
 use crate::live::{LiveScope, LiveServer, REST_ONLY_POLL_INTERVAL_MS, thread_summary, with_local_expiry};
@@ -956,9 +956,9 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
       .map_or_else(Vec::new, RemoteCalls::incoming)
   }
 
-  fn join_call(&self, request: CallRequest, is_muted: bool) {
+  fn join_call(&self, request: CallRequest, media: JoinMedia) {
     if let Some(calls) = &self.maybe_calls {
-      calls.join(request, is_muted);
+      calls.join(request, media);
     }
   }
 

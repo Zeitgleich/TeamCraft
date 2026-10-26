@@ -19,7 +19,9 @@
 //!
 //! A rejoin after a lost connection prepares again (fresh token, current devices).
 //!
-//! Failed actions reject with [`crate::failure::ActionFailure`] wire text.
+//! Failed actions reject with [`crate::failure::ActionFailure`] wire text. An action that went
+//! through resolves with nothing, or with the wire text of a part of it that failed without
+//! undoing it ([`crate::remote::CallActionAnswer`]).
 
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{DeviceId, UserId};
@@ -35,7 +37,7 @@ pub const MODULE_META: &str = "teamcraft-calls";
 pub const WORKLET_META: &str = "teamcraft-call-worklet";
 /// `start(callbacks)`: once, after the module is initialized.
 pub const EXPORT_START: &str = "start";
-/// `act(CallAction JSON) -> Promise`.
+/// `act(CallAction JSON) -> Promise<undefined | string>` (see the module docs).
 pub const EXPORT_ACT: &str = "act";
 /// `signal(CallSignal JSON)`: a call event from the gateway.
 pub const EXPORT_SIGNAL: &str = "signal";

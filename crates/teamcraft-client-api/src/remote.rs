@@ -16,8 +16,8 @@ use crate::admin::DeviceInfo;
 use crate::backend::{ChatBackend, LoadingList, SearchBackend};
 use crate::calls::{
   ActiveCall, BackgroundEffect, BackgroundImageInfo, CallEndReason, CallHistoryItem, CallMoveOffer,
-  CallRequest, CallStatusSounds, IncomingCall, MediaDevices, OrgBackgroundRule, OrgBackgrounds, PushToTalk,
-  RemoteVideoTrack, RunningCall, ScreenContentMode,
+  CallRequest, CallStatusSounds, IncomingCall, JoinMedia, MediaDevices, OrgBackgroundRule, OrgBackgrounds,
+  PushToTalk, RemoteVideoTrack, RunningCall, ScreenContentMode,
 };
 use crate::live::LiveSnapshot;
 use crate::model::{
@@ -60,14 +60,23 @@ pub struct CallSnapshot {
 }
 
 /// Something the user did in or about a call.
+///
+/// The desktop shell (`call_action`) and the browser's call module (`act`) carry it out. A failed
+/// action answers with `ActionFailure` wire text. One that went through answers with nothing, or
+/// with the wire text of a part of it that failed without undoing it ([`CallActionAnswer`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum CallAction {
+  /// Joins with the pre-join screen's choice ([`JoinMedia`]).
   Join {
     request: CallRequest,
-    /// Join with the microphone muted from the first frame (the pre-join choice).
+    /// Join with the microphone muted from the first frame.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     is_muted: bool,
+    /// Start the camera with the call (#453). Older UIs send no flag and turn the camera on with
+    /// [`CallAction::SetCamera`] after the join.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    is_camera_on: bool,
   },
   Leave,
   Decline {
@@ -139,6 +148,22 @@ pub enum CallAction {
   },
   #[serde(other)]
   Unknown,
+}
+
+/// What a [`CallAction`] that went through answers: `None`, or a part of it that failed without
+/// undoing it, as `ActionFailure` wire text. A join whose camera didn't start (#453) is still a
+/// join: the call runs, and the UI says why the camera stayed off.
+pub type CallActionAnswer = Option<String>;
+
+impl CallAction {
+  /// Joins `request` with the pre-join choice.
+  pub fn join(request: CallRequest, media: JoinMedia) -> Self {
+    Self::Join {
+      request,
+      is_muted: media.is_muted,
+      is_camera_on: media.is_camera_on,
+    }
+  }
 }
 
 /// HTTP verbs the UI may use for authenticated server calls (the shell attaches the bearer token).
@@ -1595,22 +1620,67 @@ mod tests {
       serde_json::from_str::<CallAction>(r#"{"action":"raise_hand"}"#).expect("parse"),
       CallAction::Unknown
     );
-    let join = CallAction::Join {
-      request: CallRequest {
-        conversation: id_from_raw(5),
-        kind: crate::calls::CallKind::Direct,
-      },
-      is_muted: false,
+  }
+
+  /// #453: the pre-join choice travels with the join; a join without it (an older UI) starts
+  /// unmuted with the camera off, as before.
+  #[test]
+  fn a_join_carries_the_pre_join_choice() {
+    let request = CallRequest {
+      conversation: id_from_raw(5),
+      kind: crate::calls::CallKind::Direct,
     };
+    let plain = CallAction::join(request, JoinMedia::default());
     assert_eq!(
-      serde_json::to_string(&join).expect("serialize"),
+      serde_json::to_string(&plain).expect("serialize"),
       r#"{"action":"join","request":{"conversation":"5","kind":"direct"}}"#
     );
-    let muted: CallAction = serde_json::from_str(
-      r#"{"action":"join","request":{"conversation":"5","kind":"direct"},"is_muted":true}"#,
+    assert_eq!(
+      serde_json::from_str::<CallAction>(
+        r#"{"action":"join","request":{"conversation":"5","kind":"direct"}}"#
+      )
+      .expect("parse"),
+      plain
+    );
+    let chosen = CallAction::join(
+      request,
+      JoinMedia {
+        is_muted: true,
+        is_camera_on: true,
+      },
+    );
+    let json = r#"{"action":"join","request":{"conversation":"5","kind":"direct"},"is_muted":true,"is_camera_on":true}"#;
+    assert_eq!(serde_json::to_string(&chosen).expect("serialize"), json);
+    assert_eq!(serde_json::from_str::<CallAction>(json).expect("parse"), chosen);
+    let camera_only: CallAction = serde_json::from_str(
+      r#"{"action":"join","request":{"conversation":"5","kind":"direct"},"is_camera_on":true}"#,
     )
     .expect("parse");
-    assert!(matches!(muted, CallAction::Join { is_muted: true, .. }));
+    assert_eq!(
+      camera_only,
+      CallAction::Join {
+        request,
+        is_muted: false,
+        is_camera_on: true,
+      }
+    );
+  }
+
+  /// A call action answers `null`, or the failure of a part that didn't go through.
+  #[test]
+  fn a_call_action_answer_is_null_or_a_failure() {
+    assert_eq!(
+      serde_json::from_str::<CallActionAnswer>("null").expect("parse"),
+      None
+    );
+    let failure = crate::failure::ActionFailure::new(
+      crate::failure::FailureKind::Call(crate::failure::CallFailure::CameraInUse),
+      "busy",
+    )
+    .to_wire();
+    let answer: CallActionAnswer =
+      serde_json::from_str(&serde_json::to_string(&failure).expect("serialize")).expect("parse");
+    assert_eq!(answer, Some(failure));
   }
 
   #[test]

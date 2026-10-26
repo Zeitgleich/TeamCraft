@@ -5,7 +5,8 @@
 //!
 //! Actions run one after the other, in the order the user took them: a camera turned on right
 //! after joining reaches the media layer after the join. A failed action reaches the user
-//! (issue #322).
+//! (issue #322), and so does a part of one that failed without undoing it (a join whose camera
+//! didn't start, #453).
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -14,11 +15,11 @@ use std::rc::Rc;
 use leptos::task::spawn_local;
 use serde_json::json;
 use teamcraft_client_api::calls::{
-  ActiveCall, CallRequest, HuddleInfo, IncomingCall, MediaDevices, Participant, RemoteVideoTrack,
+  ActiveCall, CallRequest, HuddleInfo, IncomingCall, JoinMedia, MediaDevices, Participant, RemoteVideoTrack,
 };
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::model::{ConversationId, UserId};
-use teamcraft_client_api::remote::{CALL_CHANGED_EVENT, CallAction, CallSnapshot};
+use teamcraft_client_api::remote::{CALL_CHANGED_EVENT, CallAction, CallActionAnswer, CallSnapshot};
 
 use crate::auth::tauri::{call, listen};
 
@@ -173,12 +174,17 @@ impl RemoteCalls {
           break;
         };
         let is_join = matches!(action, CallAction::Join { .. });
-        if let Err(error) = calls.carry_out(action).await {
-          if is_join {
-            // async-ok: a Cell the calls share, not a signal.
-            calls.join_failures.set(calls.join_failures.get() + 1);
-          }
-          crate::feedback::report_failure(ActionFailure::from_wire(&error));
+        match calls.carry_out(action).await {
+          Ok(None) => {},
+          // The action went through (the call runs); only a part of it didn't.
+          Ok(Some(partial)) => crate::feedback::report_failure(ActionFailure::from_wire(&partial)),
+          Err(error) => {
+            if is_join {
+              // async-ok: a Cell the calls share, not a signal.
+              calls.join_failures.set(calls.join_failures.get() + 1);
+            }
+            crate::feedback::report_failure(ActionFailure::from_wire(&error));
+          },
         }
       }
       // async-ok: a Cell the calls share, not a signal.
@@ -195,8 +201,9 @@ impl RemoteCalls {
       let result = match link {
         CallLink::Shell => {
           let action = CallAction::TestSpeakers { maybe_device };
-          call::<()>("call_action", &json!({ "action": action }))
+          call::<CallActionAnswer>("call_action", &json!({ "action": action }))
             .await
+            .map(drop)
             .map_err(|error| ActionFailure::from_wire(&error))
         },
         // The page plays it itself, with the context the click started (speaker_test.rs).
@@ -209,13 +216,13 @@ impl RemoteCalls {
     });
   }
 
-  pub fn join(&self, request: CallRequest, is_muted: bool) {
-    self.act(CallAction::Join { request, is_muted });
+  pub fn join(&self, request: CallRequest, media: JoinMedia) {
+    self.act(CallAction::join(request, media));
   }
 
-  async fn carry_out(&self, action: CallAction) -> Result<(), String> {
+  async fn carry_out(&self, action: CallAction) -> Result<CallActionAnswer, String> {
     match &self.link {
-      CallLink::Shell => call::<()>("call_action", &json!({ "action": action })).await,
+      CallLink::Shell => call::<CallActionAnswer>("call_action", &json!({ "action": action })).await,
       #[cfg(target_arch = "wasm32")]
       CallLink::Page(host) => host.act(action).await,
     }
