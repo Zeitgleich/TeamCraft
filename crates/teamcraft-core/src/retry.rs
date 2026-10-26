@@ -47,6 +47,7 @@ mod tests {
     let unavailable = ApiError::Status {
       status: 503,
       maybe_body: Some(ErrorBody::new(ErrorCode::Unavailable, "later").with_retry_after_secs(30)),
+      maybe_retry_after: None,
     };
     assert_eq!(retry_after(&unavailable), Some(Duration::from_secs(30)));
     assert_eq!(
@@ -56,6 +57,7 @@ mod tests {
     let bare = ApiError::Status {
       status: 503,
       maybe_body: None,
+      maybe_retry_after: None,
     };
     assert_eq!(retry_after(&bare), None);
     assert_eq!(retry_after(&ApiError::Network("down".into())), None);
