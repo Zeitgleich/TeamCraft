@@ -246,6 +246,10 @@ is_desktop_attention_enabled = true
 # How long an "attentive" report counts; the session's gateway heartbeats renew it (keep it above
 # twice [gateway] heartbeat_interval_secs).
 attention_lease_secs = 75
+# The user's own activity on a desktop or web session (input, a message sent from it) holds phone
+# pushes back like attention for this long, also with the window in the background: the user is at
+# the computer. Keep it above 30 s (how often clients repeat "active" during input); 0: attention only.
+desktop_activity_secs = 120
 # Pushes held per user while a desktop is attentive; beyond that the oldest goes out at once.
 max_held_pushes_per_user = 100
 

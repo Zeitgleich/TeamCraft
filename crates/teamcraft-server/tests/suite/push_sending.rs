@@ -291,6 +291,50 @@ mod routing {
     app.stop().await;
   }
 
+  /// Issue #756: of four quick messages only the first reached the phone. The server pushes every
+  /// one of them, each naming its own message, so the app can add each line to the conversation's
+  /// notification; nothing collapses or throttles them per conversation.
+  #[tokio::test]
+  async fn every_message_of_a_quick_burst_is_pushed() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+    let carol_id = user_id(&app, &s.carol).await;
+    let dm = app
+      .post(&s.alice, "/dms", json!({"user_id": carol_id}))
+      .await
+      .id();
+    // An open desktop carol isn't at does not change that.
+    let desktop = register_device(&app, &s.carol).await;
+    let mut socket = ws::connect(&app, &s.carol, &desktop).await;
+    send_frame(
+      &mut socket,
+      &GatewayClientMessage::Attention { is_attentive: false },
+    )
+    .await;
+
+    let mut sent = Vec::new();
+    for n in 1..=4 {
+      sent.push(send(&app, &s.alice, &dm, &s.alice_device, n).await);
+    }
+    let pushes = recorder.wait_for(4).await;
+    assert_eq!(pushes.len(), 4, "{pushes:?}");
+    let mut pushed: Vec<String> = pushes
+      .iter()
+      .map(|push| {
+        assert_eq!(push.device, s.carol_push_device);
+        assert_eq!(push.wake_up.kind, PushKind::Mention);
+        assert_eq!(push.urgency, Urgency::High);
+        assert_eq!(push.wake_up.conversation_id.to_string(), dm);
+        push.wake_up.maybe_message_id.unwrap().to_string()
+      })
+      .collect();
+    pushed.sort();
+    sent.sort();
+    assert_eq!(pushed, sent);
+    app.stop().await;
+  }
+
   #[tokio::test]
   async fn muted_channels_and_do_not_disturb_suppress_pushes() {
     let recorder = Recorder::default();
@@ -1572,6 +1616,116 @@ mod attention {
     )
     .await;
 
+    mention_carol(&app, &s, 1).await;
+    assert_eq!(kinds(&recorder.wait_for(1).await), vec![PushKind::Mention]);
+    app.stop().await;
+  }
+
+  /// Issue #756: "push to the phone only when I'm not at the desktop". Input on the computer counts
+  /// although the app's window is in the background (or the webview reports its focus wrongly).
+  #[tokio::test]
+  async fn working_at_the_desktop_holds_the_phone_back_even_with_the_window_behind() {
+    let recorder = Recorder::default();
+    let Some(app) = start_with_grace(&recorder, 1).await else {
+      return;
+    };
+    let s = scene(&app).await;
+    let desktop = register_device(&app, &s.carol).await;
+    let mut socket = ws::connect(&app, &s.carol, &desktop).await;
+    send_frame(
+      &mut socket,
+      &GatewayClientMessage::Attention { is_attentive: false },
+    )
+    .await;
+    send_frame(
+      &mut socket,
+      &GatewayClientMessage::SetActivity {
+        activity: DeviceActivity::Active,
+      },
+    )
+    .await;
+
+    mention_carol(&app, &s, 1).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+      recorder.seen.lock().unwrap().is_empty(),
+      "held while carol works at the desktop"
+    );
+    // Still unread after the grace delay: the phone gets it.
+    assert_eq!(kinds(&recorder.wait_for(1).await), vec![PushKind::Mention]);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_desktop_going_idle_releases_a_held_push_at_once() {
+    let recorder = Recorder::default();
+    let Some(app) = start_with_grace(&recorder, 30).await else {
+      return;
+    };
+    let s = scene(&app).await;
+    let desktop = register_device(&app, &s.carol).await;
+    let mut socket = ws::connect(&app, &s.carol, &desktop).await;
+    send_frame(
+      &mut socket,
+      &GatewayClientMessage::Attention { is_attentive: false },
+    )
+    .await;
+    send_frame(
+      &mut socket,
+      &GatewayClientMessage::SetActivity {
+        activity: DeviceActivity::Active,
+      },
+    )
+    .await;
+    mention_carol(&app, &s, 1).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(recorder.seen.lock().unwrap().is_empty(), "held");
+
+    // The gateway takes one activity change a second; then the screen locks.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    send_frame(
+      &mut socket,
+      &GatewayClientMessage::SetActivity {
+        activity: DeviceActivity::Idle,
+      },
+    )
+    .await;
+    assert_eq!(kinds(&recorder.wait_for(1).await), vec![PushKind::Mention]);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_desktop_without_recent_activity_never_delays_the_phone() {
+    let recorder = Recorder::default();
+    let Some(app) = TestApp::start_with_push(
+      |settings| {
+        settings.notifications.mobile_push_delay_secs = 30;
+        settings.notifications.desktop_activity_secs = 1;
+      },
+      recorder.dispatcher(),
+    )
+    .await
+    else {
+      return;
+    };
+    let s = scene(&app).await;
+    let desktop = register_device(&app, &s.carol).await;
+    let mut socket = ws::connect(&app, &s.carol, &desktop).await;
+    send_frame(
+      &mut socket,
+      &GatewayClientMessage::Attention { is_attentive: false },
+    )
+    .await;
+    send_frame(
+      &mut socket,
+      &GatewayClientMessage::SetActivity {
+        activity: DeviceActivity::Active,
+      },
+    )
+    .await;
+    // Carol left the desktop without locking it: once the activity window passed, the phone is
+    // pushed at once.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
     mention_carol(&app, &s, 1).await;
     assert_eq!(kinds(&recorder.wait_for(1).await), vec![PushKind::Mention]);
     app.stop().await;

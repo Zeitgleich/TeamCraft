@@ -57,7 +57,8 @@ pub enum Attention {
   Away,
   /// A phone or tablet has the app in the foreground.
   MobileActive,
-  /// The user is looking at a desktop or web session.
+  /// The user is at a desktop or web session: looking at it, or using the computer
+  /// ([`crate::gateway::Hub::active_devices`]).
   DesktopAttentive,
 }
 
@@ -104,8 +105,9 @@ pub struct RecipientState {
 /// 2. Do-not-disturb suppresses the push unless an override applies (decided by the caller).
 /// 3. Mentions, direct messages and replies in followed threads push; otherwise only `all` channels
 ///    do, and integration channels only for mentions.
-/// 4. Unless the user chose to be pushed always: no push while a phone is in use; while a desktop
-///    is attentive, the push waits for the grace delay (or is dropped without one).
+/// 4. Unless the user chose to be pushed always: no push while a phone is in use; while the user is
+///    at a desktop (attentive, or recently active on it), the push waits for the grace delay (or is
+///    dropped without one).
 pub fn decide(state: RecipientState) -> Result<Decision, Skip> {
   if state.level_is_none {
     return Err(Skip::Muted);

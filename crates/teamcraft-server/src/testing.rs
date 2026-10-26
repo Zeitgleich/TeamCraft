@@ -796,6 +796,7 @@ fn new_hub(settings: &Settings) -> Hub {
     max_sessions_per_device: settings.gateway.max_sessions_per_device,
     max_sessions_per_user: settings.gateway.max_sessions_per_user,
     attention_lease: Duration::from_secs(settings.notifications.attention_lease_secs),
+    desktop_activity_window: Duration::from_secs(settings.notifications.desktop_activity_secs),
   })
 }
 
