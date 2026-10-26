@@ -90,7 +90,7 @@ struct AttachmentView: View {
       VStack(alignment: .leading, spacing: 2) {
         Text(file.fileName).font(.subheadline.weight(.semibold)).lineLimit(2)
         Text(FileSizeText.format(file.sizeBytes)).font(.caption)
-          .foregroundStyle(isInBubble ? AnyShapeStyle(.secondary) : AnyShapeStyle(Theme.textMuted))
+          .foregroundStyle(isInBubble ? AnyShapeStyle(HierarchicalShapeStyle.secondary) : AnyShapeStyle(Theme.textMuted))
         FileStateLine(file: file)
       }
       if !isInBubble { Spacer(minLength: 0) }
@@ -102,7 +102,7 @@ struct AttachmentView: View {
   }
 
   private var rowBackground: AnyShapeStyle {
-    isInBubble ? AnyShapeStyle(.primary.opacity(0.08)) : AnyShapeStyle(Theme.surface)
+    isInBubble ? AnyShapeStyle(HierarchicalShapeStyle.primary.opacity(0.08)) : AnyShapeStyle(Theme.surface)
   }
 
   private func open() {
@@ -280,9 +280,9 @@ struct LinkPreviewCard: View {
     .frame(maxWidth: .infinity, alignment: .leading)
     .padding(10)
     .padding(.leading, 3)
-    .background(isInBubble ? AnyShapeStyle(.primary.opacity(0.08)) : AnyShapeStyle(Theme.surface))
+    .background(isInBubble ? AnyShapeStyle(HierarchicalShapeStyle.primary.opacity(0.08)) : AnyShapeStyle(Theme.surface))
     .overlay(alignment: .leading) {
-      Rectangle().fill(isInBubble ? AnyShapeStyle(.primary) : AnyShapeStyle(Theme.accent)).frame(width: 3)
+      Rectangle().fill(isInBubble ? AnyShapeStyle(HierarchicalShapeStyle.primary) : AnyShapeStyle(Theme.accent)).frame(width: 3)
     }
     .clipShape(RoundedRectangle(cornerRadius: 8))
     if let url = preview.maybeOpenableURL {
@@ -293,7 +293,7 @@ struct LinkPreviewCard: View {
   }
 
   private var muted: AnyShapeStyle {
-    isInBubble ? AnyShapeStyle(.secondary) : AnyShapeStyle(Theme.textMuted)
+    isInBubble ? AnyShapeStyle(HierarchicalShapeStyle.secondary) : AnyShapeStyle(Theme.textMuted)
   }
 }
 

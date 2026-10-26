@@ -246,7 +246,7 @@ struct MessageBodyView: View {
         .opacity(0.85)
         .padding(.leading, 11)
         .overlay(alignment: .leading) {
-          RoundedRectangle(cornerRadius: 1.5).fill(.primary.opacity(0.45)).frame(width: 3)
+          RoundedRectangle(cornerRadius: 1.5).fill(HierarchicalShapeStyle.primary.opacity(0.45)).frame(width: 3)
         }
     case .items(let kind, let items):
       VStack(alignment: .leading, spacing: 2) {
@@ -427,7 +427,7 @@ struct BubbleReplyQuote: View {
     }
     .frame(maxWidth: .infinity, alignment: .leading)
     .padding(.leading, 11).padding(.trailing, 8).padding(.vertical, 6)
-    .background(.primary.opacity(0.08))
+    .background(HierarchicalShapeStyle.primary.opacity(0.08))
     .overlay(alignment: .leading) { Rectangle().fill(accent).frame(width: 3) }
     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     .accessibilityElement(children: .combine)
