@@ -33,7 +33,8 @@ private let bubbleTextInset: CGFloat = 9
 /// One message as a chat bubble (#713, the same design as the Android app): own messages on the
 /// trailing side in the accent, others on the leading side in a neutral bubble with the sender's
 /// name and avatar once per group (channels and groups). Reactions, "not sent" and the thread link
-/// go below the bubble. Messages without text and files (joins, renames) are a quiet line instead.
+/// go below the bubble. System messages (joins, renames, who added whom) are a quiet line instead,
+/// worded as on desktop and web (#769).
 struct MessageRow: View {
   let entry: FeedEntry
   let maybeExtras: MessageExtras?
@@ -45,8 +46,8 @@ struct MessageRow: View {
   var displayNames: [String: String] = [:]
 
   var body: some View {
-    if isEvent {
-      Text("chat_preview_event")
+    if let line = SystemLine(message: message, maybeExtras: maybeExtras, names: displayNames) {
+      Text(line.text)
         .font(.footnote.italic())
         .foregroundStyle(Theme.textMuted)
         .multilineTextAlignment(.center)
@@ -58,9 +59,6 @@ struct MessageRow: View {
   }
 
   private var message: MessageItem { entry.message }
-  private var files: [FileInfo] { maybeExtras?.files ?? [] }
-  private var isDeleted: Bool { maybeExtras?.isDeleted == true }
-  private var isEvent: Bool { message.body.isEmpty && files.isEmpty && !isDeleted }
   private var showsSender: Bool { look.showsSenders && !isMine }
 
   private var bubbleRow: some View {
@@ -341,9 +339,27 @@ struct BubbleFooter: View {
     } else if message.isPending {
       // Not confirmed by the server yet; the core keeps retrying in the background.
       Image(systemName: "clock").accessibilityLabel(Text("pending"))
+    } else if maybeExtras?.isRead == true {
+      // The other member of the DM read it: two ticks at the bubble's full text colour, where the
+      // single "sent" tick is muted (desktop and web: two accent ticks, #769).
+      DoubleCheckmark().foregroundStyle(Theme.onOwnBubble).accessibilityLabel(Text("message_read"))
     } else {
       Image(systemName: "checkmark").accessibilityLabel(Text("message_sent"))
     }
+  }
+}
+
+/// Two overlapping ticks, the read state of an own message. SF Symbols has no double tick, so two
+/// `checkmark`s share some room; the overlap scales with the text like the symbols do.
+struct DoubleCheckmark: View {
+  @ScaledMetric(relativeTo: .caption2) private var overlap: CGFloat = 5
+
+  var body: some View {
+    HStack(spacing: -overlap) {
+      Image(systemName: "checkmark")
+      Image(systemName: "checkmark")
+    }
+    .accessibilityElement(children: .ignore)
   }
 }
 
