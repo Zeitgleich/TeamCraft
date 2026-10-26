@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use teamcraft_client_api::window_chrome::{TitleBar, WindowAction, WindowChrome};
+use teamcraft_client_api::window_chrome::{TitleBar, TrayIconStyle, WindowAction, WindowChrome};
 use teamcraft_proto::{AvatarContentType, UserId};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
@@ -544,14 +544,16 @@ pub async fn set_zoom(percent: u16) {
   }
 }
 
-/// The desktop shell's own preferences (closing to the tray, starting minimized, the title bar).
-/// Sent back whole, so every field the shell has must be here.
+/// The desktop shell's own preferences (closing to the tray, starting minimized, the title bar,
+/// the tray icon's look). Sent back whole, so every field the shell has must be here.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellPrefs {
   pub is_close_to_tray: bool,
   pub is_start_minimized: bool,
   #[serde(default)]
   pub title_bar: TitleBar,
+  #[serde(default)]
+  pub tray_icon: TrayIconStyle,
 }
 
 /// Desktop only: who draws the title bar and which window controls the UI shows.
