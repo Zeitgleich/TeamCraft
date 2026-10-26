@@ -26,6 +26,7 @@ use crate::components::channel_preview::ChannelPreview;
 use crate::components::channel_view::ChannelView;
 use crate::components::edge_swipe::EdgeSwipeBack;
 use crate::components::file_drop;
+use crate::components::files_view::FilesView;
 use crate::components::getting_started::GettingStarted;
 use crate::components::guest_join::GuestJoinPage;
 use crate::components::home::{HomeSidebar, HomeStart, NewMessageDialog};
@@ -284,6 +285,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
             MainView::Search => lazy_area(Place::Pane, || areas::search(())),
             MainView::Meetings => lazy_area(Place::Pane, || areas::meetings(())),
             MainView::Saved => view! { <SavedView /> }.into_any(),
+            MainView::Files => view! { <FilesView /> }.into_any(),
             MainView::Activity => view! { <ActivityView /> }.into_any(),
             MainView::Calls => view! { <CallsView /> }.into_any(),
             MainView::Directory => lazy_area(Place::Pane, || areas::directory(())),

@@ -671,6 +671,27 @@ impl Default for ComposerPrefs {
   }
 }
 
+/// A step of the "Set up your workspace" checklist on Chats.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SetupStep {
+  ProfilePicture,
+  InstallApp,
+  BrowseChannels,
+  InvitePeople,
+  /// A step a newer version knows; ignored here.
+  #[serde(other)]
+  Unknown,
+}
+
+/// Progress through the setup checklist, remembered with the other preferences of this account.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OnboardingPrefs {
+  pub done: Vec<SetupStep>,
+  pub is_dismissed: bool,
+}
+
 /// Everything in one place, stored as a single JSON document.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -681,6 +702,7 @@ pub struct Preferences {
   pub display: DisplayPrefs,
   pub sidebar: SidebarPrefs,
   pub composer: ComposerPrefs,
+  pub onboarding: OnboardingPrefs,
 }
 
 impl Preferences {

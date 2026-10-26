@@ -2670,3 +2670,23 @@ rail-create-short = Neu
 rail-focus = Fokusmodus: Benachrichtigungen pausieren
 rail-focus-short = Fokus
 focus-30-minutes = Für 30 Minuten
+
+# Dateien-Ansicht und Einrichtungs-Checkliste (Issue #301)
+sidebar-files = Dateien
+files-title = Dateien
+files-filter = Dateien filtern
+files-filter-all = Alle
+files-filter-media = Bilder und Videos
+files-filter-documents = Dokumente
+files-all-empty = Dateien und Bilder aus allen deinen Unterhaltungen erscheinen hier.
+setup-title = Arbeitsbereich einrichten
+setup-progress = { $done } von { $total }
+setup-dismiss = Checkliste ausblenden
+setup-picture = Profilbild hinzufügen
+setup-picture-hint = Damit dich dein Team erkennt.
+setup-app = Mobile App holen
+setup-app-hint = Anrufe und Nachrichten auf dem Handy.
+setup-channels = Kanäle durchstöbern
+setup-channels-hint = Tritt denen bei, die dich interessieren.
+setup-invite = Personen einladen
+setup-invite-hint = Hol dein Team dazu.

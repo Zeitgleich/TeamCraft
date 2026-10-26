@@ -2670,3 +2670,23 @@ rail-create-short = Create
 rail-focus = Focus mode: pause notifications
 rail-focus-short = Focus
 focus-30-minutes = For 30 minutes
+
+# Files view and setup checklist (issue #301)
+sidebar-files = Files
+files-title = Files
+files-filter = Filter files
+files-filter-all = All
+files-filter-media = Images and videos
+files-filter-documents = Documents
+files-all-empty = Files and images shared in any of your conversations show up here.
+setup-title = Set up your workspace
+setup-progress = { $done } of { $total }
+setup-dismiss = Hide the checklist
+setup-picture = Add a profile picture
+setup-picture-hint = So colleagues recognize you.
+setup-app = Get the mobile app
+setup-app-hint = Calls and messages on your phone.
+setup-channels = Browse channels
+setup-channels-hint = Join the ones that matter to you.
+setup-invite = Invite people
+setup-invite-hint = Bring your team along.

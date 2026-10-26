@@ -9,6 +9,7 @@ use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::huddle_bar::CallPill;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
+use crate::components::setup_checklist::SetupChecklist;
 use crate::components::sidebar::GlobalEntries;
 
 use crate::components::people_picker::PeoplePicker;
@@ -361,6 +362,7 @@ pub fn HomeStart() -> impl IntoView {
       <button class="btn btn-primary" on:click=move |_| state.overlay.set(Overlay::NewMessage)>
         {move || i18n.t("dm-new")}
       </button>
+      <SetupChecklist />
     </section>
   }
 }

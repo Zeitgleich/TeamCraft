@@ -119,6 +119,8 @@ pub enum MainView {
   Search,
   /// Messages the user saved for later.
   Saved,
+  /// Every file the user can see, across conversations.
+  Files,
   /// Mentions, reactions to the user's messages and replies in their threads.
   Activity,
   /// The user's calls: missed, incoming and outgoing.
@@ -631,6 +633,7 @@ impl AppState {
       | MainView::Search
       | MainView::Meetings
       | MainView::Saved
+      | MainView::Files
       | MainView::Activity
       | MainView::Calls
       | MainView::Directory => true,
@@ -764,6 +767,7 @@ impl AppState {
       | MainView::Search
       | MainView::Meetings
       | MainView::Saved
+      | MainView::Files
       | MainView::Activity
       | MainView::Calls
       | MainView::Directory
@@ -1286,6 +1290,12 @@ impl AppState {
     self.overlay.set(Overlay::None);
   }
 
+  pub fn open_files(&self) {
+    self.view.set(MainView::Files);
+    self.panel.set(SidePanel::Closed);
+    self.overlay.set(Overlay::None);
+  }
+
   pub fn open_activity(&self) {
     self.view.set(MainView::Activity);
     self.panel.set(SidePanel::Closed);
@@ -1498,6 +1508,7 @@ impl AppState {
       MainView::Admin(section) => Route::Admin(section),
       MainView::Search => Route::Search,
       MainView::Saved => Route::Saved,
+      MainView::Files => Route::Files,
       MainView::Activity => Route::Activity,
       MainView::Calls => Route::Calls,
       MainView::Meetings => Route::Meetings,
@@ -1682,6 +1693,7 @@ impl AppState {
       },
       Route::People => self.open_directory(),
       Route::Saved => self.open_saved(),
+      Route::Files => self.open_files(),
       Route::Search => self.open_search(None),
       Route::Settings(page) => self.show_settings(page),
       Route::Admin(section) => {
@@ -1941,6 +1953,7 @@ mod tests {
         Route::Meetings,
         Route::People,
         Route::Saved,
+        Route::Files,
         Route::Search,
         Route::Settings(SettingsPage::Section(SettingsTab::Security)),
         Route::Admin(AdminSection::Users),
