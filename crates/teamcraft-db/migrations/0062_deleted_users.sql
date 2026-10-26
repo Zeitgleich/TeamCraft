@@ -5,6 +5,16 @@ ALTER TABLE users ADD COLUMN deleted_at timestamptz;
 ALTER TABLE users
   ADD CONSTRAINT users_deleted_is_deactivated CHECK (deleted_at IS NULL OR deactivated_at IS NOT NULL);
 
+-- Identities a deletion released: the next sign-in with one creates a new account, but tokens
+-- from a sign-in before the deletion are refused, so a device of the deleted person can't quietly
+-- open that account. One row per deleted identity, kept like the tombstone.
+CREATE TABLE released_identities (
+  issuer      text        NOT NULL,
+  subject     text        NOT NULL,
+  released_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (issuer, subject)
+);
+
 -- Direct messages deleted with a user, per remaining participant: a device that was offline when
 -- the gateway announced it drops the conversation and its local history on the next full sync.
 -- Kept for a while (the housekeeping prunes old rows), then such a device only drops the listing.

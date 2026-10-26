@@ -211,15 +211,17 @@ Deactivation and removal are two steps (issue #631); deletion is the final one (
     the user is listed as left in the group for an admin who is (below). The
     remaining participants' devices drop it with its local history when the gateway announces
     `conversation_delete`, or on their next full sync (`deleted_conversation_ids` of
-    `GET /conversations`, remembered for 180 days).
+    `GET /conversations`, remembered for `[policy] deleted_conversations_kept_days`, default 180).
   - **Channels.** The user's messages stay; clients show the author as "Deleted user" (in their own
     language) in messages, profiles and member lists, and leave the tombstone out of people lists,
     the DM list and the mention picker. Optionally deleting their messages is out of scope: the
     server can't read them.
   - **The identity.** The OIDC issuer of the row gets a `deleted:{id}:` prefix, so the issuer and
-    subject pair is free and the identity provider sync no longer sees the account. An access token
-    the person still holds creates a new account on its next request; to keep them out, disable them
-    at the identity provider too.
+    subject pair is free and the identity provider sync no longer sees the account. Only a sign-in
+    after the deletion creates the new account: tokens from an earlier sign-in (`auth_time`, else
+    `iat`, at or before the deletion), also ones refreshed since, are refused on REST, the gateway
+    and device linking with 401 `account_deleted`. To keep the person out for good, disable them at
+    the identity provider too.
   - **Signed roster.** A deleted admin or owner stays in the signed roster until an owner signs a
     new one; their devices are revoked, so the entry grants nothing.
 - **Users left in encryption groups** (issue #734). The console's "Spaces and channels" lists, as one

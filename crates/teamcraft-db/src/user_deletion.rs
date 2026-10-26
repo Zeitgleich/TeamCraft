@@ -167,6 +167,23 @@ impl Database {
     Ok(keys)
   }
 
+  /// When a deletion released this identity, if one did: tokens from a sign-in up to then are
+  /// refused.
+  pub async fn identity_released_at(
+    &self,
+    issuer: &str,
+    subject: &str,
+  ) -> Result<Option<OffsetDateTime>, DbError> {
+    let released = sqlx::query_scalar!(
+      "SELECT released_at FROM released_identities WHERE issuer = $1 AND subject = $2",
+      issuer,
+      subject,
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    Ok(released)
+  }
+
   /// Owners and admins whose accounts are active (by the role the identity provider gave them).
   pub async fn active_admin_counts(&self) -> Result<ActiveAdminCounts, DbError> {
     let row = sqlx::query!(
@@ -240,6 +257,16 @@ impl Database {
              OR (s.issuer = $2 AND s.subject = $1::bigint::text))"#,
       id,
       LOCAL_ISSUER,
+    )
+    .execute(&mut *tx)
+    .await?;
+    // Released before it changes; the first deletion's time counts.
+    sqlx::query!(
+      r#"INSERT INTO released_identities (issuer, subject)
+         SELECT oidc_issuer, oidc_subject FROM users
+         WHERE id = $1 AND deleted_at IS NULL AND oidc_issuer IS NOT NULL AND oidc_subject IS NOT NULL
+         ON CONFLICT (issuer, subject) DO UPDATE SET released_at = EXCLUDED.released_at"#,
+      id,
     )
     .execute(&mut *tx)
     .await?;

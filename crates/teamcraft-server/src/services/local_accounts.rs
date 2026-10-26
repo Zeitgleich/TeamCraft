@@ -575,6 +575,7 @@ pub async fn validate_session_token(
     is_email_verified: true,
     role: Role::Guest,
     issued_at: claims.iat,
+    authenticated_at: claims.iat,
     maybe_session_id: Some(claims.sid),
     // Checked at sign-in; the policy's session limits were checked just now.
     authentication_methods: vec!["pwd".into(), "otp".into()],

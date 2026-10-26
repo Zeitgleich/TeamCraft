@@ -246,7 +246,8 @@ impl ApiError {
         | AuthError::InvalidToken(_)
         | AuthError::Expired(_)
         | AuthError::SessionEnded
-        | AuthError::SessionTimedOut,
+        | AuthError::SessionTimedOut
+        | AuthError::AccountDeleted,
       ) => StatusCode::UNAUTHORIZED,
       Self::Auth(AuthError::NoTeamcraftRole | AuthError::AccountDeactivated)
       | Self::Forbidden(_)
@@ -281,6 +282,7 @@ impl ApiError {
       Self::Auth(AuthError::SessionTimedOut) => ErrorCode::SessionTimedOut,
       Self::Auth(AuthError::NoTeamcraftRole) => ErrorCode::NoTeamcraftRole,
       Self::Auth(AuthError::AccountDeactivated) => ErrorCode::AccountDeactivated,
+      Self::Auth(AuthError::AccountDeleted) => ErrorCode::AccountDeleted,
       Self::Forbidden(_) => ErrorCode::Forbidden,
       Self::Auth(AuthError::KeysUnavailable(_)) => ErrorCode::Unavailable,
       Self::NotFound { code, .. } => code.clone(),
@@ -389,6 +391,11 @@ mod tests {
         AuthError::AccountDeactivated,
         StatusCode::FORBIDDEN,
         ErrorCode::AccountDeactivated,
+      ),
+      (
+        AuthError::AccountDeleted,
+        StatusCode::UNAUTHORIZED,
+        ErrorCode::AccountDeleted,
       ),
       (
         AuthError::KeysUnavailable("x".into()),

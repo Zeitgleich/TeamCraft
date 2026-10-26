@@ -106,6 +106,9 @@ default_channels = []
 # days to remove them from all chats automatically that long after the deactivation (their
 # devices leave every group, keys rotate). Unset (the default): never automatically.
 # remove_deactivated_after_days = 90
+# Direct messages deleted with a deleted account are remembered this many days for the other
+# participants, so a device offline that long still drops them with their local history.
+deleted_conversations_kept_days = 180
 
 [limits]
 max_ciphertext_bytes = 1048576

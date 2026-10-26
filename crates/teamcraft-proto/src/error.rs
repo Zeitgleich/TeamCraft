@@ -18,6 +18,9 @@ wire_enum! {
     /// The account is deactivated (suspended by an admin or the identity provider); signing in is
     /// refused until it is reactivated.
     AccountDeactivated => "account_deactivated",
+    /// The token comes from a sign-in before the account was deleted (admin.md §3.2.1); signing
+    /// in again creates a new account.
+    AccountDeleted => "account_deleted",
     Forbidden => "forbidden",
     UserNotFound => "user_not_found",
     SpaceNotFound => "space_not_found",
@@ -207,6 +210,7 @@ mod tests {
       ErrorCode::SessionTimedOut,
       ErrorCode::NoTeamcraftRole,
       ErrorCode::AccountDeactivated,
+      ErrorCode::AccountDeleted,
       ErrorCode::Forbidden,
       ErrorCode::UserNotFound,
       ErrorCode::SpaceNotFound,

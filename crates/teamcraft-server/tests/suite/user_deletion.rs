@@ -193,17 +193,40 @@ mod effects {
   }
 
   #[tokio::test]
-  async fn the_next_sign_in_with_the_same_identity_creates_a_new_account() {
+  async fn only_a_sign_in_after_the_deletion_creates_a_new_account() {
     let app = app!();
     let (bob, carol) = (admin(), member("carol"));
-    let old_id = user_id(&app, &carol).await;
+    let signed_in = unix_now() - 60;
+    let old_token = app.token_issued_at(&carol, signed_in);
+    let (status, body) = get_with(&app, &old_token, "/me").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let old_id = body["id"].as_str().unwrap().to_owned();
+    let device = register_device(&app, &carol).await;
     let deleted = app.delete(&bob, &format!("/admin/users/{old_id}")).await;
     assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
 
-    let new_id = user_id(&app, &carol).await;
-    assert_ne!(new_id, old_id, "the identity provider's identity was released");
-    let me = app.get(&carol, "/me").await;
-    assert_eq!(me.body["username"], "carol");
+    // A token from the old sign-in, also one refreshed since (same `auth_time`), opens nothing.
+    let (status, body) = get_with(&app, &old_token, "/me").await;
+    assert_eq!(
+      (status, body["error_code"].as_str()),
+      (StatusCode::UNAUTHORIZED, Some("account_deleted"))
+    );
+    let refreshed = app.token_with(&carol, unix_now() + 5, &json!({"auth_time": signed_in}));
+    let (status, body) = get_with(&app, &refreshed, "/me").await;
+    assert_eq!(
+      (status, body["error_code"].as_str()),
+      (StatusCode::UNAUTHORIZED, Some("account_deleted"))
+    );
+    // Same on the gateway.
+    let refusal = identify_with(&app, &old_token, &device).await;
+    assert!(refusal.contains("account_deleted"), "{refusal}");
+
+    // A fresh sign-in creates a new account.
+    let fresh = app.token_issued_at(&carol, unix_now() + 5);
+    let (status, body) = get_with(&app, &fresh, "/me").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_ne!(body["id"].as_str().unwrap(), old_id, "the identity was released");
+    assert_eq!(body["username"], "carol");
     let old = app.get(&bob, &format!("/users/{old_id}")).await;
     assert_eq!(old.body["is_deleted"], true);
     app.stop().await;
@@ -300,6 +323,53 @@ mod direct_messages {
     assert_eq!(kept.body["members"].as_array().unwrap().len(), 3);
     app.stop().await;
   }
+}
+
+fn unix_now() -> i64 {
+  i64::try_from(now_secs()).unwrap()
+}
+
+/// A GET with this exact token (status and JSON body).
+async fn get_with(app: &TestApp, token: &str, path: &str) -> (StatusCode, serde_json::Value) {
+  let response = app
+    .http
+    .get(format!("{}/api/v1{path}", app.base_url))
+    .bearer_auth(token)
+    .send()
+    .await
+    .unwrap();
+  let status = response.status();
+  (status, response.json().await.unwrap_or(serde_json::Value::Null))
+}
+
+/// What the gateway answers an identify with this token: the text frames until it goes quiet or
+/// closes.
+async fn identify_with(app: &TestApp, token: &str, device: &str) -> String {
+  let (mut socket, _) = tokio_tungstenite::connect_async(&app.ws_url).await.unwrap();
+  socket.next().await;
+  let identify = GatewayClientMessage::Identify {
+    token: token.to_owned(),
+    device_id: serde_json::from_value(json!(device)).unwrap(),
+    activity: DeviceActivity::Active,
+  };
+  socket
+    .send(Message::Text(serde_json::to_string(&identify).unwrap().into()))
+    .await
+    .unwrap();
+  let mut seen = String::new();
+  while let Ok(Some(Ok(frame))) = tokio::time::timeout(Duration::from_millis(700), socket.next()).await {
+    match frame {
+      Message::Text(text) => seen.push_str(text.as_str()),
+      Message::Close(maybe_frame) => {
+        if let Some(frame) = maybe_frame {
+          seen.push_str(frame.reason.as_str());
+        }
+        break;
+      },
+      _ => {},
+    }
+  }
+  seen
 }
 
 type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;

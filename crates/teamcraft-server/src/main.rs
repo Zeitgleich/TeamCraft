@@ -508,11 +508,7 @@ fn spawn_account_housekeeping(state: AppState) {
         Ok(removed) => info!(removed, "removed long-deactivated users from all chats"),
         Err(error) => warn!(%error, "removing deactivated users from chats failed"),
       }
-      match state
-        .database
-        .prune_deleted_conversations(now - admin::DELETED_CONVERSATION_MEMORY)
-        .await
-      {
+      match admin::prune_deleted_conversations(&state, now).await {
         Ok(0) => {},
         Ok(pruned) => info!(pruned, "forgot old deleted direct messages"),
         Err(error) => warn!(%error, "forgetting deleted direct messages failed"),

@@ -29,10 +29,6 @@ const REMOVAL_SWEEP_BATCH: i64 = 50;
 /// The identity provider sync deactivating this many users within an hour looks like an outage or
 /// a misconfiguration, not people leaving: the automatic removal leaves them to an admin.
 const MASS_OIDC_DEACTIVATION: i64 = 10;
-/// How long a direct message deleted with a deleted account is remembered for the remaining
-/// participants, so a device offline that long still drops it with its local history on the
-/// next sync; after that it only disappears from the list.
-pub const DELETED_CONVERSATION_MEMORY: time::Duration = time::Duration::days(180);
 
 pub async fn list_spaces(
   state: &AppState,
@@ -449,6 +445,14 @@ fn admins_remain_without(role: Option<&str>, counts: ActiveAdminCounts) -> Resul
     Some("owner" | "admin") if counts.admins <= 1 => Err(ApiError::LastAdmin),
     _ => Ok(()),
   }
+}
+
+/// Forgets direct messages deleted longer ago than `[policy] deleted_conversations_kept_days`.
+/// Run with the account housekeeping; returns how many records went.
+pub async fn prune_deleted_conversations(state: &AppState, now: OffsetDateTime) -> Result<u64, ApiError> {
+  let days = state.settings.get().policy.deleted_conversations_kept_days.max(1);
+  let cutoff = now - time::Duration::days(i64::from(days));
+  Ok(state.database.prune_deleted_conversations(cutoff).await?)
 }
 
 /// Deletes the user's 1:1 direct messages, and group DMs that would keep at most one other person,
