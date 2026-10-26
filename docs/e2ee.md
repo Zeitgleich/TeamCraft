@@ -71,8 +71,8 @@ key only keeps the passwords out of database dumps and backups ([admin.md](admin
   device list through `GET /users/{id}/enrollment`, which answers with whichever of the two the user
   has published (neither before their first device is enrolled) instead of a 404; against a server
   without it they fall back to the single endpoints.
-- **Removals need a signer.** A removal the server reports (an admin's deactivation, a revoked device)
-  is only a hint; clients don't sign a removal on the server's word. The device that revokes signs
+- **Removals need a signer.** A removal the server reports (an admin's "remove from all chats", a
+  revoked device) is only a hint; clients don't sign a removal on the server's word. The device that revokes signs
   (above); an admin removes people with a signed change any member commits, also in conversations the
   admin isn't in (admin.md §2.2).
 - **Other devices finish a revocation.** If the revoking device is lost after it published the list
@@ -555,6 +555,17 @@ its own. See [admin.md](admin.md) §2.
   ID wasn't applied before, and the commit's add/remove proposals do exactly what the change says.
   MLS external proposals from a registered admin key are a later option; the signed change format
   stays the same.
+- **Deactivation suspends, removal rotates keys** (admin.md §3.2.1). Deactivating an account changes
+  no group: the user's devices stay members and new messages are still encrypted to them, so a
+  reactivation needs no recovery and no re-adding. The server refuses the account every request
+  and sends it no pushes, but it is untrusted: a compromised server could keep delivering that
+  ciphertext to a suspended user's devices, which can still decrypt it. That is the residual risk
+  of a suspension. "Remove from all chats" closes it: the admin's client signs the user's removal
+  from every channel, members commit it and the epoch keys rotate; then the server revokes the
+  devices. It is not undone by a reactivation. The automatic removal after
+  `remove_deactivated_after_days` is the server's alone and changes no group (A8); those users are
+  listed for admins until one removes them. Admins should remove people who left the organization
+  rather than only suspend them.
 - **Exception: further devices of existing members.** A commit may add devices of users who already
   have a device in the group without a signed change, because each device is cross-signed by its
   user's identity key (§3). Removing anything always needs a signed change.

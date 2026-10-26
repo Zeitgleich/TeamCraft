@@ -92,6 +92,9 @@ async fn handshake(
     } => {
       let caller = authenticate(state, socket, &token, device_id, ip).await?;
       let attached = state.hub.open_session(caller.user.id, device_id, activity);
+      if !is_still_active(state, socket, caller.user.id, &attached).await {
+        return None;
+      }
       if let Some(oidc_session) = &caller.maybe_oidc_session {
         state.hub.set_oidc_session(&attached.session_id, oidc_session);
       }
@@ -114,6 +117,9 @@ async fn handshake(
         .resume_session(&session_id, caller.user.id, device_id, last_seq)
       {
         Ok(mut attached) => {
+          if !is_still_active(state, socket, caller.user.id, &attached).await {
+            return None;
+          }
           let replay = std::mem::take(&mut attached.replay);
           send(
             socket,
@@ -173,6 +179,32 @@ async fn authenticate(
       None
     },
   }
+}
+
+/// Checks the account again once its session is registered: a deactivation that committed after
+/// [`authenticate`] already ended the user's sessions (`Hub::revoke_user`) before this one existed.
+/// Seen now, it ends this one as well; a later deactivation finds it in the hub. When the account
+/// can't be read, only this connection is refused (fail closed); the client tries again.
+async fn is_still_active(
+  state: &AppState,
+  socket: &mut WebSocket,
+  user: UserId,
+  attached: &Attached,
+) -> bool {
+  let error = match state.database.get_user(user).await {
+    Ok(Some(stored)) if !stored.is_deactivated => return true,
+    Ok(_) => {
+      state.hub.revoke_user(user);
+      ApiError::from(crate::auth::AuthError::AccountDeactivated)
+    },
+    Err(error) => {
+      state.hub.detach(&attached.session_id, attached.connection_id);
+      ApiError::from(error)
+    },
+  };
+  let body = ErrorBody::new(error.error_code(), error.public_message());
+  let _ = send(socket, &GatewayServerMessage::Error { error: body }).await;
+  false
 }
 
 async fn serve(

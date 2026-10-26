@@ -15,9 +15,17 @@ not when someone was active.
 
 ## Deactivate and reactivate
 
-- **Console or API:** `POST /admin/users/{id}/deactivate` (and `/reactivate`). Sessions are revoked,
-  devices removed, the user leaves their MLS groups at the next member commit, and the audit log
-  records it.
+- **Deactivate** (console or `POST /admin/users/{id}/deactivate`) suspends the account: the user is
+  signed out on every device at once and can't sign in (they see "Your account is deactivated"), and
+  gets no notifications. They stay in their chats and spaces with their devices; others see them as
+  deactivated.
+- **Reactivate** (`/reactivate`) lets them sign in again on the same devices with everything as before.
+- **Remove from all chats** (console, after deactivating; needs the desktop app or a browser where your account is set up, because your app signs the removals)
+  is the second, explicit step for people who left: their devices are removed and they leave every
+  chat and space, and the members' apps rotate the keys. A reactivation does not undo it. To do this
+  automatically, set *Remove deactivated users from all chats after* (Administration > Settings >
+  Server rules) to a number of days; empty means never.
+- The audit log records each step (`user_deactivated`, `user_reactivated`, `user_removed_from_chats`).
 - **Automatically:** disable or delete the user in the identity provider, or remove their TeamCraft
   roles. Back-channel logout ends sessions at once; the user sync (`[oidc.sync]`) catches the rest
   within its interval (default 5 minutes). Enable both.

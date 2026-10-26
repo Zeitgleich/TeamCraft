@@ -63,6 +63,8 @@ pub enum SessionState {
 pub enum LoginProblem {
   /// The account signed in but has no TeamCraft role (`no_teamcraft_role`).
   NoTeamcraftRole,
+  /// The account is deactivated (`account_deactivated`); an admin has to reactivate it.
+  AccountDeactivated,
   ServerUnreachable,
   /// The encrypted local data could not be opened (keystore, database); the text is for details.
   CoreFailed(String),
@@ -110,6 +112,8 @@ pub enum LocalSignInProblem {
   Disabled,
   /// Too many attempts; try again later.
   RateLimited,
+  /// The account is deactivated; an admin has to reactivate it.
+  Deactivated,
   /// The server could not be reached.
   Network,
   /// Anything else; the text is for a details line.
@@ -485,6 +489,7 @@ fn local_problem(error: &AuthError) -> LocalSignInProblem {
         LocalSignInProblem::Disabled
       },
       "rate_limited" | "http_429" => LocalSignInProblem::RateLimited,
+      "account_deactivated" => LocalSignInProblem::Deactivated,
       other => LocalSignInProblem::Failed(other.to_owned()),
     },
     AuthError::Network(_) => LocalSignInProblem::Network,
@@ -507,6 +512,7 @@ pub fn interpret_me_response(response: ApiResponse) -> Result<GetMeResponse, Log
       .map_err(|error| LoginProblem::Failed(format!("unreadable account response: {error}"))),
     status => match serde_json::from_str::<ErrorBody>(&response.body) {
       Ok(body) if body.error_code == ErrorCode::NoTeamcraftRole => Err(LoginProblem::NoTeamcraftRole),
+      Ok(body) if body.error_code == ErrorCode::AccountDeactivated => Err(LoginProblem::AccountDeactivated),
       Ok(body) => Err(LoginProblem::Failed(format!("{} ({status})", body.error_code))),
       Err(_) => Err(LoginProblem::Failed(format!("HTTP {status}"))),
     },
@@ -540,6 +546,16 @@ mod tests {
   }
 
   #[test]
+  fn a_deactivated_account_gets_its_own_problem() {
+    let body = r#"{"error_code":"account_deactivated","message":"the account is deactivated"}"#;
+    let outcome = interpret_me_response(ApiResponse {
+      status: 403,
+      body: body.into(),
+    });
+    assert_eq!(outcome, Err(LoginProblem::AccountDeactivated));
+  }
+
+  #[test]
   fn other_errors_keep_the_code() {
     let body = r#"{"error_code":"invalid_token","message":"expired"}"#;
     let outcome = interpret_me_response(ApiResponse {
@@ -565,6 +581,7 @@ mod tests {
       ("http_503", LocalSignInProblem::Disabled),
       ("rate_limited", LocalSignInProblem::RateLimited),
       ("http_429", LocalSignInProblem::RateLimited),
+      ("account_deactivated", LocalSignInProblem::Deactivated),
       ("internal", LocalSignInProblem::Failed("internal".into())),
     ];
     for (code, expected) in cases {

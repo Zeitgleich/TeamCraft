@@ -1217,6 +1217,20 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     }
   }
 
+  fn remove_user_from_chats(&self, user: UserId) {
+    // Signed by this client, never the server's removal alone (security review A8).
+    if self.can_remove_from_chats() {
+      self.chat.admin_remove_from_all_chats(user);
+      if let Some(admin) = &self.maybe_admin {
+        admin.queue_refresh_after_publish();
+      }
+    }
+  }
+
+  fn can_remove_from_chats(&self) -> bool {
+    self.chat.can_sign_workspace()
+  }
+
   /// Organization recovery needs the recovery key ceremony of the core, which the console does not
   /// drive yet; `can_start_org_recovery` keeps the button disabled.
   fn start_org_recovery(&self, _user: UserId) {}

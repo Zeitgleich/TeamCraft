@@ -1433,6 +1433,10 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::AdminJoinChannel { conversation });
   }
 
+  fn admin_remove_from_all_chats(&self, user: UserId) {
+    self.act(ChatAction::AdminRemoveFromAllChats { user });
+  }
+
   fn last_action_error(&self) -> Option<String> {
     self.maybe_error.borrow().clone()
   }

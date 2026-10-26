@@ -10,6 +10,9 @@ wire_enum! {
     Unauthorized => "unauthorized",
     InvalidToken => "invalid_token",
     NoTeamcraftRole => "no_teamcraft_role",
+    /// The account is deactivated (suspended by an admin or the identity provider); signing in is
+    /// refused until it is reactivated.
+    AccountDeactivated => "account_deactivated",
     Forbidden => "forbidden",
     UserNotFound => "user_not_found",
     SpaceNotFound => "space_not_found",
@@ -143,6 +146,7 @@ mod tests {
       ErrorCode::Unauthorized,
       ErrorCode::InvalidToken,
       ErrorCode::NoTeamcraftRole,
+      ErrorCode::AccountDeactivated,
       ErrorCode::Forbidden,
       ErrorCode::UserNotFound,
       ErrorCode::SpaceNotFound,

@@ -1134,6 +1134,7 @@ fn user_from_wire(
     last_seen: summary.maybe_last_seen_at.unwrap_or(summary.created_at).0,
     space_names,
     is_active: !summary.is_deactivated,
+    is_in_chats: summary.conversation_count > 0 || summary.space_count > 0 || summary.device_count > 0,
     maybe_guest: None,
   }
 }
@@ -1146,6 +1147,7 @@ pub fn action_from_wire(action: &str) -> AuditAction {
     "device_revoked" => AuditAction::DeviceRemoved,
     "user_deactivated" => AuditAction::UserDeactivated,
     "user_reactivated" => AuditAction::UserReactivated,
+    "user_removed_from_chats" => AuditAction::UserRemovedFromChats,
     "invite_created" => AuditAction::GuestInvited,
     "conversation_member_added" | "space_member_added" => AuditAction::MemberAdded,
     "conversation_member_removed" | "space_member_removed" => AuditAction::MemberRemoved,
@@ -1296,6 +1298,7 @@ mod tests {
       maybe_deactivation_reason: Some(DeactivationReason::Admin),
       device_count: 2,
       space_count: 1,
+      conversation_count: 3,
       maybe_last_seen_at: None,
       created_at: UnixMillis(1000),
     };
@@ -1320,6 +1323,7 @@ mod tests {
     let user = user_from_wire(&summary, devices, vec!["Space A".into()]);
     assert_eq!(user.role, Role::Admin);
     assert!(!user.is_active);
+    assert!(user.is_in_chats);
     assert_eq!(user.devices.len(), 1);
     assert_eq!(user.devices[0].last_seen, 5000);
     assert_eq!(user.last_seen, 1000);

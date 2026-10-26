@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT o.user_id FROM memberships m\n         JOIN memberships o ON o.conversation_id = m.conversation_id AND o.user_id <> m.user_id\n         WHERE m.user_id = $1 ORDER BY o.user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9090e59084250a4d22d7d0b13165ea880309b37605e6ec7765cb036b031da146"
+}

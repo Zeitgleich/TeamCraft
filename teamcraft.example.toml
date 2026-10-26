@@ -102,6 +102,10 @@ invites_require_verified_email = true
 # guests and bots get none.
 default_spaces = []
 default_channels = []
+# Deactivated users stay in their chats (suspended) until an admin removes them. Set a number of
+# days to remove them from all chats automatically that long after the deactivation (their
+# devices leave every group, keys rotate). Unset (the default): never automatically.
+# remove_deactivated_after_days = 90
 
 [limits]
 max_ciphertext_bytes = 1048576

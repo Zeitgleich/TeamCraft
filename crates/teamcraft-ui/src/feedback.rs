@@ -125,6 +125,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       ErrorCode::NotSpaceMember => "error-not-space-member",
       ErrorCode::Forbidden | ErrorCode::NoTeamcraftRole => "error-forbidden",
       ErrorCode::Unauthorized | ErrorCode::InvalidToken => "error-signed-out",
+      ErrorCode::AccountDeactivated => "error-account-deactivated",
       ErrorCode::RateLimited => "error-rate-limited",
       ErrorCode::PayloadTooLarge => "error-too-large",
       ErrorCode::Unavailable | ErrorCode::Internal => "error-server-trouble",

@@ -355,6 +355,7 @@ pub async fn leave(state: &AppState, caller: &AuthenticatedUser, id: MeetingId) 
     caller.user.id,
     teamcraft_proto::DeactivationReason::Left,
     "left the meeting",
+    super::admin::AfterDeactivation::RemoveFromChats,
   )
   .await?;
   Ok(())
@@ -385,6 +386,7 @@ pub async fn sweep_expired_guests_at(state: &AppState, now: OffsetDateTime) -> R
       guest,
       teamcraft_proto::DeactivationReason::Left,
       "the meeting's access ended",
+      super::admin::AfterDeactivation::RemoveFromChats,
     )
     .await?
     {
@@ -422,6 +424,7 @@ pub async fn end_removed_guests(
       *guest,
       teamcraft_proto::DeactivationReason::Admin,
       "removed from the meeting",
+      super::admin::AfterDeactivation::RemoveFromChats,
     )
     .await?;
   }
@@ -478,6 +481,7 @@ pub async fn deny(
     guest,
     teamcraft_proto::DeactivationReason::Admin,
     "turned away in the meeting lobby",
+    super::admin::AfterDeactivation::RemoveFromChats,
   )
   .await?;
   Ok(())

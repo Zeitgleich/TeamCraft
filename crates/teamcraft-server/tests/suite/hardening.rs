@@ -649,8 +649,9 @@ mod a8_admin_channels_of_user {
     let (alice, carol) = (owner(), member("carol"));
     let carol_id = user_id(&app, &carol).await;
     user_id(&app, &alice).await;
-    let with_carol = channel_with(&app, &[&alice, &carol]).await;
-    let _without = channel_with(&app, &[&alice]).await;
+    // Alice creates both (`channel_with` makes the owner the creator, so she isn't added again).
+    let with_carol = channel_with(&app, &[&carol]).await;
+    let _without = channel_with(&app, &[]).await;
 
     let reply = app
       .get(&alice, &format!("/admin/conversations?user_id={carol_id}"))

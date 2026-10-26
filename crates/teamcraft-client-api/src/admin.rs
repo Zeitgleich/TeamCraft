@@ -55,6 +55,9 @@ pub struct AdminUser {
   pub last_seen: TimestampMs,
   pub space_names: Vec<String>,
   pub is_active: bool,
+  /// Still in a conversation or space, or still with a device: a deactivated user like this can
+  /// be removed from all chats.
+  pub is_in_chats: bool,
   pub maybe_guest: Option<GuestInfo>,
 }
 
@@ -100,6 +103,8 @@ pub enum AuditAction {
   DeviceRemoved,
   UserDeactivated,
   UserReactivated,
+  /// A deactivated user's devices left every group and the user left every chat.
+  UserRemovedFromChats,
   RecoveryStarted,
   AdminJoinedChannel,
   OwnerAssigned,
@@ -128,12 +133,13 @@ pub enum AuditAction {
 }
 
 impl AuditAction {
-  pub const ALL: [AuditAction; 25] = [
+  pub const ALL: [AuditAction; 26] = [
     Self::PolicyChanged,
     Self::RetentionChanged,
     Self::DeviceRemoved,
     Self::UserDeactivated,
     Self::UserReactivated,
+    Self::UserRemovedFromChats,
     Self::RecoveryStarted,
     Self::AdminJoinedChannel,
     Self::OwnerAssigned,
@@ -163,6 +169,7 @@ impl AuditAction {
       Self::DeviceRemoved => "device-removed",
       Self::UserDeactivated => "user-deactivated",
       Self::UserReactivated => "user-reactivated",
+      Self::UserRemovedFromChats => "user-removed-from-chats",
       Self::RecoveryStarted => "recovery-started",
       Self::AdminJoinedChannel => "admin-joined-channel",
       Self::OwnerAssigned => "owner-assigned",

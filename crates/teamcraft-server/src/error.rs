@@ -266,7 +266,8 @@ impl ApiError {
       Self::Auth(AuthError::MissingToken) => ErrorCode::Unauthorized,
       Self::Auth(AuthError::InvalidToken(_) | AuthError::Expired(_)) => ErrorCode::InvalidToken,
       Self::Auth(AuthError::NoTeamcraftRole) => ErrorCode::NoTeamcraftRole,
-      Self::Auth(AuthError::AccountDeactivated) | Self::Forbidden(_) => ErrorCode::Forbidden,
+      Self::Auth(AuthError::AccountDeactivated) => ErrorCode::AccountDeactivated,
+      Self::Forbidden(_) => ErrorCode::Forbidden,
       Self::Auth(AuthError::KeysUnavailable(_)) => ErrorCode::Unavailable,
       Self::NotFound { code, .. } => code.clone(),
       Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
@@ -361,7 +362,7 @@ mod tests {
       (
         AuthError::AccountDeactivated,
         StatusCode::FORBIDDEN,
-        ErrorCode::Forbidden,
+        ErrorCode::AccountDeactivated,
       ),
       (
         AuthError::KeysUnavailable("x".into()),

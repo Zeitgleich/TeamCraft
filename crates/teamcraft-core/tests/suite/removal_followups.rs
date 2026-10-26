@@ -135,6 +135,47 @@ mod left_in_group {
 mod admin_outside_the_group {
   use super::*;
 
+  /// "Remove from all chats" (#631): the admin's client signs Carol's removal from her channel,
+  /// the members commit it (her devices leave, keys rotate), and only then does the server drop
+  /// the rest. Only admins of the signed roster can.
+  #[tokio::test]
+  async fn removal_from_all_chats_is_signed_by_the_admin_and_committed_by_members() {
+    let server = FakeServer::new();
+    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let (mut alice, mut bob, mut carol) = three(&server).await;
+    let mut admin = enroll_with_clock(&server, "Admin", &clock, settings()).await;
+    let (alice_id, admin_id) = (alice.client.user_id(), admin.client.user_id());
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner), (admin_id, RosterRole::Admin)])
+      .await
+      .unwrap();
+    server.set_admin(admin_id);
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut admin]).await;
+    let carol_id = carol.client.user_id();
+    let commits_before = commits(&alice, channel).await;
+
+    let error = bob
+      .client
+      .admin_remove_from_all_chats(carol_id)
+      .await
+      .unwrap_err();
+    assert!(
+      matches!(error, teamcraft_core::CoreError::NotAnAdmin(_)),
+      "{error}"
+    );
+
+    admin.client.admin_remove_from_all_chats(carol_id).await.unwrap();
+    assert_eq!(proposals_by(&alice, &admin, channel).await, 1);
+    assert!(!is_listed(&alice, channel, carol_id).await);
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut admin]).await;
+
+    assert_eq!(commits(&alice, channel).await, commits_before + 1);
+    assert_eq!(epoch(&mut alice, channel), epoch(&mut bob, channel));
+    assert!(group_leftovers(alice.store.as_ref(), channel).unwrap().is_empty());
+  }
+
   /// The admin can't see the members' commit; it learns the group's epoch and signs again
   /// before members would refuse the change as too old, then stops watching.
   #[tokio::test]

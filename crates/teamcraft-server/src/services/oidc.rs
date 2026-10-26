@@ -14,7 +14,7 @@ use teamcraft_db::{GroupCreateOutcome, NewUserGroup, OidcUserRow};
 use teamcraft_proto::{DeactivationReason, UserGroupId, UserKind};
 use tracing::{debug, info, warn};
 
-use super::admin::deactivate_user;
+use super::admin::{AfterDeactivation, announce_reactivation, deactivate_user};
 use super::audit::{self, Target as AuditTarget};
 use super::user_groups;
 use crate::auth::RoleMapping;
@@ -120,6 +120,7 @@ pub async fn sync_once(state: &AppState) -> Result<SyncReport, ApiError> {
         let was_deactivated_by_sync =
           user.is_deactivated && user.maybe_deactivation_reason.as_deref() == Some("oidc");
         if was_deactivated_by_sync && state.database.reactivate_user(user.id).await? {
+          announce_reactivation(state, user.id).await?;
           audit::record(
             state,
             None,
@@ -239,7 +240,17 @@ async fn deactivate(state: &AppState, user: &OidcUserRow, note: &str) -> Result<
   if user.is_deactivated {
     return Ok(false);
   }
-  deactivate_user(state, None, user.id, DeactivationReason::Oidc, note).await
+  // Suspended like by an admin: the provider may enable the user again, and the sync then
+  // reactivates them with everything intact. The automatic removal setting covers people who left.
+  deactivate_user(
+    state,
+    None,
+    user.id,
+    DeactivationReason::Oidc,
+    note,
+    AfterDeactivation::KeepChats,
+  )
+  .await
 }
 
 fn unavailable(error: ProviderError) -> ApiError {

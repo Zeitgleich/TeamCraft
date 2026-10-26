@@ -194,10 +194,12 @@ the server API, the sync engine and first-run enrollment. All cryptography is de
 15. **Device lists** (security review A4): no `GET /users/{id}/device-list` / `PUT /me/device-list`
     yet (opaque signed blob, compare-and-swap on `sequence`). Clients publish and check lists when
     the endpoints exist and fall back to certificates only while they return 404.
-16. **Removals** (security review A8): clients no longer sign removals the server reports. Deactivating
-    a user has to go through admins' clients (`admin_remove_member` per conversation), so the admin
-    API needs the list of a user's conversations; until then a deactivated user stays in the MLS
-    groups (the server stops delivering to them).
+16. **Removals** (security review A8): clients no longer sign removals the server reports. Removing
+    a deactivated user from all chats should go through admins' clients (`admin_remove_member` per
+    conversation), so the admin API needs the list of a user's conversations; until then the server's
+    removal leaves the user in the MLS groups, shown to members as still in the group with a
+    "remove" for admins (the server stops delivering to them). Deactivation alone (#631) is a
+    suspension and keeps them in the groups on purpose.
 
 17. **Org recovery** (security review B3, B4): the recovery request endpoints should carry the request
     ID, user and request key (`RecoveryRequest`); the approval log should tell owners' clients that a

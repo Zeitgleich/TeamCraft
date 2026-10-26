@@ -156,9 +156,10 @@ impl Database {
     provider: &str,
   ) -> Result<Option<(String, Vec<u8>)>, DbError> {
     let row = sqlx::query!(
-      r#"SELECT push_token AS "push_token!", push_key AS "push_key!" FROM devices
-         WHERE id = $1 AND push_provider = $2 AND push_token IS NOT NULL AND push_key IS NOT NULL
-           AND revoked_at IS NULL"#,
+      r#"SELECT d.push_token AS "push_token!", d.push_key AS "push_key!" FROM devices d
+         JOIN users u ON u.id = d.user_id AND u.deactivated_at IS NULL
+         WHERE d.id = $1 AND d.push_provider = $2 AND d.push_token IS NOT NULL AND d.push_key IS NOT NULL
+           AND d.revoked_at IS NULL"#,
       to_db(device),
       provider,
     )

@@ -99,7 +99,8 @@ impl Engine {
       ChatAction::SetActivity { .. } | ChatAction::SetAttention { .. } => Ok(()),
       ChatAction::PublishPolicy { .. }
       | ChatAction::PublishRoster { .. }
-      | ChatAction::AdminJoinChannel { .. } => Err(TeamCraftError::InvalidInput(
+      | ChatAction::AdminJoinChannel { .. }
+      | ChatAction::AdminRemoveFromAllChats { .. } => Err(TeamCraftError::InvalidInput(
         "workspace administration is on desktop and web".into(),
       )),
       other => {

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT push_token AS \"push_token!\", push_key AS \"push_key!\" FROM devices\n         WHERE id = $1 AND push_provider = $2 AND push_token IS NOT NULL AND push_key IS NOT NULL\n           AND revoked_at IS NULL",
+  "query": "SELECT d.push_token AS \"push_token!\", d.push_key AS \"push_key!\" FROM devices d\n         JOIN users u ON u.id = d.user_id AND u.deactivated_at IS NULL\n         WHERE d.id = $1 AND d.push_provider = $2 AND d.push_token IS NOT NULL AND d.push_key IS NOT NULL\n           AND d.revoked_at IS NULL",
   "describe": {
     "columns": [
       {
@@ -37,5 +37,5 @@
       true
     ]
   },
-  "hash": "c7191ff555a4574a5732bbf6363bbbc9d0258c3b3ff641a5f074403998775f45"
+  "hash": "d85195785344331006cb64b3cda71b0403ff6080f13765d9dd869d82adbe4d44"
 }

@@ -162,6 +162,7 @@ fn UserDetail(entry: AdminUser, now: i64) -> impl IntoView {
   let user_id = entry.user.id;
   let pending_device = RwSignal::new(None::<DeviceId>);
   let confirm_deactivate = RwSignal::new(false);
+  let confirm_removal = RwSignal::new(false);
   let recovery_started = RwSignal::new(false);
   let (_, policy) = state.read(|backend| backend.workspace_policy());
   let is_recovery_allowed = if entry.maybe_guest.is_some() {
@@ -179,6 +180,9 @@ fn UserDetail(entry: AdminUser, now: i64) -> impl IntoView {
     "admin-recovery-needs-second"
   };
   let is_active = entry.is_active;
+  let can_remove_from_chats = !entry.is_active && entry.is_in_chats;
+  // The removals are signed by this client (admin.md §3.2.1); without its keys nothing is offered.
+  let can_sign_removals = state.read(|backend| backend.can_remove_from_chats());
 
   view! {
     <h3 translate="no">{entry.user.display_name.clone()}</h3>
@@ -262,6 +266,32 @@ fn UserDetail(entry: AdminUser, now: i64) -> impl IntoView {
         </button>
         <button class="btn" on:click=move |_| confirm_deactivate.set(false)>{move || i18n.t("cancel")}</button>
       </Show>
+      {(can_remove_from_chats && can_sign_removals)
+        .then(|| {
+          view! {
+            <Show
+              when=move || confirm_removal.get()
+              fallback=move || {
+                view! {
+                  <button class="btn" on:click=move |_| confirm_removal.set(true)>
+                    {move || i18n.t("admin-remove-from-chats")}
+                  </button>
+                }
+              }
+            >
+              <button
+                class="btn btn-danger"
+                on:click=move |_| {
+                  state.write(|backend| backend.remove_user_from_chats(user_id));
+                  confirm_removal.set(false);
+                }
+              >
+                {move || i18n.t("admin-remove-from-chats-confirm")}
+              </button>
+              <button class="btn" on:click=move |_| confirm_removal.set(false)>{move || i18n.t("cancel")}</button>
+            </Show>
+          }
+        })}
       <button
         class="btn"
         disabled=!can_recover
@@ -274,6 +304,21 @@ fn UserDetail(entry: AdminUser, now: i64) -> impl IntoView {
         {move || i18n.t("admin-recovery-start")}
       </button>
     </div>
+    <p class="muted-text small">
+      {move || {
+        if confirm_deactivate.get() {
+          Some(i18n.t("admin-deactivate-hint"))
+        } else if confirm_removal.get() {
+          Some(i18n.t("admin-remove-from-chats-hint"))
+        } else if can_remove_from_chats && !can_sign_removals {
+          Some(i18n.t("admin-remove-from-chats-needs-keys"))
+        } else if can_remove_from_chats {
+          Some(i18n.t("admin-deactivated-hint"))
+        } else {
+          None
+        }
+      }}
+    </p>
     <p class="status-line" role="status">
       {move || recovery_started.get().then(|| i18n.t("admin-recovery-started"))}
     </p>

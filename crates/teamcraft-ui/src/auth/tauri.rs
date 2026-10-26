@@ -268,7 +268,9 @@ fn map_kind(kind: &str, message: String) -> AuthError {
     "not_signed_in" => AuthError::NotSignedIn,
     "unsupported" => AuthError::Unsupported(message),
     // Refusals of the local sign-in keep their kind for the form's message.
-    "refused" | "disabled" | "rate_limited" | "mfa_required" => AuthError::Denied(kind.to_owned()),
+    "refused" | "disabled" | "rate_limited" | "mfa_required" | "account_deactivated" => {
+      AuthError::Denied(kind.to_owned())
+    },
     _ => AuthError::InvalidResponse(message),
   }
 }

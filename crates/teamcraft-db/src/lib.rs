@@ -50,8 +50,8 @@ mod user_group;
 mod workspace_log;
 
 pub use admin::{
-  AdminConversationFilter, AdminConversationRow, AdminDeviceRow, AdminSpaceRow, AdminUserRow,
-  DeactivationEffects, PushDeviceCount, StorageTotals, UserStatusFilter,
+  AdminConversationFilter, AdminConversationRow, AdminDeviceRow, AdminSpaceRow, AdminUserRow, ChatRemoval,
+  ChatRemovalEffects, Deactivation, PushDeviceCount, StorageTotals, UserStatusFilter,
 };
 pub use announcement::{NewAnnouncement, StoredAnnouncement};
 pub use attachment::{Attachment, NewAttachment, RemovedAttachment};
