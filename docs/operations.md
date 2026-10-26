@@ -76,6 +76,28 @@ exists; clients can still read what they have stored locally.
   has begun. The images ship
   `teamcraft-server healthcheck [--ready]`, `teamcraft-sfu healthcheck` and `teamcraft-bridge
   healthcheck` for container health checks (no curl in the images).
+- **Dependencies** (`[dependencies]`, issue #743). Each backend (database, object storage, identity
+  provider, push gateway, SFU control) has a circuit breaker: after `failure_threshold` (3) failures
+  in a row it counts as down, requests that need it are answered at once with **503, `Retry-After`
+  and `error_code: "unavailable"`** instead of waiting for a timeout each, and after `open_secs`
+  (15) one request probes it again. Idempotent calls are retried twice within a request first
+  (200 ms, doubling, with jitter; timeouts are not repeated). `/readyz` lists every dependency's
+  state:
+
+  ```json
+  {"status": "degraded", "dependencies": [{"dependency": "database", "state": "ok"},
+    {"dependency": "object_storage", "state": "down"}]}
+  ```
+
+  Only the database makes `/readyz` answer 503, and only after the breaker opened (one slow ping,
+  bounded by `readiness_timeout_ms`, doesn't take the instance out of the load balancer). Another
+  dependency that is down makes it `degraded` with 200: every instance would meet the same outage,
+  and taking them out would turn a storage outage into a full one. Alert on `degraded` and on the
+  log lines `dependency is down` / `dependency is back`.
+- Every 503 of the server carries `Retry-After` (in the header and as `retry_after_secs` in the
+  body); the apps wait at least that long (one shared retry policy, capped exponential backoff
+  with jitter). A short database blip at startup — also between the connect and the migrations —
+  is waited for within `[database] startup_wait_secs` instead of exiting into a crash loop.
 - Logs are structured `tracing` output on stderr (`RUST_LOG` / `[logging]`). They never contain
   tokens, keys or message content (checked by tests); IDs of public objects are logged.
 - Watch: 5xx rate, 429 rate (rate limits, `docs/performance.md`), database connection saturation

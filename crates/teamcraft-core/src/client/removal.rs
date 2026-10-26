@@ -21,6 +21,7 @@ use crate::api::ServerApi;
 use crate::convert;
 use crate::error::CoreError;
 use crate::records;
+use crate::retry::RetryPolicy;
 use crate::store::{ConversationEvent, LocalStore, MessageContent, Table};
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
@@ -927,12 +928,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
-  /// `removal_retry` doubled for each try after the first, at most `removal_retry_max`.
+  /// `removal_retry` doubled for each try after the first, at most `removal_retry_max` (the
+  /// shared backoff of `crate::retry`; without jitter: removals follow per-group events, not one
+  /// outage every device saw at once).
   fn backoff_ms(&self, tries: u32) -> i64 {
-    let base = millis(self.settings.removal_retry);
-    let ceiling = millis(self.settings.removal_retry_max).max(base);
-    let doublings = tries.saturating_sub(1).min(32);
-    base.saturating_mul(1_i64 << doublings).min(ceiling)
+    let policy = RetryPolicy::new(self.settings.removal_retry, self.settings.removal_retry_max);
+    millis(policy.backoff(tries.saturating_sub(1)))
   }
 
   /// Moves a stored removal to `step`, keeping its tries and announcement.

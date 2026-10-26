@@ -252,4 +252,11 @@ impl ClockJump {
       .0
       .fetch_add(i64::try_from(duration.as_millis()).unwrap(), Ordering::SeqCst);
   }
+
+  /// The wall clock set back (NTP after a drift, a user fixing the time).
+  pub fn backward(&self, duration: std::time::Duration) {
+    self
+      .0
+      .fetch_sub(i64::try_from(duration.as_millis()).unwrap(), Ordering::SeqCst);
+  }
 }

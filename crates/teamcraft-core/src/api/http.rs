@@ -64,6 +64,7 @@ use super::{
   RendezvousConnection, RendezvousFrame, ServerApi,
 };
 use crate::clock::{Clock, SystemClock};
+use crate::retry::parse_retry_after;
 use crate::transfers::ByteCounter;
 use teamcraft_proto::{CreateDeviceLinkRequest, DeviceLinkRequest, ListDeviceLinksResponse};
 
@@ -1768,7 +1769,17 @@ async fn send(request: RequestBuilder) -> Result<Response, ApiError> {
   if status.is_success() {
     return Ok(response);
   }
-  let maybe_body = response.json::<ErrorBody>().await.ok();
+  let maybe_header_wait = response
+    .headers()
+    .get(reqwest::header::RETRY_AFTER)
+    .and_then(|value| value.to_str().ok())
+    .and_then(parse_retry_after);
+  let maybe_body = response.json::<ErrorBody>().await.ok().map(|body| {
+    match (body.maybe_retry_after_secs, maybe_header_wait) {
+      (None, Some(wait)) => body.with_retry_after_secs(wait.as_secs()),
+      _ => body,
+    }
+  });
   Err(ApiError::Status {
     status: status.as_u16(),
     maybe_body,

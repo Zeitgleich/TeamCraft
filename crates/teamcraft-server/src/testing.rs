@@ -12,6 +12,7 @@ use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use teamcraft_db::SnowflakeGenerator;
 use teamcraft_db::testing::TestDatabase;
+use teamcraft_proto::DependencyName;
 use tokio::task::JoinHandle;
 
 use crate::auth::test_keys::{TEST_KEY_ID, TEST_MODULUS_B64, TEST_PRIVATE_KEY_PEM};
@@ -21,6 +22,7 @@ use crate::auth::{
 };
 use crate::brand::{BrandInputs, BrandStore};
 use crate::config::{CallsConfig, MeetingsConfig, RoleNames, StorageConfig};
+use crate::dependencies::Dependencies;
 use crate::gateway::{Hub, HubOptions};
 use crate::listener::bind_listener;
 use time::OffsetDateTime;
@@ -177,6 +179,7 @@ struct Extras {
   maybe_push: Option<PushDispatcher>,
   maybe_meetings: Option<MeetingService>,
   maybe_mailer: Option<Arc<dyn Mailer>>,
+  maybe_dependencies: Option<Arc<Dependencies>>,
 }
 
 pub struct TestApp {
@@ -304,6 +307,26 @@ impl TestApp {
       roster_timeout_secs: 120,
     };
     Self::start_with_calls_config(&config, signing_key_pem).await
+  }
+
+  /// Fault injection (issue #743): storage at `maybe_storage` (a fake that fails on demand), calls
+  /// with `maybe_calls` (a fake SFU control endpoint), and the breakers of `dependencies` (on a
+  /// clock the test steps).
+  pub async fn start_with_dependencies(
+    maybe_storage: Option<StorageConfig>,
+    maybe_calls: Option<CallService>,
+    dependencies: Arc<Dependencies>,
+  ) -> Option<Self> {
+    Self::start_full(
+      |_| {},
+      Extras {
+        maybe_storage,
+        maybe_calls,
+        maybe_dependencies: Some(dependencies),
+        ..Extras::default()
+      },
+    )
+    .await
   }
 
   /// Like [`Self::start_with_calls`] with a full calls configuration (SFU token, ring timeout).
@@ -452,7 +475,10 @@ impl TestApp {
       maybe_push,
       maybe_meetings,
       maybe_mailer,
+      maybe_dependencies,
     } = extras;
+    let dependencies = maybe_dependencies.unwrap_or_default();
+    dependencies.guard(DependencyName::Database);
     let test_db = TestDatabase::create().await?;
     let mut settings = Settings {
       max_attachment_bytes: maybe_storage
@@ -501,8 +527,16 @@ impl TestApp {
       hub: Arc::new(new_hub(&settings)),
       rendezvous: Arc::new(RendezvousHub::new(&settings.rendezvous)),
       drain: Arc::default(),
-      maybe_blob_store: maybe_storage.map(|config| Arc::new(BlobStore::new(&config).unwrap())),
-      maybe_calls: maybe_calls.map(Arc::new),
+      maybe_blob_store: maybe_storage.map(|config| {
+        Arc::new(
+          BlobStore::new(&config)
+            .unwrap()
+            .with_guard(dependencies.guard(DependencyName::ObjectStorage)),
+        )
+      }),
+      maybe_calls: maybe_calls
+        .map(|calls| Arc::new(calls.with_dependency_guard(dependencies.guard(DependencyName::Sfu)))),
+      dependencies,
       maybe_meetings: maybe_meetings.map(Arc::new),
       mailer: Arc::new(Slot::new(maybe_mailer)),
       mail_status: Arc::new(MailStatus::default()),

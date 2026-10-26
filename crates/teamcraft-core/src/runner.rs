@@ -199,7 +199,9 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       Some(_) => deadline.min(now.saturating_add(millis(TRANSFER_PROGRESS))),
       None => deadline,
     };
-    let until_ms = deadline.saturating_sub(now).max(0);
+    // Never longer than a tick: after the wall clock went back, deadlines lie in the "future" by
+    // the jump, and the tick notices the jump and moves them (robustness.md, "Time").
+    let until_ms = deadline.saturating_sub(now).clamp(0, millis(self.settings.tick));
     let Self {
       commands,
       connection,
@@ -292,6 +294,10 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
   async fn on_tick(&mut self) {
     let now = self.client.now_ms();
     self.connection.on_tick(now).await;
+    if self.next_tick_ms.saturating_sub(now) > millis(self.settings.tick) {
+      // The clock went back: the upkeep runs now, not after the jump.
+      self.next_tick_ms = now;
+    }
     if now < self.next_tick_ms {
       // Woken for the connection only.
       return;

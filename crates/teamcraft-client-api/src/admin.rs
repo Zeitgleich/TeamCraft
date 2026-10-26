@@ -1090,6 +1090,7 @@ mod tests {
           maybe_organization: None,
           device_setup: crate::model::DeviceSetup::Unknown,
           is_deactivated,
+          is_deleted: false,
           maybe_email: None,
         },
         role,

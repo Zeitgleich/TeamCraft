@@ -18,6 +18,8 @@ pub const MAILPIT_URL: &str = "http://127.0.0.1:8025";
 const POSTGRES_ADMIN_URL: &str = "postgres://teamcraft:teamcraft-dev-only@127.0.0.1:5432/postgres";
 const POSTGRES_ADDR: &str = "127.0.0.1:5432";
 const GARAGE_URL: &str = "http://127.0.0.1:3900";
+const GARAGE_ADDR: &str = "127.0.0.1:3900";
+const KEYCLOAK_ADDR: &str = "127.0.0.1:8080";
 const SFU_REGISTRATION_TOKEN: &str = "e2e-sfu-registration-token-0123456789";
 const GUEST_TOKEN_SECRET: &str = "e2e-guest-token-secret-0123456789abcdef";
 /// Throwaway Ed25519 key pair for call join tokens; it protects nothing (same as the server's tests).
@@ -51,6 +53,12 @@ struct OwnedServer {
   envs: Vec<(String, String)>,
   /// Between the server and Postgres when the test asked for it ([`StackBuilder::with_database_relay`]).
   maybe_database_relay: Option<TcpRelay>,
+  /// Between the server (and clients' presigned uploads) and the object storage
+  /// ([`StackBuilder::with_storage_relay`]).
+  maybe_storage_relay: Option<TcpRelay>,
+  /// Between the server and the identity provider's signing keys
+  /// ([`StackBuilder::with_identity_relay`]).
+  maybe_identity_relay: Option<TcpRelay>,
 }
 
 /// The SFU process and what clients need to talk to it.
@@ -72,6 +80,8 @@ pub struct StackBuilder {
   maybe_port: Option<u16>,
   extra_env: Vec<(String, String)>,
   has_database_relay: bool,
+  has_storage_relay: bool,
+  has_identity_relay: bool,
   /// PEM certificate and key for the SFU instead of its own self-signed one.
   maybe_sfu_identity: Option<(String, String)>,
 }
@@ -136,6 +146,20 @@ impl StackBuilder {
   /// ([`Stack::database_relay`]).
   pub fn with_database_relay(mut self) -> Self {
     self.has_database_relay = true;
+    self
+  }
+
+  /// Puts a relay the test can cut or stall between the server and the object storage
+  /// ([`Stack::storage_relay`]); presigned URLs point through it too.
+  pub fn with_storage_relay(mut self) -> Self {
+    self.has_storage_relay = true;
+    self
+  }
+
+  /// Puts a relay the test can cut or stall between the server and the identity provider's
+  /// signing keys ([`Stack::identity_relay`]). Tokens still come from the provider directly.
+  pub fn with_identity_relay(mut self) -> Self {
+    self.has_identity_relay = true;
     self
   }
 
@@ -215,6 +239,26 @@ impl Stack {
     &mut self.owned().server
   }
 
+  /// The relay between server and object storage; panics unless the stack was built
+  /// [`StackBuilder::with_storage_relay`].
+  pub fn storage_relay(&mut self) -> &TcpRelay {
+    self
+      .owned()
+      .maybe_storage_relay
+      .as_ref()
+      .expect("the stack was built without with_storage_relay()")
+  }
+
+  /// The relay between server and identity provider; panics unless the stack was built
+  /// [`StackBuilder::with_identity_relay`].
+  pub fn identity_relay(&mut self) -> &TcpRelay {
+    self
+      .owned()
+      .maybe_identity_relay
+      .as_ref()
+      .expect("the stack was built without with_identity_relay()")
+  }
+
   /// The relay between server and Postgres; panics unless the stack was built
   /// [`StackBuilder::with_database_relay`].
   pub fn database_relay(&mut self) -> &TcpRelay {
@@ -292,6 +336,8 @@ impl Stack {
       database_name,
       server,
       maybe_database_relay,
+      maybe_storage_relay,
+      maybe_identity_relay,
       ..
     }) = maybe_owned
     else {
@@ -299,6 +345,8 @@ impl Stack {
     };
     drop(server);
     drop(maybe_database_relay);
+    drop(maybe_storage_relay);
+    drop(maybe_identity_relay);
     // Best effort: the runner script also removes leftover e2e databases.
     if let Ok(mut connection) = sqlx::PgConnection::connect(POSTGRES_ADMIN_URL).await {
       let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -332,6 +380,20 @@ impl Stack {
       None
     };
     let database_port = maybe_database_relay.as_ref().map_or(5432, |relay| relay.port);
+    let maybe_storage_relay = if settings.has_storage_relay {
+      Some(TcpRelay::start(GARAGE_ADDR).await?)
+    } else {
+      None
+    };
+    let storage_url = maybe_storage_relay.as_ref().map_or_else(
+      || GARAGE_URL.to_owned(),
+      |relay| format!("http://127.0.0.1:{}", relay.port),
+    );
+    let maybe_identity_relay = if settings.has_identity_relay {
+      Some(TcpRelay::start(KEYCLOAK_ADDR).await?)
+    } else {
+      None
+    };
     let mut envs = vec![
       (
         "TEAMCRAFT_SERVER__LISTEN_ADDR".into(),
@@ -347,7 +409,7 @@ impl Stack {
       ("TEAMCRAFT_OIDC__ISSUER".into(), ISSUER.into()),
       ("TEAMCRAFT_OIDC__CLIENT_ID".into(), "teamcraft".into()),
       ("TEAMCRAFT_OIDC__SERVER_CLIENT".into(), "teamcraft-server".into()),
-      ("TEAMCRAFT_STORAGE__ENDPOINT".into(), GARAGE_URL.into()),
+      ("TEAMCRAFT_STORAGE__ENDPOINT".into(), storage_url),
       ("TEAMCRAFT_STORAGE__REGION".into(), "garage".into()),
       ("TEAMCRAFT_STORAGE__BUCKET".into(), "teamcraft-dev".into()),
       (
@@ -432,6 +494,16 @@ impl Stack {
         ),
       ]);
     }
+    if let Some(relay) = &maybe_identity_relay {
+      // Only the signing keys go through the relay; the issuer (and the tokens) stay as they are.
+      envs.push((
+        "TEAMCRAFT_OIDC__JWKS_URI".into(),
+        format!(
+          "http://127.0.0.1:{}/realms/teamcraft-dev/protocol/openid-connect/certs",
+          relay.port
+        ),
+      ));
+    }
     envs.extend(settings.extra_env.iter().cloned());
 
     let mut server = Service::spawn("server", &binary("teamcraft-server"), &[], &envs, &dir)?;
@@ -454,6 +526,8 @@ impl Stack {
         server,
         envs,
         maybe_database_relay,
+        maybe_storage_relay,
+        maybe_identity_relay,
       }),
     })
   }
