@@ -219,6 +219,9 @@ pub struct NotificationPrefs {
   pub spaces: BTreeMap<String, ConversationNotify>,
   /// A ringtone plays on the default output while a call rings (notifications.md, "Calls").
   pub plays_ringtone: bool,
+  /// Desktop: a ringing call shows a small window above all other apps while TeamCraft is in the
+  /// background, instead of the notification (#650).
+  pub shows_call_window: bool,
   /// Remind this many minutes before a meeting starts; `None`: no reminder before.
   pub maybe_meeting_reminder_minutes: Option<u16>,
   /// Remind when a meeting starts.
@@ -250,6 +253,7 @@ impl Default for NotificationPrefs {
       conversations: BTreeMap::new(),
       spaces: BTreeMap::new(),
       plays_ringtone: true,
+      shows_call_window: true,
       maybe_meeting_reminder_minutes: Some(DEFAULT_MEETING_REMINDER_MINUTES),
       notifies_meeting_start: true,
     }
@@ -786,16 +790,18 @@ mod tests {
   fn call_and_meeting_alerts_are_on_by_default_and_can_be_turned_off() {
     let older = Preferences::from_json(r#"{"notifications":{"desktop":"all"}}"#).notifications;
     assert!(older.plays_ringtone);
+    assert!(older.shows_call_window);
     assert_eq!(
       older.maybe_meeting_reminder_minutes,
       Some(DEFAULT_MEETING_REMINDER_MINUTES)
     );
     assert!(older.notifies_meeting_start);
     let off = Preferences::from_json(
-      r#"{"notifications":{"plays_ringtone":false,"maybe_meeting_reminder_minutes":null,"notifies_meeting_start":false}}"#,
+      r#"{"notifications":{"plays_ringtone":false,"shows_call_window":false,"maybe_meeting_reminder_minutes":null,"notifies_meeting_start":false}}"#,
     )
     .notifications;
     assert!(!off.plays_ringtone);
+    assert!(!off.shows_call_window);
     assert_eq!(off.maybe_meeting_reminder_minutes, None);
     assert!(!off.notifies_meeting_start);
   }
