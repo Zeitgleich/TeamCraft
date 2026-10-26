@@ -892,6 +892,15 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self.get("/unread").await
   }
 
+  async fn read_receipts(
+    &self,
+    conversation: ConversationId,
+  ) -> Result<teamcraft_proto::ReadReceiptsResponse, ApiError> {
+    self
+      .get(&format!("/conversations/{conversation}/read-receipts"))
+      .await
+  }
+
   async fn key_bag(&self) -> Result<KeyBagResponse, ApiError> {
     self.get("/me/key-bag").await
   }

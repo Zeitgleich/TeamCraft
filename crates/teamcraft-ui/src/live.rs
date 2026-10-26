@@ -19,6 +19,7 @@ use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
 use teamcraft_client_api::custom_status::set_request;
 use teamcraft_client_api::live::{LiveMarks, LiveReceipt, LiveSnapshot};
+use teamcraft_client_api::receipts::seen_by;
 use teamcraft_proto::{
   AnnouncementId, AnnouncementResponse, CustomStatus as CustomStatusWire, GetAnnouncementResponse,
   ListPresenceResponse, ListThreadsResponse, PresenceState, ReadReceiptsResponse,
@@ -296,13 +297,7 @@ impl LiveServer {
     state
       .receipts
       .get(&conversation)
-      .map_or_else(Vec::new, |receipts| {
-        receipts
-          .iter()
-          .filter(|(_, read_up_to)| *read_up_to >= message)
-          .map(|(user, _)| *user)
-          .collect()
-      })
+      .map_or_else(Vec::new, |receipts| seen_by(receipts, message))
   }
 
   /// Marks the conversation read in the local counts right away; the server confirms on refresh.

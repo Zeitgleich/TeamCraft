@@ -120,6 +120,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .await
   }
 
+  /// Reads how far the other members of a DM or group DM read: receipts sent while this device was
+  /// offline never arrive as events. Receipts only move forward, so a stale answer changes nothing.
+  pub async fn refresh_read_receipts(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    let response = self.api.read_receipts(conversation).await?;
+    for receipt in response.receipts {
+      read_state::note_read_receipt(&self.store, conversation, receipt.user_id, receipt.message_id)?;
+    }
+    Ok(())
+  }
+
   /// Marks the conversation unread from `from` on (synced to the user's devices).
   pub fn mark_unread(&mut self, conversation: ConversationId, from: MessageId) -> Result<(), CoreError> {
     self.update_account_data(|data, now| {

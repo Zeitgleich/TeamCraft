@@ -366,6 +366,11 @@ pub trait ServerApi {
   ) -> impl Future<Output = Result<ListThreadsResponse, ApiError>>;
   /// Unread and mention counts (`GET /unread`).
   fn unread(&self) -> impl Future<Output = Result<UnreadResponse, ApiError>>;
+  /// How far the other members of a DM or group DM read (`GET /conversations/{id}/read-receipts`).
+  fn read_receipts(
+    &self,
+    conversation: ConversationId,
+  ) -> impl Future<Output = Result<teamcraft_proto::ReadReceiptsResponse, ApiError>>;
 
   fn post_mls_commit(
     &self,
