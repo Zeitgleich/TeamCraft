@@ -17,6 +17,7 @@
 use std::future::Future;
 use std::rc::Rc;
 
+use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local_scoped_with_cancellation;
 use leptos::wasm_split::{SplitLoaderError, wasm_split};
@@ -25,6 +26,7 @@ use crate::admin::AdminSection;
 use crate::calls::CallRequest;
 use crate::components::add_to_call::AddToCallDialog;
 use crate::components::admin_console::AdminConsole;
+use crate::components::bookmarks::BookmarksDialog;
 use crate::components::call_prejoin::PreJoinScreen;
 use crate::components::call_screen::CallScreen;
 use crate::components::directory_view::DirectoryView;
@@ -33,19 +35,24 @@ use crate::components::guest_meeting::{GuestMeeting, GuestSession};
 use crate::components::lightbox::Lightbox;
 use crate::components::login::SessionGate;
 use crate::components::meetings_view::{MeetingCreatedDialog, MeetingsView, ScheduleMeetingDialog};
+use crate::components::message_actions::{EditHistoryDialog, ForwardDialog};
+use crate::components::quick_switcher::QuickSwitcher;
 use crate::components::search_view::SearchView;
-use crate::components::settings_modal::SettingsModal;
+use crate::components::security_ui::{VerifyContactDialog, VerifyKeyDialog};
+use crate::components::settings_modal::{SettingsModal, ShortcutsModal};
+use crate::components::share_link_dialog::ShareLinkDialog;
 use crate::components::space_invites::{AddToChannelDialog, BrowseSpacesDialog, InvitePeopleDialog};
+use crate::components::video_player::VideoPlayer;
 use crate::components::workspace_dialogs::{
   BrowseChannelsDialog, ChannelSettingsDialog, NewChannelDialog, NewSpaceDialog, SpaceSettingsDialog,
 };
 use crate::i18n::use_i18n;
 use crate::lightbox::MediaKey;
-use crate::model::{ConversationId, SpaceId};
+use crate::model::{ConversationId, MessageId, SpaceId, UserId};
 use crate::reactive::SetIfAlive;
 use crate::settings::Settings;
 use crate::state::AppState;
-use teamcraft_proto::MeetingId;
+use teamcraft_proto::{AttachmentId, MeetingId};
 
 /// Where an area shows: how its placeholder and its error sit in the page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,7 +93,14 @@ areas! {
   /// The administration console: the largest part of the app, for admins only.
   admin_console(section: AdminSection) => admin: view! { <AdminConsole section=section /> };
   settings(_unit: ()) => settings: view! { <SettingsModal /> };
+  /// The keyboard shortcuts, next to their settings (#695).
+  shortcuts(_unit: ()) => settings: view! { <ShortcutsModal /> };
   lightbox(conversation: ConversationId, start: MediaKey) => lightbox: view! { <Lightbox conversation=conversation start=start /> };
+  /// The app's own video player in a message row, once play is pressed (#638): a first visit
+  /// doesn't need it (#695). The lightbox's chunk uses it as well.
+  inline_video_player(src: String, video: NodeRef<html::Video>, label: String, on_error: Callback<()>) => video: view! {
+    <VideoPlayer src=src video=video label=label class="media-video-player" is_autoplay=true on_error=on_error />
+  };
   /// The preview of Markdown, HTML and PDF files (#557).
   file_preview(conversation: ConversationId, key: MediaKey) => preview: view! { <FilePreview conversation=conversation key=key /> };
   /// Creating and configuring spaces and channels, and inviting people.
@@ -110,6 +124,15 @@ areas! {
   guest_meeting(session: GuestSession) => session: view! { <GuestMeeting session=session /> };
   directory(_unit: ()) => directory: view! { <DirectoryView /> };
   search(_unit: ()) => search: view! { <SearchView /> };
+  /// The top bar's search (Ctrl/Cmd+K), in the chunk of the search results it leads to (#695).
+  quick_switcher(_unit: ()) => search: view! { <QuickSwitcher /> };
+  /// Dialogs a first visit doesn't open: on a message, a file or a contact's keys (#695).
+  forward(from: ConversationId, message: MessageId) => dialogs: view! { <ForwardDialog from=from message=message /> };
+  edit_history(conversation: ConversationId, message: MessageId) => dialogs: view! { <EditHistoryDialog conversation=conversation message=message /> };
+  bookmarks(conversation: ConversationId) => dialogs: view! { <BookmarksDialog conversation=conversation /> };
+  share_file(conversation: ConversationId, message: MessageId, file: AttachmentId) => dialogs: view! { <ShareLinkDialog conversation=conversation message=message file=file /> };
+  verify_key(conversation: ConversationId) => dialogs: view! { <VerifyKeyDialog conversation=conversation /> };
+  verify_contact(user: UserId) => dialogs: view! { <VerifyContactDialog user=user /> };
 }
 
 /// Shows the view `load` builds once its chunk is there: a placeholder until then, and a message

@@ -6818,6 +6818,9 @@ html.call-window body {
 /* The player of a video playing in its row (#483) covers the tile; the tile's own button stays below it. */
 .media-video { position: absolute; inset: 0; display: grid; place-items: center; border-radius: inherit; overflow: hidden; background: var(--media-backdrop); }
 .media-video .video-player { width: 100%; height: 100%; }
+/* While the player's chunk loads (areas.rs), or when it can't: centred in the tile. */
+.media-video > .lazy-area { width: 100%; height: 100%; }
+.media-video > .lazy-area-failed { overflow: auto; }
 
 /* The app's own video player (#638), inline and in the lightbox, the same on every platform: the
    video letterboxed in the player's box, a translucent bar floating over its bottom edge. With a

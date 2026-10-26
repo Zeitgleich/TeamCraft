@@ -17,7 +17,6 @@ use crate::calls::{BackgroundEffect, CallEvent, CallRequest, CallStatusSounds};
 use crate::clock::now_ms;
 use crate::components::activity_view::ActivityView;
 use crate::components::announcement_banner::AnnouncementBanner;
-use crate::components::bookmarks::BookmarksDialog;
 use crate::components::bottom_nav::BottomNav;
 use crate::components::bundle_banner::{BundleBanner, ReleaseBanner};
 use crate::components::calls_unavailable::CallsUnavailableDialog;
@@ -34,20 +33,15 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::incoming_call::IncomingCallDialog;
 use crate::components::link_request_prompt::LinkRequestPrompt;
 use crate::components::members_panel::MembersPanel;
-use crate::components::message_actions::{EditHistoryDialog, ForwardDialog, PinsPanel, SavedView};
+use crate::components::message_actions::{PinsPanel, SavedView};
 use crate::components::notification_prompt::NotificationPrompt;
 use crate::components::offline_banner::OfflineBanner;
 use crate::components::profile_views::UserProfileDialog;
-use crate::components::quick_switcher::QuickSwitcher;
 use crate::components::rail::SpaceRail;
-use crate::components::security_ui::{
-  DeviceApprovalDialog, LinkDeviceDialog, VerifyContactDialog, VerifyKeyDialog,
-};
-use crate::components::settings_modal::ShortcutsModal;
+use crate::components::security_ui::{DeviceApprovalDialog, LinkDeviceDialog};
 use crate::components::settings_tabs::apply_call_prefs;
 #[cfg(target_arch = "wasm32")]
 use crate::components::share_download::ShareDownloadPage;
-use crate::components::share_link_dialog::ShareLinkDialog;
 use crate::components::sidebar::Sidebar;
 use crate::components::status_menu::CustomStatusDialog;
 use crate::components::status_menu::StatusMenu;
@@ -390,21 +384,21 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         </For>
       </div>
       {move || match state.overlay.get() {
-        Overlay::QuickSwitcher => view! { <QuickSwitcher /> }.into_any(),
+        Overlay::QuickSwitcher => lazy_area(Place::Overlay, || areas::quick_switcher(())),
         Overlay::CustomStatus => view! { <CustomStatusDialog /> }.into_any(),
         Overlay::Settings => lazy_area(Place::Overlay, || areas::settings(())),
-        Overlay::Shortcuts => view! { <ShortcutsModal /> }.into_any(),
+        Overlay::Shortcuts => lazy_area(Place::Overlay, || areas::shortcuts(())),
         Overlay::DeviceApproval => view! { <DeviceApprovalDialog /> }.into_any(),
         Overlay::LinkDevice => view! { <LinkDeviceDialog /> }.into_any(),
-        Overlay::VerifyContact(user) => view! { <VerifyContactDialog user=user /> }.into_any(),
-        Overlay::VerifyKey(conversation) => view! { <VerifyKeyDialog conversation=conversation /> }.into_any(),
+        Overlay::VerifyContact(user) => lazy_area(Place::Overlay, move || areas::verify_contact(user)),
+        Overlay::VerifyKey(conversation) => lazy_area(Place::Overlay, move || areas::verify_key(conversation)),
         Overlay::ScheduleMeeting => lazy_area(Place::Overlay, || areas::schedule_meeting(())),
         Overlay::EditMeeting(meeting) => lazy_area(Place::Overlay, move || areas::edit_meeting(meeting)),
         Overlay::MeetingCreated => lazy_area(Place::Overlay, || areas::meeting_created(())),
         Overlay::ShareFile(conversation, message, file) => {
-          view! { <ShareLinkDialog conversation=conversation message=message file=file /> }.into_any()
+          lazy_area(Place::Overlay, move || areas::share_file(conversation, message, file))
         },
-        Overlay::Forward(from, message) => view! { <ForwardDialog from=from message=message /> }.into_any(),
+        Overlay::Forward(from, message) => lazy_area(Place::Overlay, move || areas::forward(from, message)),
         Overlay::Lightbox(conversation, start) => lazy_area(Place::Overlay, move || areas::lightbox(conversation, start)),
         Overlay::FilePreview(conversation, key) => lazy_area(Place::Overlay, move || areas::file_preview(conversation, key)),
         Overlay::NewSpace => lazy_area(Place::Overlay, || areas::new_space(())),
@@ -417,8 +411,10 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::BrowseChannels(space) => lazy_area(Place::Overlay, move || areas::browse_channels(space)),
         Overlay::ChannelSettings(id) => lazy_area(Place::Overlay, move || areas::channel_settings(id)),
         Overlay::SpaceSettings(space) => lazy_area(Place::Overlay, move || areas::space_settings(space)),
-        Overlay::EditHistory(conversation, message) => view! { <EditHistoryDialog conversation=conversation message=message /> }.into_any(),
-        Overlay::Bookmarks(conversation) => view! { <BookmarksDialog conversation=conversation /> }.into_any(),
+        Overlay::EditHistory(conversation, message) => {
+          lazy_area(Place::Overlay, move || areas::edit_history(conversation, message))
+        },
+        Overlay::Bookmarks(conversation) => lazy_area(Place::Overlay, move || areas::bookmarks(conversation)),
         Overlay::UserProfile(user) => view! { <UserProfileDialog user=user /> }.into_any(),
         Overlay::CallsUnavailable => view! { <CallsUnavailableDialog /> }.into_any(),
         Overlay::None | Overlay::StatusMenu => ().into_any(),
