@@ -2100,6 +2100,11 @@ settings-close-to-tray-hint = Notifications keep arriving. Quit from the tray ic
 settings-start-minimized = Start in the tray without opening the window
 settings-system-title-bar = Use the system title bar
 settings-system-title-bar-hint = Shows the operating system's title bar above TeamCraft's own. On macOS the change applies at the next start.
+settings-tray-icon = Tray icon
+settings-tray-icon-hint = White or black suits a panel the coloured icon doesn’t stand out on.
+settings-tray-icon-colour = Colour
+settings-tray-icon-white = White
+settings-tray-icon-black = Black
 
 ## Desktop updates (docs/updates.md)
 settings-updates = Updates

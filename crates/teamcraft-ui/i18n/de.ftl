@@ -2100,6 +2100,11 @@ settings-close-to-tray-hint = Benachrichtigungen kommen weiter an. Beenden über
 settings-start-minimized = Im Infobereich starten, ohne das Fenster zu öffnen
 settings-system-title-bar = Titelleiste des Systems verwenden
 settings-system-title-bar-hint = Zeigt die Titelleiste des Betriebssystems über der von TeamCraft. Unter macOS gilt die Änderung ab dem nächsten Start.
+settings-tray-icon = Symbol im Infobereich
+settings-tray-icon-hint = Weiß oder Schwarz passt zu einer Leiste, auf der das farbige Symbol untergeht.
+settings-tray-icon-colour = Farbig
+settings-tray-icon-white = Weiß
+settings-tray-icon-black = Schwarz
 
 ## Desktop updates (docs/updates.md)
 settings-updates = Updates
