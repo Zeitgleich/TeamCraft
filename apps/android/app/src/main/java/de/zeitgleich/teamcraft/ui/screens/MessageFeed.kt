@@ -50,6 +50,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -927,7 +928,10 @@ private fun NotSentLine(viewModel: MainViewModel, message: Message) {
   }
 }
 
-/** An own file going up: how far ("37 %", "12 MB / 48 MB") and cancel; stopped: why, retry, cancel. */
+/**
+ * An own file going up, as on desktop and web (#742): quiet while it goes up or retries by itself (a
+ * small ring and cancel; how far, or "retrying", only for TalkBack); stopped: why, retry, cancel.
+ */
 @Composable
 private fun UploadLine(viewModel: MainViewModel, file: FileInfo, colors: BubbleColors) {
   val context = LocalContext.current
@@ -936,18 +940,30 @@ private fun UploadLine(viewModel: MainViewModel, file: FileInfo, colors: BubbleC
     when (file.transfer.state) {
       "uploading" -> {
         val transfer = file.transfer
-        val label = if (transfer.doneBytes == 0L && transfer.failedAttempts > 0) {
+        val label = if (transfer.isRetrying) {
           stringResource(R.string.file_upload_retrying)
         } else if (transfer.totalBytes >= LARGE_TRANSFER_BYTES) {
           "${Formatter.formatShortFileSize(context, transfer.doneBytes)} / ${Formatter.formatShortFileSize(context, transfer.totalBytes)}"
         } else {
           "${if (transfer.totalBytes > 0) transfer.doneBytes * 100 / transfer.totalBytes else 0} %"
         }
-        Text(label, style = MaterialTheme.typography.labelSmall, color = colors.muted)
+        val ring = Modifier.padding(start = 4.dp).size(16.dp).semantics { contentDescription = label }
+        val maybeProgress = transfer.maybeProgress
+        if (maybeProgress == null || transfer.isRetrying) {
+          CircularProgressIndicator(ring, color = colors.content, strokeWidth = 2.dp)
+        } else {
+          CircularProgressIndicator(progress = { maybeProgress }, modifier = ring, color = colors.content, strokeWidth = 2.dp)
+        }
         TextButton(onClick = cancel) { Text(stringResource(R.string.file_cancel_upload), color = colors.content) }
       }
       "upload_stalled" -> {
-        Text(stringResource(R.string.file_upload_stalled), color = colors.content, style = MaterialTheme.typography.labelSmall)
+        val reason = if (file.transfer.isStorageUnavailable) R.string.file_upload_storage_unavailable else R.string.file_upload_stalled
+        Text(
+          stringResource(reason),
+          color = colors.content,
+          style = MaterialTheme.typography.labelSmall,
+          modifier = Modifier.weight(1f, fill = false),
+        )
         TextButton(onClick = { viewModel.act(ChatActions.retrySend(file.conversation, file.message)) }) {
           Text(stringResource(R.string.retry), color = colors.content)
         }

@@ -771,6 +771,7 @@ fn rejected(error: ErrorBody) -> CoreError {
   CoreError::Api(ApiError::Status {
     status,
     maybe_body: Some(error),
+    maybe_retry_after: None,
   })
 }
 
