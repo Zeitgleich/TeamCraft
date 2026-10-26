@@ -423,6 +423,18 @@ impl<S: LocalStore> CoreChatBackend<S> {
     std::mem::take(&mut *self.commands.borrow_mut())
   }
 
+  /// The deactivated and deleted accounts this device knows: [`ChatBackend::users`] leaves them out
+  /// of lists and pickers (issue #654), but they still name their old messages. The mobile apps
+  /// read them next to the snapshot (issue #751).
+  pub fn former_users(&self) -> Vec<User> {
+    self
+      .summaries()
+      .values()
+      .filter(|summary| summary.is_deactivated)
+      .map(|summary| self.to_user(summary))
+      .collect()
+  }
+
   pub(crate) fn me_id(&self) -> UserId {
     self.me
   }

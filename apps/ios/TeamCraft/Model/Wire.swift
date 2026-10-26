@@ -130,16 +130,55 @@ struct ChatAnswer: Decodable, Sendable {
   let channels: [BrowsableChannel]?
 }
 
-/// The people part of the core's chat snapshot: who can be mentioned.
+/// The people part of the core's chat snapshot: who can be mentioned, and the former accounts that
+/// only name their old messages.
 struct PeopleSnapshot: Decodable, Sendable {
   struct Person: Decodable, Sendable {
     let id: String
     let username: String
     let displayName: String
+    /// Deleted (issue #630): a tombstone the app names by its own "Deleted user" (issue #751).
+    let isDeleted: Bool?
+
+    /// The name to show: the app's own "Deleted user" for a deleted account, as on desktop and web.
+    var shownName: String { isDeleted == true ? deletedUserName : displayName }
   }
 
   let me: Person
+  /// The people to offer in lists, pickers and mentions.
   let users: [Person]?
+  /// Deactivated and deleted accounts: offered nowhere, they only name their old messages.
+  let formerUsers: [Person]?
+
+  /// Names by user ID for reply quotes and calls: everyone this device knows, former accounts
+  /// included.
+  var namesById: [String: String] {
+    let everyone = (users ?? []) + [me] + (formerUsers ?? [])
+    return Dictionary(everyone.map { ($0.id, $0.shownName) }, uniquingKeysWith: { first, _ in first })
+  }
+}
+
+/// The app's own name for a deleted account in the user's language, instead of the server's
+/// placeholder (issue #751).
+private var deletedUserName: String { String(localized: "user_deleted_name") }
+
+extension MessageItem {
+  /// The message with `deletedUserName` as its author's name when the author's account was deleted.
+  func namingDeletedAuthor() -> MessageItem {
+    guard isAuthorDeleted else { return self }
+    var named = self
+    named.authorName = deletedUserName
+    return named
+  }
+}
+
+extension SearchHitItem {
+  /// The hit with `deletedUserName` as its author's name when the author's account was deleted.
+  func namingDeletedAuthor() -> SearchHitItem {
+    var named = self
+    named.message = message.namingDeletedAuthor()
+    return named
+  }
 }
 
 /// A meeting as the server lists it (`GET /meetings`).

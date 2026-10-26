@@ -141,6 +141,11 @@ pub struct MessageItem {
   /// Set on replies: the thread (root message ID) they belong to.
   pub maybe_thread_id: Option<String>,
   pub reactions: Vec<ReactionItem>,
+  /// The author's account was deleted (issue #630): the app shows its own "Deleted user" instead of
+  /// `author_name`, the server's placeholder (issue #751). Last and defaulted, so items the apps
+  /// build in tests need no change.
+  #[uniffi(default = false)]
+  pub is_author_deleted: bool,
 }
 
 /// An emoji the composer offers for a typed `:name`.
@@ -400,13 +405,20 @@ impl ConversationKind {
 }
 
 impl MessageItem {
-  /// `author_name` is resolved by the caller (the view model only has the ID).
-  pub(crate) fn from_view(message: &view::Message, author_name: String, is_pending: bool) -> Self {
+  /// `maybe_author` is looked up by the caller (the view model only has the ID); an unknown author
+  /// has no name yet.
+  pub(crate) fn from_view(
+    message: &view::Message,
+    maybe_author: Option<&view::User>,
+    is_pending: bool,
+  ) -> Self {
     Self {
       id: message.id.to_string(),
       conversation_id: message.conversation.to_string(),
       author_id: message.author.to_string(),
-      author_name,
+      author_name: maybe_author
+        .map(|author| author.display_name.clone())
+        .unwrap_or_default(),
       sent_at_ms: message.sent_at,
       body: message.body.clone(),
       is_edited: message.is_edited,
@@ -422,6 +434,7 @@ impl MessageItem {
           reacted_by_me: reaction.reacted_by_me,
         })
         .collect(),
+      is_author_deleted: maybe_author.is_some_and(|author| author.is_deleted),
     }
   }
 }
@@ -745,5 +758,55 @@ mod tests {
       NotificationContent::from(&PushContentMode::Unknown("later".into())),
       NotificationContent::Nothing
     );
+  }
+
+  #[test]
+  fn a_deleted_author_is_flagged_for_the_apps_own_name() {
+    let message = message();
+    let mut author = author();
+    assert!(!MessageItem::from_view(&message, Some(&author), false).is_author_deleted);
+
+    author.is_deleted = true;
+    author.display_name = "Deleted user".into();
+    let item = MessageItem::from_view(&message, Some(&author), false);
+    assert!(item.is_author_deleted);
+    assert_eq!(item.author_name, "Deleted user");
+
+    let unknown = MessageItem::from_view(&message, None, false);
+    assert!(!unknown.is_author_deleted);
+    assert_eq!(unknown.author_name, "");
+  }
+
+  fn message() -> view::Message {
+    view::Message {
+      id: view::id_from_raw(7),
+      conversation: view::id_from_raw(5),
+      author: view::id_from_raw(3),
+      kind: view::MessageKind::User,
+      sent_at: 0,
+      body: "Hello".into(),
+      is_edited: false,
+      reactions: Vec::new(),
+      reply_count: 0,
+      maybe_thread: None,
+    }
+  }
+
+  fn author() -> view::User {
+    view::User {
+      id: view::id_from_raw(3),
+      username: "sam".into(),
+      display_name: "Sam Doe".into(),
+      presence: PresenceStatus::Offline,
+      maybe_custom_status: None,
+      avatar_hue: 0,
+      is_guest: false,
+      is_bot: false,
+      maybe_organization: None,
+      is_deactivated: false,
+      is_deleted: false,
+      device_setup: view::DeviceSetup::Unknown,
+      maybe_email: None,
+    }
   }
 }

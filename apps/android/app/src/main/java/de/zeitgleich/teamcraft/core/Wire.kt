@@ -39,7 +39,18 @@ data class User(
   @SerialName("avatar_hue") val avatarHue: Int = 0,
   @SerialName("is_guest") val isGuest: Boolean = false,
   @SerialName("is_bot") val isBot: Boolean = false,
-)
+  /** Deactivated (issue #654): offered nowhere, only names their old messages. */
+  @SerialName("is_deactivated") val isDeactivated: Boolean = false,
+  /** Deleted (issue #630): a tombstone the app names by its own "Deleted user" (issue #751). */
+  @SerialName("is_deleted") val isDeleted: Boolean = false,
+) {
+  /** Whether lists, pickers and mentions may offer this person. */
+  val isOffered: Boolean get() = !isDeactivated && !isDeleted
+
+  /** Named [deletedUserName] and without a username if the account was deleted, as on desktop and web. */
+  fun namedIfDeleted(deletedUserName: String): User =
+    if (isDeleted) copy(displayName = deletedUserName, username = "") else this
+}
 
 @Serializable
 data class Space(
@@ -128,14 +139,30 @@ data class ContactKeys(
 @Serializable
 data class ChatSnapshot(
   val me: User,
+  /** The people to offer in lists, pickers and mentions. */
   val users: List<User> = emptyList(),
   val spaces: List<Space> = emptyList(),
   val conversations: List<Conversation> = emptyList(),
   val security: SecuritySnapshot = SecuritySnapshot(),
+  /** Deactivated and deleted accounts: offered nowhere, they only name their old messages. */
+  @SerialName("former_users") val formerUsers: List<User> = emptyList(),
 ) {
-  fun user(id: String): User? = users.firstOrNull { it.id == id } ?: me.takeIf { it.id == id }
+  /** Anyone this device knows, former accounts included (the authors of old messages). */
+  fun user(id: String): User? =
+    users.firstOrNull { it.id == id } ?: me.takeIf { it.id == id } ?: formerUsers.firstOrNull { it.id == id }
+
   fun conversation(id: String): Conversation? = conversations.firstOrNull { it.id == id }
   fun name(userId: String): String = user(userId)?.displayName ?: userId
+
+  /**
+   * Deleted accounts named [deletedUserName], the app's own "Deleted user" in the user's language,
+   * instead of the server's placeholder (issue #751).
+   */
+  fun namingDeletedUsers(deletedUserName: String): ChatSnapshot =
+    copy(
+      users = users.map { it.namedIfDeleted(deletedUserName) },
+      formerUsers = formerUsers.map { it.namedIfDeleted(deletedUserName) },
+    )
 }
 
 @Serializable

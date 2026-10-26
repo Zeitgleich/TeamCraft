@@ -5433,6 +5433,22 @@
         }
       }
     },
+    "user_deleted_name": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deleted user"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gelöschter Nutzer"
+          }
+        }
+      }
+    },
     "browse_title": {
       "localizations": {
         "en": {

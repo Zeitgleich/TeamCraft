@@ -1071,12 +1071,8 @@ impl Engine {
   }
 
   fn message_item(&self, backend: &CoreChatBackend<Store>, message: &MessageView) -> MessageItem {
-    let author_name = backend
-      .user(message.author)
-      .map(|user| user.display_name)
-      .unwrap_or_default();
-    let is_pending = is_pending(message.id);
-    MessageItem::from_view(message, author_name, is_pending)
+    let maybe_author = backend.user(message.author);
+    MessageItem::from_view(message, maybe_author.as_ref(), is_pending(message.id))
   }
 
   fn client_settings(&self) -> ClientSettings {

@@ -93,6 +93,7 @@
   <string name="notification_reply">Antworten</string>
   <string name="notification_mark_read">Als gelesen markieren</string>
   <string name="you">Du</string>
+  <string name="user_deleted_name">Gelöschter Nutzer</string>
   <plurals name="replies">
     <item quantity="one">%d Antwort</item>
     <item quantity="other">%d Antworten</item>

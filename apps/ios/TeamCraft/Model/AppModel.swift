@@ -431,11 +431,15 @@ final class AppModel {
   }
 
   func messages(conversationId: String, limit: UInt32 = 200) async -> [MessageItem] {
-    (try? await core().messages(conversationId: conversationId, limit: limit)) ?? []
+    ((try? await core().messages(conversationId: conversationId, limit: limit)) ?? []).map {
+      $0.namingDeletedAuthor()
+    }
   }
 
   func thread(conversationId: String, threadId: String) async -> [MessageItem] {
-    (try? await core().thread(conversationId: conversationId, threadId: threadId)) ?? []
+    ((try? await core().thread(conversationId: conversationId, threadId: threadId)) ?? []).map {
+      $0.namingDeletedAuthor()
+    }
   }
 
   /// The newest message of each conversation, for the chat list. Local reads only.
@@ -450,7 +454,7 @@ final class AppModel {
 
   func search(_ query: String) async -> [SearchHitItem] {
     guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { return [] }
-    return (try? await core().search(query: query)) ?? []
+    return ((try? await core().search(query: query)) ?? []).map { $0.namingDeletedAuthor() }
   }
 
   // MARK: Acting
@@ -871,13 +875,13 @@ final class AppModel {
     await answer(.browseChannels(spaceId: spaceId))?.channels ?? []
   }
 
-  /// Display names by user ID, for reply quotes.
+  /// Display names by user ID, for reply quotes; former accounts too, deleted ones by the app's own
+  /// "Deleted user".
   func displayNames() async -> [String: String] {
     guard let json = try? await core().snapshot(), let people = Wire.decode(PeopleSnapshot.self, from: json) else {
       return [:]
     }
-    let everyone = (people.users ?? []) + [people.me]
-    return Dictionary(everyone.map { ($0.id, $0.displayName) }, uniquingKeysWith: { first, _ in first })
+    return people.namesById
   }
 
   /// Names of the people typing in a conversation right now.
