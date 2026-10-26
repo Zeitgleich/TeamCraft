@@ -13,14 +13,17 @@
 //! - [`batch`], [`limiter`]: collecting lines into messages, per-source rate limits.
 //! - [`sources`]: the sources the endpoints accept: announced in the app, or in the file.
 //! - [`http`]: the endpoints.
+//! - [`multipart`], [`form`]: webhook forms with files, read as they arrive.
 //! - [`worker`]: the task that owns the client (gateway, sending, index segments).
 //! - [`app`]: wiring for the binary.
 
 pub mod app;
 pub mod batch;
 pub mod config;
+pub mod form;
 pub mod http;
 pub mod limiter;
+pub mod multipart;
 pub mod render;
 pub mod sources;
 pub mod worker;
