@@ -1240,7 +1240,7 @@ fn SpaceOverview(space: Space) -> impl IntoView {
   let edited = move || has_saved.set(false);
   view! {
     {(!can_edit).then(|| view! { <p class="hint">{move || i18n.t("space-settings-read-only")}</p> })}
-    <SpaceImageSection space=id />
+    {can_edit.then(|| view! { <SpaceImageSection space=id /> })}
     <form class="settings-form" on:submit=save>
       <fieldset class="plain-fieldset" prop:disabled=!can_edit>
         <label for="ss-name">{move || i18n.t("space-name")}</label>
