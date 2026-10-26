@@ -124,6 +124,9 @@ pub enum VideoStartError {
 struct SendCounters {
   captured: AtomicU64,
   encoded: AtomicU64,
+  /// Waits for a frame that ended without one: lets tests know the thread idled.
+  #[cfg(test)]
+  idle_polls: AtomicU64,
 }
 
 /// What the encoder thread has done so far: frames taken from the capture and pictures encoded
@@ -373,13 +376,21 @@ impl EncoderLoop {
       }
       let frame = match self.frame_rx.recv_timeout(CONTROL_POLL) {
         Ok(frame) => frame,
-        Err(RecvTimeoutError::Timeout) => continue,
+        Err(RecvTimeoutError::Timeout) => {
+          #[cfg(test)]
+          self.counters.idle_polls.fetch_add(1, Ordering::Relaxed);
+          continue;
+        },
         Err(RecvTimeoutError::Disconnected) => {
           warn!(kind = ?self.kind, "the video capture ended");
           self.report_start(Err(VideoStartError::CaptureEnded(self.source_name())));
           return;
         },
       };
+      // A request that came while waiting (a viewer asked for a keyframe) applies to this frame.
+      if self.apply_controls(&mut simulcast) == LoopStep::Stop {
+        return;
+      }
       self.counters.captured.fetch_add(1, Ordering::Relaxed);
       // A camera may deliver 60 fps; the call sends at most its layers' rate.
       if !limiter.is_due(frame.timestamp_us()) {
@@ -834,9 +845,16 @@ mod tests {
       assert!(is_keyframe(0).await, "the first picture");
       assert!(!is_keyframe(1).await);
       // A still screen: no frame for a while, during which the encoder thread polls its queues.
-      // It used to take the request off the queue there, looking for a stop (issue #683).
+      // It used to take the request off the queue there, looking for a stop (issue #683). Two
+      // polls that ended without a frame since the request: at least one ran while it waited.
       sender.request_keyframe(0);
-      tokio::time::sleep(CONTROL_POLL * 5).await;
+      let idle_polls = || sender.counters.idle_polls.load(Ordering::Relaxed);
+      let since = idle_polls();
+      let deadline = Instant::now() + Duration::from_secs(10);
+      while idle_polls() < since + 2 {
+        assert!(Instant::now() < deadline, "the encoder thread never idled");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+      }
       assert!(is_keyframe(2).await, "the request waited for the next frame");
     }
 
