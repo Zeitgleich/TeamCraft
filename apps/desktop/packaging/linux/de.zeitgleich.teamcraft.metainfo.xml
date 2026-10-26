@@ -35,6 +35,11 @@
     <display_length compare="ge">720</display_length>
   </requires>
   <releases>
+    <release version="1.0.5" date="2026-10-26" type="stable">
+      <description>
+        <p>Everything in 1.0.4 (new message layouts with read ticks, redesigned home pages, search in a conversation, meeting guests in the browser, notifications on every platform, multi-device calls, resumable uploads, file previews and share links, integrations, QR device linking), with a fix that lets the server update its database.</p>
+      </description>
+    </release>
     <release version="1.0.4" date="2026-10-26" type="stable">
       <description>
         <p>New message layouts with read ticks, redesigned home pages, search in a conversation, meeting guests in the browser, notifications on Linux, macOS, Android and iOS, multi-device calls with mute indicators, resumable uploads, file previews and share links, integrations, and QR device linking.</p>
