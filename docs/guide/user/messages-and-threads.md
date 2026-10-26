@@ -61,7 +61,9 @@ Hover a message and open **More actions**:
 ## Slash commands
 
 Type `/` in the composer for the list. Commands run on your device. To send text that starts with a
-slash, type `//`.
+slash, type `//`. The list and `/help` show only the commands that work in the conversation:
+channel commands not in direct messages, your notes or meeting chats, and changing a channel or its
+members only with the right to do so.
 
 | Command                                   | Does                                         |
 |-------------------------------------------|----------------------------------------------|
@@ -73,7 +75,6 @@ slash, type `//`.
 | `/msg @person [text]` `/groupmsg ...`     | Opens a direct or group conversation         |
 | `/mute`                                   | Mutes the conversation                       |
 | `/me` `/shrug` `/code`                    | Action message, shrug, code block            |
-| `/search text`                            | Opens search                                 |
 | `/remind in 10m` or `at 14:30` + text     | A reminder in this conversation              |
 | `/meet`                                   | Starts an instant meeting                    |
 | `/settings` `/shortcuts` `/help`          | Opens settings or the lists                  |

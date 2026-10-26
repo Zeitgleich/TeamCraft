@@ -3,8 +3,9 @@
 use leptos::prelude::*;
 use teamcraft_client_api::actions::ChannelChanges;
 use teamcraft_client_api::custom_status::is_allowed;
-use teamcraft_proto::{HistoryPolicy, IdempotencyKey};
+use teamcraft_proto::{HistoryPolicy, IdempotencyKey, Permission, Role};
 
+use crate::channel_access::may_now;
 use crate::clock::{end_of_local_day, now_ms};
 use crate::feedback::PendingAction;
 use crate::i18n::I18n;
@@ -13,7 +14,7 @@ use crate::model::{ConversationId, CustomStatus, StatusExpiry, User};
 use crate::prefs::{ConversationNotify, MuteFor};
 use crate::reminders::{Reminder, due_time, from_json, to_json};
 use crate::settings::{load_string, store_string};
-use crate::slash::{ReminderTime, SlashCommand, SlashError, StatusChange};
+use crate::slash::{CommandContext, ReminderTime, SlashCommand, SlashError, StatusChange, Unavailable};
 use crate::state::{AppState, Overlay};
 
 // Markdown source: the backslash and both underscores are escaped so they show as typed.
@@ -26,6 +27,55 @@ const MS_PER_DAY: i64 = 86_400_000;
 pub enum Notice {
   Text(String),
   Help,
+}
+
+/// Something that may close the notice above the composer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoticeEvent<'a> {
+  Escape,
+  /// A press anywhere outside the composer.
+  PointerOutside,
+  /// A message went out.
+  Sent,
+  CloseButton,
+  /// The user changed the text; this is what it reads now.
+  Edited(&'a str),
+}
+
+impl Notice {
+  /// Whether `event` closes the notice. The command list of `/help` also goes once the text no
+  /// longer asks for it; a short answer stays while the user types on.
+  pub fn closes_on(&self, event: NoticeEvent) -> bool {
+    match event {
+      NoticeEvent::Escape | NoticeEvent::PointerOutside | NoticeEvent::Sent | NoticeEvent::CloseButton => {
+        true
+      },
+      NoticeEvent::Edited(text) => match self {
+        Self::Help => !text.trim_start().to_lowercase().starts_with("/help"),
+        Self::Text(_) => false,
+      },
+    }
+  }
+}
+
+/// What the composer's `/` button does: it types the slash that opens the command list (the list
+/// is the help), or closes the list again. Commands only work at the start of a message, so with
+/// text in the composer it has nothing to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandButton {
+  Open,
+  Close,
+  Unavailable,
+}
+
+impl CommandButton {
+  pub fn of(is_blank: bool, is_command_list_open: bool) -> Self {
+    match (is_command_list_open, is_blank) {
+      (true, _) => Self::Close,
+      (false, true) => Self::Open,
+      (false, false) => Self::Unavailable,
+    }
+  }
 }
 
 /// What running a command asks of the composer.
@@ -46,12 +96,12 @@ pub fn explain_error(i18n: I18n, error: &SlashError) -> String {
 
 pub fn run(state: AppState, i18n: I18n, conversation: ConversationId, command: SlashCommand) -> Outcome {
   let text = |key: &str| Outcome::Notice(Notice::Text(i18n.t(key)));
-  // Typed in a DM anyway: the server would refuse it (#648), so say why instead.
-  let is_direct = state
-    .read(|backend| backend.conversation(conversation))
-    .is_some_and(|conv| conv.kind.is_direct_like());
-  if is_direct && command.is_channel_only() {
-    return text("slash-channel-only");
+  // Typed where it can't work (outside a channel, without the right): the server would refuse it
+  // (#648, #692), so say why instead.
+  match command.check(context(state, conversation)) {
+    Ok(()) => {},
+    Err(Unavailable::NotAChannel) => return text("slash-channel-only"),
+    Err(Unavailable::NotAllowed) => return text("slash-not-allowed"),
   }
   match command {
     SlashCommand::Presence(presence) => {
@@ -175,10 +225,6 @@ pub fn run(state: AppState, i18n: I18n, conversation: ConversationId, command: S
       format!("{body} {SHRUG}")
     }),
     SlashCommand::Code(code) => Outcome::Send(format!("```\n{code}\n```")),
-    SlashCommand::Search(query) => {
-      state.open_search(Some(&query));
-      Outcome::Done
-    },
     SlashCommand::Settings => {
       state.open_settings();
       Outcome::Done
@@ -190,6 +236,19 @@ pub fn run(state: AppState, i18n: I18n, conversation: ConversationId, command: S
     SlashCommand::Help => Outcome::Notice(Notice::Help),
     SlashCommand::Remind { when, text: body } => remind(i18n, when, body),
     SlashCommand::Meet => start_meeting(state, i18n),
+  }
+}
+
+/// Where the composer of `conversation` is and what the user may do there, read once.
+pub fn context(state: AppState, conversation: ConversationId) -> CommandContext {
+  let is_channel = state
+    .read(|backend| backend.conversation(conversation))
+    .is_some_and(|conv| conv.has_channel_settings());
+  CommandContext {
+    is_channel,
+    can_change_channel: is_channel && may_now(state, conversation, &Permission::ManageChannelProperties),
+    can_manage_members: is_channel && may_now(state, conversation, &Permission::ManageMembers),
+    is_guest: state.read(|backend| backend.my_role()) == Role::Guest,
   }
 }
 
@@ -301,4 +360,53 @@ pub fn left_text(state: AppState, i18n: I18n, conversation: ConversationId) -> S
     .map(|conv| conv.name)
     .unwrap_or_default();
   i18n.t_with("channel-left-toast", &[("name", &name)])
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  mod notice {
+    use super::*;
+
+    #[test]
+    fn every_notice_closes_on_escape_outside_press_send_and_its_button() {
+      for notice in [Notice::Help, Notice::Text("Status set.".into())] {
+        for event in [
+          NoticeEvent::Escape,
+          NoticeEvent::PointerOutside,
+          NoticeEvent::Sent,
+          NoticeEvent::CloseButton,
+        ] {
+          assert!(notice.closes_on(event), "{notice:?} on {event:?}");
+        }
+      }
+    }
+
+    #[test]
+    fn the_command_list_stays_while_the_text_asks_for_it() {
+      assert!(!Notice::Help.closes_on(NoticeEvent::Edited("/help")));
+      assert!(!Notice::Help.closes_on(NoticeEvent::Edited("  /HELP")));
+      assert!(Notice::Help.closes_on(NoticeEvent::Edited("/hel")));
+      assert!(Notice::Help.closes_on(NoticeEvent::Edited("hello")));
+      assert!(Notice::Help.closes_on(NoticeEvent::Edited("")));
+    }
+
+    #[test]
+    fn a_short_answer_stays_while_typing() {
+      assert!(!Notice::Text("Status set.".into()).closes_on(NoticeEvent::Edited("hello")));
+    }
+  }
+
+  #[test]
+  fn the_command_button_toggles_the_list_and_needs_an_empty_composer() {
+    assert_eq!(CommandButton::of(true, false), CommandButton::Open);
+    assert_eq!(
+      CommandButton::of(false, true),
+      CommandButton::Close,
+      "the slash it typed"
+    );
+    assert_eq!(CommandButton::of(true, true), CommandButton::Close);
+    assert_eq!(CommandButton::of(false, false), CommandButton::Unavailable);
+  }
 }
