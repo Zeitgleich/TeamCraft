@@ -218,7 +218,10 @@ The release job builds the app, signs it inside out (`apps/desktop/packaging/mac
 every library and plugin of the bundled GStreamer framework, the framework, then the app with
 `Entitlements.plist`) and only then packs the dmg (`make-dmg.sh`). It fails when the signature is
 broken (`verify-app.sh`: `codesign --verify --deep --strict` and `spctl`), on the app and again on the
-app inside the mounted dmg. A broken or missing seal is what Gatekeeper calls "damaged"; an intact
+app inside the mounted dmg. The dmg window is laid out like other Mac apps' (#710): 660 × 400 with
+the background of `scripts/brand/dmg_background.py` (committed as `dmg-background.png` and `@2x`;
+re-run it after a brand change) and the app and Applications on either side of its arrow; Finder
+writes the layout, and where it can't be scripted the job warns and ships the plain window. A broken or missing seal is what Gatekeeper calls "damaged"; an intact
 ad-hoc signature gets the normal "could not verify" prompt instead.
 
 With the secrets `APPLE_CERTIFICATE` (the Developer ID Application certificate as base64 .p12),
