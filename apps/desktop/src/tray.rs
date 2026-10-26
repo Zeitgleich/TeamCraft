@@ -326,9 +326,15 @@ pub fn tray_update(app: AppHandle, last_unread: State<'_, LastUnread>, update: T
     set_badge(&app, unread);
     if had_unread != (unread > 0)
       && let Some(tray) = app.tray_by_id(TRAY_ID)
-      && let Err(error) = tray.set_icon(Some(tray_icon(unread > 0)))
     {
-      tracing::debug!(%error, "could not change the tray icon");
+      if let Err(error) = tray.set_icon(Some(tray_icon(unread > 0))) {
+        tracing::debug!(%error, "could not change the tray icon");
+      }
+      // A new image drops the template flag, and macOS then draws it black in a dark menu bar (#632).
+      #[cfg(target_os = "macos")]
+      if let Err(error) = tray.set_icon_as_template(true) {
+        tracing::debug!(%error, "could not keep the tray icon a template");
+      }
     }
   }
 }
