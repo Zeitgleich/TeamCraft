@@ -2922,6 +2922,7 @@ impl ServerApi for FakeServerApi {
         can_add_members: true,
         can_invite_guests: true,
         can_manage_space: true,
+        can_create_channels: true,
       };
       state.spaces.insert(id, space.clone());
       if let Some(key) = request.maybe_idempotency_key {
@@ -4251,6 +4252,7 @@ impl State {
       can_add_members: false,
       can_invite_guests: false,
       can_manage_space: false,
+      can_create_channels: false,
     });
   }
 
@@ -4410,6 +4412,7 @@ impl State {
       is_integration: false,
       contains_guests: false,
       maybe_organizer_user_id: None,
+      maybe_my_permissions: None,
       maybe_my_membership: None,
       participants: Vec::new(),
       maybe_image: None,

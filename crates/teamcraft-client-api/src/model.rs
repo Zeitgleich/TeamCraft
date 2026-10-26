@@ -205,6 +205,18 @@ pub struct Space {
   /// server checks again).
   #[serde(default)]
   pub can_manage_space: bool,
+  /// Whether the user may create channels in the space (guests may not; the server checks
+  /// again).
+  #[serde(default)]
+  pub can_create_channels: bool,
+}
+
+impl Space {
+  /// Whether "Invite people" leads anywhere: adding members or guests, or sharing the link of an
+  /// open space, which guests don't do (issue #691).
+  pub fn can_invite(&self, is_guest: bool) -> bool {
+    self.can_add_members || self.can_invite_guests || (!is_guest && self.join_policy == JoinPolicy::Open)
+  }
 }
 
 /// A member of a channel with the role the member list holds.
@@ -325,6 +337,7 @@ impl JoinableSpace {
       can_add_members: false,
       can_invite_guests: false,
       can_manage_space: false,
+      can_create_channels: false,
     }
   }
 }
@@ -426,6 +439,17 @@ pub struct Conversation {
   /// ([`teamcraft_proto::ConversationResponse::is_notes_to_self`]), not its current members.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub is_notes_to_self: bool,
+  /// The channel permissions the server says the user holds here
+  /// ([`teamcraft_proto::ConversationResponse::maybe_my_permissions`]); `None` when it didn't
+  /// say (an older server), and the client evaluates the built-in scheme instead
+  /// ([`crate::role_rules::RoleActor::maybe_granted`]). The UI offers an action only when it is
+  /// in here (issue #691); the server checks every request again.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_permissions: Option<Vec<teamcraft_proto::Permission>>,
+  /// A DM or group DM whose other people are all deactivated (issue #698): listed apart, after
+  /// the active conversations; its history stays readable.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub has_only_deactivated_others: bool,
 }
 
 impl Conversation {

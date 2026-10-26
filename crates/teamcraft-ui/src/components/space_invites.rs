@@ -8,8 +8,9 @@ use std::collections::HashSet;
 
 use leptos::prelude::*;
 use teamcraft_client_api::actions::SpaceInvite;
-use teamcraft_proto::{HistoryPolicy, Role};
+use teamcraft_proto::{HistoryPolicy, Permission};
 
+use crate::channel_access::{can_in_workspace_now, is_guest};
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_actions::copy_to_clipboard;
 use crate::components::people_picker::PeoplePicker;
@@ -162,7 +163,9 @@ pub fn BrowseSpacesDialog(maybe_highlight: Option<SpaceId>) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let filter = RwSignal::new(String::new());
-  let is_guest = Memo::new(move |_| state.read(|backend| backend.my_role()) == Role::Guest);
+  let is_guest = Memo::new(move |_| is_guest(state));
+  // `create_space`: admins and owners in the built-in scheme.
+  let can_create_space = Memo::new(move |_| can_in_workspace_now(state, &Permission::CreateSpace));
   let joinable = Memo::new(move |_| {
     let mut list = matching(
       state.read(|backend| backend.joinable_spaces()),
@@ -214,7 +217,7 @@ pub fn BrowseSpacesDialog(maybe_highlight: Option<SpaceId>) -> impl IntoView {
         </Show>
       </ul>
       <p class="hint">{move || i18n.t("spaces-browse-invite-only-hint")}</p>
-      <Show when=move || !is_guest.get() fallback=|| ()>
+      <Show when=move || can_create_space.get() fallback=|| ()>
         <footer class="modal-foot">
           <span class="grow"></span>
           <button type="button" class="btn btn-primary" on:click=move |_| state.overlay.set(Overlay::NewSpace)>
@@ -272,8 +275,8 @@ fn OwnSpaceRow(space: Space) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let id = space.id;
-  // Open spaces can always be shared as a link, so everyone in them gets the invite dialog.
-  let can_invite = space.can_add_members || space.can_invite_guests || space.join_policy == JoinPolicy::Open;
+  // Open spaces can be shared as a link, so everyone in them but guests gets the invite dialog.
+  let can_invite = space.can_invite(is_guest(state));
   view! {
     <li class="browse-row space-row">
       <SpaceTile space=space.clone() />
@@ -772,6 +775,7 @@ mod tests {
       can_add_members,
       can_invite_guests,
       can_manage_space: false,
+      can_create_channels: false,
     }
   }
 

@@ -21,6 +21,7 @@ use teamcraft_client_api::links::{LINKS_PER_PAGE, LinkInfo};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
+use crate::channel_access::can_share_files;
 use crate::clock::format_date_time;
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
@@ -767,7 +768,7 @@ fn MediaToolbar(file: FileInfo, #[prop(optional, into)] on_expand: Option<Callba
         <ToolbarButton label="video-expand" icon=IconName::Maximize on_click=move || expand.run(()) />
       })}
       <ToolbarButton label="file-download" icon=IconName::Download on_click=move || actions.download() />
-      <ToolbarButton label="file-copy-share" icon=IconName::Link on_click=move || actions.share() />
+      {actions.can_share.then(|| view! { <ToolbarButton label="file-copy-share" icon=IconName::Link on_click=move || actions.share() /> })}
       <ToolbarButton label="lightbox-forward" icon=IconName::Forward on_click=move || actions.forward() />
       <button
         class="icon-btn media-tool"
@@ -997,10 +998,12 @@ fn FileMenu(actions: FileActions) -> impl IntoView {
             <Icon name=IconName::Download />
             <span class="menu-label">{move || i18n.t("file-download")}</span>
           </button>
-          <button class="menu-item" role="menuitem" on:click=item(FileActions::share)>
-            <Icon name=IconName::Link />
-            <span class="menu-label">{move || i18n.t("file-share")}</span>
-          </button>
+          {actions.can_share.then(|| view! {
+            <button class="menu-item" role="menuitem" on:click=item(FileActions::share)>
+              <Icon name=IconName::Link />
+              <span class="menu-label">{move || i18n.t("file-share")}</span>
+            </button>
+          })}
           <button class="menu-item" role="menuitem" on:click=item(FileActions::forward)>
             <Icon name=IconName::Forward />
             <span class="menu-label">{move || i18n.t("lightbox-forward")}</span>
@@ -1030,6 +1033,8 @@ struct FileActions {
   conversation: ConversationId,
   message: MessageId,
   file_id: StoredValue<String>,
+  /// Share links are offered only to people who may make them (issue #691).
+  can_share: bool,
 }
 
 impl FileActions {
@@ -1040,6 +1045,7 @@ impl FileActions {
       conversation: file.conversation,
       message: file.message,
       file_id: StoredValue::new(file.file_id.clone()),
+      can_share: can_share_files(state, file.conversation),
     }
   }
 

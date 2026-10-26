@@ -17,6 +17,7 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
+use crate::channel_access::can_share_files;
 use crate::clock::format_date_time;
 use crate::components::icons::{Icon, IconName};
 use crate::components::lightbox::{FullMedia, sizes};
@@ -376,6 +377,7 @@ fn MoreMenu(
   let trigger = NodeRef::<html::Button>::new();
   let menu = NodeRef::<html::Div>::new();
   let conversation = actions.conversation;
+  let can_share = can_share_files(state, conversation);
   let message = move || actions.current.get_untracked().message;
   let is_saved = Memo::new(move |_| {
     let message = actions.current.get().message;
@@ -502,10 +504,12 @@ fn MoreMenu(
             <Icon name=IconName::Link />
             <span class="menu-label">{move || i18n.t("lightbox-copy-link")}</span>
           </button>
-          <button class="menu-item" role="menuitem" on:click=share>
-            <Icon name=IconName::Link />
-            <span class="menu-label">{move || i18n.t("file-share")}</span>
-          </button>
+          {can_share.then(|| view! {
+            <button class="menu-item" role="menuitem" on:click=share>
+              <Icon name=IconName::Link />
+              <span class="menu-label">{move || i18n.t("file-share")}</span>
+            </button>
+          })}
           <Show when=can_copy_image fallback=|| ()>
             <button class="menu-item" role="menuitem" on:click=move |_| { actions.run(Command::CopyImage); close(); }>
               <Icon name=IconName::Copy />

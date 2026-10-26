@@ -362,7 +362,17 @@ pub fn ChannelSettingsDialog(
   let Some(info) = info else {
     return view! { <Dialog title_key="channel-settings-title"><p>{move || i18n.t("channel-missing")}</p></Dialog> }.into_any();
   };
-  let sections = channel_settings_sections(info.kind);
+  // Everything under "Advanced" is an action (category, moving, archiving): without the rights
+  // for any of them the section isn't offered.
+  let access = ChannelAccess::new(state, conversation);
+  let can_manage_space = info.maybe_space.is_some_and(|space| {
+    state
+      .read(|backend| backend.spaces())
+      .iter()
+      .any(|found| found.id == space && found.can_manage_space)
+  });
+  let has_advanced = can_manage_space || untrack(|| access.can(&Permission::ManageChannelProperties));
+  let sections = channel_settings_sections(info.kind, has_advanced);
   let first = maybe_section
     .and_then(|slug| sections.iter().copied().find(|section| section.slug == slug))
     .unwrap_or(sections[0]);
@@ -390,18 +400,22 @@ pub fn ChannelSettingsDialog(
 
 /// The sections of a conversation's settings. Name, topic, privacy, bots, the log mode and the
 /// advanced ones are channel properties: the server refuses them for DMs and group DMs (#648),
-/// which keep their members only.
-fn channel_settings_sections(kind: ConversationKind) -> Vec<Section> {
+/// which keep their members only. The advanced section holds only actions and is left out for
+/// people who may take none of them (issue #691); the others show what is set to everybody.
+fn channel_settings_sections(kind: ConversationKind, has_advanced: bool) -> Vec<Section> {
   if kind.is_direct_like() {
     vec![CHANNEL_MEMBERS]
   } else {
-    vec![
+    let mut sections = vec![
       CHANNEL_GENERAL,
       CHANNEL_MEMBERS,
       CHANNEL_PRIVACY,
       CHANNEL_INTEGRATIONS,
-      CHANNEL_ADVANCED,
-    ]
+    ];
+    if has_advanced {
+      sections.push(CHANNEL_ADVANCED);
+    }
+    sections
   }
 }
 
@@ -410,7 +424,10 @@ fn channel_settings_sections(kind: ConversationKind) -> Vec<Section> {
 fn ChannelGeneral(conversation: ConversationId, name: String, topic: String) -> impl IntoView {
   let state = use_app_state();
   let access = ChannelAccess::new(state, conversation);
-  let can_change_picture = move || access.can(&Permission::ManageChannelProperties);
+  // Name, topic and picture are channel properties (`manage_channel_properties`); everybody else
+  // reads them.
+  let can_edit = Memo::new(move |_| access.can(&Permission::ManageChannelProperties));
+  let can_change_picture = move || can_edit.get();
   let i18n = use_i18n();
   let name = RwSignal::new(name);
   let topic = RwSignal::new(topic);
@@ -433,12 +450,19 @@ fn ChannelGeneral(conversation: ConversationId, name: String, topic: String) -> 
     });
   };
   view! {
+    <Show when=move || !can_edit.get() fallback=|| ()>
+      <p class="hint">{move || i18n.t("channel-settings-read-only")}</p>
+    </Show>
     <form class="settings-form" on:submit=save>
-      <label for="cs-name">{move || i18n.t("channel-name")}</label>
-      <input id="cs-name" class="input" data-autofocus required maxlength="80" prop:value=move || name.get() on:input=move |ev| { has_saved.set(false); name.set(event_target_value(&ev)) } />
-      <label for="cs-topic">{move || i18n.t("channel-topic")}</label>
-      <input id="cs-topic" class="input" maxlength="250" prop:value=move || topic.get() on:input=move |ev| { has_saved.set(false); topic.set(event_target_value(&ev)) } />
-      <SaveFooter pending=pending has_saved=has_saved />
+      <fieldset class="plain-fieldset" prop:disabled=move || !can_edit.get()>
+        <label for="cs-name">{move || i18n.t("channel-name")}</label>
+        <input id="cs-name" class="input" data-autofocus required maxlength="80" prop:value=move || name.get() on:input=move |ev| { has_saved.set(false); name.set(event_target_value(&ev)) } />
+        <label for="cs-topic">{move || i18n.t("channel-topic")}</label>
+        <input id="cs-topic" class="input" maxlength="250" prop:value=move || topic.get() on:input=move |ev| { has_saved.set(false); topic.set(event_target_value(&ev)) } />
+      </fieldset>
+      <Show when=move || can_edit.get() fallback=|| ()>
+        <SaveFooter pending=pending has_saved=has_saved />
+      </Show>
     </form>
     <Show when=can_change_picture fallback=|| ()>
       <ChannelImageSection conversation=conversation />
@@ -515,10 +539,12 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
     <div class="settings-row">
       <span class="muted-text">{move || i18n.t_count("members-count", members.with(Vec::len))}</span>
       <span class="grow"></span>
-      <button type="button" class="btn btn-primary" on:click=move |_| state.overlay.set(Overlay::AddToChannel(conversation))>
-        <Icon name=IconName::UserPlus />
-        {move || i18n.t("channel-add-people")}
-      </button>
+      <Show when=move || access.can_add_members() fallback=|| ()>
+        <button type="button" class="btn btn-primary" on:click=move |_| state.overlay.set(Overlay::AddToChannel(conversation))>
+          <Icon name=IconName::UserPlus />
+          {move || i18n.t("channel-add-people")}
+        </button>
+      </Show>
     </div>
     <p class="hint">{move || if can_manage_roles.get() { i18n.t("channel-roles-hint") } else { i18n.t("channel-roles-read-only") }}</p>
     <ul class="settings-member-list">
@@ -608,11 +634,13 @@ fn ChannelMemberRow(
       {(!is_me).then(|| view! {
         <Show
           when=move || is_confirming.get()
-          fallback=move || view! {
+          // Removing takes `manage_members`, removing a moderator or an admin the right to manage
+          // roles too: nobody else gets the button.
+          fallback=move || role.with(|role| access.can_remove_member(role.as_ref())).then(|| view! {
             <button type="button" class="btn btn-small" prop:disabled=move || pending.is_pending() on:click=move |_| is_confirming.set(true)>
               {move || i18n.t("settings-member-remove")}
             </button>
-          }
+          })
         >
           <span role="alert" class="muted-text">{
             let name = user.display_name.clone();
@@ -792,6 +820,8 @@ fn role_value(role: &SpaceRole) -> String {
 fn ChannelPrivacy(conversation: ConversationId, is_private: bool) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
+  let access = ChannelAccess::new(state, conversation);
+  let can_convert = Memo::new(move |_| access.can(&Permission::ConvertChannelPrivacy));
   let is_confirming_privacy = RwSignal::new(false);
   let pending = PendingAction::new();
   // Closes once the core confirmed the conversion; a refusal stays in the dialog.
@@ -816,7 +846,7 @@ fn ChannelPrivacy(conversation: ConversationId, is_private: bool) -> impl IntoVi
     <p class="hint">{move || if is_private { i18n.t("channel-privacy-hint-private") } else { i18n.t("channel-privacy-hint-public") }}</p>
     <Show
       when=move || is_confirming_privacy.get()
-      fallback=move || view! { <button type="button" class="btn" on:click=move |_| is_confirming_privacy.set(true)>{move || if is_private { i18n.t("channel-make-public") } else { i18n.t("channel-make-private") }}</button> }
+      fallback=move || can_convert.get().then(|| view! { <button type="button" class="btn" on:click=move |_| is_confirming_privacy.set(true)>{move || if is_private { i18n.t("channel-make-public") } else { i18n.t("channel-make-private") }}</button> })
     >
       <p role="alert">{move || if is_private { i18n.t("channel-make-public-confirm") } else { i18n.t("channel-make-private-confirm") }}</p>
       <div class="inline-actions">
@@ -825,7 +855,7 @@ fn ChannelPrivacy(conversation: ConversationId, is_private: bool) -> impl IntoVi
       </div>
       <FailureNote pending=pending />
     </Show>
-    <ChannelRetention conversation=conversation />
+    <ChannelRetention conversation=conversation can_edit=Signal::derive(move || access.can(&Permission::ManageChannelProperties)) />
   }
 }
 
@@ -834,6 +864,9 @@ fn ChannelPrivacy(conversation: ConversationId, is_private: bool) -> impl IntoVi
 fn ChannelAdvanced(conversation: ConversationId, space: Option<SpaceId>) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
+  // Category and archiving are channel properties; moving takes managing both spaces.
+  let access = ChannelAccess::new(state, conversation);
+  let can_edit = Memo::new(move |_| access.can(&Permission::ManageChannelProperties));
   let is_confirming_archive = RwSignal::new(false);
   let category_pending = PendingAction::new();
   let has_saved_category = RwSignal::new(false);
@@ -880,30 +913,34 @@ fn ChannelAdvanced(conversation: ConversationId, space: Option<SpaceId>) -> impl
   };
   view! {
     {space.is_some().then(|| view! {
-      <div class="field">
-        <label for="cs-category">{move || i18n.t("channel-move-category")}</label>
-        <select id="cs-category" class="input" prop:disabled=move || category_pending.is_pending() on:change=change_category>
-          <option value="">{move || i18n.t("channel-uncategorized")}</option>
-          <For each=move || categories.get() key=|category| category.id let:category>
-            <option value=category.id.to_string() translate="no">{category.name.clone()}</option>
-          </For>
-        </select>
-        <SavedNote pending=category_pending has_saved=has_saved_category />
-      </div>
+      <Show when=move || can_edit.get() fallback=|| ()>
+        <div class="field">
+          <label for="cs-category">{move || i18n.t("channel-move-category")}</label>
+          <select id="cs-category" class="input" prop:disabled=move || category_pending.is_pending() on:change=change_category>
+            <option value="">{move || i18n.t("channel-uncategorized")}</option>
+            <For each=move || categories.get() key=|category| category.id let:category>
+              <option value=category.id.to_string() translate="no">{category.name.clone()}</option>
+            </For>
+          </select>
+          <SavedNote pending=category_pending has_saved=has_saved_category />
+        </div>
+      </Show>
     })}
     <MoveChannel conversation=conversation current_space=space />
-    <h3>{move || i18n.t("channel-archive")}</h3>
-    <p class="hint">{move || i18n.t("channel-archive-hint")}</p>
-    <Show
-      when=move || is_confirming_archive.get()
-      fallback=move || view! { <button type="button" class="btn btn-danger" on:click=move |_| is_confirming_archive.set(true)>{move || i18n.t("channel-archive-action")}</button> }
-    >
-      <p role="alert">{move || i18n.t("channel-archive-confirm")}</p>
-      <div class="inline-actions">
-        <button type="button" class="btn btn-danger" prop:disabled=move || archive_pending.is_pending() on:click=archive>{move || i18n.t("confirm")}</button>
-        <button type="button" class="btn" on:click=move |_| is_confirming_archive.set(false)>{move || i18n.t("cancel")}</button>
-      </div>
-      <FailureNote pending=archive_pending />
+    <Show when=move || can_edit.get() fallback=|| ()>
+      <h3>{move || i18n.t("channel-archive")}</h3>
+      <p class="hint">{move || i18n.t("channel-archive-hint")}</p>
+      <Show
+        when=move || is_confirming_archive.get()
+        fallback=move || view! { <button type="button" class="btn btn-danger" on:click=move |_| is_confirming_archive.set(true)>{move || i18n.t("channel-archive-action")}</button> }
+      >
+        <p role="alert">{move || i18n.t("channel-archive-confirm")}</p>
+        <div class="inline-actions">
+          <button type="button" class="btn btn-danger" prop:disabled=move || archive_pending.is_pending() on:click=archive>{move || i18n.t("confirm")}</button>
+          <button type="button" class="btn" on:click=move |_| is_confirming_archive.set(false)>{move || i18n.t("cancel")}</button>
+        </div>
+        <FailureNote pending=archive_pending />
+      </Show>
     </Show>
   }
 }
@@ -942,8 +979,18 @@ fn MoveChannel(conversation: ConversationId, current_space: Option<SpaceId>) -> 
     state
       .read(|backend| backend.spaces())
       .into_iter()
-      .filter(|space| Some(space.id) != current_space)
+      .filter(|space| Some(space.id) != current_space && space.can_manage_space)
       .collect::<Vec<_>>()
+  });
+  // The server asks for `manage_space_properties` in the space the channel leaves and in the one
+  // it enters.
+  let can_leave_space = Memo::new(move |_| {
+    current_space.is_some_and(|current| {
+      state
+        .read(|backend| backend.spaces())
+        .iter()
+        .any(|space| space.id == current && space.can_manage_space)
+    })
   });
   let chosen = RwSignal::new(String::new());
   let is_confirming = RwSignal::new(false);
@@ -969,7 +1016,7 @@ fn MoveChannel(conversation: ConversationId, current_space: Option<SpaceId>) -> 
   };
 
   view! {
-    <Show when=move || current_space.is_some() && !targets.get().is_empty() fallback=|| ()>
+    <Show when=move || can_leave_space.get() && !targets.get().is_empty() fallback=|| ()>
       <h3>{move || i18n.t("channel-move-space")}</h3>
       <p class="hint">{move || i18n.t("channel-move-space-hint")}</p>
       <div class="inline-form">
@@ -1005,7 +1052,7 @@ fn MoveChannel(conversation: ConversationId, current_space: Option<SpaceId>) -> 
 /// How long the channel keeps its messages, within the limit the administrators set. The server
 /// decides who may change it and refuses values above the limit.
 #[component]
-fn ChannelRetention(conversation: ConversationId) -> impl IntoView {
+fn ChannelRetention(conversation: ConversationId, can_edit: Signal<bool>) -> impl IntoView {
   let i18n = use_i18n();
   let Some(hub) = use_context::<ChannelPolicyHub>() else {
     return ().into_any();
@@ -1076,12 +1123,14 @@ fn ChannelRetention(conversation: ConversationId) -> impl IntoView {
       <h3>{move || i18n.t("retention-channel-title")}</h3>
       <p class="hint">{move || i18n.t("retention-channel-hint")}</p>
       <form on:submit=save>
-        <label for="cs-retention-days">{move || i18n.t("retention-days")}</label>
-        <input id="cs-retention-days" class="input" inputmode="numeric" prop:value=move || days.get()
-          on:input=move |ev| days.set(event_target_value(&ev)) />
-        <label for="cs-retention-messages">{move || i18n.t("retention-messages")}</label>
-        <input id="cs-retention-messages" class="input" inputmode="numeric" prop:value=move || messages.get()
-          on:input=move |ev| messages.set(event_target_value(&ev)) />
+        <fieldset class="plain-fieldset" prop:disabled=move || !can_edit.get()>
+          <label for="cs-retention-days">{move || i18n.t("retention-days")}</label>
+          <input id="cs-retention-days" class="input" inputmode="numeric" prop:value=move || days.get()
+            on:input=move |ev| days.set(event_target_value(&ev)) />
+          <label for="cs-retention-messages">{move || i18n.t("retention-messages")}</label>
+          <input id="cs-retention-messages" class="input" inputmode="numeric" prop:value=move || messages.get()
+            on:input=move |ev| messages.set(event_target_value(&ev)) />
+        </fieldset>
         <p class="muted-text small">
           {move || status.get().map(|current| {
             i18n.t_with("retention-channel-effective", &[("value", &describe(current.effective))])
@@ -1096,10 +1145,12 @@ fn ChannelRetention(conversation: ConversationId) -> impl IntoView {
         </p>
         <p role="alert" class="warn-text">{move || maybe_error.get().map(|key| i18n.t(key))}</p>
         <p role="status">{move || is_saved.get().then(|| i18n.t("retention-channel-saved"))}</p>
-        <div class="modal-foot">
-          <span class="grow"></span>
-          <button type="submit" class="btn">{move || i18n.t("save")}</button>
-        </div>
+        <Show when=move || can_edit.get() fallback=|| ()>
+          <div class="modal-foot">
+            <span class="grow"></span>
+            <button type="submit" class="btn">{move || i18n.t("save")}</button>
+          </div>
+        </Show>
       </form>
     </Show>
   }
@@ -1824,14 +1875,8 @@ mod tests {
 
   #[test]
   fn dms_and_group_dms_have_no_channel_settings() {
-    let slugs = |kind| {
-      channel_settings_sections(kind)
-        .into_iter()
-        .map(|section| section.slug)
-        .collect::<Vec<_>>()
-    };
     for kind in [ConversationKind::Direct, ConversationKind::Group] {
-      assert_eq!(slugs(kind), ["members"], "{kind:?}");
+      assert_eq!(section_slugs(kind, true), ["members"], "{kind:?}");
     }
     for kind in [
       ConversationKind::Public,
@@ -1839,11 +1884,19 @@ mod tests {
       ConversationKind::Integration,
     ] {
       assert_eq!(
-        slugs(kind),
+        section_slugs(kind, true),
         ["general", "members", "privacy", "integrations", "advanced"],
         "{kind:?}"
       );
     }
+  }
+
+  #[test]
+  fn the_advanced_section_is_left_out_for_people_who_may_take_none_of_its_actions() {
+    assert_eq!(
+      section_slugs(ConversationKind::Public, false),
+      ["general", "members", "privacy", "integrations"]
+    );
   }
 
   #[test]
@@ -1942,6 +1995,14 @@ mod tests {
       can_add_members: true,
       can_invite_guests: true,
       can_manage_space: true,
+      can_create_channels: true,
     }
+  }
+
+  fn section_slugs(kind: ConversationKind, has_advanced: bool) -> Vec<&'static str> {
+    channel_settings_sections(kind, has_advanced)
+      .into_iter()
+      .map(|section| section.slug)
+      .collect()
   }
 }

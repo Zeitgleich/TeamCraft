@@ -216,6 +216,7 @@ pub fn build_snapshot(
       can_add_members: space.can_add_members,
       can_invite_guests: space.can_invite_guests,
       can_manage_space: space.can_manage_space,
+      can_create_channels: space.can_create_channels,
     })
     .collect();
 
@@ -285,10 +286,13 @@ fn to_conversation(conversation: &ConversationResponse, member_ids: Vec<UserId>,
     is_favorite: membership.is_some_and(|membership| membership.is_favorite),
     is_muted: membership
       .is_some_and(|membership| membership.notification_level == teamcraft_proto::NotificationLevel::None),
-    can_post: !conversation.is_archived,
+    can_post: conversation.may_post(),
     bookmarks: Vec::new(),
     is_catching_up: false,
     is_notes_to_self: conversation.is_notes_to_self(me),
+    maybe_permissions: conversation.maybe_my_permissions.clone(),
+    has_only_deactivated_others: conversation
+      .has_only_deactivated_others(me, |participant| participant.is_deactivated),
     maybe_image_version: conversation
       .maybe_image
       .as_ref()

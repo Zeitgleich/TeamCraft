@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::json;
 use teamcraft_db::{
@@ -8,12 +8,13 @@ use teamcraft_db::{
 use teamcraft_proto::{
   ConversationId, ConversationKind, ConversationResponse, ConversationVisibility, ConvertChannelRequest,
   CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, GatewayEvent, HistoryPolicy,
-  ListConversationsQuery, ListConversationsResponse, MoveChannelRequest, Permission, SpaceId,
+  ListConversationsQuery, ListConversationsResponse, MoveChannelRequest, Permission, SpaceId, SpaceRole,
   SystemEventKind, Target, UpdateConversationRequest, UserId,
 };
 
 use super::access::{
-  ConversationAccess, is_guest, is_instance_admin, load_conversation, load_space, require, space_target,
+  ConversationAccess, channel_permissions, channel_target, is_guest, is_instance_admin, load_conversation,
+  load_space, require, space_target,
 };
 use super::audit::{self, Target as AuditTarget};
 use super::convert::{ConversationExtras, conversation_response};
@@ -58,9 +59,27 @@ pub async fn list_conversations(
     }
   };
   let views = state.database.list_conversations(caller.user.id, &filter).await?;
-  Ok(ListConversationsResponse {
-    conversations: respond_all(state, &views).await?,
-  })
+  let mut conversations = respond_all(state, &views).await?;
+  let mut space_roles: HashMap<SpaceId, Option<SpaceRole>> = HashMap::new();
+  for (view, response) in views.iter().zip(conversations.iter_mut()) {
+    let maybe_space_role = match view.conversation.maybe_space_id {
+      Some(space) => match space_roles.get(&space) {
+        Some(role) => role.clone(),
+        None => {
+          let role = state.database.space_role(space, caller.user.id).await?;
+          space_roles.insert(space, role.clone());
+          role
+        },
+      },
+      None => None,
+    };
+    response.maybe_my_permissions = Some(channel_permissions(
+      state,
+      caller,
+      &channel_target(view, maybe_space_role),
+    ));
+  }
+  Ok(ListConversationsResponse { conversations })
 }
 
 pub async fn get_conversation(
@@ -70,6 +89,7 @@ pub async fn get_conversation(
 ) -> Result<ConversationResponse, ApiError> {
   let access = load_conversation(state, caller, id).await?;
   let mut response = respond(state, &access.view).await?;
+  response.maybe_my_permissions = Some(channel_permissions(state, caller, &access.target()));
   if response.kind == ConversationKind::Meeting {
     response.maybe_organizer_user_id = state
       .database
@@ -585,9 +605,8 @@ async fn open_participants_conversation(
       &GatewayEvent::ConversationUpdate { conversation_id: id },
     );
   }
-  let access = load_conversation(state, caller, id).await?;
   Ok(Created {
-    value: respond(state, &access.view).await?,
+    value: get_conversation(state, caller, id).await?,
     is_new,
   })
 }
