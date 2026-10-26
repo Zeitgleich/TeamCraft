@@ -25,7 +25,7 @@ use crate::session::use_session;
 
 /// "Connecting" and "unreachable" only show when the connection stays down longer than this, counted
 /// from the page's return when it was hidden or frozen: a quick reconnect needs no banner.
-const CONNECTING_GRACE_MS: i64 = 3_000;
+const CONNECTING_GRACE_MS: i64 = 10_000;
 /// How often the countdown to the next attempt updates.
 const COUNTDOWN_MS: u64 = 1_000;
 
