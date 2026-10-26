@@ -80,7 +80,7 @@ pub(crate) type Store = Arc<SealedSqliteStore>;
 pub(crate) type CoreClient = Client<Api, Store>;
 
 pub(crate) struct Engine {
-  server_url: String,
+  pub(crate) server_url: String,
   /// Where downloaded files are decrypted to (inside the app's private storage).
   download_dir: PathBuf,
   maybe_push_gateway_url: Option<String>,

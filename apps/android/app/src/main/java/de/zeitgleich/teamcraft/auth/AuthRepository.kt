@@ -46,7 +46,12 @@ import uniffi.teamcraft_ffi.storedServerWithLoginHint
  * with e-mail and password ([signInLocal]). Either session is kept sealed with a Keystore key, one
  * file per server; the Rust core asks for access tokens through [accessToken].
  */
-class AuthRepository(private val context: Context, private val servers: ServerStore) {
+class AuthRepository(
+  private val context: Context,
+  private val servers: ServerStore,
+  /** Called when the session ends (sign-out or an expired refresh token). */
+  private val onSignedOut: () -> Unit = {},
+) {
   /** For the best-effort logout of a local session, which must not hold up signing out. */
   private val background = CoroutineScope(SupervisorJob() + Dispatchers.IO)
   private val signedIn = MutableStateFlow(false)
@@ -217,6 +222,7 @@ class AuthRepository(private val context: Context, private val servers: ServerSt
     }
     session.file.delete()
     session.localFile.delete()
+    onSignedOut()
     if (maybeSession === session) signedIn.value = false
     // An expired token is already dead on the server; only a live one is worth a request.
     maybeLocal?.takeIf { it.isValid(System.currentTimeMillis()) }?.let { local ->

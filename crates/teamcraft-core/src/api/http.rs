@@ -1580,8 +1580,36 @@ fn http_client_builder() -> reqwest::ClientBuilder {
   #[cfg(target_os = "android")]
   let builder = builder.tls_backend_preconfigured((*super::tls::client_config()).clone());
   // The same proxy as the WebSockets, also one the mobile app set (api/proxy.rs).
-  builder.proxy(reqwest::Proxy::custom(super::proxy::proxy_for))
+  builder
+    .proxy(reqwest::Proxy::custom(super::proxy::proxy_for))
+    .redirect(reqwest::redirect::Policy::custom(follow_redirect))
 }
+
+/// Redirects are followed up to [`MAX_REDIRECTS`] hops, but never from `https` down to `http`: a
+/// presigned URL or a token-bearing request must not leave TLS because a server said so.
+#[cfg(not(target_arch = "wasm32"))]
+fn follow_redirect(attempt: reqwest::redirect::Attempt<'_>) -> reqwest::redirect::Action {
+  if attempt.previous().len() >= MAX_REDIRECTS {
+    return attempt.stop();
+  }
+  let comes_from_https = attempt
+    .previous()
+    .last()
+    .is_some_and(|previous| previous.scheme() == "https");
+  if is_downgrade(comes_from_https, attempt.url().scheme()) {
+    return attempt.error("refusing a redirect from https to http");
+  }
+  attempt.follow()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn is_downgrade(comes_from_https: bool, next_scheme: &str) -> bool {
+  comes_from_https && next_scheme != "https"
+}
+
+/// reqwest's own default.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_REDIRECTS: usize = 10;
 
 /// The browser's `fetch` has its own timeouts and connection handling.
 #[cfg(target_arch = "wasm32")]
@@ -1779,6 +1807,13 @@ fn query_string(parameters: &[(&str, Option<String>)]) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn a_redirect_never_leaves_https() {
+    assert!(is_downgrade(true, "http"));
+    assert!(!is_downgrade(true, "https"));
+    assert!(!is_downgrade(false, "http"));
+  }
 
   #[test]
   fn query_string_skips_absent_parameters() {

@@ -29,6 +29,10 @@ class AvatarCache(
 ) {
   private val inFlight = ConcurrentHashMap.newKeySet<String>()
 
+  /** Counts [clear]s: a refresh that started before one must not write its picture afterwards. */
+  private var generation = 0
+  private val writeLock = Any()
+
   /** The circular picture of `userId` if one is cached; never touches the network. */
   fun maybeIcon(userId: String): IconCompat? = maybeBitmap(userId)?.let(IconCompat::createWithBitmap)
 
@@ -48,22 +52,29 @@ class AvatarCache(
     val missing = missingFile(userId) ?: return false
     if (isFresh(picture, PICTURE_MAX_AGE_MS) || isFresh(missing, MISSING_MAX_AGE_MS)) return false
     if (!inFlight.add(userId)) return false
+    val startedIn = synchronized(writeLock) { generation }
     return try {
       withContext(Dispatchers.IO) {
         val bytes = core().avatarPicture(userId, MAX_PICTURE_BYTES)
-        if (bytes == null) {
-          picture.delete()
-          missing.parentFile?.mkdirs()
-          missing.writeBytes(ByteArray(0))
-          missing.setLastModified(System.currentTimeMillis())
-          false
-        } else if (!isDecodable(bytes)) {
-          false
-        } else {
-          picture.parentFile?.mkdirs()
-          picture.writeBytes(bytes)
-          missing.delete()
-          true
+        // Under the lock, so a sign-out's clear() can't be followed by this write.
+        synchronized(writeLock) {
+          when {
+            generation != startedIn -> false
+            bytes == null -> {
+              picture.delete()
+              missing.parentFile?.mkdirs()
+              missing.writeBytes(ByteArray(0))
+              missing.setLastModified(System.currentTimeMillis())
+              false
+            }
+            !isDecodable(bytes) -> false
+            else -> {
+              picture.parentFile?.mkdirs()
+              picture.writeBytes(bytes)
+              missing.delete()
+              true
+            }
+          }
         }
       }
     } catch (cancelled: CancellationException) {
@@ -79,7 +90,10 @@ class AvatarCache(
 
   /** Forgets every picture (sign-out): they belong to the account that is gone. */
   fun clear() {
-    runCatching { directory().deleteRecursively() }
+    synchronized(writeLock) {
+      generation++
+      runCatching { directory().deleteRecursively() }
+    }
   }
 
   private fun directory() = File(context.cacheDir, DIRECTORY)
@@ -96,13 +110,13 @@ class AvatarCache(
   private fun isDecodable(bytes: ByteArray): Boolean {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-    return bounds.outWidth > 0 && bounds.outHeight > 0
+    return isReasonable(bounds.outWidth, bounds.outHeight)
   }
 
   private fun decodeCircle(file: File): Bitmap? {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeFile(file.path, bounds)
-    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    if (!isReasonable(bounds.outWidth, bounds.outHeight)) return null
     val options = BitmapFactory.Options().apply {
       inSampleSize = sampleSize(minOf(bounds.outWidth, bounds.outHeight))
     }
@@ -117,6 +131,13 @@ class AvatarCache(
     private const val MAX_PICTURE_BYTES = 2u * 1024u * 1024u
     private const val PICTURE_MAX_AGE_MS = 12L * 60 * 60 * 1000
     private const val MISSING_MAX_AGE_MS = 60L * 60 * 1000
+
+    /** Profile pictures are small; a very long thin one would still decode to a huge bitmap. */
+    private const val MAX_SIDE_PX = 4096
+
+    /** Whether a picture of this size (as the header says) may be decoded. */
+    fun isReasonable(widthPx: Int, heightPx: Int): Boolean =
+      widthPx > 0 && heightPx > 0 && maxOf(widthPx, heightPx) <= MAX_SIDE_PX
 
     /** The largest power of two that keeps the shorter side at least [SIZE_PX]. */
     fun sampleSize(shorterSidePx: Int): Int {
