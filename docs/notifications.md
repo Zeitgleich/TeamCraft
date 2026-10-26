@@ -155,8 +155,9 @@ For each recipient without a live connection the server decides from metadata it
    applies: the sender is on the user's allow list, or the message is urgent and the user lets urgent
    messages through. Overrides apply to manual and scheduled DND alike.
 3. **Attention**: no push while a phone of the user is in the foreground (it gets the event live). While
-   a desktop or web session of the user is *attentive* (see below), pushes to phones wait for the grace
-   delay and go out only if the message is still unread then. Push mode `always` skips both.
+   the user is *at a desktop or web session* (attentive, or recently active on it; see below), pushes to
+   phones wait for the grace delay and go out only if the message is still unread then. Push mode
+   `always` skips both.
 4. **Level**: mentions, DMs and replies in followed threads push; other messages only in `all`
    conversations; integration channels only for mentions.
 
@@ -214,6 +215,7 @@ remembers per process which devices show what (for withdrawals and rings) and th
 |---------------------------------------------------|-------------|---------------------------------------------------------------------------------|
 | `notifications.mobile_push_delay_secs`            | 120         | Grace delay while a desktop is attentive; `0` sends nothing meanwhile           |
 | `notifications.attention_lease_secs`              | 75          | How long an `attention` report counts without being repeated                    |
+| `notifications.desktop_activity_secs`             | 120         | Activity on a desktop holds pushes like attention this long; `0`: off           |
 | `notifications.is_desktop_attention_enabled`      | true        | Off: sessions report no attention; an active desktop holds pushes like presence |
 | `notifications.max_held_pushes_per_user`          | 100         | Held pushes per user; beyond that the oldest goes out at once                   |
 | `push.ttl_secs`                                   | 86400       | TTL of message and mention wake-ups                                             |
@@ -256,6 +258,19 @@ logs it.
 | macOS    | Core Graphics event source           | not read; locking takes focus from the window  |
 | Windows  | `GetLastInputInfo`                   | not read; locking takes focus from the window  |
 | Web      | none (in-app input only)             | none                                           |
+
+**At the desktop (issue #756).** Attention alone missed users who sat at the computer: with the app's
+window behind another one, or a webview that reported focus wrongly (#720), the phone was pushed at
+once while the user chatted at the desktop, and when the user turned to the window a moment later the
+next messages were held, so the phone showed only the first message of a burst. So the server also
+counts the device's own activity (gateway.md, "Presence"): a desktop or web session whose device
+renewed its activity after its last "away" report holds phone pushes like an attentive one for
+`notifications.desktop_activity_secs` (120 s). The device renews it with every `active` report (input
+in the window, and on the desktop input anywhere on the computer, repeated at most every 30 s), with
+`typing`, and, with #732, with every message sent from it. An `idle` report (screen locked, "Away
+after") ends it at once and releases the held pushes; an "away" report after the last activity (tab
+hidden or closed) ends it too. Every message is routed on its own: nothing collapses or throttles
+pushes per conversation, and the apps add each message to the conversation's notification.
 
 **Urgent and DND.** With "urgent messages break through" on, an urgent message reaches the user during
 DND only in DMs and group DMs by default (`urgent_scope: direct`); `everywhere` includes channels.

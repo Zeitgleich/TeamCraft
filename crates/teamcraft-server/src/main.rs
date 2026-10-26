@@ -152,6 +152,7 @@ async fn run() -> anyhow::Result<()> {
       max_sessions_per_device: config.gateway.max_sessions_per_device,
       max_sessions_per_user: config.gateway.max_sessions_per_user,
       attention_lease: Duration::from_secs(config.notifications.attention_lease_secs),
+      desktop_activity_window: Duration::from_secs(config.notifications.desktop_activity_secs),
     })),
     rendezvous: Arc::new(RendezvousHub::new(&config.rendezvous)),
     drain: Arc::default(),
