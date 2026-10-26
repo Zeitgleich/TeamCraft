@@ -134,6 +134,33 @@ async fn waking_up_from_sleep_replaces_the_connection_at_once() {
     .await;
 }
 
+/// The wall clock jumps back an hour: heartbeats keep their pace and a lost connection is
+/// replaced after the usual backoff, not after the hour.
+#[tokio::test(start_paused = true)]
+async fn a_clock_set_back_postpones_neither_heartbeats_nor_reconnects() {
+  let rig = Rig::start("Judy").await;
+  rig
+    .drive(|rig| async move {
+      rig.wait_for(is_connected, Duration::from_secs(5)).await;
+      let beats = rig.server.heartbeat_count();
+      rig.jump.backward(Duration::from_secs(60 * 60));
+      tokio::time::sleep(Duration::from_secs(30)).await;
+      assert!(
+        rig.server.heartbeat_count() > beats,
+        "no heartbeat after the jump"
+      );
+      assert!(is_connected(rig.status.get()));
+
+      rig.server.set_offline(rig.user, true);
+      rig.server.drop_gateways(rig.user);
+      rig.wait_for(is_offline, Duration::from_secs(5)).await;
+      rig.jump.backward(Duration::from_secs(60 * 60));
+      rig.server.set_offline(rig.user, false);
+      rig.wait_for(is_connected, Duration::from_secs(35)).await;
+    })
+    .await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_refused_token_asks_to_sign_in_and_stops_retrying() {
   let rig = Rig::start("Frank").await;
@@ -174,6 +201,30 @@ async fn an_unreachable_server_is_retried_with_growing_pauses() {
       rig.server.set_offline(rig.user, false);
       // At most the capped pause (30 s) until the next attempt.
       rig.wait_for(is_connected, Duration::from_secs(31)).await;
+    })
+    .await;
+}
+
+/// A server that answers 503 with `Retry-After` (a dependency outage, a restart behind the proxy)
+/// is asked again no sooner than it said, not after the first 1-2 s of backoff, and the client
+/// connects by itself once it is back.
+#[tokio::test(start_paused = true)]
+async fn a_server_that_answers_503_is_asked_again_only_after_its_retry_after() {
+  let rig = Rig::start("Ivan").await;
+  rig.server.set_unavailable(rig.user, Duration::from_secs(25));
+  rig
+    .drive(|rig| async move {
+      rig.wait_for(is_offline, Duration::from_secs(5)).await;
+      let connects = rig.server.unavailable_connects();
+      assert!(connects >= 1);
+      tokio::time::sleep(Duration::from_secs(20)).await;
+      assert_eq!(
+        rig.server.unavailable_connects(),
+        connects,
+        "asked again before Retry-After"
+      );
+      rig.server.clear_unavailable(rig.user);
+      rig.wait_for(is_connected, Duration::from_secs(10)).await;
     })
     .await;
 }

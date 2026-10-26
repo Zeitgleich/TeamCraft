@@ -20,6 +20,7 @@ use teamcraft_proto::{GatewayClientMessage, GatewayServerMessage};
 use crate::api::{ApiError, GatewayConnection, Interception, ServerApi};
 use crate::client::{Client, GatewayOutcome, GatewayTiming, HeldFrames, HeldLimits, keep_alive};
 use crate::error::CoreError;
+use crate::retry::{Jitter, RetryPolicy, core_retry_after};
 use crate::store::LocalStore;
 use teamcraft_proto::SignInReason;
 
@@ -47,6 +48,9 @@ pub enum ConnectionState {
     reason: SignInReason,
   },
 }
+
+/// A tick this much earlier than the previous one means the wall clock was set back.
+const CLOCK_JUMP_BACK_MS: i64 = 1_000;
 
 /// Timing of the supervisor. The defaults suit every shell.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,10 +111,6 @@ pub struct ConnectionSupervisor<G> {
   held: HeldFrames,
   jitter: Jitter,
 }
-
-/// A small xorshift generator: the backoff only needs spread, not secrecy, and tests seed it.
-#[derive(Clone, Copy, Debug)]
-struct Jitter(u64);
 
 impl Default for ConnectionSettings {
   fn default() -> Self {
@@ -297,7 +297,8 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
           CoreError::Api(api) => api.interception(),
           _ => None,
         };
-        self.schedule_attempt(now, maybe_interception);
+        // A server that answered 503 says when to come back (a restart, a dependency outage).
+        self.schedule_attempt(now, maybe_interception, core_retry_after(&error));
         None
       },
     }
@@ -355,6 +356,15 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
   /// seconds and at [`Self::next_deadline_ms`].
   pub async fn on_tick(&mut self, now_ms: i64) {
     self.note_kept_alive(now_ms);
+    if let Some(last) = self.maybe_last_tick_ms
+      && last.saturating_sub(now_ms) >= CLOCK_JUMP_BACK_MS
+    {
+      tracing::info!(
+        back_ms = last - now_ms,
+        "the clock went back; keeping the gateway's pace"
+      );
+      self.shift_timers(now_ms.saturating_sub(last));
+    }
     let has_slept = self
       .maybe_last_tick_ms
       .is_some_and(|last| now_ms.saturating_sub(last) >= millis(self.settings.wake_gap));
@@ -492,26 +502,53 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     if now_ms.saturating_sub(self.connected_at_ms) >= millis(self.settings.stable_after) {
       self.failures = 0;
     }
-    self.schedule_attempt(now_ms, None);
+    self.schedule_attempt(now_ms, None, None);
   }
 
-  /// Equal jitter: half the backoff plus a random part of the other half, so clients that lost
-  /// the server at the same moment (a restart) don't come back in lock-step.
-  fn schedule_attempt(&mut self, now_ms: i64, maybe_interception: Option<Interception>) {
-    let exponent = self.failures.min(16);
-    let base = self
-      .settings
-      .reconnect_min
-      .saturating_mul(1 << exponent)
-      .min(self.settings.reconnect_max);
-    let half_ms = millis(base) / 2;
-    let delay_ms = half_ms.saturating_add(self.jitter.below(half_ms.saturating_add(1)));
+  /// The shared retry policy (`crate::retry`): equal jitter, so clients that lost the server at
+  /// the same moment (a restart) don't come back in lock-step, and at least the server's
+  /// `Retry-After`.
+  fn schedule_attempt(
+    &mut self,
+    now_ms: i64,
+    maybe_interception: Option<Interception>,
+    maybe_retry_after: Option<Duration>,
+  ) {
+    let policy = RetryPolicy::new(self.settings.reconnect_min, self.settings.reconnect_max);
+    let delay = policy.delay(self.failures, &mut self.jitter, maybe_retry_after);
     self.failures = self.failures.saturating_add(1);
-    self.next_attempt_ms = now_ms.saturating_add(delay_ms);
+    self.next_attempt_ms = now_ms.saturating_add(millis(delay));
     self.set_state(ConnectionState::Offline {
       retry_at_ms: self.next_attempt_ms,
       maybe_interception,
     });
+  }
+
+  /// Moves every timer by `delta_ms` (negative after the wall clock went back), so a clock that
+  /// jumps back an hour doesn't postpone heartbeats, dead-connection checks and reconnects by an
+  /// hour (robustness.md, "Time").
+  fn shift_timers(&mut self, delta_ms: i64) {
+    let shift = |at: &mut i64| {
+      if *at != i64::MIN {
+        *at = at.saturating_add(delta_ms);
+      }
+    };
+    shift(&mut self.next_attempt_ms);
+    shift(&mut self.connected_at_ms);
+    shift(&mut self.last_heard_ms);
+    shift(&mut self.last_heartbeat_ms);
+    if let Some(deadline) = self.maybe_probe_deadline_ms.as_mut() {
+      shift(deadline);
+    }
+    if let ConnectionState::Offline {
+      maybe_interception, ..
+    } = self.state()
+    {
+      self.set_state(ConnectionState::Offline {
+        retry_at_ms: self.next_attempt_ms,
+        maybe_interception,
+      });
+    }
   }
 
   /// Every heartbeat is answered, so two missed answers and a slow round trip mean the connection
@@ -556,26 +593,6 @@ impl From<ConnectionState> for teamcraft_client_api::remote::CoreConnection {
   }
 }
 
-impl Jitter {
-  fn new(seed: u64) -> Self {
-    // Xorshift never leaves zero.
-    Self(seed.max(1))
-  }
-
-  /// A number in `0..bound` (0 for an empty range).
-  fn below(&mut self, bound: i64) -> i64 {
-    let mut x = self.0;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    self.0 = x;
-    match u64::try_from(bound) {
-      Ok(bound) if bound > 0 => i64::try_from(x % bound).unwrap_or(0),
-      _ => 0,
-    }
-  }
-}
-
 /// Tells tokens apart without keeping one around. Not a security measure: it only notices that the
 /// app has another token than the refused one.
 fn token_fingerprint<A: ServerApi, S: LocalStore>(client: &Client<A, S>) -> Option<u64> {
@@ -592,15 +609,6 @@ fn millis(duration: Duration) -> i64 {
 #[cfg(test)]
 mod tests {
   use super::*;
-
-  #[test]
-  fn jitter_stays_in_range_and_varies() {
-    let mut jitter = Jitter::new(7);
-    let draws: Vec<i64> = (0..100).map(|_| jitter.below(1_000)).collect();
-    assert!(draws.iter().all(|draw| (0..1_000).contains(draw)));
-    assert!(draws.iter().any(|draw| *draw != draws[0]));
-    assert_eq!(jitter.below(0), 0);
-  }
 
   #[test]
   fn network_changes_reach_every_subscriber() {

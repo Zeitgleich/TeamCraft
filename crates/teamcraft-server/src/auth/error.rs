@@ -27,6 +27,12 @@ pub enum AuthError {
   KeysUnavailable(String),
 }
 
+impl From<crate::dependencies::CircuitOpen> for AuthError {
+  fn from(open: crate::dependencies::CircuitOpen) -> Self {
+    Self::KeysUnavailable(open.to_string())
+  }
+}
+
 impl AuthError {
   /// What a token guesser produces (missing, forged or malformed tokens). Rate limits count these;
   /// expired tokens and refused roles say nothing about guessing.

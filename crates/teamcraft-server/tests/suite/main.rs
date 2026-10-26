@@ -22,6 +22,7 @@ mod call_roster;
 mod calls;
 mod channel_images;
 mod conversations;
+mod dependency_outages;
 mod device_gaps;
 mod directory;
 mod first_sight;

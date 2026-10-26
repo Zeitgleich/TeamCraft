@@ -53,12 +53,13 @@ reqwest.workspace = true
 url = "2.5.8"
 image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
 teamcraft-client-api = { path = "../teamcraft-client-api", optional = true }
+# The shared retry policy (src/retry.rs); natively also Happy Eyeballs for the WebSocket connects
+# (src/api/connect.rs).
+teamcraft-net.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Upload bodies streamed in chunks, so the bytes sent are counted for the progress (src/api/http.rs).
 reqwest = { workspace = true, features = ["stream"] }
-# Happy Eyeballs for the WebSocket connects (src/api/connect.rs).
-teamcraft-net.workspace = true
 # SQLCipher: e2ee.md §9. Version matches the libsqlite3-sys already in the lock file (sqlx).
 rusqlite = { version = "0.39", optional = true }
 tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }

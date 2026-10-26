@@ -303,14 +303,25 @@ mod database_outage {
       StatusCode::OK,
       "liveness must not depend on Postgres"
     );
-    let ready = rig
-      .stack
-      .http
-      .get(format!("{}/readyz", rig.stack.base_url))
-      .send()
-      .await
-      .unwrap();
-    assert_eq!(ready.status(), StatusCode::SERVICE_UNAVAILABLE);
+    // Readiness follows the database's breaker: down after a few failed probes, not on the first.
+    let mut is_reported = false;
+    for _ in 0..3 {
+      let ready = rig
+        .stack
+        .http
+        .get(format!("{}/readyz", rig.stack.base_url))
+        .send()
+        .await
+        .unwrap();
+      if ready.status() == StatusCode::SERVICE_UNAVAILABLE {
+        is_reported = true;
+        break;
+      }
+    }
+    assert!(
+      is_reported,
+      "readiness still OK after three probes without Postgres"
+    );
     raw.send(&GatewayClientMessage::Heartbeat).await;
     assert_eq!(raw.receive().await, Some(GatewayServerMessage::HeartbeatAck));
     assert!(
