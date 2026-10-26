@@ -975,6 +975,13 @@ impl ChatBackend for RemoteChat {
     }
   }
 
+  fn newest_message(&self, conversation: ConversationId) -> Option<MessageId> {
+    match self.ask(ChatQuery::NewestMessage { conversation }) {
+      Some(ChatAnswer::Message { maybe_message }) => maybe_message,
+      _ => None,
+    }
+  }
+
   fn draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) -> Option<String> {
     match self.ask(ChatQuery::Draft {
       conversation,

@@ -110,7 +110,7 @@ impl DwellClock {
 
 impl ReadMarkerGate {
   /// Whether to mark read now: something is unread through `maybe_unread_through` (the newest
-  /// confirmed message), the user reads at the bottom of the focused window ([`is_reading_latest`]),
+  /// message the server stored, reactions included), the user reads at the bottom of the focused window ([`is_reading_latest`]),
   /// and that message is newer than the one sent last. Remembers it when so. With nothing confirmed
   /// to point at yet it waits for the message to arrive.
   pub fn should_mark(
@@ -222,6 +222,28 @@ mod tests {
     }
 
     #[test]
+    fn a_reaction_while_reading_is_marked_at_once() {
+      let mut feed = FakeFeed::default();
+      feed.arrive(5);
+      // #641: no new row, but a newer message on the server that raises the count.
+      feed.react(6);
+      assert_eq!(feed.mark_read_calls, 2);
+      assert_eq!(feed.unread_count, 0);
+    }
+
+    #[test]
+    fn a_reaction_while_away_waits_for_the_focus() {
+      let mut feed = FakeFeed::default();
+      feed.arrive(5);
+      feed.is_focused = false;
+      feed.react(6);
+      assert_eq!((feed.mark_read_calls, feed.unread_count), (1, 1));
+      feed.is_focused = true;
+      feed.run();
+      assert_eq!((feed.mark_read_calls, feed.unread_count), (2, 0));
+    }
+
+    #[test]
     fn a_lagging_count_for_the_same_message_marks_nothing_again() {
       let mut feed = FakeFeed::default();
       feed.arrive(5);
@@ -271,8 +293,8 @@ mod tests {
       assert!(gate.should_mark(Some(message(10)), true, true));
     }
 
-    /// The message list's wiring against a fake backend: the unread count, the newest confirmed
-    /// message and the `mark_read` calls, re-run on every change like the effect.
+    /// The message list's wiring against a fake backend: the unread count, the newest stored
+    /// message (reactions included) and the `mark_read` calls, re-run on every change like the effect.
     struct FakeFeed {
       gate: ReadMarkerGate,
       unread_count: u32,
@@ -300,6 +322,11 @@ mod tests {
         self.maybe_newest = Some(message(raw));
         self.unread_count += 1;
         self.run();
+      }
+
+      /// A reaction to a message on screen: stored under a newer server ID, counted as unread.
+      fn react(&mut self, raw: u64) {
+        self.arrive(raw);
       }
 
       fn server_counts(&mut self, unread_count: u32) {

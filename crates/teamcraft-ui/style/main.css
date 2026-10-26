@@ -8307,6 +8307,24 @@ ol.md-list {
   color: var(--accent);
 }
 
+/* Comfortable and Compact: the tick or clock sits at the body's trailing edge on its last line, in
+   space the body keeps free for it, never on a row of its own (#634). It takes the body's font and
+   line height so `1lh` is one line of text; the icon has a fixed size. Bubbles float it instead. */
+:root:not([data-density="bubbles"]) .msg-body:has(> .msg-delivery.is-sent, > .msg-delivery.is-pending:not(.msg-delayed)) {
+  position: relative;
+  padding-inline-end: 22px;
+}
+
+:root:not([data-density="bubbles"]) .msg-body > .msg-delivery:is(.is-sent, .is-pending:not(.msg-delayed)) {
+  position: absolute;
+  inset-inline-end: 0;
+  bottom: 0;
+  height: 1lh;
+  margin: 0;
+  font-size: inherit;
+  letter-spacing: inherit;
+}
+
 /* Not confirmed after a while: still retried by itself, so muted, not an error. */
 .msg-delayed {
   color: var(--text-muted);
@@ -9767,6 +9785,24 @@ ol.md-list {
 :root[data-layout="compact"] .send-menu-btn {
   width: 28px;
   height: var(--touch);
+}
+
+/* Phones (#662): send is the composer's main target, half again as wide as a touch target; same
+   height, and the options button keeps its size. A desktop window as narrow as a phone has a fine
+   pointer and keeps the square button. On the narrowest phones it gives way down to the touch
+   target instead of pushing the toolbar off the screen. */
+@media (pointer: coarse) {
+  :root[data-layout="compact"] .send-group {
+    min-width: 0;
+  }
+
+  :root[data-layout="compact"] .send-menu-btn {
+    flex-shrink: 0;
+  }
+
+  :root[data-layout="compact"] .send-group .send-btn {
+    width: calc(var(--touch) * 1.5);
+  }
 }
 
 /* iOS zooms into fields with text under 16px and doesn't zoom back out: the conversation then looks

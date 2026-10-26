@@ -31,7 +31,8 @@ use crate::feedback::{PendingAction, failure_message};
 use crate::i18n::use_i18n;
 use crate::image_crop::check_pick;
 use crate::model::{
-  ConversationId, JoinPolicy, Space, SpaceId, SpaceMember, SpaceRole, SpaceRoster, User, UserId, hue_from_hex,
+  ConversationId, ConversationKind, JoinPolicy, Space, SpaceId, SpaceMember, SpaceRole, SpaceRoster, User,
+  UserId, hue_from_hex,
 };
 use crate::reactive::SetIfAlive;
 use crate::space_images::{ImageOwner, use_space_images};
@@ -361,19 +362,10 @@ pub fn ChannelSettingsDialog(
   let Some(info) = info else {
     return view! { <Dialog title_key="channel-settings-title"><p>{move || i18n.t("channel-missing")}</p></Dialog> }.into_any();
   };
-  let mut sections = vec![
-    CHANNEL_GENERAL,
-    CHANNEL_MEMBERS,
-    CHANNEL_PRIVACY,
-    CHANNEL_ADVANCED,
-  ];
-  // Bots and the log mode are for channels, not for direct conversations.
-  if !info.kind.is_direct_like() {
-    sections.insert(3, CHANNEL_INTEGRATIONS);
-  }
+  let sections = channel_settings_sections(info.kind);
   let first = maybe_section
     .and_then(|slug| sections.iter().copied().find(|section| section.slug == slug))
-    .unwrap_or(CHANNEL_GENERAL);
+    .unwrap_or(sections[0]);
   let selected = RwSignal::new(first);
   let title = info.name.clone();
   view! {
@@ -384,10 +376,10 @@ pub fn ChannelSettingsDialog(
           let info = info.clone();
           match section.slug {
             "members" => view! { <ChannelMembers conversation=conversation /> }.into_any(),
-            "privacy" => view! { <ChannelPrivacy conversation=conversation is_private=matches!(info.kind, crate::model::ConversationKind::Private) /> }.into_any(),
+            "privacy" => view! { <ChannelPrivacy conversation=conversation is_private=matches!(info.kind, ConversationKind::Private) /> }.into_any(),
             "integrations" => view! { <ChannelIntegrations conversation=conversation /> }.into_any(),
             "advanced" => view! { <ChannelAdvanced conversation=conversation space=info.maybe_space /> }.into_any(),
-            _ => view! { <ChannelGeneral conversation=conversation name=info.name.clone() topic=info.topic.clone() is_channel=!info.kind.is_direct_like() /> }.into_any(),
+            _ => view! { <ChannelGeneral conversation=conversation name=info.name.clone() topic=info.topic.clone() /> }.into_any(),
           }
         }
       </SectionTabs>
@@ -396,18 +388,29 @@ pub fn ChannelSettingsDialog(
   .into_any()
 }
 
+/// The sections of a conversation's settings. Name, topic, privacy, bots, the log mode and the
+/// advanced ones are channel properties: the server refuses them for DMs and group DMs (#648),
+/// which keep their members only.
+fn channel_settings_sections(kind: ConversationKind) -> Vec<Section> {
+  if kind.is_direct_like() {
+    vec![CHANNEL_MEMBERS]
+  } else {
+    vec![
+      CHANNEL_GENERAL,
+      CHANNEL_MEMBERS,
+      CHANNEL_PRIVACY,
+      CHANNEL_INTEGRATIONS,
+      CHANNEL_ADVANCED,
+    ]
+  }
+}
+
 /// Name and topic, saved together.
 #[component]
-fn ChannelGeneral(
-  conversation: ConversationId,
-  name: String,
-  topic: String,
-  /// A channel, not a direct conversation: only channels have pictures.
-  is_channel: bool,
-) -> impl IntoView {
+fn ChannelGeneral(conversation: ConversationId, name: String, topic: String) -> impl IntoView {
   let state = use_app_state();
   let access = ChannelAccess::new(state, conversation);
-  let can_change_picture = move || is_channel && access.can(&Permission::ManageChannelProperties);
+  let can_change_picture = move || access.can(&Permission::ManageChannelProperties);
   let i18n = use_i18n();
   let name = RwSignal::new(name);
   let topic = RwSignal::new(topic);
@@ -1818,6 +1821,30 @@ mod tests {
   use teamcraft_proto::SpaceResponse;
 
   use super::*;
+
+  #[test]
+  fn dms_and_group_dms_have_no_channel_settings() {
+    let slugs = |kind| {
+      channel_settings_sections(kind)
+        .into_iter()
+        .map(|section| section.slug)
+        .collect::<Vec<_>>()
+    };
+    for kind in [ConversationKind::Direct, ConversationKind::Group] {
+      assert_eq!(slugs(kind), ["members"], "{kind:?}");
+    }
+    for kind in [
+      ConversationKind::Public,
+      ConversationKind::Private,
+      ConversationKind::Integration,
+    ] {
+      assert_eq!(
+        slugs(kind),
+        ["general", "members", "privacy", "integrations", "advanced"],
+        "{kind:?}"
+      );
+    }
+  }
 
   #[test]
   fn history_choice_maps_to_policy() {

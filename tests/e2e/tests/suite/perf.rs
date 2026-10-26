@@ -215,6 +215,7 @@ struct Report {
   long_channel_rows_after_scrolling_back: f64,
   scroll_frames: f64,
   scroll_frames_over_50ms: f64,
+  scroll_frames_moving_backwards: f64,
   js_heap_mib_after_first_switches: f64,
   js_heap_mib_after_more_switches: f64,
   pss_mib_after_switches: f64,
@@ -566,9 +567,10 @@ async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> R
   let (long_name, long_last) = &seeded.long_channel;
   report.long_channel_open_ms = switch_to(page, long_name, long_last).await;
   report.long_channel_rows_in_dom = rows_in_dom(page).await;
-  let (frames, slow_frames) = scroll_back(page).await;
+  let (frames, slow_frames, backward_frames) = scroll_back(page).await;
   report.scroll_frames = frames;
   report.scroll_frames_over_50ms = slow_frames;
+  report.scroll_frames_moving_backwards = backward_frames;
   report.long_channel_rows_after_scrolling_back = rows_in_dom(page).await;
 
   // Leak check: 100 more switches, then compare the heap after a full collection.
@@ -957,22 +959,42 @@ async fn rows_in_dom(page: &Page) -> f64 {
 }
 
 /// Scrolls the long channel upwards in steps (loading older pages as a user would) and counts
-/// frames and frames slower than 50 ms meanwhile. Returns `(frames, slow_frames)`.
-async fn scroll_back(page: &Page) -> (f64, f64) {
+/// frames, frames slower than 50 ms and frames that moved the list backwards meanwhile (#642): the
+/// row at the top may only move down while scrolling up, checked after the frame was painted (the
+/// list corrects row heights in its own frame callbacks). Returns `(frames, slow, backwards)`.
+async fn scroll_back(page: &Page) -> (f64, f64, f64) {
   let script = r#"new Promise(resolve => {
     const list = document.querySelector('.message-list');
-    let frames = 0, slow = 0, last = performance.now(), steps = 0;
+    let frames = 0, slow = 0, backwards = 0, last = performance.now(), steps = 0, tracked = null;
+    const pick = () => {
+      const top = list.getBoundingClientRect().top;
+      const row = [...list.querySelectorAll('.row[data-idx]')].find(row => row.getBoundingClientRect().top > top);
+      tracked = row ? { idx: row.dataset.idx, top: row.getBoundingClientRect().top } : null;
+    };
+    const check = () => {
+      const row = tracked && list.querySelector(`.row[data-idx="${tracked.idx}"]`);
+      if (row && row.getBoundingClientRect().top < tracked.top - 1) backwards += 1;
+    };
     const tick = now => {
       frames += 1;
       if (now - last > 50) slow += 1;
       last = now;
-      if (steps < 120) { list.scrollTop = Math.max(0, list.scrollTop - 600); steps += 1; requestAnimationFrame(tick); }
-      else resolve([frames, slow]);
+      if (steps < 120) {
+        pick();
+        list.scrollTop = Math.max(0, list.scrollTop - 600);
+        steps += 1;
+        setTimeout(check, 0);
+        requestAnimationFrame(tick);
+      } else resolve([frames, slow, backwards]);
     };
     requestAnimationFrame(tick);
   })"#;
   let values = evaluate_value(page, script.into()).await;
-  (values[0].as_f64().unwrap(), values[1].as_f64().unwrap())
+  (
+    values[0].as_f64().unwrap(),
+    values[1].as_f64().unwrap(),
+    values[2].as_f64().unwrap(),
+  )
 }
 
 fn wasm_bytes() -> u64 {
@@ -1067,6 +1089,10 @@ impl Report {
       ("scroll_frames", self.scroll_frames),
       ("scroll_frames_over_50ms", self.scroll_frames_over_50ms),
       (
+        "scroll_frames_moving_backwards",
+        self.scroll_frames_moving_backwards,
+      ),
+      (
         "js_heap_mib_after_first_switches",
         self.js_heap_mib_after_first_switches,
       ),
@@ -1123,6 +1149,10 @@ impl Report {
       "message list not virtualised: {self:#?}"
     );
     assert!(self.long_channel_rows_after_scrolling_back < 600.0, "{self:#?}");
+    assert_eq!(
+      self.scroll_frames_moving_backwards, 0.0,
+      "the list jumps while scrolling back (#642): {self:#?}"
+    );
     assert!(self.pss_mib_after_switches < 2000.0, "{self:#?}");
     assert!(
       self.js_heap_mib_after_more_switches < self.js_heap_mib_after_first_switches * 1.5 + 5.0,

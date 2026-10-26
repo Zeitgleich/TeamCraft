@@ -33,6 +33,8 @@ const ESTIMATED_MESSAGE_HEIGHT: f32 = 68.0;
 const ESTIMATED_LOG_HEIGHT: f32 = 22.0;
 /// New messages looked at for the first one from somebody else (the divider goes there).
 const MAX_NEW_SCAN: usize = 50;
+/// How long after a scrolling key its scroll events count as the user's.
+const KEY_SCROLL_MS: i64 = 1_000;
 /// Measure passes after a jump that keep the target row in place while heights settle.
 const ALIGN_PASSES: u8 = 6;
 /// How long the floating day stays after scrolling stops.
@@ -177,6 +179,8 @@ pub fn MessageList(
   let stick_to_bottom =
     RwSignal::new(maybe_jump.is_none() && maybe_marker.is_none() && maybe_saved_anchor.is_none());
   let last_top = StoredValue::new(0.0_f64);
+  // Scrollbar drags and scrolling keys; wheel and touch leave the bottom on their own.
+  let intent = StoredValue::new(ScrollIntent::default());
   // Row to keep at the top while heights settle after a jump: (index, measure passes left).
   let pending_align = StoredValue::new(maybe_jump.map(|index| (index, ALIGN_PASSES)));
   // The message count when the reader left the bottom (or where the unread ones began): what is
@@ -189,6 +193,13 @@ pub fn MessageList(
     heights.update_value(|heights| heights.resize(count, estimate));
     heights.with_value(|heights| compute_window(heights, scroll_top.get(), viewport.get()))
   });
+
+  // After a programmatic scroll: the window follows, and the next scroll event compares against it.
+  let note_position = move |element: &web_sys::Element| {
+    let top = exact_scroll_top(element);
+    scroll_top.set(top);
+    last_top.set_value(top);
+  };
 
   // Jump to a message (date, search, link): it goes near the top, with a little context above.
   Effect::new(move |_| {
@@ -203,18 +214,18 @@ pub fn MessageList(
       pending_align.set_value(Some((index, ALIGN_PASSES)));
       stick_to_bottom.set(false);
       element.set_scroll_top((f64::from(top) - DIVIDER_CONTEXT_PX).max(0.0) as i32);
-      scroll_top.set(f64::from(element.scroll_top()));
-      last_top.set_value(f64::from(element.scroll_top()));
+      note_position(&element);
       layout_rev.update(|rev| *rev += 1);
     }
     state.jump_to_index.set(None);
   });
 
   let scroll_to_bottom = move || {
+    // At the bottom, a jump's target no longer needs to stay at the top.
+    pending_align.set_value(None);
     if let Some(element) = container.get_untracked() {
       element.set_scroll_top(element.scroll_height());
-      scroll_top.set(f64::from(element.scroll_top()));
-      last_top.set_value(f64::from(element.scroll_top()));
+      note_position(&element);
     }
   };
 
@@ -239,12 +250,8 @@ pub fn MessageList(
         else {
           continue;
         };
-        let Some(measured) = child
-          .dyn_ref::<web_sys::HtmlElement>()
-          .map(|el| el.offset_height() as f32)
-        else {
-          continue;
-        };
+        // The exact height: `offset_height` rounds, and the rounding adds up in the corrections.
+        let measured = child.get_bounding_client_rect().height() as f32;
         // A row whose message is still loading is empty; keep its estimate so it stays in the window.
         if measured <= 0.0 {
           continue;
@@ -268,9 +275,12 @@ pub fn MessageList(
       layout_rev.update(|rev| *rev += 1);
       defer_while_alive(list_id, scroll_to_bottom);
     } else {
-      let corrected = container_element.scroll_top() as f64 + shift_above_anchor;
-      container_element.set_scroll_top(corrected as i32);
-      scroll_top.set(f64::from(container_element.scroll_top()));
+      // Relative, so the fraction of the position survives (#642): rows above the one at the top
+      // changed height, the rows on screen stay where they are.
+      if shift_above_anchor != 0.0 {
+        container_element.scroll_by_with_x_and_y(0.0, shift_above_anchor);
+      }
+      note_position(&container_element);
       layout_rev.update(|rev| *rev += 1);
     }
   };
@@ -291,10 +301,8 @@ pub fn MessageList(
     let offset = row.get_bounding_client_rect().top() - container_element.get_bounding_client_rect().top();
     let delta = offset - DIVIDER_CONTEXT_PX;
     if delta.abs() > 1.0 {
-      let corrected = f64::from(container_element.scroll_top()) + delta;
-      container_element.set_scroll_top(corrected.max(0.0) as i32);
-      scroll_top.set(f64::from(container_element.scroll_top()));
-      last_top.set_value(f64::from(container_element.scroll_top()));
+      container_element.scroll_by_with_x_and_y(0.0, delta);
+      note_position(&container_element);
     }
   };
   let schedule_measure = move || {
@@ -365,8 +373,7 @@ pub fn MessageList(
         Some(top) => {
           let top = (top - DIVIDER_CONTEXT_PX).max(0.0);
           element.set_scroll_top(top as i32);
-          scroll_top.set(f64::from(element.scroll_top()));
-          last_top.set_value(f64::from(element.scroll_top()));
+          note_position(&element);
         },
         None => {
           stick_to_bottom.set(true);
@@ -416,12 +423,14 @@ pub fn MessageList(
   let scroll_generation = StoredValue::new(0_u32);
   let new_below = move || away_from.get().map_or(0, |from| count.get().saturating_sub(from));
   // Rows grow after they were measured (reactions, edits, late-loading content). While following,
-  // stay at the bottom so the newest line is never cut off.
+  // stay at the bottom so the newest line is never cut off. Corrected in the same frame, before it
+  // is painted: a frame later the rows would visibly jump and jump back (#642).
   observe_row_growth(list_id, rows, move || {
     if stick_to_bottom.get_untracked() {
       scroll_to_bottom();
     }
-    schedule_measure();
+    measure();
+    align_row();
   });
   let listener = window_event_listener(ev::resize, move |_| {
     if let Some(element) = container.get_untracked() {
@@ -436,7 +445,7 @@ pub fn MessageList(
     let Some(element) = container.get_untracked() else {
       return;
     };
-    let top = f64::from(element.scroll_top());
+    let top = exact_scroll_top(&element);
     let bottom_gap = f64::from(element.scroll_height()) - top - f64::from(element.client_height());
     scroll_top.set(top);
     viewport.set(f64::from(element.client_height()));
@@ -454,15 +463,29 @@ pub fn MessageList(
       },
       FLOATING_DAY_LINGER,
     );
-    // Only an upward move counts as the user leaving the bottom; programmatic scrolls to the bottom
-    // can fire late scroll events while row heights are still settling.
-    if bottom_gap <= STICK_THRESHOLD_PX {
-      stick_to_bottom.set(true);
-    } else if top < last_top.get_value() - 1.0 {
-      stick_to_bottom.set(false);
+    let is_user_scrolling = intent.with_value(|intent| intent.is_user_scrolling(now_ms()));
+    let maybe_follow = follow_after_scroll(bottom_gap, top, last_top.get_value(), is_user_scrolling);
+    if let Some(is_following) = maybe_follow
+      && stick_to_bottom.get_untracked() != is_following
+    {
+      stick_to_bottom.set(is_following);
     }
     last_top.set_value(top);
   };
+
+  // The user's own scrolling up leaves the bottom at once, before the scroll event: a row that
+  // grows meanwhile must not pin the list back down against them (#642). It also ends the
+  // alignment after a jump: the user took over.
+  let leave_bottom = move || {
+    let can_scroll_up = container
+      .get_untracked()
+      .is_some_and(|element| exact_scroll_top(&element) > 0.0);
+    pending_align.set_value(None);
+    if can_scroll_up && stick_to_bottom.get_untracked() {
+      stick_to_bottom.set(false);
+    }
+  };
+  listen_to_user_scrolls(list_id, container, intent, leave_bottom);
 
   let indices = move || {
     let window = window.get();
@@ -478,6 +501,9 @@ pub fn MessageList(
         state.mark_conversation_read(conversation);
       }
       return;
+    }
+    if is_scroll_key(&ev) {
+      intent.update_value(|intent| intent.key_pressed(now_ms()));
     }
     handle_list_keys(&ev, container, rows);
   };
@@ -517,6 +543,15 @@ pub fn MessageList(
         aria-label=move || i18n.t("messages-label")
         node_ref=container
         on:scroll=on_scroll
+        on:pointerdown=move |ev: web_sys::PointerEvent| {
+          // A press on the list itself, not on a row: its scrollbar.
+          let is_on_list = ev.target().zip(container.get_untracked()).is_some_and(|(target, element)| {
+            target.dyn_ref::<web_sys::Element>().is_some_and(|target| target.is_same_node(Some(&element)))
+          });
+          if is_on_list {
+            intent.update_value(|intent| intent.is_dragging = true);
+          }
+        }
         on:keydown=on_keydown
       >
         <Show when=move || count.get() == 0 fallback=|| ()>
@@ -662,7 +697,7 @@ fn track_unread_divider(conversation: ConversationId, count: Memo<usize>, is_at_
 /// Marks the conversation read whenever something in it is unread while the user watches its newest
 /// message: at the bottom of the focused, visible window. Covers messages that arrive while it is
 /// open, coming back to the window and scrolling down to the end; opening it marks it read in
-/// `AppState::open_conversation`. Each newest confirmed message is sent once ([`ReadMarkerGate`]):
+/// `AppState::open_conversation`. Each newest message is sent once ([`ReadMarkerGate`]):
 /// an `unread_update` the server sent before it applied the new position raises the count again,
 /// and that must not queue another read position for the same message. A new message does.
 fn mark_read_while_watched(
@@ -671,13 +706,18 @@ fn mark_read_while_watched(
   is_focused: RwSignal<bool>,
 ) {
   let state = use_app_state();
-  // The newest confirmed message while something is unread; looked up only then.
+  // The newest message the server stored while something is unread; looked up only then. A
+  // reaction is no row but counts as unread, so the newest row alone would never read it (#641).
   let maybe_unread_through = Memo::new(move |_| {
     let has_unread = state
       .read(|backend| backend.conversation(conversation))
       .is_some_and(|conversation| conversation.has_unread());
     has_unread
-      .then(|| newest_confirmed_of(state, conversation))
+      .then(|| {
+        state
+          .read(|backend| backend.newest_message(conversation))
+          .or_else(|| newest_confirmed_of(state, conversation))
+      })
       .flatten()
   });
   let gate = StoredValue::new(ReadMarkerGate::default());
@@ -713,6 +753,141 @@ fn is_escape_free(ev: &web_sys::KeyboardEvent) -> bool {
     && state.panel.get_untracked() == crate::state::SidePanel::Closed
 }
 
+/// Who moves the list. Only the user's own scrolling leaves the bottom (#640, #642): programmatic
+/// scrolls, late scroll events and rows that change height move it too, but never unpin it, or a
+/// message sent right then would land below the visible area.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ScrollIntent {
+  /// The scrollbar is held.
+  pub is_dragging: bool,
+  /// When a scrolling key (Page Up, arrows, Home, space) was pressed last, in ms.
+  maybe_key_at: Option<i64>,
+}
+
+impl ScrollIntent {
+  pub fn key_pressed(&mut self, now: i64) {
+    self.maybe_key_at = Some(now);
+  }
+
+  /// Whether a scroll event now comes from the user's scrollbar or keys. Wheel and touch don't
+  /// need this: they leave the bottom themselves, before the list moves.
+  pub fn is_user_scrolling(&self, now: i64) -> bool {
+    self.is_dragging
+      || self
+        .maybe_key_at
+        .is_some_and(|at| (0..KEY_SCROLL_MS).contains(&now.saturating_sub(at)))
+  }
+}
+
+/// What a scroll event means for following the newest message: back at the bottom follows it
+/// again, the user's own upward move stops following, anything else changes nothing. Any upward
+/// move counts: a slow touchpad scroll moves less than a pixel per event.
+pub fn follow_after_scroll(
+  bottom_gap: f64,
+  top: f64,
+  last_top: f64,
+  is_user_scrolling: bool,
+) -> Option<bool> {
+  if bottom_gap <= STICK_THRESHOLD_PX {
+    Some(true)
+  } else if is_user_scrolling && top < last_top {
+    Some(false)
+  } else {
+    None
+  }
+}
+
+/// Keys that scroll the list up or down.
+fn is_scroll_key(ev: &web_sys::KeyboardEvent) -> bool {
+  matches!(
+    ev.key().as_str(),
+    "PageUp" | "PageDown" | "ArrowUp" | "ArrowDown" | "Home" | "End" | " "
+  )
+}
+
+/// Wheel and touch input that scrolls the list up calls `on_scroll_up`. Passive listeners: an
+/// active one would make the browser wait for it before every scroll step. A released scrollbar
+/// ends the drag of `intent`.
+fn listen_to_user_scrolls(
+  list_id: u64,
+  container: NodeRef<html::Div>,
+  intent: StoredValue<ScrollIntent>,
+  on_scroll_up: impl Fn() + Copy + 'static,
+) {
+  let touch_y = StoredValue::new(None::<i32>);
+  let on_wheel = Closure::<dyn FnMut(web_sys::WheelEvent)>::new(move |ev: web_sys::WheelEvent| {
+    // async-ok: a thread-local Cell, not a signal.
+    if ACTIVE_LIST.get() == list_id && ev.delta_y() < 0.0 && !ev.ctrl_key() {
+      on_scroll_up();
+    }
+  });
+  let on_touch_start = Closure::<dyn FnMut(web_sys::TouchEvent)>::new(move |ev: web_sys::TouchEvent| {
+    touch_y.try_set_value(ev.touches().get(0).map(|touch| touch.client_y()));
+  });
+  // The finger moving down scrolls the list up.
+  let on_touch_move = Closure::<dyn FnMut(web_sys::TouchEvent)>::new(move |ev: web_sys::TouchEvent| {
+    let (Some(Some(start)), Some(touch)) = (touch_y.try_get_value(), ev.touches().get(0)) else {
+      return;
+    };
+    // async-ok: a thread-local Cell, not a signal.
+    if ACTIVE_LIST.get() == list_id && touch.client_y() > start {
+      on_scroll_up();
+    }
+  });
+  let listeners = StoredValue::new_local([
+    ("wheel", on_wheel.into_js_value()),
+    ("touchstart", on_touch_start.into_js_value()),
+    ("touchmove", on_touch_move.into_js_value()),
+  ]);
+  Effect::new(move |_| {
+    let Some(element) = container.get() else { return };
+    let options = web_sys::AddEventListenerOptions::new();
+    options.set_passive(true);
+    listeners.with_value(|listeners| {
+      for (name, listener) in listeners {
+        let added = element.add_event_listener_with_callback_and_add_event_listener_options(
+          name,
+          listener.unchecked_ref(),
+          &options,
+        );
+        if added.is_err() {
+          tracing::debug!(name, "could not listen to scroll input");
+        }
+      }
+    });
+  });
+  let released = [
+    window_event_listener(ev::pointerup, move |_| {
+      intent.try_update_value(|intent| intent.is_dragging = false);
+    }),
+    window_event_listener(ev::pointercancel, move |_| {
+      intent.try_update_value(|intent| intent.is_dragging = false);
+    }),
+  ];
+  on_cleanup(move || {
+    released.into_iter().for_each(|listener| listener.remove());
+    let Some(element) = container.get_untracked() else {
+      return;
+    };
+    listeners.try_with_value(|listeners| {
+      for (name, listener) in listeners {
+        // Removing a listener that was never added is a no-op; nothing to report.
+        drop(element.remove_event_listener_with_callback(name, listener.unchecked_ref()));
+      }
+    });
+  });
+}
+
+/// The exact scroll position. `Element::scroll_top` truncates to whole pixels, which loses the
+/// fraction on scaled displays: corrections drift by a pixel each, and a slow upward scroll looks
+/// like no move at all (#642).
+fn exact_scroll_top(element: &web_sys::Element) -> f64 {
+  js_sys::Reflect::get(element, &wasm_bindgen::JsValue::from_str("scrollTop"))
+    .ok()
+    .and_then(|value| value.as_f64())
+    .unwrap_or_else(|| f64::from(element.scroll_top()))
+}
+
 /// Whether the window has the focus and the page is visible.
 fn is_window_focused() -> bool {
   web_sys::window()
@@ -720,9 +895,15 @@ fn is_window_focused() -> bool {
     .is_some_and(|document| !document.hidden() && document.has_focus().unwrap_or(true))
 }
 
-/// Calls `on_change` (on the next frame) whenever the rendered rows change size.
+/// Calls `on_change` whenever the rendered rows change size: after layout, before the frame is
+/// painted, unless the list that asked for it was unmounted in the meantime.
 fn observe_row_growth(list_id: u64, rows: NodeRef<html::Div>, on_change: impl Fn() + Copy + 'static) {
-  let callback = Closure::<dyn FnMut()>::new(move || defer_while_alive(list_id, on_change));
+  let callback = Closure::<dyn FnMut()>::new(move || {
+    // async-ok: a thread-local Cell, not a signal.
+    if ACTIVE_LIST.get() == list_id {
+      on_change();
+    }
+  });
   let Ok(observer) = web_sys::ResizeObserver::new(callback.as_ref().unchecked_ref()) else {
     tracing::debug!("ResizeObserver unavailable");
     return;
@@ -875,6 +1056,50 @@ mod tests {
     assert_eq!(window.pad_bottom, 0.0);
     let empty = compute_window(&[], 0.0, 600.0);
     assert_eq!((empty.first, empty.end, empty.total), (0, 0, 0.0));
+  }
+
+  mod following {
+    use super::*;
+
+    #[test]
+    fn reaching_the_bottom_follows_again() {
+      assert_eq!(follow_after_scroll(0.0, 900.0, 950.0, false), Some(true));
+      assert_eq!(
+        follow_after_scroll(STICK_THRESHOLD_PX, 900.0, 950.0, true),
+        Some(true)
+      );
+    }
+
+    #[test]
+    fn only_the_user_scrolling_up_stops_following() {
+      // #640: a programmatic scroll or a late scroll event while rows settle moves the list up,
+      // and a message sent right then must still scroll into view.
+      assert_eq!(follow_after_scroll(60.0, 900.0, 950.0, false), None);
+      assert_eq!(follow_after_scroll(60.0, 900.0, 950.0, true), Some(false));
+      assert_eq!(
+        follow_after_scroll(60.0, 950.0, 900.0, true),
+        None,
+        "down is no leaving"
+      );
+    }
+
+    #[test]
+    fn a_sub_pixel_step_up_counts() {
+      // #642: a slow touchpad scroll; pinning it back down made the list jump.
+      assert_eq!(follow_after_scroll(20.0, 999.6, 1_000.0, true), Some(false));
+    }
+
+    #[test]
+    fn keys_count_for_a_moment_and_the_scrollbar_while_held() {
+      let mut intent = ScrollIntent::default();
+      assert!(!intent.is_user_scrolling(5_000));
+      intent.key_pressed(5_000);
+      assert!(intent.is_user_scrolling(5_000 + KEY_SCROLL_MS - 1));
+      assert!(!intent.is_user_scrolling(5_000 + KEY_SCROLL_MS));
+      assert!(!intent.is_user_scrolling(4_000), "a clock that went back");
+      intent.is_dragging = true;
+      assert!(intent.is_user_scrolling(60_000));
+    }
   }
 
   #[test]

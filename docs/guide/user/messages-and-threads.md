@@ -97,7 +97,8 @@ Reply in a thread to keep a conversation tidy.
 
 ## Direct message extras
 
-In DMs and group DMs the sender sees **Seen by** after you read a message. Read receipts are
+In a DM the sender's message shows two blue ticks after you read it; in a group DM the sender sees
+**Seen by** with the names of who read it. Read receipts are
 reciprocal: if you turn them off in Settings > Privacy, you neither send nor see them.
 
 ## Keyboard

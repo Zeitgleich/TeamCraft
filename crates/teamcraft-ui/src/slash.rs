@@ -31,6 +31,10 @@ pub const COMMANDS: [(&str, &str); 24] = [
   ("meet", ""),
 ];
 
+/// Commands that change channel properties: DMs and group DMs have none, and the server refuses
+/// them there (#648), so they are neither offered nor sent.
+const CHANNEL_ONLY: [&str; 3] = ["topic", "purpose", "rename"];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SlashCommand {
   Presence(PresenceStatus),
@@ -62,6 +66,13 @@ pub enum SlashCommand {
     text: String,
   },
   Meet,
+}
+
+impl SlashCommand {
+  /// Whether it only makes sense in a channel (see [`CHANNEL_ONLY`]).
+  pub fn is_channel_only(&self) -> bool {
+    matches!(self, Self::Topic(_) | Self::Purpose(_) | Self::Rename(_))
+  }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -260,18 +271,59 @@ fn reminder(args: &str) -> Result<(ReminderTime, String), SlashError> {
 }
 
 /// Commands whose name starts with `prefix`, for the autocomplete list.
-pub fn matching_commands(prefix: &str) -> Vec<(&'static str, &'static str)> {
+pub fn matching_commands(prefix: &str, is_channel: bool) -> Vec<(&'static str, &'static str)> {
   let prefix = prefix.to_lowercase();
+  commands(is_channel)
+    .filter(|(name, _)| name.starts_with(&prefix))
+    .collect()
+}
+
+/// The commands of a channel, or of a DM or group DM (without [`CHANNEL_ONLY`]), for `/help`.
+pub fn commands(is_channel: bool) -> impl Iterator<Item = (&'static str, &'static str)> {
   COMMANDS
     .iter()
     .copied()
-    .filter(|(name, _)| name.starts_with(&prefix))
-    .collect()
+    .filter(move |(name, _)| is_channel || !CHANNEL_ONLY.contains(name))
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  mod channel_only {
+    use super::*;
+
+    #[test]
+    fn dms_are_not_offered_channel_commands() {
+      let names = |is_channel| {
+        matching_commands("", is_channel)
+          .into_iter()
+          .map(|(name, _)| name)
+          .collect::<Vec<_>>()
+      };
+      for name in CHANNEL_ONLY {
+        assert!(names(true).contains(&name), "{name}");
+        assert!(!names(false).contains(&name), "{name}");
+      }
+      assert!(names(false).contains(&"mute"));
+      assert_eq!(names(true).len(), COMMANDS.len());
+      assert_eq!(commands(false).count(), COMMANDS.len() - CHANNEL_ONLY.len());
+    }
+
+    #[test]
+    fn typed_channel_commands_are_recognized() {
+      for input in ["/topic Release week", "/purpose Plans", "/rename plans"] {
+        let Parsed::Command(command) = parse(input) else {
+          panic!("{input} is a command");
+        };
+        assert!(command.is_channel_only(), "{input}");
+      }
+      let Parsed::Command(command) = parse("/mute") else {
+        panic!("/mute is a command");
+      };
+      assert!(!command.is_channel_only());
+    }
+  }
 
   #[test]
   fn plain_text_and_escaped_slashes_are_messages() {
@@ -373,6 +425,10 @@ mod tests {
       parse("/groupmsg @a @b"),
       Parsed::Command(SlashCommand::GroupMsg(vec!["a".into(), "b".into()]))
     );
-    assert!(matching_commands("sh").iter().any(|(name, _)| *name == "shrug"));
+    assert!(
+      matching_commands("sh", true)
+        .iter()
+        .any(|(name, _)| *name == "shrug")
+    );
   }
 }

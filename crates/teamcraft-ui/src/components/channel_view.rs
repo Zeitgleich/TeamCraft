@@ -16,6 +16,7 @@ use crate::components::security_ui::KeyChangeBanner;
 use crate::components::sheet::MenuSurface;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::components::tab_list::{on_tab_keys, roving_tabindex};
+use crate::delivery::ReadIndicator;
 use crate::i18n::use_i18n;
 use crate::keys::{SEARCH_IN_CONVERSATION, shortcut_text};
 use crate::model::{Conversation, ConversationId, ConversationKind, MembershipIssue, UserId};
@@ -908,8 +909,8 @@ fn CallButtons(conversation: ConversationId, info: Memo<Option<Conversation>>) -
   }
 }
 
-/// "Seen by …" for the newest message of mine, when a DM member has read it. Receipts are
-/// reciprocal and only exist in DMs and group DMs; elsewhere the backend returns nobody.
+/// "Seen by …" for the newest message of mine, when a group DM member has read it. Receipts are
+/// reciprocal; a DM shows them as ticks instead (#635), channels have none.
 #[component]
 fn SeenLine(conversation: ConversationId) -> impl IntoView {
   let state = use_app_state();
@@ -917,6 +918,10 @@ fn SeenLine(conversation: ConversationId) -> impl IntoView {
   let me = state.me().id;
   let names = Memo::new(move |_| {
     state.read(|backend| {
+      let kind = backend.conversation(conversation)?.kind;
+      if ReadIndicator::of(kind) != ReadIndicator::SeenLine {
+        return None;
+      }
       let count = backend.message_count(conversation);
       let recent = backend.messages(conversation, count.saturating_sub(SEEN_LOOKBACK), SEEN_LOOKBACK);
       let newest = recent.into_iter().rev().find(|message| message.author == me)?;

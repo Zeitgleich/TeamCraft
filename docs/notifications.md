@@ -33,6 +33,8 @@ back (issue #159), also after an app restart. Clients move the read position whe
 conversation, sends a top-level message in it, and whenever something in the open conversation is
 unread while its newest message is in view of the focused window (a message that arrives while the
 user reads along, coming back to the window, scrolling down to the end), once per newest message.
+"Newest" is the newest message the server stored, reactions, edits and deletions included: they
+raise the server's count too, so a reaction to a message on screen is read at once (issue #641).
 Moving the read position also sends the DM read receipt (subject to the read-receipt setting), so a
 DM shows as read as soon as the recipient is at its bottom in a focused, visible window.
 
@@ -419,15 +421,17 @@ them off neither sends nor sees them. Channels have none.
 
 Own messages show one indicator next to the time (issue #568), drawn with the app's SVG icons:
 
-| State          | Indicator        | Source                                                           |
-|----------------|------------------|------------------------------------------------------------------|
-| Sending        | clock            | message still in the local outbox                                |
-| On the server  | one grey tick    | the server confirmed the send                                    |
-| Read           | two blue ticks   | every other member's read receipt reaches the message (DMs, group DMs) |
-| Failed         | alert, retry     | the server refused the send                                      |
+| State         | Indicator      | Source                                                    |
+|---------------|----------------|-----------------------------------------------------------|
+| Sending       | clock          | message still in the local outbox                         |
+| On the server | one grey tick  | the server confirmed the send                             |
+| Read          | two blue ticks | the other member's read receipt reaches the message (DMs) |
+| Failed        | alert, retry   | the server refused the send                               |
 
-Because the blue ticks come from read receipts, they are reciprocal: someone with receipts off
-neither sends nor sees blue ticks, and the message stays at one tick. Channels show one tick only.
+One read model per conversation kind (issue #635), never two saying the same thing: a DM shows the
+two blue ticks and no "Seen by"; a group DM shows "Seen by <names>" under my newest message (it says
+who) and its messages keep the single tick; channels show one tick only. Because both come from read
+receipts, they are reciprocal: someone with receipts off neither sends nor sees them.
 "Delivered" (two grey ticks, derived from device sync cursors on the server) is not built yet.
 
 ## Urgent messages

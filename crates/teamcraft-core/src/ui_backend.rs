@@ -1303,6 +1303,11 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_first_unread(conversation)
   }
 
+  fn newest_message(&self, conversation: ConversationId) -> Option<MessageId> {
+    // The same message `CoreCommand::MarkRead` sends as the read position.
+    newest_server_id(&self.all_messages(conversation))
+  }
+
   fn is_waiting_for_device(&self, conversation: ConversationId) -> bool {
     crate::client::is_waiting_for_device(&self.store, conversation).unwrap_or(false)
   }
@@ -1883,6 +1888,15 @@ fn reactions_of(target: ClientMessageId, all: &[StoredMessage], me: UserId) -> V
   by_emoji.into_values().collect()
 }
 
+/// The newest of `messages` the server stored (outbox messages have no server ID yet): the read
+/// position that covers everything, reactions included.
+pub(crate) fn newest_server_id(messages: &[StoredMessage]) -> Option<MessageId> {
+  messages
+    .iter()
+    .filter_map(|message| message.maybe_server_id)
+    .max()
+}
+
 /// The ID the UI uses: the server's, or a stable stand-in for outbox messages.
 pub(crate) fn ui_message_id(message: &StoredMessage) -> MessageId {
   if let Some(id) = message.maybe_server_id {
@@ -1925,6 +1939,46 @@ mod tests {
       teamcraft_client_api::actions::MAX_VIEWER_BYTES,
       crate::MAX_VIEWER_BYTES
     );
+  }
+
+  #[test]
+  fn a_reaction_is_the_newest_message_though_not_a_row() {
+    let store = std::sync::Arc::new(MemoryStore::new());
+    let conversation = id::<ConversationId>(10);
+    let backend = CoreChatBackend::new(store.clone(), id(1), Box::new(ManualClock::new(1_000)));
+    assert_eq!(backend.newest_message(conversation), None);
+    let text = ClientMessageId::from_bytes([1; 16]);
+    let stored = |client_message_id, server_id, content| StoredMessage {
+      conversation_id: conversation,
+      client_message_id,
+      maybe_server_id: Some(id(server_id)),
+      sender_user_id: id(2),
+      maybe_thread_id: None,
+      sent_at_ms: 1_000,
+      content,
+      is_edited: false,
+      edits: Vec::new(),
+      maybe_edit_id: None,
+      is_pinned: false,
+    };
+    let body = MessageContent::Text {
+      body: "hello".into(),
+      mentions: Vec::new(),
+      meta: Default::default(),
+    };
+    store.upsert_message(&stored(text, 101, body)).unwrap();
+    let reaction = MessageContent::Reaction {
+      target: text,
+      emoji: "+1".into(),
+      is_added: true,
+    };
+    store
+      .upsert_message(&stored(ClientMessageId::from_bytes([2; 16]), 102, reaction))
+      .unwrap();
+
+    // #641: the reaction raises the unread count, so the open conversation must see it to read it.
+    assert_eq!(backend.messages(conversation, 0, 10).len(), 1);
+    assert_eq!(backend.newest_message(conversation), Some(id(102)));
   }
 
   #[test]
