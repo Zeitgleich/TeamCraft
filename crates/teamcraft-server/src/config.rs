@@ -1071,6 +1071,11 @@ pub struct NotificationsConfig {
   /// heartbeats renew it, so keep it above twice `[gateway] heartbeat_interval_secs`; a session that
   /// stops (sleep, crash, lost network) no longer holds pushes back.
   pub attention_lease_secs: u64,
+  /// The user's own activity on a desktop or web session (input it reported, a message sent from
+  /// it) holds phone pushes back like an attentive report for this long, also when its window is
+  /// not in front: the user is at the computer (notifications.md, "Attention"). Keep it above the
+  /// 30 s the clients repeat "active" during input. `0`: only attention counts.
+  pub desktop_activity_secs: u64,
   /// Pushes held for an attentive desktop per user at most; beyond that the oldest goes out at once.
   pub max_held_pushes_per_user: usize,
   /// E-mail digest of missed mentions.
@@ -1448,6 +1453,7 @@ impl Default for NotificationsConfig {
       mobile_push_delay_secs: 120,
       is_desktop_attention_enabled: true,
       attention_lease_secs: 75,
+      desktop_activity_secs: 120,
       max_held_pushes_per_user: 100,
       email_digest: EmailDigestConfig::default(),
     }

@@ -234,6 +234,35 @@ class MessageNotificationSpecTest {
     assertEquals(listOf("again"), NotificationLines.withWakeUp(listOf(read), read.copy(text = "again"), isDuplicate = false).map { it.text })
   }
 
+  /**
+   * Issue #756: a quick burst for one conversation. Every wake-up updates the conversation's one
+   * notification with its line, whatever the order they arrive in; a repeated wake-up changes
+   * nothing and doesn't alert again.
+   */
+  @Test
+  fun aBurstOfWakeUpsShowsEveryMessageInSendOrder() {
+    val arrivals = listOf(
+      line("1000", "Alice", "ping") to false,
+      line("3000", "Alice", "abc") to false,
+      line("2000", "Alice", "pong") to false,
+      line("3000", "Alice", "abc") to true,
+      line("4000", "Alice", "123") to false,
+    )
+    var lines = emptyList<NotificationLine>()
+    val specs = arrivals.map { (line, isDuplicate) ->
+      lines = NotificationLines.withWakeUp(lines, line, isDuplicate)
+      spec(direct(*lines.toTypedArray()), isAlerting = !isDuplicate)
+    }
+    assertEquals(listOf(1, 2, 3, 3, 4), specs.map { it.messageCount })
+    val last = specs.last()
+    assertEquals(listOf("ping", "pong", "abc", "123"), last.maybeConversation!!.messages.map { it.text })
+    assertEquals("123", last.text)
+    assertEquals(4000L, last.whenMs)
+    assertEquals("4 from Alice", last.publicText)
+    val alert = NotificationAlerting.ALERT
+    assertEquals(listOf(alert, alert, alert, NotificationAlerting.SILENT, alert), specs.map { it.alerting })
+  }
+
   private fun assertNoText(spec: MessageNotificationSpec) {
     for (shown in listOf(spec.title, spec.text, spec.publicTitle, spec.publicText)) assertFalse(shown.contains("secret"))
   }

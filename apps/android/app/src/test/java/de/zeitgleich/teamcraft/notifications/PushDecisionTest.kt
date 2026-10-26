@@ -13,6 +13,15 @@ class PushDecisionTest {
     assertEquals(PushDecision.ShowMessage(wakeUp, isAlerting = true), PushDecision.of(wakeUp))
   }
 
+  /** Issue #756: a conversation that already shows a notification still gets every new message. */
+  @Test
+  fun everyNewMessageOfABurstIsShown() {
+    for (id in listOf("200", "201", "202", "203")) {
+      val wakeUp = push(PushNotificationKind.MESSAGE, maybeMessageId = id)
+      assertEquals(PushDecision.ShowMessage(wakeUp, isAlerting = true), PushDecision.of(wakeUp))
+    }
+  }
+
   @Test
   fun aSilentMessageShowsWithoutAlerting() {
     val wakeUp = push(PushNotificationKind.MESSAGE, isSilent = true)

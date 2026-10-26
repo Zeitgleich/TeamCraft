@@ -68,6 +68,10 @@ pub struct HubOptions {
   pub max_sessions_per_user: usize,
   /// How long an "attentive" report counts without being repeated.
   pub attention_lease: Duration,
+  /// How long the user's own activity on a desktop or web session (input it reported, a message
+  /// sent from it) holds phone pushes back without an attentive report (notifications.md,
+  /// "Attention"). `ZERO`: only attention counts.
+  pub desktop_activity_window: Duration,
 }
 
 /// A connection attached to a session.
@@ -128,7 +132,8 @@ pub enum ResumeError {
 pub struct ActiveDevices {
   /// A phone or tablet has the app in the foreground.
   pub is_mobile_active: bool,
-  /// The user is looking at a desktop or web session right now (notifications.md, "Attention").
+  /// The user is at a desktop or web session right now: looking at it, or using it (notifications.md,
+  /// "Attention").
   pub is_desktop_attentive: bool,
 }
 
@@ -138,10 +143,10 @@ enum Attention {
   /// An older client that never reports attention: its activity stands in for it.
   NeverReported,
   /// Attentive until the lease runs out.
-  Attentive {
-    until: Instant,
-  },
-  Away,
+  Attentive { until: Instant },
+  /// Not looking at the session since then; activity after that still counts (the user works at
+  /// the computer in another window, or the webview reports focus wrongly).
+  Away { since: Instant },
 }
 
 /// What the hub knows about a session's activity.
@@ -293,11 +298,12 @@ impl Hub {
         debug!("a replaced gateway connection ended; the session stays attached");
         return;
       }
+      let now = Instant::now();
       session.maybe_connection = None;
       if session.maybe_detached_at.is_none() {
-        session.maybe_detached_at = Some(Instant::now());
+        session.maybe_detached_at = Some(now);
       }
-      session.attention = Attention::Away;
+      session.attention = Attention::Away { since: now };
       Some(session.user)
     };
     if let Some(user) = maybe_user {
@@ -344,16 +350,25 @@ impl Hub {
 
   /// Records the device's own activity report; a repeated "active" counts for the away timeout.
   /// Returns whether the session's activity changed (only then the presence needs a refresh).
+  /// A device going idle no longer holds phone pushes back: its user's held pushes go out now.
   pub fn set_activity(&self, session_id: &str, activity: DeviceActivity) -> bool {
-    let mut inner = self.lock();
-    let Some(session) = inner.sessions.get_mut(session_id) else {
-      return false;
+    let (has_changed, maybe_gone_idle) = {
+      let mut inner = self.lock();
+      let Some(session) = inner.sessions.get_mut(session_id) else {
+        return false;
+      };
+      if activity == DeviceActivity::Active {
+        session.last_active_at = Instant::now();
+      }
+      let reported = SessionActivity::reported(&activity);
+      let previous = std::mem::replace(&mut session.activity, reported);
+      let is_gone_idle = previous == SessionActivity::Active && reported != SessionActivity::Active;
+      (previous != reported, is_gone_idle.then_some(session.user))
     };
-    if activity == DeviceActivity::Active {
-      session.last_active_at = Instant::now();
+    if let Some(user) = maybe_gone_idle {
+      self.announce_attention_lost(user);
     }
-    let reported = SessionActivity::reported(&activity);
-    std::mem::replace(&mut session.activity, reported) != reported
+    has_changed
   }
 
   /// Whether this report would make an idle or timed-out session active. The gateway lets such a
@@ -381,7 +396,7 @@ impl Hub {
         };
         (None, session.show_sign_of_life(now))
       } else {
-        session.attention = Attention::Away;
+        session.attention = Attention::Away { since: now };
         (Some(session.user), None)
       }
     };
@@ -476,9 +491,12 @@ impl Hub {
       .collect()
   }
 
-  /// Which kinds of device of the user are in use. `is_mobile` tells phones from the rest. Without
-  /// `uses_attention` (the user or the instance turned it off) a desktop counts by its activity, as
-  /// presence does.
+  /// Which kinds of device of the user are in use. `is_mobile` tells phones from the rest. A desktop
+  /// or web session is in use while its attentive report lasts, and also for
+  /// [`HubOptions::desktop_activity_window`] after the user's own activity on it (reported input, a
+  /// sent message) that came after its last "away" report: the user is at the computer, if not in
+  /// this window (notifications.md, "Attention"). Without `uses_attention` (the user or the
+  /// instance turned it off) a desktop counts by its activity, as presence does.
   pub fn active_devices(
     &self,
     user: UserId,
@@ -502,7 +520,9 @@ impl Hub {
           _ if !uses_attention => session.activity == SessionActivity::Active,
           Attention::NeverReported => session.activity == SessionActivity::Active,
           Attention::Attentive { until } => until > now,
-          Attention::Away => false,
+          Attention::Away { since } => {
+            session.has_acted_since(since, now, self.options.desktop_activity_window)
+          },
         };
       }
     }
@@ -903,6 +923,15 @@ impl Session {
       SessionActivity::Idle => None,
     }
   }
+
+  /// The device is active and showed it after `since`, within `window` of `now`. Any report or
+  /// action that renews the activity counts (gateway.md, "Presence"): input the device reported, a
+  /// message sent from it, typing.
+  fn has_acted_since(&self, since: Instant, now: Instant, window: Duration) -> bool {
+    self.activity == SessionActivity::Active
+      && self.last_active_at > since
+      && now.saturating_duration_since(self.last_active_at) < window
+  }
 }
 
 impl SessionActivity {
@@ -1029,6 +1058,7 @@ mod tests {
     max_sessions_per_device: 100,
     max_sessions_per_user: 100,
     attention_lease: Duration::from_secs(75),
+    desktop_activity_window: Duration::from_secs(120),
   };
 
   #[tokio::test(start_paused = true)]
@@ -1410,6 +1440,71 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn using_the_computer_holds_pushes_back_while_the_window_is_not_in_front() {
+      let hub = Hub::new(OPTIONS);
+      let desktop = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      hub.set_attention(&desktop.session_id, false);
+      assert!(!is_in_use(&hub));
+      // Input anywhere on the computer (or in a window the webview thinks is unfocused) renews the
+      // device's activity: the user is at the desktop.
+      tokio::time::advance(Duration::from_secs(1)).await;
+      hub.set_activity(&desktop.session_id, DeviceActivity::Active);
+      assert!(is_in_use(&hub));
+      tokio::time::advance(Duration::from_secs(119)).await;
+      assert!(is_in_use(&hub));
+      // Nothing for the window's length: the user left.
+      tokio::time::advance(Duration::from_secs(1)).await;
+      assert!(!is_in_use(&hub));
+      // Typing shows it as well.
+      hub.touch_activity(&desktop.session_id);
+      assert!(is_in_use(&hub));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_away_report_after_the_last_activity_wins() {
+      let hub = Hub::new(OPTIONS);
+      let desktop = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      hub.set_activity(&desktop.session_id, DeviceActivity::Active);
+      tokio::time::advance(Duration::from_secs(1)).await;
+      // The tab was hidden or closed after the input: not at this session any more.
+      hub.set_attention(&desktop.session_id, false);
+      assert!(!is_in_use(&hub));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn going_idle_ends_it_and_releases_the_held_pushes() {
+      let hub = Hub::new(OPTIONS);
+      let watcher = hub.watch_attention(user(1));
+      let desktop = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      hub.set_attention(&desktop.session_id, false);
+      assert!(is_woken(&watcher).await);
+      tokio::time::advance(Duration::from_secs(1)).await;
+      hub.set_activity(&desktop.session_id, DeviceActivity::Active);
+      assert!(is_in_use(&hub));
+      assert!(!is_woken(&watcher).await);
+      // The screen locks: the device says idle, the phone gets its pushes now.
+      hub.set_activity(&desktop.session_id, DeviceActivity::Idle);
+      assert!(!is_in_use(&hub));
+      assert!(is_woken(&watcher).await);
+      // Idle again changes nothing and wakes nobody.
+      hub.set_activity(&desktop.session_id, DeviceActivity::Idle);
+      assert!(!is_woken(&watcher).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn without_an_activity_window_only_attention_counts() {
+      let hub = Hub::new(HubOptions {
+        desktop_activity_window: Duration::ZERO,
+        ..OPTIONS
+      });
+      let desktop = hub.open_session(user(1), device(1), DeviceActivity::Active);
+      hub.set_attention(&desktop.session_id, false);
+      tokio::time::advance(Duration::from_secs(1)).await;
+      hub.set_activity(&desktop.session_id, DeviceActivity::Active);
+      assert!(!is_in_use(&hub));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn clients_that_never_report_attention_fall_back_to_their_activity() {
       let hub = Hub::new(OPTIONS);
       let desktop = hub.open_session(user(1), device(1), DeviceActivity::Active);
@@ -1454,6 +1549,12 @@ mod tests {
           .active_devices(user(1), desktop_only, true)
           .is_desktop_attentive
       );
+    }
+
+    fn is_in_use(hub: &Hub) -> bool {
+      hub
+        .active_devices(user(1), desktop_only, true)
+        .is_desktop_attentive
     }
 
     async fn is_woken(watcher: &Notify) -> bool {
