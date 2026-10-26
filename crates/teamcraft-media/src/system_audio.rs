@@ -81,10 +81,16 @@ impl SystemAudioSender {
 impl MonoResampler {
   /// A rate of 0 (a broken device report) counts as the codec's rate instead of never advancing.
   pub fn new(channels: usize, rate_hz: u32) -> Self {
-    let rate_hz = if rate_hz == 0 { SAMPLE_RATE_HZ } else { rate_hz };
+    Self::between(channels, rate_hz, SAMPLE_RATE_HZ)
+  }
+
+  /// From `from_hz` to `to_hz` instead of to the codec's rate (playback on a 44.1 or 96 kHz
+  /// device). A rate of 0 counts as the codec's rate.
+  pub fn between(channels: usize, from_hz: u32, to_hz: u32) -> Self {
+    let or_codec = |rate_hz: u32| if rate_hz == 0 { SAMPLE_RATE_HZ } else { rate_hz };
     Self {
       channels: channels.max(1),
-      step: f64::from(rate_hz) / f64::from(SAMPLE_RATE_HZ),
+      step: f64::from(or_codec(from_hz)) / f64::from(or_codec(to_hz)),
       position: 0.0,
       previous: 0.0,
     }
