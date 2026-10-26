@@ -40,7 +40,7 @@ final class FeedTests: XCTestCase {
 
   func testANewDayStartsANewGroup() {
     let entries = feedSections(
-      [message("1", "a", dayOne + 1439 * minute), message("2", "a", dayOne + 1441 * minute)], calendar: utc
+      [message("1", "a", dayOne + 959 * minute), message("2", "a", dayOne + 961 * minute)], calendar: utc
     ).flatMap(\.entries)
     XCTAssertEqual(entries.map(\.isContinuation), [false, false])
     XCTAssertEqual(entries.map(\.isGroupEnd), [true, true])
