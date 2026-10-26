@@ -520,6 +520,7 @@ impl CallHost {
       capture,
       encoders: preferred_encoders(),
       maybe_filter: Some(self.self_view.filter(maybe_filter)),
+      maybe_idle_refresh: None,
     };
     // Answers once the capture runs; the media task turns the camera on in the call state, and
     // off again (with an error for the user) if no picture comes.
@@ -607,6 +608,7 @@ impl CallHost {
       capture,
       encoders: preferred_encoders(),
       maybe_filter: None,
+      maybe_idle_refresh: VideoSendConfig::default_idle_refresh(&VideoTrackKind::Screen),
     };
     self.start_video(config).await?;
     if maybe_new_token.is_some() {
@@ -1246,6 +1248,7 @@ mod tests {
       capture: Box<dyn VideoCapture>,
     ) -> oneshot::Receiver<Result<(), String>> {
       let config = VideoSendConfig {
+        maybe_idle_refresh: VideoSendConfig::default_idle_refresh(&kind),
         kind,
         capture,
         layers: simulcast_layers(FORMAT.resolution, 30, 300_000, 1),

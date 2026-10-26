@@ -1,11 +1,11 @@
 //! Video that has to recover through the SFU (issue #683): a viewer that lost a keyframe asks for
-//! a new one instead of waiting for the publisher's periodic keyframe (300 frames, 10 s here).
+//! a new one instead of waiting for the publisher's periodic keyframe (300 frames, 10 s here), and
+//! a still screen, which delivers no frames, still answers a keyframe request.
 
 // clippy.toml only relaxes these lints inside #[test] functions; the helpers below are test code too.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::net::{Ipv6Addr, SocketAddr};
-
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -13,7 +13,9 @@ use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
 use teamcraft_media::call_native::{NativeCall, NativeCallConfig};
 use teamcraft_media::video::{VideoFrame, VideoResolution, simulcast_layers};
-use teamcraft_media::video_capture::{CaptureFormat, TestPatternCapture};
+use teamcraft_media::video_capture::{
+  CaptureError, CaptureFormat, FrameSender, TestPatternCapture, VideoCapture, test_pattern,
+};
 use teamcraft_media::video_pipeline::{VideoSendConfig, software_encoders};
 use teamcraft_proto::{AudioCodec, DeviceId, MediaCapabilities, VideoCodec, VideoTrackKind};
 use teamcraft_sfu::auth::DevTokenVerifier;
@@ -33,6 +35,64 @@ const RECOVERY_DEADLINE: Duration = Duration::from_secs(5);
 const VIDEO_PACKET_BYTES: usize = 1000;
 /// Covers the keyframes the start of a subscription brings (the publisher's own, the SFU's).
 const LOSS_WINDOW: Duration = Duration::from_millis(500);
+/// A viewer that subscribes this long after the share started: it missed the first picture.
+const LATE_SUBSCRIBE: Duration = Duration::from_millis(500);
+
+/// A shared screen that doesn't change after its first picture (ScreenCaptureKit and PipeWire
+/// deliver nothing then). The viewer subscribes later; the SFU asks for a keyframe, and the
+/// presenter answers with the screen's last picture.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_late_viewer_of_a_still_screen_gets_its_picture() {
+  let (port, certificate_hash) = start_sfu().await;
+  let sfu = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port);
+  let mut presenter = join(sfu, certificate_hash, 1, 2).await;
+  let mut viewer = join(sfu, certificate_hash, 2, 1).await;
+  wait_until_secured(&mut presenter).await;
+  wait_until_secured(&mut viewer).await;
+
+  let screen = StillScreen::default();
+  let config = VideoSendConfig {
+    kind: VideoTrackKind::Screen,
+    capture: Box::new(screen.clone()),
+    layers: simulcast_layers(VGA, 30, 800_000, 1),
+    encoders: software_encoders(),
+    maybe_filter: None,
+    // Only the answer to the keyframe request may bring the picture, not the idle refresh.
+    maybe_idle_refresh: None,
+  };
+  let first_picture = presenter.start_video_checked(config).await.unwrap();
+  screen.show_one_picture();
+  first_picture.wait().await.unwrap();
+
+  let decoded: Arc<Mutex<Vec<VideoFrame>>> = Arc::default();
+  let mut maybe_subscribe_at = None;
+  let deadline = tokio::time::Instant::now() + RECOVERY_DEADLINE;
+  while tokio::time::Instant::now() < deadline && decoded.lock().unwrap().is_empty() {
+    if let Ok(Some(CallEngineEvent::VideoPublished(track))) =
+      tokio::time::timeout(Duration::from_millis(20), viewer.next_event()).await
+    {
+      maybe_subscribe_at = Some((track.stream_id, tokio::time::Instant::now() + LATE_SUBSCRIBE));
+    }
+    if let Some((stream_id, at)) = maybe_subscribe_at
+      && tokio::time::Instant::now() >= at
+    {
+      maybe_subscribe_at = None;
+      let sink = Arc::clone(&decoded);
+      viewer.watch_video(
+        stream_id,
+        None,
+        Box::new(move |frame| sink.lock().unwrap().push(frame)),
+      );
+    }
+  }
+  presenter.stop_video(VideoTrackKind::Screen);
+  presenter.leave().await.unwrap();
+  viewer.leave().await.unwrap();
+  assert!(
+    !decoded.lock().unwrap().is_empty(),
+    "the late viewer never saw the still screen"
+  );
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_viewer_that_lost_the_first_keyframe_asks_for_another() {
@@ -57,6 +117,8 @@ async fn a_viewer_that_lost_the_first_keyframe_asks_for_another() {
     layers: simulcast_layers(VGA, 30, 150_000, 1),
     encoders: software_encoders(),
     maybe_filter: None,
+    // Frames come all the time: only a requested keyframe can help.
+    maybe_idle_refresh: None,
   };
   presenter.start_video(config).await.unwrap();
 
@@ -86,6 +148,36 @@ async fn a_viewer_that_lost_the_first_keyframe_asks_for_another() {
     !decoded.lock().unwrap().is_empty(),
     "no picture within {RECOVERY_DEADLINE:?}: the lost keyframe wasn't replaced"
   );
+}
+
+/// A shared screen that shows one picture when told to, and then stands still.
+#[derive(Clone, Default)]
+struct StillScreen(Arc<Mutex<Option<FrameSender>>>);
+
+impl StillScreen {
+  fn show_one_picture(&self) {
+    let frames = self.0.lock().unwrap();
+    let frames = frames.as_ref().expect("the capture runs");
+    assert!(frames.send(test_pattern(VGA, 0, 0).unwrap()));
+  }
+}
+
+impl VideoCapture for StillScreen {
+  fn format(&self) -> CaptureFormat {
+    CaptureFormat {
+      resolution: VGA,
+      framerate: 30,
+    }
+  }
+
+  fn start(&mut self, frames: FrameSender) -> Result<(), CaptureError> {
+    *self.0.lock().unwrap() = Some(frames);
+    Ok(())
+  }
+
+  fn stop(&mut self) {
+    self.0.lock().unwrap().take();
+  }
 }
 
 /// Relays one client's UDP to the SFU and back. Told to, it loses the large packets towards the

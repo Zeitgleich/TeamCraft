@@ -29,6 +29,13 @@ const CONTROL_POLL: Duration = Duration::from_millis(20);
 pub const FIRST_PICTURE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Repeated failures of one kind (a frame not encoded, not sent) are logged at most this often.
 const REPEATED_WARNING_INTERVAL: Duration = Duration::from_secs(10);
+/// A keyframe request still open this long after the last picture is answered with the last
+/// picture again: the capture delivers nothing while a screen stands still, and the request
+/// would wait for the next change (issue #683). Longer than a frame of any capture that runs.
+const KEYFRAME_REFRESH_DELAY: Duration = Duration::from_millis(150);
+/// The default [`VideoSendConfig::maybe_idle_refresh`] of screen shares: a still screen's
+/// picture again about once a second, so a viewer never waits long for one.
+pub const SCREEN_IDLE_REFRESH: Duration = Duration::from_secs(1);
 
 /// Makes the encoder for one layer; hardware where available (see [`software_encoders`]).
 pub type EncoderFactory =
@@ -138,6 +145,10 @@ pub struct VideoSendConfig {
   pub layers: Vec<VideoLayerInfo>,
   pub encoders: EncoderFactory,
   pub maybe_filter: Option<FrameFilter>,
+  /// Encodes the last picture again after this long without a new frame. Screen captures only
+  /// deliver when something changes ([`VideoSendConfig::default_idle_refresh`]); `None` for
+  /// cameras, which deliver all the time.
+  pub maybe_idle_refresh: Option<Duration>,
 }
 
 /// One watched track's decoder thread.
@@ -183,6 +194,14 @@ pub fn software_encoders() -> EncoderFactory {
   Arc::new(|layer, content| Ok(Box::new(OpenH264Encoder::new(layer, content)?) as Box<dyn VideoEncoder>))
 }
 
+impl VideoSendConfig {
+  /// The idle refresh a track of `kind` gets unless the app sets another: screen shares
+  /// [`SCREEN_IDLE_REFRESH`], cameras none.
+  pub fn default_idle_refresh(kind: &VideoTrackKind) -> Option<Duration> {
+    (*kind == VideoTrackKind::Screen).then_some(SCREEN_IDLE_REFRESH)
+  }
+}
+
 impl VideoSender {
   /// Starts capturing and encoding; frames go to `encoded` tagged with the track kind. The
   /// [`FirstPicture`] tells whether pictures come; dropping it lets the track take as long as it
@@ -197,6 +216,7 @@ impl VideoSender {
       layers,
       encoders,
       maybe_filter,
+      maybe_idle_refresh,
     } = config;
     let content = match kind {
       VideoTrackKind::Screen => VideoContent::Screen,
@@ -213,6 +233,9 @@ impl VideoSender {
       content,
       encoders,
       maybe_filter,
+      refresh: Refresh {
+        maybe_idle_interval: maybe_idle_refresh,
+      },
       frame_rx,
       control_rx,
       encoded,
@@ -274,6 +297,7 @@ struct EncoderLoop {
   content: VideoContent,
   encoders: EncoderFactory,
   maybe_filter: Option<FrameFilter>,
+  refresh: Refresh,
   frame_rx: FrameReceiver,
   control_rx: std_mpsc::Receiver<SenderControl>,
   encoded: mpsc::UnboundedSender<(VideoTrackKind, EncodedVideoFrame)>,
@@ -286,6 +310,18 @@ struct EncoderLoop {
 enum LoopStep {
   Continue,
   Stop,
+}
+
+/// When the encoder thread encodes its last picture again without a new frame from the capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Refresh {
+  maybe_idle_interval: Option<Duration>,
+}
+
+/// The picture encoded last (scaled and filtered), for [`Refresh`].
+struct LastPicture {
+  frame: VideoFrame,
+  encoded_at: Instant,
 }
 
 impl EncoderLoop {
@@ -311,12 +347,26 @@ impl EncoderLoop {
     let mut limiter = FrameLimiter::new(self.layers.iter().map(|layer| layer.max_framerate).max());
     let mut encode_warning = RepeatedWarning::default();
     let started_at = Instant::now();
+    let mut maybe_last: Option<LastPicture> = None;
     loop {
       if self.apply_controls(&mut simulcast) == LoopStep::Stop {
         return;
       }
       if self.check_first_picture(Instant::now(), started_at) == LoopStep::Stop {
         return;
+      }
+      if let Some(frame) = self.due_refresh(&simulcast, maybe_last.as_ref(), Instant::now()) {
+        match self.encode_and_send(&mut simulcast, frame, &mut encode_warning) {
+          Ok(last) => maybe_last = Some(last),
+          Err(LoopStep::Stop) => return,
+          // Not encoded: the next try after another wait, not at once.
+          Err(LoopStep::Continue) => {
+            if let Some(last) = &mut maybe_last {
+              last.encoded_at = Instant::now();
+            }
+          },
+        }
+        continue;
       }
       let frame = match self.frame_rx.recv_timeout(CONTROL_POLL) {
         Ok(frame) => frame,
@@ -349,24 +399,76 @@ impl EncoderLoop {
         Some(filter) => filter(frame),
         None => frame,
       };
-      let encoded_frames = match simulcast.encode(&frame) {
-        Ok(encoded_frames) => encoded_frames,
-        Err(error) => {
-          let kind = &self.kind;
-          encode_warning.warn(|suppressed| warn!(%error, suppressed, ?kind, "video frame not encoded"));
-          continue;
+      // A refreshed picture may have run ahead of the capture's clock; time doesn't go back.
+      let frame = match &maybe_last {
+        Some(last) if frame.timestamp_us() <= last.frame.timestamp_us() => {
+          let timestamp_us = last.frame.timestamp_us().saturating_add(1_000);
+          frame.with_timestamp_us(timestamp_us)
         },
+        _ => frame,
       };
-      if !encoded_frames.is_empty() {
-        self.report_start(Ok(()));
-      }
-      for encoded_frame in encoded_frames {
-        self.counters.encoded.fetch_add(1, Ordering::Relaxed);
-        if self.encoded.send((self.kind.clone(), encoded_frame)).is_err() {
-          return;
-        }
+      match self.encode_and_send(&mut simulcast, frame, &mut encode_warning) {
+        Ok(last) => maybe_last = Some(last),
+        Err(LoopStep::Stop) => return,
+        Err(LoopStep::Continue) => {},
       }
     }
+  }
+
+  /// The last picture again with a later timestamp, when [`Refresh`] says so (and someone
+  /// receives the track).
+  fn due_refresh(
+    &self,
+    simulcast: &SimulcastEncoder,
+    maybe_last: Option<&LastPicture>,
+    now: Instant,
+  ) -> Option<VideoFrame> {
+    let last = maybe_last?;
+    let is_due = simulcast.has_needed_layers()
+      && self
+        .refresh
+        .is_due(now, last.encoded_at, simulcast.wants_keyframe());
+    if !is_due {
+      return None;
+    }
+    let elapsed_us =
+      u64::try_from(now.saturating_duration_since(last.encoded_at).as_micros()).unwrap_or(u64::MAX);
+    let timestamp_us = last.frame.timestamp_us().saturating_add(elapsed_us);
+    Some(last.frame.clone().with_timestamp_us(timestamp_us))
+  }
+
+  /// Encodes `frame` for every needed layer and hands the pictures on. The frame comes back as
+  /// the last picture; `Err` when it wasn't encoded ([`LoopStep::Continue`]) or nobody takes the
+  /// pictures any more ([`LoopStep::Stop`]).
+  fn encode_and_send(
+    &mut self,
+    simulcast: &mut SimulcastEncoder,
+    frame: VideoFrame,
+    encode_warning: &mut RepeatedWarning,
+  ) -> Result<LastPicture, LoopStep> {
+    let encoded_frames = match simulcast.encode(&frame) {
+      Ok(encoded_frames) => encoded_frames,
+      Err(error) => {
+        let kind = &self.kind;
+        encode_warning.warn(|suppressed| warn!(%error, suppressed, ?kind, "video frame not encoded"));
+        return Err(LoopStep::Continue);
+      },
+    };
+    let has_pictures = !encoded_frames.is_empty();
+    for encoded_frame in encoded_frames {
+      self.counters.encoded.fetch_add(1, Ordering::Relaxed);
+      if self.encoded.send((self.kind.clone(), encoded_frame)).is_err() {
+        return Err(LoopStep::Stop);
+      }
+    }
+    // After the hand-off: once the start is reported, the first picture is on its way.
+    if has_pictures {
+      self.report_start(Ok(()));
+    }
+    Ok(LastPicture {
+      frame,
+      encoded_at: Instant::now(),
+    })
   }
 
   /// Applies every queued control; [`LoopStep::Stop`] once the sender is gone (the track was
@@ -438,6 +540,17 @@ fn source_name(kind: &VideoTrackKind) -> &'static str {
   match kind {
     VideoTrackKind::Screen => "screen capture",
     _ => "camera",
+  }
+}
+
+impl Refresh {
+  /// Whether the last picture, encoded at `last_encoded_at`, is due again at `now`: a keyframe
+  /// request has waited [`KEYFRAME_REFRESH_DELAY`] for a new frame, or the track idled for its
+  /// interval.
+  fn is_due(&self, now: Instant, last_encoded_at: Instant, wants_keyframe: bool) -> bool {
+    let idle = now.saturating_duration_since(last_encoded_at);
+    (wants_keyframe && idle >= KEYFRAME_REFRESH_DELAY)
+      || self.maybe_idle_interval.is_some_and(|interval| idle >= interval)
   }
 }
 
@@ -615,6 +728,7 @@ mod tests {
         let resolution = frame.resolution();
         VideoFrame::new(resolution, frame.timestamp_us(), vec![128; frame.data().len()]).unwrap()
       })),
+      maybe_idle_refresh: None,
     };
     let (sender, _first_picture) = VideoSender::start(config, encoded).unwrap();
     let frames = pushed.lock().unwrap().clone().unwrap();
@@ -667,6 +781,7 @@ mod tests {
       // No encoder: the thread ends at once, as when the system ends the capture.
       encoders: Arc::new(|_, _| Err(VideoCodecError::Codec("none".into()))),
       maybe_filter: None,
+      maybe_idle_refresh: None,
     };
     let (sender, _first_picture) = VideoSender::start(config, encoded).unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -832,11 +947,11 @@ mod tests {
       }
     }
 
-    fn fake_encoders() -> EncoderFactory {
+    pub(super) fn fake_encoders() -> EncoderFactory {
       Arc::new(|_, _| Ok(Box::new(FakeEncoder) as Box<dyn VideoEncoder>))
     }
 
-    fn manual_capture() -> ManualCapture {
+    pub(super) fn manual_capture() -> ManualCapture {
       ManualCapture::new(CaptureFormat {
         resolution: VGA,
         framerate: 30,
@@ -858,6 +973,7 @@ mod tests {
         layers: simulcast_layers(VGA, 30, 800_000, 1),
         encoders,
         maybe_filter: None,
+        maybe_idle_refresh: None,
       };
       let (sender, first_picture) = VideoSender::start(config, encoded).unwrap();
       (sender, first_picture, encoded_rx)
@@ -875,6 +991,9 @@ mod tests {
         content: VideoContent::Camera,
         encoders: fake_encoders(),
         maybe_filter: None,
+        refresh: Refresh {
+          maybe_idle_interval: None,
+        },
         frame_rx,
         control_rx,
         encoded,
@@ -882,6 +1001,93 @@ mod tests {
         maybe_first_picture: Some(first_picture),
       };
       (encoder_loop, first_picture_rx)
+    }
+  }
+
+  /// The last picture again when the capture delivers nothing (issue #683).
+  mod refresh {
+    use super::first_picture::{fake_encoders, manual_capture};
+    use super::*;
+
+    const RECEIVE: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn a_waiting_keyframe_or_an_idle_screen_brings_the_last_picture_again() {
+      let start = Instant::now();
+      let camera = Refresh {
+        maybe_idle_interval: None,
+      };
+      let screen = Refresh {
+        maybe_idle_interval: Some(SCREEN_IDLE_REFRESH),
+      };
+      let soon = start + Duration::from_millis(100);
+      assert!(!camera.is_due(soon, start, true), "a new frame may still come");
+      assert!(camera.is_due(start + KEYFRAME_REFRESH_DELAY, start, true));
+      assert!(
+        !camera.is_due(start + Duration::from_secs(60), start, false),
+        "cameras deliver all the time"
+      );
+      assert!(!screen.is_due(start + KEYFRAME_REFRESH_DELAY, start, false));
+      assert!(screen.is_due(start + SCREEN_IDLE_REFRESH, start, false));
+    }
+
+    #[tokio::test]
+    async fn a_keyframe_request_for_a_still_screen_is_answered_with_its_last_picture() {
+      let (sender, frames, mut encoded_rx) = still_screen(None);
+      assert!(frames.send(test_pattern(VGA, 0, 0).unwrap()));
+      let first = next(&mut encoded_rx).await;
+      // The screen doesn't change: no frame comes. A viewer asks for a keyframe.
+      sender.request_keyframe(0);
+      let again = next(&mut encoded_rx).await;
+      assert!(again.is_keyframe);
+      assert!(again.timestamp.0 > first.timestamp.0, "a later picture");
+    }
+
+    #[tokio::test]
+    async fn an_idle_screen_repeats_its_picture() {
+      let (_sender, frames, mut encoded_rx) = still_screen(Some(Duration::from_millis(30)));
+      assert!(frames.send(test_pattern(VGA, 0, 0).unwrap()));
+      let mut timestamps = Vec::new();
+      for _ in 0..3 {
+        timestamps.push(next(&mut encoded_rx).await.timestamp.0);
+      }
+      assert!(
+        timestamps.is_sorted() && timestamps[0] < timestamps[2],
+        "{timestamps:?}"
+      );
+    }
+
+    /// A screen sender whose frames the test pushes, with fake encoders.
+    fn still_screen(
+      maybe_idle_refresh: Option<Duration>,
+    ) -> (
+      VideoSender,
+      crate::video_capture::FrameSender,
+      mpsc::UnboundedReceiver<(VideoTrackKind, EncodedVideoFrame)>,
+    ) {
+      let pushed = Arc::new(Mutex::new(None));
+      let (encoded, encoded_rx) = mpsc::unbounded_channel();
+      let config = VideoSendConfig {
+        kind: VideoTrackKind::Screen,
+        capture: Box::new(SharedCapture(manual_capture(), Arc::clone(&pushed))),
+        layers: simulcast_layers(VGA, 30, 800_000, 1),
+        encoders: fake_encoders(),
+        maybe_filter: None,
+        maybe_idle_refresh,
+      };
+      let (sender, _first_picture) = VideoSender::start(config, encoded).unwrap();
+      let frames = pushed.lock().unwrap().clone().unwrap();
+      (sender, frames, encoded_rx)
+    }
+
+    async fn next(
+      encoded_rx: &mut mpsc::UnboundedReceiver<(VideoTrackKind, EncodedVideoFrame)>,
+    ) -> EncodedVideoFrame {
+      tokio::time::timeout(RECEIVE, encoded_rx.recv())
+        .await
+        .expect("a picture in time")
+        .unwrap()
+        .1
     }
   }
 

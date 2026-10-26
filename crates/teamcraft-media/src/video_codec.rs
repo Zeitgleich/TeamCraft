@@ -338,6 +338,19 @@ impl SimulcastEncoder {
     }
   }
 
+  /// Whether a needed layer waits for a keyframe (asked for, not yet encoded).
+  pub fn wants_keyframe(&self) -> bool {
+    self
+      .layers
+      .iter()
+      .any(|layer| layer.is_needed && layer.wants_keyframe)
+  }
+
+  /// Whether anybody receives a layer; with none, encoding is wasted.
+  pub fn has_needed_layers(&self) -> bool {
+    self.layers.iter().any(|layer| layer.is_needed)
+  }
+
   pub fn request_keyframe(&mut self, layer: u8) -> Result<(), VideoCodecError> {
     let encoder = self
       .layers
