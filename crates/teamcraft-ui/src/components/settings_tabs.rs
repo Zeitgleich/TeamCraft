@@ -5,7 +5,7 @@
 
 use leptos::prelude::*;
 use teamcraft_client_api::calls::CallStatusSounds;
-use teamcraft_client_api::window_chrome::TitleBar;
+use teamcraft_client_api::window_chrome::{TitleBar, TrayIconStyle, WindowPlatform};
 
 use crate::auth::tauri;
 use crate::components::background_picker::{BackgroundPicker, effect_from_slug, effect_slug};
@@ -351,10 +351,16 @@ fn DesktopCard() -> impl IntoView {
   let autostart = RwSignal::new(None::<bool>);
   // Hidden where the system can't start the app at login; shown (and waiting) until that is known.
   let is_autostart_supported = RwSignal::new(true);
+  // The tray icon's look can be chosen on Linux and Windows; macOS colours its template icon itself.
+  let has_tray_icon_style = RwSignal::new(false);
   let saving_prefs = PendingAction::new();
   let saving_autostart = PendingAction::new();
   leptos::task::spawn_local(async move {
     prefs.set_if_alive(tauri::shell_prefs().await);
+    let is_mac = tauri::window_chrome()
+      .await
+      .is_none_or(|chrome| chrome.platform == WindowPlatform::Macos);
+    has_tray_icon_style.set_if_alive(!is_mac);
     match tauri::autostart().await {
       Ok(Some(is_on)) => autostart.set_if_alive(Some(is_on)),
       Ok(None) => is_autostart_supported.set_if_alive(false),
@@ -362,12 +368,12 @@ fn DesktopCard() -> impl IntoView {
       Err(error) => report_failure(ActionFailure::new(FailureKind::Other, error)),
     }
   });
-  let save = move |change: fn(&mut tauri::ShellPrefs, bool), value: bool| {
+  let save_with = move |change: &dyn Fn(&mut tauri::ShellPrefs)| {
     let Some(before) = prefs.get_untracked() else {
       return;
     };
     let mut next = before;
-    change(&mut next, value);
+    change(&mut next);
     prefs.set(Some(next));
     saving_prefs.spawn(async move {
       if let Err(error) = tauri::set_shell_prefs(next).await {
@@ -376,6 +382,9 @@ fn DesktopCard() -> impl IntoView {
       }
       Ok(())
     });
+  };
+  let save = move |change: fn(&mut tauri::ShellPrefs, bool), value: bool| {
+    save_with(&|prefs: &mut tauri::ShellPrefs| change(prefs, value));
   };
   let set_autostart = move |on: bool| {
     autostart.set(Some(on));
@@ -428,8 +437,39 @@ fn DesktopCard() -> impl IntoView {
           save(|prefs, on| prefs.title_bar = if on { TitleBar::System } else { TitleBar::Custom }, on)
         })
       />
+      <Show when=move || has_tray_icon_style.get()>
+        <SegmentedRow
+          label="settings-tray-icon"
+          hint="settings-tray-icon-hint"
+          options=TrayIconStyle::CHOICES
+            .iter()
+            .map(|style| (tray_icon_slug(*style).to_owned(), format!("settings-tray-icon-{}", tray_icon_slug(*style))))
+            .collect()
+          value=Signal::derive(move || tray_icon_slug(current().tray_icon).to_owned())
+          on_change=Callback::new(move |slug: String| {
+            let style = tray_icon_from_slug(&slug);
+            save_with(&move |prefs: &mut tauri::ShellPrefs| prefs.tray_icon = style);
+          })
+        />
+      </Show>
     </SettingsCard>
   }
+}
+
+/// The tray icon style's value in the settings' choices (its wire name).
+fn tray_icon_slug(style: TrayIconStyle) -> &'static str {
+  match style {
+    TrayIconStyle::Colour | TrayIconStyle::Unknown => "colour",
+    TrayIconStyle::White => "white",
+    TrayIconStyle::Black => "black",
+  }
+}
+
+fn tray_icon_from_slug(slug: &str) -> TrayIconStyle {
+  TrayIconStyle::CHOICES
+    .into_iter()
+    .find(|style| tray_icon_slug(*style) == slug)
+    .unwrap_or_default()
 }
 
 #[component]
