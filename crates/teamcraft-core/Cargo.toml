@@ -44,7 +44,7 @@ rand_core = { version = "0.6.4", features = ["getrandom"] }
 zeroize = "1.9.1"
 # Async plumbing shared by the gateway abstraction and the in-process fake server.
 futures-channel = "0.3"
-futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+futures-util = { version = "0.3", default-features = false, features = ["async-await", "async-await-macro", "sink", "std"] }
 # REST client; uses fetch in the browser.
 reqwest.workspace = true
 # Thumbnails of image attachments, made by the sender's client (already in the tree via the
