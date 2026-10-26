@@ -2750,5 +2750,10 @@ channel-sources-hint = Point Grafana, CI or journalctl at the bridge. Paste this
 channel-sources-block = Source for the bridge configuration
 channel-sources-webhook = Webhook (Slack-compatible)
 channel-sources-logs = Log lines
+channel-sources-bridge = Where the bridge runs
+channel-sources-bridge-instance = On this server
+channel-sources-bridge-loopback = On its own machine
+channel-sources-bridge-instance-hint = The bridge runs beside the server (deployment option teamcraft_bridge); producers post to this server's address.
+channel-sources-bridge-loopback-hint = The bridge runs next to the producers and listens on its default local address. Use the bridge's own address if you opened its listener.
 
 notes-title = Notes
