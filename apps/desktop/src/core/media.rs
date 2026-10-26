@@ -352,8 +352,9 @@ mod tests {
     if is_enforced {
       assert!(outcome.is_err(), "the failure is reported");
       assert!(root.join(PENDING_CLEAR_MARKER).exists(), "and remembered");
+      std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o700)).expect("unlock");
     }
-    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o700)).expect("unlock");
+    // Without enforcement (root, as in CI) the folder was deleted with the others.
     finish_pending_clear(&root);
     assert!(
       !root.join("server-a").join(MEDIA_CACHE_DIR).exists(),
