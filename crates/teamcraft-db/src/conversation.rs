@@ -417,6 +417,33 @@ impl Database {
     ids.into_iter().map(from_db).collect()
   }
 
+  /// The members of every conversation in the space, by conversation; with `maybe_user` only that
+  /// user's conversations there. Conversations without members are left out.
+  pub async fn space_conversation_members(
+    &self,
+    space: SpaceId,
+    maybe_user: Option<UserId>,
+  ) -> Result<HashMap<ConversationId, Vec<UserId>>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT m.conversation_id, m.user_id
+         FROM memberships m
+         JOIN conversations c ON c.id = m.conversation_id
+         WHERE c.space_id = $1 AND ($2::bigint IS NULL OR m.user_id = $2)"#,
+      to_db(space),
+      maybe_user.map(to_db),
+    )
+    .fetch_all(self.pool())
+    .await?;
+    let mut members: HashMap<ConversationId, Vec<UserId>> = HashMap::new();
+    for row in rows {
+      members
+        .entry(from_db(row.conversation_id)?)
+        .or_default()
+        .push(from_db(row.user_id)?);
+    }
+    Ok(members)
+  }
+
   /// Adds the user; keeps the existing membership if there is one. `true` if newly added.
   pub async fn add_conversation_member(
     &self,
