@@ -572,6 +572,7 @@ fn workspace_event(event: &ConversationEvent, actor: UserId) -> Option<Workspace
       user: *user,
       by: actor,
     },
+    ConversationEvent::AdminJoined { user } => WorkspaceEvent::AdminJoined { user: *user },
     ConversationEvent::Archived => WorkspaceEvent::Archived { by: actor },
     ConversationEvent::Unarchived => WorkspaceEvent::Unarchived { by: actor },
     ConversationEvent::MadePrivate => WorkspaceEvent::MadePrivate { by: actor },

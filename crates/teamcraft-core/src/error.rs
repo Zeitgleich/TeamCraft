@@ -118,6 +118,13 @@ pub enum CoreError {
   NotAnAdmin(UserId),
   #[error("user {0} has no identity key yet (never enrolled)")]
   UnknownIdentity(UserId),
+  /// The signed roster holds this user with an identity key this device can't use, and the new
+  /// roster keeps them: their entry can't be signed again as it is, and it is never changed or
+  /// dropped silently (issue #765). The message starts with a stable code the UI localizes.
+  #[error(
+    "roster_key_unusable: the signed roster's identity key of user {0} can't be used on this device; remove them explicitly, or let another owner sign"
+  )]
+  RosterKeyUnusable(UserId),
   #[error("conversation {0} has no MLS group on this device")]
   NoGroup(ConversationId),
   /// A call needs this device in the conversation's MLS group (e2ee.md §8), and it isn't yet:
@@ -243,6 +250,12 @@ mod tests {
   #[test]
   fn the_non_owner_refusal_carries_its_stable_code() {
     assert!(CoreError::NotAnOwner.to_string().starts_with("not_an_owner:"));
+    let user = <UserId as teamcraft_proto::Id>::from_snowflake(teamcraft_proto::Snowflake::new(2).unwrap());
+    assert!(
+      CoreError::RosterKeyUnusable(user)
+        .to_string()
+        .starts_with("roster_key_unusable:")
+    );
     assert!(
       CoreError::RosterBaseMismatch
         .to_string()

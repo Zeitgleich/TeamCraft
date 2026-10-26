@@ -257,6 +257,10 @@ pub struct SpaceMember {
   pub user: UserId,
   pub display_name: String,
   pub is_guest: bool,
+  /// An integration's bot account: listed as "Integration", without a role to change (issue
+  /// #764); it is added and removed in the channels' integration settings.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_bot: bool,
   pub role: SpaceRole,
 }
 

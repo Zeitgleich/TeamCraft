@@ -376,6 +376,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// pinned; the first roster makes this user the first owner and the workspace root of trust.
   pub async fn publish_roster(&mut self, roles: &[(UserId, RosterRole)]) -> Result<(), CoreError> {
     self.sync_workspace().await?;
+    if let Some(user) = crate::workspace::kept_unusable_entry(&self.workspace()?.roster, roles) {
+      return Err(CoreError::RosterKeyUnusable(user));
+    }
     let directory_users: Vec<UserId> = roles.iter().map(|(user, _)| *user).collect();
     self.pin_identities(directory_users).await?;
     let pinned = records::pinned_identities(&self.store)?;

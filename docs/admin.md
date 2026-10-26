@@ -137,9 +137,18 @@ signature (freshness above).
   started from (`publish_roster_based_on`); if another owner signed meanwhile, nothing is signed
   (`roster_changed`) and the owner edits the new roster.
 - **Identity provider roles.** The `owner` and `admin` roles in the identity provider don't change
-  the signed roster by themselves: the server can't sign. When they differ from it, the console
-  lists the difference, and an owner signs the identity provider's role holders through the same
-  confirmation.
+  the signed roster by themselves: the server can't sign. When the provider lists owners or admins
+  the roster doesn't have, the console lists them (with each account, so two accounts with one name
+  differ), and an owner signs them through the same confirmation. This only adds people and
+  promotes admins to owners: it never removes or demotes anybody, because the server's role list is
+  the role each account last showed in a token and can lag behind the provider; removing someone
+  is the owner's explicit edit (issue #765). Deactivated accounts are never proposed.
+- **Unsigned roles are said, not hidden.** Admin rights hold only through the fresh signed roster,
+  so an admin or owner whose provider role nobody signed yet is a member on everybody else's app.
+  A banner above the app and on every console page says so, with the owners to ask; a signing
+  owner sees there that provider roles wait for their signature, and after the freshness window
+  ran out an owner signs the unchanged roster again from the banner. Actions refused for this
+  reason (integration sources, joining private channels) say it where they are.
 - **Admins can't sign.** For admins the form is read-only; the core refuses to sign a roster or
   policy for anyone who isn't an owner of the verified roster (`not_an_owner`), and every client
   would refuse such an entry anyway.
@@ -165,6 +174,13 @@ history. That is allowed, but never silent:
   - `disabled`.
 - Member clients enforce this setting themselves (it's part of the signed workspace policy), so the
   server can't bypass it.
+- **Where admins join.** The channel browser lists a space's private channels to workspace admins,
+  marked private, as the verified policy allows: "Join as admin" for `visible`, a note to ask a
+  channel admin for `owner_approval` (there is no request flow yet), nothing for `disabled`. The
+  admin's app signs the self-join; the member whose app commits it then posts the encrypted
+  "joined as a workspace admin" message (`AdminJoined`), shown to everybody whatever their
+  join/leave setting. Members' apps let the admin in only while their role is in the fresh signed
+  roster.
 
 ### 2.5 Orphaned channels
 
