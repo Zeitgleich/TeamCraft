@@ -15,7 +15,8 @@ loader-checking = Sitzung wird geprüft …
 
 ## Kopfleiste und Kontomenü
 search-placeholder = Suchen
-search-placeholder-scoped = Suche: { $scope }
+search-in = In { $name } suchen
+search-scope-clear = Überall suchen
 account-menu-label = Kontomenü für { $name }, Status { $status }
 status-menu-label = Konto und Status
 menu-settings = Einstellungen
@@ -59,7 +60,10 @@ status-presets-only = Dein Arbeitsbereich bietet diese Status zur Auswahl an.
 ## Space-Leiste
 rail-label = Spaces
 rail-add-space = Spaces durchsuchen oder anlegen
-rail-space-mentions = { $name }, { $count } Erwähnungen
+rail-space-mentions = { $name }, { $count ->
+    [one] { $count } ungelesene Erwähnung
+   *[other] { $count } ungelesene Erwähnungen
+  }
 rail-space-unread = { $name }, ungelesene Nachrichten
 rail-chats-unread = Chats, { $count } ungelesen
 rail-chats = Chats
@@ -2092,6 +2096,9 @@ connection-banner-connecting = Verbindung zum Server wird aufgebaut…
 connection-banner-unreachable = Der Server ist nicht erreichbar. Nachrichten warten, bis er wieder da ist. Nächster Versuch in { $seconds } s.
 connection-banner-captive-portal = Dieses Netzwerk verlangt zuerst eine Anmeldung (statt des Servers hat eine Anmeldeseite geantwortet). Öffne eine Webseite, um dich anzumelden; Nachrichten warten. Nächster Versuch in { $seconds } s.
 connection-banner-untrusted-certificate = Dem Zertifikat des Servers wird nicht vertraut. In einem Netzwerk, das verschlüsselten Verkehr prüft: Nutze ein anderes Netzwerk oder bitte deine IT, das Firmenzertifikat auf diesem Gerät zu installieren. Passiert es überall, ist vielleicht das Zertifikat des Servers fehlerhaft: Sag deiner Administration Bescheid. Nächster Versuch in { $seconds } s.
+connection-hint-offline = Offline
+connection-hint-connecting = Verbinden…
+connection-hint-reconnecting = Neu verbinden…
 connection-banner-retry = Jetzt versuchen
 connection-banner-sign-in = Deine Sitzung ist abgelaufen. Nachrichten warten, bis du dich wieder anmeldest.
 connection-banner-sign-in-action = Erneut anmelden
@@ -2185,6 +2192,9 @@ update-off-preference = TeamCraft sucht nicht nach neuen Versionen.
 update-off-not_configured = Dieser Build kann sich nicht selbst aktualisieren. Neue Versionen gibt es auf der Release-Seite.
 update-off-unpackaged = Entwicklungs-Build: keine Updates.
 update-ready = TeamCraft { $version } ist bereit.
+update-ready-banner = TeamCraft { $version } ist bereit – zum Aktualisieren neu starten.
+update-ready-installed = TeamCraft { $version } ist installiert – neu starten, um die neue Version zu nutzen.
+update-restart-short = Neu starten
 update-available = TeamCraft { $version } ist verfügbar.
 update-restart = Neu starten und aktualisieren
 update-restart-after-call = Nach dem Anruf neu starten
@@ -2530,8 +2540,6 @@ lightbox-play = Abspielen
 lightbox-pause = Anhalten
 lightbox-thread-show = Thread einblenden
 lightbox-thread-hide = Thread ausblenden
-lightbox-open-window = In neuem Fenster öffnen
-lightbox-window-blocked = Das neue Fenster wurde blockiert.
 lightbox-more = Weitere Aktionen
 lightbox-view-thread = Thread anzeigen
 lightbox-jump = Zur Nachricht springen
@@ -2796,6 +2804,7 @@ focus-30-minutes = Für 30 Minuten
 
 # Dateien-Ansicht und Einrichtungs-Checkliste (Issue #301)
 sidebar-files = Dateien
+sidebar-shortcuts = Schnellzugriffe
 files-title = Dateien
 files-filter = Dateien filtern
 files-filter-all = Alle

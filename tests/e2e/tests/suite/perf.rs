@@ -729,18 +729,21 @@ struct Traffic {
   gateway_frames: f64,
 }
 
-/// Waits until the client is done with what it was doing: connected (no connection banner for
-/// [`QUIET`]: a sync holds the connection, and the banner shows "connecting" after 3 s) and no API
-/// request for [`QUIET`]. Returns when the connection banner went away for good.
+/// Waits until the client is done with what it was doing: connected (no connection hint or notice
+/// for [`QUIET`]: a sync holds the connection, and the hint shows after the grace period) and no
+/// API request for [`QUIET`]. Returns when the connection hint went away for good.
 async fn wait_until_done(page: &Page) -> Instant {
   let deadline = Instant::now() + LONG_WAIT;
   let mut maybe_connected_since: Option<Instant> = None;
   loop {
     assert!(Instant::now() < deadline, "the client never settled");
-    let has_banner = evaluate_value(page, "!!document.querySelector('.offline-banner')".into())
-      .await
-      .as_bool()
-      .unwrap_or(true);
+    let has_banner = evaluate_value(
+      page,
+      "!!document.querySelector('.connection-hint, .connection-notice')".into(),
+    )
+    .await
+    .as_bool()
+    .unwrap_or(true);
     match (has_banner, maybe_connected_since) {
       (true, _) => maybe_connected_since = None,
       (false, None) => maybe_connected_since = Some(Instant::now()),
