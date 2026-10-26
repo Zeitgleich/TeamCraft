@@ -42,7 +42,7 @@ async fn files_go_up_first_and_arrive_with_their_message() {
   ];
   let mut attachments = Vec::new();
   for upload in &mut uploads {
-    attachments.push(upload_whole(&mut alice, upload).await.unwrap());
+    attachments.push(upload_whole(&mut alice, upload).await);
   }
   assert_eq!(server.part_upload_count(), 2, "the large file went up in parts");
   assert!(
@@ -92,7 +92,7 @@ async fn a_picture_gets_its_thumbnail_and_size() {
   let (_server, mut alice, _bob, channel) = channel_with_two().await;
   let png = png(40, 20);
   let mut upload = direct(channel, bytes_source(&png), "graph.png", "image/png", png.len());
-  let attachment = upload_whole(&mut alice, &mut upload).await.unwrap();
+  let attachment = upload_whole(&mut alice, &mut upload).await;
   assert!(attachment.maybe_thumbnail.is_some());
   let dimensions = attachment.maybe_dimensions.unwrap();
   assert_eq!((dimensions.width, dimensions.height), (40, 20));
@@ -155,15 +155,17 @@ async fn an_upload_that_fails_half_way_is_given_up_at_the_server() {
 }
 
 /// Drives the upload's steps until the file is up.
-async fn upload_whole(
-  peer: &mut Peer,
-  upload: &mut DirectUpload,
-) -> Result<AttachmentRef, DirectUploadError> {
+async fn upload_whole(peer: &mut Peer, upload: &mut DirectUpload) -> AttachmentRef {
   loop {
-    let mut step = peer.client.start_direct_upload(upload).await?;
+    let mut step = peer.client.start_direct_upload(upload).await.unwrap();
     let sent = step.sent().await;
-    if let Some(attachment) = peer.client.finish_direct_upload(upload, step, sent).await? {
-      return Ok(attachment);
+    if let Some(attachment) = peer
+      .client
+      .finish_direct_upload(upload, step, sent)
+      .await
+      .unwrap()
+    {
+      return attachment;
     }
   }
 }

@@ -845,7 +845,7 @@ mod tests {
         ),
       ];
       for (event, expected) in cases {
-        let item = MessageItem::from_view(&message_of(view::MessageKind::System(event)), "Sam".into(), false);
+        let item = MessageItem::from_view(&message_of(view::MessageKind::System(event)), None, false);
         assert_eq!(item.maybe_system_event, Some(expected));
       }
     }
@@ -856,7 +856,7 @@ mod tests {
         view::MessageKind::User,
         view::MessageKind::Log(view::LogLevel::Info),
       ] {
-        let item = MessageItem::from_view(&message_of(kind), "Sam".into(), false);
+        let item = MessageItem::from_view(&message_of(kind), None, false);
         assert_eq!(item.maybe_system_event, None);
       }
     }
