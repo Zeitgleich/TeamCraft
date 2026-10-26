@@ -6,7 +6,8 @@
 //! slides down from wherever the finger let go (`motion.rs`).
 //!
 //! [`MenuSurface`] is what menus use: a popover beside its trigger on wider layouts, this sheet on
-//! phones.
+//! phones. Every popover sits on a [`PopoverBackdrop`], the one way a popover is dismissed from
+//! outside and leaves (#639).
 
 use leptos::html;
 use leptos::prelude::*;
@@ -211,7 +212,7 @@ pub fn MenuSurface(
     .into_any();
   }
   view! {
-    <div class="popover-backdrop" on:mousedown=move |_| on_close.run(())></div>
+    <PopoverBackdrop on_close=on_close popover=node_ref />
     <div
       class=format!("popover {class}")
       role=role
@@ -227,6 +228,33 @@ pub fn MenuSurface(
     </div>
   }
   .into_any()
+}
+
+/// The layer behind a popover, and the one place its dismissal and exit live (#639):
+///
+/// - A press outside closes it when it completes (`click`), not when it starts. Closing on
+///   `mousedown` removed the layer mid-press, and WebKit then delivered the press's `click` to the
+///   trigger under it, which opened the popover again: every press on the trigger toggled twice.
+///   Now the whole press lands on the backdrop, so the trigger only ever sees presses that start
+///   while the popover is closed. A right click closes it too, without the page's context menu.
+/// - The press doesn't move the focus (`mousedown` default prevented): it stays in the popover until
+///   the owner closes it and puts the focus back, so a focus ring around the trigger's container
+///   doesn't blink off and on.
+/// - When the popover leaves, its ghost plays the exit (`motion-popover-out`, `motion.rs`).
+#[component]
+pub fn PopoverBackdrop(on_close: Callback<()>, popover: NodeRef<html::Div>) -> impl IntoView {
+  use_leave_ghost(popover);
+  view! {
+    <div
+      class="popover-backdrop"
+      on:mousedown=|ev| ev.prevent_default()
+      on:click=move |_| on_close.run(())
+      on:contextmenu=move |ev| {
+        ev.prevent_default();
+        on_close.run(());
+      }
+    ></div>
+  }
 }
 
 /// A sheet whose content scrolls is dragged from the top of its content: once the finger pulls it

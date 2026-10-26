@@ -7,6 +7,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
 use crate::clock::{local_day_start, now_ms, parse_local_datetime};
+use crate::components::sheet::PopoverBackdrop;
 use crate::i18n::use_i18n;
 use crate::model::ConversationId;
 use crate::state::use_app_state;
@@ -98,7 +99,7 @@ pub fn DateJumpPopover(conversation: ConversationId, menu: DateJumpMenu) -> impl
         let (x, y) = placed(menu.0.get().unwrap_or_default());
         let latest_day = latest_day.get_value();
         view! {
-          <div class="popover-backdrop" on:mousedown=move |_| close()></div>
+          <PopoverBackdrop on_close=Callback::new(move |()| close()) popover=node />
           <div
             class="popover date-jump-menu"
             role="menu"

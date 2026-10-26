@@ -26,6 +26,7 @@ use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::components::lightbox::prefers_reduced_motion;
 use crate::components::message_actions::copy_to_clipboard;
+use crate::components::sheet::PopoverBackdrop;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::i18n::{I18n, use_i18n};
 use crate::lightbox::{MediaKey, MediaKind};
@@ -947,6 +948,7 @@ fn FileMenu(actions: FileActions) -> impl IntoView {
   let i18n = use_i18n();
   let is_open = RwSignal::new(false);
   let trigger = NodeRef::<html::Button>::new();
+  let menu = NodeRef::<html::Div>::new();
   let is_saved = actions.is_saved();
   let close = move || {
     is_open.set(false);
@@ -988,8 +990,8 @@ fn FileMenu(actions: FileActions) -> impl IntoView {
         <Icon name=IconName::More />
       </button>
       <Show when=move || is_open.get() fallback=|| ()>
-        <div class="popover-backdrop" on:mousedown=move |_| is_open.set(false)></div>
-        <div class="popover file-menu" role="menu" aria-label=move || i18n.t("lightbox-more") on:keydown=on_keydown>
+        <PopoverBackdrop on_close=Callback::new(move |()| is_open.set(false)) popover=menu />
+        <div class="popover file-menu" role="menu" node_ref=menu aria-label=move || i18n.t("lightbox-more") on:keydown=on_keydown>
           <button class="menu-item" role="menuitem" on:click=item(FileActions::download)>
             <Icon name=IconName::Download />
             <span class="menu-label">{move || i18n.t("file-download")}</span>

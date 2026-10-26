@@ -24,6 +24,7 @@ pub fn Modal(
   let state = use_app_state();
   let dialog = NodeRef::<html::Div>::new();
   let backdrop = NodeRef::<html::Div>::new();
+  let is_press_on_backdrop = StoredValue::new(false);
   if has_exit_motion {
     use_leave_ghost(backdrop);
   }
@@ -66,11 +67,20 @@ pub fn Modal(
   };
 
   view! {
-    <div class="modal-backdrop" node_ref=backdrop on:mousedown=move |ev| {
-      if ev.target() == ev.current_target() {
-        state.close_overlay();
+    // Closes when a press both starts and ends on the backdrop (#639): closing on `mousedown` let
+    // the press's `click` reach whatever was under the backdrop (WebKit), and a text selection
+    // dragged out of the dialog must not close it.
+    <div
+      class="modal-backdrop"
+      node_ref=backdrop
+      on:mousedown=move |ev| is_press_on_backdrop.set_value(ev.target() == ev.current_target())
+      on:click=move |ev| {
+        if is_press_on_backdrop.get_value() && ev.target() == ev.current_target() {
+          state.close_overlay();
+        }
+        is_press_on_backdrop.set_value(false);
       }
-    }>
+    >
       <div
         class=format!("modal {class}")
         role="dialog"

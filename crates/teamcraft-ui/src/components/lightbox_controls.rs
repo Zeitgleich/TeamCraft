@@ -22,6 +22,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::lightbox::{FullMedia, sizes};
 use crate::components::lightbox_motion::StageMotion;
 use crate::components::message_actions::copy_to_clipboard;
+use crate::components::sheet::PopoverBackdrop;
 use crate::i18n::{I18n, use_i18n};
 use crate::lightbox::{
   Command, KEY_ZOOM_STEP, MAX_STRIP_THUMBNAILS, MediaKey, MediaKind, ModifierStyle, Point, Viewport,
@@ -479,7 +480,7 @@ fn MoreMenu(
         <Icon name=IconName::More />
       </button>
       <Show when=move || is_open.get() fallback=|| ()>
-        <div class="popover-backdrop" on:mousedown=move |_| is_open.set(false)></div>
+        <PopoverBackdrop on_close=Callback::new(move |()| is_open.set(false)) popover=menu />
         <div class="popover lightbox-menu opens-up" role="menu" node_ref=menu aria-label=move || i18n.t("lightbox-more") on:keydown=on_menu_keydown>
           <button class="menu-item" role="menuitem" on:click=view_thread>
             <Icon name=IconName::Threads />

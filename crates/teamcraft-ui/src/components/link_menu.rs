@@ -7,6 +7,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
 use crate::components::message_actions::copy_to_clipboard;
+use crate::components::sheet::PopoverBackdrop;
 use crate::external_links::{self, LinkMenuTarget};
 use crate::i18n::use_i18n;
 
@@ -54,7 +55,7 @@ pub fn LinkMenu() -> impl IntoView {
         let open_url = target.url.clone();
         let copy_url = target.url;
         view! {
-          <div class="popover-backdrop" on:mousedown=move |_| close() on:contextmenu=move |ev| { ev.prevent_default(); close(); }></div>
+          <PopoverBackdrop on_close=Callback::new(move |()| close()) popover=node />
           <div
             class="popover link-menu"
             role="menu"
