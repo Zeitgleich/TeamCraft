@@ -1256,6 +1256,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_refresh_call_history();
   }
 
+  fn is_loaded(&self, list: teamcraft_client_api::backend::LoadingList) -> bool {
+    self.ui_is_loaded(list)
+  }
+
   fn own_devices(&self) -> Vec<teamcraft_client_api::admin::DeviceInfo> {
     self.ui_own_devices()
   }

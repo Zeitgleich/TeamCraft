@@ -13,7 +13,7 @@ use crate::actions::{
 };
 use crate::activity::ActivityFeed;
 use crate::admin::DeviceInfo;
-use crate::backend::{ChatBackend, SearchBackend};
+use crate::backend::{ChatBackend, LoadingList, SearchBackend};
 use crate::calls::{
   ActiveCall, BackgroundEffect, BackgroundImageInfo, CallEndReason, CallHistoryItem, CallMoveOffer,
   CallRequest, CallStatusSounds, IncomingCall, MediaDevices, OrgBackgroundRule, OrgBackgrounds, PushToTalk,
@@ -1089,6 +1089,10 @@ pub enum ChatQuery {
   },
   Privacy,
   CallHistory,
+  /// Whether a list has had its first answer ([`ChatBackend::is_loaded`]).
+  ListLoaded {
+    list: LoadingList,
+  },
   OwnDevices,
   /// People by name, the server's directory included ([`ChatBackend::search_people`]).
   SearchPeople {
@@ -1199,6 +1203,9 @@ pub enum ChatAnswer {
   },
   CallHistory {
     calls: Vec<CallHistoryItem>,
+  },
+  ListLoaded {
+    is_loaded: bool,
   },
   Devices {
     devices: Vec<DeviceInfo>,
@@ -1346,6 +1353,9 @@ impl ChatQuery {
       },
       Self::CallHistory => ChatAnswer::CallHistory {
         calls: backend.call_history(),
+      },
+      Self::ListLoaded { list } => ChatAnswer::ListLoaded {
+        is_loaded: backend.is_loaded(list),
       },
       Self::OwnDevices => ChatAnswer::Devices {
         devices: backend.own_devices(),

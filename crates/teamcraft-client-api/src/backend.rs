@@ -38,6 +38,13 @@ use crate::model::{
 use crate::privacy::{LastSeenVisibility, PrivacySettings};
 use crate::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
 
+/// A list that depends on a server round trip, so it can be "not loaded yet" as well as empty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoadingList {
+  CallHistory,
+}
+
 pub trait ChatBackend {
   /// Gives backends that load data in the background (over IPC or the network) a way to tell the UI
   /// that something changed and views should re-read. Backends whose reads are instant ignore it.
@@ -520,6 +527,11 @@ pub trait ChatBackend {
   }
   /// Asks for the newest calls again (the call list opened).
   fn refresh_call_history(&self) {}
+  /// Whether the list has had its first answer. Until then the UI shows placeholders, not the
+  /// empty state; a backend that reads everything locally is always loaded.
+  fn is_loaded(&self, _list: LoadingList) -> bool {
+    true
+  }
 
   /// This user's devices as the server last listed them; empty until the first answer.
   fn own_devices(&self) -> Vec<crate::admin::DeviceInfo> {

@@ -2690,3 +2690,5 @@ setup-channels = Browse channels
 setup-channels-hint = Join the ones that matter to you.
 setup-invite = Invite people
 setup-invite-hint = Bring your team along.
+
+calls-loading = Loading calls

@@ -721,6 +721,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.refresh_call_history();
   }
 
+  fn is_loaded(&self, list: teamcraft_client_api::backend::LoadingList) -> bool {
+    self.chat.is_loaded(list)
+  }
+
   fn is_in_call(&self, user: UserId) -> bool {
     self
       .maybe_calls
