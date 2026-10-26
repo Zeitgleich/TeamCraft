@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-call-window-info"
+description = "Enables the call_window_info command without any pre-configured scope."
+commands.allow = ["call_window_info"]
+
+[[permission]]
+identifier = "deny-call-window-info"
+description = "Denies the call_window_info command without any pre-configured scope."
+commands.deny = ["call_window_info"]

@@ -17,8 +17,8 @@ use objc2::runtime::Bool;
 use objc2_foundation::{NSArray, NSBundle, NSError, NSSet, NSString};
 use objc2_user_notifications::{
   UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationAction, UNNotificationActionOptions,
-  UNNotificationCategory, UNNotificationCategoryOptions, UNNotificationRequest, UNNotificationSound,
-  UNTextInputNotificationAction, UNUserNotificationCenter,
+  UNNotificationCategory, UNNotificationCategoryOptions, UNNotificationInterruptionLevel,
+  UNNotificationRequest, UNNotificationSound, UNTextInputNotificationAction, UNUserNotificationCenter,
 };
 use teamcraft_client_api::os_notify::{NotificationAction, OsNotification, TagTarget};
 
@@ -96,8 +96,12 @@ pub fn show(notification: &OsNotification) {
     TagTarget::Reminder => String::new(),
   };
   content.setThreadIdentifier(&NSString::from_str(&thread));
-  // A ringing call is silent: the app plays its own ringtone.
-  if !notification.kind.is_ringing() {
+  // A ringing call is silent (the app plays its own ringtone) and time-sensitive: it breaks through
+  // a Focus that lets time-sensitive notifications through, as a phone call does. The app's own
+  // do-not-disturb already kept it from ringing (#650).
+  if notification.kind.is_ringing() {
+    content.setInterruptionLevel(UNNotificationInterruptionLevel::TimeSensitive);
+  } else {
     content.setSound(Some(&UNNotificationSound::defaultSound()));
   }
   if let Some(spec) = category_spec(notification) {

@@ -13,6 +13,7 @@ use wasm_bindgen_futures::JsFuture;
 use super::{
   ApiBytes, ApiMethod, ApiResponse, AuthError, Authenticator, BinaryBody, LocalFuture, SignInLook,
 };
+use teamcraft_client_api::call_window::CallWindow;
 use teamcraft_client_api::os_notify::{NotificationTag, OsNotification, TagTarget};
 
 use crate::feedback::{ActionFailure, FailureKind, NotificationFailure};
@@ -448,6 +449,42 @@ pub async fn set_ringtone(is_ringing: bool) {
   if let Err(error) = call::<()>("set_ringtone", &args).await {
     tracing::debug!(%error, "could not switch the ringtone");
   }
+}
+
+/// Desktop: shows the incoming-call window (#650); `false` if the shell couldn't, so the caller
+/// shows the notification instead.
+pub async fn show_call_window(window: &CallWindow) -> bool {
+  if !is_available() {
+    return false;
+  }
+  let args = serde_json::json!({ "window": window });
+  match call::<()>("call_window_show", &args).await {
+    Ok(()) => true,
+    Err(error) => {
+      tracing::warn!(%error, "could not show the incoming-call window");
+      false
+    },
+  }
+}
+
+/// Desktop: closes the incoming-call window if it shows the call with this tag.
+pub async fn close_call_window(tag: &NotificationTag) {
+  if !is_available() {
+    return;
+  }
+  let args = serde_json::json!({ "tag": tag });
+  if let Err(error) = call::<()>("call_window_close", &args).await {
+    tracing::debug!(%error, "could not close the incoming-call window");
+  }
+}
+
+/// The label of the shell's window this page runs in; `None` in a browser.
+pub fn window_label() -> Option<String> {
+  let metadata = js_sys::Reflect::get(&internals()?, &JsValue::from_str("metadata")).ok()?;
+  let current = js_sys::Reflect::get(&metadata, &JsValue::from_str("currentWindow")).ok()?;
+  js_sys::Reflect::get(&current, &JsValue::from_str("label"))
+    .ok()?
+    .as_string()
 }
 
 /// Desktop: asks for the user's attention (taskbar flash, dock bounce) or stops asking.

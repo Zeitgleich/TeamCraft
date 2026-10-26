@@ -209,6 +209,12 @@ pub fn NotificationsSection() -> impl IntoView {
           value=Signal::derive(move || notes.get().plays_ringtone)
           on_change=Callback::new(move |value: bool| edit(Box::new(move |n| n.plays_ringtone = value)))
         />
+        <SwitchRow
+          label="notif-call-window"
+          hint="notif-call-window-hint"
+          value=Signal::derive(move || notes.get().shows_call_window)
+          on_change=Callback::new(move |value: bool| edit(Box::new(move |n| n.shows_call_window = value)))
+        />
       </Show>
       <SelectRow
         label="notif-meeting-reminder"

@@ -367,8 +367,16 @@ conversation, the level "nothing" and do-not-disturb (except people on the allow
 in-app card. Otherwise the ringtone plays (setting `plays_ringtone`, default on; a synthesized
 electric-piano arpeggio from `teamcraft_media::ringtone` on the default output; not during another
 call; not while the desktop's own do-not-disturb is on, where the OS tells: GNOME, KDE). With the
-window not in front a notification with Accept and Decline comes too (Accept with video only where the
-in-app card offers it), and the window asks for attention. All of it stops the moment the call stops
+window not in front (minimised, hidden to the tray, behind other windows), also when it leaves the
+front while the call rings, the call shows outside it and the window asks for attention: as the
+incoming-call window (setting `shows_call_window`, default on), a small borderless window above all
+others in the corner where the system's notifications appear (top right; bottom right on Windows)
+with the in-app card's caller, Decline and Accept; or, with the setting off or where the window can't
+open, as a notification with Accept and Decline (Accept with video only where the in-app card offers
+it; Linux: urgency critical, category `call.incoming`; Windows: toast scenario `incomingCall`; macOS:
+time-sensitive). Coming back to the window takes both away again (the in-app card is on screen).
+Answering or declining from the window, the notification or the card is one path: the window's and
+the notification's buttons reach the page as the same notification action. All of it stops the moment the call stops
 ringing on this device: answered here or on another device (the user is in the roster), declined
 here, answered by someone else (group calls), cancelled or timed out. A call nobody answered and the
 user did not decline here leaves a "missed call" notification with Call back, under the direct-message

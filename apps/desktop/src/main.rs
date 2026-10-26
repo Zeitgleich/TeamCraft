@@ -10,6 +10,7 @@ mod appindicator;
 mod attention;
 mod auth;
 mod autostart;
+mod call_window;
 mod calls;
 mod core;
 #[cfg(target_os = "linux")]
@@ -87,6 +88,7 @@ fn main() -> anyhow::Result<()> {
     .manage(service.clone())
     .manage(attention::OsProbe::default())
     .manage(notifications::ShownNotifications::default())
+    .manage(call_window::CallWindowState::default())
     .manage(ringtone::RingtoneState::default())
     .manage(calls::push_to_talk::PushToTalkState::default())
     .manage(CoreHost::new(tokens))
@@ -217,6 +219,11 @@ fn main() -> anyhow::Result<()> {
       notifications::notify_user,
       notifications::withdraw_notifications,
       notifications::request_attention,
+      call_window::call_window_show,
+      call_window::call_window_close,
+      call_window::call_window_info,
+      call_window::call_window_ready,
+      call_window::call_window_action,
       ringtone::set_ringtone,
       attention::os_attention,
       autostart::autostart_get,

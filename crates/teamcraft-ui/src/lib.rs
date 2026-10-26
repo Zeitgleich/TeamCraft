@@ -105,6 +105,11 @@ pub use components::app::App;
 /// Mounts the application into `<body>`. Called from the wasm entry point.
 pub fn mount() {
   panic_overlay::install();
+  // The desktop shell's incoming-call window shows only the call's card (#650).
+  if auth::tauri::window_label().as_deref() == Some(teamcraft_client_api::call_window::CALL_WINDOW_LABEL) {
+    components::incoming_call::mount_call_window();
+    return;
+  }
   #[cfg(feature = "demo")]
   panic_overlay::panic_on_request();
   register_service_worker();

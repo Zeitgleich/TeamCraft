@@ -42,6 +42,7 @@ const ENTRIES: &[(SettingsTab, &str)] = &[
   (SettingsTab::Notifications, "notif-uses-attention"),
   (SettingsTab::Notifications, "notif-attention-input"),
   (SettingsTab::Notifications, "notif-ringtone"),
+  (SettingsTab::Notifications, "notif-call-window"),
   (SettingsTab::Notifications, "notif-meeting-reminder"),
   (SettingsTab::Notifications, "notif-meeting-start"),
   (SettingsTab::Notifications, "notif-dnd-enable"),
@@ -97,6 +98,7 @@ const DESKTOP_APP_ONLY: &[&str] = &[
   "settings-start-minimized",
   "settings-system-title-bar",
   "notif-ringtone",
+  "notif-call-window",
   "settings-updates",
 ];
 

@@ -19,6 +19,7 @@ use std::time::Duration;
 use leptos::leptos_dom::helpers::{TimeoutHandle, set_timeout_with_handle};
 use leptos::prelude::*;
 use teamcraft_client_api::actions::{MessagePriority, OutgoingMessage};
+use teamcraft_client_api::call_window::{CallWindow, CallWindowTheme};
 use teamcraft_client_api::os_notify::{
   NOTIFICATION_ACTION_EVENT, NotificationAction, NotificationActionEvent, NotificationButton,
   NotificationTag, OsNotification, OsNotificationKind, ReplyField, TagTarget,
@@ -43,7 +44,7 @@ use crate::notifier::{
   notifications_for,
 };
 use crate::reactive::OwnerLiveness;
-use crate::settings::{load_string, store_string};
+use crate::settings::{Theme, load_string, store_string};
 use crate::state::{AppState, MainView};
 
 /// How long another tab's "I show this conversation" counts without being renewed.
@@ -173,37 +174,65 @@ fn watch_messages(state: AppState, i18n: I18n) {
 
 // ---- Calls ----------------------------------------------------------------------------------------
 
-/// Desktop: a ringing call gets a notification with Accept and Decline when the window is not in
-/// front, the ringtone and an attention request; all of it stops the moment the call stops ringing
-/// here, and an unanswered call leaves a missed-call notification.
+/// Desktop: a ringing call gets the ringtone and, while the window is not in front, the
+/// incoming-call window (a setting, on by default) or else a notification with Accept and Decline,
+/// and an attention request (#650). Leaving the window while it rings shows them then; coming back
+/// takes them away again (the in-app card is on screen). All of it stops the moment the call stops
+/// ringing here, and an unanswered call leaves a missed-call notification.
 fn watch_calls(state: AppState, i18n: I18n, cell: CallAlertsCell) {
-  let ringtone_for = Rc::new(RefCell::new(Vec::<ConversationId>::new()));
-  Effect::new(move |_| {
-    let incoming = state.read(|backend| backend.incoming_calls());
-    let me = state.me().id;
-    let alerts = cell.0.try_update_value(|alerts| {
-      alerts.update(&incoming, |call| {
-        let participants: Vec<_> = state
-          .read(|backend| backend.call_participants(call.conversation))
-          .into_iter()
-          .map(|participant| participant.user)
-          .collect();
-        let maybe_participants = (!participants.is_empty()).then_some(participants.as_slice());
-        ring_end(call, me, maybe_participants)
-      })
+  let here = Rc::new(RefCell::new(RingingHere::default()));
+  {
+    let here = here.clone();
+    Effect::new(move |_| {
+      let incoming = state.read(|backend| backend.incoming_calls());
+      let me = state.me().id;
+      let alerts = cell.0.try_update_value(|alerts| {
+        alerts.update(&incoming, |call| {
+          let participants: Vec<_> = state
+            .read(|backend| backend.call_participants(call.conversation))
+            .into_iter()
+            .map(|participant| participant.user)
+            .collect();
+          let maybe_participants = (!participants.is_empty()).then_some(participants.as_slice());
+          ring_end(call, me, maybe_participants)
+        })
+      });
+      for alert in alerts.unwrap_or_default() {
+        apply_call_alert(state, i18n, &here, alert);
+      }
     });
-    for alert in alerts.unwrap_or_default() {
-      apply_call_alert(state, i18n, &ringtone_for, alert);
+  }
+  for event in ["blur", "visibilitychange"] {
+    let here = here.clone();
+    on_window_event(event, move || {
+      if !is_window_in_front() {
+        surface_ringing(state, i18n, &here);
+      }
+    });
+  }
+  on_window_event("focus", move || {
+    let surfaced = std::mem::take(&mut here.borrow_mut().surfaced);
+    if !surfaced.is_empty() {
+      for conversation in surfaced {
+        hide_surfaced(conversation);
+      }
+      leptos::task::spawn_local(tauri::request_attention(false));
     }
   });
 }
 
-fn apply_call_alert(
-  state: AppState,
-  i18n: I18n,
-  ringtone_for: &Rc<RefCell<Vec<ConversationId>>>,
-  alert: CallAlert,
-) {
+/// What the call watcher keeps about the calls ringing on this device.
+#[derive(Default)]
+struct RingingHere {
+  /// Calls that play the ringtone.
+  ringtone_for: Vec<ConversationId>,
+  /// Every call ringing here, so leaving the window can still show them.
+  calls: Vec<IncomingCall>,
+  /// Calls shown outside the window right now (call window or notification).
+  surfaced: Vec<ConversationId>,
+}
+
+fn apply_call_alert(state: AppState, i18n: I18n, here: &Rc<RefCell<RingingHere>>, alert: CallAlert) {
   match alert {
     CallAlert::Ring(call) => {
       let prefs = state.settings.prefs.get_untracked().notifications;
@@ -212,30 +241,32 @@ fn apply_call_alert(
       else {
         return;
       };
+      here.borrow_mut().calls.push(call);
       if decision.shows_notification {
-        let shown = incoming_call_notification(state, i18n, &call);
-        leptos::task::spawn_local(async move { tauri::show_notification(&shown).await });
+        surface(state, i18n, here, &call);
       }
       // A second call while the user is in one rings only as a notification ("call waiting").
       let is_in_call = state.call.phase.get_untracked() == CallPhase::Active;
       if decision.plays_ringtone && !is_in_call {
-        let was_silent = ringtone_for.borrow().is_empty();
-        ringtone_for.borrow_mut().push(call.conversation);
+        let was_silent = here.borrow().ringtone_for.is_empty();
+        here.borrow_mut().ringtone_for.push(call.conversation);
         if was_silent {
           leptos::task::spawn_local(tauri::set_ringtone(true));
         }
       }
-      if decision.requests_attention {
-        leptos::task::spawn_local(tauri::request_attention(true));
-      }
     },
     CallAlert::StopRinging(conversation) => {
-      let tags = [NotificationTag::call(conversation)];
-      leptos::task::spawn_local(async move { tauri::withdraw_tags(&tags).await });
-      let mut ringing = ringtone_for.borrow_mut();
-      let had_ringtone = !ringing.is_empty();
-      ringing.retain(|other| *other != conversation);
-      if had_ringtone && ringing.is_empty() {
+      let (had_ringtone, has_ringtone) = {
+        let mut here = here.borrow_mut();
+        let had_ringtone = !here.ringtone_for.is_empty();
+        here.ringtone_for.retain(|other| *other != conversation);
+        here.calls.retain(|call| call.conversation != conversation);
+        here.surfaced.retain(|other| *other != conversation);
+        (had_ringtone, !here.ringtone_for.is_empty())
+      };
+      // Withdrawn also when not surfaced by this page: one may be left from before a reload.
+      hide_surfaced(conversation);
+      if had_ringtone && !has_ringtone {
         leptos::task::spawn_local(tauri::set_ringtone(false));
       }
       if state.read(|backend| backend.incoming_calls().is_empty()) {
@@ -255,6 +286,68 @@ fn apply_call_alert(
       leptos::task::spawn_local(async move { tauri::show_notification(&shown).await });
     },
   }
+}
+
+/// The window went to the background while calls ring: shows those the rules let through.
+fn surface_ringing(state: AppState, i18n: I18n, here: &Rc<RefCell<RingingHere>>) {
+  let waiting: Vec<IncomingCall> = {
+    let here = here.borrow();
+    here
+      .calls
+      .iter()
+      .filter(|call| !here.surfaced.contains(&call.conversation))
+      .copied()
+      .collect()
+  };
+  let prefs = state.settings.prefs.get_untracked().notifications;
+  for call in waiting {
+    let is_shown = with_ring_input(state, &call, |input| decide_ring(input, prefs.plays_ringtone))
+      .flatten()
+      .is_some_and(|decision| decision.shows_notification);
+    if is_shown {
+      surface(state, i18n, here, &call);
+    }
+  }
+}
+
+/// Shows a ringing call outside the window: the incoming-call window where the setting is on and
+/// the shell can open it, the notification otherwise; and asks for attention.
+fn surface(state: AppState, i18n: I18n, here: &Rc<RefCell<RingingHere>>, call: &IncomingCall) {
+  if here.borrow().surfaced.contains(&call.conversation) {
+    return;
+  }
+  here.borrow_mut().surfaced.push(call.conversation);
+  let prefs = state.settings.prefs.get_untracked().notifications;
+  let maybe_window = prefs
+    .shows_call_window
+    .then(|| call_window(state, i18n, call))
+    .flatten();
+  let notification = incoming_call_notification(state, i18n, call);
+  let conversation = call.conversation;
+  let here = here.clone();
+  leptos::task::spawn_local(async move {
+    let is_window_shown = match maybe_window {
+      Some(window) => tauri::show_call_window(&window).await,
+      None => false,
+    };
+    if !is_window_shown {
+      tauri::show_notification(&notification).await;
+    }
+    // It stopped ringing (or the user came back) while the shell showed it.
+    if !here.borrow().surfaced.contains(&conversation) {
+      hide_surfaced(conversation);
+    }
+  });
+  leptos::task::spawn_local(tauri::request_attention(true));
+}
+
+/// Takes a ringing call's window and notification away.
+fn hide_surfaced(conversation: ConversationId) {
+  let tag = NotificationTag::call(conversation);
+  leptos::task::spawn_local(async move {
+    tauri::close_call_window(&tag).await;
+    tauri::withdraw_tags(&[tag]).await;
+  });
 }
 
 /// Runs `decide` on the policy input of a call; `None` when the conversation is unknown.
@@ -318,6 +411,32 @@ fn incoming_call_notification(state: AppState, i18n: I18n, call: &IncomingCall) 
     actions,
     maybe_reply: None,
   }
+}
+
+/// What the incoming-call window shows: the in-app card's content, in the app's theme. `None` when
+/// the caller is unknown (the notification shows instead).
+fn call_window(state: AppState, i18n: I18n, call: &IncomingCall) -> Option<CallWindow> {
+  let caller = state.read(|backend| backend.user(call.caller))?;
+  let key = if call.with_video {
+    "incoming-video"
+  } else {
+    "incoming-audio"
+  };
+  let theme = match state.settings.theme.get_untracked() {
+    Theme::System => CallWindowTheme::System,
+    Theme::Light => CallWindowTheme::Light,
+    Theme::Dark => CallWindowTheme::Dark,
+  };
+  Some(CallWindow {
+    tag: NotificationTag::call(call.conversation),
+    title: i18n.t("incoming-title"),
+    text: i18n.t_with(key, &[("name", &caller.display_name)]),
+    initials: caller.initials(),
+    avatar_hue: caller.avatar_hue,
+    decline_label: i18n.t("incoming-decline"),
+    accept_label: i18n.t("incoming-accept-audio"),
+    theme,
+  })
 }
 
 fn missed_call_notification(state: AppState, i18n: I18n, call: &IncomingCall) -> OsNotification {

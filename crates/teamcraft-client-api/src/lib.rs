@@ -12,6 +12,7 @@ pub mod admin;
 pub mod backend;
 pub mod brand;
 pub mod call_view;
+pub mod call_window;
 pub mod calls;
 pub mod custom_status;
 pub mod emoji;
