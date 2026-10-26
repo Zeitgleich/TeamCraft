@@ -29,6 +29,7 @@ use crate::mention::{self, TriggerKind};
 use crate::model::{ConversationId, ThreadId};
 use crate::model::{ConversationKind, MessageKind, User};
 use crate::notifier::needs_channel_confirmation;
+use crate::paste::{PasteKind, paste_from_shell};
 use crate::raster;
 use crate::reactive::SetIfAlive;
 use crate::settings::SendMode;
@@ -923,14 +924,33 @@ pub fn Composer(
     };
     ev.prevent_default();
     let files = transfer_files(&data);
-    if !files.is_empty() {
-      add_files(files);
-      return;
+    let plain = data.get_data("text/plain").unwrap_or_default();
+    let maybe_uri_list = data
+      .get_data("text/uri-list")
+      .ok()
+      .filter(|list| !list.is_empty());
+    let maybe_html = data.get_data("text/html").ok().filter(|html| !html.is_empty());
+    // What the event didn't carry (a screenshot, copied files) the desktop shell reads (#761).
+    match PasteKind::classify(
+      !files.is_empty(),
+      crate::auth::tauri::is_available(),
+      maybe_uri_list.as_deref(),
+      &plain,
+      maybe_html.as_deref(),
+    ) {
+      PasteKind::Files => {
+        add_files(files);
+        return;
+      },
+      kind @ (PasteKind::CopiedFiles | PasteKind::Picture) => {
+        paste_from_shell(kind, drop_zone, state, i18n);
+        return;
+      },
+      PasteKind::Text => {},
     }
     let Some(element) = editor.get_untracked() else {
       return;
     };
-    let plain = data.get_data("text/plain").unwrap_or_default();
     let url = plain.trim();
     let has_selection = !composer_editor::selected_text().is_empty();
     if composer_editor::block_format(&element) == BlockFormat::CodeBlock {

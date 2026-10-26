@@ -2074,6 +2074,7 @@ shortcut-search-here = In dieser Unterhaltung suchen
 drop-files-here = Zum Anhängen hier ablegen
 drop-files-unreadable = Die abgelegten Dateien konnten nicht gelesen werden. Hänge sie stattdessen mit der Plus-Schaltfläche an.
 drop-file-too-large = { $name } ist größer als { $limit } und zu groß, um es per Ablegen anzuhängen. Hänge es stattdessen mit der Plus-Schaltfläche an.
+paste-picture-failed = Das Bild aus der Zwischenablage konnte nicht eingefügt werden.
 message-show-more = Mehr anzeigen
 message-show-less = Weniger anzeigen
 message-sending = Wird gesendet …

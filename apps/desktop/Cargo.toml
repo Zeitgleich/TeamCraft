@@ -39,6 +39,9 @@ secrecy.workspace = true
 tokio = { workspace = true, features = ["io-util", "rt", "time", "sync", "macros"] }
 # System browser for the OIDC login (RFC 8252): the webview never shows the identity provider.
 tauri-plugin-opener = "2"
+# Pictures pasted from the system clipboard go to the UI as PNG (#761); already in the tree through
+# the client core, PNG only.
+image = { version = "0.25.9", default-features = false, features = ["png"] }
 # Push-to-talk while another app has focus (Windows, macOS, X11).
 tauri-plugin-global-shortcut = "2"
 # System notifications for mentions and direct messages (the UI decides what to show).
@@ -80,6 +83,11 @@ webkit2gtk = "2.0.2"
 # (`vtenc_h264`); untested. The dmg bundles GStreamer.framework (packaging/macos/bundle-gstreamer.sh);
 # building needs the framework's development files installed. If an encoder or GStreamer itself is
 # missing at runtime, video falls back to OpenH264.
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+# Reads a picture from the system clipboard when the webview's paste event carries none (#761);
+# Linux reads the GTK clipboard instead. Same Tauri plugin family, used from Rust only.
+tauri-plugin-clipboard-manager = "2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # "Start at login" as a LaunchAgent (autostart.rs); the same plugin as on Windows.
 tauri-plugin-autostart = "2"

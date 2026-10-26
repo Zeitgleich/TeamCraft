@@ -12,6 +12,7 @@ mod auth;
 mod autostart;
 mod call_window;
 mod calls;
+mod clipboard_paste;
 mod core;
 #[cfg(target_os = "linux")]
 mod desktop_entry;
@@ -81,6 +82,9 @@ fn main() -> anyhow::Result<()> {
     tauri_plugin_autostart::MacosLauncher::LaunchAgent,
     Some(vec![autostart::AUTOSTART_ARG]),
   ));
+  // Pictures pasted from the clipboard when the webview's paste event carries none (#761).
+  #[cfg(any(target_os = "macos", windows))]
+  let builder = builder.plugin(tauri_plugin_clipboard_manager::init());
   builder
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -219,6 +223,8 @@ fn main() -> anyhow::Result<()> {
       core::commands::core_reset_store,
       dropped_files::dropped_files_take,
       dropped_files::dropped_file_read,
+      clipboard_paste::clipboard_paste_files,
+      clipboard_paste::clipboard_read_image,
       calls::commands::call_snapshot,
       calls::commands::call_media_devices,
       calls::commands::call_action,
