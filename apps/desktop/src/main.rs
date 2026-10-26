@@ -30,6 +30,7 @@ mod updates;
 mod webview_downloads;
 #[cfg(target_os = "linux")]
 mod webview_memory;
+mod webview_menu;
 mod window_chrome;
 #[cfg(windows)]
 mod windows_shell;
@@ -334,10 +335,19 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     )),
     _ => window,
   };
+  // `TEAMCRAFT_DEVTOOLS=1`: the webview's own context menu everywhere (webview_menu.rs).
+  let window = match webview_menu::is_devtools_requested() {
+    true => window.initialization_script(webview_menu::NATIVE_MENU_SCRIPT),
+    false => window,
+  };
   let window = window.build()?;
   #[cfg(target_os = "linux")]
-  if let Err(error) = window.with_webview(|webview| webview_memory::configure(&webview.inner())) {
-    tracing::warn!(%error, "could not set the webview's memory caches");
+  if let Err(error) = window.with_webview(|webview| {
+    let webview = webview.inner();
+    webview_memory::configure(&webview);
+    webview_menu::filter_menus(&webview);
+  }) {
+    tracing::warn!(%error, "could not set up the webview's memory caches and menus");
   }
   tray::reveal_without_host(app.handle());
   if is_start_minimized

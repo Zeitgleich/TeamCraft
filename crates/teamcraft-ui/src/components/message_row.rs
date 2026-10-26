@@ -829,10 +829,30 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
       on:pointermove=move |ev| long_press.track(&ev)
       on:pointerup=move |_| long_press.cancel()
       on:pointercancel=move |_| long_press.cancel()
-      on:contextmenu=move |ev| {
+      on:contextmenu=move |ev: web_sys::MouseEvent| {
         // The browser's own long-press menu would cover the action sheet.
         if long_press.has_fired() || is_touch_primary() {
           ev.prevent_default();
+          return;
+        }
+        // A right click in the desktop app shows the message's actions (#719); text keeps the text
+        // menu, links the link menu, files their own (they stop the event before it gets here).
+        let is_on_link = event_target::<web_sys::Element>(&ev).closest("a[href]").ok().flatten().is_some();
+        if !crate::auth::tauri::is_available()
+          || is_on_link
+          || crate::external_links::is_on_text(&ev)
+          || crate::external_links::wants_native_menu()
+        {
+          return;
+        }
+        let is_deleted = extras
+          .try_with_untracked(|extras| extras.as_ref().is_some_and(|extras| extras.is_deleted))
+          .unwrap_or(true);
+        if let Some(host) = maybe_host
+          && !is_deleted
+        {
+          ev.prevent_default();
+          host.open_more(active.get_value());
         }
       }
     >

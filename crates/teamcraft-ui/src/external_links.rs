@@ -53,9 +53,10 @@ pub fn start(menu: RwSignal<Option<LinkMenuTarget>>) {
       })));
       return;
     }
-    // The webview's menu stays where it helps: text fields (paste, spelling) and selected text
-    // (copy). Elsewhere its entries (reload, back, "Save image as" on a `blob:` URL) have no place
-    // in an app (#719); files open the app's own menu (`attachment_menu`).
+    // The webview's menu stays only on text: text fields (cut, paste, spelling) and selected text
+    // (copy), where the shell has taken out everything that treats the app as a web page. Elsewhere
+    // there is no menu (#719), except the app's own: files (`attachment_menu`) and messages (their
+    // actions, `message_row`).
     if !keeps_webview_menu(&event) {
       event.prevent_default();
     }
@@ -116,12 +117,16 @@ fn on_click(event: web_sys::MouseEvent) {
   }
 }
 
-/// Whether a right click keeps the webview's own menu: on a text field, with text selected, or
-/// with Shift held in a debug build (the web inspector's "Inspect Element").
+/// Whether a right click keeps the webview's own menu: on text ([`is_on_text`]), with Shift held in
+/// a debug build, or everywhere when the shell was started with `TEAMCRAFT_DEVTOOLS=1` (the web
+/// inspector's "Inspect Element").
 fn keeps_webview_menu(event: &web_sys::MouseEvent) -> bool {
-  if cfg!(debug_assertions) && event.shift_key() {
-    return true;
-  }
+  (cfg!(debug_assertions) && event.shift_key()) || wants_native_menu() || is_on_text(event)
+}
+
+/// A right click on a text field or with text selected: the webview's text menu (cut, copy,
+/// paste, spelling) is the one to show.
+pub fn is_on_text(event: &web_sys::MouseEvent) -> bool {
   let is_text_field = event
     .target()
     .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
@@ -136,6 +141,13 @@ fn keeps_webview_menu(event: &web_sys::MouseEvent) -> bool {
     .and_then(|window| window.get_selection().ok().flatten())
     .is_some_and(|selection| !selection.is_collapsed());
   is_text_field || has_selection
+}
+
+/// The shell set the devtools flag (`TEAMCRAFT_DEVTOOLS=1`).
+pub fn wants_native_menu() -> bool {
+  web_sys::window()
+    .and_then(|window| js_sys::Reflect::get(&window, &"__TEAMCRAFT_NATIVE_MENU__".into()).ok())
+    .is_some_and(|flag| flag.is_truthy())
 }
 
 fn anchor_of(event: &web_sys::MouseEvent) -> Option<web_sys::HtmlAnchorElement> {

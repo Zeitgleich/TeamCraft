@@ -47,6 +47,13 @@ user has saved the desktop settings, the saved value wins. Windows 11 snap layou
 hovering the custom maximize button (Tauri can't do that yet, tauri-apps/tauri#4531; tracked in
 #173); Win+Z, Win+arrow keys and dragging to the screen edges work as usual.
 
+Context menus are the app's own: files (open, save, copy image, forward, copy link), messages
+(their actions) and links. On text fields and selected text the webview's text menu stays (cut,
+copy, paste, spelling); on Linux the shell takes out its web page entries (Back, Reload, open or
+save a link or image). Elsewhere a right click shows nothing. For debugging, start the app with
+`TEAMCRAFT_DEVTOOLS=1` to get the webview's full menu everywhere (with "Inspect Element" where the
+build has the inspector); debug builds also keep it while Shift is held.
+
 ## Icons
 
 `icons/` holds the app icon: PNGs from 32 px to 1024 px, `icon.ico` (Windows) and `icon.icns`
