@@ -150,6 +150,18 @@ pub struct ConversationItem {
   /// The other person's presence in a one-to-one DM (the direct messages list shows it).
   #[uniffi(default = None)]
   pub maybe_peer_presence: Option<Presence>,
+  // What the user may do here besides posting, as the core decided it from the server's
+  // `my_permissions` (issue #758): the apps offer an action only when it is allowed. Defaulted
+  // (to offered) for items the apps build themselves; the server checks every request again.
+  /// React to messages (`add_reaction`).
+  #[uniffi(default = true)]
+  pub can_react: bool,
+  /// Pin and unpin messages (`manage_bookmarks`).
+  #[uniffi(default = true)]
+  pub can_manage_bookmarks: bool,
+  /// Change the channel itself, such as archiving it (`manage_channel_properties`); never in DMs.
+  #[uniffi(default = true)]
+  pub can_manage_channel: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -431,6 +443,36 @@ pub enum Presence {
   Away,
   DoNotDisturb,
   Offline,
+}
+
+impl ConversationItem {
+  /// The list entry of a conversation; the caller looks up the space's name and the DM peer's
+  /// presence. `is_guest` is the user's, for what a conversation offers when an older server
+  /// didn't say (issue #758).
+  pub(crate) fn from_view(
+    conversation: view::Conversation,
+    maybe_space_name: Option<String>,
+    maybe_peer_presence: Option<Presence>,
+    is_guest: bool,
+  ) -> Self {
+    Self {
+      can_react: conversation.can_react(),
+      can_manage_bookmarks: conversation.can_manage_bookmarks(is_guest),
+      can_manage_channel: conversation.can_manage_channel(),
+      id: conversation.id.to_string(),
+      maybe_space_id: conversation.maybe_space.map(|space| space.to_string()),
+      maybe_space_name,
+      kind: ConversationKind::from_view(conversation.kind),
+      name: conversation.name,
+      topic: conversation.topic,
+      unread_count: conversation.unread_count,
+      mention_count: conversation.mention_count,
+      is_favorite: conversation.is_favorite,
+      is_muted: conversation.is_muted,
+      can_post: conversation.can_post,
+      maybe_peer_presence,
+    }
+  }
 }
 
 impl ConversationKind {
@@ -875,6 +917,65 @@ mod tests {
         maybe_thread: None,
       }
     }
+  }
+
+  #[test]
+  fn conversation_items_carry_what_the_user_may_do() {
+    let item = |kind, maybe_permissions, is_guest| {
+      let conversation = view::Conversation {
+        id: view::id_from_raw(5),
+        maybe_space: Some(view::id_from_raw(2)),
+        kind,
+        category: view::SidebarCategory::Channels,
+        name: "news".into(),
+        topic: "Daily".into(),
+        member_ids: Vec::new(),
+        unread_count: 3,
+        mention_count: 1,
+        is_favorite: false,
+        is_muted: false,
+        can_post: true,
+        bookmarks: Vec::new(),
+        is_catching_up: false,
+        maybe_image_version: None,
+        is_notes_to_self: false,
+        maybe_permissions,
+        has_only_deactivated_others: false,
+      };
+      ConversationItem::from_view(conversation, Some("Project A".into()), None, is_guest)
+    };
+    let rights = |item: &ConversationItem| {
+      (
+        item.can_post,
+        item.can_react,
+        item.can_manage_bookmarks,
+        item.can_manage_channel,
+      )
+    };
+    // The server's answer: a moderated channel where members may post but not react or pin.
+    let moderated = item(
+      ConversationKindView::Public,
+      Some(vec![teamcraft_proto::Permission::CreatePost]),
+      false,
+    );
+    assert_eq!(rights(&moderated), (true, false, false, false));
+    assert_eq!(
+      (moderated.id.as_str(), moderated.maybe_space_name.as_deref()),
+      ("5", Some("Project A"))
+    );
+    // An older server: the built-in scheme, where guests keep no pins; DMs have no channel.
+    assert_eq!(
+      rights(&item(ConversationKindView::Private, None, false)),
+      (true, true, true, true)
+    );
+    assert_eq!(
+      rights(&item(ConversationKindView::Private, None, true)),
+      (true, true, false, true)
+    );
+    assert_eq!(
+      rights(&item(ConversationKindView::Direct, None, false)),
+      (true, true, true, false)
+    );
   }
 
   #[test]

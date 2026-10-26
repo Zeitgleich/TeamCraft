@@ -38,6 +38,21 @@ enforces, which the server hands out as hints:
 announcement channel takes "post" from its members in the UI too. A server that doesn't send it
 leaves the client on the built-in scheme. The server checks every request again.
 
+The desktop, web, Android and iOS clients offer the same actions from the same facts (issue #758).
+When the facts change, the server tells the people concerned, and their clients fetch the
+conversation (`conversation_update`) or the spaces (`space_update`) again, so the UI follows
+without a reload:
+
+| Change                        | Who hears it                                               | Event                                 |
+|-------------------------------|------------------------------------------------------------|---------------------------------------|
+| channel role, moderation      | the channel's members                                      | `conversation_update`                 |
+| space role (e.g. space admin) | the space's members; the person for each of their channels | `space_update`, `conversation_update` |
+| a space's permission scheme   | the space's members; each channel's members                | `space_update`, `conversation_update` |
+
+Changes to the instance scheme reach every conversation of the instance and are not pushed (one
+update per conversation would make every client fetch all of them at once); clients see them at
+their next sync or the conversation's next update.
+
 ## 2. Managing rooms without reading them
 
 ### 2.1 What an admin sees for every conversation

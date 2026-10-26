@@ -9,14 +9,16 @@ use std::sync::{Arc, RwLock};
 use serde_json::json;
 use teamcraft_db::{OverrideEdit, StoredOverride};
 use teamcraft_proto::{
-  ALL_PERMISSIONS, ChannelModeration, ConversationId, ConversationKind, OverrideEffect, Permission,
-  PermissionScheme, PermissionSchemeResponse, SchemeChange, SchemeOverride, SchemeRole, SchemeRoleResponse,
-  SetChannelModerationRequest, SpaceId, SystemEventKind, Target, UpdatePermissionSchemeRequest,
-  check_scheme_change,
+  ALL_PERMISSIONS, ChannelModeration, ConversationId, ConversationKind, GatewayEvent, OverrideEffect,
+  Permission, PermissionScheme, PermissionSchemeResponse, SchemeChange, SchemeOverride, SchemeRole,
+  SchemeRoleResponse, SetChannelModerationRequest, SpaceId, SystemEventKind, Target,
+  UpdatePermissionSchemeRequest, UserId, check_scheme_change,
 };
+use tracing::warn;
 
 use super::access::{load_space, require};
 use super::audit::{self, Target as AuditTarget};
+use super::spaces::notify_space;
 use super::system_events;
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
@@ -138,6 +140,9 @@ pub async fn update_instance_scheme(
 ) -> Result<PermissionSchemeResponse, ApiError> {
   require(state, caller, Permission::ManageWorkspace, &Target::Instance)?;
   apply(state, caller, None, request).await?;
+  // Not announced live (issue #758): the instance scheme reaches every conversation of the
+  // instance, and an update for each would make every client fetch all of them at once. Clients
+  // pick the new `my_permissions` up with their next sync or the conversation's next update.
   Ok(response(state, None))
 }
 
@@ -161,7 +166,36 @@ pub async fn update_space_scheme(
   require(state, caller, Permission::ManageWorkspace, &Target::Instance)?;
   load_space(state, caller, space).await?;
   apply(state, caller, Some(space), request).await?;
+  // What people may do in the space changed: its hints (`can_create_channels`, ...) and every
+  // conversation's `my_permissions` are fetched again (issue #758).
+  if let Err(error) = notify_space(state, space, &GatewayEvent::SpaceUpdate { space_id: space }).await {
+    warn!(space_id = %space, %error, "could not announce the changed scheme to the space's members");
+  }
+  announce_conversation_rights(state, space, None).await;
   Ok(response(state, Some(space)))
+}
+
+/// Tells the members of the space's conversations (with `maybe_user`, only that member) that what
+/// they may do there changed, so their clients fetch the conversations and their `my_permissions`
+/// again (issue #758). Best effort: the change is stored, and a client that misses the event has
+/// it after its next sync.
+pub(super) async fn announce_conversation_rights(
+  state: &AppState,
+  space: SpaceId,
+  maybe_user: Option<UserId>,
+) {
+  match state.database.space_conversation_members(space, maybe_user).await {
+    Ok(members) => {
+      for (conversation_id, users) in members {
+        state
+          .hub
+          .publish(users, &GatewayEvent::ConversationUpdate { conversation_id });
+      }
+    },
+    Err(error) => {
+      warn!(space_id = %space, %error, "could not announce changed rights in the space's conversations");
+    },
+  }
 }
 
 /// What members and guests may not do in the channel, as set by its admins or an instance admin.
@@ -222,7 +256,7 @@ pub async fn set_channel_moderation(
   let members = state.database.conversation_member_ids(conversation).await?;
   state.hub.publish(
     members,
-    &teamcraft_proto::GatewayEvent::ConversationUpdate {
+    &GatewayEvent::ConversationUpdate {
       conversation_id: conversation,
     },
   );

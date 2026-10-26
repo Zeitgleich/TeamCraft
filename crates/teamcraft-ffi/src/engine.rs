@@ -43,10 +43,9 @@ use tokio::task::{JoinHandle, LocalSet};
 use crate::calls::{CallHub, CallPreparation};
 use crate::error::TeamCraftError;
 use crate::types::{
-  AccountState, AppConfig, ConversationItem, ConversationKind, LinkPlatform, LinkRequestItem,
-  MentionSettings, MessageItem, NotificationContent, NotificationContentSettings, Presence,
-  PushDiagnosticsInfo, PushNotification, PushService, SearchHitItem, SegmentPrefetchMode,
-  SegmentPrefetchResult, StoreProblem, TestPushResult,
+  AccountState, AppConfig, ConversationItem, LinkPlatform, LinkRequestItem, MentionSettings, MessageItem,
+  NotificationContent, NotificationContentSettings, Presence, PushDiagnosticsInfo, PushNotification,
+  PushService, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem, TestPushResult,
 };
 use crate::{EventListener, TokenProvider};
 
@@ -680,25 +679,16 @@ impl Engine {
       conversations.extend(backend.space_conversations(*space));
     }
     conversations.extend(backend.direct_conversations());
-    let me = backend.me().id;
+    let me = backend.me();
     Ok(
       conversations
         .into_iter()
-        .map(|conversation| ConversationItem {
-          maybe_peer_presence: peer_presence(backend, &conversation, me),
-          id: conversation.id.to_string(),
-          maybe_space_id: conversation.maybe_space.map(|space| space.to_string()),
-          maybe_space_name: conversation
+        .map(|conversation| {
+          let maybe_peer_presence = peer_presence(backend, &conversation, me.id);
+          let maybe_space_name = conversation
             .maybe_space
-            .and_then(|space| spaces.get(&space).cloned()),
-          kind: ConversationKind::from_view(conversation.kind),
-          name: conversation.name,
-          topic: conversation.topic,
-          unread_count: conversation.unread_count,
-          mention_count: conversation.mention_count,
-          is_favorite: conversation.is_favorite,
-          is_muted: conversation.is_muted,
-          can_post: conversation.can_post,
+            .and_then(|space| spaces.get(&space).cloned());
+          ConversationItem::from_view(conversation, maybe_space_name, maybe_peer_presence, me.is_guest)
         })
         .collect(),
     )

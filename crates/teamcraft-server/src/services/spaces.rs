@@ -13,6 +13,7 @@ use time::OffsetDateTime;
 use super::access::{is_guest, is_instance_admin, load_space, require, space_target};
 use super::audit::{self, Target as AuditTarget};
 use super::convert::{category_response, offset_date_time, space_response, unix_millis, user_summary};
+use super::permission_scheme::announce_conversation_rights;
 use super::{validate_name, validate_text};
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
@@ -333,6 +334,10 @@ pub async fn update_space_member(
   )
   .await?;
   notify_space(state, id, &GatewayEvent::SpaceUpdate { space_id: id }).await?;
+  // A space admin manages every channel of the space: the member's `my_permissions` there changed.
+  if current != request.role {
+    announce_conversation_rights(state, id, Some(user_id)).await;
+  }
   member_response(state, id, &user, request.role).await
 }
 

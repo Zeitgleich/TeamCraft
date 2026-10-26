@@ -26,13 +26,15 @@ struct BrowseView: View {
   var body: some View {
     NavigationStack {
       VStack(spacing: 0) {
-        Picker("browse_title", selection: $tab) {
-          Text("channels").tag(Tab.channels)
-          Text("people").tag(Tab.people)
+        if snapshot?.canBrowseChannels != false {
+          Picker("browse_title", selection: $tab) {
+            Text("channels").tag(Tab.channels)
+            Text("people").tag(Tab.people)
+          }
+          .pickerStyle(.segmented)
+          .padding()
         }
-        .pickerStyle(.segmented)
-        .padding()
-        switch tab {
+        switch shownTab {
         case .channels: channelList
         case .people: peopleList
         }
@@ -51,6 +53,9 @@ struct BrowseView: View {
     .task(id: model.changeCount) { await reload() }
   }
 
+  /// The people for guests, who browse no channels.
+  private var shownTab: Tab { snapshot?.canBrowseChannels == false ? .people : tab }
+
   @ViewBuilder
   private var channelList: some View {
     let spaces = snapshot?.spaces ?? []
@@ -63,7 +68,7 @@ struct BrowseView: View {
             ForEach(spaces) { space in Text(verbatim: space.name).tag(Optional(space.id)) }
           }
         }
-        if spaceId != nil {
+        if let spaceId, spaces.first(where: { $0.id == spaceId })?.offersChannelCreation == true {
           Button("channel_create", systemImage: "plus") { isCreating = true }
         }
         let visible = channels.filter { $0.isArchived != true }
@@ -149,7 +154,7 @@ struct BrowseView: View {
   }
 
   private func loadChannels() async {
-    guard let spaceId else { return }
+    guard let spaceId, snapshot?.canBrowseChannels != false else { return }
     channels = await model.browseChannels(spaceId: spaceId)
   }
 

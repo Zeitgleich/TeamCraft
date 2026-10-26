@@ -961,7 +961,8 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
         can_add_members: space.can_add_members,
         can_invite_guests: space.can_invite_guests,
         can_manage_space: space.can_manage_space,
-        can_create_channels: space.can_create_channels,
+        // An older server leaves the hint out (taken as allowed); its guests still create nothing.
+        can_create_channels: space.can_create_channels && space.maybe_my_role != Some(SpaceRole::Guest),
       })
       .collect()
   }
@@ -2083,6 +2084,44 @@ mod tests {
       backend.drain_commands(),
       vec![CoreCommand::MarkRead { conversation }]
     );
+  }
+
+  #[test]
+  fn guests_of_a_space_create_no_channels_whatever_an_older_server_says() {
+    let store = std::sync::Arc::new(MemoryStore::new());
+    let backend = CoreChatBackend::new(store.clone(), id(1), Box::new(ManualClock::new(0)));
+    for (raw, role, can_create_channels) in [
+      (7, SpaceRole::Member, true),
+      (8, SpaceRole::Guest, true),
+      (9, SpaceRole::Member, false),
+    ] {
+      let space = SpaceResponse {
+        id: id(raw),
+        name: format!("Project {raw}"),
+        maybe_icon: None,
+        maybe_color: None,
+        maybe_description: None,
+        maybe_image: None,
+        join_policy: JoinPolicy::InviteOnly,
+        is_archived: false,
+        maybe_brand_id: None,
+        maybe_my_role: Some(role),
+        maybe_my_notifications: None,
+        member_count: 2,
+        can_add_members: false,
+        can_invite_guests: false,
+        can_manage_space: false,
+        // `true` is also what a server that doesn't send it is taken to mean.
+        can_create_channels,
+      };
+      records::put_json(store.as_ref(), Table::Spaces, &space.id.to_string(), &space).unwrap();
+    }
+    let offered: Vec<(SpaceId, bool)> = backend
+      .spaces()
+      .into_iter()
+      .map(|space| (space.id, space.can_create_channels))
+      .collect();
+    assert_eq!(offered, [(id(7), true), (id(8), false), (id(9), false)]);
   }
 
   #[test]

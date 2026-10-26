@@ -7,11 +7,17 @@ struct BrowseSnapshot: Decodable, Sendable {
     let username: String
     let displayName: String
     let isBot: Bool?
+    let isGuest: Bool?
   }
 
   struct Space: Decodable, Identifiable, Sendable {
     let id: String
     let name: String
+    /// Whether the user may create channels here, as the core decided it (issue #758).
+    let canCreateChannels: Bool?
+
+    /// "Create channel" is offered: the core's word, or offered when an older core didn't say.
+    var offersChannelCreation: Bool { canCreateChannels ?? true }
   }
 
   struct Conversation: Decodable, Sendable {
@@ -25,6 +31,9 @@ struct BrowseSnapshot: Decodable, Sendable {
   let users: [Person]?
   let spaces: [Space]?
   let conversations: [Conversation]?
+
+  /// Guests browse no channels (the server refuses them, as on desktop): they only find people.
+  var canBrowseChannels: Bool { me.isGuest != true }
 
   /// Everyone the user can message, without the user and bots.
   var people: [Person] {

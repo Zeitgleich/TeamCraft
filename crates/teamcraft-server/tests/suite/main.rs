@@ -49,6 +49,7 @@ mod org_recovery;
 mod organizations;
 mod perf_gateway;
 mod perf_history;
+mod permission_updates;
 mod presence_derived;
 mod profiles;
 mod push;

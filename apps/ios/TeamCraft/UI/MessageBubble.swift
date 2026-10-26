@@ -44,6 +44,8 @@ struct MessageRow: View {
   let showsThreadLink: Bool
   let onOpenThread: () -> Void
   var displayNames: [String: String] = [:]
+  /// Without the right to react, the reactions stay readable but don't toggle (issue #758).
+  var canReact = true
 
   var body: some View {
     if let line = SystemLine(message: message, maybeExtras: maybeExtras, names: displayNames) {
@@ -81,7 +83,10 @@ struct MessageRow: View {
           showsName: showsSender && !entry.isContinuation, displayNames: displayNames)
         if !isMine { Spacer(minLength: look.gutter(listWidth: listWidth)) }
       }
-      BelowBubble(message: message, maybeExtras: maybeExtras, showsThreadLink: showsThreadLink, onOpenThread: onOpenThread)
+      BelowBubble(
+        message: message, maybeExtras: maybeExtras, showsThreadLink: showsThreadLink, onOpenThread: onOpenThread,
+        canReact: canReact
+      )
         .padding(.leading, showsSender ? senderAvatarSize + senderAvatarGap : 0)
     }
     .frame(maxWidth: .infinity, alignment: isMine ? .trailing : .leading)
@@ -370,6 +375,7 @@ struct BelowBubble: View {
   let maybeExtras: MessageExtras?
   let showsThreadLink: Bool
   let onOpenThread: () -> Void
+  var canReact = true
 
   var body: some View {
     if maybeExtras?.isSendFailed == true { notSentLine }
@@ -382,6 +388,7 @@ struct BelowBubble: View {
                 .toggleReaction(conversationId: message.conversationId, messageId: message.id, emoji: reaction.emoji))
             }
           }
+          .disabled(!canReact)
         }
       }
     }

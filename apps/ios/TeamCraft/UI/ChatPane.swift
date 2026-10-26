@@ -213,17 +213,19 @@ struct ChatPane: View {
 
   private static let bottomId = "bottom"
 
-  /// One message with its gestures: double tap reacts, long press opens the menu.
+  /// One message with its gestures: double tap reacts, long press opens the menu. Each only where
+  /// the user's rights allow it (issue #758).
   private func entryRow(_ entry: FeedEntry, look: BubbleLook, listWidth: CGFloat) -> some View {
     let message = entry.message
     let row = MessageRow(
       entry: entry, maybeExtras: extras[message.id], isMine: message.authorId == account.userId, look: look,
       listWidth: listWidth, showsThreadLink: threadId == nil,
       onOpenThread: { maybeThread = ThreadTarget(threadId: message.maybeThreadId ?? message.id) },
-      displayNames: displayNames
+      displayNames: displayNames,
+      canReact: conversation.canReact
     )
     let highlight: Color = maybeHighlighted == message.id ? Theme.accentSoft : .clear
-    return SwipeToReply(isEnabled: threadId == nil && !message.isPending) {
+    return SwipeToReply(isEnabled: threadId == nil && !message.isPending && conversation.canPost) {
       maybeReplying = message
       isComposerFocused = true
     } content: {
@@ -232,13 +234,23 @@ struct ChatPane: View {
       .padding(.top, entry.isContinuation ? 2 : 8)
       .background(highlight)
       .contentShape(Rectangle())
-      .onTapGesture(count: 2) { react(message, Self.quickReaction) }
+      // Without the right to react, a tap doesn't wait to tell a double tap apart either.
+      .gesture(
+        TapGesture(count: 2).onEnded { react(message, Self.quickReaction) },
+        including: conversation.canReact ? .all : .subviews
+      )
       .contextMenu { menu(for: message) }
-      .accessibilityAction(named: Text("reply")) {
-        maybeReplying = message
-        isComposerFocused = true
+      .accessibilityActions {
+        if conversation.canPost {
+          Button("reply") {
+            maybeReplying = message
+            isComposerFocused = true
+          }
+        }
+        if conversation.canReact {
+          Button("react_quick \(Self.quickReaction)") { react(message, Self.quickReaction) }
+        }
       }
-      .accessibilityAction(named: Text("react_quick \(Self.quickReaction)")) { react(message, Self.quickReaction) }
       .id(message.id)
   }
 
@@ -397,14 +409,18 @@ struct ChatPane: View {
     }
   }
 
+  /// The long-press menu: only what the user's rights allow (issue #758). Replying, editing and
+  /// deleting are messages too, so they need posting.
   @ViewBuilder
   private func menu(for message: MessageItem) -> some View {
-    Menu("react") {
-      ForEach(Self.quickReactions, id: \.self) { emoji in
-        Button(emoji) { react(message, emoji) }
+    if conversation.canReact {
+      Menu("react") {
+        ForEach(Self.quickReactions, id: \.self) { emoji in
+          Button(emoji) { react(message, emoji) }
+        }
       }
     }
-    if threadId == nil {
+    if threadId == nil && conversation.canPost {
       Button("reply", systemImage: "arrowshape.turn.up.left") {
         maybeReplying = message
         isComposerFocused = true
@@ -415,7 +431,7 @@ struct ChatPane: View {
     }
     Button("copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = message.body }
     if !message.isPending { sharedMessageActions(for: message) }
-    if message.authorId == account.userId && !message.isPending {
+    if message.authorId == account.userId && !message.isPending && conversation.canPost {
       Button("edit", systemImage: "pencil") {
         maybeEditing = message
         draft = message.body
@@ -479,9 +495,11 @@ struct ChatPane: View {
     let isPinned = maybeExtras?.isPinned == true
     let isSaved = maybeExtras?.isSaved == true
     Button("forward", systemImage: "arrowshape.turn.up.right") { maybeForwarding = MessageTarget(message: message) }
-    Button(LocalizedStringKey(isPinned ? "unpin" : "pin"), systemImage: isPinned ? "pin.slash" : "pin") {
-      Task {
-        await model.perform(.setPinned(conversationId: conversation.id, messageId: message.id, isPinned: !isPinned))
+    if conversation.canManageBookmarks {
+      Button(LocalizedStringKey(isPinned ? "unpin" : "pin"), systemImage: isPinned ? "pin.slash" : "pin") {
+        Task {
+          await model.perform(.setPinned(conversationId: conversation.id, messageId: message.id, isPinned: !isPinned))
+        }
       }
     }
     Button(LocalizedStringKey(isSaved ? "unsave" : "save_for_later"), systemImage: isSaved ? "bookmark.slash" : "bookmark") {

@@ -54,16 +54,12 @@ pub fn can_share_files(state: AppState, conversation: ConversationId) -> bool {
   }
 }
 
-/// Whether the user may react in the conversation (`add_reaction`, which an archived or a
-/// moderated channel takes away). Light enough for every message row: the server's answer when
-/// there is one, otherwise wherever the user may post.
+/// Whether the user may react in the conversation ([`crate::model::Conversation::can_react`], as
+/// in the native apps). Light enough for every message row.
 pub fn can_react_in(state: AppState, conversation: ConversationId) -> bool {
   state
     .read(|backend| backend.conversation(conversation))
-    .is_some_and(|found| match &found.maybe_permissions {
-      Some(granted) => granted.contains(&Permission::AddReaction),
-      None => found.can_post,
-    })
+    .is_some_and(|found| found.can_react())
 }
 
 /// Whether the user may create a channel in the space.
