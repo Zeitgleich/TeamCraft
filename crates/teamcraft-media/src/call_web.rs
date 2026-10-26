@@ -28,6 +28,7 @@
 //! sessions in the `pagehide` handler itself: the SFU frees the slot at once instead of the others
 //! seeing "reconnecting" until the grace period ends.
 
+mod meter;
 mod session_watch;
 mod video;
 
@@ -60,6 +61,7 @@ use web_sys::{
 };
 use web_time::Instant;
 
+pub use self::meter::MicrophoneMeter;
 use self::session_watch::{NetworkVerdict, PacketCount, PathVerdict, Reading, SessionWatch, may_hurry};
 use self::video::{TrackSender, VideoView};
 
@@ -579,6 +581,34 @@ impl Drop for WebCall {
 /// from a user gesture.
 pub async fn capture_camera(maybe_device: Option<&str>) -> Result<MediaStream, WebCallError> {
   video::capture_camera(maybe_device).await
+}
+
+/// Asks for the microphone (`getUserMedia`) with the browser's echo cancellation, noise
+/// suppression and gain control, as the call sends it.
+async fn capture_microphone(choice: &AudioDeviceChoice) -> Result<MediaStream, WebCallError> {
+  let track_constraints = MediaTrackConstraints::new();
+  track_constraints.set_echo_cancellation(&JsValue::TRUE);
+  track_constraints.set_noise_suppression(&JsValue::TRUE);
+  track_constraints.set_auto_gain_control(&JsValue::TRUE);
+  track_constraints.set_channel_count(&JsValue::from(1));
+  if let AudioDeviceChoice::Device(id) = choice {
+    let exact = dictionary(&[("exact", JsValue::from_str(id.as_str()))]).map_err(browser("getUserMedia"))?;
+    track_constraints.set_device_id(&exact);
+  }
+  let constraints = MediaStreamConstraints::new();
+  constraints.set_audio(&track_constraints);
+  let promise = window()?
+    .navigator()
+    .media_devices()
+    .map_err(|_| WebCallError::Unsupported(SECURE_CONTEXT))?
+    .get_user_media_with_constraints(&constraints)
+    .map_err(media_access(MediaInput::Microphone))?;
+  Ok(
+    JsFuture::from(promise)
+      .await
+      .map_err(media_access(MediaInput::Microphone))?
+      .unchecked_into(),
+  )
 }
 
 /// Whether this browser has what calls need (WebTransport, WebCodecs audio, AudioWorklet); the
@@ -1557,28 +1587,7 @@ impl Capture {
     choice: &AudioDeviceChoice,
     inputs: &mpsc::UnboundedSender<Input>,
   ) -> Result<Self, WebCallError> {
-    let track_constraints = MediaTrackConstraints::new();
-    track_constraints.set_echo_cancellation(&JsValue::TRUE);
-    track_constraints.set_noise_suppression(&JsValue::TRUE);
-    track_constraints.set_auto_gain_control(&JsValue::TRUE);
-    track_constraints.set_channel_count(&JsValue::from(1));
-    if let AudioDeviceChoice::Device(id) = choice {
-      let exact =
-        dictionary(&[("exact", JsValue::from_str(id.as_str()))]).map_err(browser("getUserMedia"))?;
-      track_constraints.set_device_id(&exact);
-    }
-    let constraints = MediaStreamConstraints::new();
-    constraints.set_audio(&track_constraints);
-    let promise = window()?
-      .navigator()
-      .media_devices()
-      .map_err(|_| WebCallError::Unsupported(SECURE_CONTEXT))?
-      .get_user_media_with_constraints(&constraints)
-      .map_err(media_access(MediaInput::Microphone))?;
-    let stream: MediaStream = JsFuture::from(promise)
-      .await
-      .map_err(media_access(MediaInput::Microphone))?
-      .unchecked_into();
+    let stream = capture_microphone(choice).await?;
     let source = context
       .create_media_stream_source(&stream)
       .map_err(browser("microphone source"))?;

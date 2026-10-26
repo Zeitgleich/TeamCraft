@@ -136,7 +136,7 @@ wasm-bindgen = { version = "0.2.129", optional = true }
 wasm-bindgen-futures = { version = "0.4.79", optional = true }
 js-sys = { version = "0.3.106", optional = true }
 web-sys = { version = "0.3.106", optional = true, features = [
-  "AudioContext", "AudioContextOptions", "AudioDestinationNode", "AudioNode", "AudioWorklet",
+  "AnalyserNode", "AudioContext", "AudioContextOptions", "AudioDestinationNode", "AudioNode", "AudioWorklet",
   "AudioWorkletNode", "AudioWorkletNodeOptions", "BaseAudioContext", "Blob", "BlobPropertyBag",
   "MediaDeviceInfo", "MediaDeviceKind", "MediaDevices", "MediaStream", "MediaStreamAudioSourceNode",
   "MediaStreamConstraints", "MediaStreamTrack", "MediaTrackConstraints", "MessageEvent", "MessagePort",
