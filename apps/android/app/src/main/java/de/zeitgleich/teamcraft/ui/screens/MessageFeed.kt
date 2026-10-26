@@ -198,6 +198,8 @@ fun MessageFeed(
   modifier: Modifier = Modifier,
   maybeFocusMessage: String? = null,
   onOpenPermalink: (String) -> Unit = {},
+  /** Whether the user may react here; without it the reactions stay readable but don't toggle. */
+  canReact: Boolean = true,
 ) {
   // Newest first in a reversed list: the bottom stays anchored when the keyboard opens or a picture
   // above grows, and the rows keep their place by key (the message ID) when new ones arrive.
@@ -289,6 +291,7 @@ fun MessageFeed(
               maybeOnReply = maybeOnReply,
               isHighlighted = item.message.id == maybeHighlighted,
               onOpenPermalink = onOpenPermalink,
+              canReact = canReact,
             )
           }
         }
@@ -591,6 +594,7 @@ private fun MessageRow(
   maybeOnReply: ((Message) -> Unit)?,
   isHighlighted: Boolean,
   onOpenPermalink: (String) -> Unit,
+  canReact: Boolean,
 ) {
   val message = entry.message
   val maybeSystemLine = systemLine(message, maybeExtras) { snapshot?.user(it)?.displayName.orEmpty() }
@@ -620,6 +624,7 @@ private fun MessageRow(
     else -> 4.dp
   }
   val alignment = if (isMine) Alignment.End else Alignment.Start
+  val reactQuickly: () -> Unit = { viewModel.act(ChatActions.react(message.conversation, message.id, QUICK_REACTION)) }
   Column(
     Modifier
       .fillMaxWidth()
@@ -631,7 +636,8 @@ private fun MessageRow(
       )
       .combinedClickable(
         onClick = {},
-        onDoubleClick = { viewModel.act(ChatActions.react(message.conversation, message.id, QUICK_REACTION)) },
+        // Without the right to react, a tap doesn't wait to tell a double tap apart either.
+        onDoubleClick = reactQuickly.takeIf { canReact },
         onLongClick = {
           haptics.performHapticFeedback(HapticFeedbackType.LongPress)
           onLongPress()
@@ -640,10 +646,7 @@ private fun MessageRow(
       .semantics {
         customActions = listOfNotNull(
           maybeOnReply?.let { reply -> CustomAccessibilityAction(replyLabel) { reply(message); true } },
-          CustomAccessibilityAction(reactLabel) {
-            viewModel.act(ChatActions.react(message.conversation, message.id, QUICK_REACTION))
-            true
-          },
+          CustomAccessibilityAction(reactLabel) { reactQuickly(); true }.takeIf { canReact },
           CustomAccessibilityAction(moreLabel) { onLongPress(); true },
         )
       }
@@ -676,7 +679,7 @@ private fun MessageRow(
       }
     }
     Column(Modifier.padding(start = indent).widthIn(max = look.bubbleMax), horizontalAlignment = alignment) {
-      BelowBubble(viewModel, message, maybeExtras, onOpenThread)
+      BelowBubble(viewModel, message, maybeExtras, onOpenThread, canReact)
     }
   }
 }
@@ -757,10 +760,19 @@ private fun Bubble(
   }
 }
 
-/** Reactions, read confirmations, "not sent" and the thread link, under the bubble. */
+/**
+ * Reactions, read confirmations, "not sent" and the thread link, under the bubble. Without the
+ * right to react, the reactions stay readable but don't toggle (issue #758).
+ */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun BelowBubble(viewModel: MainViewModel, message: Message, maybeExtras: MessageExtras?, onOpenThread: ((String) -> Unit)?) {
+private fun BelowBubble(
+  viewModel: MainViewModel,
+  message: Message,
+  maybeExtras: MessageExtras?,
+  onOpenThread: ((String) -> Unit)?,
+  canReact: Boolean,
+) {
   if (maybeExtras?.isSendFailed == true) NotSentLine(viewModel, message)
   if (message.reactions.isNotEmpty()) {
     FlowRow(
@@ -769,7 +781,7 @@ private fun BelowBubble(viewModel: MainViewModel, message: Message, maybeExtras:
       modifier = Modifier.padding(top = 2.dp),
     ) {
       for (reaction in message.reactions) {
-        ReactionPill(reaction.emoji, reaction.count, reaction.reactedByMe) {
+        ReactionPill(reaction.emoji, reaction.count, reaction.reactedByMe, isEnabled = canReact) {
           viewModel.act(ChatActions.react(message.conversation, message.id, reaction.emoji))
         }
       }
@@ -799,10 +811,11 @@ private fun BelowBubble(viewModel: MainViewModel, message: Message, maybeExtras:
 
 /** One reaction: the emoji and how many, outlined in the accent when the user is among them. */
 @Composable
-private fun ReactionPill(emoji: String, count: Int, isMine: Boolean, onClick: () -> Unit) {
+private fun ReactionPill(emoji: String, count: Int, isMine: Boolean, isEnabled: Boolean, onClick: () -> Unit) {
   val scheme = MaterialTheme.colorScheme
   Surface(
     onClick = onClick,
+    enabled = isEnabled,
     shape = CircleShape,
     color = if (isMine) scheme.primaryContainer else scheme.surfaceContainerHigh,
     border = BorderStroke(1.dp, if (isMine) scheme.primary else scheme.outlineVariant),

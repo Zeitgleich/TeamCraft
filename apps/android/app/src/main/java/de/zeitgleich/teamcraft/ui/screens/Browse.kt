@@ -60,6 +60,9 @@ fun BrowseScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
   var isCreating by remember { mutableStateOf(false) }
   val spaces = snapshot?.spaces.orEmpty()
   val maybeSpace = spaces.getOrNull(spaceIndex)
+  // Guests browse no channels (the server refuses them, as on desktop): they only find people.
+  val isGuest = snapshot?.me?.isGuest == true
+  val isShowingPeople = showPeople || isGuest
   // People picked for a new DM (one) or group DM (several).
   var picked by rememberSaveable { mutableStateOf(listOf<String>()) }
   // A new direct conversation opens as soon as the core created it, as on desktop.
@@ -67,7 +70,10 @@ fun BrowseScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
   LaunchedEffect(changes, maybeSpace?.id) {
     val loaded = viewModel.readChat { snapshot() }
     snapshot = loaded
-    channels = maybeSpace?.let { space -> viewModel.readChat { query(ChatQueries.browseChannels(space.id)).channels } } ?: emptyList()
+    channels = maybeSpace
+      ?.takeIf { loaded?.me?.isGuest != true }
+      ?.let { space -> viewModel.readChat { query(ChatQueries.browseChannels(space.id)).channels } }
+      ?: emptyList()
     val maybeCreated = maybePendingDm?.let { users -> loaded?.let { directWith(it, users) } }
     if (maybeCreated != null) {
       maybePendingDm = null
@@ -88,7 +94,7 @@ fun BrowseScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
     contentWindowInsets = ScreenInsets,
     topBar = { ChromeTopBar(title = stringResource(R.string.browse_title), maybeOnBack = onBack) },
     bottomBar = {
-      if (showPeople && picked.isNotEmpty()) {
+      if (isShowingPeople && picked.isNotEmpty()) {
         Button(
           onClick = startConversation,
           modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(16.dp),
@@ -97,15 +103,17 @@ fun BrowseScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
     },
   ) { padding ->
     Column(Modifier.fillMaxSize().padding(padding)) {
-      PrimaryTabRow(selectedTabIndex = if (showPeople) 1 else 0) {
-        Tab(selected = !showPeople, onClick = { showPeople = false }, text = { Text(stringResource(R.string.channels)) })
-        Tab(selected = showPeople, onClick = { showPeople = true }, text = { Text(stringResource(R.string.people)) })
+      if (!isGuest) {
+        PrimaryTabRow(selectedTabIndex = if (showPeople) 1 else 0) {
+          Tab(selected = !showPeople, onClick = { showPeople = false }, text = { Text(stringResource(R.string.channels)) })
+          Tab(selected = showPeople, onClick = { showPeople = true }, text = { Text(stringResource(R.string.people)) })
+        }
       }
       val people = snapshot?.users.orEmpty().filter { it.id != snapshot?.me?.id && !it.isBot }
       val visibleChannels = channels.filter { !it.isArchived }
-      if (showPeople && snapshot != null && people.isEmpty()) {
+      if (isShowingPeople && snapshot != null && people.isEmpty()) {
         EmptyHint(R.string.browse_no_people)
-      } else if (showPeople) {
+      } else if (isShowingPeople) {
         Text(
           stringResource(R.string.dm_pick_hint),
           style = MaterialTheme.typography.bodySmall,
@@ -144,7 +152,7 @@ fun BrowseScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
             }
           }
         }
-        if (maybeSpace != null) {
+        if (maybeSpace?.canCreateChannels == true) {
           TextButton(onClick = { isCreating = true }, modifier = Modifier.padding(horizontal = 8.dp)) {
             Text(stringResource(R.string.channel_create))
           }

@@ -58,6 +58,8 @@ data class Space(
   val name: String,
   @SerialName("unread_count") val unreadCount: Int = 0,
   @SerialName("mention_count") val mentionCount: Int = 0,
+  /** Whether the user may create channels here, as the core decided it (issue #758). */
+  @SerialName("can_create_channels") val canCreateChannels: Boolean = true,
 )
 
 @Serializable

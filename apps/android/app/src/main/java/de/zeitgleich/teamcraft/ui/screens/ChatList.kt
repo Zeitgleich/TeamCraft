@@ -156,6 +156,10 @@ fun ChatListScreen(
   var selection by rememberSaveable { mutableStateOf(listOf<String>()) }
   var maybeNotifying by remember { mutableStateOf<String?>(null) }
   var tab by rememberSaveable { mutableStateOf(ChatTab.Home) }
+  // An account stays a guest or not; read again only when the list changes size (the first sync
+  // is what names the user).
+  var isGuest by remember { mutableStateOf(false) }
+  LaunchedEffect(conversations?.size) { isGuest = viewModel.readChat { snapshot() }?.me?.isGuest == true }
   BackHandler(enabled = selection.isNotEmpty()) { selection = emptyList() }
   // Back on Activity or Spaces goes Home first, as in other apps with a bottom navigation.
   BackHandler(enabled = selection.isEmpty() && tab != ChatTab.Home) { tab = ChatTab.Home }
@@ -213,6 +217,7 @@ fun ChatListScreen(
       OfflineBanner(onSignInAgain = { viewModel.signOut() })
       NotificationPermissionCard()
     },
+    isGuest = isGuest,
   )
   // Mute or change notifications without opening the conversation.
   maybeNotifying?.let { id -> ConversationNotificationsDialog(viewModel, id) { maybeNotifying = null } }
@@ -239,6 +244,8 @@ internal fun MainScaffold(
   onAccount: () -> Unit,
   onNavigate: (String) -> Unit,
   banners: @Composable () -> Unit = {},
+  /** Guests browse no channels (as on desktop); the Spaces tab lists only their own. */
+  isGuest: Boolean = false,
 ) {
   val hasDirect = maybeConversations.orEmpty().any { it.isDirect }
   Scaffold(
@@ -264,7 +271,7 @@ internal fun MainScaffold(
         maybeConversations == null -> LoadingScreen()
         tab == ChatTab.Home -> HomeTab(maybeConversations, list, onNavigate)
         tab == ChatTab.Activity -> ActivityTab(maybeConversations, list, onNavigate)
-        else -> SpacesTab(maybeConversations, list, onNavigate)
+        else -> SpacesTab(maybeConversations, list, onNavigate, canBrowse = !isGuest)
       }
     }
   }
@@ -332,21 +339,26 @@ private fun ActivityTab(conversations: List<ConversationItem>, list: ListState, 
   }
 }
 
-/** Spaces: the channels by space; browsing for more is the first row (or the empty state's action). */
+/**
+ * Spaces: the channels by space; browsing for more is the first row (or the empty state's action),
+ * for those who may browse.
+ */
 @Composable
-private fun SpacesTab(conversations: List<ConversationItem>, list: ListState, onNavigate: (String) -> Unit) {
+private fun SpacesTab(conversations: List<ConversationItem>, list: ListState, onNavigate: (String) -> Unit, canBrowse: Boolean) {
   val sections = channelSections(conversations)
   if (sections.isEmpty()) {
     EmptyState(
       icon = Icons.Filled.Search,
       title = stringResource(R.string.spaces_empty_title),
       text = stringResource(R.string.spaces_empty),
-      maybeAction = stringResource(R.string.browse_channels) to { onNavigate("browse") },
+      maybeAction = if (canBrowse) stringResource(R.string.browse_channels) to { onNavigate("browse") } else null,
     )
     return
   }
   LazyColumn(Modifier.fillMaxSize()) {
-    item(key = "browse") { EntryRow(Icons.Filled.Add, stringResource(R.string.browse_channels)) { onNavigate("browse") } }
+    if (canBrowse) {
+      item(key = "browse") { EntryRow(Icons.Filled.Add, stringResource(R.string.browse_channels)) { onNavigate("browse") } }
+    }
     conversationRows(sections, list)
   }
 }
