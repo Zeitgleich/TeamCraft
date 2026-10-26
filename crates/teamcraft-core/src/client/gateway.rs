@@ -101,17 +101,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok((start.connection, start.outcome))
   }
 
-  /// Like [`Self::connect_gateway`], with a deadline for every handshake step and the heartbeat
-  /// interval from `hello`. The connection keeps sending heartbeats while the sync after the
-  /// handshake runs, which can take minutes on a workspace that grew (issue #325); what arrives
-  /// meanwhile comes back in [`GatewayStart::held`]. A rejected token comes back as an API error
-  /// with status 401 ([`CoreError::is_sign_in_required`]).
   /// Remembers what the device says about its activity, so the next gateway session identifies
   /// with it instead of claiming to be active (the shells send the report on the live connection).
   pub fn set_device_activity(&mut self, activity: DeviceActivity) {
     self.device_activity = activity;
   }
 
+  /// What the device last said about its activity ([`Self::set_device_activity`]); a resumed
+  /// session hears it again, since the server keeps what it last knew (docs/gateway.md).
+  pub fn device_activity(&self) -> &DeviceActivity {
+    &self.device_activity
+  }
+
+  /// Like [`Self::connect_gateway`], with a deadline for every handshake step and the heartbeat
+  /// interval from `hello`. The connection keeps sending heartbeats while the sync after the
+  /// handshake runs, which can take minutes on a workspace that grew (issue #325); what arrives
+  /// meanwhile comes back in [`GatewayStart::held`]. A rejected token comes back as an API error
+  /// with status 401 ([`CoreError::is_sign_in_required`]).
   pub async fn start_gateway(
     &mut self,
     timing: GatewayTiming,

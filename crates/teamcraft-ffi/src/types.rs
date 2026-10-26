@@ -2,7 +2,9 @@
 //! 64-bit unsigned type that matches, and the app only passes them back.
 
 use teamcraft_client_api::model::{self as view, ConversationKind as ConversationKindView, PresenceStatus};
+use teamcraft_core::UnreadableStore;
 use teamcraft_core::client::LinkRequestInfo;
+use teamcraft_core::device_activity::AppUse;
 use teamcraft_core::notify_rules::MentionPreferences;
 use teamcraft_core::prefetch::SegmentPrefetch;
 use teamcraft_core::push_guard::{PushDiagnostics, Suppression};
@@ -39,6 +41,30 @@ pub enum AccountState {
     /// Shown for out-of-band comparison (safety number).
     identity_fingerprint: String,
   },
+  /// The local data can't be read by this version, and a retry won't change that (issue #414):
+  /// the app offers to set the device up again (`TeamCraft::reset_store`), which sets the file
+  /// aside instead of deleting it.
+  StoreUnreadable { problem: StoreProblem },
+}
+
+/// Why the local data can't be read ([`AccountState::StoreUnreadable`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum StoreProblem {
+  /// The file is damaged, or the key that opens it is gone (the keystore lost or replaced it).
+  Damaged,
+  /// A newer version of the app changed it: update the app.
+  NewerVersion,
+}
+
+/// What the user does with the app, for presence (`TeamCraft::report_activity`, issue #472).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AppActivity {
+  /// The app came to the foreground (opened, resumed, unlocked).
+  Foreground,
+  /// The user touched the screen or pressed a key.
+  Interaction,
+  /// The app went to the background.
+  Background,
 }
 
 /// Where the gateway connection stands. The banner follows this, not the OS connectivity: the
@@ -697,6 +723,25 @@ impl From<teamcraft_core::connection::ConnectionState> for ConnectionState {
         }),
       },
       Core::SignInRequired { .. } => Self::SignInRequired,
+    }
+  }
+}
+
+impl From<UnreadableStore> for StoreProblem {
+  fn from(problem: UnreadableStore) -> Self {
+    match problem {
+      UnreadableStore::Damaged => Self::Damaged,
+      UnreadableStore::NewerVersion => Self::NewerVersion,
+    }
+  }
+}
+
+impl From<AppActivity> for AppUse {
+  fn from(activity: AppActivity) -> Self {
+    match activity {
+      AppActivity::Foreground => Self::Foreground,
+      AppActivity::Interaction => Self::Interaction,
+      AppActivity::Background => Self::Background,
     }
   }
 }

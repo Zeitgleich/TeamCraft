@@ -8,6 +8,7 @@ pub mod attestation;
 pub mod client;
 pub mod clock;
 pub mod connection;
+pub mod device_activity;
 pub mod downloads;
 pub mod error;
 pub mod integration_sources;
