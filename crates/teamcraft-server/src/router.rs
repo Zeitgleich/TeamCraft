@@ -53,29 +53,30 @@ use crate::handlers::{
   get_unread_handler, get_user_avatar_handler, get_user_device_list_handler, get_user_enrollment_handler,
   get_user_group_handler, get_user_handler, get_user_profile_handler, get_web_push_key_handler,
   healthz_handler, join_conversation_handler, join_meeting_handler, join_space_handler,
-  key_package_status_handler, knock_meeting_handler, leave_meeting_handler, list_acknowledgements_handler,
-  list_brands_handler, list_call_history_handler, list_categories_handler, list_conversation_members_handler,
-  list_conversations_handler, list_device_links_handler, list_devices_handler, list_invites_handler,
-  list_lobby_handler, list_meetings_handler, list_messages_handler, list_mls_messages_handler,
-  list_organizations_handler, list_policy_log_handler, list_presence_handler, list_recovery_requests_handler,
-  list_roster_handler, list_share_links_handler, list_space_members_handler, list_spaces_handler,
-  list_system_events_handler, list_threads_handler, list_user_devices_handler, list_user_groups_handler,
-  list_welcomes_handler, local_activate_handler, local_login_handler, local_logout_handler,
-  move_call_handler, move_channel_handler, pin_message_handler, post_mls_commit_handler,
-  post_mls_message_handler, presign_attachment_part_handler, put_channel_image_handler,
-  put_conversation_notification_settings_handler, put_email_digest_handler, put_guest_proof_handler,
-  put_identity_key_handler, put_key_bag_handler, put_mls_group_info_handler, put_my_device_list_handler,
-  put_my_privacy_handler, put_my_profile_handler, put_notification_settings_handler,
-  put_org_recovery_shares_handler, put_recovery_result_handler, put_recovery_share_handler,
-  put_space_image_handler, put_space_notification_settings_handler, readyz_handler,
-  receive_meeting_reply_handler, register_device_handler, register_push_handler, reject_device_link_handler,
-  remove_conversation_member_handler, remove_space_member_handler, remove_user_group_member_handler,
-  rendezvous_handler, report_participant_joined_handler, report_participant_left_handler,
-  revoke_device_handler, revoke_share_link_handler, revoke_shared_guest_link_handler, search_users_handler,
-  send_message_handler, send_test_push_handler, set_conversation_retention_handler,
-  set_custom_status_handler, set_device_certificate_handler, set_meeting_rsvp_handler, set_presence_handler,
-  set_read_position_handler, set_space_retention_handler, set_thread_read_handler, unfollow_thread_handler,
-  unpin_message_handler, unregister_push_handler, update_category_handler, update_conversation_handler,
+  key_package_status_handler, knock_meeting_handler, leave_call_everywhere_handler, leave_meeting_handler,
+  list_acknowledgements_handler, list_brands_handler, list_call_history_handler, list_categories_handler,
+  list_conversation_members_handler, list_conversations_handler, list_device_links_handler,
+  list_devices_handler, list_invites_handler, list_lobby_handler, list_meetings_handler,
+  list_messages_handler, list_mls_messages_handler, list_organizations_handler, list_policy_log_handler,
+  list_presence_handler, list_recovery_requests_handler, list_roster_handler, list_share_links_handler,
+  list_space_members_handler, list_spaces_handler, list_system_events_handler, list_threads_handler,
+  list_user_devices_handler, list_user_groups_handler, list_welcomes_handler, local_activate_handler,
+  local_login_handler, local_logout_handler, move_call_handler, move_channel_handler, pin_message_handler,
+  post_mls_commit_handler, post_mls_message_handler, presign_attachment_part_handler,
+  put_channel_image_handler, put_conversation_notification_settings_handler, put_email_digest_handler,
+  put_guest_proof_handler, put_identity_key_handler, put_key_bag_handler, put_mls_group_info_handler,
+  put_my_device_list_handler, put_my_privacy_handler, put_my_profile_handler,
+  put_notification_settings_handler, put_org_recovery_shares_handler, put_recovery_result_handler,
+  put_recovery_share_handler, put_space_image_handler, put_space_notification_settings_handler,
+  readyz_handler, receive_meeting_reply_handler, register_device_handler, register_push_handler,
+  reject_device_link_handler, remove_conversation_member_handler, remove_space_member_handler,
+  remove_user_group_member_handler, rendezvous_handler, report_call_roster_handler,
+  report_participant_joined_handler, report_participant_left_handler, revoke_device_handler,
+  revoke_share_link_handler, revoke_shared_guest_link_handler, search_users_handler, send_message_handler,
+  send_test_push_handler, set_conversation_retention_handler, set_custom_status_handler,
+  set_device_certificate_handler, set_meeting_rsvp_handler, set_presence_handler, set_read_position_handler,
+  set_space_retention_handler, set_thread_read_handler, unfollow_thread_handler, unpin_message_handler,
+  unregister_push_handler, update_category_handler, update_conversation_handler,
   update_conversation_member_handler, update_meeting_handler, update_space_handler,
   update_space_member_handler, update_user_group_handler, upload_key_packages_handler,
   withdraw_device_link_handler,
@@ -520,6 +521,10 @@ pub fn router(state: AppState) -> Router {
       post(move_call_handler),
     )
     .route(
+      "/conversations/{conversation_id}/call/leave",
+      post(leave_call_everywhere_handler),
+    )
+    .route(
       "/me/status",
       put(set_custom_status_handler).delete(clear_custom_status_handler),
     )
@@ -616,6 +621,7 @@ pub fn router(state: AppState) -> Router {
       post(report_participant_joined_handler),
     )
     .route("/calls/participants/left", post(report_participant_left_handler))
+    .route("/calls/roster", post(report_call_roster_handler))
     .route("/meetings/replies", post(receive_meeting_reply_handler));
 
   Router::new()

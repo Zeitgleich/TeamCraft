@@ -73,8 +73,9 @@ pub async fn control_meeting(
     SfuControlAction::End => {
       state.database.end_meeting(meeting.id).await?;
     },
-    // Unknown is only what a newer peer might send; the server never builds it.
-    SfuControlAction::MuteAll | SfuControlAction::Unknown => {},
+    // Unknown is only what a newer peer might send; the server never builds it. Leaving on all
+    // devices is not a host control (`calls::leave_call_everywhere`).
+    SfuControlAction::MuteAll | SfuControlAction::DisconnectUser { .. } | SfuControlAction::Unknown => {},
   }
   audit::record(
     state,

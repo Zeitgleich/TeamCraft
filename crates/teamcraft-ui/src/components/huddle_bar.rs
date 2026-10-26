@@ -3,6 +3,8 @@ use leptos::prelude::*;
 use crate::calls::{CallKind, CallPhase, CallRequest};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
+use crate::components::pending_button::PendingButton;
+use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
 use crate::model::ConversationId;
 use crate::state::use_app_state;
@@ -54,10 +56,20 @@ pub fn HuddleBar(conversation: ConversationId) -> impl IntoView {
       kind: CallKind::Huddle,
     });
   };
+  // Also clears an entry only the server still lists (a device that left without it hearing).
+  let leaving_everywhere = PendingAction::new();
+  let leave_everywhere = move |_| {
+    leaving_everywhere.run(|| state.write(|backend| backend.leave_call_everywhere(conversation)));
+  };
 
   view! {
     <Show when=move || is_in_call.get() || huddle.get().is_some() fallback=|| ()>
-      <div class="huddle-bar" role="region" aria-label=move || i18n.t("huddle-bar-label")>
+      <div
+        class="huddle-bar"
+        class:huddle-bar-choices=move || is_on_other_device.get()
+        role="region"
+        aria-label=move || i18n.t("huddle-bar-label")
+      >
         <Icon name=IconName::Headphones class="huddle-icon" />
         <div class="huddle-info">
           <strong>
@@ -86,12 +98,17 @@ pub fn HuddleBar(conversation: ConversationId) -> impl IntoView {
                   }
                 }
               >
-                <button class="btn btn-small" on:click=join_alongside>
-                  {move || i18n.t("huddle-join-here")}
-                </button>
-                <button class="btn btn-primary btn-small" on:click=take_over>
-                  {move || i18n.t("huddle-move-here")}
-                </button>
+                <div class="huddle-controls" role="group" aria-label=move || i18n.t("huddle-on-other-device")>
+                  <PendingButton pending=leaving_everywhere class="btn btn-small btn-quiet" on_click=leave_everywhere>
+                    {move || i18n.t("huddle-leave-everywhere")}
+                  </PendingButton>
+                  <button class="btn btn-small" on:click=join_alongside>
+                    {move || i18n.t("huddle-join-here")}
+                  </button>
+                  <button class="btn btn-primary btn-small" on:click=take_over>
+                    {move || i18n.t("huddle-move-here")}
+                  </button>
+                </div>
               </Show>
             }
           }
