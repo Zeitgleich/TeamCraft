@@ -15,7 +15,8 @@
      Android's outline. --border stays for dividers and cards, which need no contrast. */
   --border-strong: #848ea0;
   --text: #1b2230;
-  --text-muted: #566175;
+  /* Secondary text (#725): 5.6:1 on --surface-3, the darkest surface it sits on. */
+  --text-muted: #4f5a6d;
   --accent: #005dfc;
   --accent-strong: #004bd3;
   --on-accent: #ffffff;
@@ -35,9 +36,9 @@
   --sb-hover: rgba(255, 255, 255, 0.07);
   /* 3:1 against --sb-bg in both themes and 4.5:1 with white text. */
   --sb-current: #0064fc;
-  --sb-muted: #8793a8;
+  --sb-muted: #9aa6ba;
   /* Muted channels: dimmer than --sb-muted but still 4.5:1 on --sb-bg; the bell-off icon says why. */
-  --sb-dim: #808ca1;
+  --sb-dim: #8d99ae;
   /* White text on it needs 4.5:1 (WCAG AA). */
   --badge-bg: #c8441d;
   /* The system red of Apple's badges (#715): the rail's space tiles. */
@@ -185,7 +186,7 @@
     --border: #28324a;
     --border-strong: #626d86;
     --text: #e4e9f2;
-    --text-muted: #9aa6ba;
+    --text-muted: #aab5c7;
     --accent: #5c9dff;
     --accent-strong: #8ab8ff;
     --on-accent: #04122e;
@@ -229,7 +230,7 @@
   --border: #28324a;
   --border-strong: #626d86;
   --text: #e4e9f2;
-  --text-muted: #9aa6ba;
+  --text-muted: #aab5c7;
   --accent: #5c9dff;
   --accent-strong: #8ab8ff;
   --on-accent: #04122e;
@@ -465,31 +466,60 @@ kbd {
   min-width: 0;
 }
 
-.search-btn {
+/* The global search (#724): a field with the open conversation as a scope chip (picture or glyph,
+   name, x to search everywhere) before a plain placeholder and the shortcut. The button is the
+   control; a press anywhere on the field opens the search too. */
+.search-field {
   grid-column: 2;
   justify-self: center;
   width: min(560px, 100%);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   height: 28px;
-  padding: 0 10px;
+  padding: 0 0 0 10px;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: var(--radius-sm);
   background: rgba(255, 255, 255, 0.07);
   color: var(--chrome-text);
-  text-align: left;
+  cursor: pointer;
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .search-btn:hover {
+  .search-field:hover {
     background: rgba(255, 255, 255, 0.12);
   }
 }
 
-/* Only the label grows; the shortcut's own spans (`.shortcut`, `.shortcut-plus`) stay compact. */
-.search-btn > span:not(.shortcut) {
+.search-field-icon {
+  flex: none;
+  display: grid;
+}
+
+.search-btn {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 100%;
+  padding: 0 10px 0 2px;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+/* The field shows its icon outside the button; a phone shows the button as the icon alone. */
+.search-btn > .icon {
+  display: none;
+}
+
+/* Only the label grows; the shortcut's own spans (`.shortcut`, `.shortcut-plus`) stay compact. */
+.search-btn-label {
+  flex: 1;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -500,6 +530,85 @@ kbd {
   color: inherit;
   border-color: rgba(255, 255, 255, 0.25);
   opacity: 0.8;
+}
+
+/* The scope: a small tinted capsule, the conversation's picture and name, a round x. */
+.search-field-scope {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 50%;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 2px 0 3px;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.14);
+  color: var(--chrome-strong);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  font-weight: var(--weight-semibold);
+  cursor: default;
+}
+
+.search-field-scope > .icon,
+.search-field-scope > .channel-glyph,
+.search-field-scope > .avatar {
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+
+.search-field-scope > .icon {
+  margin-left: 2px;
+}
+
+.search-field-scope > .avatar .avatar-initials {
+  font-size: var(--text-2xs);
+  transform: scale(0.65);
+}
+
+.search-field-scope-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Small to look at, a finger's size to hit: the ring around it takes the press too. */
+.search-field-scope-clear {
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.16);
+  color: inherit;
+}
+
+.search-field-scope-clear::before {
+  content: "";
+  position: absolute;
+  inset: -6px;
+}
+
+.search-field-scope-clear .icon {
+  width: 10px;
+  height: 10px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .search-field-scope-clear:hover {
+    background: rgba(255, 255, 255, 0.3);
+  }
+}
+
+.search-field-scope-clear:active {
+  transform: scale(var(--press-scale));
 }
 
 .top-actions {
@@ -618,6 +727,14 @@ kbd {
 .input:focus-visible {
   outline-offset: 0;
   border-color: var(--focus);
+}
+
+/* Placeholders in the secondary text colour at full strength (#725): the browsers' default is a
+   faded grey under 4.5:1. */
+.input::placeholder,
+textarea::placeholder {
+  color: var(--text-muted);
+  opacity: 1;
 }
 
 select.input {
@@ -1480,7 +1597,7 @@ select.input {
 }
 
 /* However narrow the window, some of the title bar stays free to grab beside the search. */
-:root[data-titlebar="custom"] .search-btn {
+:root[data-titlebar="custom"] .search-field {
   width: min(560px, calc(100% - 32px));
 }
 
@@ -1873,8 +1990,10 @@ select.input {
   overflow: hidden;
   white-space: nowrap;
   color: var(--text-muted);
-  font-size: var(--text-xs);
-  letter-spacing: var(--tracking-xs);
+  /* Status, last seen and local time are read, not glanced at (#725): body-adjacent size and a
+     little weight, so they hold up in the dark. */
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
   line-height: 1.3;
 }
 
@@ -2209,8 +2328,8 @@ select.input {
   display: block;
   visibility: hidden;
   padding-top: 3px;
-  font-size: var(--text-2xs);
-  letter-spacing: var(--tracking-2xs);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
   text-align: center;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
@@ -3443,8 +3562,8 @@ ol.md-list {
 
 .menu-label small {
   display: block;
-  font-size: var(--text-2xs);
-  letter-spacing: var(--tracking-2xs);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
   color: var(--text-muted);
 }
 
@@ -7107,7 +7226,7 @@ html.call-window body {
 .file-thumb img { display: block; width: 36px; height: 36px; object-fit: cover; border-radius: var(--radius-sm); }
 .file-meta { display: flex; flex-direction: column; min-width: 0; flex: 1; line-height: 1.3; }
 .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: var(--weight-medium); }
-.file-size, .file-state { color: var(--text-muted); font-size: var(--text-2xs); letter-spacing: var(--tracking-2xs); }
+.file-size, .file-state { color: var(--text-muted); font-size: var(--text-xs); letter-spacing: var(--tracking-xs); }
 .file-progress { width: 100%; height: 4px; margin-top: 4px; }
 /* The preview of a Markdown, HTML or PDF file (#557) */
 .modal.file-preview { width: min(960px, 100%); height: min(88vh, 900px); max-height: none; }
@@ -7215,7 +7334,9 @@ html.call-window body {
 .lightbox-stage.zoomed { cursor: grab; }
 .lightbox-stage.zoomed:active { cursor: grabbing; }
 .lightbox-stage.is-video { cursor: default; touch-action: auto; }
-.lightbox-image { max-width: 100%; max-height: 100%; transform-origin: center; will-change: transform; -webkit-user-drag: none; box-shadow: 0 8px 40px rgba(0, 0, 0, .45); transition: transform var(--dur-fast) var(--ease-out); }
+/* No box behind the picture (#727): a transparent PNG or SVG floats on the backdrop. Its shadow is a
+   `drop-shadow`, which follows the picture's alpha, not a `box-shadow` around its rectangle. */
+.lightbox-image { max-width: 100%; max-height: 100%; background: none; transform-origin: center; will-change: transform; -webkit-user-drag: none; filter: drop-shadow(0 8px 28px rgba(0, 0, 0, .4)); transition: transform var(--dur-fast) var(--ease-out); }
 .lightbox-stage.zoomed .lightbox-image, .lightbox-stage.is-live .lightbox-image { transition: none; }
 /* The previous, current and next picture side by side; the track moves as one while paging, and
    carries the picture into and out of its tile. Its transform and opacity are written per frame. */
@@ -7388,7 +7509,7 @@ html.call-window body {
 /* A bridge source: its name over who added it when (channel settings, Integrations). */
 .source-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .source-meta > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.source-meta .muted-text { font-size: var(--text-2xs); letter-spacing: var(--tracking-2xs); }
+.source-meta .muted-text { font-size: var(--text-xs); letter-spacing: var(--tracking-xs); }
 .plain-fieldset { border: 0; margin: 0; padding: 0; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .plain-fieldset:disabled { opacity: .7; }
 .radio-explained { align-items: flex-start; }
@@ -7407,7 +7528,7 @@ html.call-window body {
 /* Browse spaces and invitations */
 .space-row .space-tile { width: 36px; height: 36px; flex: none; font-size: 14px; }
 .space-row.highlighted { background: var(--accent-soft); border-radius: 6px; padding-inline: .4rem; }
-.browse-meta { font-size: var(--text-2xs); letter-spacing: var(--tracking-2xs); }
+.browse-meta { font-size: var(--text-xs); letter-spacing: var(--tracking-xs); }
 .radio-group { border: 0; margin: .5rem 0; padding: 0; }
 .radio-group legend { padding: 0; font-weight: var(--weight-semibold); }
 .invite-form h3, .modal-body > h3 { margin: 1rem 0 .25rem; font-size: var(--text-md); }
@@ -7959,7 +8080,7 @@ html.call-window body {
 /* A failed action (issue #322): stays until closed, with the details behind a toggle. */
 .toast-error { border-color: var(--danger); border-inline-start-width: 4px; }
 .toast-details summary { cursor: pointer; font-size: var(--text-xs); letter-spacing: var(--tracking-xs); color: var(--text-muted); }
-.toast-detail-text { display: block; margin-top: .25rem; font-size: var(--text-2xs); letter-spacing: var(--tracking-2xs); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.toast-detail-text { display: block; margin-top: .25rem; font-size: var(--text-xs); letter-spacing: var(--tracking-xs); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
 
 /* A button whose work runs (PendingAction): disabled, with a spinner in front of its label. */
 .btn[aria-busy="true"] { cursor: progress; }
@@ -8083,6 +8204,13 @@ html.call-window body {
   border-bottom: 1px solid var(--border);
 }
 .update-banner[role="alert"] { background: var(--mention-bg); color: var(--mention-text); }
+/* A ready update (#729): the accent colour, the restart as a white button on it. It stays until
+   the restart; in a call the button waits, disabled, and says so. */
+.update-banner.is-ready { background: var(--accent); color: var(--on-accent); border-bottom-color: transparent; font-weight: var(--weight-semibold); }
+.update-banner.is-ready a { color: inherit; text-decoration: underline; }
+.update-banner.is-ready .update-banner-restart { border: 0; background: var(--on-accent); color: var(--accent); font-weight: var(--weight-semibold); }
+.update-banner.is-ready .update-banner-restart:disabled { opacity: 0.75; cursor: default; }
+@media (hover: hover) and (pointer: fine) { .update-banner.is-ready .update-banner-restart:hover:not(:disabled) { background: color-mix(in srgb, var(--on-accent) 88%, var(--accent)); } }
 .update-command {
   padding: 2px 6px;
   border-radius: var(--radius);
@@ -9808,17 +9936,30 @@ html.call-window body {
   max-width: none;
 }
 
-:root[data-layout="compact"] .search-btn {
+:root[data-layout="compact"] .search-field {
   grid-column: 2;
   justify-self: end;
-  justify-content: center;
-  width: var(--touch);
+  width: auto;
   height: var(--touch);
   padding: 0;
   border: 0;
   background: transparent;
 }
 
+:root[data-layout="compact"] .search-btn {
+  flex: none;
+  justify-content: center;
+  width: var(--touch);
+  height: var(--touch);
+  padding: 0;
+}
+
+:root[data-layout="compact"] .search-btn > .icon {
+  display: block;
+}
+
+:root[data-layout="compact"] .search-field-icon,
+:root[data-layout="compact"] .search-field-scope,
 :root[data-layout="compact"] .search-btn > span,
 :root[data-layout="compact"] .search-btn kbd,
 :root[data-layout="compact"] .search-btn .shortcut,
@@ -12181,8 +12322,8 @@ html.call-window body {
 
 .person-note {
   margin-left: auto;
-  font-size: var(--text-2xs);
-  letter-spacing: var(--tracking-2xs);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
 }
 
 .person-check {

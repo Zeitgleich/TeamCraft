@@ -24,7 +24,10 @@ const PREFERENCES: [UpdatePreference; 3] = [
 ];
 
 /// Above the app: "ready, restart", "available", or "too old". Renders nothing outside the
-/// desktop app. "Later" hides a version until the next launch; "too old" can't be hidden.
+/// desktop app. "Later" hides an available version until the next launch. "Ready" and "too old"
+/// can't be hidden (#729): an update that is downloaded or installed only needs a restart, and the
+/// banner keeps asking for it, in the accent colour (the one banner meant to be seen; connection
+/// trouble stays quiet, offline_banner.rs). During a call its button waits for the call to end.
 #[component]
 pub fn UpdateNotice() -> impl IntoView {
   let i18n = use_i18n();
@@ -33,7 +36,7 @@ pub fn UpdateNotice() -> impl IntoView {
   let error = RwSignal::new(None::<String>);
   move || {
     let banner = status.get()?.banner()?;
-    let version = banner_version(&banner);
+    let version = dismissable_version(&banner);
     if dismissed
       .get()
       .is_some_and(|hidden| Some(&hidden) == version.as_ref())
@@ -41,6 +44,7 @@ pub fn UpdateNotice() -> impl IntoView {
       return None;
     }
     let is_alert = matches!(banner, UpdateBanner::TooOld { .. });
+    let is_ready = matches!(banner, UpdateBanner::Ready { .. });
     let later = version.map(|version| {
       view! {
         <button class="btn btn-small" on:click=move |_| dismissed.set(Some(version.clone()))>
@@ -49,7 +53,7 @@ pub fn UpdateNotice() -> impl IntoView {
       }
     });
     Some(view! {
-      <div class="update-banner" role=if is_alert { "alert" } else { "status" }>
+      <div class="update-banner" class:is-ready=is_ready role=if is_alert { "alert" } else { "status" }>
         <Icon name=if is_alert { IconName::Alert } else { IconName::Download } />
         {banner_body(i18n, banner, status, error)}
         {later}
@@ -159,12 +163,23 @@ fn banner_body(
       version,
       maybe_notes_url,
       can_restart,
-    } => view! {
-      <span>{i18n.t_with("update-ready", &[("version", &version)])}</span>
-      {notes_link(i18n, maybe_notes_url)}
-      {restart_button(i18n, can_restart, status, error)}
-    }
-    .into_any(),
+    } => {
+      // A package manager installed it (deb/rpm): the files are new, the running app isn't.
+      let is_installed = status.with_untracked(|maybe| maybe.as_ref().is_some_and(|current| current.maybe_package_manager.is_some()));
+      let text_key = if is_installed { "update-ready-installed" } else { "update-ready-banner" };
+      view! {
+        <span class="update-banner-text">{i18n.t_with(text_key, &[("version", &version)])}</span>
+        {notes_link(i18n, maybe_notes_url)}
+        <button
+          class="btn btn-small update-banner-restart"
+          prop:disabled=!can_restart
+          on:click=move |_| run(error, status, tauri::update_restart())
+        >
+          {i18n.t(if can_restart { "update-restart-short" } else { "update-restart-after-call" })}
+        </button>
+      }
+      .into_any()
+    },
     UpdateBanner::Available {
       version,
       maybe_notes_url,
@@ -282,10 +297,11 @@ fn run(
   });
 }
 
-fn banner_version(banner: &UpdateBanner) -> Option<String> {
+/// The version "Later" hides, for the banners that can be hidden: only an available one.
+fn dismissable_version(banner: &UpdateBanner) -> Option<String> {
   match banner {
-    UpdateBanner::Ready { version, .. } | UpdateBanner::Available { version, .. } => Some(version.clone()),
-    UpdateBanner::TooOld { .. } => None,
+    UpdateBanner::Available { version, .. } => Some(version.clone()),
+    UpdateBanner::Ready { .. } | UpdateBanner::TooOld { .. } => None,
   }
 }
 
@@ -372,6 +388,9 @@ mod tests {
       "update-available",
       "update-restart",
       "update-restart-after-call",
+      "update-restart-short",
+      "update-ready-banner",
+      "update-ready-installed",
       "update-download",
       "update-later",
       "update-whats-new",
@@ -393,17 +412,27 @@ mod tests {
   }
 
   #[test]
-  fn only_versioned_banners_can_be_dismissed() {
+  fn only_an_available_update_can_be_dismissed() {
+    let available = UpdateBanner::Available {
+      version: "1.0.1".into(),
+      maybe_notes_url: None,
+      action: AvailableAction::Download { can_download: true },
+    };
+    assert_eq!(dismissable_version(&available), Some("1.0.1".to_owned()));
     let ready = UpdateBanner::Ready {
       version: "1.0.1".into(),
       maybe_notes_url: None,
-      can_restart: true,
+      can_restart: false,
     };
-    assert_eq!(banner_version(&ready), Some("1.0.1".to_owned()));
+    assert_eq!(
+      dismissable_version(&ready),
+      None,
+      "a ready update keeps asking, also in a call"
+    );
     let too_old = UpdateBanner::TooOld {
       required_version: "1.2.0".into(),
       action: TooOldAction::Elsewhere,
     };
-    assert_eq!(banner_version(&too_old), None);
+    assert_eq!(dismissable_version(&too_old), None);
   }
 }
