@@ -6,7 +6,7 @@
 //! sequence numbers and resume. It never looks inside payloads, like the real server. Tests can take
 //! a client offline or drop its gateway to exercise retries and resume.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
@@ -161,6 +161,8 @@ struct State {
   next_connection: u64,
   /// Users with workspace admin rights (permission checks only; trust comes from the roster).
   admins: HashSet<UserId>,
+  /// Direct messages deleted with a deleted account, per remaining participant.
+  deleted_conversations: HashMap<UserId, Vec<ConversationId>>,
   attachments: HashMap<AttachmentId, FakeAttachment>,
   push_registrations: HashMap<DeviceId, RegisterPushRequest>,
   notification_settings: HashMap<UserId, NotificationSettings>,
@@ -383,6 +385,7 @@ impl FakeServer {
         maybe_organization: None,
         maybe_has_devices: None,
         is_deactivated: false,
+        is_deleted: false,
       },
     );
     drop(state);
@@ -1307,7 +1310,8 @@ impl ServerApi for FakeServerApi {
   async fn user(&self, user: UserId) -> Result<UserSummary, ApiError> {
     self.with(|state, _| {
       let summary = state.user(user)?;
-      if summary.is_deactivated {
+      // Like the server: a deleted account's tombstone is shown, a deactivated one is not.
+      if summary.is_deactivated && !summary.is_deleted {
         return Err(ApiError::status(404, ErrorCode::UserNotFound, "unknown user"));
       }
       Ok(summary.clone())
@@ -1739,7 +1743,10 @@ impl ServerApi for FakeServerApi {
         .filter(|conversation| conversation.members.contains_key(&me))
         .map(|conversation| conversation.view(me))
         .collect();
-      Ok(ListConversationsResponse { conversations })
+      Ok(ListConversationsResponse {
+        conversations,
+        deleted_conversation_ids: state.deleted_conversations.get(&me).cloned().unwrap_or_default(),
+      })
     })
   }
 
@@ -1958,6 +1965,23 @@ impl ServerApi for FakeServerApi {
     for conversation in conversations {
       self.server.remove_member_as_admin(conversation, user);
     }
+    Ok(())
+  }
+
+  async fn admin_delete_user(&self, user: UserId) -> Result<(), ApiError> {
+    let me = self.user;
+    let mut state = self.server.lock();
+    if !state.admins.contains(&me) {
+      return Err(ApiError::status(403, ErrorCode::Forbidden, "administrators only"));
+    }
+    if user == me {
+      return Err(ApiError::status(
+        409,
+        ErrorCode::CannotDeleteSelf,
+        "admins can't delete their own account",
+      ));
+    }
+    state.delete_user(user);
     Ok(())
   }
 
@@ -2892,7 +2916,10 @@ impl ServerApi for FakeServerApi {
         })
         .map(|conversation| conversation.view(me))
         .collect();
-      Ok(ListConversationsResponse { conversations })
+      Ok(ListConversationsResponse {
+        conversations,
+        deleted_conversation_ids: Vec::new(),
+      })
     })
   }
 
@@ -4434,6 +4461,83 @@ impl State {
       },
     );
     id
+  }
+
+  /// What `DELETE /admin/users/{id}` does: 1:1 DMs (and group DMs that would keep one other
+  /// person) go, the user leaves every other conversation, their devices and keys go, and the
+  /// account becomes a tombstone. Idempotent.
+  fn delete_user(&mut self, user: UserId) {
+    let theirs: Vec<ConversationId> = self
+      .conversations
+      .iter()
+      .filter(|(_, entry)| entry.members.contains_key(&user))
+      .map(|(id, _)| *id)
+      .collect();
+    let mut co_members = BTreeSet::new();
+    for conversation in theirs {
+      let Some(entry) = self.conversations.get_mut(&conversation) else {
+        continue;
+      };
+      entry.members.remove(&user);
+      let remaining: Vec<UserId> = entry.members.keys().copied().collect();
+      co_members.extend(remaining.iter().copied());
+      let is_direct = matches!(
+        entry.response.kind,
+        ConversationKind::Dm | ConversationKind::Group
+      );
+      if is_direct && (entry.response.kind == ConversationKind::Dm || remaining.len() <= 1) {
+        self.conversations.remove(&conversation);
+        for other in &remaining {
+          self
+            .deleted_conversations
+            .entry(*other)
+            .or_default()
+            .push(conversation);
+        }
+        self.publish(
+          remaining,
+          &GatewayEvent::ConversationDelete {
+            conversation_id: conversation,
+          },
+        );
+      } else {
+        self.publish(
+          remaining,
+          &GatewayEvent::MembershipRemove {
+            conversation_id: conversation,
+            user_id: user,
+          },
+        );
+      }
+    }
+    let devices: Vec<DeviceId> = self
+      .devices
+      .iter()
+      .filter(|(_, device)| device.user == user)
+      .map(|(id, _)| *id)
+      .collect();
+    for device in devices {
+      self.devices.remove(&device);
+      self.key_packages.remove(&device);
+      self.publish(
+        co_members.iter().copied(),
+        &GatewayEvent::DeviceRemove {
+          user_id: user,
+          device_id: device,
+        },
+      );
+    }
+    self.identity_keys.remove(&user);
+    self.key_bags.remove(&user);
+    self.admins.remove(&user);
+    if let Some(summary) = self.users.get_mut(&user) {
+      summary.is_deactivated = true;
+      summary.is_deleted = true;
+      summary.display_name = "Deleted user".to_owned();
+      summary.maybe_username = None;
+    }
+    let everyone: Vec<UserId> = self.users.keys().copied().collect();
+    self.publish(everyone, &GatewayEvent::ProfileUpdate { user_id: user });
   }
 
   fn publish(&mut self, users: impl IntoIterator<Item = UserId>, event: &GatewayEvent) {

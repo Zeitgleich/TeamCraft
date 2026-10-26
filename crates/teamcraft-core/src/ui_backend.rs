@@ -493,6 +493,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       is_bot: summary.kind == UserKind::Bot,
       maybe_organization: summary.maybe_organization.clone(),
       is_deactivated: summary.is_deactivated,
+      is_deleted: summary.is_deleted,
       device_setup: match summary.maybe_has_devices {
         Some(true) => DeviceSetup::HasDevices,
         Some(false) => DeviceSetup::NoDevices,
@@ -877,6 +878,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
         is_bot: false,
         maybe_organization: None,
         is_deactivated: false,
+        is_deleted: false,
         device_setup: DeviceSetup::HasDevices,
         maybe_email: None,
       })
@@ -2124,6 +2126,7 @@ mod tests {
       maybe_organization: None,
       maybe_has_devices: None,
       is_deactivated: false,
+      is_deleted: false,
     };
     let direct = ConversationResponse {
       id: id(10),
@@ -2406,6 +2409,7 @@ mod tests {
         maybe_organization: None,
         maybe_has_devices: None,
         is_deactivated: false,
+        is_deleted: false,
       };
       (backend, conversation, BTreeMap::from([(me.id, me)]))
     }

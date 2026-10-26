@@ -1747,6 +1747,15 @@ impl Core {
           .await
           .map_err(describe_failure);
       },
+      ChatAction::AdminDeleteUser { user } => {
+        return client.admin_delete_user(*user).await.map_err(describe_failure);
+      },
+      ChatAction::AdminRemoveGroupLeftover { conversation, user } => {
+        return client
+          .admin_remove_group_leftover(*conversation, *user)
+          .await
+          .map_err(describe_failure);
+      },
       _ => {},
     }
     let backend = self.backend.as_ref().ok_or_else(not_set_up)?;
@@ -1782,7 +1791,9 @@ impl Core {
       | ChatAction::PublishPolicy { .. }
       | ChatAction::PublishRoster { .. }
       | ChatAction::AdminJoinChannel { .. }
-      | ChatAction::AdminRemoveFromAllChats { .. } => {},
+      | ChatAction::AdminRemoveFromAllChats { .. }
+      | ChatAction::AdminDeleteUser { .. }
+      | ChatAction::AdminRemoveGroupLeftover { .. } => {},
       // Message actions, files and workspace management go to the backend, which queues what
       // needs the engine as commands.
       other => {

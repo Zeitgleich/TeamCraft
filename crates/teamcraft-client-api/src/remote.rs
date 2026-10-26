@@ -538,6 +538,17 @@ pub enum ChatAction {
   AdminRemoveFromAllChats {
     user: UserId,
   },
+  /// An admin deletes an account: signed removals per channel, then `DELETE /admin/users/{id}`
+  /// (admin.md §3.2.1).
+  AdminDeleteUser {
+    user: UserId,
+  },
+  /// An admin removes a user left over in the encryption group of a conversation this device is in
+  /// (issue #734).
+  AdminRemoveGroupLeftover {
+    conversation: ConversationId,
+    user: UserId,
+  },
   // The actions of crate::actions; `apply_to` runs them on a backend.
   SendMessage {
     message: OutgoingMessage,

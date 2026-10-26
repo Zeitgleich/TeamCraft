@@ -757,6 +757,184 @@ mod welcome_retry {
   }
 }
 
+mod leftover_removal {
+  use super::*;
+
+  /// Issue #734: the admin console's "Remove from the group" on a confirmed leftover. The admin's
+  /// device, a member of the group, signs and commits the removal itself; keys rotate.
+  #[tokio::test]
+  async fn an_admin_in_the_group_removes_a_confirmed_leftover() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol) = three(&server).await;
+    let alice_id = alice.client.user_id();
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    let carol_id = carol.client.user_id();
+    let bob_id = bob.client.user_id();
+    server.remove_member_as_admin(channel, carol_id);
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    alice.client.sync_mls(channel).await.unwrap();
+    bob.client.sync_mls(channel).await.unwrap();
+    assert_eq!(
+      group_leftovers(alice.store.as_ref(), channel).unwrap(),
+      [carol_id]
+    );
+    let commits_before = commits(&alice, channel).await;
+
+    // Not for members, and only for somebody recorded as left over.
+    let error = bob
+      .client
+      .admin_remove_group_leftover(channel, carol_id)
+      .await
+      .unwrap_err();
+    assert!(
+      matches!(error, teamcraft_core::CoreError::NotAnAdmin(_)),
+      "{error}"
+    );
+    let error = alice
+      .client
+      .admin_remove_group_leftover(channel, bob_id)
+      .await
+      .unwrap_err();
+    assert!(!error.is_transient(), "{error}");
+    assert_eq!(commits(&alice, channel).await, commits_before);
+
+    alice
+      .client
+      .admin_remove_group_leftover(channel, carol_id)
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    assert_eq!(commits(&alice, channel).await, commits_before + 1);
+    assert!(group_leftovers(alice.store.as_ref(), channel).unwrap().is_empty());
+    assert_eq!(epoch(&mut alice, channel), epoch(&mut bob, channel));
+    // Again is fine: nothing left to remove.
+    let error = alice
+      .client
+      .admin_remove_group_leftover(channel, carol_id)
+      .await
+      .unwrap_err();
+    assert!(!error.is_transient(), "{error}");
+  }
+}
+
+mod account_deletion {
+  use super::*;
+
+  /// Issue #630: "Delete account" signs the removal from every channel first (members commit it,
+  /// keys rotate), then the server deletes. Their 1:1 DM is deleted and the other side drops it
+  /// with its history; the account shows as a tombstone.
+  #[tokio::test]
+  async fn the_admin_signs_the_removals_then_the_server_deletes_the_account() {
+    let server = FakeServer::new();
+    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let (mut alice, mut bob, mut carol) = three(&server).await;
+    let mut admin = enroll_with_clock(&server, "Admin", &clock, settings()).await;
+    let (alice_id, admin_id) = (alice.client.user_id(), admin.client.user_id());
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner), (admin_id, RosterRole::Admin)])
+      .await
+      .unwrap();
+    server.set_admin(admin_id);
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
+    let carol_id = carol.client.user_id();
+    let dm = bob.client.open_dm(carol_id).await.unwrap();
+    bob.client.send_text(dm, None, "hello").await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut admin]).await;
+    assert!(is_cached(&bob, dm));
+    let commits_before = commits(&alice, channel).await;
+
+    let error = bob.client.admin_delete_user(carol_id).await.unwrap_err();
+    assert!(
+      matches!(error, teamcraft_core::CoreError::NotAnAdmin(_)),
+      "{error}"
+    );
+    let error = admin.client.admin_delete_user(admin_id).await.unwrap_err();
+    assert!(!error.is_transient(), "{error}");
+
+    admin.client.admin_delete_user(carol_id).await.unwrap();
+    assert_eq!(proposals_by(&alice, &admin, channel).await, 1);
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut admin]).await;
+
+    // The members committed the signed removal: she can't read anything new.
+    assert_eq!(commits(&alice, channel).await, commits_before + 1);
+    // The DM went, with what Bob kept of it.
+    assert!(!is_cached(&bob, dm));
+    assert!(
+      bob
+        .store
+        .messages(dm, MessageFilter::TopLevel)
+        .unwrap()
+        .is_empty()
+    );
+    assert!(!bob.client.has_group(dm).unwrap());
+    // Everybody sees the tombstone.
+    let known: teamcraft_proto::UserSummary = serde_json::from_slice(
+      &bob
+        .store
+        .get(Table::Users, &carol_id.to_string())
+        .unwrap()
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(known.is_deleted && known.is_deactivated, "{known:?}");
+    #[cfg(feature = "ui")]
+    {
+      use teamcraft_client_api::backend::ChatBackend;
+      let backend = common::backend_of(&bob);
+      assert!(backend.user(carol_id).unwrap().is_deleted);
+      assert!(
+        backend.users().iter().all(|user| user.id != carol_id),
+        "people lists leave it out"
+      );
+      assert!(
+        backend
+          .direct_conversations()
+          .iter()
+          .all(|conversation| conversation.id != dm)
+      );
+    }
+    // A retry after a lost answer succeeds.
+    admin.client.admin_delete_user(carol_id).await.unwrap();
+  }
+
+  /// A device that was away when the DM was deleted drops it on its next full sync.
+  #[tokio::test]
+  async fn a_device_that_was_away_drops_the_deleted_dm_on_its_next_sync() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol) = three(&server).await;
+    let alice_id = alice.client.user_id();
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    server.set_admin(alice_id);
+    let carol_id = carol.client.user_id();
+    let dm = bob.client.open_dm(carol_id).await.unwrap();
+    bob.client.send_text(dm, None, "hello").await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+
+    alice.client.admin_delete_user(carol_id).await.unwrap();
+    // Bob's device doesn't read its gateway (offline beyond the resume window): only the sync.
+    bob.client.full_sync().await.unwrap();
+    assert!(!is_cached(&bob, dm));
+    assert!(
+      bob
+        .store
+        .messages(dm, MessageFilter::TopLevel)
+        .unwrap()
+        .is_empty()
+    );
+  }
+}
+
 async fn three(server: &FakeServer) -> (Peer, Peer, Peer) {
   (
     Peer::enroll(server, "Alice").await,

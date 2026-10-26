@@ -1274,6 +1274,7 @@ fn demo_users() -> Vec<User> {
       },
       // The last colleague hasn't set up the app yet.
       is_deactivated: false,
+      is_deleted: false,
       device_setup: if id == 8 {
         crate::model::DeviceSetup::NoDevices
       } else {
@@ -1305,6 +1306,7 @@ fn demo_users() -> Vec<User> {
     is_bot: true,
     maybe_organization: None,
     is_deactivated: false,
+    is_deleted: false,
     device_setup: crate::model::DeviceSetup::HasDevices,
     maybe_email: None,
   });

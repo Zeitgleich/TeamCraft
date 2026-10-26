@@ -95,6 +95,10 @@ impl ConversationResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ListConversationsResponse {
   pub conversations: Vec<ConversationResponse>,
+  /// Direct messages deleted with a deleted account since this user's devices last looked
+  /// (admin.md §3.2.1): devices drop them with their local history. Absent from older servers.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub deleted_conversation_ids: Vec<ConversationId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -228,4 +232,23 @@ pub struct ListConversationsQuery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct SetReadPositionRequest {
   pub message_id: MessageId,
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn deleted_conversations_are_listed_only_when_there_are_some() {
+    let empty = ListConversationsResponse {
+      conversations: Vec::new(),
+      deleted_conversation_ids: Vec::new(),
+    };
+    assert_eq!(serde_json::to_string(&empty).unwrap(), r#"{"conversations":[]}"#);
+    let listed: ListConversationsResponse =
+      serde_json::from_str(r#"{"conversations":[],"deleted_conversation_ids":["8"]}"#).unwrap();
+    assert_eq!(listed.deleted_conversation_ids.len(), 1);
+    let older: ListConversationsResponse = serde_json::from_str(r#"{"conversations":[]}"#).unwrap();
+    assert!(older.deleted_conversation_ids.is_empty());
+  }
 }

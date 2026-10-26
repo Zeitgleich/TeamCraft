@@ -37,6 +37,12 @@ pub enum ApiError {
   /// A roster without an owner: nobody could ever sign a roster or policy again (admin.md §2.3).
   #[error("the roster must keep at least one owner")]
   LastOwner,
+  /// An admin tried to delete their own account.
+  #[error("admins can't delete their own account")]
+  CannotDeleteSelf,
+  /// Deleting the account would leave the workspace without an active admin.
+  #[error("the workspace must keep at least one active admin")]
+  LastAdmin,
   /// Channel members must belong to the channel's space; the user is not in it (yet).
   #[error("the user is not a member of the space")]
   NotSpaceMember,
@@ -254,7 +260,8 @@ impl ApiError {
         | AuthError::InvalidToken(_)
         | AuthError::Expired(_)
         | AuthError::SessionEnded
-        | AuthError::SessionTimedOut,
+        | AuthError::SessionTimedOut
+        | AuthError::AccountDeleted,
       ) => StatusCode::UNAUTHORIZED,
       Self::Auth(AuthError::NoTeamcraftRole | AuthError::AccountDeactivated)
       | Self::Forbidden(_)
@@ -265,6 +272,8 @@ impl ApiError {
         StatusCode::BAD_REQUEST
       },
       Self::Conflict(_)
+      | Self::CannotDeleteSelf
+      | Self::LastAdmin
       | Self::KeyPackageExhausted
       | Self::EpochConflict { .. }
       | Self::VersionConflict { .. } => StatusCode::CONFLICT,
@@ -287,6 +296,7 @@ impl ApiError {
       Self::Auth(AuthError::SessionTimedOut) => ErrorCode::SessionTimedOut,
       Self::Auth(AuthError::NoTeamcraftRole) => ErrorCode::NoTeamcraftRole,
       Self::Auth(AuthError::AccountDeactivated) => ErrorCode::AccountDeactivated,
+      Self::Auth(AuthError::AccountDeleted) => ErrorCode::AccountDeleted,
       Self::Forbidden(_) => ErrorCode::Forbidden,
       Self::Auth(AuthError::KeysUnavailable(_)) => ErrorCode::Unavailable,
       Self::NotFound { code, .. } => code.clone(),
@@ -297,6 +307,8 @@ impl ApiError {
       Self::UnknownHost => ErrorCode::UnknownHost,
       Self::Conflict(_) => ErrorCode::Conflict,
       Self::LastOwner => ErrorCode::LastOwner,
+      Self::CannotDeleteSelf => ErrorCode::CannotDeleteSelf,
+      Self::LastAdmin => ErrorCode::LastAdmin,
       Self::NotSpaceMember => ErrorCode::NotSpaceMember,
       Self::KeyPackageExhausted => ErrorCode::KeyPackageExhausted,
       Self::InvalidKeyPackage(_) => ErrorCode::InvalidKeyPackage,
@@ -393,6 +405,11 @@ mod tests {
         AuthError::AccountDeactivated,
         StatusCode::FORBIDDEN,
         ErrorCode::AccountDeactivated,
+      ),
+      (
+        AuthError::AccountDeleted,
+        StatusCode::UNAUTHORIZED,
+        ErrorCode::AccountDeleted,
       ),
       (
         AuthError::KeysUnavailable("x".into()),
@@ -498,6 +515,12 @@ mod tests {
         ErrorCode::Conflict,
       ),
       (ApiError::LastOwner, StatusCode::BAD_REQUEST, ErrorCode::LastOwner),
+      (
+        ApiError::CannotDeleteSelf,
+        StatusCode::CONFLICT,
+        ErrorCode::CannotDeleteSelf,
+      ),
+      (ApiError::LastAdmin, StatusCode::CONFLICT, ErrorCode::LastAdmin),
       (
         ApiError::NotSpaceMember,
         StatusCode::BAD_REQUEST,

@@ -18,6 +18,9 @@ wire_enum! {
     /// The account is deactivated (suspended by an admin or the identity provider); signing in is
     /// refused until it is reactivated.
     AccountDeactivated => "account_deactivated",
+    /// The token comes from a sign-in before the account was deleted (admin.md §3.2.1); signing
+    /// in again creates a new account.
+    AccountDeleted => "account_deleted",
     Forbidden => "forbidden",
     UserNotFound => "user_not_found",
     SpaceNotFound => "space_not_found",
@@ -50,6 +53,10 @@ wire_enum! {
     VersionConflict => "version_conflict",
     /// A roster change would leave the workspace without an owner (admin.md §2.3).
     LastOwner => "last_owner",
+    /// An admin can't delete their own account.
+    CannotDeleteSelf => "cannot_delete_self",
+    /// Deleting the account would leave the workspace without an active admin.
+    LastAdmin => "last_admin",
     /// A channel member must belong to the channel's space first (invite them to the space).
     NotSpaceMember => "not_space_member",
     KeyPackageExhausted => "key_package_exhausted",
@@ -203,6 +210,7 @@ mod tests {
       ErrorCode::SessionTimedOut,
       ErrorCode::NoTeamcraftRole,
       ErrorCode::AccountDeactivated,
+      ErrorCode::AccountDeleted,
       ErrorCode::Forbidden,
       ErrorCode::UserNotFound,
       ErrorCode::SpaceNotFound,
@@ -232,6 +240,8 @@ mod tests {
       ErrorCode::EpochConflict,
       ErrorCode::VersionConflict,
       ErrorCode::LastOwner,
+      ErrorCode::CannotDeleteSelf,
+      ErrorCode::LastAdmin,
       ErrorCode::KeyPackageExhausted,
       ErrorCode::PayloadTooLarge,
       ErrorCode::RateLimited,

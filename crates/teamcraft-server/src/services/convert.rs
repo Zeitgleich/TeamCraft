@@ -28,6 +28,7 @@ pub fn user_summary(state: &AppState, user: &User) -> UserSummary {
     maybe_organization: user.maybe_organization.clone(),
     maybe_has_devices: None,
     is_deactivated: user.is_deactivated,
+    is_deleted: user.is_deleted,
   }
 }
 

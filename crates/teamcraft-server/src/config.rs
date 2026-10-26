@@ -224,6 +224,10 @@ pub struct PolicyConfig {
   /// after the deactivation. None (the default): only when an admin removes them (admin.md §3.4).
   #[serde(rename = "remove_deactivated_after_days", default)]
   pub maybe_remove_deactivated_after_days: Option<u32>,
+  /// Days a direct message deleted with a deleted account is remembered for the remaining
+  /// participants, so their devices that were offline that long still drop it with its local
+  /// history on the next sync (admin.md §3.2.1). After that it only leaves the list.
+  pub deleted_conversations_kept_days: u32,
 }
 
 /// Size limits of requests and results.
@@ -1324,6 +1328,7 @@ impl Default for PolicyConfig {
       default_spaces: Vec::new(),
       default_channels: Vec::new(),
       maybe_remove_deactivated_after_days: None,
+      deleted_conversations_kept_days: 180,
     }
   }
 }

@@ -59,7 +59,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // Not fatal: names stay as they were until the next sync.
       tracing::warn!(%error, "could not recheck people no list mentions");
     }
-    let conversations = self.api.list_conversations().await?.conversations;
+    let listing = self.api.list_conversations().await?;
+    // Direct messages deleted with a deleted account while this device was away: they go with
+    // their local history, as on the gateway's `conversation_delete`.
+    for deleted in &listing.deleted_conversation_ids {
+      if self
+        .store
+        .get(Table::Conversations, &deleted.to_string())?
+        .is_some()
+      {
+        self.purge_conversation(*deleted)?;
+      }
+    }
+    let conversations = listing.conversations;
     let known: Vec<ConversationId> = self.cached_conversations()?.into_keys().collect();
     for stale in known
       .iter()
@@ -417,8 +429,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Cached people that neither a space member list (`listed`) nor a stored conversation member
   /// list names are asked about one by one, at most [`MAX_UNLISTED_RECHECKS`] per sync and each
   /// at most once per [`UNLISTED_RECHECK_INTERVAL_MS`]: a deactivated account drops out of every
-  /// list, and without this its old name stayed in the people lists forever (issue #654). Those
-  /// already marked deactivated are not asked again.
+  /// list, and without this its old name stayed in the people lists forever (issue #654). A
+  /// deactivated account is still asked about: it may be deleted later and then shows as "Deleted
+  /// user" (issue #630). Deleted ones are not asked again.
   async fn recheck_unlisted_people(&mut self, listed: &HashSet<UserId>) -> Result<(), CoreError> {
     let me = self.user_id();
     let now = self.now_ms();
@@ -432,7 +445,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let cached: Vec<UserSummary> = records::list_json(&self.store, Table::Users)?;
     let unlisted: Vec<UserId> = cached
       .iter()
-      .filter(|user| !user.is_deactivated && user.id != me)
+      .filter(|user| !user.is_deleted && user.id != me)
       .map(|user| user.id)
       .filter(|user| !listed.contains(user) && !in_conversations.contains(user))
       .filter(|user| {

@@ -489,6 +489,12 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn admin_delete_user(&self, user: UserId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/admin/users/{user}"), None)
+      .await
+  }
+
   async fn update_member(
     &self,
     conversation: ConversationId,
