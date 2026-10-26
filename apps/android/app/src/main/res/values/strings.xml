@@ -94,6 +94,7 @@
   <string name="notification_reply">Reply</string>
   <string name="notification_mark_read">Mark as read</string>
   <string name="you">You</string>
+  <string name="user_deleted_name">Deleted user</string>
   <plurals name="replies">
     <item quantity="one">%d reply</item>
     <item quantity="other">%d replies</item>

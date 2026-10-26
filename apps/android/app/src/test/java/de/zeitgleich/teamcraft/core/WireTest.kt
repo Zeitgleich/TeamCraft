@@ -42,6 +42,25 @@ class WireTest {
   }
 
   @Test
+  fun formerAccountsNameOldMessagesAndDeletedOnesGetTheAppsName() {
+    val snapshot = WireJson.decodeFromString(
+      ChatSnapshot.serializer(),
+      """
+      {"me":{"id":"1","username":"alice","display_name":"Alice"},
+       "users":[{"id":"2","username":"sam","display_name":"Sam Doe"}],
+       "former_users":[{"id":"3","username":"bea","display_name":"Bea Former","is_deactivated":true},
+                       {"id":"4","username":"","display_name":"Deleted user","is_deactivated":true,"is_deleted":true}]}
+      """,
+    ).namingDeletedUsers("Gelöschter Nutzer")
+    assertEquals(listOf("2"), snapshot.users.map { it.id })
+    assertEquals("Bea Former", snapshot.name("3"))
+    assertEquals("Gelöschter Nutzer", snapshot.name("4"))
+    assertEquals("", snapshot.user("4")?.username)
+    assertFalse(snapshot.user("3")!!.isOffered)
+    assertTrue(snapshot.user("2")!!.isOffered)
+  }
+
+  @Test
   fun answersDecodeWithTransfersAndUnknownFields() {
     val answer = decodeAnswer(
       """

@@ -95,4 +95,38 @@ final class ChatModelTests: XCTestCase {
     XCTAssertEqual(AvatarView.initials(of: "Alex Example"), "AE")
     XCTAssertEqual(AvatarView.initials(of: ""), "?")
   }
+
+  func testFormerAccountsNameOldMessagesAndDeletedOnesGetTheAppsName() throws {
+    let json = """
+      {
+        "me": {"id": "1", "username": "alex", "display_name": "Alex Example"},
+        "users": [{"id": "2", "username": "sam", "display_name": "Sam Doe"}],
+        "former_users": [
+          {"id": "3", "username": "bea", "display_name": "Bea Former", "is_deactivated": true},
+          {"id": "4", "username": "", "display_name": "Tombstone", "is_deactivated": true, "is_deleted": true}
+        ]
+      }
+      """
+    let people = try XCTUnwrap(Wire.decode(PeopleSnapshot.self, from: json))
+    let names = people.namesById
+    XCTAssertEqual(names["2"], "Sam Doe")
+    XCTAssertEqual(names["3"], "Bea Former")
+    XCTAssertEqual(names["4"], String(localized: "user_deleted_name"))
+    // Only the people to offer are mentionable.
+    XCTAssertEqual(people.users?.map(\.id), ["2"])
+  }
+
+  func testADeletedAuthorGetsTheAppsName() {
+    let message = MessageItem(
+      id: "7", conversationId: "5", authorId: "4", authorName: "Tombstone", sentAtMs: 0, body: "Hello",
+      isEdited: false, isPending: false, replyCount: 0, maybeThreadId: nil, reactions: [], isAuthorDeleted: true)
+    XCTAssertEqual(message.namingDeletedAuthor().authorName, String(localized: "user_deleted_name"))
+    let hit = SearchHitItem(message: message, conversationName: "general", maybeSpaceName: nil)
+    XCTAssertEqual(hit.namingDeletedAuthor().message.authorName, String(localized: "user_deleted_name"))
+
+    var kept = message
+    kept.isAuthorDeleted = false
+    kept.authorName = "Sam Doe"
+    XCTAssertEqual(kept.namingDeletedAuthor().authorName, "Sam Doe")
+  }
 }

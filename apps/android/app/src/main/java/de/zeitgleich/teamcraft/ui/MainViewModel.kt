@@ -108,7 +108,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   val changeCount: StateFlow<Long> = graph.core.changeCount
 
   /** The chat features over the core's JSON bridge. */
-  val chat = ChatClient { graph.core.core() }
+  val chat = ChatClient(::deletedUserName) { graph.core.core() }
   private val failures = MutableStateFlow<Int?>(null)
 
   /** Files picked in a composer and not sent yet, by conversation and thread. */
@@ -357,13 +357,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   suspend fun messages(conversationId: String): List<MessageItem> =
-    read { messages(conversationId, MESSAGE_PAGE.toUInt()) } ?: emptyList()
+    read { messages(conversationId, MESSAGE_PAGE.toUInt()) }?.map(::namedAuthor) ?: emptyList()
 
   suspend fun thread(conversationId: String, threadId: String): List<MessageItem> =
-    read { thread(conversationId, threadId) } ?: emptyList()
+    read { thread(conversationId, threadId) }?.map(::namedAuthor) ?: emptyList()
 
   suspend fun search(query: String): List<SearchHitItem> =
-    if (query.isBlank()) emptyList() else read { search(query) } ?: emptyList()
+    if (query.isBlank()) {
+      emptyList()
+    } else {
+      read { search(query) }?.map { it.copy(message = namedAuthor(it.message)) } ?: emptyList()
+    }
+
+  /** The app's own "Deleted user" in the user's language (issue #751). */
+  private fun deletedUserName(): String = getApplication<Application>().getString(R.string.user_deleted_name)
+
+  /** [message] with [deletedUserName] instead of the server's placeholder when its author was deleted. */
+  private fun namedAuthor(message: MessageItem): MessageItem =
+    if (message.isAuthorDeleted) message.copy(authorName = deletedUserName()) else message
 
   fun send(conversationId: String, maybeThreadId: String?, body: String) = viewModelScope.launch {
     runCatching { graph.core.core().sendMessage(conversationId, maybeThreadId, body) }
