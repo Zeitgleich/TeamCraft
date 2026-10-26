@@ -10,12 +10,12 @@ use teamcraft_proto::{
   GuestLinkResponse, IdempotencyKey, JoinMeetingRequest, JoinMeetingResponse, ListLobbyResponse,
   ListMeetingsResponse, LobbyEntry, LobbyState, LobbyStateResponse, MeetingControlAction,
   MeetingControlRequest, MeetingId, MeetingInvitee, MeetingRecurrence, MeetingResponse, RecurrenceFrequency,
-  RsvpStatus, SetRsvpRequest, UnixMillis,
+  RsvpStatus, SetRsvpRequest, UnixMillis, UpdateMeetingRequest,
 };
 
 use crate::auth::fetch::fetch;
 use crate::auth::{ApiMethod, ApiResponse, AppConfig, AuthError, Authenticator};
-use crate::clock::{now_ms, parse_local_datetime};
+use crate::clock::{format_local_datetime_input, now_ms, parse_local_datetime};
 use crate::feedback::{ActionFailure, FailureKind};
 use crate::meeting_reminders::ServerClock;
 use crate::model::{ConversationId, TimestampMs, UserId};
@@ -87,6 +87,21 @@ impl MeetingsClient {
   pub async fn create(&self, request: &CreateMeetingRequest) -> Result<MeetingResponse, MeetingError> {
     self
       .call(ApiMethod::Post, "/api/v1/meetings", Some(to_json(request)?))
+      .await
+  }
+
+  /// Saves a changed meeting (organizer only); invitees are replaced as a whole.
+  pub async fn update(
+    &self,
+    meeting: MeetingId,
+    request: &UpdateMeetingRequest,
+  ) -> Result<MeetingResponse, MeetingError> {
+    self
+      .call(
+        ApiMethod::Patch,
+        &format!("/api/v1/meetings/{meeting}"),
+        Some(to_json(request)?),
+      )
       .await
   }
 
@@ -377,6 +392,159 @@ pub fn invited_users(request: &CreateMeetingRequest) -> Vec<UserId> {
     .collect()
 }
 
+/// Who joined and who left a meeting's invitee list when the organizer saved a change: the whole
+/// list now (for the chat's encryption group) and the users taken off it. Both come from the
+/// organizer's own saved request and the meeting as it was, never from the server's member list
+/// (e2ee.md §4.6, "Meeting chats").
+pub fn invitee_change(
+  before: &MeetingResponse,
+  request: &UpdateMeetingRequest,
+) -> Option<(Vec<UserId>, Vec<UserId>)> {
+  let invitees = request.maybe_invitees.as_ref()?;
+  let now: Vec<UserId> = invitees
+    .iter()
+    .filter_map(|invitee| match invitee {
+      MeetingInvitee::User { user_id } => Some(*user_id),
+      MeetingInvitee::External { .. } => None,
+    })
+    .collect();
+  let removed = attending_users(before)
+    .into_iter()
+    .filter(|user| !now.contains(user) && *user != before.organizer_user_id)
+    .collect();
+  Some((now, removed))
+}
+
+/// The same from the server's answer to the save: the invitee list as saved and the users who were
+/// on `before` and are not on it any more.
+pub fn saved_change(before: &MeetingResponse, saved: &MeetingResponse) -> (Vec<UserId>, Vec<UserId>) {
+  let now = attending_users(saved);
+  let removed = attending_users(before)
+    .into_iter()
+    .filter(|user| !now.contains(user) && *user != before.organizer_user_id)
+    .collect();
+  (now, removed)
+}
+
+// ---- Edits whose chat change is still owed ----------------------------------------------------
+
+const PENDING_EDITS_KEY: &str = "meeting-edits-pending";
+/// An entry younger than this may still be in flight in this session; only older ones are
+/// reconciled.
+const PENDING_EDIT_GRACE_MS: i64 = 2 * 60_000;
+/// An entry older than this is dropped: the meeting is long gone from the list.
+const PENDING_EDIT_MAX_AGE_MS: i64 = 7 * 24 * 3_600_000;
+
+/// Users the organizer is about to take off a meeting, written down before the save is sent. If the
+/// app dies between the save and the commit that removes them from the chat's group, the next start
+/// finishes it ([`reconcile_pending_edits`]); the pending-removal record of the core only exists
+/// once `update_meeting_chat_members` ran.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct PendingEdit {
+  meeting: MeetingId,
+  removed: Vec<UserId>,
+  noted_at: TimestampMs,
+}
+
+pub fn note_pending_edit(meeting: MeetingId, removed: Vec<UserId>, now: TimestampMs) {
+  if removed.is_empty() {
+    return;
+  }
+  let mut edits = load_pending_edits();
+  edits.retain(|edit| edit.meeting != meeting);
+  edits.push(PendingEdit {
+    meeting,
+    removed,
+    noted_at: now,
+  });
+  store_pending_edits(&edits);
+}
+
+/// The save failed or the core has taken over: nothing is owed for this meeting.
+pub fn clear_pending_edit(meeting: MeetingId) {
+  let mut edits = load_pending_edits();
+  let before = edits.len();
+  edits.retain(|edit| edit.meeting != meeting);
+  if edits.len() != before {
+    store_pending_edits(&edits);
+  }
+}
+
+/// Finishes edits that were saved but not applied to the chat's group (the app was closed in
+/// between), judging by the meeting list: users no longer attending are removed, an edit that never
+/// reached the server is forgotten.
+pub fn reconcile_pending_edits(
+  now: TimestampMs,
+  meetings: &[MeetingResponse],
+  mut apply: impl FnMut(ConversationId, Vec<UserId>, Vec<UserId>),
+) {
+  let edits = load_pending_edits();
+  let (kept, actions) = plan_reconcile(&edits, now, meetings);
+  for (conversation, invitees, removed) in actions {
+    apply(conversation, invitees, removed);
+  }
+  if kept.len() != edits.len() {
+    store_pending_edits(&kept);
+  }
+}
+
+type ChatMemberUpdate = (ConversationId, Vec<UserId>, Vec<UserId>);
+
+fn plan_reconcile(
+  edits: &[PendingEdit],
+  now: TimestampMs,
+  meetings: &[MeetingResponse],
+) -> (Vec<PendingEdit>, Vec<ChatMemberUpdate>) {
+  let mut kept = Vec::new();
+  let mut actions = Vec::new();
+  for edit in edits {
+    let age = now - edit.noted_at;
+    if age > PENDING_EDIT_MAX_AGE_MS {
+      continue;
+    }
+    if age < PENDING_EDIT_GRACE_MS {
+      kept.push(edit.clone());
+      continue;
+    }
+    // Not in the list (not loaded, or over): decided on a later list, until it ages out.
+    let Some(meeting) = meetings.iter().find(|meeting| meeting.id == edit.meeting) else {
+      kept.push(edit.clone());
+      continue;
+    };
+    let attending = attending_users(meeting);
+    let removed: Vec<UserId> = edit
+      .removed
+      .iter()
+      .copied()
+      .filter(|user| !attending.contains(user))
+      .collect();
+    if !removed.is_empty() {
+      actions.push((meeting.conversation_id, attending, removed));
+    }
+  }
+  (kept, actions)
+}
+
+fn load_pending_edits() -> Vec<PendingEdit> {
+  crate::settings::load_string(PENDING_EDITS_KEY)
+    .and_then(|text| serde_json::from_str(&text).ok())
+    .unwrap_or_default()
+}
+
+fn store_pending_edits(edits: &[PendingEdit]) {
+  if let Ok(text) = serde_json::to_string(edits) {
+    crate::settings::store_string(PENDING_EDITS_KEY, &text);
+  }
+}
+
+/// [`reconcile_pending_edits`] on the hub's current list, applied through the core.
+pub fn finish_pending_edits(state: crate::state::AppState, hub: MeetingsHub) {
+  let meetings = hub.meetings.get_untracked();
+  reconcile_pending_edits(now_ms(), &meetings, |conversation, invitees, removed| {
+    state.try_write(|backend| backend.update_meeting_chat_members(conversation, invitees, removed));
+  });
+}
+
 /// The TeamCraft users a saved meeting lists as attendees (externals have no account). The
 /// organizer's own device sets the meeting chat's group up from this as it knows the meeting.
 pub fn attending_users(meeting: &MeetingResponse) -> Vec<UserId> {
@@ -488,13 +656,69 @@ impl ScheduleForm {
     }
   }
 
+  /// The form of the edit dialog: what the saved meeting says now (the organizer `me` is not an
+  /// invitee in the list). The repeat rule can't be changed after scheduling.
+  pub fn from_meeting(meeting: &MeetingResponse, me: UserId) -> Self {
+    let minutes = (meeting.ends_at.0 - meeting.starts_at.0) / MS_PER_MINUTE;
+    let mut form = Self::new(format_local_datetime_input(meeting.starts_at.0));
+    form.title = meeting.title.clone();
+    form.description = meeting.maybe_description.clone().unwrap_or_default();
+    form.duration_minutes = u32::try_from(minutes).unwrap_or(0);
+    form.has_lobby = meeting.has_lobby;
+    form.maybe_idempotency_key = None;
+    for attendee in &meeting.attendees {
+      match (attendee.maybe_user_id, &attendee.maybe_email) {
+        (Some(user), _) if user != me => form.members.push(user),
+        (None, Some(email)) => form.externals.push(ExternalInvitee {
+          email: email.clone(),
+          name: attendee.maybe_name.clone().unwrap_or_default(),
+        }),
+        _ => {},
+      }
+    }
+    form
+  }
+
+  /// The change to save: the time only when it moved (a meeting already under way can still get a
+  /// new invitee), the invitees as the whole list.
+  pub fn to_update_request(
+    &self,
+    now: TimestampMs,
+    before: &MeetingResponse,
+  ) -> Result<UpdateMeetingRequest, FormError> {
+    let create = self.to_request_inner(now, Some(before.starts_at.0))?;
+    // The input has minute precision: seconds of the saved times are not a change.
+    let has_moved = (create.starts_at.0 - before.starts_at.0).abs() >= MS_PER_MINUTE
+      || (create.ends_at.0 - before.ends_at.0).abs() >= MS_PER_MINUTE;
+    Ok(UpdateMeetingRequest {
+      maybe_title: Some(create.title),
+      maybe_description: Some(create.maybe_description.unwrap_or_default()),
+      maybe_starts_at: has_moved.then_some(create.starts_at),
+      maybe_ends_at: has_moved.then_some(create.ends_at),
+      maybe_invitees: Some(create.invitees),
+      maybe_has_lobby: Some(create.has_lobby),
+    })
+  }
+
   pub fn to_request(&self, now: TimestampMs) -> Result<CreateMeetingRequest, FormError> {
+    self.to_request_inner(now, None)
+  }
+
+  /// `maybe_unchanged_start` is a start that needs no future check (the saved start of a meeting being
+  /// edited).
+  fn to_request_inner(
+    &self,
+    now: TimestampMs,
+    maybe_unchanged_start: Option<TimestampMs>,
+  ) -> Result<CreateMeetingRequest, FormError> {
     let title = self.title.trim();
     if title.is_empty() {
       return Err(FormError::MissingTitle);
     }
     let starts_at = parse_local_datetime(&self.starts_at).ok_or(FormError::InvalidStart)?;
-    if starts_at < now - MS_PER_MINUTE {
+    // The input has minute precision: the saved start (with seconds) counts as unchanged.
+    let is_unchanged = maybe_unchanged_start.is_some_and(|saved| (starts_at - saved).abs() < MS_PER_MINUTE);
+    if starts_at < now - MS_PER_MINUTE && !is_unchanged {
       return Err(FormError::StartInThePast);
     }
     if self.duration_minutes == 0 || self.duration_minutes > MAX_DURATION_MINUTES {
@@ -854,6 +1078,145 @@ mod tests {
     assert!(!hosts_lobby(&meeting, id_from_raw(2)));
     meeting.status = teamcraft_proto::MeetingStatus::Cancelled;
     assert!(!hosts_lobby(&meeting, organizer));
+  }
+
+  #[test]
+  fn an_edit_sends_the_whole_invitee_list_and_the_time_only_when_it_moved() {
+    let organizer = id_from_raw(1);
+    let mut before = fixture_meeting(organizer);
+    before.attendees = vec![
+      attendee(Some(id_from_raw(1)), None),
+      attendee(Some(id_from_raw(2)), None),
+      attendee(Some(id_from_raw(3)), None),
+    ];
+    let mut form = ScheduleForm::from_meeting(&before, organizer);
+    assert_eq!(form.members, vec![id_from_raw(2), id_from_raw(3)]);
+    form.members = vec![id_from_raw(3), id_from_raw(4)];
+    let request = form.to_update_request(NOW, &before).expect("valid");
+    assert_eq!(request.maybe_starts_at, None, "an unmoved time is not sent");
+    let (invitees, removed) = invitee_change(&before, &request).expect("invitees sent");
+    assert_eq!(invitees, vec![id_from_raw(3), id_from_raw(4)]);
+    assert_eq!(removed, vec![id_from_raw(2)]);
+    form.duration_minutes += 30;
+    let request = form.to_update_request(NOW, &before).expect("valid");
+    assert!(request.maybe_ends_at.is_some());
+  }
+
+  #[test]
+  fn a_saved_edit_whose_removal_is_owed_is_finished_and_an_unsaved_one_forgotten() {
+    let organizer = id_from_raw(1);
+    let mut meeting = fixture_meeting(organizer);
+    meeting.attendees = vec![
+      attendee(Some(organizer), None),
+      attendee(Some(id_from_raw(3)), None),
+    ];
+    let edit = |removed: Vec<UserId>, noted_at| PendingEdit {
+      meeting: meeting.id,
+      removed,
+      noted_at,
+    };
+    let old = NOW - 10 * MS_PER_MINUTE;
+    // User 2 is off the saved list: owed. User 3 is still on it: the save never happened.
+    let (kept, actions) = plan_reconcile(
+      &[edit(vec![id_from_raw(2), id_from_raw(3)], old)],
+      NOW,
+      &[meeting.clone()],
+    );
+    assert!(kept.is_empty());
+    assert_eq!(
+      actions,
+      vec![(
+        meeting.conversation_id,
+        vec![organizer, id_from_raw(3)],
+        vec![id_from_raw(2)]
+      )]
+    );
+    let (kept, actions) = plan_reconcile(&[edit(vec![id_from_raw(3)], old)], NOW, &[meeting.clone()]);
+    assert!(kept.is_empty() && actions.is_empty());
+    // In flight in this session, or the meeting not listed yet: kept for later.
+    let fresh = edit(vec![id_from_raw(2)], NOW - 1_000);
+    assert_eq!(
+      plan_reconcile(std::slice::from_ref(&fresh), NOW, &[meeting.clone()]).0,
+      vec![fresh]
+    );
+    let unlisted = edit(vec![id_from_raw(2)], old);
+    assert_eq!(
+      plan_reconcile(std::slice::from_ref(&unlisted), NOW, &[]).0,
+      vec![unlisted]
+    );
+  }
+
+  #[test]
+  fn a_save_with_an_unknown_outcome_keeps_its_record_until_the_list_shows_the_result() {
+    let organizer = id_from_raw(1);
+    let mut meeting = fixture_meeting(organizer);
+    meeting.attendees = vec![
+      attendee(Some(organizer), None),
+      attendee(Some(id_from_raw(2)), None),
+    ];
+    let record = PendingEdit {
+      meeting: meeting.id,
+      removed: vec![id_from_raw(2)],
+      noted_at: NOW - 30_000,
+    };
+    // Just after the lost answer: kept, whatever the list says.
+    let (kept, actions) = plan_reconcile(std::slice::from_ref(&record), NOW, std::slice::from_ref(&meeting));
+    assert_eq!((kept.len(), actions.len()), (1, 0));
+    // Later the list shows the save went through: the removal is finished and the record goes.
+    meeting.attendees.pop();
+    let (kept, actions) = plan_reconcile(
+      std::slice::from_ref(&record),
+      NOW + 10 * MS_PER_MINUTE,
+      &[meeting],
+    );
+    assert!(kept.is_empty());
+    assert_eq!(actions.len(), 1);
+  }
+
+  #[test]
+  fn a_meeting_under_way_can_be_edited_but_not_moved_into_the_past() {
+    let mut before = fixture_meeting(id_from_raw(1));
+    before.starts_at = UnixMillis(NOW - 10 * MS_PER_MINUTE);
+    before.ends_at = UnixMillis(NOW + 20 * MS_PER_MINUTE);
+    let mut form = ScheduleForm::from_meeting(&before, id_from_raw(1));
+    form.title = "Renamed".into();
+    assert!(form.to_update_request(NOW, &before).is_ok());
+    form.starts_at = crate::clock::format_local_datetime_input(NOW - 60 * MS_PER_MINUTE);
+    assert_eq!(
+      form.to_update_request(NOW, &before),
+      Err(FormError::StartInThePast)
+    );
+  }
+
+  fn fixture_meeting(organizer: UserId) -> MeetingResponse {
+    MeetingResponse {
+      id: id_from_raw(7),
+      title: "Planning".into(),
+      maybe_description: None,
+      starts_at: UnixMillis(NOW + 2 * 3_600_000 + 17_000),
+      ends_at: UnixMillis(NOW + 2 * 3_600_000 + 17_000 + 30 * MS_PER_MINUTE),
+      kind: teamcraft_proto::MeetingKind::Scheduled,
+      status: teamcraft_proto::MeetingStatus::Scheduled,
+      has_lobby: true,
+      organizer_user_id: organizer,
+      conversation_id: id_from_raw(9),
+      join_url: String::new(),
+      maybe_recurrence: None,
+      attendees: Vec::new(),
+      undelivered_invitations: Vec::new(),
+    }
+  }
+
+  fn attendee(
+    maybe_user_id: Option<UserId>,
+    maybe_email: Option<String>,
+  ) -> teamcraft_proto::MeetingAttendeeResponse {
+    teamcraft_proto::MeetingAttendeeResponse {
+      maybe_user_id,
+      maybe_email,
+      maybe_name: None,
+      rsvp: RsvpStatus::NeedsAction,
+    }
   }
 
   fn filled_form() -> ScheduleForm {

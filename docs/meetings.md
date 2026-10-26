@@ -37,7 +37,12 @@ the change, and people taken off the list are removed from the group.
 2. **Change / cancel** (`PATCH` / `DELETE /meetings/{id}`, organizer only): SEQUENCE increases,
    the event is replaced or deleted, staying invitees get an update, new ones an invitation,
    removed ones and everybody on cancellation a CANCEL. The chat of a cancelled meeting is archived
-   and stays readable.
+   and stays readable. The app's edit dialog (title, time, length, description, invitees, lobby;
+   the repeat rule is fixed after scheduling) sends the whole invitee list; once the server saved it,
+   the organizer's device calls `update_meeting_chat_members` with that list and the users taken off
+   it, so later invitees join the chat's encryption group and removed ones leave it (a signed
+   commit that rotates the key). The list comes from the organizer's request, never from the
+   server's member list.
 3. **Answer**: invitees answer in the app (`PUT /meetings/{id}/rsvp`) or by e-mail. The e-mail path
    is `POST /api/internal/v1/meetings/replies` with the iMIP REPLY as `text/calendar`, called by the
    inbox handler that receives the mail (or by CalCraft) with the `inbox_token`. That caller vouches

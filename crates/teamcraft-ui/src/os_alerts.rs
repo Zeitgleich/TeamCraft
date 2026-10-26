@@ -400,6 +400,7 @@ impl MeetingWatch {
       if !watch.is_alive() {
         return;
       }
+      crate::meetings::finish_pending_edits(watch.state, watch.hub);
       remind_due(watch.state, watch.i18n, watch.hub);
       watch.plan_next();
     });

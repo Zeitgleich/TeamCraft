@@ -478,6 +478,48 @@ mod sessions {
   }
 }
 
+mod removed_invitees {
+  use super::*;
+
+  #[tokio::test]
+  async fn an_unused_link_of_a_removed_invitee_stops_working() {
+    let rig = rig!();
+    let alice = owner();
+    let (meeting, _, token) = rig.meeting_with_guest(&alice, true).await;
+
+    let reply = rig
+      .app
+      .patch(&alice, &format!("/meetings/{meeting}"), json!({"invitees": []}))
+      .await;
+
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let (status, _) = rig.join(&token, "Gus").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "the removed invitee's link is dead");
+    rig.app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_removed_invitee_who_already_joined_loses_the_session() {
+    let rig = rig!();
+    let alice = owner();
+    let (meeting, chat, token) = rig.meeting_with_guest(&alice, false).await;
+    let (_, joined) = rig.join(&token, "Gus").await;
+    let guest_token = joined["guest_token"].as_str().unwrap().to_owned();
+
+    let reply = rig
+      .app
+      .patch(&alice, &format!("/meetings/{meeting}"), json!({"invitees": []}))
+      .await;
+
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let after = rig
+      .request(Some(&guest_token), Method::GET, &format!("/conversations/{chat}"), None)
+      .await;
+    assert_eq!(after.0, StatusCode::FORBIDDEN, "the session ended with the removal");
+    rig.app.stop().await;
+  }
+}
+
 mod shared_link {
   use super::*;
 

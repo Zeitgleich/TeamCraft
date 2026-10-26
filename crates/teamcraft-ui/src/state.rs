@@ -172,6 +172,8 @@ pub enum Overlay {
   VerifyContact(UserId),
   /// The dialog that schedules a meeting.
   ScheduleMeeting,
+  /// The same dialog filled with a meeting the user organizes.
+  EditMeeting(MeetingId),
   /// The link of the meeting just scheduled or started (`MeetingsHub::maybe_created`), to copy.
   MeetingCreated,
   /// Pick a conversation to forward a message to.

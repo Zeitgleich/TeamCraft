@@ -50,6 +50,9 @@ pub async fn join_meeting(
     .await?
     .filter(|invite| invite.meeting == meeting_id)
     .ok_or_else(|| AuthError::InvalidToken("invalid join link".into()))?;
+  if link.is_revoked && !link.is_shared {
+    return Err(AuthError::InvalidToken("the join link was revoked".into()).into());
+  }
   let meeting = state
     .database
     .get_meeting(meeting_id)
@@ -393,6 +396,40 @@ pub async fn sweep_expired_guests_at(state: &AppState, now: OffsetDateTime) -> R
     }
   }
   Ok(ended)
+}
+
+/// Ends the sessions of guests who joined with the personal link of an invitee the organizer
+/// removed (`PATCH /meetings/{id}`): their lobby place is closed and their account deactivated, which
+/// ends connections and takes them out of the chat, so the others' devices commit the removal.
+pub async fn end_removed_guests(
+  state: &AppState,
+  organizer: UserId,
+  meeting: &StoredMeeting,
+  guests: &[UserId],
+) -> Result<(), ApiError> {
+  for guest in guests {
+    // Not waiting any more is fine: they may have been admitted already.
+    state
+      .database
+      .decide_lobby(meeting, *guest, LobbyState::Denied.as_str(), organizer)
+      .await?;
+    state.hub.publish(
+      [*guest],
+      &GatewayEvent::LobbyDecision {
+        meeting_id: meeting.id,
+        state: LobbyState::Denied,
+      },
+    );
+    super::admin::deactivate_user(
+      state,
+      Some(organizer),
+      *guest,
+      teamcraft_proto::DeactivationReason::Admin,
+      "removed from the meeting",
+    )
+    .await?;
+  }
+  Ok(())
 }
 
 /// Lets a waiting guest into the meeting chat (hosts only).

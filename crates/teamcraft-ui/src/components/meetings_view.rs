@@ -6,6 +6,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_proto::{
   IdempotencyKey, LobbyEntry, LobbyState, MeetingId, MeetingResponse, MeetingStatus, RsvpStatus,
+  UpdateMeetingRequest,
 };
 
 use crate::calls::{CallKind, CallRequest};
@@ -51,7 +52,12 @@ pub fn MeetingsView() -> impl IntoView {
   let i18n = use_i18n();
   let hub = expect_context::<MeetingsHub>();
   let me = state.me().id;
-  let reload = move || spawn_local(async move { hub.refresh(me, now_ms()).await });
+  let reload = move || {
+    spawn_local(async move {
+      hub.refresh(me, now_ms()).await;
+      crate::meetings::finish_pending_edits(state, hub);
+    })
+  };
   reload();
   use_interval_while_visible(REFRESH_MS, reload);
 
@@ -308,6 +314,9 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
                 on:click=move |_| shows_guest_links.update(|open| *open = !*open)
               >
                 {move || i18n.t("meetings-invite-guests")}
+              </button>
+              <button class="btn" on:click=move |_| state.overlay.set(Overlay::EditMeeting(id))>
+                {move || i18n.t("meetings-edit")}
               </button>
               <button class="btn btn-quiet" on:click=cancel>{move || i18n.t("meetings-cancel")}</button>
             }
@@ -756,15 +765,31 @@ fn attendee_summary(meeting: &MeetingResponse, users: Vec<crate::model::User>) -
 // ---- The schedule dialog ----------------------------------------------------------------------------
 
 #[component]
-pub fn ScheduleMeetingDialog() -> impl IntoView {
+pub fn ScheduleMeetingDialog(
+  /// The meeting being edited; without it the dialog schedules a new one.
+  #[prop(optional)]
+  maybe_edit: Option<MeetingId>,
+) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let hub = expect_context::<MeetingsHub>();
   let me = state.me().id;
   let now = now_ms();
-  let form = RwSignal::new(ScheduleForm::new(format_local_datetime_input(suggested_start(
-    now,
-  ))));
+  let maybe_before = maybe_edit.and_then(|id| {
+    hub
+      .meetings
+      .with_untracked(|all| all.iter().find(|meeting| meeting.id == id).cloned())
+  });
+  let is_edit = maybe_before.is_some();
+  let form = RwSignal::new(match &maybe_before {
+    Some(before) => ScheduleForm::from_meeting(before, me),
+    None => ScheduleForm::new(format_local_datetime_input(suggested_start(now))),
+  });
+  let mut durations = DURATIONS.to_vec();
+  if !durations.contains(&form.get_untracked().duration_minutes) {
+    durations.push(form.get_untracked().duration_minutes);
+    durations.sort_unstable();
+  }
   let maybe_error = RwSignal::new(None::<FormError>);
   let is_saving = RwSignal::new(false);
   let others = Memo::new(move |_| {
@@ -795,6 +820,20 @@ pub fn ScheduleMeetingDialog() -> impl IntoView {
       return;
     }
     let now = now_ms();
+    if let Some(before) = maybe_before.clone() {
+      match form.get_untracked().to_update_request(now, &before) {
+        Err(error) => maybe_error.set(Some(error)),
+        Ok(request) => {
+          maybe_error.set(None);
+          is_saving.set(true);
+          spawn_local(async move {
+            save_edit(state, hub, me, before, request).await;
+            is_saving.set_if_alive(false);
+          });
+        },
+      }
+      return;
+    }
     match form.get_untracked().to_request(now) {
       Err(error) => maybe_error.set(Some(error)),
       Ok(request) => {
@@ -820,7 +859,7 @@ pub fn ScheduleMeetingDialog() -> impl IntoView {
     <Modal labelled_by="schedule-title" class="modal-wide">
       <form on:submit=submit>
         <header class="modal-head">
-          <h2 id="schedule-title">{move || i18n.t("schedule-title")}</h2>
+          <h2 id="schedule-title">{move || i18n.t(if is_edit { "schedule-edit-title" } else { "schedule-title" })}</h2>
           <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
             <Icon name=IconName::Close />
           </button>
@@ -858,7 +897,7 @@ pub fn ScheduleMeetingDialog() -> impl IntoView {
                   }
                 }
               >
-                {DURATIONS
+                {durations
                   .into_iter()
                   .map(|minutes| {
                     view! {
@@ -957,6 +996,7 @@ pub fn ScheduleMeetingDialog() -> impl IntoView {
               <button type="button" class="btn" on:click=add_external>{move || i18n.t("schedule-add")}</button>
             </div>
           </fieldset>
+          <Show when=move || !is_edit fallback=|| ()>
           <div class="field-row">
             <div class="field grow">
               <label for="meeting-repeat">{move || i18n.t("schedule-repeat")}</label>
@@ -1012,6 +1052,7 @@ pub fn ScheduleMeetingDialog() -> impl IntoView {
               </div>
             </Show>
           </div>
+          </Show>
           <label class="checkbox">
             <input
               type="checkbox"
@@ -1035,12 +1076,47 @@ pub fn ScheduleMeetingDialog() -> impl IntoView {
           <span class="grow"></span>
           <button type="button" class="btn" on:click=move |_| state.close_overlay()>{move || i18n.t("cancel")}</button>
           <button type="submit" class="btn btn-primary" prop:disabled=move || is_saving.get()>
-            {move || i18n.t("schedule-submit")}
+            {move || i18n.t(if is_edit { "schedule-save" } else { "schedule-submit" })}
           </button>
         </footer>
       </form>
     </Modal>
   }
+}
+
+/// Saves an edit and, only once the server took it, brings the meeting chat's encryption group in
+/// line with the new invitee list (security-relevant: added users get access to later messages,
+/// removed ones are taken out with a key-rotating commit; e2ee.md §4.6, "Meeting chats"). The list
+/// comes from this request, never from the server's member list.
+async fn save_edit(
+  state: AppState,
+  hub: MeetingsHub,
+  me: UserId,
+  before: MeetingResponse,
+  request: UpdateMeetingRequest,
+) {
+  use crate::meetings::{clear_pending_edit, invitee_change, note_pending_edit, saved_change};
+  // Diffed against the meeting as the server has it now, not the possibly stale list on screen.
+  let before = hub.client().get(before.id).await.unwrap_or(before);
+  // Written down before the save: if the app dies after the server took it but before the
+  // chat's group lost the removed users, the next start finishes the removal.
+  if let Some((_, removed)) = invitee_change(&before, &request) {
+    note_pending_edit(before.id, removed, now_ms());
+  }
+  let Some(saved) = hub
+    .run(me, now_ms(), hub.client().update(before.id, &request))
+    .await
+  else {
+    // Not cleared: a timeout or a lost answer may hide a save the server took. The record stays
+    // for `reconcile_pending_edits`, which removes the users who are off the list by then and
+    // drops the record when they still attend (the save did not happen).
+    return;
+  };
+  // From the saved meeting, which is what the server holds now.
+  let (invitees, removed) = saved_change(&before, &saved);
+  state.try_write(|backend| backend.update_meeting_chat_members(saved.conversation_id, invitees, removed));
+  clear_pending_edit(before.id);
+  state.close_overlay();
 }
 
 /// The next full hour that is at least [`MIN_LEAD_MS`] away.
