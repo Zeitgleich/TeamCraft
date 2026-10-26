@@ -17,6 +17,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import de.zeitgleich.teamcraft.calls.IncomingCallNotifier
 import de.zeitgleich.teamcraft.calls.IncomingRing
+import de.zeitgleich.teamcraft.notifications.AvatarCache
 import de.zeitgleich.teamcraft.notifications.MessageNotifier
 import de.zeitgleich.teamcraft.notifications.NotificationChannels
 import de.zeitgleich.teamcraft.notifications.NotificationContentPrefs
@@ -39,7 +40,7 @@ class NotificationsOnDeviceTest {
       InstrumentationRegistry.getInstrumentation().uiAutomation
         .grantRuntimePermission(context.packageName, Manifest.permission.POST_NOTIFICATIONS)
     }
-    notifier = MessageNotifier(context, NotificationContentPrefs(context))
+    notifier = MessageNotifier(context, NotificationContentPrefs(context), AvatarCache(context) { error("no core in this test") })
     notifier.clearAll()
   }
 
