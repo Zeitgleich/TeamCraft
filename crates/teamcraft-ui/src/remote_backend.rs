@@ -1251,6 +1251,14 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::RefreshCallHistory);
   }
 
+  fn is_loaded(&self, list: teamcraft_client_api::backend::LoadingList) -> bool {
+    // Until the first answer arrives the list counts as loading.
+    matches!(
+      self.ask(ChatQuery::ListLoaded { list }),
+      Some(ChatAnswer::ListLoaded { is_loaded: true })
+    )
+  }
+
   fn own_devices(&self) -> Vec<teamcraft_client_api::admin::DeviceInfo> {
     match self.ask(ChatQuery::OwnDevices) {
       Some(ChatAnswer::Devices { devices }) => devices,

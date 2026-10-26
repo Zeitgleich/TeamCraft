@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use teamcraft_client_api::admin::DeviceInfo;
-use teamcraft_client_api::backend::filter_people;
+use teamcraft_client_api::backend::{LoadingList, filter_people};
 use teamcraft_client_api::calls::{CallDirection, CallHistoryItem};
 use teamcraft_client_api::model::{TimestampMs, User, UserId};
 use teamcraft_client_api::privacy::PrivacySettings;
@@ -134,6 +134,19 @@ impl<S: LocalStore> CoreChatBackend<S> {
     maybe_record
       .map(|record| record.calls.iter().map(|call| history_item(me, call)).collect())
       .unwrap_or_default()
+  }
+
+  pub(crate) fn ui_is_loaded(&self, list: LoadingList) -> bool {
+    match list {
+      LoadingList::CallHistory => {
+        let maybe_record: Option<CallHistoryRecord> = self.read(records::get_json(
+          self.store_ref(),
+          Table::SyncState,
+          CALL_HISTORY_KEY,
+        ));
+        maybe_record.is_some()
+      },
+    }
   }
 
   /// The list was opened: fetch the newest calls (once per [`RETRY_AFTER_MS`]).

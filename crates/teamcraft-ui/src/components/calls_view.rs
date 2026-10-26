@@ -1,6 +1,7 @@
 //! The call history: missed, incoming and outgoing calls, by day, with a button to call back.
 
 use leptos::prelude::*;
+use teamcraft_client_api::backend::LoadingList;
 use teamcraft_client_api::calls::{CallDirection, CallHistoryItem};
 
 use crate::calls::{CallKind, CallPhase, CallRequest};
@@ -10,10 +11,14 @@ use crate::components::compact_back::CompactBack;
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::components::page::{ConversationPortrait, day_heading};
+use crate::components::skeleton::ListSkeleton;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::i18n::use_i18n;
 use crate::model::{ConversationKind, TimestampMs};
 use crate::state::use_app_state;
+
+/// Placeholder rows while the call history loads.
+const SKELETON_ROWS: usize = 5;
 
 /// What the user sees of the history in one go.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +39,7 @@ pub fn CallsView() -> impl IntoView {
     }
     call_days(all)
   });
+  let is_loaded = Memo::new(move |_| state.read(|backend| backend.is_loaded(LoadingList::CallHistory)));
   let filter_button = move |value: CallFilter, label: &'static str| {
     view! {
       <button aria-pressed=move || (filter.get() == value).to_string() on:click=move |_| filter.set(value)>
@@ -68,7 +74,11 @@ pub fn CallsView() -> impl IntoView {
             </ul>
           </section>
         </For>
-        <Show when=move || days.with(Vec::is_empty) fallback=|| ()>
+        // Until the first answer the list shows placeholders, not "no calls" (issue #297).
+        <Show when=move || !is_loaded.get() && days.with(Vec::is_empty) fallback=|| ()>
+          <ListSkeleton rows=SKELETON_ROWS label=Signal::derive(move || i18n.t("calls-loading")) />
+        </Show>
+        <Show when=move || is_loaded.get() && days.with(Vec::is_empty) fallback=|| ()>
           <EmptyState icon=IconName::Phone title_key="calls-empty-title" body_key="calls-empty" />
         </Show>
       </div>
