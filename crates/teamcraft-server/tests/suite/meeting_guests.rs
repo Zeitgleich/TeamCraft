@@ -123,6 +123,20 @@ impl Rig {
     (status, response.json().await.unwrap_or(Value::Null))
   }
 
+  /// A host admits the guest who just joined.
+  async fn admit(&self, host: &TestUser, meeting: &str, joined: &Value) {
+    let guest = joined["user_id"].as_str().unwrap();
+    let admit = self
+      .app
+      .post(
+        host,
+        &format!("/meetings/{meeting}/lobby/{guest}/admit"),
+        json!({}),
+      )
+      .await;
+    assert_eq!(admit.status, StatusCode::NO_CONTENT, "{}", admit.body);
+  }
+
   /// Registers a device for the guest and returns its ID.
   async fn guest_device(&self, guest_token: &str) -> String {
     let (status, body) = self
@@ -306,7 +320,7 @@ mod joining {
   }
 
   #[tokio::test]
-  async fn without_a_lobby_the_guest_is_in_the_chat_at_once() {
+  async fn without_a_lobby_the_guest_still_waits_for_a_hosts_device() {
     let rig = rig!();
     let (_, chat, token) = rig.meeting_with_guest(&owner(), false).await;
 
@@ -314,7 +328,7 @@ mod joining {
 
     assert_eq!(
       (status, joined["lobby_state"].as_str()),
-      (StatusCode::OK, Some("admitted"))
+      (StatusCode::OK, Some("waiting"))
     );
     let guest_token = joined["guest_token"].as_str().unwrap();
     let chat_access = rig
@@ -325,7 +339,7 @@ mod joining {
         None,
       )
       .await;
-    assert_eq!(chat_access.0, StatusCode::OK);
+    assert_eq!(chat_access.0, StatusCode::NOT_FOUND);
     rig.app.stop().await;
   }
 }
@@ -494,7 +508,11 @@ mod removed_invitees {
 
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     let (status, _) = rig.join(&token, "Gus").await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "the removed invitee's link is dead");
+    assert_eq!(
+      status,
+      StatusCode::UNAUTHORIZED,
+      "the removed invitee's link is dead"
+    );
     rig.app.stop().await;
   }
 
@@ -513,9 +531,18 @@ mod removed_invitees {
 
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     let after = rig
-      .request(Some(&guest_token), Method::GET, &format!("/conversations/{chat}"), None)
+      .request(
+        Some(&guest_token),
+        Method::GET,
+        &format!("/conversations/{chat}"),
+        None,
+      )
       .await;
-    assert_eq!(after.0, StatusCode::FORBIDDEN, "the session ended with the removal");
+    assert_eq!(
+      after.0,
+      StatusCode::FORBIDDEN,
+      "the session ended with the removal"
+    );
     rig.app.stop().await;
   }
 }
@@ -868,6 +895,7 @@ mod scope_and_leaving {
     let alice = owner();
     let (meeting, chat, token) = rig.meeting_with_guest(&alice, false).await;
     let (_, joined) = rig.join(&token, "Gus").await;
+    rig.admit(&alice, &meeting, &joined).await;
     let guest_token = joined["guest_token"].as_str().unwrap().to_owned();
 
     for (method, path, body) in [
@@ -906,6 +934,7 @@ mod scope_and_leaving {
     let alice_device = register_device(app, &alice).await;
     let (meeting, chat, token) = rig.meeting_with_guest(&alice, false).await;
     let (_, joined) = rig.join(&token, "Gus").await;
+    rig.admit(&alice, &meeting, &joined).await;
     let guest_token = joined["guest_token"].as_str().unwrap().to_owned();
     let guest_id = joined["user_id"].as_str().unwrap().to_owned();
     let mut alice_socket = ws::connect(app, &alice, &alice_device).await;
@@ -1025,6 +1054,7 @@ mod scope_and_leaving {
     let alice = owner();
     let (meeting, _, token) = rig.meeting_with_guest(&alice, false).await;
     let (_, joined) = rig.join(&token, "Gus").await;
+    rig.admit(&alice, &meeting, &joined).await;
     let guest_token = joined["guest_token"].as_str().unwrap().to_owned();
 
     let (status, body) = rig

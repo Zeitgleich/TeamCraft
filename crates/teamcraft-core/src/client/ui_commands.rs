@@ -261,6 +261,29 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       CoreCommand::LetIntoMeetingChat { conversation, user } => {
         self.let_into_meeting_chat(conversation, user).await
       },
+      CoreCommand::PrepareGuestLink {
+        conversation,
+        meeting,
+      } => self.prepare_guest_link(conversation, meeting).await,
+      CoreCommand::LetGuestIntoMeetingChat {
+        conversation,
+        meeting,
+        guest,
+        display_name,
+        maybe_proof,
+        access_ends_at_ms,
+      } => {
+        self
+          .admit_guest(
+            conversation,
+            meeting,
+            guest,
+            &display_name,
+            maybe_proof,
+            access_ends_at_ms,
+          )
+          .await
+      },
       CoreCommand::DiscardRemoval { conversation, user } => self.discard_removal(conversation, user).await,
       CoreCommand::InviteToSpace {
         space,

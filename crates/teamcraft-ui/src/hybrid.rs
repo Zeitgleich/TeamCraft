@@ -485,6 +485,33 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.let_into_meeting_chat(conversation, user);
   }
 
+  fn prepare_guest_link(&self, conversation: ConversationId, meeting: teamcraft_proto::MeetingId) {
+    self.chat.prepare_guest_link(conversation, meeting);
+  }
+
+  fn guest_link_fragment(&self, meeting: teamcraft_proto::MeetingId) -> Option<String> {
+    self.chat.guest_link_fragment(meeting)
+  }
+
+  fn let_guest_into_meeting_chat(
+    &self,
+    conversation: ConversationId,
+    meeting: teamcraft_proto::MeetingId,
+    guest: UserId,
+    display_name: String,
+    maybe_proof: Option<Vec<u8>>,
+    access_ends_at_ms: i64,
+  ) {
+    self.chat.let_guest_into_meeting_chat(
+      conversation,
+      meeting,
+      guest,
+      display_name,
+      maybe_proof,
+      access_ends_at_ms,
+    );
+  }
+
   fn discard_removal(&self, conversation: ConversationId, user: UserId) {
     self.chat.discard_removal(conversation, user);
   }

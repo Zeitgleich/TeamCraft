@@ -6587,6 +6587,35 @@ ol.md-list {
   flex: 1;
 }
 
+/* What a guest sees after being let in: a bar with the meeting's name and the chat below it. */
+.app.guest-meeting {
+  grid-template-rows: var(--topbar-h) minmax(0, 1fr);
+}
+
+.guest-meeting-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  background: var(--chrome);
+  color: var(--chrome-text);
+}
+
+.guest-meeting-title {
+  margin: 0;
+  font-size: var(--text-lg);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.guest-meeting > .main {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .schedule-form {
   display: grid;
   gap: 12px;

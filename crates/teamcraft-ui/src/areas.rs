@@ -29,6 +29,7 @@ use crate::components::call_prejoin::PreJoinScreen;
 use crate::components::call_screen::CallScreen;
 use crate::components::directory_view::DirectoryView;
 use crate::components::file_preview::FilePreview;
+use crate::components::guest_meeting::{GuestMeeting, GuestSession};
 use crate::components::lightbox::Lightbox;
 use crate::components::login::SessionGate;
 use crate::components::meetings_view::{MeetingCreatedDialog, MeetingsView, ScheduleMeetingDialog};
@@ -105,6 +106,8 @@ areas! {
   schedule_meeting(_unit: ()) => meetings: view! { <ScheduleMeetingDialog /> };
   edit_meeting(meeting: MeetingId) => meetings: view! { <ScheduleMeetingDialog maybe_edit=meeting /> };
   meeting_created(_unit: ()) => meetings: view! { <MeetingCreatedDialog /> };
+  /// What a guest sees after a host let them in: the meeting chat and its call.
+  guest_meeting(session: GuestSession) => session: view! { <GuestMeeting session=session /> };
   directory(_unit: ()) => directory: view! { <DirectoryView /> };
   search(_unit: ()) => search: view! { <SearchView /> };
 }

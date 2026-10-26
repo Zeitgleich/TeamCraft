@@ -406,6 +406,7 @@ impl SessionControl {
       let request = EnrollRequest {
         passphrase,
         device_name,
+        is_guest: false,
       };
       match remote_backend::enroll(&request).await {
         Ok(()) => control.state.set_if_alive(SessionState::Ready(me)),

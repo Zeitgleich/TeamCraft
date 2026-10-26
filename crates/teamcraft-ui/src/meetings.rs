@@ -34,6 +34,8 @@ const MAX_DURATION_MINUTES: u32 = 24 * 60;
 /// Prefix of the page of a meeting; the guest token follows in the fragment (`#invite=`).
 const MEETING_PATH_PREFIX: &str = "/meeting/";
 const INVITE_FRAGMENT_KEY: &str = "invite=";
+const SECRET_FRAGMENT_KEY: &str = "k=";
+const ORGANIZER_FRAGMENT_KEY: &str = "o=";
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MeetingError {
@@ -799,16 +801,35 @@ pub fn is_plausible_email(text: &str) -> bool {
 
 // ---- The guest side -----------------------------------------------------------------------------
 
-/// The meeting and token of a personal link (`/meeting/<id>#invite=<token>`), if the page is one.
-pub fn parse_guest_link(path: &str, fragment: &str) -> Option<(MeetingId, String)> {
+/// What a guest link holds: the meeting, the server's token, and the two values only the page sees
+/// (the fragment never reaches a server): the link secret and the organizer's key fingerprint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestLink {
+  pub meeting: MeetingId,
+  pub invite_token: String,
+  pub maybe_secret: Option<String>,
+  pub maybe_organizer_fingerprint: Option<String>,
+}
+
+/// The meeting and token of a personal link (`/meeting/<id>#invite=<token>&k=<secret>&o=<key>`),
+/// if the page is one.
+pub fn parse_guest_link(path: &str, fragment: &str) -> Option<GuestLink> {
   let id_text = path.strip_prefix(MEETING_PATH_PREFIX)?.trim_end_matches('/');
   let meeting = id_text.parse::<MeetingId>().ok()?;
-  let token = fragment
-    .trim_start_matches('#')
-    .split('&')
-    .find_map(|part| part.strip_prefix(INVITE_FRAGMENT_KEY))
-    .filter(|token| !token.is_empty())?;
-  Some((meeting, token.to_owned()))
+  let fragment = fragment.trim_start_matches('#');
+  let value = |key: &str| {
+    fragment
+      .split('&')
+      .find_map(|part| part.strip_prefix(key))
+      .filter(|value| !value.is_empty())
+      .map(str::to_owned)
+  };
+  Some(GuestLink {
+    meeting,
+    invite_token: value(INVITE_FRAGMENT_KEY)?,
+    maybe_secret: value(SECRET_FRAGMENT_KEY),
+    maybe_organizer_fingerprint: value(ORGANIZER_FRAGMENT_KEY),
+  })
 }
 
 /// Requests of a guest. They carry no member account: the link's token is traded for a session.
@@ -844,6 +865,31 @@ impl GuestClient {
     let state: LobbyStateResponse =
       serde_json::from_str(&response.body).map_err(|error| MeetingError::Unreadable(error.to_string()))?;
     Ok(state.state)
+  }
+
+  /// The guest's proof that they hold the link (the hosts' devices check it before they let the
+  /// guest's device into the encryption).
+  pub async fn put_proof(
+    &self,
+    meeting: MeetingId,
+    guest_token: &str,
+    proof: &[u8],
+  ) -> Result<(), MeetingError> {
+    let body = to_json(&teamcraft_proto::PutGuestProofRequest {
+      proof: proof.to_vec().into(),
+    })?;
+    let path = format!("/api/v1/meetings/{meeting}/lobby/me/proof");
+    self.request("PUT", &path, Some(guest_token), Some(body)).await?;
+    Ok(())
+  }
+
+  /// The guest leaves: the server ends their session.
+  pub async fn leave(&self, meeting: MeetingId, guest_token: &str) -> Result<(), MeetingError> {
+    let path = format!("/api/v1/meetings/{meeting}/leave");
+    self
+      .request("POST", &path, Some(guest_token), Some("{}".to_owned()))
+      .await?;
+    Ok(())
   }
 
   async fn request(
@@ -994,9 +1040,16 @@ mod tests {
 
   #[test]
   fn guest_links_are_read_from_the_path_and_the_fragment() {
-    let (meeting, token) = parse_guest_link("/meeting/123456789", "#invite=abc.def").expect("link");
-    assert_eq!(meeting.to_string(), "123456789");
-    assert_eq!(token, "abc.def");
+    let link = parse_guest_link("/meeting/123456789", "#invite=abc.def").expect("link");
+    assert_eq!(link.meeting.to_string(), "123456789");
+    assert_eq!(link.invite_token, "abc.def");
+    assert_eq!(
+      (link.maybe_secret, link.maybe_organizer_fingerprint),
+      (None, None)
+    );
+    let full = parse_guest_link("/meeting/123456789", "#invite=abc.def&k=s3cret&o=ab12").expect("link");
+    assert_eq!(full.maybe_secret.as_deref(), Some("s3cret"));
+    assert_eq!(full.maybe_organizer_fingerprint.as_deref(), Some("ab12"));
     assert!(parse_guest_link("/meeting/123456789", "").is_none());
     assert!(parse_guest_link("/meeting/123456789", "#invite=").is_none());
     assert!(parse_guest_link("/meeting/not-a-number", "#invite=abc").is_none());

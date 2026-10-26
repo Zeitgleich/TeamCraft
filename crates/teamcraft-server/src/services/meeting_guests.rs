@@ -69,8 +69,6 @@ pub async fn join_meeting(
   // A shared link hands every guest a one-time invite of their own; from here on both kinds of
   // link take the same path. Guests of a shared link always wait in the lobby.
   let invite_id = invite_for_guest(state, service, &link, &display_name).await?;
-  let has_lobby = meeting.has_lobby || link.is_shared;
-
   let guest = match redeem_invite(state, invite_id, &display_name, now).await {
     Ok(guest) => guest,
     Err(error) => {
@@ -92,14 +90,12 @@ pub async fn join_meeting(
     .map_err(|error| ApiError::Internal(error.to_string()))?;
 
   let entry = state.database.enter_lobby(meeting_id, guest.user.id).await?;
-  let lobby_state = if has_lobby {
-    announce_waiting(state, &meeting, &guest).await?;
-    LobbyState::from(entry.state)
-  } else {
-    // No lobby: the guest is let in right away on behalf of the organizer.
-    admit_guest(state, &meeting, guest.user.id, meeting.organizer).await?;
-    LobbyState::Admitted
-  };
+  // Guests always wait for a host, also in a meeting without a lobby: they can read and speak only
+  // once a host's device adds theirs to the chat's encryption group, which needs the host to see
+  // the guest's proof of the link first (e2ee.md §4.6, "Meeting guests"). `has_lobby` keeps its
+  // place in the meeting for older clients.
+  announce_waiting(state, &meeting, &guest).await?;
+  let lobby_state = LobbyState::from(entry.state);
   Ok(JoinMeetingResponse {
     guest_token: token,
     expires_at: unix_millis(expires_at),

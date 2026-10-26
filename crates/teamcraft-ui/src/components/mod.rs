@@ -58,6 +58,7 @@ pub mod file_views;
 pub mod files_view;
 pub mod getting_started;
 pub mod guest_join;
+pub mod guest_meeting;
 pub mod home;
 pub mod huddle_bar;
 pub mod icons;
