@@ -273,8 +273,10 @@ fn DirectItem(conversation: Conversation) -> impl IntoView {
     .flatten();
   let is_notes = conversation.is_notes_to_self;
   let leading = match maybe_other {
+    // Notes to self show the user's own picture, as other chat apps do.
     _ if is_notes => {
-      view! { <span class="home-avatar home-avatar-group"><Icon name=IconName::Compose /></span> }.into_any()
+      let me = state.me();
+      view! { <span class="home-avatar"><Avatar user=me size=AvatarSize::Small /></span> }.into_any()
     },
     // Presence arrives later than the row is built, so the avatar is read reactively.
     Some(other) => view! {
