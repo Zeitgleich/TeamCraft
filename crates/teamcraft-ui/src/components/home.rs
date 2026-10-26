@@ -37,7 +37,14 @@ pub fn HomeSidebar() -> impl IntoView {
       .prefs
       .with(|prefs| (prefs.sidebar.dm_sort, prefs.sidebar.dm_limit as usize));
     let limit = if show_all.get() { 0 } else { limit };
-    build_direct(state.direct_entries(), sort, limit, &query.get(), chip.get())
+    build_direct(
+      state.direct_entries(),
+      state.me().id,
+      sort,
+      limit,
+      &query.get(),
+      chip.get(),
+    )
   });
   let has_any = Memo::new(move |_| state.read(|backend| !backend.direct_conversations().is_empty()));
 
@@ -211,9 +218,11 @@ fn DirectSections(list: DirectList, show_all: RwSignal<bool>) -> impl IntoView {
         let kind = section.kind;
         let heading_id = format!("dm-section-{}", section_slug(kind));
         let labelled_by = heading_id.clone();
+        // The pinned notes need no heading of their own: the row says what it is.
+        let is_notes = kind == DirectSectionKind::Notes;
         view! {
           <section class="sb-section" aria-labelledby=labelled_by>
-            <h3 id=heading_id class="sb-section-title">{move || i18n.t(kind.title_key())}</h3>
+            <h3 id=heading_id class="sb-section-title" class:visually-hidden=is_notes>{move || i18n.t(kind.title_key())}</h3>
             <ul>
               {section
                 .conversations
@@ -238,6 +247,7 @@ fn DirectSections(list: DirectList, show_all: RwSignal<bool>) -> impl IntoView {
 
 fn section_slug(kind: DirectSectionKind) -> &'static str {
   match kind {
+    DirectSectionKind::Notes => "notes",
     DirectSectionKind::Favorites => "favorites",
     DirectSectionKind::Conversations => "conversations",
   }
@@ -268,7 +278,11 @@ fn DirectItem(conversation: Conversation) -> impl IntoView {
         .find(|member| *member != me)
     })
     .flatten();
+  let is_notes = conversation.is_notes_to_self(me);
   let leading = match maybe_other {
+    _ if is_notes => {
+      view! { <span class="home-avatar home-avatar-group"><Icon name=IconName::Compose /></span> }.into_any()
+    },
     // Presence arrives later than the row is built, so the avatar is read reactively.
     Some(other) => view! {
       <span class="home-avatar">
@@ -289,7 +303,11 @@ fn DirectItem(conversation: Conversation) -> impl IntoView {
   let status_emoji = maybe_other_user
     .and_then(|user| user.maybe_custom_status)
     .map(|status| status.emoji);
-  let name = conversation.name.clone();
+  let name = if is_notes {
+    i18n.t("notes-title")
+  } else {
+    conversation.name.clone()
+  };
   let is_muted = conversation.is_muted;
   let aria_name = name.clone();
   let label = move || {

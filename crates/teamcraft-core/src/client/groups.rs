@@ -231,6 +231,26 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.found_participants_group(conversation, &[user]).await
   }
 
+  /// Makes the user's notes to self when there are none yet ([`ClientSettings::creates_notes_to_self`]):
+  /// a DM with oneself, whose group holds only this user's devices; their other devices join it
+  /// like any further device. Two devices making it at once end up in one conversation (the
+  /// server returns the existing one) and one group (first commit wins).
+  pub(crate) async fn ensure_notes_to_self(&mut self) -> Result<(), CoreError> {
+    if !self.settings.creates_notes_to_self {
+      return Ok(());
+    }
+    let me = self.user_id();
+    let has_notes = self.cached_conversations()?.values().any(|conversation| {
+      conversation.kind == ConversationKind::Dm
+        && conversation.participants.len() == 1
+        && conversation.participants.iter().all(|user| user.id == me)
+    });
+    if has_notes {
+      return Ok(());
+    }
+    self.open_dm(me).await.map(drop)
+  }
+
   /// Opens (or returns) the group DM with exactly these people (and the user). Founding works
   /// like [`Self::open_dm`]: whoever commits first owns the group, the others join by welcome.
   pub async fn open_group_dm(&mut self, users: &[UserId]) -> Result<ConversationId, CoreError> {

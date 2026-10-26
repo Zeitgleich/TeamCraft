@@ -403,6 +403,13 @@ pub struct Conversation {
 }
 
 impl Conversation {
+  /// The user's notes to themself: a DM whose only member is the user (e2ee.md, "Notes to self").
+  pub fn is_notes_to_self(&self, me: UserId) -> bool {
+    self.kind == ConversationKind::Direct
+      && !self.member_ids.is_empty()
+      && self.member_ids.iter().all(|member| *member == me)
+  }
+
   /// Whether anything in it waits to be read: the read marker has something to move past.
   pub fn has_unread(&self) -> bool {
     self.unread_count > 0 || self.mention_count > 0

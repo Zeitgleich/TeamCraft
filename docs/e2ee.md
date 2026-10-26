@@ -769,6 +769,13 @@ cursor stays before the later entries, so nothing after the welcome is lost. The
 it missed are sealed to it after the commit (above, "Keys a device added back missed"); the user's
 key bag may hold them too.
 
+**Notes to self.** Every user has a DM with themself (`POST /dms` with their own ID; the server
+returns the same conversation every time). Its only participant is the user, so its group holds only
+that user's devices: the device that finds none after a sync founds the group like any DM's, and
+the user's further devices join it as further devices (#179). Nobody else can be added; the server
+never lists it among anyone else's conversations. The apps show it as "Notes" pinned above the
+direct messages (`ClientSettings::creates_notes_to_self`).
+
 **Founding a DM, and finishing it.** A DM or group DM has no creator who must found it: whichever
 participant's device first commits at epoch 0 owns the group, and the server keeps only that commit.
 The device that opened the DM keeps a setup record until its group holds every participant it asked

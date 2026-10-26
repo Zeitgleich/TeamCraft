@@ -721,22 +721,6 @@
         }
       }
     },
-    "call_ongoing": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "TeamCraft call"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "TeamCraft-Anruf"
-          }
-        }
-      }
-    },
     "call_participants %lld": {
       "localizations": {
         "en": {

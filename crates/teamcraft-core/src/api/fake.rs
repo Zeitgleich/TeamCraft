@@ -1793,6 +1793,8 @@ impl ServerApi for FakeServerApi {
         conversation.response.kind == ConversationKind::Dm
           && conversation.members.contains_key(&me)
           && conversation.members.contains_key(&request.user_id)
+          // A DM with oneself has one member (notes to self).
+          && (request.user_id != me || conversation.members.len() == 1)
       });
       if let Some(conversation) = existing {
         return Ok(conversation.view(me));
@@ -1802,7 +1804,11 @@ impl ServerApi for FakeServerApi {
         None,
         None,
         HistoryPolicy::Full,
-        &[me, request.user_id],
+        &if request.user_id == me {
+          vec![me]
+        } else {
+          vec![me, request.user_id]
+        },
       );
       state.publish(
         [me, request.user_id],

@@ -184,6 +184,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // After the welcomes: a member's add (with a Welcome) wins over claiming the place ourselves.
     self.join_missing_groups().await?;
     phases.lap("missing groups", self.now_ms());
+    if let Err(error) = self.ensure_notes_to_self().await {
+      // Not fatal: the next catch-up tries again.
+      tracing::warn!(%error, "could not make the notes to self");
+    }
     let waiting = conversations
       .iter()
       .copied()

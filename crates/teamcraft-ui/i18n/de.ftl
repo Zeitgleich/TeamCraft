@@ -2738,3 +2738,5 @@ channel-sources-hint = Grafana, CI oder journalctl auf die Bridge richten. Diese
 channel-sources-block = Quelle für die Bridge-Konfiguration
 channel-sources-webhook = Webhook (Slack-kompatibel)
 channel-sources-logs = Logzeilen
+
+notes-title = Mein Speicher

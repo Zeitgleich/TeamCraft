@@ -587,3 +587,30 @@ async fn client_reopens_from_its_store() {
   settle(&mut [&mut alice, &mut bob]).await;
   assert_eq!(alice.texts(channel), vec!["still there?", "yes"]);
 }
+
+#[cfg(feature = "ui")]
+#[tokio::test]
+async fn every_user_gets_one_notes_to_self() {
+  use teamcraft_client_api::backend::ChatBackend;
+
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll_with_settings(&server, "Alice", settings().with_notes_to_self()).await;
+  let me = alice.client.user_id();
+  let (gateway, _) = alice.client.connect_gateway().await.unwrap();
+  alice.gateway = gateway;
+
+  let notes = common::backend_of(&alice).direct_conversations();
+  assert_eq!(notes.len(), 1, "the sync made the notes");
+  let id = notes[0].id;
+  alice.client.send_text(id, None, "buy milk").await.unwrap();
+  settle(&mut [&mut alice]).await;
+  assert_eq!(alice.texts(id), vec!["buy milk"]);
+
+  // Another sync finds them and makes no second conversation.
+  let (gateway, _) = alice.client.connect_gateway().await.unwrap();
+  alice.gateway = gateway;
+  let notes = common::backend_of(&alice).direct_conversations();
+  assert_eq!(notes.len(), 1);
+  assert!(notes[0].is_notes_to_self(me), "its only member is the user");
+  assert_eq!(alice.client.open_dm(me).await.unwrap(), id);
+}
