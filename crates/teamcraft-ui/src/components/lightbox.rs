@@ -30,6 +30,8 @@ use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_client_api::actions::{FileInfo, MAX_VIEWER_BYTES, MediaAnchor};
+// How many messages a page has and how close to an end the next one is read (#274).
+use teamcraft_client_api::media_viewer::{PAGE_MARGIN, PAGE_MESSAGES};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
@@ -55,13 +57,6 @@ use crate::state::use_app_state;
 
 /// Pixels per line of a wheel event that scrolls by lines (Firefox with a mouse wheel).
 const WHEEL_LINE_PX: f64 = 16.0;
-
-/// Messages (with pictures or videos) the lightbox reads at a time: around the opened one when it
-/// opens, then a page further out whenever the user comes within [`PAGE_MARGIN`] images of an end
-/// (#274). The core reads only the page from its store, so a conversation of any size opens at once.
-const PAGE_MESSAGES: usize = 40;
-/// How close to an end of the loaded images the next page is read.
-const PAGE_MARGIN: usize = 8;
 
 /// Below this window width the thread panel starts hidden: the picture needs the room.
 const THREAD_PANEL_MIN_WIDTH_PX: f64 = 1200.0;

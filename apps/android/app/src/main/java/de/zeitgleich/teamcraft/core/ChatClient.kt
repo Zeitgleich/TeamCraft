@@ -32,6 +32,9 @@ class ChatClient(
 
   suspend fun query(query: String): ChatAnswer = decodeAnswer(core().query(query))
 
+  /** A query whose answer goes back to the core undecoded (the image viewer's pages). */
+  suspend fun rawQuery(query: String): String = core().query(query)
+
   suspend fun act(action: String) = core().act(action)
 
   suspend fun extras(conversation: String, messages: List<String>): Map<String, MessageExtras> =

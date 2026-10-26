@@ -42,8 +42,10 @@ import kotlinx.coroutines.delay
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatQueries
+import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.FileInfo
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.PictureTarget
 import de.zeitgleich.teamcraft.ui.THUMBNAIL_DECODE_PX
 import de.zeitgleich.teamcraft.ui.rememberThumbnail
 import de.zeitgleich.teamcraft.ui.thumbnailKey
@@ -54,8 +56,13 @@ fun FilesScreen(viewModel: MainViewModel, conversationId: String, onBack: () -> 
   val changes by viewModel.changeCount.collectAsState()
   val context = LocalContext.current
   var files by remember { mutableStateOf<List<FileInfo>?>(null) }
-  // Saveable: a rotation keeps the viewer open.
-  var maybeViewedId by rememberSaveable { mutableStateOf<String?>(null) }
+  // Saveable: a rotation keeps the viewer open (the conversation, message and file it opened on).
+  var maybeViewing by rememberSaveable { mutableStateOf<List<String>?>(null) }
+  // Names for the viewer's sender line and its forward targets; read when it opens.
+  var maybeSnapshot by remember { mutableStateOf<ChatSnapshot?>(null) }
+  LaunchedEffect(maybeViewing != null) {
+    if (maybeViewing != null && maybeSnapshot == null) maybeSnapshot = viewModel.readChat { snapshot() }
+  }
   LaunchedEffect(changes, conversationId) {
     files = viewModel.readChat { query(ChatQueries.files(conversationId)).files }
   }
@@ -75,9 +82,9 @@ fun FilesScreen(viewModel: MainViewModel, conversationId: String, onBack: () -> 
         Column(
           Modifier.padding(4.dp).clickable {
             val path = file.transfer.path
-            if (file.isImage) {
-              // The viewer shows the thumbnail at once and fetches the full image itself.
-              maybeViewedId = file.fileId
+            if (file.isImage && file.maybeThumbnail != null) {
+              // The viewer shows the thumbnail at once and fetches the original itself.
+              maybeViewing = PictureTarget.of(file).toList()
             } else if (file.transfer.state == "local" && path != null) {
               openFile(context, File(path), file.mediaType)
             } else {
@@ -109,12 +116,7 @@ fun FilesScreen(viewModel: MainViewModel, conversationId: String, onBack: () -> 
       }
     }
   }
-  maybeViewedId?.let { fileId ->
-    ImageViewer(
-      images = files.orEmpty().filter { it.isImage },
-      startFileId = fileId,
-      onDownload = { file -> viewModel.act(ChatActions.download(file.conversation, file.message)) },
-      onDismiss = { maybeViewedId = null },
-    )
+  maybeViewing?.let(PictureTarget::fromList)?.let { target ->
+    ImageViewer(viewModel, maybeSnapshot, target, onDismiss = { maybeViewing = null })
   }
 }

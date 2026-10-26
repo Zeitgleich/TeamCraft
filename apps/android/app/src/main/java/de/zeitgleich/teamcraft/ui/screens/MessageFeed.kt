@@ -91,6 +91,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -122,6 +123,7 @@ import de.zeitgleich.teamcraft.ui.FirstUnread
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.MarkupColors
 import de.zeitgleich.teamcraft.ui.MentionNames
+import de.zeitgleich.teamcraft.ui.PictureTarget
 import de.zeitgleich.teamcraft.ui.Pictures
 import de.zeitgleich.teamcraft.ui.THUMBNAIL_DECODE_PX
 import de.zeitgleich.teamcraft.ui.bubbleCorners
@@ -135,6 +137,8 @@ import de.zeitgleich.teamcraft.ui.showsSenders
 import de.zeitgleich.teamcraft.ui.systemLine
 import de.zeitgleich.teamcraft.ui.thumbnailKey
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
+import uniffi.teamcraft_ffi.AlbumLayout
+import uniffi.teamcraft_ffi.albumLayout
 import uniffi.teamcraft_ffi.isOpenableLink
 
 /** The reaction a double tap toggles, as in most chat apps. */
@@ -215,8 +219,8 @@ fun MessageFeed(
   // Measured while composing the new rows, before the list lays them out: afterwards the list has
   // kept its place on the previous newest row, and the end would already look far away.
   val wasNearBottom = remember(items) { Snapshot.withoutReadObservation { listState.isNearBottom() } }
-  // Saveable: a rotation keeps the viewer open.
-  var maybeViewedId by rememberSaveable { mutableStateOf<String?>(null) }
+  // Saveable: a rotation keeps the viewer open (the conversation, message and file it opened on).
+  var maybeViewing by rememberSaveable { mutableStateOf<List<String>?>(null) }
   var maybeHighlighted by remember(maybeFocusMessage) { mutableStateOf(maybeFocusMessage) }
   LaunchedEffect(maybeHighlighted) {
     if (maybeHighlighted != null) {
@@ -257,8 +261,8 @@ fun MessageFeed(
   val context = LocalContext.current
   val onOpenFile: (FileInfo) -> Unit = remember(viewModel, context) {
     { file ->
-      // Images open in the viewer at once (it shows the thumbnail and fetches the full picture).
-      if (file.isImage && file.maybeThumbnail != null) maybeViewedId = file.fileId else openOrDownload(viewModel, file, context)
+      // Pictures open in the viewer at once (it shows the thumbnail and fetches the original).
+      if (file.isImage && file.maybeThumbnail != null) maybeViewing = PictureTarget.of(file).toList() else openOrDownload(viewModel, file, context)
     }
   }
   // Once per snapshot, not per row: mentions are matched against every user's name.
@@ -307,14 +311,8 @@ fun MessageFeed(
       }
     }
   }
-  maybeViewedId?.let { fileId ->
-    ImageViewer(
-      // Oldest first, so swiping to the right goes back in time as in the feed above.
-      images = messages.flatMap { message -> extras[message.id]?.files.orEmpty() }.filter { it.isImage && it.maybeThumbnail != null },
-      startFileId = fileId,
-      onDownload = { file -> viewModel.act(ChatActions.download(file.conversation, file.message)) },
-      onDismiss = { maybeViewedId = null },
-    )
+  maybeViewing?.let(PictureTarget::fromList)?.let { target ->
+    ImageViewer(viewModel, snapshot, target, onDismiss = { maybeViewing = null })
   }
 }
 
@@ -1096,30 +1094,68 @@ private fun FileCard(file: FileInfo, colors: BubbleColors, onOpen: (FileInfo) ->
   }
 }
 
-/** Square tiles, two per row, across the bubble; a tap opens the picture like a single one. */
+/**
+ * A message's pictures as an album across the bubble, laid out as on every platform (the core's
+ * `albumLayout`, #240): two side by side, three with the first spanning both rows, four in two
+ * rows, and "+N" on the last tile for the rest. A tap opens the viewer on that picture; it pages
+ * through all of them.
+ */
 @Composable
 private fun ImageGrid(images: List<FileInfo>, bubbleMax: Dp, onOpen: (FileInfo) -> Unit) {
-  Column(Modifier.width(bubbleMax - BUBBLE_MEDIA_PADDING * 2), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-    for (row in images.chunked(2)) {
-      Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-        for (image in row) {
-          Box(
-            Modifier
-              .weight(1f)
-              .aspectRatio(1f)
-              .clip(RoundedCornerShape(MEDIA_CORNER))
-              .background(MaterialTheme.colorScheme.surfaceVariant)
-              .clickable(onClickLabel = stringResource(R.string.file_open)) { onOpen(image) },
-          ) {
-            TransferOverlay(image) { Thumbnail(image, ContentScale.Crop) }
-          }
+  val layout = remember(images.size) { albumLayout(images.size.toUInt()) }
+    ?: AlbumLayout(tiles = images.size.toUInt(), hidden = 0u, isFirstTall = false)
+  val shown = images.take(layout.tiles.toInt())
+  val width = bubbleMax - BUBBLE_MEDIA_PADDING * 2
+  val side = (width - ALBUM_GAP) / 2
+  fun hiddenAt(index: Int): Int? = if (index == shown.lastIndex && layout.hidden > 0u) layout.hidden.toInt() else null
+  if (layout.isFirstTall && shown.size == 3) {
+    Row(Modifier.width(width), horizontalArrangement = Arrangement.spacedBy(ALBUM_GAP)) {
+      AlbumTile(shown[0], null, Modifier.width(side).height(side * 2 + ALBUM_GAP), onOpen)
+      Column(verticalArrangement = Arrangement.spacedBy(ALBUM_GAP)) {
+        AlbumTile(shown[1], null, Modifier.size(side), onOpen)
+        AlbumTile(shown[2], hiddenAt(2), Modifier.size(side), onOpen)
+      }
+    }
+  } else {
+    Column(Modifier.width(width), verticalArrangement = Arrangement.spacedBy(ALBUM_GAP)) {
+      for ((row, pair) in shown.chunked(2).withIndex()) {
+        Row(horizontalArrangement = Arrangement.spacedBy(ALBUM_GAP)) {
+          pair.forEachIndexed { column, image -> AlbumTile(image, hiddenAt(row * 2 + column), Modifier.size(side), onOpen) }
         }
-        // An odd last picture keeps its tile size.
-        if (row.size == 1) Spacer(Modifier.weight(1f))
       }
     }
   }
 }
+
+/** One tile of an album; on the last one, the pictures it doesn't show ("+3"). */
+@Composable
+private fun AlbumTile(image: FileInfo, maybeHidden: Int?, modifier: Modifier, onOpen: (FileInfo) -> Unit) {
+  val more = maybeHidden?.let { pluralStringResource(R.plurals.album_more_pictures, it, it) }
+  Box(
+    modifier
+      .clip(RoundedCornerShape(MEDIA_CORNER))
+      .background(MaterialTheme.colorScheme.surfaceVariant)
+      .clickable(onClickLabel = stringResource(R.string.file_open)) { onOpen(image) }
+      .semantics { more?.let { stateDescription = it } },
+  ) {
+    TransferOverlay(image) { Thumbnail(image, ContentScale.Crop) }
+    maybeHidden?.let { hidden ->
+      Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = ALBUM_MORE_SCRIM)), contentAlignment = Alignment.Center) {
+        Text(
+          "+$hidden",
+          color = Color.White,
+          style = MaterialTheme.typography.headlineSmall,
+          fontWeight = FontWeight.SemiBold,
+          modifier = Modifier.clearAndSetSemantics {},
+        )
+      }
+    }
+  }
+}
+
+/** The gap between an album's tiles, and the shade under "+N". */
+private val ALBUM_GAP = 3.dp
+private const val ALBUM_MORE_SCRIM = 0.45f
 
 /** A preview's picture, decoded in the background; the tile's own color stands in until then. */
 @Composable

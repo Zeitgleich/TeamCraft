@@ -450,16 +450,51 @@ struct BubbleReplyQuote: View {
   }
 }
 
-/// Square tiles, two per row, across the bubble; a tap opens the picture like a single one.
+/// A message's pictures as an album across the bubble, laid out as on every platform (the core's
+/// `albumLayout`): two side by side, three with the first spanning both rows, four in two rows, and
+/// "+N" on the last tile for the rest. A tap opens the viewer on that picture; it pages through all of
+/// them.
 struct ImageGrid: View {
   let images: [FileInfo]
   let width: CGFloat
 
+  private let spacing: CGFloat = 3
+
   var body: some View {
-    LazyVGrid(columns: [GridItem(.flexible(), spacing: 3), GridItem(.flexible(), spacing: 3)], spacing: 3) {
-      ForEach(images) { image in AttachmentView(file: image, isTile: true) }
+    let layout =
+      albumLayout(pictures: UInt32(clamping: images.count))
+      ?? AlbumLayout(tiles: UInt32(clamping: images.count), hidden: 0, isFirstTall: false)
+    let shown = Array(images.prefix(Int(layout.tiles)))
+    let side = max(0, (width - spacing) / 2)
+    Group {
+      if layout.isFirstTall, shown.count == 3 {
+        HStack(spacing: spacing) {
+          tile(shown, 0, layout).frame(width: side, height: side * 2 + spacing)
+          VStack(spacing: spacing) {
+            tile(shown, 1, layout).frame(width: side, height: side)
+            tile(shown, 2, layout).frame(width: side, height: side)
+          }
+        }
+      } else {
+        VStack(spacing: spacing) {
+          ForEach(Array(stride(from: 0, to: shown.count, by: 2)), id: \.self) { row in
+            HStack(spacing: spacing) {
+              ForEach(row..<min(row + 2, shown.count), id: \.self) { index in
+                tile(shown, index, layout).frame(width: side, height: side)
+              }
+            }
+            .frame(width: width, alignment: .leading)
+          }
+        }
+      }
     }
-    .frame(width: width)
+    .frame(width: width, alignment: .leading)
+  }
+
+  private func tile(_ shown: [FileInfo], _ index: Int, _ layout: AlbumLayout) -> some View {
+    let isLast = index + 1 == Int(layout.tiles)
+    return AttachmentView(
+      file: shown[index], isTile: true, maybeHiddenCount: isLast && layout.hidden > 0 ? Int(layout.hidden) : nil)
   }
 }
 

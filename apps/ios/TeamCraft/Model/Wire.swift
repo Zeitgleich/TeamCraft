@@ -52,6 +52,9 @@ struct FileInfo: Decodable, Equatable, Identifiable, Sendable {
   /// PNG bytes of the thumbnail the sender's core made (images and videos).
   let maybeThumbnailPng: [UInt8]?
   let transfer: FileTransfer
+  /// Who sent the message and when (Unix milliseconds), for the image viewer.
+  var maybeSender: String?
+  var maybeSentAt: Int64?
 
   var id: String { fileId }
   var isImage: Bool { mediaType.hasPrefix("image/") }

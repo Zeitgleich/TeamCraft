@@ -711,7 +711,7 @@ fun TextDialog(title: Int, initial: String, onConfirm: (String) -> Unit, onDismi
 }
 
 @Composable
-private fun ForwardDialog(snapshot: ChatSnapshot, onPick: (String) -> Unit, onDismiss: () -> Unit) {
+internal fun ForwardDialog(snapshot: ChatSnapshot, onPick: (String) -> Unit, onDismiss: () -> Unit) {
   AlertDialog(
     onDismissRequest = onDismiss,
     title = { Text(stringResource(R.string.action_forward)) },

@@ -33,6 +33,7 @@ struct ChatPane: View {
   @State private var typingNames: [String] = []
   @State private var displayNames: [String: String] = [:]
   @State private var maybeForwarding: MessageTarget?
+  @State private var maybeViewing: PictureTarget?
   @State private var maybeShowingEdits: MessageTarget?
   @State private var maybeLastTypingNotified: Date?
   @AppStorage("share_typing") private var isSharingTyping = true
@@ -53,8 +54,9 @@ struct ChatPane: View {
       displayNames = await model.displayNames()
     }
     .sheet(item: $maybeForwarding) { target in
-      ForwardSheet(fromConversationId: conversation.id, message: target.message)
+      ForwardSheet(fromConversationId: conversation.id, messageId: target.message.id)
     }
+    .fullScreenCover(item: $maybeViewing) { target in PictureViewer(target: target) }
     .sheet(item: $maybeShowingEdits) { target in
       EditHistorySheet(edits: extras[target.message.id]?.edits ?? [], current: target.message.body)
     }
@@ -77,6 +79,7 @@ struct ChatPane: View {
     VStack(spacing: 0) {
       OfflineBanner()
       messageList
+        .environment(\.openPicture, OpenPictureAction { file in maybeViewing = PictureTarget(file: file) })
       if let line = typingText(typingNames) {
         Text(line)
           .font(.caption.italic())
@@ -656,7 +659,7 @@ struct ForwardSheet: View {
   @Environment(AppModel.self) private var model
   @Environment(\.dismiss) private var dismiss
   let fromConversationId: String
-  let message: MessageItem
+  let messageId: String
 
   @State private var targets: [ConversationItem] = []
 
@@ -666,7 +669,7 @@ struct ForwardSheet: View {
         Button(target.name) {
           Task {
             await model.perform(
-              .forward(fromConversationId: fromConversationId, messageId: message.id, toConversationId: target.id))
+              .forward(fromConversationId: fromConversationId, messageId: messageId, toConversationId: target.id))
             dismiss()
           }
         }

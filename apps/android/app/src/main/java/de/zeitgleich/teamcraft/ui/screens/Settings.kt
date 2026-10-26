@@ -174,6 +174,8 @@ private fun ChatsPage(viewModel: MainViewModel) {
   HorizontalDivider()
   CallStatusSoundsSetting()
   HorizontalDivider()
+  OriginalDownloadSetting()
+  HorizontalDivider()
   Heading(R.string.search_prefetch_title)
   SearchPrefetchSection(viewModel.segmentPrefetch)
 }
