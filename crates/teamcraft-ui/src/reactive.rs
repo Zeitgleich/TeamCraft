@@ -1,5 +1,7 @@
 //! Helpers for reading signals from code that runs both inside and outside reactive scopes.
 
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -153,6 +155,33 @@ pub fn use_debounced(source: impl Into<Signal<String>>, delay_ms: u64) -> ReadSi
     );
   });
   value
+}
+
+/// The items of a list by key, for rows that are built once and then follow their item: a `<For>`
+/// keyed by id alone keeps its rows, and each row reads its current item with [`keyed_item`].
+/// Keying a `<For>` by what a row shows instead builds the row anew (its pictures and animations
+/// included) whenever that changes; so does a list rendered inside a closure (issue #687).
+pub fn items_by_key<K, T>(list: Signal<Vec<T>>, key_of: fn(&T) -> K) -> Memo<HashMap<K, T>>
+where
+  K: Eq + Hash + Send + Sync + 'static,
+  T: Clone + PartialEq + Send + Sync + 'static,
+{
+  Memo::new(move |_| list.with(|items| items.iter().map(|item| (key_of(item), item.clone())).collect()))
+}
+
+/// One row's item of [`items_by_key`]: changes only when that item does. Once the key left the list
+/// the row is about to go, and keeps showing its last item until then.
+pub fn keyed_item<K, T>(items: Memo<HashMap<K, T>>, key: K, initial: T) -> Memo<T>
+where
+  K: Eq + Hash + Send + Sync + 'static,
+  T: Clone + PartialEq + Send + Sync + 'static,
+{
+  Memo::new(move |previous: Option<&T>| {
+    items
+      .with(|items| items.get(&key).cloned())
+      .or_else(|| previous.cloned())
+      .unwrap_or_else(|| initial.clone())
+  })
 }
 
 /// Waits on the page's event loop, without holding up anything else.
