@@ -5,10 +5,11 @@
 //! - `POST /ingest/{token}`: log lines, plain text or NDJSON, batched by the worker.
 //! - `GET /healthz`: for the container health check.
 //!
-//! The token selects the source, and so the conversation and the limits. Unknown tokens get 404,
-//! like Slack's webhook URLs, so scanning for valid ones learns nothing.
+//! The token selects the source, and so the conversation and the limits (`sources.rs`). Unknown
+//! tokens, and tokens of a source of the other kind, get 404, like Slack's webhook URLs, so
+//! scanning for valid ones learns nothing.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::Router;
@@ -18,93 +19,40 @@ use axum::http::header::{CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use secrecy::{ExposeSecret, SecretString};
-use subtle::ConstantTimeEq;
-use teamcraft_proto::ConversationId;
 use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::batch::LogLine;
-use crate::config::BridgeConfig;
-use crate::limiter::RateLimiter;
-use crate::render::{LogRules, parse_log_lines, parse_webhook};
+use crate::render::{parse_log_lines, parse_webhook};
+use crate::sources::{Endpoint, Source, SourceRegistry};
 
 /// What the endpoints hand to the worker.
 #[derive(Debug)]
 pub enum Submission {
   /// One webhook message, sent as it is.
   Message {
-    source: usize,
+    source: Arc<Source>,
     text: String,
     is_alert: bool,
   },
   /// Log lines to batch.
-  Lines { source: usize, lines: Vec<LogLine> },
+  Lines {
+    source: Arc<Source>,
+    lines: Vec<LogLine>,
+  },
   /// Lines refused by the rate limit, to be reported in the channel.
-  Dropped { source: usize, count: usize },
-}
-
-/// A producer as the endpoints see it.
-pub struct Source {
-  pub name: String,
-  token: SecretString,
-  pub conversation: ConversationId,
-  rules: LogRules,
-  danger_is_alert: bool,
+  Dropped { source: Arc<Source>, count: usize },
 }
 
 #[derive(Clone)]
 pub struct HttpState {
-  sources: Arc<Vec<Source>>,
-  limiters: Arc<Mutex<Vec<RateLimiter>>>,
+  sources: SourceRegistry,
   sender: mpsc::Sender<Submission>,
 }
 
-impl Source {
-  pub fn from_config(config: &crate::config::SourceConfig) -> Self {
-    Self {
-      name: config.name.clone(),
-      token: config.token.clone(),
-      conversation: config.conversation_id,
-      rules: config.log_rules(),
-      danger_is_alert: config.danger_is_alert,
-    }
-  }
-}
-
 impl HttpState {
-  pub fn new(config: &BridgeConfig, sender: mpsc::Sender<Submission>) -> Self {
-    let now = Instant::now();
-    Self {
-      sources: Arc::new(config.sources.iter().map(Source::from_config).collect()),
-      limiters: Arc::new(Mutex::new(
-        config
-          .sources
-          .iter()
-          .map(|source| RateLimiter::new(source.rate_limit_per_minute, now))
-          .collect(),
-      )),
-      sender,
-    }
-  }
-
-  /// The source whose token matches, compared in constant time.
-  fn find(&self, token: &str) -> Option<usize> {
-    let mut found = None;
-    for (index, source) in self.sources.iter().enumerate() {
-      if bool::from(source.token.expose_secret().as_bytes().ct_eq(token.as_bytes())) {
-        found = Some(index);
-      }
-    }
-    found
-  }
-
-  fn limiters(&self) -> std::sync::MutexGuard<'_, Vec<RateLimiter>> {
-    // The limiter state is plain numbers, so a poisoned lock is still consistent.
-    self
-      .limiters
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
+  pub fn new(sources: SourceRegistry, sender: mpsc::Sender<Submission>) -> Self {
+    Self { sources, sender }
   }
 }
 
@@ -123,14 +71,14 @@ async fn webhook_handler(
   headers: HeaderMap,
   body: Bytes,
 ) -> Response {
-  let Some(source) = state.find(&token) else {
+  let Some(source) = state.sources.find(&token, Endpoint::Webhook) else {
     return StatusCode::NOT_FOUND.into_response();
   };
-  if let Some(refusal) = refuse_if_limited(&state, source, 1) {
+  if let Some(refusal) = refuse_if_limited(&state, &source, 1) {
     return refusal;
   }
   let content_type = content_type(&headers);
-  let message = match parse_webhook(&content_type, &body, state.sources[source].danger_is_alert) {
+  let message = match parse_webhook(&content_type, &body, source.danger_is_alert) {
     Ok(message) => message,
     Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
   };
@@ -150,30 +98,28 @@ async fn ingest_handler(
   headers: HeaderMap,
   body: Bytes,
 ) -> Response {
-  let Some(source) = state.find(&token) else {
+  let Some(source) = state.sources.find(&token, Endpoint::Ingest) else {
     return StatusCode::NOT_FOUND.into_response();
   };
-  let mut lines = parse_log_lines(&content_type(&headers), &body, &state.sources[source].rules);
+  let mut lines = parse_log_lines(&content_type(&headers), &body, &source.rules);
   if lines.is_empty() {
     return (StatusCode::OK, "accepted 0 lines").into_response();
   }
   let total = lines.len();
-  let allowed = {
-    let wanted = u32::try_from(total).unwrap_or(u32::MAX);
-    let mut limiters = state.limiters();
-    limiters[source].take_up_to(wanted, Instant::now()) as usize
-  };
+  let wanted = u32::try_from(total).unwrap_or(u32::MAX);
+  let allowed = state.sources.take_up_to(&source, wanted, Instant::now()) as usize;
   if allowed == 0 {
     // Everything was refused; tell the channel once per request, and the sender to slow down.
-    let _ = state
-      .sender
-      .try_send(Submission::Dropped { source, count: total });
-    return too_many_requests(&state, source);
+    let _ = state.sender.try_send(Submission::Dropped {
+      source: source.clone(),
+      count: total,
+    });
+    return too_many_requests(&state, &source);
   }
   lines.truncate(allowed);
   if allowed < total {
     let _ = state.sender.try_send(Submission::Dropped {
-      source,
+      source: source.clone(),
       count: total - allowed,
     });
   }
@@ -191,13 +137,13 @@ async fn ingest_handler(
   response
 }
 
-fn refuse_if_limited(state: &HttpState, source: usize, count: u32) -> Option<Response> {
-  let allowed = state.limiters()[source].try_take(count, Instant::now());
+fn refuse_if_limited(state: &HttpState, source: &Source, count: u32) -> Option<Response> {
+  let allowed = state.sources.try_take(source, count, Instant::now());
   (!allowed).then(|| too_many_requests(state, source))
 }
 
-fn too_many_requests(state: &HttpState, source: usize) -> Response {
-  let retry_after = state.limiters()[source].retry_after().as_secs().max(1);
+fn too_many_requests(state: &HttpState, source: &Source) -> Response {
+  let retry_after = state.sources.retry_after(source, Instant::now()).as_secs().max(1);
   (
     StatusCode::TOO_MANY_REQUESTS,
     [(RETRY_AFTER, retry_after.to_string())],
@@ -238,6 +184,8 @@ mod tests {
   const TOKEN_A: &str = "alpha-token-0123456789";
   const TOKEN_B: &str = "bravo-token-0123456789";
 
+  use crate::config::BridgeConfig;
+
   fn config(rate: u32) -> BridgeConfig {
     BridgeConfig::from_toml(&format!(
       r#"
@@ -261,7 +209,7 @@ mod tests {
 
   async fn start(rate: u32) -> (String, mpsc::Receiver<Submission>) {
     let (sender, receiver) = mpsc::channel(64);
-    let app = router(HttpState::new(&config(rate), sender), 4096);
+    let app = router(HttpState::new(SourceRegistry::new(&config(rate)), sender), 4096);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, app).await });
@@ -302,7 +250,10 @@ mod tests {
           text,
           is_alert,
         } => {
-          assert_eq!((source, text.as_str(), is_alert), (1, "**ci**\nhi", false));
+          assert_eq!(
+            (source.name.as_str(), text.as_str(), is_alert),
+            ("b", "**ci**\nhi", false)
+          );
         },
         other => panic!("{other:?}"),
       }
@@ -386,7 +337,7 @@ mod tests {
       assert_eq!(status, StatusCode::OK);
       match receiver.recv().await.unwrap() {
         Submission::Lines { source, lines } => {
-          assert_eq!(source, 0);
+          assert_eq!(source.name, "a");
           assert_eq!(
             lines.iter().map(|l| l.is_alert).collect::<Vec<_>>(),
             [false, true]

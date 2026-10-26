@@ -210,6 +210,27 @@ pub struct ChannelMember {
   pub role: ChannelRole,
 }
 
+/// A source of the integration bridge that posts into a channel, announced in the app
+/// (docs/bridge.md, "Sources"). Only sources in force are listed; the token is never known again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrationSource {
+  pub id: teamcraft_proto::SourceId,
+  pub name: String,
+  pub kind: teamcraft_proto::SourceKind,
+  pub created_by: UserId,
+  pub created_at_ms: i64,
+}
+
+/// A source to announce: the app generated the token and keeps only its hash.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewIntegrationSource {
+  pub id: teamcraft_proto::SourceId,
+  pub name: String,
+  pub kind: teamcraft_proto::SourceKind,
+  pub token_sha256: teamcraft_proto::SourceTokenHash,
+  pub options: teamcraft_proto::SourceOptions,
+}
+
 /// A member of a space as the space settings list them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpaceMember {

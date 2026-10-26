@@ -11,6 +11,7 @@
 //! - [`config`]: the TOML file.
 //! - [`render`]: webhook payloads and log lines to message text.
 //! - [`batch`], [`limiter`]: collecting lines into messages, per-source rate limits.
+//! - [`sources`]: the sources the endpoints accept: announced in the app, or in the file.
 //! - [`http`]: the endpoints.
 //! - [`worker`]: the task that owns the client (gateway, sending, index segments).
 //! - [`app`]: wiring for the binary.
@@ -21,4 +22,5 @@ pub mod config;
 pub mod http;
 pub mod limiter;
 pub mod render;
+pub mod sources;
 pub mod worker;

@@ -40,6 +40,8 @@ tracing-subscriber.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+# Source tokens in the end-to-end test, as the app generates them.
+rand_core.workspace = true
 teamcraft-server = { path = "../teamcraft-server", features = ["integration"] }
 reqwest.workspace = true
 figment = { workspace = true, features = ["test"] }

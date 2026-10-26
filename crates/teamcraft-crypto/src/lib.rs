@@ -26,6 +26,7 @@ pub mod rendezvous;
 pub mod secret;
 pub mod server_secret;
 pub mod share_link;
+pub mod source_token;
 pub mod workspace;
 
 mod aead;

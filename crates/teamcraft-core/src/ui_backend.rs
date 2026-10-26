@@ -774,6 +774,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       | MessageContent::Event { .. }
       | MessageContent::Deleted
       | MessageContent::IndexSegment { .. }
+      | MessageContent::IntegrationSource { .. }
       | MessageContent::Unknown => String::new(),
     };
     let (kind, author) = match &stored.content {
@@ -1739,6 +1740,29 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.command(CoreCommand::RefreshSpaceRoster { space });
   }
 
+  fn integration_sources(
+    &self,
+    conversation: ConversationId,
+  ) -> Vec<teamcraft_client_api::model::IntegrationSource> {
+    self.ui_integration_sources(conversation)
+  }
+
+  fn can_manage_integration_sources(&self) -> bool {
+    self.ui_can_manage_integration_sources()
+  }
+
+  fn add_integration_source(
+    &self,
+    conversation: ConversationId,
+    source: teamcraft_client_api::model::NewIntegrationSource,
+  ) {
+    self.ui_add_integration_source(conversation, source);
+  }
+
+  fn revoke_integration_source(&self, conversation: ConversationId, source: teamcraft_proto::SourceId) {
+    self.ui_revoke_integration_source(conversation, source);
+  }
+
   fn channel_roles(&self, conversation: ConversationId) -> Vec<teamcraft_client_api::model::ChannelMember> {
     let stored: Option<teamcraft_proto::ListConversationMembersResponse> = self.read(records::get_json(
       &self.store,
@@ -1943,6 +1967,82 @@ mod tests {
       backend.drain_commands(),
       vec![CoreCommand::MarkRead { conversation }]
     );
+  }
+
+  #[test]
+  fn a_roster_admin_adds_and_revokes_sources_and_the_announcements_stay_out_of_the_feed() {
+    use teamcraft_client_api::model::NewIntegrationSource;
+    use teamcraft_proto::{SourceChange, SourceId, SourceKind, SourceOptions, SourceTokenHash};
+
+    use crate::workspace::{RosterMember, RosterRole, WorkspaceState};
+
+    let store = std::sync::Arc::new(MemoryStore::new());
+    let (me, colleague) = (id::<UserId>(1), id::<UserId>(2));
+    let conversation = id::<ConversationId>(10);
+    let backend = CoreChatBackend::new(store.clone(), me, Box::new(ManualClock::new(1_000)));
+    assert!(!backend.can_manage_integration_sources(), "no roster, no sources");
+    let mut workspace = WorkspaceState::default();
+    workspace.roster.members.push(RosterMember {
+      user_id: me,
+      role: RosterRole::Admin,
+      identity_key: teamcraft_proto::Base64Bytes::new(vec![0; 32]),
+    });
+    records::put_json(
+      &*store,
+      Table::Workspace,
+      crate::client::WORKSPACE_KEY,
+      &workspace,
+    )
+    .unwrap();
+    assert!(backend.can_manage_integration_sources());
+
+    let source = SourceId::random();
+    backend.add_integration_source(
+      conversation,
+      NewIntegrationSource {
+        id: source,
+        name: "ci".into(),
+        kind: SourceKind::Webhook,
+        token_sha256: SourceTokenHash::from_bytes([3; 32]),
+        options: SourceOptions::default(),
+      },
+    );
+    let listed = backend.integration_sources(conversation);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+      (
+        listed[0].name.as_str(),
+        listed[0].created_by,
+        listed[0].created_at_ms
+      ),
+      ("ci", me, 1_000)
+    );
+    assert_eq!(backend.message_count(conversation), 0, "hidden from the feed");
+    assert_eq!(
+      records::outbox(&store).unwrap().len(),
+      1,
+      "on its way to the members"
+    );
+
+    // A member outside the roster announces one and revokes the admin's: neither counts.
+    for change in [
+      SourceChange::Created {
+        source: SourceId::random(),
+        name: "sneaky".into(),
+        kind: SourceKind::Log,
+        token_sha256: SourceTokenHash::from_bytes([4; 32]),
+        options: SourceOptions::default(),
+      },
+      SourceChange::Revoked { source },
+    ] {
+      crate::integration_sources::apply_source_change(&*store, conversation, colleague, &change, 2_000, None)
+        .unwrap();
+    }
+    assert_eq!(backend.integration_sources(conversation).len(), 1);
+
+    backend.revoke_integration_source(conversation, source);
+    assert!(backend.integration_sources(conversation).is_empty());
+    assert_eq!(records::outbox(&store).unwrap().len(), 2);
   }
 
   #[test]

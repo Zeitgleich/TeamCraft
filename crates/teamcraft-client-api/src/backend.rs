@@ -486,6 +486,24 @@ pub trait ChatBackend {
     _joins_space: bool,
   ) {
   }
+  /// The channel's integration-bridge sources in force, oldest first (docs/bridge.md, "Sources").
+  fn integration_sources(&self, _conversation: ConversationId) -> Vec<crate::model::IntegrationSource> {
+    Vec::new()
+  }
+  /// Whether sources the user adds would be in force: they need an admin of the verified
+  /// workspace roster (channel roles aren't signed yet, issue #380).
+  fn can_manage_integration_sources(&self) -> bool {
+    false
+  }
+  /// Announces a new source in the channel: an encrypted, hidden control message the bridge reads.
+  fn add_integration_source(
+    &self,
+    _conversation: ConversationId,
+    _source: crate::model::NewIntegrationSource,
+  ) {
+  }
+  /// Revokes a source for good: its token stops working once the bridge reads the revocation.
+  fn revoke_integration_source(&self, _conversation: ConversationId, _source: teamcraft_proto::SourceId) {}
   /// The channel's members with their roles; empty until the member list is loaded.
   fn channel_roles(&self, _conversation: ConversationId) -> Vec<crate::model::ChannelMember> {
     Vec::new()

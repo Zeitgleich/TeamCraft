@@ -21,6 +21,9 @@ demo = []
 [dependencies]
 teamcraft-proto.workspace = true
 teamcraft-client-api = { path = "../teamcraft-client-api" }
+# Bridge source tokens are generated in the app (integrations.rs); the browser build also uses it
+# for the client core.
+teamcraft-crypto = { path = "../teamcraft-crypto" }
 leptos = { version = "0.8.22", features = ["csr"] }
 # Browser bindings: DOM access for focus, scroll measurement, storage and clipboard-free helpers.
 wasm-bindgen = "0.2"
@@ -69,7 +72,6 @@ tracing-web = "0.1"
 # The browser build runs the client core in the page (src/web_core.rs): same engine as the desktop app.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 teamcraft-core = { path = "../teamcraft-core", default-features = false, features = ["ui"] }
-teamcraft-crypto = { path = "../teamcraft-crypto" }
 # Signs and verifies call key bindings for the call module (web_calls); the call engine itself is
 # in that module, which the page loads only for a call. `web-api`: the WebCodecs bindings with
 # which the desktop webview decodes the shell's call video (shell_video).

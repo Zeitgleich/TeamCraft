@@ -217,7 +217,7 @@ fn non_empty(text: Option<&str>) -> Option<&str> {
 }
 
 /// What a source considers an alert line.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogRules {
   /// Lower-case level names that make a line an alert (`error`, `fatal`, ...).
   pub alert_levels: Vec<String>,

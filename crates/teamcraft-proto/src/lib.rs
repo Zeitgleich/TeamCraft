@@ -11,6 +11,7 @@ mod conversation;
 mod error;
 mod gateway;
 mod id;
+mod integration;
 pub mod live;
 mod permission;
 mod rendezvous;
@@ -35,6 +36,11 @@ pub use id::{
   IdError, InviteId, MeetingAttendeeId, MeetingId, MeetingInviteId, MessageId, MlsMessageId, OrgBackgroundId,
   PushRetryId, RecoveryRequestId, SNOWFLAKE_EPOCH_MS, SNOWFLAKE_SEQUENCE_BITS, SNOWFLAKE_WORKER_BITS,
   Snowflake, SpaceId, SystemEventId, ThreadId, UserGroupId, UserId,
+};
+pub use integration::{
+  DEFAULT_SOURCE_ALERT_LEVELS, DEFAULT_SOURCE_RATE_LIMIT_PER_MINUTE, MAX_SOURCE_ALERT_LEVEL_CHARS,
+  MAX_SOURCE_ALERT_LEVELS, MAX_SOURCE_NAME_CHARS, MAX_SOURCE_RATE_LIMIT_PER_MINUTE, SourceChange, SourceId,
+  SourceKind, SourceOptions, SourceTokenHash, SourceTokenHashError,
 };
 pub use permission::{
   ALL_KNOWN as ALL_PERMISSIONS, ChannelContext, ChannelModeration, ChannelRole, Permission, PermissionScheme,
