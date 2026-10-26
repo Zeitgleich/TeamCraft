@@ -25,6 +25,7 @@ pub mod channel_access;
 pub mod channel_policy;
 pub mod clock;
 pub mod components;
+pub mod composer_focus;
 pub mod delivery;
 pub mod diff;
 pub mod editor_doc;

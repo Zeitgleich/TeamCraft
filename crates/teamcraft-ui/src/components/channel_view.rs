@@ -17,7 +17,7 @@ use crate::components::sheet::MenuSurface;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::components::tab_list::{on_tab_keys, roving_tabindex};
 use crate::delivery::ReadIndicator;
-use crate::i18n::use_i18n;
+use crate::i18n::{I18n, use_i18n};
 use crate::keys::{SEARCH_IN_CONVERSATION, shortcut_text};
 use crate::model::{Conversation, ConversationId, ConversationKind, MembershipIssue, UserId};
 use crate::prefs::MuteFor;
@@ -71,8 +71,14 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
   move || {
     // Everything below is recreated per conversation, which resets scroll state and drafts.
     let conv = info.get_untracked()?;
-    let name = conv.name.clone();
-    let label_name = conv.name;
+    let name = shown_name(i18n, &conv);
+    let label_name = name.clone();
+    // The notes to self have nobody to write to (#699).
+    let placeholder_key = if conv.is_notes_to_self {
+      "composer-placeholder-notes"
+    } else {
+      "composer-placeholder"
+    };
     let can_post = conv.can_post;
     // Files dropped anywhere on the conversation go to its composer.
     let zone = FileDrop::provide(can_post);
@@ -112,7 +118,7 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
                 <ChannelFeed conversation=conversation />
                 <SeenLine conversation=conversation />
                 <DropStrip zone=zone />
-                <Composer conversation=conversation can_post=can_post conversation_name=name />
+                <Composer conversation=conversation can_post=can_post conversation_name=name placeholder_key=placeholder_key />
               </div>
             }
               .into_any()
@@ -132,6 +138,15 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
         }}
       </section>
     })
+  }
+}
+
+/// The name a conversation is shown with: the notes to self have none of their own (#699).
+pub fn shown_name(i18n: I18n, conversation: &Conversation) -> String {
+  if conversation.is_notes_to_self {
+    i18n.t("notes-title")
+  } else {
+    conversation.name.clone()
   }
 }
 
@@ -393,7 +408,8 @@ fn ChannelHeader(
         }
       },
     };
-    let full_name = conv.name.clone();
+    let shown = shown_name(i18n, &conv);
+    let full_name = shown.clone();
     // A direct conversation's name is the person: it opens their profile card.
     let maybe_person = (conv.kind == ConversationKind::Direct)
       .then(|| conv.member_ids.iter().copied().find(|id| *id != state.me().id))
@@ -411,7 +427,7 @@ fn ChannelHeader(
               on:click=move |_| state.overlay.set(Overlay::UserProfile(person))
             >
               {icon}
-              <span class="header-name">{conv.name}</span>
+              <span class="header-name">{shown}</span>
             </button>
           </h1>
         }
@@ -420,7 +436,7 @@ fn ChannelHeader(
       None => view! {
         <h1 class="header-title" translate="no" title=full_name>
           {icon}
-          <span class="header-name">{conv.name}</span>
+          <span class="header-name">{shown}</span>
         </h1>
       }
       .into_any(),

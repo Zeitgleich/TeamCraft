@@ -157,6 +157,7 @@ bookmarks-add-soon = Lesezeichen können noch nicht bearbeitet werden
 
 ## Eingabefeld
 composer-placeholder = Nachricht an { $name }
+composer-placeholder-untitled = Nachricht schreiben
 composer-placeholder-reply = Antworten …
 composer-readonly = In diesem Kanal kannst du nichts schreiben.
 composer-label = Nachricht
@@ -1690,7 +1691,8 @@ slash-msg-send-there = Unterhaltung geöffnet. Schreibe deine Nachricht dort.
 slash-groupmsg-unsupported = Gruppenunterhaltungen sind noch nicht verfügbar.
 slash-muted = Unterhaltung stummgeschaltet.
 slash-unmuted = Stummschaltung aufgehoben.
-slash-channel-only = Nur Kanäle haben einen Namen, ein Thema und einen Zweck.
+slash-channel-only = Dieser Befehl funktioniert nur in Kanälen.
+slash-not-allowed = Dazu fehlt dir hier die Berechtigung.
 slash-reminder-set = Erinnerung gesetzt für { $time }.
 slash-meet-starting = Meeting wird gestartet …
 slash-meet-unavailable = Meetings brauchen eine angemeldete Sitzung.
@@ -2851,3 +2853,6 @@ channel-sources-bridge-instance-hint = Die Bridge läuft neben dem Server (Deplo
 channel-sources-bridge-loopback-hint = Die Bridge läuft neben den Quellen und lauscht auf ihrer lokalen Standardadresse. Wurde ihr Listener geöffnet, die eigene Adresse der Bridge verwenden.
 
 notes-title = Mein Speicher
+notes-empty-title = Noch nichts notiert
+notes-empty = Halte hier Ideen, Links und Dateien fest. Nur deine eigenen Geräte können sie lesen.
+composer-placeholder-notes = Notiere etwas für dich
