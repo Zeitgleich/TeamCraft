@@ -20,6 +20,7 @@ use teamcraft_proto::{GatewayClientMessage, GatewayServerMessage};
 use crate::api::{ApiError, GatewayConnection, Interception, ServerApi};
 use crate::client::{Client, GatewayOutcome, GatewayTiming, HeldFrames, HeldLimits, keep_alive};
 use crate::error::CoreError;
+use crate::retry::{Jitter, RetryPolicy, core_retry_after};
 use crate::store::LocalStore;
 use teamcraft_proto::SignInReason;
 
@@ -107,10 +108,6 @@ pub struct ConnectionSupervisor<G> {
   held: HeldFrames,
   jitter: Jitter,
 }
-
-/// A small xorshift generator: the backoff only needs spread, not secrecy, and tests seed it.
-#[derive(Clone, Copy, Debug)]
-struct Jitter(u64);
 
 impl Default for ConnectionSettings {
   fn default() -> Self {
@@ -297,7 +294,8 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
           CoreError::Api(api) => api.interception(),
           _ => None,
         };
-        self.schedule_attempt(now, maybe_interception);
+        // A server that answered 503 says when to come back (a restart, a dependency outage).
+        self.schedule_attempt(now, maybe_interception, core_retry_after(&error));
         None
       },
     }
@@ -492,22 +490,22 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     if now_ms.saturating_sub(self.connected_at_ms) >= millis(self.settings.stable_after) {
       self.failures = 0;
     }
-    self.schedule_attempt(now_ms, None);
+    self.schedule_attempt(now_ms, None, None);
   }
 
-  /// Equal jitter: half the backoff plus a random part of the other half, so clients that lost
-  /// the server at the same moment (a restart) don't come back in lock-step.
-  fn schedule_attempt(&mut self, now_ms: i64, maybe_interception: Option<Interception>) {
-    let exponent = self.failures.min(16);
-    let base = self
-      .settings
-      .reconnect_min
-      .saturating_mul(1 << exponent)
-      .min(self.settings.reconnect_max);
-    let half_ms = millis(base) / 2;
-    let delay_ms = half_ms.saturating_add(self.jitter.below(half_ms.saturating_add(1)));
+  /// The shared retry policy (`crate::retry`): equal jitter, so clients that lost the server at
+  /// the same moment (a restart) don't come back in lock-step, and at least the server's
+  /// `Retry-After`.
+  fn schedule_attempt(
+    &mut self,
+    now_ms: i64,
+    maybe_interception: Option<Interception>,
+    maybe_retry_after: Option<Duration>,
+  ) {
+    let policy = RetryPolicy::new(self.settings.reconnect_min, self.settings.reconnect_max);
+    let delay = policy.delay(self.failures, &mut self.jitter, maybe_retry_after);
     self.failures = self.failures.saturating_add(1);
-    self.next_attempt_ms = now_ms.saturating_add(delay_ms);
+    self.next_attempt_ms = now_ms.saturating_add(millis(delay));
     self.set_state(ConnectionState::Offline {
       retry_at_ms: self.next_attempt_ms,
       maybe_interception,
@@ -556,26 +554,6 @@ impl From<ConnectionState> for teamcraft_client_api::remote::CoreConnection {
   }
 }
 
-impl Jitter {
-  fn new(seed: u64) -> Self {
-    // Xorshift never leaves zero.
-    Self(seed.max(1))
-  }
-
-  /// A number in `0..bound` (0 for an empty range).
-  fn below(&mut self, bound: i64) -> i64 {
-    let mut x = self.0;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    self.0 = x;
-    match u64::try_from(bound) {
-      Ok(bound) if bound > 0 => i64::try_from(x % bound).unwrap_or(0),
-      _ => 0,
-    }
-  }
-}
-
 /// Tells tokens apart without keeping one around. Not a security measure: it only notices that the
 /// app has another token than the refused one.
 fn token_fingerprint<A: ServerApi, S: LocalStore>(client: &Client<A, S>) -> Option<u64> {
@@ -592,15 +570,6 @@ fn millis(duration: Duration) -> i64 {
 #[cfg(test)]
 mod tests {
   use super::*;
-
-  #[test]
-  fn jitter_stays_in_range_and_varies() {
-    let mut jitter = Jitter::new(7);
-    let draws: Vec<i64> = (0..100).map(|_| jitter.below(1_000)).collect();
-    assert!(draws.iter().all(|draw| (0..1_000).contains(draw)));
-    assert!(draws.iter().any(|draw| *draw != draws[0]));
-    assert_eq!(jitter.below(0), 0);
-  }
 
   #[test]
   fn network_changes_reach_every_subscriber() {

@@ -27,6 +27,7 @@ use crate::api::{ApiError, ServerApi};
 use crate::convert;
 use crate::error::CoreError;
 use crate::records;
+use crate::retry::{RetryPolicy, millis};
 use crate::store::{ConversationEvent, LocalStore, Table};
 use crate::trust::{PinnedDirectory, WorkspaceAuthority};
 
@@ -2658,12 +2659,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// How long after a rejoin request this device waits before asking again: `rejoin_retry`, for a
   /// device without a group doubled with every request up to `rejoin_retry_max`.
   fn rejoin_wait_ms(&self, attempts: u32) -> i64 {
-    let base = i64::try_from(self.settings.rejoin_retry.as_millis()).unwrap_or(i64::MAX);
-    let ceiling = i64::try_from(self.settings.rejoin_retry_max.as_millis())
-      .unwrap_or(i64::MAX)
-      .max(base);
-    let doublings = attempts.saturating_sub(1).min(32);
-    base.saturating_mul(1_i64 << doublings).min(ceiling)
+    // The shared backoff (`crate::retry`), without jitter: one DM's rejoin requests, not a fleet.
+    let policy = RetryPolicy::new(self.settings.rejoin_retry, self.settings.rejoin_retry_max);
+    millis(policy.backoff(attempts.saturating_sub(1)))
   }
 
   /// Posts the signed rejoin request; `Ok(false)` when the group moved on meanwhile.

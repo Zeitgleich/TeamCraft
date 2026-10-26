@@ -12,6 +12,7 @@ use common::{Peer, clock, settings, settle};
 use teamcraft_core::api::fake::{FakeServer, NetworkCut};
 use teamcraft_core::client::{PendingAction, PendingActionSettings};
 use teamcraft_core::clock::ManualClock;
+use teamcraft_core::retry::JitterMode;
 use teamcraft_core::store::{LocalStore, MessageFilter, Table};
 use teamcraft_core::{Client, ClientSettings, GatewayOutcome, read_state, upkeep};
 use teamcraft_proto::{ConversationId, Id, MessageId, Snowflake};
@@ -226,6 +227,8 @@ mod queue {
       pending_actions: PendingActionSettings {
         retry_after: Duration::from_secs(1),
         retry_max: Duration::from_secs(60),
+        // The test steps the clock by the exact backoff.
+        jitter: JitterMode::None,
         max_attempts: 3,
         max_age: Duration::from_secs(60),
         ..PendingActionSettings::default()
