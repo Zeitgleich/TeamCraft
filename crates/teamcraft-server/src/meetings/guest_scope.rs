@@ -63,6 +63,8 @@ const READ_WRITE: &[&str] = &[
   "/conversations/{conversation_id}/mls/messages",
   "/conversations/{conversation_id}/mls/group-info",
   "/conversations/{conversation_id}/call/join-token",
+  // Only ever takes the guest's own devices out of the call.
+  "/conversations/{conversation_id}/call/leave",
   "/meetings/{meeting_id}/leave",
   "/meetings/{meeting_id}/lobby/me/proof",
 ];

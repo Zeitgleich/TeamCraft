@@ -453,6 +453,19 @@ notice the dead path after the stall timeout (5 s) and rejoin the same way. Host
 the SFU (locks, removals) start fresh; the server's meeting admission still applies to every join
 ticket.
 
+**Roster reconciliation** (#684). Join and leave reports alone can leave a device in the server's
+roster for good: a report given up, a leave never sent while going away by a client that didn't
+come back. So the SFU also reports its whole roster (`POST /api/internal/v1/calls/roster`) at
+start, every `TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS` (30 s) and right after a call moved between a
+user's devices, in the same ordered queue as the join and leave reports. The server drops the
+devices it lacks – at once, or, while the SFU has run for less than `[calls] roster_grace_secs`
+(60 s, so it is fresh from a restart and its devices are rejoining), once they were missing that
+long – ends calls left with nobody, and takes devices it never heard join as joins. Once an SFU has
+sent a roster, none for `roster_timeout_secs` (120 s) ends every call. A user can also clear their
+own devices from a call at once ("Leave on all devices", `POST
+/api/v1/conversations/{id}/call/leave`): the SFU closes them with `connection_replaced`, so they
+don't rejoin, and the server drops them whatever the SFU answered.
+
 **Browsers** can't migrate a WebTransport session to another network; when it closes, the
 browser driver rejoins as above, spreading the first attempt when the session's close code
 (`closed`'s `closeCode`) is `SFU_GOING_AWAY_CLOSE_CODE`. Where the browser reports the session's

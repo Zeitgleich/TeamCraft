@@ -34,7 +34,7 @@ use teamcraft_server::router::router;
 use teamcraft_server::runtime::mail_status::MailStatus;
 use teamcraft_server::runtime::{SettingsCell, Slot, settings_key};
 use teamcraft_server::security::RateLimits;
-use teamcraft_server::services::calls::CallService;
+use teamcraft_server::services::calls::{self, CallService};
 use teamcraft_server::services::local_accounts::LocalAuth;
 use teamcraft_server::services::permission_scheme::{self, SchemeStore};
 use teamcraft_server::services::presence::{self, refresh_presence};
@@ -258,6 +258,7 @@ async fn run() -> anyhow::Result<()> {
   spawn_background_sweeper(state.clone());
   spawn_partition_maintenance(state.clone(), config.server.partitions_ahead_months);
   spawn_derived_presence(state.clone());
+  spawn_call_roster_sweeper(state.clone());
   // Wake-ups that failed for a temporary reason, also those queued before a restart.
   spawn_retry_workers(&state);
 
@@ -342,6 +343,26 @@ fn spawn_background_sweeper(state: AppState) {
         Ok(ended) => info!(ended, "ended sessions of guests whose meeting is over"),
         Err(error) => warn!(%error, "ending expired guest sessions failed"),
       }
+    }
+  });
+}
+
+/// Ends the calls of an SFU that stopped sending its roster (#684), a few times per
+/// `[calls] roster_timeout_secs`. Only with calls and SFU reports configured.
+fn spawn_call_roster_sweeper(state: AppState) {
+  let Some(period) = state
+    .maybe_calls
+    .as_ref()
+    .filter(|calls| calls.is_reporting_enabled())
+    .map(|calls| calls.roster_sweep_interval())
+  else {
+    return;
+  };
+  tokio::spawn(async move {
+    let mut interval = tokio::time::interval(period);
+    loop {
+      interval.tick().await;
+      calls::expire_silent_sfu(&state).await;
     }
   });
 }

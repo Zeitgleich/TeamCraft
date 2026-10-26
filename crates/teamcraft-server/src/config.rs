@@ -1196,6 +1196,16 @@ pub struct CallsConfig {
   /// Leave unset with a certificate browsers trust.
   #[serde(rename = "sfu_certificate_sha256", default)]
   pub maybe_sfu_certificate_sha256: Option<String>,
+  /// The SFU reports its whole roster now and then (`/api/internal/v1/calls/roster`); a device it
+  /// no longer has leaves the call. While the SFU is fresh from a restart, its devices get this
+  /// long to rejoin first.
+  #[serde(default = "default_roster_grace_secs")]
+  pub roster_grace_secs: u64,
+  /// Once the SFU has sent a roster, no roster for this long ends every call: the SFU is gone or
+  /// cut off, and nothing confirms anybody is still in a call. Keep it a few SFU roster intervals
+  /// (`TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS`, default 30).
+  #[serde(default = "default_roster_timeout_secs")]
+  pub roster_timeout_secs: u64,
 }
 
 /// Device-linking relay at /api/v1/rendezvous.
@@ -1540,6 +1550,14 @@ fn default_caldav_timeout_secs() -> u64 {
 
 fn default_ring_timeout_secs() -> u64 {
   30
+}
+
+fn default_roster_grace_secs() -> u64 {
+  60
+}
+
+fn default_roster_timeout_secs() -> u64 {
+  120
 }
 
 fn default_call_idle_secs() -> u64 {

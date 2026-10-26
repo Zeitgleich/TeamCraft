@@ -23,9 +23,9 @@ use std::{
 
 use teamcraft_media::{datagram::StreamId, dave::DaveEpoch};
 use teamcraft_proto::{
-  Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, DeviceId, ErrorBody, ErrorCode,
-  MediaCapabilities, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, SfuControlAction, TransportFeedback, UserId,
-  VideoCodec, VideoLayerInfo, VideoTrackKind,
+  Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallRosterEntry, DeviceId, ErrorBody,
+  ErrorCode, MediaCapabilities, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, SfuCallRoster, SfuControlAction,
+  TransportFeedback, UserId, VideoCodec, VideoLayerInfo, VideoTrackKind,
 };
 use thiserror::Error;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
@@ -300,9 +300,24 @@ impl Rooms {
         }
         room.close_everyone(CallEvent::EndedByHost { by_user_id });
       },
+      SfuControlAction::DisconnectUser { user_id } => room.disconnect_user(*user_id),
       SfuControlAction::Unknown => {},
     }
     Ok(())
+  }
+
+  /// Every call on this SFU and the devices in it, reconnecting ones included: what the server's
+  /// roster is reconciled with (`SfuRosterReport`).
+  pub fn roster(&self) -> Vec<SfuCallRoster> {
+    // Lock order: rooms, then room state; the rooms lock is released first.
+    let rooms: Vec<Arc<Room>> = lock(&self.rooms).values().cloned().collect();
+    rooms
+      .iter()
+      .map(|room| SfuCallRoster {
+        call_id: room.call_id,
+        participants: room.roster(),
+      })
+      .collect()
   }
 
   /// Adds a participant to a call, creating the room on first join. A device that is already in
@@ -702,6 +717,17 @@ impl Room {
     }
   }
 
+  fn roster(&self) -> Vec<CallRosterEntry> {
+    lock(&self.state)
+      .participants
+      .iter()
+      .map(|(device_id, participant)| CallRosterEntry {
+        user_id: participant.user_id,
+        device_id: *device_id,
+      })
+      .collect()
+  }
+
   fn has_participant(&self, participant_id: DeviceId) -> bool {
     lock(&self.state).participants.contains_key(&participant_id)
   }
@@ -772,6 +798,33 @@ impl Room {
       CallEvent::ConnectionReplaced,
       REPLACED_BY_NEW_CONNECTION,
       b"call moved to another device",
+    );
+  }
+
+  /// The user left the call on all devices: each of them hears that its connection was replaced
+  /// (so it doesn't rejoin), then is closed; reconnecting ones lose their slot at once. Their
+  /// sessions then leave as usual, and the server hears about it.
+  fn disconnect_user(&self, user_id: UserId) {
+    let mut state = lock(&self.state);
+    let devices: Vec<DeviceId> = state
+      .participants
+      .iter()
+      .filter(|(_, participant)| participant.user_id == user_id)
+      .map(|(device_id, _)| *device_id)
+      .collect();
+    let mut handles = Vec::new();
+    for device_id in &devices {
+      match state.handle_of(*device_id) {
+        Some(handle) => handles.push(handle.clone()),
+        None => state.remove(self.call_id, *device_id, Instant::now()),
+      }
+    }
+    info!(call_id = %self.call_id, user_id = %user_id, devices = devices.len(), "user left on all devices");
+    close_after_event(
+      handles,
+      CallEvent::ConnectionReplaced,
+      REPLACED_BY_NEW_CONNECTION,
+      b"left the call on all devices",
     );
   }
 
@@ -1058,4 +1111,112 @@ fn send(handle: &ParticipantHandle, event: CallEvent) {
 /// Recovers from poisoning: room state stays consistent because no invariant spans a panic point.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
   mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+  use teamcraft_proto::{Id, Snowflake};
+  use tokio::sync::mpsc::{self, Receiver};
+
+  use super::*;
+
+  const CALL: i64 = 9;
+
+  #[test]
+  fn the_roster_lists_every_device_of_every_call() {
+    let rooms = Rooms::new(SfuConfig::default());
+    let (_alice_rx, _) = join(&rooms, 1, 10);
+    let (_bob_rx, _) = join(&rooms, 2, 20);
+
+    let roster = rooms.roster();
+
+    assert_eq!(roster.len(), 1);
+    assert_eq!(roster[0].call_id, id(CALL));
+    let mut participants = roster[0].participants.clone();
+    participants.sort_by_key(|entry| entry.device_id);
+    assert_eq!(participants, vec![entry(1, 10), entry(2, 20)]);
+  }
+
+  #[tokio::test]
+  async fn leaving_on_all_devices_replaces_only_that_users_connections() {
+    let rooms = Rooms::new(SfuConfig::default());
+    let (mut laptop_rx, _) = join(&rooms, 1, 10);
+    let (mut phone_rx, phone_session) = join(&rooms, 1, 11);
+    let (mut bob_rx, _) = join(&rooms, 2, 20);
+    let room = lock(&rooms.rooms).get(&id(CALL)).cloned().unwrap();
+    // The phone lost its connection: it holds its slot while it reconnects.
+    assert!(rooms.disconnect(&room, id(11), phone_session, Instant::now()));
+    drain(&mut laptop_rx);
+    drain(&mut phone_rx);
+    drain(&mut bob_rx);
+
+    rooms
+      .control(
+        id(CALL),
+        id(1),
+        &SfuControlAction::DisconnectUser { user_id: id(1) },
+      )
+      .unwrap();
+
+    assert!(drain(&mut laptop_rx).contains(&CallEvent::ConnectionReplaced));
+    assert!(
+      !drain(&mut bob_rx).contains(&CallEvent::ConnectionReplaced),
+      "the others stay"
+    );
+    let devices: Vec<DeviceId> = rooms.roster()[0]
+      .participants
+      .iter()
+      .map(|entry| entry.device_id)
+      .collect();
+    assert!(
+      !devices.contains(&id(11)),
+      "a reconnecting device loses its slot at once"
+    );
+    assert!(devices.contains(&id(20)));
+  }
+
+  /// Joins user `user` with device `device`; returns its signaling queue and session.
+  fn join(rooms: &Rooms, user: i64, device: i64) -> (Receiver<Outgoing>, SessionId) {
+    let (signal_tx, signal_rx) = mpsc::channel(64);
+    let handle = ParticipantHandle {
+      link: Arc::new(QuietLink),
+      signal_tx,
+    };
+    let grant = JoinGrant {
+      call_id: id(CALL),
+      user_id: id(user),
+      device_id: id(device),
+    };
+    let (_, session, _) = rooms.join(grant, MediaCapabilities::default(), handle).unwrap();
+    (signal_rx, session)
+  }
+
+  fn drain(rx: &mut Receiver<Outgoing>) -> Vec<CallEvent> {
+    let mut events = Vec::new();
+    while let Ok(outgoing) = rx.try_recv() {
+      if let Outgoing::Event(event) = outgoing {
+        events.push(event);
+      }
+    }
+    events
+  }
+
+  /// A link that drops everything.
+  struct QuietLink;
+
+  impl ParticipantLink for QuietLink {
+    fn send_datagram(&self, _bytes: &[u8]) {}
+    fn close(&self, _code: u32, _reason: &[u8]) {}
+  }
+
+  fn entry(user: i64, device: i64) -> CallRosterEntry {
+    CallRosterEntry {
+      user_id: id(user),
+      device_id: id(device),
+    }
+  }
+
+  fn id<T: Id>(raw: i64) -> T {
+    T::from_snowflake(Snowflake::new(raw).unwrap())
+  }
 }

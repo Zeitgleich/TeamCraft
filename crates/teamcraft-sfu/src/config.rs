@@ -46,6 +46,10 @@ pub struct SfuConfig {
   /// On shutdown, how long the going-away closes get to reach the clients before the process
   /// exits (clients that miss it notice the dead path within seconds anyway).
   pub shutdown_drain: Duration,
+  /// How often the SFU reports its whole roster to the server (also once at start and after a call
+  /// moved between devices), so a leave the server never heard of can't keep a device in a call
+  /// for good. One small request per interval; the server drops what the SFU no longer has.
+  pub roster_interval: Duration,
 }
 
 impl Default for SfuConfig {
@@ -66,6 +70,7 @@ impl Default for SfuConfig {
       idle_timeout: Duration::from_secs(10),
       reconnect_grace: Duration::from_secs(30),
       shutdown_drain: Duration::from_secs(2),
+      roster_interval: Duration::from_secs(30),
     }
   }
 }

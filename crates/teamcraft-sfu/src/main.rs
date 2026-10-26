@@ -25,6 +25,8 @@
 //! - `TEAMCRAFT_SFU_SHUTDOWN_DRAIN_SECS`: on SIGTERM every call connection is closed as "going
 //!   away" (clients rejoin, ARCHITECTURE.md §6.5); how long those closes get to reach the clients
 //!   before the process exits, default 2
+//! - `TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS`: how often the whole call roster is reported to the
+//!   server (also at start), which drops participants the SFU no longer has, default 30
 
 use std::io::Write;
 use std::net::SocketAddr;
@@ -94,6 +96,9 @@ async fn run() -> anyhow::Result<()> {
   }
   if let Some(drain) = env_duration_secs("TEAMCRAFT_SFU_SHUTDOWN_DRAIN_SECS")? {
     config.shutdown_drain = drain;
+  }
+  if let Some(interval) = env_duration_secs("TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS")? {
+    config.roster_interval = interval;
   }
 
   let identity = load_identity().await?;

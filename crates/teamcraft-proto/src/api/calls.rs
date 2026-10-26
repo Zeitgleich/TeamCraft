@@ -41,7 +41,7 @@ impl std::fmt::Debug for CallJoinTokenResponse {
 }
 
 /// One device in a call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 pub struct CallRosterEntry {
   pub user_id: UserId,
   pub device_id: DeviceId,
@@ -99,6 +99,12 @@ pub enum SfuControlAction {
   Unlock,
   /// Disconnect everyone.
   End,
+  /// Disconnect all of the user's devices because the user left the call on all of them ("Leave on
+  /// all devices"); unlike [`Self::RemoveParticipant`] they may join again. Not a host control: the
+  /// server sends it for the user themselves.
+  DisconnectUser {
+    user_id: UserId,
+  },
   #[serde(other)]
   Unknown,
 }
@@ -110,6 +116,26 @@ pub struct SfuParticipantReport {
   pub call_id: CallId,
   pub user_id: UserId,
   pub device_id: DeviceId,
+}
+
+/// Body of `POST /api/internal/v1/calls/roster`: every call the SFU runs and who is in it, sent when
+/// the SFU starts, periodically and after a call moved between a user's devices. The server
+/// reconciles its roster with it, so a lost or never sent leave can't keep a device in a call for
+/// good (#684). Internal: authenticated with the SFU's registration token. It travels in the same
+/// ordered queue as the join and leave reports, so it never overtakes one of them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SfuRosterReport {
+  /// How long the SFU has been running, in seconds. A freshly (re)started SFU has lost its rooms;
+  /// the server gives the devices that were in them time to rejoin before it drops them.
+  pub uptime_secs: u64,
+  pub calls: Vec<SfuCallRoster>,
+}
+
+/// One call on the SFU, with every device in it (also those reconnecting).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SfuCallRoster {
+  pub call_id: CallId,
+  pub participants: Vec<CallRosterEntry>,
 }
 
 #[cfg(test)]
@@ -134,6 +160,43 @@ mod tests {
     assert_eq!(serde_json::from_str::<SfuControlRequest>(&json).unwrap(), request);
     let unknown: SfuControlAction = serde_json::from_str(r#"{"action":"spotlight"}"#).unwrap();
     assert_eq!(unknown, SfuControlAction::Unknown);
+  }
+
+  #[test]
+  fn leaving_on_all_devices_has_a_stable_wire_format() {
+    let request = SfuControlRequest {
+      call_id: CallId::from_snowflake(Snowflake::new(7).unwrap()),
+      by_user_id: UserId::from_snowflake(Snowflake::new(2).unwrap()),
+      action: SfuControlAction::DisconnectUser {
+        user_id: UserId::from_snowflake(Snowflake::new(2).unwrap()),
+      },
+    };
+    let json = serde_json::to_string(&request).unwrap();
+    assert_eq!(
+      json,
+      r#"{"call_id":"7","by_user_id":"2","action":"disconnect_user","user_id":"2"}"#
+    );
+    assert_eq!(serde_json::from_str::<SfuControlRequest>(&json).unwrap(), request);
+  }
+
+  #[test]
+  fn roster_reports_have_a_stable_wire_format() {
+    let report = SfuRosterReport {
+      uptime_secs: 90,
+      calls: vec![SfuCallRoster {
+        call_id: CallId::from_snowflake(Snowflake::new(7).unwrap()),
+        participants: vec![CallRosterEntry {
+          user_id: UserId::from_snowflake(Snowflake::new(2).unwrap()),
+          device_id: DeviceId::from_snowflake(Snowflake::new(3).unwrap()),
+        }],
+      }],
+    };
+    let json = serde_json::to_string(&report).unwrap();
+    assert_eq!(
+      json,
+      r#"{"uptime_secs":90,"calls":[{"call_id":"7","participants":[{"user_id":"2","device_id":"3"}]}]}"#
+    );
+    assert_eq!(serde_json::from_str::<SfuRosterReport>(&json).unwrap(), report);
   }
 
   #[test]

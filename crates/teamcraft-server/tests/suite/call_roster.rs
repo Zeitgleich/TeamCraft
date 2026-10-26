@@ -263,6 +263,128 @@ mod direct_messages {
   }
 }
 
+mod reconciliation {
+  use super::*;
+
+  #[tokio::test]
+  async fn the_sfu_roster_drops_stale_devices_and_ends_empty_calls() {
+    let app = app!(30);
+    let (alice, bob) = (owner(), member("bob"));
+    let channel = channel_with(&app, &[&bob]).await;
+    let (alice_device, bob_device) = (
+      register_device(&app, &alice).await,
+      register_device(&app, &bob).await,
+    );
+    let (alice_id, bob_id) = (user_id(&app, &alice).await, user_id(&app, &bob).await);
+    let mut bob_socket = ws::connect(&app, &bob, &bob_device).await;
+    let call_id = join_token(&app, &alice, &channel, &alice_device).await;
+    report(
+      &app,
+      "joined",
+      Some(SFU_TOKEN),
+      &call_id,
+      &alice_id,
+      &alice_device,
+    )
+    .await;
+    report(&app, "joined", Some(SFU_TOKEN), &call_id, &bob_id, &bob_device).await;
+    ws::events(&mut bob_socket, QUIET).await;
+
+    // Alice's leave got lost: the SFU only has Bob.
+    let only_bob = json!({ "uptime_secs": 600, "calls": [{
+      "call_id": call_id,
+      "participants": [{ "user_id": bob_id, "device_id": bob_device }],
+    }]});
+    assert_eq!(
+      roster(&app, Some(SFU_TOKEN), &only_bob).await,
+      StatusCode::NO_CONTENT
+    );
+    let update = call_events(&ws::events(&mut bob_socket, QUIET).await);
+    assert_eq!(update[0]["type"], "call_update", "{update:?}");
+    assert_eq!(update[0]["participants"].as_array().unwrap().len(), 1);
+
+    // The SFU has no call any more.
+    let empty = json!({ "uptime_secs": 630, "calls": [] });
+    roster(&app, Some(SFU_TOKEN), &empty).await;
+    let end = call_events(&ws::events(&mut bob_socket, QUIET).await);
+    assert_eq!(
+      (end[0]["type"].as_str(), end[0]["call_id"].as_str()),
+      (Some("call_end"), Some(call_id.as_str()))
+    );
+    assert_eq!(
+      app
+        .get(&bob, &format!("/conversations/{channel}/call"))
+        .await
+        .status,
+      StatusCode::NOT_FOUND
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn leaving_on_all_devices_clears_the_users_devices() {
+    let app = app!(30);
+    let (alice, bob) = (owner(), member("bob"));
+    let channel = channel_with(&app, &[&bob]).await;
+    let (laptop, phone, bob_device) = (
+      register_device(&app, &alice).await,
+      register_device(&app, &alice).await,
+      register_device(&app, &bob).await,
+    );
+    let (alice_id, bob_id) = (user_id(&app, &alice).await, user_id(&app, &bob).await);
+    let mut bob_socket = ws::connect(&app, &bob, &bob_device).await;
+    let call_id = join_token(&app, &alice, &channel, &laptop).await;
+    report(&app, "joined", Some(SFU_TOKEN), &call_id, &alice_id, &laptop).await;
+    report(&app, "joined", Some(SFU_TOKEN), &call_id, &alice_id, &phone).await;
+    report(&app, "joined", Some(SFU_TOKEN), &call_id, &bob_id, &bob_device).await;
+    ws::events(&mut bob_socket, QUIET).await;
+
+    let path = format!("/conversations/{channel}/call/leave");
+    let reply = app.post(&alice, &path, json!({})).await;
+
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+    let update = call_events(&ws::events(&mut bob_socket, QUIET).await);
+    assert_eq!(update[0]["type"], "call_update", "{update:?}");
+    let participants = update[0]["participants"].as_array().unwrap();
+    assert_eq!(participants.len(), 1);
+    assert_eq!(participants[0]["user_id"], bob_id.as_str());
+    // A retry after a lost answer changes nothing.
+    assert_eq!(
+      app.post(&alice, &path, json!({})).await.status,
+      StatusCode::NO_CONTENT
+    );
+    assert!(call_events(&ws::events(&mut bob_socket, QUIET).await).is_empty());
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn rosters_need_the_registration_token() {
+    let app = app!(30);
+    let empty = json!({ "uptime_secs": 600, "calls": [] });
+
+    let missing = roster(&app, None, &empty).await;
+    let wrong = roster(&app, Some("not-the-token"), &empty).await;
+
+    assert_eq!(
+      (missing, wrong),
+      (StatusCode::UNAUTHORIZED, StatusCode::UNAUTHORIZED)
+    );
+    app.stop().await;
+  }
+
+  /// Posts an SFU roster to the internal endpoint and returns the status.
+  async fn roster(app: &TestApp, maybe_token: Option<&str>, body: &Value) -> StatusCode {
+    let mut request = app
+      .http
+      .post(format!("{}/api/internal/v1/calls/roster", app.base_url))
+      .json(body);
+    if let Some(token) = maybe_token {
+      request = request.bearer_auth(token);
+    }
+    request.send().await.unwrap().status()
+  }
+}
+
 mod internal_endpoint {
   use super::*;
 
@@ -323,6 +445,8 @@ fn calls_config(ring_timeout_secs: u64, maybe_token: Option<&str>) -> CallsConfi
     ring_timeout_secs,
     maybe_sfu_control_url: None,
     maybe_sfu_certificate_sha256: None,
+    roster_grace_secs: 60,
+    roster_timeout_secs: 120,
   }
 }
 
