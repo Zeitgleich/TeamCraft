@@ -26,6 +26,12 @@
   <string name="connection_sign_in">Deine Sitzung ist abgelaufen. Nachrichten warten, bis du dich wieder anmeldest.</string>
   <string name="connection_sign_in_action">Erneut anmelden</string>
   <string name="connection_connecting">Verbindung zum Server wird aufgebaut…</string>
+  <string name="message_link_label">Link zu einer Nachricht</string>
+  <string name="message_sent">Gesendet</string>
+  <plurals name="conversation_members">
+    <item quantity="one">%d Mitglied</item>
+    <item quantity="other">%d Mitglieder</item>
+  </plurals>
 
   <!-- Conversation -->
   <string name="jump_down">Zur neuesten Nachricht springen</string>

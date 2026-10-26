@@ -27,8 +27,11 @@ sealed interface FeedItem {
     override val contentType: FeedContentType get() = FeedContentType.Unread
   }
 
-  /** A message; `isContinuation` when it follows the same author's previous one closely. */
-  data class Entry(val message: Message, val isContinuation: Boolean) : FeedItem {
+  /**
+   * A message; `isContinuation` when it follows the same author's previous one closely,
+   * `isGroupEnd` when the next one doesn't continue it (the group's last bubble carries the avatar).
+   */
+  data class Entry(val message: Message, val isContinuation: Boolean, val isGroupEnd: Boolean = true) : FeedItem {
     override val key: String get() = message.id
     override val contentType: FeedContentType
       get() = when {
@@ -43,7 +46,8 @@ enum class FeedContentType { Day, Unread, Event, Message, FollowUp }
 
 /**
  * Lays out a conversation (oldest first) the way chat apps do: a date chip per day, the unread line
- * before `maybeFirstUnread`, and follow-up messages of the same author grouped under one name.
+ * before `maybeFirstUnread`, and follow-up messages of the same author grouped under one name and
+ * one avatar.
  */
 fun feedItems(messages: List<Message>, maybeFirstUnread: String?, zone: ZoneId = ZoneId.systemDefault()): List<FeedItem> {
   val items = ArrayList<FeedItem>(messages.size + 8)
@@ -56,6 +60,11 @@ fun feedItems(messages: List<Message>, maybeFirstUnread: String?, zone: ZoneId =
     val isUnreadStart = message.id == maybeFirstUnread
     if (isUnreadStart) items += FeedItem.Unread
     val isContinuation = !isNewDay && !isUnreadStart && maybePrevious?.let { continues(it, message) } == true
+    if (isContinuation) {
+      // The entry just before is the previous message: no chip or line came between them.
+      val previous = items.removeAt(items.lastIndex) as FeedItem.Entry
+      items += previous.copy(isGroupEnd = false)
+    }
     items += FeedItem.Entry(message, isContinuation)
     maybePrevious = message
     maybeDay = day
