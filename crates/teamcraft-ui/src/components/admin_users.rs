@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use teamcraft_proto::Role;
 
-use crate::admin::AdminUser;
+use crate::admin::{AdminUser, DeviceInfo};
 use crate::clock::{format_date_time, format_relative, now_ms};
 use crate::components::admin_console::SectionHeader;
 use crate::components::avatar::{Avatar, AvatarSize};
@@ -9,6 +9,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::i18n::use_i18n;
 use crate::model::{DeviceId, UserId};
+use crate::reactive::{items_by_key, keyed_item};
 use crate::state::use_app_state;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +39,31 @@ pub fn UsersSection() -> impl IntoView {
     selected
       .get()
       .and_then(|id| users.get().into_iter().find(|entry| entry.user.id == id))
+  });
+  // The detail is built again for another person or when what it offers changes; a refresh that
+  // brings new "last seen" times or a presence updates the device list in place, so the pane
+  // doesn't flicker and a started confirmation stays (issue #687).
+  let detail_key = Memo::new(move |_| {
+    selected_user.with(|maybe_entry| {
+      maybe_entry.as_ref().map(|entry| {
+        (
+          entry.user.id,
+          entry.user.display_name.clone(),
+          entry.user.username.clone(),
+          entry.is_active,
+          entry.is_in_chats,
+          entry.maybe_guest.is_some(),
+        )
+      })
+    })
+  });
+  let selected_devices = Memo::new(move |_| {
+    selected_user.with(|maybe_entry| {
+      maybe_entry
+        .as_ref()
+        .map(|entry| entry.devices.clone())
+        .unwrap_or_default()
+    })
   });
 
   view! {
@@ -95,8 +121,8 @@ pub fn UsersSection() -> impl IntoView {
         </Show>
       </div>
       <aside class="detail-pane" aria-label=move || i18n.t("admin-detail-label")>
-        {move || match selected_user.get() {
-          Some(entry) => view! { <UserDetail entry=entry now=now /> }.into_any(),
+        {move || match detail_key.with(Option::is_some).then(|| selected_user.get_untracked()).flatten() {
+          Some(entry) => view! { <UserDetail entry=entry devices=selected_devices now=now /> }.into_any(),
           None => view! { <p class="empty-state">{move || i18n.t("admin-user-select")}</p> }.into_any(),
         }}
       </aside>
@@ -156,10 +182,11 @@ fn UserRow(entry: AdminUser, selected: RwSignal<Option<UserId>>, now: i64, guest
 }
 
 #[component]
-fn UserDetail(entry: AdminUser, now: i64) -> impl IntoView {
+fn UserDetail(entry: AdminUser, devices: Memo<Vec<DeviceInfo>>, now: i64) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let user_id = entry.user.id;
+  let by_id = items_by_key(devices.into(), |device: &DeviceInfo| device.id);
   let pending_device = RwSignal::new(None::<DeviceId>);
   let confirm_deactivate = RwSignal::new(false);
   let confirm_removal = RwSignal::new(false);
@@ -189,19 +216,17 @@ fn UserDetail(entry: AdminUser, now: i64) -> impl IntoView {
     <p class="muted-text" translate="no">{format!("@{}", entry.user.username)}</p>
     <h4 class="detail-heading">{move || i18n.t("admin-devices")}</h4>
     <ul class="device-list">
-      {entry
-        .devices
-        .iter()
-        .cloned()
-        .map(|device| {
+      <For each=move || devices.get() key=|device| device.id let:device>
+        {
           let device_id = device.id;
+          let device = keyed_item(by_id, device_id, device);
           let is_pending = move || pending_device.get() == Some(device_id);
-          let seen = move || format_relative(device.last_seen, now, i18n.locale().tag());
+          let seen = move || format_relative(device.with(|device| device.last_seen), now, i18n.locale().tag());
           view! {
             <li class="device">
               <Icon name=IconName::Smartphone />
               <div class="device-info">
-                <span translate="no">{device.name.clone()}</span>
+                <span translate="no">{move || device.with(|device| device.name.clone())}</span>
                 <span class="muted-text small">{seen}</span>
               </div>
               <Show
@@ -229,12 +254,9 @@ fn UserDetail(entry: AdminUser, now: i64) -> impl IntoView {
               </Show>
             </li>
           }
-        })
-        .collect_view()}
-      <Show when={
-        let none = entry.devices.is_empty();
-        move || none
-      } fallback=|| ()>
+        }
+      </For>
+      <Show when=move || devices.with(Vec::is_empty) fallback=|| ()>
         <li class="muted-text">{move || i18n.t("admin-no-devices")}</li>
       </Show>
     </ul>
