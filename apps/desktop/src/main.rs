@@ -15,15 +15,16 @@ mod calls;
 mod core;
 #[cfg(target_os = "linux")]
 mod desktop_entry;
+mod dropped_files;
 mod external_links;
-#[cfg(target_os = "linux")]
-mod file_portal;
 #[cfg(target_os = "linux")]
 mod freedesktop;
 mod notifications;
 mod ringtone;
 mod shell_prefs;
 mod single_instance;
+#[cfg(target_os = "linux")]
+mod startup_env;
 mod tray;
 mod updates;
 #[cfg(target_os = "linux")]
@@ -47,6 +48,7 @@ use crate::auth::{AuthService, DesktopConfig, KeyringStore};
 use crate::calls::{BUNDLED_MODEL, CALL_CHANGED_EVENT, CallHost, MediaFiles};
 use crate::core::TokenCache;
 use crate::core::commands::CoreHost;
+use crate::dropped_files::DroppedFilesState;
 use crate::shell_prefs::ShellPrefsState;
 use crate::updates::UpdateHost;
 use crate::window_chrome::WindowChromeState;
@@ -55,9 +57,10 @@ use crate::window_chrome::WindowChromeState;
 const TOKEN_REFRESH: Duration = Duration::from_secs(2);
 
 fn main() -> anyhow::Result<()> {
-  // Before GTK starts: file pickers go through xdg-desktop-portal (the desktop's own dialog).
+  // Before GTK starts: file pickers through xdg-desktop-portal, WebKitGTK without the DMABUF
+  // renderer that flickers on some GPUs (startup_env.rs).
   #[cfg(target_os = "linux")]
-  file_portal::ensure_portal_choosers();
+  startup_env::ensure_startup_environment();
   tracing_subscriber::fmt()
     .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
     .init();
@@ -98,6 +101,7 @@ fn main() -> anyhow::Result<()> {
     .manage(ringtone::RingtoneState::default())
     .manage(calls::push_to_talk::PushToTalkState::default())
     .manage(CoreHost::new(tokens))
+    .manage(Arc::new(DroppedFilesState::default()))
     .setup(move |app| {
       let servers = Arc::new(ServerState::new(
         ServerDirectory::load(&core::commands::base_dir(app.handle())?),
@@ -213,6 +217,8 @@ fn main() -> anyhow::Result<()> {
       core::commands::core_stage_file,
       core::commands::core_stop,
       core::commands::core_reset_store,
+      dropped_files::dropped_files_take,
+      dropped_files::dropped_file_read,
       calls::commands::call_snapshot,
       calls::commands::call_media_devices,
       calls::commands::call_action,
@@ -280,7 +286,8 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     .min_inner_size(720.0, 520.0)
     // Files dragged onto the window reach the page as HTML5 drag and drop (#484), the same path as
     // in the browser: the UI gets `File` objects and attaches them like the + button. Tauri's own
-    // handler would swallow the drop on every platform and only report file paths.
+    // handler would swallow the drop on every platform and only report file paths. WebKitGTK hands
+    // the page no files, so on Linux the shell reads them for it (dropped_files.rs, #651).
     .disable_drag_drop_handler()
     .on_new_window({
       let app = app.handle().clone();
@@ -328,8 +335,17 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
   };
   let window = window.build()?;
   #[cfg(target_os = "linux")]
-  if let Err(error) = window.with_webview(|webview| webview_memory::configure(&webview.inner())) {
-    tracing::warn!(%error, "could not set the webview's memory caches");
+  {
+    let dropped = app.state::<Arc<DroppedFilesState>>().inner().clone();
+    let handle = app.handle().clone();
+    let configured = window.with_webview(move |webview| {
+      let webview = webview.inner();
+      webview_memory::configure(&webview);
+      dropped_files::watch(&webview, dropped, handle);
+    });
+    if let Err(error) = configured {
+      tracing::warn!(%error, "could not set up the webview's memory caches and file drops");
+    }
   }
   tray::reveal_without_host(app.handle());
   if is_start_minimized

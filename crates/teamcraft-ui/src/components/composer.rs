@@ -13,9 +13,7 @@ use crate::components::composer_toolbar::{
   ActiveFormats, FormatAction, FormatToolbar, SendOptionsMenu, format_action_for, move_focus_vertical,
 };
 use crate::components::emoji_picker::EmojiPicker;
-use crate::components::file_drop::{
-  DroppedFiles, is_unreadable_file_drop, report_unreadable_drop, transfer_files,
-};
+use crate::components::file_drop::{DropContent, DroppedFiles, take_drop, transfer_files};
 use crate::components::file_views::blob_url;
 use crate::components::icons::{Icon, IconName};
 use crate::components::sheet::MenuSurface;
@@ -882,16 +880,18 @@ pub fn Composer(
       element.click();
     }
   };
-  // Drops anywhere on the conversation or thread arrive through its drop zone (`FileDrop`).
-  if let Some(DroppedFiles(dropped)) = use_context::<DroppedFiles>() {
-    Effect::new(move |_| {
-      let files = dropped.get();
-      if !files.is_empty() {
-        dropped.set(Vec::new());
-        add_files(files);
-      }
-    });
-  }
+  // Drops anywhere on the conversation or thread arrive through its drop zone (`FileDrop`). A
+  // composer outside one has its own, for the files the desktop shell reads after a drop.
+  let drop_zone =
+    use_context::<DroppedFiles>().unwrap_or_else(|| DroppedFiles(RwSignal::new_local(Vec::new())));
+  let DroppedFiles(dropped) = drop_zone;
+  Effect::new(move |_| {
+    let files = dropped.get();
+    if !files.is_empty() {
+      dropped.set(Vec::new());
+      add_files(files);
+    }
+  });
   // Files are attached; dropped text goes in as plain text, never as the HTML that came with it.
   let on_drop = move |ev: web_sys::DragEvent| {
     // Marks the drop as handled, so the conversation around doesn't attach the files a second time.
@@ -899,12 +899,12 @@ pub fn Composer(
     let Some(transfer) = ev.data_transfer() else {
       return;
     };
-    let files = transfer_files(&transfer);
-    match files.is_empty() {
-      false => add_files(files),
-      // Files the webview handed over as addresses only: said so, not pasted in as text.
-      true if is_unreadable_file_drop(&transfer) => report_unreadable_drop(state, i18n),
-      true => {
+    // Files the webview handed over as addresses only come from the desktop shell, or an error says
+    // why not; they are never pasted in as text.
+    match take_drop(&transfer, Some(drop_zone), state, i18n) {
+      DropContent::Files(files) => add_files(files),
+      DropContent::FromShell | DropContent::Unreadable => {},
+      DropContent::NoFiles => {
         if let (Ok(text), Some(element)) = (transfer.get_data("text/plain"), editor.get_untracked())
           && !text.is_empty()
         {
