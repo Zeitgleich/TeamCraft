@@ -88,6 +88,7 @@ pub mod speaker_test;
 pub mod startup;
 pub mod state;
 pub mod sync_reads;
+pub mod tab_handover;
 pub mod toast_motion;
 pub mod toast_timer;
 pub mod unread_divider;

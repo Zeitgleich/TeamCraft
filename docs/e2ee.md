@@ -1720,13 +1720,18 @@ wins per record. MLS epochs fork (messages become undecryptable) and queued mess
 So exactly one core owns a device's store at a time:
 
 - **Web.** The tab holding the Web Lock `teamcraft-core-<user>` (`navigator.locks`, taken with
-  `ifAvailable` before IndexedDB is opened) owns the store and runs the core. Other tabs of the same
-  account are followers: their `core_*` calls go over the `BroadcastChannel` of the same name to the
-  owner, which answers them and announces every change, so all tabs show the same data. Each
-  follower also waits for the lock; when the owner closes or crashes, the browser hands it to one of
-  them, which opens the store and becomes the owner. A follower whose owner does not answer (a frozen
-  tab) gets an error instead of waiting forever. Browsers without Web Locks run one core per tab, as
-  before. The service worker only reads the store (push previews, §7).
+  `ifAvailable` before IndexedDB is opened) owns the store, runs the core and is the only tab that
+  shows the app (#744). Other tabs of the same account are inactive: they show "TeamCraft is
+  already open in another tab" with "Use here", and their few `core_*` calls (the session check)
+  go over the `BroadcastChannel` of the same name to the owner. "Use here" asks the owner over that
+  channel to hand over and waits for the lock. The owner refuses while it is in a call (the user can
+  then end the call and ask again); otherwise it has the composers store their drafts, waits for
+  IndexedDB to hold everything written (the outbox included, at most 5 s), stops its core, which
+  releases the lock, and shows "TeamCraft was opened in another tab". No tab takes the lock on its
+  own: a tab whose owner closed takes it on "Use here". A reload of the active tab finds its own
+  account in the tab's session storage and waits up to 3 s for the old page's lock instead of
+  asking. Browsers without Web Locks run one core per tab, as before. The service worker only reads
+  the store (push previews, §7).
 - **Desktop.** One running instance on every OS (Tauri's single-instance plugin: a named mutex on
   Windows, D-Bus on Linux, a Unix socket on macOS); a second launch shows the first instance's window
   and exits. Behind that, an OS file lock (`<store>.lock`, `StoreLock`) keeps any second process off

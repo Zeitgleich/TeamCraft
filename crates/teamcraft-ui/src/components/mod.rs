@@ -114,6 +114,7 @@ pub mod space_invites;
 pub mod space_tile;
 pub mod status_menu;
 pub mod storage_banner;
+pub mod tab_elsewhere;
 pub mod tab_list;
 pub mod thread_panel;
 pub mod threads_inbox;

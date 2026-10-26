@@ -4,8 +4,11 @@
 //! core: own MLS state, own gateway session, own outbox. MLS state forks and outbox entries go out
 //! twice. The tab holding the Web Lock `teamcraft-core-<user>` owns the store and runs the core;
 //! every other tab of that account is a follower: its `core_*` calls go over the BroadcastChannel of
-//! the same name to the owner, which answers them and tells every tab when data changed. When the
-//! owner closes, the browser hands the lock to a waiting follower, which then opens the store.
+//! the same name to the owner, which answers them and tells every tab when data changed.
+//!
+//! Only the owner shows the app (#744, tab_handover.rs): a follower shows a notice instead, and
+//! takes the store only when the user asks for it there ("Use here"). It then asks the owner over
+//! the channel to hand over and waits for the lock; the owner lets go or refuses (a running call).
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
@@ -18,6 +21,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use teamcraft_core::platform;
 use teamcraft_proto::UserId;
+
+use crate::tab_handover::Blocker;
 use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 
@@ -62,6 +67,8 @@ pub struct Follower {
   tab: String,
   next_call: Cell<u64>,
   pending: PendingCalls,
+  /// Told when the owner refuses this tab's takeover.
+  refusals: Rc<RefCell<Option<oneshot::Sender<Blocker>>>>,
   _on_message: Closure<dyn FnMut(web_sys::MessageEvent)>,
 }
 
@@ -93,6 +100,11 @@ enum TabMessage {
   },
   /// The core's data changed: read again.
   Changed,
+  /// The follower `tab` asks to run the app itself; `ends_call` when the user agreed to end a call
+  /// the owner is in.
+  TakeOver { tab: String, ends_call: bool },
+  /// The owner keeps the store: something needs the user's say first.
+  TakeOverRefused { tab: String, blocker: Blocker },
 }
 
 impl Drop for OwnerLock {
@@ -182,25 +194,33 @@ async fn request_lock(name: &str, if_available: bool) -> Result<Option<OwnerLock
 }
 
 impl OwnerChannel {
-  /// Answers followers' calls with `serve` until dropped.
-  pub fn open<F, Fut>(user: UserId, serve: F) -> Result<Self, String>
+  /// Answers followers' calls with `serve` until dropped. `on_takeover` decides a follower's
+  /// request to take over (its argument: whether the user agreed to end a call); `Some` refuses.
+  pub fn open<F, Fut, T>(user: UserId, serve: F, on_takeover: T) -> Result<Self, String>
   where
     F: Fn(String, Value) -> Fut + 'static,
     Fut: std::future::Future<Output = Result<Value, String>> + 'static,
+    T: Fn(bool) -> Option<Blocker> + 'static,
   {
     let channel = open_channel(user)?;
     let serve = Rc::new(serve);
     let replies = channel.clone();
     let mut seen = VecDeque::<(String, u64)>::new();
     let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
-      let Some(TabMessage::Call {
-        id,
-        tab,
-        command,
-        args,
-      }) = read(&event)
-      else {
-        return;
+      let (id, tab, command, args) = match read(&event) {
+        Some(TabMessage::Call {
+          id,
+          tab,
+          command,
+          args,
+        }) => (id, tab, command, args),
+        Some(TabMessage::TakeOver { tab, ends_call }) => {
+          if let Some(blocker) = on_takeover(ends_call) {
+            post(&replies, &TabMessage::TakeOverRefused { tab, blocker });
+          }
+          return;
+        },
+        _ => return,
       };
       post(&replies, &TabMessage::Ack { id, tab: tab.clone() });
       let call = (tab.clone(), id);
@@ -244,8 +264,10 @@ impl Follower {
     let channel = open_channel(user)?;
     let tab = tab_id();
     let pending = PendingCalls::default();
+    let refusals = Rc::new(RefCell::new(None::<oneshot::Sender<Blocker>>));
     let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new({
       let pending = pending.clone();
+      let refusals = refusals.clone();
       let me = tab.clone();
       move |event: web_sys::MessageEvent| match read(&event) {
         Some(TabMessage::Ack { id, tab }) if tab == me => {
@@ -261,6 +283,12 @@ impl Follower {
           }
         },
         Some(TabMessage::Changed) => on_change(),
+        Some(TabMessage::TakeOverRefused { tab, blocker }) if tab == me => {
+          if let Some(refusal) = refusals.borrow_mut().take() {
+            // The takeover may have ended meanwhile (the lock came, or it timed out).
+            let _ = refusal.send(blocker);
+          }
+        },
         _ => {},
       }
     });
@@ -270,8 +298,24 @@ impl Follower {
       tab,
       next_call: Cell::new(0),
       pending,
+      refusals,
       _on_message: on_message,
     })
+  }
+
+  /// Asks the owner to hand the store to this tab. The answer is the owner's refusal; when it lets
+  /// go instead, the lock comes (`wait_to_own`) and this never resolves.
+  pub async fn request_takeover(&self, ends_call: bool) -> Option<Blocker> {
+    let (refusal, refused) = oneshot::channel();
+    *self.refusals.borrow_mut() = Some(refusal);
+    post(
+      &self.channel,
+      &TabMessage::TakeOver {
+        tab: self.tab.clone(),
+        ends_call,
+      },
+    );
+    refused.await.ok()
   }
 
   /// Runs a `core_*` command in the owning tab.

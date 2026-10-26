@@ -5479,6 +5479,28 @@ html.call-window body {
   padding: 0 18px;
 }
 
+/* Another tab runs the app (#744, components/tab_elsewhere.rs): the title, one sentence, the choice. */
+.tab-elsewhere h1 {
+  text-wrap: balance;
+}
+
+.tab-elsewhere-body {
+  margin: 8px 0 0;
+  color: var(--text-muted);
+}
+
+.tab-elsewhere-error {
+  margin: 12px 0 0;
+  color: var(--danger);
+  font-size: var(--text-sm);
+}
+
+.tab-elsewhere-hint {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
 .auth-alert {
   display: flex;
   gap: 12px;
