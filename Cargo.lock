@@ -10532,8 +10532,10 @@ name = "teamcraft-desktop-native"
 version = "1.0.3"
 dependencies = [
  "block2",
+ "objc2",
  "objc2-app-kit",
  "objc2-foundation",
+ "objc2-user-notifications",
  "thiserror 2.0.21",
  "tracing",
  "windows",

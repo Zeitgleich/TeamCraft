@@ -330,15 +330,16 @@ history, and replacing that one only updates the history entry, without a popup 
 |----------|----------------------------------------|-------------------|---------|---------------------------------|-------------------------------------------|
 | Linux    | freedesktop notification service       | yes               | yes     | servers with `inline-reply`     | yes; quiet in GNOME/KDE do-not-disturb    |
 | Windows  | WinRT toasts (tag, group `teamcraft`)  | yes               | yes     | yes                             | yes; taskbar flash                        |
-| macOS    | `UNUserNotificationCenter` (bundled)   | yes               | no      | no                              | yes; dock bounce                          |
+| macOS    | `UNUserNotificationCenter` (bundled)   | yes               | yes     | yes                             | yes; dock bounce                          |
 | Web      | service worker registration, else page | yes               | yes     | no (browsers have none)         | yes, in the tab that runs the calls¹      |
 
 ¹ Browsers play sound only in a tab the user has interacted with; a tab untouched since it loaded
 shows the incoming call card and the notification without the ringtone.
 
-macOS buttons need a notification center delegate, an Objective-C class the shell cannot define
-without `unsafe`; a click brings the app to the front, where the conversation or the call card is
-(#189). An unbundled macOS build and a Linux session without a notification service fall back to the
+macOS buttons and the reply field need a notification category (registered as notifications arrive,
+since the labels are translated) and a notification center delegate, an Objective-C class that
+`teamcraft-desktop-native` defines (the one crate with `unsafe`, code-style.md "Native FFI"); the
+delegate also lets banners show while the app is in front. An unbundled macOS build and a Linux session without a notification service fall back to the
 notification plugin (title and text only, no withdrawal).
 
 **Messages.** Mentions, DMs and followed thread replies by the rules above, the text only as far as
