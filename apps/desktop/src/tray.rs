@@ -101,6 +101,10 @@ pub struct TrayUpdate {
   pub tooltip: String,
   pub show_label: String,
   pub quit_label: String,
+  /// macOS: the menu bar's texts (app_menu.rs); the UI sends them when its language changes.
+  #[cfg(target_os = "macos")]
+  #[serde(rename = "menu", default)]
+  pub maybe_menu: Option<crate::app_menu::AppMenuLabels>,
 }
 
 /// Creates the tray icon with "Show" and "Quit". The texts are in the OS language until the UI
@@ -312,6 +316,10 @@ fn host_state(_app: &AppHandle) -> Option<bool> {
 pub fn tray_update(app: AppHandle, last_unread: State<'_, LastUnread>, update: TrayUpdate) {
   if let Some(menu) = app.try_state::<TrayMenu>() {
     update_tray(&app, &menu, &update);
+  }
+  #[cfg(target_os = "macos")]
+  if let Some(labels) = &update.maybe_menu {
+    crate::app_menu::update(&app, labels);
   }
   let mut last = last_unread
     .count

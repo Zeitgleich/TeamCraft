@@ -766,8 +766,38 @@ fn sync_tray_labels(i18n: crate::i18n::I18n) {
   Effect::new(move |_| {
     let name = brand.0.with(|brand| brand.display_name.clone());
     let (show, quit) = (i18n.t("tray-show"), i18n.t("tray-quit"));
-    leptos::task::spawn_local(async move { tauri::tray_update(None, &name, &show, &quit).await });
+    let menu = menu_bar_labels(i18n, &name);
+    leptos::task::spawn_local(async move { tauri::tray_update(None, &name, &show, &quit, Some(menu)).await });
   });
+}
+
+/// The macOS menu bar's texts in the UI language (#712), as the desktop shell's `AppMenuLabels`.
+fn menu_bar_labels(i18n: crate::i18n::I18n, name: &str) -> serde_json::Value {
+  let plain = |key: &str| i18n.t(key);
+  let named = |key: &str| i18n.t_with(key, &[("name", name)]);
+  serde_json::json!({
+    "about": named("menubar-about"),
+    "services": plain("menubar-services"),
+    "hide": named("menubar-hide"),
+    "hide_others": plain("menubar-hide-others"),
+    "show_all": plain("menubar-show-all"),
+    "quit": named("menubar-quit"),
+    "file": plain("menubar-file"),
+    "close_window": plain("menubar-close-window"),
+    "edit": plain("menubar-edit"),
+    "undo": plain("menubar-undo"),
+    "redo": plain("menubar-redo"),
+    "cut": plain("menubar-cut"),
+    "copy": plain("menubar-copy"),
+    "paste": plain("menubar-paste"),
+    "select_all": plain("menubar-select-all"),
+    "view": plain("menubar-view"),
+    "fullscreen": plain("menubar-fullscreen"),
+    "window": plain("menubar-window"),
+    "minimize": plain("menubar-minimize"),
+    "zoom": plain("menubar-zoom"),
+    "help": plain("menubar-help"),
+  })
 }
 
 /// The browser tab's icon gets a red dot while the tray would show a count.
@@ -816,9 +846,9 @@ fn sync_tray(state: AppState, i18n: crate::i18n::I18n) {
         ),
       };
       let (show, quit) = (i18n.t("tray-show"), i18n.t("tray-quit"));
-      leptos::task::spawn_local(
-        async move { tauri::tray_update(Some(unread), &tooltip, &show, &quit).await },
-      );
+      leptos::task::spawn_local(async move {
+        tauri::tray_update(Some(unread), &tooltip, &show, &quit, None).await
+      });
     }
     current
   });

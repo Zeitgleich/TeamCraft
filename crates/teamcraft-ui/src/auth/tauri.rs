@@ -521,12 +521,25 @@ pub async fn os_attention() -> Option<OsAttention> {
 }
 
 /// Desktop only: unread count (`None` keeps the badge) and menu texts for the tray icon and the dock/taskbar badge.
-pub async fn tray_update(maybe_unread: Option<u32>, tooltip: &str, show_label: &str, quit_label: &str) {
+/// `maybe_menu` are the macOS menu bar's texts (the shell's `AppMenuLabels`); `None` leaves them.
+pub async fn tray_update(
+  maybe_unread: Option<u32>,
+  tooltip: &str,
+  show_label: &str,
+  quit_label: &str,
+  maybe_menu: Option<serde_json::Value>,
+) {
   if !is_available() {
     return;
   }
   let args = serde_json::json!({
-    "update": { "maybe_unread": maybe_unread, "tooltip": tooltip, "show_label": show_label, "quit_label": quit_label }
+    "update": {
+      "maybe_unread": maybe_unread,
+      "tooltip": tooltip,
+      "show_label": show_label,
+      "quit_label": quit_label,
+      "menu": maybe_menu,
+    }
   });
   if let Err(error) = call::<()>("tray_update", &args).await {
     tracing::debug!(%error, "could not update the tray");
