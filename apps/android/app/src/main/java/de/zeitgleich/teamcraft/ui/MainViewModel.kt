@@ -52,6 +52,8 @@ import uniffi.teamcraft_ffi.AccountState
 import uniffi.teamcraft_ffi.CheckedServer
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.ConversationKind
+import uniffi.teamcraft_ffi.LinkPlatform
+import uniffi.teamcraft_ffi.LinkRequestItem
 import uniffi.teamcraft_ffi.LoginBrand
 import uniffi.teamcraft_ffi.MessageItem
 import uniffi.teamcraft_ffi.NotificationContent
@@ -88,6 +90,12 @@ sealed interface AppState {
   data class Ready(val userId: String, val displayName: String, val identityFingerprint: String) : AppState
   data class Failed(@StringRes val error: Int) : AppState
 }
+
+/** The approval of a new device the user is in; the code to type is on the new device only. */
+data class LinkReview(val deviceName: String?, @StringRes val maybeError: Int? = null, val isDone: Boolean = false)
+
+/** What typing the new device's code did. */
+enum class LinkConfirmation { CONFIRMED, WRONG_CODE, ATTEMPT_ENDED, FAILED }
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
   private val graph = TeamCraftApplication.graph(application)
@@ -283,7 +291,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   fun linkThisDevice() = launchBusy {
     val core = graph.core.core()
-    val code = core.startDeviceLink()
+    val code = core.startDeviceLink(deviceName(), LinkPlatform.ANDROID)
     state.value = AppState.LinkingThisDevice(code)
     try {
       val shortCode = core.waitForLinkPeer()
@@ -516,13 +524,93 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   fun selectDistributor(packageName: String) = UnifiedPushBackend.selectDistributor(getApplication(), packageName)
 
-  /** Existing device: starts approving a new device; returns the short code to compare. */
-  suspend fun approveLink(code: String): Result<String> =
+  private val linkRequestList = MutableStateFlow<List<LinkRequestItem>>(emptyList())
+
+  /** New devices of this account that wait for a decision; the prompts on every signed-in screen. */
+  val linkRequests: StateFlow<List<LinkRequestItem>> = linkRequestList
+
+  private val review = MutableStateFlow<LinkReview?>(null)
+
+  /** The approval the user took up from a prompt; absent while none is open. */
+  val linkReview: StateFlow<LinkReview?> = review
+
+  private val promptFailure = MutableStateFlow<Int?>(null)
+
+  /** Why denying or reviewing a request failed, shown on the prompt. */
+  val linkPromptFailure: StateFlow<Int?> = promptFailure
+
+  /** Reads the waiting requests; cheap, called on every store change. */
+  suspend fun refreshLinkRequests() {
+    read { linkRequests() }?.let { linkRequestList.value = it }
+  }
+
+  /** Drops a prompt whose request ran out; a later read confirms it. */
+  fun expireLinkRequest(id: String) {
+    linkRequestList.value = linkRequestList.value.filter { it.id != id }
+  }
+
+  fun rejectLinkRequest(id: String) = viewModelScope.launch {
+    promptFailure.value = null
+    try {
+      graph.core.core().rejectLinkRequest(id)
+      expireLinkRequest(id)
+    } catch (failure: TeamCraftException) {
+      promptFailure.value = errorText(failure)
+    }
+  }
+
+  /** Takes up a request from its prompt; the user then types the code the new device shows. */
+  fun reviewLinkRequest(request: LinkRequestItem) = viewModelScope.launch {
+    promptFailure.value = null
+    try {
+      graph.core.core().reviewLinkRequest(request.id)
+      expireLinkRequest(request.id)
+      review.value = LinkReview(request.deviceName)
+    } catch (failure: TeamCraftException) {
+      promptFailure.value = errorText(failure)
+    }
+  }
+
+  /** Sends the typed code of a reviewed request; a wrong code stays on the step for another try. */
+  fun confirmLinkReview(typedCode: String) = viewModelScope.launch {
+    val current = review.value ?: return@launch
+    review.value = when (confirmLink(typedCode)) {
+      LinkConfirmation.CONFIRMED -> current.copy(maybeError = null, isDone = true)
+      LinkConfirmation.WRONG_CODE -> current.copy(maybeError = R.string.approve_code_wrong)
+      LinkConfirmation.ATTEMPT_ENDED -> current.copy(maybeError = R.string.approve_attempt_ended, isDone = false)
+      LinkConfirmation.FAILED -> current.copy(maybeError = R.string.error_generic)
+    }
+  }
+
+  /** The user left the reviewed approval (or closed its confirmation). */
+  fun closeLinkReview() {
+    val current = review.value ?: return
+    review.value = null
+    promptFailure.value = null
+    if (!current.isDone) cancelLinkApproval()
+  }
+
+  /** New device: asks the account's other devices to approve this one (the server then holds the code's key). */
+  suspend fun askOtherDevices(): Result<Unit> = runCatching { graph.core.core().announceDeviceLink() }
+
+  /** Existing device: joins the new device whose QR code was scanned or typed. */
+  suspend fun approveLink(code: String): Result<Unit> =
     runCatching { graph.core.core().approveDeviceLink(code.trim()) }
 
-  suspend fun confirmLink(): Result<Unit> = runCatching { graph.core.core().confirmDeviceLink() }
+  /** Checks the code the user typed from the new device's screen; sends the keys if it is right. */
+  suspend fun confirmLink(typedCode: String): LinkConfirmation =
+    try {
+      graph.core.core().confirmDeviceLink(typedCode.trim())
+      LinkConfirmation.CONFIRMED
+    } catch (failure: TeamCraftException.LinkCodeRejected) {
+      LinkConfirmation.WRONG_CODE
+    } catch (failure: TeamCraftException.LinkAttemptEnded) {
+      LinkConfirmation.ATTEMPT_ENDED
+    } catch (failure: TeamCraftException) {
+      LinkConfirmation.FAILED
+    }
 
-  /** The user left the code comparison: nothing is sent, syncing resumes. */
+  /** The user left the code step: nothing is sent, syncing resumes. */
   fun cancelLinkApproval() {
     graph.scope.launch { runCatching { graph.core.core().cancelDeviceLinkApproval() } }
   }
@@ -531,6 +619,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Wake-ups that arrive from now on show nothing; notifications are cleared last, when no
     // core can be opened any more to post new ones.
     graph.push.beginSignOut()
+    linkRequestList.value = emptyList()
+    review.value = null
     graph.calls.hangUp()
     graph.push.unregister()
     runCatching { graph.core.core().deletePlaintextFiles() }

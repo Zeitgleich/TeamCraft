@@ -11,9 +11,10 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-  CallId, CallRosterEntry, ConversationId, CustomStatus, DeviceActivity, DeviceId, ErrorBody, LobbyState,
-  MeetingId, MessageId, MessageResponse, MlsMessageResponse, PresenceState, RecoveryRequestId, SpaceId,
-  SystemEventResponse, ThreadId, UnixMillis, UserGroupId, UserId, UserSummary, WorkspaceLogKind,
+  CallId, CallRosterEntry, ConversationId, CustomStatus, DeviceActivity, DeviceId, DeviceLinkClosedReason,
+  DeviceLinkRequest, ErrorBody, LobbyState, MeetingId, MessageId, MessageResponse, MlsMessageResponse,
+  PresenceState, RecoveryRequestId, SpaceId, SystemEventResponse, ThreadId, UnixMillis, UserGroupId, UserId,
+  UserSummary, WorkspaceLogKind,
 };
 
 /// How long a client waits before it reports that the user stopped being attentive, so the server
@@ -233,6 +234,16 @@ pub enum GatewayEvent {
   DeviceAdd {
     user_id: UserId,
     device_id: DeviceId,
+  },
+  /// A new device of the user asks to be linked (e2ee.md §5). Sent to the user's devices; the first
+  /// one that takes it up joins the relay, and the others get `device_link_closed`.
+  DeviceLinkRequested {
+    request: DeviceLinkRequest,
+  },
+  /// A pending link request is gone: drop its prompt.
+  DeviceLinkClosed {
+    request_id: String,
+    reason: DeviceLinkClosedReason,
   },
   /// A device of a user was removed (lost phone, deactivation); members commit its removal from their groups.
   DeviceRemove {

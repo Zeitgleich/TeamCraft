@@ -30,12 +30,13 @@ use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{
   AttachmentPriority, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreConnection,
-  CoreStatus, EnrollRequest, LinkStatus, MessageWindow, SecuritySnapshot, StoreHealth, StoreProblem,
+  CoreStatus, EnrollRequest, LinkRequestView, LinkStatus, MessageWindow, SecuritySnapshot, StoreHealth,
+  StoreProblem,
 };
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
 use teamcraft_core::client::files::BlobUpload;
-use teamcraft_core::client::{CatchUpFocus, LinkApproval, LinkedSecrets, NewDeviceLink};
+use teamcraft_core::client::{CatchUpFocus, LinkAnnouncement, LinkApproval, LinkedSecrets, NewDeviceLink};
 use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor};
 use teamcraft_core::downloads::{Downloads, Finished};
@@ -53,6 +54,7 @@ use teamcraft_core::{
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::secret::SecretBytes;
+use teamcraft_proto::DeviceLinkPlatform;
 use teamcraft_proto::{
   ConversationId, DeviceActivity, GatewayClientMessage, GatewayServerMessage, MessageId, UserId,
 };
@@ -337,6 +339,21 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
     },
     "core_approval_cancel" => {
       send(Request::ApprovalCancel)?;
+      Ok(Value::Null)
+    },
+    "core_link_announce" => {
+      ask(Request::LinkAnnounce).await??;
+      Ok(Value::Null)
+    },
+    "core_link_requests" => to_value(ask(Request::LinkRequests).await?),
+    "core_link_request_review" => {
+      let id: String = field(&args, "id")?;
+      ask(|reply| Request::LinkRequestReview { id, reply }).await??;
+      Ok(Value::Null)
+    },
+    "core_link_request_reject" => {
+      let id: String = field(&args, "id")?;
+      ask(|reply| Request::LinkRequestReject { id, reply }).await??;
       Ok(Value::Null)
     },
     other => Err(format!("{other} is not available in the browser")),
@@ -627,6 +644,16 @@ enum Request {
     reply: oneshot::Sender<Result<(), String>>,
   },
   ApprovalCancel,
+  LinkAnnounce(oneshot::Sender<Result<(), String>>),
+  LinkRequests(oneshot::Sender<Vec<LinkRequestView>>),
+  LinkRequestReview {
+    id: String,
+    reply: oneshot::Sender<Result<(), String>>,
+  },
+  LinkRequestReject {
+    id: String,
+    reply: oneshot::Sender<Result<(), String>>,
+  },
   /// The browser went online, the tab became visible or was resumed: check the connection now.
   NetworkChanged,
   /// What joining a conversation's call needs (`web_calls`).
@@ -1146,6 +1173,10 @@ impl Core {
         drop(reply.send(self.approval_confirm(&short_code).await));
       },
       Request::ApprovalCancel => self.approval = None,
+      Request::LinkAnnounce(reply) => drop(reply.send(self.link_announce().await)),
+      Request::LinkRequests(reply) => drop(reply.send(self.link_requests())),
+      Request::LinkRequestReview { id, reply } => drop(reply.send(self.link_request_review(&id).await)),
+      Request::LinkRequestReject { id, reply } => drop(reply.send(self.link_request_reject(&id).await)),
       Request::NetworkChanged => self.connection.network_changed(now_ms()).await,
       Request::PrepareCall(conversation, reply) => {
         let result = match self.client.as_mut() {
@@ -1348,6 +1379,56 @@ impl Core {
     let approval = client.start_link_approval(code).await.map_err(describe)?;
     self.approval = Some(approval);
     self.approval_misses = 0;
+    Ok(())
+  }
+
+  /// New device: asks the other devices to approve this one. Hands the code's key to the server, so
+  /// only when the user chooses it (e2ee.md §5).
+  async fn link_announce(&mut self) -> Result<(), String> {
+    let run = self.link.as_ref().ok_or("no device link in progress")?;
+    let code = match &*run.view.borrow() {
+      LinkStatus::WaitingForScan { code } | LinkStatus::Confirm { code, .. } => code.clone(),
+      _ => return Err("no device link in progress".to_owned()),
+    };
+    let announcement = LinkAnnouncement {
+      device_name: run.device_name.clone(),
+      platform: DeviceLinkPlatform::Web,
+    };
+    let offer = LinkOffer::parse(&code).map_err(describe)?;
+    offer.announce(&self.api(), &announcement).await.map_err(describe)
+  }
+
+  fn link_requests(&mut self) -> Vec<LinkRequestView> {
+    let Some(client) = self.client.as_mut() else {
+      return Vec::new();
+    };
+    client
+      .link_requests()
+      .into_iter()
+      .map(|request| LinkRequestView {
+        id: request.id,
+        device_name: request.device_name,
+        platform: request.platform,
+        seconds_left: request.seconds_left,
+      })
+      .collect()
+  }
+
+  /// Existing device: takes up a request from a prompt; the typed-code check is the same as for a
+  /// scanned code ([`Self::approval_confirm`]).
+  async fn link_request_review(&mut self, id: &str) -> Result<(), String> {
+    let client = self.client.as_mut().ok_or_else(not_set_up)?;
+    let approval = client.review_link_request(id).await.map_err(describe)?;
+    self.approval = Some(approval);
+    self.approval_misses = 0;
+    notify_changed();
+    Ok(())
+  }
+
+  async fn link_request_reject(&mut self, id: &str) -> Result<(), String> {
+    let client = self.client.as_mut().ok_or_else(not_set_up)?;
+    client.reject_link_request(id).await.map_err(describe)?;
+    notify_changed();
     Ok(())
   }
 

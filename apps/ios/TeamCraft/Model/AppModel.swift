@@ -16,7 +16,7 @@ enum AppFailure: Equatable {
     case .storage: self = .storage
     case .recoveryPending: self = .recoveryPending
     case .callMoveRefused: self = .callMoveRefused
-    case .notEnrolled, .other: self = .generic
+    case .notEnrolled, .linkCodeRejected, .linkAttemptEnded, .other: self = .generic
     }
   }
 
@@ -87,6 +87,10 @@ final class AppModel {
   private(set) var pushStatus: PushStatus = .unknown
   /// Where the core's gateway connection stands (`nil`: no core open); the banner follows it.
   private(set) var connection: ConnectionState?
+  /// New devices of this account waiting for a decision; the popup on every signed-in screen.
+  private(set) var linkPrompts: [LinkPrompt] = []
+  /// The request or scanned code this device is typing the confirmation for (see `LinkReview`).
+  private(set) var maybeLinkReview: LinkReview?
 
   let calls = CallManager()
   /// The server's brand for the confirmation and sign-in screens.
@@ -112,6 +116,7 @@ final class AppModel {
   @ObservationIgnored private var maybeCore: TeamCraft?
   @ObservationIgnored private var isSyncing = false
   @ObservationIgnored private var maybePushToken: String?
+  @ObservationIgnored private var maybeLinkExpiry: Task<Void, Never>?
   @ObservationIgnored private var maybeReconcile: Task<Void, Never>?
 
   private init() {}
@@ -297,7 +302,7 @@ final class AppModel {
     await busy {
       do {
         let core = try self.core()
-        let code = try await core.startDeviceLink()
+        let code = try await core.startDeviceLink(deviceName: deviceName, platform: .ios)
         phase = .linking(LinkProgress(code: code))
         let shortCode = try await core.waitForLinkPeer()
         phase = .linking(LinkProgress(code: code, maybeShortCode: shortCode))
@@ -306,6 +311,17 @@ final class AppModel {
       } catch {
         phase = .needsEnrollment(hasExistingIdentity: true, failure: AppFailure(CoreFailure(error)))
       }
+    }
+  }
+
+  /// New device: asks the account's other devices to approve this one. The server then holds the
+  /// code's key, which scanning does not need, so this runs only on the user's tap.
+  func askOtherDevices() async -> Bool {
+    do {
+      try await core().announceDeviceLink()
+      return true
+    } catch {
+      return false
     }
   }
 
@@ -341,13 +357,66 @@ final class AppModel {
     phase = .needsEnrollment(hasExistingIdentity: true, failure: nil)
   }
 
-  /// Existing device: approves a new device by its code; returns the short code to compare.
-  func approveLink(code: String) async throws -> String {
+  // MARK: Linking another device (existing device)
+
+  /// Existing device: joins the new device whose code was scanned or typed. The new device shows
+  /// a short code the user types next (`confirmLink`); this device never shows it (docs/e2ee.md §5).
+  func approveLink(code: String) async throws {
     try await core().approveDeviceLink(code: code.trimmingCharacters(in: .whitespacesAndNewlines))
+    maybeLinkReview = LinkReview(maybeDeviceName: nil, maybeRequestId: nil)
   }
 
-  func confirmLink() async throws {
-    try await core().confirmDeviceLink()
+  /// Existing device: checks the code the user typed from the new device and sends the keys if it
+  /// is right.
+  func confirmLink(typedCode: String) async -> LinkConfirmResult {
+    do {
+      try await core().confirmDeviceLink(typedCode: LinkCode.digits(of: typedCode))
+      maybeLinkReview = nil
+      return .approved
+    } catch {
+      switch CoreFailure(error) {
+      case .linkCodeRejected: return .wrongCode
+      case .linkAttemptEnded:
+        maybeLinkReview = nil
+        return .attemptEnded
+      case let failure: return .failed(AppFailure(failure))
+      }
+    }
+  }
+
+  /// Existing device: the user left the typed-code step; nothing is sent.
+  func cancelLinkApproval() async {
+    maybeLinkReview = nil
+    // Best effort: without a core or an attempt there is nothing to cancel.
+    try? await core().cancelDeviceLinkApproval()
+  }
+
+  /// Popup, Review: takes the request up (the other devices drop their prompt) and moves to the
+  /// typed-code step.
+  func reviewLinkRequest(_ prompt: LinkPrompt) async throws {
+    try await core().reviewLinkRequest(id: prompt.id)
+    maybeLinkReview = LinkReview(maybeDeviceName: prompt.deviceName, maybeRequestId: prompt.id)
+    linkPrompts.removeAll { $0.id == prompt.id }
+  }
+
+  /// Popup, Deny: closes the request; the new device is told and stops.
+  func rejectLinkRequest(_ prompt: LinkPrompt) async throws {
+    try await core().rejectLinkRequest(id: prompt.id)
+    linkPrompts.removeAll { $0.id == prompt.id }
+  }
+
+  /// Reads the open requests again; called on every change the core reports (cheap), and when the
+  /// account becomes ready.
+  func refreshLinkRequests() async {
+    guard case .ready = phase, let core = maybeCore else {
+      linkPrompts = []
+      maybeLinkReview = nil
+      armLinkExpiry()
+      return
+    }
+    // A failed read keeps what is shown; the next change reads again.
+    guard let requests = try? await core.linkRequests() else { return }
+    applyLinkRequests(requests)
   }
 
   // MARK: Reading
@@ -653,6 +722,7 @@ final class AppModel {
     changeCount += 1
     calls.storeDidChange()
     connection = maybeCore?.connectionState()
+    Task { [weak self] in await self?.refreshLinkRequests() }
     guard maybeReconcile == nil else { return }
     maybeReconcile = Task { [weak self] in
       // Coalesces a burst of changes (a sync delivers many) into one pass.
@@ -660,6 +730,34 @@ final class AppModel {
       await self?.reconcileNotifications()
       self?.maybeReconcile = nil
     }
+  }
+
+  /// Shows `requests` as prompts.
+  private func applyLinkRequests(_ requests: [LinkRequestItem]) {
+    let prompts = LinkPrompts.merge(
+      current: linkPrompts, requests: requests, readAt: Date(), hiding: maybeLinkReview?.maybeRequestId)
+    if prompts != linkPrompts { linkPrompts = prompts }
+    armLinkExpiry()
+  }
+
+  /// The one timer of the prompts: wakes when the first one runs out and drops it. Nothing runs
+  /// while no prompt is shown.
+  private func armLinkExpiry() {
+    maybeLinkExpiry?.cancel()
+    maybeLinkExpiry = nil
+    guard let expiry = LinkPrompts.nextExpiry(of: linkPrompts) else { return }
+    maybeLinkExpiry = Task { [weak self] in
+      // A moment past the deadline, so the prompt is expired when it is checked.
+      try? await Task.sleep(for: .seconds(max(expiry.timeIntervalSinceNow, 0) + 0.2))
+      guard !Task.isCancelled else { return }
+      self?.dropExpiredLinkPrompts()
+    }
+  }
+
+  private func dropExpiredLinkPrompts() {
+    let now = Date()
+    linkPrompts.removeAll { $0.isExpired(at: now) }
+    armLinkExpiry()
   }
 
   /// Removes notifications of conversations the core reports fully read and sets the badge from the
@@ -913,6 +1011,7 @@ final class AppModel {
       await calls.attach(core: core)
     }
     await startSyncing()
+    await refreshLinkRequests()
     await resumePush()
   }
 

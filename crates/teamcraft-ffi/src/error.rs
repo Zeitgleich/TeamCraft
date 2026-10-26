@@ -29,6 +29,12 @@ pub enum TeamCraftError {
   /// A link or recovery step was called out of order.
   #[error("no device link in progress")]
   NoLinkInProgress,
+  /// The code typed for a device link is not the one the new device shows; the user may try again.
+  #[error("that is not the code on the new device")]
+  LinkCodeRejected,
+  /// The last try failed: the attempt is over and the new device has to start again.
+  #[error("the code did not match; start again on the new device")]
+  LinkAttemptEnded,
   /// The admins haven't answered the recovery request yet; try again later.
   #[error("the recovery request isn't answered yet")]
   RecoveryPending,

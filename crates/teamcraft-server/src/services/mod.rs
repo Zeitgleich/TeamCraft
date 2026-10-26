@@ -15,6 +15,7 @@ pub mod calls;
 pub mod channel_images;
 pub mod conversations;
 pub mod convert;
+pub mod device_links;
 pub mod device_lists;
 pub mod devices;
 pub mod directory;

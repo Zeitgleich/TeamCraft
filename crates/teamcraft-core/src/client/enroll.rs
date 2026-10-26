@@ -174,6 +174,7 @@ impl PendingEnrollment {
       held_upload_progress: None,
       is_picked_sweep_due: true,
       maybe_call_sink: None,
+      link_requests: Default::default(),
       call_ids: HashMap::new(),
       maybe_preview_fetcher,
       maybe_jwks_source,

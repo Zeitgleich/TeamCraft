@@ -30,7 +30,7 @@ use teamcraft_client_api::model::{
 };
 use teamcraft_client_api::remote::{
   CORE_CHANGED_EVENT, CORE_FAILED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection,
-  CoreStatus, EnrollRequest, LinkStatus, MessageWindow, StoreHealth,
+  CoreStatus, EnrollRequest, LinkRequestView, LinkStatus, MessageWindow, StoreHealth,
 };
 use teamcraft_client_api::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
@@ -110,6 +110,27 @@ pub async fn approval_start(code: &str) -> Result<(), String> {
 /// hands the keys over.
 pub async fn approval_confirm(short_code: &str) -> Result<(), String> {
   call("core_approval_confirm", &json!({ "short_code": short_code })).await
+}
+
+/// New device: asks the other devices of the account to approve this one (hands the code's key to
+/// the server; only on the user's choice).
+pub async fn link_announce() -> Result<(), String> {
+  call("core_link_announce", &json!({})).await
+}
+
+/// The new devices of this account that ask to be linked (e2ee.md §5).
+pub async fn link_requests() -> Result<Vec<LinkRequestView>, String> {
+  call("core_link_requests", &json!({})).await
+}
+
+/// Takes up a link request and joins its relay; the user then types the code the new device shows
+/// ([`approval_confirm`]).
+pub async fn link_request_review(id: &str) -> Result<(), String> {
+  call("core_link_request_review", &json!({ "id": id })).await
+}
+
+pub async fn link_request_reject(id: &str) -> Result<(), String> {
+  call("core_link_request_reject", &json!({ "id": id })).await
 }
 
 pub async fn approval_cancel() -> Result<(), String> {
@@ -1341,6 +1362,16 @@ impl ChatBackend for RemoteChat {
       .maybe_live
       .as_ref()
       .map_or(0, |live| live.marks.meetings)
+  }
+
+  fn link_request_mark(&self) -> u64 {
+    self
+      .mirror
+      .borrow()
+      .snapshot
+      .maybe_live
+      .as_ref()
+      .map_or(0, |live| live.marks.link_requests)
   }
 
   fn live_snapshot(&self) -> Option<teamcraft_client_api::live::LiveSnapshot> {

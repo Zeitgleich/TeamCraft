@@ -132,6 +132,11 @@ pub trait ChatBackend {
   fn meetings_revision(&self) -> u64 {
     0
   }
+  /// Moves when the open device link requests changed (e2ee.md §5); the UI then reads them. 0
+  /// without a core.
+  fn link_request_mark(&self) -> u64 {
+    0
+  }
   /// Other people typing in a conversation right now (the indicator lasts a few seconds).
   fn typing_users(&self, _conversation: ConversationId) -> Vec<UserId> {
     Vec::new()

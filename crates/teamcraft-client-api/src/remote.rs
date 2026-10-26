@@ -297,6 +297,17 @@ pub enum LinkStatus {
   },
 }
 
+/// A new device of the user asks to be linked; every signed-in device of the account shows it as a
+/// prompt (e2ee.md §5). The handshake key stays in the core.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkRequestView {
+  pub id: String,
+  pub device_name: String,
+  pub platform: teamcraft_proto::DeviceLinkPlatform,
+  /// Seconds the request stays open, when it was read.
+  pub seconds_left: u64,
+}
+
 /// A slice of one conversation's feed, oldest first.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MessageWindow {

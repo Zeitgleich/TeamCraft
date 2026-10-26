@@ -31,6 +31,7 @@ use crate::components::guest_join::GuestJoinPage;
 use crate::components::home::{HomeSidebar, HomeStart, NewMessageDialog};
 use crate::components::icons::{Icon, IconName};
 use crate::components::incoming_call::IncomingCallDialog;
+use crate::components::link_request_prompt::LinkRequestPrompt;
 use crate::components::members_panel::MembersPanel;
 use crate::components::message_actions::{EditHistoryDialog, ForwardDialog, PinsPanel, SavedView};
 use crate::components::notification_prompt::NotificationPrompt;
@@ -328,6 +329,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         _ => None,
       }}
       <IncomingCallDialog />
+      <LinkRequestPrompt />
       // Always in the page: screen readers only announce changes in a live region that already
       // existed when the toast arrived.
       <div

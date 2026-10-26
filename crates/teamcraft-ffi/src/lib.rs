@@ -32,11 +32,11 @@ use teamcraft_media::openh264_library::{self, OpenH264Binary};
 use tokio::sync::{mpsc, oneshot};
 pub use types::{
   AccountState, AppConfig, BrandAccent, BrandLinks, ConnectionState, ConversationItem, ConversationKind,
-  EmojiSuggestion, LoginBrand, MentionSettings, MessageItem, NetworkInterception, NetworkProxy,
-  NotificationAttachmentKind, NotificationContent, NotificationContentSettings, NotificationGap,
-  NotificationSuppression, OrgRecoveryStart, Presence, PushDiagnosticsInfo, PushNotification,
-  PushNotificationKind, PushService, ReactionItem, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult,
-  TestPushOutcome, TestPushResult,
+  EmojiSuggestion, LinkPlatform, LinkRequestItem, LoginBrand, MentionSettings, MessageItem,
+  NetworkInterception, NetworkProxy, NotificationAttachmentKind, NotificationContent,
+  NotificationContentSettings, NotificationGap, NotificationSuppression, OrgRecoveryStart, Presence,
+  PushDiagnosticsInfo, PushNotification, PushNotificationKind, PushService, ReactionItem, SearchHitItem,
+  SegmentPrefetchMode, SegmentPrefetchResult, TestPushOutcome, TestPushResult,
 };
 
 pub use video::{CameraFrame, VideoFrameRgba};
@@ -120,9 +120,24 @@ impl TeamCraft {
       .await
   }
 
-  /// New device: the text for the QR code another device of the user scans (e2ee.md §5).
-  pub async fn start_device_link(&self) -> Result<String, TeamCraftError> {
-    self.call(|engine| Box::pin(engine.start_device_link())).await
+  /// New device: the text for the QR code another device of the user scans (e2ee.md §5). The
+  /// `device_name` and `platform` are what [`Self::announce_device_link`] tells the other
+  /// devices.
+  pub async fn start_device_link(
+    &self,
+    device_name: String,
+    platform: LinkPlatform,
+  ) -> Result<String, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(engine.start_device_link(device_name, platform)))
+      .await
+  }
+
+  /// New device: asks the user's other devices to approve this one with a prompt. This hands the
+  /// code's key to the server, which scanning does not: call it only when the user chose "confirm
+  /// from another device".
+  pub async fn announce_device_link(&self) -> Result<(), TeamCraftError> {
+    self.call(|engine| Box::pin(engine.announce_device_link())).await
   }
 
   /// New device: waits until the other device joined; returns the short code both show.
@@ -137,16 +152,45 @@ impl TeamCraft {
       .await
   }
 
-  /// Existing device: scanned `code`; returns the short code to compare.
-  pub async fn approve_device_link(&self, code: String) -> Result<String, TeamCraftError> {
+  /// Existing device: scanned (or typed) `code`; joins the new device. The short code appears only
+  /// on the new device: the user types it into [`Self::confirm_device_link`].
+  pub async fn approve_device_link(&self, code: String) -> Result<(), TeamCraftError> {
     self
       .call(move |engine| Box::pin(engine.approve_device_link(code)))
       .await
   }
 
-  /// Existing device: the user confirmed both codes match; sends the keys.
-  pub async fn confirm_device_link(&self) -> Result<(), TeamCraftError> {
-    self.call(|engine| Box::pin(engine.confirm_device_link())).await
+  /// Existing device: the user typed the short code the new device shows; sends the keys if it is
+  /// right. A wrong code is `LinkCodeRejected` (try again); after the last try it is
+  /// `LinkAttemptEnded`.
+  pub async fn confirm_device_link(&self, typed_code: String) -> Result<(), TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(engine.confirm_device_link(typed_code)))
+      .await
+  }
+
+  /// New devices of this account that ask to be linked (e2ee.md §5). Read it when the app is told
+  /// about a change; the list is empty while nothing waits.
+  pub async fn link_requests(&self) -> Result<Vec<LinkRequestItem>, TeamCraftError> {
+    self
+      .call(|engine| Box::pin(async move { Ok(engine.link_requests()) }))
+      .await
+  }
+
+  /// Existing device: takes up a request from the prompt and joins its relay. The other devices
+  /// drop their prompt. The user then types the code the new device shows into
+  /// [`Self::confirm_device_link`].
+  pub async fn review_link_request(&self, id: String) -> Result<(), TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(engine.review_link_request(id)))
+      .await
+  }
+
+  /// Existing device: denies a request; the new device is told.
+  pub async fn reject_link_request(&self, id: String) -> Result<(), TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(engine.reject_link_request(id)))
+      .await
   }
 
   /// Existing device: the user left the comparison without confirming; nothing is sent and

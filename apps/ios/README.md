@@ -7,7 +7,7 @@ Android app uses). The app does login, keys in the Keychain, screens, push and C
 
 Status: written without a Mac; CI builds and unit-tests it on a macOS runner, nobody has run it on a
 device yet. Use the [manual test checklist](#manual-test-checklist) for the first run. **Untested on a
-device, and not testable in CI:** the camera and video path (needs a camera and a call partner), the
+device, and not testable in CI:** the camera and video path (needs a camera and a call partner), the QR scanner for device linking (VisionKit `DataScannerViewController`), the
 photo and document pickers, Quick Look, the background prefetch task and CallKit's video flag.
 
 ## Layout

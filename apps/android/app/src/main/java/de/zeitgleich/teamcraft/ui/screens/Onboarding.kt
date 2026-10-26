@@ -27,8 +27,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -226,8 +228,18 @@ internal fun ErrorLine(@StringRes text: Int) {
   )
 }
 
+private enum class LinkAsk { IDLE, ASKING, ASKED, FAILED }
+
 @Composable
-fun LinkThisDeviceScreen(code: String, maybeShortCode: String?, onCancel: () -> Unit) {
+fun LinkThisDeviceScreen(
+  code: String,
+  maybeShortCode: String?,
+  onAskOtherDevices: suspend () -> Result<Unit>,
+  onCancel: () -> Unit,
+) {
+  val scope = rememberCoroutineScope()
+  // Not saveable: asking hands the code's key to the server and must be a fresh choice each time.
+  var ask by remember { mutableStateOf(LinkAsk.IDLE) }
   Centered {
     Title(R.string.link_new_title)
     if (maybeShortCode == null) {
@@ -238,6 +250,21 @@ fun LinkThisDeviceScreen(code: String, maybeShortCode: String?, onCancel: () -> 
       // Not selectable: a copy goes through the button, marked sensitive and cleared again.
       Text(code, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
       CopySecretButton(code)
+      // The prompt on the other devices needs the code's key at the server; scanning does not.
+      when (ask) {
+        LinkAsk.ASKED -> Text(stringResource(R.string.link_asked), modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+        else -> {
+          Text(stringResource(R.string.link_ask_hint), style = MaterialTheme.typography.bodySmall)
+          OutlinedButton(
+            enabled = ask != LinkAsk.ASKING,
+            onClick = {
+              ask = LinkAsk.ASKING
+              scope.launch { ask = if (onAskOtherDevices().isSuccess) LinkAsk.ASKED else LinkAsk.FAILED }
+            },
+          ) { Text(stringResource(R.string.link_ask)) }
+          if (ask == LinkAsk.FAILED) ErrorLine(R.string.link_ask_failed)
+        }
+      }
       Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
         Text(stringResource(R.string.link_waiting))

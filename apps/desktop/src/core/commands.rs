@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use teamcraft_client_api::model::{Message, ThreadId};
-use teamcraft_client_api::remote::AttachmentPriority;
+use teamcraft_client_api::remote::{AttachmentPriority, LinkRequestView};
 use teamcraft_client_api::remote::{
   CORE_CHANGED_EVENT, CORE_FAILED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection,
   CoreStatus, EnrollRequest, LinkStatus, MessageWindow,
@@ -254,6 +254,26 @@ pub async fn core_approval_confirm(
 pub fn core_approval_cancel(host: State<'_, CoreHost>) -> Result<(), CommandError> {
   host.current()?.approval_cancel();
   Ok(())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn core_link_announce(host: State<'_, CoreHost>) -> Result<(), CommandError> {
+  Ok(host.current()?.link_announce().await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn core_link_requests(host: State<'_, CoreHost>) -> Result<Vec<LinkRequestView>, CommandError> {
+  Ok(host.current()?.link_requests().await)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn core_link_request_review(host: State<'_, CoreHost>, id: String) -> Result<(), CommandError> {
+  Ok(host.current()?.link_request_review(id).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn core_link_request_reject(host: State<'_, CoreHost>, id: String) -> Result<(), CommandError> {
+  Ok(host.current()?.link_request_reject(id).await?)
 }
 
 #[tauri::command(rename_all = "snake_case")]

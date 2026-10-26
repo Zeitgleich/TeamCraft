@@ -777,6 +777,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     }
   }
 
+  fn link_request_mark(&self) -> u64 {
+    self.chat.link_request_mark()
+  }
+
   fn seen_by(&self, conversation: ConversationId, message: MessageId) -> Vec<UserId> {
     self
       .maybe_live

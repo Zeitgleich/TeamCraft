@@ -46,6 +46,7 @@ import de.zeitgleich.teamcraft.ui.screens.DoNotDisturbScreen
 import de.zeitgleich.teamcraft.ui.screens.NotificationDiagnosticsScreen
 import de.zeitgleich.teamcraft.ui.screens.PushBatteryScreen
 import de.zeitgleich.teamcraft.ui.screens.EnrollScreen
+import de.zeitgleich.teamcraft.ui.screens.LinkRequestPrompts
 import de.zeitgleich.teamcraft.ui.screens.LinkThisDeviceScreen
 import de.zeitgleich.teamcraft.ui.screens.LoginScreen
 import de.zeitgleich.teamcraft.ui.screens.MessageScreen
@@ -128,10 +129,14 @@ fun AppRoot(
       is AppState.LinkingThisDevice -> LinkThisDeviceScreen(
         code = current.code,
         maybeShortCode = current.maybeShortCode,
+        onAskOtherDevices = viewModel::askOtherDevices,
         onCancel = viewModel::cancelLinking,
       )
       is AppState.Failed -> MessageScreen(message = current.error, onRetry = viewModel::refresh)
-      is AppState.Ready -> ReadyNavigation(viewModel, current, maybeConversationToOpen, onConversationOpened, maybeShare, onShareHandled)
+      is AppState.Ready -> {
+        ReadyNavigation(viewModel, current, maybeConversationToOpen, onConversationOpened, maybeShare, onShareHandled)
+        LinkRequestPrompts(viewModel, Modifier.align(Alignment.TopCenter))
+      }
     }
   }
 }

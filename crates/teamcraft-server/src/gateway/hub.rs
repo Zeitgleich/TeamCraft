@@ -997,7 +997,14 @@ fn new_connection(
 
 /// Events that only matter to whoever is connected at this moment.
 fn is_ephemeral(event: &GatewayEvent) -> bool {
-  matches!(event, GatewayEvent::TypingStart { .. })
+  // The link request carries a key that must not sit in the replay buffer, and a request that is
+  // replayed after its time is worse than none: devices fetch the open ones on every (re)connect.
+  matches!(
+    event,
+    GatewayEvent::TypingStart { .. }
+      | GatewayEvent::DeviceLinkRequested { .. }
+      | GatewayEvent::DeviceLinkClosed { .. }
+  )
 }
 
 fn new_session_id() -> String {

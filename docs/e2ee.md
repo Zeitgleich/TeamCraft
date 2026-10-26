@@ -1041,6 +1041,28 @@ Implemented as (`teamcraft-crypto::rendezvous`, `teamcraft-core` linking):
 - Not a port of libthreema's `d2d_rendezvous`: its path nomination isn't needed with one relay, and
   the construction above uses only primitives already in the crate. It still needs the security
   review security.md asks for.
+- **Prompt on every device (the user's choice).** A scanned or typed code never involves the
+  server beyond the relay: `AK` stays between the two devices. The new device offers a second way
+  next to the QR code, a button "Ask my other devices". Only when the user taps it, the new device
+  announces itself (`POST /device-links`, after it joined the relay) with name, platform and `AK`,
+  which the server passes to the user's other devices as it would in the approve-prompt variant
+  above. **This is the one step that gives the server `AK`**, and the screen says so. The gateway
+  sends the request to every connected device of the user (unnumbered, never in the replay buffer,
+  because it holds `AK`); a device that connects reads the open ones (`GET /device-links`). Every
+  signed-in device (desktop, web, phones) shows a corner prompt. Name and platform are the new
+  device's own claim and the prompt says so ("says it is …, not verified"). **The prompt never
+  approves and never shows the verification code**: the user takes the request up (*Review*), which
+  joins the relay as the responder, and types the code the *new* device shows; the core checks it
+  (three wrong codes end the attempt), as for a scanned code. A failed join leaves the request
+  listed, so the user can try again. The first device that joins the relay owns the request: the
+  server closes it (`device_link_closed`, reason `claimed`) and the other prompts go, so approving on
+  one device completes it everywhere. *Deny* closes the request and tells the waiting device
+  (`rejected`), which stops. The request ends with the relay (the new device gave up or its
+  lifetime, `rendezvous.ttl_secs`, ran out); prompts count the time left from when they arrived, so
+  a wrong local clock changes nothing the server enforces. A server that invents a request or
+  changes `AK` cannot complete a link: the handshake with the real new device would not produce the
+  code the user types. Not yet: a notification on a backgrounded phone (needs a push for the
+  request).
 - The transfer carries the backup key and the encrypted key bag (and the protocol version). The new
   device checks that the bag opens with the backup key and answers with a sealed **receipt**
   (`received` or `rejected`); the existing device reports success only on `received`. A lost

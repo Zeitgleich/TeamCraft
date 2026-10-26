@@ -31,6 +31,8 @@ pub enum RendezvousServerMessage {
   PeerLeft,
   /// The relay's lifetime ended.
   Expired,
+  /// A device of the user denied the link request of the device waiting here; the relay is closed.
+  Rejected,
   Error {
     error: ErrorBody,
   },

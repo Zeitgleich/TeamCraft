@@ -63,6 +63,7 @@ pub mod lightbox;
 pub mod lightbox_controls;
 pub mod lightbox_motion;
 pub mod link_menu;
+pub mod link_request_prompt;
 pub mod log_view;
 pub mod login;
 pub mod meeting_controls;
