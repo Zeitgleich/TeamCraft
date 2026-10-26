@@ -35,6 +35,11 @@
     <display_length compare="ge">720</display_length>
   </requires>
   <releases>
+    <release version="1.0.7" date="2026-10-26" type="stable">
+      <description>
+        <p>Devices stay signed in, calls open any common microphone format, deactivated users keep their chats, start at login on Linux and macOS, and many fixes to the message list, files and icons.</p>
+      </description>
+    </release>
     <release version="1.0.6" date="2026-10-26" type="stable">
       <description>
         <p>Webhook and log sources for integration channels are created and revoked in the app; the bridge picks them up without any configuration.</p>
