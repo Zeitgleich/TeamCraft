@@ -155,7 +155,7 @@ fn BotRow(hub: BotsHub, bot: BotResponse) -> impl IntoView {
 fn TokenReveal(hub: BotsHub, reveal: BotTokenResponse) -> impl IntoView {
   let i18n = use_i18n();
   let server = crate::components::space_invites::web_origin().unwrap_or_default();
-  let config = bridge_config(&server, &reveal.bot.name, &reveal.token);
+  let config = bridge_config(&server, &reveal.bot.name);
   let token = reveal.token.clone();
   let bot_name = reveal.bot.name.clone();
   view! {
