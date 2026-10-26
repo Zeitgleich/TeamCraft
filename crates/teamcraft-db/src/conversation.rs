@@ -377,7 +377,7 @@ impl Database {
   ) -> Result<Vec<ConversationMember>, DbError> {
     let rows = sqlx::query!(
       r#"SELECT u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,
-                u.deactivated_at IS NOT NULL AS "is_deactivated!", m.role
+                u.deactivated_at IS NOT NULL AS "is_deactivated!", u.deleted_at IS NOT NULL AS "is_deleted!", m.role
          FROM memberships m JOIN users u ON u.id = m.user_id
          WHERE m.conversation_id = $1 ORDER BY u.display_name, u.id"#,
       to_db(conversation),
@@ -395,6 +395,7 @@ impl Database {
             kind: row.kind.into(),
             created_at: row.created_at,
             is_deactivated: row.is_deactivated,
+            is_deleted: row.is_deleted,
             maybe_organization: row.organization,
           },
           role: ChannelRole::from(row.role),
@@ -532,7 +533,7 @@ impl Database {
   ) -> Result<HashMap<ConversationId, Vec<User>>, DbError> {
     let rows = sqlx::query!(
       r#"SELECT c.id AS conversation_id, u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,
-                u.deactivated_at IS NOT NULL AS "is_deactivated!"
+                u.deactivated_at IS NOT NULL AS "is_deactivated!", u.deleted_at IS NOT NULL AS "is_deleted!"
          FROM conversations c JOIN users u
            ON (c.kind = 'dm' AND u.id = ANY(string_to_array(c.participants_key, '-')::bigint[]))
            OR (c.kind = 'group'
@@ -555,6 +556,7 @@ impl Database {
           kind: row.kind.into(),
           created_at: row.created_at,
           is_deactivated: row.is_deactivated,
+          is_deleted: row.is_deleted,
           maybe_organization: row.organization,
         });
     }

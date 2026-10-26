@@ -50,6 +50,9 @@ pub struct TokenIdentity {
   pub role: Role,
   /// When the provider issued the token (Unix seconds); tokens older than a logout are refused.
   pub issued_at: i64,
+  /// When the person signed in at the provider (`auth_time`, else `iat`; Unix seconds). A token
+  /// refreshed later keeps it, so sessions from before an account's deletion stay refused.
+  pub authenticated_at: i64,
   /// The provider's session ID (`sid` claim), if any.
   pub maybe_session_id: Option<String>,
   /// How the user authenticated (`amr` claim) and the assurance level reached (`acr`); used for
@@ -88,6 +91,8 @@ struct AccessClaims {
   email_verified: bool,
   #[serde(default)]
   iat: i64,
+  #[serde(default)]
+  auth_time: Option<i64>,
   #[serde(default)]
   sid: Option<String>,
   #[serde(default)]
@@ -291,6 +296,7 @@ impl TokenValidator {
       is_email_verified: claims.email_verified,
       role,
       issued_at: claims.iat,
+      authenticated_at: claims.auth_time.unwrap_or(claims.iat),
       maybe_session_id: claims.sid,
       authentication_methods: claims.amr,
       maybe_acr: claims.acr,

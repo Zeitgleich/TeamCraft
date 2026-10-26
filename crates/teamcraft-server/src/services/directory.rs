@@ -49,6 +49,11 @@ pub async fn get_user(
   caller: &AuthenticatedUser,
   id: UserId,
 ) -> Result<UserSummary, ApiError> {
+  if let Some(tombstone) = state.database.get_user(id).await?.filter(|user| user.is_deleted) {
+    // A deleted account (issue #630) still names old messages; its tombstone holds nothing about
+    // the person, so clients may show it as "Deleted user" instead of a cached name.
+    return Ok(user_summary(state, &tombstone));
+  }
   let mut summary = vec![user_summary(state, &visible_user(state, caller, id).await?)];
   add_emails(state, caller, &mut summary).await?;
   add_device_presence(state, &mut summary).await?;

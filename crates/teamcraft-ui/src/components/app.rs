@@ -424,7 +424,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::Bookmarks(conversation) => lazy_area(Place::Overlay, move || areas::bookmarks(conversation)),
         Overlay::UserProfile(user) => view! { <UserProfileDialog user=user /> }.into_any(),
         Overlay::CallsUnavailable => view! { <CallsUnavailableDialog /> }.into_any(),
-        Overlay::None | Overlay::StatusMenu => ().into_any(),
+        // The admin console renders its own dialog, in its part of the app.
+        Overlay::None | Overlay::StatusMenu | Overlay::DeleteUser(_) => ().into_any(),
       }}
     </div>
   }

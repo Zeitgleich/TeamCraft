@@ -2,8 +2,9 @@
 
 use serde_json::json;
 use teamcraft_db::{
-  AdminConversationFilter, AdminConversationRow, AdminDeviceRow, AdminSpaceRow, AdminUserRow, AuditEntry,
-  AuditQuery, ChatRemoval, LOCAL_ISSUER, UserStatusFilter,
+  ActiveAdminCounts, AdminConversationFilter, AdminConversationRow, AdminDeviceRow, AdminSpaceRow,
+  AdminUserRow, AuditEntry, AuditQuery, ChatRemoval, ChatRemovalEffects, LOCAL_ISSUER, UserDeletion,
+  UserStatusFilter,
 };
 use teamcraft_proto::{
   AdminConversationSummary, AdminDeviceResponse, AdminInstanceResponse, AdminSpaceSummary, AdminUserStatus,
@@ -308,10 +309,28 @@ pub async fn remove_from_all_chats(
     },
     ChatRemoval::UnknownUser => return Err(ApiError::user_not_found()),
   };
+  if !announce_chat_removal(state, user, &effects).await {
+    return Ok(());
+  }
+  audit::record(
+    state,
+    maybe_actor,
+    "user_removed_from_chats",
+    Some(AuditTarget::new("user", user)),
+    &json!({"devices": effects.devices.len(), "conversations": effects.conversations.len(), "spaces": effects.spaces.len()}),
+  )
+  .await?;
+  Ok(())
+}
+
+/// Tells everyone affected that the user left conversations and spaces and lost their devices, so
+/// their clients commit the device removals to the MLS groups (only a hint, security review A8),
+/// and ends the user's part in running calls. `false` if there was nothing to tell.
+async fn announce_chat_removal(state: &AppState, user: UserId, effects: &ChatRemovalEffects) -> bool {
   let is_nothing_left =
     effects.devices.is_empty() && effects.conversations.is_empty() && effects.spaces.is_empty();
   if is_nothing_left {
-    return Ok(());
+    return false;
   }
   for (conversation, _) in &effects.conversations {
     super::calls::evict_from_call(state, *conversation, user).await;
@@ -343,15 +362,132 @@ pub async fn remove_from_all_chats(
       },
     );
   }
+  true
+}
+
+/// "Delete account" (admin.md §3.2.1, issue #630). The admin's client signed the user's removal
+/// from every channel before (the server never fakes a membership change); this does the rest:
+/// the user's 1:1 direct messages (and group DMs that would keep one other person) are deleted
+/// with their content, devices are revoked, key material, sessions and memberships go, the
+/// identity provider's identity is released, and the account stays as a tombstone that names old
+/// messages. Idempotent: a retry after a lost answer finishes what is left and succeeds.
+pub async fn delete_user_as_admin(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  user: UserId,
+) -> Result<(), ApiError> {
+  require(state, caller, Permission::ManageUsers, &Target::Instance)?;
+  if user == caller.user.id {
+    return Err(ApiError::CannotDeleteSelf);
+  }
+  let target = state
+    .database
+    .get_user(user)
+    .await?
+    .ok_or_else(ApiError::user_not_found)?;
+  if !target.is_deleted {
+    ensure_may_act_on(state, caller, user).await?;
+    ensure_admins_remain(state, user, target.is_deactivated).await?;
+  }
+  let direct_conversations = delete_direct_conversations(state, user).await?;
+  for key in state.database.user_object_keys(user).await? {
+    super::retention::delete_object(state, &key).await?;
+  }
+  let (was_already_deleted, effects) = match state.database.delete_user(user).await? {
+    UserDeletion::Deleted {
+      was_already_deleted,
+      effects,
+    } => (was_already_deleted, effects),
+    UserDeletion::UnknownUser => return Err(ApiError::user_not_found()),
+  };
+  // Also on a retry: a crash after the commit must not leave a connection or a call running.
+  state.hub.revoke_user(user);
+  announce_chat_removal(state, user, &effects).await;
+  if was_already_deleted {
+    return Ok(());
+  }
+  // Clients fetch the profile again and show the tombstone.
+  state.hub.publish(
+    effects.co_members.iter().copied(),
+    &GatewayEvent::ProfileUpdate { user_id: user },
+  );
   audit::record(
     state,
-    maybe_actor,
-    "user_removed_from_chats",
+    Some(caller.user.id),
+    "user_deleted",
     Some(AuditTarget::new("user", user)),
-    &json!({"devices": effects.devices.len(), "conversations": effects.conversations.len(), "spaces": effects.spaces.len()}),
+    &json!({
+      "devices": effects.devices.len(),
+      "conversations": effects.conversations.len(),
+      "spaces": effects.spaces.len(),
+      "direct_conversations_deleted": direct_conversations,
+    }),
   )
   .await?;
   Ok(())
+}
+
+/// Deleting an active owner or admin must leave the workspace with another active one.
+async fn ensure_admins_remain(state: &AppState, user: UserId, is_deactivated: bool) -> Result<(), ApiError> {
+  if is_deactivated {
+    // Not counted as an active admin anyway.
+    return Ok(());
+  }
+  let role = state.database.get_user_oidc_role(user).await?.flatten();
+  let counts = state.database.active_admin_counts().await?;
+  admins_remain_without(role.as_deref(), counts)
+}
+
+/// Whether the workspace keeps an active owner and admin once an active account with `role` goes.
+fn admins_remain_without(role: Option<&str>, counts: ActiveAdminCounts) -> Result<(), ApiError> {
+  match role {
+    Some("owner") if counts.owners <= 1 => Err(ApiError::LastOwner),
+    Some("owner" | "admin") if counts.admins <= 1 => Err(ApiError::LastAdmin),
+    _ => Ok(()),
+  }
+}
+
+/// Forgets direct messages deleted longer ago than `[policy] deleted_conversations_kept_days`.
+/// Run with the account housekeeping; returns how many records went.
+pub async fn prune_deleted_conversations(state: &AppState, now: OffsetDateTime) -> Result<u64, ApiError> {
+  let days = state.settings.get().policy.deleted_conversations_kept_days.max(1);
+  let cutoff = now - time::Duration::days(i64::from(days));
+  Ok(state.database.prune_deleted_conversations(cutoff).await?)
+}
+
+/// Deletes the user's 1:1 direct messages, and group DMs that would keep at most one other person,
+/// with their content in storage (PO decision on #630: a conversation with nobody left to talk to
+/// goes). The remaining participants' devices drop it with its local history: live by the gateway,
+/// later by the next sync (`deleted_conversation_ids`). Returns how many went.
+async fn delete_direct_conversations(state: &AppState, user: UserId) -> Result<usize, ApiError> {
+  let conversations = state.database.direct_conversations_deleted_with(user).await?;
+  for direct in &conversations {
+    let conversation_id = direct.conversation;
+    super::calls::evict_from_call(state, conversation_id, user).await;
+    // Storage first: a failure leaves the rows, so a retry finds the objects again.
+    for key in state.database.conversation_object_keys(conversation_id).await? {
+      super::retention::delete_object(state, &key).await?;
+    }
+    state
+      .database
+      .delete_direct_conversation(conversation_id, &direct.remaining)
+      .await?;
+    state.hub.publish(
+      direct.remaining.iter().copied(),
+      &GatewayEvent::ConversationDelete { conversation_id },
+    );
+    // Clients that don't know `conversation_delete` yet drop a conversation they were removed from.
+    for other in &direct.remaining {
+      state.hub.publish(
+        [*other],
+        &GatewayEvent::MembershipRemove {
+          conversation_id,
+          user_id: *other,
+        },
+      );
+    }
+  }
+  Ok(conversations.len())
 }
 
 /// Removes users from all chats whose deactivation is older than the instance setting
@@ -512,6 +648,7 @@ fn conversation_summary(row: &AdminConversationRow) -> AdminConversationSummary 
     member_count: count(row.member_count),
     guest_count: count(row.guest_count),
     message_count: u64::try_from(row.message_count).unwrap_or(0),
+    storage_bytes: u64::try_from(row.storage_bytes).unwrap_or(0),
     created_at: unix_millis(row.created_at),
     maybe_last_activity_at: row.maybe_last_message_millis.map(UnixMillis),
   }
@@ -525,6 +662,7 @@ fn user_summary(row: &AdminUserRow) -> AdminUserSummary {
     kind: row.kind.clone(),
     maybe_oidc_role: row.maybe_oidc_role.clone(),
     is_deactivated: row.is_deactivated,
+    is_deleted: row.is_deleted,
     maybe_deactivation_reason: row
       .maybe_deactivation_reason
       .clone()
@@ -696,4 +834,30 @@ pub async fn instance_status(
     },
     is_telephony_available: false,
   })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn the_last_active_owner_and_admin_stay() {
+    let counts = |owners, admins| ActiveAdminCounts { owners, admins };
+    assert!(matches!(
+      admins_remain_without(Some("owner"), counts(1, 3)),
+      Err(ApiError::LastOwner)
+    ));
+    assert!(matches!(
+      admins_remain_without(Some("admin"), counts(1, 1)),
+      Err(ApiError::LastAdmin)
+    ));
+    assert!(matches!(
+      admins_remain_without(Some("owner"), counts(2, 1)),
+      Err(ApiError::LastAdmin)
+    ));
+    assert!(admins_remain_without(Some("owner"), counts(2, 2)).is_ok());
+    assert!(admins_remain_without(Some("admin"), counts(1, 2)).is_ok());
+    assert!(admins_remain_without(Some("member"), counts(0, 0)).is_ok());
+    assert!(admins_remain_without(None, counts(0, 0)).is_ok());
+  }
 }

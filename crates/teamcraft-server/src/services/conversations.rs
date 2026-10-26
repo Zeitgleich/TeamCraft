@@ -58,8 +58,15 @@ pub async fn list_conversations(
     }
   };
   let views = state.database.list_conversations(caller.user.id, &filter).await?;
+  // Only with the user's own list: the channel browser lists other conversations.
+  let deleted_conversation_ids = if filter.only_joined {
+    state.database.deleted_conversations_of(caller.user.id).await?
+  } else {
+    Vec::new()
+  };
   Ok(ListConversationsResponse {
     conversations: respond_all(state, &views).await?,
+    deleted_conversation_ids,
   })
 }
 

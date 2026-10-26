@@ -1,21 +1,10 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT c.id AS conversation_id, u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,\n                u.deactivated_at IS NOT NULL AS \"is_deactivated!\"\n         FROM conversations c JOIN users u\n           ON (c.kind = 'dm' AND u.id = ANY(string_to_array(c.participants_key, '-')::bigint[]))\n           OR (c.kind = 'group'\n               AND EXISTS (SELECT 1 FROM memberships m WHERE m.conversation_id = c.id AND m.user_id = u.id))\n         WHERE c.id = ANY($1) AND c.kind IN ('dm', 'group')\n         ORDER BY u.display_name, u.id",
+  "query": "SELECT id, username, display_name, kind, created_at, organization,\n                deactivated_at IS NOT NULL AS \"is_deactivated!\", deleted_at IS NOT NULL AS \"is_deleted!\"\n         FROM users WHERE id = ANY($1) ORDER BY id",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "conversation_id",
-        "type_info": "Int8",
-        "origin": {
-          "Table": {
-            "table": "conversations",
-            "name": "id"
-          }
-        }
-      },
-      {
-        "ordinal": 1,
         "name": "id",
         "type_info": "Int8",
         "origin": {
@@ -26,7 +15,7 @@
         }
       },
       {
-        "ordinal": 2,
+        "ordinal": 1,
         "name": "username",
         "type_info": "Text",
         "origin": {
@@ -37,7 +26,7 @@
         }
       },
       {
-        "ordinal": 3,
+        "ordinal": 2,
         "name": "display_name",
         "type_info": "Text",
         "origin": {
@@ -48,7 +37,7 @@
         }
       },
       {
-        "ordinal": 4,
+        "ordinal": 3,
         "name": "kind",
         "type_info": "Text",
         "origin": {
@@ -59,7 +48,7 @@
         }
       },
       {
-        "ordinal": 5,
+        "ordinal": 4,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -70,7 +59,7 @@
         }
       },
       {
-        "ordinal": 6,
+        "ordinal": 5,
         "name": "organization",
         "type_info": "Text",
         "origin": {
@@ -81,8 +70,14 @@
         }
       },
       {
-        "ordinal": 7,
+        "ordinal": 6,
         "name": "is_deactivated!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "is_deleted!",
         "type_info": "Bool",
         "origin": "Expression"
       }
@@ -94,14 +89,14 @@
     },
     "nullable": [
       false,
-      false,
       true,
       false,
       false,
       false,
       true,
+      null,
       null
     ]
   },
-  "hash": "b473f38cffa7a4aef5a4820ef36d994f78f89f7840da2fa38779252ddcb3e3d4"
+  "hash": "0cfff479805d2c8659ce1508e2045b605f4114aeb024736100a6cdaa7a520468"
 }

@@ -8,10 +8,12 @@ use crate::components::admin_console::SectionHeader;
 use crate::components::admin_spaces::{LoadNotice, SpacesPanel};
 use crate::components::channel_view::UnconfirmedRemovalActions;
 use crate::components::icons::{Icon, IconName};
+use crate::components::pending_button::PendingButton;
 use crate::components::sliding_indicator::SlidingIndicator;
-use crate::i18n::use_i18n;
+use crate::feedback::PendingAction;
+use crate::i18n::{I18n, use_i18n};
 use crate::model::{ConversationId, ConversationKind, UserId};
-use crate::state::use_app_state;
+use crate::state::{AppState, use_app_state};
 
 const INACTIVE_AFTER_DAYS: i64 = 30;
 const DAY_MS: i64 = 86_400_000;
@@ -112,41 +114,161 @@ fn UnconfirmedRemovals(channels: Memo<Vec<AdminChannel>>) -> impl IntoView {
 }
 
 /// Users still in an encryption group of this admin's device whom the server no longer lists,
-/// confirmed by fresh member lists (#661). Only the server's word is behind it, so no client
-/// removes them; members never see this. Informational, for the admin's security review.
+/// confirmed by fresh member lists (#661), as one compact list. No client removes them on the
+/// server's word; the admin decides here, and this device signs and commits the removal (#734).
+/// Members never see this.
 #[component]
 fn GroupLeftovers(channels: Memo<Vec<AdminChannel>>) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let leftovers = Memo::new(move |_| state.read(|backend| backend.group_leftovers()));
+  // The removal is signed by this client; without its keys the list only informs.
+  let can_remove = state.read(|backend| backend.can_remove_from_chats());
+  let remove_all = PendingAction::new();
   move || {
-    leftovers
-      .get()
+    let rows = leftovers.get();
+    if rows.is_empty() {
+      return ().into_any();
+    }
+    let has_several = rows.len() > 1;
+    view! {
+      <section class="key-banner leftover-list" role="status" aria-labelledby="leftover-title">
+        <Icon name=IconName::Lock />
+        <div class="key-banner-text">
+          <strong id="leftover-title">{move || i18n.t("admin-left-in-group-title")}</strong>
+          <span class="muted-text small">{move || i18n.t("admin-left-in-group-hint")}</span>
+          <ul class="leftover-rows">
+            {rows
+              .into_iter()
+              .map(|(conversation, user)| view! { <LeftoverRow conversation=conversation user=user channels=channels can_remove=can_remove /> })
+              .collect_view()}
+          </ul>
+        </div>
+        {(can_remove && has_several)
+          .then(|| {
+            view! {
+              <PendingButton
+                pending=remove_all
+                class="btn btn-small"
+                on_click=move |_| {
+                  remove_all.run(|| {
+                    for (conversation, user) in leftovers.get_untracked() {
+                      state.write(|backend| backend.remove_group_leftover(conversation, user));
+                    }
+                  });
+                }
+              >
+                {move || i18n.t("admin-left-in-group-remove-all")}
+              </PendingButton>
+            }
+          })}
+      </section>
+    }
+    .into_any()
+  }
+}
+
+#[component]
+fn LeftoverRow(
+  conversation: ConversationId,
+  user: UserId,
+  channels: Memo<Vec<AdminChannel>>,
+  can_remove: bool,
+) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let pending = PendingAction::new();
+  let text = move || {
+    let name = leftover_name(state, i18n, user);
+    let place = conversation_label(state, i18n, conversation, user, &channels.get());
+    i18n.t_with(
+      "admin-left-in-group-row",
+      &[("name", &name), ("conversation", &place)],
+    )
+  };
+  view! {
+    <li class="leftover-row">
+      <span class="leftover-text" translate="no">{text}</span>
+      {can_remove
+        .then(|| {
+          view! {
+            <PendingButton
+              pending=pending
+              class="btn btn-small"
+              on_click=move |_| pending.run(|| state.write(|backend| backend.remove_group_leftover(conversation, user)))
+            >
+              {move || i18n.t("admin-left-in-group-remove")}
+            </PendingButton>
+          }
+        })}
+    </li>
+  }
+}
+
+/// The leftover account's current name: the console's user list has it from the server (the
+/// group may know the person under an older name), marked when the account is deactivated.
+fn leftover_name(state: AppState, i18n: I18n, user: UserId) -> String {
+  let maybe_account = state.read(|backend| {
+    backend
+      .admin_users()
       .into_iter()
-      .map(|(conversation, user)| {
-        let channel = channels
-          .get()
-          .into_iter()
-          .find(|channel| channel.id == conversation)
-          .map(|channel| channel.name)
-          .unwrap_or_default();
-        let name = state
-          .read(|backend| backend.user(user))
-          .map(|user| user.display_name)
-          .filter(|name| !name.is_empty())
-          .unwrap_or_else(|| i18n.t("left-in-group-unknown"));
-        let text = i18n.t_with("admin-left-in-group", &[("name", &name), ("channel", &channel)]);
-        view! {
-          <div class="key-banner" role="status">
-            <Icon name=IconName::Lock />
-            <div class="key-banner-text">
-              <strong translate="no">{text}</strong>
-              <span class="muted-text small">{move || i18n.t("admin-left-in-group-hint")}</span>
-            </div>
-          </div>
-        }
-      })
-      .collect_view()
+      .find(|entry| entry.user.id == user)
+  });
+  if let Some(account) = maybe_account {
+    if account.user.is_deleted {
+      return i18n.t("user-deleted-name");
+    }
+    if !account.is_active {
+      return i18n.t_with(
+        "admin-account-deactivated-name",
+        &[("name", &account.user.display_name)],
+      );
+    }
+    return account.user.display_name;
+  }
+  state
+    .read(|backend| backend.user(user))
+    .map(|known| known.display_name)
+    .filter(|name| !name.is_empty())
+    .unwrap_or_else(|| i18n.t("left-in-group-unknown"))
+}
+
+/// Where the leftover is: `#channel`, a direct message with the other people, or a deleted
+/// conversation the console no longer knows.
+fn conversation_label(
+  state: AppState,
+  i18n: I18n,
+  conversation: ConversationId,
+  leftover: UserId,
+  channels: &[AdminChannel],
+) -> String {
+  let me = state.read(|backend| backend.me().id);
+  match state.read(|backend| backend.conversation(conversation)) {
+    Some(known) if known.kind.is_direct_like() => {
+      let names: Vec<String> = known
+        .member_ids
+        .iter()
+        .filter(|member| **member != me && **member != leftover)
+        .filter_map(|member| state.read(|backend| backend.user(*member)))
+        .map(|member| member.display_name)
+        .filter(|name| !name.is_empty())
+        .collect();
+      if names.is_empty() {
+        i18n.t("admin-conversation-direct-unnamed")
+      } else {
+        i18n.t_with("admin-conversation-direct", &[("names", &names.join(", "))])
+      }
+    },
+    Some(known) if !known.name.is_empty() => {
+      i18n.t_with("admin-conversation-channel", &[("name", &known.name)])
+    },
+    _ => channels
+      .iter()
+      .find(|channel| channel.id == conversation && !channel.name.is_empty())
+      .map_or_else(
+        || i18n.t("admin-conversation-deleted"),
+        |channel| i18n.t_with("admin-conversation-channel", &[("name", &channel.name)]),
+      ),
   }
 }
 

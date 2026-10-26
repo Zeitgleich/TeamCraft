@@ -71,6 +71,10 @@ pub struct AdminConversationSummary {
   pub member_count: u32,
   pub guest_count: u32,
   pub message_count: u64,
+  /// What the channel's attachments and search index take up in storage (ciphertext bytes).
+  /// Absent (0) from older servers.
+  #[serde(default)]
+  pub storage_bytes: u64,
   pub created_at: UnixMillis,
   /// Time of the newest message, if there is one.
   #[serde(rename = "last_activity_at", default, skip_serializing_if = "Option::is_none")]
@@ -129,6 +133,9 @@ pub struct AdminUserSummary {
   #[serde(rename = "oidc_role", default, skip_serializing_if = "Option::is_none")]
   pub maybe_oidc_role: Option<String>,
   pub is_deactivated: bool,
+  /// The account was deleted (`DELETE /admin/users/{id}`); only its tombstone is left.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_deleted: bool,
   #[serde(
     rename = "deactivation_reason",
     default,

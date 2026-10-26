@@ -177,6 +177,13 @@ pub trait ChatBackend {
   /// Removes a deactivated user from all chats with signed removals (admin.md §3.2.1). Needs
   /// [`Self::can_sign_workspace`].
   fn admin_remove_from_all_chats(&self, _user: UserId) {}
+  /// Deletes an account (admin.md §3.2.1): the signed removals of
+  /// [`Self::admin_remove_from_all_chats`], then the server's deletion. Needs
+  /// [`Self::can_sign_workspace`].
+  fn admin_delete_user(&self, _user: UserId) {}
+  /// Removes a leftover of [`Self::group_leftovers`] from the encryption group with a removal this
+  /// device signs and commits (issue #734). Needs [`Self::can_sign_workspace`].
+  fn admin_remove_group_leftover(&self, _conversation: ConversationId, _user: UserId) {}
   /// What desktop and browser notifications may show (the verified workspace policy). A backend
   /// that does not know the policy answers with the strictest mode.
   fn push_content_mode(&self) -> teamcraft_proto::PushContentMode {
@@ -723,6 +730,14 @@ pub trait AdminBackend {
   fn can_remove_from_chats(&self) -> bool {
     false
   }
+  /// Deletes an account (admin.md §3.2.1): this admin's client signs the removal from every
+  /// channel first, then the server deletes devices, key material, memberships and direct
+  /// messages; a "Deleted user" tombstone stays on old messages. Needs
+  /// [`AdminBackend::can_remove_from_chats`].
+  fn delete_user(&self, _user: UserId) {}
+  /// Removes a user left over in the encryption group of a conversation (issue #734), signed and
+  /// committed by this admin's client. Needs [`AdminBackend::can_remove_from_chats`].
+  fn remove_group_leftover(&self, _conversation: ConversationId, _user: UserId) {}
   fn start_org_recovery(&self, user: UserId);
   /// Whether [`AdminBackend::start_org_recovery`] does anything on this client.
   fn can_start_org_recovery(&self) -> bool {
@@ -924,6 +939,7 @@ mod tests {
       is_bot: false,
       maybe_organization: None,
       is_deactivated,
+      is_deleted: false,
       device_setup: DeviceSetup::Unknown,
       maybe_email: None,
     }

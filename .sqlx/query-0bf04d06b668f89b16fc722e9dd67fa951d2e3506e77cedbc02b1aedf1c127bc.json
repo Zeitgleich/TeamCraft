@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT avatar_key AS \"key!\" FROM user_profiles WHERE user_id = $1 AND avatar_key IS NOT NULL\n         UNION ALL\n         SELECT pending_avatar_key AS \"key!\" FROM user_profiles\n           WHERE user_id = $1 AND pending_avatar_key IS NOT NULL\n         UNION ALL\n         SELECT s3_key AS \"key!\" FROM user_backgrounds WHERE user_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "key!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "0bf04d06b668f89b16fc722e9dd67fa951d2e3506e77cedbc02b1aedf1c127bc"
+}
