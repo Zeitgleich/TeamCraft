@@ -292,9 +292,9 @@ struct ConversationMuteMenu: View {
         }
       }
     } label: {
-      Image(systemName: maybeMutedUntil == nil ? "bell" : "bell.slash")
+      // A toolbar shows the icon, a menu the title too.
+      Label("mute_title", systemImage: maybeMutedUntil == nil ? "bell" : "bell.slash")
     }
-    .accessibilityLabel(Text("mute_title"))
     .task(id: conversationId) { maybeMutedUntil = await model.conversationMutedUntil(conversationId) }
   }
 
