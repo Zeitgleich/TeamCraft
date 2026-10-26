@@ -177,7 +177,7 @@ to the path it started on.
 | `src/history.rs`        | Address bar and history in step with `AppState`, Back and Forward       |
 | `src/settings.rs`       | Per-device preferences (theme, language, send mode) in `localStorage`   |
 | `src/i18n.rs`           | Fluent bundles, `I18n::t`, `t_with`, `t_count`                          |
-| `src/markdown.rs`       | Safe Markdown subset producing a tree (no HTML injection)               |
+| `markdown` (re-export)  | Safe Markdown subset (teamcraft-client-api, shared with mobile)         |
 | `src/editor_doc.rs`     | Composer document model: DOM tree ↔ Markdown, paste allow-list          |
 | `src/components/`       | One module per screen area                                              |
 | `style/main.css`        | Design tokens, layout, components                                       |
