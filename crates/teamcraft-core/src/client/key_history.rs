@@ -1,14 +1,17 @@
 //! What a device that was added back missed (e2ee.md §4.6, "a device added back"): the content
 //! keys this device got in a group, each with the first epoch it had it in, and since which epoch
 //! each other member device has been in the group. A member that adds a device back sends it the
-//! keys of the epochs that device was a member in, sealed to it alone, never older ones.
+//! keys of the epochs that device was a member in, sealed to it alone, never older ones, unless
+//! the device's leaf came in with a signed addition that shared the full history (#400).
 
 use std::collections::BTreeMap;
 
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::content_key::{ContentKey, ContentKeyId};
-use teamcraft_crypto::mls::{ContentKeyBundle, GroupMember};
+use teamcraft_crypto::ids::UserId as UserIdCrypto;
+use teamcraft_crypto::membership::{HistoryShare, MembershipAction, MembershipChange};
+use teamcraft_crypto::mls::{GroupMember, MembershipUpdate};
 use teamcraft_proto::{ConversationId, DeviceId, Id, UserId};
 
 use super::Client;
@@ -39,6 +42,12 @@ struct KeyHistory {
   /// not what it may be sent.
   #[serde(default)]
   member_restarted: BTreeMap<String, u64>,
+  /// "user/device" → the epoch its current leaf was added in by a signed change that shared the
+  /// full history with its user, which this device verified and merged (#400). A device that
+  /// can't open that welcome is added back with a new leaf but stays the same member, so it keeps
+  /// the entry; the entry goes with the leaf (a removal), and a leaf added any other way has none.
+  #[serde(default)]
+  full_history_since: BTreeMap<String, u64>,
 }
 
 /// The current key a bundle hands over ([`Client::hand_over_key`]).
@@ -62,6 +71,18 @@ impl KeyHistory {
   /// could see.
   fn has_stayed(&self, user: &str, epoch: u64, joined: u64) -> bool {
     epoch >= joined && self.user_left.get(user).is_none_or(|left| *left <= epoch)
+  }
+
+  /// Whether `device` of `user`, added back, is owed the history a signed full-history addition
+  /// shared with it (#400): its current leaf came in with that addition, which this device saw
+  /// committed, and the user stayed a member since, as far as this device could see. What the
+  /// device may have missed of it (it may never have opened that welcome) can't be told here: a
+  /// device that only reads leaves no trace in the group.
+  fn is_owed_full_history(&self, device: &str, user: &str, joined: u64) -> bool {
+    let Some(added) = self.full_history_since.get(device) else {
+      return false;
+    };
+    self.member_since.get(device) == Some(added) && self.has_stayed(user, *added, joined)
   }
 
   /// Whether `member`'s own record of keys starts after `joined` (this device's join): its leaf
@@ -157,31 +178,41 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
-  /// After a merged commit: devices in the group now and not `before` were added in the current
-  /// epoch; devices gone left it. A device added back is in both and keeps its entry.
-  /// `maybe_rejoined`: the device the commit added back, whose own record starts afresh.
+  /// After the merged commit `update`: devices in the group now and not `before` were added in
+  /// the current epoch, with the full history if its signed change shared that with their user;
+  /// devices gone left it. A device added back is in both and keeps its entries; its own record
+  /// starts afresh.
   pub(crate) fn note_member_changes(
     &mut self,
     conversation: ConversationId,
     before: &[GroupMember],
-    maybe_rejoined: Option<GroupMember>,
+    update: &MembershipUpdate,
   ) -> Result<(), CoreError> {
     let group = self.group_or_error(conversation)?;
     let epoch = group.epoch();
     let after = group.members()?;
     let added: Vec<&GroupMember> = after.iter().filter(|member| !before.contains(member)).collect();
     let removed: Vec<&GroupMember> = before.iter().filter(|member| !after.contains(member)).collect();
+    let maybe_rejoined = update.maybe_rejoined;
     if added.is_empty() && removed.is_empty() && maybe_rejoined.is_none() {
       return Ok(());
     }
+    let maybe_full_history_user = full_history_user(update);
     let mut history = self.key_history(conversation)?;
     for member in added {
-      history.member_since.insert(member_key(*member)?, epoch);
+      let key = member_key(*member)?;
+      history.member_since.insert(key.clone(), epoch);
+      if maybe_full_history_user == Some(member.user_id) {
+        history.full_history_since.insert(key, epoch);
+      } else {
+        history.full_history_since.remove(&key);
+      }
     }
     for member in removed {
       let key = member_key(*member)?;
       history.member_since.remove(&key);
       history.member_restarted.remove(&key);
+      history.full_history_since.remove(&key);
       if !after.iter().any(|other| other.user_id == member.user_id) {
         let user = convert::user_from_crypto(member.user_id)?;
         history.user_left.insert(user.to_string(), epoch);
@@ -220,7 +251,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     &mut self,
     conversation: ConversationId,
     device: GroupMember,
-  ) -> Result<ContentKeyBundle, CoreError> {
+  ) -> Result<Vec<ContentKey>, CoreError> {
     let history = self.key_history(conversation)?;
     let joined = self.group_or_error(conversation)?.joined_epoch();
     let device_key = member_key(device)?;
@@ -230,11 +261,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .ring(convert::conversation(conversation))
       .map(|ring| ring.keys())
       .unwrap_or_default();
-    let keys = history.entitled_keys(ring_keys, joined, &device_key, self.settings.max_missed_keys);
-    Ok(ContentKeyBundle::without_current(
-      convert::conversation(conversation),
-      keys,
-    ))
+    Ok(history.entitled_keys(ring_keys, joined, &device_key, self.settings.max_missed_keys))
+  }
+
+  /// Whether `device`, added back, is owed the full history its leaf's signed addition shared
+  /// with its user, by what this device recorded (#400). The caller still checks that the user
+  /// may get the full history at all (a guest never does).
+  pub(crate) fn is_owed_full_history(
+    &mut self,
+    conversation: ConversationId,
+    device: GroupMember,
+  ) -> Result<bool, CoreError> {
+    let joined = self.group_or_error(conversation)?.joined_epoch();
+    let history = self.key_history(conversation)?;
+    let user = convert::user_from_crypto(device.user_id)?;
+    Ok(history.is_owed_full_history(&member_key(device)?, &user.to_string(), joined))
   }
 
   /// Whether this device had the key in the group since its join (derived or received there, not
@@ -503,6 +544,20 @@ pub(crate) fn key_history_key(conversation: ConversationId) -> String {
   format!("key_history/{conversation}")
 }
 
+/// The user a merged commit's verified signed change added with the full history, if it did. Not
+/// a user who signed that for themselves: only a member who chooses to share the history adds
+/// somebody with it (e2ee.md §4.7), so members don't commit such a change, and don't count it
+/// when another member did. This device's own commits went through that check before signing.
+fn full_history_user(update: &MembershipUpdate) -> Option<UserIdCrypto> {
+  match update.maybe_change.as_ref().map(MembershipChange::action) {
+    Some(MembershipAction::AddUser {
+      user_id,
+      history: HistoryShare::Full,
+    }) if update.maybe_signer != Some(*user_id) => Some(*user_id),
+    _ => None,
+  }
+}
+
 fn member_key(member: GroupMember) -> Result<String, CoreError> {
   let user: UserId = convert::user_from_crypto(member.user_id)?;
   let device: DeviceId = convert::device_from_crypto(member.device_id)?;
@@ -611,7 +666,102 @@ mod tests {
     let decoded: KeyHistory =
       serde_json::from_str(r#"{"key_epochs":{"00":3},"member_since":{"7/8":2}}"#).unwrap();
     assert!(decoded.member_restarted.is_empty());
+    assert!(decoded.full_history_since.is_empty());
     assert_eq!(decoded.member_since.get(DEVICE), Some(&2));
+  }
+
+  /// Issue #400: who is owed the full history again when it is added back.
+  mod full_history {
+    use teamcraft_crypto::ids::ConversationId as ConversationIdCrypto;
+
+    use super::*;
+
+    const USER: &str = "7";
+
+    #[test]
+    fn a_device_its_full_history_addition_put_in_is_owed_it() {
+      assert!(added_with_full_history(5).is_owed_full_history(DEVICE, USER, 0));
+      assert!(
+        added_with_full_history(5).is_owed_full_history(DEVICE, USER, 4),
+        "this device joined in the epoch before: it merged the addition"
+      );
+    }
+
+    #[test]
+    fn a_device_added_any_other_way_is_owed_nothing() {
+      // From the join on, a further device, or a record from before this was noted.
+      let mut history = KeyHistory::default();
+      history.member_since.insert(DEVICE.into(), 5);
+      assert!(!history.is_owed_full_history(DEVICE, USER, 0));
+    }
+
+    #[test]
+    fn a_leaf_added_again_since_is_owed_nothing() {
+      let mut history = added_with_full_history(5);
+      history.member_since.insert(DEVICE.into(), 9);
+      assert!(!history.is_owed_full_history(DEVICE, USER, 0));
+    }
+
+    #[test]
+    fn a_user_who_left_since_is_owed_nothing() {
+      let mut history = added_with_full_history(5);
+      history.user_left.insert(USER.into(), 7);
+      assert!(!history.is_owed_full_history(DEVICE, USER, 0));
+    }
+
+    #[test]
+    fn an_addition_before_this_device_joined_is_not_vouched_for() {
+      assert!(!added_with_full_history(5).is_owed_full_history(DEVICE, USER, 6));
+    }
+
+    #[test]
+    fn only_a_signed_full_history_addition_by_somebody_else_counts() {
+      let (user, admin) = (UserIdCrypto::new(7), UserIdCrypto::new(1));
+      let full = add(user, HistoryShare::Full);
+      assert_eq!(full_history_user(&update(Some(full), Some(admin))), Some(user));
+      assert_eq!(
+        full_history_user(&update(Some(full), None)),
+        Some(user),
+        "this device's own commit"
+      );
+      assert_eq!(
+        full_history_user(&update(Some(full), Some(user))),
+        None,
+        "signed by the user added"
+      );
+      let from_join = add(user, HistoryShare::FromJoin);
+      assert_eq!(full_history_user(&update(Some(from_join), Some(admin))), None);
+      let removal = MembershipAction::RemoveUser { user_id: user };
+      assert_eq!(full_history_user(&update(Some(removal), Some(admin))), None);
+      assert_eq!(
+        full_history_user(&update(None, None)),
+        None,
+        "a rejoin or a further device"
+      );
+    }
+
+    fn added_with_full_history(epoch: u64) -> KeyHistory {
+      let mut history = KeyHistory::default();
+      history.member_since.insert(DEVICE.into(), epoch);
+      history.full_history_since.insert(DEVICE.into(), epoch);
+      history
+    }
+
+    fn add(user_id: UserIdCrypto, history: HistoryShare) -> MembershipAction {
+      MembershipAction::AddUser { user_id, history }
+    }
+
+    fn update(
+      maybe_action: Option<MembershipAction>,
+      maybe_signer: Option<UserIdCrypto>,
+    ) -> MembershipUpdate {
+      MembershipUpdate {
+        maybe_change: maybe_action
+          .map(|action| MembershipChange::new(ConversationIdCrypto::new(3), 4, action, &mut OsRng)),
+        maybe_signer,
+        ..MembershipUpdate::default()
+      }
+    }
   }
 
   #[test]

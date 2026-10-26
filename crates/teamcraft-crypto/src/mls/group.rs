@@ -128,6 +128,8 @@ pub struct MembershipUpdate {
   /// The signed change that authorized the commit; `None` for additions of devices of existing
   /// members, which only need the user's cross-signature, and for rejoins.
   pub maybe_change: Option<MembershipChange>,
+  /// Who signed `maybe_change`, verified with it; `None` for this device's own commits.
+  pub maybe_signer: Option<UserId>,
   pub added: Vec<GroupMember>,
   /// Includes a rejoining device's old leaf.
   pub removed: Vec<GroupMember>,
@@ -622,6 +624,7 @@ impl ConversationGroup {
     }
     Ok(MembershipUpdate {
       maybe_change: pending.maybe_change,
+      maybe_signer: None,
       added: pending.maybe_rejoin.iter().map(|(member, _)| *member).collect(),
       removed: pending.removed,
       maybe_rejoined: pending.maybe_rejoin.map(|(member, _)| member),
@@ -884,6 +887,7 @@ impl ConversationGroup {
       }
       let update = MembershipUpdate {
         maybe_change: None,
+        maybe_signer: None,
         added,
         removed: proposed.removed,
         maybe_rejoined: Some(member),
@@ -892,20 +896,21 @@ impl ConversationGroup {
       };
       return Ok((update, Some(verified.request().request_id())));
     }
-    let maybe_change = if authenticated_data.is_empty() {
+    let (maybe_change, maybe_signer) = if authenticated_data.is_empty() {
       if !proposed.removed.is_empty() {
         return Err(MlsError::MissingSignedChange);
       }
       self.check_device_additions(&proposed)?;
-      None
+      (None, None)
     } else {
       let signed = SignedMembershipChange::from_bytes(authenticated_data)?;
       let verified = signed.verify(directory, authority)?;
       self.check_change_matches(verified.change(), &proposed)?;
-      Some(verified.change().clone())
+      (Some(verified.change().clone()), Some(verified.actor().user_id()))
     };
     let update = MembershipUpdate {
       maybe_change,
+      maybe_signer,
       added: proposed.added.iter().map(GroupMember::from).collect(),
       removed: proposed.removed,
       maybe_rejoined: None,
@@ -959,6 +964,7 @@ impl ConversationGroup {
     })?;
     Ok(MembershipUpdate {
       maybe_change: None,
+      maybe_signer: None,
       added: vec![joiner],
       removed: Vec::new(),
       maybe_rejoined: None,

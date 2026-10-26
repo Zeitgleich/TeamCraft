@@ -1320,7 +1320,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           // Somebody answered that device's request already.
           self.note_device_readded(conversation, device, at_ms)?;
         }
-        self.note_member_changes(conversation, &before, update.maybe_rejoined)?;
+        self.note_member_changes(conversation, &before, &update)?;
         if let (Some(rejoined), Some(committer)) = (update.maybe_rejoined, update.maybe_committer) {
           self.follow_up_rejoin(conversation, rejoined, committer)?;
         }
@@ -1680,7 +1680,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // The merged state, what it noted and the cursor past the commit go to the store together
     // (issue #160).
     self.atomically(|client| {
-      client.note_member_changes(conversation, &before, update.maybe_rejoined)?;
+      client.note_member_changes(conversation, &before, &update)?;
       if update.maybe_change.is_none() && update.maybe_rejoined.is_none() {
         // This device's own addition of further devices of members: they wait for a current key
         // like any (#178); this device takes its turn with the others.
@@ -1852,12 +1852,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       tracing::info!(conversation_id = %conversation, "dropped a history share: the member left since the addition");
       return Ok(());
     }
-    let keys: Vec<ContentKey> = self
-      .account
-      .key_bag
-      .ring(convert::conversation(conversation))
-      .map(|ring| ring.keys().iter().map(ContentKey::duplicate).collect())
-      .unwrap_or_default();
+    let keys = self.ring_keys(conversation);
     if keys.is_empty() {
       return Ok(());
     }
@@ -1878,15 +1873,37 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         },
       }
     }
-    let chunk_len = self.settings.max_missed_keys.max(1);
     for recipient in &recipients {
-      for chunk in keys.chunks(chunk_len) {
-        let bundle = ContentKeyBundle::without_current(
-          convert::conversation(conversation),
-          chunk.iter().map(ContentKey::duplicate).collect(),
-        );
-        self.send_bundle(conversation, &bundle, Some(recipient)).await?;
-      }
+      self.seal_keys_to(conversation, &keys, recipient).await?;
+    }
+    Ok(())
+  }
+
+  /// Every key of the conversation's ring: the history a member shares.
+  fn ring_keys(&self, conversation: ConversationId) -> Vec<ContentKey> {
+    self
+      .account
+      .key_bag
+      .ring(convert::conversation(conversation))
+      .map(|ring| ring.keys().iter().map(ContentKey::duplicate).collect())
+      .unwrap_or_default()
+  }
+
+  /// Seals `keys` to `recipient` alone, in bundles of at most `max_missed_keys` keys that name no
+  /// current key (e2ee.md §4.6).
+  async fn seal_keys_to(
+    &mut self,
+    conversation: ConversationId,
+    keys: &[ContentKey],
+    recipient: &VerifiedDevice,
+  ) -> Result<(), CoreError> {
+    let chunk_len = self.settings.max_missed_keys.max(1);
+    for chunk in keys.chunks(chunk_len) {
+      let bundle = ContentKeyBundle::without_current(
+        convert::conversation(conversation),
+        chunk.iter().map(ContentKey::duplicate).collect(),
+      );
+      self.send_bundle(conversation, &bundle, Some(recipient)).await?;
     }
     Ok(())
   }
@@ -1904,8 +1921,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.send_bundle(conversation, &bundle, None).await
   }
 
-  /// Seals to a device added back the keys of the epochs it was a member in (e2ee.md §4.6). Done
-  /// when there are none or the device is no longer in the group.
+  /// Seals to a device added back the keys of the epochs it was a member in (e2ee.md §4.6). A
+  /// device whose leaf came in with a signed full-history addition gets that history (every key
+  /// of the ring) as the addition shared it with the user: it may never have opened that welcome
+  /// (#400). Done when there are none or the device is no longer in the group.
   async fn send_missed_keys(
     &mut self,
     conversation: ConversationId,
@@ -1916,8 +1935,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       user_id: convert::user(user),
       device_id: convert::device(device),
     };
-    let bundle = self.missed_keys(conversation, member)?;
-    if bundle.keys().is_empty() {
+    let keys = if self.is_owed_full_history_now(conversation, user, member).await? {
+      tracing::info!(conversation_id = %conversation, device_id = %device, "sharing the history of its full-history addition with a device added back");
+      self.ring_keys(conversation)
+    } else {
+      self.missed_keys(conversation, member)?
+    };
+    if keys.is_empty() {
       return Ok(());
     }
     let directory = self.member_directory(conversation).await?;
@@ -1927,7 +1951,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     else {
       return Ok(());
     };
-    self.send_bundle(conversation, &bundle, Some(&recipient)).await
+    self.seal_keys_to(conversation, &keys, &recipient).await
+  }
+
+  /// [`Self::is_owed_full_history`], and the user may still get the full history: one the server
+  /// now shows as a guest gets nothing more (its word can only lower what is shared).
+  async fn is_owed_full_history_now(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+    member: GroupMember,
+  ) -> Result<bool, CoreError> {
+    if !self.is_owed_full_history(conversation, member)? {
+      return Ok(false);
+    }
+    Ok(self.effective_history(user, HistoryShare::Full).await? == HistoryShare::Full)
   }
 
   /// Applies a content key bundle a member sent to the whole group in `epoch`: only its current

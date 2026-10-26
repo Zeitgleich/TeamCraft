@@ -274,6 +274,10 @@ struct State {
   /// The next application message of these users is accepted but published only on
   /// [`FakeServer::release_held_messages`].
   holding_application_of: HashSet<UserId>,
+  /// The next proposal of these users is accepted but published only on
+  /// [`FakeServer::release_held_messages`].
+  holding_proposal_of: HashSet<UserId>,
+  /// Held application messages and proposals, in the order they were posted.
   held_applications: Vec<(UserId, ConversationId, PostMlsMessageRequest)>,
   /// Members refused their groups' queues ([`FakeServer::refuse_queue_to`]).
   queue_refused_to: HashSet<UserId>,
@@ -441,6 +445,13 @@ impl FakeServer {
       user.kind = UserKind::Guest;
     }
     api
+  }
+
+  /// The server shows `user` as a guest (kind `guest`) from now on, whatever they were.
+  pub fn show_as_guest(&self, user: UserId) {
+    if let Some(entry) = self.lock().users.get_mut(&user) {
+      entry.kind = UserKind::Guest;
+    }
   }
 
   /// While offline, every REST call of this user fails with a network error. Coming back online
@@ -862,7 +873,14 @@ impl FakeServer {
     self.lock().holding_application_of.insert(user);
   }
 
-  /// Publishes the held application messages, after everything posted meanwhile.
+  /// The user's next MLS proposal (a rejoin request, a signed change) is accepted but reaches the
+  /// group's queue only on [`Self::release_held_messages`]: a server that holds a request back and
+  /// delivers it later.
+  pub fn hold_next_proposal(&self, user: UserId) {
+    self.lock().holding_proposal_of.insert(user);
+  }
+
+  /// Publishes the held application messages and proposals, after everything posted meanwhile.
   pub fn release_held_messages(&self) {
     let held = std::mem::take(&mut self.lock().held_applications);
     for (user, conversation, request) in held {
@@ -1316,6 +1334,28 @@ impl FakeServerApi {
       );
       Ok(message)
     })
+  }
+
+  /// Accepts `request` without publishing it until [`FakeServer::release_held_messages`].
+  fn hold(
+    &self,
+    state: &mut State,
+    conversation: ConversationId,
+    request: &PostMlsMessageRequest,
+  ) -> MlsMessageResponse {
+    let id = state.next_id();
+    state
+      .held_applications
+      .push((self.user, conversation, request.clone()));
+    MlsMessageResponse {
+      id,
+      conversation_id: conversation,
+      epoch: request.epoch,
+      kind: request.kind.clone(),
+      sender_device_id: request.device_id,
+      maybe_recipient_device_id: None,
+      payload: request.payload.clone(),
+    }
   }
 
   /// [`Self::with`], failing as [`FakeServer::cut_next_removal`] asked.
@@ -2572,23 +2612,17 @@ impl ServerApi for FakeServerApi {
     request: &PostMlsMessageRequest,
   ) -> Result<MlsMessageResponse, ApiError> {
     let maybe_cut = match request.kind {
-      MlsMessageKind::Proposal => self.server.lock().proposal_cuts.remove(&self.user),
+      MlsMessageKind::Proposal => {
+        let mut state = self.server.lock();
+        if state.holding_proposal_of.remove(&self.user) {
+          return Ok(self.hold(&mut state, conversation, request));
+        }
+        state.proposal_cuts.remove(&self.user)
+      },
       MlsMessageKind::Application => {
         let mut state = self.server.lock();
         if state.holding_application_of.remove(&self.user) {
-          let id = state.next_id();
-          state
-            .held_applications
-            .push((self.user, conversation, request.clone()));
-          return Ok(MlsMessageResponse {
-            id,
-            conversation_id: conversation,
-            epoch: request.epoch,
-            kind: request.kind.clone(),
-            sender_device_id: request.device_id,
-            maybe_recipient_device_id: None,
-            payload: request.payload.clone(),
-          });
+          return Ok(self.hold(&mut state, conversation, request));
         }
         state.application_cuts.remove(&self.user)
       },

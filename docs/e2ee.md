@@ -323,13 +323,14 @@ for months must keep fresh ones on the server:
   tried again on the next start. Copies the file system or the flash controller keep are
   out of reach; the browser's IndexedDB gives no such control. The listing and the wiping rely on
   how `openmls_memory_storage` 0.6 keys bundles; a test fails when a new version changes it.
-- **History of a first add-back (known gap).** A user whose first device can't open the welcome
-  that added them (its package deleted, or opened but not joined) is added back with history from
-  that epoch on: the content keys the adder shared for a full-history add went into the group the
-  device never joined, and the add-back doesn't send them again. The keys of earlier epochs stay
-  unreadable for that user until somebody adds them again with history (#400). This needs a
-  welcome that waited past the package's lifetime plus `key_package_retention` (about 72 days
-  after the server handed it out), or a network error at the exact moment of joining.
+- **History of a first add-back.** A user whose first device can't open the welcome that added
+  them (its package deleted, or opened but not joined) is added back (§4.6). The content keys the
+  adder shared for a full-history add went into the group the device never joined, so the member
+  that adds it back seals that history to it again, checked against the signed addition it merged
+  (§4.6, "Keys a device added back missed", #400). An addition from the join on brings nothing
+  from before it, also after an add-back. Losing a welcome needs one that waited past the
+  package's lifetime plus `key_package_retention` (about 72 days after the server handed it out),
+  or a network error at the exact moment of joining.
 - **One bad device.** The adder checks every claimed package (signature, lifetime, credential, the
   user's signed device list, not revoked from this group, the device and user the server claims)
   and leaves out bad ones with a warning, so a revoked or broken device doesn't keep its user's other
@@ -659,10 +660,28 @@ its own. See [admin.md](admin.md) §2.
   an application message of that epoch, which every member of the epoch got too), and, per member
   device, the epoch its leaf was added in, when it saw that. It sends the keys noted for epochs since
   both its own join and the device's addition, newest first, at most `max_missed_keys` (client, 512).
-  Keys from the user's key bag or sealed to it have no epoch and are never sent on. A member that
-  joined after the device fell out lacks the keys before its join; so when a member added back a
-  device and the committer joined after this member (it saw the committer's leaf added, or the
-  committer added back, which starts its own record afresh), this member
+  Keys from the user's key bag or sealed to it have no epoch and are never sent on. **A device a
+  full-history addition put in** gets that history instead (#400): every key of the ring, as the
+  addition shared it, in bundles of at most `max_missed_keys`, since it may never have opened that
+  addition's welcome (§4.3.1). A member sends it only if it merged that addition itself (a signed
+  change that shared the full history with the device's user and added the device's current leaf;
+  each device notes this per member device and drops it with the leaf), the change wasn't signed
+  by the user it added (only a member who chooses to share history adds somebody with it, §4.7),
+  the user stayed a member since (as for a history share still pending), and the server doesn't
+  show the user as a guest by now (its word can only lower what is shared). Nothing else unlocks
+  it: the add-back only names the device, so neither the device nor the server can ask for more
+  than the merged addition shared, and a replayed or old request (above) at most adds the device
+  back again. Whether the device ever opened its welcome can't be told (a device that only reads
+  leaves no trace in the group, and the signed request can't say so without older members
+  refusing the add-back commit), so a device that did join and fell out later gets that history
+  again, which it had. A device the addition didn't put in (a further device of the user, which
+  gets the history through the user's key bag), a device added from the join on and a user
+  removed since get nothing of it. A member that joined after the addition can't vouch for it and
+  sends only the missed keys; the members that saw the addition follow up (below). Members that
+  merged the addition on a client before this version noted nothing and send only the missed
+  keys. A member that joined after the device fell out lacks the keys before its join; so when a
+  member added back a device and the committer joined after this member (it saw the committer's
+  leaf added, or the committer added back, which starts its own record afresh), this member
   sends its own keys too, ranked among the members whose record starts before the committer's
   (online users first, then the oldest record, `device_add_stagger` per rank), unless a member
   that joined no later than itself sent them first. Each device

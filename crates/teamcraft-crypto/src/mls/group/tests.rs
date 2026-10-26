@@ -34,6 +34,11 @@ fn add_member_and_share_full_history() {
     update.maybe_change.as_ref().map(MembershipChange::change_id),
     Some(change.unverified().change_id())
   );
+  assert_eq!(
+    update.maybe_signer,
+    Some(UserId::new(ALICE)),
+    "the verified signer"
+  );
 
   let mut bob_group = world.bob_joins(&output);
   assert_eq!(bob_group.epoch(), world.alice_group.epoch());
@@ -224,6 +229,7 @@ fn device_addition_needs_only_cross_signature() {
     panic!("expected a membership change")
   };
   assert!(update.maybe_change.is_none());
+  assert!(update.maybe_signer.is_none());
   assert_eq!(update.added, vec![member(&carol_phone.user)]);
 
   let welcome = output.maybe_welcome.unwrap();

@@ -21,6 +21,7 @@ mod direct_uploads;
 mod dm_setup;
 mod enrollment;
 mod files;
+mod first_add_back;
 mod guest_meetings;
 mod key_packages;
 mod link_previews;
