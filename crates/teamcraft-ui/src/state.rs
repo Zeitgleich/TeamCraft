@@ -302,6 +302,12 @@ pub struct AppState {
   linked_message: RwSignal<Option<PermalinkTarget>>,
   /// A route that names something which hasn't loaded yet.
   pub pending_route: RwSignal<Option<Route>>,
+  /// The route being followed is the place the desktop app reopens (#721): if it is gone, the app
+  /// starts as usual without a notice.
+  is_restoring: StoredValue<bool>,
+  /// The message the user was reading in a conversation when the app closed; its feed starts there
+  /// (taken by the message list).
+  restored_reading: StoredValue<Option<crate::last_place::ReadingPosition>>,
   /// A meeting link (`/meeting/{id}`) the meetings screen has yet to open; it takes it.
   pub maybe_meeting_link: RwSignal<Option<MeetingId>>,
   /// Bumped when a route named something that doesn't exist or the user can't open.
@@ -403,6 +409,8 @@ impl AppState {
       settings_page: RwSignal::new(SettingsPage::Section(SettingsTab::DEFAULT)),
       linked_message: RwSignal::new(None),
       pending_route: RwSignal::new(None),
+      is_restoring: StoredValue::new(false),
+      restored_reading: StoredValue::new(None),
       maybe_meeting_link: RwSignal::new(None),
       unavailable_routes: RwSignal::new(0),
       follows_url: StoredValue::new(false),
@@ -1569,7 +1577,42 @@ impl AppState {
   /// loaded at all; anything else that can't be opened falls back to Home with a notice.
   pub fn follow_route(&self, route: Route) -> RouteOutcome {
     // Called from outside reactive scopes (start, popstate, data arriving), like event handlers.
-    untrack(|| self.follow_route_now(route))
+    let outcome = untrack(|| self.follow_route_now(route));
+    if outcome != RouteOutcome::Waiting {
+      self.is_restoring.set_value(false);
+    }
+    outcome
+  }
+
+  /// Reopens the place the desktop app was closed in (#721), and the message the user was reading
+  /// there. Like [`Self::follow_route`], except that a place that is gone or no longer allowed
+  /// falls back to the start without a notice.
+  pub fn restore_route(
+    &self,
+    route: Route,
+    maybe_reading: Option<crate::last_place::ReadingPosition>,
+  ) -> RouteOutcome {
+    self.is_restoring.set_value(true);
+    self.restored_reading.set_value(maybe_reading);
+    self.follow_route(route)
+  }
+
+  /// The index of the message the user was reading in `conversation` when the app closed, once:
+  /// its feed starts there. `None` if there was none or it isn't loaded.
+  pub fn take_restored_reading(&self, conversation: ConversationId) -> Option<usize> {
+    let reading = self
+      .restored_reading
+      .try_get_value()
+      .flatten()
+      .filter(|reading| reading.conversation == conversation)?;
+    self.restored_reading.set_value(None);
+    self.read(|backend| {
+      let count = backend.message_count(conversation);
+      backend
+        .messages(conversation, 0, count)
+        .iter()
+        .position(|message| message.id == reading.message)
+    })
   }
 
   fn follow_route_now(&self, route: Route) -> RouteOutcome {
@@ -1610,6 +1653,7 @@ impl AppState {
 
   /// Forgets a route that was still waiting, because the user went somewhere else meanwhile.
   pub fn cancel_pending_route(&self) {
+    self.is_restoring.set_value(false);
     if self.pending_route.get_untracked().is_some() {
       self.pending_route.set(None);
     }
@@ -1732,6 +1776,13 @@ impl AppState {
   }
 
   fn show_unavailable_route(&self) {
+    // A reopened place that is gone (left, deleted, no longer allowed): the usual start, quietly.
+    if self.is_restoring.get_value() {
+      self.is_restoring.set_value(false);
+      self.restored_reading.set_value(None);
+      self.open_start();
+      return;
+    }
     self.open_chats();
     self.unavailable_routes.update(|count| *count += 1);
   }
@@ -2090,6 +2141,55 @@ mod tests {
       state.give_up_route(waited);
       assert_eq!(state.pending_route.get(), None);
       assert_eq!(state.unavailable_routes.get(), 1);
+    }
+
+    #[test]
+    fn a_reopened_place_that_is_gone_starts_quietly() {
+      let state = test_state();
+      let (space, channel) = first_channel(&state);
+      let unknown: ConversationId = id_from_raw(999_999_999);
+      state.open_threads();
+      assert_eq!(
+        state.restore_route(Route::Conversation(unknown), None),
+        RouteOutcome::Unavailable
+      );
+      assert_eq!(
+        state.unavailable_routes.get(),
+        0,
+        "no notice for a place that went"
+      );
+      assert_eq!(
+        state.route(),
+        Route::Channel { space, channel },
+        "the usual start"
+      );
+      // Only the reopened place is quiet: a link to something gone still says so.
+      state.follow_route(Route::Conversation(unknown));
+      assert_eq!(state.unavailable_routes.get(), 1);
+    }
+
+    #[test]
+    fn a_reopened_place_opens_with_its_reading_position() {
+      let state = test_state();
+      let (space, channel) = first_channel(&state);
+      let messages = state.read(|backend| backend.messages(channel, 0, backend.message_count(channel)));
+      let reading = crate::last_place::ReadingPosition {
+        conversation: channel,
+        message: messages[0].id,
+      };
+      state.open_threads();
+      assert_eq!(
+        state.restore_route(Route::Channel { space, channel }, Some(reading)),
+        RouteOutcome::Shown
+      );
+      assert_eq!(state.route(), Route::Channel { space, channel });
+      assert_eq!(
+        state.take_restored_reading(id_from_raw(999_999_999)),
+        None,
+        "another feed"
+      );
+      assert_eq!(state.take_restored_reading(channel), Some(0));
+      assert_eq!(state.take_restored_reading(channel), None, "taken once");
     }
 
     #[test]
