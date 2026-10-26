@@ -1132,7 +1132,7 @@ fn WelcomeScreen(name: String, control: SessionControl) -> impl IntoView {
 
 /// The desktop app reads chat data from the client core in the shell (encrypted store, sync), the
 /// browser build from the core in the page; without a core, spaces and conversations come over REST.
-async fn load_backend(
+pub(crate) async fn load_backend(
   auth: Rc<dyn crate::auth::Authenticator>,
   me: &GetMeResponse,
 ) -> Result<Rc<dyn Backend>, LoadError> {

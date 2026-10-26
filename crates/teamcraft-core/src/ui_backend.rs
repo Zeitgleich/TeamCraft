@@ -284,6 +284,20 @@ pub enum CoreCommand {
     conversation: ConversationId,
     user: UserId,
   },
+  /// A host's app is about to hand out a guest link: make its secret (`guest_link_fragment`).
+  PrepareGuestLink {
+    conversation: ConversationId,
+    meeting: teamcraft_proto::MeetingId,
+  },
+  /// A host admitted a guest: their device joins the chat's group if the link's proof checks out.
+  LetGuestIntoMeetingChat {
+    conversation: ConversationId,
+    meeting: teamcraft_proto::MeetingId,
+    guest: UserId,
+    display_name: String,
+    maybe_proof: Option<Vec<u8>>,
+    access_ends_at_ms: i64,
+  },
   InviteToSpace {
     space: SpaceId,
     email: String,
@@ -1414,6 +1428,36 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn let_into_meeting_chat(&self, conversation: ConversationId, user: UserId) {
     self.command(CoreCommand::LetIntoMeetingChat { conversation, user });
+  }
+
+  fn prepare_guest_link(&self, conversation: ConversationId, meeting: teamcraft_proto::MeetingId) {
+    self.command(CoreCommand::PrepareGuestLink {
+      conversation,
+      meeting,
+    });
+  }
+
+  fn guest_link_fragment(&self, meeting: teamcraft_proto::MeetingId) -> Option<String> {
+    crate::client::guest_link_fragment(self.store_ref(), meeting)
+  }
+
+  fn let_guest_into_meeting_chat(
+    &self,
+    conversation: ConversationId,
+    meeting: teamcraft_proto::MeetingId,
+    guest: UserId,
+    display_name: String,
+    maybe_proof: Option<Vec<u8>>,
+    access_ends_at_ms: i64,
+  ) {
+    self.command(CoreCommand::LetGuestIntoMeetingChat {
+      conversation,
+      meeting,
+      guest,
+      display_name,
+      maybe_proof,
+      access_ends_at_ms,
+    });
   }
 
   fn unconfirmed_removals(&self) -> Vec<(ConversationId, UserId)> {

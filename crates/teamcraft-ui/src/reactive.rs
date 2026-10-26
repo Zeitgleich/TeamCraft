@@ -155,6 +155,19 @@ pub fn use_debounced(source: impl Into<Signal<String>>, delay_ms: u64) -> ReadSi
   value
 }
 
+/// Waits on the page's event loop, without holding up anything else.
+pub async fn pause(duration: std::time::Duration) {
+  let (done, wait) = futures_channel::oneshot::channel::<()>();
+  leptos::prelude::set_timeout(
+    move || {
+      // The waiter may be gone (its view closed): nothing to tell then.
+      let _ = done.send(());
+    },
+    duration,
+  );
+  let _ = wait.await;
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;

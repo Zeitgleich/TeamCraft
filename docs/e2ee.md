@@ -873,9 +873,11 @@ never by the server's member list:
     signed device list. The key bag the server requires with a new identity is wrapped with a random
     passphrase that is never shown or stored: there is no backup and no recovery, a guest who loses
     the device (cleared site data) loses the guest's place, and the host admits the same link-holder
-    again as a new guest. The store is encrypted like the web client's (§9) with a key that lives in
-    the page's session only, and is wiped when the guest leaves, is turned away or the meeting's
-    access ends. No push, no search index, no account data sync.
+    again as a new guest. The store is the web client's encrypted store (§9). "Leave the meeting" deletes its
+    database (only a guest device accepts that command), and a guest page opened later deletes the
+    database an earlier page left behind (closed without leaving), as far as no other tab holds it
+    open. Until then the encrypted data stays in the browser; nothing reuses it, since the session
+    token is gone and the server deactivates the account when access ends. No push, no search index, no account data sync.
   - *Link secrets.* The server signs the session tokens and decides admission, so by itself it
     could admit a guest of its own and hand members that guest's key. A guest link therefore carries
     two values in the `#fragment`, which no server sees: a random 256-bit **link secret** made by the

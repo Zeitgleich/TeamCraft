@@ -416,6 +416,10 @@ pub struct EnrollRequest {
   pub passphrase: String,
   /// Shown in the user's device list.
   pub device_name: String,
+  /// The device of a meeting guest (browser only): an ephemeral identity with no backup; the
+  /// passphrase is ignored.
+  #[serde(default)]
+  pub is_guest: bool,
 }
 
 /// Something the user did that changes data.
@@ -708,6 +712,19 @@ pub enum ChatAction {
     conversation: ConversationId,
     user: UserId,
   },
+  PrepareGuestLink {
+    conversation: ConversationId,
+    meeting: teamcraft_proto::MeetingId,
+  },
+  LetGuestIntoMeetingChat {
+    conversation: ConversationId,
+    meeting: teamcraft_proto::MeetingId,
+    guest: UserId,
+    display_name: String,
+    #[serde(rename = "proof", default, skip_serializing_if = "Option::is_none")]
+    maybe_proof: Option<Base64Bytes>,
+    access_ends_at_ms: i64,
+  },
   SetBookmarks {
     conversation: ConversationId,
     bookmarks: Vec<crate::model::Bookmark>,
@@ -952,6 +969,25 @@ impl ChatAction {
       } => backend.add_people_to_call(from, in_call, added, maybe_title, key),
       Self::AcceptCallMove { from, to } => backend.accept_call_move(from, to),
       Self::LetIntoMeetingChat { conversation, user } => backend.let_into_meeting_chat(conversation, user),
+      Self::PrepareGuestLink {
+        conversation,
+        meeting,
+      } => backend.prepare_guest_link(conversation, meeting),
+      Self::LetGuestIntoMeetingChat {
+        conversation,
+        meeting,
+        guest,
+        display_name,
+        maybe_proof,
+        access_ends_at_ms,
+      } => backend.let_guest_into_meeting_chat(
+        conversation,
+        meeting,
+        guest,
+        display_name,
+        maybe_proof.map(|proof| proof.as_slice().to_vec()),
+        access_ends_at_ms,
+      ),
       Self::SetBookmarks {
         conversation,
         bookmarks,
@@ -1014,6 +1050,10 @@ pub enum ChatQuery {
   },
   IsWaitingForDevice {
     conversation: ConversationId,
+  },
+  /// The `#fragment` values of a guest link to the meeting, once the core made them.
+  GuestLinkFragment {
+    meeting: teamcraft_proto::MeetingId,
   },
   MembershipIssues {
     conversation: ConversationId,
@@ -1252,6 +1292,9 @@ impl ChatQuery {
       },
       Self::LinkedMessage { link } => ChatAnswer::LinkedMessage {
         maybe_linked: backend.linked_message(&link),
+      },
+      Self::GuestLinkFragment { meeting } => ChatAnswer::Link {
+        maybe_link: backend.guest_link_fragment(meeting),
       },
       Self::IsWaitingForDevice { conversation } => ChatAnswer::Flag {
         value: backend.is_waiting_for_device(conversation),

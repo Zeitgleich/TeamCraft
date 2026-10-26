@@ -326,6 +326,26 @@ pub trait ChatBackend {
   /// A host admitted `user` from a meeting's lobby: lets them into the chat's encryption, on this
   /// host's own decision (never because the server made them a member).
   fn let_into_meeting_chat(&self, _conversation: ConversationId, _user: UserId) {}
+  /// A host's app is about to hand out a guest link to `meeting`: makes the link's secret, which
+  /// [`Self::guest_link_fragment`] returns once it is there.
+  fn prepare_guest_link(&self, _conversation: ConversationId, _meeting: teamcraft_proto::MeetingId) {}
+  /// What goes into the guest link's `#fragment` next to the server's token
+  /// (`k=<secret>&o=<organizer fingerprint>`), once [`Self::prepare_guest_link`] made it.
+  fn guest_link_fragment(&self, _meeting: teamcraft_proto::MeetingId) -> Option<String> {
+    None
+  }
+  /// A host admitted a guest from a meeting's lobby: their device joins the chat's group if the
+  /// proof from the lobby entry checks out against the link's secret (e2ee.md §4.6).
+  fn let_guest_into_meeting_chat(
+    &self,
+    _conversation: ConversationId,
+    _meeting: teamcraft_proto::MeetingId,
+    _guest: UserId,
+    _display_name: String,
+    _maybe_proof: Option<Vec<u8>>,
+    _access_ends_at_ms: i64,
+  ) {
+  }
   /// Unconfirmed removals in every conversation, for the admin console: an admin outside the
   /// group doesn't see the conversation.
   fn unconfirmed_removals(&self) -> Vec<(ConversationId, UserId)> {

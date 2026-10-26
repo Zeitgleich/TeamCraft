@@ -30,8 +30,14 @@ use crate::records;
 use crate::store::{LocalStore, Table};
 
 const LINK_SECRET_PREFIX: &str = "guest-link-secret/";
+/// What the host's app appends to a guest link's `#fragment` (`k=<secret>&o=<fingerprint>`), kept
+/// for the UI to read once [`Client::prepare_guest_link`] made it.
+const LINK_FRAGMENT_PREFIX: &str = "guest-link-fragment/";
 const ORGANIZER_ANCHOR_PREFIX: &str = "guest-organizer-anchor/";
 /// Marks the store of a guest's ephemeral device.
+/// The names of the values in a guest link's fragment, next to the server's `invite`.
+pub const LINK_SECRET_KEY: &str = "k";
+pub const ORGANIZER_KEY: &str = "o";
 const GUEST_DEVICE_KEY: &str = "guest-device";
 /// The guests this device let into meeting chats (a local record: the server's word about a user's
 /// kind is not the only thing that says somebody is a guest).
@@ -135,6 +141,51 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       secret: Zeroizing::new(URL_SAFE_NO_PAD.encode(secret.expose_secret())),
       organizer_fingerprint: key.fingerprint().to_string(),
     })
+  }
+
+  /// Makes the secret and organizer fingerprint of a guest link to `meeting` and keeps them where
+  /// the UI reads them ([`guest_link_fragment`]).
+  pub async fn prepare_guest_link(
+    &mut self,
+    conversation: ConversationId,
+    meeting: MeetingId,
+  ) -> Result<(), CoreError> {
+    let material = self.guest_link_material(conversation, meeting).await?;
+    let fragment = Zeroizing::new(format!(
+      "{LINK_SECRET_KEY}={}&{ORGANIZER_KEY}={}",
+      material.secret.as_str(),
+      material.organizer_fingerprint
+    ));
+    records::put_json(
+      &self.store,
+      Table::SyncState,
+      &link_fragment_key(meeting),
+      &*fragment,
+    )
+  }
+
+  /// [`Self::let_guest_into_meeting_chat`] for a UI that has the guest's proof from the lobby entry
+  /// (or none).
+  pub async fn admit_guest(
+    &mut self,
+    conversation: ConversationId,
+    meeting: MeetingId,
+    guest: UserId,
+    display_name: &str,
+    maybe_proof: Option<Vec<u8>>,
+    access_ends_at_ms: i64,
+  ) -> Result<(), CoreError> {
+    let admission = GuestAdmission::Proof(maybe_proof.unwrap_or_default());
+    self
+      .let_guest_into_meeting_chat(
+        conversation,
+        meeting,
+        guest,
+        display_name,
+        &admission,
+        access_ends_at_ms,
+      )
+      .await
   }
 
   /// Lets an admitted guest's devices into the meeting chat's group, after the guest passed the
@@ -382,6 +433,17 @@ fn decode_secret(encoded: &str) -> Result<GuestLinkSecret, CoreError> {
 fn meeting_number(meeting: MeetingId) -> u64 {
   // Snowflake IDs are never negative (`Id` refuses them).
   u64::try_from(meeting.snowflake().get()).unwrap_or_default()
+}
+
+/// The fragment a host's app appends to a guest link, if [`Client::prepare_guest_link`] made it.
+pub fn guest_link_fragment<S: LocalStore>(store: &S, meeting: MeetingId) -> Option<String> {
+  records::get_json(store, Table::SyncState, &link_fragment_key(meeting))
+    .ok()
+    .flatten()
+}
+
+fn link_fragment_key(meeting: MeetingId) -> String {
+  format!("{LINK_FRAGMENT_PREFIX}{meeting}")
 }
 
 fn deadlines_key(conversation: ConversationId) -> String {

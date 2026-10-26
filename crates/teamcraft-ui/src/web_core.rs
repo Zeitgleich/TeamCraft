@@ -56,7 +56,7 @@ use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_proto::DeviceLinkPlatform;
 use teamcraft_proto::{
-  ConversationId, DeviceActivity, GatewayClientMessage, GatewayServerMessage, MessageId, UserId,
+  ConversationId, DeviceActivity, GatewayClientMessage, GatewayServerMessage, MeetingId, MessageId, UserId,
 };
 use wasm_bindgen::JsCast;
 
@@ -84,6 +84,9 @@ const TOKEN_REFRESH: Duration = Duration::from_secs(20);
 const PUSH_SESSION_LIFETIME_MS: i64 = 4 * 60 * 1000;
 /// Local storage key (per user) remembering that this browser had the account set up, so a store
 /// the browser deleted is told apart from a first visit (e2ee.md §9.4).
+/// Local storage key (this browser) naming the user of the last guest device's database, so a later
+/// guest page deletes what a page closed without "Leave" left behind (e2ee.md §4.6).
+const GUEST_STORE_KEY: &str = "teamcraft.guest_store_user";
 const STORE_READY_PREFIX: &str = "teamcraft.store_ready.";
 /// How long to wait before checking the push subscription again after the check failed (offline).
 const PUSH_CHECK_RETRY: Duration = Duration::from_secs(60);
@@ -201,6 +204,18 @@ pub async fn requires_org_background() -> bool {
   }
 }
 
+/// Deletes the database of a guest device an earlier page left behind (closed without "Leave").
+/// Best effort: a database another tab holds open stays until that tab closes.
+pub async fn delete_stale_guest_store() {
+  let Some(user) = load_string(GUEST_STORE_KEY) else {
+    return;
+  };
+  match IndexedDbStore::delete(&format!("teamcraft-{user}")).await {
+    Ok(()) => store_string(GUEST_STORE_KEY, ""),
+    Err(error) => tracing::debug!(%error, "could not delete an earlier guest device's database"),
+  }
+}
+
 /// Answers one `core_*` command the way the desktop shell does.
 pub async fn call(command: &str, args: Value) -> Result<Value, String> {
   match command {
@@ -255,6 +270,36 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
       ask(|reply| Request::Enroll(request, reply))
         .await?
         .map(|()| Value::Null)
+    },
+    "core_wipe_guest" => {
+      ask(Request::WipeGuestStore).await??;
+      Ok(Value::Null)
+    },
+    "core_guest_anchor" => {
+      let (conversation, fingerprint) = (field(&args, "conversation")?, field(&args, "fingerprint")?);
+      ask(|reply| Request::GuestAnchor {
+        conversation,
+        fingerprint,
+        reply,
+      })
+      .await??;
+      Ok(Value::Null)
+    },
+    "core_guest_proof" => {
+      let (secret, meeting, display_name) = (
+        field(&args, "secret")?,
+        field(&args, "meeting")?,
+        field(&args, "display_name")?,
+      );
+      to_value(
+        ask(|reply| Request::GuestProof {
+          secret,
+          meeting,
+          display_name,
+          reply,
+        })
+        .await??,
+      )
     },
     "core_snapshot" => to_value(ask(Request::Snapshot).await??),
     "core_snapshot_changes" => {
@@ -595,6 +640,21 @@ enum Request {
   /// The service worker saw the browser change the push subscription.
   CheckPush,
   Enroll(EnrollRequest, oneshot::Sender<Result<(), String>>),
+  /// A guest leaves: this device's database is deleted (guest devices only).
+  WipeGuestStore(oneshot::Sender<Result<(), String>>),
+  /// A guest's page keeps the organizer's key from the link for a conversation (e2ee.md §4.6).
+  GuestAnchor {
+    conversation: ConversationId,
+    fingerprint: String,
+    reply: oneshot::Sender<Result<(), String>>,
+  },
+  /// A guest's proof that they hold the link, for the lobby.
+  GuestProof {
+    secret: String,
+    meeting: MeetingId,
+    display_name: String,
+    reply: oneshot::Sender<Result<Vec<u8>, String>>,
+  },
   Snapshot(oneshot::Sender<Result<ChatSnapshot, String>>),
   /// What changed in the snapshot since the reader's cursor (issue #246).
   SnapshotChanges(
@@ -1128,6 +1188,34 @@ impl Core {
         }
         drop(reply.send(result));
       },
+      Request::WipeGuestStore(reply) => drop(reply.send(self.wipe_guest_store().await)),
+      Request::GuestAnchor {
+        conversation,
+        fingerprint,
+        reply,
+      } => {
+        let result = match self.client.as_ref() {
+          Some(client) => client
+            .set_guest_organizer_anchor(conversation, &fingerprint)
+            .map_err(describe),
+          None => Err(not_set_up()),
+        };
+        drop(reply.send(result));
+      },
+      Request::GuestProof {
+        secret,
+        meeting,
+        display_name,
+        reply,
+      } => {
+        let result = match self.client.as_ref() {
+          Some(client) => client
+            .guest_link_proof(&secret, meeting, &display_name)
+            .map_err(describe),
+          None => Err(not_set_up()),
+        };
+        drop(reply.send(result));
+      },
       Request::LinkStart { device_name, reply } => drop(reply.send(self.link_start(device_name))),
       Request::LinkStatus(reply) => {
         let view = self
@@ -1265,6 +1353,9 @@ impl Core {
     if self.client.is_some() {
       return Ok(());
     }
+    if request.is_guest {
+      return self.enroll_guest(request.device_name).await;
+    }
     let options = EnrollmentOptions {
       device_name: request.device_name,
       secret: EnrollmentSecret::Passphrase(SecretBytes::new(request.passphrase.into_bytes())),
@@ -1272,6 +1363,52 @@ impl Core {
       maybe_attestation: None,
     };
     self.complete_enrollment(options).await
+  }
+
+  /// A meeting guest's ephemeral device: no passphrase, no backup (e2ee.md §4.6, "Meeting guests").
+  async fn enroll_guest(&mut self, device_name: String) -> Result<(), String> {
+    let store = self.store.clone().ok_or("the local database is not open")?;
+    tracing::info!("enrolling a guest device");
+    let client = PendingEnrollment::complete_as_guest(
+      self.api(),
+      store,
+      Box::new(SystemClock),
+      ClientSettings::default(),
+      device_name,
+      // The key bag is wrapped with a random secret nobody keeps: the cheapest setting is plenty.
+      Argon2Settings {
+        memory_kib: 64,
+        iterations: 1,
+        parallelism: 1,
+      },
+    )
+    .await
+    .map_err(describe)?;
+    self.status = self.adopt(client);
+    store_string(GUEST_STORE_KEY, &self.user.to_string());
+    Ok(())
+  }
+
+  /// Deletes the database of this guest device: its keys, messages and state. Refuses on any other
+  /// device. The core stays closed afterwards.
+  async fn wipe_guest_store(&mut self) -> Result<(), String> {
+    let is_guest = self
+      .client
+      .as_ref()
+      .is_some_and(|client| client.is_guest_device().unwrap_or(false));
+    if !is_guest {
+      return Err("this is not a guest device".to_owned());
+    }
+    self.client = None;
+    self.backend = None;
+    // Dropping the last handle closes the database, so it can be deleted.
+    self.store = None;
+    IndexedDbStore::delete(&format!("teamcraft-{}", self.user))
+      .await
+      .map_err(|error| error.to_string())?;
+    store_string(GUEST_STORE_KEY, "");
+    notify_changed();
+    Ok(())
   }
 
   async fn complete_enrollment(&mut self, options: EnrollmentOptions) -> Result<(), String> {

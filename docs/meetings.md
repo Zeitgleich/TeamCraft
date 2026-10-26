@@ -64,8 +64,9 @@ the change, and people taken off the list are removed from the group.
    until the meeting's end plus `guest_grace_secs`. The guest then exists as an ordinary guest user,
    is put into the lobby, and the hosts get a `lobby_join` event. `POST .../lobby/{user}/admit`
    makes the guest a member of the meeting chat (`membership_add` to the members, `lobby_decision` to
-   the guest); `deny` turns them away and ends their session. `has_lobby: false` lets guests of a
-   personal link in at once.
+   the guest); `deny` turns them away and ends their session. Guests always wait for a host, also when
+   the meeting has `has_lobby: false`: a guest can read and speak only once a host's device has added
+   theirs to the chat's encryption group (see "Guests in the browser").
 5. **Shared guest link** (`PUT /meetings/{id}/shared-guest-link`, hosts only): the same URL shape
    and token as a personal link, but the invite it names is marked shared. Asking again returns the
    same link. Every guest who redeems it gets a one-time invite of their own (`shared_invite_id`
@@ -180,6 +181,32 @@ A guest's page keeps going after "You are in" (#446; design in e2ee.md §4.6, "M
    against `user_writes_per_minute`; devices and key packages against `limits.max_devices_per_user`
    and the key package limits like any user's. The shared link's guest limit bounds how many guests
    one link lets in.
+
+### What the guest's page does
+
+`components/guest_join.rs` and `guest_meeting.rs`; `auth/guest.rs` is the guest's session as an
+`Authenticator`, so the same client core and chat views run for a guest:
+
+1. The link must carry the secret and the organizer's key fingerprint (`#invite=…&k=…&o=…`); a link
+   without them is refused before the one-time link is used up ("ask for a new link").
+2. After joining, the page opens its client core with the guest token, enrolls the ephemeral device
+   (`EnrollRequest.is_guest`), keeps the fingerprint for the meeting chat, and sends the proof.
+3. Once a host admitted the guest (the host's app offers "Let in" when the lobby entry carries the
+   proof, and adds the guest's device with `LetGuestIntoMeetingChat`), the page shows the slim
+   meeting view: the meeting's name, the chat, "Join the call" and "Leave the meeting". The call is
+   the browser call engine; the guest's call key binding is signed by the guest's device.
+4. "Leave" calls `POST .../leave`, deletes the page's database (its keys and messages) and shows a
+   goodbye. Closing the page without leaving keeps the encrypted data in the browser until the next
+   guest page is opened here, which deletes it (or the guest clears site data); nothing reuses it.
+
+A host's app hands out a guest link only after its core made the link secret
+(`PrepareGuestLink`; the copy buttons wait for it), so the link always carries it.
+
+Not done yet: reloading the page loses the guest's device (a one-time link is used up: the host
+sends a new one); the host's key-code fallback for a device that did not make the link has no
+dialog yet (the core supports it, the app shows the guest as waiting for its device); the size of
+what a guest downloads is not measured yet (the guest entry path is the initial chunk; the
+chat and call chunks load after admission).
 
 ## Gateway events
 

@@ -2,8 +2,11 @@
 //! lobby of meetings the user hosts, and opening a meeting from its link. The server owns all state
 //! (docs/meetings.md); [`MeetingsHub`] mirrors it.
 
+use std::time::Duration;
+
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_proto::{
   IdempotencyKey, LobbyEntry, LobbyState, MeetingId, MeetingResponse, MeetingStatus, RsvpStatus,
   UpdateMeetingRequest,
@@ -27,7 +30,7 @@ use crate::meetings::{
   ScheduleForm, attending_users, hosts_lobby, is_over, my_rsvp,
 };
 use crate::model::{ConversationId, UserId};
-use crate::reactive::{SetIfAlive, use_interval_while_visible};
+use crate::reactive::{SetIfAlive, pause, use_interval_while_visible};
 use crate::state::{AppState, Overlay, use_app_state};
 
 /// How often the list and the lobbies are reloaded while the screen is open and visible (guests
@@ -323,7 +326,7 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
           })}
       </div>
       <Show when=move || shows_guest_links.get() fallback=|| ()>
-        <GuestLinks meeting=id />
+        <GuestLinks meeting=id conversation=conversation />
       </Show>
       <button class="btn btn-quiet btn-small meeting-responses" aria-expanded=move || show_responses.get().to_string() on:click=move |_| show_responses.update(|open| *open = !*open)>
         {move || i18n.t_with("meetings-responses", &[("count", &response_total.to_string())])}
@@ -360,8 +363,10 @@ fn Lobby(meeting: MeetingId) -> impl IntoView {
       all
         .iter()
         .find(|item| item.id == meeting)
-        .map(|item| item.conversation_id)
+        .map(|item| (item.conversation_id, item.ends_at.0))
     });
+    let guest_name = entry.user.display_name.clone();
+    let maybe_proof = entry.maybe_proof.as_ref().map(|proof| proof.as_slice().to_vec());
     spawn_local(async move {
       let client = hub.client();
       let outcome = async move {
@@ -374,10 +379,20 @@ fn Lobby(meeting: MeetingId) -> impl IntoView {
       let is_done = hub.run(me, now_ms(), outcome).await.is_some();
       if admit
         && is_done
-        && let Some(chat) = maybe_chat
+        && let Some((chat, ends_at)) = maybe_chat
       {
-        // The host's own decision lets the guest into the chat's encryption (e2ee.md §4.6).
-        state.try_write(|backend| backend.let_into_meeting_chat(chat, guest));
+        // The host's own decision lets the guest into the chat's encryption, if the guest proved
+        // that they hold the link (e2ee.md §4.6, "Meeting guests").
+        state.try_write(|backend| {
+          backend.let_guest_into_meeting_chat(
+            chat,
+            meeting,
+            guest,
+            guest_name,
+            maybe_proof,
+            ends_at + GUEST_ACCESS_GRACE_MS,
+          )
+        });
       }
     });
   };
@@ -392,11 +407,21 @@ fn Lobby(meeting: MeetingId) -> impl IntoView {
               .into_iter()
               .map(|entry| {
                 let name = entry.user.display_name.clone();
+                // A guest is let in only with their proof of the link, which their page sends
+                // once its device is set up (e2ee.md §4.6, "Meeting guests").
+                let is_guest_unproven = entry.user.kind == teamcraft_proto::UserKind::Guest && entry.maybe_proof.is_none();
                 let (admit_entry, deny_entry) = (entry.clone(), entry);
                 view! {
                   <li class="lobby-entry">
                     <span translate="no">{name}</span>
-                    <button class="btn btn-primary" on:click=move |_| decide(&admit_entry, true)>
+                    {is_guest_unproven.then(|| view! {
+                      <span class="muted-text small">{move || i18n.t("meetings-guest-device-pending")}</span>
+                    })}
+                    <button
+                      class="btn btn-primary"
+                      prop:disabled=is_guest_unproven
+                      on:click=move |_| decide(&admit_entry, true)
+                    >
                       {move || i18n.t("meetings-admit")}
                     </button>
                     <button class="btn" on:click=move |_| decide(&deny_entry, false)>
@@ -459,7 +484,7 @@ fn LinkField(link: String, field_id: String, label_key: &'static str) -> impl In
 /// guests, each waits in the lobby, revocable) and personal one-time links. Each button makes the
 /// link and copies it in one click; the link stays in a field in case the browser refused the copy.
 #[component]
-fn GuestLinks(meeting: MeetingId) -> impl IntoView {
+fn GuestLinks(meeting: MeetingId, conversation: ConversationId) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let hub = expect_context::<MeetingsHub>();
@@ -474,8 +499,9 @@ fn GuestLinks(meeting: MeetingId) -> impl IntoView {
         .shared_guest_link(meeting)
         .await
         .map_err(|error| error.to_failure())?;
-      copy_fetched(state, i18n, link.join_url.clone()).await;
-      maybe_shared.set_if_alive(Some(link.join_url));
+      let join_url = with_link_secret(state, conversation, meeting, link.join_url).await?;
+      copy_fetched(state, i18n, join_url.clone()).await;
+      maybe_shared.set_if_alive(Some(join_url));
       Ok(())
     });
   };
@@ -501,8 +527,9 @@ fn GuestLinks(meeting: MeetingId) -> impl IntoView {
         .guest_link(meeting, None)
         .await
         .map_err(|error| error.to_failure())?;
-      copy_fetched(state, i18n, link.join_url.clone()).await;
-      maybe_one_time.set_if_alive(Some(link.join_url));
+      let join_url = with_link_secret(state, conversation, meeting, link.join_url).await?;
+      copy_fetched(state, i18n, join_url.clone()).await;
+      maybe_one_time.set_if_alive(Some(join_url));
       Ok(())
     });
   };
@@ -546,6 +573,38 @@ fn GuestLinks(meeting: MeetingId) -> impl IntoView {
       }}
     </div>
   }
+}
+
+/// How long the host's core gets to make a guest link's secret (it pins the organizer's key first).
+/// How long after a meeting's end the server keeps a guest's session (`guest_grace_secs`, default
+/// two hours): the host's device removes the guest from the encryption group then at the latest.
+const GUEST_ACCESS_GRACE_MS: i64 = 2 * 60 * 60_000;
+const LINK_SECRET_WAIT: Duration = Duration::from_secs(8);
+const LINK_SECRET_POLL: Duration = Duration::from_millis(100);
+
+/// The server's guest link with this device's link secret and the organizer's key fingerprint in
+/// its `#fragment`, which no server sees (e2ee.md §4.6, "Meeting guests"). A link without them
+/// would let the guest in without anything the server can't fake, so none is handed out then.
+async fn with_link_secret(
+  state: AppState,
+  conversation: ConversationId,
+  meeting: MeetingId,
+  join_url: String,
+) -> Result<String, ActionFailure> {
+  state.try_write(|backend| backend.prepare_guest_link(conversation, meeting));
+  let polls = LINK_SECRET_WAIT.as_millis() / LINK_SECRET_POLL.as_millis();
+  for _ in 0..polls {
+    if !state.is_alive() {
+      break;
+    }
+    if let Some(fragment) = state.read(|backend| backend.guest_link_fragment(meeting)) {
+      return Ok(format!("{join_url}&{fragment}"));
+    }
+    pause(LINK_SECRET_POLL).await;
+  }
+  Err(ActionFailure::other(
+    "this device could not make the guest link's secret".to_owned(),
+  ))
 }
 
 /// Copies a link that had to be fetched first and says so. The click that asked for it may be too
@@ -595,7 +654,7 @@ pub fn MeetingCreatedDialog() -> impl IntoView {
         <LinkField link=meeting.join_url.clone() field_id="meeting-created-link".to_owned() label_key="meetings-link" />
         <p class="muted-text small">{move || i18n.t("meetings-link-hint")}</p>
         <h4 class="meeting-created-guests">{move || i18n.t("meetings-invite-guests")}</h4>
-        <GuestLinks meeting=meeting.id />
+        <GuestLinks meeting=meeting.id conversation=conversation />
       </div>
       <footer class="modal-foot">
         <span class="grow"></span>
@@ -1104,6 +1163,7 @@ async fn save_edit(
     note_pending_edit(before.id, removed, now_ms());
   }
   let Some(saved) = hub
+    // async-ok: `MeetingsHub::run` is a plain method, not a signal.
     .run(me, now_ms(), hub.client().update(before.id, &request))
     .await
   else {

@@ -101,8 +101,8 @@ pub fn App() -> impl IntoView {
 /// The guest page, the sign-in gate or (development) the demo shell.
 fn screen(settings: Settings) -> AnyView {
   // A personal meeting link needs no sign-in: it gets its own page before anything else.
-  if let Some((meeting, invite_token)) = guest_link_from_location() {
-    return view! { <GuestJoinPage meeting=meeting invite_token=invite_token /> }.into_any();
+  if let Some(link) = guest_link_from_location() {
+    return view! { <GuestJoinPage link=link /> }.into_any();
   }
 
   // A share link needs no sign-in either: the file's key is in the fragment.
@@ -876,7 +876,7 @@ fn window_has_focus() -> bool {
 }
 
 /// The meeting and token when the page was opened from a personal meeting link.
-fn guest_link_from_location() -> Option<(teamcraft_proto::MeetingId, String)> {
+fn guest_link_from_location() -> Option<crate::meetings::GuestLink> {
   let location = web_sys::window()?.location();
   parse_guest_link(&location.pathname().ok()?, &location.hash().ok()?)
 }
@@ -927,7 +927,7 @@ fn track_banner_height(banners: NodeRef<leptos::html::Div>) {
 
 /// The user's call actions go to the call backend (the desktop shell or the page's call module), and
 /// calls that ring there show the dialog.
-fn connect_calls(state: AppState) {
+pub(crate) fn connect_calls(state: AppState) {
   let call = state.call;
   let maybe_alerts = use_context::<crate::os_alerts::CallAlertsCell>();
   call.set_handler(move |event| {

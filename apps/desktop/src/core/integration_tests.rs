@@ -349,6 +349,7 @@ async fn the_recovery_passphrase_can_be_changed_and_the_new_one_recovers() {
     .enroll(EnrollRequest {
       passphrase: PASSPHRASE.to_owned(),
       device_name: "Laptop".into(),
+      is_guest: false,
     })
     .await;
   assert!(
@@ -359,6 +360,7 @@ async fn the_recovery_passphrase_can_be_changed_and_the_new_one_recovers() {
     .enroll(EnrollRequest {
       passphrase: NEW_PASSPHRASE.to_owned(),
       device_name: "Laptop".into(),
+      is_guest: false,
     })
     .await
     .expect("the new passphrase recovers the keys");
@@ -391,6 +393,7 @@ pub(super) async fn enroll(person: &Person) {
   let request = EnrollRequest {
     passphrase: PASSPHRASE.into(),
     device_name: format!("{} e2e", person.name),
+    is_guest: false,
   };
   person.runtime.enroll(request).await.expect("enroll");
   assert!(matches!(person.runtime.status().await, CoreStatus::Ready { .. }));

@@ -8,6 +8,7 @@
 pub mod browser;
 mod config;
 pub(crate) mod fetch;
+pub mod guest;
 pub mod tauri;
 mod token_vault;
 
