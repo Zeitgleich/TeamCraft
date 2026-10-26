@@ -769,7 +769,7 @@ operator. It matters only if Keycloak is operated separately from the app server
 
 #### Done correctly (a)
 
-- Markdown (`teamcraft-ui/src/markdown.rs`) builds a typed tree. Links come only from
+- Markdown (`teamcraft-client-api/src/markdown.rs`) builds a typed tree. Links come only from
   `http://`/`https://` prefixes (`markdown.rs:133-140`), and `javascript:` is tested
   (`markdown.rs:186-191`). They render as `<a href target=_blank rel="noopener noreferrer">`
   (`components/rich_text.rs:46-49`). Recursion depth is bounded because each nesting level drops a
