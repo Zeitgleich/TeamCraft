@@ -29,6 +29,8 @@ struct RootView: View {
           .overlay(alignment: .top) { LinkPromptOverlay() }
       case .failed(let failure):
         FailureView(failure: failure)
+      case .storeUnreadable(let problem, let failure):
+        StoreRecoveryView(problem: problem, failure: failure)
       }
       // The animated mark while the core starts, handing over to whatever screen comes next (#463).
       LoadingMarkOverlay(isLoading: isStarting)

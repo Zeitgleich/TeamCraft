@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -32,7 +32,7 @@ use teamcraft_core::runner::{RunnerCommand, RunnerHandle, RunnerSettings, SyncRu
 use teamcraft_core::store::{LocalStore as _, SealedSqliteStore, StaticKeySource};
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
 use teamcraft_core::{
-  Client, ClientSettings, EnrollmentOptions, EnrollmentSecret, LinkOffer, PendingEnrollment,
+  Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer, PendingEnrollment,
 };
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
@@ -46,7 +46,7 @@ use crate::types::{
   AccountState, AppConfig, ConversationItem, ConversationKind, LinkPlatform, LinkRequestItem,
   MentionSettings, MessageItem, NotificationContent, NotificationContentSettings, Presence,
   PushDiagnosticsInfo, PushNotification, PushService, SearchHitItem, SegmentPrefetchMode,
-  SegmentPrefetchResult, TestPushResult,
+  SegmentPrefetchResult, StoreProblem, TestPushResult,
 };
 use crate::{EventListener, TokenProvider};
 
@@ -114,6 +114,29 @@ pub(crate) struct SyncSignals {
   pub(crate) connection: ConnectionStatus,
 }
 
+/// What opening the engine needs, checked once. The handle keeps it while the local store is
+/// unreadable, to open the engine again after a reset (issue #414); the key zeroizes on drop.
+pub(crate) struct EngineStart {
+  server_url: String,
+  maybe_push_gateway_url: Option<String>,
+  /// The app's private files directory.
+  data_dir: PathBuf,
+  account: String,
+  key: SymmetricKey,
+  tokens: Arc<dyn TokenProvider>,
+  listener: Arc<dyn EventListener>,
+  signals: SyncSignals,
+}
+
+/// Why the engine didn't open.
+#[derive(Debug)]
+pub(crate) enum OpenError {
+  /// The local store can't be read by this version, now or after a restart (issue #414): the user
+  /// decides what happens to it.
+  Unreadable(StoreProblem),
+  Failed(TeamCraftError),
+}
+
 /// Where the client is: not enrolled yet, held by the engine, or running in the sync loop.
 pub(crate) enum ClientSlot {
   Missing,
@@ -159,13 +182,9 @@ async fn catch_up_for_push(
   Ok(())
 }
 
-/// Starts the engine thread and waits until the store is open.
-pub(crate) fn spawn(
-  config: AppConfig,
-  tokens: Arc<dyn TokenProvider>,
-  listener: Arc<dyn EventListener>,
-  signals: SyncSignals,
-) -> Result<mpsc::UnboundedSender<Job>, TeamCraftError> {
+/// Starts the engine thread for `start` and waits until the store is open.
+pub(crate) fn spawn(start: &EngineStart) -> Result<mpsc::UnboundedSender<Job>, OpenError> {
+  let start = start.duplicate();
   let (ready, opened) = std::sync::mpsc::channel();
   let (jobs, mut queue) = mpsc::unbounded_channel::<Job>();
   std::thread::Builder::new()
@@ -175,14 +194,14 @@ pub(crate) fn spawn(
         Ok(runtime) => runtime,
         Err(error) => {
           // The constructor waits for this; if it has gone, nobody needs the answer.
-          let _ = ready.send(Err(TeamCraftError::Core(error.to_string())));
+          let _ = ready.send(Err(OpenError::Failed(TeamCraftError::Core(error.to_string()))));
           return;
         },
       };
       LocalSet::new().block_on(&runtime, async move {
         // A panic while opening would otherwise only show as `EngineStopped`; Rust's panic output
         // goes nowhere on Android, so the error carries the message and location instead.
-        let mut engine = match open_reporting_panics(config, ForeignTokens(tokens), listener, signals) {
+        let mut engine = match open_reporting_panics(start) {
           Ok(engine) => engine,
           Err(error) => {
             let _ = ready.send(Err(error));
@@ -196,18 +215,15 @@ pub(crate) fn spawn(
         engine.stop_runner().await;
       });
     })
-    .map_err(|error| TeamCraftError::Core(error.to_string()))?;
-  opened.recv().map_err(|_| TeamCraftError::EngineStopped)??;
+    .map_err(|error| OpenError::Failed(TeamCraftError::Core(error.to_string())))?;
+  opened
+    .recv()
+    .map_err(|_| OpenError::Failed(TeamCraftError::EngineStopped))??;
   Ok(jobs)
 }
 
 /// [`Engine::open`], with a panic turned into an error that says where it happened.
-fn open_reporting_panics(
-  config: AppConfig,
-  tokens: ForeignTokens,
-  listener: Arc<dyn EventListener>,
-  signals: SyncSignals,
-) -> Result<Engine, TeamCraftError> {
+fn open_reporting_panics(start: EngineStart) -> Result<Engine, OpenError> {
   let report = Arc::new(Mutex::new(String::new()));
   let previous_hook = std::panic::take_hook();
   let hook_report = report.clone();
@@ -216,22 +232,55 @@ fn open_reporting_panics(
       *report = info.to_string();
     }
   }));
-  let opened = std::panic::catch_unwind(AssertUnwindSafe(|| {
-    Engine::open(config, tokens, listener, signals)
-  }));
+  let opened = std::panic::catch_unwind(AssertUnwindSafe(|| Engine::open(start)));
   std::panic::set_hook(previous_hook);
   opened.unwrap_or_else(|_| {
     let message = report.lock().map(|report| report.clone()).unwrap_or_default();
-    Err(TeamCraftError::Core(format!(
+    Err(OpenError::Failed(TeamCraftError::Core(format!(
       "opening the engine panicked: {message}"
-    )))
+    ))))
   })
 }
 
-impl Engine {
-  fn open(
+/// Sets the unreadable database at `path` aside: it and its log are renamed beside themselves
+/// (`….db.unreadable-<now_ms>`), never deleted, so a new one opens there (issue #414). The log goes
+/// first: a new database must never find the old one's log, and a failure leaves the database
+/// where it was.
+pub(crate) fn set_store_aside(path: &Path, now_ms: i64) -> Result<(), TeamCraftError> {
+  for extension in ["db-wal", "db-shm", "db"] {
+    let file = path.with_extension(extension);
+    let aside = path.with_extension(format!("{extension}.unreadable-{now_ms}"));
+    match std::fs::rename(&file, &aside) {
+      Ok(()) => tracing::warn!(file = extension, "set the unreadable local database aside"),
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+      Err(error) => {
+        return Err(TeamCraftError::Storage(format!(
+          "could not set the local database aside: {error}"
+        )));
+      },
+    }
+  }
+  Ok(())
+}
+
+/// Deletes plaintext folders (decrypted downloads, staged uploads); a missing one is fine.
+pub(crate) fn delete_plaintext_dirs<'a>(
+  directories: impl IntoIterator<Item = &'a Path>,
+) -> Result<(), TeamCraftError> {
+  for directory in directories {
+    match std::fs::remove_dir_all(directory) {
+      Ok(()) => {},
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+      Err(error) => return Err(TeamCraftError::Storage(error.to_string())),
+    }
+  }
+  Ok(())
+}
+
+impl EngineStart {
+  pub(crate) fn new(
     config: AppConfig,
-    tokens: ForeignTokens,
+    tokens: Arc<dyn TokenProvider>,
     listener: Arc<dyn EventListener>,
     signals: SyncSignals,
   ) -> Result<Self, TeamCraftError> {
@@ -240,12 +289,70 @@ impl Engine {
     if config.account.is_empty() || config.account.contains(['/', '\\']) || config.account.contains("..") {
       return Err(TeamCraftError::InvalidInput("account name".into()));
     }
-    let directory = PathBuf::from(&config.data_dir);
-    std::fs::create_dir_all(&directory).map_err(|error| TeamCraftError::Storage(error.to_string()))?;
-    remove_shared_downloads(&directory.join(DOWNLOADS_DIR));
-    let path = directory.join(format!("{}.teamcraft.db", config.account));
-    let store = Arc::new(SealedSqliteStore::open(&path, &StaticKeySource::new(key))?);
-    let upload_staging_dir = directory.join(UPLOAD_STAGING_DIR).join(&config.account);
+    Ok(Self {
+      server_url: config.server_url,
+      maybe_push_gateway_url: config.push_gateway_url.filter(|url| !url.is_empty()),
+      data_dir: PathBuf::from(config.data_dir),
+      account: config.account,
+      key,
+      tokens,
+      listener,
+      signals,
+    })
+  }
+
+  /// The account's sealed database.
+  pub(crate) fn store_path(&self) -> PathBuf {
+    self.data_dir.join(format!("{}.teamcraft.db", self.account))
+  }
+
+  /// Where the account's plaintext files lie: decrypted downloads and staged uploads, each per
+  /// account, so another account signed in on this device never sees them.
+  pub(crate) fn plaintext_dirs(&self) -> [PathBuf; 2] {
+    [self.download_dir(), self.upload_staging_dir()]
+  }
+
+  fn download_dir(&self) -> PathBuf {
+    self.data_dir.join(DOWNLOADS_DIR).join(&self.account)
+  }
+
+  fn upload_staging_dir(&self) -> PathBuf {
+    self.data_dir.join(UPLOAD_STAGING_DIR).join(&self.account)
+  }
+
+  fn duplicate(&self) -> Self {
+    Self {
+      server_url: self.server_url.clone(),
+      maybe_push_gateway_url: self.maybe_push_gateway_url.clone(),
+      data_dir: self.data_dir.clone(),
+      account: self.account.clone(),
+      key: self.key.duplicate(),
+      tokens: self.tokens.clone(),
+      listener: self.listener.clone(),
+      signals: self.signals.clone(),
+    }
+  }
+}
+
+impl Engine {
+  fn open(start: EngineStart) -> Result<Self, OpenError> {
+    std::fs::create_dir_all(&start.data_dir)
+      .map_err(|error| OpenError::Failed(TeamCraftError::Storage(error.to_string())))?;
+    remove_shared_downloads(&start.data_dir.join(DOWNLOADS_DIR));
+    let [download_dir, upload_staging_dir] = start.plaintext_dirs();
+    let path = start.store_path();
+    let EngineStart {
+      server_url,
+      maybe_push_gateway_url,
+      key,
+      tokens,
+      listener,
+      signals,
+      ..
+    } = start;
+    let store =
+      SealedSqliteStore::open(&path, &StaticKeySource::new(key)).map_err(|error| open_error(error.into()))?;
+    let store = Arc::new(store);
     // Plaintext copies of files that were never sent (taken out of the composer, app stopped).
     if let Err(error) = sweep_staged_copies(store.as_ref(), &upload_staging_dir) {
       tracing::debug!(%error, "stray staged upload copies could not be listed");
@@ -254,15 +361,13 @@ impl Engine {
     let mentions: MentionSettings = load_mention_preferences(store.as_ref())
       .unwrap_or_default()
       .into();
-    let download_dir = directory.join(DOWNLOADS_DIR).join(&config.account);
     trim_downloads(&download_dir, MAX_DOWNLOADS_BYTES);
     let mut engine = Self {
-      server_url: config.server_url,
-      maybe_push_gateway_url: config.push_gateway_url.filter(|url| !url.is_empty()),
-      // Per account, so another account signed in on this device never sees these files.
+      server_url,
+      maybe_push_gateway_url,
       download_dir,
       upload_staging_dir,
-      tokens,
+      tokens: ForeignTokens(tokens),
       listener,
       store,
       client: ClientSlot::Missing,
@@ -278,12 +383,16 @@ impl Engine {
       mentions,
       signals,
     };
-    if let Some(client) = Client::open(
+    // Records that don't decode, or a key bag its own key doesn't open, make the store unreadable
+    // too.
+    let maybe_client = Client::open(
       engine.api(),
       engine.store.clone(),
       Box::new(SystemClock),
       engine.client_settings(),
-    )? {
+    )
+    .map_err(open_error)?;
+    if let Some(client) = maybe_client {
       engine.adopt(client);
     }
     Ok(engine)
@@ -1051,14 +1160,7 @@ impl Engine {
   /// Deletes this account's plaintext files: decrypted downloads and staged upload copies (at
   /// sign-out; the sealed store stays).
   pub(crate) fn delete_plaintext_files(&self) -> Result<(), TeamCraftError> {
-    for directory in [&self.download_dir, &self.upload_staging_dir] {
-      match std::fs::remove_dir_all(directory) {
-        Ok(()) => {},
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-        Err(error) => return Err(TeamCraftError::Storage(error.to_string())),
-      }
-    }
-    Ok(())
+    delete_plaintext_dirs([self.download_dir.as_path(), self.upload_staging_dir.as_path()])
   }
 
   pub(crate) fn backend(&self) -> Result<&CoreChatBackend<Store>, TeamCraftError> {
@@ -1128,6 +1230,18 @@ async fn run_offline_tolerant(client: &mut CoreClient, command: CoreCommand) -> 
     Ok(()) => Ok(()),
     Err(error) if error.is_transient() => Ok(()),
     Err(error) => Err(error.into()),
+  }
+}
+
+/// An error of opening the store or the client on it: data this version can't read, now or after a
+/// restart, gets its own answer (issue #414); anything else stays a plain failure.
+fn open_error(error: CoreError) -> OpenError {
+  match error.unreadable_store() {
+    Some(problem) => {
+      tracing::error!(%error, ?problem, "the local database is unreadable");
+      OpenError::Unreadable(problem.into())
+    },
+    None => OpenError::Failed(error.into()),
   }
 }
 
@@ -1241,6 +1355,70 @@ mod tests {
     trim_downloads(directory.path(), 10);
     assert!(directory.path().join("one").is_file());
     trim_downloads(&directory.path().join("missing"), 0);
+  }
+
+  mod unreadable_store {
+    use teamcraft_core::store::StoreError;
+
+    use super::*;
+
+    #[test]
+    fn open_errors_name_what_this_version_can_not_read() {
+      let newer = CoreError::Store(StoreError::NewerSchema {
+        found: 9,
+        supported: 2,
+      });
+      assert!(matches!(
+        open_error(newer),
+        OpenError::Unreadable(StoreProblem::NewerVersion)
+      ));
+      for damaged in [
+        CoreError::Store(StoreError::WrongKey),
+        CoreError::Store(StoreError::Corrupt("file is not a database".into())),
+        CoreError::Corrupt("a record does not decode".into()),
+      ] {
+        assert!(matches!(
+          open_error(damaged),
+          OpenError::Unreadable(StoreProblem::Damaged)
+        ));
+      }
+      // Busy or out of space: the data may be fine, so it stays a failure to try again.
+      assert!(matches!(
+        open_error(CoreError::Store(StoreError::Database(
+          "database is locked".into()
+        ))),
+        OpenError::Failed(TeamCraftError::Storage(_))
+      ));
+    }
+
+    #[test]
+    fn the_database_and_its_log_are_renamed_aside_never_deleted() {
+      let directory = TestDir::new("aside");
+      let path = directory.path().join("alice.teamcraft.db");
+      for (name, content) in [
+        ("alice.teamcraft.db", "records"),
+        ("alice.teamcraft.db-wal", "log"),
+        ("alice.teamcraft.db-shm", "index"),
+      ] {
+        std::fs::write(directory.path().join(name), content).unwrap();
+      }
+
+      set_store_aside(&path, 1_700_000_000_000).unwrap();
+
+      for (name, content) in [
+        ("alice.teamcraft.db.unreadable-1700000000000", "records"),
+        ("alice.teamcraft.db-wal.unreadable-1700000000000", "log"),
+        ("alice.teamcraft.db-shm.unreadable-1700000000000", "index"),
+      ] {
+        assert_eq!(
+          std::fs::read_to_string(directory.path().join(name)).unwrap(),
+          content
+        );
+      }
+      assert!(!path.exists());
+      // Nothing left to move (the log already went, or never was): fine.
+      set_store_aside(&path, 1_700_000_000_001).unwrap();
+    }
   }
 
   /// A fresh folder in the system's temporary directory, removed when dropped.

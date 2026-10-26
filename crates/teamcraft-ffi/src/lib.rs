@@ -14,8 +14,8 @@ mod server_entry;
 mod types;
 mod video;
 
-use std::path::Path;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
 pub use calls::{
@@ -28,6 +28,7 @@ pub use server_entry::{
   check_server_info, normalize_server_address, sign_in_page, sso_only_sign_in_page, stored_server,
 };
 use teamcraft_core::api::proxy::SystemProxy;
+use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
 use teamcraft_core::device_activity::ActivityReports;
 use teamcraft_media::openh264_library::{self, OpenH264Binary};
@@ -38,7 +39,7 @@ pub use types::{
   NetworkInterception, NetworkProxy, NotificationAttachmentKind, NotificationContent,
   NotificationContentSettings, NotificationGap, NotificationSuppression, OrgRecoveryStart, Presence,
   PushDiagnosticsInfo, PushNotification, PushNotificationKind, PushService, ReactionItem, SearchHitItem,
-  SegmentPrefetchMode, SegmentPrefetchResult, TestPushOutcome, TestPushResult,
+  SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem, TestPushOutcome, TestPushResult,
 };
 
 pub use video::{CameraFrame, VideoFrameRgba};
@@ -50,7 +51,12 @@ uniffi::setup_scaffolding!();
 /// The app's handle on the client core of one signed-in account.
 #[derive(uniffi::Object)]
 pub struct TeamCraft {
-  jobs: mpsc::UnboundedSender<Job>,
+  /// The engine thread's queue, set once the engine runs: unset while the local store is
+  /// unreadable, until [`Self::reset_store`] (issue #414).
+  jobs: OnceLock<mpsc::UnboundedSender<Job>>,
+  /// While the local store is unreadable: why, and what opens the engine after a reset. `None` once
+  /// the engine runs (only ever taken away, under its lock, when `jobs` is set).
+  recovery: Mutex<Option<StoreRecovery>>,
   /// Network changes the app reports; the sync loop (and later calls) listen.
   network: NetworkChanges,
   connection: ConnectionStatus,
@@ -72,9 +78,17 @@ pub trait EventListener: Send + Sync {
   fn on_change(&self);
 }
 
+/// What the handle keeps while the local store is unreadable (issue #414).
+struct StoreRecovery {
+  problem: StoreProblem,
+  start: engine::EngineStart,
+}
+
 #[uniffi::export]
 impl TeamCraft {
-  /// Opens the encrypted store of `config.account` and the client if this device is enrolled.
+  /// Opens the encrypted store of `config.account` and the client if this device is enrolled. A
+  /// store this version can't read is no error here: [`Self::account_state`] says so, and
+  /// [`Self::reset_store`] sets it aside.
   #[uniffi::constructor]
   pub fn new(
     config: AppConfig,
@@ -87,9 +101,17 @@ impl TeamCraft {
       network: network.clone(),
       connection: connection.clone(),
     };
-    let jobs = engine::spawn(config, tokens, listener, signals)?;
+    let start = engine::EngineStart::new(config, tokens, listener, signals)?;
+    let (jobs, maybe_recovery) = match engine::spawn(&start) {
+      Ok(jobs) => (OnceLock::from(jobs), None),
+      Err(engine::OpenError::Unreadable(problem)) => {
+        (OnceLock::new(), Some(StoreRecovery { problem, start }))
+      },
+      Err(engine::OpenError::Failed(error)) => return Err(error),
+    };
     Ok(Arc::new(Self {
       jobs,
+      recovery: Mutex::new(maybe_recovery),
       network,
       connection,
       activity: Mutex::default(),
@@ -124,12 +146,44 @@ impl TeamCraft {
       return;
     };
     let job: Job = Box::new(move |engine| Box::pin(async move { engine.report_activity(device_activity) }));
-    // Refused only once the handle is closing; nothing to report to then.
-    let _ = self.jobs.send(job);
+    // No engine while the store is unreadable, and a closing handle refuses: nothing to report to.
+    if let Some(jobs) = self.jobs.get() {
+      let _ = jobs.send(job);
+    }
   }
 
   pub async fn account_state(&self) -> Result<AccountState, TeamCraftError> {
+    if let Some(problem) = self.unreadable_problem() {
+      return Ok(AccountState::StoreUnreadable { problem });
+    }
     self.call(|engine| Box::pin(engine.account_state())).await
+  }
+
+  /// "Set up this device again" while the local data can't be read
+  /// ([`AccountState::StoreUnreadable`], issue #414): sets the database and its log aside beside
+  /// themselves (renamed, never deleted) and opens a new, empty store; the account state is then
+  /// `NeedsEnrollment`. Refused while the store is readable. Waits while the new store opens, like
+  /// the constructor: call it off the main thread.
+  pub fn reset_store(&self) -> Result<(), TeamCraftError> {
+    // Held throughout, so two resets can't run at once; `account_state` waits the moment it takes.
+    let mut recovery = self.recovery.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(unreadable) = recovery.as_ref() else {
+      return Err(TeamCraftError::InvalidInput(
+        "the local data is readable; nothing to reset".into(),
+      ));
+    };
+    engine::set_store_aside(&unreadable.start.store_path(), SystemClock.now_ms())?;
+    let jobs = engine::spawn(&unreadable.start).map_err(|error| match error {
+      // A new, empty store that doesn't open: no room or no permission, not the old data.
+      engine::OpenError::Unreadable(_) => {
+        TeamCraftError::Storage("the new local database can't be read".into())
+      },
+      engine::OpenError::Failed(error) => error,
+    })?;
+    // Invariant: `jobs` is unset while `recovery` holds something, and only set here.
+    let _ = self.jobs.set(jobs);
+    *recovery = None;
+    Ok(())
   }
 
   /// First run on this device: creates the identity, or recovers it with the passphrase if the
@@ -236,6 +290,16 @@ impl TeamCraft {
   /// Deletes this account's plaintext files on the device (decrypted downloads, staged uploads);
   /// for sign-out. The sealed store stays.
   pub async fn delete_plaintext_files(&self) -> Result<(), TeamCraftError> {
+    // An unreadable store has no engine, but its account's plaintext files are still there.
+    let maybe_unreadable_dirs = self
+      .recovery
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .as_ref()
+      .map(|recovery| recovery.start.plaintext_dirs());
+    if let Some(directories) = maybe_unreadable_dirs {
+      return engine::delete_plaintext_dirs(directories.iter().map(PathBuf::as_path));
+    }
     self
       .call(|engine| Box::pin(async move { engine.delete_plaintext_files() }))
       .await
@@ -608,7 +672,14 @@ impl TeamCraft {
         })
       })
       .await?;
-    calls::join(preparation, is_muted, hub, self.jobs.clone(), &self.network).await
+    calls::join(
+      preparation,
+      is_muted,
+      hub,
+      self.engine_jobs()?.clone(),
+      &self.network,
+    )
+    .await
   }
 }
 
@@ -763,7 +834,207 @@ impl TeamCraft {
         let _ = reply.send(job(engine).await);
       })
     });
-    self.jobs.send(boxed).map_err(|_| TeamCraftError::EngineStopped)?;
+    self
+      .engine_jobs()?
+      .send(boxed)
+      .map_err(|_| TeamCraftError::EngineStopped)?;
     answer.await.map_err(|_| TeamCraftError::EngineStopped)?
+  }
+
+  /// The engine thread's queue; none while the local store is unreadable (issue #414).
+  fn engine_jobs(&self) -> Result<&mpsc::UnboundedSender<Job>, TeamCraftError> {
+    self
+      .jobs
+      .get()
+      .ok_or_else(|| TeamCraftError::Storage("the local data can't be read; set this device up again".into()))
+  }
+
+  /// Why the local store can't be read, while it can't.
+  fn unreadable_problem(&self) -> Option<StoreProblem> {
+    self
+      .recovery
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .as_ref()
+      .map(|recovery| recovery.problem)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use teamcraft_core::store::{LocalStore as _, SealedSqliteStore, StaticKeySource, Table};
+  use teamcraft_crypto::secret::SymmetricKey;
+
+  use super::*;
+
+  const ACCOUNT: &str = "alice";
+  const KEY: [u8; 32] = [7; 32];
+
+  /// Issue #414: data this version can't read is an account state with a way out, not an error.
+  mod store_recovery {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_damaged_store_is_reported_then_set_aside_for_a_new_one() {
+      let directory = TestDir::new("damaged");
+      std::fs::write(directory.store(), b"not a database").unwrap();
+
+      let core = open(&directory, KEY).unwrap();
+      assert_eq!(
+        core.account_state().await.unwrap(),
+        AccountState::StoreUnreadable {
+          problem: StoreProblem::Damaged
+        }
+      );
+      assert!(matches!(
+        core.mention_settings().await,
+        Err(TeamCraftError::Storage(_))
+      ));
+
+      core.reset_store().unwrap();
+      // The engine runs on a new, readable store.
+      assert!(core.mention_settings().await.is_ok());
+      // Kept as it was, beside the new database (its log, if any, goes along: engine tests).
+      let kept = directory.files_containing(".unreadable-");
+      assert_eq!(kept.len(), 1, "{kept:?}");
+      assert!(
+        kept[0]
+          .to_string_lossy()
+          .contains("alice.teamcraft.db.unreadable-")
+      );
+      assert_eq!(std::fs::read(&kept[0]).unwrap(), b"not a database");
+      assert!(directory.store().exists());
+      // A readable store is never reset.
+      assert!(matches!(core.reset_store(), Err(TeamCraftError::InvalidInput(_))));
+      assert_eq!(directory.files_containing(".unreadable-").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_store_its_key_does_not_open_is_damaged() {
+      let directory = TestDir::new("wrong-key");
+      let store = SealedSqliteStore::open(
+        &directory.store(),
+        &StaticKeySource::new(SymmetricKey::from_bytes([1; 32])),
+      )
+      .unwrap();
+      store.put(Table::Users, "1", b"someone").unwrap();
+      drop(store);
+
+      let core = open(&directory, [2; 32]).unwrap();
+      assert_eq!(
+        core.account_state().await.unwrap(),
+        AccountState::StoreUnreadable {
+          problem: StoreProblem::Damaged
+        }
+      );
+    }
+
+    #[tokio::test]
+    async fn a_readable_store_opens_and_is_never_reset() {
+      let directory = TestDir::new("readable");
+      let core = open(&directory, KEY).unwrap();
+      assert!(core.mention_settings().await.is_ok());
+      assert!(matches!(core.reset_store(), Err(TeamCraftError::InvalidInput(_))));
+      assert!(directory.store().exists());
+      assert!(directory.files_containing(".unreadable-").is_empty());
+    }
+
+    #[tokio::test]
+    async fn sign_out_still_deletes_the_plaintext_files_of_an_unreadable_store() {
+      let directory = TestDir::new("plaintext");
+      std::fs::write(directory.store(), b"not a database").unwrap();
+      let downloads = directory.path().join("downloads").join(ACCOUNT);
+      let staged = directory.path().join("outgoing").join(ACCOUNT);
+      for folder in [&downloads, &staged] {
+        std::fs::create_dir_all(folder).unwrap();
+        std::fs::write(folder.join("picture.jpg"), b"plaintext").unwrap();
+      }
+      let core = open(&directory, KEY).unwrap();
+
+      core.delete_plaintext_files().await.unwrap();
+
+      assert!(!downloads.exists());
+      assert!(!staged.exists());
+    }
+
+    #[test]
+    fn a_bad_key_or_account_name_is_still_refused() {
+      let directory = TestDir::new("refused");
+      assert!(matches!(
+        open(&directory, [0; 31]),
+        Err(TeamCraftError::InvalidInput(_))
+      ));
+      let config = AppConfig {
+        account: "../bob".into(),
+        ..config(&directory, KEY.to_vec())
+      };
+      assert!(matches!(
+        TeamCraft::new(config, Arc::new(NoTokens), Arc::new(Quiet)),
+        Err(TeamCraftError::InvalidInput(_))
+      ));
+    }
+  }
+
+  fn open(directory: &TestDir, key: impl Into<Vec<u8>>) -> Result<Arc<TeamCraft>, TeamCraftError> {
+    TeamCraft::new(config(directory, key.into()), Arc::new(NoTokens), Arc::new(Quiet))
+  }
+
+  fn config(directory: &TestDir, database_key: Vec<u8>) -> AppConfig {
+    AppConfig {
+      server_url: "https://chat.example.com".into(),
+      data_dir: directory.path().display().to_string(),
+      account: ACCOUNT.into(),
+      database_key,
+      push_gateway_url: None,
+    }
+  }
+
+  /// Signed out: nothing here talks to a server.
+  struct NoTokens;
+
+  impl TokenProvider for NoTokens {
+    fn access_token(&self) -> Option<String> {
+      None
+    }
+  }
+
+  struct Quiet;
+
+  impl EventListener for Quiet {
+    fn on_change(&self) {}
+  }
+
+  /// A fresh folder in the system's temporary directory, removed when dropped.
+  struct TestDir(PathBuf);
+
+  impl TestDir {
+    fn new(name: &str) -> Self {
+      let path = std::env::temp_dir().join(format!("teamcraft-store-{}-{name}", std::process::id()));
+      let _ = std::fs::remove_dir_all(&path);
+      std::fs::create_dir_all(&path).unwrap();
+      Self(path)
+    }
+
+    fn path(&self) -> &Path {
+      &self.0
+    }
+
+    fn store(&self) -> PathBuf {
+      self.0.join(format!("{ACCOUNT}.teamcraft.db"))
+    }
+
+    fn files_containing(&self, text: &str) -> Vec<PathBuf> {
+      std::fs::read_dir(&self.0)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.to_string_lossy().contains(text))
+        .collect()
+    }
+  }
+
+  impl Drop for TestDir {
+    fn drop(&mut self) {
+      let _ = std::fs::remove_dir_all(&self.0);
+    }
   }
 }

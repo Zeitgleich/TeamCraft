@@ -1781,12 +1781,13 @@ fields and an `Unknown` catch-all, so newer records are read or skipped, not mis
 only partly open), whose key no longer opens it (the keystore lost or replaced the key), or whose
 layout is newer is not a generic failure: the app says what happened and offers to set the device
 up again (recovery passphrase or linking, §5, §6), after a confirmation. The desktop sets the old
-file aside (`<user>.db.unreadable-<time>`, never deleted); the browser deletes the database,
-because its key wrapping lives in the same database (if another tab doesn't let go of it within
-seconds, the reset fails with that reason). Data from a newer version is never reset in the
-browser: a newer bundle reads it, so the page offers to reload; an old cached page must not wipe
-it. A keystore that is just unavailable (locked, no keyring service) stays a "try again" failure,
-since the data is intact.
+file aside (`<user>.db.unreadable-<time>`, never deleted), the mobile apps likewise with their
+database and its log (`<account>.teamcraft.db.unreadable-<time>`, issue #414); the browser deletes
+the database, because its key wrapping lives in the same database (if another tab doesn't let go
+of it within seconds, the reset fails with that reason). Data from a newer version is never reset
+in the browser: a newer bundle reads it, so the page offers to reload; an old cached page must not
+wipe it. A keystore that is just unavailable (locked, no keyring service) stays a "try again"
+failure, since the data is intact.
 
 **Concurrent edits.** Two devices editing the same message converge: the edit with the highest
 server ID wins on every device, whatever order the edits arrive in (history loads newest first). An

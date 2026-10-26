@@ -65,6 +65,8 @@ enum AppPhase {
   case recovering(RecoveryProgress, failure: AppFailure?)
   case ready(Account)
   case failed(AppFailure)
+  /// The local data can't be read by this version (issue #414); `failure` says why a reset failed.
+  case storeUnreadable(StoreProblem, failure: AppFailure?)
 }
 
 /// The app's state and its one entry to the Rust core. Screens read; the core does the work
@@ -280,6 +282,37 @@ final class AppModel {
     await busy {
       await endSession()
       phase = .signedOut(nil)
+    }
+  }
+
+  // MARK: Unreadable local data
+
+  /// "Set up this device again" (issue #414): the core sets the unreadable database aside (renamed,
+  /// never deleted) and opens a new one; enrollment follows. Off the main thread, since the new
+  /// store opens while it waits.
+  func resetStore() async {
+    guard case .storeUnreadable(let problem, _) = phase, let core = maybeCore else { return }
+    await busy {
+      // The notification extension may have the old file open; the lock keeps it out meanwhile.
+      let lock = processLock
+      let hasLock = await Task.detached { lock.acquire(timeout: 5) }.value
+      defer { if hasLock { lock.release() } }
+      do {
+        try await Task.detached { try core.resetStore() }.value
+        await refreshAccountState()
+      } catch {
+        phase = .storeUnreadable(problem, failure: AppFailure(CoreFailure(error)))
+      }
+    }
+  }
+
+  /// "Try again" on the unreadable-data screen: opens the core afresh (after an update, or a
+  /// keychain that answers again).
+  func retryStore() async {
+    guard case .storeUnreadable = phase else { return }
+    await busy {
+      maybeCore = nil
+      await refreshAccountState()
     }
   }
 
@@ -991,9 +1024,12 @@ final class AppModel {
     }
     do {
       let state = try await core().accountState()
-      if case .needsEnrollment(let hasExistingIdentity) = state {
+      switch state {
+      case .needsEnrollment(let hasExistingIdentity):
         phase = .needsEnrollment(hasExistingIdentity: hasExistingIdentity, failure: nil)
-      } else {
+      case .storeUnreadable(let problem):
+        phase = .storeUnreadable(problem, failure: nil)
+      case .ready:
         await adopt(state)
       }
     } catch {

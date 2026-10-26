@@ -63,6 +63,7 @@ import uniffi.teamcraft_ffi.PushService
 import uniffi.teamcraft_ffi.SearchHitItem
 import uniffi.teamcraft_ffi.ServerEntryException
 import uniffi.teamcraft_ffi.SignInPageInfo
+import uniffi.teamcraft_ffi.StoreProblem
 import uniffi.teamcraft_ffi.StoredServer
 import uniffi.teamcraft_ffi.checkServerInfo
 import uniffi.teamcraft_ffi.normalizeServerAddress
@@ -89,6 +90,9 @@ sealed interface AppState {
   data class RecoveringThroughOrganization(val code: String, @StringRes val maybeError: Int? = null) : AppState
   data class Ready(val userId: String, val displayName: String, val identityFingerprint: String) : AppState
   data class Failed(@StringRes val error: Int) : AppState
+
+  /** The local data can't be read by this version (issue #414); [maybeError] says why a reset failed. */
+  data class StoreUnreadable(val problem: StoreProblem, @StringRes val maybeError: Int? = null) : AppState
 }
 
 /** The approval of a new device the user is in; the code to type is on the new device only. */
@@ -325,6 +329,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   fun cancelLinking() {
     state.value = AppState.NeedsEnrollment(hasExistingIdentity = true)
+  }
+
+  /**
+   * "Set up this device again" (issue #414): the core sets the unreadable database aside (renamed,
+   * never deleted) and opens a new one; enrollment follows.
+   */
+  fun resetStore() = launchBusy {
+    val current = state.value as? AppState.StoreUnreadable ?: return@launchBusy
+    state.value = try {
+      val core = graph.core.core()
+      // Opens the new store while it waits.
+      withContext(Dispatchers.IO) { core.resetStore() }
+      loadAccountState()
+    } catch (failure: TeamCraftException) {
+      current.copy(maybeError = errorText(failure))
+    }
+  }
+
+  /** "Try again" on the unreadable-data screen: opens the core afresh (after an update, say). */
+  fun retryStore() = launchBusy {
+    if (state.value !is AppState.StoreUnreadable) return@launchBusy
+    graph.core.close()
+    state.value = loadAccountState()
   }
 
   /**
@@ -809,6 +836,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       when (val account = graph.core.core().accountState()) {
         is AccountState.NeedsEnrollment -> AppState.NeedsEnrollment(account.hasExistingIdentity)
         is AccountState.Ready -> ready(account)
+        is AccountState.StoreUnreadable -> AppState.StoreUnreadable(account.problem)
       }
     } catch (failure: TeamCraftException.SignedOut) {
       graph.auth.signOut()

@@ -2,6 +2,7 @@
 //! 64-bit unsigned type that matches, and the app only passes them back.
 
 use teamcraft_client_api::model::{self as view, ConversationKind as ConversationKindView, PresenceStatus};
+use teamcraft_core::UnreadableStore;
 use teamcraft_core::client::LinkRequestInfo;
 use teamcraft_core::device_activity::AppUse;
 use teamcraft_core::notify_rules::MentionPreferences;
@@ -40,6 +41,19 @@ pub enum AccountState {
     /// Shown for out-of-band comparison (safety number).
     identity_fingerprint: String,
   },
+  /// The local data can't be read by this version, and a retry won't change that (issue #414):
+  /// the app offers to set the device up again (`TeamCraft::reset_store`), which sets the file
+  /// aside instead of deleting it.
+  StoreUnreadable { problem: StoreProblem },
+}
+
+/// Why the local data can't be read ([`AccountState::StoreUnreadable`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum StoreProblem {
+  /// The file is damaged, or the key that opens it is gone (the keystore lost or replaced it).
+  Damaged,
+  /// A newer version of the app changed it: update the app.
+  NewerVersion,
 }
 
 /// What the user does with the app, for presence (`TeamCraft::report_activity`, issue #472).
@@ -696,6 +710,15 @@ impl From<teamcraft_core::connection::ConnectionState> for ConnectionState {
         }),
       },
       Core::SignInRequired { .. } => Self::SignInRequired,
+    }
+  }
+}
+
+impl From<UnreadableStore> for StoreProblem {
+  fn from(problem: UnreadableStore) -> Self {
+    match problem {
+      UnreadableStore::Damaged => Self::Damaged,
+      UnreadableStore::NewerVersion => Self::NewerVersion,
     }
   }
 }
