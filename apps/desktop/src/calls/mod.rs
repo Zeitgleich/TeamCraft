@@ -45,7 +45,7 @@ use teamcraft_media::effects::{BackgroundImage, EffectHandle};
 use teamcraft_media::ringtone;
 use teamcraft_media::system_audio::SystemAudioCapture;
 use teamcraft_media::video_capture::CaptureError;
-use teamcraft_media::video_pipeline::{VideoSendConfig, preferred_encoders};
+use teamcraft_media::video_pipeline::{VideoSendConfig, VideoStartError, preferred_encoders};
 use teamcraft_proto::{
   AudioCodec, ConversationId, DeviceId, GatewayEvent, MediaCapabilities, MediaStreamId, ScreenContentMode,
   VideoCodec, VideoTrackKind,
@@ -67,6 +67,8 @@ const CERT_HASH_VARIABLE: &str = "TEAMCRAFT_SFU_CERT_HASH";
 pub struct CallHost {
   state: Arc<Mutex<CallState>>,
   notify: Arc<dyn Fn() + Send + Sync>,
+  /// Tells the UI about a failure no action waits for (`failure::ActionFailure` wire text).
+  report_failure: FailureReporter,
   /// The running media call, if any; a mutex across awaits so joins and leaves don't interleave.
   media: tokio::sync::Mutex<Option<MediaCall>>,
   video_sinks: VideoSinks,
@@ -136,6 +138,9 @@ enum Control {
   Leave,
 }
 
+/// Shows the UI a failure as `failure::ActionFailure` wire text.
+pub type FailureReporter = Arc<dyn Fn(String) + Send + Sync>;
+
 /// Gets a watched track's decrypted frames (see `video::h264_sink` and `video::jpeg_sink`).
 pub type VideoSink = Arc<dyn Fn(&ReceivedVideoFrame) + Send + Sync>;
 type VideoSinks = Arc<Mutex<HashMap<MediaStreamId, WatchedVideo>>>;
@@ -162,11 +167,17 @@ pub struct CoreJoinTickets {
 }
 
 impl CallHost {
-  /// `notify` tells the UI that the call state changed.
-  pub fn new(notify: Arc<dyn Fn() + Send + Sync>, files: MediaFiles) -> Self {
+  /// `notify` tells the UI that the call state changed; `report_failure` shows a failure that
+  /// comes after the action that caused it returned (a camera that never sends a picture).
+  pub fn new(
+    notify: Arc<dyn Fn() + Send + Sync>,
+    report_failure: FailureReporter,
+    files: MediaFiles,
+  ) -> Self {
     Self {
       state: Arc::new(Mutex::new(CallState::default())),
       notify,
+      report_failure,
       media: tokio::sync::Mutex::new(None),
       video_sinks: Arc::default(),
       self_view: SelfView::default(),
@@ -291,6 +302,7 @@ impl CallHost {
         own_device,
         state: Arc::clone(&self.state),
         notify: Arc::clone(&self.notify),
+        report_failure: Arc::clone(&self.report_failure),
         video_sinks: Arc::clone(&self.video_sinks),
       },
     ));
@@ -502,11 +514,13 @@ impl CallHost {
       encoders: preferred_encoders(),
       maybe_filter: Some(self.self_view.filter(maybe_filter)),
     };
-    // Answers once the camera's first picture is encoded, or why none comes (already worded for
-    // the UI, see `video::start_failure_wire`).
+    // Answers once the capture runs; the media task turns the camera on in the call state, and
+    // off again (with an error for the user) if no picture comes.
     self.start_video(config).await?;
-    lock(&self.state).maybe_effect_handle = maybe_handle;
-    self.update_active(|active| active.is_camera_on = true);
+    if self.is_camera_on() {
+      lock(&self.state).maybe_effect_handle = maybe_handle;
+    }
+    self.changed();
     Ok(())
   }
 
@@ -591,8 +605,14 @@ impl CallHost {
     if maybe_new_token.is_some() {
       lock(&self.state).maybe_screen_token = maybe_new_token;
     }
-    self.update_active(|active| active.is_sharing_screen = true);
-    let screen_sound = if has_sound {
+    self.changed();
+    let is_sharing = lock(&self.state)
+      .view
+      .maybe_active
+      .as_ref()
+      .is_some_and(|active| active.is_sharing_screen);
+    // The share may already have ended (no picture): its sound stays off then.
+    let screen_sound = if has_sound && is_sharing {
       self.start_screen_audio().await
     } else {
       ScreenShareSound::Off
@@ -728,6 +748,7 @@ struct MediaShared {
   own_device: DeviceId,
   state: Arc<Mutex<CallState>>,
   notify: Arc<dyn Fn() + Send + Sync>,
+  report_failure: FailureReporter,
   video_sinks: VideoSinks,
 }
 
@@ -740,9 +761,12 @@ async fn run_media(
     own_device,
     state,
     notify,
+    report_failure,
     video_sinks,
   } = shared;
   let mut roster = CallRoster::new(own_device);
+  let mut video_starts = VideoStarts::default();
+  let (failed, mut failed_rx) = mpsc::unbounded_channel::<VideoStartFailure>();
   loop {
     tokio::select! {
       maybe_control = controls.recv() => match maybe_control {
@@ -755,25 +779,33 @@ async fn run_media(
         },
         Some(Control::StartVideo(config, done)) => {
           let kind = config.kind.clone();
-          match call.start_video_checked(config).await {
-            // The first picture may take seconds; the call (and its video) goes on meanwhile.
+          let result = match call.start_video_checked(config).await {
             Ok(first_picture) => {
+              // The answer doesn't wait for the first picture (up to seconds): other call actions
+              // queue behind this one. The check reports later (`failed_rx`).
+              let start = video_starts.started(&kind);
+              set_video_flag(&state, &kind, true);
+              let failed = failed.clone();
               tokio::spawn(async move {
-                let result = first_picture.wait().await.map_err(|error| {
-                  tracing::warn!(%error, ?kind, "own video sends no picture");
-                  video::start_failure_wire(&kind, &NativeCallError::from(error))
-                });
-                // The caller may have given up waiting.
-                let _ = done.send(result);
+                if let Err(error) = first_picture.wait().await {
+                  // The call ended meanwhile: nobody to tell.
+                  let _ = failed.send(VideoStartFailure { start, error });
+                }
               });
+              Ok(())
             },
             Err(error) => {
               tracing::warn!(%error, ?kind, "own video not started");
-              let _ = done.send(Err(video::start_failure_wire(&kind, &error)));
+              Err(video::start_failure_wire(&kind, &error))
             },
-          }
+          };
+          // The caller may have given up waiting.
+          let _ = done.send(result);
         },
-        Some(Control::StopVideo(kind)) => call.stop_video(kind),
+        Some(Control::StopVideo(kind)) => {
+          video_starts.stopped(&kind);
+          call.stop_video(kind);
+        },
         Some(Control::StartScreenAudio(capture, done)) => {
           let result = call.start_screen_audio(capture).await.map_err(|error| error.to_string());
           let _ = done.send(result);
@@ -783,6 +815,22 @@ async fn run_media(
         Some(Control::StatusSounds(sounds)) => call.set_status_cues(status_cues(sounds)),
         Some(Control::NetworkChanged) => call.network_changed(),
         Some(Control::Leave) | None => break,
+      },
+      Some(failure) = failed_rx.recv() => {
+        // A track stopped or replaced since ends without a picture too; that's no failure.
+        if !video_starts.is_current(&failure.start) {
+          continue;
+        }
+        let kind = failure.start.kind.clone();
+        tracing::warn!(error = %failure.error, ?kind, "own video sends no picture; turning it off");
+        video_starts.stopped(&kind);
+        call.stop_video(kind.clone());
+        if kind == VideoTrackKind::Screen {
+          call.stop_screen_audio();
+        }
+        set_video_flag(&state, &kind, false);
+        report_failure(video::start_failure_wire(&kind, &NativeCallError::from(failure.error)));
+        notify();
       },
       maybe_event = call.next_event() => match maybe_event {
         Some(CallEngineEvent::VideoFrame(frame)) => {
@@ -820,6 +868,66 @@ async fn run_media(
   lock(&state).view.end_active();
   lock(&video_sinks).clear();
   notify();
+}
+
+/// Which start of each own track kind is the current one, so that the first-picture check of a
+/// track stopped or replaced meanwhile doesn't turn its successor off.
+#[derive(Debug, Default)]
+struct VideoStarts {
+  next: u64,
+  current: HashMap<VideoTrackKind, u64>,
+}
+
+/// One start of an own track.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VideoStart {
+  kind: VideoTrackKind,
+  number: u64,
+}
+
+/// A started track whose first picture never came.
+struct VideoStartFailure {
+  start: VideoStart,
+  error: VideoStartError,
+}
+
+impl VideoStarts {
+  fn started(&mut self, kind: &VideoTrackKind) -> VideoStart {
+    self.next += 1;
+    self.current.insert(kind.clone(), self.next);
+    VideoStart {
+      kind: kind.clone(),
+      number: self.next,
+    }
+  }
+
+  fn stopped(&mut self, kind: &VideoTrackKind) {
+    self.current.remove(kind);
+  }
+
+  fn is_current(&self, start: &VideoStart) -> bool {
+    self.current.get(&start.kind) == Some(&start.number)
+  }
+}
+
+/// Sets whether the own camera or screen share is on, as the UI shows it.
+fn set_video_flag(state: &Mutex<CallState>, kind: &VideoTrackKind, is_on: bool) {
+  let mut state = lock(state);
+  if *kind == VideoTrackKind::Camera && !is_on {
+    state.maybe_effect_handle = None;
+  }
+  if let Some(active) = state.view.maybe_active.as_mut() {
+    match kind {
+      VideoTrackKind::Camera => active.is_camera_on = is_on,
+      VideoTrackKind::Screen => {
+        active.is_sharing_screen = is_on;
+        if !is_on {
+          active.screen_sound = ScreenShareSound::Off;
+        }
+      },
+      _ => {},
+    }
+  }
 }
 
 /// The native call for a prepared join: device-bound DAVE keys, and only the conversation's
@@ -956,9 +1064,237 @@ mod tests {
     assert!(!host.is_camera_on());
   }
 
+  mod video_starts {
+    use super::*;
+
+    #[test]
+    fn only_the_current_start_of_a_kind_counts() {
+      let mut starts = VideoStarts::default();
+      let first = starts.started(&VideoTrackKind::Camera);
+      assert!(starts.is_current(&first));
+      // Restarted (another camera): the first start's check no longer applies.
+      let second = starts.started(&VideoTrackKind::Camera);
+      assert!(!starts.is_current(&first));
+      assert!(starts.is_current(&second));
+      let screen = starts.started(&VideoTrackKind::Screen);
+      assert!(
+        starts.is_current(&second) && starts.is_current(&screen),
+        "kinds are separate"
+      );
+      // Turned off: its check ending without a picture is no failure.
+      starts.stopped(&VideoTrackKind::Camera);
+      assert!(!starts.is_current(&second));
+      assert!(starts.is_current(&screen));
+    }
+  }
+
+  /// The media task in a real call against a local SFU: what the UI's action queue waits for.
+  mod media_task {
+    use std::net::{Ipv6Addr, SocketAddr};
+    use std::time::Duration;
+
+    use teamcraft_client_api::calls::{CallKind, CallRequest};
+    use teamcraft_media::video::{VideoResolution, simulcast_layers};
+    use teamcraft_media::video_capture::{CaptureFormat, FrameSender, ManualCapture, VideoCapture};
+    use teamcraft_media::video_pipeline::software_encoders;
+    use teamcraft_sfu::auth::DevTokenVerifier;
+    use teamcraft_sfu::config::SfuConfig;
+    use teamcraft_sfu::server::{CALL_PATH, Sfu};
+
+    use super::*;
+
+    const FORMAT: CaptureFormat = CaptureFormat {
+      resolution: VideoResolution {
+        width: 320,
+        height: 180,
+      },
+      framerate: 30,
+    };
+    /// Far below the first-picture check (10 s): an answer this fast didn't wait for it.
+    const PROMPT: Duration = Duration::from_secs(3);
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn call_actions_do_not_wait_for_a_cameras_first_picture() {
+      let mut media = start_media().await;
+      // A camera that opens but never delivers: its check would take 10 s to fail.
+      let answer = start_video(
+        &media,
+        VideoTrackKind::Camera,
+        Box::new(ManualCapture::new(FORMAT)),
+      );
+      assert_eq!(
+        tokio::time::timeout(PROMPT, answer).await.unwrap().unwrap(),
+        Ok(())
+      );
+      assert!(media.flags().0, "the camera shows as on while its check runs");
+      // Mute, a screen share and leaving go through at once.
+      media.controls.send(Control::Mute(true)).unwrap();
+      let screen = start_video(
+        &media,
+        VideoTrackKind::Screen,
+        Box::new(ManualCapture::new(FORMAT)),
+      );
+      assert_eq!(
+        tokio::time::timeout(PROMPT, screen).await.unwrap().unwrap(),
+        Ok(())
+      );
+      media.controls.send(Control::Leave).unwrap();
+      tokio::time::timeout(PROMPT, media.task).await.unwrap().unwrap();
+      assert!(media.reported.try_recv().is_err(), "nothing failed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_camera_without_pictures_turns_off_and_says_so() {
+      let mut media = start_media().await;
+      let answer = start_video(&media, VideoTrackKind::Camera, Box::new(EndingCapture));
+      assert_eq!(
+        tokio::time::timeout(PROMPT, answer).await.unwrap().unwrap(),
+        Ok(())
+      );
+      // The capture ends before its first picture: the check fails at once, after the answer.
+      let reported = tokio::time::timeout(PROMPT, media.reported.recv())
+        .await
+        .unwrap()
+        .unwrap();
+      assert_eq!(
+        ActionFailure::from_wire(&reported).kind,
+        FailureKind::Call(CallFailure::CameraNoPicture)
+      );
+      assert!(!media.flags().0, "the camera is off again");
+      media.controls.send(Control::Leave).unwrap();
+      tokio::time::timeout(PROMPT, media.task).await.unwrap().unwrap();
+    }
+
+    /// A running media task and what it shares.
+    struct Media {
+      controls: mpsc::UnboundedSender<Control>,
+      task: tokio::task::JoinHandle<()>,
+      state: Arc<Mutex<CallState>>,
+      reported: mpsc::UnboundedReceiver<String>,
+    }
+
+    impl Media {
+      /// Whether the camera and the screen share show as on.
+      fn flags(&self) -> (bool, bool) {
+        lock(&self.state)
+          .view
+          .maybe_active
+          .as_ref()
+          .map_or((false, false), |active| {
+            (active.is_camera_on, active.is_sharing_screen)
+          })
+      }
+    }
+
+    /// A capture whose queue closes at once, like a camera that disappears.
+    struct EndingCapture;
+
+    impl VideoCapture for EndingCapture {
+      fn format(&self) -> CaptureFormat {
+        FORMAT
+      }
+
+      fn start(&mut self, frames: FrameSender) -> Result<(), CaptureError> {
+        drop(frames);
+        Ok(())
+      }
+
+      fn stop(&mut self) {}
+    }
+
+    async fn start_media() -> Media {
+      let (port, certificate_hash) = start_sfu().await;
+      let call = join(port, certificate_hash).await;
+      let state = Arc::new(Mutex::new(CallState::default()));
+      let request = CallRequest {
+        conversation: conversation(5),
+        kind: CallKind::Group,
+      };
+      lock(&state).view.start_active(request, UiBackgroundEffect::None);
+      let (sink, reported) = mpsc::unbounded_channel();
+      let (controls, control_rx) = mpsc::unbounded_channel();
+      let shared = MediaShared {
+        own_device: id(1),
+        state: Arc::clone(&state),
+        notify: Arc::new(|| {}),
+        report_failure: Arc::new(move |failure| {
+          // The test may be done already.
+          let _ = sink.send(failure);
+        }),
+        video_sinks: Arc::default(),
+      };
+      let task = tokio::spawn(run_media(call, control_rx, shared));
+      Media {
+        controls,
+        task,
+        state,
+        reported,
+      }
+    }
+
+    fn start_video(
+      media: &Media,
+      kind: VideoTrackKind,
+      capture: Box<dyn VideoCapture>,
+    ) -> oneshot::Receiver<Result<(), String>> {
+      let config = VideoSendConfig {
+        kind,
+        capture,
+        layers: simulcast_layers(FORMAT.resolution, 30, 300_000, 1),
+        encoders: software_encoders(),
+        maybe_filter: None,
+      };
+      let (done, answer) = oneshot::channel();
+      media.controls.send(Control::StartVideo(config, done)).unwrap();
+      answer
+    }
+
+    async fn join(port: u16, certificate_hash: [u8; 32]) -> NativeCall {
+      let engine = CallEngineConfig {
+        user_id: id(1),
+        device_id: id(1),
+        capabilities: MediaCapabilities {
+          audio_codecs: vec![AudioCodec::Opus],
+          video_encoders: vec![VideoCodec::H264],
+          video_decoders: vec![VideoCodec::H264],
+          max_simulcast_layers: 3,
+        },
+        bwe: BweConfig::default(),
+      };
+      let sfu_url = format!(
+        "https://{}{CALL_PATH}",
+        SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port)
+      );
+      let mut config = NativeCallConfig::new(sfu_url, "dev:14:1:1".to_owned(), engine);
+      config.maybe_certificate_hash = Some(certificate_hash);
+      NativeCall::join(config).await.unwrap()
+    }
+
+    async fn start_sfu() -> (u16, [u8; 32]) {
+      let config = SfuConfig {
+        bind_addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
+        ..SfuConfig::default()
+      };
+      let identity = wtransport::Identity::self_signed(["localhost", "127.0.0.1", "::1"]).unwrap();
+      let sfu = Sfu::bind(config, identity, Arc::new(DevTokenVerifier)).unwrap();
+      let port = sfu.local_addr().unwrap().port();
+      let certificate_hash = *sfu.certificate_hash().as_ref();
+      tokio::spawn(sfu.run());
+      (port, certificate_hash)
+    }
+
+    fn id<T: std::str::FromStr>(raw: i64) -> T
+    where
+      T::Err: std::fmt::Debug,
+    {
+      raw.to_string().parse().unwrap()
+    }
+  }
+
   fn host() -> CallHost {
     CallHost::new(
       Arc::new(|| {}),
+      Arc::new(|_| {}),
       MediaFiles {
         codec_directory: std::env::temp_dir(),
         maybe_segmentation_model: None,

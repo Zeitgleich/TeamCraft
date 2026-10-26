@@ -48,6 +48,11 @@ const CAMERA_FORMAT: CaptureFormat = CaptureFormat {
   framerate: 30,
 };
 const CAMERA_BITRATE_BPS: u32 = 1_500_000;
+/// How long the portal's camera stream may take to its first frame before V4L2 is tried: well
+/// inside the call's first-picture check (`video_pipeline::FIRST_PICTURE_TIMEOUT`, 10 s), so the
+/// V4L2 camera still has time to deliver.
+#[cfg(target_os = "linux")]
+const PORTAL_CAMERA_WAIT: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// Cameras for the device picker.
 #[cfg(target_os = "linux")]
@@ -122,15 +127,26 @@ pub(super) fn screen_failure_wire(error: &CaptureError) -> String {
 /// portal only offers "the camera", so it is tried for the default.
 #[cfg(target_os = "linux")]
 pub(super) fn open_camera(maybe_id: Option<&str>) -> Result<Box<dyn VideoCapture>, String> {
+  use teamcraft_media::capture_fallback::FallbackCapture;
   use teamcraft_media::capture_portal::PortalCapture;
   use teamcraft_media::capture_v4l2::V4l2Camera;
 
   if maybe_id.is_none() {
     match PortalCapture::camera(CAMERA_FORMAT) {
-      Ok(capture) => return Ok(Box::new(capture)),
+      Ok(capture) => {
+        info!("camera through the portal (PipeWire), V4L2 if it stays silent");
+        // The portal's stream can stay paused for good (#683): then the default camera directly.
+        let open_v4l2 = Box::new(|| {
+          V4l2Camera::open(None, CAMERA_FORMAT).map(|camera| Box::new(camera) as Box<dyn VideoCapture>)
+        });
+        let capture =
+          FallbackCapture::new(Box::new(capture), "portal", open_v4l2, "V4L2", PORTAL_CAMERA_WAIT);
+        return Ok(Box::new(capture));
+      },
       Err(error) => info!(%error, "no camera through the portal; trying V4L2"),
     }
   }
+  info!(device = maybe_id.unwrap_or("default"), "camera through V4L2");
   V4l2Camera::open(maybe_id, CAMERA_FORMAT)
     .map(|camera| Box::new(camera) as Box<dyn VideoCapture>)
     .map_err(|error| camera_failure_wire(error.to_string()))

@@ -40,11 +40,12 @@ use tauri::path::BaseDirectory;
 use tauri::webview::NewWindowResponse;
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_window_state::StateFlags;
+use teamcraft_client_api::remote::CORE_FAILED_EVENT;
 use tracing_subscriber::EnvFilter;
 
 use crate::auth::servers::{ManagedServer, ServerDirectory, ServerState};
 use crate::auth::{AuthService, DesktopConfig, KeyringStore};
-use crate::calls::{BUNDLED_MODEL, CALL_CHANGED_EVENT, CallHost, MediaFiles};
+use crate::calls::{BUNDLED_MODEL, CALL_CHANGED_EVENT, CallHost, FailureReporter, MediaFiles};
 use crate::core::TokenCache;
 use crate::core::commands::CoreHost;
 use crate::shell_prefs::ShellPrefsState;
@@ -130,7 +131,13 @@ fn main() -> anyhow::Result<()> {
         codec_directory: app.path().app_data_dir()?.join("codecs"),
         maybe_segmentation_model: app.path().resolve(BUNDLED_MODEL, BaseDirectory::Resource).ok(),
       };
-      app.manage(Arc::new(CallHost::new(notify, files)));
+      let emitter = app.handle().clone();
+      let report_failure: FailureReporter = Arc::new(move |failure| {
+        if let Err(error) = emitter.emit(CORE_FAILED_EVENT, failure) {
+          tracing::debug!(%error, "could not tell the webview about a failure");
+        }
+      });
+      app.manage(Arc::new(CallHost::new(notify, report_failure, files)));
       app.manage(ShellPrefsState::load(app.handle()));
       app.manage(Arc::new(UpdateHost::load(app.handle())));
       UpdateHost::spawn(app.handle().clone());
