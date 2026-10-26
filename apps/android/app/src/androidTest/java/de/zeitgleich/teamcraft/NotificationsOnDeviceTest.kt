@@ -72,7 +72,11 @@ class NotificationsOnDeviceTest {
     val style = NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(shown)
     assertEquals(listOf("first", "second"), style?.messages?.map { it.text.toString() })
     assertEquals(CONVERSATION, shown.shortcutId)
+    // One conversation needs no summary (a watch would mirror it as a second notification).
+    assertTrue(system.activeNotifications.none { it.notification.flags and Notification.FLAG_GROUP_SUMMARY != 0 })
+    notifier.show(message("3000", text = "elsewhere", conversationId = OTHER_CONVERSATION), isAlerting = false)
     assertTrue(system.activeNotifications.any { it.notification.flags and Notification.FLAG_GROUP_SUMMARY != 0 })
+    notifier.dismiss(OTHER_CONVERSATION)
 
     // Read on another device up to the first message: one line stays.
     notifier.removeRead(CONVERSATION, maybeThreadId = null, maybeUpToMessageId = "1000", maybeBadge = 1u)
@@ -99,9 +103,9 @@ class NotificationsOnDeviceTest {
   private fun active(tag: String) =
     system.activeNotifications.firstOrNull { it.tag == tag && it.id == MessageNotifier.MESSAGE_ID }
 
-  private fun message(id: String, text: String) = PushNotification(
+  private fun message(id: String, text: String, conversationId: String = CONVERSATION) = PushNotification(
     kind = PushNotificationKind.MESSAGE,
-    conversationId = CONVERSATION,
+    conversationId = conversationId,
     maybeMessageId = id,
     maybeConversationName = "planning",
     maybeSenderId = "300",
@@ -126,5 +130,6 @@ class NotificationsOnDeviceTest {
 
   private companion object {
     const val CONVERSATION = "4242"
+    const val OTHER_CONVERSATION = "4343"
   }
 }

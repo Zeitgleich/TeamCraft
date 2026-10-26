@@ -57,9 +57,16 @@ content policy says otherwise) within ~5 s.
   "mark as read" removes the notification.
 - [ ] Urgent message from B: alerts (iOS: time-sensitive), and the repeat a few minutes later replaces
   the first notification and alerts again; acknowledging stops the repeats.
-- [ ] App lock on (Settings): new and already shown message notifications say only "New message",
-  no sender, no text, no reply action — also in the unlocked shade; calls still ring with the caller.
+- [ ] App lock on (Settings): new and already shown message notifications say "New message from
+  <name>", no text, no reply action — also in the unlocked shade; calls still ring with the caller.
   App lock off: the text comes back.
+- [ ] One conversation shows one notification and no group summary; a second conversation adds the
+  summary, which names both conversations and does not alert.
+- [ ] Watch (Wear OS emulator paired with the phone, or a vendor bridge such as Garmin Connect): one
+  message is one watch notification with sender and text; reply and mark as read work from the watch.
+  With "sender only" or the app lock it reads "New message from <name>", still one notification. With
+  the phone locked and the system set to hide sensitive content, the lock screen and bridges that
+  follow it show "New message from <name>" (never the text); with "nothing", "New message".
 - [ ] Badge on the app icon (iOS; Android launchers that show numbers) matches conversations with
   unread mentions and DMs.
 

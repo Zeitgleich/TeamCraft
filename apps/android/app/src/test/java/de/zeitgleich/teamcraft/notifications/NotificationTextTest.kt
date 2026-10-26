@@ -77,6 +77,7 @@ class NotificationTextTest {
       newMessage = "New message",
       newMessageFrom = { "from $it" },
       newMessagesFrom = { count, names -> "$count from $names" },
+      newMessages = { count -> "$count new" },
       attachment = { kind, name -> "$kind $name" },
     )
   }

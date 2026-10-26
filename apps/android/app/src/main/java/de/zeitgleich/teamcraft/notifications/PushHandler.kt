@@ -45,6 +45,17 @@ class PushHandler(
     handled.update { it + 1 }
   }
 
+  /**
+   * A retry of a wake-up shown as a placeholder ([PushRetry]): fills in the message if it is still
+   * shown; never alerts, never posts anything new.
+   */
+  fun handleRetry(notification: PushNotification) {
+    if (PushDecision.of(notification) is PushDecision.ShowMessage) notifier.fillIn(notification)
+  }
+
+  /** Whether a notification of this conversation shows now (a retry for it is worth making). */
+  fun isShowing(conversationId: String): Boolean = conversationId in notifier.shownConversationIds()
+
   /** A visible wake-up that could not be opened: never nothing (see [MessageNotifier.showUnreadable]). */
   fun handleUnreadable() {
     stats.recordUnreadable()
