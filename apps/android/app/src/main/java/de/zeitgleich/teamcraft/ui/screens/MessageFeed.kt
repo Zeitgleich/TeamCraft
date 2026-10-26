@@ -50,8 +50,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material3.Badge
-import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -67,8 +65,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -113,13 +114,20 @@ import de.zeitgleich.teamcraft.core.MessageExtras
 import de.zeitgleich.teamcraft.core.ReplyPreview
 import de.zeitgleich.teamcraft.core.User
 import de.zeitgleich.teamcraft.ui.FeedItem
+import de.zeitgleich.teamcraft.ui.FeedScrollAction
+import de.zeitgleich.teamcraft.ui.FeedScrollEvent
+import de.zeitgleich.teamcraft.ui.FeedScrollState
+import de.zeitgleich.teamcraft.ui.FirstUnread
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.MarkupColors
 import de.zeitgleich.teamcraft.ui.MentionNames
 import de.zeitgleich.teamcraft.ui.Pictures
 import de.zeitgleich.teamcraft.ui.THUMBNAIL_DECODE_PX
 import de.zeitgleich.teamcraft.ui.bubbleCorners
+import de.zeitgleich.teamcraft.ui.decideFeedScroll
 import de.zeitgleich.teamcraft.ui.feedItems
+import de.zeitgleich.teamcraft.ui.isNearBottom
+import de.zeitgleich.teamcraft.ui.newerMessages
 import de.zeitgleich.teamcraft.ui.rememberThumbnail
 import de.zeitgleich.teamcraft.ui.showsSenders
 import de.zeitgleich.teamcraft.ui.thumbnailKey
@@ -131,6 +139,12 @@ private const val QUICK_REACTION = "👍"
 
 /** How long a message opened from a link stays highlighted. */
 private const val HIGHLIGHT_MS = 2500L
+
+/** Scrolled less than this from the end still counts as "at the end" for the jump-down button. */
+private const val AT_BOTTOM_SLOP_PX = 8
+
+/** The pill counts new messages up to this, then says "99+". */
+private const val MAX_SHOWN_UNSEEN = 99
 
 /** How long the floating day pill stays after scrolling stopped. */
 private const val DAY_PILL_LINGER_MS = 1200L
@@ -162,9 +176,10 @@ private val MEDIA_CORNER = 14.dp
 /**
  * A conversation's messages as chat bubbles (issue #704): own messages on the end side in the
  * accent colour, others on the start side in a neutral bubble with name and avatar once per group
- * (channels and groups). Date pills, the unread line, a floating date while scrolling. Opens at the
- * first unread message (or the end), follows new messages only while the user is at the bottom, and
- * otherwise offers a jump-down button with the number of messages below.
+ * (channels and groups). Date pills, the unread line, a floating date while scrolling. It follows
+ * the conversation like a messenger (#755, [decideFeedScroll]): opens at the first unread message
+ * (or the end), jumps to the end on send, stays pinned there while the user reads at the end, and
+ * otherwise shows an "N new" pill instead of moving.
  */
 @Composable
 fun MessageFeed(
@@ -172,7 +187,8 @@ fun MessageFeed(
   snapshot: ChatSnapshot?,
   messages: List<Message>,
   extras: Map<String, MessageExtras>,
-  maybeFirstUnread: String?,
+  firstUnread: FirstUnread,
+  sentCount: Int,
   onOpenThread: ((String) -> Unit)?,
   maybeOnReply: ((Message) -> Unit)?,
   onLongPress: (Message) -> Unit,
@@ -180,12 +196,22 @@ fun MessageFeed(
   maybeFocusMessage: String? = null,
   onOpenPermalink: (String) -> Unit = {},
 ) {
-  // Newest first in a reversed list: the bottom stays anchored when the keyboard opens.
-  val items = remember(messages, maybeFirstUnread) { feedItems(messages, maybeFirstUnread).asReversed() }
+  // Newest first in a reversed list: the bottom stays anchored when the keyboard opens or a picture
+  // above grows, and the rows keep their place by key (the message ID) when new ones arrive.
+  val items = remember(messages, firstUnread) { feedItems(messages, firstUnread.maybeMessageId).asReversed() }
   val listState = rememberLazyListState()
   val scope = rememberCoroutineScope()
-  var hasScrolledInitially by remember { mutableStateOf(false) }
-  var maybeLastMessageId by remember { mutableStateOf<String?>(null) }
+  // Saveable: coming back from a thread or a rotation doesn't jump to the unread line again.
+  var scrollState by rememberSaveable(stateSaver = FeedScrollStateSaver) { mutableStateOf(FeedScrollState()) }
+  val newestSeen = remember { NewestSeen() }
+  fun decide(event: FeedScrollEvent, isNearBottom: Boolean): FeedScrollAction {
+    val decision = decideFeedScroll(scrollState, event, isNearBottom)
+    scrollState = decision.state
+    return decision.action
+  }
+  // Measured while composing the new rows, before the list lays them out: afterwards the list has
+  // kept its place on the previous newest row, and the end would already look far away.
+  val wasNearBottom = remember(items) { Snapshot.withoutReadObservation { listState.isNearBottom() } }
   // Saveable: a rotation keeps the viewer open.
   var maybeViewedId by rememberSaveable { mutableStateOf<String?>(null) }
   var maybeHighlighted by remember(maybeFocusMessage) { mutableStateOf(maybeFocusMessage) }
@@ -195,25 +221,35 @@ fun MessageFeed(
       maybeHighlighted = null
     }
   }
-  val isAtBottom by remember { derivedStateOf { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset < 8 } }
-  val belowCount by remember(items) { derivedStateOf { items.messagesBefore(listState.firstVisibleItemIndex) } }
-  LaunchedEffect(items) {
-    if (items.isEmpty()) return@LaunchedEffect
-    val newest = messages.last()
-    if (!hasScrolledInitially) {
-      hasScrolledInitially = true
-      // A message link opens at its message; otherwise at the first unread one.
+  val showsJumpDown by remember {
+    derivedStateOf { listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > AT_BOTTOM_SLOP_PX }
+  }
+  LaunchedEffect(items, firstUnread) {
+    // The opening waits for the unread position, or it would land at the end and stay there.
+    if (items.isEmpty() || (!scrollState.isOpened && firstUnread == FirstUnread.Loading)) return@LaunchedEffect
+    val maybePrevious = newestSeen.maybeMessage
+    newestSeen.maybeMessage = messages.last()
+    val action = if (!scrollState.isOpened) {
       val focusIndex = maybeFocusMessage?.let { id -> items.indexOfFirst { it is FeedItem.Entry && it.message.id == id } } ?: -1
       val unreadIndex = items.indexOf(FeedItem.Unread)
-      when {
-        focusIndex >= 0 -> showAtTop(listState, focusIndex)
-        unreadIndex > 0 -> showAtTop(listState, unreadIndex)
-      }
-    } else if (newest.id != maybeLastMessageId && (isAtBottom || newest.author == snapshot?.me?.id)) {
-      // Own messages always come into view; others' only while reading at the bottom.
-      listState.animateScrollToItem(0)
+      decide(FeedScrollEvent.Opened(focusIndex.takeIf { it >= 0 }, unreadIndex.takeIf { it >= 0 }), wasNearBottom)
+    } else {
+      val newer = newerMessages(messages, maybePrevious)
+      if (newer.isEmpty()) return@LaunchedEffect
+      val me = snapshot?.me?.id
+      val event = FeedScrollEvent.NewMessages(fromOthers = newer.count { it.author != me }, hasOwn = newer.any { it.author == me })
+      decide(event, wasNearBottom)
     }
-    maybeLastMessageId = newest.id
+    listState.perform(action)
+  }
+  LaunchedEffect(sentCount) {
+    if (sentCount == 0) return@LaunchedEffect
+    listState.perform(decide(FeedScrollEvent.Sent, listState.isNearBottom()))
+  }
+  LaunchedEffect(listState) {
+    snapshotFlow { listState.firstVisibleItemIndex == 0 }.collect { isNewestVisible ->
+      if (isNewestVisible) decide(FeedScrollEvent.ReachedBottom, isNearBottom = true)
+    }
   }
   val context = LocalContext.current
   val onOpenFile: (FileInfo) -> Unit = remember(viewModel, context) {
@@ -257,12 +293,15 @@ fun MessageFeed(
     }
     FloatingDay(listState, items, Modifier.align(Alignment.TopCenter).padding(top = 8.dp))
     AnimatedVisibility(
-      visible = !isAtBottom && items.isNotEmpty(),
+      visible = (showsJumpDown || scrollState.unseenCount > 0) && items.isNotEmpty(),
       enter = fadeIn(),
       exit = fadeOut(),
       modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
     ) {
-      JumpDownButton(belowCount) { scope.launch { listState.animateScrollToItem(0) } }
+      JumpDownButton(scrollState.unseenCount) {
+        decide(FeedScrollEvent.ReachedBottom, isNearBottom = true)
+        scope.launch { listState.animateScrollToItem(0) }
+      }
     }
   }
   maybeViewedId?.let { fileId ->
@@ -279,8 +318,29 @@ fun MessageFeed(
 /** What every bubble of a feed shares. */
 private class FeedLook(val bubbleMax: Dp, val showsSenders: Boolean, val names: MentionNames)
 
-/** Messages newer than the item at `index` of the newest-first list (the "below" count). */
-private fun List<FeedItem>.messagesBefore(index: Int): Int = take(index).count { it is FeedItem.Entry }
+/** The newest message the feed has handled; a plain holder, reading it never recomposes. */
+private class NewestSeen(var maybeMessage: Message? = null)
+
+private val FeedScrollStateSaver = listSaver<FeedScrollState, Any>(
+  save = { listOf(it.isOpened, it.isAwaitingOwnMessage, it.unseenCount) },
+  restore = { FeedScrollState(isOpened = it[0] as Boolean, isAwaitingOwnMessage = it[1] as Boolean, unseenCount = it[2] as Int) },
+)
+
+/** [isNearBottom] for the list as last laid out. */
+private fun LazyListState.isNearBottom(): Boolean {
+  val info = layoutInfo
+  val visible = info.visibleItemsInfo
+  val averageRowPx = if (visible.isEmpty()) 0 else visible.sumOf { it.size } / visible.size
+  return isNearBottom(firstVisibleItemIndex, firstVisibleItemScrollOffset, averageRowPx, info.viewportEndOffset - info.viewportStartOffset)
+}
+
+private suspend fun LazyListState.perform(action: FeedScrollAction) {
+  when (action) {
+    FeedScrollAction.None -> {}
+    is FeedScrollAction.ShowAtTop -> showAtTop(this, action.index)
+    is FeedScrollAction.ToBottom -> if (action.isAnimated) animateScrollToItem(0) else scrollToItem(0)
+  }
+}
 
 /** Puts the item at `index` (newest-first list) at the top of the screen, newer messages below it. */
 private suspend fun showAtTop(listState: LazyListState, index: Int) {
@@ -301,14 +361,34 @@ private fun openOrDownload(viewModel: MainViewModel, file: FileInfo, context: Co
   }
 }
 
+/**
+ * The way down: a round arrow while scrolled up, a "N new" pill once others' messages arrived
+ * below; both go to the newest message.
+ */
 @Composable
-private fun JumpDownButton(count: Int, onClick: () -> Unit) {
-  val label = if (count > 0) pluralStringResource(R.plurals.jump_down_new, count, count) else stringResource(R.string.jump_down)
-  BadgedBox(badge = {
-    if (count > 0) {
-      Badge { Text(if (count > 99) "99+" else count.toString()) }
+private fun JumpDownButton(unseenCount: Int, onClick: () -> Unit) {
+  if (unseenCount > 0) {
+    val label = pluralStringResource(R.plurals.jump_down_new, unseenCount, unseenCount)
+    Surface(
+      onClick = onClick,
+      shape = CircleShape,
+      color = MaterialTheme.colorScheme.primaryContainer,
+      contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+      shadowElevation = 3.dp,
+      modifier = Modifier.semantics { contentDescription = label },
+    ) {
+      Row(Modifier.padding(start = 10.dp, end = 14.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(Icons.Filled.KeyboardArrowDown, contentDescription = null, modifier = Modifier.size(20.dp))
+        val count = if (unseenCount > MAX_SHOWN_UNSEEN) "$MAX_SHOWN_UNSEEN+" else unseenCount.toString()
+        Text(
+          pluralStringResource(R.plurals.jump_down_unseen, unseenCount, count),
+          style = MaterialTheme.typography.labelLarge,
+          modifier = Modifier.padding(start = 4.dp),
+        )
+      }
     }
-  }) {
+  } else {
+    val label = stringResource(R.string.jump_down)
     SmallFloatingActionButton(onClick = onClick, modifier = Modifier.semantics { contentDescription = label }) {
       Icon(Icons.Filled.KeyboardArrowDown, contentDescription = null)
     }
