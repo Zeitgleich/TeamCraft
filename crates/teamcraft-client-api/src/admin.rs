@@ -318,6 +318,44 @@ pub fn roster_from_roles(owners: &[UserId], admins: &[UserId]) -> Vec<RosterEntr
   normalized_roster(&entries)
 }
 
+/// What taking over the identity provider's roles proposes (issue #765): the signed roster plus
+/// everyone the provider lists as owner or admin, with promotions to owner. It never removes or
+/// demotes anybody: the server's role list can lag behind the provider (roles are read from
+/// tokens) or miss people, and a list like that once cost signed entries. Removals and demotions
+/// are the owner's explicit edit.
+pub fn idp_roster_proposal(signed: &[RosterEntry], owners: &[UserId], admins: &[UserId]) -> Vec<RosterEntry> {
+  let mut proposed: Vec<RosterEntry> = signed.to_vec();
+  for entry in roster_from_roles(owners, admins) {
+    match proposed.iter_mut().find(|existing| existing.user == entry.user) {
+      Some(existing) => existing.role = existing.role.min(entry.role),
+      None => proposed.push(entry),
+    }
+  }
+  normalized_roster(&proposed)
+}
+
+/// Owners and admins as the server lists them, for the roster proposals: each account once, and
+/// never a deactivated one (an old account of somebody who has a new one would be proposed twice).
+pub fn role_holders(users: &[AdminUser]) -> (Vec<UserId>, Vec<UserId>) {
+  let mut seen = std::collections::HashSet::new();
+  let mut owners = Vec::new();
+  let mut admins = Vec::new();
+  for user in users
+    .iter()
+    .filter(|user| user.is_active && !user.user.is_deactivated)
+  {
+    if !seen.insert(user.user.id) {
+      continue;
+    }
+    match user.role {
+      Role::Owner => owners.push(user.user.id),
+      Role::Admin => admins.push(user.user.id),
+      _ => {},
+    }
+  }
+  (owners, admins)
+}
+
 /// The first roster, proposed for the owner's confirmation before the first policy is signed
 /// (#265): the signer as owner (the root of trust), then the identity provider's role holders as
 /// the server reports them. Nothing in it is trusted until the owner confirms each entry.
@@ -720,6 +758,80 @@ mod tests {
         ]
       );
       assert!(roster_changes(&proposed, &proposed).is_empty());
+    }
+
+    /// Issue #765: taking over the provider's roles never drops a signed entry, whatever the
+    /// server's (lagging or partial) role list says.
+    #[test]
+    fn the_identity_provider_proposal_adds_and_promotes_but_never_removes() {
+      let signed = vec![owner(1), owner(2), admin(3), admin(4)];
+      // The server lists only 1 as owner and 5 as new admin; 3 is owner there now; 2 and 4 are
+      // missing (their stored role is stale).
+      let proposed = idp_roster_proposal(&signed, &[user(1), user(3)], &[user(5)]);
+      assert_eq!(proposed, vec![owner(1), owner(2), owner(3), admin(4), admin(5)]);
+      let changes = roster_changes(&signed, &proposed);
+      assert_eq!(
+        changes,
+        vec![
+          RosterChange::ChangeRole {
+            user: user(3),
+            role: RosterRoleChoice::Owner
+          },
+          RosterChange::Add {
+            user: user(5),
+            role: RosterRoleChoice::Admin
+          },
+        ]
+      );
+      assert!(
+        !changes
+          .iter()
+          .any(|change| matches!(change, RosterChange::Remove { .. }))
+      );
+      // An owner the provider lists only as admin stays owner.
+      assert_eq!(idp_roster_proposal(&[owner(1)], &[], &[user(1)]), vec![owner(1)]);
+      // Nothing listed: nothing changes.
+      assert_eq!(idp_roster_proposal(&signed, &[], &[]), normalized_roster(&signed));
+    }
+
+    #[test]
+    fn deactivated_and_repeated_accounts_are_not_role_holders() {
+      let users = [
+        admin_user(1, Role::Owner, true, false),
+        admin_user(2, Role::Admin, true, false),
+        // The old account of somebody who has a new one: deactivated, still with its role.
+        admin_user(3, Role::Admin, false, true),
+        admin_user(4, Role::Admin, false, false),
+        admin_user(2, Role::Admin, true, false),
+        admin_user(5, Role::Member, true, false),
+      ];
+      assert_eq!(role_holders(&users), (vec![user(1)], vec![user(2)]));
+    }
+
+    fn admin_user(raw: i64, role: Role, is_active: bool, is_deactivated: bool) -> AdminUser {
+      AdminUser {
+        user: User {
+          id: user(raw),
+          username: format!("person{raw}"),
+          display_name: "Person A".into(),
+          presence: crate::model::PresenceStatus::Offline,
+          maybe_custom_status: None,
+          avatar_hue: 0,
+          is_guest: false,
+          is_bot: false,
+          maybe_organization: None,
+          device_setup: crate::model::DeviceSetup::Unknown,
+          is_deactivated,
+          maybe_email: None,
+        },
+        role,
+        devices: Vec::new(),
+        last_seen: 0,
+        space_names: Vec::new(),
+        is_active,
+        is_in_chats: false,
+        maybe_guest: None,
+      }
     }
 
     fn user(raw: i64) -> UserId {

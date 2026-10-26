@@ -5,8 +5,8 @@
 use leptos::prelude::*;
 
 use crate::admin::{
-  OwnerRosterStatus, OwnerWarning, RosterChange, RosterEntry, RosterRoleChoice, normalized_roster,
-  roster_changes, roster_from_roles, roster_problem, signed_roster,
+  OwnerRosterStatus, OwnerWarning, RosterChange, RosterEntry, RosterRoleChoice, idp_roster_proposal,
+  normalized_roster, roster_changes, roster_problem, signed_roster,
 };
 use crate::clock::{format_date_time, now_ms};
 use crate::components::admin_policy::{PolicyDraft, SelectRow};
@@ -128,18 +128,10 @@ fn RosterEditor(status: OwnerRosterStatus) -> impl IntoView {
   let confirming = RwSignal::new(None::<Vec<RosterEntry>>);
   let picked = RwSignal::new(String::new());
   let (idp_owners, idp_admins) = state.read(|backend| backend.admin_role_holders());
-  let from_roles = roster_from_roles(&idp_owners, &idp_admins);
-  let idp_changes = if from_roles.is_empty() {
-    Vec::new()
-  } else {
-    roster_changes(&signed.get_value(), &from_roles)
-  };
-  let name_of = move |user: UserId| {
-    state
-      .read(|backend| backend.user(user))
-      .map(|user| user.display_name)
-      .unwrap_or_else(|| user.to_string())
-  };
+  // Additions and promotions only: removals are the owner's explicit edit (issue #765).
+  let from_roles = idp_roster_proposal(&signed.get_value(), &idp_owners, &idp_admins);
+  let idp_changes = roster_changes(&signed.get_value(), &from_roles);
+  let name_of = move |user: UserId| account_label(state, user);
   let changes = Memo::new(move |_| roster_changes(&signed.get_value(), &draft.get()));
   let problem = Memo::new(move |_| roster_problem(&draft.get()));
   let addable = Memo::new(move |_| {
@@ -198,6 +190,7 @@ fn RosterEditor(status: OwnerRosterStatus) -> impl IntoView {
       <div class="roster-idp">
         <p class="auth-alert" role="status">{i18n.t("roster-idp-title")}</p>
         <ul>{lines}</ul>
+        <p class="muted-text small">{i18n.t("roster-idp-hint")}</p>
         <button type="button" class="btn" disabled=has_problem on:click=move |_| review(target.clone())>
           {i18n.t("roster-idp-sign")}
         </button>
@@ -315,12 +308,7 @@ pub(crate) fn RosterConfirm(
 ) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let name_of = move |user: UserId| {
-    state
-      .read(|backend| backend.user(user))
-      .map(|user| user.display_name)
-      .unwrap_or_else(|| user.to_string())
-  };
+  let name_of = move |user: UserId| account_label(state, user);
   let lines = roster_changes(&signed, &members)
     .into_iter()
     .map(|change| {
@@ -407,6 +395,16 @@ fn key_line(i18n: I18n, user: UserId) -> (String, bool) {
       };
       (format!("{fingerprint} · {note}"), is_warning)
     },
+  }
+}
+
+/// A person in a roster line: the display name with the account, so two accounts with one name
+/// (an old, deactivated one and the new one) can be told apart.
+fn account_label(state: crate::state::AppState, user: UserId) -> String {
+  match state.read(|backend| backend.user(user)) {
+    Some(found) if found.username.is_empty() => found.display_name,
+    Some(found) => format!("{} (@{})", found.display_name, found.username),
+    None => user.to_string(),
   }
 }
 

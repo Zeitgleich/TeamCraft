@@ -270,6 +270,95 @@ mod last_owner {
   }
 }
 
+/// Issue #765: signed entries never disappear by themselves. The automatic re-sign signs exactly
+/// the verified roster, and an older, validly signed roster the server serves again can't replace
+/// a newer one.
+mod roster_integrity {
+  use super::*;
+  use teamcraft_core::api::ServerApi;
+  use teamcraft_proto::ListWorkspaceLogQuery;
+
+  #[tokio::test]
+  async fn the_automatic_re_sign_keeps_every_entry() {
+    let server = FakeServer::new();
+    let clock = std::sync::Arc::new(teamcraft_core::clock::ManualClock::new(1_800_000_000_000));
+    let mut alice = Peer::enroll_on_clock(
+      server.add_user("Alice"),
+      "Alice",
+      common::settings(),
+      Box::new(clock.clone()),
+    )
+    .await;
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    let mut carol = Peer::enroll(&server, "Carol").await;
+    let mut dave = Peer::enroll(&server, "Dave").await;
+    let roles = [
+      (alice.client.user_id(), RosterRole::Owner),
+      (bob.client.user_id(), RosterRole::Owner),
+      (carol.client.user_id(), RosterRole::Admin),
+      (dave.client.user_id(), RosterRole::Admin),
+    ];
+    alice.client.publish_roster(&roles).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+    let before = alice.client.workspace().unwrap().roster;
+
+    // Not due yet: nothing is signed.
+    alice.client.refresh_workspace_signatures().await.unwrap();
+    assert_eq!(alice.client.workspace().unwrap().roster.version, before.version);
+
+    // Half the accepted age later the owner's client signs again, the same people in the same roles.
+    let half = i64::try_from(common::settings().workspace_max_age.as_millis()).unwrap() / 2;
+    clock.advance(half + 1);
+    alice.client.refresh_workspace_signatures().await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+    for peer in [&alice, &bob, &carol, &dave] {
+      let roster = peer.client.workspace().unwrap().roster;
+      assert_eq!(roster.version, before.version + 1, "{}", peer.name);
+      assert_eq!(roster.members, before.members, "{}: no entry dropped", peer.name);
+    }
+  }
+
+  #[tokio::test]
+  async fn an_older_signed_roster_served_again_is_refused() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    let mut carol = Peer::enroll(&server, "Carol").await;
+    let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner), (bob_id, RosterRole::Admin)])
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+
+    // The server appends the genesis (validly signed, without Bob) once more.
+    let log = alice
+      .api
+      .list_workspace_log(&WorkspaceLogKind::Roster, &ListWorkspaceLogQuery::default())
+      .await
+      .unwrap();
+    let genesis = log.entries.first().unwrap().clone();
+    server.inject_workspace_entry(
+      WorkspaceLogKind::Roster,
+      genesis.payload.as_slice().to_vec(),
+      genesis.signature.as_slice().to_vec(),
+    );
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    for peer in [&alice, &carol] {
+      let workspace = peer.client.workspace().unwrap();
+      assert_eq!(workspace.roster.version, 2, "{}", peer.name);
+      assert!(workspace.is_admin(bob_id), "{}: Bob stays", peer.name);
+      assert!(workspace.maybe_rejection.is_some(), "{}", peer.name);
+    }
+  }
+}
+
 #[tokio::test]
 async fn a_policy_edited_from_something_unverified_is_not_signed() {
   let server = FakeServer::new();
