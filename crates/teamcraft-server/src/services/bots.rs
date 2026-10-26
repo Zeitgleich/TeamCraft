@@ -17,7 +17,7 @@ use teamcraft_proto::{
 };
 
 use super::access::require;
-use super::admin::deactivate_user;
+use super::admin::{AfterDeactivation, deactivate_user};
 use super::audit::{self, Target as AuditTarget};
 use super::convert::unix_millis;
 use super::validate_name;
@@ -103,8 +103,8 @@ pub async fn rotate_token(
   })
 }
 
-/// Revokes the bot: its token stops working and the account is deactivated (devices removed,
-/// sessions ended, groups left).
+/// Revokes the bot: its token stops working, the account is deactivated and removed from all chats
+/// (devices removed, sessions ended, groups left).
 pub async fn revoke_bot(state: &AppState, caller: &AuthenticatedUser, bot: UserId) -> Result<(), ApiError> {
   require(state, caller, Permission::ManageUsers, &Target::Instance)?;
   if !state.database.revoke_bot(bot).await? {
@@ -116,6 +116,7 @@ pub async fn revoke_bot(state: &AppState, caller: &AuthenticatedUser, bot: UserI
     bot,
     DeactivationReason::Admin,
     "bot revoked",
+    AfterDeactivation::RemoveFromChats,
   )
   .await?;
   audit::record(

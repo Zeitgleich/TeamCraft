@@ -353,6 +353,14 @@ pub struct ServerRulesSettings {
   /// Public channels of those spaces they join with them.
   #[serde(default)]
   pub default_channels: Vec<ConversationId>,
+  /// Deactivated accounts are removed from all chats (devices removed, keys rotated) this many
+  /// days after the deactivation; none (the default) keeps them until an admin removes them.
+  #[serde(
+    rename = "remove_deactivated_after_days",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_remove_deactivated_after_days: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

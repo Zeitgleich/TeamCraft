@@ -258,6 +258,7 @@ mod sync {
     assert_eq!(report.deactivated, 1);
 
     assert_eq!(app.get(&carol, "/me").await.status, StatusCode::FORBIDDEN);
+    // Suspended, not removed: she stays in the channel for when the provider enables her again.
     assert_eq!(
       app
         .get(&dave, &format!("/conversations/{channel}/members"))
@@ -266,7 +267,7 @@ mod sync {
         .as_array()
         .unwrap()
         .len(),
-      2
+      3
     );
     let users = app.get(&admin(), "/admin/users?query=carol").await;
     assert_eq!(users.body["users"][0]["deactivation_reason"], "oidc");
@@ -276,6 +277,10 @@ mod sync {
     provider.update("sub-carol", |user| user.is_enabled = true);
     assert_eq!(sync_once(&app.state).await.unwrap().reactivated, 1);
     assert_eq!(app.get(&carol, "/me").await.status, StatusCode::OK);
+    assert_eq!(
+      app.get(&carol, &format!("/conversations/{channel}")).await.status,
+      StatusCode::OK
+    );
     let log = app
       .get(
         &admin(),

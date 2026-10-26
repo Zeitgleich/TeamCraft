@@ -18,13 +18,13 @@ use crate::handlers::{
   admin_list_space_members_handler, admin_list_spaces_handler, admin_list_user_devices_handler,
   admin_list_users_handler, admin_put_brand_asset_handler, admin_put_calendar_settings_handler,
   admin_put_mail_settings_handler, admin_put_settings_handler, admin_reactivate_user_handler,
-  admin_reissue_local_activation_handler, admin_reset_calendar_settings_handler,
-  admin_reset_mail_settings_handler, admin_reset_settings_handler, admin_revoke_bot_handler,
-  admin_revoke_device_handler, admin_rotate_bot_token_handler, admin_send_test_mail_handler,
-  admin_set_announcement_handler, admin_set_channel_moderation_handler, admin_take_over_brand_handler,
-  admin_test_calendar_handler, admin_update_brand_handler, admin_update_permission_scheme_handler,
-  admin_update_space_permission_scheme_handler, admit_guest_handler, append_policy_handler,
-  append_roster_handler, approve_recovery_request_handler, backchannel_logout_handler,
+  admin_reissue_local_activation_handler, admin_remove_user_from_chats_handler,
+  admin_reset_calendar_settings_handler, admin_reset_mail_settings_handler, admin_reset_settings_handler,
+  admin_revoke_bot_handler, admin_revoke_device_handler, admin_rotate_bot_token_handler,
+  admin_send_test_mail_handler, admin_set_announcement_handler, admin_set_channel_moderation_handler,
+  admin_take_over_brand_handler, admin_test_calendar_handler, admin_update_brand_handler,
+  admin_update_permission_scheme_handler, admin_update_space_permission_scheme_handler, admit_guest_handler,
+  append_policy_handler, append_roster_handler, approve_recovery_request_handler, backchannel_logout_handler,
   cancel_meeting_handler, cancel_recovery_request_handler, change_local_password_handler,
   change_web_push_subscription_handler, check_member_removal_handler, claim_key_packages_handler,
   clear_custom_status_handler, complete_attachment_handler, complete_avatar_upload_handler,
@@ -482,6 +482,10 @@ pub fn router(state: AppState) -> Router {
     .route(
       "/admin/users/{user_id}/reactivate",
       post(admin_reactivate_user_handler),
+    )
+    .route(
+      "/admin/users/{user_id}/remove-from-chats",
+      post(admin_remove_user_from_chats_handler),
     )
     .route(
       "/admin/users/{user_id}/devices/{device_id}",

@@ -496,6 +496,41 @@ mod who_may_share {
   }
 
   #[tokio::test]
+  async fn links_of_a_deactivated_user_pause_until_reactivation() {
+    let Some(s) = scene().await else { return };
+    let id = share(&s, json!({"attachment_id": s.attachment})).await.body["id"]
+      .as_str()
+      .unwrap()
+      .to_owned();
+    let carol_id = user_id(&s.app, &s.carol).await;
+    let path = format!("/shares/{id}");
+    s.app
+      .post(
+        &admin(),
+        &format!("/admin/users/{carol_id}/deactivate"),
+        json!({}),
+      )
+      .await;
+    assert_eq!(
+      public(&s.app, reqwest::Method::GET, &path).await.0,
+      StatusCode::GONE
+    );
+    assert_eq!(download_with(&s.app, &id, json!({})).await.0, StatusCode::GONE);
+    s.app
+      .post(
+        &admin(),
+        &format!("/admin/users/{carol_id}/reactivate"),
+        json!({}),
+      )
+      .await;
+    assert_eq!(
+      public(&s.app, reqwest::Method::GET, &path).await.0,
+      StatusCode::OK
+    );
+    s.app.stop().await;
+  }
+
+  #[tokio::test]
   async fn deleting_the_attachment_ends_its_links() {
     let Some(s) = scene().await else { return };
     let id = share(&s, json!({"attachment_id": s.attachment})).await.body["id"]

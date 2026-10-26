@@ -44,6 +44,8 @@ enum Kind {
     scale: u64,
     max: u64,
     unit: Option<&'static str>,
+    /// Empty means none (off).
+    is_optional: bool,
   },
   Text,
   Area,
@@ -74,6 +76,7 @@ const fn count(id: &'static str) -> FieldDef {
       scale: 1,
       max: u32::MAX as u64,
       unit: None,
+      is_optional: false,
     },
   }
 }
@@ -85,6 +88,20 @@ const fn amount(id: &'static str, scale: u64, max: u64, unit: &'static str) -> F
       scale,
       max,
       unit: Some(unit),
+      is_optional: false,
+    },
+  }
+}
+
+/// Like [`amount`], but may be left empty (none).
+const fn optional_amount(id: &'static str, scale: u64, max: u64, unit: &'static str) -> FieldDef {
+  FieldDef {
+    id,
+    kind: Kind::Number {
+      scale,
+      max,
+      unit: Some(unit),
+      is_optional: true,
     },
   }
 }
@@ -122,6 +139,7 @@ const SERVER_RULES: &[FieldDef] = &[
     id: "default_channels",
     kind: Kind::IdList,
   },
+  optional_amount("remove_deactivated_after_days", 1, 3_650, DAYS),
 ];
 const NOTIFICATIONS: &[FieldDef] = &[
   flag("read_receipts_default"),
@@ -550,6 +568,9 @@ fn check(key: &RuntimeSettingsKey, values: &Values) -> Result<RuntimeSettingsSec
 fn field_json(kind: Kind, typed: &str) -> Result<Value, &'static str> {
   match kind {
     Kind::Bool => Ok(Value::Bool(typed == "true")),
+    Kind::Number {
+      is_optional: true, ..
+    } if typed.trim().is_empty() => Ok(Value::Null),
     Kind::Number { scale, max, .. } => match parse_scaled(typed, scale) {
       Some(raw) if raw <= max => Ok(json!(raw)),
       _ => Err("admin-error-number"),
@@ -662,6 +683,34 @@ mod tests {
     };
     assert_eq!(rules.default_spaces.len(), 2);
     assert!(rules.default_channels.is_empty());
+  }
+
+  #[test]
+  fn the_removal_period_is_optional() {
+    let empty = typed(&[
+      ("invites_require_verified_email", "true"),
+      ("remove_deactivated_after_days", ""),
+    ]);
+    let Ok(RuntimeSettingsSection::ServerRules(rules)) = check(&kind("server_rules"), &empty) else {
+      panic!("valid");
+    };
+    assert_eq!(rules.maybe_remove_deactivated_after_days, None);
+    let set = typed(&[
+      ("invites_require_verified_email", "true"),
+      ("remove_deactivated_after_days", "90"),
+    ]);
+    let Ok(RuntimeSettingsSection::ServerRules(rules)) = check(&kind("server_rules"), &set) else {
+      panic!("valid");
+    };
+    assert_eq!(rules.maybe_remove_deactivated_after_days, Some(90));
+    let wrong = typed(&[
+      ("invites_require_verified_email", "true"),
+      ("remove_deactivated_after_days", "-1"),
+    ]);
+    assert_eq!(
+      check(&kind("server_rules"), &wrong).err(),
+      Some(vec![("remove_deactivated_after_days", "admin-error-number")])
+    );
   }
 
   #[test]

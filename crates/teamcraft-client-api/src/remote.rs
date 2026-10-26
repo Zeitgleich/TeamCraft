@@ -530,6 +530,11 @@ pub enum ChatAction {
   AdminJoinChannel {
     conversation: ConversationId,
   },
+  /// An admin removes a deactivated user from all chats: signed removals per channel, then the
+  /// server's step (admin.md §3.2.1).
+  AdminRemoveFromAllChats {
+    user: UserId,
+  },
   // The actions of crate::actions; `apply_to` runs them on a backend.
   SendMessage {
     message: OutgoingMessage,

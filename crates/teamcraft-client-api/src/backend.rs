@@ -171,6 +171,9 @@ pub trait ChatBackend {
   fn publish_roster(&self, _base_version: u64, _members: Vec<crate::admin::RosterEntry>) {}
   /// Adds the signed-in admin to a conversation through the encryption group (admin.md §2.2).
   fn admin_add_self(&self, _conversation: ConversationId) {}
+  /// Removes a deactivated user from all chats with signed removals (admin.md §3.2.1). Needs
+  /// [`Self::can_sign_workspace`].
+  fn admin_remove_from_all_chats(&self, _user: UserId) {}
   /// What desktop and browser notifications may show (the verified workspace policy). A backend
   /// that does not know the policy answers with the strictest mode.
   fn push_content_mode(&self) -> teamcraft_proto::PushContentMode {
@@ -697,7 +700,17 @@ pub trait AdminBackend {
   fn set_workspace_policy(&self, policy: WorkspacePolicy, genesis: Vec<crate::admin::RosterEntry>);
   fn set_channel_retention(&self, channel: ConversationId, retention: Retention);
   fn remove_device(&self, user: UserId, device: DeviceId);
+  /// Suspends (`false`) or reactivates (`true`) an account; memberships and devices stay.
   fn set_user_active(&self, user: UserId, is_active: bool);
+  /// Removes a deactivated user from all chats: this admin's client signs the removal from every
+  /// channel (members commit it, keys rotate), then devices, direct messages and spaces go. Not
+  /// undone by a reactivation. Does nothing without [`AdminBackend::can_remove_from_chats`].
+  fn remove_user_from_chats(&self, user: UserId);
+  /// Whether this client can sign the removals of "Remove from all chats" (it holds the device
+  /// keys of an admin); without, the console explains instead of offering a server-only removal.
+  fn can_remove_from_chats(&self) -> bool {
+    false
+  }
   fn start_org_recovery(&self, user: UserId);
   /// Whether [`AdminBackend::start_org_recovery`] does anything on this client.
   fn can_start_org_recovery(&self) -> bool {

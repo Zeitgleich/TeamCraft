@@ -220,6 +220,10 @@ pub struct PolicyConfig {
   pub default_spaces: Vec<SpaceId>,
   /// Public channels (by ID) of the default spaces that new members join as well.
   pub default_channels: Vec<ConversationId>,
+  /// Deactivated users are removed from all chats (devices removed, keys rotated) this many days
+  /// after the deactivation. None (the default): only when an admin removes them (admin.md §3.4).
+  #[serde(rename = "remove_deactivated_after_days", default)]
+  pub maybe_remove_deactivated_after_days: Option<u32>,
 }
 
 /// Size limits of requests and results.
@@ -1304,6 +1308,7 @@ impl Default for PolicyConfig {
       invites_require_verified_email: true,
       default_spaces: Vec::new(),
       default_channels: Vec::new(),
+      maybe_remove_deactivated_after_days: None,
     }
   }
 }

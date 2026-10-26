@@ -15,10 +15,10 @@ use teamcraft_proto::{
   ConversationId, ConversationMemberResponse, ConversationResponse, CreateChannelRequest, CreateDmRequest,
   CreateGroupDmRequest, DeviceId, DeviceResponse, ErrorBody, GatewayClientMessage, GatewayServerMessage,
   GetMeResponse, IdentityKeyResponse, InviteId, KeyBagResponse, KeyPackageStatusResponse,
-  ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse, ListInvitesResponse,
-  ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse,
-  ListSpaceMembersResponse, ListSpacesResponse, MessageResponse, MlsMessageResponse, MoveChannelRequest,
-  PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest,
+  ListAdminConversationsResponse, ListConversationMembersResponse, ListConversationsResponse,
+  ListDevicesResponse, ListInvitesResponse, ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery,
+  ListMlsMessagesResponse, ListSpaceMembersResponse, ListSpacesResponse, MessageResponse, MlsMessageResponse,
+  MoveChannelRequest, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest,
   RegisterDeviceRequest, SearchUsersResponse, SendMessageRequest, SpaceId, SpaceMemberResponse,
   UpdateSpaceMemberRequest, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
 };
@@ -452,6 +452,33 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .send_without_response::<()>(
         Method::DELETE,
         &format!("/conversations/{conversation}/members/{user}"),
+        None,
+      )
+      .await
+  }
+
+  async fn admin_channels_of(&self, user: UserId) -> Result<Vec<ConversationId>, ApiError> {
+    let mut channels = Vec::new();
+    loop {
+      let after = channels
+        .last()
+        .map(|last: &ConversationId| format!("&after={last}"))
+        .unwrap_or_default();
+      let page: ListAdminConversationsResponse = self
+        .get(&format!("/admin/conversations?user_id={user}{after}"))
+        .await?;
+      channels.extend(page.conversations.iter().map(|channel| channel.id));
+      if !page.has_more || page.conversations.is_empty() {
+        return Ok(channels);
+      }
+    }
+  }
+
+  async fn admin_remove_from_chats(&self, user: UserId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(
+        Method::POST,
+        &format!("/admin/users/{user}/remove-from-chats"),
         None,
       )
       .await

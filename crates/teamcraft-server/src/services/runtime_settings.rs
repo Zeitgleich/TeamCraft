@@ -39,6 +39,8 @@ const MAX_HELP_TEXT_CHARS: usize = 1000;
 const MAX_LIST_ENTRIES: usize = 200;
 /// Longest repeat or grace interval an admin can set: a day.
 const MAX_INTERVAL_SECS: u64 = 86_400;
+/// Longest period before deactivated users are removed from all chats automatically (ten years).
+const MAX_REMOVAL_DAYS: u64 = 3_650;
 
 /// Puts the stored groups on top of the configuration; at startup and after every change.
 pub async fn load(state: &AppState) -> Result<(), ApiError> {
@@ -173,6 +175,7 @@ fn apply(settings: &mut Settings, section: &RuntimeSettingsSection) {
         .policy
         .default_channels
         .clone_from(&rules.default_channels);
+      settings.policy.maybe_remove_deactivated_after_days = rules.maybe_remove_deactivated_after_days;
     },
     RuntimeSettingsSection::Notifications(values) => {
       let notifications = &mut settings.notifications;
@@ -274,6 +277,7 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
       invites_require_verified_email: settings.policy.invites_require_verified_email,
       default_spaces: settings.policy.default_spaces.clone(),
       default_channels: settings.policy.default_channels.clone(),
+      maybe_remove_deactivated_after_days: settings.policy.maybe_remove_deactivated_after_days,
     },
     notifications: NotificationRuntimeSettings {
       read_receipts_default: notifications.read_receipts_default,
@@ -351,7 +355,16 @@ fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
   match section {
     RuntimeSettingsSection::ServerRules(rules) => {
       check_count("default_spaces", rules.default_spaces.len())?;
-      check_count("default_channels", rules.default_channels.len())
+      check_count("default_channels", rules.default_channels.len())?;
+      match rules.maybe_remove_deactivated_after_days {
+        Some(days) => check_range(
+          "remove_deactivated_after_days",
+          u64::from(days),
+          1,
+          MAX_REMOVAL_DAYS,
+        ),
+        None => Ok(()),
+      }
     },
     RuntimeSettingsSection::Notifications(values) => {
       check_range(

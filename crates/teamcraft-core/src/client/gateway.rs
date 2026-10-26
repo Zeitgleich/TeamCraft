@@ -705,6 +705,17 @@ mod tests {
   use super::*;
 
   #[test]
+  fn a_deactivated_account_needs_a_sign_in_not_a_retry_loop() {
+    let error = rejected(ErrorBody::new(
+      ErrorCode::AccountDeactivated,
+      "the account is deactivated",
+    ));
+    assert!(error.is_sign_in_required());
+    let error = rejected(ErrorBody::new(ErrorCode::Forbidden, "no"));
+    assert!(!error.is_sign_in_required());
+  }
+
+  #[test]
   fn heartbeat_answers_are_heard_not_held() {
     let mut held = HeldFrames::default();
     held.hold(Some(Ok(GatewayServerMessage::HeartbeatAck)));

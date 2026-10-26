@@ -190,6 +190,12 @@ pub trait ServerApi {
     conversation: ConversationId,
     user: UserId,
   ) -> impl Future<Output = Result<(), ApiError>>;
+  /// Every channel `user` is a member of (`GET /admin/conversations?user_id=`, all pages; instance
+  /// admins): the admin's client signs a removal from each (admin.md §3.2.1).
+  fn admin_channels_of(&self, user: UserId) -> impl Future<Output = Result<Vec<ConversationId>, ApiError>>;
+  /// Removes a deactivated user from what is left after the signed removals: devices, direct
+  /// messages, spaces (`POST /admin/users/{id}/remove-from-chats`; idempotent).
+  fn admin_remove_from_chats(&self, user: UserId) -> impl Future<Output = Result<(), ApiError>>;
   /// Joins an open space (`POST /spaces/{id}/join`).
   fn join_space(&self, space: SpaceId) -> impl Future<Output = Result<SpaceResponse, ApiError>>;
   /// Adds a person to a space as member or guest (`POST /spaces/{id}/members`). On someone who is
@@ -666,10 +672,16 @@ impl ApiError {
     self.is_transient() || self.is_sign_in_required()
   }
 
-  /// No access token, or the server refused it: retrying with the same token won't help, the user
-  /// (or the app's token refresh) has to sign in again.
+  /// No access token, the server refused it, or the account is deactivated: retrying with the same
+  /// token won't help, the user (or the app's token refresh) has to sign in again. A deactivated
+  /// account's queued work waits for a reactivation like for a new token.
   pub fn is_sign_in_required(&self) -> bool {
-    matches!(self, Self::Token(_) | Self::Status { status: 401, .. })
+    matches!(self, Self::Token(_) | Self::Status { status: 401, .. }) || self.is_account_deactivated()
+  }
+
+  /// The account is deactivated (suspended): nothing works until an admin reactivates it.
+  pub fn is_account_deactivated(&self) -> bool {
+    self.error_code() == Some(&ErrorCode::AccountDeactivated)
   }
 
   pub(crate) fn status(status: u16, code: ErrorCode, message: impl Into<String>) -> Self {

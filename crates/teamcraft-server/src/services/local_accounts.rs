@@ -413,6 +413,16 @@ pub async fn login(state: &AppState, request: LocalLoginRequest) -> Result<Local
     }
   }
 
+  // Only after the credentials are right: others don't learn that the account is deactivated.
+  let is_deactivated = state
+    .database
+    .get_user(account.user)
+    .await?
+    .is_none_or(|user| user.is_deactivated);
+  if is_deactivated {
+    return Err(AuthError::AccountDeactivated.into());
+  }
+
   state.database.clear_login_failures(account.user).await?;
   rehash_if_needed(state, local, &account, &request.password).await?;
 

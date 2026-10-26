@@ -140,7 +140,7 @@ without the bridge role the instance's host name has no `/hooks/` route.
 | Create          | `POST /api/v1/admin/bots` (admins); the token is returned once, only its SHA-256 is stored                                                                 |
 | Authenticate    | `Authorization: Bearer tcb_...` on the REST API and in the gateway `identify`                                                                              |
 | Permissions     | Those of a guest: sees only the conversations it was added to                                                                                              |
-| Rotate / revoke | `POST /admin/bots/{id}/token` (old token dies at once), `DELETE /admin/bots/{id}` (deactivates the account like any user: devices removed, sessions ended) |
+| Rotate / revoke | `POST /admin/bots/{id}/token` (old token dies at once), `DELETE /admin/bots/{id}` (deactivates the account and removes it from all chats: devices removed, sessions ended) |
 
 A token is a long random string that the server can revoke, so there is no identity provider client
 per bridge (client credentials would mean one confidential Keycloak client each) and no signed

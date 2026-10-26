@@ -32,6 +32,8 @@ pub enum LocalRefusal {
   /// Local accounts are turned off or not set up on this server.
   Disabled,
   RateLimited,
+  /// The account is deactivated; an admin has to reactivate it.
+  Deactivated,
 }
 
 /// What the keyring entry holds: the token and its expiry as JSON.
@@ -111,6 +113,7 @@ impl LocalRefusal {
       Self::Refused => "refused",
       Self::Disabled => "disabled",
       Self::RateLimited => "rate_limited",
+      Self::Deactivated => "account_deactivated",
     }
   }
 
@@ -127,6 +130,7 @@ impl LocalRefusal {
       },
       Some(ErrorCode::LocalAccountsDisabled) => Some(Self::Disabled),
       Some(ErrorCode::RateLimited) => Some(Self::RateLimited),
+      Some(ErrorCode::AccountDeactivated) => Some(Self::Deactivated),
       _ => match status {
         400 | 401 => Some(Self::Refused),
         404 | 503 => Some(Self::Disabled),
@@ -215,6 +219,7 @@ mod tests {
       (401, body("mfa_required"), Some(LocalRefusal::Refused)),
       (403, body("local_accounts_disabled"), Some(LocalRefusal::Disabled)),
       (429, body("rate_limited"), Some(LocalRefusal::RateLimited)),
+      (403, body("account_deactivated"), Some(LocalRefusal::Deactivated)),
       (429, b"slow down".to_vec(), Some(LocalRefusal::RateLimited)),
       (503, b"".to_vec(), Some(LocalRefusal::Disabled)),
       (403, body("forbidden"), None),
@@ -227,6 +232,7 @@ mod tests {
     assert_eq!(LocalRefusal::Refused.kind(), "refused");
     assert_eq!(LocalRefusal::Disabled.kind(), "disabled");
     assert_eq!(LocalRefusal::RateLimited.kind(), "rate_limited");
+    assert_eq!(LocalRefusal::Deactivated.kind(), "account_deactivated");
   }
 
   #[test]

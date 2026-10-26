@@ -137,6 +137,10 @@ pub struct AdminUserSummary {
   pub maybe_deactivation_reason: Option<DeactivationReason>,
   pub device_count: u32,
   pub space_count: u32,
+  /// Conversations the user is a member of. A deactivated user who still has conversations,
+  /// spaces or devices can be removed from all chats.
+  #[serde(default)]
+  pub conversation_count: u32,
   #[serde(rename = "last_seen_at", default, skip_serializing_if = "Option::is_none")]
   pub maybe_last_seen_at: Option<UnixMillis>,
   pub created_at: UnixMillis,

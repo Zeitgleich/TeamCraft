@@ -202,6 +202,7 @@ pub async fn download_share(
       .await?
     && state.settings.get().shares.is_enabled
     && is_served_on(state, &link, brand)
+    && is_creator_active(state, &link).await?
   {
     return Ok(download_response(store, &target, presented.to_owned()));
   }
@@ -248,10 +249,22 @@ async fn usable_share(
     .find_downloadable_share(id, OffsetDateTime::now_utc())
     .await?
     .ok_or(ApiError::ShareUnavailable)?;
-  if !is_served_on(state, &link, brand) {
+  if !is_served_on(state, &link, brand) || !is_creator_active(state, &link).await? {
     return Err(ApiError::ShareUnavailable);
   }
   Ok((link, target))
+}
+
+/// Links of a deactivated (suspended) user are paused, not revoked: they work again after a
+/// reactivation if they haven't expired meanwhile (admin.md §3.2.1).
+async fn is_creator_active(state: &AppState, link: &ShareLink) -> Result<bool, ApiError> {
+  Ok(
+    state
+      .database
+      .get_user(link.created_by)
+      .await?
+      .is_some_and(|creator| !creator.is_deactivated),
+  )
 }
 
 /// A link works only on the host names of the brand that made it (docs/branding.md §8), so that a

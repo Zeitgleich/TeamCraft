@@ -51,6 +51,30 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.record_and_run_removal(conversation, user, None).await
   }
 
+  /// "Remove from all chats" for a deactivated user (admin.md §3.2.1): this admin's device signs
+  /// the user's removal from every channel they are in ([`Self::admin_remove_member`]; members
+  /// commit it with a key rotation), and only when all of them are on their way asks the server to
+  /// drop the rest (devices, direct messages, spaces). A channel that fails leaves the server step
+  /// out, so "remove" again finishes it; channels already done are no longer listed.
+  pub async fn admin_remove_from_all_chats(&mut self, user: UserId) -> Result<(), CoreError> {
+    let me = self.account.user_id;
+    if !self.workspace()?.is_admin(me) {
+      return Err(CoreError::NotAnAdmin(me));
+    }
+    let mut maybe_failure = None;
+    for channel in self.api.admin_channels_of(user).await? {
+      if let Err(error) = self.admin_remove_member(channel, user).await {
+        tracing::warn!(conversation_id = %channel, %error, "signing a removal from all chats failed for a channel");
+        maybe_failure.get_or_insert(error);
+      }
+    }
+    if let Some(failure) = maybe_failure {
+      return Err(failure);
+    }
+    self.api.admin_remove_from_chats(user).await?;
+    Ok(())
+  }
+
   /// Says goodbye, then leaves: this device posts a signed request to remove its user, which the
   /// remaining members commit (MLS doesn't let a member commit its own removal). Once a commit
   /// removed this device, the pending queue drops the server's membership; `Ok` before that. The

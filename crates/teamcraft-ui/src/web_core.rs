@@ -1738,6 +1738,12 @@ impl Core {
           .await
           .map_err(describe_failure);
       },
+      ChatAction::AdminRemoveFromAllChats { user } => {
+        return client
+          .admin_remove_from_all_chats(*user)
+          .await
+          .map_err(describe_failure);
+      },
       _ => {},
     }
     let backend = self.backend.as_ref().ok_or_else(not_set_up)?;
@@ -1772,7 +1778,8 @@ impl Core {
       | ChatAction::AcceptKeyChange { .. }
       | ChatAction::PublishPolicy { .. }
       | ChatAction::PublishRoster { .. }
-      | ChatAction::AdminJoinChannel { .. } => {},
+      | ChatAction::AdminJoinChannel { .. }
+      | ChatAction::AdminRemoveFromAllChats { .. } => {},
       // Message actions, files and workspace management go to the backend, which queues what
       // needs the engine as commands.
       other => {

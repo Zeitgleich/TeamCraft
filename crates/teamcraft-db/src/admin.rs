@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use teamcraft_proto::{
   ConversationId, ConversationVisibility, DeviceId, JoinPolicy, PushProvider, SpaceId, UserId, UserKind,
 };
@@ -67,6 +69,7 @@ pub struct AdminUserRow {
   pub maybe_deactivation_reason: Option<String>,
   pub device_count: i64,
   pub space_count: i64,
+  pub conversation_count: i64,
   pub maybe_last_seen: Option<OffsetDateTime>,
   pub created_at: OffsetDateTime,
 }
@@ -81,11 +84,30 @@ pub struct AdminDeviceRow {
   pub created_at: OffsetDateTime,
 }
 
-/// What deactivating a user removed, so the server can tell the people affected.
+/// What deactivating a user touched, so the server can tell the people affected.
 #[derive(Debug, Clone, Default)]
-pub struct DeactivationEffects {
-  /// The user was already deactivated; nothing changed.
+pub struct Deactivation {
+  /// The user was already deactivated; nothing changed in the database.
   pub was_already_deactivated: bool,
+  /// Conversations the user is (still) a member of.
+  pub conversations: Vec<ConversationId>,
+  /// Everyone who shares a conversation with the user.
+  pub co_members: Vec<UserId>,
+}
+
+/// Outcome of removing a deactivated user from all chats.
+#[derive(Debug, Clone)]
+pub enum ChatRemoval {
+  Removed(ChatRemovalEffects),
+  /// The user is active; only deactivated users are removed this way.
+  NotDeactivated,
+  UnknownUser,
+}
+
+/// What removing a deactivated user from all chats removed, so the server can tell the people
+/// affected.
+#[derive(Debug, Clone, Default)]
+pub struct ChatRemovalEffects {
   pub devices: Vec<DeviceId>,
   /// Conversations the user left, with the members that remain.
   pub conversations: Vec<(ConversationId, Vec<UserId>)>,
@@ -215,6 +237,7 @@ impl Database {
                 u.deactivation_reason, u.created_at,
                 (SELECT count(*) FROM devices d WHERE d.user_id = u.id AND d.revoked_at IS NULL) AS "device_count!",
                 (SELECT count(*) FROM space_members m WHERE m.user_id = u.id) AS "space_count!",
+                (SELECT count(*) FROM memberships m WHERE m.user_id = u.id) AS "conversation_count!",
                 -- Only the day for users who hide their last seen or appear offline: admins still
                 -- spot unused devices, but not when someone was active.
                 (SELECT CASE WHEN u.last_seen_visibility = 'everyone' AND u.presence_pref <> 'invisible'
@@ -246,6 +269,7 @@ impl Database {
           maybe_deactivation_reason: row.deactivation_reason,
           device_count: row.device_count,
           space_count: row.space_count,
+          conversation_count: row.conversation_count,
           maybe_last_seen: row.last_seen,
           created_at: row.created_at,
         })
@@ -282,9 +306,10 @@ impl Database {
       .collect()
   }
 
-  /// Deactivates the account: devices are revoked, push registrations dropped, and the user leaves
-  /// all conversations and spaces. Returns what changed so others can be told. Idempotent.
-  pub async fn deactivate_user(&self, user: UserId, reason: &str) -> Result<DeactivationEffects, DbError> {
+  /// Deactivates (suspends) the account: the user can't sign in and gets no pushes (the push
+  /// queries skip deactivated users), but memberships, space memberships, devices and their push
+  /// registrations stay, so reactivating restores everything. Returns who to tell. Idempotent.
+  pub async fn deactivate_user(&self, user: UserId, reason: &str) -> Result<Deactivation, DbError> {
     let mut tx = self.pool().begin().await?;
     let marked = sqlx::query!(
       "UPDATE users SET deactivated_at = now(), deactivation_reason = $2 WHERE id = $1 AND deactivated_at IS NULL",
@@ -293,11 +318,46 @@ impl Database {
     )
     .execute(&mut *tx)
     .await?;
-    if marked.rows_affected() == 0 {
-      return Ok(DeactivationEffects {
-        was_already_deactivated: true,
-        ..DeactivationEffects::default()
-      });
+    // Also when it already was: a caller that crashed after the commit repeats its steps.
+    let was_already_deactivated = marked.rows_affected() == 0;
+    let conversations = sqlx::query_scalar!(
+      "SELECT conversation_id FROM memberships WHERE user_id = $1 ORDER BY conversation_id",
+      to_db(user),
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let co_members = sqlx::query_scalar!(
+      r#"SELECT DISTINCT o.user_id FROM memberships m
+         JOIN memberships o ON o.conversation_id = m.conversation_id AND o.user_id <> m.user_id
+         WHERE m.user_id = $1 ORDER BY o.user_id"#,
+      to_db(user),
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Deactivation {
+      was_already_deactivated,
+      conversations: conversations.into_iter().map(from_db).collect::<Result<_, _>>()?,
+      co_members: co_members.into_iter().map(from_db).collect::<Result<_, _>>()?,
+    })
+  }
+
+  /// Removes a deactivated user from everything: devices are revoked and the user leaves all
+  /// conversations and spaces. Returns what changed so others can be told (their clients commit
+  /// the removals to the MLS groups). Refuses active users: they are deactivated first.
+  pub async fn remove_deactivated_user_from_chats(&self, user: UserId) -> Result<ChatRemoval, DbError> {
+    let mut tx = self.pool().begin().await?;
+    // Locks the row so a concurrent reactivation waits until the removal is done.
+    let is_deactivated = sqlx::query_scalar!(
+      r#"SELECT deactivated_at IS NOT NULL AS "is_deactivated!" FROM users WHERE id = $1 FOR UPDATE"#,
+      to_db(user),
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    match is_deactivated {
+      None => return Ok(ChatRemoval::UnknownUser),
+      Some(false) => return Ok(ChatRemoval::NotDeactivated),
+      Some(true) => {},
     }
 
     let devices = sqlx::query_scalar!(
@@ -332,11 +392,11 @@ impl Database {
       .await?;
     tx.commit().await?;
 
-    let mut effects = DeactivationEffects {
+    let mut effects = ChatRemovalEffects {
       devices: devices.into_iter().map(from_db).collect::<Result<_, _>>()?,
-      ..DeactivationEffects::default()
+      ..ChatRemovalEffects::default()
     };
-    let mut conversations: std::collections::BTreeMap<i64, Vec<UserId>> = std::collections::BTreeMap::new();
+    let mut conversations: BTreeMap<i64, Vec<UserId>> = BTreeMap::new();
     for row in conversation_rows {
       let entry = conversations.entry(row.conversation_id).or_default();
       if let Some(other) = row.other {
@@ -347,7 +407,7 @@ impl Database {
       effects.co_members.extend(members.iter().copied());
       effects.conversations.push((from_db(id)?, members));
     }
-    let mut spaces: std::collections::BTreeMap<i64, Vec<UserId>> = std::collections::BTreeMap::new();
+    let mut spaces: BTreeMap<i64, Vec<UserId>> = BTreeMap::new();
     for row in space_rows {
       let entry = spaces.entry(row.space_id).or_default();
       if let Some(other) = row.other {
@@ -359,10 +419,42 @@ impl Database {
     }
     effects.co_members.sort_unstable();
     effects.co_members.dedup();
-    Ok(effects)
+    Ok(ChatRemoval::Removed(effects))
   }
 
-  /// Lifts the deactivation. Memberships and devices are not restored.
+  /// Users deactivated before `cutoff` who are still in a conversation or space or still have a
+  /// device: due for the automatic removal from all chats. At most `limit`, oldest first. Users
+  /// the identity provider sync deactivated in a burst (at least `mass_oidc_count` within an hour
+  /// of each other, e.g. a provider outage or misconfiguration) are left out: an admin decides.
+  pub async fn deactivated_users_due_for_removal(
+    &self,
+    cutoff: OffsetDateTime,
+    mass_oidc_count: i64,
+    limit: i64,
+  ) -> Result<Vec<UserId>, DbError> {
+    let ids = sqlx::query_scalar!(
+      r#"SELECT u.id FROM users u
+         WHERE u.deactivated_at < $1
+           AND (EXISTS (SELECT 1 FROM memberships m WHERE m.user_id = u.id)
+             OR EXISTS (SELECT 1 FROM space_members m WHERE m.user_id = u.id)
+             OR EXISTS (SELECT 1 FROM devices d WHERE d.user_id = u.id AND d.revoked_at IS NULL))
+           AND NOT (u.deactivation_reason = 'oidc' AND (
+             SELECT count(*) FROM users o
+             WHERE o.deactivation_reason = 'oidc'
+               AND o.deactivated_at BETWEEN u.deactivated_at - interval '1 hour'
+                                        AND u.deactivated_at + interval '1 hour') >= $3)
+         ORDER BY u.deactivated_at, u.id LIMIT $2"#,
+      cutoff,
+      limit,
+      mass_oidc_count,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    ids.into_iter().map(from_db).collect()
+  }
+
+  /// Lifts the deactivation. Memberships and devices the user still has work again as before; after
+  /// a removal from all chats they stay removed.
   pub async fn reactivate_user(&self, user: UserId) -> Result<bool, DbError> {
     let result = sqlx::query!(
       "UPDATE users SET deactivated_at = NULL, deactivation_reason = NULL WHERE id = $1 AND deactivated_at IS NOT NULL",

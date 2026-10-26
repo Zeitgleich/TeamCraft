@@ -170,16 +170,56 @@ remaining members. The admin doesn't need to be a member for that.
 
 ### 3.2 Users and guests
 
-| Feature                                                                                                            | Prio |
-|--------------------------------------------------------------------------------------------------------------------|------|
-| User list with status, devices, last seen, role, spaces                                                            | v1   |
-| Deactivate user (also automatically when disabled in the OIDC provider): sessions revoked, removed from all groups | v1   |
-| Remove a single device (lost phone)                                                                                | v1   |
-| Start org recovery for a user (needs a second admin, see e2ee.md §6.3)                                             | v1   |
-| Invite guests, set expiry and sponsor, see all guests and where they are                                           | v1   |
-| Local accounts: create, reset password/TOTP                                                                        | v1   |
-| OIDC group → role/space mapping                                                                                    | v1   |
-| User groups (`@devteam`)                                                                                           | v1   |
+| Feature                                                                                                          | Prio |
+|------------------------------------------------------------------------------------------------------------------|------|
+| User list with status, devices, last seen, role, spaces                                                          | v1   |
+| Deactivate (suspend) user, also automatically when disabled in the OIDC provider; reactivate restores everything | v1   |
+| Remove a deactivated user from all chats (devices leave every group, keys rotate); optionally after a set period | v1   |
+| Remove a single device (lost phone)                                                                              | v1   |
+| Start org recovery for a user (needs a second admin, see e2ee.md §6.3)                                           | v1   |
+| Invite guests, set expiry and sponsor, see all guests and where they are                                         | v1   |
+| Local accounts: create, reset password/TOTP                                                                      | v1   |
+| OIDC group → role/space mapping                                                                                  | v1   |
+| User groups (`@devteam`)                                                                                         | v1   |
+
+#### 3.2.1 Deactivating and removing users
+
+Deactivation and removal are two steps (issue #631):
+
+| Step                      | What happens                                                                                                                                                                                                                                                                       | Reversible                                  |
+|---------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------|
+| **Deactivate** (suspend)  | Gateway connections close and can't resume, local sessions end, every request and sign-in (SSO and local) is refused with `account_deactivated`, no pushes are sent (registrations are kept). Memberships, space memberships and devices stay; others see the user as deactivated. | Yes: reactivate, same devices sign in again |
+| **Remove from all chats** | Only for deactivated users. The admin's client signs the user's removal from every channel they are in; members' clients commit it, which rotates the keys (e2ee.md §4.6). Then the server revokes the devices and drops direct messages and spaces.                               | No: they have to be added again             |
+
+- **Who triggers what.** An admin deactivates in the console (`POST /admin/users/{id}/deactivate`) and
+  removes in a second, explicit step. "Remove from all chats" runs on the admin's client, which
+  needs its device keys (desktop app, or a browser with the account set up; otherwise the console
+  explains and offers nothing): it lists the user's channels (`GET /admin/conversations?user_id=`),
+  signs a removal from each like any admin removal (§2.2), and only then calls
+  `POST /admin/users/{id}/remove-from-chats` (409 `conflict` for an active user), which revokes the
+  devices and drops direct messages and spaces. A channel that fails leaves the server step out; the
+  admin removes again. Recommended for people who left the organization.
+- **Automatic removal.** `server_rules.remove_deactivated_after_days` (config `[policy]
+  remove_deactivated_after_days`, default none = never): the server removes users that long after
+  their deactivation (checked with the account housekeeping). Without an admin's client this is the
+  server's removal alone: it ends their memberships and devices on the server, but no client signs
+  a removal on its word (security review A8), so the users stay in the encryption groups and are
+  listed for admins in the console (issue #661) until an admin removes them. Users the identity
+  provider sync deactivated in a burst (10 or more within an hour: an outage or a misconfigured
+  provider) are left out of the automatic removal; an admin decides.
+- **Direct messages.** Admins don't sign changes in DMs and group DMs; the server's removal drops
+  the user there, and the participants' clients list them for admins like any server-only removal.
+- **Share links** of a deactivated user are paused (they answer like an unknown link) and work again
+  after a reactivation if they haven't expired.
+- **Per reason** (`deactivation_reason`): `admin` and `oidc` only suspend; the OIDC sync reactivates a
+  user it deactivated once the provider enables them again, with everything intact. Bots that are
+  revoked and meeting guests (`left`, turned away, removed from the meeting, access ended) are
+  removed from all chats at once: they don't come back.
+- **Why removal is separate.** While suspended, the user's devices stay in the groups and new
+  messages are still encrypted to them. The server refuses them every request, but a compromised
+  server could keep handing them that ciphertext. Removal is what takes them out
+  cryptographically: the admin's signed change, committed by members, rotates the keys. The
+  server's own removal is only a hint to the clients (security review A8).
 
 ### 3.3 Moderation
 
@@ -269,6 +309,7 @@ What the server offers for the features above (all under `/api/v1`; instance adm
 | Mail server (§6.2)                       | `GET/PUT/DELETE /admin/settings/mail`, `POST /admin/settings/mail/test`            |
 | Calendar (§6.2)                          | `GET/PUT/DELETE /admin/settings/calendar`, `POST /admin/settings/calendar/test`    |
 | Instance settings (§6.3)                 | `GET/PUT /admin/settings`, `DELETE /admin/settings/{section}`                      |
+| Deactivate, reactivate, remove (§3.2.1)  | `POST /admin/users/{id}/deactivate`, `.../reactivate`, `.../remove-from-chats`      |
 
 Session length, idle timeout, required second factor, display name format and the privacy of names and
 e-mail addresses, and the presence switches (statuses on/off, custom status on/off, presets, away
@@ -348,7 +389,7 @@ Groups that are stored and reset as a whole:
 
 | Group            | Values                                                                                                                                        |
 |------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
-| `server_rules`   | invites need a verified e-mail address; default spaces and channels for new members                                                           |
+| `server_rules`   | invites need a verified e-mail address; default spaces and channels for new members; days until deactivated users are removed from all chats  |
 | `notifications`  | read receipt default, urgent repeat interval and count, phone push delay, desktop attention                                                   |
 | `email_digest`   | on/off, default and shortest interval, grace period, subjects and texts                                                                       |
 | `shares`         | on/off, default and longest expiry, download cap, links per user                                                                              |

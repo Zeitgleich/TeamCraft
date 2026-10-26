@@ -369,7 +369,7 @@ mod routing {
   }
 
   #[tokio::test]
-  async fn deactivated_users_are_not_pushed_to() {
+  async fn deactivated_users_are_not_pushed_to_until_reactivated() {
     let recorder = Recorder::default();
     let Some(app) = start(&recorder).await else { return };
     let s = scene(&app).await;
@@ -385,6 +385,21 @@ mod routing {
 
     send(&app, &s.alice, &s.channel, &s.alice_device, 1).await;
     assert!(recorder.wait_for(0).await.is_empty());
+
+    // The push registration was kept: after a reactivation pushes arrive again.
+    app
+      .post(
+        &admin(),
+        &format!("/admin/users/{carol_id}/reactivate"),
+        json!({}),
+      )
+      .await;
+    send(&app, &s.alice, &s.channel, &s.alice_device, 2).await;
+    let pushes = recorder.wait_for(1).await;
+    assert_eq!(
+      pushes.iter().map(|p| p.device.clone()).collect::<Vec<_>>(),
+      vec![s.carol_push_device.clone()]
+    );
     app.stop().await;
   }
 }

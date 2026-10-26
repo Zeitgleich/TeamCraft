@@ -318,6 +318,7 @@ fn default_runtime() -> RuntimeSettingsResponse {
       invites_require_verified_email: true,
       default_spaces: Vec::new(),
       default_channels: Vec::new(),
+      maybe_remove_deactivated_after_days: None,
     },
     notifications: NotificationRuntimeSettings {
       read_receipts_default: true,

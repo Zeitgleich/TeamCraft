@@ -296,7 +296,11 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
     .map_or_else(|| AppConfig::load().server_url, |server| server.origin);
   let sign_in = SignInPageState::load(server_url);
   let form = LocalForm::new();
-  let is_role_problem = problem == Some(LoginProblem::NoTeamcraftRole);
+  // Signing in again with the same account won't help: offer another one.
+  let is_role_problem = matches!(
+    problem,
+    Some(LoginProblem::NoTeamcraftRole | LoginProblem::AccountDeactivated)
+  );
   let is_core_problem = matches!(
     problem,
     Some(LoginProblem::CoreFailed(_) | LoginProblem::CoreStopped | LoginProblem::CoreNotSignedIn)
@@ -307,6 +311,9 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
   };
   let (title_key, body_key) = match &problem {
     Some(LoginProblem::NoTeamcraftRole) => (Some("login-no-role-title"), Some("login-no-role-body")),
+    Some(LoginProblem::AccountDeactivated) => {
+      (Some("login-deactivated-title"), Some("login-deactivated-body"))
+    },
     Some(LoginProblem::ServerUnreachable) => {
       (Some("login-unreachable-title"), Some("login-unreachable-body"))
     },
@@ -664,6 +671,7 @@ fn local_problem_message(problem: &LocalSignInProblem) -> (&'static str, Option<
     LocalSignInProblem::Refused => ("login-local-refused", None),
     LocalSignInProblem::Disabled => ("login-local-disabled", None),
     LocalSignInProblem::RateLimited => ("login-local-rate-limited", None),
+    LocalSignInProblem::Deactivated => ("login-deactivated-body", None),
     LocalSignInProblem::Network => ("login-local-network", None),
     LocalSignInProblem::Failed(detail) => ("login-local-failed", Some(detail.clone())),
   }
@@ -1661,6 +1669,10 @@ mod tests {
     assert_eq!(
       local_problem_message(&LocalSignInProblem::Network),
       ("login-local-network", None)
+    );
+    assert_eq!(
+      local_problem_message(&LocalSignInProblem::Deactivated),
+      ("login-deactivated-body", None)
     );
     assert_eq!(
       local_problem_message(&LocalSignInProblem::Failed("internal".into())),

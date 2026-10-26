@@ -99,14 +99,16 @@ impl Database {
     Ok(recipients)
   }
 
-  /// The user's devices with a push registration (not revoked), by device ID.
+  /// The user's devices with a push registration (not revoked), by device ID. None while the
+  /// account is deactivated: the registrations are kept for a reactivation, but not used.
   pub async fn list_push_devices(&self, user: UserId) -> Result<Vec<PushDeviceRow>, DbError> {
     let rows = sqlx::query!(
-      r#"SELECT id, push_provider AS "push_provider!", push_token AS "push_token!", push_key AS "push_key!"
-         FROM devices
-         WHERE user_id = $1 AND revoked_at IS NULL AND push_provider IS NOT NULL
-           AND push_token IS NOT NULL AND push_key IS NOT NULL
-         ORDER BY id"#,
+      r#"SELECT d.id, d.push_provider AS "push_provider!", d.push_token AS "push_token!",
+                d.push_key AS "push_key!"
+         FROM devices d JOIN users u ON u.id = d.user_id AND u.deactivated_at IS NULL
+         WHERE d.user_id = $1 AND d.revoked_at IS NULL AND d.push_provider IS NOT NULL
+           AND d.push_token IS NOT NULL AND d.push_key IS NOT NULL
+         ORDER BY d.id"#,
       to_db(user),
     )
     .fetch_all(self.pool())

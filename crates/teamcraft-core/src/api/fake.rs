@@ -1893,6 +1893,44 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  async fn admin_channels_of(&self, user: UserId) -> Result<Vec<ConversationId>, ApiError> {
+    self.with(|state, me| {
+      if !state.admins.contains(&me) {
+        return Err(ApiError::status(403, ErrorCode::Forbidden, "administrators only"));
+      }
+      Ok(
+        state
+          .conversations
+          .iter()
+          .filter(|(_, entry)| {
+            entry.response.kind == teamcraft_proto::ConversationKind::Channel
+              && entry.members.contains_key(&user)
+          })
+          .map(|(id, _)| *id)
+          .collect(),
+      )
+    })
+  }
+
+  async fn admin_remove_from_chats(&self, user: UserId) -> Result<(), ApiError> {
+    let me = self.user;
+    if !self.server.lock().admins.contains(&me) {
+      return Err(ApiError::status(403, ErrorCode::Forbidden, "administrators only"));
+    }
+    let conversations: Vec<ConversationId> = self
+      .server
+      .lock()
+      .conversations
+      .iter()
+      .filter(|(_, entry)| entry.members.contains_key(&user))
+      .map(|(id, _)| *id)
+      .collect();
+    for conversation in conversations {
+      self.server.remove_member_as_admin(conversation, user);
+    }
+    Ok(())
+  }
+
   async fn check_member_removal(&self, conversation: ConversationId, _user: UserId) -> Result<(), ApiError> {
     self.with(|state, me| state.removal_target(conversation, me).map(|_| ()))
   }

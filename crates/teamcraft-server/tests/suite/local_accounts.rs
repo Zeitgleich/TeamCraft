@@ -371,6 +371,76 @@ mod sign_in {
   }
 
   #[tokio::test]
+  async fn a_deactivated_account_is_signed_out_and_told_why_only_with_the_right_password() {
+    let (app, mailer) = app!();
+    let alice = owner();
+    let space = create_space(&app, &alice, "Client", "invite_only").await;
+    let (gus_id, token) = create_guest(&app, &mailer, &alice, &space).await;
+    let (_, activated) = public_post(
+      &app,
+      "/auth/local/activate",
+      json!({"token": token, "password": PASSWORD}),
+    )
+    .await;
+    let secret = activated["totp_secret"].as_str().unwrap().to_owned();
+    let (status, session) = public_post(
+      &app,
+      "/auth/local/login",
+      json!({"login": "gus@partner.test", "password": PASSWORD, "totp_code": code_at(&secret, -1)}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    let access = session["access_token"].as_str().unwrap().to_owned();
+    let (_, spaces) = bearer(&app, reqwest::Method::GET, &access, "/spaces", None).await;
+    assert_eq!(spaces["spaces"][0]["name"], "Client");
+
+    let done = app
+      .post(&alice, &format!("/admin/users/{gus_id}/deactivate"), json!({}))
+      .await;
+    assert_eq!(done.status, StatusCode::NO_CONTENT, "{}", done.body);
+    // The session ended at once.
+    let (status, _) = bearer(&app, reqwest::Method::GET, &access, "/me", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // A wrong password learns nothing; the right one hears that the account is deactivated.
+    let (status, reply) = public_post(
+      &app,
+      "/auth/local/login",
+      json!({"login": "gus@partner.test", "password": "wrong wrong wrong", "totp_code": code_at(&secret, 0)}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{reply}");
+    let (status, reply) = public_post(
+      &app,
+      "/auth/local/login",
+      json!({"login": "gus@partner.test", "password": PASSWORD, "totp_code": code_at(&secret, 0)}),
+    )
+    .await;
+    assert_eq!(
+      (status, reply["error_code"].as_str()),
+      (StatusCode::FORBIDDEN, Some("account_deactivated")),
+      "{reply}"
+    );
+
+    app
+      .post(&alice, &format!("/admin/users/{gus_id}/reactivate"), json!({}))
+      .await;
+    let (status, session) = public_post(
+      &app,
+      "/auth/local/login",
+      json!({"login": "gus@partner.test", "password": PASSWORD, "totp_code": code_at(&secret, 1)}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    let access = session["access_token"].as_str().unwrap().to_owned();
+    let (_, spaces) = bearer(&app, reqwest::Method::GET, &access, "/spaces", None).await;
+    assert_eq!(
+      spaces["spaces"][0]["name"], "Client",
+      "the space membership is kept"
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn changing_the_password_ends_all_sessions() {
     let (app, mailer) = app!();
     let alice = owner();

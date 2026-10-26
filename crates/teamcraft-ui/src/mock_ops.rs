@@ -573,6 +573,26 @@ impl AdminBackend for MockBackend {
     ops.record(self.now, action, &target, "");
   }
 
+  fn can_remove_from_chats(&self) -> bool {
+    true
+  }
+
+  fn remove_user_from_chats(&self, user: UserId) {
+    let mut ops = self.ops.borrow_mut();
+    let Some(entry) = ops
+      .users
+      .iter_mut()
+      .find(|candidate| candidate.user.id == user && !candidate.is_active)
+    else {
+      return;
+    };
+    entry.is_in_chats = false;
+    entry.devices.clear();
+    entry.space_names.clear();
+    let target = entry.user.display_name.clone();
+    ops.record(self.now, AuditAction::UserRemovedFromChats, &target, "");
+  }
+
   fn can_start_org_recovery(&self) -> bool {
     true
   }
@@ -1002,6 +1022,7 @@ fn demo_admin_users(now: TimestampMs, users: &[crate::model::User]) -> Vec<Admin
           vec!["Project A".into(), "Project B".into()]
         },
         is_active: n != 8,
+        is_in_chats: true,
         maybe_guest: (n == 9).then(|| GuestInfo {
           sponsor: id_from_raw(3),
           expires_at: now + 12 * DAY,
