@@ -5,12 +5,15 @@ use teamcraft_client_api::actions::{
   ForwardedFrom, LinkPreview, LinkedMessage, MessageEdit, MessageExtras, MessagePriority, OutgoingMessage,
   PermalinkTarget, ReplyPreview, SavedItem, WorkspaceEvent,
 };
-use teamcraft_client_api::model::{Bookmark, ConversationId, Message, MessageId, ThreadId, UserId};
-use teamcraft_proto::ClientMessageId;
+use teamcraft_client_api::model::{
+  Bookmark, ConversationId, IntegrationSource, Message, MessageId, NewIntegrationSource, ThreadId, UserId,
+};
+use teamcraft_proto::{ClientMessageId, SourceChange, SourceId};
 
 use crate::client::previews::queue_preview;
 use crate::client::{apply_control, forward_content, reply_ref, stored_account_data};
 use crate::error::CoreError;
+use crate::integration_sources::{SourceAuthority, SourceLedger};
 use crate::link_preview::is_allowed;
 use crate::read_state;
 use crate::records;
@@ -267,6 +270,56 @@ impl<S: LocalStore> CoreChatBackend<S> {
       })
       .collect();
     self.control(conversation, MessageContent::Bookmarks { items });
+  }
+
+  /// The channel's sources in force as this device judges them (integration_sources.rs). The UI
+  /// process doesn't look into the MLS group: decryption already proved the announcer was in it,
+  /// and the bridge checks the group itself.
+  pub(crate) fn ui_integration_sources(&self, conversation: ConversationId) -> Vec<IntegrationSource> {
+    let ledger = self.read(SourceLedger::load(self.store_ref(), conversation));
+    if ledger.revision == 0 {
+      return Vec::new();
+    }
+    let workspace: crate::workspace::WorkspaceState = self.read(
+      records::get_json(self.store_ref(), Table::Workspace, crate::client::WORKSPACE_KEY)
+        .map(Option::unwrap_or_default),
+    );
+    let max_age_ms =
+      i64::try_from(crate::ClientSettings::default().workspace_max_age.as_millis()).unwrap_or(i64::MAX);
+    let is_fresh = workspace.is_roster_fresh(self.now_ms(), max_age_ms);
+    let authority = self.read(
+      SourceAuthority::from_store(self.store_ref(), conversation, &workspace, is_fresh, None, []).map(Some),
+    );
+    let Some(authority) = authority else {
+      return Vec::new();
+    };
+    ledger
+      .active(conversation, &authority)
+      .into_iter()
+      .map(|source| IntegrationSource {
+        id: source.id,
+        name: source.name,
+        kind: source.kind,
+        created_by: source.created_by,
+        created_at_ms: source.created_at_ms,
+      })
+      .collect()
+  }
+
+  pub(crate) fn ui_add_integration_source(&self, conversation: ConversationId, source: NewIntegrationSource) {
+    let change = SourceChange::Created {
+      source: source.id,
+      name: source.name,
+      kind: source.kind,
+      token_sha256: source.token_sha256,
+      options: source.options,
+    };
+    self.control(conversation, MessageContent::IntegrationSource { change });
+  }
+
+  pub(crate) fn ui_revoke_integration_source(&self, conversation: ConversationId, source: SourceId) {
+    let change = SourceChange::Revoked { source };
+    self.control(conversation, MessageContent::IntegrationSource { change });
   }
 
   pub(crate) fn ui_pinned_messages(&self, conversation: ConversationId) -> Vec<Message> {

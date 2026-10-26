@@ -659,6 +659,25 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.space_members(space)
   }
 
+  fn integration_sources(
+    &self,
+    conversation: ConversationId,
+  ) -> Vec<teamcraft_client_api::model::IntegrationSource> {
+    self.chat.integration_sources(conversation)
+  }
+
+  fn add_integration_source(
+    &self,
+    conversation: ConversationId,
+    source: teamcraft_client_api::model::NewIntegrationSource,
+  ) {
+    self.chat.add_integration_source(conversation, source);
+  }
+
+  fn revoke_integration_source(&self, conversation: ConversationId, source: teamcraft_proto::SourceId) {
+    self.chat.revoke_integration_source(conversation, source);
+  }
+
   fn channel_roles(&self, conversation: ConversationId) -> Vec<teamcraft_client_api::model::ChannelMember> {
     self.chat.channel_roles(conversation)
   }

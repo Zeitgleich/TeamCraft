@@ -1198,6 +1198,28 @@ impl ChatBackend for RemoteChat {
     }
   }
 
+  fn integration_sources(
+    &self,
+    conversation: ConversationId,
+  ) -> Vec<teamcraft_client_api::model::IntegrationSource> {
+    match self.ask(ChatQuery::IntegrationSources { conversation }) {
+      Some(ChatAnswer::IntegrationSources { sources }) => sources,
+      _ => Vec::new(),
+    }
+  }
+
+  fn add_integration_source(
+    &self,
+    conversation: ConversationId,
+    source: teamcraft_client_api::model::NewIntegrationSource,
+  ) {
+    self.act(ChatAction::AddIntegrationSource { conversation, source });
+  }
+
+  fn revoke_integration_source(&self, conversation: ConversationId, source: teamcraft_proto::SourceId) {
+    self.act(ChatAction::RevokeIntegrationSource { conversation, source });
+  }
+
   fn channel_roles(&self, conversation: ConversationId) -> Vec<teamcraft_client_api::model::ChannelMember> {
     match self.ask(ChatQuery::ChannelRoles { conversation }) {
       Some(ChatAnswer::ChannelRoles { members }) => members,

@@ -28,6 +28,18 @@ impl SourceToken {
   pub fn generate(rng: &mut impl CryptoRngCore) -> Self {
     let mut bytes = [0u8; TOKEN_RANDOM_BYTES];
     rng.fill_bytes(&mut bytes);
+    Self::from_random(bytes)
+  }
+
+  /// A fresh token from the operating system's (or browser's) random source; `None` if it fails,
+  /// never a weak token.
+  pub fn random() -> Option<Self> {
+    let mut bytes = [0u8; TOKEN_RANDOM_BYTES];
+    rand_core::RngCore::try_fill_bytes(&mut rand_core::OsRng, &mut bytes).ok()?;
+    Some(Self::from_random(bytes))
+  }
+
+  fn from_random(mut bytes: [u8; TOKEN_RANDOM_BYTES]) -> Self {
     let token = format!("{SOURCE_TOKEN_PREFIX}{}", URL_SAFE_NO_PAD.encode(bytes));
     bytes.zeroize();
     Self(token)
@@ -82,6 +94,10 @@ mod tests {
     let one = SourceToken::generate(&mut OsRng);
     let two = SourceToken::generate(&mut OsRng);
     assert_ne!(one.expose_secret(), two.expose_secret());
+    assert_ne!(
+      SourceToken::random().unwrap().expose_secret(),
+      one.expose_secret()
+    );
     let text = one.expose_secret();
     assert!(text.starts_with(SOURCE_TOKEN_PREFIX));
     assert_eq!(text.len(), SOURCE_TOKEN_PREFIX.len() + 43);

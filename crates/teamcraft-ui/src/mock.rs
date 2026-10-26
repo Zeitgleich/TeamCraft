@@ -211,6 +211,7 @@ struct State {
   /// every space otherwise).
   space_roles: HashMap<(SpaceId, UserId), SpaceRole>,
   channel_roles: HashMap<(ConversationId, UserId), teamcraft_client_api::model::ChannelRole>,
+  integration_sources: Vec<(ConversationId, teamcraft_client_api::model::IntegrationSource)>,
   space_leavers: HashSet<(SpaceId, UserId)>,
   invites: Vec<(SpaceId, PendingInvite)>,
 }
@@ -270,6 +271,7 @@ impl MockBackend {
       }],
       space_roles: HashMap::new(),
       channel_roles: HashMap::new(),
+      integration_sources: Vec::new(),
       space_leavers: HashSet::new(),
       invites: vec![(
         space_a(),
@@ -524,6 +526,47 @@ impl ChatBackend for MockBackend {
       .filter(|(of, _)| *of == space)
       .map(|(_, invite)| invite.clone())
       .collect()
+  }
+
+  fn integration_sources(
+    &self,
+    conversation: ConversationId,
+  ) -> Vec<teamcraft_client_api::model::IntegrationSource> {
+    self
+      .state
+      .borrow()
+      .integration_sources
+      .iter()
+      .filter(|(id, _)| *id == conversation)
+      .map(|(_, source)| source.clone())
+      .collect()
+  }
+
+  fn add_integration_source(
+    &self,
+    conversation: ConversationId,
+    source: teamcraft_client_api::model::NewIntegrationSource,
+  ) {
+    let listed = teamcraft_client_api::model::IntegrationSource {
+      id: source.id,
+      name: source.name,
+      kind: source.kind,
+      created_by: me(),
+      created_at_ms: crate::clock::now_ms(),
+    };
+    self
+      .state
+      .borrow_mut()
+      .integration_sources
+      .push((conversation, listed));
+  }
+
+  fn revoke_integration_source(&self, conversation: ConversationId, source: teamcraft_proto::SourceId) {
+    self
+      .state
+      .borrow_mut()
+      .integration_sources
+      .retain(|(id, listed)| !(*id == conversation && listed.id == source));
   }
 
   fn channel_roles(&self, conversation: ConversationId) -> Vec<teamcraft_client_api::model::ChannelMember> {

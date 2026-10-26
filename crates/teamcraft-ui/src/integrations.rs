@@ -1,13 +1,17 @@
 //! Bots and the bridge setup in the app (docs/bridge.md): the admin's list of bot accounts with
-//! create / rotate / revoke, and the text a bridge operator pastes (configuration, webhook and log
-//! URLs). The server owns the bots; this module is the REST client and the pure text builders.
+//! create / rotate / revoke, the text a bridge operator pastes (configuration), and the webhook and
+//! log URLs of a source. The server owns the bots; this module is the REST client and the pure
+//! builders.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use teamcraft_proto::{BotResponse, BotTokenResponse, CreateBotRequest, ListBotsResponse};
+use teamcraft_crypto::source_token::SourceToken;
+use teamcraft_proto::{
+  BotResponse, BotTokenResponse, CreateBotRequest, ListBotsResponse, MAX_SOURCE_NAME_CHARS, SourceTokenHash,
+};
 
 use crate::auth::ApiMethod;
-use crate::model::{ConversationId, UserId};
+use crate::model::UserId;
 use crate::reactive::SetIfAlive;
 use crate::rest::{RestClient, RestError};
 
@@ -125,15 +129,6 @@ pub fn bridge_config(server_url: &str, bot_name: &str) -> String {
   )
 }
 
-/// A `[[sources]]` block that sends to `conversation`; `source_name` is the label in the bridge's
-/// logs and `source_token` the secret part of the URLs.
-pub fn source_block(conversation: ConversationId, source_name: &str, source_token: &str) -> String {
-  format!(
-    "[[sources]]\nname = \"{}\"\ntoken = \"{source_token}\"\nconversation_id = \"{conversation}\"\n",
-    toml_escape(source_name)
-  )
-}
-
 /// Where producers reach the bridge: the instance's address (`server_url`) or the loopback default.
 /// Without a known instance address the loopback default is the only usable answer.
 pub fn bridge_base_url(location: BridgeLocation, server_url: &str) -> String {
@@ -154,16 +149,27 @@ pub fn ingest_url(base_url: &str, source_token: &str) -> String {
   format!("{base_url}/ingest/{source_token}")
 }
 
-/// A random-looking source token for the snippet: 32 hex characters from the browser's CSPRNG
-/// (`getrandom`); the operator may replace it with any 24+ characters.
-pub fn new_source_token() -> String {
-  let mut bytes = [0_u8; 16];
-  // Without a random source the snippet shows a placeholder the operator must replace: never a
-  // predictable token that looks real.
-  if getrandom::getrandom(&mut bytes).is_err() {
-    return "replace-with-24-or-more-random-characters".to_owned();
+/// A source token made for "Add source": the token to show once, and the hash that is announced.
+pub struct NewSource {
+  pub token: String,
+  pub token_sha256: SourceTokenHash,
+}
+
+impl NewSource {
+  /// `None` when the browser has no random source: never a predictable token.
+  pub fn generate() -> Option<Self> {
+    let token = SourceToken::random()?;
+    Some(Self {
+      token_sha256: SourceTokenHash::from_bytes(token.sha256()),
+      token: token.expose_secret().to_owned(),
+    })
   }
-  bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Whether a source name may be announced (the receiving devices drop other names).
+pub fn is_valid_source_name(name: &str) -> bool {
+  let name = name.trim();
+  !name.is_empty() && name.chars().count() <= MAX_SOURCE_NAME_CHARS && !name.chars().any(char::is_control)
 }
 
 fn toml_escape(text: &str) -> String {
@@ -176,7 +182,6 @@ fn toml_escape(text: &str) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::model::id_from_raw;
 
   #[test]
   fn the_config_names_server_token_and_device() {
@@ -188,10 +193,22 @@ mod tests {
   }
 
   #[test]
-  fn a_source_block_points_at_the_channel() {
-    let text = source_block(id_from_raw(42), "nas-logs", "tok");
-    assert!(text.contains("conversation_id = \"42\""));
-    assert!(text.contains("name = \"nas-logs\""));
+  fn a_new_source_announces_the_hash_of_the_token_it_shows() {
+    let source = NewSource::generate().unwrap();
+    assert!(source.token.starts_with("tcs_"));
+    assert_eq!(
+      source.token_sha256,
+      SourceTokenHash::from_bytes(teamcraft_crypto::source_token::source_token_sha256(&source.token))
+    );
+    assert_ne!(NewSource::generate().unwrap().token, source.token);
+  }
+
+  #[test]
+  fn source_names_must_be_short_printable_and_not_blank() {
+    assert!(is_valid_source_name(" ci "));
+    assert!(!is_valid_source_name("   "));
+    assert!(!is_valid_source_name(&"x".repeat(MAX_SOURCE_NAME_CHARS + 1)));
+    assert!(!is_valid_source_name("a\nb"));
   }
 
   #[test]

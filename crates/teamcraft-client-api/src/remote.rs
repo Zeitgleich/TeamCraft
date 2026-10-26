@@ -729,6 +729,14 @@ pub enum ChatAction {
     conversation: ConversationId,
     bookmarks: Vec<crate::model::Bookmark>,
   },
+  AddIntegrationSource {
+    conversation: ConversationId,
+    source: crate::model::NewIntegrationSource,
+  },
+  RevokeIntegrationSource {
+    conversation: ConversationId,
+    source: teamcraft_proto::SourceId,
+  },
   AddMemberWithHistory {
     conversation: ConversationId,
     user: UserId,
@@ -992,6 +1000,12 @@ impl ChatAction {
         conversation,
         bookmarks,
       } => backend.set_bookmarks(conversation, bookmarks),
+      Self::AddIntegrationSource { conversation, source } => {
+        backend.add_integration_source(conversation, source)
+      },
+      Self::RevokeIntegrationSource { conversation, source } => {
+        backend.revoke_integration_source(conversation, source)
+      },
       Self::InviteToSpace { invite } => backend.invite_to_space(invite),
       Self::AddSpaceMembers {
         space,
@@ -1086,6 +1100,9 @@ pub enum ChatQuery {
     space: SpaceId,
   },
   ChannelRoles {
+    conversation: ConversationId,
+  },
+  IntegrationSources {
     conversation: ConversationId,
   },
   SpaceInvites {
@@ -1204,6 +1221,10 @@ pub enum ChatAnswer {
   ChannelRoles {
     #[serde(default)]
     members: Vec<crate::model::ChannelMember>,
+  },
+  IntegrationSources {
+    #[serde(default)]
+    sources: Vec<crate::model::IntegrationSource>,
   },
   SpaceInvites {
     invites: Vec<crate::model::PendingInvite>,
@@ -1342,6 +1363,9 @@ impl ChatQuery {
       },
       Self::ChannelRoles { conversation } => ChatAnswer::ChannelRoles {
         members: backend.channel_roles(conversation),
+      },
+      Self::IntegrationSources { conversation } => ChatAnswer::IntegrationSources {
+        sources: backend.integration_sources(conversation),
       },
       Self::SpaceMembers { space } => ChatAnswer::SpaceMembers {
         roster: backend.space_members(space),

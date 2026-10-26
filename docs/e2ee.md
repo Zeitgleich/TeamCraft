@@ -1868,6 +1868,47 @@ E2EE means a bot can only read a channel if it is a member with its own device k
 run as clients (TeamCraft bot SDK, Rust) on a machine we trust, not on the VPS. Incoming webhooks and
 logs are encrypted by `teamcraft-bridge`, which runs next to the source (ARCHITECTURE.md §4.5).
 
+### 13.1 Bridge sources announced in the channel
+
+A channel admin adds a webhook or log source in the app (docs/bridge.md, "Sources") without
+touching the bridge's configuration. The app generates the source token (256 random bits,
+`teamcraft-crypto::source_token`), shows the URL once and sends an encrypted control message into
+the channel: `MessageContent::IntegrationSource` with a `SourceChange` (`teamcraft-proto`):
+
+| Change    | Carries                                                                                                                             |
+|-----------|-------------------------------------------------------------------------------------------------------------------------------------|
+| `created` | random source ID, name, kind (`webhook`, `log`), SHA-256 of the token, options (danger attachments alert, alert levels, rate limit) |
+| `renamed` | source ID, new name                                                                                                                 |
+| `revoked` | source ID                                                                                                                           |
+
+The message is hidden from the timeline; older clients that don't know the kind keep it as
+`unknown` (also hidden), and unknown changes or kinds are ignored. The token itself never travels;
+the bridge hashes the token of each request and compares it with every known hash in constant time.
+
+**Trust rule.** The server sees ciphertext only and can't write in the channel's group, so it can
+neither create nor alter a source. Each member device (the bridge included) keeps a bounded ledger
+per channel (`teamcraft-core::integration_sources`, at most 1024 sources) and decides at use which
+sources are in force:
+
+- A source counts only if its creator is, at that moment, a member of the channel's MLS group
+  (the bridge checks its own group; decrypting proved the creator wrote as a member), not a guest
+  or bot, and a workspace admin of the verified, fresh roster (admin.md §2.3) **or** a channel
+  admin. Channel roles are still the server's word (signed channel roles: issue #380), so they only
+  choose among the group's members, the same people who may already change the group's
+  membership (§4.6). A compromised server can't make a non-member a source admin, and a source
+  always posts into the channel whose group announced it, never elsewhere. A creator who loses the
+  role or leaves the channel takes their sources out of force.
+- A revocation counts from any member of the group and is final: a revoked source never comes
+  back, whatever arrives later or in which order. Revoking fails safe.
+- A rename counts from somebody who may manage sources; the newest by server order wins.
+- Of two announcements with the same source ID the first the server numbered wins, so a member
+  can't take over another's source by reusing its ID.
+
+The bridge reads the ledgers from its encrypted store once a second, reads the channel roles again
+when a ledger changed, and looks back once through older history (bounded) when its database is
+new. A bot added after a source was announced can't read the announcement (history from its join
+only), so the app offers "Add source" only once a bot is in the channel.
+
 ## 14. Open questions
 
 - Key transparency: when?

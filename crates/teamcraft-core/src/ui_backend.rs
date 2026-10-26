@@ -1740,6 +1740,25 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.command(CoreCommand::RefreshSpaceRoster { space });
   }
 
+  fn integration_sources(
+    &self,
+    conversation: ConversationId,
+  ) -> Vec<teamcraft_client_api::model::IntegrationSource> {
+    self.ui_integration_sources(conversation)
+  }
+
+  fn add_integration_source(
+    &self,
+    conversation: ConversationId,
+    source: teamcraft_client_api::model::NewIntegrationSource,
+  ) {
+    self.ui_add_integration_source(conversation, source);
+  }
+
+  fn revoke_integration_source(&self, conversation: ConversationId, source: teamcraft_proto::SourceId) {
+    self.ui_revoke_integration_source(conversation, source);
+  }
+
   fn channel_roles(&self, conversation: ConversationId) -> Vec<teamcraft_client_api::model::ChannelMember> {
     let stored: Option<teamcraft_proto::ListConversationMembersResponse> = self.read(records::get_json(
       &self.store,
@@ -1944,6 +1963,93 @@ mod tests {
       backend.drain_commands(),
       vec![CoreCommand::MarkRead { conversation }]
     );
+  }
+
+  #[test]
+  fn a_channel_admin_adds_and_revokes_sources_and_the_announcements_stay_out_of_the_feed() {
+    use teamcraft_client_api::model::NewIntegrationSource;
+    use teamcraft_proto::{SourceId, SourceKind, SourceOptions, SourceTokenHash};
+
+    let store = std::sync::Arc::new(MemoryStore::new());
+    let (me, colleague) = (id::<UserId>(1), id::<UserId>(2));
+    let conversation = id::<ConversationId>(10);
+    let summary = |user: UserId| UserSummary {
+      id: user,
+      maybe_username: None,
+      display_name: format!("user {user}"),
+      kind: teamcraft_proto::UserKind::Member,
+      maybe_email: None,
+      maybe_organization: None,
+      maybe_has_devices: None,
+    };
+    let members = ListConversationMembersResponse {
+      members: vec![
+        teamcraft_proto::ConversationMemberResponse {
+          user: summary(me),
+          role: teamcraft_proto::ChannelRole::Admin,
+        },
+        teamcraft_proto::ConversationMemberResponse {
+          user: summary(colleague),
+          role: teamcraft_proto::ChannelRole::Member,
+        },
+      ],
+    };
+    records::put_json(&*store, Table::Members, &conversation.to_string(), &members).unwrap();
+    let backend = CoreChatBackend::new(store.clone(), me, Box::new(ManualClock::new(1_000)));
+    let source = SourceId::random();
+    backend.add_integration_source(
+      conversation,
+      NewIntegrationSource {
+        id: source,
+        name: "ci".into(),
+        kind: SourceKind::Webhook,
+        token_sha256: SourceTokenHash::from_bytes([3; 32]),
+        options: SourceOptions::default(),
+      },
+    );
+    let listed = backend.integration_sources(conversation);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+      (
+        listed[0].name.as_str(),
+        listed[0].created_by,
+        listed[0].created_at_ms
+      ),
+      ("ci", me, 1_000)
+    );
+    assert_eq!(backend.message_count(conversation), 0, "hidden from the feed");
+    assert_eq!(
+      records::outbox(&store).unwrap().len(),
+      1,
+      "on its way to the members"
+    );
+
+    // The same announcement from a member who is no channel admin is not in force.
+    let mut ledger = crate::integration_sources::SourceLedger::load(&*store, conversation).unwrap();
+    ledger.apply(
+      colleague,
+      &teamcraft_proto::SourceChange::Created {
+        source: SourceId::random(),
+        name: "sneaky".into(),
+        kind: SourceKind::Log,
+        token_sha256: SourceTokenHash::from_bytes([4; 32]),
+        options: SourceOptions::default(),
+      },
+      2_000,
+      None,
+    );
+    records::put_json(
+      &*store,
+      Table::Account,
+      &format!("integration_sources/{conversation}"),
+      &ledger,
+    )
+    .unwrap();
+    assert_eq!(backend.integration_sources(conversation).len(), 1);
+
+    backend.revoke_integration_source(conversation, source);
+    assert!(backend.integration_sources(conversation).is_empty());
+    assert_eq!(records::outbox(&store).unwrap().len(), 2);
   }
 
   #[test]

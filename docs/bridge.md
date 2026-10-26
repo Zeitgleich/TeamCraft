@@ -27,7 +27,8 @@ the VPS that runs the server.
 | `GET /healthz`         | `200 ok`, for the container health check                                                                     |
 
   `icon_url`, `channel` and blocks of the Slack format are ignored: the source's token decides the
-  conversation. Slack markup (`<url|label>`, `<@user>`, `<!here>`) becomes Markdown.
+  conversation. Slack markup (`<url|label>`, `<@user>`, `<!here>`) becomes Markdown. A source added
+  in the app opens one of the two endpoints (its kind); a token on the other one gets `404`.
 
 ```sh
 curl -d '{"text":"Deploy finished","username":"ci"}' http://127.0.0.1:8088/hooks/<token>
@@ -51,8 +52,9 @@ journalctl -f | curl -T - -H 'Content-Type: text/plain' http://127.0.0.1:8088/in
 - **No channel yet:** messages for a channel the bot hasn't been added to wait (up to 1000) and go
   out once it joins. A lost connection is retried with backoff; sends that fail stay in the
   encrypted outbox of the local store.
-- Tokens are part of the URL, so treat the URL as the credential: unknown tokens get `404`, tokens
-  are compared in constant time, and the listener is loopback unless you open it.
+- Tokens are part of the URL, so treat the URL as the credential: unknown tokens get `404`, the
+  bridge knows only their SHA-256 and compares it in constant time, and the listener is loopback
+  unless you open it.
 
 ## Setup
 
@@ -63,21 +65,54 @@ In the app:
    token at once, "Revoke" deactivates the bot. (API: `POST /api/v1/admin/bots`.)
 2. **Channel settings → Integrations** (channel admins): add the bot to the channel. If the bot is not
    in the channel's space yet it joins it as a guest first (space admins), then its device is
-   committed into the channel's encryption group from the client and handed the content keys. The
-   section also shows a `[[sources]]` block for this channel with the webhook and log URLs to point
-   Grafana, CI or `journalctl` at, for either place the bridge can run (see "Where producers reach
-   the bridge" below). A bot can be added to **any** channel; a bot's messages carry a bot badge.
-3. **Channel settings → Integrations → Mode** (or "Channel type" in the new-channel dialog): "Normal"
+   committed into the channel's encryption group from the client and handed the content keys. A bot
+   can be added to **any** channel; a bot's messages carry a bot badge.
+3. **Channel settings → Integrations → Sources** (channel admins): "Add source" with a name and a
+   kind (webhook or log lines) shows the URL once, to point Grafana, CI or `journalctl` at; the
+   bridge serves it within a second, with no configuration change and no restart (see "Sources"
+   below).
+4. **Channel settings → Integrations → Mode** (or "Channel type" in the new-channel dialog): "Normal"
    or "Log channel" (`is_integration`: log view, log retention, 30 days by default, `[integration]`
    in the server config, and push only for @mentions). Log channels are private; switch an existing
    private channel at any time.
-4. Configure the bridge (`crates/teamcraft-bridge/teamcraft-bridge.example.toml`) with the server
-   URL, the bot token, a database key and a recovery passphrase, and one `[[sources]]` block per
-   producer. Start it; the first run enrolls the bot's device and it picks the welcomes of its
-   channels up through its gateway connection.
+5. Configure the bridge once (`crates/teamcraft-bridge/teamcraft-bridge.example.toml`) with the
+   server URL, the bot token, a database key and a recovery passphrase. Start it; the first run
+   enrolls the bot's device and it picks the welcomes of its channels up through its gateway
+   connection. Sources need no entry here.
 
-The bridge never adds itself to a channel, and the app never shows a bot's token again after the
-first display (only its hash is stored).
+The bridge never adds itself to a channel, and the app never shows a bot's or a source's token again
+after the first display (only their hashes are kept).
+
+## Sources
+
+A source is a token that posts into one channel. Channel admins manage them in the app; the bridge
+reads them from the channel itself (e2ee.md §13.1):
+
+1. "Add source" generates the token in the app (256 random bits, `tcs_...`) and sends an encrypted,
+   hidden control message into the channel: source ID, name, kind, the token's SHA-256 and the
+   options (webhooks: attachments with `color: "danger"` mention people; log lines: the default alert
+   levels; 600 per minute). The token and its URL are shown once, with a copy button.
+2. The bridge is a member of the channel, so it decrypts the message like every member device. It
+   keeps the sources in its encrypted store and swaps its table of tokens live (checked once a
+   second). A restart serves them from the store at once.
+3. "Revoke" sends another control message; the token stops working as soon as the bridge read it,
+   and a revoked source never comes back. The list shows the sources in force with who added them
+   and when; to replace a leaked URL, revoke the source and add a new one.
+
+Who may: the bridge accepts a source only from a current, non-guest member of the channel's
+encryption group who is a channel admin or a workspace admin of the verified roster, judged when
+the source is used (a creator who loses the role or leaves takes their sources out of force). Any
+member may revoke. The server only carries ciphertext, so it can neither add nor change a source.
+
+The bridge learns of sources through the channel, so the bot must be in the channel before a source
+is added (the app offers "Add source" only then): a bot added later reads history from its join on.
+When its database is new or was lost, the bridge reads the channels' older history once
+(`[app_sources] history_pages`, 200 pages of 50 messages) for older announcements; sources older than
+that have to be added again.
+
+**Sources in the file.** A bridge on its own host may still list `[[sources]]` (token, conversation,
+mentions) in its configuration, read at start; they serve both endpoints. `[app_sources] enabled =
+false` turns app-managed sources off for such a bridge.
 
 ### Where producers reach the bridge
 
@@ -115,7 +150,10 @@ loopback only: `-p 127.0.0.1:8088:8088`.
 ## Limits of the current version
 
 - The bridge sends text. File attachments of webhooks (Slack `files`) are ignored.
-- Source configuration is read at start; changing a source needs a restart.
+- `[[sources]]` in the configuration file are read at start; changing one needs a restart. Sources
+  added in the app don't.
+- Sources added in the app have no alert mentions yet (the file's `mentions` has no app equivalent)
+  and no rename in the UI (the control message exists).
 - Channel membership of the bot is managed by members/admins, as for any user; the bridge never
   adds itself.
 - The bot list shows no last-activity time and bots have no picture yet.

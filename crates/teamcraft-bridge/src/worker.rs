@@ -230,11 +230,12 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
       .get(&conversation)
       .is_none_or(|seen| *seen != sources.revision);
     if is_new && sources.revision > 0 && self.gateway.is_some() {
-      // Somebody announced, renamed or revoked a source: judge it by the current channel roles.
+      // Somebody announced, renamed or revoked a source: judge it by the current channel roles. Once
+      // per change, also when it fails (the gateway's member events keep the roles current too), so a
+      // refusing server isn't asked every second.
+      self.seen_revisions.insert(conversation, sources.revision);
       if let Err(error) = self.client.refresh_source_authority(conversation).await {
         debug!(%error, %conversation, "reading the channel roles failed; using the stored ones");
-      } else {
-        self.seen_revisions.insert(conversation, sources.revision);
       }
       sources = self.client.integration_sources(conversation)?;
     }

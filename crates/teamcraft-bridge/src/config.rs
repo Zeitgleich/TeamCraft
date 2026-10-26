@@ -423,7 +423,8 @@ mod tests {
     fn the_example_file_loads() {
       let text = include_str!("../teamcraft-bridge.example.toml");
       let config = BridgeConfig::from_toml(text).unwrap();
-      assert!(!config.sources.is_empty());
+      assert!(config.sources.is_empty(), "sources come from the app");
+      assert!(config.app_sources.is_enabled);
     }
   }
 
