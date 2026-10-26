@@ -39,8 +39,13 @@
   <!-- Conversation -->
   <string name="jump_down">Jump to the newest message</string>
   <plurals name="jump_down_new">
-    <item quantity="one">%d newer message, jump down</item>
-    <item quantity="other">%d newer messages, jump down</item>
+    <item quantity="one">%d new message, jump down</item>
+    <item quantity="other">%d new messages, jump down</item>
+  </plurals>
+  <!-- The pill over the conversation when messages arrived below; %s is the count (or "99+") -->
+  <plurals name="jump_down_unseen">
+    <item quantity="one">%s new</item>
+    <item quantity="other">%s new</item>
   </plurals>
   <string name="day_today">Today</string>
   <string name="day_yesterday">Yesterday</string>
