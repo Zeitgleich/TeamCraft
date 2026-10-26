@@ -45,6 +45,7 @@ pub mod image_crop;
 pub mod integrations;
 pub mod keys;
 pub mod large_files;
+pub mod last_place;
 pub mod lightbox;
 pub mod live;
 pub mod markdown;
