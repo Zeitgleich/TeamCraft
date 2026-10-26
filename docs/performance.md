@@ -402,6 +402,64 @@ What changed and what the numbers say:
   number of groups; splitting it per group is a change to the store format and needs its own
   review.
 
+#### Coming back: requests and round trips (issue #714)
+
+Product requirement: after the app opens, the sync is done in **under 300 ms**, whatever the size of
+the workspace and its chats. `tests/e2e` `sync_perf.rs` measures the client core (the code every app
+runs) against the release harness's real server, Keycloak and MLS: Carol is in 3 spaces with 24
+channels, one message each. It measures from "a new client opens the store" to "the gateway
+connection is caught up" for a fresh session after the resume window (`session_invalid`) on an
+unchanged workspace, the same with three channels that got a message meanwhile, and a resume within
+the window. Every scenario runs once directly against the local server and once through a relay that
+adds 30 ms to every round trip, like a client in another region or on a good mobile network. Debug
+build of the server and the test, local machine (24 threads), October 2026; the core's own work (MLS,
+store) is slower in a debug build than in the apps.
+
+```sh
+E2E_REQUIRED=1 cargo test -p teamcraft-e2e --features e2e --test suite -- --nocapture sync_perf
+```
+
+| What                                       | Before: requests | Before: local | Before: 30 ms RTT | After: requests | After: local | After: 30 ms RTT | Budget   |
+|--------------------------------------------|------------------|---------------|-------------------|-----------------|--------------|------------------|----------|
+| Fresh session, unchanged workspace         | 91               | 249 ms        | 1,333 ms          | 16              | 87 ms        | 187 ms           | ≤ 300 ms |
+| Fresh session, three channels with news    | 91               | 258 ms        | 1,369 ms          | 22              | 119 ms       | 248 ms           | -        |
+| Resume within the window                   | 6                | 27 ms         | 264 ms            | 6               | 9 ms         | 74 ms            | ≤ 300 ms |
+
+"Before" is `main` f1a0f6e with the same test. The client prints the phases of each connection
+(`gateway connection caught up`, `Client::last_connection_phases`); after the change, 30 ms away, an
+unchanged workspace spends them like this: socket and `hello` 33 ms, `ready` 35 ms, the first reads
+(all at once) 56 ms, then local work: deciding what is due 12 ms, the device list check 15 ms, the
+rest a few ms.
+
+What changed and what the numbers say:
+
+- **One request per conversation was the cost.** Every member list, MLS queue and history page was read
+  for every conversation (24 × 3 requests here), so the time grew with the workspace: about 300
+  conversations took tens of seconds (see "Coming back: the open channel first" above). Now
+  `GET /sync/heads` names where each conversation stands, and only conversations whose newest message,
+  MLS entry or member list moved are read: 16 requests for 24 channels here, and in the core suite
+  as many for 8 channels as for 2
+  (`sync_heads::an_unchanged_workspace_costs_no_request_per_conversation`). The
+  server answers it with three queries and one per space; the newest IDs are one backward index probe
+  each (`mls_messages_conversation_id_idx`, migration 0063).
+- **Round trips, not requests, are what a user far away waits for.** The full sync asked one thing
+  after the other (about 30 round trips: 1.3 s at 30 ms, several seconds on a mobile network). The
+  first reads now go out together after `ready` and each step takes its answer: three round trips for an
+  unchanged workspace: socket and `hello`, `ready`, the first reads. The member lists and first
+  pages of changed conversations are read at once too, and each conversation's MLS queue and history
+  side by side.
+- **A resume** read its counts, presence and link requests one after the other after the answer; now
+  they are read while the server answers.
+- The budget test fails above 18 requests or 300 ms for an unchanged workspace, also at 30 ms RTT.
+
+Left open (see the PR of #714/#717):
+
+- The web and desktop shells still restore the sign-in (token refresh at the identity provider) and read
+  `GET /me` before they start the core; offline the web app shows the sign-in page instead of the
+  stored chats. The cached account should start the core at once and the sign-in be checked beside it.
+- The web core decrypts the whole IndexedDB store into memory before it answers the first read.
+- The MLS state is still one record (#424); a catch-up of many changed groups rewrites it per group.
+
 The desktop and Android apps are measured against the same harness (`PERF_MOBILE_USER`) in a local
 session. Slack, Teams and Element were not measured: that needs their apps installed and accounts
 on their services.
