@@ -29,6 +29,7 @@ pub mod oidc_login;
 pub mod os_notify;
 pub mod page_calls;
 pub mod privacy;
+pub mod receipts;
 pub mod remote;
 pub mod role_rules;
 pub mod search;

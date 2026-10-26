@@ -91,6 +91,46 @@ struct MessageExtras: Decodable, Equatable, Sendable {
   /// Deleted for everyone: a placeholder instead of the body.
   let isDeleted: Bool?
   let maybeForwarded: ForwardedFrom?
+  /// An own message the other member of a DM read: two ticks instead of one (#769).
+  let isRead: Bool?
+  /// A membership or channel change someone made, shown as a line instead of a bubble.
+  let maybeWorkspaceEvent: WorkspaceEvent?
+}
+
+/// A membership or channel change and who made it (`WorkspaceEvent`, tagged by `event`). Read
+/// leniently: a field missing or an event this version doesn't know never fails the extras.
+enum WorkspaceEvent: Decodable, Equatable, Sendable {
+  case memberAdded(user: String, by: String, sharesHistory: Bool)
+  case memberRemoved(user: String, by: String)
+  case archived(by: String)
+  case unarchived(by: String)
+  case madePrivate(by: String)
+  case madePublic(by: String)
+  /// To the space named `space`; empty if the mover's device didn't know its name.
+  case moved(by: String, space: String)
+  case pinned(by: String)
+  case unknown
+
+  private enum CodingKeys: String, CodingKey {
+    case event, user, by, history, space
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    let text = { (key: CodingKeys) -> String? in try? container.decodeIfPresent(String.self, forKey: key) }
+    let by = text(.by) ?? ""
+    switch text(.event) {
+    case "member_added": self = .memberAdded(user: text(.user) ?? "", by: by, sharesHistory: text(.history) == "full")
+    case "member_removed": self = .memberRemoved(user: text(.user) ?? "", by: by)
+    case "archived": self = .archived(by: by)
+    case "unarchived": self = .unarchived(by: by)
+    case "made_private": self = .madePrivate(by: by)
+    case "made_public": self = .madePublic(by: by)
+    case "moved": self = .moved(by: by, space: text(.space) ?? "")
+    case "pinned": self = .pinned(by: by)
+    default: self = .unknown
+    }
+  }
 }
 
 /// Where a forwarded message came from.

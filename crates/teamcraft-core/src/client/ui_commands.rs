@@ -148,6 +148,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           .await
       },
       CoreCommand::RefreshPresence { users } => self.refresh_presence(&users).await,
+      CoreCommand::RefreshReadReceipts { conversation } => self.refresh_read_receipts(conversation).await,
       CoreCommand::SearchDirectory { query } => self.search_directory(&query).await.map(|_| ()),
       CoreCommand::RefreshPrivacy => self.refresh_privacy().await.map(|_| ()),
       CoreCommand::SetLastSeenVisibility { visibility } => self.set_last_seen_visibility(visibility).await,

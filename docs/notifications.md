@@ -477,6 +477,14 @@ who) and its messages keep the single tick; channels show one tick only. Because
 receipts, they are reciprocal: someone with receipts off neither sends nor sees them.
 "Delivered" (two grey ticks, derived from device sync cursors on the server) is not built yet.
 
+The rules live in teamcraft-client-api (`receipts`), so every platform decides alike. The mobile apps
+read the result from the core: `MessageExtras::is_read` marks an own message the other member of a
+DM read (issue #769); inside an own bubble, which already has the accent, the two ticks take the
+bubble's full text colour where the single tick is muted. Receipts sent while a device was offline
+never arrive as events: desktop and web read the open DM's receipts after each connection, the apps
+ask the core for them (`refresh_read_receipts`) when a conversation opens and when the connection
+comes back. The group DM's "Seen by" line is not in the apps yet.
+
 ## Urgent messages
 
 A sender marks a message urgent (`is_urgent`). Recipients acknowledge with

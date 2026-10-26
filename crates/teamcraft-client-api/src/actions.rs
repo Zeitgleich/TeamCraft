@@ -122,6 +122,11 @@ pub struct MessageExtras {
   /// or "delete" ([`crate::remote::ChatAction::DiscardUnsent`]) instead of "sending…" forever.
   #[serde(default)]
   pub is_send_failed: bool,
+  /// An own message every other member read, in a conversation whose receipts show as ticks
+  /// ([`crate::receipts::ReadIndicator::Ticks`]): its two ticks (#568, #769). Never set without
+  /// receipts (channels, group DMs, receipts off on either side).
+  #[serde(default)]
+  pub is_read: bool,
 }
 
 impl MessageExtras {
@@ -144,6 +149,7 @@ impl MessageExtras {
       maybe_link_preview: None,
       maybe_workspace_event: None,
       is_send_failed: false,
+      is_read: false,
     }
   }
 }
@@ -755,6 +761,30 @@ mod tests {
     assert_eq!(parsed.priority, MessagePriority::Normal);
     assert!(!parsed.is_silent && !parsed.wants_acknowledgement && parsed.files.is_empty());
     assert_eq!(parsed.conversation, id_from_raw(7));
+  }
+
+  #[test]
+  fn read_state_and_workspace_events_keep_the_names_the_mobile_apps_decode() {
+    let mut extras = MessageExtras::new(id_from_raw(9));
+    extras.is_read = true;
+    assert_eq!(serde_json::to_value(&extras).expect("serialize")["is_read"], true);
+    assert_eq!(
+      serde_json::to_value(WorkspaceEvent::MemberAdded {
+        user: id_from_raw(2),
+        by: id_from_raw(1),
+        history: HistoryPolicy::Full,
+      })
+      .expect("serialize"),
+      serde_json::json!({ "event": "member_added", "user": "2", "by": "1", "history": "full" })
+    );
+    assert_eq!(
+      serde_json::to_value(WorkspaceEvent::Moved {
+        by: id_from_raw(1),
+        space: "Project A".into(),
+      })
+      .expect("serialize"),
+      serde_json::json!({ "event": "moved", "by": "1", "space": "Project A" })
+    );
   }
 
   #[test]

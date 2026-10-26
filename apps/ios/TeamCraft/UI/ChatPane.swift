@@ -59,6 +59,13 @@ struct ChatPane: View {
       EditHistorySheet(edits: extras[target.message.id]?.edits ?? [], current: target.message.body)
     }
     .task(id: model.changeCount) { await followTyping() }
+    // Receipts sent while this device was offline never arrive as events: they are read when the
+    // conversation opens and whenever the connection comes back (#769). Channels have none, so the
+    // core doesn't ask for theirs.
+    .task(id: model.connection == .connected) {
+      guard threadId == nil, model.connection == .connected else { return }
+      await model.perform(.refreshReadReceipts(conversationId: conversation.id))
+    }
     .onAppear { model.visibleConversationId = conversation.id }
     .onDisappear {
       if model.visibleConversationId == conversation.id { model.visibleConversationId = nil }

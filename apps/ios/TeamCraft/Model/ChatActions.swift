@@ -29,6 +29,8 @@ enum ChatAction {
   case openDm(userId: String)
   /// The group DM with exactly these people (and the user); created when there is none yet.
   case openGroupDm(userIds: [String])
+  /// Reads again how far the others read: receipts sent while the app was offline never arrive.
+  case refreshReadReceipts(conversationId: String)
 
   /// The wire form.
   var json: String {
@@ -79,6 +81,8 @@ enum ChatAction {
       object = ["action": "open_dm", "user": user]
     case .openGroupDm(let users):
       object = ["action": "open_group_dm", "users": users]
+    case .refreshReadReceipts(let conversation):
+      object = ["action": "refresh_read_receipts", "conversation": conversation]
     }
     return jsonText(object)
   }

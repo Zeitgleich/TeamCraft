@@ -168,10 +168,25 @@ pub struct MessageItem {
   pub maybe_thread_id: Option<String>,
   pub reactions: Vec<ReactionItem>,
   /// The author's account was deleted (issue #630): the app shows its own "Deleted user" instead of
-  /// `author_name`, the server's placeholder (issue #751). Last and defaulted, so items the apps
+  /// `author_name`, the server's placeholder (issue #751). Defaulted, so items the apps
   /// build in tests need no change.
   #[uniffi(default = false)]
   pub is_author_deleted: bool,
+  /// What a system message reports (a join, a rename), shown as a line instead of a bubble; `None`
+  /// for messages people wrote. Membership and channel changes by someone else come with the
+  /// message's extras (`maybe_workspace_event`). Defaulted, so items the apps build need no change.
+  #[uniffi(default = None)]
+  pub maybe_system_event: Option<SystemEventItem>,
+}
+
+/// The system events of [`MessageItem::maybe_system_event`]; the message's author is who joined,
+/// left, renamed or changed the topic (issue #769).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SystemEventItem {
+  Joined,
+  Left,
+  Renamed { name: String },
+  TopicChanged { topic: String },
 }
 
 /// An emoji the composer offers for a typed `:name`.
@@ -451,6 +466,7 @@ impl MessageItem {
       is_pending,
       reply_count: message.reply_count,
       maybe_thread_id: message.maybe_thread.map(|thread| thread.to_string()),
+      maybe_system_event: SystemEventItem::of(&message.kind),
       reactions: message
         .reactions
         .iter()
@@ -462,6 +478,20 @@ impl MessageItem {
         .collect(),
       is_author_deleted: maybe_author.is_some_and(|author| author.is_deleted),
     }
+  }
+}
+
+impl SystemEventItem {
+  fn of(kind: &view::MessageKind) -> Option<Self> {
+    let view::MessageKind::System(event) = kind else {
+      return None;
+    };
+    Some(match event {
+      view::SystemEvent::Joined => Self::Joined,
+      view::SystemEvent::Left => Self::Left,
+      view::SystemEvent::Renamed { name } => Self::Renamed { name: name.clone() },
+      view::SystemEvent::TopicChanged { topic } => Self::TopicChanged { topic: topic.clone() },
+    })
   }
 }
 
@@ -788,6 +818,64 @@ impl From<LinkRequestInfo> for LinkRequestItem {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  mod system_events {
+    use super::*;
+
+    #[test]
+    fn each_kind_reaches_the_apps_with_its_text() {
+      let cases = [
+        (view::SystemEvent::Joined, SystemEventItem::Joined),
+        (view::SystemEvent::Left, SystemEventItem::Left),
+        (
+          view::SystemEvent::Renamed {
+            name: "Project A".into(),
+          },
+          SystemEventItem::Renamed {
+            name: "Project A".into(),
+          },
+        ),
+        (
+          view::SystemEvent::TopicChanged {
+            topic: "Launch plan".into(),
+          },
+          SystemEventItem::TopicChanged {
+            topic: "Launch plan".into(),
+          },
+        ),
+      ];
+      for (event, expected) in cases {
+        let item = MessageItem::from_view(&message_of(view::MessageKind::System(event)), "Sam".into(), false);
+        assert_eq!(item.maybe_system_event, Some(expected));
+      }
+    }
+
+    #[test]
+    fn written_messages_and_log_lines_are_no_system_events() {
+      for kind in [
+        view::MessageKind::User,
+        view::MessageKind::Log(view::LogLevel::Info),
+      ] {
+        let item = MessageItem::from_view(&message_of(kind), "Sam".into(), false);
+        assert_eq!(item.maybe_system_event, None);
+      }
+    }
+
+    fn message_of(kind: view::MessageKind) -> view::Message {
+      view::Message {
+        id: view::id_from_raw(7),
+        conversation: view::id_from_raw(5),
+        author: view::id_from_raw(3),
+        kind,
+        sent_at: 0,
+        body: String::new(),
+        is_edited: false,
+        reactions: Vec::new(),
+        reply_count: 0,
+        maybe_thread: None,
+      }
+    }
+  }
 
   #[test]
   fn notification_content_maps_both_ways_and_unknown_modes_are_strictest() {

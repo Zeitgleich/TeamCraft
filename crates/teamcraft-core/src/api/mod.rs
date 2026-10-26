@@ -373,6 +373,12 @@ pub trait ServerApi {
   /// bare 404 from a server older than the endpoint.
   fn sync_heads(&self) -> impl Future<Output = Result<SyncHeadsResponse, ApiError>>;
 
+  /// How far the other members of a DM or group DM read (`GET /conversations/{id}/read-receipts`).
+  fn read_receipts(
+    &self,
+    conversation: ConversationId,
+  ) -> impl Future<Output = Result<teamcraft_proto::ReadReceiptsResponse, ApiError>>;
+
   fn post_mls_commit(
     &self,
     conversation: ConversationId,

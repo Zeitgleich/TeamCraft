@@ -8,6 +8,7 @@ use teamcraft_client_api::actions::{
 use teamcraft_client_api::model::{
   Bookmark, ConversationId, IntegrationSource, Message, MessageId, NewIntegrationSource, ThreadId, UserId,
 };
+use teamcraft_client_api::receipts::{is_read_by_all, seen_by};
 use teamcraft_proto::{ClientMessageId, SourceChange, SourceId};
 
 use crate::client::previews::queue_preview;
@@ -422,11 +423,13 @@ impl<S: LocalStore> CoreChatBackend<S> {
   ) -> Vec<MessageExtras> {
     let all = self.all_messages(conversation);
     let data = self.read(stored_account_data(self.store_ref()));
+    let ticks = Ticks::read(self, conversation);
     messages
       .iter()
       .filter_map(|id| {
         let stored = all.iter().find(|stored| ui_message_id(stored) == *id)?;
         let mut extras = MessageExtras::new(*id);
+        extras.is_read = ticks.is_read(stored, self.me_id());
         extras.is_pinned = stored.is_pinned;
         extras.is_saved = data.is_saved(conversation, stored.client_message_id);
         extras.is_deleted = matches!(stored.content, MessageContent::Deleted);
@@ -525,6 +528,37 @@ impl<S: LocalStore> CoreChatBackend<S> {
       tracing::error!(%error, "could not apply the change locally");
     }
     self.enqueue(conversation, None, content);
+  }
+}
+
+/// What the two ticks of the user's own messages need, read once per conversation: its members
+/// and their receipts where receipts show as ticks (a DM, #635), nothing elsewhere.
+struct Ticks {
+  maybe_members: Option<Vec<UserId>>,
+  receipts: Vec<(UserId, MessageId)>,
+}
+
+impl Ticks {
+  fn read<S: LocalStore>(backend: &CoreChatBackend<S>, conversation: ConversationId) -> Self {
+    let maybe_members = backend.tick_members(conversation);
+    let receipts = match maybe_members {
+      Some(_) => backend.read_receipts(conversation),
+      None => Vec::new(),
+    };
+    Self {
+      maybe_members,
+      receipts,
+    }
+  }
+
+  /// Whether every other member read `stored`, an own message the server has (#568, #769).
+  fn is_read(&self, stored: &StoredMessage, me: UserId) -> bool {
+    match (&self.maybe_members, stored.maybe_server_id) {
+      (Some(members), Some(server_id)) if stored.sender_user_id == me => {
+        is_read_by_all(&seen_by(&self.receipts, server_id), members, me)
+      },
+      _ => false,
+    }
   }
 }
 
