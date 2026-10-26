@@ -28,7 +28,7 @@ final class NetworkMonitor {
   private func update(isOnline: Bool) {
     self.isOnline = isOnline
     // The first path is the state at start, not a change.
-    if hasFirstPath { AppModel.shared.networkChanged() }
+    AppModel.shared.networkPathChanged(isFirstPath: !hasFirstPath)
     hasFirstPath = true
   }
 }

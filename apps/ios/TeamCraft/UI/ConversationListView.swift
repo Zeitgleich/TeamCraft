@@ -6,6 +6,9 @@ struct ConversationListView: View {
   let account: Account
 
   @State private var conversations: [ConversationItem] = []
+  /// The local store was read once: until then an empty list is not "no chats yet" (no flash of
+  /// the empty state at start; the store answers at once, offline too).
+  @State private var hasLoaded = false
   @State private var previews: [String: ChatPreview] = [:]
   @State private var selection: String?
   @State private var query = ""
@@ -60,6 +63,7 @@ struct ConversationListView: View {
     .searchable(text: $query, prompt: Text("search_hint"))
     .task(id: model.changeCount) {
       conversations = await model.conversations()
+      hasLoaded = true
       previews = await model.chatPreviews(conversations, myId: account.userId)
     }
     .task(id: fullQuery) {
@@ -102,7 +106,11 @@ struct ConversationListView: View {
         selection = hit.message.conversationId
       }
     } else if conversations.isEmpty {
-      EmptyChatsView { tab in maybeBrowseTab = tab }
+      if hasLoaded {
+        EmptyChatsView { tab in maybeBrowseTab = tab }
+      } else {
+        Color.clear
+      }
     } else {
       List(selection: $selection) {
         if tab == .home {
