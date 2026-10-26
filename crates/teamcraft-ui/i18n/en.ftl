@@ -1347,6 +1347,7 @@ file-progress-percent = { $percent } %
 file-progress-bytes = { $done } / { $total }
 file-upload-retrying = Retrying…
 file-upload-failed = Upload failed
+file-upload-storage-unavailable = The file storage is unavailable right now. Try again in a moment.
 file-upload-unreadable = The file could not be read any more. Attach it again.
 file-preview = Show preview
 preview-unavailable = The file could not be loaded. Check your connection and try again.

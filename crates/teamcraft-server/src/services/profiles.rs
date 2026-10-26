@@ -122,7 +122,7 @@ pub async fn complete_avatar_upload(
     .ok_or_else(|| ApiError::Conflict("no avatar upload is waiting".into()))?;
   let stored = store.object_size(&pending.key).await.map_err(|error| {
     warn!(%error, "avatar storage check failed");
-    ApiError::Unavailable("avatar storage".into())
+    ApiError::storage_unavailable("avatar storage")
   })?;
   match stored {
     None => return Err(ApiError::Conflict("the avatar has not been uploaded".into())),

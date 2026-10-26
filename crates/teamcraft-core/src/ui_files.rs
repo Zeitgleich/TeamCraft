@@ -8,8 +8,9 @@ use teamcraft_client_api::model::{ConversationId, MessageId, ThreadId};
 use teamcraft_proto::{AttachmentId, Base64Bytes};
 
 use crate::client::files::{
-  PendingFile, PendingUpload, TransferFailure, TransferState, UploadRetry, UploadSource, attachments_of,
-  cancel_pending_file, failed_uploads, pending_upload, save_pending_upload, share_links, transfer_state,
+  PendingFile, PendingUpload, RetryCause, TransferFailure, TransferState, UploadRetry, UploadSource,
+  attachments_of, cancel_pending_file, failed_uploads, pending_upload, save_pending_upload, share_links,
+  transfer_state,
 };
 use crate::error::CoreError;
 use crate::records;
@@ -475,9 +476,15 @@ fn upload_transfer(file: &PendingFile, transfers: &Transfers) -> FileTransfer {
       reason: failure_view(reason),
     };
   }
-  if file.maybe_done.is_none() && file.retry.is_stalled() {
+  if file.maybe_done.is_none()
+    && let Some(cause) = file.retry.stall_cause()
+  {
+    // The stall says why (#742): an outage of the storage reads differently from a network failure.
     return FileTransfer::UploadStalled {
-      reason: FileFailure::Network,
+      reason: match cause {
+        RetryCause::Network => FileFailure::Network,
+        RetryCause::StorageUnavailable => FileFailure::StorageUnavailable,
+      },
     };
   }
   let done_bytes = match (&file.maybe_done, &file.maybe_slot) {
