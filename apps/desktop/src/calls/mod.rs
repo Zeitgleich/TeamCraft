@@ -44,6 +44,7 @@ use teamcraft_media::call_view::{CallRoster, status_cues};
 use teamcraft_media::effects::{BackgroundImage, EffectHandle};
 use teamcraft_media::ringtone;
 use teamcraft_media::system_audio::SystemAudioCapture;
+use teamcraft_media::video_capture::CaptureError;
 use teamcraft_media::video_pipeline::{VideoSendConfig, preferred_encoders};
 use teamcraft_proto::{
   AudioCodec, ConversationId, DeviceId, GatewayEvent, MediaCapabilities, MediaStreamId, ScreenContentMode,
@@ -501,10 +502,9 @@ impl CallHost {
       encoders: preferred_encoders(),
       maybe_filter: Some(self.self_view.filter(maybe_filter)),
     };
-    self
-      .start_video(config)
-      .await
-      .map_err(video::camera_failure_wire)?;
+    // Answers once the camera's first picture is encoded, or why none comes (already worded for
+    // the UI, see `video::start_failure_wire`).
+    self.start_video(config).await?;
     lock(&self.state).maybe_effect_handle = maybe_handle;
     self.update_active(|active| active.is_camera_on = true);
     Ok(())
@@ -565,10 +565,21 @@ impl CallHost {
   pub async fn start_screen_share(&self, has_sound: bool, mode: ScreenContentMode) -> Result<(), String> {
     self.ensure_video_codec().await?;
     let maybe_token = lock(&self.state).maybe_screen_token.clone();
-    let (capture, maybe_new_token) =
-      tokio::task::spawn_blocking(move || video::open_screen(maybe_token.as_deref(), mode))
-        .await
-        .map_err(|error| error.to_string())??;
+    let opened = tokio::task::spawn_blocking(move || video::open_screen(maybe_token.as_deref(), mode))
+      .await
+      .map_err(|error| error.to_string())?;
+    let (capture, maybe_new_token) = match opened {
+      Ok(opened) => opened,
+      // Closing the picker is a choice, not a failure: nothing is shared, nothing to report.
+      Err(CaptureError::Cancelled(_)) => {
+        tracing::info!("screen picker closed without a choice");
+        return Ok(());
+      },
+      Err(error) => {
+        tracing::warn!(%error, "screen share not started");
+        return Err(video::screen_failure_wire(&error));
+      },
+    };
     let config = VideoSendConfig {
       kind: VideoTrackKind::Screen,
       layers: video::screen_layers(capture.format(), mode),
@@ -743,8 +754,24 @@ async fn run_media(
           let _ = done.send(result);
         },
         Some(Control::StartVideo(config, done)) => {
-          let result = call.start_video(config).await.map_err(|error| error.to_string());
-          let _ = done.send(result);
+          let kind = config.kind.clone();
+          match call.start_video_checked(config).await {
+            // The first picture may take seconds; the call (and its video) goes on meanwhile.
+            Ok(first_picture) => {
+              tokio::spawn(async move {
+                let result = first_picture.wait().await.map_err(|error| {
+                  tracing::warn!(%error, ?kind, "own video sends no picture");
+                  video::start_failure_wire(&kind, &NativeCallError::from(error))
+                });
+                // The caller may have given up waiting.
+                let _ = done.send(result);
+              });
+            },
+            Err(error) => {
+              tracing::warn!(%error, ?kind, "own video not started");
+              let _ = done.send(Err(video::start_failure_wire(&kind, &error)));
+            },
+          }
         },
         Some(Control::StopVideo(kind)) => call.stop_video(kind),
         Some(Control::StartScreenAudio(capture, done)) => {
@@ -780,6 +807,8 @@ async fn run_media(
     Ok(stats) => tracing::info!(
       frames_sent = stats.frames_sent,
       frames_received = stats.frames_received,
+      camera = ?stats.camera,
+      screen = ?stats.screen,
       "left the call"
     ),
     Err(NativeCallError::ConnectionLost) => {

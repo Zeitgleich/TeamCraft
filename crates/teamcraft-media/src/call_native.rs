@@ -48,6 +48,7 @@ use crate::call_auth::{CallKeyAuthenticator, DeviceCallKeyAuthenticator};
 use crate::call_cues::{CallCue, CuePlayer, StatusCues};
 use crate::call_engine::{
   AudioOrigin, CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats, EngineOutput,
+  VideoSendOutcome, VideoStats,
 };
 use crate::call_resilience::{
   JoinTicket, JoinTicketError, PathMonitor, PathState, ReconnectSchedule, ResilienceConfig, rejoin_attempt,
@@ -57,7 +58,9 @@ use crate::sfu_address::{PinnedResolver, sfu_addresses};
 use crate::system_audio::{SystemAudioCapture, SystemAudioError, SystemAudioReceiver, system_audio_queue};
 use crate::video::EncodedVideoFrame;
 use crate::video_capture::CaptureError;
-use crate::video_pipeline::{FrameSink, VideoReceiver, VideoSendConfig, VideoSender};
+use crate::video_pipeline::{
+  FirstPicture, FrameSink, RepeatedWarning, VideoReceiver, VideoSendConfig, VideoSender, VideoStartError,
+};
 
 /// Audio frame period.
 const FRAME_INTERVAL: Duration = Duration::from_millis(20);
@@ -73,6 +76,8 @@ const LEAVE: u32 = 0;
 const STREAM_CLOSE_WAIT: Duration = Duration::from_millis(200);
 /// How often the route toward the SFU is looked up (see [`RouteWatch`]).
 const ROUTE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+/// How often the video counters are logged (debug) while own or others' video flows.
+const VIDEO_LOG_INTERVAL: Duration = Duration::from_secs(10);
 
 /// A running call.
 pub struct NativeCall {
@@ -144,6 +149,8 @@ pub enum NativeCallError {
   #[error(transparent)]
   Capture(#[from] CaptureError),
   #[error(transparent)]
+  VideoStart(#[from] VideoStartError),
+  #[error(transparent)]
   SystemAudio(#[from] SystemAudioError),
   #[error(transparent)]
   Ticket(#[from] JoinTicketError),
@@ -198,8 +205,12 @@ enum VideoCommand {
     stream_id: MediaStreamId,
     frame: EncodedVideoFrame,
   },
-  /// Capture, encode and publish a track (camera or screen).
-  Start(VideoSendConfig, oneshot::Sender<Result<(), CaptureError>>),
+  /// Capture, encode and publish a track (camera or screen); the answer brings the wait for
+  /// its first picture.
+  Start(
+    VideoSendConfig,
+    oneshot::Sender<Result<FirstPicture, CaptureError>>,
+  ),
   Stop(VideoTrackKind),
   Watch {
     stream_id: MediaStreamId,
@@ -215,6 +226,32 @@ struct VideoState {
   /// Own tracks; the stream id arrives with `VideoPublished`.
   senders: Vec<(VideoSender, Option<MediaStreamId>)>,
   receivers: HashMap<MediaStreamId, VideoReceiver>,
+  /// What others' tracks show, for counting what arrives per kind.
+  remote_kinds: HashMap<MediaStreamId, VideoTrackKind>,
+  counts: VideoCounts,
+  send_warning: RepeatedWarning,
+  /// When the counters were last looked at, and what they were.
+  maybe_last_log: Option<(Instant, VideoCounts)>,
+}
+
+/// Where an own track's pictures stopped during one [`VIDEO_LOG_INTERVAL`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VideoStall {
+  /// The camera delivered no frame (a screen only delivers when something changes).
+  Capture,
+  /// Frames came, but no encoder gave a picture.
+  Encoder,
+  /// Pictures were encoded but none left: the track not confirmed, the call not secured, or
+  /// sending failed.
+  Sending,
+}
+
+/// Video counters of the call: what the stopped own tracks captured and encoded, and what was
+/// sent and received.
+#[derive(Debug, Clone, Copy, Default)]
+struct VideoCounts {
+  camera: VideoStats,
+  screen: VideoStats,
 }
 
 /// The audio thread's handles: samples from the microphone and the speakers' buffer.
@@ -317,8 +354,18 @@ impl NativeCall {
   }
 
   /// Captures, encodes (simulcast per `config.layers`) and publishes a track; replaces a running
-  /// track of the same kind. Frames flow once the SFU confirmed the track.
+  /// track of the same kind. Frames flow once the SFU confirmed the track. Returns once the
+  /// capture started; see [`NativeCall::start_video_checked`] to learn whether pictures come.
   pub async fn start_video(&self, config: VideoSendConfig) -> Result<(), NativeCallError> {
+    self.start_video_checked(config).await.map(drop)
+  }
+
+  /// [`NativeCall::start_video`], with the wait for the track's first encoded picture: awaiting
+  /// it tells a camera or screen capture that delivers nothing, or pictures no encoder takes,
+  /// from a working one; the track then ends by itself after
+  /// [`crate::video_pipeline::FIRST_PICTURE_TIMEOUT`]. Dropping it lets the track wait as long as
+  /// it needs (an app that pushes the frames itself).
+  pub async fn start_video_checked(&self, config: VideoSendConfig) -> Result<FirstPicture, NativeCallError> {
     let (done, done_rx) = oneshot::channel();
     self.video(VideoCommand::Start(config, done));
     Ok(done_rx.await.map_err(|_| NativeCallError::TaskEnded)??)
@@ -558,12 +605,9 @@ async fn run_call(
         if maybe_screen_audio.is_some() && !engine.is_sharing_screen_audio() {
           stop_screen_audio(&mut engine, &mut maybe_screen_audio);
         }
+        sinks.video.log_counts(now);
       },
-      Some((kind, frame)) = encoded_rx.recv() => {
-        if let Some(stream_id) = sinks.video.stream_of(&kind) {
-          engine.send_video(stream_id, &frame, Instant::now());
-        }
-      },
+      Some((kind, frame)) = encoded_rx.recv() => sinks.video.send(&mut engine, &kind, &frame, Instant::now()),
       maybe_command = commands.recv() => {
         match maybe_command {
           Some(Command::Mute(is_muted)) => {
@@ -627,6 +671,8 @@ async fn run_call(
   devices.close();
   connection.close();
   let mut stats = sinks.stats;
+  let video = sinks.video.totals();
+  (stats.camera, stats.screen) = (video.camera, video.screen);
   stats.maybe_privacy_code = engine.privacy_code();
   info!(?stats, "call ended");
   result.map(|()| stats)
@@ -1097,10 +1143,14 @@ fn handle_video(
   match command {
     VideoCommand::Start(config, done) => {
       video.stop(engine, &config.kind);
-      let result = VideoSender::start(config, encoded.clone()).map(|sender| {
-        engine.publish_video(sender.kind.clone(), VideoCodec::H264, sender.layers.clone());
-        video.senders.push((sender, None));
-      });
+      let kind = config.kind.clone();
+      let result = VideoSender::start(config, encoded.clone())
+        .map(|(sender, first_picture)| {
+          engine.publish_video(sender.kind.clone(), VideoCodec::H264, sender.layers.clone());
+          video.senders.push((sender, None));
+          first_picture
+        })
+        .inspect_err(|error| warn!(%error, ?kind, "video capture not started"));
       // The caller may have given up waiting.
       let _ = done.send(result);
     },
@@ -1127,7 +1177,10 @@ fn handle_video(
       stream_id,
       maybe_max_layer,
     } => engine.subscribe_video(stream_id, maybe_max_layer),
-    VideoCommand::Send { stream_id, frame } => engine.send_video(stream_id, &frame, Instant::now()),
+    VideoCommand::Send { stream_id, frame } => {
+      // Frames the app encodes itself; what becomes of each is its own business.
+      let _ = engine.send_video(stream_id, &frame, Instant::now());
+    },
   }
 }
 
@@ -1214,6 +1267,7 @@ impl Sinks {
           self.mixer.push(sender, origin, sequence_number, opus)?;
         },
         EngineOutput::Event(CallEngineEvent::VideoFrame(frame)) => {
+          self.video.count_received(frame.stream_id);
           // Watched tracks are decoded for the app's sink; tracks the app subscribed to itself
           // (subscribe_video) arrive encoded as events.
           match self.video.receivers.get(&frame.stream_id) {
@@ -1233,8 +1287,15 @@ impl Sinks {
             CallEngineEvent::VideoPublished(track) if track.device_id == engine.device_id() => {
               self.video.on_published(&track.kind, track.stream_id);
             },
+            CallEngineEvent::VideoPublished(track) => {
+              self
+                .video
+                .remote_kinds
+                .insert(track.stream_id, track.kind.clone());
+            },
             CallEngineEvent::VideoUnpublished(stream_id) => {
               self.video.receivers.remove(stream_id);
+              self.video.remote_kinds.remove(stream_id);
               // An own track the SFU dropped (rejoin without the slot) is published again.
               self.video.on_unpublished(*stream_id);
             },
@@ -1264,6 +1325,90 @@ impl Sinks {
 }
 
 impl VideoState {
+  /// Hands an own picture to the engine and counts what became of it.
+  fn send(
+    &mut self,
+    engine: &mut CallEngine,
+    kind: &VideoTrackKind,
+    frame: &EncodedVideoFrame,
+    now: Instant,
+  ) {
+    let outcome = match self.stream_of(kind) {
+      Some(stream_id) => engine.send_video(stream_id, frame, now),
+      None => VideoSendOutcome::NotPublished,
+    };
+    let Some(stats) = self.counts.of_mut(kind) else {
+      return;
+    };
+    match outcome {
+      VideoSendOutcome::Sent => stats.pictures_sent += 1,
+      VideoSendOutcome::LayerPaused => stats.pictures_paused += 1,
+      // Expected for a moment at the start; `log_counts` warns when it lasts.
+      VideoSendOutcome::NotPublished | VideoSendOutcome::NotSecured => {
+        stats.pictures_dropped += 1;
+        debug!(?kind, ?outcome, "video picture not sent");
+      },
+      VideoSendOutcome::Failed => {
+        stats.pictures_dropped += 1;
+        self
+          .send_warning
+          .warn(|suppressed| warn!(?kind, suppressed, "video picture not sent"));
+      },
+    }
+  }
+
+  fn count_received(&mut self, stream_id: MediaStreamId) {
+    if let Some(kind) = self.remote_kinds.get(&stream_id)
+      && let Some(stats) = self.counts.of_mut(kind)
+    {
+      stats.pictures_received += 1;
+    }
+  }
+
+  /// The counters so far: stopped tracks, running ones and what was sent and received.
+  fn totals(&self) -> VideoCounts {
+    let mut totals = VideoCounts {
+      camera: self.counts.camera,
+      screen: self.counts.screen,
+    };
+    for (sender, _) in &self.senders {
+      if let Some(stats) = totals.of_mut(&sender.kind) {
+        let progress = sender.progress();
+        stats.frames_captured += progress.frames_captured;
+        stats.pictures_encoded += progress.pictures_encoded;
+      }
+    }
+    totals
+  }
+
+  /// Logs the counters every [`VIDEO_LOG_INTERVAL`] while there is video, and warns when an own
+  /// track's pictures stopped somewhere during it (capture, encoder, sending), so a log shows
+  /// where they stop.
+  fn log_counts(&mut self, now: Instant) {
+    if self.senders.is_empty() && self.remote_kinds.is_empty() {
+      self.maybe_last_log = None;
+      return;
+    }
+    let Some((last, previous)) = self.maybe_last_log else {
+      self.maybe_last_log = Some((now, self.totals()));
+      return;
+    };
+    if now.saturating_duration_since(last) < VIDEO_LOG_INTERVAL {
+      return;
+    }
+    let totals = self.totals();
+    debug!(camera = ?totals.camera, screen = ?totals.screen, "video counters");
+    for (sender, _) in &self.senders {
+      let (Some(before), Some(after)) = (previous.of(&sender.kind), totals.of(&sender.kind)) else {
+        continue;
+      };
+      if let Some(stall) = video_stall(&sender.kind, before, after) {
+        warn!(kind = ?sender.kind, ?stall, interval = ?VIDEO_LOG_INTERVAL, stats = ?after, "own video stalled");
+      }
+    }
+    self.maybe_last_log = Some((now, totals));
+  }
+
   fn stream_of(&self, kind: &VideoTrackKind) -> Option<MediaStreamId> {
     self
       .senders
@@ -1318,7 +1463,46 @@ impl VideoState {
       if let Some(stream_id) = maybe_stream {
         engine.unpublish_video(stream_id);
       }
-      drop(sender);
+      let kind = sender.kind.clone();
+      // Read after the thread stopped: nothing changes the counters any more.
+      let progress = sender.finish();
+      if let Some(stats) = self.counts.of_mut(&kind) {
+        stats.frames_captured += progress.frames_captured;
+        stats.pictures_encoded += progress.pictures_encoded;
+      }
+    }
+  }
+}
+
+/// Whether an own track of `kind` stalled between two readings of its counters.
+fn video_stall(kind: &VideoTrackKind, before: &VideoStats, after: &VideoStats) -> Option<VideoStall> {
+  let captured = after.frames_captured.saturating_sub(before.frames_captured);
+  let encoded = after.pictures_encoded.saturating_sub(before.pictures_encoded);
+  let sent = after.pictures_sent.saturating_sub(before.pictures_sent);
+  let dropped = after.pictures_dropped.saturating_sub(before.pictures_dropped);
+  if captured == 0 {
+    return (*kind == VideoTrackKind::Camera).then_some(VideoStall::Capture);
+  }
+  if encoded == 0 {
+    return Some(VideoStall::Encoder);
+  }
+  (sent == 0 && dropped > 0).then_some(VideoStall::Sending)
+}
+
+impl VideoCounts {
+  fn of(&self, kind: &VideoTrackKind) -> Option<&VideoStats> {
+    match kind {
+      VideoTrackKind::Camera => Some(&self.camera),
+      VideoTrackKind::Screen => Some(&self.screen),
+      _ => None,
+    }
+  }
+
+  fn of_mut(&mut self, kind: &VideoTrackKind) -> Option<&mut VideoStats> {
+    match kind {
+      VideoTrackKind::Camera => Some(&mut self.camera),
+      VideoTrackKind::Screen => Some(&mut self.screen),
+      _ => None,
     }
   }
 }
@@ -1485,6 +1669,62 @@ async fn read_datagrams(connection: Connection, inputs: mpsc::UnboundedSender<Li
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  mod video_stalls {
+    use super::*;
+
+    #[test]
+    fn flowing_video_is_no_stall() {
+      let before = stats(100, 300, 290, 10);
+      let after = stats(400, 1200, 1190, 10);
+      assert_eq!(video_stall(&VideoTrackKind::Camera, &before, &after), None);
+    }
+
+    #[test]
+    fn a_camera_without_frames_stalls_but_a_still_screen_does_not() {
+      let before = stats(100, 300, 300, 0);
+      assert_eq!(
+        video_stall(&VideoTrackKind::Camera, &before, &before),
+        Some(VideoStall::Capture)
+      );
+      // Screen captures deliver frames only when something on the screen changes.
+      assert_eq!(video_stall(&VideoTrackKind::Screen, &before, &before), None);
+    }
+
+    #[test]
+    fn frames_without_pictures_are_an_encoder_stall() {
+      let before = stats(100, 300, 300, 0);
+      let after = stats(400, 300, 300, 0);
+      assert_eq!(
+        video_stall(&VideoTrackKind::Screen, &before, &after),
+        Some(VideoStall::Encoder)
+      );
+    }
+
+    #[test]
+    fn pictures_that_never_leave_are_a_send_stall_but_paused_layers_are_not() {
+      let before = stats(100, 300, 0, 300);
+      let after = stats(400, 1200, 0, 1200);
+      assert_eq!(
+        video_stall(&VideoTrackKind::Camera, &before, &after),
+        Some(VideoStall::Sending)
+      );
+      // Nobody watches: every picture is paused, which is no failure.
+      let mut paused = stats(400, 1200, 0, 300);
+      paused.pictures_paused = 900;
+      assert_eq!(video_stall(&VideoTrackKind::Camera, &before, &paused), None);
+    }
+
+    fn stats(captured: u64, encoded: u64, sent: u64, dropped: u64) -> VideoStats {
+      VideoStats {
+        frames_captured: captured,
+        pictures_encoded: encoded,
+        pictures_sent: sent,
+        pictures_dropped: dropped,
+        ..VideoStats::default()
+      }
+    }
+  }
 
   /// Issue #420 for calls: nothing answers QUIC on the SFU's IPv6 address (the handshake is
   /// swallowed, as on a broken route), IPv4 works. The call connects over IPv4.

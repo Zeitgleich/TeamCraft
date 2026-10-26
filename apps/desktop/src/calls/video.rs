@@ -17,6 +17,7 @@ use teamcraft_client_api::calls::{
   BackgroundEffect as UiBackgroundEffect, BackgroundPreset as UiBackgroundPreset,
 };
 use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
+use teamcraft_media::call_native::NativeCallError;
 use teamcraft_media::call_video::ReceivedVideoFrame;
 use teamcraft_media::effects::{
   BackgroundEffect, BackgroundImage, BlurStrength, Compositor, EffectHandle, EffectsConfig, EffectsError,
@@ -25,11 +26,11 @@ use teamcraft_media::effects::{
 };
 use teamcraft_media::system_audio::SystemAudioCapture;
 use teamcraft_media::video::{VideoResolution, fit_within, screen_limits, simulcast_layers};
-use teamcraft_media::video_capture::{CameraInfo, CaptureFormat, VideoCapture};
+use teamcraft_media::video_capture::{CameraInfo, CaptureError, CaptureFormat, VideoCapture};
 use teamcraft_media::video_codec::OpenH264Decoder;
 use teamcraft_media::video_jpeg::JpegTranscoder;
 use teamcraft_media::video_pipeline::FrameFilter;
-use teamcraft_proto::{MediaStreamId, ScreenContentMode, VideoCodec, VideoLayerInfo};
+use teamcraft_proto::{MediaStreamId, ScreenContentMode, VideoCodec, VideoLayerInfo, VideoTrackKind};
 use tracing::{debug, info, warn};
 
 use super::VideoSink;
@@ -88,6 +89,35 @@ pub(super) fn camera_failure_wire(message: String) -> String {
   ActionFailure::new(FailureKind::Call(failure), message).to_wire()
 }
 
+/// A failed start of an own video track as the UI reads it: the capture's own errors as for
+/// [`camera_failure_wire`] and [`screen_failure_wire`], a track that started but sends no picture
+/// (issue #683) as its own failure.
+pub(super) fn start_failure_wire(kind: &VideoTrackKind, error: &NativeCallError) -> String {
+  let is_screen = *kind == VideoTrackKind::Screen;
+  match error {
+    NativeCallError::VideoStart(start) => {
+      let failure = if is_screen {
+        CallFailure::ScreenNoPicture
+      } else {
+        CallFailure::CameraNoPicture
+      };
+      ActionFailure::new(FailureKind::Call(failure), start.to_string()).to_wire()
+    },
+    NativeCallError::Capture(capture) if is_screen => screen_failure_wire(capture),
+    NativeCallError::Capture(capture) => camera_failure_wire(capture.to_string()),
+    other => other.to_string(),
+  }
+}
+
+/// A screen capture that couldn't start, as the UI reads it.
+pub(super) fn screen_failure_wire(error: &CaptureError) -> String {
+  ActionFailure::new(
+    FailureKind::Call(CallFailure::ScreenUnavailable),
+    error.to_string(),
+  )
+  .to_wire()
+}
+
 /// Opens the camera (blocking: the portal may ask the user). A chosen device is a V4L2 path; the
 /// portal only offers "the camera", so it is tried for the default.
 #[cfg(target_os = "linux")]
@@ -124,10 +154,9 @@ pub(super) fn open_camera(_maybe_id: Option<&str>) -> Result<Box<dyn VideoCaptur
 pub(super) fn open_screen(
   maybe_restore_token: Option<&str>,
   mode: ScreenContentMode,
-) -> Result<(Box<dyn VideoCapture>, Option<String>), String> {
+) -> Result<(Box<dyn VideoCapture>, Option<String>), CaptureError> {
   teamcraft_media::capture_portal::PortalCapture::screen(screen_format(mode), maybe_restore_token)
     .map(|(capture, maybe_token)| (Box::new(capture) as Box<dyn VideoCapture>, maybe_token))
-    .map_err(|error| error.to_string())
 }
 
 /// The primary display, or the source a stored token names (`monitor:N`, `window:Title`).
@@ -135,14 +164,13 @@ pub(super) fn open_screen(
 pub(super) fn open_screen(
   maybe_restore_token: Option<&str>,
   mode: ScreenContentMode,
-) -> Result<(Box<dyn VideoCapture>, Option<String>), String> {
+) -> Result<(Box<dyn VideoCapture>, Option<String>), CaptureError> {
   use teamcraft_media::capture_windows::{ScreenSource, WindowsScreenCapture};
 
   let source = ScreenSource::from_token(maybe_restore_token);
   let maybe_token = source.to_token();
   WindowsScreenCapture::open(source, screen_format(mode))
     .map(|capture| (Box::new(capture) as Box<dyn VideoCapture>, maybe_token))
-    .map_err(|error| error.to_string())
 }
 
 /// What the user picks in the system's picker each time (a window, an application or a display;
@@ -152,20 +180,19 @@ pub(super) fn open_screen(
 pub(super) fn open_screen(
   _maybe_restore_token: Option<&str>,
   mode: ScreenContentMode,
-) -> Result<(Box<dyn VideoCapture>, Option<String>), String> {
+) -> Result<(Box<dyn VideoCapture>, Option<String>), CaptureError> {
   use teamcraft_media::capture_screencapturekit::ScreenCaptureKitScreen;
 
   ScreenCaptureKitScreen::pick(screen_format(mode))
     .map(|capture| (Box::new(capture) as Box<dyn VideoCapture>, None))
-    .map_err(|error| error.to_string())
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub(super) fn open_screen(
   _maybe_restore_token: Option<&str>,
   _mode: ScreenContentMode,
-) -> Result<(Box<dyn VideoCapture>, Option<String>), String> {
-  Err("screen sharing is not supported on this platform yet".into())
+) -> Result<(Box<dyn VideoCapture>, Option<String>), CaptureError> {
+  Err(CaptureError::NoDevice("screen capture on this platform"))
 }
 
 /// The computer's sound for a screen share, without this app's own playback.
@@ -461,6 +488,34 @@ mod tests {
     assert!(camera_failure_wire("no camera available".into()).starts_with("call_camera_missing: "));
     assert!(camera_failure_wire("capture: device busy".into()).starts_with("call_camera_in_use: "));
     assert_eq!(camera_failure_wire("the call ended".into()), "the call ended");
+  }
+
+  #[test]
+  fn video_that_starts_without_pictures_reaches_the_user_per_kind() {
+    use teamcraft_media::video_pipeline::VideoStartError;
+
+    let no_frames = NativeCallError::VideoStart(VideoStartError::NoFrames("camera"));
+    let wire = start_failure_wire(&VideoTrackKind::Camera, &no_frames);
+    assert!(wire.starts_with("call_camera_no_picture: "), "{wire}");
+    assert_eq!(
+      ActionFailure::from_wire(&wire).kind,
+      FailureKind::Call(CallFailure::CameraNoPicture)
+    );
+    let not_encoded = NativeCallError::VideoStart(VideoStartError::NotEncoded {
+      source_name: "screen capture",
+      captured: 3,
+    });
+    assert!(
+      start_failure_wire(&VideoTrackKind::Screen, &not_encoded).starts_with("call_screen_no_picture: ")
+    );
+    // A capture that didn't open keeps its own wording.
+    let busy = NativeCallError::Capture(CaptureError::Device("busy".into()));
+    assert!(start_failure_wire(&VideoTrackKind::Camera, &busy).starts_with("call_camera_in_use: "));
+    assert!(start_failure_wire(&VideoTrackKind::Screen, &busy).starts_with("call_screen_unavailable: "));
+    assert_eq!(
+      start_failure_wire(&VideoTrackKind::Camera, &NativeCallError::TaskEnded),
+      NativeCallError::TaskEnded.to_string()
+    );
   }
 
   #[test]
