@@ -25,6 +25,7 @@ mod guest_meetings;
 mod key_packages;
 mod link_previews;
 mod linking;
+mod live_permissions;
 mod meeting_chats;
 mod member_devices;
 mod member_removal;

@@ -1097,6 +1097,18 @@ impl FakeServer {
     }
   }
 
+  /// What the server answers as `my_permissions` for the conversation from now on (the same for
+  /// every member); `None` answers like an older server.
+  pub fn set_my_permissions(
+    &self,
+    conversation: ConversationId,
+    maybe_permissions: Option<Vec<teamcraft_proto::Permission>>,
+  ) {
+    if let Some(entry) = self.lock().conversations.get_mut(&conversation) {
+      entry.response.maybe_my_permissions = maybe_permissions;
+    }
+  }
+
   /// Refuses attachments larger than `limit` bytes, like the server's `max_attachment_bytes`.
   /// While set, this user's blob uploads fail like a refused request; the REST API still answers.
   pub fn refuse_blob_uploads(&self, user: UserId, is_refused: bool) {

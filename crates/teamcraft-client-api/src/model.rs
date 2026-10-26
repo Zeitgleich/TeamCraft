@@ -2,6 +2,7 @@
 //! shapes.
 
 use serde::{Deserialize, Serialize};
+use teamcraft_proto::Permission;
 pub use teamcraft_proto::{ChannelRole, InviteId, JoinPolicy, SpaceRole};
 pub use teamcraft_proto::{ConversationId, DeviceId, Id, MessageId, Snowflake, SpaceId, ThreadId, UserId};
 
@@ -471,6 +472,42 @@ impl Conversation {
   pub fn has_unread(&self) -> bool {
     self.unread_count > 0 || self.mention_count > 0
   }
+
+  /// Whether the user may react here (`add_reaction`, which an archived or a moderated channel
+  /// takes away; issues #691, #758): the server's word, otherwise wherever the user may post.
+  pub fn can_react(&self) -> bool {
+    self
+      .maybe_holds(&Permission::AddReaction)
+      .unwrap_or(self.can_post)
+  }
+
+  /// Whether the user may pin messages and keep links and files as bookmarks (`manage_bookmarks`;
+  /// a pin is sent as a message, so posting too): the server's word, otherwise everybody but
+  /// guests, as in the built-in scheme.
+  pub fn can_manage_bookmarks(&self, is_guest: bool) -> bool {
+    self.can_post
+      && self
+        .maybe_holds(&Permission::ManageBookmarks)
+        .unwrap_or(!is_guest)
+  }
+
+  /// Whether the user may change the channel itself, such as its name or archiving it
+  /// (`manage_channel_properties`); never in DMs and group DMs. Without the server's word it is
+  /// offered and the server decides.
+  pub fn can_manage_channel(&self) -> bool {
+    !self.kind.is_direct_like()
+      && self
+        .maybe_holds(&Permission::ManageChannelProperties)
+        .unwrap_or(true)
+  }
+
+  /// Whether the server says the user holds `permission` here; `None` when it didn't say.
+  fn maybe_holds(&self, permission: &Permission) -> Option<bool> {
+    self
+      .maybe_permissions
+      .as_ref()
+      .map(|granted| granted.contains(permission))
+  }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -649,6 +686,91 @@ mod tests {
     .unwrap();
     assert_eq!(space.maybe_color, None);
     assert_eq!(space.maybe_image_version, None);
+  }
+
+  /// Issue #758: what a conversation offers the native apps, from the server's answer and without
+  /// it (an older server).
+  mod offered_actions {
+    use super::*;
+
+    #[test]
+    fn the_servers_answer_decides() {
+      let announcements = conversation(
+        ConversationKind::Public,
+        false,
+        Some(vec![Permission::AddReaction]),
+      );
+      assert!(announcements.can_react());
+      assert!(!announcements.can_manage_bookmarks(false));
+      assert!(!announcements.can_manage_channel());
+      let managed = conversation(
+        ConversationKind::Private,
+        true,
+        Some(vec![
+          Permission::CreatePost,
+          Permission::ManageBookmarks,
+          Permission::ManageChannelProperties,
+        ]),
+      );
+      assert!(!managed.can_react(), "moderated: posting without reactions");
+      assert!(
+        managed.can_manage_bookmarks(true),
+        "the answer counts, not the guess"
+      );
+      assert!(managed.can_manage_channel());
+      let nothing = conversation(ConversationKind::Public, true, Some(Vec::new()));
+      assert!(!nothing.can_react());
+      assert!(!nothing.can_manage_bookmarks(false));
+      assert!(!nothing.can_manage_channel());
+    }
+
+    #[test]
+    fn without_an_answer_the_built_in_scheme_and_posting_decide() {
+      let open = conversation(ConversationKind::Public, true, None);
+      assert!(open.can_react());
+      assert!(open.can_manage_bookmarks(false));
+      assert!(!open.can_manage_bookmarks(true), "guests keep no bookmarks");
+      assert!(open.can_manage_channel(), "offered; the server decides");
+      let archived = conversation(ConversationKind::Public, false, None);
+      assert!(!archived.can_react());
+      assert!(!archived.can_manage_bookmarks(false));
+    }
+
+    #[test]
+    fn direct_messages_have_no_channel_to_manage() {
+      for kind in [ConversationKind::Direct, ConversationKind::Group] {
+        let everything = conversation(kind, true, Some(vec![Permission::ManageChannelProperties]));
+        assert!(!everything.can_manage_channel(), "{kind:?}");
+        assert!(!conversation(kind, true, None).can_manage_channel(), "{kind:?}");
+      }
+    }
+
+    fn conversation(
+      kind: ConversationKind,
+      can_post: bool,
+      maybe_permissions: Option<Vec<Permission>>,
+    ) -> Conversation {
+      Conversation {
+        id: id_from_raw(1),
+        maybe_space: None,
+        kind,
+        category: SidebarCategory::Channels,
+        name: "news".into(),
+        topic: String::new(),
+        member_ids: Vec::new(),
+        unread_count: 0,
+        mention_count: 0,
+        is_favorite: false,
+        is_muted: false,
+        can_post,
+        bookmarks: Vec::new(),
+        is_catching_up: false,
+        maybe_image_version: None,
+        is_notes_to_self: false,
+        maybe_permissions,
+        has_only_deactivated_others: false,
+      }
+    }
   }
 
   #[test]
