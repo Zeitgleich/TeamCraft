@@ -49,6 +49,9 @@ pub enum ConnectionState {
   },
 }
 
+/// A tick this much earlier than the previous one means the wall clock was set back.
+const CLOCK_JUMP_BACK_MS: i64 = 1_000;
+
 /// Timing of the supervisor. The defaults suit every shell.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConnectionSettings {
@@ -353,6 +356,15 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
   /// seconds and at [`Self::next_deadline_ms`].
   pub async fn on_tick(&mut self, now_ms: i64) {
     self.note_kept_alive(now_ms);
+    if let Some(last) = self.maybe_last_tick_ms
+      && last.saturating_sub(now_ms) >= CLOCK_JUMP_BACK_MS
+    {
+      tracing::info!(
+        back_ms = last - now_ms,
+        "the clock went back; keeping the gateway's pace"
+      );
+      self.shift_timers(now_ms.saturating_sub(last));
+    }
     let has_slept = self
       .maybe_last_tick_ms
       .is_some_and(|last| now_ms.saturating_sub(last) >= millis(self.settings.wake_gap));
@@ -510,6 +522,33 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
       retry_at_ms: self.next_attempt_ms,
       maybe_interception,
     });
+  }
+
+  /// Moves every timer by `delta_ms` (negative after the wall clock went back), so a clock that
+  /// jumps back an hour doesn't postpone heartbeats, dead-connection checks and reconnects by an
+  /// hour (robustness.md, "Time").
+  fn shift_timers(&mut self, delta_ms: i64) {
+    let shift = |at: &mut i64| {
+      if *at != i64::MIN {
+        *at = at.saturating_add(delta_ms);
+      }
+    };
+    shift(&mut self.next_attempt_ms);
+    shift(&mut self.connected_at_ms);
+    shift(&mut self.last_heard_ms);
+    shift(&mut self.last_heartbeat_ms);
+    if let Some(deadline) = self.maybe_probe_deadline_ms.as_mut() {
+      shift(deadline);
+    }
+    if let ConnectionState::Offline {
+      maybe_interception, ..
+    } = self.state()
+    {
+      self.set_state(ConnectionState::Offline {
+        retry_at_ms: self.next_attempt_ms,
+        maybe_interception,
+      });
+    }
   }
 
   /// Every heartbeat is answered, so two missed answers and a slow round trip mean the connection

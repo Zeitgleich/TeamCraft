@@ -136,6 +136,11 @@ struct State {
   blob_refused_users: HashSet<UserId>,
   /// Users whose REST calls fail while their gateway still connects.
   rest_failing_users: HashSet<UserId>,
+  /// Users the server answers 503 with this `Retry-After` (seconds): a dependency outage or a
+  /// restart behind the proxy (`set_unavailable`).
+  unavailable_users: HashMap<UserId, u64>,
+  /// Gateway connects answered with that 503.
+  unavailable_connects: u64,
   /// Users whose access token the server rejects (401), as after an expired session.
   signed_out_users: HashSet<UserId>,
   /// Users whose REST calls a captive portal answers (`set_behind_captive_portal`).
@@ -587,6 +592,22 @@ impl FakeServer {
     } else {
       state.rest_failing_users.remove(&user);
     }
+  }
+
+  /// While set, the server answers this user's REST calls and gateway connects with 503, code
+  /// `unavailable` and `Retry-After: retry_after` (a dependency outage, a restart behind the proxy).
+  pub fn set_unavailable(&self, user: UserId, retry_after: std::time::Duration) {
+    self.lock().unavailable_users.insert(user, retry_after.as_secs());
+  }
+
+  /// Ends [`Self::set_unavailable`].
+  pub fn clear_unavailable(&self, user: UserId) {
+    self.lock().unavailable_users.remove(&user);
+  }
+
+  /// How many gateway connects [`Self::set_unavailable`] answered with 503.
+  pub fn unavailable_connects(&self) -> u64 {
+    self.lock().unavailable_connects
   }
 
   /// Serves another identity key for a user, as a server substituting its own would.
@@ -1204,6 +1225,9 @@ impl FakeServerApi {
     *state.rest_calls.entry(self.user).or_default() += 1;
     if state.offline_users.contains(&self.user) || state.rest_failing_users.contains(&self.user) {
       return Err(ApiError::Network("fake server: client is offline".into()));
+    }
+    if let Some(error) = state.unavailable_answer(self.user) {
+      return Err(error);
     }
     if state.signed_out_users.contains(&self.user) {
       return Err(ApiError::status(401, ErrorCode::Unauthorized, "token expired"));
@@ -3878,6 +3902,10 @@ impl ServerApi for FakeServerApi {
       if state.offline_users.contains(&self.user) {
         return Err(ApiError::Network("fake server: client is offline".into()));
       }
+      if let Some(error) = state.unavailable_answer(self.user) {
+        state.unavailable_connects += 1;
+        return Err(error);
+      }
       state.next_connection += 1;
       state.gateway_connects += 1;
       state.next_connection
@@ -4489,6 +4517,20 @@ impl Conversation {
       is_notification_inherited: false,
     });
     response
+  }
+}
+
+impl State {
+  /// The 503 the server gives `user` while [`FakeServer::set_unavailable`] holds.
+  fn unavailable_answer(&self, user: UserId) -> Option<ApiError> {
+    let retry_after_secs = *self.unavailable_users.get(&user)?;
+    Some(ApiError::Status {
+      status: 503,
+      maybe_body: Some(
+        ErrorBody::new(ErrorCode::Unavailable, "fake server: a dependency is down")
+          .with_retry_after_secs(retry_after_secs),
+      ),
+    })
   }
 }
 

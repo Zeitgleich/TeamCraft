@@ -221,6 +221,33 @@ mod queue {
     assert_eq!(server.read_position(channel, me), None);
   }
 
+  /// A 503 with `Retry-After` (a dependency outage): the entry waits as long as the server asked,
+  /// not the 1 s backoff, and goes out by itself afterwards.
+  #[tokio::test]
+  async fn an_entry_waits_as_long_as_the_server_asked() {
+    let (server, _alice, bob, channel) = channel_with_messages(1).await;
+    let message = latest_server_id(&bob, channel);
+    let me = bob.client.user_id();
+    let clock = Arc::new(ManualClock::new(START_MS));
+    let mut bob = reopen(bob, &clock);
+
+    server.set_unavailable(me, Duration::from_secs(40));
+    bob.client.queue_action(read(channel, message)).await.unwrap();
+    assert_eq!(bob.client.pending_action_count().unwrap(), 1);
+    server.clear_unavailable(me);
+    clock.advance(39 * 1000);
+    upkeep::flush(&mut bob.client).await;
+    assert_eq!(
+      bob.client.pending_action_count().unwrap(),
+      1,
+      "the server asked for 40 s"
+    );
+    clock.advance(1000);
+    upkeep::flush(&mut bob.client).await;
+    assert_eq!(bob.client.pending_action_count().unwrap(), 0);
+    assert_eq!(server.read_position(channel, me), Some(message));
+  }
+
   /// The peer's client again, on a clock the test moves and with short queue limits.
   fn reopen(peer: Peer, clock: &Arc<ManualClock>) -> Peer {
     let client_settings = ClientSettings {
