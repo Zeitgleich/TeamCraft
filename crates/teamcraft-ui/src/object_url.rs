@@ -2,7 +2,8 @@
 //!
 //! Full attachments are end-to-end encrypted like everything else: the client core (the desktop shell
 //! or the core in the page) downloads and decrypts them, and the page only ever sees the plaintext as
-//! a `Blob` in memory. Nothing is written to disk and no plaintext URL exists outside this page.
+//! a `Blob` in memory. No plaintext URL exists outside this page; only inline renditions are also
+//! kept on the device, sealed, by [`crate::media_cache`] (#749).
 //! An SVG is only ever shown drawn into a PNG ([`crate::raster`]), never as itself.
 
 use wasm_bindgen::JsCast;
@@ -35,6 +36,8 @@ pub struct ObjectUrl {
   byte_len: u64,
   /// The picture moves (GIF, animated WebP, APNG), whatever its media type says.
   is_animated: bool,
+  /// The blob behind it, for the persistent cache of renditions ([`crate::media_cache`]).
+  blob: web_sys::Blob,
 }
 
 /// How much of a file's start is read to tell whether it is an animation.
@@ -59,7 +62,12 @@ impl ObjectUrl {
       url,
       byte_len: blob.size() as u64,
       is_animated: false,
+      blob: blob.clone(),
     })
+  }
+
+  pub fn blob(&self) -> &web_sys::Blob {
+    &self.blob
   }
 
   pub fn is_animated(&self) -> bool {

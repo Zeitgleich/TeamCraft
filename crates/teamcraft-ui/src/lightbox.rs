@@ -1521,6 +1521,7 @@ mod tests {
       maybe_sent_at: None,
       maybe_dimensions: None,
       maybe_duration_ms: None,
+      maybe_content_sha256: None,
     }
   }
 

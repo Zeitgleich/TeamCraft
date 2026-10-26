@@ -551,7 +551,7 @@ fn load_current(inputs: LoadInputs) {
     }
     full.set(FullMedia::Loading);
     spawn_local(async move {
-      let result = media_cache::load(conversation, key, &media_type, Rendition::Full, || true).await;
+      let result = media_cache::load(conversation, key, &media_type, Rendition::Full, None, || true).await;
       if ticket.try_get_value() != Some(next_ticket) {
         // The user moved on or closed the lightbox; the cache keeps the file for next time.
         return;
