@@ -3862,13 +3862,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "📎 %@"
+            "value": "File: %@"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "📎 %@"
+            "value": "Datei: %@"
           }
         }
       }
