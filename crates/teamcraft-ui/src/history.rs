@@ -28,7 +28,8 @@ use crate::auth::tauri;
 use crate::clock::now_ms;
 use crate::components::app::on_window;
 use crate::i18n::I18n;
-use crate::model::TimestampMs;
+use crate::last_place::{self, LastPlace, ReadingPosition};
+use crate::model::{TimestampMs, UserId};
 use crate::reactive::OwnerLiveness;
 use crate::route::{HistoryStep, Route};
 use crate::state::{AppState, RouteOutcome};
@@ -67,13 +68,27 @@ pub fn start(state: AppState, i18n: I18n) {
     maybe_below_settings: StoredValue::new(None),
     maybe_waiting_on: StoredValue::new(None),
   };
+  // The desktop webview always starts at `/`: there the app reopens where the user left off (#721).
+  // Per account; a snapshot without the user yet (ID 0) remembers nothing.
+  let maybe_user = tauri::is_available()
+    .then(|| untrack(|| state.me().id))
+    .filter(|user| crate::model::raw_id(*user) != 0);
   // Following a URL reads and sets state outside any reactive scope, like an event handler does.
-  untrack(|| follow_location(state, bar));
+  untrack(|| match maybe_user {
+    Some(user) if current_path() == "/" => restore_last_place(state, bar, user),
+    _ => follow_location(state, bar),
+  });
   let route = Memo::new(move |_| state.route());
   Effect::new(move |previous: Option<()>| {
     let next = route.get();
     let is_waiting = state.pending_route.get().is_some();
     sync_address_bar(state, bar, next, is_waiting, previous.is_none());
+    // Not while a reopened place is still awaited: the start shown meanwhile isn't the user's.
+    if let Some(user) = maybe_user
+      && !is_waiting
+    {
+      last_place::remember_route(user, next);
+    }
   });
   Effect::new(move |previous: Option<u64>| {
     let count = state.unavailable_routes.get();
@@ -165,11 +180,35 @@ fn depth_of_current_entry() -> u32 {
     .map_or(0, |depth| depth as u32)
 }
 
+/// Reopens the place the desktop app was closed in, or starts as usual.
+fn restore_last_place(state: AppState, bar: AddressBar, user: UserId) {
+  let place = LastPlace::load(user);
+  let Some(route) = place.route() else {
+    follow_location(state, bar);
+    return;
+  };
+  let maybe_reading = route.conversation().and_then(|conversation| {
+    place.reading_in(conversation).map(|message| ReadingPosition {
+      conversation,
+      message,
+    })
+  });
+  bar.maybe_waiting_on.set_value(None);
+  if state.restore_route(route, maybe_reading) == RouteOutcome::Waiting {
+    bar.maybe_waiting_on.set_value(Some(state.route_untracked()));
+    set_timeout(move || untrack(|| state.give_up_route(route)), ROUTE_WAIT);
+  }
+}
+
+fn current_path() -> String {
+  web_sys::window()
+    .and_then(|window| window.location().pathname().ok())
+    .unwrap_or_else(|| "/".to_owned())
+}
+
 /// Shows the route of the current URL (start, Back, Forward).
 fn follow_location(state: AppState, bar: AddressBar) {
-  let path = web_sys::window()
-    .and_then(|window| window.location().pathname().ok())
-    .unwrap_or_else(|| "/".to_owned());
+  let path = current_path();
   let Some(route) = Route::parse(&path) else {
     bar.shown.set_value(Route::Start);
     state.reject_route();
