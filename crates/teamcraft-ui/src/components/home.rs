@@ -16,6 +16,7 @@ use crate::components::people_picker::PeoplePicker;
 use crate::i18n::use_i18n;
 use crate::model::{Conversation, ConversationKind, User, UserId};
 use crate::prefs::DmSort;
+use crate::reactive::{items_by_key, keyed_item};
 use crate::sections::{DirectList, DirectSectionKind, HomeFilter, build_direct};
 use crate::state::{MainView, Overlay, use_app_state};
 
@@ -40,6 +41,7 @@ pub fn HomeSidebar() -> impl IntoView {
     build_direct(state.direct_entries(), sort, limit, &query.get(), chip.get())
   });
   let has_any = Memo::new(move |_| state.read(|backend| !backend.direct_conversations().is_empty()));
+  let is_filtered_out = Memo::new(move |_| list.with(|list| list.sections.is_empty()));
 
   view! {
     <nav class="sidebar dm-sidebar" aria-label=move || i18n.t("chats-title")>
@@ -108,14 +110,14 @@ pub fn HomeSidebar() -> impl IntoView {
           .collect_view()}
       </div>
       <div class="sidebar-scroll">
+        // Only a change between these three builds the list again; its rows follow `list` in place.
         {move || {
-          let current = list.get();
           if !has_any.get() {
             view! { <DirectEmpty /> }.into_any()
-          } else if current.sections.is_empty() {
+          } else if is_filtered_out.get() {
             view! { <p class="sb-empty">{move || i18n.t("dm-filter-empty")}</p> }.into_any()
           } else {
-            view! { <DirectSections list=current show_all=show_all /> }.into_any()
+            view! { <DirectSections list=list show_all=show_all /> }.into_any()
           }
         }}
       </div>
@@ -200,41 +202,58 @@ fn DirectOptions() -> impl IntoView {
 }
 
 #[component]
-fn DirectSections(list: DirectList, show_all: RwSignal<bool>) -> impl IntoView {
+fn DirectSections(list: Memo<DirectList>, show_all: RwSignal<bool>) -> impl IntoView {
   let i18n = use_i18n();
-  let hidden = list.hidden_count;
+  let hidden = Memo::new(move |_| list.with(|list| list.hidden_count));
+  // Sections and rows are built once and follow the list (issue #687): a new message reorders the
+  // rows and changes a count, it doesn't build the avatars again.
   view! {
-    {list
-      .sections
-      .into_iter()
-      .map(|section| {
-        let kind = section.kind;
+    <For
+      each=move || list.with(|list| list.sections.iter().map(|section| section.kind).collect::<Vec<_>>())
+      key=|kind| *kind
+      let:kind
+    >
+      {
         let heading_id = format!("dm-section-{}", section_slug(kind));
         let labelled_by = heading_id.clone();
         // The pinned notes need no heading of their own: the row says what it is.
         let is_notes = kind == DirectSectionKind::Notes;
+        let conversations = Memo::new(move |previous: Option<&Vec<Conversation>>| {
+          list
+            .with(|list| {
+              list
+                .sections
+                .iter()
+                .find(|section| section.kind == kind)
+                .map(|section| section.conversations.clone())
+            })
+            .or_else(|| previous.cloned())
+            .unwrap_or_default()
+        });
+        let by_id = items_by_key(conversations.into(), |conv: &Conversation| conv.id);
         view! {
           <section class="sb-section" aria-labelledby=labelled_by>
             <h3 id=heading_id class="sb-section-title" class:visually-hidden=is_notes>{move || i18n.t(kind.title_key())}</h3>
             <ul>
-              {section
-                .conversations
-                .into_iter()
-                .map(|conversation| view! { <li><DirectItem conversation=conversation /></li> })
-                .collect_view()}
+              <For each=move || conversations.get() key=|conv| conv.id let:conv>
+                <li><DirectItem conversation=keyed_item(by_id, conv.id, conv) /></li>
+              </For>
             </ul>
           </section>
         }
-      })
-      .collect_view()}
-    {(hidden > 0)
-      .then(|| {
-        view! {
-          <button class="sb-more" on:click=move |_| show_all.set(true)>
-            {move || i18n.t_count("sidebar-show-more", hidden)}
-          </button>
-        }
-      })}
+      }
+    </For>
+    {move || {
+      let hidden = hidden.get();
+      (hidden > 0)
+        .then(|| {
+          view! {
+            <button class="sb-more" on:click=move |_| show_all.set(true)>
+              {move || i18n.t_count("sidebar-show-more", hidden)}
+            </button>
+          }
+        })
+    }}
   }
 }
 
@@ -247,41 +266,43 @@ fn section_slug(kind: DirectSectionKind) -> &'static str {
 }
 
 /// One DM or group DM: avatar with presence (or the group icon), name, bot marker, status and
-/// unread count; bold while unread.
+/// unread count; bold while unread. Built once per row; what it shows follows `conversation`.
 #[component]
-fn DirectItem(conversation: Conversation) -> impl IntoView {
+fn DirectItem(#[prop(into)] conversation: Signal<Conversation>) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let id = conversation.id;
+  // A conversation keeps its id, kind and members' other person.
+  let (id, kind, is_notes, member_ids) =
+    conversation.with_untracked(|conv| (conv.id, conv.kind, conv.is_notes_to_self, conv.member_ids.clone()));
   let is_current = move || state.view.get() == MainView::Conversation(id);
-  let is_unread = conversation.unread_count > 0 && !conversation.is_muted;
+  let is_muted = Memo::new(move |_| conversation.with(|conv| conv.is_muted));
+  let is_unread = Memo::new(move |_| conversation.with(|conv| conv.unread_count > 0 && !conv.is_muted));
   // DMs are addressed to the user, so every unread message counts (muted ones only mentions).
-  let count = if conversation.is_muted {
-    conversation.mention_count
-  } else {
-    conversation.unread_count.max(conversation.mention_count)
-  };
-  let me = state.me().id;
-  let maybe_other = (conversation.kind == ConversationKind::Direct)
-    .then(|| {
-      conversation
-        .member_ids
-        .iter()
-        .copied()
-        .find(|member| *member != me)
+  let count = Memo::new(move |_| {
+    conversation.with(|conv| {
+      if conv.is_muted {
+        conv.mention_count
+      } else {
+        conv.unread_count.max(conv.mention_count)
+      }
     })
+  });
+  let me = state.me().id;
+  let maybe_other = (kind == ConversationKind::Direct)
+    .then(|| member_ids.iter().copied().find(|member| *member != me))
     .flatten();
-  let is_notes = conversation.is_notes_to_self;
+  let maybe_other_user =
+    Memo::new(move |_| maybe_other.and_then(|other| state.read(|backend| backend.user(other))));
   let leading = match maybe_other {
     _ if is_notes => {
       view! { <span class="home-avatar home-avatar-group"><Icon name=IconName::Compose /></span> }.into_any()
     },
     // Presence arrives later than the row is built, so the avatar is read reactively.
-    Some(other) => view! {
+    Some(_) => view! {
       <span class="home-avatar">
         {move || {
-          state
-            .read(|backend| backend.user(other))
+          maybe_other_user
+            .get()
             .map(|user| view! { <Avatar user=user size=AvatarSize::Small show_presence=true /> })
         }}
       </span>
@@ -291,28 +312,38 @@ fn DirectItem(conversation: Conversation) -> impl IntoView {
       view! { <span class="home-avatar home-avatar-group"><Icon name=IconName::Users /></span> }.into_any()
     },
   };
-  let maybe_other_user = maybe_other.and_then(|other| state.read(|backend| backend.user(other)));
-  let is_bot = maybe_other_user.as_ref().is_some_and(|user| user.is_bot);
-  let status_emoji = maybe_other_user
-    .and_then(|user| user.maybe_custom_status)
-    .map(|status| status.emoji);
-  let name = if is_notes {
-    i18n.t("notes-title")
-  } else {
-    conversation.name.clone()
-  };
-  let is_muted = conversation.is_muted;
-  let aria_name = name.clone();
+  let is_bot = Memo::new(move |_| {
+    maybe_other_user.with(|maybe_user| maybe_user.as_ref().is_some_and(|user| user.is_bot))
+  });
+  let status_emoji = Memo::new(move |_| {
+    maybe_other_user.with(|maybe_user| {
+      maybe_user
+        .as_ref()
+        .and_then(|user| user.maybe_custom_status.as_ref())
+        .map(|status| status.emoji.clone())
+    })
+  });
+  let name = Memo::new(move |_| {
+    if is_notes {
+      i18n.t("notes-title")
+    } else {
+      conversation.with(|conv| conv.name.clone())
+    }
+  });
+  let is_peer_in_call =
+    Memo::new(move |_| maybe_other.is_some_and(|other| state.read(|backend| backend.is_in_call(other))));
   let label = move || {
+    let aria_name = name.get();
+    let count = count.get();
     let label = if count > 0 {
       i18n.t_with(
         "dm-item-unread",
         &[("name", &aria_name), ("count", &count.to_string())],
       )
     } else {
-      aria_name.clone()
+      aria_name
     };
-    if is_muted {
+    if is_muted.get() {
       i18n.t_with("sidebar-item-muted-label", &[("label", &label)])
     } else {
       label
@@ -323,24 +354,27 @@ fn DirectItem(conversation: Conversation) -> impl IntoView {
     <button
       class="sb-item"
       class:current=is_current
-      class:unread=is_unread
-      class:muted=conversation.is_muted
+      class:unread=move || is_unread.get()
+      class:muted=move || is_muted.get()
       data-conversation=id.to_string()
       aria-current=move || is_current().then_some("page")
       aria-label=label
       on:click=move |_| state.open_conversation(id)
     >
       {leading}
-      <span class="sb-name" translate="no">{name}</span>
-      {is_bot.then(|| view! { <span class="badge">{move || i18n.t("badge-bot")}</span> })}
-      {status_emoji.map(|emoji| view! { <span class="sb-status" aria-hidden="true">{emoji}</span> })}
+      <span class="sb-name" translate="no">{move || name.get()}</span>
+      {move || is_bot.get().then(|| view! { <span class="badge">{move || i18n.t("badge-bot")}</span> })}
+      {move || status_emoji.get().map(|emoji| view! { <span class="sb-status" aria-hidden="true">{emoji}</span> })}
       {move || {
-        maybe_other
-          .filter(|other| state.read(|backend| backend.is_in_call(*other)))
-          .map(|_| view! { <span class="sb-call" title=i18n.t("presence-in-call")><Icon name=IconName::Phone /></span> })
+        is_peer_in_call
+          .get()
+          .then(|| view! { <span class="sb-call" title=i18n.t("presence-in-call")><Icon name=IconName::Phone /></span> })
       }}
-      {is_muted.then(|| view! { <span class="sb-muted-icon" title=i18n.t("sidebar-item-muted")><Icon name=IconName::BellOff /></span> })}
-      {(count > 0).then(|| view! { <span class="badge-count" aria-hidden="true">{count}</span> })}
+      {move || is_muted.get().then(|| view! { <span class="sb-muted-icon" title=i18n.t("sidebar-item-muted")><Icon name=IconName::BellOff /></span> })}
+      {move || {
+        let count = count.get();
+        (count > 0).then(|| view! { <span class="badge-count" aria-hidden="true">{count}</span> })
+      }}
     </button>
   }
 }

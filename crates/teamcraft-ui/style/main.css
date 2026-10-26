@@ -7242,6 +7242,8 @@ html.call-window body {
 
 /* Profiles and directory */
 .avatar-img { width: 100%; height: 100%; border-radius: inherit; object-fit: cover; display: block; }
+/* Without a picture the element stays (avatar.rs), hidden; `display: block` above beats `[hidden]`. */
+.avatar-img[hidden] { display: none; }
 
 /* Space pictures: the rail button, the sidebar head and the quick switcher; letters until loaded. */
 .space-image { width: 100%; height: 100%; border-radius: inherit; object-fit: cover; display: block; }
