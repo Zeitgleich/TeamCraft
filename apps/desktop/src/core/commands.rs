@@ -154,6 +154,7 @@ pub async fn core_start(
         server_url: server.server_url.clone(),
         data_dir,
         keystore_scope: server.server_url.clone(),
+        maybe_download_dir: app.path().download_dir().ok(),
         argon2: Argon2Settings::default(),
       };
       let key = KeyChoice::Keyring {
@@ -366,6 +367,72 @@ pub async fn core_attachment(
   Ok(tauri::ipc::Response::new(plaintext.expose_secret().to_vec()))
 }
 
+/// "Save…" and "Download" on a file (#719): asks where to put it in the system's save dialog, then
+/// the core downloads and decrypts it to exactly that path beside its loop (the file's transfer
+/// state shows the progress and the result). Answers `false` when the user cancelled the dialog.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn core_save_attachment(
+  window: tauri::WebviewWindow,
+  host: State<'_, CoreHost>,
+  conversation: ConversationId,
+  message: MessageId,
+  file_id: String,
+  file_name: String,
+) -> Result<bool, CommandError> {
+  let runtime = host.current()?;
+  let Some(path) = ask_save_path(&window, &file_name).await else {
+    return Ok(false);
+  };
+  runtime
+    .save_attachment(conversation, message, file_id, path)
+    .await?;
+  Ok(true)
+}
+
+/// The path the user picks in the system's save dialog, starting in the downloads folder with
+/// `file_name`; `None` when cancelled.
+async fn ask_save_path(window: &tauri::WebviewWindow, file_name: &str) -> Option<PathBuf> {
+  use tauri_plugin_dialog::DialogExt;
+
+  let (sender, receiver) = tokio::sync::oneshot::channel();
+  let mut dialog = window
+    .dialog()
+    .file()
+    .set_parent(window)
+    .set_file_name(save_name(file_name));
+  if let Ok(downloads) = window.path().download_dir() {
+    dialog = dialog.set_directory(downloads);
+  }
+  // A dropped sender (the dialog failed to open) reads as cancelled.
+  dialog.save_file(move |maybe_path| drop(sender.send(maybe_path)));
+  let picked = receiver.await.ok().flatten()?;
+  match picked.into_path() {
+    Ok(path) => Some(path),
+    Err(error) => {
+      tracing::warn!(%error, "the save dialog answered with no local path");
+      None
+    },
+  }
+}
+
+/// The name the save dialog suggests: the sender's file name without path separators or control
+/// characters, so it can't point the dialog elsewhere.
+fn save_name(file_name: &str) -> String {
+  let cleaned: String = file_name
+    .chars()
+    .map(|character| match character {
+      '/' | '\\' | ':' => '_',
+      character if character.is_control() => '_',
+      character => character,
+    })
+    .collect();
+  let trimmed = cleaned.trim().trim_start_matches('.');
+  match trimmed.is_empty() {
+    true => "file".to_owned(),
+    false => trimmed.to_owned(),
+  }
+}
+
 /// One chunk of a large file the webview stages for its upload (issue #153), as a raw body with
 /// the copy's ID and the chunk's offset in headers; answers the staged copy's path, which the
 /// message's file then names.
@@ -437,6 +504,16 @@ mod tests {
   use crate::auth::{DesktopConfig, MemoryStore};
 
   const TOKEN: &str = "local-token-a";
+
+  #[test]
+  fn the_suggested_save_name_stays_a_file_name() {
+    assert_eq!(save_name("beach photo.jpg"), "beach photo.jpg");
+    assert_eq!(save_name("../../.bashrc"), "_.._.bashrc");
+    assert_eq!(save_name("C:\\Users\\a.txt"), "C__Users_a.txt");
+    assert_eq!(save_name("line\nbreak.txt"), "line_break.txt");
+    assert_eq!(save_name("..."), "file");
+    assert_eq!(save_name(""), "file");
+  }
 
   /// A new device signs in and the UI starts the core at once, before any refresh loop copied the
   /// token: the core reads the session itself and offers enrollment (the server has no identity).
@@ -665,6 +742,7 @@ mod tests {
       server_url: server_url.to_owned(),
       data_dir,
       keystore_scope: "test".into(),
+      maybe_download_dir: None,
       argon2: Argon2Settings::default(),
     };
     CoreRuntime::spawn(

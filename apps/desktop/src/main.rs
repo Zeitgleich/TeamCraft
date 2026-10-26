@@ -12,6 +12,7 @@ mod auth;
 mod autostart;
 mod call_window;
 mod calls;
+mod clipboard;
 mod core;
 #[cfg(target_os = "linux")]
 mod desktop_entry;
@@ -26,6 +27,7 @@ mod shell_prefs;
 mod single_instance;
 mod tray;
 mod updates;
+mod webview_downloads;
 #[cfg(target_os = "linux")]
 mod webview_memory;
 mod window_chrome;
@@ -80,6 +82,8 @@ fn main() -> anyhow::Result<()> {
   ));
   builder
     .plugin(tauri_plugin_opener::init())
+    // The save dialog of "Save…" (core_save_attachment); the webview gets no dialog permission.
+    .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_global_shortcut::Builder::new().build())
     .plugin(tauri_plugin_notification::init())
     // The shell drives it (updates.rs); the webview gets no updater permission.
@@ -210,6 +214,7 @@ fn main() -> anyhow::Result<()> {
       core::commands::core_action,
       core::commands::core_query,
       core::commands::core_attachment,
+      core::commands::core_save_attachment,
       core::commands::core_stage_file,
       core::commands::core_stop,
       core::commands::core_reset_store,
@@ -222,6 +227,7 @@ fn main() -> anyhow::Result<()> {
       calls::commands::call_watch_camera,
       calls::commands::call_unwatch_camera,
       external_links::open_external,
+      clipboard::clipboard_write_image,
       notifications::notify_user,
       notifications::withdraw_notifications,
       notifications::request_attention,
@@ -282,6 +288,8 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     // in the browser: the UI gets `File` objects and attaches them like the + button. Tauri's own
     // handler would swallow the drop on every platform and only report file paths.
     .disable_drag_drop_handler()
+    // A download the page starts itself lands in the downloads folder and is reported (#719).
+    .on_download(webview_downloads::on_download)
     .on_new_window({
       let app = app.handle().clone();
       move |url, _features| {

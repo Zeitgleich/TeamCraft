@@ -22,6 +22,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
 use crate::clock::format_date_time;
+use crate::components::attachment_menu;
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::components::lightbox::prefers_reduced_motion;
@@ -405,6 +406,7 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
   // Long-press on touch screens opens the context menu event: it shows the actions instead.
   let is_pinned = RwSignal::new(false);
   let is_touch = StoredValue::new(false);
+  let maybe_menu = attachment_menu::use_attachment_menu();
   let file = StoredValue::new(file);
   let name = file.with_value(|file| file.file_name.clone());
   let label = name.clone();
@@ -481,10 +483,13 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
         style:--media-h=media_height
         on:pointerdown=move |ev: web_sys::PointerEvent| is_touch.set_value(ev.pointer_type() == "touch")
         on:contextmenu=move |ev: web_sys::MouseEvent| {
-          // A long-press shows the actions; a right click keeps the browser's menu ("Save image as").
+          // A long-press shows the actions. A right click opens the app's menu in the desktop app
+          // (#719); the browser keeps its own ("Save image as", "Copy image").
           if is_touch.get_value() {
             ev.prevent_default();
             is_pinned.update(|pinned| *pinned = !*pinned);
+          } else {
+            file.with_value(|file| attachment_menu::open_on_right_click(maybe_menu, &ev, file, false));
           }
         }
       >
@@ -839,6 +844,12 @@ pub fn FileCard(file: FileInfo) -> impl IntoView {
     },
   };
   let status = transfer_status(&file.transfer, actions);
+  let maybe_menu = attachment_menu::use_attachment_menu();
+  let menu_file = StoredValue::new(file.clone());
+  let on_context_menu = move |ev: web_sys::MouseEvent| {
+    let is_touch = crate::viewport::is_touch_primary();
+    menu_file.with_value(|file| attachment_menu::open_on_right_click(maybe_menu, &ev, file, is_touch));
+  };
   // Markdown, HTML and PDF files open in the app (#557) unless they are too large.
   let maybe_document_key = MediaKey::for_file(&file).filter(|_| {
     is_on_server
@@ -851,7 +862,7 @@ pub fn FileCard(file: FileInfo) -> impl IntoView {
       FileTransfer::Uploading { .. } | FileTransfer::Downloading { .. }
     );
   view! {
-    <div class="file-card">
+    <div class="file-card" on:contextmenu=on_context_menu>
       {preview}
       <div class="file-meta">
         <span class="file-name" translate="no" title=file.file_name.clone()>{file.file_name.clone()}</span>
@@ -1022,24 +1033,59 @@ fn FileMenu(actions: FileActions) -> impl IntoView {
   }
 }
 
-/// What the toolbar, the card and the "…" menu do with one file.
+/// Saves one file of a message. In the desktop app the system's save dialog asks where, and the
+/// core decrypts the file to exactly that place (#719); the file's card shows the progress. In the
+/// browser the core hands the decrypted file to the browser's download. A failure says so.
+pub(crate) fn save_attachment(
+  state: AppState,
+  i18n: I18n,
+  conversation: ConversationId,
+  message: MessageId,
+  file_id: String,
+  file_name: String,
+) {
+  if !crate::auth::tauri::is_available() {
+    state.write(|backend| backend.download_attachment(conversation, message, &file_id));
+    return;
+  }
+  spawn_local(async move {
+    let args = serde_json::json!({
+      "conversation": conversation,
+      "message": message,
+      "file_id": file_id,
+      "file_name": file_name,
+    });
+    match crate::auth::tauri::call::<bool>("core_save_attachment", &args).await {
+      Ok(true) => state.show_brief_toast(i18n.t("lightbox-saving")),
+      // The user closed the dialog.
+      Ok(false) => {},
+      Err(error) => state.show_error(i18n.t("file-save-failed"), error),
+    }
+  });
+}
+
+/// What the toolbar, the card, the "…" menu and the right-click menu do with one file.
 #[derive(Clone, Copy)]
-struct FileActions {
+pub(crate) struct FileActions {
   state: AppState,
   i18n: I18n,
   conversation: ConversationId,
   message: MessageId,
   file_id: StoredValue<String>,
+  file_name: StoredValue<String>,
+  media_type: StoredValue<String>,
 }
 
 impl FileActions {
-  fn new(state: AppState, file: &FileInfo) -> Self {
+  pub(crate) fn new(state: AppState, file: &FileInfo) -> Self {
     Self {
       state,
       i18n: use_i18n(),
       conversation: file.conversation,
       message: file.message,
       file_id: StoredValue::new(file.file_id.clone()),
+      file_name: StoredValue::new(file.file_name.clone()),
+      media_type: StoredValue::new(file.media_type.clone()),
     }
   }
 
@@ -1054,13 +1100,45 @@ impl FileActions {
     })
   }
 
-  /// The core downloads and decrypts the file again and saves it (the download folder on the
-  /// desktop, the browser's download on the web).
-  fn download(self) {
-    self.file_id.with_value(|file_id| {
-      self
-        .state
-        .write(|backend| backend.download_attachment(self.conversation, self.message, file_id));
+  /// Saves the file: in the desktop app where the user picks in the save dialog, in the browser as
+  /// its download (see [`save_attachment`]).
+  pub(crate) fn download(self) {
+    save_attachment(
+      self.state,
+      self.i18n,
+      self.conversation,
+      self.message,
+      self.file_id.get_value(),
+      self.file_name.get_value(),
+    );
+  }
+
+  /// Whether "Copy image" applies: a picture the webview can draw.
+  pub(crate) fn can_copy_image(self) -> bool {
+    self
+      .media_type
+      .with_value(|media_type| crate::copy_image::can_copy(media_type))
+  }
+
+  /// Puts the picture on the clipboard (see [`crate::copy_image`]) and says how it went. Starts
+  /// within the click: the web Clipboard API allows it only then.
+  pub(crate) fn copy_image(self) {
+    let picture = crate::copy_image::CopiedPicture {
+      conversation: self.conversation,
+      message: self.message,
+      file_id: self.file_id.get_value(),
+      media_type: self.media_type.get_value(),
+    };
+    let copying = crate::copy_image::copy(picture);
+    let (state, i18n) = (self.state, self.i18n);
+    spawn_local(async move {
+      match copying.await {
+        true => state.show_brief_toast(i18n.t("lightbox-image-copied")),
+        false => state.show_error(
+          i18n.t("lightbox-copy-failed"),
+          "the picture could not be put on the clipboard".to_owned(),
+        ),
+      }
     });
   }
 
@@ -1077,7 +1155,7 @@ impl FileActions {
     }
   }
 
-  fn forward(self) {
+  pub(crate) fn forward(self) {
     self
       .state
       .overlay
@@ -1101,13 +1179,13 @@ impl FileActions {
     self.state.show_brief_toast(self.i18n.t(key));
   }
 
-  fn prefetch_permalink(self) {
+  pub(crate) fn prefetch_permalink(self) {
     self
       .state
       .read(|backend| drop(backend.permalink(self.conversation, self.message)));
   }
 
-  fn copy_message_link(self) {
+  pub(crate) fn copy_message_link(self) {
     let key = match self
       .state
       .read(|backend| backend.permalink(self.conversation, self.message))

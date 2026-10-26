@@ -32,7 +32,8 @@ pub struct LinkMenuTarget {
 
 /// Starts the click routing in the desktop shell; a no-op in the browser. A right click on a link
 /// fills `menu`, which the app shows as its own menu instead of the webview's (open, copy,
-/// download, new tab).
+/// download, new tab); elsewhere the webview's menu only stays for text (see
+/// [`keeps_webview_menu`]).
 pub fn start(menu: RwSignal<Option<LinkMenuTarget>>) {
   if !tauri::is_available() {
     return;
@@ -50,6 +51,13 @@ pub fn start(menu: RwSignal<Option<LinkMenuTarget>>) {
         x: event.client_x(),
         y: event.client_y(),
       })));
+      return;
+    }
+    // The webview's menu stays where it helps: text fields (paste, spelling) and selected text
+    // (copy). Elsewhere its entries (reload, back, "Save image as" on a `blob:` URL) have no place
+    // in an app (#719); files open the app's own menu (`attachment_menu`).
+    if !keeps_webview_menu(&event) {
+      event.prevent_default();
     }
   });
   if document
@@ -106,6 +114,28 @@ fn on_click(event: web_sys::MouseEvent) {
     event.prevent_default();
     open_in_system(url);
   }
+}
+
+/// Whether a right click keeps the webview's own menu: on a text field, with text selected, or
+/// with Shift held in a debug build (the web inspector's "Inspect Element").
+fn keeps_webview_menu(event: &web_sys::MouseEvent) -> bool {
+  if cfg!(debug_assertions) && event.shift_key() {
+    return true;
+  }
+  let is_text_field = event
+    .target()
+    .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+    .and_then(|element| {
+      element
+        .closest("input, textarea, [contenteditable]")
+        .ok()
+        .flatten()
+    })
+    .is_some();
+  let has_selection = web_sys::window()
+    .and_then(|window| window.get_selection().ok().flatten())
+    .is_some_and(|selection| !selection.is_collapsed());
+  is_text_field || has_selection
 }
 
 fn anchor_of(event: &web_sys::MouseEvent) -> Option<web_sys::HtmlAnchorElement> {
