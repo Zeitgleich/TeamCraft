@@ -1203,6 +1203,7 @@ fn DataGate(me: GetMeResponse, settings: Settings, control: SessionControl) -> i
   let i18n = use_i18n();
   let backend = RwSignal::new_local(None::<Result<Rc<dyn Backend>, LoadError>>);
   let attempt = RwSignal::new(0_u32);
+  crate::persisted_media::use_account(me.id);
   let me = StoredValue::new(me);
 
   Effect::new(move |_| {

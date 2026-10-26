@@ -58,6 +58,16 @@ pub enum SessionState {
   Ready(GetMeResponse),
 }
 
+impl SessionState {
+  /// The signed-in account, in the states that know it.
+  pub fn maybe_user(&self) -> Option<crate::model::UserId> {
+    match self {
+      Self::NeedsDeviceSetup(me) | Self::NeedsEnrollment { me, .. } | Self::Ready(me) => Some(me.id),
+      _ => None,
+    }
+  }
+}
+
 /// Why the user is back at the login screen.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LoginProblem {
@@ -150,7 +160,11 @@ impl SessionControl {
       let auth = control.authenticator();
       match auth.restore().await {
         Ok(true) => control.load_account().await,
-        Ok(false) => control.state.set_if_alive(SessionState::SignedOut(None)),
+        Ok(false) => {
+          control.state.set_if_alive(SessionState::SignedOut(None));
+          // A sign-out in a tab closed before it finished may have left a cache behind (#749).
+          crate::persisted_media::sweep_signed_out().await;
+        },
         Err(error) => control
           .state
           .set_if_alive(SessionState::SignedOut(Some(problem_from_auth(&error)))),
@@ -285,8 +299,11 @@ impl SessionControl {
 
   pub fn sign_out(&self) {
     let control = *self;
+    let maybe_user = control.state.with_untracked(SessionState::maybe_user);
     control.core_round.update(|round| *round = round.wrapping_add(1));
     spawn_local(async move {
+      // Pictures of this account don't outlive the session on this device (#749).
+      crate::persisted_media::clear(maybe_user).await;
       if tauri::has_core()
         && let Err(error) = remote_backend::stop_core().await
       {
