@@ -39,6 +39,7 @@ use teamcraft_proto::{
 };
 
 use teamcraft_client_api::notify::{MentionRules, is_mentioned};
+use teamcraft_client_api::receipts::{ReadIndicator, seen_by};
 
 use crate::client::bookmarks_key;
 use crate::client::workspace_admin::{ChannelOptions, StoredRoster};
@@ -146,6 +147,10 @@ pub enum CoreCommand {
   /// Presence and last seen of these people.
   RefreshPresence {
     users: Vec<UserId>,
+  },
+  /// How far the other members of a DM or group DM read.
+  RefreshReadReceipts {
+    conversation: ConversationId,
   },
   /// Ask the server's directory for people matching the query (people page, quick switcher).
   SearchDirectory {
@@ -476,6 +481,24 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .unwrap_or_default()
   }
 
+  /// The members of a conversation whose receipts show as ticks (a DM, #635); `None` elsewhere.
+  pub(crate) fn tick_members(&self, conversation: ConversationId) -> Option<Vec<UserId>> {
+    let response = self
+      .conversations_raw()
+      .into_iter()
+      .find(|response| response.id == conversation)?;
+    (ReadIndicator::of(view_kind(&response)) == ReadIndicator::Ticks).then(|| self.members(conversation))
+  }
+
+  /// How far each other member read, as far as this device heard (gateway events and
+  /// [`CoreCommand::RefreshReadReceipts`]).
+  pub(crate) fn read_receipts(&self, conversation: ConversationId) -> Vec<(UserId, MessageId)> {
+    self
+      .read(crate::read_state::read_receipts(&self.store, conversation))
+      .into_iter()
+      .collect()
+  }
+
   pub(crate) fn to_user(&self, summary: &UserSummary) -> User {
     let maybe_presence: Option<PresenceState> = self.read(records::get_json(
       &self.store,
@@ -540,13 +563,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     if member_ids.is_empty() && is_notes_to_self {
       member_ids = vec![self.me];
     }
-    let kind = match (&response.kind, &response.visibility) {
-      (ConversationKindProto::Dm, _) => ConversationKind::Direct,
-      (ConversationKindProto::Group, _) => ConversationKind::Group,
-      (_, _) if response.is_integration => ConversationKind::Integration,
-      (_, ConversationVisibility::Public) => ConversationKind::Public,
-      _ => ConversationKind::Private,
-    };
+    let kind = view_kind(response);
     let is_favorite = response
       .maybe_my_membership
       .as_ref()
@@ -1467,6 +1484,24 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.typing.users(conversation, self.me, self.clock.now_ms())
   }
 
+  fn seen_by(&self, conversation: ConversationId, message: MessageId) -> Vec<UserId> {
+    seen_by(&self.read_receipts(conversation), message)
+  }
+
+  fn refresh_read_receipts(&self, conversation: ConversationId) {
+    // Receipts exist only in DMs and group DMs: a channel's answer would always be empty.
+    let has_receipts = self.conversations_raw().iter().any(|response| {
+      response.id == conversation
+        && matches!(
+          response.kind,
+          ConversationKindProto::Dm | ConversationKindProto::Group
+        )
+    });
+    if has_receipts {
+      self.command(CoreCommand::RefreshReadReceipts { conversation });
+    }
+  }
+
   fn live_snapshot(&self) -> Option<LiveSnapshot> {
     // Each part is one record, except the receipts (one per member of each DM).
     Some(LiveSnapshot {
@@ -1837,6 +1872,17 @@ fn system_view(event: &ConversationEvent, sender: UserId) -> (MessageKind, UserI
     | ConversationEvent::Moved { .. }
     | ConversationEvent::CallMoved { .. }
     | ConversationEvent::Unknown => (MessageKind::User, sender),
+  }
+}
+
+/// The UI's kind of a conversation.
+fn view_kind(response: &ConversationResponse) -> ConversationKind {
+  match (&response.kind, &response.visibility) {
+    (ConversationKindProto::Dm, _) => ConversationKind::Direct,
+    (ConversationKindProto::Group, _) => ConversationKind::Group,
+    (_, _) if response.is_integration => ConversationKind::Integration,
+    (_, ConversationVisibility::Public) => ConversationKind::Public,
+    _ => ConversationKind::Private,
   }
 }
 

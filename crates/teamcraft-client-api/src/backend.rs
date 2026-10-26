@@ -132,6 +132,9 @@ pub trait ChatBackend {
   fn seen_by(&self, _conversation: ConversationId, _message: MessageId) -> Vec<UserId> {
     Vec::new()
   }
+  /// The conversation is shown: read its members' receipts again, since those sent while this
+  /// device was offline never arrive as events. Backends whose UI reads receipts itself ignore it.
+  fn refresh_read_receipts(&self, _conversation: ConversationId) {}
   /// Unread counts, threads, presence and receipts the backend keeps current from gateway events.
   /// `None` when it has no gateway (the UI then asks the server itself).
   fn live_snapshot(&self) -> Option<crate::live::LiveSnapshot> {

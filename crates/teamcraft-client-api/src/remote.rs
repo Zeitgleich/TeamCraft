@@ -471,6 +471,11 @@ pub enum ChatAction {
   RefreshCallHistory,
   /// Fetch this user's device list again (the devices settings were opened).
   RefreshOwnDevices,
+  /// Read again how far the other members read (a DM was opened, or the connection came back
+  /// while it is open): receipts that arrived while offline were missed.
+  RefreshReadReceipts {
+    conversation: ConversationId,
+  },
   /// Sign out one of this user's other devices.
   RevokeOwnDevice {
     device: DeviceId,
@@ -853,6 +858,7 @@ impl ChatAction {
       Self::SetLastSeenVisibility { visibility } => backend.set_last_seen_visibility(visibility),
       Self::RefreshCallHistory => backend.refresh_call_history(),
       Self::RefreshOwnDevices => backend.refresh_own_devices(),
+      Self::RefreshReadReceipts { conversation } => backend.refresh_read_receipts(conversation),
       Self::RevokeOwnDevice { device } => backend.revoke_own_device(device),
       Self::SetThreadFollowed {
         conversation,
@@ -1520,6 +1526,18 @@ mod tests {
   }
 
   #[test]
+  fn the_mobile_apps_ask_for_receipts_by_a_stable_name() {
+    let refresh: ChatAction =
+      serde_json::from_str(r#"{"action":"refresh_read_receipts","conversation":"7"}"#).expect("parse");
+    assert_eq!(
+      refresh,
+      ChatAction::RefreshReadReceipts {
+        conversation: id_from_raw(7)
+      }
+    );
+  }
+
+  #[test]
   fn failed_send_actions_are_tagged() {
     let retry: ChatAction =
       serde_json::from_str(r#"{"action":"retry_send","conversation":"7","message":"9"}"#).expect("parse");
@@ -1551,9 +1569,10 @@ mod tests {
         file_id: "pending-1".into(),
       }
     );
-    // Extras from an older core have no send state: not failed.
+    // Extras from an older core have no send or read state: not failed, not read.
     let extras: crate::actions::MessageExtras = serde_json::from_str(r#"{"message":"9"}"#).expect("parse");
     assert!(!extras.is_send_failed);
+    assert!(!extras.is_read);
   }
 
   #[test]

@@ -3185,6 +3185,44 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  /// Like the server: only in DMs and group DMs, the others' positions, and nothing for (or about)
+  /// members who turned receipts off.
+  async fn read_receipts(
+    &self,
+    conversation: ConversationId,
+  ) -> Result<teamcraft_proto::ReadReceiptsResponse, ApiError> {
+    self.with(|state, me| {
+      let found = state.member_conversation(conversation, me)?;
+      let sends_receipts = |user: &UserId| {
+        state
+          .notification_settings
+          .get(user)
+          .is_none_or(|settings| settings.send_read_receipts)
+      };
+      let has_receipts = matches!(
+        found.response.kind,
+        ConversationKind::Dm | ConversationKind::Group
+      );
+      let receipts = if has_receipts && sends_receipts(&me) {
+        found
+          .read_positions
+          .iter()
+          .filter(|(user, _)| **user != me && sends_receipts(user))
+          .map(|(user, message)| teamcraft_proto::ReadReceipt {
+            user_id: *user,
+            message_id: *message,
+          })
+          .collect()
+      } else {
+        Vec::new()
+      };
+      Ok(teamcraft_proto::ReadReceiptsResponse {
+        conversation_id: conversation,
+        receipts,
+      })
+    })
+  }
+
   async fn key_bag(&self) -> Result<KeyBagResponse, ApiError> {
     self.with(|state, me| {
       state
