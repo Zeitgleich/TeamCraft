@@ -8,8 +8,12 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import de.zeitgleich.teamcraft.auth.AuthRepository
 import de.zeitgleich.teamcraft.calls.CallController
 import de.zeitgleich.teamcraft.core.CoreRepository
@@ -25,6 +29,7 @@ import de.zeitgleich.teamcraft.push.PushManager
 import de.zeitgleich.teamcraft.search.SegmentPrefetch
 import de.zeitgleich.teamcraft.server.ManagedConfig
 import de.zeitgleich.teamcraft.server.ServerStore
+import de.zeitgleich.teamcraft.ui.ConnectionGrace
 import de.zeitgleich.teamcraft.ui.NetworkWatcher
 import de.zeitgleich.teamcraft.ui.Pictures
 import uniffi.teamcraft_ffi.AccountState
@@ -52,6 +57,8 @@ class AppGraph(context: Context) {
   val segmentPrefetch = SegmentPrefetch(context)
   val readWatcher = ReadWatcher(core, notifier, scope)
   val network = NetworkWatcher(context) { core.networkChanged() }
+  /** The connection banner's grace period, shared by every screen (issue #700). */
+  val connectionGrace = ConnectionGrace(scope, core.connectionState, network.isOnline)
 }
 
 class TeamCraftApplication : Application() {
@@ -73,30 +80,55 @@ class TeamCraftApplication : Application() {
 
   /**
    * Syncs live (gateway) while the app is visible; in the background the push service wakes it.
+   * Offline-first (issue #700): screens show the core's local store at once, whatever the
+   * connection does; coming back only restarts the sync, and the banner's grace period with it.
+   * Stopping waits [STOP_DELAY_MS], so a quick look at the camera or another app keeps the
+   * connection instead of tearing it down and reconnecting.
    */
   private class ForegroundSync(private val graph: AppGraph) : DefaultLifecycleObserver {
+    private var maybeStopping: Job? = null
+    /** Start and stop one after the other: a stop already under way finishes before the start. */
+    private val order = Mutex()
+
     override fun onStart(owner: LifecycleOwner) {
+      maybeStopping?.cancel()
+      maybeStopping = null
+      graph.connectionGrace.appReturned()
       graph.scope.launch {
         if (!graph.auth.isSignedIn.value) return@launch
-        runCatching {
-          val core = graph.core.core()
-          if (core.accountState() is AccountState.Ready) {
-            core.start()
-            graph.calls.start()
-            graph.push.refresh()
-          }
-        }
+        order.withLock { startSync() }
       }
     }
 
     override fun onStop(owner: LifecycleOwner) {
-      graph.scope.launch {
-        if (graph.auth.isSignedIn.value) runCatching { graph.core.core().stop() }
+      maybeStopping?.cancel()
+      maybeStopping = graph.scope.launch {
+        delay(STOP_DELAY_MS)
+        order.withLock {
+          if (graph.auth.isSignedIn.value) runCatching { graph.core.core().stop() }
+        }
+      }
+    }
+
+    private suspend fun startSync() {
+      runCatching {
+        val core = graph.core.core()
+        if (core.accountState() is AccountState.Ready) {
+          core.start()
+          // Still running (back within the delay) or just started: check the connection now
+          // instead of after a backoff that ran while the app was away.
+          graph.core.networkChanged()
+          graph.calls.start()
+          graph.push.refresh()
+        }
       }
     }
   }
 
   companion object {
+    /** How long the sync keeps running after the app left the foreground. */
+    private const val STOP_DELAY_MS = 10_000L
+
     fun graph(context: Context): AppGraph = (context.applicationContext as TeamCraftApplication).graph
   }
 }

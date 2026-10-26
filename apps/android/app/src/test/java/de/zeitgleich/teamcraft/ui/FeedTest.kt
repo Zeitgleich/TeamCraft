@@ -35,6 +35,26 @@ class FeedTest {
   }
 
   @Test
+  fun onlyTheLastMessageOfAGroupEndsIt() {
+    val items = entries(
+      message("1", "a", DAY_ONE),
+      message("2", "a", DAY_ONE + MINUTE),
+      message("3", "a", DAY_ONE + 2 * MINUTE),
+      message("4", "b", DAY_ONE + 3 * MINUTE),
+    )
+    assertEquals(listOf(false, false, true, true), items.map { it.isGroupEnd })
+  }
+
+  @Test
+  fun aDayChipEndsTheGroupBeforeIt() {
+    // DAY_ONE is 08:00 UTC: one minute before and at midnight.
+    val midnight = DAY_ONE + 16 * HOUR
+    val items = entries(message("1", "a", midnight - MINUTE), message("2", "a", midnight))
+    assertEquals(listOf(true, true), items.map { it.isGroupEnd })
+    assertEquals(listOf(false, false), items.map { it.isContinuation })
+  }
+
+  @Test
   fun unreadLineBreaksAGroup() {
     val items = feedItems(
       listOf(message("1", "a", DAY_ONE), message("2", "a", DAY_ONE + MINUTE)),

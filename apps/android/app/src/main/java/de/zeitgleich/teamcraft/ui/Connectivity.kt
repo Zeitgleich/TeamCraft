@@ -26,6 +26,7 @@ class NetworkWatcher(context: Context, private val onChange: () -> Unit) {
   private val online = MutableStateFlow(manager.isOnline())
   private var maybeNetwork: Network? = null
   private var wasValidated = online.value
+  private var isBlocked = false
 
   val isOnline: StateFlow<Boolean> = online
 
@@ -48,9 +49,23 @@ class NetworkWatcher(context: Context, private val onChange: () -> Unit) {
           if (NetworkTrust.reportProxy(properties)) onChange()
         }
 
+        override fun onBlockedStatusChanged(network: Network, blocked: Boolean) {
+          // Doze, App Standby or Data Saver cut the app off the network while it stays up; when
+          // they let go, the core reconnects at once instead of waiting out its backoff.
+          setBlocked(blocked)
+        }
+
         override fun onLost(network: Network) = changed(null, isValidated = false)
       },
     )
+  }
+
+  @Synchronized
+  private fun setBlocked(isNowBlocked: Boolean) {
+    if (isNowBlocked == isBlocked) return
+    isBlocked = isNowBlocked
+    online.value = wasValidated && !isBlocked
+    onChange()
   }
 
   /** Capabilities change often (signal strength); only another network or validation counts. */
@@ -59,7 +74,7 @@ class NetworkWatcher(context: Context, private val onChange: () -> Unit) {
     val isNew = maybeNow != maybeNetwork || isValidated != wasValidated
     maybeNetwork = maybeNow
     wasValidated = isValidated
-    online.value = isValidated
+    online.value = isValidated && !isBlocked
     if (isNew) onChange()
   }
 }

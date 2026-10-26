@@ -45,7 +45,7 @@ token.
 |--------------------------|------------------------------------------------------------------------------------------|
 | Messages                 | Reply (also by swiping), react (double tap), edit, delete, forward, pin, save, link      |
 | Sending                  | Mentions with a picker, priority, read confirmation, silent, files with progress         |
-| Reading                  | Date chips, grouped follow-ups, jump to unread or newest, tappable links, drafts         |
+| Reading                  | Bubbles grouped by sender, Markdown as on desktop, date pills, jump to unread, drafts     |
 | Threads                  | Thread view, follow / unfollow, inbox of followed threads with unread replies            |
 | Files                    | Camera, photo picker, files; full-screen image viewer; share in from other apps          |
 | Channels and people      | Browse, join, create, archive and leave channels, bookmarks, direct messages, presence   |
