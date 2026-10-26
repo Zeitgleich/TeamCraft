@@ -1808,6 +1808,7 @@ fn query_string(parameters: &[(&str, Option<String>)]) -> String {
 mod tests {
   use super::*;
 
+  #[cfg(not(target_arch = "wasm32"))]
   #[test]
   fn a_redirect_never_leaves_https() {
     assert!(is_downgrade(true, "http"));
