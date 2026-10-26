@@ -1,16 +1,20 @@
 //! A webhook POST arrives as a decrypted message for a member client, through a real server and
 //! Postgres (the server's testing harness, needs `DATABASE_URL`; skipped without).
 //!
-//! alice (owner) and bob (member) share an integration channel with the bridge's bot. The bridge
-//! runs next to the test; bob reads what the tools sent after decrypting it himself.
+//! alice (owner, the channel's admin) and bob (member) share an integration channel with the
+//! bridge's bot. The bridge runs next to the test; bob reads what the tools sent after decrypting
+//! it himself. Sources come from the configuration file, or from the app: control messages that
+//! alice's and bob's clients write into the channel.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stderr)]
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use rand_core::OsRng;
 use serde_json::json;
-use teamcraft_bridge::app::{enroll_or_open, start_endpoints, worker_parts};
+use teamcraft_bridge::app::{Endpoints, enroll_or_open, start_endpoints, worker_settings};
 use teamcraft_bridge::config::BridgeConfig;
+use teamcraft_bridge::sources::SourceRegistry;
 use teamcraft_bridge::worker::Worker;
 use teamcraft_core::api::{HttpGateway, HttpServerApi, StaticToken};
 use teamcraft_core::clock::SystemClock;
@@ -18,7 +22,10 @@ use teamcraft_core::store::{LocalStore, MemoryStore, MessageContent, MessageFilt
 use teamcraft_core::{Client, ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::SecretBytes;
-use teamcraft_proto::{ConversationId, UserId};
+use teamcraft_crypto::source_token::SourceToken;
+use teamcraft_proto::{
+  ConversationId, SourceChange, SourceId, SourceKind, SourceOptions, SourceTokenHash, UserId,
+};
 use teamcraft_server::testing::{TestApp, TestUser};
 use tokio::sync::mpsc;
 
@@ -98,9 +105,22 @@ async fn post(url: &str, content_type: &str, body: &str) -> reqwest::StatusCode 
     .status()
 }
 
-#[tokio::test]
-async fn webhooks_and_logs_arrive_decrypted_for_a_member_and_the_server_sees_only_ciphertext() {
-  let Some(app) = TestApp::start().await else { return };
+/// Everything the tests share: the server, alice and bob with their gateways, the channel and the
+/// bot's enrolled client.
+struct Setup {
+  app: TestApp,
+  alice_user: TestUser,
+  alice: TestClient,
+  bob: TestClient,
+  bob_store: Arc<MemoryStore>,
+  bob_gateway: HttpGateway,
+  bot_id: String,
+  bot_token: String,
+  bot_store: Arc<MemoryStore>,
+  channel: ConversationId,
+}
+
+async fn setup(app: TestApp) -> Setup {
   let (alice_user, bob_user) = (
     TestUser::new("alice", &["owner"]),
     TestUser::new("bob", &["member"]),
@@ -155,7 +175,55 @@ async fn webhooks_and_logs_arrive_decrypted_for_a_member_and_the_server_sees_onl
     assert_eq!(added.status, reqwest::StatusCode::CREATED, "{}", added.body);
   }
 
-  // The bridge: configured like a real one, started against the test server.
+  // The bot enrolls; then alice adds bob and the bot to the channel.
+  let bot_store = Arc::new(MemoryStore::new());
+  let config = bridge_config(&app, &bot_token, channel, &bob_id, true);
+  let bot_api = HttpServerApi::new(app.base_url.clone(), StaticToken(bot_token.clone()));
+  let bot_client = enroll_or_open(bot_api, bot_store.clone(), &config).await.unwrap();
+  assert_eq!(bot_client.user_id().to_string(), bot_id);
+  alice.add_member(channel, bob.user_id()).await.unwrap();
+  alice.add_member(channel, bot_client.user_id()).await.unwrap();
+  pump_until("bob joins", &mut bob, &mut bob_gateway, |client| {
+    client.has_group(channel).unwrap()
+  })
+  .await;
+  drop(bot_client);
+  Setup {
+    app,
+    alice_user,
+    alice,
+    bob,
+    bob_store,
+    bob_gateway,
+    bot_id,
+    bot_token,
+    bot_store,
+    channel,
+  }
+}
+
+/// The bridge's configuration; `with_static_source` adds a `[[sources]]` block for the channel.
+fn bridge_config(
+  app: &TestApp,
+  bot_token: &str,
+  channel: ConversationId,
+  bob_id: &str,
+  with_static_source: bool,
+) -> BridgeConfig {
+  let source = if with_static_source {
+    format!(
+      r#"
+      [[sources]]
+      name = "nas"
+      token = "{SOURCE_TOKEN}"
+      conversation_id = "{channel}"
+      danger_is_alert = true
+      mentions = [{{ user_id = "{bob_id}", name = "bob" }}]
+      "#
+    )
+  } else {
+    String::new()
+  };
   let mut config = BridgeConfig::from_toml(&format!(
     r#"
     [server]
@@ -171,37 +239,54 @@ async fn webhooks_and_logs_arrive_decrypted_for_a_member_and_the_server_sees_onl
     interval_ms = 200
     [index]
     interval_secs = 0
-    [[sources]]
-    name = "nas"
-    token = "{SOURCE_TOKEN}"
-    conversation_id = "{channel}"
-    danger_is_alert = true
-    mentions = [{{ user_id = "{bob_id}", name = "bob" }}]
+    {source}
     "#,
     url = app.base_url
   ))
   .unwrap();
   config.identity.argon2_memory_kib = weak_argon2().memory_kib;
   config.identity.argon2_iterations = weak_argon2().iterations;
-  let bot_api = HttpServerApi::new(app.base_url.clone(), StaticToken(bot_token));
-  let bot_client = enroll_or_open(bot_api, Arc::new(MemoryStore::new()), &config)
+  config
+}
+
+/// Opens the bot's client from its store and starts endpoints and worker: what a (re)start of the
+/// bridge does.
+async fn start_bridge(
+  setup: &Setup,
+  config: &BridgeConfig,
+) -> (
+  Endpoints,
+  String,
+  Worker<HttpServerApi<StaticToken>, Arc<MemoryStore>>,
+) {
+  let api = HttpServerApi::new(setup.app.base_url.clone(), StaticToken(setup.bot_token.clone()));
+  let client = enroll_or_open(api, setup.bot_store.clone(), config)
     .await
     .unwrap();
-  assert_eq!(bot_client.user_id().to_string(), bot_id);
-
-  // Now the bot has keys: alice adds bob and the bot to the channel.
-  alice.add_member(channel, bob.user_id()).await.unwrap();
-  alice.add_member(channel, bot_client.user_id()).await.unwrap();
-  pump_until("bob joins", &mut bob, &mut bob_gateway, |client| {
-    client.has_group(channel).unwrap()
-  })
-  .await;
-
   let (sender, receiver) = mpsc::channel(64);
-  let endpoints = start_endpoints(&config, sender).await.unwrap();
+  let sources = SourceRegistry::new(config);
+  let endpoints = start_endpoints(config, sources.clone(), sender).await.unwrap();
   let base = format!("http://{}", endpoints.addrs[0]);
-  let (sources, settings) = worker_parts(&config);
-  let worker = Worker::new(bot_client, sources, receiver, settings);
+  let worker = Worker::new(client, sources, receiver, worker_settings(config));
+  (endpoints, base, worker)
+}
+
+#[tokio::test]
+async fn webhooks_and_logs_arrive_decrypted_for_a_member_and_the_server_sees_only_ciphertext() {
+  let Some(app) = TestApp::start().await else { return };
+  let mut setup = setup(app).await;
+  let (channel, bot_id) = (setup.channel, setup.bot_id.clone());
+  let bob_id = setup.bob.user_id().to_string();
+  let config = bridge_config(&setup.app, &setup.bot_token, channel, &bob_id, true);
+  let (endpoints, base, worker) = start_bridge(&setup, &config).await;
+  let Setup {
+    app,
+    alice_user,
+    bob,
+    bob_store,
+    bob_gateway,
+    ..
+  } = &mut setup;
 
   let script = async {
     // A Slack-style webhook.
@@ -212,8 +297,8 @@ async fn webhooks_and_logs_arrive_decrypted_for_a_member_and_the_server_sees_onl
     )
     .await;
     assert_eq!(status, reqwest::StatusCode::OK);
-    pump_until("bob decrypts the webhook", &mut bob, &mut bob_gateway, |_| {
-      texts(&bob_store, channel)
+    pump_until("bob decrypts the webhook", bob, bob_gateway, |_| {
+      texts(bob_store, channel)
         .iter()
         .any(|(body, _)| body == "**ci**\nDeploy [#42](https://ci.example.com/42) finished")
     })
@@ -228,8 +313,8 @@ async fn webhooks_and_logs_arrive_decrypted_for_a_member_and_the_server_sees_onl
     .await;
     assert_eq!(status, reqwest::StatusCode::OK);
     let bob_user_id = bob.user_id();
-    pump_until("bob decrypts the alert", &mut bob, &mut bob_gateway, |_| {
-      texts(&bob_store, channel)
+    pump_until("bob decrypts the alert", bob, bob_gateway, |_| {
+      texts(bob_store, channel)
         .iter()
         .any(|(body, mentions)| body.contains("Backup failed") && mentions == &vec![bob_user_id])
     })
@@ -243,8 +328,8 @@ async fn webhooks_and_logs_arrive_decrypted_for_a_member_and_the_server_sees_onl
     )
     .await;
     assert_eq!(status, reqwest::StatusCode::OK);
-    pump_until("bob decrypts the log batch", &mut bob, &mut bob_gateway, |_| {
-      texts(&bob_store, channel)
+    pump_until("bob decrypts the log batch", bob, bob_gateway, |_| {
+      texts(bob_store, channel)
         .iter()
         .any(|(body, _)| body == "```\nINFO started\nWARN disk at 91%\nINFO done\n```")
     })
@@ -252,7 +337,7 @@ async fn webhooks_and_logs_arrive_decrypted_for_a_member_and_the_server_sees_onl
 
     // The server holds ciphertext only.
     let stored = app
-      .get(&alice_user, &format!("/conversations/{channel}/messages"))
+      .get(alice_user, &format!("/conversations/{channel}/messages"))
       .await;
     let raw = stored.body.to_string();
     for secret in ["Deploy", "Backup failed", "disk at 91%"] {
@@ -285,5 +370,110 @@ async fn webhooks_and_logs_arrive_decrypted_for_a_member_and_the_server_sees_onl
     endpoints.shutdown().await;
   };
   let (_, ()) = tokio::join!(worker.run(), script);
-  app.stop().await;
+  setup.app.stop().await;
+}
+
+#[tokio::test]
+async fn sources_added_in_the_app_work_without_configuration_and_survive_a_restart() {
+  let Some(app) = TestApp::start().await else { return };
+  let mut setup = setup(app).await;
+  let channel = setup.channel;
+  let bob_id = setup.bob.user_id().to_string();
+  let config = bridge_config(&setup.app, &setup.bot_token, channel, &bob_id, false);
+  assert!(config.sources.is_empty(), "no source in the file");
+
+  // bob is a member but no channel admin: his source must not open.
+  let bobs_token = SourceToken::generate(&mut OsRng);
+  let (_, bobs_change) = created("bob's", SourceKind::Webhook, &bobs_token);
+  setup.bob.send_source_change(channel, bobs_change).await.unwrap();
+  // alice created the channel, so she is its admin: hers opens.
+  let token = SourceToken::generate(&mut OsRng);
+  let (source, change) = created("ci", SourceKind::Webhook, &token);
+  setup.alice.send_source_change(channel, change).await.unwrap();
+
+  let (endpoints, base, worker) = start_bridge(&setup, &config).await;
+  let hook = format!("{base}/hooks/{}", token.expose_secret());
+  let script = async {
+    wait_for_status("alice's source opens", &hook, reqwest::StatusCode::OK).await;
+    let bobs_hook = format!("{base}/hooks/{}", bobs_token.expose_secret());
+    assert_eq!(
+      post(&bobs_hook, "application/json", r#"{"text":"x"}"#).await,
+      reqwest::StatusCode::NOT_FOUND,
+      "a member's source stays closed"
+    );
+    let ingest = format!("{base}/ingest/{}", token.expose_secret());
+    assert_eq!(
+      post(&ingest, "text/plain", "x\n").await,
+      reqwest::StatusCode::NOT_FOUND,
+      "a webhook source takes no log lines"
+    );
+    let sent = post(
+      &hook,
+      "application/json",
+      r#"{"text":"from the app","username":"ci"}"#,
+    )
+    .await;
+    assert_eq!(sent, reqwest::StatusCode::OK);
+    pump_until(
+      "bob decrypts the webhook",
+      &mut setup.bob,
+      &mut setup.bob_gateway,
+      |_| {
+        texts(&setup.bob_store, channel)
+          .iter()
+          .any(|(body, _)| body == "**ci**\nfrom the app")
+      },
+    )
+    .await;
+    endpoints.shutdown().await;
+  };
+  let (client, ()) = tokio::join!(worker.run(), script);
+  drop(client);
+
+  // A restart (a new client on the same database) serves the source from the store at once.
+  let (endpoints, base, worker) = start_bridge(&setup, &config).await;
+  let hook = format!("{base}/hooks/{}", token.expose_secret());
+  let script = async {
+    assert_eq!(
+      post(&hook, "application/json", r#"{"text":"after restart"}"#).await,
+      reqwest::StatusCode::OK,
+      "known from the store before the gateway is back"
+    );
+    // alice revokes it: the token stops working.
+    setup
+      .alice
+      .send_source_change(channel, SourceChange::Revoked { source })
+      .await
+      .unwrap();
+    wait_for_status("the revoked token closes", &hook, reqwest::StatusCode::NOT_FOUND).await;
+    endpoints.shutdown().await;
+  };
+  let _ = tokio::join!(worker.run(), script);
+  setup.app.stop().await;
+}
+
+fn created(name: &str, kind: SourceKind, token: &SourceToken) -> (SourceId, SourceChange) {
+  let source = SourceId::random();
+  (
+    source,
+    SourceChange::Created {
+      source,
+      name: name.into(),
+      kind,
+      token_sha256: SourceTokenHash::from_bytes(token.sha256()),
+      options: SourceOptions::default(),
+    },
+  )
+}
+
+/// Posts a small webhook until the answer is `wanted` (the bridge picks changes up once a second).
+async fn wait_for_status(what: &str, url: &str, wanted: reqwest::StatusCode) {
+  let deadline = Instant::now() + Duration::from_secs(30);
+  while Instant::now() < deadline {
+    if post(url, "application/json", r#"{"text":"probe"}"#).await == wanted {
+      return;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+  }
+  panic!("timed out waiting until {what}");
 }

@@ -18,7 +18,8 @@ use tracing::{info, warn};
 
 use crate::config::BridgeConfig;
 use crate::http::{HttpState, Submission, router};
-use crate::worker::{Worker, WorkerSettings, WorkerSource};
+use crate::sources::SourceRegistry;
+use crate::worker::{AppSourceSettings, Worker, WorkerSettings};
 
 /// Submissions waiting for the worker; beyond this the endpoints answer 503.
 const QUEUE_CAPACITY: usize = 4096;
@@ -89,9 +90,10 @@ impl Endpoints {
 /// is tolerated if another one worked (hosts without IPv6).
 pub async fn start_endpoints(
   config: &BridgeConfig,
+  sources: SourceRegistry,
   sender: mpsc::Sender<Submission>,
 ) -> anyhow::Result<Endpoints> {
-  let state = HttpState::new(config, sender);
+  let state = HttpState::new(sources, sender);
   let (stop, stopped) = watch::channel(false);
   let mut listeners: Vec<TcpListener> = Vec::new();
   for addr in &config.listen.addrs {
@@ -122,21 +124,14 @@ pub async fn start_endpoints(
 }
 
 /// What the worker takes from the configuration.
-pub fn worker_parts(config: &BridgeConfig) -> (Vec<WorkerSource>, WorkerSettings) {
-  let sources = config
-    .sources
-    .iter()
-    .map(|source| WorkerSource {
-      name: source.name.clone(),
-      conversation: source.conversation_id,
-      mentions: source.mentions(),
-    })
-    .collect();
-  let settings = WorkerSettings {
+pub fn worker_settings(config: &BridgeConfig) -> WorkerSettings {
+  WorkerSettings {
     batch: config.batch_limits(),
     index_interval: (config.index.interval_secs > 0).then(|| Duration::from_secs(config.index.interval_secs)),
-  };
-  (sources, settings)
+    maybe_app_sources: config.app_sources.is_enabled.then_some(AppSourceSettings {
+      history_pages: config.app_sources.history_pages,
+    }),
+  }
 }
 
 /// Runs the bridge until `shutdown` resolves, then stops the endpoints and sends what is pending.
@@ -150,10 +145,15 @@ where
   S: LocalStore,
 {
   let (sender, receiver) = mpsc::channel(QUEUE_CAPACITY);
-  let endpoints = start_endpoints(config, sender).await?;
-  info!(addrs = ?endpoints.addrs, sources = config.sources.len(), "listening for webhooks and logs");
-  let (sources, settings) = worker_parts(config);
-  let worker = Worker::new(client, sources, receiver, settings);
+  let sources = SourceRegistry::new(config);
+  let endpoints = start_endpoints(config, sources.clone(), sender).await?;
+  info!(
+    addrs = ?endpoints.addrs,
+    static_sources = config.sources.len(),
+    app_sources = config.app_sources.is_enabled,
+    "listening for webhooks and logs"
+  );
+  let worker = Worker::new(client, sources, receiver, worker_settings(config));
   let work = worker.run();
   tokio::pin!(work);
   tokio::select! {

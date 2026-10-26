@@ -208,6 +208,9 @@ pub enum MessageContent {
     emoji: String,
     is_added: bool,
   },
+  /// A change to the channel's integration-bridge sources (docs/bridge.md, "Sources"); applied
+  /// to the conversation's [`SourceLedger`](crate::integration_sources::SourceLedger).
+  IntegrationSource { change: teamcraft_proto::SourceChange },
   #[serde(other)]
   Unknown,
 }
@@ -701,6 +704,7 @@ impl StoredMessage {
         | MessageContent::Pin { .. }
         | MessageContent::Bookmarks { .. }
         | MessageContent::IndexSegment { .. }
+        | MessageContent::IntegrationSource { .. }
         | MessageContent::Event {
           event: ConversationEvent::CallMoved { .. }
         }

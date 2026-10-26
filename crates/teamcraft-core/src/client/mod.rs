@@ -34,6 +34,7 @@ pub mod previews;
 mod removal;
 #[cfg(not(target_arch = "wasm32"))]
 mod segments;
+mod sources;
 mod sync;
 #[cfg(feature = "ui")]
 mod ui_commands;
@@ -80,6 +81,7 @@ pub use pending_actions::{PendingAction, PendingActionSettings, StatusChange};
 pub use pending_add::{UserAddWait, pending_user_additions};
 #[cfg(not(target_arch = "wasm32"))]
 pub use segments::SegmentPrefetch;
+pub use sources::{HistoryScan, IntegrationSources};
 use teamcraft_crypto::membership::ChangeId;
 use teamcraft_crypto::mls::{ChangeHistory, ConversationGroup, PendingCommit};
 use teamcraft_proto::{Base64Bytes, ConversationId, ConversationResponse, DeviceActivity, UserId};

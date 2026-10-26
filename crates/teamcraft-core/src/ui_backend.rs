@@ -774,6 +774,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       | MessageContent::Event { .. }
       | MessageContent::Deleted
       | MessageContent::IndexSegment { .. }
+      | MessageContent::IntegrationSource { .. }
       | MessageContent::Unknown => String::new(),
     };
     let (kind, author) = match &stored.content {

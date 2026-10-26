@@ -585,6 +585,18 @@ fn apply_control_with(
   if let MessageContent::Bookmarks { items } = content {
     return records::put_json(store, Table::Account, &bookmarks_key(conversation), items);
   }
+  if let MessageContent::IntegrationSource { change } = content {
+    // Decrypted in the conversation's group, so `sender` is a member of it; who may do what is
+    // decided when the sources are used (integration_sources.rs).
+    return crate::integration_sources::apply_source_change(
+      store,
+      conversation,
+      sender,
+      change,
+      at_ms,
+      maybe_server_id,
+    );
+  }
   if let MessageContent::Event {
     event: crate::store::ConversationEvent::CallMoved {
       meeting,

@@ -10,6 +10,7 @@ pub mod clock;
 pub mod connection;
 pub mod downloads;
 pub mod error;
+pub mod integration_sources;
 pub mod link_preview;
 pub mod notify_rules;
 pub mod picked_files;
@@ -54,8 +55,8 @@ mod trust;
 
 pub use client::{
   AttestationSettings, CallEventSink, CallKeySigner, CallPreparation, Client, ClientSettings,
-  EnrollmentOptions, EnrollmentSecret, FlushReport, GatewayOutcome, GroupAccess, JwksSource,
-  LinkAnnouncement, LinkOffer, LinkRequestInfo, LinkRequestList, MAX_VIEWER_BYTES, OrgRecoveryUnlock,
-  PendingEnrollment, TypingState,
+  EnrollmentOptions, EnrollmentSecret, FlushReport, GatewayOutcome, GroupAccess, HistoryScan,
+  IntegrationSources, JwksSource, LinkAnnouncement, LinkOffer, LinkRequestInfo, LinkRequestList,
+  MAX_VIEWER_BYTES, OrgRecoveryUnlock, PendingEnrollment, TypingState,
 };
 pub use error::{CoreError, UnreadableStore};

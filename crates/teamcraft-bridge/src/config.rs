@@ -14,7 +14,9 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::SymmetricKey;
-use teamcraft_proto::{ConversationId, UserId};
+use teamcraft_proto::{
+  ConversationId, DEFAULT_SOURCE_ALERT_LEVELS, DEFAULT_SOURCE_RATE_LIMIT_PER_MINUTE, UserId,
+};
 
 use crate::batch::{BatchLimits, Mentions};
 use crate::render::LogRules;
@@ -38,6 +40,9 @@ pub struct BridgeConfig {
   pub batching: BatchingSection,
   #[serde(default)]
   pub index: IndexSection,
+  #[serde(default)]
+  pub app_sources: AppSourcesSection,
+  /// Optional: sources written into this file. Sources added in the app need none.
   #[serde(default)]
   pub sources: Vec<SourceConfig>,
 }
@@ -110,6 +115,18 @@ pub struct IndexSection {
   pub interval_secs: u64,
 }
 
+/// Sources that channel admins add in the app (docs/bridge.md, "Sources").
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AppSourcesSection {
+  /// Serve them; `false` limits the bridge to the `[[sources]]` of this file.
+  #[serde(rename = "enabled")]
+  pub is_enabled: bool,
+  /// Pages of older history (50 messages each) read once per channel, for sources announced
+  /// before the bridge's database existed (a new or lost database).
+  pub history_pages: u32,
+}
+
 /// One producer: a token that selects a conversation, with its limits and alert rules.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -179,8 +196,8 @@ impl BridgeConfig {
 
   fn validate(&self) -> Result<(), ConfigError> {
     let invalid = |message: String| Err(ConfigError::Invalid(message));
-    if self.sources.is_empty() {
-      return invalid("define at least one [[sources]]".into());
+    if self.sources.is_empty() && !self.app_sources.is_enabled {
+      return invalid("define at least one [[sources]] or turn app_sources on".into());
     }
     if self.listen.addrs.is_empty() {
       return invalid("listen.addrs is empty".into());
@@ -331,6 +348,15 @@ impl Default for BatchingSection {
   }
 }
 
+impl Default for AppSourcesSection {
+  fn default() -> Self {
+    Self {
+      is_enabled: true,
+      history_pages: 200,
+    }
+  }
+}
+
 impl Default for IndexSection {
   fn default() -> Self {
     Self { interval_secs: 3600 }
@@ -338,13 +364,11 @@ impl Default for IndexSection {
 }
 
 fn default_rate_limit() -> u32 {
-  600
+  DEFAULT_SOURCE_RATE_LIMIT_PER_MINUTE
 }
 
 fn default_alert_levels() -> Vec<String> {
-  ["error", "err", "fatal", "critical", "alert", "emergency"]
-    .map(String::from)
-    .into()
+  DEFAULT_SOURCE_ALERT_LEVELS.map(String::from).into()
 }
 
 #[cfg(test)]
@@ -378,6 +402,15 @@ mod tests {
     }
 
     #[test]
+    fn sources_in_the_file_are_optional() {
+      let text = MINIMAL.split("[[sources]]").next().unwrap();
+      let config = BridgeConfig::from_toml(text).unwrap();
+      assert!(config.sources.is_empty());
+      assert!(config.app_sources.is_enabled);
+      assert_eq!(config.app_sources.history_pages, 200);
+    }
+
+    #[test]
     fn unknown_keys_are_rejected() {
       let text = format!("{MINIMAL}\n[extra]\nx = 1\n");
       assert!(matches!(
@@ -405,8 +438,11 @@ mod tests {
     fn weak_duplicate_and_unusable_sources_are_rejected() {
       for (what, text) in [
         (
-          "no sources",
-          MINIMAL.split("[[sources]]").next().unwrap().to_owned(),
+          "no sources and app sources off",
+          format!(
+            "{}\n[app_sources]\nenabled = false\n",
+            MINIMAL.split("[[sources]]").next().unwrap()
+          ),
         ),
         (
           "short token",
