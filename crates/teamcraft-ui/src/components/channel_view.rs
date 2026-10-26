@@ -121,6 +121,10 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
               conversation=conversation
               panel_id=ChannelTab::Files.panel_id()
               labelled_by=ChannelTab::Files.tab_id()
+              on_show_message=Callback::new(move |message| {
+                tab.set(ChannelTab::Messages);
+                state.open_message(conversation, message, None);
+              })
             />
           }
             .into_any(),
