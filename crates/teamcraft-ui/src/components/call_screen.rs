@@ -65,7 +65,6 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         .is_some_and(|conversation| conversation.kind.is_direct_like())
       && state.read(|backend| !backend.has_simulated_calls())
   });
-  let is_share_layout = move || call.is_sharing_screen.get() || remote_sharer.get().is_some();
 
   // Real calls report who is speaking; the demo rotates the active speaker among people who are not
   // muted.
@@ -98,7 +97,10 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           .active_call()
           .and_then(|active| active.active_speakers.first().copied())
       });
-      speaking.set(loudest);
+      // Every backend change runs this; only a new speaker may tell the stage (issue #687).
+      if speaking.get_untracked() != loudest {
+        speaking.set(loudest);
+      }
     }
   });
   let privacy_code = Memo::new(move |_| {
@@ -128,7 +130,9 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
       .map(|tile| tile.user.id)
       .collect();
     if candidates.is_empty() {
-      speaking.set(None);
+      if speaking.get_untracked().is_some() {
+        speaking.set(None);
+      }
     } else {
       rotation.set(rotation.get() + 1);
       speaking.set(candidates.get(rotation.get() % candidates.len()).copied());
@@ -193,40 +197,72 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
       />
     }
   };
-  let remote_tile = move |tile: TileData, is_large: bool| {
-    let participant = tile.participant.unwrap_or(Participant {
-      user: tile.user.id,
-      is_muted: false,
-      is_camera_on: true,
-      has_hand_raised: false,
-      is_sharing_screen: false,
-    });
-    let id = tile.user.id;
-    view! {
-      <VideoTile
-        user=tile.user
-        is_large=is_large
-        is_muted=participant.is_muted
-        is_camera_on=participant.is_camera_on
-        has_hand_raised=participant.has_hand_raised
-        is_speaking=Signal::derive(move || speaking.get() == Some(id))
-        is_reconnecting=Signal::derive(move || reconnecting.get().contains(&id))
-        video=Memo::new(move |_| track_of(id, VideoTrackKind::Camera))
-      />
-    }
+  // A tile follows its person's microphone, camera and hand in place: muting someone must not build
+  // the stage again, which would remount every video (issue #687).
+  let participant_flag = move |id: UserId, flag: fn(&Participant) -> bool, fallback: bool| {
+    Memo::new(move |_| {
+      remote.with(|tiles| {
+        tiles
+          .iter()
+          .find(|tile| tile.user.id == id)
+          .and_then(|tile| tile.participant.as_ref())
+          .map_or(fallback, flag)
+      })
+    })
   };
+  let remote_tile = move |id: UserId, is_large: bool| {
+    // Untracked: a new presence or name doesn't build the tile again.
+    let maybe_user = remote.with_untracked(|tiles| {
+      tiles
+        .iter()
+        .find(|tile| tile.user.id == id)
+        .map(|tile| tile.user.clone())
+    });
+    maybe_user.map(|user| {
+      view! {
+        <VideoTile
+          user=user
+          is_large=is_large
+          is_muted=participant_flag(id, |participant| participant.is_muted, false)
+          is_camera_on=participant_flag(id, |participant| participant.is_camera_on, true)
+          has_hand_raised=participant_flag(id, |participant| participant.has_hand_raised, false)
+          is_speaking=Signal::derive(move || speaking.get() == Some(id))
+          is_reconnecting=Signal::derive(move || reconnecting.get().contains(&id))
+          video=Memo::new(move |_| track_of(id, VideoTrackKind::Camera))
+        />
+      }
+    })
+  };
+  // What the stage is built from: who is in the call (in order), and who shares their screen.
+  let remote_ids =
+    Memo::new(move |_| remote.with(|tiles| tiles.iter().map(|tile| tile.user.id).collect::<Vec<_>>()));
+  let sharer = Memo::new(move |_| {
+    remote_sharer.with(|maybe_tile| {
+      maybe_tile
+        .as_ref()
+        .map(|tile| (tile.user.id, tile.user.display_name.clone()))
+    })
+  });
+  let is_share_layout = move || call.is_sharing_screen.get() || sharer.with(Option::is_some);
+  let shared_screen = Memo::new(move |_| {
+    sharer
+      .with(|maybe_sharer| maybe_sharer.as_ref().map(|(id, _)| *id))
+      .and_then(|id| track_of(id, VideoTrackKind::Screen))
+  });
+
+  // The active speaker layout moves a tile only when the one in focus is someone else.
+  let speaker_focus = Memo::new(move |_| {
+    speaking
+      .get()
+      .and_then(|id| remote_ids.with(|ids| ids.iter().position(|candidate| *candidate == id)))
+      .unwrap_or(0)
+  });
 
   let stage = move || {
-    let remote_tiles = remote.get();
+    let remote_tiles = remote_ids.get();
     if is_share_layout() {
-      let maybe_sharer = remote_sharer.get();
-      let maybe_screen = maybe_sharer
-        .as_ref()
-        .and_then(|tile| track_of(tile.user.id, VideoTrackKind::Screen));
-      let sharer_name = match maybe_sharer {
-        Some(tile) => tile.user.display_name,
-        None => String::new(),
-      };
+      let maybe_screen = shared_screen.get();
+      let sharer_name = sharer.get().map(|(_, name)| name).unwrap_or_default();
       let is_me_sharing = call.is_sharing_screen.get();
       let banner = if is_me_sharing {
         i18n.t("share-banner-self")
@@ -317,10 +353,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         .into_any()
       },
       CallLayout::ActiveSpeaker => {
-        let focus = speaking
-          .get()
-          .and_then(|id| remote_tiles.iter().position(|tile| tile.user.id == id))
-          .unwrap_or(0);
+        let focus = speaker_focus.get();
         let mut others = remote_tiles;
         let main = if others.is_empty() {
           None
