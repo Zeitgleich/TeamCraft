@@ -128,9 +128,11 @@ import de.zeitgleich.teamcraft.ui.bubbleCorners
 import de.zeitgleich.teamcraft.ui.decideFeedScroll
 import de.zeitgleich.teamcraft.ui.feedItems
 import de.zeitgleich.teamcraft.ui.isNearBottom
+import de.zeitgleich.teamcraft.ui.localizedText
 import de.zeitgleich.teamcraft.ui.newerMessages
 import de.zeitgleich.teamcraft.ui.rememberThumbnail
 import de.zeitgleich.teamcraft.ui.showsSenders
+import de.zeitgleich.teamcraft.ui.systemLine
 import de.zeitgleich.teamcraft.ui.thumbnailKey
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
 import uniffi.teamcraft_ffi.isOpenableLink
@@ -591,10 +593,11 @@ private fun MessageRow(
   onOpenPermalink: (String) -> Unit,
 ) {
   val message = entry.message
-  if (message.maybeSystemEvent != null || maybeExtras?.maybeWorkspaceEvent != null) {
-    // Joins, renames and the like: a quiet centred line, not a bubble.
+  val maybeSystemLine = systemLine(message, maybeExtras) { snapshot?.user(it)?.displayName.orEmpty() }
+  if (maybeSystemLine != null) {
+    // Joins, renames, who added whom: a quiet centred line in the desktop and web wording (#769).
     Text(
-      systemText(message, maybeExtras, snapshot),
+      maybeSystemLine.localizedText(),
       style = MaterialTheme.typography.labelMedium,
       fontStyle = FontStyle.Italic,
       color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -852,6 +855,14 @@ private fun ColumnScope.Footer(message: Message, maybeExtras: MessageExtras?, co
         tint = colors.content,
         modifier = Modifier.size(14.dp),
       )
+      // The other member of the DM read it: two ticks at the bubble's full text colour, where the
+      // single "sent" tick is muted (desktop and web: two accent ticks, #769).
+      maybeExtras?.isRead == true -> Icon(
+        painterResource(R.drawable.ic_done_all),
+        contentDescription = stringResource(R.string.message_read),
+        tint = colors.content,
+        modifier = Modifier.size(14.dp),
+      )
       else -> Icon(Icons.Filled.Done, contentDescription = stringResource(R.string.message_sent), tint = colors.muted, modifier = Modifier.size(14.dp))
     }
   }
@@ -1026,23 +1037,6 @@ fun openLink(context: Context, url: String) {
     // No app handles the link; nothing sensible to open, so leave it.
   } catch (failure: SecurityException) {
     // The handling app refused to be started from here; leave it.
-  }
-}
-
-@Composable
-private fun systemText(message: Message, maybeExtras: MessageExtras?, snapshot: ChatSnapshot?): String {
-  val who = snapshot?.name(message.author).orEmpty()
-  val event = message.maybeSystemEvent?.toString().orEmpty()
-  val workspace = maybeExtras?.maybeWorkspaceEvent?.get("event")?.toString()?.trim('"').orEmpty()
-  return when {
-    event.contains("Joined") -> stringResource(R.string.event_joined, who)
-    event.contains("Left") -> stringResource(R.string.event_left, who)
-    event.contains("Renamed") -> stringResource(R.string.event_renamed, who)
-    event.contains("TopicChanged") -> stringResource(R.string.event_topic, who)
-    workspace == "archived" -> stringResource(R.string.event_archived, who)
-    workspace == "made_private" -> stringResource(R.string.event_private, who)
-    workspace == "made_public" -> stringResource(R.string.event_public, who)
-    else -> stringResource(R.string.event_changed, who)
   }
 }
 

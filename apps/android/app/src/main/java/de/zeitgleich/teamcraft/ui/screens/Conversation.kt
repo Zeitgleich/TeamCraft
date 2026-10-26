@@ -95,6 +95,7 @@ import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.calls.CallOptions
 import de.zeitgleich.teamcraft.core.Bookmark
 import de.zeitgleich.teamcraft.core.ChatActions
@@ -116,6 +117,7 @@ import de.zeitgleich.teamcraft.ui.shouldNotifyTyping
 import de.zeitgleich.teamcraft.ui.typingLine
 import de.zeitgleich.teamcraft.ui.entry
 import de.zeitgleich.teamcraft.ui.sensitiveClip
+import uniffi.teamcraft_ffi.ConnectionState
 import uniffi.teamcraft_ffi.emojiConvert
 import uniffi.teamcraft_ffi.emojiSuggestions
 import uniffi.teamcraft_ffi.needsChannelConfirmation
@@ -158,6 +160,14 @@ fun ConversationScreen(
   }
   FollowTransfers(extras) { extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: extras }
   LaunchedEffect(conversationId, messages.size) { viewModel.markRead(conversationId) }
+  // Receipts sent while this device was offline never arrive as events: they are read when the
+  // conversation opens and whenever the connection comes back (#769). Channels have none, so the
+  // core doesn't ask for theirs; a failure stays quiet, the next connection asks again.
+  val maybeConnection by TeamCraftApplication.graph(LocalContext.current).core.connectionState.collectAsState()
+  val isConnected = maybeConnection is ConnectionState.Connected
+  LaunchedEffect(conversationId, isConnected) {
+    if (isConnected) viewModel.readChat { act(ChatActions.refreshReadReceipts(conversationId)) }
+  }
   val conversation = snapshot?.conversation(conversationId)
   ChatScaffold(
     viewModel = viewModel,
