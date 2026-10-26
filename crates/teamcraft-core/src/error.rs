@@ -10,7 +10,7 @@ use teamcraft_crypto::mls::MlsError;
 use teamcraft_proto::{ConversationId, DeviceId, UserId};
 
 #[cfg(feature = "ui")]
-use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
+use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind, LinkFailure};
 
 use crate::api::ApiError;
 #[cfg(feature = "ui")]
@@ -62,6 +62,19 @@ pub enum CoreError {
   /// The two devices speak different versions of the device-linking protocol (e2ee.md §5).
   #[error("the other device uses device linking version {theirs}, this one {ours}; update both apps")]
   LinkVersionMismatch { ours: u32, theirs: u32 },
+  /// The scanned or typed text is no device link code (another app's QR code, a cut-off paste).
+  #[error("this is not a TeamCraft device link code; scan the code the new device shows")]
+  LinkCodeInvalid,
+  /// The new device no longer waits for this code (it gave up, went to sleep or the code expired):
+  /// joining its relay would only wait for nobody (issue #645).
+  #[error("the new device is no longer waiting for this code; show a new code there and scan again")]
+  LinkPeerGone,
+  /// The other device stopped answering during the handshake.
+  #[error("the other device did not answer in time; start linking again")]
+  LinkTimedOut,
+  /// The code expired before another device took it up; the new device shows a new one.
+  #[error("nobody took up this code in time; show a new code")]
+  LinkCodeExpired,
   /// The new device never confirmed the transfer (a lost frame, a closed relay or a timeout).
   #[error("the new device did not confirm that it received the keys; link it again")]
   LinkNotConfirmed,
@@ -206,6 +219,14 @@ impl CoreError {
         .error_code()
         .map_or(FailureKind::Other, |code| FailureKind::Server(code.clone())),
       Self::CallEncryptionPending(_) => FailureKind::Call(CallFailure::EncryptionPending),
+      Self::LinkCodeInvalid => FailureKind::Link(LinkFailure::CodeInvalid),
+      Self::LinkVersionMismatch { .. } => FailureKind::Link(LinkFailure::OtherVersion),
+      Self::LinkPeerGone => FailureKind::Link(LinkFailure::PeerGone),
+      Self::LinkTimedOut => FailureKind::Link(LinkFailure::TimedOut),
+      Self::LinkCodeExpired => FailureKind::Link(LinkFailure::CodeExpired),
+      Self::LinkDenied => FailureKind::Link(LinkFailure::Denied),
+      Self::LinkNotConfirmed | Self::LinkRejected => FailureKind::Link(LinkFailure::NotConfirmed),
+      Self::LinkRequestGone => FailureKind::Link(LinkFailure::RequestGone),
       Self::CallMoveRefused { .. } => FailureKind::Call(CallFailure::MoveRefused),
       _ => FailureKind::Other,
     };

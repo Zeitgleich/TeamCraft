@@ -16,6 +16,8 @@ const CAPTIVE_PORTAL_PREFIX: &str = "captive_portal";
 const UNTRUSTED_CERTIFICATE_PREFIX: &str = "untrusted_certificate";
 /// Prefix of a system notification that could not be shown on this device: `notification_<failure>`.
 const NOTIFICATION_PREFIX: &str = "notification_";
+/// Prefix of a device link that failed ([`LinkFailure`]): `link_<failure>`.
+const LINK_PREFIX: &str = "link_";
 
 /// What went wrong and the technical detail behind it, for the "Details" of an error message.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,6 +44,8 @@ pub enum FailureKind {
   UntrustedCertificate,
   /// A system notification could not be shown on this device ([`NotificationFailure`]).
   Notification(NotificationFailure),
+  /// Linking a device failed ([`LinkFailure`], issue #645).
+  Link(LinkFailure),
   /// Anything else (local store, encryption, a stopped core).
   Other,
 }
@@ -55,6 +59,58 @@ pub enum NotificationFailure {
   Unsupported,
   /// The browser or system refused to show it.
   Refused,
+}
+
+/// Why linking a device failed, so the UI can say what to do next (issue #645).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkFailure {
+  /// The scanned or typed text is no device link code.
+  CodeInvalid,
+  /// The other device speaks another linking version: one of the apps needs an update.
+  OtherVersion,
+  /// The new device no longer waits for this code: show a new one and scan again.
+  PeerGone,
+  /// The other device stopped answering.
+  TimedOut,
+  /// Nobody took the code up in time: show a new one.
+  CodeExpired,
+  /// A device of the account denied the request.
+  Denied,
+  /// The keys went out but the new device did not confirm them, or could not open them.
+  NotConfirmed,
+  /// The request was taken up by another device, withdrawn or expired.
+  RequestGone,
+}
+
+impl LinkFailure {
+  const ALL: [Self; 8] = [
+    Self::CodeInvalid,
+    Self::OtherVersion,
+    Self::PeerGone,
+    Self::TimedOut,
+    Self::CodeExpired,
+    Self::Denied,
+    Self::NotConfirmed,
+    Self::RequestGone,
+  ];
+
+  /// Stable name on the wire, after [`LINK_PREFIX`].
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::CodeInvalid => "code_invalid",
+      Self::OtherVersion => "other_version",
+      Self::PeerGone => "peer_gone",
+      Self::TimedOut => "timed_out",
+      Self::CodeExpired => "code_expired",
+      Self::Denied => "denied",
+      Self::NotConfirmed => "not_confirmed",
+      Self::RequestGone => "request_gone",
+    }
+  }
+
+  fn from_wire(name: &str) -> Option<Self> {
+    Self::ALL.into_iter().find(|failure| failure.as_str() == name)
+  }
 }
 
 impl NotificationFailure {
@@ -204,6 +260,9 @@ impl ActionFailure {
     {
       return Self::new(FailureKind::Notification(failure), detail);
     }
+    if let Some(failure) = prefix.strip_prefix(LINK_PREFIX).and_then(LinkFailure::from_wire) {
+      return Self::new(FailureKind::Link(failure), detail);
+    }
     match ErrorCode::from(prefix.to_owned()) {
       ErrorCode::Unknown(_) => Self::other(text),
       code => Self::new(FailureKind::Server(code), detail),
@@ -219,6 +278,7 @@ impl ActionFailure {
       FailureKind::Notification(failure) => {
         format!("{NOTIFICATION_PREFIX}{}: {}", failure.as_str(), self.detail)
       },
+      FailureKind::Link(failure) => format!("{LINK_PREFIX}{}: {}", failure.as_str(), self.detail),
       FailureKind::CaptivePortal => format!("{CAPTIVE_PORTAL_PREFIX}: {}", self.detail),
       FailureKind::UntrustedCertificate => format!("{UNTRUSTED_CERTIFICATE_PREFIX}: {}", self.detail),
       FailureKind::Other => self.detail.clone(),
@@ -241,6 +301,14 @@ mod tests {
       "not_space_member: server: server answered 400: the user is not a member of the space"
     );
     assert_eq!(ActionFailure::from_wire(&failure.to_wire()), failure);
+  }
+
+  #[test]
+  fn link_failures_round_trip() {
+    for failure in LinkFailure::ALL {
+      let failure = ActionFailure::new(FailureKind::Link(failure), "device link: relay closed");
+      assert_eq!(ActionFailure::from_wire(&failure.to_wire()), failure);
+    }
   }
 
   #[test]

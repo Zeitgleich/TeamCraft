@@ -6,6 +6,7 @@ use std::rc::Rc;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_client_api::brand::BrandView;
+use teamcraft_client_api::failure::{ActionFailure, FailureKind};
 use teamcraft_client_api::remote::StoreProblem;
 use teamcraft_client_api::sign_in_page::SignInPage;
 use teamcraft_proto::{GetMeResponse, SignInMethod};
@@ -23,7 +24,7 @@ use crate::components::bundle_banner::BundleBanner;
 use crate::components::icons::{Icon, IconName};
 use crate::components::pending_button::PendingButton;
 use crate::components::security_ui::QrImage;
-use crate::feedback::PendingAction;
+use crate::feedback::{PendingAction, failure_message};
 use crate::hybrid::Hybrid;
 use crate::i18n::{I18n, use_i18n};
 use crate::meetings::{MeetingsClient, MeetingsHub};
@@ -1417,11 +1418,18 @@ fn LinkScreen(device_name: String, control: SessionControl, on_back: Callback<()
   // Asking the other devices hands the code's key to the server: only on the user's click.
   let asking = RwSignal::new(AskState::Idle);
 
-  spawn_local(async move {
-    if let Err(message) = remote_backend::link_start(&device_name.get_value()).await {
-      status.set_if_alive(LinkStatus::Failed { message });
-    }
-  });
+  // A new code each time: after a failure (the code expired, the other device went away) "Try
+  // again" starts over instead of leaving the user on a dead screen (issue #645).
+  let start = move || {
+    status.set(LinkStatus::Idle);
+    asking.set(AskState::Idle);
+    spawn_local(async move {
+      if let Err(message) = remote_backend::link_start(&device_name.get_value()).await {
+        status.set_if_alive(LinkStatus::Failed { message });
+      }
+    });
+  };
+  start();
   use_interval(LINK_POLL_MS, move || {
     spawn_local(async move {
       if matches!(status.get_untracked(), LinkStatus::Failed { .. }) {
@@ -1490,13 +1498,19 @@ fn LinkScreen(device_name: String, control: SessionControl, on_back: Callback<()
           .into_any()
         },
         LinkStatus::Failed { message } => {
+          let failure = ActionFailure::from_wire(&message);
+          let is_known = !matches!(failure.kind, FailureKind::Other);
           view! {
-            <p class="field-error" role="alert">{move || i18n.t("link-new-failed")}</p>
-            <p class="small mono" translate="no">{message}</p>
+            <p class="field-error" role="alert">
+              {move || if is_known { failure_message(i18n, &failure) } else { i18n.t("link-new-failed") }}
+            </p>
+            {(!is_known).then(|| view! { <p class="small mono" translate="no">{message.clone()}</p> })}
+            <button type="button" class="btn btn-primary" on:click=move |_| start()>{move || i18n.t("link-new-retry")}</button>
           }
           .into_any()
         },
       }}
+      <p class="muted-text small">{move || i18n.t("link-new-no-device")}</p>
       <div class="auth-actions">
         <button type="button" class="btn" on:click=back>{move || i18n.t("link-new-back")}</button>
       </div>

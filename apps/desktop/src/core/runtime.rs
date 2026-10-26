@@ -1334,7 +1334,7 @@ impl Core {
   /// Existing device: joins the new device's link; the user compares the short code.
   async fn approval_start(&mut self, code: &str) -> Result<(), String> {
     let client = self.client.as_ref().ok_or("this device is not set up yet")?;
-    let approval = client.start_link_approval(code).await.map_err(describe)?;
+    let approval = client.start_link_approval(code).await.map_err(describe_failure)?;
     self.approval = Some(approval);
     self.approval_misses = 0;
     Ok(())
@@ -1350,7 +1350,7 @@ impl Core {
       device_name: run.device_name.clone(),
       platform: platform(),
     };
-    let offer = LinkOffer::parse(&code).map_err(describe)?;
+    let offer = LinkOffer::parse(&code).map_err(describe_failure)?;
     offer.announce(&self.api(), &announcement).await.map_err(describe)
   }
 
@@ -1374,7 +1374,7 @@ impl Core {
   /// scanned code ([`Self::approval_confirm`]).
   async fn link_request_review(&mut self, id: &str) -> Result<(), String> {
     let client = self.client.as_mut().ok_or("this device is not set up yet")?;
-    let approval = client.review_link_request(id).await.map_err(describe)?;
+    let approval = client.review_link_request(id).await.map_err(describe_failure)?;
     self.approval = Some(approval);
     self.approval_misses = 0;
     self.changed();
@@ -1383,7 +1383,7 @@ impl Core {
 
   async fn link_request_reject(&mut self, id: &str) -> Result<(), String> {
     let client = self.client.as_mut().ok_or("this device is not set up yet")?;
-    client.reject_link_request(id).await.map_err(describe)?;
+    client.reject_link_request(id).await.map_err(describe_failure)?;
     self.changed();
     Ok(())
   }
@@ -1409,7 +1409,10 @@ impl Core {
       .take()
       .ok_or("there is no device waiting for approval")?;
     let client = self.client.as_mut().ok_or("this device is not set up yet")?;
-    client.complete_link_approval(approval).await.map_err(describe)
+    client
+      .complete_link_approval(approval)
+      .await
+      .map_err(describe_failure)
   }
 
   fn snapshot(&mut self) -> Result<ChatSnapshot, String> {
@@ -1846,13 +1849,18 @@ async fn link_task(
   view: Rc<RefCell<LinkStatus>>,
   on_change: Arc<dyn Fn() + Send + Sync>,
 ) -> Result<LinkedSecrets, String> {
-  let link = NewDeviceLink::connect(&api, &offer).await.map_err(describe)?;
+  let link = NewDeviceLink::connect(&api, &offer)
+    .await
+    .map_err(describe_failure)?;
   *view.borrow_mut() = LinkStatus::Confirm {
     code: offer.to_code(),
     short_code: link.short_code(),
   };
   on_change();
-  link.receive_secrets(&store, &device_name).await.map_err(describe)
+  link
+    .receive_secrets(&store, &device_name)
+    .await
+    .map_err(describe_failure)
 }
 
 /// What this build runs on, for the prompt on the user's other devices.

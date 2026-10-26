@@ -323,3 +323,68 @@ mod announced {
     offer.to_code().split(':').nth(1).unwrap().to_string()
   }
 }
+
+mod failures_are_visible {
+  use teamcraft_core::api::{RendezvousConnection, ServerApi};
+  use teamcraft_proto::RendezvousClientMessage;
+
+  use super::*;
+
+  #[tokio::test]
+  async fn scanning_a_code_nobody_waits_for_fails_at_once() {
+    // Issue #645: the new device's code expired (or it went to sleep) before the phone scanned it.
+    let server = FakeServer::new();
+    let alice = Peer::enroll(&server, "Alice").await;
+    let code = LinkOffer::generate().to_code();
+
+    let result = alice.client.start_link_approval(&code).await;
+
+    assert!(
+      matches!(result, Err(CoreError::LinkPeerGone)),
+      "{:?}",
+      result.err()
+    );
+  }
+
+  #[tokio::test]
+  async fn foreign_and_other_version_codes_say_what_is_wrong() {
+    for foreign in ["", "https://example.com/menu", "tclink2:short:key"] {
+      assert!(
+        matches!(LinkOffer::parse(foreign), Err(CoreError::LinkCodeInvalid)),
+        "{foreign}"
+      );
+    }
+    let ours = LinkOffer::generate().to_code();
+    let newer = ours.replacen("tclink2:", "tclink9:", 1);
+    assert!(matches!(
+      LinkOffer::parse(&newer),
+      Err(CoreError::LinkVersionMismatch { theirs: 9, .. })
+    ));
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn a_new_device_that_stops_answering_times_out() {
+    let server = FakeServer::new();
+    let alice = Peer::enroll(&server, "Alice").await;
+    let code = LinkOffer::generate().to_code();
+    let rendezvous_id = code.split(':').nth(1).unwrap().to_owned();
+    // The new device joined its relay and then went silent (asleep, offline).
+    let mut silent = alice.api.connect_rendezvous().await.unwrap();
+    silent
+      .send_control(&RendezvousClientMessage::Join {
+        token: alice.api.gateway_token().unwrap(),
+        rendezvous_id,
+      })
+      .await
+      .unwrap();
+
+    let result = alice.client.start_link_approval(&code).await;
+
+    assert!(
+      matches!(result, Err(CoreError::LinkTimedOut)),
+      "{:?}",
+      result.err()
+    );
+    drop(silent);
+  }
+}
