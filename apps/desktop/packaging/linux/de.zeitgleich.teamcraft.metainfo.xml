@@ -35,6 +35,11 @@
     <display_length compare="ge">720</display_length>
   </requires>
   <releases>
+    <release version="1.0.4" date="2026-10-26" type="stable">
+      <description>
+        <p>New message layouts with read ticks, redesigned home pages, search in a conversation, meeting guests in the browser, notifications on Linux, macOS, Android and iOS, multi-device calls with mute indicators, resumable uploads, file previews and share links, integrations, and QR device linking.</p>
+      </description>
+    </release>
     <release version="1.0.3" date="2026-10-25" type="stable">
       <description>
         <p>Fixes a memory leak, adds calls in the browser and real video in desktop calls, reworked settings, smoother motion and phone layout, text size, new logo, a faster web app that loads in parts, more robust networking, calls and local storage.</p>
