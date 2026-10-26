@@ -265,6 +265,8 @@ fn main() -> anyhow::Result<()> {
       calls::commands::call_unwatch_video,
       calls::commands::call_watch_camera,
       calls::commands::call_unwatch_camera,
+      calls::commands::call_watch_level,
+      calls::commands::call_unwatch_level,
       external_links::open_external,
       clipboard::clipboard_write_image,
       notifications::notify_user,

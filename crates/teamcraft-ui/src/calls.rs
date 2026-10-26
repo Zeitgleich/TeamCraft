@@ -23,10 +23,10 @@ pub struct MoveOffer {
 /// What the user did that the call backend has to carry out.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallEvent {
-  /// `is_muted`: the microphone is muted from the first frame.
+  /// Joins with the microphone and camera as chosen (#453).
   Join {
     request: CallRequest,
-    is_muted: bool,
+    media: JoinMedia,
   },
   Leave,
   Decline(ConversationId),
@@ -40,6 +40,8 @@ pub enum CallEvent {
   TestSpeakers(String),
   /// Lists the devices again.
   RefreshDevices,
+  /// Starts, changes or ends the pre-join check of the camera and microphone (#442).
+  Preview(CallPreview),
   Camera(bool),
   CameraDevice(String),
   Effect(BackgroundEffect),
@@ -118,7 +120,8 @@ impl CallState {
   /// the backend's change notification after the action re-runs the effect, which emits again: a
   /// loop of call actions and refreshes that kept the desktop app busy while idle (issue #399).
   pub fn emit(&self, event: CallEvent) {
-    if let Some(handler) = self.handler.get_value() {
+    // Gone only while the app itself is torn down (signing out): nothing left to tell.
+    if let Some(handler) = self.handler.try_get_value().flatten() {
       untrack(|| handler(event));
     }
   }
@@ -216,17 +219,16 @@ impl CallState {
     self.is_deafened.set(false);
     self.phase.set(CallPhase::Active);
     if let Some(request) = self.maybe_request.get_untracked() {
-      // A muted microphone stays muted from the first frame, also when a call moves on into a
-      // meeting room: no audio slips out before the mute is applied.
+      // The media layer starts as chosen, in one action (#453): a muted microphone stays muted
+      // from the first frame (also when a call moves on into a meeting room), and the camera
+      // starts with the call. The phone button joins with the camera off and never asks for it.
       self.emit(CallEvent::Join {
         request,
-        is_muted: !self.is_mic_on.get_untracked(),
+        media: JoinMedia {
+          is_muted: !self.is_mic_on.get_untracked(),
+          is_camera_on: self.is_camera_on.get_untracked(),
+        },
       });
-      // The camera choice of the pre-join screen, applied once joined: the backend carries out
-      // actions in order. The phone button joins with the camera off and never asks for it.
-      if self.is_camera_on.get_untracked() {
-        self.emit(CallEvent::Camera(true));
-      }
     }
   }
 
@@ -291,8 +293,11 @@ pub fn selected_camera_is_rear(cameras: &[MediaDevice], selected_id: &str) -> bo
 
 #[cfg(test)]
 mod tests {
+  use std::cell::RefCell;
   use std::sync::Arc;
   use std::sync::atomic::{AtomicU32, Ordering};
+
+  use teamcraft_client_api::model::id_from_raw;
 
   use super::*;
 
@@ -318,6 +323,47 @@ mod tests {
     assert!(!is_rear_camera("Front Camera"));
     assert!(!is_rear_camera("camera2 1, facing front"));
     assert!(!is_rear_camera(""));
+  }
+
+  /// #453: the pre-join choice goes with the join, in one event; no camera action follows it.
+  #[test]
+  fn entering_joins_with_the_chosen_microphone_and_camera() {
+    let owner = Owner::new();
+    owner.with(|| {
+      let call = CallState::new();
+      let events = Rc::new(RefCell::new(Vec::new()));
+      let seen = events.clone();
+      call.set_handler(move |event| seen.borrow_mut().push(event));
+      let request = CallRequest {
+        conversation: id_from_raw(7),
+        kind: CallKind::Group,
+      };
+      call.prepare(request, true);
+      // Before joining, a toggle is only the choice the call starts with.
+      call.set_muted(true);
+      assert!(events.borrow().is_empty());
+      call.enter();
+      let joined = CallEvent::Join {
+        request,
+        media: JoinMedia {
+          is_muted: true,
+          is_camera_on: true,
+        },
+      };
+      assert_eq!(*events.borrow(), vec![joined]);
+
+      // The phone button: camera off, never asked for.
+      call.leave();
+      events.borrow_mut().clear();
+      call.set_muted(false);
+      call.prepare(request, false);
+      call.enter();
+      let joined = CallEvent::Join {
+        request,
+        media: JoinMedia::default(),
+      };
+      assert_eq!(*events.borrow(), vec![joined]);
+    });
   }
 
   fn camera(id: &str, label: &str) -> MediaDevice {

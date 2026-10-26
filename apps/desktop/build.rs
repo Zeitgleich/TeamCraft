@@ -64,6 +64,8 @@ const COMMANDS: &[&str] = &[
   "call_unwatch_video",
   "call_watch_camera",
   "call_unwatch_camera",
+  "call_watch_level",
+  "call_unwatch_level",
   "open_external",
   "clipboard_write_image",
   "notify_user",

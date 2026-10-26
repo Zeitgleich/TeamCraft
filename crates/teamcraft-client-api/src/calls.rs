@@ -476,6 +476,47 @@ pub struct CallRequest {
   pub kind: CallKind,
 }
 
+/// How this device's media starts when it joins: the pre-join screen's choice (#453). It travels
+/// with the join, so the media layer starts in it: a muted microphone sends nothing before an
+/// unmute, and the camera needs no action of its own after the join.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JoinMedia {
+  /// The microphone stays muted from the first frame.
+  pub is_muted: bool,
+  /// The camera starts with the call. One that can't start leaves the call running without it.
+  pub is_camera_on: bool,
+}
+
+/// The pre-join screen's check of this device's camera and microphone (#442). Nothing of it
+/// leaves the device: the camera only reaches the self view, the microphone only the level meter.
+/// Both off releases them; so does a join, which opens them for the call itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallPreview {
+  /// Show the camera as the call would send it, with the background effect.
+  #[serde(default)]
+  pub is_camera_on: bool,
+  /// Measure the microphone for the level meter.
+  #[serde(default)]
+  pub is_mic_on: bool,
+}
+
+/// How far the pre-join check got with the camera ([`CallPreview`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewCamera {
+  /// Not asked for, or released.
+  #[default]
+  Off,
+  /// Opening; no picture yet.
+  Starting,
+  /// Pictures arrive: the self view shows them.
+  Live,
+  /// It didn't open or sent no picture; the check's action said why where one waited.
+  Failed,
+  #[serde(other)]
+  Unknown,
+}
+
 /// The call this device is in, as the media layer reports it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActiveCall {

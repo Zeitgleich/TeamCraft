@@ -30,7 +30,7 @@ use crate::calls::{
   CallStatusSounds, CallsUnavailableReason, HuddleInfo, IncomingCall, MediaDevices, Participant,
   RemoteVideoTrack, ScreenContentMode,
 };
-use crate::calls::{OrgBackgroundRule, OrgBackgrounds};
+use crate::calls::{CallPreview, JoinMedia, OrgBackgroundRule, OrgBackgrounds, PreviewCamera};
 use crate::model::{
   Conversation, ConversationId, CustomStatus, DeviceId, MembershipIssue, Message, MessageId, PresenceStatus,
   Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId,
@@ -674,9 +674,10 @@ pub trait CallBackend {
   fn incoming_calls(&self) -> Vec<IncomingCall> {
     Vec::new()
   }
-  /// Joins (or starts) the conversation's call, leaving any other call first.
-  /// `is_muted`: the microphone stays muted from the first frame (nothing is sent before an unmute).
-  fn join_call(&self, _request: CallRequest, _is_muted: bool) {}
+  /// Joins (or starts) the conversation's call, leaving any other call first. The media starts as
+  /// `media` says: a muted microphone sends nothing before an unmute, a chosen camera starts with
+  /// the call.
+  fn join_call(&self, _request: CallRequest, _media: JoinMedia) {}
   fn leave_call(&self) {}
   /// Stops ringing for this call on this device; the call goes on for the others.
   fn decline_call(&self, _conversation: ConversationId) {}
@@ -707,6 +708,18 @@ pub trait CallBackend {
   /// The push-to-talk key inside the window went down (`true`) or up.
   fn set_talking(&self, _is_talking: bool) {}
   fn stop_screen_share(&self) {}
+  /// Starts, changes or ends the pre-join check (#442): the camera for the self view, the
+  /// microphone for [`CallBackend::call_preview_level`]. Nothing of it leaves the device.
+  fn set_call_preview(&self, _preview: CallPreview) {}
+  /// How far the pre-join check got with the camera.
+  fn call_preview_camera(&self) -> PreviewCamera {
+    PreviewCamera::Off
+  }
+  /// The microphone's level in the pre-join check, from 0.0 (silence) to 1.0 (full scale); the
+  /// meter reads it a few times a second.
+  fn call_preview_level(&self) -> f32 {
+    0.0
+  }
 }
 
 /// Administration without content access: every read returns metadata only.

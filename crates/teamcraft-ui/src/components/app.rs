@@ -1010,7 +1010,7 @@ pub(crate) fn connect_calls(state: AppState) {
       alerts.handled_here(*conversation);
     }
     state.read(|backend| match event {
-      CallEvent::Join { request, is_muted } => backend.join_call(request, is_muted),
+      CallEvent::Join { request, media } => backend.join_call(request, media),
       CallEvent::Leave => backend.leave_call(),
       CallEvent::Decline(conversation) => backend.decline_call(conversation),
       CallEvent::Muted(is_muted) => backend.set_call_muted(is_muted),
@@ -1020,6 +1020,7 @@ pub(crate) fn connect_calls(state: AppState) {
       CallEvent::Speakers(device) => backend.select_speakers(Some(device)),
       CallEvent::TestSpeakers(device) => backend.test_speakers(Some(device)),
       CallEvent::RefreshDevices => backend.refresh_media_devices(),
+      CallEvent::Preview(preview) => backend.set_call_preview(preview),
       CallEvent::Camera(is_on) => backend.set_call_camera(is_on),
       CallEvent::CameraDevice(device) => backend.select_camera(Some(device)),
       CallEvent::Effect(effect) => backend.set_background_effect(effect),

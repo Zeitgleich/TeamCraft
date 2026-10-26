@@ -68,6 +68,8 @@
     "allow-call-unwatch-video",
     "allow-call-watch-camera",
     "allow-call-unwatch-camera",
+    "allow-call-watch-level",
+    "allow-call-unwatch-level",
     "allow-open-external",
     "allow-clipboard-write-image",
     "allow-notify-user",

@@ -258,6 +258,14 @@ pub(super) fn screen_layers(format: CaptureFormat, mode: ScreenContentMode) -> V
   teamcraft_media::video::screen_layers(format.resolution, format.framerate, mode)
 }
 
+/// The chosen camera, opened, with the effects that go in front of it: what the call sends and
+/// the pre-join check shows.
+pub(super) struct OpenedCamera {
+  pub(super) capture: Box<dyn VideoCapture>,
+  pub(super) maybe_filter: Option<FrameFilter>,
+  pub(super) maybe_handle: Option<EffectHandle>,
+}
+
 /// The effects filter for the camera, if a segmentation model and a GPU are available. The model
 /// comes from `TEAMCRAFT_SEGMENTATION_MODEL`, else from the app's resources.
 pub(super) fn effects_filter(

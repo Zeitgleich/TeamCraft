@@ -39,8 +39,8 @@ use crate::admin_live::AdminLive;
 use crate::auth::Authenticator;
 use crate::backend::{AdminBackend, CallBackend, ChatBackend, SearchBackend, SecurityBackend};
 use crate::calls::{
-  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallRequest, HuddleInfo, IncomingCall, MediaDevices,
-  Participant,
+  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallPreview, CallRequest, HuddleInfo, IncomingCall,
+  JoinMedia, MediaDevices, Participant, PreviewCamera,
 };
 use crate::clock::now_ms;
 use crate::i18n::translate_current;
@@ -975,9 +975,9 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
       .map_or_else(Vec::new, RemoteCalls::incoming)
   }
 
-  fn join_call(&self, request: CallRequest, is_muted: bool) {
+  fn join_call(&self, request: CallRequest, media: JoinMedia) {
     if let Some(calls) = &self.maybe_calls {
-      calls.join(request, is_muted);
+      calls.join(request, media);
     }
   }
 
@@ -1084,6 +1084,23 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
     if let Some(calls) = &self.maybe_calls {
       calls.act(CallAction::SetStatusSounds { sounds });
     }
+  }
+
+  fn set_call_preview(&self, preview: CallPreview) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.set_preview(preview);
+    }
+  }
+
+  fn call_preview_camera(&self) -> PreviewCamera {
+    self
+      .maybe_calls
+      .as_ref()
+      .map_or(PreviewCamera::Off, RemoteCalls::preview_camera)
+  }
+
+  fn call_preview_level(&self) -> f32 {
+    self.maybe_calls.as_ref().map_or(0.0, RemoteCalls::preview_level)
   }
 }
 

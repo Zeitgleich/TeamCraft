@@ -5,7 +5,8 @@
 //!
 //! Actions run one after the other, in the order the user took them: a camera turned on right
 //! after joining reaches the media layer after the join. A failed action reaches the user
-//! (issue #322).
+//! (issue #322), and so does a part of one that failed without undoing it (a join whose camera
+//! didn't start, #453).
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -14,11 +15,12 @@ use std::rc::Rc;
 use leptos::task::spawn_local;
 use serde_json::json;
 use teamcraft_client_api::calls::{
-  ActiveCall, CallRequest, HuddleInfo, IncomingCall, MediaDevices, Participant, RemoteVideoTrack,
+  ActiveCall, CallPreview, CallRequest, HuddleInfo, IncomingCall, JoinMedia, MediaDevices, Participant,
+  PreviewCamera, RemoteVideoTrack,
 };
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::model::{ConversationId, UserId};
-use teamcraft_client_api::remote::{CALL_CHANGED_EVENT, CallAction, CallSnapshot};
+use teamcraft_client_api::remote::{CALL_CHANGED_EVENT, CallAction, CallActionAnswer, CallSnapshot};
 
 use crate::auth::tauri::{call, listen};
 
@@ -33,6 +35,9 @@ pub struct RemoteCalls {
   queue: Rc<RefCell<VecDeque<CallAction>>>,
   is_draining: Rc<Cell<bool>>,
   join_failures: Rc<Cell<u64>>,
+  /// The pre-join check's microphone level from the desktop shell (#442).
+  #[cfg(target_arch = "wasm32")]
+  shell_level: crate::shell_level::ShellLevel,
 }
 
 /// Where the media runs.
@@ -50,6 +55,11 @@ impl RemoteCalls {
   pub async fn connect() -> Result<Self, String> {
     let snapshot: CallSnapshot = call("call_snapshot", &json!({})).await?;
     let calls = Self::new(snapshot, CallLink::Shell);
+    // A check an earlier page left running (reloaded while the pre-join screen was open) ends:
+    // nothing on screen shows the camera or the meter now.
+    calls.act(CallAction::SetPreview {
+      preview: CallPreview::default(),
+    });
     let listener = calls.clone();
     listen(CALL_CHANGED_EVENT, move || listener.refresh());
     Ok(calls)
@@ -79,6 +89,8 @@ impl RemoteCalls {
       queue: Rc::default(),
       is_draining: Rc::default(),
       join_failures: Rc::default(),
+      #[cfg(target_arch = "wasm32")]
+      shell_level: crate::shell_level::ShellLevel::default(),
     }
   }
 
@@ -173,12 +185,17 @@ impl RemoteCalls {
           break;
         };
         let is_join = matches!(action, CallAction::Join { .. });
-        if let Err(error) = calls.carry_out(action).await {
-          if is_join {
-            // async-ok: a Cell the calls share, not a signal.
-            calls.join_failures.set(calls.join_failures.get() + 1);
-          }
-          crate::feedback::report_failure(ActionFailure::from_wire(&error));
+        match calls.carry_out(action).await {
+          Ok(None) => {},
+          // The action went through (the call runs); only a part of it didn't.
+          Ok(Some(partial)) => crate::feedback::report_failure(ActionFailure::from_wire(&partial)),
+          Err(error) => {
+            if is_join {
+              // async-ok: a Cell the calls share, not a signal.
+              calls.join_failures.set(calls.join_failures.get() + 1);
+            }
+            crate::feedback::report_failure(ActionFailure::from_wire(&error));
+          },
         }
       }
       // async-ok: a Cell the calls share, not a signal.
@@ -195,8 +212,9 @@ impl RemoteCalls {
       let result = match link {
         CallLink::Shell => {
           let action = CallAction::TestSpeakers { maybe_device };
-          call::<()>("call_action", &json!({ "action": action }))
+          call::<CallActionAnswer>("call_action", &json!({ "action": action }))
             .await
+            .map(drop)
             .map_err(|error| ActionFailure::from_wire(&error))
         },
         // The page plays it itself, with the context the click started (speaker_test.rs).
@@ -209,13 +227,39 @@ impl RemoteCalls {
     });
   }
 
-  pub fn join(&self, request: CallRequest, is_muted: bool) {
-    self.act(CallAction::Join { request, is_muted });
+  pub fn join(&self, request: CallRequest, media: JoinMedia) {
+    self.act(CallAction::join(request, media));
   }
 
-  async fn carry_out(&self, action: CallAction) -> Result<(), String> {
+  /// Starts, changes or ends the pre-join check (#442), in order with the other actions: a join
+  /// right after it finds the check running and takes the camera and microphone over.
+  pub fn set_preview(&self, preview: CallPreview) {
+    #[cfg(target_arch = "wasm32")]
+    if let CallLink::Shell = self.link {
+      self.shell_level.follow(preview.is_mic_on);
+    }
+    self.act(CallAction::SetPreview { preview });
+  }
+
+  pub fn preview_camera(&self) -> PreviewCamera {
+    self.snapshot.borrow().preview_camera
+  }
+
+  /// The pre-join check's microphone level: the shell's newest reading, or the page's meter.
+  pub fn preview_level(&self) -> f32 {
     match &self.link {
-      CallLink::Shell => call::<()>("call_action", &json!({ "action": action })).await,
+      #[cfg(target_arch = "wasm32")]
+      CallLink::Shell => self.shell_level.get(),
+      #[cfg(not(target_arch = "wasm32"))]
+      CallLink::Shell => 0.0,
+      #[cfg(target_arch = "wasm32")]
+      CallLink::Page(_) => crate::web_calls::preview_level(),
+    }
+  }
+
+  async fn carry_out(&self, action: CallAction) -> Result<CallActionAnswer, String> {
+    match &self.link {
+      CallLink::Shell => call::<CallActionAnswer>("call_action", &json!({ "action": action })).await,
       #[cfg(target_arch = "wasm32")]
       CallLink::Page(host) => host.act(action).await,
     }
@@ -328,6 +372,7 @@ mod tests {
       video_tracks: Vec::new(),
       push_to_talk: Default::default(),
       maybe_end_reason: None,
+      preview_camera: PreviewCamera::Off,
     };
     assert_eq!(roster_of(&snapshot, conversation), vec![carol, dave]);
     assert!(roster_of(&snapshot, id_from_raw(8)).is_empty());
