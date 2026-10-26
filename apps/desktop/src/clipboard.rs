@@ -40,6 +40,7 @@ pub enum ClipboardError {
   #[cfg_attr(target_os = "linux", allow(dead_code))]
   #[error("this platform copies pictures in the page")]
   Unsupported,
+  #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
   #[error("the clipboard could not be reached")]
   Unavailable,
 }
