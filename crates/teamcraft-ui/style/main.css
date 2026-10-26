@@ -6496,6 +6496,12 @@ html.call-window body {
   display: none;
 }
 
+/* In a conversation of two, left and right already say who wrote it: no name either (#735).
+   Group DMs and channels keep name and avatar per sender group. */
+:root[data-density="bubbles"] .is-dm .msg-header {
+  display: none;
+}
+
 :root[data-density="bubbles"] .hover-time {
   display: none;
 }
@@ -6549,10 +6555,13 @@ html.call-window body {
   display: none;
 }
 
-/* Time (and the delivery state) sit in the bottom corner of the bubble. */
-:root[data-density="bubbles"] .bubble-time,
-:root[data-density="bubbles"] .msg-delivery:not(.msg-failed) {
+/* Time, then the delivery state, in the bottom corner of the bubble (#735): the body is the
+   bubble's last part, so its trailing float ends the bubble. */
+:root[data-density="bubbles"] .bubble-meta {
   float: inline-end;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   margin: 8px 0 -3px;
   margin-inline-start: 8px;
   color: var(--text-muted);
@@ -6566,7 +6575,78 @@ html.call-window body {
 }
 
 :root[data-density="bubbles"] .msg-delivery:not(.msg-failed) {
-  margin-inline-start: 4px;
+  margin: 0;
+  font-size: inherit;
+  letter-spacing: inherit;
+}
+
+/* A refused message says so with its actions: on a line of its own, not squeezed in the corner. */
+:root[data-density="bubbles"] .bubble-meta:has(> .msg-failed) {
+  float: none;
+  display: flex;
+  flex-wrap: wrap;
+  margin-inline-start: 0;
+}
+
+/* Media first, the text below as their caption, the time at the very bottom (#735). Link
+   previews and the acknowledge button come between the media and the caption. */
+:root[data-density="bubbles"] .msg-bubble {
+  display: flex;
+  flex-direction: column;
+}
+
+:root[data-density="bubbles"] .msg-bubble > .msg-files {
+  order: 1;
+}
+
+:root[data-density="bubbles"] .msg-bubble > :is(.link-card, .linked-message, .msg-ack) {
+  order: 2;
+}
+
+:root[data-density="bubbles"] .msg-bubble > .msg-ack {
+  align-self: flex-start;
+}
+
+:root[data-density="bubbles"] .msg-bubble > .msg-body {
+  order: 3;
+}
+
+/* With media, the bubble is as wide as they are and frames them evenly; the caption wraps to that
+   width instead of widening the bubble. Inner corners are the bubble's radius minus the frame. */
+:root[data-density="bubbles"] .msg-bubble:has(> .msg-files) {
+  --bubble-frame: 4px;
+  padding: var(--bubble-frame);
+}
+
+:root[data-density="bubbles"] .msg-bubble:has(> .msg-files) > .msg-files {
+  align-items: stretch;
+  margin-top: 0;
+}
+
+:root[data-density="bubbles"] .msg-bubble:has(> .msg-files) > :not(.msg-files) {
+  margin-inline: 8px;
+}
+
+:root[data-density="bubbles"] .msg-bubble:has(> .msg-files) > .msg-header {
+  margin-top: 2px;
+}
+
+:root[data-density="bubbles"] .msg-bubble:has(> .msg-files) > .msg-body {
+  padding-block: 2px;
+}
+
+/* Pictures and videos set the width; file cards let a longer caption widen the bubble. */
+:root[data-density="bubbles"] .msg-bubble:has(> .msg-files .media-tile) > .msg-body {
+  inline-size: 0;
+  min-inline-size: calc(100% - 16px);
+}
+
+:root[data-density="bubbles"] .msg-bubble > .msg-files :is(.media-tile, .media-grid, .file-card) {
+  border-radius: calc(18px - var(--bubble-frame, 0px));
+}
+
+:root[data-density="bubbles"] .msg-bubble > .msg-files .media-grid .media-tile {
+  border-radius: var(--radius-sm);
 }
 
 :root[data-density="bubbles"] .msg-body::after {
@@ -8422,12 +8502,17 @@ html.call-window body {
 /* Comfortable and Compact: the tick or clock sits at the body's trailing edge on its last line, in
    space the body keeps free for it, never on a row of its own (#634). It takes the body's font and
    line height so `1lh` is one line of text; the icon has a fixed size. Bubbles float it instead. */
-:root:not([data-density="bubbles"]) .msg-body:has(> .msg-delivery.is-sent, > .msg-delivery.is-pending:not(.msg-delayed)) {
+/* The meta wrapper only groups time and ticks for the bubbles; here it adds no box. */
+:root:not([data-density="bubbles"]) .bubble-meta {
+  display: contents;
+}
+
+:root:not([data-density="bubbles"]) .msg-body:has(> .bubble-meta > .msg-delivery.is-sent, > .bubble-meta > .msg-delivery.is-pending:not(.msg-delayed)) {
   position: relative;
   padding-inline-end: 22px;
 }
 
-:root:not([data-density="bubbles"]) .msg-body > .msg-delivery:is(.is-sent, .is-pending:not(.msg-delayed)) {
+:root:not([data-density="bubbles"]) .msg-body > .bubble-meta > .msg-delivery:is(.is-sent, .is-pending:not(.msg-delayed)) {
   position: absolute;
   inset-inline-end: 0;
   bottom: 0;
