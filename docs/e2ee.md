@@ -1917,11 +1917,11 @@ touching the bridge's configuration. The app generates the source token (256 ran
 `teamcraft-crypto::source_token`), shows the URL once and sends an encrypted control message into
 the channel: `MessageContent::IntegrationSource` with a `SourceChange` (`teamcraft-proto`):
 
-| Change    | Carries                                                                                                                             |
-|-----------|-------------------------------------------------------------------------------------------------------------------------------------|
-| `created` | random source ID, name, kind (`webhook`, `log`), SHA-256 of the token, options (danger attachments alert, alert levels, rate limit) |
-| `renamed` | source ID, new name                                                                                                                 |
-| `revoked` | source ID                                                                                                                           |
+| Change    | Carries                                                                                                                                                |
+|-----------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `created` | random source ID, name, kind (`webhook`, `log`), SHA-256 of the token, options (danger attachments alert, alert levels, rate limit, files per message) |
+| `renamed` | source ID, new name                                                                                                                                    |
+| `revoked` | source ID                                                                                                                                              |
 
 The message is hidden from the timeline; older clients that don't know the kind keep it as
 `unknown` (also hidden), and unknown changes or kinds are ignored. The token itself never travels;
@@ -1956,6 +1956,14 @@ source when in doubt, and keep the bridge's database volume (docs/bridge.md, "Co
 The bridge reads the ledgers from its encrypted store once a second and looks back once through older history (bounded) when its database is
 new. A bot added after a source was announced can't read the announcement (history from its join
 only), so the app offers "Add source" only once a bot is in the channel.
+
+**Files of webhooks** (docs/bridge.md, "Files") are attachments of the bridge's message, encrypted
+and uploaded exactly like a client's (§4.5, `teamcraft-core` `direct_uploads`): a fresh key per
+file, the key and hash only inside the message. The bridge uploads all of a message's files before
+it sends the message, so a failed upload leaves no message whose files are missing; files already
+up stay as ciphertext without a key until retention removes them. Before their upload the files
+wait as plaintext in the bridge's spool directory, on the bridge's own host, readable by its user
+only and deleted once the request is answered.
 
 ## 14. Open questions
 

@@ -10,14 +10,15 @@ fuzz/run.sh                   # all targets, 180 s each
 fuzz/run.sh imip 600          # one target for ten minutes (needs rootless podman or CONTAINER_ENGINE=docker)
 ```
 
-| Target            | What it feeds                                                                                                    |
-|-------------------|------------------------------------------------------------------------------------------------------------------|
-| `proto_requests`  | every request body and query type of the REST API, and the notification/status types: decode, re-encode, decode  |
-| `proto_gateway`   | gateway frames in both directions, events, rendezvous frames and the main response types                         |
-| `bridge_ingest`   | Slack/Mattermost webhook bodies (JSON and form), plain/NDJSON log lines, Slack markup, then batching             |
-| `imip`            | received iMIP REPLY text; rendering events from arbitrary strings (CR/LF injection, line folding)                |
-| `workspace_log`   | signed workspace log entries (random payloads and signatures must fail verification) and the roster/policy chain |
-| `crypto_decoders` | binary decoders of messages, key bags, wrapped backup keys, membership changes, certificates, call bindings      |
+| Target             | What it feeds                                                                                                    |
+|--------------------|------------------------------------------------------------------------------------------------------------------|
+| `proto_requests`   | every request body and query type of the REST API, and the notification/status types: decode, re-encode, decode  |
+| `proto_gateway`    | gateway frames in both directions, events, rendezvous frames and the main response types                         |
+| `bridge_ingest`    | Slack/Mattermost webhook bodies (JSON and form), plain/NDJSON log lines, Slack markup, then batching             |
+| `bridge_multipart` | webhooks with files (`multipart/form-data`) cut at random points: same outcome, bounded buffer, limits held      |
+| `imip`             | received iMIP REPLY text; rendering events from arbitrary strings (CR/LF injection, line folding)                |
+| `workspace_log`    | signed workspace log entries (random payloads and signatures must fail verification) and the roster/policy chain |
+| `crypto_decoders`  | binary decoders of messages, key bags, wrapped backup keys, membership changes, certificates, call bindings      |
 
 There is no target for CalDAV responses: the CalDAV client only looks at HTTP status codes and
 parses no XML.

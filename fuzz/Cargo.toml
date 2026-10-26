@@ -51,6 +51,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "bridge_multipart"
+path = "fuzz_targets/bridge_multipart.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "imip"
 path = "fuzz_targets/imip.rs"
 test = false
