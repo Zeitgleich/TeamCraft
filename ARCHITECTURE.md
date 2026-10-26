@@ -467,7 +467,12 @@ conversation id (signed), the SFU names it per call in its roster, and the serve
 calls it doesn't know – at start it reads the roster from the SFU (`GET
 {sfu_control_url}/internal/v1/calls/roster`) before it serves, otherwise from the next pushed
 roster. Nothing rings again, and the history entry written at the call's start is the one closed at
-its end. Calls that ended here within `roster_grace_secs` are not taken over again. A user can also clear their
+its end. Calls that ended here within `roster_grace_secs` are not taken over again. A failed read
+at start is retried in the background (1, 2, 4, 8, 15, 30 s, until a roster came in), and the
+first join token of a conversation without a call asks the SFU first (at most 1 s). Should a
+token still name a new call id for a conversation the SFU runs a call for, the SFU puts the
+device into the running room (one conversation, one room); its `joined` event names the call id
+it is in, and the reports tell the server. A user can also clear their
 own devices from a call at once ("Leave on all devices", `POST
 /api/v1/conversations/{id}/call/leave`): the SFU closes them with `connection_replaced`, so they
 don't rejoin, and the server drops them whatever the SFU answered.

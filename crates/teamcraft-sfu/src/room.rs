@@ -336,11 +336,23 @@ impl Rooms {
     capabilities: MediaCapabilities,
     handle: ParticipantHandle,
   ) -> Result<(Arc<Room>, SessionId, JoinOutcome), RoomError> {
-    let call_id = grant.call_id;
     let session = SessionId(self.next_session.fetch_add(1, Ordering::Relaxed));
     // The rooms lock is held across the join so `leave` can't drop the room in between.
     // Lock order everywhere: rooms, then control, then room state.
     let mut rooms = lock(&self.rooms);
+    let call_id = running_call_of(&rooms, &grant);
+    if call_id != grant.call_id {
+      // One conversation, one room: a server that lost track of the call (it restarted) handed out
+      // a new call id. The device joins the running call; its `joined` names the call id it is in,
+      // and the server learns it from the reports. The token was verified as usual; only the room
+      // it opens is the one its signed conversation already has.
+      info!(
+        token_call_id = %grant.call_id,
+        call_id = %call_id,
+        "join for a new call of a conversation that has one: joins the running call"
+      );
+    }
+    let grant = JoinGrant { call_id, ..grant };
     let has_slot = rooms
       .get(&call_id)
       .is_some_and(|room| room.has_participant(grant.device_id));
@@ -1126,6 +1138,24 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
   mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The call `grant` joins: its own if it runs here, else the running call of its (signed)
+/// conversation, else its own (a new room).
+fn running_call_of(rooms: &HashMap<CallId, Arc<Room>>, grant: &JoinGrant) -> CallId {
+  if rooms.contains_key(&grant.call_id) {
+    return grant.call_id;
+  }
+  let Some(conversation_id) = grant.maybe_conversation_id else {
+    return grant.call_id;
+  };
+  rooms
+    .values()
+    .filter(|room| room.maybe_conversation_id == Some(conversation_id))
+    // Deterministic should there ever be two (rooms opened by tokens of an older server).
+    .map(|room| room.call_id)
+    .min()
+    .unwrap_or(grant.call_id)
+}
+
 /// The wall clock, only for the start time the roster reports (shown, never trusted for order).
 fn unix_now_millis() -> UnixMillis {
   let millis = SystemTime::now()
@@ -1161,6 +1191,64 @@ mod tests {
     let mut participants = roster[0].participants.clone();
     participants.sort_by_key(|entry| entry.device_id);
     assert_eq!(participants, vec![entry(1, 10), entry(2, 20)]);
+  }
+
+  mod one_room_per_conversation {
+    use super::*;
+
+    #[test]
+    fn a_new_call_id_for_a_running_conversation_lands_in_its_room() {
+      let rooms = Rooms::new(SfuConfig::default());
+      let (_alice_rx, _) = join(&rooms, 1, 10);
+
+      // A restarted server handed out a fresh call id for the same conversation.
+      let (mut bob_rx, _, joined) = join_with(&rooms, grant(55, Some(CONVERSATION), 2, 20)).unwrap();
+
+      assert_eq!(joined, id(CALL));
+      let roster = rooms.roster();
+      assert_eq!(roster.len(), 1, "{roster:?}");
+      assert_eq!(roster[0].participants.len(), 2);
+      let events = drain(&mut bob_rx);
+      assert!(
+        events
+          .iter()
+          .any(|event| matches!(event, CallEvent::Joined { call_id, .. } if *call_id == id(CALL))),
+        "the client learns the call it is in: {events:?}"
+      );
+    }
+
+    #[test]
+    fn other_conversations_and_unnamed_tokens_get_their_own_room() {
+      let rooms = Rooms::new(SfuConfig::default());
+      join(&rooms, 1, 10);
+
+      let (_, _, other) = join_with(&rooms, grant(56, Some(78), 2, 20)).unwrap();
+      let (_, _, unnamed) = join_with(&rooms, grant(57, None, 3, 30)).unwrap();
+
+      assert_eq!((other, unnamed), (id(56), id(57)));
+      assert_eq!(rooms.roster().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn host_controls_of_the_running_call_still_apply() {
+      let rooms = Rooms::new(SfuConfig::default());
+      join(&rooms, 1, 10);
+      join(&rooms, 2, 20);
+      rooms
+        .control(
+          id(CALL),
+          id(1),
+          &SfuControlAction::RemoveParticipant { user_id: id(2) },
+        )
+        .unwrap();
+      rooms.control(id(CALL), id(1), &SfuControlAction::Lock).unwrap();
+
+      let removed = join_with(&rooms, grant(55, Some(CONVERSATION), 2, 21));
+      let locked_out = join_with(&rooms, grant(55, Some(CONVERSATION), 3, 30));
+
+      assert!(matches!(removed, Err(RoomError::Removed)));
+      assert!(matches!(locked_out, Err(RoomError::Locked)));
+    }
   }
 
   #[tokio::test]
@@ -1203,19 +1291,31 @@ mod tests {
 
   /// Joins user `user` with device `device`; returns its signaling queue and session.
   fn join(rooms: &Rooms, user: i64, device: i64) -> (Receiver<Outgoing>, SessionId) {
+    let (signal_rx, session, _) = join_with(rooms, grant(CALL, Some(CONVERSATION), user, device)).unwrap();
+    (signal_rx, session)
+  }
+
+  /// Joins with `grant`; also returns the call joined.
+  fn join_with(
+    rooms: &Rooms,
+    grant: JoinGrant,
+  ) -> Result<(Receiver<Outgoing>, SessionId, CallId), RoomError> {
     let (signal_tx, signal_rx) = mpsc::channel(64);
     let handle = ParticipantHandle {
       link: Arc::new(QuietLink),
       signal_tx,
     };
-    let grant = JoinGrant {
-      call_id: id(CALL),
+    let (room, session, _) = rooms.join(grant, MediaCapabilities::default(), handle)?;
+    Ok((signal_rx, session, room.call_id()))
+  }
+
+  fn grant(call: i64, maybe_conversation: Option<i64>, user: i64, device: i64) -> JoinGrant {
+    JoinGrant {
+      call_id: id(call),
       user_id: id(user),
       device_id: id(device),
-      maybe_conversation_id: Some(id(CONVERSATION)),
-    };
-    let (_, session, _) = rooms.join(grant, MediaCapabilities::default(), handle).unwrap();
-    (signal_rx, session)
+      maybe_conversation_id: maybe_conversation.map(id),
+    }
   }
 
   fn drain(rx: &mut Receiver<Outgoing>) -> Vec<CallEvent> {

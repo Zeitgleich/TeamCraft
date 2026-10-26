@@ -337,6 +337,11 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
   };
 
   drop(prejoin_slot);
+  // The call the device is in: the running call of its conversation when the token named another.
+  let grant = JoinGrant {
+    call_id: room.call_id(),
+    ..grant
+  };
   // A device taking its slot back is still in the server's roster.
   if outcome == JoinOutcome::Joined {
     shared.reporter.joined(grant);

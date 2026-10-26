@@ -37,6 +37,18 @@ use crate::error::ApiError;
 use crate::state::AppState;
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a join token waits for the SFU's roster when the conversation has no call here.
+const PRE_TOKEN_ROSTER_TIMEOUT: Duration = Duration::from_secs(1);
+/// Pauses before the background retries of a failed roster read at start. They stop early once a
+/// roster arrived; the SFU's periodic roster covers anything later.
+const STARTUP_ROSTER_RETRIES: [Duration; 6] = [
+  Duration::from_secs(1),
+  Duration::from_secs(2),
+  Duration::from_secs(4),
+  Duration::from_secs(8),
+  Duration::from_secs(15),
+  Duration::from_secs(30),
+];
 
 /// Signs join tokens and tracks the active call of each conversation.
 pub struct CallService {
@@ -353,6 +365,45 @@ impl CallService {
       .await
       .map(Some)
       .map_err(|error| ApiError::Unavailable(format!("the SFU's roster is unreadable: {error}")))
+  }
+
+  /// Reads the SFU's roster within `timeout` and takes over the calls it runs that the server
+  /// doesn't know (only that: a pulled snapshot is not in the order of the SFU's pushed reports, so
+  /// it neither drops anybody nor counts as the SFU's roster). `None` without host controls.
+  async fn pull_and_adopt(&self, timeout: Duration) -> Result<Option<RosterChanges>, ApiError> {
+    let report = tokio::time::timeout(timeout, self.fetch_sfu_roster())
+      .await
+      .map_err(|_| ApiError::Unavailable("the SFU's roster did not come in time".into()))??;
+    let Some(report) = report else {
+      return Ok(None);
+    };
+    Ok(Some(self.adopt_calls(
+      &report,
+      Instant::now(),
+      unix_now_millis()?,
+    )))
+  }
+
+  /// [`Self::pull_and_adopt`] again after each of `pauses`, until it worked or a roster arrived
+  /// from the SFU by itself (which takes the calls over too).
+  async fn retry_adoption(&self, pauses: &[Duration]) -> Option<RosterChanges> {
+    for pause in pauses {
+      sleep(*pause).await;
+      if self.last_roster().is_some() {
+        return None;
+      }
+      match self.pull_and_adopt(CONTROL_TIMEOUT).await {
+        Ok(maybe_changes) => return maybe_changes,
+        Err(error) => debug!(%error, "reading the SFU's roster failed again"),
+      }
+    }
+    warn!("the SFU's roster could not be read; its next roster takes the calls over");
+    None
+  }
+
+  /// Whether the conversation has a call here (running, or opened by a join token).
+  fn has_call(&self, conversation_id: ConversationId) -> bool {
+    self.lock().contains_key(&conversation_id)
   }
 
   /// The conversation's current call, or a new one from `new_call_id`.
@@ -885,6 +936,7 @@ pub async fn create_join_token(
   if access.view.conversation.kind == ConversationKind::Meeting {
     check_meeting_admission(state, calls, caller, conversation_id, request.device_id).await?;
   }
+  adopt_before_first_token(state, calls, conversation_id).await;
   let call_id = calls.call_for(conversation_id, Instant::now(), || state.next_id())?;
   let claims = calls.claims(
     conversation_id,
@@ -1199,28 +1251,44 @@ pub async fn report_roster(state: &AppState, report: SfuRosterReport) -> Result<
 /// restarted, before people ask for join tokens (which would open a second call next to them). An
 /// SFU that can't be asked (no control URL, unreachable) delivers the same with its next roster.
 pub async fn adopt_running_calls(state: &AppState) {
-  let Some(calls) = state.maybe_calls.as_ref() else {
+  let Some(calls) = state.maybe_calls.clone() else {
     return;
   };
-  let report = match calls.fetch_sfu_roster().await {
-    Ok(Some(report)) => report,
-    Ok(None) => return,
+  match calls.pull_and_adopt(CONTROL_TIMEOUT).await {
+    Ok(Some(changes)) => publish_adopted(state, changes).await,
+    Ok(None) => {},
     Err(error) => {
-      warn!(%error, "reading the SFU's roster at start failed; its next roster takes the calls over");
-      return;
+      warn!(%error, "reading the SFU's roster at start failed; trying again in the background");
+      let state = state.clone();
+      tokio::spawn(async move {
+        if let Some(changes) = calls.retry_adoption(&STARTUP_ROSTER_RETRIES).await {
+          publish_adopted(&state, changes).await;
+        }
+      });
     },
-  };
-  let Ok(now_ms) = unix_now_millis() else {
-    return;
-  };
-  let changes = calls.reconcile(&report, Instant::now(), now_ms);
+  }
+}
+
+async fn publish_adopted(state: &AppState, changes: RosterChanges) {
   if !changes.changes.is_empty() {
-    info!(
-      calls = changes.changes.len(),
-      "calls taken over from the SFU at start"
-    );
+    info!(calls = changes.changes.len(), "calls taken over from the SFU");
   }
   publish_roster_changes(state, changes).await;
+}
+
+/// Before the first join token of a conversation without a call: the SFU may run one the server
+/// lost (it restarted and couldn't read the roster yet). Asking first, for at most
+/// [`PRE_TOKEN_ROSTER_TIMEOUT`], keeps the token on the running call; without an answer the
+/// token opens a new call as before (and the SFU still puts the device into the running room).
+async fn adopt_before_first_token(state: &AppState, calls: &CallService, conversation_id: ConversationId) {
+  if calls.has_call(conversation_id) {
+    return;
+  }
+  match calls.pull_and_adopt(PRE_TOKEN_ROSTER_TIMEOUT).await {
+    Ok(Some(changes)) => publish_adopted(state, changes).await,
+    Ok(None) => {},
+    Err(error) => debug!(%conversation_id, %error, "no SFU roster before the first join token"),
+  }
 }
 
 /// Ends the calls of an SFU that stopped sending rosters ([`CallService::expire_if_silent`]).
@@ -1875,6 +1943,108 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
 
     fn reconcile(service: &CallService, report: &SfuRosterReport, now: Instant) -> RosterChanges {
       service.reconcile(report, now, UnixMillis(5_000))
+    }
+  }
+
+  mod roster_reads {
+    use std::sync::atomic::AtomicUsize;
+
+    use axum::Json;
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use axum::routing::get;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_failed_read_at_start_is_retried_and_tokens_name_the_running_call() {
+      let sfu = FakeSfu::start(1).await;
+      let service = service_with_sfu(&sfu.url);
+
+      // The read at start finds the SFU busy; the background retry gets the roster.
+      assert!(service.pull_and_adopt(Duration::from_secs(5)).await.is_err());
+      let adopted = service.retry_adoption(&[Duration::ZERO]).await;
+
+      assert!(matches!(&adopted, Some(changes) if changes.changes.len() == 1));
+      let call = service.call_for(id(1), Instant::now(), || Ok(id(999))).unwrap();
+      assert_eq!(call, id(100), "the join token names the running call");
+    }
+
+    #[tokio::test]
+    async fn the_first_join_token_of_a_conversation_asks_the_sfu_first() {
+      let sfu = FakeSfu::start(1).await;
+      let service = service_with_sfu(&sfu.url);
+      assert!(service.pull_and_adopt(Duration::from_secs(5)).await.is_err());
+
+      // What `create_join_token` does for a conversation without a call.
+      assert!(!service.has_call(id(1)));
+      let adopted = service
+        .pull_and_adopt(PRE_TOKEN_ROSTER_TIMEOUT)
+        .await
+        .unwrap()
+        .unwrap();
+      let call = service.call_for(id(1), Instant::now(), || Ok(id(999))).unwrap();
+
+      assert_eq!(adopted.changes.len(), 1);
+      assert_eq!(call, id(100));
+      assert_eq!(sfu.reads(), 2);
+    }
+
+    #[tokio::test]
+    async fn retries_stop_once_the_sfu_sent_a_roster_by_itself() {
+      let sfu = FakeSfu::start(0).await;
+      let service = service_with_sfu(&sfu.url);
+      service.reconcile(
+        &named_roster(600, 1, 100, &[entry(4, 40)]),
+        Instant::now(),
+        UnixMillis(5_000),
+      );
+
+      let adopted = service.retry_adoption(&[Duration::ZERO, Duration::ZERO]).await;
+
+      assert_eq!(adopted, None);
+      assert_eq!(sfu.reads(), 0);
+    }
+
+    /// The SFU's roster endpoint: refuses the first `failures` reads, then answers with call 100
+    /// of conversation 1.
+    struct FakeSfu {
+      url: String,
+      reads: Arc<AtomicUsize>,
+    }
+
+    impl FakeSfu {
+      async fn start(failures: usize) -> Self {
+        async fn roster(
+          State((reads, failures)): State<(Arc<AtomicUsize>, usize)>,
+        ) -> Result<Json<SfuRosterReport>, StatusCode> {
+          if reads.fetch_add(1, Ordering::SeqCst) < failures {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+          }
+          Ok(Json(named_roster(600, 1, 100, &[entry(4, 40), entry(5, 50)])))
+        }
+        let reads = Arc::new(AtomicUsize::new(0));
+        let router = axum::Router::new()
+          .route("/internal/v1/calls/roster", get(roster))
+          .with_state((Arc::clone(&reads), failures));
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0))
+          .await
+          .unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await });
+        Self { url, reads }
+      }
+
+      fn reads(&self) -> usize {
+        self.reads.load(Ordering::SeqCst)
+      }
+    }
+
+    fn service_with_sfu(url: &str) -> CallService {
+      let mut config = config();
+      config.maybe_sfu_control_url = Some(url.to_owned());
+      config.maybe_sfu_registration_token = Some("sfu-token-for-tests".to_owned().into());
+      CallService::new(&config, TEST_SIGNING_KEY_PEM.as_bytes()).unwrap()
     }
   }
 
