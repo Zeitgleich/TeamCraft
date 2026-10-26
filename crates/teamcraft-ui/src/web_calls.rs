@@ -105,6 +105,21 @@ pub fn support() -> Result<(), CallsUnavailableReason> {
   Ok(())
 }
 
+/// Whether this page is in a call. Another tab's takeover waits for it (#744).
+pub fn is_in_call() -> bool {
+  current().is_some_and(|host| host.was_in_call.get())
+}
+
+/// Leaves the call this page is in, before another tab takes over (the user agreed).
+pub async fn end_call() {
+  let Some(module) = current().and_then(|host| host.loaded_module()) else {
+    return;
+  };
+  if let Err(failure) = module.call(EXPORT_STOP, &[]).await {
+    tracing::debug!(detail = %failure.detail, "the call module did not stop cleanly");
+  }
+}
+
 /// The client core's call events (ringing, rosters) for the call module.
 pub fn on_gateway_event(event: &GatewayEvent) {
   if let (Some(host), Some(signal)) = (current(), CallSignal::from_gateway(event)) {
