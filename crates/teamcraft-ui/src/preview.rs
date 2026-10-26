@@ -6,7 +6,7 @@
 //! the app, its storage or its tokens, no forms, no popups, no top navigation) and carries its own
 //! Content-Security-Policy ([`HTML_FRAME_CSP`]) on top of the page's: nothing is loaded from the
 //! network, so opening a file never tells anyone that it was opened. Markdown goes through the
-//! app's own renderer (`markdown.rs`, a tree of elements, no HTML string), PDF through the vendored
+//! app's own renderer (`markdown`, a tree of elements, no HTML string), PDF through the vendored
 //! PDF.js with scripting off (`pdf-viewer.mjs`). docs/e2ee.md, "Previews of files".
 
 use std::collections::HashSet;

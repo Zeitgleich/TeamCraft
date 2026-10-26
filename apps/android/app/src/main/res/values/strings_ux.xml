@@ -27,6 +27,14 @@
   <string name="connection_sign_in">Your session has expired. Messages wait until you sign in again.</string>
   <string name="connection_sign_in_action">Sign in again</string>
   <string name="connection_connecting">Connecting to the server…</string>
+  <!-- Stands in for a link to a message inside message text -->
+  <string name="message_link_label">Message link</string>
+  <!-- Accessibility: an own message the server has accepted -->
+  <string name="message_sent">Sent</string>
+  <plurals name="conversation_members">
+    <item quantity="one">%d member</item>
+    <item quantity="other">%d members</item>
+  </plurals>
 
   <!-- Conversation -->
   <string name="jump_down">Jump to the newest message</string>

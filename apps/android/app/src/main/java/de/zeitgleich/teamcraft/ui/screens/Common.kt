@@ -13,19 +13,14 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.material3.TextButton
 import androidx.compose.foundation.layout.Row
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.delay
-import uniffi.teamcraft_ffi.ConnectionState
 import uniffi.teamcraft_ffi.NetworkInterception
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
@@ -40,6 +35,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
+import de.zeitgleich.teamcraft.ui.CONNECTION_GRACE_MS
+import de.zeitgleich.teamcraft.ui.ConnectionNotice
+import de.zeitgleich.teamcraft.ui.connectionNotice
 import de.zeitgleich.teamcraft.ui.rememberIsOnline
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
 import de.zeitgleich.teamcraft.ui.theme.darkStatusBarBackdrop
@@ -104,42 +102,39 @@ fun ChromeTopBar(
 /**
  * A thin bar while the app can't reach the server: the device is offline, the server is
  * unreachable although the device is online, or the session expired. Follows the core's connection
- * state; new messages wait, sent ones stay in the outbox.
+ * state; new messages wait, sent ones stay in the outbox. A connection that comes back within the
+ * grace period ([CONNECTION_GRACE_MS], from going down or from the app's return) shows nothing: the
+ * cached state is on screen and syncs quietly (issue #700).
  */
 @Composable
 fun OfflineBanner(onSignInAgain: () -> Unit) {
   val graph = TeamCraftApplication.graph(LocalContext.current)
   val isOnline = rememberIsOnline()
   val maybeConnection by graph.core.connectionState.collectAsState()
-  val now by produceState(System.currentTimeMillis()) {
-    while (true) {
+  val unsettled by graph.connectionGrace.unsettled.collectAsState()
+  // The clock only matters while the connection is down; a connected app doesn't wake every second.
+  val now by produceState(System.currentTimeMillis(), unsettled) {
+    value = System.currentTimeMillis()
+    while (unsettled.maybeSinceMs != null) {
       delay(COUNTDOWN_MILLIS)
       value = System.currentTimeMillis()
     }
   }
-  var maybeConnectingSince by remember { mutableStateOf<Long?>(null) }
-  LaunchedEffect(maybeConnection) {
-    maybeConnectingSince = if (maybeConnection is ConnectionState.Connecting) System.currentTimeMillis() else null
-  }
-  val connection = maybeConnection
-  val (text, maybeAction) = when {
-    !isOnline -> stringResource(R.string.offline_banner) to null
-    connection is ConnectionState.Offline -> {
-      val seconds = ((connection.retryAtMs - now).coerceAtLeast(0) + 999) / 1000
-      val text = when (connection.maybeInterception) {
+  val (text, maybeAction) = when (val notice = connectionNotice(isOnline, maybeConnection, unsettled, now)) {
+    null -> return
+    ConnectionNotice.DeviceOffline -> stringResource(R.string.offline_banner) to null
+    ConnectionNotice.Connecting -> stringResource(R.string.connection_connecting) to null
+    is ConnectionNotice.Unreachable -> {
+      val text = when (notice.maybeInterception) {
         NetworkInterception.CAPTIVE_PORTAL -> R.string.connection_captive_portal
         NetworkInterception.UNTRUSTED_CERTIFICATE -> R.string.connection_untrusted_certificate
         null -> R.string.connection_unreachable
       }
-      stringResource(text, seconds) to
+      stringResource(text, notice.retryInSeconds.toInt()) to
         (stringResource(R.string.connection_retry) to { graph.core.networkChanged() })
     }
-    connection is ConnectionState.SignInRequired ->
+    ConnectionNotice.SignInRequired ->
       stringResource(R.string.connection_sign_in) to (stringResource(R.string.connection_sign_in_action) to onSignInAgain)
-    connection is ConnectionState.Connecting &&
-      maybeConnectingSince?.let { now - it >= CONNECTING_GRACE_MILLIS } == true ->
-      stringResource(R.string.connection_connecting) to null
-    else -> return
   }
   Surface(
     color = MaterialTheme.colorScheme.errorContainer,
@@ -162,6 +157,5 @@ fun OfflineBanner(onSignInAgain: () -> Unit) {
   }
 }
 
-/** "Connecting" only shows when it takes longer than this; a quick reconnect needs no banner. */
-private const val CONNECTING_GRACE_MILLIS = 3_000L
+/** How often the countdown to the next attempt (and the grace period) is checked. */
 private const val COUNTDOWN_MILLIS = 1_000L
