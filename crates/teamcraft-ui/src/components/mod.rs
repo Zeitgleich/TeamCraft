@@ -25,6 +25,7 @@ pub mod admin_updates;
 pub mod admin_users;
 pub mod announcement_banner;
 pub mod app;
+pub mod attachment_menu;
 pub mod avatar;
 pub mod background_picker;
 pub mod bookmarks;

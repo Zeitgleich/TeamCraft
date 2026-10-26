@@ -43,6 +43,9 @@ tauri-plugin-opener = "2"
 tauri-plugin-global-shortcut = "2"
 # System notifications for mentions and direct messages (the UI decides what to show).
 tauri-plugin-notification = "2"
+# Native save dialog for "Save…" on a file (#719): the OS's own dialog on Windows and macOS, GTK's
+# (through the portal with GTK_USE_PORTAL) on Linux. Same Tauri plugin family; used from Rust only.
+tauri-plugin-dialog = "2"
 # Opens the window with the size, position and maximized state it had when the app was closed.
 tauri-plugin-window-state = "2"
 # Self-update of the Windows, macOS and AppImage builds from a signed manifest (docs/updates.md).
