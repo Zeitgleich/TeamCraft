@@ -208,6 +208,10 @@ pub struct ClientSettings {
   /// Make the user's notes to self (a DM with themself) once a sync finds there is none. Off by
   /// default; the apps turn it on with [`ClientSettings::with_notes_to_self`].
   pub creates_notes_to_self: bool,
+  /// Decode pictures to upload for their thumbnail and size. A host that decodes them itself, off
+  /// its loop and with its own limits (the integration bridge), turns this off and hands its own
+  /// thumbnail in; the core then reads only the picture's header for its size.
+  pub makes_thumbnails: bool,
 }
 
 impl ClientSettings {
@@ -321,6 +325,7 @@ impl Default for ClientSettings {
       upload_retry: files::UploadRetrySettings::default(),
       catch_up_concurrency: 6,
       creates_notes_to_self: false,
+      makes_thumbnails: true,
     }
   }
 }

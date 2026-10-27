@@ -1,13 +1,16 @@
 //! Files uploaded at once, outside the outbox (the integration bridge's webhooks with files): they
-//! go up like the outbox's, the message follows only once all are up, and a failed one is given up
-//! at the server.
+//! go up like the outbox's, are completed only once all are up, the message follows, and a failed
+//! one is given up at the server with the others.
 #![allow(clippy::unwrap_used)]
 
 use crate::common;
 
-use common::{Peer, settle};
+use common::{Peer, settings, settle};
+use teamcraft_core::ClientSettings;
 use teamcraft_core::api::fake::FakeServer;
-use teamcraft_core::client::direct_uploads::{DirectUpload, DirectUploadError};
+use teamcraft_core::client::direct_uploads::{
+  DirectUpload, DirectUploadError, DirectUploadProgress, estimated_message_bytes,
+};
 use teamcraft_core::client::files::UploadSource;
 use teamcraft_core::client::upload_parts::PART_CHUNKS;
 use teamcraft_core::store::{AttachmentRef, LocalStore, MessageContent, MessageFilter};
@@ -131,13 +134,13 @@ async fn an_upload_that_fails_half_way_is_given_up_at_the_server() {
   );
   let mut step = alice.client.start_direct_upload(&mut upload).await.unwrap();
   let sent = step.sent().await;
-  assert!(
+  assert_eq!(
     alice
       .client
       .finish_direct_upload(&mut upload, step, sent)
       .await
-      .unwrap()
-      .is_none(),
+      .unwrap(),
+    DirectUploadProgress::MoreToSend,
     "the first part is stored"
   );
 
@@ -154,16 +157,114 @@ async fn an_upload_that_fails_half_way_is_given_up_at_the_server() {
   assert!(alice.texts(channel).is_empty());
 }
 
-/// Drives the upload's steps until the file is up.
+#[tokio::test]
+async fn nothing_is_completed_before_every_file_is_up_so_a_failure_leaves_nothing() {
+  let (server, mut alice, _bob, channel) = channel_with_two().await;
+  let small = b"report".to_vec();
+  let large = sample(2 * PART + 10);
+  let mut first = direct(
+    channel,
+    bytes_source(&small),
+    "report.txt",
+    "text/plain",
+    small.len(),
+  );
+  let mut second = direct(
+    channel,
+    bytes_source(&large),
+    "video.mp4",
+    "video/mp4",
+    large.len(),
+  );
+  send_all(&mut alice, &mut first).await.unwrap();
+  let mut step = alice.client.start_direct_upload(&mut second).await.unwrap();
+  let sent = step.sent().await;
+  alice
+    .client
+    .finish_direct_upload(&mut second, step, sent)
+    .await
+    .unwrap();
+
+  // The second file fails half way: both are given up, and the server keeps neither.
+  server.refuse_blob_uploads(alice.client.user_id(), true);
+  assert!(send_all(&mut alice, &mut second).await.is_err());
+  alice.client.abandon_direct_upload(&first).await;
+  alice.client.abandon_direct_upload(&second).await;
+  assert_eq!(server.abandoned_attachments().len(), 2);
+  assert_eq!(server.attachment_count(), 0, "no file is left behind");
+}
+
+#[tokio::test]
+async fn a_host_that_makes_its_own_thumbnails_hands_them_in() {
+  let server = FakeServer::new();
+  let host_settings = ClientSettings {
+    makes_thumbnails: false,
+    ..settings()
+  };
+  let mut alice = Peer::enroll_with_settings(&server, "Alice", host_settings).await;
+  let channel = alice
+    .client
+    .create_channel(alice.space().await, "ci")
+    .await
+    .unwrap();
+  let png = png(40, 20);
+  let mut plain = direct(channel, bytes_source(&png), "graph.png", "image/png", png.len());
+  let attachment = upload_whole(&mut alice, &mut plain).await.unwrap();
+  assert!(attachment.maybe_thumbnail.is_none(), "the core decoded nothing");
+  let dimensions = attachment.maybe_dimensions.unwrap();
+  assert_eq!(
+    (dimensions.width, dimensions.height),
+    (40, 20),
+    "the size comes from the header"
+  );
+
+  let mut handed = direct(channel, bytes_source(&png), "graph.png", "image/png", png.len())
+    .with_picture(Some(b"preview".to_vec()), Some((40, 20)));
+  let attachment = upload_whole(&mut alice, &mut handed).await.unwrap();
+  assert_eq!(
+    attachment.maybe_thumbnail.unwrap(),
+    Base64Bytes::new(b"preview".to_vec())
+  );
+}
+
+#[test]
+fn the_message_estimate_counts_text_files_and_their_thumbnails() {
+  let empty = estimated_message_bytes("", 0, &[]);
+  assert!(empty < 20 * 1024, "{empty}");
+  let names: Vec<String> = (0..20)
+    .map(|index| format!("artifact-{index:02}.tar.gz"))
+    .collect();
+  let files: Vec<(&str, &str)> = names
+    .iter()
+    .map(|name| (name.as_str(), "application/gzip"))
+    .collect();
+  let with_files = estimated_message_bytes("", 0, &files);
+  assert!(with_files > empty + 20 * 100, "every file adds its reference");
+  let pictures = estimated_message_bytes("", 0, &[("a.png", "image/png"); 20]);
+  assert!(
+    pictures > with_files + 500 * 1024,
+    "the thumbnail budget counts once there are pictures"
+  );
+  let long_text = "x".repeat(900 * 1024);
+  assert!(estimated_message_bytes(&long_text, 3, &files) > 900 * 1024 + with_files - empty);
+}
+
+/// Drives the upload's steps until the file is up, then completes it.
 async fn upload_whole(
   peer: &mut Peer,
   upload: &mut DirectUpload,
 ) -> Result<AttachmentRef, DirectUploadError> {
+  send_all(peer, upload).await?;
+  peer.client.complete_direct_upload(upload).await
+}
+
+/// Drives the upload's steps until every byte is up.
+async fn send_all(peer: &mut Peer, upload: &mut DirectUpload) -> Result<(), DirectUploadError> {
   loop {
     let mut step = peer.client.start_direct_upload(upload).await?;
     let sent = step.sent().await;
-    if let Some(attachment) = peer.client.finish_direct_upload(upload, step, sent).await? {
-      return Ok(attachment);
+    if peer.client.finish_direct_upload(upload, step, sent).await? == DirectUploadProgress::AllSent {
+      return Ok(());
     }
   }
 }

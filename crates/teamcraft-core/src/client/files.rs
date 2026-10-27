@@ -651,7 +651,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let content = read_source(&file.source, file.size_bytes)
       .await
       .map_err(|()| UploadError::Failed(TransferFailure::LocalFile))?;
-    let maybe_thumbnail = crate::thumbnail::thumbnail(&content, &file.media_type).or_else(|| {
+    let maybe_made = if self.settings.makes_thumbnails {
+      crate::thumbnail::thumbnail(&content, &file.media_type)
+    } else {
+      None
+    };
+    let maybe_thumbnail = maybe_made.or_else(|| {
       file
         .maybe_thumbnail
         .as_ref()

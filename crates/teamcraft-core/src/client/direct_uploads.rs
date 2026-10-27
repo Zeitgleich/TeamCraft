@@ -6,18 +6,21 @@
 //! a large file in parts through presigned part URLs and read one part at a time, a picture with
 //! its thumbnail and size. Nothing is retried or kept in the store: the producer, which still waits
 //! for its answer, retries.
+//!
+//! Sending a file's bytes and completing its upload are separate steps, so a host completes the
+//! files of a message only once all of them are up. Until then each is an unfinished upload that
+//! the server frees when it is given up; a failure half way leaves nothing behind.
 
-use teamcraft_proto::{AttachmentId, ClientMessageId, ConversationId, UserId};
+use teamcraft_proto::{AttachmentId, Base64Bytes, ClientMessageId, ConversationId, Id, Snowflake, UserId};
 
 use super::Client;
 use super::files::{
-  BlobRequest, PendingFile, TransferFailure, UploadError, UploadRetry, UploadSource, UploadTarget,
-  announced_attachment,
+  BlobRequest, PendingFile, TransferFailure, UploadError, UploadRetry, UploadSlot, UploadSource,
+  UploadTarget, announced_attachment,
 };
-use super::upload_parts::PartOutcome;
 use crate::api::{ApiError, ServerApi};
 use crate::error::CoreError;
-use crate::store::{AttachmentRef, LocalStore, MessageContent, MessageMeta};
+use crate::store::{AttachmentRef, ImageDimensions, LocalStore, MessageContent, MessageMeta};
 use crate::thumbnail::MAX_THUMBNAIL_BYTES;
 use crate::transfers::TransferGuard;
 
@@ -25,15 +28,41 @@ use crate::transfers::TransferGuard;
 /// ciphertext limit (1 MiB by default), and base64 makes each a third larger. Files beyond it go
 /// without their preview.
 pub const MAX_MESSAGE_THUMBNAIL_BYTES: usize = 4 * MAX_THUMBNAIL_BYTES;
+/// What a message adds to its content on the way, generously: the sender's workspace head, the
+/// encryption's framing and authentication.
+const MESSAGE_OVERHEAD_BYTES: usize = 16 * 1024;
 
 /// A file on its way up, outside the outbox. Drive it with [`Client::start_direct_upload`] and
-/// [`Client::finish_direct_upload`] until the latter returns the file's reference; give it up with
-/// [`Client::abandon_direct_upload`] when it fails or is no longer wanted.
+/// [`Client::finish_direct_upload`] until every byte is sent, then [`Client::complete_direct_upload`]
+/// gives its reference; give it up with [`Client::abandon_direct_upload`] when it fails or is no
+/// longer wanted.
 pub struct DirectUpload {
   conversation_id: ConversationId,
   file: PendingFile,
   /// Every attachment the server announced for the file, to give up if it fails.
   announced: Vec<AttachmentId>,
+  /// Set once every byte is up: what completing the upload needs.
+  maybe_sent: Option<SentFile>,
+}
+
+/// Where a [`DirectUpload`] stands after a step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectUploadProgress {
+  /// A part is stored; the next step follows.
+  MoreToSend,
+  /// Every byte is up; [`Client::complete_direct_upload`] finishes the upload.
+  AllSent,
+}
+
+/// A file whose bytes are all up, before its upload is completed.
+enum SentFile {
+  /// In one blob, in its announced slot.
+  Whole {
+    slot: UploadSlot,
+    attachment: Box<AttachmentRef>,
+  },
+  /// In parts; their `ETag`s are on the file.
+  Parts,
 }
 
 /// One step of a [`DirectUpload`] (the whole file, or one part of a large one), detached from the
@@ -94,7 +123,21 @@ impl DirectUpload {
         maybe_parts: None,
       },
       announced: Vec::new(),
+      maybe_sent: None,
     }
+  }
+
+  /// A picture's thumbnail and size, made by the host ([`crate::ClientSettings::makes_thumbnails`]
+  /// off): they go into the file's reference as they are (a thumbnail larger than a message allows
+  /// is dropped).
+  pub fn with_picture(
+    mut self,
+    maybe_thumbnail: Option<Vec<u8>>,
+    maybe_dimensions: Option<(u32, u32)>,
+  ) -> Self {
+    self.file.maybe_thumbnail = maybe_thumbnail.map(Base64Bytes::new);
+    self.file.maybe_dimensions = maybe_dimensions.map(|(width, height)| ImageDimensions { width, height });
+    self
   }
 
   /// Remembers the attachment the server announced for the file, which a failure may drop from the
@@ -126,38 +169,71 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     })
   }
 
-  /// Completes a step the host drove: confirms a whole file, or records a part and joins the parts
-  /// after the last one. `Ok(Some(_))`: the file is up, with what its message needs; `Ok(None)`: a
-  /// part is stored and the next step follows.
+  /// Records a step the host drove: a whole file is sent, or a part is stored. Nothing is completed
+  /// yet ([`Self::complete_direct_upload`]), so the upload can still be given up whole.
   pub async fn finish_direct_upload(
     &mut self,
     upload: &mut DirectUpload,
     step: DirectUploadStep,
     sent: Result<(), ApiError>,
-  ) -> Result<Option<AttachmentRef>, DirectUploadError> {
+  ) -> Result<DirectUploadProgress, DirectUploadError> {
     let DirectUploadStep {
       target, maybe_etag, ..
     } = step;
-    let finished = match target {
-      UploadTarget::Whole { slot, attachment } => self
-        .confirm_blob(&slot, sent, &mut upload.file)
-        .await
-        .map(|()| PartOutcome::Uploaded(attachment)),
+    let recorded = match target {
+      UploadTarget::Whole { slot, attachment } => match sent {
+        Ok(()) => {
+          upload.maybe_sent = Some(SentFile::Whole {
+            slot,
+            attachment: Box::new(attachment),
+          });
+          Ok(DirectUploadProgress::AllSent)
+        },
+        Err(error) if error.is_unreachable() => Err(DirectUploadError::Offline(CoreError::Api(error))),
+        Err(error) => Err(DirectUploadError::Failed(CoreError::Api(error))),
+      },
       UploadTarget::Part(target) => {
         // A stored part's ETag was kept by `DirectUploadStep::sent`.
         let answer = sent.map(|()| maybe_etag);
-        self.finish_part(target, answer, &mut upload.file).await
+        match self.record_part(target, answer, &mut upload.file).await {
+          Ok(true) => {
+            upload.maybe_sent = Some(SentFile::Parts);
+            Ok(DirectUploadProgress::AllSent)
+          },
+          Ok(false) => Ok(DirectUploadProgress::MoreToSend),
+          Err(error) => Err(error.into()),
+        }
       },
     };
     upload.note_announced();
-    match finished? {
-      PartOutcome::Uploaded(attachment) => Ok(Some(attachment)),
-      PartOutcome::Stored => Ok(None),
-    }
+    recorded
   }
 
-  /// Gives the upload up at the server, which frees what it stored so far. A file that is up
-  /// already stays: the server keeps completed attachments, but no message will carry its key.
+  /// Completes an upload whose bytes are all up (the server checks the stored size) and returns
+  /// what its message needs. After this the server keeps the file: complete the files of a message
+  /// only once all of them are up.
+  pub async fn complete_direct_upload(
+    &mut self,
+    upload: &mut DirectUpload,
+  ) -> Result<AttachmentRef, DirectUploadError> {
+    let completed = match upload.maybe_sent.take() {
+      Some(SentFile::Whole { slot, attachment }) => self
+        .confirm_blob(&slot, Ok(()), &mut upload.file)
+        .await
+        .map(|()| *attachment),
+      Some(SentFile::Parts) => self.join_parts(&mut upload.file).await,
+      None => {
+        return Err(DirectUploadError::Failed(CoreError::InvalidRequest(
+          "the file is not up yet".into(),
+        )));
+      },
+    };
+    upload.note_announced();
+    Ok(completed?)
+  }
+
+  /// Gives the upload up at the server, which frees what it stored so far. A file whose upload was
+  /// completed stays: the server keeps completed attachments, but no message will carry its key.
   /// Best effort; the server sweeps unfinished uploads it doesn't hear about.
   pub async fn abandon_direct_upload(&self, upload: &DirectUpload) {
     for attachment in &upload.announced {
@@ -187,6 +263,54 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     self.enqueue(conversation, None, content)
   }
+}
+
+/// About how large a message with `body`, `mention_count` mentions and files of these names and
+/// media types gets once encrypted, at most: every picture counted with the largest thumbnail, up
+/// to the message's thumbnail budget. A host checks it against the server's message limit before it
+/// uploads anything.
+pub fn estimated_message_bytes(body: &str, mention_count: usize, files: &[(&str, &str)]) -> usize {
+  // The longest IDs: as many digits as there can be.
+  let Ok(largest_id) = Snowflake::new(i64::MAX) else {
+    return usize::MAX;
+  };
+  let placeholder = |(file_name, media_type): &(&str, &str)| AttachmentRef {
+    attachment_id: AttachmentId::from_snowflake(largest_id),
+    key: Base64Bytes::new(vec![u8::MAX; 32]),
+    ciphertext_sha256: Base64Bytes::new(vec![u8::MAX; 32]),
+    file_name: (*file_name).to_owned(),
+    media_type: (*media_type).to_owned(),
+    size_bytes: u64::MAX,
+    // Room for the field itself; the bytes are counted below.
+    maybe_thumbnail: Some(Base64Bytes::new(Vec::new())),
+    maybe_dimensions: Some(ImageDimensions {
+      width: u32::MAX,
+      height: u32::MAX,
+    }),
+    maybe_duration_ms: None,
+  };
+  let content = MessageContent::Text {
+    body: body.to_owned(),
+    mentions: vec![UserId::from_snowflake(largest_id); mention_count],
+    meta: MessageMeta {
+      attachments: files.iter().map(placeholder).collect(),
+      ..MessageMeta::default()
+    },
+  };
+  // Serializing plain data can't fail; if it did, no size is small enough.
+  let content_bytes = serde_json::to_vec(&content).map_or(usize::MAX, |json| json.len());
+  let pictures = files
+    .iter()
+    .filter(|(_, media_type)| media_type.starts_with("image/"))
+    .count();
+  let thumbnail_bytes = pictures
+    .saturating_mul(MAX_THUMBNAIL_BYTES)
+    .min(MAX_MESSAGE_THUMBNAIL_BYTES)
+    .div_ceil(3)
+    * 4;
+  content_bytes
+    .saturating_add(thumbnail_bytes)
+    .saturating_add(MESSAGE_OVERHEAD_BYTES)
 }
 
 impl DirectUploadStep {
