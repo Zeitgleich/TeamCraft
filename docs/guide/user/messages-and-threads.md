@@ -22,8 +22,10 @@ all:
 | Normal text, headings | Ctrl+Alt+0 to Ctrl+Alt+3              | `# ` to `### `           |
 
 Messages are stored as a safe Markdown subset, so they read well on every device. Pasted text from
-web pages or documents keeps only that formatting; no HTML is ever rendered. `:)` and `:tada:`
-become emoji when you send (a setting).
+web pages or documents keeps only that formatting; no HTML is ever rendered. Underline that starts
+inside a word can't be stored unless those letters have another format too; the message then leaves
+out just that underline and keeps the rest of the formatting. `:)` and `:tada:` become emoji when
+you send (a setting).
 
 The row under the text: **+** attaches files or photos (and takes a photo on phones), **Aa**,
 **emoji**, **@** to mention someone, **/** for commands, and **Send** with an arrow for the

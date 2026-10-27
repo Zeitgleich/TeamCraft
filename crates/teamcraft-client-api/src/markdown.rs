@@ -4,7 +4,8 @@
 //! `[label](url)`) and @mentions. Everything else is text.
 //!
 //! [`to_source`] writes a tree back into this format; the composer's editor stores what the user
-//! formatted through it, so `parse(to_source(blocks))` gives the same blocks back.
+//! formatted through it, so `parse(to_source(blocks))` reads back the same text with the same
+//! formatting on every character.
 
 /// How message permalinks start (the client core makes them).
 pub const PERMALINK_PREFIX: &str = "teamcraft:/c/";
@@ -21,6 +22,12 @@ const MAX_LIST_NUMBER_DIGITS: usize = 9;
 /// Messages longer than this many lines (or characters) start collapsed with a "Show more" button.
 const LONG_MESSAGE_LINES: usize = 14;
 const LONG_MESSAGE_CHARS: usize = 1_400;
+
+/// Emphasis from the outside in, the order the composer's editor nests it in.
+const EMPHASIS: [Mark; 4] = [Mark::Underline, Mark::Bold, Mark::Strike, Mark::Italic];
+
+/// The emphasis a run keeps first when the subset can't write all of it at the run's spot.
+const KEPT_FIRST: [Mark; 4] = [Mark::Bold, Mark::Italic, Mark::Strike, Mark::Underline];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Block {
@@ -348,9 +355,10 @@ pub fn is_allowed_link(url: &str) -> bool {
   link_at(url) == Some(url)
 }
 
-/// Writes blocks in the subset so that [`parse`] reads the same blocks back. Text that would read as
-/// markup is escaped; formatting the subset can't express at that spot is dropped rather than shown
-/// as stray markers.
+/// Writes blocks in the subset so that [`parse`] reads the same text with the same formatting back.
+/// Text that would read as markup is escaped; formatting the subset can't express at a spot
+/// (underline starting inside a word) is dropped there rather than shown as stray markers, and the
+/// rest of the line keeps its formatting.
 pub fn to_source(blocks: &[Block]) -> String {
   let mut lines: Vec<String> = Vec::new();
   for block in blocks {
@@ -389,18 +397,25 @@ pub fn to_source(blocks: &[Block]) -> String {
   lines.join("\n")
 }
 
-/// One line of inline content in the subset. Tries the lightest escaping first and checks each
-/// candidate by parsing it again, so the result always reads back as `inlines` (or, if formatting
-/// can't be expressed, at least as the same text).
+/// One line of inline content in the subset. Tries the nested form with the lightest escaping first
+/// and checks each candidate by parsing it again, so the result reads back with the same text and
+/// the same formatting on every character. Where the nested form can't be read back (an italic end
+/// of a bold word, `**a*b***`), the line is written run by run; formatting that can't be written at
+/// its spot at all is left out there, and only if even that doesn't read back is the line plain
+/// text (issue #791: one such spot used to drop the formatting of the whole message).
 fn line_source(inlines: &[Inline]) -> String {
-  let expected = normalize(inlines);
+  let expected = pieces(inlines);
   for escaping in [Escaping::Light, Escaping::Strict] {
-    let candidate = write_inlines(inlines, escaping);
-    if normalize(&parse_inline(&candidate)) == expected {
+    let candidate = write_inlines(inlines, escaping, None);
+    if pieces(&parse_inline(&candidate)) == expected {
       return candidate;
     }
   }
-  write_inlines(&[Inline::Text(plain_text(inlines))], Escaping::Strict)
+  let by_runs = write_runs(inlines);
+  if is_faithful(&pieces(&parse_inline(&by_runs)), &expected) {
+    return by_runs;
+  }
+  write_inlines(&[Inline::Text(plain_text(inlines))], Escaping::Strict, None)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -411,26 +426,38 @@ enum Escaping {
   Strict,
 }
 
-fn write_inlines(inlines: &[Inline], escaping: Escaping) -> String {
+/// `maybe_enclosing` is the marker of the emphasis the inlines are in, if any.
+fn write_inlines(inlines: &[Inline], escaping: Escaping, maybe_enclosing: Option<&str>) -> String {
   let mut out = String::new();
-  for inline in inlines {
-    write_inline(&mut out, inline, escaping);
+  for (index, inline) in inlines.iter().enumerate() {
+    // Spaces at an emphasis' edges move outside it (see `wrap`), so they don't keep markers apart.
+    let maybe_touching = maybe_enclosing.filter(|_| {
+      matches!(inline, Inline::Italic(_))
+        && (out.trim().is_empty() || inlines[index + 1..].iter().all(is_blank_text))
+    });
+    write_inline(&mut out, inline, escaping, maybe_touching);
   }
   out
 }
 
-fn write_inline(out: &mut String, inline: &Inline, escaping: Escaping) {
+/// `maybe_touching` is the marker of the enclosing emphasis when `inline` sits right at its edge.
+fn write_inline(out: &mut String, inline: &Inline, escaping: Escaping, maybe_touching: Option<&str>) {
   match inline {
     Inline::Text(text) => out.push_str(&escape_text(text, escaping)),
     Inline::Bold(inner) => wrap(out, "**", inner, escaping),
     Inline::Strike(inner) => wrap(out, "~~", inner, escaping),
     Inline::Underline(inner) => wrap(out, "__", inner, escaping),
-    // `_` doesn't clash with a `**` around it, but needs a word boundary in front and can't hold
-    // another `_`; `*` covers those cases.
+    // `_` doesn't clash with a `**` around it, but needs a word boundary in front, can't hold
+    // another `_` and can't touch a `__` (`___x___` pairs wrongly); `*` covers those cases.
     Inline::Italic(inner) => {
       let after_word = out.chars().last().is_some_and(char::is_alphanumeric);
-      let holds_underscore = write_inlines(inner, escaping).contains('_');
-      let marker = if after_word || holds_underscore { "*" } else { "_" };
+      let holds_underscore = write_inlines(inner, escaping, None).contains('_');
+      let touches_underline = maybe_touching == Some("__");
+      let marker = if after_word || holds_underscore || touches_underline {
+        "*"
+      } else {
+        "_"
+      };
       wrap(out, marker, inner, escaping);
     },
     Inline::Code(code) if code.contains('`') || code.trim() != code || code.is_empty() => {
@@ -461,9 +488,13 @@ fn write_inline(out: &mut String, inline: &Inline, escaping: Escaping) {
   }
 }
 
+fn is_blank_text(inline: &Inline) -> bool {
+  matches!(inline, Inline::Text(text) if text.trim().is_empty())
+}
+
 /// Emphasis around `inner`; spaces at its edges move outside, since `** x**` isn't emphasis.
 fn wrap(out: &mut String, marker: &str, inner: &[Inline], escaping: Escaping) {
-  let body = write_inlines(inner, escaping);
+  let body = write_inlines(inner, escaping, Some(marker));
   let trimmed = body.trim();
   if trimmed.is_empty() {
     out.push_str(&body);
@@ -549,64 +580,355 @@ pub fn plain_text(inlines: &[Inline]) -> String {
   out
 }
 
-/// The same content in a canonical shape: adjacent text merged, empty pieces dropped, and plain text
-/// split into the links and mentions the parser would find in it.
-fn normalize(inlines: &[Inline]) -> Vec<Inline> {
-  let mut merged: Vec<Inline> = Vec::new();
-  for inline in inlines {
-    match (merged.last_mut(), inline) {
-      (Some(Inline::Text(previous)), Inline::Text(text)) => previous.push_str(text),
-      (_, inline) => merged.push(inline.clone()),
+/// Formatting of a piece of a line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mark {
+  Underline,
+  Bold,
+  Strike,
+  Italic,
+  Code,
+}
+
+/// A set of [`Mark`]s.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Marks(u8);
+
+/// What a reader sees of a line, piece by piece: each character with its formatting, a labelled
+/// link whole. Bare links and mentions are their characters: whether text reads as one depends on
+/// what is written before it, not on formatting. White space has no formatting here, since an
+/// emphasis can't start or end with it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Piece {
+  kind: PieceKind,
+  marks: Marks,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PieceKind {
+  Char(char),
+  LabeledLink { url: String, label: String },
+}
+
+/// Text, code, a link or a mention, with the emphasis around it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Leaf {
+  inline: Inline,
+  marks: Marks,
+}
+
+impl Mark {
+  const fn bit(self) -> u8 {
+    1 << self as u8
+  }
+
+  /// The markers that write it; italic has two.
+  fn markers(self) -> &'static [&'static str] {
+    match self {
+      Self::Underline => &["__"],
+      Self::Bold => &["**"],
+      Self::Strike => &["~~"],
+      Self::Italic => &["_", "*"],
+      Self::Code => &[],
     }
   }
-  let mut out: Vec<Inline> = Vec::new();
-  for inline in &merged {
-    let pieces = match inline {
-      Inline::Text(text) => parse_inline(&escape_text(text, Escaping::Strict)),
-      Inline::Bold(inner) => styled(Inline::Bold, inner),
-      Inline::Italic(inner) => styled(Inline::Italic, inner),
-      Inline::Underline(inner) => styled(Inline::Underline, inner),
-      Inline::Strike(inner) => styled(Inline::Strike, inner),
-      other => vec![other.clone()],
+}
+
+impl Marks {
+  const fn with(self, mark: Mark) -> Self {
+    Self(self.0 | mark.bit())
+  }
+
+  const fn contains(self, mark: Mark) -> bool {
+    self.0 & mark.bit() != 0
+  }
+
+  const fn union(self, other: Self) -> Self {
+    Self(self.0 | other.0)
+  }
+
+  const fn intersection(self, other: Self) -> Self {
+    Self(self.0 & other.0)
+  }
+
+  const fn is_within(self, other: Self) -> bool {
+    self.0 & !other.0 == 0
+  }
+
+  /// Every subset of `self`, the ones keeping the most (and the most visible) emphasis first.
+  fn subsets(self) -> Vec<Self> {
+    let weight = |subset: Self| -> u32 {
+      KEPT_FIRST
+        .iter()
+        .enumerate()
+        .filter(|(_, mark)| subset.contains(**mark))
+        .map(|(rank, _)| 1 << (KEPT_FIRST.len() - rank))
+        .sum()
     };
-    for piece in pieces {
-      match (out.last_mut(), piece) {
-        (Some(Inline::Text(previous)), Inline::Text(text)) => previous.push_str(&text),
-        (_, piece) => out.push(piece),
-      }
+    let mut all: Vec<Self> = (0..=self.0)
+      .map(Self)
+      .filter(|subset| subset.is_within(self))
+      .collect();
+    all.sort_by_key(|subset| std::cmp::Reverse((subset.0.count_ones(), weight(*subset))));
+    all
+  }
+}
+
+/// What a reader sees of `inlines` (see [`Piece`]).
+fn pieces(inlines: &[Inline]) -> Vec<Piece> {
+  let mut out = Vec::new();
+  for Leaf { inline, marks } in leaves(inlines) {
+    match inline {
+      Inline::Text(text) | Inline::Link(text) => push_chars(&mut out, &text, marks),
+      Inline::Mention(name) => push_chars(&mut out, &format!("@{name}"), marks),
+      Inline::Code(code) => push_chars(&mut out, &code, marks.with(Mark::Code)),
+      Inline::LabeledLink { url, label } => out.push(Piece {
+        kind: PieceKind::LabeledLink { url, label },
+        marks,
+      }),
+      // Leaves hold no emphasis; theirs is in `marks`.
+      Inline::Bold(_) | Inline::Italic(_) | Inline::Underline(_) | Inline::Strike(_) => {},
     }
   }
   out
 }
 
-/// Emphasis around normalized content; spaces at the edges belong outside it (see [`wrap`]).
-fn styled(make: fn(Vec<Inline>) -> Inline, inner: &[Inline]) -> Vec<Inline> {
-  let mut content = normalize(inner);
-  let mut leading = String::new();
-  let mut trailing = String::new();
-  if let Some(Inline::Text(first)) = content.first_mut() {
-    let kept = first.trim_start().len();
-    leading = first[..first.len() - kept].to_owned();
-    *first = first.trim_start().to_owned();
-  }
-  if let Some(Inline::Text(last)) = content.last_mut() {
-    let kept = last.trim_end().len();
-    trailing = last[kept..].to_owned();
-    last.truncate(kept);
-  }
-  content.retain(|inline| !matches!(inline, Inline::Text(text) if text.is_empty()));
-  if content.is_empty() {
-    return vec![Inline::Text(leading + &trailing)];
-  }
+fn push_chars(out: &mut Vec<Piece>, text: &str, marks: Marks) {
+  out.extend(text.chars().map(|ch| Piece {
+    kind: PieceKind::Char(ch),
+    marks: if ch.is_whitespace() {
+      Marks::default()
+    } else {
+      marks
+    },
+  }));
+}
+
+/// Whether `read` has the text and labelled links of `expected` and no formatting it doesn't have
+/// (some may be missing: what the subset can't write at its spot).
+fn is_faithful(read: &[Piece], expected: &[Piece]) -> bool {
+  read.len() == expected.len()
+    && read
+      .iter()
+      .zip(expected)
+      .all(|(read, expected)| read.kind == expected.kind && read.marks.is_within(expected.marks))
+}
+
+/// The leaves of a line in order, adjacent text with the same emphasis merged.
+fn leaves(inlines: &[Inline]) -> Vec<Leaf> {
   let mut out = Vec::new();
-  if !leading.is_empty() {
-    out.push(Inline::Text(leading));
+  collect_leaves(inlines, Marks::default(), &mut out);
+  out
+}
+
+fn collect_leaves(inlines: &[Inline], marks: Marks, out: &mut Vec<Leaf>) {
+  for inline in inlines {
+    match inline {
+      Inline::Underline(inner) => collect_leaves(inner, marks.with(Mark::Underline), out),
+      Inline::Bold(inner) => collect_leaves(inner, marks.with(Mark::Bold), out),
+      Inline::Strike(inner) => collect_leaves(inner, marks.with(Mark::Strike), out),
+      Inline::Italic(inner) => collect_leaves(inner, marks.with(Mark::Italic), out),
+      Inline::Text(text) => match out.last_mut() {
+        Some(Leaf {
+          inline: Inline::Text(previous),
+          marks: previous_marks,
+        }) if *previous_marks == marks => previous.push_str(text),
+        _ => out.push(Leaf {
+          inline: inline.clone(),
+          marks,
+        }),
+      },
+      leaf => out.push(Leaf {
+        inline: leaf.clone(),
+        marks,
+      }),
+    }
   }
-  out.push(make(content));
-  if !trailing.is_empty() {
-    out.push(Inline::Text(trailing));
+}
+
+/// The line as one emphasis per run of equally formatted content, every marker closed at the run's
+/// end. Wordier than the nested form, but markers never meet where the parser would pair them
+/// wrongly. Emphasis a run can't have at its spot (`__` right after a letter reads as part of the
+/// word) is left out of that run only.
+fn write_runs(inlines: &[Inline]) -> String {
+  let mut out = String::new();
+  let mut is_after_word = false;
+  for (marks, run) in runs(inlines) {
+    let start = run
+      .iter()
+      .position(|leaf| !is_blank_text(&leaf.inline))
+      .unwrap_or(run.len());
+    let end = run
+      .iter()
+      .rposition(|leaf| !is_blank_text(&leaf.inline))
+      .map_or(start, |last| last + 1);
+    // Spaces at a run's edges go outside its markers (`** x**` isn't emphasis).
+    let leading = spaces(&run[..start]);
+    let trailing = spaces(&run[end..]);
+    out.push_str(&leading);
+    if start < end {
+      let body = run_body(&run[start..end]);
+      let written = write_run(marks, &body, is_after_word && leading.is_empty());
+      // After an emphasis the parser starts afresh; after plain text ending in a letter (or a
+      // mention, which takes a following `_` into its name) `_` markers can't open.
+      is_after_word = written == body && body.ends_with(|ch: char| ch.is_alphanumeric() || ch == '_');
+      out.push_str(&written);
+    }
+    if !trailing.is_empty() {
+      is_after_word = false;
+    }
+    out.push_str(&trailing);
   }
   out
+}
+
+/// The white space of blank leaves.
+fn spaces(leaves: &[Leaf]) -> String {
+  leaves
+    .iter()
+    .filter_map(|leaf| match &leaf.inline {
+      Inline::Text(text) => Some(text.as_str()),
+      _ => None,
+    })
+    .collect()
+}
+
+/// The leaves of a line in runs of the same emphasis. A space takes the emphasis both its neighbours
+/// share, so a run doesn't end at a space inside a formatted phrase; code that can't be written as
+/// code (empty, or holding a backtick) is text, and spaces at its edges move outside it.
+fn runs(inlines: &[Inline]) -> Vec<(Marks, Vec<Leaf>)> {
+  let mut split: Vec<Leaf> = Vec::new();
+  for Leaf { inline, marks } in leaves(inlines) {
+    match inline {
+      Inline::Text(text) => split_spaces(&text, marks, &mut split),
+      Inline::Code(code) if code.trim().is_empty() || code.contains('`') => {
+        split_spaces(&code, marks, &mut split);
+      },
+      Inline::Code(code) => {
+        split_spaces(&code[..code.len() - code.trim_start().len()], marks, &mut split);
+        split.push(Leaf {
+          inline: Inline::Code(code.trim().to_owned()),
+          marks,
+        });
+        split_spaces(&code[code.trim_end().len()..], marks, &mut split);
+      },
+      other => split.push(Leaf { inline: other, marks }),
+    }
+  }
+  let solid: Vec<Option<Marks>> = split
+    .iter()
+    .map(|leaf| (!is_blank_text(&leaf.inline)).then_some(leaf.marks))
+    .collect();
+  for (index, leaf) in split.iter_mut().enumerate() {
+    if solid[index].is_none() {
+      let before = solid[..index].iter().rev().find_map(|marks| *marks);
+      let after = solid[index + 1..].iter().find_map(|marks| *marks);
+      leaf.marks = before.unwrap_or_default().intersection(after.unwrap_or_default());
+    }
+  }
+  let mut out: Vec<(Marks, Vec<Leaf>)> = Vec::new();
+  for leaf in split {
+    match out.last_mut() {
+      Some((marks, run)) if *marks == leaf.marks => run.push(leaf),
+      _ => out.push((leaf.marks, vec![leaf])),
+    }
+  }
+  out
+}
+
+/// Text as alternating pieces of white space and the rest.
+fn split_spaces(text: &str, marks: Marks, out: &mut Vec<Leaf>) {
+  let mut rest = text;
+  while let Some(first) = rest.chars().next() {
+    let is_space = first.is_whitespace();
+    let end = rest
+      .find(|ch: char| ch.is_whitespace() != is_space)
+      .unwrap_or(rest.len());
+    out.push(Leaf {
+      inline: Inline::Text(rest[..end].to_owned()),
+      marks,
+    });
+    rest = &rest[end..];
+  }
+}
+
+/// The content of a run, escaped strictly.
+fn run_body(leaves: &[Leaf]) -> String {
+  let mut out = String::new();
+  let mut text = String::new();
+  for leaf in leaves {
+    match &leaf.inline {
+      Inline::Text(more) => text.push_str(more),
+      other => {
+        push_escaped(&mut out, &std::mem::take(&mut text));
+        write_inline(&mut out, other, Escaping::Strict, None);
+      },
+    }
+  }
+  push_escaped(&mut out, &text);
+  out
+}
+
+/// Strictly escaped text; a backslash at its end is escaped too, since a marker may follow it.
+fn push_escaped(out: &mut String, text: &str) {
+  out.push_str(&escape_text(text, Escaping::Strict));
+  if text.ends_with('\\') {
+    out.push('\\');
+  }
+}
+
+/// `body` with as much of `marks` as reads back where it stands (`is_after_word`: right after a
+/// letter). The markers are tried in every order, italic as `_` and as `*`, each checked by parsing.
+fn write_run(marks: Marks, body: &str, is_after_word: bool) -> String {
+  let plain = pieces(&parse_inline(body));
+  for kept in marks.subsets() {
+    let expected: Vec<Piece> = plain
+      .iter()
+      .map(|piece| Piece {
+        kind: piece.kind.clone(),
+        marks: match piece.kind {
+          PieceKind::Char(ch) if ch.is_whitespace() => piece.marks,
+          _ => piece.marks.union(kept),
+        },
+      })
+      .collect();
+    let emphasis: Vec<Mark> = EMPHASIS.into_iter().filter(|mark| kept.contains(*mark)).collect();
+    let mut orders = Vec::new();
+    marker_orders(&emphasis, &mut Vec::new(), &mut orders);
+    for markers in orders {
+      // `_` and `__` only open at the start of a word.
+      if is_after_word && markers.first().is_some_and(|marker| marker.starts_with('_')) {
+        continue;
+      }
+      let closing: String = markers.iter().rev().copied().collect();
+      let candidate = format!("{}{body}{closing}", markers.concat());
+      if pieces(&parse_inline(&candidate)) == expected {
+        return candidate;
+      }
+    }
+  }
+  body.to_owned()
+}
+
+/// Every order of the markers of `marks`, outermost first.
+fn marker_orders(marks: &[Mark], prefix: &mut Vec<&'static str>, out: &mut Vec<Vec<&'static str>>) {
+  if marks.is_empty() {
+    out.push(prefix.clone());
+    return;
+  }
+  for (index, mark) in marks.iter().enumerate() {
+    let others: Vec<Mark> = marks
+      .iter()
+      .enumerate()
+      .filter(|(other, _)| *other != index)
+      .map(|(_, other)| *other)
+      .collect();
+    for marker in mark.markers() {
+      prefix.push(marker);
+      marker_orders(&others, prefix, out);
+      prefix.pop();
+    }
+  }
 }
 
 #[cfg(test)]
@@ -925,9 +1247,216 @@ mod tests {
       assert_round_trip(&blocks);
     }
 
+    mod mixed_emphasis {
+      //! Issue #791: a line whose formatting the nested form couldn't write lost all of it.
+      use super::*;
+
+      #[test]
+      fn italic_in_underline_keeps_the_rest_of_the_line() {
+        // `___word___` reads as text, which turned the whole line into plain text.
+        let blocks = paragraph(vec![
+          Inline::Underline(vec![Inline::Italic(vec![text("underlined")])]),
+          text(" and "),
+          Inline::Bold(vec![text("bold")]),
+        ]);
+        assert_eq!(to_source(&blocks), "__*underlined*__ and **bold**");
+        assert_round_trip(&blocks);
+      }
+
+      #[test]
+      fn italic_end_of_a_bold_word_is_written_run_by_run() {
+        // `**bold*face***` pairs the closing markers wrongly.
+        let blocks = paragraph(vec![
+          Inline::Bold(vec![text("bold"), Inline::Italic(vec![text("face")])]),
+          text(" here"),
+        ]);
+        assert_eq!(to_source(&blocks), "**bold****_face_** here");
+        assert_formatting_kept(&blocks);
+      }
+
+      #[test]
+      fn bold_end_of_an_italic_word_is_written_run_by_run() {
+        let blocks = paragraph(vec![
+          text("x"),
+          Inline::Italic(vec![text("ab "), Inline::Bold(vec![text("cd")])]),
+        ]);
+        assert_formatting_kept(&blocks);
+      }
+
+      #[test]
+      fn underline_inside_a_word_is_left_out_but_nothing_else() {
+        // `file__name__` can't be underline: `_` only opens at the start of a word.
+        let blocks = paragraph(vec![
+          text("file"),
+          Inline::Underline(vec![text("name")]),
+          text(" in "),
+          Inline::Bold(vec![text("bold")]),
+          text(" and "),
+          Inline::Italic(vec![text("italic")]),
+        ]);
+        assert_eq!(to_source(&blocks), "filename in **bold** and _italic_");
+      }
+
+      #[test]
+      fn underline_inside_a_word_opens_behind_another_emphasis() {
+        // `**` may open inside a word, and `__` right after it starts afresh.
+        let blocks = paragraph(vec![
+          text("file"),
+          Inline::Underline(vec![Inline::Bold(vec![text("name")])]),
+        ]);
+        assert_eq!(to_source(&blocks), "file**__name__**");
+        assert_formatting_kept(&blocks);
+      }
+
+      #[test]
+      fn a_backslash_before_formatting_stays_text() {
+        let blocks = paragraph(vec![text("C:\\"), Inline::Bold(vec![text("dir")])]);
+        assert_formatting_kept(&blocks);
+      }
+
+      #[test]
+      fn code_with_spaces_at_its_edges_stays_code() {
+        let blocks = paragraph(vec![
+          text("run"),
+          Inline::Code(" make ".into()),
+          Inline::Bold(vec![text("now")]),
+        ]);
+        assert_eq!(
+          parse(&to_source(&blocks)),
+          paragraph(vec![
+            text("run "),
+            Inline::Code("make".into()),
+            text(" "),
+            Inline::Bold(vec![text("now")]),
+          ])
+        );
+      }
+
+      #[test]
+      fn headings_quotes_and_list_items_are_written_the_same_way() {
+        let line = vec![
+          Inline::Underline(vec![Inline::Italic(vec![text("both")])]),
+          text(" "),
+          Inline::Bold(vec![text("bold"), Inline::Italic(vec![text("face")])]),
+        ];
+        for blocks in [
+          vec![Block::Heading {
+            level: 2,
+            content: line.clone(),
+          }],
+          vec![Block::Quote(vec![line.clone()])],
+          vec![Block::List {
+            kind: ListKind::Bulleted,
+            items: vec![line.clone()],
+          }],
+        ] {
+          let read = parse(&to_source(&blocks));
+          assert_eq!(read.len(), 1, "{read:?}");
+          assert_eq!(pieces(block_line(&read[0])), pieces(&line), "{read:?}");
+        }
+      }
+
+      /// Every pair of formatted runs after nothing, a word or a space, with text at the edges that
+      /// could pair with a marker, as the editor nests them.
+      #[test]
+      fn every_combination_reads_back() {
+        // Every subset of underline, bold, strike and italic.
+        let all_marks: Vec<Marks> = (0..16).map(Marks).collect();
+        for before in ["", "x", "x "] {
+          for first in &all_marks {
+            for second in &all_marks {
+              for first_text in ["ab", "c d", " e", "f ", "_g", "h*", "i\\", "@sam", "@sam,"] {
+                for second_text in ["yz", " w", "~v"] {
+                  let mut runs = vec![(before, Marks::default())];
+                  runs.push((first_text, *first));
+                  runs.push((second_text, *second));
+                  let inlines = nested(&runs);
+                  let source = line_source(&inlines);
+                  let read = pieces(&parse_inline(&source));
+                  let expected = pieces(&inlines);
+                  assert!(is_faithful(&read, &expected), "{inlines:?} via {source:?}");
+                  let lost = read.iter().zip(&expected).fold(0, |lost, (read, expected)| {
+                    lost | (expected.marks.0 & !read.marks.0)
+                  });
+                  // Only underline can't always be written: not right after a letter.
+                  assert_eq!(lost & !Mark::Underline.bit(), 0, "{inlines:?} via {source:?}");
+                  if !first.contains(Mark::Underline) && !second.contains(Mark::Underline) {
+                    assert_eq!(read, expected, "{inlines:?} via {source:?}");
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      /// Runs of text with their emphasis as the editor nests them (`editor_doc::inlines`).
+      fn nested(runs: &[(&str, Marks)]) -> Vec<Inline> {
+        let mut out: Vec<Inline> = Vec::new();
+        let mut at = 0;
+        while at < runs.len() {
+          let marks = runs[at].1;
+          let Some(mark) = EMPHASIS.into_iter().find(|mark| marks.contains(*mark)) else {
+            match out.last_mut() {
+              Some(Inline::Text(previous)) => previous.push_str(runs[at].0),
+              _ => out.push(text(runs[at].0)),
+            }
+            at += 1;
+            continue;
+          };
+          let end = at + runs[at..].iter().take_while(|run| run.1.contains(mark)).count();
+          let inner: Vec<(&str, Marks)> = runs[at..end]
+            .iter()
+            .map(|(content, marks)| (*content, Marks(marks.0 & !mark.bit())))
+            .collect();
+          let inner = nested(&inner);
+          out.push(match mark {
+            Mark::Underline => Inline::Underline(inner),
+            Mark::Bold => Inline::Bold(inner),
+            Mark::Strike => Inline::Strike(inner),
+            Mark::Italic | Mark::Code => Inline::Italic(inner),
+          });
+          at = end;
+        }
+        out
+      }
+
+      fn block_line(block: &Block) -> &[Inline] {
+        match block {
+          Block::Heading { content, .. } => content,
+          Block::Quote(lines) | Block::Paragraph(lines) | Block::List { items: lines, .. } => &lines[0],
+          Block::Code { .. } => &[],
+        }
+      }
+    }
+
     fn assert_round_trip(blocks: &[Block]) {
       let source = to_source(blocks);
       assert_eq!(parse(&source), blocks, "via {source:?}");
+    }
+
+    /// The same text with the same formatting on every character, whatever the nesting.
+    fn assert_formatting_kept(blocks: &[Block]) {
+      let source = to_source(blocks);
+      let [Block::Paragraph(lines)] = blocks else {
+        panic!("one paragraph expected: {blocks:?}");
+      };
+      let parsed = parse(&source);
+      let [Block::Paragraph(read)] = parsed.as_slice() else {
+        panic!("{source:?} isn't one paragraph");
+      };
+      assert_eq!(read.len(), lines.len(), "via {source:?}");
+      for (read, line) in read.iter().zip(lines) {
+        assert_eq!(pieces(read), pieces(line), "via {source:?}");
+      }
+    }
+
+    fn paragraph(line: Vec<Inline>) -> Vec<Block> {
+      vec![Block::Paragraph(vec![line])]
+    }
+
+    fn text(content: &str) -> Inline {
+      Inline::Text(content.into())
     }
   }
 }
