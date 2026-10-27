@@ -58,29 +58,29 @@ you set yourself is never changed.
 | Variable                           | Set to | Why                                                                                     |
 |------------------------------------|--------|-----------------------------------------------------------------------------------------|
 | `GTK_USE_PORTAL`                   | `1`    | File dialogs through xdg-desktop-portal, the desktop's own dialog (not in Flatpak, which does this anyway) |
-| `WEBKIT_DISABLE_DMABUF_RENDERER`   | `1`    | Rendering, see below                                                                    |
+| `WEBKIT_DISABLE_DMABUF_RENDERER`   | `1`    | Only with `TEAMCRAFT_WEBKIT_DMABUF=0`, see "Rendering"                                  |
 
 ### Rendering
 
-WebKitGTK's DMABUF renderer makes transitions and animations flicker, or flash the whole window
-dark, on some GPU drivers and compositors (seen with AMD GPUs on KDE Plasma, #687). TeamCraft
-therefore starts WebKitGTK with `WEBKIT_DISABLE_DMABUF_RENDERER=1`: pages are handed to the
-compositor through shared memory instead. It looks the same and costs a little more CPU time while
-something moves.
+TeamCraft uses WebKitGTK's DMABUF renderer: pages are painted on the GPU and handed to the compositor
+without a copy. Without it WebKitGTK paints into shared memory and the CPU copies every frame,
+which makes animations and the lightbox stutter on large or scaled windows (#805).
 
-To keep the DMABUF renderer (for example to compare, or where it works well), start the app with
-either variable:
+Version 1.0.8 turned the renderer off for everyone because transitions and animations flickered or
+flashed the window dark with some drivers and compositors (seen with AMD GPUs on KDE Plasma, #687).
+That did not reproduce with Mesa 26.2, WebKitGTK 2.54 and KWin 6.7. If it happens on your system,
+switch to the compatible renderer (shared memory) with either variable:
 
 ```sh
-TEAMCRAFT_WEBKIT_DMABUF=1 teamcraft-desktop          # the app leaves WebKit's default alone
-WEBKIT_DISABLE_DMABUF_RENDERER=0 teamcraft-desktop   # WebKit's own switch, kept as you set it
-TEAMCRAFT_WEBKIT_DMABUF=1 ./TeamCraft_amd64.AppImage    # the same for the AppImage
-flatpak run --env=TEAMCRAFT_WEBKIT_DMABUF=1 de.zeitgleich.teamcraft
+TEAMCRAFT_WEBKIT_DMABUF=0 teamcraft-desktop                # the app sets WebKit's switch for you
+WEBKIT_DISABLE_DMABUF_RENDERER=1 teamcraft-desktop         # WebKit's own switch, kept as you set it
+TEAMCRAFT_WEBKIT_DMABUF=0 ./TeamCraft_amd64.AppImage       # the same for the AppImage
+flatpak run --env=TEAMCRAFT_WEBKIT_DMABUF=0 de.zeitgleich.teamcraft
 ```
 
 For a permanent choice, put the variable into the `.desktop` file's `Exec=env …` line or
-`~/.config/environment.d/`, or use `flatpak override --user --env=TEAMCRAFT_WEBKIT_DMABUF=1
-de.zeitgleich.teamcraft`.
+`~/.config/environment.d/`, or use `flatpak override --user --env=TEAMCRAFT_WEBKIT_DMABUF=0
+de.zeitgleich.teamcraft`. Please report the GPU, driver, compositor and scaling when you need it.
 
 ### Dropped files
 
