@@ -160,6 +160,8 @@ struct State {
   unread: HashMap<UserId, UnreadResponse>,
   /// A malicious server: the next registered device gets this ID instead of a fresh one.
   maybe_forced_device_id: Option<DeviceId>,
+  /// A malicious server: the next message gets this ID instead of a fresh one.
+  maybe_forced_message_id: Option<MessageId>,
   /// A network cut armed per user: after the given number of calls, the next one fails.
   network_cuts: HashMap<UserId, (u32, NetworkCut)>,
   /// Users whose gateway connections stay open but carry nothing either way: no `hello`, no
@@ -285,6 +287,9 @@ struct State {
   holding_proposal_of: HashSet<UserId>,
   /// Held application messages and proposals, in the order they were posted.
   held_applications: Vec<(UserId, ConversationId, PostMlsMessageRequest)>,
+  /// Users whose messages are answered as stored but never kept or delivered
+  /// ([`FakeServer::drop_messages_of`]).
+  dropping_messages_of: HashSet<UserId>,
   /// Members refused their groups' queues ([`FakeServer::refuse_queue_to`]).
   queue_refused_to: HashSet<UserId>,
   /// The next identity key lookup of these users fails with a network error.
@@ -671,6 +676,12 @@ impl FakeServer {
     self.lock().maybe_forced_device_id = Some(id);
   }
 
+  /// Gives the next message the ID `id` (one the server gave something else), as a malicious
+  /// server might.
+  pub fn force_next_message_id(&self, id: MessageId) {
+    self.lock().maybe_forced_message_id = Some(id);
+  }
+
   /// The next `count` binary frames sent over any relay are lost.
   pub fn lose_relay_frames(&self, count: u32) {
     self.lock().relay_frames_to_lose = count;
@@ -931,6 +942,18 @@ impl FakeServer {
       entry.mls.push(message.clone());
       let members: Vec<UserId> = entry.members.keys().copied().collect();
       state.publish(members, &GatewayEvent::MlsMessage { message });
+    }
+  }
+
+  /// While `is_dropping`, the server answers `user`'s messages as stored but neither keeps nor
+  /// delivers them: a server that keeps a message from the members (or a sender that crashed
+  /// before sending it, as the members see it).
+  pub fn drop_messages_of(&self, user: UserId, is_dropping: bool) {
+    let mut state = self.lock();
+    if is_dropping {
+      state.dropping_messages_of.insert(user);
+    } else {
+      state.dropping_messages_of.remove(&user);
     }
   }
 
@@ -2613,7 +2636,10 @@ impl ServerApi for FakeServerApi {
       if let Some(message) = existing {
         return Ok(message);
       }
-      let id = state.next_id();
+      let id = match state.maybe_forced_message_id.take() {
+        Some(id) => id,
+        None => state.next_id(),
+      };
       let message = MessageResponse {
         id,
         client_message_id: request.client_message_id,
@@ -2626,6 +2652,9 @@ impl ServerApi for FakeServerApi {
         content_key_id: request.content_key_id.clone(),
         ciphertext: request.ciphertext.clone(),
       };
+      if state.dropping_messages_of.contains(&me) {
+        return Ok(message);
+      }
       let entry = state.member_conversation_mut(conversation, me)?;
       entry.messages.push(message.clone());
       let members: Vec<UserId> = entry.members.keys().copied().collect();

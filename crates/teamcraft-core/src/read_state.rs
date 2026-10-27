@@ -626,6 +626,7 @@ mod tests {
           edits: Vec::new(),
           maybe_edit_id: None,
           is_pinned: false,
+          maybe_verified_commit: None,
         })
         .unwrap();
       note_new_message(&store, &delivered, id(5)).unwrap();

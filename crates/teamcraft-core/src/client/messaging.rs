@@ -319,9 +319,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub(crate) fn receive_message(&mut self, message: MessageResponse) -> Result<(), CoreError> {
     let conversation = message.conversation_id;
     if let Some(existing) = self.store.message(conversation, message.client_message_id)?
-      && existing.maybe_server_id.is_some()
+      && (existing.maybe_server_id.is_some() || existing.maybe_verified_commit.is_some())
     {
-      // Already known (own message echoed back, or a duplicate delivery).
+      // Already known (own message echoed back, or a duplicate delivery), or the ID of a line this
+      // device derived from a commit, which no message replaces (issue #811).
       return Ok(());
     }
     if self.sent_after_leaving(&message)? {
@@ -348,6 +349,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           edits: Vec::new(),
           maybe_edit_id: None,
           is_pinned: false,
+          maybe_verified_commit: None,
         })?;
         apply_control_with(
           &self.store,
@@ -633,7 +635,9 @@ fn apply_control_with(
       maybe_server_id,
     );
   };
-  if matches!(stored.content, MessageContent::Deleted) {
+  // A deleted message stays deleted; a line this device derived from a commit is no message
+  // anybody sent, so nobody's edit, delete or pin changes it (issue #811).
+  if matches!(stored.content, MessageContent::Deleted) || stored.maybe_verified_commit.is_some() {
     return Ok(());
   }
   let is_own = stored.sender_user_id == sender;
@@ -802,6 +806,7 @@ mod tests {
       edits: Vec::new(),
       maybe_edit_id: None,
       is_pinned: false,
+      maybe_verified_commit: None,
     }
   }
 

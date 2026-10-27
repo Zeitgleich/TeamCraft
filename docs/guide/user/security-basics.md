@@ -45,8 +45,10 @@ Until you accept, TeamCraft does not trust the new key.
 ## Admins in private channels
 
 Admins cannot read channels they are not in. They can add *themselves* to a private channel, but
-this is never silent: members see a system message with an admin badge. The workspace policy
-`admin_self_join` decides whether that is allowed (`visible` by default) or disabled.
+this is never silent: every member's app shows "… joined this channel as a workspace admin",
+worked out from the encrypted membership change itself, so nobody can fake or hide it. The
+workspace policy `admin_self_join` decides whether that is allowed (`visible` by default) or
+disabled.
 
 ## The web app
 

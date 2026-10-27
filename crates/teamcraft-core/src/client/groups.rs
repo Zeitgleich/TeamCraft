@@ -20,6 +20,7 @@ use teamcraft_proto::{
   MlsWelcome, PostMlsCommitRequest, PostMlsMessageRequest, SpaceId, UserId,
 };
 
+use super::admin_joins::JoinCommit;
 use super::key_history::{SealedShare, ShareGuard};
 use super::member_device::{GroupInfoOutcome, MemberDeviceJoin};
 use super::workspace::{PendingChange, SharedKeys};
@@ -1335,6 +1336,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           self.note_device_readded(conversation, device, at_ms)?;
         }
         self.note_member_changes(conversation, &before, &update)?;
+        // Never silent (admin.md §2.4): told from the commit just verified, not from a message.
+        let after = self.group_or_error(conversation)?.members()?;
+        self.note_admin_joins(
+          conversation,
+          &JoinCommit {
+            id: message.id,
+            before: &before,
+            after: &after,
+            maybe_signer: update.maybe_signer.map(convert::user_from_crypto).transpose()?,
+          },
+        )?;
         if let (Some(rejoined), Some(committer)) = (update.maybe_rejoined, update.maybe_committer) {
           self.follow_up_rejoin(conversation, rejoined, committer)?;
         }
@@ -1540,13 +1552,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         },
         Err(error) => return Err(error.into()),
       };
-      let is_founding_commit = group.epoch() == 0;
+      let epoch = group.epoch();
+      let is_founding_commit = epoch == 0;
+      if matches!(action, MembershipAction::AddUser { .. }) {
+        // Before posting: the line about an admin who joined names who let them in, also when the
+        // answer is lost and the commit is merged from the queue (`merge_own_commit`).
+        self.note_pending_signer(
+          conversation,
+          epoch,
+          convert::user_from_crypto(signed.signer_user())?,
+        )?;
+      }
       if let Some(own) = self.post_commit(conversation, output, &recipients).await? {
         self.remember_member_keys(conversation, &directory, own.at_ms)?;
         if let Some(share) = self.after_own_commit(conversation, &own.update, own.at_ms)? {
           self.share_history_or_queue(conversation, share).await?;
         }
-        // After the keys went out, so the admin reads it too.
+        // After the keys went out, so the admin reads it too. For older versions only: this one
+        // shows the line it derived from the commit (issue #811).
         if let Some(user) = maybe_self_joiner {
           self.announce_admin_join(conversation, user).await?;
         }
@@ -1702,6 +1725,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           client.queue_current_key_share(conversation, *added)?;
         }
       }
+      // This device's own commit is as verified as one it receives (issue #811).
+      let maybe_signer = client.take_pending_signer(conversation, entry.epoch)?;
+      client.note_admin_joins(
+        conversation,
+        &JoinCommit {
+          id: entry.id,
+          before: &before,
+          after: &after,
+          maybe_signer,
+        },
+      )?;
       client.persist_group(conversation)?;
       client
         .store
@@ -1724,6 +1758,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self
       .store
       .delete(Table::AppliedChanges, &pending_post_key(conversation))?;
+    self.store.delete(
+      Table::AppliedChanges,
+      &super::admin_joins::pending_signer_key(conversation),
+    )?;
     Ok(())
   }
 
@@ -2609,8 +2647,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(users)
   }
 
-  /// Tells the members that a workspace admin joined a private channel by themselves (admin.md
-  /// §2.4). A self-join to a public channel is an ordinary join and says nothing here.
+  /// Tells members on older versions that a workspace admin joined a private channel by themselves
+  /// (admin.md §2.4); this version shows the line it derives from the commit instead and keeps the
+  /// message hidden (issue #811). A self-join to a public channel is an ordinary join and says
+  /// nothing here.
   async fn announce_admin_join(
     &mut self,
     conversation: ConversationId,

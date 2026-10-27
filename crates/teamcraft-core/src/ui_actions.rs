@@ -427,7 +427,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
     messages
       .iter()
       .filter_map(|id| {
-        let stored = all.iter().find(|stored| ui_message_id(stored) == *id)?;
+        // A server can give a message the ID of a commit a line was derived from; the line wins
+        // (issue #811), so the ID clash can't hide it.
+        let stored = all
+          .iter()
+          .find(|stored| stored.maybe_verified_commit.is_some() && ui_message_id(stored) == *id)
+          .or_else(|| all.iter().find(|stored| ui_message_id(stored) == *id))?;
         let mut extras = MessageExtras::new(*id);
         extras.is_read = ticks.is_read(stored, self.me_id());
         extras.is_pinned = stored.is_pinned;

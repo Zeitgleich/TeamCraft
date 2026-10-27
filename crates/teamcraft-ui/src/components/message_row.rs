@@ -44,6 +44,9 @@ const LONG_PRESS_SLOP_PX: i32 = 10;
 /// The short tick when the action sheet opens, where the device can vibrate (not iOS Safari).
 const LONG_PRESS_HAPTIC_MS: u32 = 10;
 
+/// A line's i18n key and its arguments.
+type LineText = (&'static str, Vec<(&'static str, String)>);
+
 /// One message in the channel feed or in a thread. The caller recreates it when the message changes.
 #[component]
 pub fn MessageRow(
@@ -75,9 +78,12 @@ pub fn MessageRow(
       let author = state.read(|backend| backend.user(message.author));
       system_line(&message, event, author, locale).into_any()
     },
-    MessageKind::User => {
-      let is_grouped = is_grouped(&message, maybe_prev.as_ref());
-      user_message(message, is_grouped, in_thread, motion).into_any()
+    MessageKind::User => match workspace_line(&message) {
+      Some(line) => line.into_any(),
+      None => {
+        let is_grouped = is_grouped(&message, maybe_prev.as_ref());
+        user_message(message, is_grouped, in_thread, motion).into_any()
+      },
     },
   };
   view! {
@@ -163,33 +169,10 @@ fn system_line(
   let name = maybe_author.map(|user| user.display_name).unwrap_or_default();
   let event = event.clone();
   let time = format_time(message.sent_at, locale);
-  let (conversation, message_id) = (message.conversation, message.id);
-  // Archive, privacy and membership changes come from the core as workspace events.
-  let workspace_text = Memo::new(move |_| {
-    state.read(|backend| {
-      let extras = backend
-        .message_extras(conversation, &[message_id])
-        .into_iter()
-        .find(|extras| extras.message == message_id)?;
-      workspace_event_text(&extras.maybe_workspace_event?, |user| {
-        backend
-          .user(user)
-          .map(|user| user.display_name)
-          .unwrap_or_default()
-      })
-    })
-  });
+  // Membership changes by somebody else come from the core as workspace events too.
+  let workspace_text = workspace_text(message);
   view! {
-    {move || {
-      workspace_text.get().map(|(key, args)| {
-        let args: Vec<(&str, &str)> = args.iter().map(|(name, value)| (*name, value.as_str())).collect();
-        view! {
-          <div class="msg msg-system" tabindex="-1" data-nav="row">
-            <span class="system-text" translate="no">{i18n.t_with(key, &args)}</span>
-          </div>
-        }
-      })
-    }}
+    {workspace_text_line(workspace_text)}
     {move || {
       state
         .settings
@@ -218,6 +201,53 @@ fn system_line(
           }
         })
     }}
+  }
+}
+
+/// A change to the conversation that the core sends as a message without text (archived, made
+/// private, moved, a workspace admin who joined): the line its workspace event reads, whatever the
+/// join/leave setting says. `None` for a message somebody wrote.
+fn workspace_line(message: &Message) -> Option<impl IntoView + use<>> {
+  if !message.body.is_empty() {
+    return None;
+  }
+  let text = workspace_text(message);
+  text.get_untracked().is_some().then(|| workspace_text_line(text))
+}
+
+/// The text of `message`'s workspace event (i18n key and arguments), with the names the backend
+/// knows; `None` without one.
+fn workspace_text(message: &Message) -> Memo<Option<LineText>> {
+  let state = use_app_state();
+  let (conversation, message_id) = (message.conversation, message.id);
+  Memo::new(move |_| {
+    state.read(|backend| {
+      let extras = backend
+        .message_extras(conversation, &[message_id])
+        .into_iter()
+        .find(|extras| extras.message == message_id)?;
+      workspace_event_text(&extras.maybe_workspace_event?, |user| {
+        backend
+          .user(user)
+          .map(|user| user.display_name)
+          .unwrap_or_default()
+      })
+    })
+  })
+}
+
+/// The line showing a workspace event's `text`, while there is one.
+fn workspace_text_line(text: Memo<Option<LineText>>) -> impl IntoView + use<> {
+  let i18n = use_i18n();
+  move || {
+    text.get().map(|(key, args)| {
+      let args: Vec<(&str, &str)> = args.iter().map(|(name, value)| (*name, value.as_str())).collect();
+      view! {
+        <div class="msg msg-system" tabindex="-1" data-nav="row">
+          <span class="system-text" translate="no">{i18n.t_with(key, &args)}</span>
+        </div>
+      }
+    })
   }
 }
 
@@ -990,7 +1020,7 @@ fn tick_haptic() {
 fn workspace_event_text(
   event: &WorkspaceEvent,
   name_of: impl Fn(crate::model::UserId) -> String,
-) -> Option<(&'static str, Vec<(&'static str, String)>)> {
+) -> Option<LineText> {
   Some(match event {
     WorkspaceEvent::MemberAdded { user, by, history } => (
       match history {
@@ -1027,9 +1057,12 @@ fn workspace_event_text(
   })
 }
 
+/// Whether `message` goes under the header of the one before. Not under a line without text (a
+/// workspace event, [`workspace_line`]): that has no header.
 fn is_grouped(message: &Message, maybe_prev: Option<&Message>) -> bool {
   let Some(prev) = maybe_prev else { return false };
   matches!(prev.kind, MessageKind::User)
+    && !prev.body.is_empty()
     && prev.author == message.author
     && message.sent_at - prev.sent_at < GROUP_WINDOW_MS
     && local_day(prev.sent_at) == local_day(message.sent_at)
@@ -1055,6 +1088,16 @@ mod tests {
     assert!(!is_grouped(&message(3, 2, 60_000), Some(&first)));
     assert!(!is_grouped(&message(4, 1, GROUP_WINDOW_MS), Some(&first)));
     assert!(!is_grouped(&first, None));
+  }
+
+  /// A workspace event's line (archived, an admin who joined) has no header to go under.
+  #[test]
+  fn nothing_is_grouped_under_a_line_without_text() {
+    let line = Message {
+      body: String::new(),
+      ..message(1, 1, 0)
+    };
+    assert!(!is_grouped(&message(2, 1, 60_000), Some(&line)));
   }
 
   #[test]
@@ -1089,6 +1132,17 @@ mod tests {
       ))
     );
     assert_eq!(workspace_event_text(&WorkspaceEvent::Unknown, name_of), None);
+    let approved = WorkspaceEvent::AdminJoined {
+      user,
+      maybe_approved_by: Some(by),
+    };
+    assert_eq!(
+      workspace_event_text(&approved, name_of),
+      Some((
+        "ws-admin-joined-approved",
+        vec![("name", "Sam".to_owned()), ("by", "Ada".to_owned())]
+      ))
+    );
   }
 
   fn message(id: u64, author: u64, sent_at: i64) -> Message {
@@ -1098,7 +1152,7 @@ mod tests {
       author: id_from_raw::<UserId>(author),
       kind: MessageKind::User,
       sent_at,
-      body: String::new(),
+      body: format!("message {id}"),
       is_edited: false,
       reactions: Vec::new(),
       reply_count: 0,

@@ -55,7 +55,7 @@ pub use sqlite::SqlCipherStore;
 pub use tracked::{RemovedRendition, StoreChanges, TrackedStore};
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{ClientMessageId, ConversationId, MessageId, ThreadId, UserId};
+use teamcraft_proto::{ClientMessageId, ConversationId, MessageId, MlsMessageId, ThreadId, UserId};
 
 /// Key-value tables of the store.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -129,12 +129,13 @@ pub enum Table {
   AnnouncedPresence,
 }
 
-/// A decrypted (or own, not yet sent) message.
+/// A decrypted (or own, not yet sent) message, or a line this device derived from a verified MLS
+/// commit ([`Self::maybe_verified_commit`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredMessage {
   pub conversation_id: ConversationId,
   pub client_message_id: ClientMessageId,
-  /// Absent while the message waits in the outbox.
+  /// Absent while the message waits in the outbox, and on a line derived from a commit.
   #[serde(rename = "server_id", default, skip_serializing_if = "Option::is_none")]
   pub maybe_server_id: Option<MessageId>,
   pub sender_user_id: UserId,
@@ -153,6 +154,12 @@ pub struct StoredMessage {
   pub maybe_edit_id: Option<MessageId>,
   #[serde(default)]
   pub is_pinned: bool,
+  /// The MLS commit, verified or made by this device, that this line was derived from (the
+  /// "joined as a workspace admin" line, admin.md §2.4). Only this device sets it, never a message
+  /// from the server or another member, so nobody can make such a line by sending one. The line
+  /// sits at the commit's place among the messages, and messages can't replace or change it.
+  #[serde(rename = "verified_commit", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_verified_commit: Option<MlsMessageId>,
 }
 
 /// A text that an edit replaced.
@@ -271,9 +278,11 @@ pub enum ConversationEvent {
     maybe_call: Option<teamcraft_proto::CallId>,
   },
   /// A workspace admin joined this private channel (admin.md §2.4), so the join is never silent;
-  /// shown whatever the join/leave setting says. Sent by the member whose client committed the
-  /// admin's signed self-join (`visible`), or with `is_approved` by the channel owner who let the
-  /// admin in (`owner_approval`): the sender approved.
+  /// shown whatever the join/leave setting says, and only as a line each member's device derives
+  /// from the verified commit that added the admin ([`StoredMessage::maybe_verified_commit`],
+  /// issue #811). As a message it is still sent, for older versions, by the member whose client
+  /// committed the admin's signed self-join (`visible`), or with `is_approved` by the channel
+  /// owner who let the admin in (`owner_approval`); this version keeps such a message hidden.
   AdminJoined {
     user: UserId,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -691,11 +700,13 @@ fn is_false(value: &bool) -> bool {
 }
 
 impl StoredMessage {
-  /// Display order: server messages by ID; pending ones after all of them, by time written.
+  /// Display order: server messages by ID, a line derived from a commit by the commit's ID (both
+  /// the server's time-ordered IDs); pending ones after all of them, by time written.
   pub fn sort_key(&self) -> (u8, i64) {
-    match self.maybe_server_id {
-      Some(id) => (0, teamcraft_proto::Id::snowflake(id).get()),
-      None => (1, self.sent_at_ms),
+    match (self.maybe_server_id, self.maybe_verified_commit) {
+      (Some(id), _) => (0, teamcraft_proto::Id::snowflake(id).get()),
+      (None, Some(commit)) => (0, teamcraft_proto::Id::snowflake(commit).get()),
+      (None, None) => (1, self.sent_at_ms),
     }
   }
 
@@ -703,21 +714,28 @@ impl StoredMessage {
     matches!(self.content, MessageContent::Reaction { .. })
   }
 
-  /// Reactions, edits, deletes and pins act on other messages and aren't listed themselves.
+  /// Reactions, edits, deletes and pins act on other messages and aren't listed themselves. Nor
+  /// is a message saying that an admin joined: only the line this device derived from the commit
+  /// shows that (issue #811), so a member can't make it up by sending one.
   pub fn is_hidden(&self) -> bool {
-    matches!(
-      self.content,
-      MessageContent::Reaction { .. }
-        | MessageContent::Edit { .. }
-        | MessageContent::Delete { .. }
-        | MessageContent::Pin { .. }
-        | MessageContent::Bookmarks { .. }
-        | MessageContent::IndexSegment { .. }
-        | MessageContent::IntegrationSource { .. }
-        | MessageContent::Event {
-          event: ConversationEvent::CallMoved { .. }
-        }
-    )
+    match &self.content {
+      MessageContent::Event {
+        event: ConversationEvent::AdminJoined { .. },
+      } => self.maybe_verified_commit.is_none(),
+      content => matches!(
+        content,
+        MessageContent::Reaction { .. }
+          | MessageContent::Edit { .. }
+          | MessageContent::Delete { .. }
+          | MessageContent::Pin { .. }
+          | MessageContent::Bookmarks { .. }
+          | MessageContent::IndexSegment { .. }
+          | MessageContent::IntegrationSource { .. }
+          | MessageContent::Event {
+            event: ConversationEvent::CallMoved { .. }
+          }
+      ),
+    }
   }
 
   /// A thread reply the sender also posted to the conversation.
@@ -883,6 +901,48 @@ pub(crate) mod tests {
     replies_also_sent_to_the_conversation_are_listed_in_both(store);
     groups_of_writes_nest_and_are_read_at_once(store);
     media_messages_are_paged_from_a_message_outwards(store);
+    admin_joins_show_only_as_lines_from_commits(store);
+  }
+
+  /// Issue #811: the line derived from a commit sits at the commit's place and is listed; a message
+  /// saying the same is kept but never listed.
+  fn admin_joins_show_only_as_lines_from_commits(store: &impl LocalStore) {
+    let conversation = id(30);
+    let joined = MessageContent::Event {
+      event: ConversationEvent::AdminJoined {
+        user: id(7),
+        is_approved: true,
+      },
+    };
+    let before = message(conversation, 1, Some(100), None, 1_000);
+    let after = message(conversation, 2, Some(300), None, 3_000);
+    let mut line = message(conversation, 3, None, None, 2_000);
+    line.content = joined.clone();
+    line.maybe_verified_commit = Some(id(200));
+    let mut announced = message(conversation, 4, Some(250), None, 2_500);
+    announced.content = joined;
+    for stored in [&after, &announced, &line, &before] {
+      store.upsert_message(stored).unwrap();
+    }
+
+    let top: Vec<_> = store
+      .messages(conversation, MessageFilter::TopLevel)
+      .unwrap()
+      .into_iter()
+      .map(|m| m.client_message_id)
+      .collect();
+    assert_eq!(
+      top,
+      vec![
+        before.client_message_id,
+        line.client_message_id,
+        after.client_message_id
+      ]
+    );
+    assert_eq!(store.messages(conversation, MessageFilter::All).unwrap().len(), 4);
+    // The line is no message of the server's, also not under the commit's ID.
+    assert_eq!(store.message_by_server_id(conversation, id(200)).unwrap(), None);
+    store.delete_messages(conversation).unwrap();
   }
 
   fn media_messages_are_paged_from_a_message_outwards(store: &impl LocalStore) {
@@ -1124,6 +1184,7 @@ pub(crate) mod tests {
       edits: Vec::new(),
       maybe_edit_id: None,
       is_pinned: false,
+      maybe_verified_commit: None,
     }
   }
 
