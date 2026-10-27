@@ -163,8 +163,9 @@ signature (freshness above).
 
 ### 2.4 Admins joining private channels
 
-An admin could add *themselves* to a private channel and then, with full history policy, read its
-history. That is allowed, but never silent:
+An admin could add *themselves* to a private channel and read what is posted there from then on. A
+self-join asks only for the history from the join on: members' apps refuse a signed self-add that
+asks for more, whatever the workspace default (e2ee.md §4.7). That is allowed, but never silent:
 
 - Per instance setting `admin_self_join` for private channels:
   - `visible` (default) – allowed; members see the same system message as for any added member
