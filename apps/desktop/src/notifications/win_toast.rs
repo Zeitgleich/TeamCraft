@@ -13,7 +13,7 @@ use windows::Foundation::{IPropertyValue, TypedEventHandler};
 use windows::UI::Notifications::{ToastActivatedEventArgs, ToastNotification, ToastNotificationManager};
 use windows::core::{HSTRING, IInspectable, Interface};
 
-use super::toast_xml::{REPLY_INPUT_ID, toast_xml};
+use super::toast_xml::{REPLY_INPUT_ID, ToastLogo, toast_xml};
 
 /// Every toast of the app is in this group, so withdrawing by tag finds it.
 const GROUP: &str = "teamcraft";
@@ -21,10 +21,15 @@ const GROUP: &str = "teamcraft";
 /// Reports a click or button to the webview.
 pub type OnAction = Arc<dyn Fn(NotificationActionEvent) + Send + Sync>;
 
-/// Shows (or replaces) the toast of `notification`.
-pub fn show(app_id: &str, notification: &OsNotification, on_action: OnAction) -> windows::core::Result<()> {
+/// Shows (or replaces) the toast of `notification`, with `maybe_logo` in place of the app's logo.
+pub fn show(
+  app_id: &str,
+  notification: &OsNotification,
+  maybe_logo: Option<&ToastLogo>,
+  on_action: OnAction,
+) -> windows::core::Result<()> {
   let document = XmlDocument::new()?;
-  document.LoadXml(&HSTRING::from(toast_xml(notification)))?;
+  document.LoadXml(&HSTRING::from(toast_xml(notification, maybe_logo)))?;
   let toast = ToastNotification::CreateToastNotification(&document)?;
   toast.SetTag(&HSTRING::from(notification.tag.as_str()))?;
   toast.SetGroup(&HSTRING::from(GROUP))?;

@@ -39,6 +39,24 @@ class WireTest {
     assertFalse(window.messages[0].isPending)
     assertTrue(window.messages[1].isPending)
     assertNotNull(window.messages[1].maybeSystemEvent)
+    assertEquals(null, snapshot.security.backup)
+  }
+
+  @Test
+  fun theKeyBackupStateDecodesAndToleratesNewMethods() {
+    val security = WireJson.decodeFromString(
+      SecuritySnapshot.serializer(),
+      """
+      {"my_fingerprint":"ab","contacts":[],
+       "backup":{"is_stored":true,"has_pending_upload":false,"recovery":["passphrase","organization","hardware_key"],
+                 "passphrase_set_at":1700000000000}}
+      """,
+    )
+    val backup = security.backup!!
+    assertTrue(backup.isStored)
+    assertTrue(backup.hasPassphrase)
+    assertTrue(backup.hasOrganization)
+    assertEquals(1_700_000_000_000L, backup.passphraseSetAt)
   }
 
   @Test

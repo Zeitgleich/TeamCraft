@@ -15,8 +15,8 @@ use teamcraft_client_api::notify::{self, MentionRules};
 use teamcraft_proto::{DndCandidate, PushContentMode};
 
 use crate::model::{
-  Conversation, ConversationId, ConversationKind, Message, MessageId, PresenceStatus, ThreadId, User, UserId,
-  is_pending,
+  Conversation, ConversationId, ConversationKind, Message, MessageId, PresenceStatus, SpaceId, ThreadId,
+  User, UserId, is_pending,
 };
 use crate::notify_sync::{LocalZone, dnd_to_server};
 use crate::prefs::{NotificationPrefs, NotifyLevel, ThreadReplies};
@@ -171,6 +171,21 @@ pub struct Notification {
   /// A reply from the notification goes to the conversation: offered for messages in conversations
   /// the user may post in, not for thread replies (the answer belongs in the thread).
   pub can_reply: bool,
+  /// Whose or which picture shows beside the text (#543); `None` where the policy hides names.
+  pub maybe_picture: Option<PictureSubject>,
+}
+
+/// What a notification's picture stands for, as messaging apps show it (#543): who wrote in a
+/// direct conversation, where it was written in a channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PictureSubject {
+  /// The sender's avatar: DMs and group DMs (whose own picture is their people).
+  Person(UserId),
+  /// The channel's picture, else its space's.
+  Place {
+    conversation: ConversationId,
+    maybe_space: Option<SpaceId>,
+  },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -419,10 +434,24 @@ pub fn notifications_for(
         title,
         body: prefs.show_preview.then(|| preview(&item.message.body)),
         can_reply: item.kind == CandidateKind::Message && item.conversation.can_post,
+        maybe_picture: Some(picture_subject(&item.conversation, item.message.author)),
       })
     })
     .map(|notification| limited_to(notification, &mode))
     .collect()
+}
+
+/// The picture of a message in `conversation` from `sender`: the person in a direct conversation,
+/// the place in a channel. Thread replies follow their conversation.
+pub fn picture_subject(conversation: &Conversation, sender: UserId) -> PictureSubject {
+  if conversation.kind.is_direct_like() {
+    PictureSubject::Person(sender)
+  } else {
+    PictureSubject::Place {
+      conversation: conversation.id,
+      maybe_space: conversation.maybe_space,
+    }
+  }
 }
 
 fn is_urgent(backend: &dyn crate::backend::Backend, message: &Message) -> bool {
@@ -434,7 +463,7 @@ fn is_urgent(backend: &dyn crate::backend::Backend, message: &Message) -> bool {
 
 /// Cuts a notification down to what the verified workspace policy allows on a lock screen, whatever
 /// the person's own "show message text" choice (the policy only ever takes away). An unknown mode
-/// counts as the strictest.
+/// counts as the strictest. A picture names who or where as a name does, so it goes with the names.
 pub fn limited_to(mut notification: Notification, mode: &PushContentMode) -> Notification {
   match mode {
     PushContentMode::Full => {},
@@ -442,6 +471,7 @@ pub fn limited_to(mut notification: Notification, mode: &PushContentMode) -> Not
     PushContentMode::Generic | PushContentMode::Unknown(_) => {
       notification.body = None;
       notification.title = NotificationTitle::Generic;
+      notification.maybe_picture = None;
     },
   }
   notification
@@ -460,6 +490,10 @@ mod tests {
       },
       body: Some("lunch at noon?".into()),
       can_reply: true,
+      maybe_picture: Some(PictureSubject::Place {
+        conversation: id_from_raw(1),
+        maybe_space: None,
+      }),
     }
   }
 
@@ -478,10 +512,43 @@ mod tests {
     let sender = limited_to(shown(), &PushContentMode::Sender);
     assert_eq!(sender.body, None);
     assert_eq!(sender.title, shown().title);
+    assert_eq!(
+      sender.maybe_picture,
+      shown().maybe_picture,
+      "names show, so pictures do"
+    );
     for mode in [PushContentMode::Generic, PushContentMode::Unknown("x".into())] {
       let generic = limited_to(shown(), &mode);
       assert_eq!(generic.body, None);
       assert_eq!(generic.title, NotificationTitle::Generic);
+      assert_eq!(generic.maybe_picture, None, "no face or place without a name");
+    }
+  }
+
+  #[test]
+  fn direct_conversations_show_the_sender_and_channels_the_place() {
+    let sender = id_from_raw(2);
+    for kind in [ConversationKind::Direct, ConversationKind::Group] {
+      assert_eq!(
+        picture_subject(&conversation(kind), sender),
+        PictureSubject::Person(sender)
+      );
+    }
+    let mut channel = conversation(ConversationKind::Public);
+    channel.maybe_space = Some(id_from_raw(3));
+    for kind in [
+      ConversationKind::Public,
+      ConversationKind::Private,
+      ConversationKind::Integration,
+    ] {
+      channel.kind = kind;
+      assert_eq!(
+        picture_subject(&channel, sender),
+        PictureSubject::Place {
+          conversation: id_from_raw(7),
+          maybe_space: Some(id_from_raw(3)),
+        }
+      );
     }
   }
 

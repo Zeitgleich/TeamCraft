@@ -18,6 +18,7 @@ use teamcraft_proto::{ConversationId, Id, MessageId, MlsMessageId, Snowflake, Us
 
 use super::{LocalStore, MessageContent, MessageFilter, SealedSqliteStore, SqlCipherStore, StaticKeySource};
 use crate::convert;
+use crate::mls_storage;
 use crate::records::{self, Account, Draft, SyncState};
 
 /// The key every fixture database is encrypted with.
@@ -105,7 +106,7 @@ fn fill(store: &impl LocalStore) {
     .write()
     .unwrap()
     .insert(b"group".to_vec(), b"state".to_vec());
-  records::save_mls_storage(store, &provider).unwrap();
+  mls_storage::save_mls_storage(store, &provider, &mls_storage::SavedMlsStorage::default()).unwrap();
   let sent = records::enqueue_message(
     store,
     user_id,
@@ -151,12 +152,15 @@ fn check(store: &impl LocalStore, name: &str) {
     Some(&id(MLS_CURSOR)),
     "{name}"
   );
-  let provider = records::load_mls_storage(store).unwrap();
-  assert_eq!(
-    provider.storage().values.read().unwrap().get(b"group".as_slice()),
-    Some(&b"state".to_vec()),
-    "{name}"
-  );
+  // Opening moves the MLS state of a version before 1.0.9 to entries; opened again, it reads them.
+  for _ in 0..2 {
+    let (provider, _) = mls_storage::load_mls_storage(store).unwrap();
+    assert_eq!(
+      provider.storage().values.read().unwrap().get(b"group".as_slice()),
+      Some(&b"state".to_vec()),
+      "{name}"
+    );
+  }
   let messages = store.messages(conversation, MessageFilter::TopLevel).unwrap();
   let bodies: Vec<&str> = messages
     .iter()

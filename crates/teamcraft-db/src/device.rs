@@ -77,6 +77,38 @@ impl Database {
       .collect()
   }
 
+  /// Renames one of the user's active devices; `None` if it doesn't exist, was revoked or belongs to
+  /// someone else.
+  pub async fn rename_device(
+    &self,
+    user: UserId,
+    device: DeviceId,
+    name: &str,
+  ) -> Result<Option<Device>, DbError> {
+    let row = sqlx::query!(
+      r#"UPDATE devices SET name = $3 WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
+         RETURNING id, user_id, name, public_key, cross_signature, push_provider, created_at"#,
+      to_db(device),
+      to_db(user),
+      name,
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    row
+      .map(|row| {
+        Ok(Device {
+          id: from_db(row.id)?,
+          user_id: from_db(row.user_id)?,
+          name: row.name,
+          public_key: row.public_key,
+          cross_signature: row.cross_signature,
+          maybe_push_provider: row.push_provider,
+          created_at: row.created_at,
+        })
+      })
+      .transpose()
+  }
+
   /// Revokes one of the user's devices; `false` if it doesn't exist or belongs to someone else.
   pub async fn revoke_device(&self, user: UserId, device: DeviceId) -> Result<bool, DbError> {
     let result = sqlx::query!(

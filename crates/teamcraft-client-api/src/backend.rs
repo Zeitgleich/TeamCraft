@@ -30,7 +30,9 @@ use crate::calls::{
   CallStatusSounds, CallsUnavailableReason, HuddleInfo, IncomingCall, MediaDevices, Participant,
   RemoteVideoTrack, ScreenContentMode,
 };
-use crate::calls::{CallPreview, JoinMedia, OrgBackgroundRule, OrgBackgrounds, PreviewCamera};
+use crate::calls::{
+  CallPreview, CameraFallback, JoinMedia, OrgBackgroundRule, OrgBackgrounds, PreviewCamera,
+};
 use crate::model::{
   Conversation, ConversationId, CustomStatus, DeviceId, MembershipIssue, Message, MessageId, PresenceStatus,
   Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId,
@@ -640,6 +642,12 @@ pub trait ChatBackend {
 
   /// Signs out one of the user's other devices (e2ee.md §3: the signed device list drops it).
   fn revoke_own_device(&self, _device: DeviceId) {}
+
+  /// Renames one of the user's devices; the list shows the new name after the next answer.
+  fn rename_own_device(&self, _device: DeviceId, _name: String) {}
+
+  /// Sends a test push to one of the user's devices; the outcome shows in the device list.
+  fn test_push_own_device(&self, _device: DeviceId) {}
 }
 
 /// Calls and huddles. Media runs in `teamcraft-media`; this is the roster and device view of it,
@@ -724,6 +732,10 @@ pub trait CallBackend {
   fn test_speakers(&self, _maybe_device: Option<String>) {}
   fn set_call_camera(&self, _is_on: bool) {}
   fn select_camera(&self, _maybe_device: Option<String>) {}
+  /// The camera that stood in for the chosen one at the last camera start, if one did (#819).
+  fn camera_fallback(&self) -> Option<CameraFallback> {
+    None
+  }
   fn set_background_effect(&self, _effect: BackgroundEffect) {}
   /// Opens the system's video effects panel (macOS); nothing elsewhere.
   fn open_system_video_effects(&self) {}
@@ -918,6 +930,13 @@ pub trait SecurityBackend {
   fn set_contact_verified(&self, user: UserId, is_verified: bool);
   /// The device list was opened: ask the server again.
   fn refresh_my_devices(&self) {}
+  fn rename_my_device(&self, _device: DeviceId, _name: String) {}
+  fn test_push_my_device(&self, _device: DeviceId) {}
+  /// The key backup as this device knows it; `None` without encryption keys (or before the core
+  /// reported it).
+  fn key_backup(&self) -> Option<crate::security::KeyBackupState> {
+    None
+  }
 }
 
 /// Full-text search over everything the user can read. `teamcraft-core` will answer from encrypted

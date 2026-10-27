@@ -69,7 +69,8 @@ pub enum Table {
   Users,
   /// Content key rings, keyed by conversation.
   ContentKeys,
-  /// The openmls provider storage (MLS group state, key package private keys).
+  /// The openmls provider storage (MLS group state, key package private keys), one record per
+  /// storage entry (`mls_storage`).
   MlsStorage,
   /// Applied membership change IDs per conversation (replay protection, crypto README).
   AppliedChanges,
@@ -536,7 +537,7 @@ pub trait LocalStore {
     Ok(())
   }
 
-  /// [`Self::purge_freed`], but for writes that come in bursts (the MLS storage is rewritten for
+  /// [`Self::purge_freed`], but for writes that come in bursts (the MLS storage is saved for
   /// every processed group message): the store may wait up to a configured interval and merge
   /// the purges, and still purges on [`Self::purge_freed`], when it is dropped and when the app
   /// stops it. Never fails the caller's write: a purge that did not run stays due and is
@@ -561,6 +562,24 @@ pub trait LocalStore {
   /// for a write another device relies on next (the secrets of a link, issue #168). Stores that
   /// write at once keep the default.
   fn write_soon(&self) {}
+
+  /// What became of the groups of writes since the store was opened, for a caller that remembers
+  /// what it wrote instead of reading it back (the MLS state, `mls_storage`): a committed group
+  /// means every group open before it is on disk, a lost one that some writes it accepted are not.
+  /// `None` for a store that keeps every write it accepted (in memory; the browser's, which writes
+  /// a failed one again until it goes through).
+  fn write_tally(&self) -> Option<WriteTally> {
+    None
+  }
+}
+
+/// Counts of [`LocalStore::write_tally`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WriteTally {
+  /// Outermost groups of writes committed.
+  pub committed: u64,
+  /// Groups of writes rolled back (one of their writes failed, or the commit did).
+  pub lost: u64,
 }
 
 /// Runs `writes` as one group of writes ([`LocalStore::begin_writes`]). An error of `writes` doesn't
@@ -671,6 +690,10 @@ macro_rules! forward_local_store {
 
       fn write_soon(&self) {
         (**self).write_soon()
+      }
+
+      fn write_tally(&self) -> Option<WriteTally> {
+        (**self).write_tally()
       }
     }
   };

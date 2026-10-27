@@ -89,6 +89,7 @@ use crate::handlers::{
   complete_org_background_upload_handler, create_org_background_upload_handler,
   delete_org_background_handler, download_org_background_handler,
 };
+use crate::handlers::{get_my_push_health_handler, update_device_handler};
 use crate::openapi::openapi_json_handler;
 use crate::security;
 use crate::state::AppState;
@@ -295,7 +296,10 @@ pub fn router(state: AppState) -> Router {
       "/devices",
       post(register_device_handler).get(list_devices_handler),
     )
-    .route("/devices/{device_id}", delete(revoke_device_handler))
+    .route(
+      "/devices/{device_id}",
+      delete(revoke_device_handler).patch(update_device_handler),
+    )
     .route(
       "/device-links",
       post(create_device_link_handler).get(list_device_links_handler),
@@ -447,6 +451,7 @@ pub fn router(state: AppState) -> Router {
       put(register_push_handler).delete(unregister_push_handler),
     )
     .route("/devices/{device_id}/push/test", post(send_test_push_handler))
+    .route("/me/push-health", get(get_my_push_health_handler))
     .route("/attachments", post(create_attachment_handler))
     .route(
       "/attachments/multipart",

@@ -16,8 +16,9 @@ use crate::admin::DeviceInfo;
 use crate::backend::{ChatBackend, LoadingList, SearchBackend};
 use crate::calls::{
   ActiveCall, BackgroundEffect, BackgroundImageInfo, CallEndReason, CallHistoryItem, CallMoveOffer,
-  CallPreview, CallRequest, CallStatusSounds, IncomingCall, JoinMedia, MediaDevices, OrgBackgroundRule,
-  OrgBackgrounds, PreviewCamera, PushToTalk, RemoteVideoTrack, RunningCall, ScreenContentMode,
+  CallPreview, CallRequest, CallStatusSounds, CameraFallback, IncomingCall, JoinMedia, MediaDevices,
+  OrgBackgroundRule, OrgBackgrounds, PreviewCamera, PushToTalk, RemoteVideoTrack, RunningCall,
+  ScreenContentMode,
 };
 use crate::live::LiveSnapshot;
 use crate::model::{
@@ -60,6 +61,9 @@ pub struct CallSnapshot {
   /// The pre-join check's camera (#442).
   #[serde(default)]
   pub preview_camera: PreviewCamera,
+  /// The camera that stood in when the chosen one didn't open, at the last camera start (#819).
+  #[serde(default)]
+  pub maybe_camera_fallback: Option<CameraFallback>,
 }
 
 /// Something the user did in or about a call.
@@ -239,6 +243,9 @@ pub struct SecuritySnapshot {
   /// older shell) allows them, as the server's default does. The server enforces it either way.
   #[serde(rename = "presence_policy", default, skip_serializing_if = "Option::is_none")]
   pub maybe_presence_policy: Option<teamcraft_proto::PresencePolicy>,
+  /// The key backup as this device knows it (issue #410); `None` from an older shell.
+  #[serde(rename = "backup", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_backup: Option<crate::security::KeyBackupState>,
 }
 
 /// What this device pinned for one contact, and a different key the server has shown since.
@@ -511,6 +518,16 @@ pub enum ChatAction {
   },
   /// Sign out one of this user's other devices.
   RevokeOwnDevice {
+    device: DeviceId,
+  },
+  /// Rename one of this user's devices (issue #409).
+  RenameOwnDevice {
+    device: DeviceId,
+    name: String,
+  },
+  /// Ask the server to send a test push to one of this user's devices; the outcome shows in the
+  /// device list.
+  TestPushOwnDevice {
     device: DeviceId,
   },
   /// Founds a new channel (and its encryption group) in a space.
@@ -901,6 +918,16 @@ impl ChatAction {
     matches!(self, Self::SendMessage { .. } | Self::PostMessage { .. })
   }
 
+  /// The conversation of a typing announcement. It is passing and changes nothing stored or shown:
+  /// the host sends it on the open gateway connection right away, tells the UI of no change, and
+  /// drops it while offline or busy connecting (a late indicator would be wrong).
+  pub fn typing_conversation(&self) -> Option<ConversationId> {
+    match self {
+      Self::Typing { conversation } => Some(*conversation),
+      _ => None,
+    }
+  }
+
   /// Runs the action on a backend. The original actions are left to the host, which handles
   /// some of them itself (enrollment state, admin flows); returns them back.
   pub fn apply_to(self, backend: &(impl ChatBackend + SearchBackend)) -> Option<Self> {
@@ -943,6 +970,8 @@ impl ChatAction {
       Self::RefreshOwnDevices => backend.refresh_own_devices(),
       Self::RefreshReadReceipts { conversation } => backend.refresh_read_receipts(conversation),
       Self::RevokeOwnDevice { device } => backend.revoke_own_device(device),
+      Self::RenameOwnDevice { device, name } => backend.rename_own_device(device, name),
+      Self::TestPushOwnDevice { device } => backend.test_push_own_device(device),
       Self::SetThreadFollowed {
         conversation,
         thread,
@@ -1610,6 +1639,12 @@ mod tests {
         conversation: id_from_raw(7)
       }
     );
+    // Hosts send it at once instead of running it as a command.
+    assert_eq!(typing.typing_conversation(), Some(id_from_raw(7)));
+    let mark_read = ChatAction::MarkRead {
+      conversation: id_from_raw(7),
+    };
+    assert_eq!(mark_read.typing_conversation(), None);
     let query: ChatQuery =
       serde_json::from_str(r#"{"kind":"typing_users","conversation":"7"}"#).expect("parse");
     assert_eq!(
@@ -1838,6 +1873,55 @@ mod tests {
       })
       .expect("serialize"),
       r#"{"action":"set_background_effect","effect":"blur_light"}"#
+    );
+  }
+
+  #[test]
+  fn own_device_actions_have_stable_wire_names() {
+    let device: DeviceId = crate::model::id_from_raw(7);
+    let rename = ChatAction::RenameOwnDevice {
+      device,
+      name: "Work laptop".into(),
+    };
+    let json = serde_json::to_string(&rename).expect("serialize");
+    assert_eq!(
+      json,
+      r#"{"action":"rename_own_device","device":"7","name":"Work laptop"}"#
+    );
+    assert_eq!(serde_json::from_str::<ChatAction>(&json).expect("parse"), rename);
+    assert_eq!(
+      serde_json::to_string(&ChatAction::TestPushOwnDevice { device }).expect("serialize"),
+      r#"{"action":"test_push_own_device","device":"7"}"#
+    );
+  }
+
+  #[test]
+  fn the_backup_state_is_optional_in_the_security_snapshot() {
+    let older: SecuritySnapshot =
+      serde_json::from_str(r#"{"my_fingerprint":"ab","contacts":[]}"#).expect("parse");
+    assert_eq!(older.maybe_backup, None);
+    let snapshot = SecuritySnapshot {
+      maybe_backup: Some(crate::security::KeyBackupState {
+        is_stored: true,
+        has_pending_upload: false,
+        recovery: vec![crate::security::RecoveryMethod::Passphrase],
+        maybe_passphrase_set_at: Some(1_000),
+      }),
+      ..SecuritySnapshot::default()
+    };
+    let json = serde_json::to_value(&snapshot).expect("serialize");
+    assert_eq!(
+      json["backup"],
+      serde_json::json!({"is_stored": true, "has_pending_upload": false, "recovery": ["passphrase"], "passphrase_set_at": 1000})
+    );
+    let newer: crate::security::KeyBackupState =
+      serde_json::from_str(r#"{"is_stored":true,"recovery":["passphrase","hardware_key"]}"#).expect("parse");
+    assert_eq!(
+      newer.recovery,
+      [
+        crate::security::RecoveryMethod::Passphrase,
+        crate::security::RecoveryMethod::Unknown
+      ]
     );
   }
 

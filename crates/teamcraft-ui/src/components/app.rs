@@ -13,7 +13,7 @@ use crate::attention::{AttentionReporter, AttentionSignals, LockReading, is_atte
 use crate::auth::tauri;
 use crate::backend::Backend;
 use crate::calls::CallPhase;
-use crate::calls::{BackgroundEffect, CallEvent, CallRequest, CallStatusSounds};
+use crate::calls::{BackgroundEffect, CallEvent, CallRequest, CallStatusSounds, CameraFallback};
 use crate::clock::now_ms;
 use crate::components::announcement_banner::AnnouncementBanner;
 use crate::components::bottom_nav::BottomNav;
@@ -48,7 +48,7 @@ use crate::model::{ConversationId, SpaceId};
 use crate::motion::use_leave_ghost;
 use crate::navigation::Step;
 use crate::notify_sync::NotificationSync;
-use crate::prefs::Zoom;
+use crate::prefs::{CallPrefs, Zoom};
 use crate::reactive::{OwnerLiveness, use_interval};
 use crate::sections::badge_count;
 use crate::settings::{Settings, Theme};
@@ -134,9 +134,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   // Backends that load in the background (the desktop core) say so through this hook.
   change_source.set_change_notifier(Rc::new(move || state.backend_changed()));
   // A failed action is never silent (issue #322).
-  crate::feedback::set_failure_sink(move |failure| {
-    state.show_error(crate::feedback::failure_message(i18n, &failure), failure.detail);
-  });
+  crate::feedback::set_failure_sink(move |failure| state.show_failure(i18n, &failure));
   // Preferences the server enforces (push, do not disturb, mutes) follow the account on the server.
   if let Some(sync) = use_context::<StoredValue<NotificationSync, LocalStorage>>() {
     sync.get_value().start(settings);
@@ -179,6 +177,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         maybe_body: Some(message),
         actions: Vec::new(),
         maybe_reply: None,
+        maybe_picture: None,
       };
       leptos::task::spawn_local(async move { tauri::show_notification(&shown).await });
     }
@@ -191,7 +190,11 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   watch_activity(state);
   // Call defaults follow the settings (and set the initial state of the call session).
   let call_prefs = Memo::new(move |_| settings.prefs.get().calls);
-  Effect::new(move |_| apply_call_prefs(state.call, &call_prefs.get()));
+  Effect::new(move |previous: Option<CallPrefs>| {
+    let calls = call_prefs.get();
+    apply_call_prefs(state.call, previous.as_ref(), &calls);
+    calls
+  });
 
   let listener = window_event_listener(ev::keydown, move |ev| handle_global_shortcut(&ev, state));
   // Removed with the component: a late event must not reach its disposed signals.
@@ -378,6 +381,11 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
                 {toast.maybe_undo.map(|undo| view! {
                   <button class="btn btn-small" on:click=move |_| state.undo(id, undo)>
                     {move || i18n.t("undo")}
+                  </button>
+                })}
+                {toast.maybe_action.map(|action| view! {
+                  <button class="btn btn-small" on:click=move |_| state.run_toast_action(id, action)>
+                    {move || i18n.t(action.label_key())}
                   </button>
                 })}
                 <button class="icon-btn icon-btn-small" aria-label=move || i18n.t("close") on:click=move |_| state.dismiss_toast(id)>
@@ -1034,6 +1042,31 @@ pub(crate) fn connect_calls(state: AppState) {
       call.emit(CallEvent::Effect(effect));
     }
     effect
+  });
+  // The camera choice reaches the call backend: the remembered one at start, then every change
+  // (a pick, the settings), once each (#819).
+  Effect::new(move |_| {
+    call.camera_id.track();
+    call.send_camera_choice();
+  });
+  // Another camera stood in for the chosen one (declined on the iPhone, in use): the user learns
+  // which one is used, and the pickers show it.
+  let i18n = use_i18n();
+  Effect::new(move |previous: Option<Option<CameraFallback>>| {
+    let maybe_fallback = state.read(|backend| backend.camera_fallback());
+    if let Some(fallback) = &maybe_fallback
+      && previous.as_ref() != Some(&maybe_fallback)
+    {
+      state.show_toast(i18n.t_with(
+        "call-camera-fallback",
+        &[
+          ("failed", fallback.failed.label.as_str()),
+          ("used", fallback.used.label.as_str()),
+        ],
+      ));
+      call.show_camera_in_use(fallback.used.id.clone());
+    }
+    maybe_fallback
   });
   // The shell ended the call (the other side hung up, the connection dropped): leave the screen.
   // Only the end of the call the screen is for: switching to another one (a call that moved into a

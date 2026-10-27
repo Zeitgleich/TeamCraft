@@ -118,7 +118,7 @@ impl PendingEnrollment {
     let mut recovered = match existing {
       None => match &options.secret {
         EnrollmentSecret::Passphrase(passphrase) => {
-          new_identity(me.id, self.identity, passphrase, options.argon2)?
+          new_identity(me.id, self.identity, passphrase, options.argon2, clock.now_ms())?
         },
         _ => return Err(CoreError::IdentityMissing),
       },
@@ -166,6 +166,8 @@ impl PendingEnrollment {
       clock,
       settings,
       provider: Default::default(),
+      // Knows nothing of the store: the first save writes the whole state and drops the rest.
+      saved_mls: Default::default(),
       account,
       groups: HashMap::new(),
       sync,
@@ -197,6 +199,7 @@ impl PendingEnrollment {
     };
     client.persist_sync()?;
     client.store_wrapped_keys_blob(&wrapped_keys)?;
+    client.mirror_account_data()?;
     // The admins who recovered the account saw its backup key (security review B5). Before the
     // account is stored: interrupted, the device recovers again (with the new passphrase if the
     // new bag reached the server).
@@ -345,6 +348,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .collect();
     keys.push(wrapped);
     self.store_wrapped_keys(&keys)?;
+    self.update_account_data(|data, now| {
+      data.maybe_recovery_passphrase_set_at = Some(now);
+      true
+    })?;
     self.upload_key_bag_keeping(WrapsOnMerge::KeepOwn).await
   }
 
@@ -369,6 +376,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       keys.push(org_wrap);
     }
     self.store_wrapped_keys(&keys)?;
+    self.note_passphrase_set()?;
     self.upload_key_bag_keeping(WrapsOnMerge::KeepOwn).await
   }
 
@@ -585,6 +593,7 @@ fn new_identity(
   identity: IdentityKeyPair,
   passphrase: &SecretBytes,
   argon2: Argon2Settings,
+  now_ms: i64,
 ) -> Result<Recovered, CoreError> {
   let backup_secret = SymmetricKey::generate(&mut OsRng);
   let wrapped = passphrase_wrap(
@@ -593,8 +602,19 @@ fn new_identity(
     passphrase,
     argon2,
   )?;
+  let mut key_bag = KeyBag::new(convert::user(user), identity);
+  // The user's devices show when the passphrase was set (issue #410); the first bag carries it.
+  let account_data = crate::account_data::AccountData {
+    maybe_recovery_passphrase_set_at: Some(now_ms),
+    ..crate::account_data::AccountData::default()
+  };
+  key_bag.set_account_data(
+    account_data
+      .to_bytes()
+      .map_err(|error| CoreError::Corrupt(error.to_string()))?,
+  );
   Ok(Recovered {
-    key_bag: KeyBag::new(convert::user(user), identity),
+    key_bag,
     backup_secret,
     version: 0,
     sequence: 0,
@@ -799,6 +819,11 @@ pub(crate) fn encode_wrapped_keys(wrapped: &[WrappedBackupKey]) -> Result<Vec<u8
     out.extend_from_slice(&bytes);
   }
   Ok(out)
+}
+
+/// The device ID of the certificate a device registers with, before the server assigned its own.
+pub(crate) fn provisional_device_id() -> teamcraft_crypto::ids::DeviceId {
+  teamcraft_crypto::ids::DeviceId::new(PROVISIONAL_DEVICE_ID)
 }
 
 pub(crate) fn decode_wrapped_keys(bytes: &[u8]) -> Result<Vec<WrappedBackupKey>, CoreError> {

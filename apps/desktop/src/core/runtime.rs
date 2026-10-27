@@ -32,6 +32,7 @@ use teamcraft_core::records;
 use teamcraft_core::store::{
   DatabaseKeySource, KeySourceError, KeyringKeySource, SqlCipherStore, StoreError, StoreLock, TrackedStore,
 };
+use teamcraft_core::typing::TypingAnnouncer;
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
 use teamcraft_core::ui_snapshot::SnapshotCache;
 use teamcraft_core::upkeep::{self, Upkeep, UploadMode};
@@ -703,6 +704,11 @@ fn security_of(client: &Client<Api, Store>) -> Result<SecuritySnapshot, String> 
     maybe_push_content: Some(teamcraft_core::push_preview::push_content_mode(client.store())),
     maybe_owners: client.owner_roster_status(),
     maybe_presence_policy: teamcraft_core::workspace::presence_policy(client.store()),
+    maybe_backup: teamcraft_core::ui_snapshot::key_backup_state(client.store()).unwrap_or_else(|error| {
+      // The settings then show the backup as unknown; the rest of the snapshot still counts.
+      tracing::warn!(%error, "the key backup state is unreadable");
+      None
+    }),
   })
 }
 
@@ -751,6 +757,8 @@ struct Core {
   /// Whether this device last said it is idle, repeated after a reconnect: a resumed session keeps
   /// what the server last knew, which may be an away timeout that ended meanwhile.
   is_idle: bool,
+  /// The user's own typing, sent on the gateway at most every few seconds (#733).
+  typing: TypingAnnouncer,
   /// Set while opening waits for an access token.
   maybe_open_retry: Option<OpenRetry>,
   /// The unreadable database was set aside: setup explains why it is asked for again.
@@ -850,6 +858,7 @@ impl Core {
       maybe_receipt: None,
       maybe_attention: None,
       is_idle: false,
+      typing: TypingAnnouncer::default(),
       maybe_open_retry: None,
       was_store_set_aside: false,
       snapshots: SnapshotCache::new(SystemClock.now_ms().unsigned_abs()),
@@ -873,6 +882,7 @@ impl Core {
         break;
       }
       let maybe_deadline = self.connection_deadline();
+      let maybe_typing_change = self.typing_change();
       tokio::select! {
         request = requests.recv() => match request {
           Some(Request::Shutdown) | None => break,
@@ -900,6 +910,8 @@ impl Core {
         () = sleep_for(maybe_deadline), if maybe_deadline.is_some() => {
           self.connection.on_tick(SystemClock.now_ms()).await;
         },
+        // Someone stopped typing: no event says so, the indicator runs out.
+        () = sleep_for(maybe_typing_change), if maybe_typing_change.is_some() => self.drop_expired_typing(),
         linked = poll_link(&mut self.link), if self.link.is_some() => self.on_linked(linked).await,
         () = sleep_until_retry(self.maybe_open_retry.as_ref()), if self.maybe_open_retry.is_some() => {
           self.open().await;
@@ -1119,6 +1131,7 @@ impl Core {
     };
     self.backend = Some(
       CoreChatBackend::new(client.store().clone(), client.user_id(), Box::new(SystemClock))
+        .with_typing(client.typing_state())
         .with_transfers(client.transfers()),
     );
     self.client = Some(client);
@@ -1254,6 +1267,12 @@ impl Core {
         drop(reply.send(result));
       },
       Request::Action(action, reply) => {
+        // Typing changes nothing shown: it goes out at once, and the UI is not told of a change.
+        if let Some(conversation) = action.typing_conversation() {
+          self.announce_typing(conversation).await;
+          drop(reply.send(Ok(())));
+          return;
+        }
         let result = self.action(*action).await;
         self.changed();
         drop(reply.send(result));
@@ -2005,6 +2024,30 @@ impl Core {
     }
   }
 
+  /// Tells the other members that the user types (throttled; dropped while offline).
+  async fn announce_typing(&mut self, conversation: ConversationId) {
+    if self.client.is_some() {
+      self
+        .typing
+        .announce(&mut self.connection, conversation, SystemClock.now_ms())
+        .await;
+    }
+  }
+
+  /// How long until a typing indicator runs out (`None`: nobody types, or there is no client).
+  fn typing_change(&self) -> Option<Duration> {
+    let at_ms = self.client.as_ref()?.typing_change_at_ms()?;
+    let wait_ms = at_ms.saturating_sub(SystemClock.now_ms()).max(0);
+    Some(Duration::from_millis(wait_ms.unsigned_abs()))
+  }
+
+  /// Forgets the typing indicators that ran out and tells the UI, which reads who types again.
+  fn drop_expired_typing(&self) {
+    if self.client.as_ref().is_some_and(Client::drop_expired_typing) {
+      self.changed();
+    }
+  }
+
   /// What a new connection has to hear again: the device's activity and attention.
   async fn repeat_reports(&mut self) {
     self.send_activity(self.is_idle).await;
@@ -2198,6 +2241,8 @@ impl ReadsWhileBusy<'_> {
           .ok_or_else(not_set_up);
         drop(reply.send(result));
       },
+      // Typing arriving while the client is busy would go out late: dropped.
+      Request::Action(action, reply) if action.typing_conversation().is_some() => drop(reply.send(Ok(()))),
       Request::Action(action, reply) if action.is_new_message() => {
         let Some(backend) = self.backend else {
           drop(reply.send(Err(not_set_up())));

@@ -25,6 +25,7 @@ const KEY_RECENT_EMOJI: &str = "teamcraft.recent_emoji";
 const KEY_FAVORITE_ORDER: &str = "teamcraft.favorite_order";
 const KEY_MEDIA_CACHE_LIMIT: &str = "teamcraft.media_cache_limit";
 const KEY_MEDIA_CACHE_MAX_AGE: &str = "teamcraft.media_cache_max_age";
+const KEY_PREVIEW_LIMIT: &str = "teamcraft.preview_limit";
 /// Per account: `teamcraft.last_open.<user id>`, a [`LastOpen`].
 const KEY_LAST_OPEN_PREFIX: &str = "teamcraft.last_open.";
 /// Conversations the quick switcher remembers as recently visited.
@@ -204,6 +205,67 @@ impl MediaCacheMaxAge {
 
   pub fn save(self) {
     store_string(KEY_MEDIA_CACHE_MAX_AGE, self.slug());
+  }
+}
+
+/// Up to which size a file opens as a preview in the app (#557, #821); a larger one says how large
+/// it is and offers the download. A preview keeps the decrypted file, and for text its lines, in
+/// memory while it is open. Read when a preview opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreviewLimit {
+  Mib2,
+  Mib5,
+  Mib10,
+  Mib25,
+  Mib50,
+}
+
+impl PreviewLimit {
+  pub const ALL: [PreviewLimit; 5] = [Self::Mib2, Self::Mib5, Self::Mib10, Self::Mib25, Self::Mib50];
+  pub const DEFAULT: PreviewLimit = Self::Mib10;
+
+  pub fn slug(self) -> &'static str {
+    match self {
+      Self::Mib2 => "2mb",
+      Self::Mib5 => "5mb",
+      Self::Mib10 => "10mb",
+      Self::Mib25 => "25mb",
+      Self::Mib50 => "50mb",
+    }
+  }
+
+  pub fn from_slug(slug: &str) -> Option<Self> {
+    Self::ALL.into_iter().find(|limit| limit.slug() == slug)
+  }
+
+  pub fn bytes(self) -> u64 {
+    const MIB: u64 = 1024 * 1024;
+    match self {
+      Self::Mib2 => 2 * MIB,
+      Self::Mib5 => 5 * MIB,
+      Self::Mib10 => 10 * MIB,
+      Self::Mib25 => 25 * MIB,
+      Self::Mib50 => 50 * MIB,
+    }
+  }
+
+  /// The limit as the settings name it ("10 MB"), in whole MiB like `format_bytes`'s "MB".
+  pub fn label(self) -> String {
+    format!("{} MB", self.bytes() / (1024 * 1024))
+  }
+
+  /// Whether a file of `size_bytes` opens as a preview; the limit itself does.
+  pub fn allows(self, size_bytes: u64) -> bool {
+    size_bytes <= self.bytes()
+  }
+
+  /// The stored choice, else the default.
+  pub fn load() -> Self {
+    load(KEY_PREVIEW_LIMIT, Self::from_slug).unwrap_or(Self::DEFAULT)
+  }
+
+  pub fn save(self) {
+    store_string(KEY_PREVIEW_LIMIT, self.slug());
   }
 }
 
@@ -433,4 +495,37 @@ fn local_storage() -> Option<web_sys::Storage> {
     return None;
   }
   web_sys::window()?.local_storage().ok().flatten()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  mod preview_limit {
+    use super::*;
+
+    #[test]
+    fn the_limit_itself_is_allowed() {
+      let limit = PreviewLimit::DEFAULT;
+      assert_eq!(limit.bytes(), 10 * 1024 * 1024);
+      assert!(limit.allows(limit.bytes()));
+      assert_eq!(limit.label(), "10 MB");
+      assert!(!limit.allows(limit.bytes() + 1));
+    }
+
+    #[test]
+    fn slugs_round_trip_and_limits_grow() {
+      for limit in PreviewLimit::ALL {
+        assert_eq!(PreviewLimit::from_slug(limit.slug()), Some(limit));
+      }
+      assert!(
+        PreviewLimit::ALL
+          .windows(2)
+          .all(|pair| pair[0].bytes() < pair[1].bytes())
+      );
+      assert_eq!(PreviewLimit::from_slug("1tb"), None);
+      // Outside a browser nothing is stored: the default.
+      assert_eq!(PreviewLimit::load(), PreviewLimit::DEFAULT);
+    }
+  }
 }

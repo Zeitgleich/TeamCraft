@@ -776,6 +776,7 @@ pub fn login_brand(response_json: String, server_url: String, language: String) 
     maybe_text: brand.login_text(&language).map(str::to_owned),
     links: BrandLinks {
       maybe_support: brand.links.maybe_support.clone(),
+      maybe_documentation: brand.links.maybe_documentation.clone(),
       maybe_privacy: brand.links.maybe_privacy.clone(),
       maybe_terms: brand.links.maybe_terms.clone(),
       maybe_imprint: brand.links.maybe_imprint.clone(),

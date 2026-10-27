@@ -10795,6 +10795,7 @@ dependencies = [
  "js-sys",
  "ndk",
  "nokhwa",
+ "nokhwa-bindings-macos",
  "openh264",
  "openmls",
  "openmls_basic_credential",

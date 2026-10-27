@@ -49,6 +49,7 @@ use teamcraft_core::push_text::{NAME_PLACEHOLDER, NotificationLabels};
 use teamcraft_core::records;
 use teamcraft_core::store::{IndexedDbStore, StoreError, TrackedStore, browser_database_key};
 use teamcraft_core::transfers::Transfers;
+use teamcraft_core::typing::TypingAnnouncer;
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
 use teamcraft_core::ui_snapshot::SnapshotCache;
 use teamcraft_core::upkeep::{self, Upkeep, UploadMode};
@@ -1057,6 +1058,8 @@ struct Core {
   /// Whether this device last said it is idle, repeated after a reconnect: a resumed session keeps
   /// what the server last knew, which may be an away timeout that ended meanwhile.
   is_idle: bool,
+  /// The user's own typing, sent on the gateway at most every few seconds (#733).
+  typing: TypingAnnouncer,
   /// Whether IndexedDB keeps up with the cache, as of the last flush.
   store_health: StoreHealth,
   /// The flush [`Self::check_store`] waits for, while IndexedDB is still writing.
@@ -1124,6 +1127,7 @@ impl Core {
       maybe_receipt: None,
       maybe_attention: None,
       is_idle: false,
+      typing: TypingAnnouncer::default(),
       store_health: StoreHealth::Saved,
       maybe_flush: None,
       maybe_push_check_at_ms: None,
@@ -1262,6 +1266,11 @@ impl Core {
     // While a file goes up, the UI reads its progress again every so often.
     let deadline = match self.maybe_reported_bytes {
       Some(_) => deadline.min(now_ms().saturating_add(millis(TRANSFER_PROGRESS))),
+      None => deadline,
+    };
+    // Someone stopped typing: no event says so, the indicator runs out ([`Self::on_tick`]).
+    let deadline = match self.client.as_ref().and_then(Client::typing_change_at_ms) {
+      Some(typing_change) => deadline.min(typing_change),
       None => deadline,
     };
     let until_tick_ms = deadline.saturating_sub(now_ms()).max(0);
@@ -1449,6 +1458,7 @@ impl Core {
     };
     self.backend = Some(
       CoreChatBackend::new(client.store().clone(), client.user_id(), Box::new(SystemClock))
+        .with_typing(client.typing_state())
         .with_transfers(client.transfers()),
     );
     self.catch_up_focus = client.catch_up_focus();
@@ -1652,6 +1662,12 @@ impl Core {
         drop(reply.send(result));
       },
       Request::Action(action, reply) => {
+        // Typing changes nothing shown: it goes out at once, and the UI is not told of a change.
+        if let Some(conversation) = action.typing_conversation() {
+          self.announce_typing(conversation).await;
+          drop(reply.send(Ok(())));
+          return;
+        }
         let result = self.action(*action).await;
         notify_changed();
         drop(reply.send(result));
@@ -2008,6 +2024,11 @@ impl Core {
       maybe_push_content: Some(teamcraft_core::push_preview::push_content_mode(client.store())),
       maybe_owners: client.owner_roster_status(),
       maybe_presence_policy: teamcraft_core::workspace::presence_policy(client.store()),
+      maybe_backup: teamcraft_core::ui_snapshot::key_backup_state(client.store()).unwrap_or_else(|error| {
+        // The settings then show the backup as unknown; the rest of the snapshot still counts.
+        tracing::warn!(%error, "the key backup state is unreadable");
+        None
+      }),
     })
   }
 
@@ -2484,6 +2505,10 @@ impl Core {
     if self.client.is_some() {
       self.connection.on_tick(now).await;
     }
+    // The UI reads who types again once an indicator ran out.
+    if self.client.as_ref().is_some_and(Client::drop_expired_typing) {
+      notify_changed();
+    }
     if now < self.next_tick_ms {
       // Woken for the connection only.
       return;
@@ -2498,6 +2523,16 @@ impl Core {
     // The upkeep may resync many conversations; heartbeats go on meanwhile.
     if self.connection.keep_alive(now, self.upkeep.tick(client)).await {
       notify_changed();
+    }
+  }
+
+  /// Tells the other members that the user types (throttled; dropped while offline).
+  async fn announce_typing(&mut self, conversation: ConversationId) {
+    if self.client.is_some() {
+      self
+        .typing
+        .announce(&mut self.connection, conversation, now_ms())
+        .await;
     }
   }
 
@@ -2651,6 +2686,11 @@ impl SyncReads<'_> {
         self.has_queued_sends.set(true);
         drop(reply.send(Ok(())));
         notify_changed();
+        return None;
+      },
+      // Typing arriving during a sync would go out late: dropped.
+      Request::Action(action, reply) if action.typing_conversation().is_some() => {
+        drop(reply.send(Ok(())));
         return None;
       },
       Request::Focus(conversation) => {

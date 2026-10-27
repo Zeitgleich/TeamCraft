@@ -47,7 +47,8 @@ icon = "brand-a/icon.png"              # square, app and notification icon
 icon_dark = "brand-a/icon-dark.png"
 favicon = "brand-a/favicon.png"
 favicon_dark = "brand-a/favicon-dark.png"
-support_url = "https://support.brand-a.example.com"
+support_url = "https://support.brand-a.example.com"   # also linked under Settings > Help & about
+documentation_url = "https://docs.brand-a.example.com" # Settings > Help & about; default: none
 privacy_url = "https://brand-a.example.com/privacy"
 terms_url = "https://brand-a.example.com/terms"
 imprint_url = "https://brand-a.example.com/imprint"
@@ -150,7 +151,7 @@ of the request host:
   "colors": { "light": { "accent": "#0b7f78" }, "dark": { "accent": "#35c6ba" } },
   "login_title": { "en": "Welcome to Brand A", "de": "Willkommen bei Brand A" },
   "login_text": { "en": "..." },
-  "links": { "support": "...", "privacy": "...", "terms": "...", "imprint": "...", "download": "..." }
+  "links": { "support": "...", "documentation": "...", "privacy": "...", "terms": "...", "imprint": "...", "download": "..." }
 }
 ```
 

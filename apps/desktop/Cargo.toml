@@ -39,9 +39,10 @@ secrecy.workspace = true
 tokio = { workspace = true, features = ["io-util", "rt", "time", "sync", "macros"] }
 # System browser for the OIDC login (RFC 8252): the webview never shows the identity provider.
 tauri-plugin-opener = "2"
-# Pictures pasted from the system clipboard go to the UI as PNG (#761); already in the tree through
-# the client core, PNG only.
-image = { version = "0.25.9", default-features = false, features = ["png"] }
+# Pictures pasted from the system clipboard go to the UI as PNG (#761), and notification pictures
+# (#543) are read from the media cache (avatars come as PNG, JPEG or WebP); already in the tree
+# through the client core with the same decoders.
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "webp"] }
 # Push-to-talk while another app has focus (Windows, macOS, X11).
 tauri-plugin-global-shortcut = "2"
 # System notifications for mentions and direct messages (the UI decides what to show).
@@ -105,7 +106,7 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
 # safe objc2 bindings (Zlib/Apache-2.0/MIT; already in the tree through Tauri's macOS stack).
 objc2 = "0.6.2"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSBundle", "NSError", "NSSet", "NSString"] }
-objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNNotificationAction", "UNNotificationAttachment", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 block2 = "0.6.2"
 
 # Windows: Media Foundation cameras and Windows Graphics Capture for screens and windows.

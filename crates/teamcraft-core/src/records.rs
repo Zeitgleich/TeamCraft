@@ -1,10 +1,8 @@
-//! Typed records on top of [`LocalStore`]: the account, sync cursors, the outbox, pinned identities
-//! and the openmls provider storage.
+//! Typed records on top of [`LocalStore`]: the account, sync cursors, the outbox and pinned
+//! identities. The openmls provider storage has its own module, [`crate::mls_storage`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
-use openmls_rust_crypto::OpenMlsRustCrypto;
-use openmls_traits::OpenMlsProvider;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::backup::BackupKey;
@@ -27,7 +25,6 @@ const SYNC_KEY: &str = "sync";
 const PENDING_DEVICE_KEY: &str = "pending_device";
 const PENDING_LINK_KEY: &str = "pending_link";
 const ABANDONED_DEVICES_KEY: &str = "abandoned_devices";
-const MLS_STORAGE_KEY: &str = "provider";
 /// At most this many registrations of dropped device key pairs wait to be revoked; older ones are
 /// given up (they stay in the user's device list, where the user can remove them).
 const MAX_ABANDONED_DEVICES: usize = 16;
@@ -244,6 +241,16 @@ pub fn stored_device_id(store: &impl LocalStore) -> Result<Option<DeviceId>, Cor
     device_id: DeviceId,
   }
   Ok(get_json::<DeviceOnly>(store, Table::Account, ACCOUNT_KEY)?.map(|record| record.device_id))
+}
+
+/// The account's user ID alone, like [`stored_device_id`]: the service worker finds the account's
+/// media cache by it.
+pub fn account_user_id(store: &impl LocalStore) -> Result<Option<UserId>, CoreError> {
+  #[derive(Deserialize)]
+  struct UserOnly {
+    user_id: UserId,
+  }
+  Ok(get_json::<UserOnly>(store, Table::Account, ACCOUNT_KEY)?.map(|record| record.user_id))
 }
 
 pub fn load_account(store: &impl LocalStore) -> Result<Option<Account>, CoreError> {
@@ -626,57 +633,6 @@ pub fn discard_failed(
   })
 }
 
-/// The openmls provider storage holds group state and key package private keys. It is kept as one
-/// snapshot (all entries) and written after every MLS operation.
-pub fn save_mls_storage(store: &impl LocalStore, provider: &OpenMlsRustCrypto) -> Result<(), CoreError> {
-  let values = provider
-    .storage()
-    .values
-    .read()
-    .map_err(|_| CoreError::Corrupt("MLS storage lock poisoned".into()))?;
-  let mut encoded = zeroize::Zeroizing::new(Vec::new());
-  for (key, value) in values.iter() {
-    push_chunk(&mut encoded, key);
-    push_chunk(&mut encoded, value);
-  }
-  store.put(Table::MlsStorage, MLS_STORAGE_KEY, &encoded)?;
-  // The snapshot is rewritten whole, so the previous one (old epoch secrets, spent key package
-  // private keys) sits in free pages and the write-ahead log until the store clears them (#417).
-  store.purge_freed_soon();
-  Ok(())
-}
-
-/// Roughly how many bytes [`save_mls_storage`] writes (diagnostics; 0 if the lock is poisoned).
-pub fn mls_storage_len(provider: &OpenMlsRustCrypto) -> usize {
-  provider.storage().values.read().map_or(0, |values| {
-    values
-      .iter()
-      .map(|(key, value)| key.len().saturating_add(value.len()))
-      .sum()
-  })
-}
-
-pub fn load_mls_storage(store: &impl LocalStore) -> Result<OpenMlsRustCrypto, CoreError> {
-  let provider = OpenMlsRustCrypto::default();
-  let Some(encoded) = store.get(Table::MlsStorage, MLS_STORAGE_KEY)? else {
-    return Ok(provider);
-  };
-  let encoded = zeroize::Zeroizing::new(encoded);
-  let mut entries = HashMap::new();
-  let mut rest = encoded.as_slice();
-  while !rest.is_empty() {
-    let key = take_chunk(&mut rest)?;
-    let value = take_chunk(&mut rest)?;
-    entries.insert(key, value);
-  }
-  *provider
-    .storage()
-    .values
-    .write()
-    .map_err(|_| CoreError::Corrupt("MLS storage lock poisoned".into()))? = entries;
-  Ok(provider)
-}
-
 pub fn pinned_identities(store: &impl LocalStore) -> Result<BTreeMap<UserId, PinnedIdentity>, CoreError> {
   let mut pinned = BTreeMap::new();
   for (key, value) in store.list(Table::PinnedIdentities)? {
@@ -750,22 +706,6 @@ pub fn list_json_with_prefix<T: DeserializeOwned>(
 
 fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, CoreError> {
   serde_json::from_slice(bytes).map_err(|error| CoreError::Corrupt(error.to_string()))
-}
-
-fn push_chunk(out: &mut Vec<u8>, chunk: &[u8]) {
-  // Invariant: storage entries are far below 4 GiB.
-  let length = u32::try_from(chunk.len()).unwrap_or(u32::MAX);
-  out.extend_from_slice(&length.to_be_bytes());
-  out.extend_from_slice(chunk);
-}
-
-fn take_chunk(rest: &mut &[u8]) -> Result<Vec<u8>, CoreError> {
-  let corrupt = || CoreError::Corrupt("truncated MLS storage snapshot".into());
-  let (length, tail) = rest.split_first_chunk::<4>().ok_or_else(corrupt)?;
-  let length = u32::from_be_bytes(*length) as usize;
-  let chunk = tail.get(..length).ok_or_else(corrupt)?;
-  *rest = &tail[length..];
-  Ok(chunk.to_vec())
 }
 
 /// The verified signing key of a device, as recorded from its certificate (security review A10).
@@ -848,6 +788,12 @@ mod tests {
     save_account(&store, &account).unwrap();
     let loaded = load_account(&store).unwrap().unwrap();
     assert_eq!(loaded.user_id, account.user_id);
+    assert_eq!(account_user_id(&store).unwrap(), Some(account.user_id));
+    assert_eq!(
+      account_user_id(&MemoryStore::new()).unwrap(),
+      None,
+      "no account yet"
+    );
     assert_eq!(loaded.device.public_keys(), account.device.public_keys());
     assert_eq!(loaded.identity_public_key(), account.identity_public_key());
     assert_eq!(loaded.certificate, account.certificate);
@@ -1044,28 +990,6 @@ mod tests {
         .map(Result::unwrap)
         .collect()
     }
-  }
-
-  #[test]
-  fn mls_storage_snapshot_round_trips() {
-    let store = MemoryStore::new();
-    let provider = OpenMlsRustCrypto::default();
-    provider
-      .storage()
-      .values
-      .write()
-      .unwrap()
-      .insert(b"key".to_vec(), b"value".to_vec());
-    save_mls_storage(&store, &provider).unwrap();
-    let loaded = load_mls_storage(&store).unwrap();
-    assert_eq!(
-      loaded.storage().values.read().unwrap().get(b"key".as_slice()),
-      Some(&b"value".to_vec())
-    );
-    store
-      .put(Table::MlsStorage, MLS_STORAGE_KEY, &[0, 0, 0, 9, 1])
-      .unwrap();
-    assert!(load_mls_storage(&store).is_err());
   }
 
   fn sample_account() -> Account {
