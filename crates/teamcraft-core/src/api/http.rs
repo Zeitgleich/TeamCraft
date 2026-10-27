@@ -3,6 +3,7 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{PoisonError, RwLock};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
@@ -113,7 +114,8 @@ pub struct StaticToken(pub String);
 pub type WriteBarrier = std::rc::Rc<dyn Fn() -> futures_util::future::LocalBoxFuture<'static, ()>>;
 
 pub struct HttpServerApi<T> {
-  client: reqwest::Client,
+  /// Replaced by [`HttpServerApi::drop_connections`] after a wake-up or network change.
+  client: RwLock<reqwest::Client>,
   /// Awaited before every request that changes server state.
   #[cfg(target_arch = "wasm32")]
   maybe_write_barrier: Option<WriteBarrier>,
@@ -136,7 +138,7 @@ enum Enrollment {
 impl<T: AccessTokenSource> HttpServerApi<T> {
   /// `base_url` without trailing slash, e.g. `https://chat.example.com`.
   pub fn new(base_url: impl Into<String>, tokens: T) -> Self {
-    let client = http_client();
+    let client = RwLock::new(http_client());
     let base_url = base_url.into().trim_end_matches('/').to_string();
     Self {
       client,
@@ -156,6 +158,18 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     self
   }
 
+  /// Forgets the pooled connections: after a suspend or a network change they are usually dead,
+  /// and a request on one would only fail once the HTTP/2 keep-alive gives up (issue #883).
+  /// Requests already running keep theirs.
+  pub fn drop_connections(&self) {
+    *self.client.write().unwrap_or_else(PoisonError::into_inner) = http_client();
+  }
+
+  /// The HTTP client of the next request (a cheap handle on the shared pool).
+  fn http(&self) -> reqwest::Client {
+    self.client.read().unwrap_or_else(PoisonError::into_inner).clone()
+  }
+
   /// Local writes are durable before the server hears of anything that follows from them.
   async fn before_change(&self, method: &Method) {
     #[cfg(target_arch = "wasm32")]
@@ -173,7 +187,7 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     self.require_secure_transport()?;
     let token = self.tokens.access_token()?;
     let request = self
-      .client
+      .http()
       .request(method, format!("{}/api/v1{path}", self.base_url))
       .bearer_auth(token);
     #[cfg(not(target_arch = "wasm32"))]
@@ -1146,14 +1160,14 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
 
   async fn put_blob(&self, url: &str, bytes: Vec<u8>) -> Result<(), ApiError> {
     // Presigned: the URL carries the authorization, so no bearer token goes to object storage.
-    send(self.client.put(url).body(bytes)).await.map(|_| ())
+    send(self.http().put(url).body(bytes)).await.map(|_| ())
   }
 
   #[cfg(not(target_arch = "wasm32"))]
   fn put_blob_detached(&self, url: &str, bytes: Vec<u8>, sent: ByteCounter) -> DetachedRequest {
     // Presigned URLs want the exact length; a streamed body would otherwise go chunked.
     let request = self
-      .client
+      .http()
       .put(url)
       .header(reqwest::header::CONTENT_LENGTH, bytes.len())
       .body(counted_body(bytes, sent.clone()));
@@ -1172,7 +1186,7 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   #[cfg(not(target_arch = "wasm32"))]
   fn put_part_detached(&self, url: &str, bytes: Vec<u8>, sent: ByteCounter) -> DetachedPart {
     let request = self
-      .client
+      .http()
       .put(url)
       .header(reqwest::header::CONTENT_LENGTH, bytes.len())
       .body(counted_body(bytes, sent.clone()));
@@ -1200,7 +1214,7 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     maybe_max_bytes: Option<u64>,
     received: ByteCounter,
   ) -> DetachedDownload {
-    let request = self.client.get(url);
+    let request = self.http().get(url);
     Box::pin(async move {
       let mut response = send(request).await?;
       let max_bytes = maybe_max_bytes.unwrap_or(u64::MAX);
@@ -1231,7 +1245,7 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   }
 
   async fn get_blob(&self, url: &str) -> Result<Vec<u8>, ApiError> {
-    let response = send(self.client.get(url)).await?;
+    let response = send(self.http().get(url)).await?;
     response
       .bytes()
       .await
@@ -1240,7 +1254,7 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   }
 
   async fn get_blob_capped(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
-    let response = send(self.client.get(url)).await?;
+    let response = send(self.http().get(url)).await?;
     if response.content_length().is_some_and(|length| length > max_bytes) {
       return Err(ApiError::BlobTooLarge { max_bytes });
     }
@@ -1305,7 +1319,7 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
 
   async fn gateway_info(&self, gateway_url: &str) -> Result<GatewayInfoResponse, ApiError> {
     let base = gateway_base(gateway_url)?;
-    decode(send(self.client.get(format!("{base}/v1/info"))).await?).await
+    decode(send(self.http().get(format!("{base}/v1/info"))).await?).await
   }
 
   async fn revoke_gateway_token(&self, gateway_url: &str, sealed_token: &[u8]) -> Result<(), ApiError> {
@@ -1313,7 +1327,7 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     let body = GatewayRevokeRequest {
       bound_token: Base64Bytes::new(sealed_token.to_vec()),
     };
-    send(self.client.post(format!("{base}/v1/tokens/revoke")).json(&body))
+    send(self.http().post(format!("{base}/v1/tokens/revoke")).json(&body))
       .await
       .map(drop)
   }

@@ -25,6 +25,7 @@ mod external_links;
 mod freedesktop;
 mod message_sound;
 mod notifications;
+mod reconnect;
 mod ringtone;
 mod shell_prefs;
 mod single_instance;
@@ -41,7 +42,6 @@ mod window_chrome;
 mod windows_shell;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Context;
 use tauri::path::BaseDirectory;
@@ -61,9 +61,6 @@ use crate::shell_prefs::ShellPrefsState;
 use crate::updates::UpdateHost;
 use crate::window_chrome::WindowChromeState;
 
-/// How often the login session's access token is checked and refreshed before it runs out.
-const TOKEN_REFRESH: Duration = Duration::from_secs(2);
-
 fn main() -> anyhow::Result<()> {
   // Before GTK starts: file pickers through xdg-desktop-portal, WebKitGTK without the DMABUF
   // renderer that flickers on some GPUs (startup_env.rs).
@@ -77,7 +74,8 @@ fn main() -> anyhow::Result<()> {
   let service = Arc::new(AuthService::new(None, KeyringStore).context("could not set up sign-in")?);
   // The core reads the session's current token on every request; the loop below refreshes it.
   let tokens = TokenCache::live(service.clone());
-  keep_tokens_fresh(service.clone());
+  let refresh_now = reconnect::RefreshNow::default();
+  reconnect::keep_tokens_fresh(service.clone(), refresh_now.clone());
 
   // Registered first: the single-instance plugin must see a second launch before anything else.
   let builder = tauri::Builder::default().plugin(single_instance::plugin());
@@ -111,6 +109,7 @@ fn main() -> anyhow::Result<()> {
         .build(),
     )
     .manage(service.clone())
+    .manage(refresh_now)
     .manage(attention::OsProbe::default())
     .manage(notifications::ShownNotifications::default())
     .manage(notifications::pictures::NotificationPictures::default())
@@ -178,8 +177,12 @@ fn main() -> anyhow::Result<()> {
       notifications::watch_notifications(app.handle());
       #[cfg(target_os = "linux")]
       watch_wake(app.handle());
+      #[cfg(target_os = "linux")]
+      watch_network(app.handle());
       #[cfg(any(target_os = "macos", windows))]
       watch_native_wake(app.handle());
+      #[cfg(any(target_os = "macos", windows))]
+      watch_native_network(app.handle());
       #[cfg(windows)]
       windows_shell::forward_deep_links(app.handle());
       Ok(())
@@ -464,10 +467,29 @@ fn watch_wake(app: &tauri::AppHandle) {
     buses
       .watch_wake(move || {
         tracing::info!("resumed from suspend");
-        handle.state::<CoreHost>().network_changed();
-        handle.state::<Arc<CallHost>>().network_changed();
+        reconnect::network_back(&handle);
       })
       .await;
+  });
+}
+
+/// NetworkManager reports the network back up (it often is only seconds after a wake-up): the
+/// gateway reconnects at once (issue #883). Without NetworkManager a probe stands in for it.
+#[cfg(target_os = "linux")]
+fn watch_network(app: &tauri::AppHandle) {
+  let app = app.clone();
+  tauri::async_runtime::spawn(async move {
+    let buses = app.state::<attention::OsProbe>().buses();
+    let handle = app.clone();
+    let has_network_manager = buses
+      .watch_network_up(move || {
+        tracing::info!("the network is up");
+        reconnect::network_back(&handle);
+      })
+      .await;
+    if !has_network_manager {
+      reconnect::probe_while_offline(app);
+    }
   });
 }
 
@@ -477,23 +499,26 @@ fn watch_native_wake(app: &tauri::AppHandle) {
   let handle = app.clone();
   let result = teamcraft_desktop_native::watch_resume(move || {
     tracing::info!("resumed from suspend");
-    handle.state::<CoreHost>().network_changed();
-    handle.state::<Arc<CallHost>>().network_changed();
+    reconnect::network_back(&handle);
   });
   if let Err(error) = result {
     tracing::warn!(%error, "no resume notification; reconnecting at the next check");
   }
 }
 
-fn keep_tokens_fresh(service: Arc<AuthService<KeyringStore>>) {
-  tauri::async_runtime::spawn(async move {
-    loop {
-      // Refreshes the token when it is close to expiry; the core reads the result from the session.
-      // Signed out is the normal case here, not an error.
-      drop(service.server_bearer_token().await);
-      tokio::time::sleep(TOKEN_REFRESH).await;
-    }
+/// macOS (Network.framework's path monitor) and Windows (connectivity hint) report the network back
+/// up: the gateway reconnects at once (issue #883). Should the hook fail, a probe stands in for it.
+#[cfg(any(target_os = "macos", windows))]
+fn watch_native_network(app: &tauri::AppHandle) {
+  let handle = app.clone();
+  let result = teamcraft_desktop_native::watch_network_up(move || {
+    tracing::info!("the network is up");
+    reconnect::network_back(&handle);
   });
+  if let Err(error) = result {
+    tracing::warn!(%error, "no network notification; probing for the network instead");
+    reconnect::probe_while_offline(app.clone());
+  }
 }
 
 #[cfg(test)]

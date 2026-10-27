@@ -94,6 +94,10 @@ pub enum SignInReason {
   SessionEnded,
   /// The session policy's idle timeout or longest session ran out.
   SessionTimedOut,
+  /// The identity provider refused the app's refresh token (`invalid_grant`): it expired (idle or
+  /// session limit of the provider), was revoked, or the user was disabled there (issue #883). The
+  /// app says so itself; no server sends it.
+  SignInExpired,
   /// The token was refused without a reason (expired, invalid), or by an older server.
   #[default]
   #[serde(other)]
@@ -214,6 +218,10 @@ mod tests {
     assert_eq!(
       SignInReason::from_error_code(&ErrorCode::InvalidToken),
       SignInReason::Unknown
+    );
+    assert_eq!(
+      serde_json::to_string(&SignInReason::SignInExpired).unwrap(),
+      r#""sign_in_expired""#
     );
     assert_eq!(
       serde_json::from_str::<SignInReason>(r#""from_a_newer_server""#).unwrap(),

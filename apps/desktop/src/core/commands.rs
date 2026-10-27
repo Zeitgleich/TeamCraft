@@ -49,6 +49,11 @@ impl CoreHost {
     }
   }
 
+  /// Where the running core's gateway connection stands; `None` without a running core.
+  pub fn connection_state(&self) -> Option<teamcraft_core::connection::ConnectionState> {
+    self.current().ok().map(|runtime| runtime.connection_state())
+  }
+
   /// Starts the core of `user` on `server_url` with `spawn`, or reuses the running one. A core
   /// that failed to open is replaced, so trying again really tries again.
   pub(crate) async fn start<S: TokenStore>(

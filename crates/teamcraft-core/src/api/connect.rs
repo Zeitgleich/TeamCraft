@@ -17,11 +17,19 @@ use url::{Host, Url};
 /// Longest proxy answer to `CONNECT` that is read; real ones are a status line and a few headers.
 const MAX_PROXY_RESPONSE_BYTES: usize = 8 * 1024;
 
-/// Why a tunnel through the proxy failed.
+/// Why a connection to the server, directly or through the proxy, failed. The text names the step
+/// that failed, so a missing network (no DNS) does not read like a proxy problem (issue #883).
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TunnelError {
+  /// The host name (of the server, or of the proxy) did not resolve: usually no network yet.
+  #[error("looking up {host} failed: {source}")]
+  Lookup { host: String, source: io::Error },
+  /// The server did not accept a direct connection.
+  #[error("connecting to the server failed: {0}")]
+  Connect(io::Error),
+  /// The proxy could not be reached, or the connection to it broke during the tunnel set-up.
   #[error("connecting to the proxy failed: {0}")]
-  Io(#[from] io::Error),
+  Proxy(io::Error),
   #[error("the proxy refused the tunnel: {0}")]
   Refused(String),
   #[error("the proxy asks for credentials (407)")]
@@ -38,17 +46,30 @@ pub(crate) async fn connect_via(url: &Url, maybe_proxy: Option<&Url>) -> Result<
     Some(proxy) => {
       let (proxy_host, proxy_port) = host_and_port(proxy).ok_or(TunnelError::Malformed)?;
       tracing::debug!(proxy = %proxy_host, "connecting through the proxy");
-      let stream = connect_host(&proxy_host, proxy_port).await?;
+      let addresses = lookup(&proxy_host, proxy_port).await?;
+      let stream = connect_first(addresses, ATTEMPT_DELAY)
+        .await
+        .map_err(TunnelError::Proxy)?;
       tunnel(stream, &authority(&host, port), proxy).await
     },
-    None => Ok(connect_host(&host, port).await?),
+    None => {
+      let addresses = lookup(&host, port).await?;
+      connect_first(addresses, ATTEMPT_DELAY)
+        .await
+        .map_err(TunnelError::Connect)
+    },
   }
 }
 
-/// Resolves `host` and races its addresses (Happy Eyeballs, `teamcraft-net`).
-pub(crate) async fn connect_host(host: &str, port: u16) -> io::Result<TcpStream> {
-  let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await?.collect();
-  connect_first(interleave(addresses), ATTEMPT_DELAY).await
+/// The addresses of `host`, interleaved for Happy Eyeballs (`teamcraft-net`).
+async fn lookup(host: &str, port: u16) -> Result<Vec<SocketAddr>, TunnelError> {
+  let addresses = tokio::net::lookup_host((host, port))
+    .await
+    .map_err(|source| TunnelError::Lookup {
+      host: host.to_owned(),
+      source,
+    })?;
+  Ok(interleave(addresses.collect()))
 }
 
 /// The first of `addresses` that accepts a TCP connection, raced as [`teamcraft_net::race`] does.
@@ -71,7 +92,10 @@ async fn tunnel(mut stream: TcpStream, authority: &str, proxy: &Url) -> Result<T
     request.push_str(&format!("Proxy-Authorization: Basic {credentials}\r\n"));
   }
   request.push_str("\r\n");
-  stream.write_all(request.as_bytes()).await?;
+  stream
+    .write_all(request.as_bytes())
+    .await
+    .map_err(TunnelError::Proxy)?;
   let head = read_head(&mut stream).await?;
   let status_line = head.lines().next().unwrap_or_default();
   let mut parts = status_line.split_whitespace();
@@ -96,8 +120,8 @@ async fn read_head(stream: &mut TcpStream) -> Result<String, TunnelError> {
       return Err(TunnelError::Malformed);
     }
     let mut byte = [0u8; 1];
-    if stream.read(&mut byte).await? == 0 {
-      return Err(TunnelError::Io(io::ErrorKind::UnexpectedEof.into()));
+    if stream.read(&mut byte).await.map_err(TunnelError::Proxy)? == 0 {
+      return Err(TunnelError::Proxy(io::ErrorKind::UnexpectedEof.into()));
     }
     head.push(byte[0]);
   }
@@ -295,6 +319,27 @@ mod tests {
       let error = tunnel(stream, "chat.example.com:443", &proxy).await.unwrap_err();
       assert!(check(&error), "{answer}: {error}");
     }
+  }
+
+  /// Without a network the error names the failed lookup, not a proxy nobody configured (#883).
+  #[tokio::test]
+  async fn a_direct_connection_without_dns_says_the_lookup_failed() {
+    let url = Url::parse("wss://chat.invalid/api/v1/gateway").unwrap();
+    let error = connect_via(&url, None).await.unwrap_err();
+    assert!(matches!(error, TunnelError::Lookup { .. }), "{error}");
+    let text = error.to_string();
+    assert!(text.starts_with("looking up chat.invalid failed"), "{text}");
+    assert!(!text.contains("proxy"), "{text}");
+  }
+
+  #[tokio::test]
+  async fn a_refused_direct_connection_names_the_server() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let url = Url::parse(&format!("ws://{address}/api/v1/gateway")).unwrap();
+    let error = connect_via(&url, None).await.unwrap_err();
+    assert!(matches!(error, TunnelError::Connect(_)), "{error}");
   }
 
   async fn read_head_of(socket: &mut TcpStream) -> String {
