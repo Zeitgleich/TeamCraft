@@ -58,7 +58,8 @@ twice. Keys are kept for 10 minutes, in memory (docs/bridge.md, "Retries").
 
 ## Limits
 
-Text only (webhook file attachments are ignored); source configuration is read at start.
+Webhooks take text and files (`multipart/form-data`, within the bridge's `[files]` limits; see the
+bridge docs, "Files"); source configuration is read at start.
 
 ## Log view
 
