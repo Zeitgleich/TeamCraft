@@ -1574,7 +1574,8 @@ Details:
 
 - The NSE only needs content keys (simple symmetric decryption), not MLS state. This avoids the classic
   problem of the extension and the main app both advancing the same MLS ratchet. Incoming MLS
-  commits are left for the main app.
+  commits are left for the main app: the NSE opens pushes with `notification_preview_for_push`,
+  which never catches a conversation up (§7.2, §9.4).
 - App and NSE still share the local database (App Group container + keychain access group). Like
   Threema's `ProcessCoordinator`, a cross-process lock ensures only one process syncs with the server at
   a time; Darwin notifications tell the other process to reload.
@@ -1994,12 +1995,19 @@ So exactly one core owns a device's store at a time:
   jitter; after five passes in a row it keeps it. A reload of the active tab finds its own account
   in the tab's session storage, claims the lock like "Use here" and waits up to 3 s for it instead
   of asking. Browsers without Web Locks run one core per tab, as before. The service worker only reads
-  the store (push previews, §7).
+  the store (push previews, §7) and opens it without upgrading it (§9.5).
 - **Desktop.** One running instance on every OS (Tauri's single-instance plugin: a named mutex on
   Windows, D-Bus on Linux, a Unix socket on macOS); a second launch shows the first instance's window
   and exits. Behind that, an OS file lock (`<store>.lock`, `StoreLock`) keeps any second process off
   the store, for example on Linux without a session bus. The OS releases it when the process ends.
-- **Mobile.** One app process; the iOS notification service extension only reads the store.
+- **Mobile.** One app process. The iOS notification service extension opens the same store under a
+  cross-process lock and never advances the account's state: it opens a push with
+  `notification_preview_for_push`, which shows what the store and the one fetched message give and
+  never catches the conversation up (§7.2). It writes only its push bookkeeping (received pushes,
+  what it showed) and, on its first open after an update, the store's migrations. Until 1.0.9 its
+  core did catch a conversation up when the app wasn't syncing, writing MLS state next to the app's
+  copy (issue #424 review). Should another process write MLS state anyway, the app's next MLS save
+  sees its commit and writes the whole state (§9.5).
 
 **Writes that fail (web).** IndexedDB refuses writes when the origin's quota is exhausted. A failed
 write is kept and issued again on every flush, until it went through; the flush reports the reason
@@ -2042,16 +2050,28 @@ half old, half new (kill-point tests in `store_integrity.rs`). Joining a group o
 message writes that group's few changed entries, whatever the number of groups; before, the whole
 storage was one record rewritten after every change, which made a catch-up of many new groups
 quadratic (0.8 GB written for 300 groups, docs/performance.md). The client remembers what the
-store holds (`SavedMlsStorage`) to find the changes without reading the store. A store that can
-lose writes it accepted counts its committed and rolled-back groups (`LocalStore::write_tally`,
-the SQLite stores): after a lost group the next save writes every entry again and deletes every key
-that may still be on disk, the deletes of groups not yet known to be committed included (the sealed
-store's cache keeps a rolled-back group, so its listing no longer shows them). The browser store
-never loses an accepted write while the page runs (§9.4). A deleted group leaves no entry, the
-previous epoch's leaf keys included, which openmls 0.9 leaves behind after a commit that removed
-the device. Versions before 1.0.9 kept the whole storage as one record (`provider`); opening the
-store moves it to entries in one group of writes that removes the old record last, so until that
-group is on disk the old record is what a start reads, and an interrupted move is done again from it.
+store holds (`SavedMlsStorage`) to find the changes without reading the store. The SQLite stores
+count what may make the disk differ from what they accepted (`LocalStore::write_tally`): groups
+of writes rolled back (a full disk) and commits of another connection to the same file (`PRAGMA
+data_version`, another process). Once a count moved, the next save writes every entry again and
+deletes every key that may still be on disk, the deletes the disk lost included: the sealed store's
+cache keeps a rolled-back group, so it remembers the entries such a group deleted
+(`LocalStore::lost_deletes`) until a later group that reached the disk wrote them again. So a second
+writer, should there be one, makes the whole state of whoever saves last win, as with the one
+record, instead of mixing two epochs of a group per entry. A client loaded again on a store that
+already lost writes (the mobile engine reopens it after a panic, on the same store) starts with
+such a full save. The browser store never loses an accepted write while the page runs and has one
+owner (§9.4). A deleted group leaves no entry, the previous epoch's leaf keys included, which
+openmls 0.9 leaves behind after a commit that removed the device.
+
+Versions before 1.0.9 kept the whole storage as one record (`provider`). Opening the store moves it
+to entries in one group of writes that puts a marker in the old record's place last: until that
+group is on disk the old record is what a start reads. The marker is a length prefix far beyond the
+record, so every earlier version (1.0.0 to 1.0.8 read the record the same way) reports the store as
+damaged instead of reading no MLS state, which would lose every group and later save a near-empty
+record. A store without the marker (set up by this version) gets it when it opens. An old record
+next to entries can only come from an older version that wrote after the move: the entries are the
+device's groups and stay, the record is set aside (`set_aside/provider-<n>`, never read) and logged.
 
 **Layout versions.** The SQLite stores keep their layout version in `PRAGMA user_version`. Each store
 has a list of numbered steps (forward-only, never edited once released); opening runs the missing
@@ -2060,11 +2080,17 @@ leaves the database at the last step that completed. Upkeep that can't run in a 
 one-time wipe of free pages, version 2, issue #391) runs after the earlier steps committed and
 counts as done only once it succeeded; a failure (a full disk) is tried again on the next start.
 Released 1.0 databases carry version 0 and the layout of version 1. A newer layout is refused
-without touching it. Version 3 changes no table but marks the MLS state stored per entry, which an
-older version would read as no MLS state at all; it is set without upkeep, so a failed wipe before
-it is still retried and the marker waits for it.
+without touching it. Version 3 changes no table but marks the MLS state stored per entry, so
+1.0.3 to 1.0.8 refuse the database ("a newer version") before they would read it; 1.0.0 to 1.0.2
+check no version and fail on the record's marker instead. The marker never waits for upkeep: a wipe
+that failed before it is noted as due (`upkeep_due`), the version moves on, and the wipe runs again
+on every open until it succeeds.
 IndexedDB versions its object stores itself and refuses a newer database (`VersionError`); version 2
-is the same marker (an older page that still holds the database closes it on `versionchange`). Databases
+is the same marker. Only a page that owns the store (it holds the Web Lock, §9.4) opens it at its
+version and so upgrades it; an older page that still holds the database closes it on
+`versionchange` and asks for a reload. The service worker opens it at whatever version it has and
+never upgrades it, so a push can't close the store under an older page that goes on running.
+Databases
 written by every release are kept as fixtures (`crates/teamcraft-core/tests/fixtures/store/`) and
 opened by every later version in CI. Records inside the store stay JSON with defaults for new
 fields and an `Unknown` catch-all, so newer records are read or skipped, not misread.

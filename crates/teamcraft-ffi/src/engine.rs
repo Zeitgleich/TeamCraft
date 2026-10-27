@@ -168,6 +168,24 @@ pub(crate) enum PushOpening {
   Retry,
 }
 
+/// Who opens a push: the app, whose client may catch the conversation up, or a notification
+/// extension next to the app (iOS), which must not advance the account's state: two processes
+/// would each advance their own copy of the MLS state (e2ee.md §7.2, issue #424 review H2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PushReader {
+  App,
+  Extension,
+}
+
+impl PushReader {
+  /// Whether the client catches the push's conversation up (welcomes, MLS backlog, messages)
+  /// when the preview couldn't read the message: only the app's own, and only while it isn't
+  /// syncing (the sync loop brings the message itself).
+  fn catches_up(self, needs_catch_up: bool, is_client_idle: bool) -> bool {
+    self == Self::App && needs_catch_up && is_client_idle
+  }
+}
+
 /// The app's [`TokenProvider`] as the core's token source.
 #[derive(Clone)]
 pub(crate) struct ForeignTokens(Arc<dyn TokenProvider>);
@@ -933,8 +951,9 @@ impl Engine {
     payload: Vec<u8>,
     utc_offset_minutes: i16,
     opening: PushOpening,
+    reader: PushReader,
   ) -> Result<PushNotification, TeamCraftError> {
-    let preview = self.push_preview_within_budget(&payload).await?;
+    let preview = self.push_preview_within_budget(&payload, reader).await?;
     let now_ms = SystemClock.now_ms();
     let store = self.store.as_ref();
     // A retry is the same push again: counting it would skew the received count and the delay.
@@ -968,7 +987,11 @@ impl Engine {
   /// The preview of a wake-up within [`PUSH_PREVIEW_BUDGET`], so the push service's time for the
   /// app (FCM: about 10 s) is never spent on a slow network: a fetch that takes longer, or a catch-up
   /// that doesn't finish, leaves a notification that names the sender instead of none.
-  async fn push_preview_within_budget(&mut self, payload: &[u8]) -> Result<PushPreview, TeamCraftError> {
+  async fn push_preview_within_budget(
+    &mut self,
+    payload: &[u8],
+    reader: PushReader,
+  ) -> Result<PushPreview, TeamCraftError> {
     let deadline = tokio::time::Instant::now() + PUSH_PREVIEW_BUDGET;
     let api = self.api();
     // Without a token the preview still names conversation and sender.
@@ -995,8 +1018,10 @@ impl Engine {
     };
     // The app's own client may catch the conversation up: a conversation this device was just
     // added to, or keys that changed while the app was closed. Not while the sync loop runs: it
-    // brings the message itself, and taking the client would cut its connection.
-    if preview.needs_catch_up()
+    // brings the message itself, and taking the client would cut its connection. Never in a
+    // notification extension ([`PushReader::Extension`]).
+    let is_client_idle = matches!(self.client, ClientSlot::Idle(_));
+    if reader.catches_up(preview.needs_catch_up(), is_client_idle)
       && let ClientSlot::Idle(client) = &mut self.client
     {
       let conversation = preview.wake_up.conversation_id;
@@ -1378,6 +1403,19 @@ mod tests {
   use std::time::{Duration, SystemTime};
 
   use super::*;
+
+  /// Issue #424 review, H2: a notification extension never catches a conversation up (it would
+  /// advance the MLS state next to the app's copy); the app's idle client does.
+  #[test]
+  fn only_the_apps_idle_client_catches_a_push_up() {
+    assert!(PushReader::App.catches_up(true, true));
+    assert!(
+      !PushReader::App.catches_up(true, false),
+      "the sync loop brings it"
+    );
+    assert!(!PushReader::App.catches_up(false, true), "nothing missing");
+    assert!(!PushReader::Extension.catches_up(true, true));
+  }
 
   #[test]
   fn downloads_above_the_limit_lose_their_least_recently_used_files() {

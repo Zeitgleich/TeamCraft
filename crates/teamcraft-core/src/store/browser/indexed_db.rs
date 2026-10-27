@@ -40,7 +40,7 @@ use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{IdbDatabase, IdbObjectStore, IdbTransaction, IdbTransactionMode};
 
-use super::idb::{self, RECORDS};
+use super::idb::{self, OpenMode, RECORDS};
 use crate::store::StoreError;
 use crate::store::sealed::{LazySeal, RecordBackend, SealedStore, format_id, parse_id};
 use crate::store::write_queue::{Issue, RecordValue, WriteFailure, Writes};
@@ -73,9 +73,20 @@ struct Inner {
 }
 
 impl SealedStore<IndexedDbRecords> {
-  /// Opens the database `name` and decrypts it into memory with `database_key`.
+  /// Opens the database `name` and decrypts it into memory with `database_key`; a page that owns
+  /// the store (it holds the Web Lock) upgrades it to this version.
   pub async fn open(name: &str, database_key: &SymmetricKey) -> Result<Self, StoreError> {
-    let database = idb::open_database(name).await?;
+    Self::open_with(name, database_key, OpenMode::Upgrade).await
+  }
+
+  /// [`Self::open`] for the service worker, at whatever version the database has: it never
+  /// upgrades it ([`OpenMode::AsIs`]).
+  pub async fn open_without_upgrade(name: &str, database_key: &SymmetricKey) -> Result<Self, StoreError> {
+    Self::open_with(name, database_key, OpenMode::AsIs).await
+  }
+
+  async fn open_with(name: &str, database_key: &SymmetricKey, mode: OpenMode) -> Result<Self, StoreError> {
+    let database = idb::open_database_with(name, mode).await?;
     let records = match read_all(&database).await {
       Ok(records) => records,
       Err(error) => {

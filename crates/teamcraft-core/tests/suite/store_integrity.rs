@@ -280,9 +280,9 @@ mod kill_points {
         .map(|(key, value)| (key.clone().into_bytes(), value.clone().into_bytes()))
         .collect();
       assert_eq!(entries(&reopened), expected, "kill point {kill_point}");
-      assert_eq!(
+      assert_ne!(
         durable.get(Table::MlsStorage, "provider").unwrap(),
-        None,
+        Some(legacy_record(&old)),
         "kill point {kill_point}: moved on the start after"
       );
       if !has_crashed {

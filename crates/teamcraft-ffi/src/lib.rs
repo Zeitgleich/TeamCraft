@@ -62,7 +62,7 @@ pub use types::{
 
 pub use video::{CameraFrame, VideoFrameRgba};
 
-use crate::engine::{Engine, Job, PushOpening};
+use crate::engine::{Engine, Job, PushOpening, PushReader};
 
 uniffi::setup_scaffolding!();
 
@@ -441,7 +441,33 @@ impl TeamCraft {
   ) -> Result<PushNotification, TeamCraftError> {
     self
       .call(move |engine| {
-        Box::pin(engine.notification_for_push(payload, utc_offset_minutes, PushOpening::Received))
+        Box::pin(engine.notification_for_push(
+          payload,
+          utc_offset_minutes,
+          PushOpening::Received,
+          PushReader::App,
+        ))
+      })
+      .await
+  }
+
+  /// [`Self::notification_for_push`] for a notification extension running next to the app (iOS):
+  /// shows what the store and the one fetched message give, and never catches the conversation up,
+  /// so the extension never advances the account's state (MLS, cursors, keys) behind the app's back
+  /// (e2ee.md §7.2).
+  pub async fn notification_preview_for_push(
+    &self,
+    payload: Vec<u8>,
+    utc_offset_minutes: i16,
+  ) -> Result<PushNotification, TeamCraftError> {
+    self
+      .call(move |engine| {
+        Box::pin(engine.notification_for_push(
+          payload,
+          utc_offset_minutes,
+          PushOpening::Received,
+          PushReader::Extension,
+        ))
       })
       .await
   }
@@ -456,7 +482,12 @@ impl TeamCraft {
   ) -> Result<PushNotification, TeamCraftError> {
     self
       .call(move |engine| {
-        Box::pin(engine.notification_for_push(payload, utc_offset_minutes, PushOpening::Retry))
+        Box::pin(engine.notification_for_push(
+          payload,
+          utc_offset_minutes,
+          PushOpening::Retry,
+          PushReader::App,
+        ))
       })
       .await
   }

@@ -320,6 +320,10 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   fn write_tally(&self) -> Option<WriteTally> {
     self.inner.write_tally()
   }
+
+  fn lost_deletes(&self, table: Table) -> Vec<String> {
+    self.inner.lost_deletes(table)
+  }
 }
 
 /// What a write to `table` under `key` may change in the snapshot.
