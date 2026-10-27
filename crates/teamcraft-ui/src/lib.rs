@@ -65,6 +65,7 @@ pub mod message_links;
 pub mod mock;
 pub mod motion;
 pub mod navigation;
+pub mod notification_pictures;
 pub mod notifier;
 pub mod notify_sync;
 pub mod object_url;

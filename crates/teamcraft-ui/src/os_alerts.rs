@@ -23,7 +23,7 @@ use teamcraft_client_api::activity::{JoinRequest, JoinRequestStanding};
 use teamcraft_client_api::call_window::{CallWindow, CallWindowTheme};
 use teamcraft_client_api::os_notify::{
   NOTIFICATION_ACTION_EVENT, NotificationAction, NotificationActionEvent, NotificationButton,
-  NotificationTag, OsNotification, OsNotificationKind, ReplyField, TagTarget,
+  NotificationPicture, NotificationTag, OsNotification, OsNotificationKind, ReplyField, TagTarget,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -40,10 +40,11 @@ use crate::meeting_reminders::{
   DueReminder, FiredReminders, ReminderKind, ReminderSchedule, ReminderSettings,
 };
 use crate::meetings::MeetingsHub;
-use crate::model::{ConversationId, TimestampMs};
+use crate::model::{ConversationId, TimestampMs, UserId};
+use crate::notification_pictures::picture_of;
 use crate::notifier::{
-  Decision, NotificationTitle, Notifier, ReadWatcher, all_conversations, needs_channel_confirmation,
-  notifications_for,
+  Decision, NotificationTitle, Notifier, PictureSubject, ReadWatcher, all_conversations,
+  needs_channel_confirmation, notifications_for,
 };
 use crate::reactive::OwnerLiveness;
 use crate::settings::{Theme, load_string, store_string};
@@ -150,6 +151,9 @@ fn watch_messages(state: AppState, i18n: I18n) {
         placeholder: i18n.t("notify-reply-placeholder"),
         send_label: i18n.t("notify-action-send"),
       });
+      let maybe_picture = notification
+        .maybe_picture
+        .and_then(|subject| state.read(|backend| picture_of(backend, subject)));
       let shown = OsNotification {
         tag: NotificationTag::conversation(notification.conversation),
         kind: OsNotificationKind::Message,
@@ -160,6 +164,7 @@ fn watch_messages(state: AppState, i18n: I18n) {
           i18n.t("notify-action-mark-read"),
         )],
         maybe_reply,
+        maybe_picture,
       };
       leptos::task::spawn_local(async move { tauri::show_notification(&shown).await });
     }
@@ -250,6 +255,7 @@ fn join_request_notification(state: AppState, i18n: I18n, request: &JoinRequest)
     maybe_body: Some(i18n.t("notify-join-request-body")),
     actions,
     maybe_reply: None,
+    maybe_picture: person_picture_if_named(state, request.user),
   }
 }
 
@@ -497,6 +503,16 @@ fn caller_name(state: AppState, call: &IncomingCall) -> Option<String> {
   state.read(|backend| backend.user(call.caller).map(|user| user.display_name))
 }
 
+/// The person's avatar (#543) where the workspace policy allows names on the lock screen: a face
+/// names the person as the name does.
+fn person_picture_if_named(state: AppState, user: UserId) -> Option<NotificationPicture> {
+  let mode = state.read(|backend| backend.push_content_mode());
+  if !may_name_names(&mode) {
+    return None;
+  }
+  state.read(|backend| picture_of(backend, PictureSubject::Person(user)))
+}
+
 fn incoming_call_notification(state: AppState, i18n: I18n, call: &IncomingCall) -> OsNotification {
   let maybe_body = caller_name(state, call).map(|name| {
     let key = if call.with_video {
@@ -525,6 +541,7 @@ fn incoming_call_notification(state: AppState, i18n: I18n, call: &IncomingCall) 
     maybe_body,
     actions,
     maybe_reply: None,
+    maybe_picture: person_picture_if_named(state, call.caller),
   }
 }
 
@@ -567,6 +584,7 @@ fn missed_call_notification(state: AppState, i18n: I18n, call: &IncomingCall) ->
       i18n.t("notify-action-call-back"),
     )],
     maybe_reply: None,
+    maybe_picture: person_picture_if_named(state, call.caller),
   }
 }
 
@@ -715,6 +733,7 @@ fn meeting_notification(
     maybe_body: may_name.then(|| reminder.title.clone()),
     actions: vec![button(NotificationAction::JoinMeeting, i18n.t("meetings-join"))],
     maybe_reply: None,
+    maybe_picture: None,
   }
 }
 
