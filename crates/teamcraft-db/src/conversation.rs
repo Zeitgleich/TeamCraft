@@ -179,7 +179,11 @@ impl Database {
     }
   }
 
-  async fn participants_conversation(&self, key: Option<&str>) -> Result<Option<ConversationId>, DbError> {
+  /// The DM / group DM that already exists for this [`participants_key`], if any.
+  pub async fn participants_conversation(
+    &self,
+    key: Option<&str>,
+  ) -> Result<Option<ConversationId>, DbError> {
     let existing = sqlx::query_scalar!("SELECT id FROM conversations WHERE participants_key = $1", key)
       .fetch_optional(self.pool())
       .await?;

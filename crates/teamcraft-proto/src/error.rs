@@ -63,6 +63,9 @@ wire_enum! {
     CannotDeleteSelf => "cannot_delete_self",
     /// Deleting the account would leave the workspace without an active admin.
     LastAdmin => "last_admin",
+    /// A guest tried to start a direct message the instance policy doesn't allow them to start
+    /// (`guest_dm_start`, PLAN.md §12). Only given to guests about people they can already see.
+    GuestDmNotAllowed => "guest_dm_not_allowed",
     /// A channel member must belong to the channel's space first (invite them to the space).
     NotSpaceMember => "not_space_member",
     KeyPackageExhausted => "key_package_exhausted",
@@ -271,6 +274,7 @@ mod tests {
       ErrorCode::LastOwner,
       ErrorCode::CannotDeleteSelf,
       ErrorCode::LastAdmin,
+      ErrorCode::GuestDmNotAllowed,
       ErrorCode::KeyPackageExhausted,
       ErrorCode::PayloadTooLarge,
       ErrorCode::RateLimited,
