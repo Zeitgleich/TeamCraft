@@ -101,6 +101,6 @@ cargo deny check
 - **Merging:** `main` requires one check, `ci-gate` (`ci.yml`). With the `ci` label it passes only
   when the whole CI passed; without it CI is skipped and it passes at once. So auto-merge
   (`gh pr merge --auto --squash`) waits for CI exactly when the pull request asked for it. Admins
-  and the nightly workflow bypass the rule.
+  bypass the rule (batch merges); the nightly workflow marks its bump commit (docs/release.md).
 - Commit messages: imperative subject line (≤ 72 chars), body explains *why*. Sign off with
   `git commit -s` (Developer Certificate of Origin, as in CalCraft).

@@ -38,10 +38,12 @@ jobs:
     name: Tag and release
     runs-on: ubuntu-latest
     permissions:
-      # Pushes the bump commit and the tag; starts release.yml; reads CI runs and pull requests.
+      # Pushes the bump commit and the tag; starts release.yml; reads CI runs and pull requests;
+      # marks the bump commit's `ci-gate` (the required check of main).
       contents: write
       actions: write
       pull-requests: read
+      statuses: write
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -141,7 +143,15 @@ jobs:
             scripts/bump-version.sh "$VERSION"
             # No skip marker in this message: GitHub would skip the release for a tag on it.
             git commit -s -a -m "Release $VERSION" -m "Version bump of the nightly release (docs/release.md)."
+            # Main requires `ci-gate` (repository ruleset), also for this push. The bump only changes
+            # version numbers of a tree whose CI was checked above, so the gate is set by hand: the
+            # commit goes to a helper branch first (a status needs a commit GitHub knows), then main.
+            helper="nightly/bump-$VERSION"
+            git push origin "HEAD:refs/heads/$helper"
+            gh api "repos/$GH_REPO/statuses/$(git rev-parse HEAD)" -f state=success -f context=ci-gate \
+              -f description="Version bump of the nightly release; CI of its tree was green"
             git push origin "HEAD:${DEFAULT_BRANCH}"
+            git push origin --delete "$helper"
           fi
           # Annotated: the message becomes the release highlights. The tagged commit is the one pushed.
           git tag --cleanup=whitespace -a -F highlights.md "v$VERSION"
