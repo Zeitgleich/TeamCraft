@@ -4,6 +4,9 @@
 //! reports clicks. Shared by the shell and the UI, so it can serve the tray menu too.
 
 use serde::{Deserialize, Serialize};
+use teamcraft_proto::Base64Bytes;
+
+use crate::media::MediaKey;
 
 /// What the shell emits to the webview when the user clicked a notification or one of its actions
 /// (payload: [`NotificationActionEvent`] as JSON text).
@@ -19,6 +22,9 @@ const MEETING_TAG_PREFIX: &str = "meeting:";
 const REMINDER_TAG_PREFIX: &str = "reminder:";
 /// Tag prefix of an admin's request to join a private channel; `{conversation}:{user}` follows.
 const JOIN_REQUEST_TAG_PREFIX: &str = "admin-join:";
+/// Side of a notification picture in pixels: the generated tile the UI draws and what the shell
+/// scales a cached picture to (the services show it at 48 to 80 points, so this is sharp at 2x).
+pub const NOTIFICATION_PICTURE_PX: u32 = 128;
 
 /// One notification to show. A newer one with the same tag replaces it; withdrawing the tag
 /// removes it, where the platform can.
@@ -36,6 +42,39 @@ pub struct OsNotification {
   /// `inline-reply`).
   #[serde(rename = "reply", default, skip_serializing_if = "Option::is_none")]
   pub maybe_reply: Option<ReplyField>,
+  /// Who wrote or where (#543): the sender's avatar for direct messages, the channel's or space's
+  /// picture for channels. The UI only sets it where the notification may name names.
+  #[serde(rename = "picture", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_picture: Option<NotificationPicture>,
+}
+
+/// The picture beside a notification's text. The shell reads [`Self::maybe_key`] from the
+/// persistent media cache (#749), where the app keeps every picture it showed, and never fetches
+/// one for a notification; without a cached copy it shows the generated fallback. Pictures are
+/// cut to their shape and scaled to [`NOTIFICATION_PICTURE_PX`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationPicture {
+  pub shape: PictureShape,
+  /// The cached picture: an avatar, a channel's or a space's picture.
+  #[serde(rename = "key", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_key: Option<MediaKey>,
+  /// What shows while the cache has no picture: the generated initials tile as the app draws it,
+  /// as PNG of [`NOTIFICATION_PICTURE_PX`] pixels, already in its shape.
+  #[serde(rename = "fallback_png", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_fallback_png: Option<Base64Bytes>,
+}
+
+/// The outline a picture is cut to, as the app shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PictureShape {
+  /// A person's avatar.
+  Circle,
+  /// A space or channel tile.
+  RoundedSquare,
+  /// From a newer UI: shown as a plain square.
+  #[serde(other)]
+  Unknown,
 }
 
 /// The texts of a notification's reply field.
@@ -237,6 +276,18 @@ impl OsNotificationKind {
   }
 }
 
+impl PictureShape {
+  /// Radius of the outline's corners as a share of the side: a circle, the app's space tile
+  /// (12 px on 40 px, `--radius-md`), or none.
+  pub fn corner_share(self) -> f32 {
+    match self {
+      Self::Circle => 0.5,
+      Self::RoundedSquare => 0.3,
+      Self::Unknown => 0.0,
+    }
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -286,6 +337,42 @@ mod tests {
       NotificationAction::from_key("snooze"),
       NotificationAction::Unknown
     );
+  }
+
+  #[test]
+  fn a_picture_travels_with_its_key_and_fallback_and_unknown_shapes_are_tolerated() {
+    let user: teamcraft_proto::UserId = serde_json::from_value(serde_json::json!("7")).unwrap();
+    let picture = NotificationPicture {
+      shape: PictureShape::Circle,
+      maybe_key: Some(MediaKey::Avatar(user)),
+      maybe_fallback_png: Some(Base64Bytes::new(b"png".to_vec())),
+    };
+    let json = serde_json::to_value(&picture).unwrap();
+    assert_eq!(
+      json,
+      serde_json::json!({
+        "shape": "circle",
+        "key": { "kind": "avatar", "id": "7" },
+        "fallback_png": "cG5n"
+      })
+    );
+    assert_eq!(
+      serde_json::from_value::<NotificationPicture>(json).unwrap(),
+      picture
+    );
+    let newer: NotificationPicture =
+      serde_json::from_value(serde_json::json!({ "shape": "hexagon" })).unwrap();
+    assert_eq!(newer.shape, PictureShape::Unknown);
+    assert_eq!(newer.maybe_key, None);
+    assert_eq!(newer.shape.corner_share(), 0.0, "a plain square");
+  }
+
+  #[test]
+  fn a_notification_without_a_picture_reads_as_before() {
+    let json = serde_json::json!({ "tag": "5", "kind": "message", "title": "Bob" });
+    let notification: OsNotification = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(notification.maybe_picture, None);
+    assert_eq!(serde_json::to_value(&notification).unwrap(), json);
   }
 
   #[test]
