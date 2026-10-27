@@ -121,6 +121,7 @@ pub mod tab_elsewhere;
 pub mod tab_list;
 pub mod thread_panel;
 pub mod top_bar;
+pub mod typing_indicator;
 pub mod update_notice;
 pub mod video_player;
 pub mod window_controls;

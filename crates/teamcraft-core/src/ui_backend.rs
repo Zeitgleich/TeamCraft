@@ -2384,7 +2384,7 @@ mod tests {
       "never the user themself"
     );
     assert!(backend.typing_users(id::<ConversationId>(11)).is_empty());
-    typing.note(conversation, colleague, 10_000 - crate::client::TYPING_TIMEOUT_MS);
+    typing.note(conversation, colleague, 10_000 - crate::typing::TYPING_TIMEOUT_MS);
     assert!(
       backend.typing_users(conversation).is_empty(),
       "indicators run out"

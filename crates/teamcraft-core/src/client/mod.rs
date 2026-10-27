@@ -82,7 +82,6 @@ pub(crate) use messaging::{REMOVED_SENDER_GRACE_MS, decrypt_content};
 #[cfg(feature = "ui")]
 pub(crate) use messaging::{apply_control, bookmarks_key};
 pub(crate) use notifications::registered_push_token;
-pub use notifications::{TYPING_TIMEOUT_MS, TypingState};
 use openmls_rust_crypto::OpenMlsRustCrypto;
 pub use org_recovery::{SealedShare, recovery_request};
 pub use pending_actions::{PendingAction, PendingActionSettings, StatusChange};
@@ -238,7 +237,7 @@ pub struct Client<A, S> {
   account: Account,
   groups: HashMap<ConversationId, ConversationGroup>,
   sync: SyncState,
-  typing: notifications::TypingState,
+  typing: crate::typing::TypingState,
   /// Refusals of earlier user actions found by a background flush, for the host to show
   /// ([`Client::take_background_failures`]).
   background_failures: Vec<CoreError>,

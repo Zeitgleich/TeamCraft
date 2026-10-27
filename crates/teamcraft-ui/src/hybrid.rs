@@ -888,6 +888,14 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
       .as_ref()
       .map_or_else(Vec::new, |live| live.seen_by(conversation, message))
   }
+
+  fn typing_users(&self, conversation: ConversationId) -> Vec<UserId> {
+    self.chat.typing_users(conversation)
+  }
+
+  fn notify_typing(&self, conversation: ConversationId) {
+    self.chat.notify_typing(conversation);
+  }
 }
 
 impl<C: ChatBackend> SearchBackend for Hybrid<C> {

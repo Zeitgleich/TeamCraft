@@ -1112,6 +1112,9 @@ enroll-failed = Die Schlüssel konnten nicht erstellt werden.
 enroll-recover-failed = Die Passphrase hat deine Schlüssel nicht entsperrt, oder der Server war nicht erreichbar.
 
 message-seen-by = Gesehen von { $names }
+typing-one = { $name } schreibt …
+typing-two = { $first } und { $second } schreiben …
+typing-several = Mehrere Personen schreiben …
 
 notif-preview = Nachrichtentext in Desktop-Benachrichtigungen zeigen
 notif-preview-hint = Aus: Benachrichtigungen nennen nur, wer wo geschrieben hat.
@@ -2807,7 +2810,7 @@ notif-phone = Telefon und andere Geräte
 notif-phone-hint = Push-Benachrichtigungen fürs Telefon, zurückgehalten, solange du am Desktop bist.
 notif-per-conversation-filter = Unterhaltungen filtern
 notif-per-conversation-none = Keine Unterhaltung passt.
-privacy-typing-hint = Die anderen in der Unterhaltung sehen, dass du schreibst.
+privacy-typing-hint = Die anderen in der Unterhaltung sehen, dass du schreibst, nicht was. Der Server sieht, wer wo schreibt.
 calls-noise-hint = Filtert Tippen, Lüfter und andere Hintergrundgeräusche.
 calls-echo-hint = Verhindert, dass andere sich über deine Lautsprecher selbst hören.
 security-status-ok = Deine Nachrichten sind Ende-zu-Ende-verschlüsselt

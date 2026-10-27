@@ -6960,6 +6960,107 @@ html.call-window body {
   text-align: right;
 }
 
+/* "Alice is typing…" (#733). A zero-height anchor after the messages holds it, so it takes no room
+   and nothing moves when someone starts or stops typing: the line sits in the space the list keeps
+   under its newest message. Over messages scrolled beneath it, the surface fades in under the text
+   (a scroll edge, not a divider). It only fades: it comes and goes every few seconds, and any
+   movement there would pull the eye from the conversation. */
+.typing-anchor {
+  position: relative;
+  flex: none;
+  height: 0;
+  z-index: 4;
+}
+
+.typing-line {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 20px 0;
+  background: linear-gradient(to top, var(--surface) 75%, transparent);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  line-height: 1rem;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--dur-exit) var(--ease-exit);
+}
+
+.typing-line.is-visible {
+  opacity: 1;
+  transition: opacity var(--dur-base) var(--ease-out);
+}
+
+/* A thread keeps the same room under its newest reply as the conversation's list, for the line. */
+.thread-panel .panel-scroll {
+  padding-bottom: var(--space-3);
+}
+
+/* While the list is scrolled up, its "jump to the latest" bar takes the bottom edge. */
+.message-list-wrap:has(> .jump-latest) + .typing-anchor .typing-line {
+  bottom: 30px;
+}
+
+.typing-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.typing-dots {
+  flex: none;
+  display: inline-flex;
+  gap: 3px;
+}
+
+.typing-dots span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.35;
+}
+
+/* The dots pulse one after the other, only while the line shows. */
+.typing-line.is-visible .typing-dots span {
+  animation: typing-dot 1.2s var(--ease-standard) infinite;
+}
+
+.typing-line.is-visible .typing-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.typing-line.is-visible .typing-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes typing-dot {
+  0%,
+  60%,
+  100% {
+    opacity: 0.35;
+    transform: none;
+  }
+
+  30% {
+    opacity: 1;
+    transform: translateY(-1px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .typing-line.is-visible .typing-dots span {
+    animation: none;
+    opacity: 0.7;
+  }
+}
+
 /* ---- Meetings ---- */
 
 .meetings-view {
