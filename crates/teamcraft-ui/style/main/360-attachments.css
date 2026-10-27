@@ -134,11 +134,15 @@
 .preview-links { flex: none; padding: 8px 16px; border-top: 1px solid var(--border); font-size: var(--text-sm); }
 .preview-links ul { max-height: 160px; overflow: auto; margin: 6px 0 0; padding-left: 18px; overflow-wrap: anywhere; }
 .pdf-tools { flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--border); }
+.pdf-tools[hidden] { display: none; }
 .pdf-page-field { display: flex; align-items: center; gap: 4px; color: var(--text-muted); }
 .pdf-page-input { width: 5em; }
 .pdf-find { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .pdf-find-state { color: var(--text-muted); font-size: var(--text-xs); }
+/* The pages, and over them what the app shows while the document opens (#835) */
+.pdf-stage { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .pdf-pages { flex: 1; min-height: 0; overflow: auto; padding: 12px; background: var(--surface-2); outline-offset: -2px; }
+.pdf-opening { position: absolute; inset: 0; }
 .pdf-page { position: relative; margin: 0 auto 12px; background: white; box-shadow: var(--shadow); }
 .pdf-page.is-broken { outline: 2px solid var(--danger); }
 .pdf-page canvas { display: block; }
