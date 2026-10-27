@@ -1,6 +1,9 @@
 //! Push registration with the device's push key (e2ee.md §7), the settings and diagnostics the
 //! device's own push checks need (`push_guard`), and typing indicators.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand_core::OsRng;
@@ -19,10 +22,53 @@ use crate::push_guard;
 use crate::push_preview::{self, PUSH_KEY_RECORD};
 use crate::records;
 use crate::store::{LocalStore, Table};
-use crate::typing::TypingState;
 
 /// The algorithm of the token key this client can seal to.
 const TOKEN_ALGORITHM: &str = "hpke-x25519-hkdf-sha256-chacha20poly1305";
+
+/// How long a "typing" indicator stays without a new `typing_start` (the server throttles to 3 s).
+pub const TYPING_TIMEOUT_MS: i64 = 6_000;
+
+/// Who is typing where, with the time the indicator was last refreshed. Ephemeral, not stored.
+/// Cloning shares it: a UI adapter keeps a clone to read while the sync loop owns the client.
+#[derive(Clone, Debug, Default)]
+pub struct TypingState {
+  seen: Arc<Mutex<HashMap<(ConversationId, UserId), i64>>>,
+}
+
+impl TypingState {
+  /// People other than `me` typing in a conversation at `now_ms`, sorted.
+  pub fn users(&self, conversation: ConversationId, me: UserId, now_ms: i64) -> Vec<UserId> {
+    let mut users: Vec<UserId> = self
+      .lock()
+      .iter()
+      .filter(|((typed_in, user), at)| {
+        *typed_in == conversation && *user != me && now_ms - **at < TYPING_TIMEOUT_MS
+      })
+      .map(|((_, user), _)| *user)
+      .collect();
+    users.sort();
+    users
+  }
+
+  pub(crate) fn note(&self, conversation: ConversationId, user: UserId, now_ms: i64) {
+    let mut seen = self.lock();
+    seen.insert((conversation, user), now_ms);
+    seen.retain(|_, at| now_ms - *at < TYPING_TIMEOUT_MS);
+  }
+
+  fn clear(&self, conversation: ConversationId, user: UserId) {
+    self.lock().remove(&(conversation, user));
+  }
+
+  fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<(ConversationId, UserId), i64>> {
+    // A panic while holding the lock leaves a plain map behind; it stays usable.
+    self
+      .seen
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+  }
+}
 
 /// How long a sealed device token stays valid at the gateway.
 pub const PUSH_TOKEN_LIFETIME_MS: i64 = 30 * 24 * 60 * 60 * 1000;
@@ -356,17 +402,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// The typing state, shared: a UI adapter reads it while the sync loop owns the client.
   pub fn typing_state(&self) -> TypingState {
     self.typing.clone()
-  }
-
-  /// When the typing indicators change by themselves next ([`TypingState::next_change_ms`]): the
-  /// host wakes up then, forgets the run out ones ([`Self::drop_expired_typing`]) and tells its UI.
-  pub fn typing_change_at_ms(&self) -> Option<i64> {
-    self.typing.next_change_ms(self.now_ms())
-  }
-
-  /// Forgets the typing indicators that ran out; whether any did (the host then tells its UI).
-  pub fn drop_expired_typing(&self) -> bool {
-    self.typing.drop_expired(self.now_ms())
   }
 
   pub(crate) fn note_typing(&mut self, conversation: ConversationId, user: UserId) {

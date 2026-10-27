@@ -131,12 +131,11 @@ private struct NotificationsSettingsPage: View {
   }
 }
 
-/// Typing indicator, call sounds, original pictures and the search download.
+/// Typing indicator and the search download.
 private struct ChatsSettingsPage: View {
   @Environment(AppModel.self) private var model
   @AppStorage("share_typing") private var isSharingTyping = true
   @AppStorage(CallStatusSoundsSetting.key) private var statusSounds = CallStatusSoundsSetting.all.rawValue
-  @AppStorage(OriginalDownloadSetting.key) private var originalDownload = OriginalDownloadSetting.fallback.rawValue
   @State private var prefetch = SegmentPrefetchMode.unmeteredOnly
   @State private var isPrefetchLoaded = false
 
@@ -153,15 +152,6 @@ private struct ChatsSettingsPage: View {
         }
       } footer: {
         Text("call_status_sounds_hint")
-      }
-      Section {
-        Picker("original_download_title", selection: $originalDownload) {
-          Text("original_download_always").tag(OriginalDownloadSetting.always.rawValue)
-          Text("original_download_unmetered").tag(OriginalDownloadSetting.unmeteredOnly.rawValue)
-          Text("original_download_never").tag(OriginalDownloadSetting.never.rawValue)
-        }
-      } footer: {
-        Text("original_download_hint")
       }
       Section {
         Picker("prefetch_title", selection: $prefetch) {
@@ -187,17 +177,12 @@ private struct ChatsSettingsPage: View {
   }
 }
 
-/// The key backup, the security code, the app lock and the app switcher cover.
+/// The security code, the app lock and the app switcher cover.
 private struct SecuritySettingsPage: View {
   let account: Account
-  @Environment(AppModel.self) private var model
-  @State private var backup: BackupSnapshot.KeyBackup?
 
   var body: some View {
     Form {
-      if let backup {
-        KeyBackupSection(backup: backup)
-      }
       Section {
         Text(account.identityFingerprint)
           .font(.system(.footnote, design: .monospaced))
@@ -211,47 +196,6 @@ private struct SecuritySettingsPage: View {
     }
     .navigationTitle("settings_security_title")
     .navigationBarTitleDisplayMode(.inline)
-    .task { backup = await model.keyBackup() }
-  }
-}
-
-/// The key backup in plain words (issue #410): stored or not, and how it is protected.
-private struct KeyBackupSection: View {
-  let backup: BackupSnapshot.KeyBackup
-
-  var body: some View {
-    Section {
-      Label {
-        Text(title)
-      } icon: {
-        Image(systemName: isOk ? "checkmark.shield" : "exclamationmark.shield")
-          .foregroundStyle(isOk ? Color.green : Color.orange)
-      }
-      .accessibilityElement(children: .combine)
-    } header: {
-      Text("backup_title")
-    } footer: {
-      VStack(alignment: .leading, spacing: 4) {
-        Text(detail)
-        if backup.hasOrganization {
-          Text("backup_organization")
-        }
-      }
-    }
-  }
-
-  private var isOk: Bool { backup.isStored && backup.hasPassphrase }
-
-  private var title: LocalizedStringKey {
-    if !backup.isStored { return "backup_missing" }
-    return backup.hasPassphrase ? "backup_ok" : "backup_no_recovery"
-  }
-
-  private var detail: String {
-    if !backup.isStored { return String(localized: "backup_missing_hint") }
-    if !backup.hasPassphrase { return String(localized: "backup_no_recovery_hint") }
-    guard let date = backup.passphraseSetDate else { return String(localized: "backup_passphrase") }
-    return String(format: String(localized: "backup_passphrase_set"), date.formatted(date: .abbreviated, time: .omitted))
   }
 }
 

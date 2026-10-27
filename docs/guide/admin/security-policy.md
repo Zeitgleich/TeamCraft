@@ -36,19 +36,11 @@ and **Instance** (below).
 
 ### admin_self_join
 
-- `visible`: allowed. Members see "… joined this channel as a workspace admin", which users cannot
-  hide; their apps work it out from the membership change itself.
+- `visible`: allowed. Members see "Admin joined" with an admin badge that users cannot hide.
 - `disabled`: refused by member clients.
-- `owner_approval`: members' clients refuse the admin's own self-join; the admin asks, and a channel
-  owner lets them in. Members see "… joined this channel as a workspace admin, approved by …".
+- `owner_approval`: **not implemented**; clients refuse self-joins because there is no approval flow.
 
 Member clients enforce this themselves, so the server cannot bypass it.
-
-The setting also covers admins bringing each other in: an admin who isn't a member of a private
-channel can't add another admin there under `owner_approval` or `disabled` either, from version
-1.0.9 on. Members can still add admins (that is how an owner approves). As long as a member of the
-channel uses an older version, that member's app can still let such an addition through; update
-all apps for the setting to hold.
 
 ### Organization recovery
 

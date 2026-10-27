@@ -39,18 +39,7 @@ data class User(
   @SerialName("avatar_hue") val avatarHue: Int = 0,
   @SerialName("is_guest") val isGuest: Boolean = false,
   @SerialName("is_bot") val isBot: Boolean = false,
-  /** Deactivated (issue #654): offered nowhere, only names their old messages. */
-  @SerialName("is_deactivated") val isDeactivated: Boolean = false,
-  /** Deleted (issue #630): a tombstone the app names by its own "Deleted user" (issue #751). */
-  @SerialName("is_deleted") val isDeleted: Boolean = false,
-) {
-  /** Whether lists, pickers and mentions may offer this person. */
-  val isOffered: Boolean get() = !isDeactivated && !isDeleted
-
-  /** Named [deletedUserName] and without a username if the account was deleted, as on desktop and web. */
-  fun namedIfDeleted(deletedUserName: String): User =
-    if (isDeleted) copy(displayName = deletedUserName, username = "") else this
-}
+)
 
 @Serializable
 data class Space(
@@ -58,8 +47,6 @@ data class Space(
   val name: String,
   @SerialName("unread_count") val unreadCount: Int = 0,
   @SerialName("mention_count") val mentionCount: Int = 0,
-  /** Whether the user may create channels here, as the core decided it (issue #758). */
-  @SerialName("can_create_channels") val canCreateChannels: Boolean = true,
 )
 
 @Serializable
@@ -129,24 +116,7 @@ data class Message(
 data class SecuritySnapshot(
   @SerialName("my_fingerprint") val myFingerprint: String = "",
   val contacts: List<ContactKeys> = emptyList(),
-  /** The key backup as this device knows it (issue #410); absent before the first key bag sync. */
-  val backup: KeyBackup? = null,
 )
-
-/** Facts about the key backup; the settings put them into words. */
-@Serializable
-data class KeyBackup(
-  /** The encrypted key bag is on the server. */
-  @SerialName("is_stored") val isStored: Boolean = false,
-  @SerialName("has_pending_upload") val hasPendingUpload: Boolean = false,
-  /** `passphrase`, `passkey`, `organization`; unknown values are skipped. */
-  val recovery: List<String> = emptyList(),
-  /** When the recovery passphrase was last set (epoch milliseconds), if a device recorded it. */
-  @SerialName("passphrase_set_at") val passphraseSetAt: Long? = null,
-) {
-  val hasPassphrase: Boolean get() = "passphrase" in recovery
-  val hasOrganization: Boolean get() = "organization" in recovery
-}
 
 @Serializable
 data class ContactKeys(
@@ -158,30 +128,14 @@ data class ContactKeys(
 @Serializable
 data class ChatSnapshot(
   val me: User,
-  /** The people to offer in lists, pickers and mentions. */
   val users: List<User> = emptyList(),
   val spaces: List<Space> = emptyList(),
   val conversations: List<Conversation> = emptyList(),
   val security: SecuritySnapshot = SecuritySnapshot(),
-  /** Deactivated and deleted accounts: offered nowhere, they only name their old messages. */
-  @SerialName("former_users") val formerUsers: List<User> = emptyList(),
 ) {
-  /** Anyone this device knows, former accounts included (the authors of old messages). */
-  fun user(id: String): User? =
-    users.firstOrNull { it.id == id } ?: me.takeIf { it.id == id } ?: formerUsers.firstOrNull { it.id == id }
-
+  fun user(id: String): User? = users.firstOrNull { it.id == id } ?: me.takeIf { it.id == id }
   fun conversation(id: String): Conversation? = conversations.firstOrNull { it.id == id }
   fun name(userId: String): String = user(userId)?.displayName ?: userId
-
-  /**
-   * Deleted accounts named [deletedUserName], the app's own "Deleted user" in the user's language,
-   * instead of the server's placeholder (issue #751).
-   */
-  fun namingDeletedUsers(deletedUserName: String): ChatSnapshot =
-    copy(
-      users = users.map { it.namedIfDeleted(deletedUserName) },
-      formerUsers = formerUsers.map { it.namedIfDeleted(deletedUserName) },
-    )
 }
 
 @Serializable
@@ -252,9 +206,6 @@ data class FileInfo(
   /** The sender's preview of an image (PNG or JPEG; decoders read the format from the bytes). */
   @SerialName("maybe_thumbnail_png") val maybeThumbnail: ImageBytes? = null,
   val transfer: FileTransfer,
-  /** Who sent the message and when (Unix milliseconds), for the image viewer. */
-  @SerialName("maybe_sender") val maybeSender: String? = null,
-  @SerialName("maybe_sent_at") val maybeSentAt: Long? = null,
 ) {
   val isImage: Boolean get() = mediaType.startsWith("image/")
 }
@@ -315,8 +266,6 @@ data class MessageExtras(
   @SerialName("maybe_workspace_event") val maybeWorkspaceEvent: JsonObject? = null,
   /** The server rejected this own message; it waits for "retry" or "delete". */
   @SerialName("is_send_failed") val isSendFailed: Boolean = false,
-  /** An own message the other member of a DM read: two ticks instead of one (issue #769). */
-  @SerialName("is_read") val isRead: Boolean = false,
 )
 
 @Serializable
@@ -345,8 +294,6 @@ data class BrowsableChannel(
   @SerialName("is_member") val isMember: Boolean = false,
   @SerialName("is_archived") val isArchived: Boolean = false,
   @SerialName("has_external_people") val hasExternalPeople: Boolean = false,
-  /** How the user gets in (`open`, `as_admin`, `needs_approval`, `requested`); see `ui.BrowseJoin`. */
-  val join: String = "open",
 )
 
 @Serializable

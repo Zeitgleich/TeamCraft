@@ -39,7 +39,6 @@ use teamcraft_proto::{
 };
 
 use teamcraft_client_api::notify::{MentionRules, is_mentioned};
-use teamcraft_client_api::receipts::{ReadIndicator, seen_by};
 
 use crate::client::bookmarks_key;
 use crate::client::workspace_admin::{ChannelOptions, StoredRoster};
@@ -148,10 +147,6 @@ pub enum CoreCommand {
   RefreshPresence {
     users: Vec<UserId>,
   },
-  /// How far the other members of a DM or group DM read.
-  RefreshReadReceipts {
-    conversation: ConversationId,
-  },
   /// Ask the server's directory for people matching the query (people page, quick switcher).
   SearchDirectory {
     query: String,
@@ -165,15 +160,6 @@ pub enum CoreCommand {
   RefreshOwnDevices,
   /// Signs out one of this user's other devices.
   RevokeOwnDevice {
-    device: teamcraft_proto::DeviceId,
-  },
-  /// Renames one of this user's devices.
-  RenameOwnDevice {
-    device: teamcraft_proto::DeviceId,
-    name: String,
-  },
-  /// A test push to one of this user's devices.
-  TestPushOwnDevice {
     device: teamcraft_proto::DeviceId,
   },
   /// Files of outbox messages are waiting for upload.
@@ -223,24 +209,6 @@ pub enum CoreCommand {
   },
   JoinChannel {
     conversation: ConversationId,
-  },
-  /// An admin asks the owners of a private channel to let them in (admin.md §2.4).
-  RequestAdminJoin {
-    conversation: ConversationId,
-  },
-  WithdrawAdminJoin {
-    conversation: ConversationId,
-  },
-  /// A channel owner lets an admin in who asked: the server membership and the own MLS add, with
-  /// the history the owner chose.
-  ApproveAdminJoin {
-    conversation: ConversationId,
-    user: UserId,
-    history: HistoryPolicy,
-  },
-  DeclineAdminJoin {
-    conversation: ConversationId,
-    user: UserId,
   },
   JoinSpace {
     space: SpaceId,
@@ -359,15 +327,6 @@ pub enum CoreCommand {
     user: UserId,
     role: teamcraft_proto::ChannelRole,
   },
-  /// Signs the role the server lists for a member (e2ee.md §4.6.1).
-  ConfirmChannelRole {
-    conversation: ConversationId,
-    user: UserId,
-  },
-  /// The channel's members and signed roles, for its settings.
-  RefreshChannelRoles {
-    conversation: ConversationId,
-  },
   RemoveSpaceMember {
     space: SpaceId,
     user: UserId,
@@ -464,18 +423,6 @@ impl<S: LocalStore> CoreChatBackend<S> {
     std::mem::take(&mut *self.commands.borrow_mut())
   }
 
-  /// The deactivated and deleted accounts this device knows: [`ChatBackend::users`] leaves them out
-  /// of lists and pickers (issue #654), but they still name their old messages. The mobile apps
-  /// read them next to the snapshot (issue #751).
-  pub fn former_users(&self) -> Vec<User> {
-    self
-      .summaries()
-      .values()
-      .filter(|summary| summary.is_deactivated)
-      .map(|summary| self.to_user(summary))
-      .collect()
-  }
-
   pub(crate) fn me_id(&self) -> UserId {
     self.me
   }
@@ -527,24 +474,6 @@ impl<S: LocalStore> CoreChatBackend<S> {
     maybe
       .map(|list| list.members.into_iter().map(|member| member.user.id).collect())
       .unwrap_or_default()
-  }
-
-  /// The members of a conversation whose receipts show as ticks (a DM, #635); `None` elsewhere.
-  pub(crate) fn tick_members(&self, conversation: ConversationId) -> Option<Vec<UserId>> {
-    let response = self
-      .conversations_raw()
-      .into_iter()
-      .find(|response| response.id == conversation)?;
-    (ReadIndicator::of(view_kind(&response)) == ReadIndicator::Ticks).then(|| self.members(conversation))
-  }
-
-  /// How far each other member read, as far as this device heard (gateway events and
-  /// [`CoreCommand::RefreshReadReceipts`]).
-  pub(crate) fn read_receipts(&self, conversation: ConversationId) -> Vec<(UserId, MessageId)> {
-    self
-      .read(crate::read_state::read_receipts(&self.store, conversation))
-      .into_iter()
-      .collect()
   }
 
   pub(crate) fn to_user(&self, summary: &UserSummary) -> User {
@@ -612,7 +541,13 @@ impl<S: LocalStore> CoreChatBackend<S> {
     if member_ids.is_empty() && is_notes_to_self {
       member_ids = vec![self.me];
     }
-    let kind = view_kind(response);
+    let kind = match (&response.kind, &response.visibility) {
+      (ConversationKindProto::Dm, _) => ConversationKind::Direct,
+      (ConversationKindProto::Group, _) => ConversationKind::Group,
+      (_, _) if response.is_integration => ConversationKind::Integration,
+      (_, ConversationVisibility::Public) => ConversationKind::Public,
+      _ => ConversationKind::Private,
+    };
     let is_favorite = response
       .maybe_my_membership
       .as_ref()
@@ -811,30 +746,16 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .maybe_my_membership
       .as_ref()
       .and_then(|membership| membership.maybe_last_read_message_id);
-    // A line this device derived (from a commit, issue #811, or from the server's record, issue
-    // #818) counts like a message at its place: the server's read position covers it once a later
-    // message was read; one newer than all of them is read once this device marked the
-    // conversation read after it arrived.
-    let maybe_lines_read = if messages.iter().any(StoredMessage::is_local_line) {
-      self.read(lines_read_through(&self.store, response.id))
-    } else {
-      None
-    };
     messages
       .into_iter()
-      .filter(|message| {
-        let is_read_line = message
-          .line_position()
-          .is_some_and(|at| maybe_lines_read.is_some_and(|read| at <= read));
-        match (unread_position(message), maybe_mark, maybe_last_read) {
+      .filter(
+        |message| match (message.maybe_server_id, maybe_mark, maybe_last_read) {
           (Some(id), Some(mark), _) => id >= mark,
-          (Some(id), None, Some(last_read)) => {
-            message.sender_user_id != self.me && id > last_read && !is_read_line
-          },
-          (Some(_), None, None) => message.sender_user_id != self.me && !is_read_line,
+          (Some(id), None, Some(last_read)) => message.sender_user_id != self.me && id > last_read,
+          (Some(_), None, None) => message.sender_user_id != self.me,
           (None, _, _) => false,
-        }
-      })
+        },
+      )
       .collect()
   }
 
@@ -1011,8 +932,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
         can_add_members: space.can_add_members,
         can_invite_guests: space.can_invite_guests,
         can_manage_space: space.can_manage_space,
-        // An older server leaves the hint out (taken as allowed); its guests still create nothing.
-        can_create_channels: space.can_create_channels && space.maybe_my_role != Some(SpaceRole::Guest),
+        can_create_channels: space.can_create_channels,
       })
       .collect()
   }
@@ -1385,14 +1305,6 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.command(CoreCommand::RevokeOwnDevice { device });
   }
 
-  fn rename_own_device(&self, device: teamcraft_proto::DeviceId, name: String) {
-    self.command(CoreCommand::RenameOwnDevice { device, name });
-  }
-
-  fn test_push_own_device(&self, device: teamcraft_proto::DeviceId) {
-    self.command(CoreCommand::TestPushOwnDevice { device });
-  }
-
   fn mark_unread(&self, conversation: ConversationId, from: MessageId) {
     self.command(CoreCommand::MarkUnread { conversation, from });
   }
@@ -1564,24 +1476,6 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.typing.users(conversation, self.me, self.clock.now_ms())
   }
 
-  fn seen_by(&self, conversation: ConversationId, message: MessageId) -> Vec<UserId> {
-    seen_by(&self.read_receipts(conversation), message)
-  }
-
-  fn refresh_read_receipts(&self, conversation: ConversationId) {
-    // Receipts exist only in DMs and group DMs: a channel's answer would always be empty.
-    let has_receipts = self.conversations_raw().iter().any(|response| {
-      response.id == conversation
-        && matches!(
-          response.kind,
-          ConversationKindProto::Dm | ConversationKindProto::Group
-        )
-    });
-    if has_receipts {
-      self.command(CoreCommand::RefreshReadReceipts { conversation });
-    }
-  }
-
   fn live_snapshot(&self) -> Option<LiveSnapshot> {
     // Each part is one record, except the receipts (one per member of each DM).
     Some(LiveSnapshot {
@@ -1705,30 +1599,6 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn join_channel(&self, conversation: ConversationId) {
     self.command(CoreCommand::JoinChannel { conversation });
-  }
-
-  fn join_requests(&self) -> Vec<teamcraft_client_api::activity::JoinRequest> {
-    self.ui_join_requests()
-  }
-
-  fn request_admin_join(&self, conversation: ConversationId) {
-    self.command(CoreCommand::RequestAdminJoin { conversation });
-  }
-
-  fn withdraw_admin_join(&self, conversation: ConversationId) {
-    self.command(CoreCommand::WithdrawAdminJoin { conversation });
-  }
-
-  fn approve_admin_join(&self, conversation: ConversationId, user: UserId, history: HistoryPolicy) {
-    self.command(CoreCommand::ApproveAdminJoin {
-      conversation,
-      user,
-      history,
-    });
-  }
-
-  fn decline_admin_join(&self, conversation: ConversationId, user: UserId) {
-    self.command(CoreCommand::DeclineAdminJoin { conversation, user });
   }
 
   fn joinable_spaces(&self) -> Vec<JoinableSpace> {
@@ -1907,27 +1777,12 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       Table::Members,
       &conversation.to_string(),
     ));
-    let signed: crate::channel_roles::ChannelRoleState = self.read(
-      records::get_json(
-        &self.store,
-        Table::Workspace,
-        &crate::client::channel_roles_key(conversation),
-      )
-      .map(Option::unwrap_or_default),
-    );
     stored
       .into_iter()
       .flat_map(|list| list.members)
-      .map(|member| {
-        let is_guest = member.user.kind == teamcraft_proto::UserKind::Guest;
-        // The server's role, marked when no signed assignment backs it (e2ee.md §4.6.1).
-        let verified = signed.role_of(member.user.id);
-        let effective = crate::channel_roles::effective_role(&verified, &member.role, is_guest);
-        teamcraft_client_api::model::ChannelMember {
-          user: member.user.id,
-          is_role_signed: member.role == teamcraft_proto::ChannelRole::Member || effective == member.role,
-          role: member.role,
-        }
+      .map(|member| teamcraft_client_api::model::ChannelMember {
+        user: member.user.id,
+        role: member.role,
       })
       .collect()
   }
@@ -1938,18 +1793,6 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       user,
       role,
     });
-  }
-
-  fn confirm_channel_role(&self, conversation: ConversationId, user: UserId) {
-    self.command(CoreCommand::ConfirmChannelRole { conversation, user });
-  }
-
-  fn refresh_channel_roles(&self, conversation: ConversationId) {
-    self.command(CoreCommand::RefreshChannelRoles { conversation });
-  }
-
-  fn can_sign_channel_roles(&self, conversation: ConversationId) -> bool {
-    self.ui_can_sign_channel_roles(conversation)
   }
 
   fn set_space_role(&self, space: SpaceId, user: UserId, role: SpaceRole) {
@@ -1981,8 +1824,8 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 }
 
 /// How a conversation event shows: the UI's system events where one fits ("X joined" with the added
-/// person as author); other changes are [`MessageKind::Change`] without text, whose line the UI
-/// reads from `MessageExtras::maybe_workspace_event`. An event of a newer version stays a message.
+/// person as author); other events stay user messages without text, and the UI reads them from
+/// `MessageExtras::maybe_workspace_event`.
 fn system_view(event: &ConversationEvent, sender: UserId) -> (MessageKind, UserId) {
   match event {
     ConversationEvent::Joined => (MessageKind::System(SystemEvent::Joined), sender),
@@ -1997,25 +1840,14 @@ fn system_view(event: &ConversationEvent, sender: UserId) -> (MessageKind, UserI
       MessageKind::System(SystemEvent::TopicChanged { topic: topic.clone() }),
       sender,
     ),
-    // Lines the UI reads from the extras' workspace event; the kind says so before they arrive.
     ConversationEvent::Archived
     | ConversationEvent::Unarchived
     | ConversationEvent::MadePrivate
     | ConversationEvent::MadePublic
     | ConversationEvent::Moved { .. }
-    | ConversationEvent::AdminJoined { .. } => (MessageKind::Change, sender),
-    ConversationEvent::CallMoved { .. } | ConversationEvent::Unknown => (MessageKind::User, sender),
-  }
-}
-
-/// The UI's kind of a conversation.
-fn view_kind(response: &ConversationResponse) -> ConversationKind {
-  match (&response.kind, &response.visibility) {
-    (ConversationKindProto::Dm, _) => ConversationKind::Direct,
-    (ConversationKindProto::Group, _) => ConversationKind::Group,
-    (_, _) if response.is_integration => ConversationKind::Integration,
-    (_, ConversationVisibility::Public) => ConversationKind::Public,
-    _ => ConversationKind::Private,
+    | ConversationEvent::CallMoved { .. }
+    | ConversationEvent::AdminJoined { .. }
+    | ConversationEvent::Unknown => (MessageKind::User, sender),
   }
 }
 
@@ -2069,52 +1901,10 @@ pub(crate) fn newest_server_id(messages: &[StoredMessage]) -> Option<MessageId> 
     .max()
 }
 
-/// The place of the newest line this device derived ([`StoredMessage::line_position`]) that the
-/// user read in `conversation` (issues #811, #818). The server's read position names messages
-/// only, so a line newer than all of them is read when the user marks the conversation read on
-/// this device. Kept as the commit's ID before #818: the same time-ordered number.
-fn lines_read_through(
-  store: &impl LocalStore,
-  conversation: ConversationId,
-) -> Result<Option<MessageId>, CoreError> {
-  records::get_json(store, Table::SyncState, &lines_read_key(conversation))
-}
-
-/// The user read `conversation`: its derived lines up to the newest of `messages` count as read
-/// here. Never moves back.
-pub(crate) fn note_lines_read(
-  store: &impl LocalStore,
-  conversation: ConversationId,
-  messages: &[StoredMessage],
-) -> Result<(), CoreError> {
-  let Some(newest) = messages.iter().filter_map(StoredMessage::line_position).max() else {
-    return Ok(());
-  };
-  if lines_read_through(store, conversation)?.is_some_and(|read| read >= newest) {
-    return Ok(());
-  }
-  records::put_json(store, Table::SyncState, &lines_read_key(conversation), &newest)
-}
-
-fn lines_read_key(conversation: ConversationId) -> String {
-  format!("lines_read/{conversation}")
-}
-
-/// Where a message stands for unread counting: the server's ID, a line this device derived at
-/// its place (the same clock); an outbox message not at all.
-fn unread_position(message: &StoredMessage) -> Option<MessageId> {
-  message.maybe_server_id.or_else(|| message.line_position())
-}
-
-/// The ID the UI uses: the server's, for a line this device derived its place (a commit's ID, or
-/// where a line about a change the server reports sits; time-ordered like the messages', and no
-/// outbox message's), or a stable stand-in for outbox messages.
+/// The ID the UI uses: the server's, or a stable stand-in for outbox messages.
 pub(crate) fn ui_message_id(message: &StoredMessage) -> MessageId {
   if let Some(id) = message.maybe_server_id {
     return id;
-  }
-  if let Some(at) = message.line_position() {
-    return at;
   }
   let mut bytes = [0u8; 8];
   bytes.copy_from_slice(&message.client_message_id.as_bytes()[..8]);
@@ -2174,8 +1964,6 @@ mod tests {
       edits: Vec::new(),
       maybe_edit_id: None,
       is_pinned: false,
-      maybe_verified_commit: None,
-      maybe_server_change: None,
     };
     let body = MessageContent::Text {
       body: "hello".into(),
@@ -2237,44 +2025,6 @@ mod tests {
       backend.drain_commands(),
       vec![CoreCommand::MarkRead { conversation }]
     );
-  }
-
-  #[test]
-  fn guests_of_a_space_create_no_channels_whatever_an_older_server_says() {
-    let store = std::sync::Arc::new(MemoryStore::new());
-    let backend = CoreChatBackend::new(store.clone(), id(1), Box::new(ManualClock::new(0)));
-    for (raw, role, can_create_channels) in [
-      (7, SpaceRole::Member, true),
-      (8, SpaceRole::Guest, true),
-      (9, SpaceRole::Member, false),
-    ] {
-      let space = SpaceResponse {
-        id: id(raw),
-        name: format!("Project {raw}"),
-        maybe_icon: None,
-        maybe_color: None,
-        maybe_description: None,
-        maybe_image: None,
-        join_policy: JoinPolicy::InviteOnly,
-        is_archived: false,
-        maybe_brand_id: None,
-        maybe_my_role: Some(role),
-        maybe_my_notifications: None,
-        member_count: 2,
-        can_add_members: false,
-        can_invite_guests: false,
-        can_manage_space: false,
-        // `true` is also what a server that doesn't send it is taken to mean.
-        can_create_channels,
-      };
-      records::put_json(store.as_ref(), Table::Spaces, &space.id.to_string(), &space).unwrap();
-    }
-    let offered: Vec<(SpaceId, bool)> = backend
-      .spaces()
-      .into_iter()
-      .map(|space| (space.id, space.can_create_channels))
-      .collect();
-    assert_eq!(offered, [(id(7), true), (id(8), false), (id(9), false)]);
   }
 
   #[test]
@@ -2429,7 +2179,7 @@ mod tests {
       "never the user themself"
     );
     assert!(backend.typing_users(id::<ConversationId>(11)).is_empty());
-    typing.note(conversation, colleague, 10_000 - crate::typing::TYPING_TIMEOUT_MS);
+    typing.note(conversation, colleague, 10_000 - crate::client::TYPING_TIMEOUT_MS);
     assert!(
       backend.typing_users(conversation).is_empty(),
       "indicators run out"
@@ -2702,214 +2452,8 @@ mod tests {
           edits: Vec::new(),
           maybe_edit_id: None,
           is_pinned: false,
-          maybe_verified_commit: None,
-          maybe_server_change: None,
         })
         .unwrap();
-    }
-
-    /// Issue #811: a line derived from a commit is a change row at the commit's place, and
-    /// counts as unread like a message there (review of #815, L1).
-    mod admin_lines {
-      use super::*;
-
-      #[test]
-      fn a_line_is_a_change_row_with_the_commits_id() {
-        let (backend, conversation, _) = mention_fixture(&[]);
-        store_line(&backend, &conversation, 150, 2);
-        let all = backend.all_messages(conversation.id);
-        let row = backend.to_message(&all[0], &all);
-        assert_eq!(row.kind, MessageKind::Change);
-        assert_eq!(row.id, id::<MessageId>(150), "not shown as sending");
-      }
-
-      #[test]
-      fn a_line_after_the_read_position_is_unread_until_read_here() {
-        let (backend, mut conversation, users) = mention_fixture(&[(2, "before", &[])]);
-        let mut membership = test_membership();
-        membership.maybe_last_read_message_id = Some(id(101));
-        conversation.maybe_my_membership = Some(membership);
-        store_line(&backend, &conversation, 90, 2);
-        let unread = |backend: &CoreChatBackend<MemoryStore>| {
-          backend
-            .to_conversation(&conversation, &users, &backend.mention_preferences())
-            .unread_count
-        };
-        assert_eq!(unread(&backend), 0, "older than what was read");
-
-        store_line(&backend, &conversation, 150, 2);
-        assert_eq!(unread(&backend), 1, "newer than everything read");
-        records::put_json(
-          &backend.store,
-          Table::Conversations,
-          &conversation.id.to_string(),
-          &conversation,
-        )
-        .unwrap();
-        assert_eq!(backend.ui_first_unread(conversation.id), Some(id(150)));
-
-        let messages = backend.all_messages(conversation.id);
-        note_lines_read(&backend.store, conversation.id, &messages).unwrap();
-        assert_eq!(unread(&backend), 0, "read on this device");
-      }
-
-      #[test]
-      fn the_users_own_approval_is_not_unread() {
-        let (backend, conversation, users) = mention_fixture(&[]);
-        store_line(&backend, &conversation, 150, 1);
-        assert_eq!(
-          backend
-            .to_conversation(&conversation, &users, &backend.mention_preferences())
-            .unread_count,
-          0
-        );
-      }
-
-      /// The line of commit `commit` about user 3, written as `sender`'s.
-      fn store_line(
-        backend: &CoreChatBackend<MemoryStore>,
-        conversation: &ConversationResponse,
-        commit: i64,
-        sender: i64,
-      ) {
-        let mut bytes = [0u8; 16];
-        bytes[..8].copy_from_slice(&commit.to_be_bytes());
-        backend
-          .store
-          .upsert_message(&StoredMessage {
-            conversation_id: conversation.id,
-            client_message_id: ClientMessageId::from_bytes(bytes),
-            maybe_server_id: None,
-            sender_user_id: id(sender),
-            maybe_thread_id: None,
-            sent_at_ms: 0,
-            content: MessageContent::Event {
-              event: ConversationEvent::AdminJoined {
-                user: id(3),
-                is_approved: true,
-              },
-            },
-            is_edited: false,
-            edits: Vec::new(),
-            maybe_edit_id: None,
-            is_pinned: false,
-            maybe_verified_commit: Some(id(commit)),
-            maybe_server_change: None,
-          })
-          .unwrap();
-      }
-    }
-
-    /// Issue #818: a line about a change the server reports is a change row at its place, counts
-    /// as unread like a message there unless it names the user, and names nobody unless an
-    /// announcement matched it.
-    mod server_change_lines {
-      use teamcraft_client_api::actions::WorkspaceEvent;
-
-      use crate::store::{ChangeActor, ServerChange, nobody};
-
-      use super::*;
-
-      #[test]
-      fn a_line_is_a_change_row_at_its_place_naming_whom_it_names() {
-        let (backend, conversation, _) = mention_fixture(&[]);
-        store_line(&backend, &conversation, 150, ChangeActor::Nobody, nobody());
-        let all = backend.all_messages(conversation.id);
-        let row = backend.to_message(&all[0], &all);
-        assert_eq!(row.kind, MessageKind::Change);
-        assert_eq!(row.id, id::<MessageId>(150), "not shown as sending");
-        let extras = backend.ui_message_extras(conversation.id, &[row.id]);
-        assert_eq!(
-          extras[0].maybe_workspace_event,
-          Some(WorkspaceEvent::Archived { maybe_by: None })
-        );
-
-        let announcement = ClientMessageId::from_bytes([9; 16]);
-        store_line(
-          &backend,
-          &conversation,
-          150,
-          ChangeActor::Announced { announcement },
-          id(2),
-        );
-        let extras = backend.ui_message_extras(conversation.id, &[row.id]);
-        assert_eq!(
-          extras[0].maybe_workspace_event,
-          Some(WorkspaceEvent::Archived {
-            maybe_by: Some(id(2))
-          })
-        );
-      }
-
-      #[test]
-      fn a_line_after_the_read_position_is_unread_until_read_here() {
-        let (backend, mut conversation, users) = mention_fixture(&[(2, "before", &[])]);
-        let mut membership = test_membership();
-        membership.maybe_last_read_message_id = Some(id(101));
-        conversation.maybe_my_membership = Some(membership);
-        let unread = |backend: &CoreChatBackend<MemoryStore>| {
-          backend
-            .to_conversation(&conversation, &users, &backend.mention_preferences())
-            .unread_count
-        };
-        store_line(&backend, &conversation, 90, ChangeActor::Nobody, nobody());
-        assert_eq!(unread(&backend), 0, "older than what was read");
-
-        store_line(&backend, &conversation, 150, ChangeActor::Nobody, nobody());
-        assert_eq!(unread(&backend), 1, "newer than everything read, by nobody named");
-        let messages = backend.all_messages(conversation.id);
-        note_lines_read(&backend.store, conversation.id, &messages).unwrap();
-        assert_eq!(unread(&backend), 0, "read on this device");
-      }
-
-      #[test]
-      fn the_users_own_change_is_not_unread() {
-        let (backend, conversation, users) = mention_fixture(&[]);
-        store_line(&backend, &conversation, 150, ChangeActor::ThisDevice, id(1));
-        assert_eq!(
-          backend
-            .to_conversation(&conversation, &users, &backend.mention_preferences())
-            .unread_count,
-          0
-        );
-      }
-
-      /// The line "This channel was archived" at `at`, naming `actor` (sent as `sender`).
-      fn store_line(
-        backend: &CoreChatBackend<MemoryStore>,
-        conversation: &ConversationResponse,
-        at: i64,
-        actor: ChangeActor,
-        sender: UserId,
-      ) {
-        let mut bytes = [0xff_u8; 16];
-        bytes[..8].copy_from_slice(&at.to_be_bytes());
-        backend
-          .store
-          .upsert_message(&StoredMessage {
-            conversation_id: conversation.id,
-            client_message_id: ClientMessageId::from_bytes(bytes),
-            maybe_server_id: None,
-            sender_user_id: sender,
-            maybe_thread_id: None,
-            sent_at_ms: 0,
-            content: MessageContent::Event {
-              event: ConversationEvent::Archived,
-            },
-            is_edited: false,
-            edits: Vec::new(),
-            maybe_edit_id: None,
-            is_pinned: false,
-            maybe_verified_commit: None,
-            maybe_server_change: Some(ServerChange {
-              at: id(at),
-              seen_after: id(at - 1),
-              seen_until: id(at - 1),
-              actor,
-            }),
-          })
-          .unwrap();
-      }
     }
   }
 

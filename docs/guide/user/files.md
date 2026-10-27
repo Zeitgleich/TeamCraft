@@ -11,13 +11,6 @@ hold ciphertext. The file name and size travel inside the encrypted message.
 - Images get a **thumbnail** made on your device and open in a **gallery** (previous / next).
   Other files show a **preview** where possible and a **Download** button; downloaded files are
   saved on this device.
-- On **Android and iOS**, several pictures in one message show as an **album**: up to four tiles,
-  "+N" on the last for the rest. A tap opens the viewer on that picture; swipe through the
-  message's pictures, or switch to all pictures of the chat (the ends don't wrap around). Pinch or
-  double-tap to zoom; sender and time are on top, save, share and forward at the bottom. The preview
-  shows at once and the original loads with its progress. **Settings → Chats → Download original
-  images automatically** (*Always*, *On Wi-Fi only* by default, *Never*) decides whether it loads by
-  itself or waits for **Load original**; on mobile data the default waits.
 - The **Files** tab of a conversation lists everything shared in it.
 - **Link previews** are made by the sender's device, within the limits and domain list your admin set.
 

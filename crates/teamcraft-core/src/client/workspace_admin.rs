@@ -13,7 +13,6 @@ use teamcraft_proto::{
 
 use super::Client;
 use super::member_device::GroupInfoOutcome;
-use super::server_changes::{Asked, Observed};
 use crate::api::{ApiError, ServerApi};
 use crate::client::groups::CREATE_ATTEMPTS;
 use crate::convert;
@@ -102,16 +101,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let maybe_before: Option<ConversationResponse> =
       records::get_json(&self.store, Table::Conversations, &conversation.to_string())?;
     let after = self.api.update_conversation(conversation, request).await?;
-    // The lines for archiving and converting (issue #818) come from the server's answer; the
-    // announcements are still sent, for older versions and to name who made the change.
-    let observed = Observed::OwnChange {
-      asked: Asked::update(request),
-    };
-    self.store_conversation_from(maybe_before.as_ref(), &after, observed)?;
+    records::put_json(
+      &self.store,
+      Table::Conversations,
+      &conversation.to_string(),
+      &after,
+    )?;
     let Some(before) = maybe_before else {
       return Ok(());
     };
-    for event in changes(&before, &after, request) {
+    for event in changes(&before, &after) {
       self.announce(conversation, event).await?;
     }
     Ok(())
@@ -124,7 +123,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     request: &MoveChannelRequest,
   ) -> Result<(), CoreError> {
     let after = self.api.move_conversation(conversation, request).await?;
-    self.store_conversation(&after, Observed::OwnChange { asked: Asked::MOVE })?;
+    records::put_json(
+      &self.store,
+      Table::Conversations,
+      &conversation.to_string(),
+      &after,
+    )?;
     let maybe_space: Option<SpaceResponse> =
       records::get_json(&self.store, Table::Spaces, &request.space_id.to_string())?;
     self
@@ -160,7 +164,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn join_channel(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
     self.api.join_conversation(conversation).await?;
     let response = self.api.conversation(conversation).await?;
-    self.store_conversation(&response, Observed::FromServer { maybe_head: None })?;
+    records::put_json(
+      &self.store,
+      Table::Conversations,
+      &conversation.to_string(),
+      &response,
+    )?;
     self.post_self_add(&response).await
   }
 
@@ -394,74 +403,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Gives a channel member another role (admin.md §2.3). The server checks the permission and
-  /// the invariants (a channel keeps an admin, guests stay members) first; then this device signs
-  /// the channel's new roles, so members don't take the server's word for them (e2ee.md §4.6.1).
-  /// Somebody who can't sign in a way members accept (a role that is the server's word only, a
-  /// space admin) still changes the server's record: members see that role as not signed.
+  /// the invariants (a channel keeps an admin, guests stay members); the member list is read again
+  /// so the UI shows what the server stored, not what was asked for. Roles are not yet signed
+  /// assignments in the roster, so this is the server's word until they are.
   pub async fn set_channel_role(
     &mut self,
     conversation: ConversationId,
     user: UserId,
     role: teamcraft_proto::ChannelRole,
-  ) -> Result<crate::client::RoleSigning, CoreError> {
+  ) -> Result<(), CoreError> {
     let request = teamcraft_proto::UpdateConversationMemberRequest {
-      maybe_role: Some(role.clone()),
+      maybe_role: Some(role),
       ..Default::default()
     };
     self.api.update_member(conversation, user, &request).await?;
-    self.refresh_members(conversation).await?;
-    self.sign_server_role(conversation, user, role).await
-  }
-
-  /// Signs the role the server lists for `user` (an admin confirming a role that is the server's
-  /// word only, e.g. from before signed roles). Nothing changes on the server.
-  pub async fn confirm_channel_role(
-    &mut self,
-    conversation: ConversationId,
-    user: UserId,
-  ) -> Result<crate::client::RoleSigning, CoreError> {
-    self.refresh_members(conversation).await?;
-    let role = self
-      .server_channel_role(conversation, user)?
-      .ok_or_else(|| CoreError::InvalidRequest(format!("user {user} is not a member")))?;
-    self.sign_server_role(conversation, user, role).await
-  }
-
-  /// Signs `user`'s new role. A channel nothing was signed for yet is founded by an admin the
-  /// server lists (its first admin who changes a role); its other roles stay unsigned until an
-  /// admin confirms them, so nobody vouches for the server's list unseen.
-  async fn sign_server_role(
-    &mut self,
-    conversation: ConversationId,
-    user: UserId,
-    role: teamcraft_proto::ChannelRole,
-  ) -> Result<crate::client::RoleSigning, CoreError> {
-    let me = self.account.user_id;
-    let may_found = self.server_channel_role(conversation, me)? == Some(teamcraft_proto::ChannelRole::Admin);
-    let signing = self
-      .sign_channel_roles(conversation, &[(user, role)], may_found)
-      .await?;
-    if signing == crate::client::RoleSigning::Unsigned {
-      tracing::info!(conversation_id = %conversation, "the role change is the server's word only: this user can't sign it");
-    }
-    Ok(signing)
-  }
-
-  /// The role the stored member list (the server's word) gives `user`.
-  fn server_channel_role(
-    &self,
-    conversation: ConversationId,
-    user: UserId,
-  ) -> Result<Option<teamcraft_proto::ChannelRole>, CoreError> {
-    let stored: Option<teamcraft_proto::ListConversationMembersResponse> =
-      records::get_json(&self.store, Table::Members, &conversation.to_string())?;
-    Ok(
-      stored
-        .into_iter()
-        .flat_map(|list| list.members)
-        .find(|member| member.user.id == user)
-        .map(|member| member.role),
-    )
+    self.refresh_members(conversation).await
   }
 
   /// Removes someone from the space; the server also takes them out of its channels, whose
@@ -596,34 +552,27 @@ fn users_to_add(picked: &[UserId], members: impl IntoIterator<Item = UserId>) ->
     .collect()
 }
 
-/// The announcements a channel update calls for: what `request` changed. A difference it didn't
-/// ask for (somebody else's change this device hadn't seen yet) is theirs to announce, so this
-/// user isn't named for it (issue #818).
-fn changes(
-  before: &ConversationResponse,
-  after: &ConversationResponse,
-  request: &UpdateConversationRequest,
-) -> Vec<ConversationEvent> {
+/// The announcements a channel update calls for.
+fn changes(before: &ConversationResponse, after: &ConversationResponse) -> Vec<ConversationEvent> {
   let mut events = Vec::new();
-  if request.maybe_name.is_some()
-    && before.maybe_name != after.maybe_name
+  if before.maybe_name != after.maybe_name
     && let Some(name) = &after.maybe_name
   {
     events.push(ConversationEvent::Renamed { name: name.clone() });
   }
-  if request.maybe_topic.is_some() && before.maybe_topic != after.maybe_topic {
+  if before.maybe_topic != after.maybe_topic {
     events.push(ConversationEvent::TopicChanged {
       topic: after.maybe_topic.clone().unwrap_or_default(),
     });
   }
-  if request.maybe_is_archived == Some(after.is_archived) && before.is_archived != after.is_archived {
+  if before.is_archived != after.is_archived {
     events.push(if after.is_archived {
       ConversationEvent::Archived
     } else {
       ConversationEvent::Unarchived
     });
   }
-  if request.maybe_visibility.as_ref() == Some(&after.visibility) && before.visibility != after.visibility {
+  if before.visibility != after.visibility {
     events.push(match after.visibility {
       ConversationVisibility::Public => ConversationEvent::MadePublic,
       _ => ConversationEvent::MadePrivate,

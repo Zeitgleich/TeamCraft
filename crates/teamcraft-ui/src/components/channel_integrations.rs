@@ -264,7 +264,7 @@ fn BotCandidateRow(conversation: ConversationId, bot: User, joins_space: bool) -
 /// adding one. Adding generates the token here, announces only its hash in the channel (an
 /// encrypted control message the bridge reads) and shows the URL once; nothing goes into the
 /// bridge's configuration. Only admins of the verified workspace roster manage sources (the bridge
-/// doesn't read the signed channel roles yet, e2ee.md §13.1); a creator may revoke their
+/// accepts no others while channel roles aren't signed, e2ee.md §13.1); a creator may revoke their
 /// own.
 #[component]
 fn Sources(conversation: ConversationId, has_bot: Signal<bool>) -> impl IntoView {

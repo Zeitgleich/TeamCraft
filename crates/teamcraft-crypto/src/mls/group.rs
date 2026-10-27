@@ -3,12 +3,10 @@
 use std::collections::BTreeSet;
 
 use openmls::prelude::{
-  GroupEpoch, GroupId, KeyPackage, LeafNodeIndex, MlsGroup, MlsGroupJoinConfig, MlsMessageBodyIn,
-  MlsMessageIn, MlsMessageOut, ProcessedMessageContent, Proposal, Sender, StagedCommit, StagedWelcome,
-  WelcomeError,
+  GroupId, KeyPackage, LeafNodeIndex, MlsGroup, MlsGroupJoinConfig, MlsMessageBodyIn, MlsMessageIn,
+  MlsMessageOut, ProcessedMessageContent, Proposal, Sender, StagedCommit, StagedWelcome, WelcomeError,
 };
 use openmls_traits::OpenMlsProvider;
-use openmls_traits::storage::StorageProvider as _;
 use tls_codec::{
   Deserialize as _, DeserializeBytes as _, Serialize as _, TlsDeserializeBytes, TlsSerialize, TlsSize,
 };
@@ -130,8 +128,6 @@ pub struct MembershipUpdate {
   /// The signed change that authorized the commit; `None` for additions of devices of existing
   /// members, which only need the user's cross-signature, and for rejoins.
   pub maybe_change: Option<MembershipChange>,
-  /// Who signed `maybe_change`, verified with it; `None` for this device's own commits.
-  pub maybe_signer: Option<UserId>,
   pub added: Vec<GroupMember>,
   /// Includes a rejoining device's old leaf.
   pub removed: Vec<GroupMember>,
@@ -387,19 +383,6 @@ impl ConversationGroup {
 
   /// Removes the group's state from the provider's storage, e.g. after this device was removed.
   pub fn delete(mut self, provider: &impl OpenMlsProvider) -> Result<(), MlsError> {
-    // openmls deletes the leaf keys of the current epoch only. A commit that removed this device
-    // moved the group to the next epoch without deleting the previous epoch's (openmls 0.9), so
-    // its private keys would stay in the storage for good (issue #424).
-    if let Some(previous) = self.group.epoch().as_u64().checked_sub(1) {
-      provider
-        .storage()
-        .delete_encryption_epoch_key_pairs(
-          self.group.group_id(),
-          &GroupEpoch::from(previous),
-          self.group.own_leaf_index().u32(),
-        )
-        .map_err(|error| MlsError::openmls("deleting group", error))?;
-    }
     self
       .group
       .delete(provider.storage())
@@ -639,7 +622,6 @@ impl ConversationGroup {
     }
     Ok(MembershipUpdate {
       maybe_change: pending.maybe_change,
-      maybe_signer: None,
       added: pending.maybe_rejoin.iter().map(|(member, _)| *member).collect(),
       removed: pending.removed,
       maybe_rejoined: pending.maybe_rejoin.map(|(member, _)| member),
@@ -902,7 +884,6 @@ impl ConversationGroup {
       }
       let update = MembershipUpdate {
         maybe_change: None,
-        maybe_signer: None,
         added,
         removed: proposed.removed,
         maybe_rejoined: Some(member),
@@ -911,21 +892,20 @@ impl ConversationGroup {
       };
       return Ok((update, Some(verified.request().request_id())));
     }
-    let (maybe_change, maybe_signer) = if authenticated_data.is_empty() {
+    let maybe_change = if authenticated_data.is_empty() {
       if !proposed.removed.is_empty() {
         return Err(MlsError::MissingSignedChange);
       }
       self.check_device_additions(&proposed)?;
-      (None, None)
+      None
     } else {
       let signed = SignedMembershipChange::from_bytes(authenticated_data)?;
       let verified = signed.verify(directory, authority)?;
       self.check_change_matches(verified.change(), &proposed)?;
-      (Some(verified.change().clone()), Some(verified.actor().user_id()))
+      Some(verified.change().clone())
     };
     let update = MembershipUpdate {
       maybe_change,
-      maybe_signer,
       added: proposed.added.iter().map(GroupMember::from).collect(),
       removed: proposed.removed,
       maybe_rejoined: None,
@@ -979,7 +959,6 @@ impl ConversationGroup {
     })?;
     Ok(MembershipUpdate {
       maybe_change: None,
-      maybe_signer: None,
       added: vec![joiner],
       removed: Vec::new(),
       maybe_rejoined: None,

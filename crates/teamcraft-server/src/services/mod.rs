@@ -3,7 +3,6 @@
 pub mod access;
 pub mod accounts;
 pub mod admin;
-pub mod admin_join_requests;
 pub mod announcements;
 pub mod attachments;
 pub mod audit;
@@ -14,7 +13,6 @@ pub mod calendar_settings;
 pub mod call_history;
 pub mod calls;
 pub mod channel_images;
-pub mod channel_roles;
 pub mod conversations;
 pub mod convert;
 pub mod device_links;

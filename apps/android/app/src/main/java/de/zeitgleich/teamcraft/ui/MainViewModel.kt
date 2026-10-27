@@ -21,7 +21,6 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -64,7 +63,6 @@ import uniffi.teamcraft_ffi.PushService
 import uniffi.teamcraft_ffi.SearchHitItem
 import uniffi.teamcraft_ffi.ServerEntryException
 import uniffi.teamcraft_ffi.SignInPageInfo
-import uniffi.teamcraft_ffi.StoreProblem
 import uniffi.teamcraft_ffi.StoredServer
 import uniffi.teamcraft_ffi.checkServerInfo
 import uniffi.teamcraft_ffi.normalizeServerAddress
@@ -91,9 +89,6 @@ sealed interface AppState {
   data class RecoveringThroughOrganization(val code: String, @StringRes val maybeError: Int? = null) : AppState
   data class Ready(val userId: String, val displayName: String, val identityFingerprint: String) : AppState
   data class Failed(@StringRes val error: Int) : AppState
-
-  /** The local data can't be read by this version (issue #414); [maybeError] says why a reset failed. */
-  data class StoreUnreadable(val problem: StoreProblem, @StringRes val maybeError: Int? = null) : AppState
 }
 
 /** The approval of a new device the user is in; the code to type is on the new device only. */
@@ -113,7 +108,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   val changeCount: StateFlow<Long> = graph.core.changeCount
 
   /** The chat features over the core's JSON bridge. */
-  val chat = ChatClient(::deletedUserName) { graph.core.core() }
+  val chat = ChatClient { graph.core.core() }
   private val failures = MutableStateFlow<Int?>(null)
 
   /** Files picked in a composer and not sent yet, by conversation and thread. */
@@ -121,9 +116,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   /** The last action that failed, as a message to show once. */
   val lastFailure: StateFlow<Int?> = failures
-
-  /** Admins' requests to join private channels: the owner's decisions and the admin's own (#799). */
-  val joinRequests = JoinRequestActions(graph.core, viewModelScope) { failures.value = it }
 
   @Volatile private var maybeBrandStore: BrandStore? = null
   private val brand = MutableStateFlow<LoginBrand?>(null)
@@ -336,29 +328,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   /**
-   * "Set up this device again" (issue #414): the core sets the unreadable database aside (renamed,
-   * never deleted) and opens a new one; enrollment follows.
-   */
-  fun resetStore() = launchBusy {
-    val current = state.value as? AppState.StoreUnreadable ?: return@launchBusy
-    state.value = try {
-      val core = graph.core.core()
-      // Opens the new store while it waits.
-      withContext(Dispatchers.IO) { core.resetStore() }
-      loadAccountState()
-    } catch (failure: TeamCraftException) {
-      current.copy(maybeError = errorText(failure))
-    }
-  }
-
-  /** "Try again" on the unreadable-data screen: opens the core afresh (after an update, say). */
-  fun retryStore() = launchBusy {
-    if (state.value !is AppState.StoreUnreadable) return@launchBusy
-    graph.core.close()
-    state.value = loadAccountState()
-  }
-
-  /**
    * Signs out and removes what the account left in the clear on this device: notifications,
    * decrypted downloads and staged uploads, and the push registration. The sealed store stays.
    */
@@ -388,24 +357,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   suspend fun messages(conversationId: String): List<MessageItem> =
-    read { messages(conversationId, MESSAGE_PAGE.toUInt()) }?.map(::namedAuthor) ?: emptyList()
+    read { messages(conversationId, MESSAGE_PAGE.toUInt()) } ?: emptyList()
 
   suspend fun thread(conversationId: String, threadId: String): List<MessageItem> =
-    read { thread(conversationId, threadId) }?.map(::namedAuthor) ?: emptyList()
+    read { thread(conversationId, threadId) } ?: emptyList()
 
   suspend fun search(query: String): List<SearchHitItem> =
-    if (query.isBlank()) {
-      emptyList()
-    } else {
-      read { search(query) }?.map { it.copy(message = namedAuthor(it.message)) } ?: emptyList()
-    }
-
-  /** The app's own "Deleted user" in the user's language (issue #751). */
-  private fun deletedUserName(): String = getApplication<Application>().getString(R.string.user_deleted_name)
-
-  /** [message] with [deletedUserName] instead of the server's placeholder when its author was deleted. */
-  private fun namedAuthor(message: MessageItem): MessageItem =
-    if (message.isAuthorDeleted) message.copy(authorName = deletedUserName()) else message
+    if (query.isBlank()) emptyList() else read { search(query) } ?: emptyList()
 
   fun send(conversationId: String, maybeThreadId: String?, body: String) = viewModelScope.launch {
     runCatching { graph.core.core().sendMessage(conversationId, maybeThreadId, body) }
@@ -442,8 +400,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   suspend fun resolvePermalink(link: String): PermalinkTarget? =
     readChat { query(ChatQueries.resolvePermalink(link)).maybeTarget }
 
-  /** The failure to show, taken so that only one screen shows it; `null` when another took it. */
-  fun takeFailure(): Int? = failures.getAndUpdate { null }
+  fun failureShown() {
+    failures.value = null
+  }
 
   /** Runs a read; `null` when the core can't answer (not enrolled, gone). */
   suspend fun <T> readChat(block: suspend ChatClient.() -> T): T? =
@@ -615,11 +574,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** Sends the typed code of a reviewed request; a wrong code stays on the step for another try. */
   fun confirmLinkReview(typedCode: String) = viewModelScope.launch {
     val current = review.value ?: return@launch
-    val confirmation = confirmLink(typedCode)
-    // Closing the review while the new device's receipt is awaited cancels the wait (issue #415):
-    // a review the user closed (or replaced) meanwhile stays closed, without an error.
-    if (review.value !== current) return@launch
-    review.value = when (confirmation) {
+    review.value = when (confirmLink(typedCode)) {
       LinkConfirmation.CONFIRMED -> current.copy(maybeError = null, isDone = true)
       LinkConfirmation.WRONG_CODE -> current.copy(maybeError = R.string.approve_code_wrong)
       LinkConfirmation.ATTEMPT_ENDED -> current.copy(maybeError = R.string.approve_attempt_ended, isDone = false)
@@ -668,8 +623,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     review.value = null
     graph.calls.hangUp()
     graph.push.unregister()
-    // A setup given up on leaves no keys behind, and its device is revoked (issue #415).
-    runCatching { graph.core.core().forgetUnfinishedSetup() }
     runCatching { graph.core.core().deletePlaintextFiles() }
     graph.core.close()
     graph.auth.signOut()
@@ -703,7 +656,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   private fun checkAnswer(origin: String, answer: ServerInfoAnswer): CheckedServer =
     checkServerInfo(
       origin = origin,
-      status = answer.status.toUShort(),
+      // HttpURLConnection reports -1 for an answer that isn't HTTP; the core rejects that as well.
+      status = answer.status.coerceIn(0, UShort.MAX_VALUE.toInt()).toUShort(),
       contentType = answer.maybeContentType,
       body = answer.body,
       clientVersion = BuildConfig.VERSION_NAME,
@@ -855,7 +809,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       when (val account = graph.core.core().accountState()) {
         is AccountState.NeedsEnrollment -> AppState.NeedsEnrollment(account.hasExistingIdentity)
         is AccountState.Ready -> ready(account)
-        is AccountState.StoreUnreadable -> AppState.StoreUnreadable(account.problem)
       }
     } catch (failure: TeamCraftException.SignedOut) {
       graph.auth.signOut()

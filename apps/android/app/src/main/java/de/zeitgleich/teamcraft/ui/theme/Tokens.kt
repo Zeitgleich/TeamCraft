@@ -21,10 +21,7 @@ object Spacing {
   val xxl = 32.dp
 }
 
-/**
- * Corner radii of crates/teamcraft-ui/style/main/000-tokens.css (`--radius-sm`, `--radius`), plus a
- * large one for cards.
- */
+/** Corner radii of crates/teamcraft-ui/style/main.css (`--radius-sm`, `--radius`), plus a large one for cards. */
 object Radius {
   val small = 5.dp
   val medium = 8.dp

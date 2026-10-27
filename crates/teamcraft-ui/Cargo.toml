@@ -42,8 +42,6 @@ web-sys = { version = "0.3", features = [
   # The pre-join speaker test (speaker_test.rs): it has to start inside the click.
   "AudioContext", "AudioContextState", "AudioBuffer", "AudioBufferSourceNode", "AudioDestinationNode",
   "AudioNode", "AudioScheduledSourceNode", "BaseAudioContext",
-  # Decoding the user's own message sound without opening the audio device (message_sounds/page.rs).
-  "OfflineAudioContext",
 ] }
 # Fluent: the i18n format mandated by the project rules (English source + translations).
 fluent-bundle = "0.16"
@@ -76,6 +74,5 @@ tracing-web = "0.1"
 teamcraft-core = { path = "../teamcraft-core", default-features = false, features = ["ui"] }
 # Signs and verifies call key bindings for the call module (web_calls); the call engine itself is
 # in that module, which the page loads only for a call. `web-api`: the WebCodecs bindings with
-# which the desktop webview decodes the shell's call video (shell_video). `message-sounds`: the
-# synthesized sounds for new messages, which the page plays in a browser (message_sounds.rs).
-teamcraft-media = { path = "../teamcraft-media", default-features = false, features = ["call-auth", "web-api", "message-sounds"] }
+# which the desktop webview decodes the shell's call video (shell_video).
+teamcraft-media = { path = "../teamcraft-media", default-features = false, features = ["call-auth", "web-api"] }

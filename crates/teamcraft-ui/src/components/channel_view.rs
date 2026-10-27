@@ -17,7 +17,6 @@ use crate::components::security_ui::KeyChangeBanner;
 use crate::components::sheet::MenuSurface;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::components::tab_list::{on_tab_keys, roving_tabindex};
-use crate::components::typing_indicator::TypingIndicator;
 use crate::delivery::ReadIndicator;
 use crate::i18n::{I18n, use_i18n};
 use crate::keys::{SEARCH_IN_CONVERSATION, shortcut_text};
@@ -82,8 +81,6 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
       "composer-placeholder"
     };
     let can_post = conv.can_post;
-    // Nobody else writes in the notes to self.
-    let is_notes_to_self = conv.is_notes_to_self;
     // Files dropped anywhere on the conversation go to its composer.
     let zone = FileDrop::provide(can_post);
     let tab = RwSignal::new(ChannelTab::Messages);
@@ -120,7 +117,6 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
                 aria-labelledby=ChannelTab::Messages.tab_id()
               >
                 <ChannelFeed conversation=conversation />
-                {(!is_notes_to_self).then(|| view! { <TypingIndicator conversation=conversation /> })}
                 <SeenLine conversation=conversation />
                 <DropStrip zone=zone />
                 <Composer conversation=conversation can_post=can_post conversation_name=name placeholder_key=placeholder_key />

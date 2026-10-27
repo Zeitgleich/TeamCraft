@@ -14,8 +14,4 @@
   <string name="local_sign_in_rejected">Wrong e-mail, password or code.</string>
   <string name="local_sign_in_disabled">Signing in with e-mail and password is not available on this server. Ask your admin.</string>
   <string name="local_sign_in_rate_limited">Too many attempts. Wait a few minutes, then try again.</string>
-  <string name="sign_in">Sign in</string>
-  <string name="sign_in_hint">Sign in with your organization account to continue.</string>
-  <string name="sign_in_failed">Sign-in failed. Please try again.</string>
-  <string name="sign_out">Sign out</string>
 </resources>

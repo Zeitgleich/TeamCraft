@@ -15,12 +15,10 @@ use serde::Deserialize;
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{
-  ConversationId, DEFAULT_SOURCE_ALERT_LEVELS, DEFAULT_SOURCE_RATE_LIMIT_PER_MINUTE,
-  MAX_SOURCE_FILES_PER_MESSAGE, UserId,
+  ConversationId, DEFAULT_SOURCE_ALERT_LEVELS, DEFAULT_SOURCE_RATE_LIMIT_PER_MINUTE, UserId,
 };
 
 use crate::batch::{BatchLimits, Mentions};
-use crate::idempotency::{ENTRY_OVERHEAD_BYTES, MAX_IDEMPOTENCY_KEY_BYTES};
 use crate::render::LogRules;
 
 const ENV_PREFIX: &str = "TEAMCRAFT_BRIDGE_";
@@ -28,8 +26,6 @@ const ENV_NESTING: &str = "__";
 /// Environment variable naming the config file; not a config key.
 pub const CONFIG_PATH_ENV: &str = "TEAMCRAFT_BRIDGE_CONFIG";
 const MIN_SOURCE_TOKEN_CHARS: usize = 16;
-/// Smallest `files.max_message_bytes` that leaves room for a text and a few files.
-const MIN_MESSAGE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -46,10 +42,6 @@ pub struct BridgeConfig {
   pub index: IndexSection,
   #[serde(default)]
   pub app_sources: AppSourcesSection,
-  #[serde(default)]
-  pub files: FilesSection,
-  #[serde(default)]
-  pub idempotency: IdempotencySection,
   /// Optional: sources written into this file. Sources added in the app need none.
   #[serde(default)]
   pub sources: Vec<SourceConfig>,
@@ -104,9 +96,6 @@ pub struct ListenSection {
   /// Webhook requests and log lines per minute of all sources together; more are refused or
   /// dropped like a single source's.
   pub total_rate_limit_per_minute: u32,
-  /// On shutdown, requests still running after this long are cut off (a producer that stalls
-  /// can't hold the bridge up).
-  pub drain_timeout_secs: u64,
 }
 
 /// How log lines are collected into messages.
@@ -141,52 +130,6 @@ pub struct AppSourcesSection {
   pub history_pages: u32,
 }
 
-/// Webhooks with files (docs/bridge.md, "Files").
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct FilesSection {
-  /// Files one webhook message may carry, for sources that don't set their own; `0` takes none.
-  pub max_files_per_message: u32,
-  /// Largest file, in bytes. The server's attachment limit (`max_attachment_bytes`) applies too.
-  pub max_file_bytes: u64,
-  /// Bytes of webhooks with files per minute and source; more get `429`. A request can't carry
-  /// more than this.
-  pub source_bytes_per_minute: u64,
-  /// Bytes of webhooks with files per minute, all sources together; more get `429`.
-  pub total_bytes_per_minute: u64,
-  /// Requests with files at the same time, all sources together and per source; more get `503`
-  /// before their body is read.
-  pub max_concurrent_requests: u32,
-  pub max_concurrent_requests_per_source: u32,
-  /// A request whose body sends nothing for this long is cut off (`408`).
-  pub idle_timeout_secs: u64,
-  /// Bytes in the spool directory at most, all requests together; more get `503`.
-  pub max_spool_bytes: u64,
-  /// The server's message limit (`[limits] max_ciphertext_bytes`): a message whose text and files
-  /// won't fit is refused (`413`) before anything is uploaded.
-  pub max_message_bytes: usize,
-  /// Pictures larger than this many pixels get no thumbnail (decoding takes about 4 bytes a pixel).
-  pub max_thumbnail_pixels: u64,
-  /// Where files wait while they go up (plaintext, readable only by the bridge, deleted after the
-  /// request). Default: `spool` next to `store.path`.
-  #[serde(rename = "spool_dir")]
-  pub maybe_spool_dir: Option<PathBuf>,
-}
-
-/// Idempotency keys of webhooks (docs/bridge.md, "Retries"): a producer's retry with the key of a
-/// request the bridge accepted is answered without posting again. Kept in memory only.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct IdempotencySection {
-  /// How long the key of an accepted request is remembered, from its answer on.
-  pub window_secs: u64,
-  /// Keys remembered at most, all sources together; beyond, the oldest are forgotten first (of
-  /// the source that holds the most).
-  pub max_keys: usize,
-  /// Their memory at most: each key counts its length and 128 bytes besides.
-  pub max_bytes: usize,
-}
-
 /// One producer: a token that selects a conversation, with its limits and alert rules.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -208,9 +151,6 @@ pub struct SourceConfig {
   /// Webhook attachments with `color: "danger"` are alerts.
   #[serde(default)]
   pub danger_is_alert: bool,
-  /// Files one webhook message may carry; default: `files.max_files_per_message`.
-  #[serde(rename = "max_files_per_message", default)]
-  pub maybe_max_files_per_message: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -294,18 +234,7 @@ impl BridgeConfig {
           source.name
         ));
       }
-      if source
-        .maybe_max_files_per_message
-        .is_some_and(|files| files > MAX_SOURCE_FILES_PER_MESSAGE)
-      {
-        return invalid(format!(
-          "source {}: max_files_per_message is at most {MAX_SOURCE_FILES_PER_MESSAGE}",
-          source.name
-        ));
-      }
     }
-    self.files.validate()?;
-    self.idempotency.validate()?;
     if self.batching.max_bytes < self.batching.max_line_bytes + 16 {
       return invalid("batching.max_bytes must exceed batching.max_line_bytes".into());
     }
@@ -346,94 +275,12 @@ impl BridgeConfig {
     SymmetricKey::from_slice(&bytes).ok_or(ConfigError::BadStoreKey)
   }
 
-  /// Where files wait while they go up: `files.spool_dir`, or `spool` next to the database.
-  pub fn spool_dir(&self) -> PathBuf {
-    self.files.maybe_spool_dir.clone().unwrap_or_else(|| {
-      self
-        .store
-        .path
-        .parent()
-        .unwrap_or_else(|| Path::new(""))
-        .join("spool")
-    })
-  }
-
   pub fn argon2(&self) -> Argon2Settings {
     Argon2Settings {
       memory_kib: self.identity.argon2_memory_kib,
       iterations: self.identity.argon2_iterations,
       parallelism: 1,
     }
-  }
-}
-
-impl FilesSection {
-  fn validate(&self) -> Result<(), ConfigError> {
-    let invalid = |message: String| Err(ConfigError::Invalid(message));
-    if self.max_files_per_message > MAX_SOURCE_FILES_PER_MESSAGE {
-      return invalid(format!(
-        "files.max_files_per_message is at most {MAX_SOURCE_FILES_PER_MESSAGE}"
-      ));
-    }
-    if self.max_file_bytes == 0 {
-      return invalid("files.max_file_bytes must be above 0".into());
-    }
-    // Every limit must let at least one file of the largest size through, or a producer gets
-    // answers that contradict each other.
-    if self.source_bytes_per_minute < self.max_file_bytes
-      || self.total_bytes_per_minute < self.source_bytes_per_minute
-      || self.max_spool_bytes < self.max_file_bytes
-    {
-      return invalid(
-        "files: max_file_bytes <= source_bytes_per_minute <= total_bytes_per_minute, and \
-         max_file_bytes <= max_spool_bytes"
-          .into(),
-      );
-    }
-    if self.max_concurrent_requests == 0
-      || self.max_concurrent_requests_per_source == 0
-      || self.max_concurrent_requests_per_source > self.max_concurrent_requests
-    {
-      return invalid("files: 0 < max_concurrent_requests_per_source <= max_concurrent_requests".into());
-    }
-    if self.idle_timeout_secs == 0 {
-      return invalid("files.idle_timeout_secs must be above 0".into());
-    }
-    if self.max_message_bytes < MIN_MESSAGE_BYTES {
-      return invalid(format!(
-        "files.max_message_bytes must be at least {MIN_MESSAGE_BYTES}"
-      ));
-    }
-    // The core reads the files by path, which it keeps as text.
-    if self
-      .maybe_spool_dir
-      .as_ref()
-      .is_some_and(|path| path.to_str().is_none())
-    {
-      return invalid("files.spool_dir must be valid UTF-8".into());
-    }
-    Ok(())
-  }
-}
-
-impl IdempotencySection {
-  fn validate(&self) -> Result<(), ConfigError> {
-    if self.window_secs == 0 || self.max_keys == 0 {
-      return Err(ConfigError::Invalid(
-        "idempotency.window_secs and idempotency.max_keys must be above 0".into(),
-      ));
-    }
-    if self.max_bytes < MAX_IDEMPOTENCY_KEY_BYTES + ENTRY_OVERHEAD_BYTES {
-      return Err(ConfigError::Invalid(format!(
-        "idempotency.max_bytes must hold at least one key ({} bytes)",
-        MAX_IDEMPOTENCY_KEY_BYTES + ENTRY_OVERHEAD_BYTES
-      )));
-    }
-    Ok(())
-  }
-
-  pub fn window(&self) -> Duration {
-    Duration::from_secs(self.window_secs)
   }
 }
 
@@ -494,7 +341,6 @@ impl Default for ListenSection {
       ],
       max_body_bytes: 1024 * 1024,
       total_rate_limit_per_minute: 12_000,
-      drain_timeout_secs: 10,
     }
   }
 }
@@ -505,34 +351,6 @@ impl Default for BatchingSection {
       interval_ms: 1000,
       max_bytes: 64 * 1024,
       max_line_bytes: 8 * 1024,
-    }
-  }
-}
-
-impl Default for FilesSection {
-  fn default() -> Self {
-    Self {
-      max_files_per_message: 10,
-      max_file_bytes: 100 * 1024 * 1024,
-      source_bytes_per_minute: 512 * 1024 * 1024,
-      total_bytes_per_minute: 1024 * 1024 * 1024,
-      max_concurrent_requests: 4,
-      max_concurrent_requests_per_source: 2,
-      idle_timeout_secs: 30,
-      max_spool_bytes: 2 * 1024 * 1024 * 1024,
-      max_message_bytes: 1024 * 1024,
-      max_thumbnail_pixels: 16_000_000,
-      maybe_spool_dir: None,
-    }
-  }
-}
-
-impl Default for IdempotencySection {
-  fn default() -> Self {
-    Self {
-      window_secs: 600,
-      max_keys: 10_000,
-      max_bytes: 4 * 1024 * 1024,
     }
   }
 }
@@ -588,21 +406,6 @@ mod tests {
       assert!(config.sources[0].alert_levels.contains(&"error".to_owned()));
       assert_eq!(config.batch_limits().interval, Duration::from_secs(1));
       assert_eq!(config.store_key().unwrap().expose_secret()[1], 1);
-      assert_eq!(config.files.max_files_per_message, 10);
-      assert_eq!(config.sources[0].maybe_max_files_per_message, None);
-      assert_eq!(config.spool_dir(), Path::new("spool"), "next to the database");
-      assert_eq!(config.idempotency.window(), Duration::from_secs(600));
-      assert_eq!(config.idempotency.max_keys, 10_000);
-    }
-
-    #[test]
-    fn the_spool_directory_can_be_set() {
-      let text = format!("{MINIMAL}\n[files]\nspool_dir = \"/tmp/bridge-spool\"\n");
-      let config = BridgeConfig::from_toml(&text).unwrap();
-      assert_eq!(config.spool_dir(), Path::new("/tmp/bridge-spool"));
-      let nested = MINIMAL.replace("path = \"bridge.db\"", "path = \"/var/lib/bridge/bridge.db\"");
-      let config = BridgeConfig::from_toml(&nested).unwrap();
-      assert_eq!(config.spool_dir(), Path::new("/var/lib/bridge/spool"));
     }
 
     #[test]
@@ -670,50 +473,6 @@ mod tests {
           with_source(
             "name = \"b\"\ntoken = \"another-token-0123456\"\nconversation_id = \"1\"\nrate_limit_per_minute = 0",
           ),
-        ),
-        (
-          "too many files per message",
-          with_source(
-            "name = \"b\"\ntoken = \"another-token-0123456\"\nconversation_id = \"1\"\nmax_files_per_message = 17",
-          ),
-        ),
-        (
-          "too many files by default",
-          format!("{MINIMAL}\n[files]\nmax_files_per_message = 17\n"),
-        ),
-        (
-          "no file bytes",
-          format!("{MINIMAL}\n[files]\ntotal_bytes_per_minute = 0\n"),
-        ),
-        (
-          "a source budget below the largest file",
-          format!("{MINIMAL}\n[files]\nmax_file_bytes = 2000\nsource_bytes_per_minute = 1000\n"),
-        ),
-        (
-          "a source budget above the total",
-          format!("{MINIMAL}\n[files]\nsource_bytes_per_minute = 4294967296\n"),
-        ),
-        (
-          "a spool smaller than a file",
-          format!("{MINIMAL}\n[files]\nmax_spool_bytes = 1000\n"),
-        ),
-        (
-          "more per source than in all",
-          format!(
-            "{MINIMAL}\n[files]\nmax_concurrent_requests = 1\nmax_concurrent_requests_per_source = 2\n"
-          ),
-        ),
-        (
-          "no idle timeout",
-          format!("{MINIMAL}\n[files]\nidle_timeout_secs = 0\n"),
-        ),
-        (
-          "no idempotency window",
-          format!("{MINIMAL}\n[idempotency]\nwindow_secs = 0\n"),
-        ),
-        (
-          "no room for a key",
-          format!("{MINIMAL}\n[idempotency]\nmax_bytes = 200\n"),
         ),
       ] {
         assert!(BridgeConfig::from_toml(&text).is_err(), "{what}");

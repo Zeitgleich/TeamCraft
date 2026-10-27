@@ -11,5 +11,3 @@ core
 core.[0-9]*
 # ... but not source folders named `core` (the Android app's `teamcraft/core/`).
 !core/
-# The UI stylesheet joined from its area files by a Trunk hook (crates/teamcraft-ui/scripts/bundle-css.sh).
-crates/teamcraft-ui/gen/

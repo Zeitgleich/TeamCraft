@@ -104,7 +104,7 @@ impl CropTarget {
     }
   }
 
-  /// Where the picture shows, at the CSS sizes used there (style/main/: `.avatar-*`, `.space-btn`,
+  /// Where the picture shows, at the CSS sizes used there (main.css: `.avatar-*`, `.space-btn`,
   /// `.space-tile`).
   fn previews(self) -> [CropPreview; 3] {
     match self {

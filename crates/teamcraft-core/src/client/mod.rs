@@ -4,19 +4,15 @@
 //! [`ServerApi`] and keeps the store current. UIs read the store (see [`crate::view`]); every
 //! network-facing operation is an `async` method here.
 
-mod abandoned;
 mod account;
 mod actions;
-mod admin_joins;
 mod attachments;
 mod attested;
 mod backgrounds;
 mod calls;
 mod catch_up;
-mod channel_roles;
 mod custom_status;
 pub mod devices;
-pub mod direct_uploads;
 mod enroll;
 pub mod files;
 mod gateway;
@@ -24,7 +20,6 @@ mod group_health;
 mod groups;
 mod guest;
 mod heads;
-mod join_requests;
 mod key_history;
 mod key_packages;
 mod linking;
@@ -41,7 +36,6 @@ mod read_ahead;
 mod removal;
 #[cfg(not(target_arch = "wasm32"))]
 mod segments;
-mod server_changes;
 mod sources;
 mod sync;
 mod sync_trace;
@@ -55,11 +49,7 @@ pub(crate) use workspace::WORKSPACE_KEY;
 
 use std::collections::{BTreeMap, HashMap};
 
-pub use abandoned::SIGN_OUT_REVOKE_PATIENCE;
 pub use account::stored_account_data;
-pub use devices::OwnDeviceCheck;
-#[cfg(feature = "ui")]
-pub(crate) use enroll::{WRAPPED_KEYS_KEY, decode_wrapped_keys};
 /// Where the engine records its upload limit for the UI.
 pub const MAX_UPLOAD_KEY: &str = "max_upload_bytes";
 pub use actions::{OutgoingText, REPLY_EXCERPT_CHARS, forward_content, reply_ref};
@@ -68,9 +58,6 @@ pub use attested::{AttestationSettings, JwksSource};
 pub use calls::{CallEventSink, CallKeySigner, CallMoveRecord, CallPreparation, call_move_announcement};
 pub(crate) use catch_up::CATCHING_UP_PREFIX;
 pub use catch_up::{CatchUpFocus, is_catching_up};
-pub use channel_roles::RoleSigning;
-#[cfg(feature = "ui")]
-pub(crate) use channel_roles::channel_roles_key;
 pub use enroll::{EnrollmentOptions, EnrollmentSecret, OrgRecoveryUnlock, PendingEnrollment};
 pub use gateway::{
   DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart, GatewayTiming, HeldFrames, HeldLimits, KeptAlive,
@@ -82,10 +69,8 @@ pub use group_health::{
 };
 pub use groups::{DmSetupStatus, dm_setup_status};
 pub use guest::{GuestAdmission, GuestLinkMaterial, guest_link_fragment};
-pub use join_requests::is_open_private_channel;
 pub use linking::{
-  LinkAnnouncement, LinkApproval, LinkOffer, LinkReceipt, LinkRequestInfo, LinkRequestList, LinkedSecrets,
-  NewDeviceLink, ReceiptCancel,
+  LinkAnnouncement, LinkApproval, LinkOffer, LinkRequestInfo, LinkRequestList, LinkedSecrets, NewDeviceLink,
 };
 pub use member_device::{GroupAccess, is_waiting_for_device};
 pub use messaging::FlushReport;
@@ -93,6 +78,7 @@ pub(crate) use messaging::{REMOVED_SENDER_GRACE_MS, decrypt_content};
 #[cfg(feature = "ui")]
 pub(crate) use messaging::{apply_control, bookmarks_key};
 pub(crate) use notifications::registered_push_token;
+pub use notifications::{TYPING_TIMEOUT_MS, TypingState};
 use openmls_rust_crypto::OpenMlsRustCrypto;
 pub use org_recovery::{SealedShare, recovery_request};
 pub use pending_actions::{PendingAction, PendingActionSettings, StatusChange};
@@ -109,7 +95,6 @@ use crate::api::ServerApi;
 use crate::clock::Clock;
 use crate::convert;
 use crate::error::CoreError;
-use crate::mls_storage;
 use crate::records::{self, Account, PinnedIdentity, SyncState};
 use crate::store::{LocalStore, Table};
 use crate::trust::PinnedDirectory;
@@ -166,11 +151,6 @@ pub struct ClientSettings {
   /// times): each answer costs a commit, and a broken or malicious device could ask far more often
   /// than `rejoin_retry` (issue #149).
   pub rejoin_cooldown: std::time::Duration,
-  /// How long after this device saw a change the server reports of a channel (archived, made
-  /// private, ...) a member's encrypted announcement of it may come and still name who made it
-  /// (issue #818), measured on the server's clock from the newest message known then. Later
-  /// announcements name nobody; the line is there either way.
-  pub change_announcement_window: std::time::Duration,
   /// Removal records whose absence ended before the workspace's retention limit are dropped
   /// (issue #186); this much later, to spare messages still on the way.
   pub removed_sender_retention_leeway: std::time::Duration,
@@ -231,14 +211,6 @@ pub struct ClientSettings {
   /// Make the user's notes to self (a DM with themself) once a sync finds there is none. Off by
   /// default; the apps turn it on with [`ClientSettings::with_notes_to_self`].
   pub creates_notes_to_self: bool,
-  /// Decode pictures to upload for their thumbnail and size. A host that decodes them itself, off
-  /// its loop and with its own limits (the integration bridge), turns this off and hands its own
-  /// thumbnail in; the core then reads only the picture's header for its size.
-  pub makes_thumbnails: bool,
-  /// An enrollment whose device key pair was stored this long ago and that nothing can finish any
-  /// more counts as given up (issue #415): the key pair is dropped and the device it registered is
-  /// revoked. Not while the keys of a link wait to be enrolled.
-  pub unfinished_enrollment_expiry: std::time::Duration,
 }
 
 impl ClientSettings {
@@ -255,12 +227,10 @@ pub struct Client<A, S> {
   clock: Box<dyn Clock>,
   settings: ClientSettings,
   provider: OpenMlsRustCrypto,
-  /// What the store holds of the provider's storage, so a save writes only what changed.
-  saved_mls: mls_storage::SavedMlsStorage,
   account: Account,
   groups: HashMap<ConversationId, ConversationGroup>,
   sync: SyncState,
-  typing: crate::typing::TypingState,
+  typing: notifications::TypingState,
   /// Refusals of earlier user actions found by a background flush, for the host to show
   /// ([`Client::take_background_failures`]).
   background_failures: Vec<CoreError>,
@@ -320,8 +290,6 @@ pub struct Client<A, S> {
   /// When this process last heard from the gateway (any frame): a reconnect soon after reads its
   /// once-per-connection data while the server answers `resume`.
   maybe_last_heard_ms: Option<i64>,
-  /// Tests of mixed versions only ([`Client::check_membership_as_before_v1_0_9`]).
-  is_checking_as_before_v1_0_9: bool,
 }
 
 impl Default for ClientSettings {
@@ -339,7 +307,6 @@ impl Default for ClientSettings {
       rejoin_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
       pending_addition_expiry: std::time::Duration::from_secs(90 * 24 * 60 * 60),
       rejoin_cooldown: std::time::Duration::from_secs(30 * 60),
-      change_announcement_window: std::time::Duration::from_secs(10 * 60),
       removed_sender_retention_leeway: std::time::Duration::from_secs(24 * 60 * 60),
       dm_welcome_timeout: std::time::Duration::from_secs(2 * 60),
       removal_retry: std::time::Duration::from_secs(60 * 60),
@@ -366,9 +333,6 @@ impl Default for ClientSettings {
       upload_retry: files::UploadRetrySettings::default(),
       catch_up_concurrency: 6,
       creates_notes_to_self: false,
-      makes_thumbnails: true,
-      // A day: a user who comes back to a failed setup soon picks up its registration.
-      unfinished_enrollment_expiry: std::time::Duration::from_secs(24 * 60 * 60),
     }
   }
 }
@@ -384,7 +348,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let Some(account) = records::load_account(&store)? else {
       return Ok(None);
     };
-    let (provider, saved_mls) = mls_storage::load_mls_storage(&store)?;
+    let provider = records::load_mls_storage(&store)?;
     // The UI shows the upload limit before sending.
     records::put_json(&store, Table::Account, MAX_UPLOAD_KEY, &settings.max_upload_bytes)?;
     let sync = records::load_sync_state(&store)?;
@@ -396,7 +360,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       clock,
       settings,
       provider,
-      saved_mls,
       account,
       groups: HashMap::new(),
       sync,
@@ -424,7 +387,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_heads: None,
       read_ahead: Default::default(),
       maybe_last_heard_ms: None,
-      is_checking_as_before_v1_0_9: false,
     };
     // A catch-up the app was closed during left its marks; the next one sets them again.
     catch_up::clear_marks(&client.store)?;
@@ -496,15 +458,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           .get(teamcraft_crypto::content_key::ContentKeyId::from_bytes(id))
           .is_some()
       })
-  }
-
-  /// From now on this device checks membership changes, its own commits and other members', as
-  /// clients before v1.0.9 did: an admin outside a group could bring another admin in whatever
-  /// `admin_self_join` said (issue #816). Only for tests of how this version takes the commits of
-  /// such members.
-  #[doc(hidden)]
-  pub fn check_membership_as_before_v1_0_9(&mut self) {
-    self.is_checking_as_before_v1_0_9 = true;
   }
 
   /// Users whose identity key changed since it was pinned (e2ee.md §1: "security key changed").
@@ -591,10 +544,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self
       .store
       .delete(Table::AppliedChanges, &pending_post_key(conversation))?;
-    self.store.delete(
-      Table::AppliedChanges,
-      &admin_joins::pending_signer_key(conversation),
-    )?;
     self
       .store
       .delete(Table::AppliedChanges, &groups::rejoin_key(conversation))?;
@@ -616,7 +565,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .store
       .delete(Table::SyncState, &groups::group_info_published_key(conversation))?;
     self.mls_current.remove(&conversation);
-    self.save_mls_storage()
+    records::save_mls_storage(&self.store, &self.provider)
   }
 
   /// Writes MLS state (provider storage and applied change IDs) after a group operation, as one
@@ -640,7 +589,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   fn write_group_state(&self, conversation: ConversationId) -> Result<(), CoreError> {
-    self.save_mls_storage()?;
+    records::save_mls_storage(&self.store, &self.provider)?;
     if let Some(group) = self.groups.get(&conversation) {
       let applied: Vec<[u8; 16]> = group.applied_changes().map(|id| *id.as_bytes()).collect();
       records::put_json(
@@ -668,12 +617,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }
     }
     Ok(())
-  }
-
-  /// Writes what changed in the MLS state (the provider storage) since the last save, as one
-  /// group of writes; inside a caller's group it reaches the disk with that group.
-  pub(crate) fn save_mls_storage(&self) -> Result<(), CoreError> {
-    mls_storage::save_mls_storage(&self.store, &self.provider, &self.saved_mls)
   }
 
   /// Writes the key bag after content keys changed, and marks it for upload (together, so a bag

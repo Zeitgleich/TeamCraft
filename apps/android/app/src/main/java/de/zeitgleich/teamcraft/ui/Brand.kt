@@ -7,12 +7,12 @@ import android.util.Log
 import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
-import java.time.Duration
+import java.net.URL
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import de.zeitgleich.teamcraft.core.CoreHttp
 import de.zeitgleich.teamcraft.server.StoragePaths
+import de.zeitgleich.teamcraft.server.readAtMost
 import uniffi.teamcraft_ffi.LoginBrand
 import uniffi.teamcraft_ffi.loginBrand
 
@@ -20,7 +20,7 @@ private const val TAG = "Brand"
 private const val PREFS = "brand"
 private const val MAX_BRAND_JSON_BYTES = 64 * 1024
 private const val MAX_LOGO_BYTES = 512 * 1024
-private val TIMEOUT: Duration = Duration.ofSeconds(10)
+private const val TIMEOUT_MILLIS = 10_000
 
 /**
  * The server's brand for the sign-in screen (docs/branding.md §5): asked without credentials from
@@ -86,7 +86,7 @@ class BrandStore(context: Context, val origin: String, storageKey: String) {
 
   private fun decoded(file: File): Bitmap? = file.takeIf(File::exists)?.let { BitmapFactory.decodeFile(it.path) }
 
-  private suspend fun saveImage(maybeUrl: String?, file: File) {
+  private fun saveImage(maybeUrl: String?, file: File) {
     if (maybeUrl == null) {
       file.delete()
       return
@@ -106,13 +106,17 @@ class BrandStore(context: Context, val origin: String, storageKey: String) {
   private fun iconFile(isDark: Boolean) = File(directory, if (isDark) "icon_dark" else "icon")
 }
 
-/** Through the core's HTTP client ([CoreHttp]), without following redirects. */
-private suspend fun download(url: String, maxBytes: Int): ByteArray {
-  val answer = CoreHttp.send(
-    CoreHttp.request(url = url, maxBodyBytes = maxBytes, connectTimeout = TIMEOUT, readTimeout = TIMEOUT),
-  )
-  if (answer.status.toInt() != HttpURLConnection.HTTP_OK) throw IOException("status ${answer.status}")
-  return answer.body
+private fun download(url: String, maxBytes: Int): ByteArray {
+  val connection = URL(url).openConnection() as HttpURLConnection
+  connection.connectTimeout = TIMEOUT_MILLIS
+  connection.readTimeout = TIMEOUT_MILLIS
+  connection.instanceFollowRedirects = false
+  try {
+    if (connection.responseCode != HttpURLConnection.HTTP_OK) throw IOException("status ${connection.responseCode}")
+    return connection.inputStream.use { readAtMost(it, maxBytes) }
+  } finally {
+    connection.disconnect()
+  }
 }
 
 /** The brand's square icon in both themes, decoded (null: the brand has none for that theme). */

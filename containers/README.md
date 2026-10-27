@@ -42,8 +42,7 @@ this automatically); `healthcheck --ready` probes `/readyz` (database reachable)
 
 `teamcraft-bridge`: a TOML file (`--config`, `TEAMCRAFT_BRIDGE_CONFIG`; `crates/teamcraft-bridge/teamcraft-bridge.example.toml`)
 plus `TEAMCRAFT_BRIDGE_*` variables. The image listens on `[::]:8088` inside the container (publish it on
-loopback only), keeps its database in the volume `/var/lib/teamcraft-bridge` and the files of webhooks,
-while they upload, in the volume `/var/spool/teamcraft-bridge`.
+loopback only) and keeps its database in the volume `/var/lib/teamcraft-bridge`.
 
 `teamcraft-sfu`: environment variables, documented in `crates/teamcraft-sfu/src/main.rs`
 (`TEAMCRAFT_SFU_BIND`, `TEAMCRAFT_SFU_CERT`/`_KEY`, `TEAMCRAFT_SFU_JOIN_TOKEN_PUBLIC_KEY`/`_ISSUER`,

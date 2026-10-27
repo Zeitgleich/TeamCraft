@@ -400,7 +400,7 @@ What changed and what the numbers say:
   covers the long case).
 - **Left open (#424):** the MLS state is still one record rewritten per group, quadratic in the
   number of groups; splitting it per group is a change to the store format and needs its own
-  review. Done since: see "The MLS state per entry (issue #424)" below.
+  review.
 
 #### Coming back: requests and round trips (issue #714)
 
@@ -458,57 +458,11 @@ Left open (see the PR of #714/#717):
   `GET /me` before they start the core; offline the web app shows the sign-in page instead of the
   stored chats. The cached account should start the core at once and the sign-in be checked beside it.
 - The web core decrypts the whole IndexedDB store into memory before it answers the first read.
-- The MLS state was still one record (#424); a catch-up of many changed groups rewrote it per group.
-  Fixed since, see the next section.
+- The MLS state is still one record (#424); a catch-up of many changed groups rewrites it per group.
 
 The desktop and Android apps are measured against the same harness (`PERF_MOBILE_USER`) in a local
 session. Slack, Teams and Element were not measured: that needs their apps installed and accounts
 on their services.
-
-#### The MLS state per entry (issue #424)
-
-The MLS state of all groups was one record, rewritten after every change to any group: a catch-up
-that joins 300 groups wrote it two times per group. It is now one record per openmls storage entry,
-and a save writes the entries that changed (docs/e2ee.md §9.5). Measured in the client core against
-the fake server: Carol comes back to channels Alice made and added her to meanwhile, and catches up
-(`tests/suite/mls_storage.rs`, a store that counts the bytes written to the MLS table; debug build,
-local machine, October 2026; "before" is the same test on `integration/v1.0.9` ecdc727):
-
-```sh
-# MLS_STORAGE_SQLCIPHER=1: on a SQLCipher file instead of the memory store
-MLS_STORAGE_CHANNELS=300 cargo test -p teamcraft-core --all-features --test suite -- \
-  --ignored --nocapture mls_storage
-```
-
-| Catch-up of           | Before: MLS writes | Before: bytes written | After: MLS writes | After: bytes written | State in the store, before / after |
-|-----------------------|--------------------|-----------------------|-------------------|----------------------|------------------------------------|
-| 100 groups            | 201                | 92.0 MB               | 1,203             | 1.1 MB               | 0.91 / 0.96 MB                     |
-| 300 groups            | 601                | 816.2 MB              | 3,603             | 3.3 MB               | 2.71 / 2.86 MB                     |
-| Per group, 300 groups | 2                  | 2.7 MB                | 12                | 11 KB                | 9.0 / 9.5 KB                       |
-
-| Time of Carol's catch-up (debug build) | Before  | After   |
-|----------------------------------------|---------|---------|
-| 100 groups, store in memory            | 2.14 s  | 1.32 s  |
-| 300 groups, store in memory            | 15.62 s | 7.96 s  |
-| 100 groups, SQLCipher file             | 3.32 s  | 2.09 s  |
-| 300 groups, SQLCipher file             | 22.91 s | 10.30 s |
-
-- **Bytes written per join no longer grow with the number of groups:** about 11 KB per join, the
-  joined group's entries and the spent key package. Before, the n-th join wrote the whole state of
-  n groups twice. The test `writes_per_joined_group_do_not_grow_with_the_number_of_groups` fails if
-  they grow again.
-- More, smaller records: a group's state is about a dozen entries (tree, context, secrets, leaf
-  keys). Opening a store reads them all, as it read the one record; the bytes are the same.
-- What a save costs besides the writes: the client compares the provider storage with what it
-  wrote last (a copy of the state in memory, compared byte for byte: no hashing, and no read of the
-  store). With the state of 300 groups (2.7 MB in 3,600 entries) a save of one changed entry takes
-  0.3 ms in a release build (`mls_storage::tests::measure_save_of_one_change`). The copy costs as
-  much memory as the state.
-- The catch-up time still grows faster than the number of groups (memory store, debug build: 1.3 s
-  for 100, 8 s for 300). The comparison is one part of it (unoptimised in a debug build); the rest
-  was not taken apart here.
-- The browser's batches stay small now, so the extra wait for a batch over 1 MiB (#326) rarely
-  applies; the large web workspace (`perf.rs`, `PERF_SCALE=large`) is still to be measured with it.
 
 ### Desktop on Linux: idle (issue #399)
 
@@ -646,12 +600,8 @@ The app is split into wasm chunks (`crates/teamcraft-ui/src/areas.rs`, built by
   workspace dialogs (spaces, channels, invitations), the call screens, meetings, the directory and
   search; since 1.0.8 also the account menu, the dialogs a first visit doesn't open, the Saved,
   Files and Calls pages, Activity, a conversation's members and pins, an integration channel's log
-  view and the image codecs that make thumbnails (below); since 1.0.9 the synthesis of the message
-  sounds (`sounds`, #800), with the first sound, the administration console's data layer (with the
-  console, `admin`), a conversation's huddle bar (`calls`), and the formatting toolbar, the emoji
-  picker, the date pills' menu, the prompt of a device asking to be linked, the desktop app's update
-  banner and the "open in another tab" page (`dialogs`; below). `lazy_area` shows a spinner when a
-  chunk takes a moment and an error with a retry when it can't load.
+  view and the image codecs that make thumbnails (below). `lazy_area` shows a spinner when a chunk
+  takes a moment and an error with a retry when it can't load.
 - Code several modules share goes into shared chunks (one per combination of modules), so each file
   is downloaded once.
 - The call engine (`teamcraft-web-calls`, #330) stays a module of its own that loads in the
@@ -722,43 +672,6 @@ next candidates: the admin console's data layer (`admin_live.rs`, about 0.1 MB b
 which the shell reaches through the backend's vtable and uses for an admin's permission scheme
 outside the console, and the image headers `image_dimensions` reads (about 0.15 MB before
 wasm-opt).
-
-Over the budget again on the way to 1.0.9 (CI on `679c2dee`: 4,732,887 B; with #800, #830 and #838
-4,751,073 B). The growth came with the settings' device checks and key backup (#409, #410), #818,
-the abandoned device setups (#827) and the message sounds (#800); the settings themselves are an area
-already. Measured on the signed-in app's files (`twiggy top` on the split before wasm-opt), parts a
-first visit doesn't need were still in it, and moved out:
-
-- **The administration console's data layer** (`admin_live.rs`, about 0.2 MB before wasm-opt with
-  the admin API's wire types): the shell reaches it through the backend's vtable, so it stayed in the
-  signed-in app although only an admin's console uses it. Its refresh and its requests (changes,
-  on-demand data, connection tests, brand images) now run through `areas::admin_refresh` and
-  `areas::admin_task`, in the console's chunk; what stays is the cached data the synchronous
-  backend answers from. Nothing changes for an admin: the console loads that chunk anyway.
-- **Parts shown only in some situations**, each where it shows (`lazy_area`, new places `Inline`
-  for a part of a view and `Popover` for a popover, whose error leaves the app usable): the huddle
-  bar with the first call it shows (`calls`); the formatting toolbar (off by default), the emoji
-  picker and the date pills' menu the first time they open, the prompt of a device asking to be
-  linked with the first request, the update banner only in the desktop app, and the page a tab
-  shows while another tab runs the app (`dialogs`).
-
-Every new module multiplies the shared chunks (one per combination of modules that use a function),
-and each file costs a few hundred bytes of headers and types: a first try with four new modules
-(one per part) made the signed-in app 745 files instead of 627; in existing modules it is 629. New
-parts go into an existing module where one fits.
-
-Release `trunk build` on macOS (trunk 0.22.0, Rust 1.99.1, wasm-opt 131, the CI job's commands),
-gzip -9:
-
-| Web wasm       | Before (`4e9bfd38`) | After       | Delta      |
-|----------------|---------------------|-------------|------------|
-| App            | 2,397,220 B         | 2,399,068 B | +1,848 B   |
-| Signed-in app  | 1,959,081 B         | 1,798,771 B | −160,310 B |
-| Service worker | 394,772 B           | 394,772 B   | 0 B        |
-| Total          | 4,751,073 B         | 4,592,611 B | −158,462 B |
-
-A guest's first visit stays at 2.79 MB. Loaded later grew accordingly: the console's chunk from
-1.08 to 1.28 MB uncompressed, `dialogs` from 0.24 to 0.38 MB, `calls` from 0.29 to 0.32 MB.
 
 Release `trunk build` in the CI image (Rust 1.99.1, trunk 0.22.0, wasm-opt 131), `main` c55b2e58:
 

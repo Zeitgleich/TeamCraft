@@ -6,13 +6,11 @@
 //! same short code; once the user confirmed it on the existing device,
 //! [`Client::complete_link_approval`] transfers the backup key and the key bag. The new device
 //! checks that the key bag opens and answers with a receipt; only that receipt makes the existing
-//! device report success, so a lost frame fails on both sides. The wait for it needs no client
-//! ([`LinkReceipt`]): apps run it on a task of their own, so their loop goes on meanwhile (#415).
-//! Before it answers, the new device stores the secrets (encrypted like the account, issue #168);
-//! it then enrolls with them ([`crate::EnrollmentSecret::Linked`]). If it stops before the account
-//! is stored, its next start finishes enrolling with the stored secrets
-//! ([`crate::PendingEnrollment::resume_link`]) instead of asking for another link the existing
-//! device already reported as done.
+//! device report success, so a lost frame fails on both sides. Before it answers, the new device
+//! stores the secrets (encrypted like the account, issue #168); it then enrolls with them
+//! ([`crate::EnrollmentSecret::Linked`]). If it stops before the account is stored, its next start
+//! finishes enrolling with the stored secrets ([`crate::PendingEnrollment::resume_link`]) instead
+//! of asking for another link the existing device already reported as done.
 //!
 //! The protocol version is in the code itself (`tclink2`): a device that speaks another version
 //! refuses the code when it is scanned, before any key leaves the existing device.
@@ -20,8 +18,7 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use futures_util::FutureExt;
-use futures_util::future::{AbortHandle, Abortable, Either, select};
+use futures_util::future::{Either, select};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::backup::BackupKey;
@@ -134,16 +131,6 @@ pub struct LinkApproval<R> {
   connection: R,
   channel: RendezvousChannel,
 }
-
-/// The existing device's side once the keys went out ([`Client::send_link_transfer`]): the new
-/// device's receipt is still to come. It holds the relay, not the client, so an app waits for it on
-/// a task of its own while its loop goes on (issue #415).
-pub struct LinkReceipt<R> {
-  approval: LinkApproval<R>,
-}
-
-/// Stops the wait of [`LinkReceipt::detach`] when cancelled or dropped.
-pub struct ReceiptCancel(AbortHandle);
 
 #[derive(Serialize, Deserialize)]
 struct TransferPayload {
@@ -489,22 +476,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// After the user confirmed that both short codes match: sends the backup key and the current key
   /// bag to the new device and waits for its receipt. Succeeds only once the new device confirmed
-  /// that the key bag opened. An app with a loop sends with [`Self::send_link_transfer`] and waits
-  /// beside it instead ([`LinkReceipt::detach`]).
+  /// that the key bag opened.
   pub async fn complete_link_approval(
     &mut self,
-    approval: LinkApproval<A::Rendezvous>,
-  ) -> Result<(), CoreError> {
-    self.send_link_transfer(approval).await?.wait().await
-  }
-
-  /// After the user confirmed that both short codes match: sends the backup key and the current key
-  /// bag to the new device. The link succeeded only once its receipt is in ([`LinkReceipt`]), which
-  /// needs no client: the app's loop goes on meanwhile (issue #415).
-  pub async fn send_link_transfer(
-    &mut self,
     mut approval: LinkApproval<A::Rendezvous>,
-  ) -> Result<LinkReceipt<A::Rendezvous>, CoreError> {
+  ) -> Result<(), CoreError> {
     // Hand over the newest content keys and removal records, and the version the server has, so
     // the new device's next upload doesn't conflict.
     self.share_removed_senders()?;
@@ -532,43 +508,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let frame = approval.channel.seal(&plaintext).map_err(link_error)?;
     approval.connection.send_binary(frame).await?;
     records::save_key_bag(&self.store, &self.account)?;
-    Ok(LinkReceipt { approval })
-  }
-}
-
-impl<R: RendezvousConnection> LinkReceipt<R> {
-  /// The new device's receipt: `Ok` once it confirmed that the key bag opened. A closed relay, a
-  /// garbled frame or a minute of silence fail with [`CoreError::LinkNotConfirmed`].
-  pub async fn wait(mut self) -> Result<(), CoreError> {
-    self.approval.wait_for_receipt().await
-  }
-
-  /// [`Self::wait`] as a future that borrows nothing, to run on a task of its own beside the app's
-  /// loop (issue #415), and the handle that stops it. A stopped (or dropped) handle ends the wait at
-  /// once with [`CoreError::LinkCancelled`] and closes the relay.
-  pub fn detach(
-    self,
-  ) -> (
-    impl Future<Output = Result<(), CoreError>> + use<R>,
-    ReceiptCancel,
-  ) {
-    let (handle, registration) = AbortHandle::new_pair();
-    let waiting = Abortable::new(self.wait(), registration)
-      .map(|outcome| outcome.unwrap_or(Err(CoreError::LinkCancelled)));
-    (waiting, ReceiptCancel(handle))
-  }
-}
-
-impl ReceiptCancel {
-  /// Ends the wait (the user closed the dialog, the app stops).
-  pub fn cancel(self) {
-    drop(self);
-  }
-}
-
-impl Drop for ReceiptCancel {
-  fn drop(&mut self) {
-    self.0.abort();
+    approval.wait_for_receipt().await
   }
 }
 

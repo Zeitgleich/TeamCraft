@@ -1,8 +1,7 @@
 import SwiftUI
 
-/// Find a conversation to start with: the channels of the user's spaces (join or create one; a
-/// workspace admin asks the owners of a private one) and the people to message. Picking one opens
-/// it in the chat list.
+/// Find a conversation to start with: the channels of the user's spaces (join or create one) and
+/// the people to message. Picking one opens it in the chat list.
 struct BrowseView: View {
   enum Tab: Hashable, Identifiable {
     case channels, people
@@ -27,15 +26,13 @@ struct BrowseView: View {
   var body: some View {
     NavigationStack {
       VStack(spacing: 0) {
-        if snapshot?.canBrowseChannels != false {
-          Picker("browse_title", selection: $tab) {
-            Text("channels").tag(Tab.channels)
-            Text("people").tag(Tab.people)
-          }
-          .pickerStyle(.segmented)
-          .padding()
+        Picker("browse_title", selection: $tab) {
+          Text("channels").tag(Tab.channels)
+          Text("people").tag(Tab.people)
         }
-        switch shownTab {
+        .pickerStyle(.segmented)
+        .padding()
+        switch tab {
         case .channels: channelList
         case .people: peopleList
         }
@@ -50,13 +47,9 @@ struct BrowseView: View {
         Button("cancel", role: .cancel) {}
         Button("channel_create") { createChannel() }
       }
-      .joinNoteAlert(model)
     }
     .task(id: model.changeCount) { await reload() }
   }
-
-  /// The people for guests, who browse no channels.
-  private var shownTab: Tab { snapshot?.canBrowseChannels == false ? .people : tab }
 
   @ViewBuilder
   private var channelList: some View {
@@ -70,7 +63,7 @@ struct BrowseView: View {
             ForEach(spaces) { space in Text(verbatim: space.name).tag(Optional(space.id)) }
           }
         }
-        if let spaceId, spaces.first(where: { $0.id == spaceId })?.offersChannelCreation == true {
+        if spaceId != nil {
           Button("channel_create", systemImage: "plus") { isCreating = true }
         }
         let visible = channels.filter { $0.isArchived != true }
@@ -84,20 +77,10 @@ struct BrowseView: View {
   }
 
   private func channelRow(_ channel: BrowsableChannel) -> some View {
-    let maybeJoin = channel.maybeJoin
-    let isPrivate = maybeJoin != .open
-    return HStack {
+    HStack {
       VStack(alignment: .leading) {
-        HStack(spacing: 4) {
-          if isPrivate {
-            Image(systemName: "lock.fill").font(.footnote).foregroundStyle(Theme.textMuted)
-              .accessibilityLabel(Text("browse_private"))
-          }
-          Text(verbatim: (isPrivate ? "" : "# ") + channel.name)
-        }
-        if !channel.isMember && maybeJoin == .requested {
-          Text("browse_join_requested_hint").font(.footnote).foregroundStyle(Theme.textMuted)
-        } else if let topic = channel.topic, !topic.isEmpty {
+        Text(verbatim: "# " + channel.name)
+        if let topic = channel.topic, !topic.isEmpty {
           Text(verbatim: topic).font(.footnote).foregroundStyle(Theme.textMuted)
         }
       }
@@ -105,48 +88,16 @@ struct BrowseView: View {
       if channel.isMember {
         Button("open") { open(channel.conversation) }
       } else {
-        joinControl(channel, maybeJoin: maybeJoin)
+        Button("channel_join") {
+          Task {
+            await model.perform(.joinChannel(conversationId: channel.conversation))
+            open(channel.conversation)
+          }
+        }
+        .buttonStyle(.bordered)
       }
     }
     .accessibilityElement(children: .combine)
-  }
-
-  /// Join a public channel; ask the owners of a private one (admin.md §2.4.1), then "Requested"
-  /// with "Withdraw". Joining as an admin without asking stays on desktop and web.
-  @ViewBuilder
-  private func joinControl(_ channel: BrowsableChannel, maybeJoin: BrowseJoin?) -> some View {
-    let isPending = model.pendingJoinKeys.contains(channel.conversation)
-    switch maybeJoin {
-    case .open:
-      Button("channel_join") {
-        Task {
-          await model.perform(.joinChannel(conversationId: channel.conversation))
-          open(channel.conversation)
-        }
-      }
-      .buttonStyle(.bordered)
-    case .needsApproval:
-      Button("browse_join_ask") { Task { await model.askToJoin(conversationId: channel.conversation) } }
-        .buttonStyle(.bordered)
-        .disabled(isPending)
-    case .requested:
-      VStack(alignment: .trailing, spacing: 2) {
-        Text("browse_join_requested").font(.caption).foregroundStyle(Theme.textMuted)
-        Button("browse_join_withdraw") {
-          Task { await model.withdrawJoinRequest(conversationId: channel.conversation) }
-        }
-        .font(.subheadline)
-        .disabled(isPending)
-      }
-    case .asAdmin:
-      Text("browse_join_admin_elsewhere")
-        .font(.caption)
-        .foregroundStyle(Theme.textMuted)
-        .multilineTextAlignment(.trailing)
-        .frame(maxWidth: 140, alignment: .trailing)
-    case nil:
-      EmptyView()
-    }
   }
 
   @ViewBuilder
@@ -198,7 +149,7 @@ struct BrowseView: View {
   }
 
   private func loadChannels() async {
-    guard let spaceId, snapshot?.canBrowseChannels != false else { return }
+    guard let spaceId else { return }
     channels = await model.browseChannels(spaceId: spaceId)
   }
 

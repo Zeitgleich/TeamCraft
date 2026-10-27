@@ -33,7 +33,6 @@ struct ChatPane: View {
   @State private var typingNames: [String] = []
   @State private var displayNames: [String: String] = [:]
   @State private var maybeForwarding: MessageTarget?
-  @State private var maybeViewing: PictureTarget?
   @State private var maybeShowingEdits: MessageTarget?
   @State private var maybeLastTypingNotified: Date?
   @AppStorage("share_typing") private var isSharingTyping = true
@@ -54,20 +53,12 @@ struct ChatPane: View {
       displayNames = await model.displayNames()
     }
     .sheet(item: $maybeForwarding) { target in
-      ForwardSheet(fromConversationId: conversation.id, messageId: target.message.id)
+      ForwardSheet(fromConversationId: conversation.id, message: target.message)
     }
-    .fullScreenCover(item: $maybeViewing) { target in PictureViewer(target: target) }
     .sheet(item: $maybeShowingEdits) { target in
       EditHistorySheet(edits: extras[target.message.id]?.edits ?? [], current: target.message.body)
     }
     .task(id: model.changeCount) { await followTyping() }
-    // Receipts sent while this device was offline never arrive as events: they are read when the
-    // conversation opens and whenever the connection comes back (#769). Channels have none, so the
-    // core doesn't ask for theirs.
-    .task(id: model.connection == .connected) {
-      guard threadId == nil, model.connection == .connected else { return }
-      await model.perform(.refreshReadReceipts(conversationId: conversation.id))
-    }
     .onAppear { model.visibleConversationId = conversation.id }
     .onDisappear {
       if model.visibleConversationId == conversation.id { model.visibleConversationId = nil }
@@ -78,10 +69,7 @@ struct ChatPane: View {
   private var screen: some View {
     VStack(spacing: 0) {
       OfflineBanner()
-      // Admins asking to join this channel, when the user owns it (admin.md §2.4.1).
-      if threadId == nil { JoinRequestBanner(conversationId: conversation.id) }
       messageList
-        .environment(\.openPicture, OpenPictureAction { file in maybeViewing = PictureTarget(file: file) })
       if let line = typingText(typingNames) {
         Text(line)
           .font(.caption.italic())
@@ -215,19 +203,17 @@ struct ChatPane: View {
 
   private static let bottomId = "bottom"
 
-  /// One message with its gestures: double tap reacts, long press opens the menu. Each only where
-  /// the user's rights allow it (issue #758).
+  /// One message with its gestures: double tap reacts, long press opens the menu.
   private func entryRow(_ entry: FeedEntry, look: BubbleLook, listWidth: CGFloat) -> some View {
     let message = entry.message
     let row = MessageRow(
       entry: entry, maybeExtras: extras[message.id], isMine: message.authorId == account.userId, look: look,
       listWidth: listWidth, showsThreadLink: threadId == nil,
       onOpenThread: { maybeThread = ThreadTarget(threadId: message.maybeThreadId ?? message.id) },
-      displayNames: displayNames,
-      canReact: conversation.canReact
+      displayNames: displayNames
     )
     let highlight: Color = maybeHighlighted == message.id ? Theme.accentSoft : .clear
-    return SwipeToReply(isEnabled: threadId == nil && !message.isPending && conversation.canPost) {
+    return SwipeToReply(isEnabled: threadId == nil && !message.isPending) {
       maybeReplying = message
       isComposerFocused = true
     } content: {
@@ -236,23 +222,13 @@ struct ChatPane: View {
       .padding(.top, entry.isContinuation ? 2 : 8)
       .background(highlight)
       .contentShape(Rectangle())
-      // Without the right to react, a tap doesn't wait to tell a double tap apart either.
-      .gesture(
-        TapGesture(count: 2).onEnded { react(message, Self.quickReaction) },
-        including: conversation.canReact ? .all : .subviews
-      )
+      .onTapGesture(count: 2) { react(message, Self.quickReaction) }
       .contextMenu { menu(for: message) }
-      .accessibilityActions {
-        if conversation.canPost {
-          Button("reply") {
-            maybeReplying = message
-            isComposerFocused = true
-          }
-        }
-        if conversation.canReact {
-          Button("react_quick \(Self.quickReaction)") { react(message, Self.quickReaction) }
-        }
+      .accessibilityAction(named: Text("reply")) {
+        maybeReplying = message
+        isComposerFocused = true
       }
+      .accessibilityAction(named: Text("react_quick \(Self.quickReaction)")) { react(message, Self.quickReaction) }
       .id(message.id)
   }
 
@@ -411,18 +387,14 @@ struct ChatPane: View {
     }
   }
 
-  /// The long-press menu: only what the user's rights allow (issue #758). Replying, editing and
-  /// deleting are messages too, so they need posting.
   @ViewBuilder
   private func menu(for message: MessageItem) -> some View {
-    if conversation.canReact {
-      Menu("react") {
-        ForEach(Self.quickReactions, id: \.self) { emoji in
-          Button(emoji) { react(message, emoji) }
-        }
+    Menu("react") {
+      ForEach(Self.quickReactions, id: \.self) { emoji in
+        Button(emoji) { react(message, emoji) }
       }
     }
-    if threadId == nil && conversation.canPost {
+    if threadId == nil {
       Button("reply", systemImage: "arrowshape.turn.up.left") {
         maybeReplying = message
         isComposerFocused = true
@@ -433,7 +405,7 @@ struct ChatPane: View {
     }
     Button("copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = message.body }
     if !message.isPending { sharedMessageActions(for: message) }
-    if message.authorId == account.userId && !message.isPending && conversation.canPost {
+    if message.authorId == account.userId && !message.isPending {
       Button("edit", systemImage: "pencil") {
         maybeEditing = message
         draft = message.body
@@ -497,11 +469,9 @@ struct ChatPane: View {
     let isPinned = maybeExtras?.isPinned == true
     let isSaved = maybeExtras?.isSaved == true
     Button("forward", systemImage: "arrowshape.turn.up.right") { maybeForwarding = MessageTarget(message: message) }
-    if conversation.canManageBookmarks {
-      Button(LocalizedStringKey(isPinned ? "unpin" : "pin"), systemImage: isPinned ? "pin.slash" : "pin") {
-        Task {
-          await model.perform(.setPinned(conversationId: conversation.id, messageId: message.id, isPinned: !isPinned))
-        }
+    Button(LocalizedStringKey(isPinned ? "unpin" : "pin"), systemImage: isPinned ? "pin.slash" : "pin") {
+      Task {
+        await model.perform(.setPinned(conversationId: conversation.id, messageId: message.id, isPinned: !isPinned))
       }
     }
     Button(LocalizedStringKey(isSaved ? "unsave" : "save_for_later"), systemImage: isSaved ? "bookmark.slash" : "bookmark") {
@@ -679,7 +649,7 @@ struct ForwardSheet: View {
   @Environment(AppModel.self) private var model
   @Environment(\.dismiss) private var dismiss
   let fromConversationId: String
-  let messageId: String
+  let message: MessageItem
 
   @State private var targets: [ConversationItem] = []
 
@@ -689,7 +659,7 @@ struct ForwardSheet: View {
         Button(target.name) {
           Task {
             await model.perform(
-              .forward(fromConversationId: fromConversationId, messageId: messageId, toConversationId: target.id))
+              .forward(fromConversationId: fromConversationId, messageId: message.id, toConversationId: target.id))
             dismiss()
           }
         }

@@ -1,6 +1,5 @@
 //! Localisation with Fluent. English is the source language; every user-facing string goes through
-//! [`I18n::t`] and friends. Translations live in `i18n/<language>/<area>.ftl`, one Fluent resource
-//! per area of the app (#614); a language's bundle loads all of its files, which build.rs embeds.
+//! [`I18n::t`] and friends. Translation files live in `i18n/*.ftl`.
 
 use fluent_bundle::FluentBundle as MessageBundle;
 use fluent_bundle::{FluentArgs, FluentResource};
@@ -9,8 +8,8 @@ use unic_langid::LanguageIdentifier;
 
 use crate::reactive::get_if_observed;
 
-// `fn sources(tag)`: the embedded files of one language.
-include!(concat!(env!("OUT_DIR"), "/i18n_sources.rs"));
+const EN_SOURCE: &str = include_str!("../i18n/en.ftl");
+const DE_SOURCE: &str = include_str!("../i18n/de.ftl");
 
 /// UI languages that ship with translations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,8 +142,8 @@ struct Bundles {
 impl Bundles {
   fn load() -> Self {
     Self {
-      en: build_bundle(Locale::En),
-      de: build_bundle(Locale::De),
+      en: build_bundle(Locale::En, EN_SOURCE),
+      de: build_bundle(Locale::De, DE_SOURCE),
     }
   }
 
@@ -156,41 +155,27 @@ impl Bundles {
   }
 }
 
-fn build_bundle(locale: Locale) -> MessageBundle<FluentResource> {
+fn build_bundle(locale: Locale, source: &str) -> MessageBundle<FluentResource> {
   let langid: LanguageIdentifier = locale.tag().parse().unwrap_or_default();
   let mut bundle = MessageBundle::new(vec![langid]);
   // Isolation marks confuse text selection and tests; the UI sets `dir` itself.
   bundle.set_use_isolating(false);
-  for (file, source) in sources(locale.tag()) {
-    // `FluentResource::try_new` returns the partial resource together with the errors; keep what parsed.
-    let resource = match FluentResource::try_new((*source).to_owned()) {
-      Ok(resource) => resource,
-      Err((resource, errors)) => {
-        tracing::error!(
-          locale = locale.tag(),
-          file,
-          error_count = errors.len(),
-          "invalid Fluent resource"
-        );
-        resource
-      },
-    };
-    // An id defined in two files keeps its first definition (the tests rule that out).
-    if bundle.add_resource(resource).is_err() {
+  // `FluentResource::try_new` returns the partial resource together with the errors; keep what parsed.
+  let resource = match FluentResource::try_new(source.to_owned()) {
+    Ok(resource) => resource,
+    Err((resource, errors)) => {
       tracing::error!(
         locale = locale.tag(),
-        file,
-        "duplicate message ids in Fluent resource"
+        error_count = errors.len(),
+        "invalid Fluent resource"
       );
-    }
+      resource
+    },
+  };
+  if bundle.add_resource(resource).is_err() {
+    tracing::error!(locale = locale.tag(), "duplicate message ids in Fluent resource");
   }
   bundle
-}
-
-/// All Fluent files of `locale` as one text, for tests that look for messages in the sources.
-#[cfg(test)]
-pub(crate) fn joined_source(locale: Locale) -> String {
-  sources(locale.tag()).iter().map(|(_, source)| *source).collect()
 }
 
 #[cfg(test)]
@@ -199,102 +184,51 @@ mod tests {
 
   #[test]
   fn translations_parse_without_errors() {
-    for locale in Locale::ALL {
-      assert!(
-        !sources(locale.tag()).is_empty(),
-        "no Fluent files for {locale:?}"
-      );
-      for (file, source) in sources(locale.tag()) {
-        assert!(
-          FluentResource::try_new((*source).to_owned()).is_ok(),
-          "i18n/{}/{file} doesn't parse",
-          locale.tag()
-        );
-      }
+    for source in [EN_SOURCE, DE_SOURCE] {
+      assert!(FluentResource::try_new(source.to_owned()).is_ok());
     }
   }
 
-  /// A duplicate makes `add_resource` fail and logs an error at startup, also when the two
-  /// definitions are in different area files.
   #[test]
-  fn message_ids_are_unique_across_files() {
-    for locale in Locale::ALL {
-      let mut seen: std::collections::BTreeMap<String, &str> = Default::default();
-      for (file, source) in sources(locale.tag()) {
-        for id in message_ids(source) {
-          if let Some(first) = seen.insert(id.clone(), file) {
-            panic!(
-              "{id} is defined in i18n/{0}/{first} and i18n/{0}/{file}",
-              locale.tag()
-            );
-          }
-        }
-      }
+  fn message_ids_are_unique_per_file() {
+    // A duplicate makes `add_resource` fail and logs an error at startup.
+    for (name, source) in [("en", EN_SOURCE), ("de", DE_SOURCE)] {
+      let ids = message_ids(source);
+      let mut sorted = ids.clone();
+      sorted.sort();
+      sorted.dedup();
+      assert_eq!(sorted.len(), ids.len(), "duplicate message ids in {name}.ftl");
     }
   }
 
   #[test]
   fn german_covers_every_english_message() {
-    let german = message_ids(&joined_source(Locale::De));
-    let missing: Vec<String> = message_ids(&joined_source(Locale::En))
+    let german = message_ids(DE_SOURCE);
+    let missing: Vec<String> = message_ids(EN_SOURCE)
       .into_iter()
       .filter(|id| !german.contains(id))
       .collect();
-    assert!(missing.is_empty(), "missing in i18n/de: {missing:?}");
+    assert!(missing.is_empty(), "missing in de.ftl: {missing:?}");
   }
 
   #[test]
   fn german_has_no_messages_english_lacks() {
-    let english = message_ids(&joined_source(Locale::En));
-    let orphans: Vec<String> = message_ids(&joined_source(Locale::De))
+    let english = message_ids(EN_SOURCE);
+    let orphans: Vec<String> = message_ids(DE_SOURCE)
       .into_iter()
       .filter(|id| !english.contains(id))
       .collect();
     assert!(
       orphans.is_empty(),
-      "only in i18n/de (stale or misspelled): {orphans:?}"
+      "only in de.ftl (stale or misspelled): {orphans:?}"
     );
-  }
-
-  /// Every language has the same area files as English, each with the same messages, so a
-  /// translation is found (and missed) where its English text is.
-  #[test]
-  fn every_language_has_the_english_area_files() {
-    let files_of = |locale: Locale| -> std::collections::BTreeMap<&str, Vec<String>> {
-      sources(locale.tag())
-        .iter()
-        .map(|(file, source)| {
-          let mut ids = message_ids(source);
-          ids.sort();
-          (*file, ids)
-        })
-        .collect()
-    };
-    let english = files_of(Locale::En);
-    for locale in Locale::ALL {
-      let translated = files_of(locale);
-      assert_eq!(
-        translated.keys().collect::<Vec<_>>(),
-        english.keys().collect::<Vec<_>>(),
-        "i18n/{} has other files than i18n/en",
-        locale.tag()
-      );
-      for (file, ids) in &english {
-        assert_eq!(
-          &translated[file],
-          ids,
-          "i18n/{}/{file} has other messages than i18n/en/{file}",
-          locale.tag()
-        );
-      }
-    }
   }
 
   /// A translation that drops or renames a `$placeholder` shows wrong or empty text.
   #[test]
   fn translations_use_the_same_placeholders() {
-    let german = placeholders(&joined_source(Locale::De));
-    for (id, english_vars) in placeholders(&joined_source(Locale::En)) {
+    let german = placeholders(DE_SOURCE);
+    for (id, english_vars) in placeholders(EN_SOURCE) {
       if let Some(german_vars) = german.get(&id) {
         assert_eq!(
           &english_vars, german_vars,

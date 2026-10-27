@@ -456,8 +456,8 @@ mod tests {
         .iter()
         .map(|limit| format!("settings-dm-limit-{limit}")),
     );
-    let en = crate::i18n::joined_source(crate::i18n::Locale::En);
-    let de = crate::i18n::joined_source(crate::i18n::Locale::De);
+    let en = include_str!("../../i18n/en.ftl");
+    let de = include_str!("../../i18n/de.ftl");
     for key in keys {
       let line = format!("\n{key} = ");
       assert!(

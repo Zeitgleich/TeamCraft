@@ -112,17 +112,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     records::put_json(&self.store, Table::SyncState, SEEN_HEADS_KEY, &heads.seen)
   }
 
-  /// The newest message of `conversation` this sync's heads name: where the server stood when the
-  /// sync started (lines about changes the server reports, issue #818).
-  pub(super) fn head_message(&self, conversation: ConversationId) -> Option<MessageId> {
-    self
-      .maybe_heads
-      .as_ref()?
-      .fresh
-      .get(&conversation)?
-      .maybe_last_message_id
-  }
-
   /// Forgets the heads of conversations the user is no longer in.
   pub(super) fn keep_listed_heads(&mut self, listed: impl IntoIterator<Item = ConversationId>) {
     if let Some(heads) = &mut self.maybe_heads {

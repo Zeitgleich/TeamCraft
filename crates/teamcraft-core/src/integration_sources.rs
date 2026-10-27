@@ -4,9 +4,9 @@
 //! channel ([`MessageContent::IntegrationSource`](crate::store::MessageContent)). Every member
 //! device that reads it, the bridge's included, keeps what it learned in a [`SourceLedger`] per
 //! conversation. Only signed data decides who may manage sources: the verified, fresh workspace
-//! roster (admin.md §2.3). Signed channel roles ([`crate::channel_roles`]) don't count here yet: the
-//! bridge would have to read each channel's role log first (a follow-up of issue #380). Neither do
-//! the server's account kinds, except to take rights away (guests and bots manage nothing).
+//! roster (admin.md §2.3). Channel roles are the server's word until they are signed (issue #380),
+//! so they count for nothing here; neither do the server's account kinds, except to take rights
+//! away (guests and bots manage nothing).
 //!
 //! - **Taking in** ([`SourceLedger::apply`]): a creation or rename counts only from a roster admin
 //!   at the message's server time; a revocation from a roster admin or the source's creator.

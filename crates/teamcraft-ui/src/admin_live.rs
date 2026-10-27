@@ -31,7 +31,7 @@ use teamcraft_proto::{
 
 use crate::admin::{
   AdminChannel, AdminLoad, AdminSpace, AdminSpaceChanges, AdminUser, AuditAction, AuditEntry, AuditFilter,
-  DeviceInfo, DeviceVerification, Retention, SettingsTestKind,
+  DeviceInfo, Retention, SettingsTestKind,
 };
 use crate::auth::{ApiMethod, Authenticator, BinaryBody};
 use crate::model::{
@@ -178,12 +178,14 @@ impl AdminLive {
   }
 
   pub fn delete_brand(&self, id: &str) {
+    let forgotten = id.to_owned();
     self.send_stored(
       ApiMethod::Delete,
       format!("/api/v1/admin/brands/{id}"),
       None,
-      Stored::Brands {
-        maybe_forgotten: Some(id.to_owned()),
+      move |data, brands: AdminBrandsResponse| {
+        data.brands = Some(brands);
+        forget_previews(data, &forgotten);
       },
     );
   }
@@ -193,9 +195,7 @@ impl AdminLive {
       ApiMethod::Post,
       format!("/api/v1/admin/brands/{id}/take-over"),
       Some("{}".to_owned()),
-      Stored::Brands {
-        maybe_forgotten: None,
-      },
+      |data, brands: AdminBrandsResponse| data.brands = Some(brands),
     );
   }
 
@@ -209,63 +209,71 @@ impl AdminLive {
     if !self.data.borrow_mut().loading.insert(format!("preview:{key}")) {
       return None;
     }
+    let live = self.clone();
     let path = format!("/api/v1/admin/brands/{id}/assets/{}", slot.as_str());
-    self.run(AdminTask::BrandPreview { key, path });
+    spawn_local(async move {
+      let maybe_url = match live.auth.api_request_bytes(ApiMethod::Get, &path, None).await {
+        Ok(response) if response.status == 200 => {
+          preview_data_url(response.maybe_content_type.as_deref(), &response.body)
+        },
+        _ => None,
+      };
+      {
+        let mut data = live.data.borrow_mut();
+        // The loading entry stays, which is what keeps a failed image from being requested again.
+        if let Some(url) = maybe_url {
+          data.loading.remove(&format!("preview:{key}"));
+          data.brand_previews.insert(key, url);
+        }
+      }
+      live.changed();
+    });
     None
   }
 
   pub fn upload_brand_asset(&self, id: &str, slot: &BrandAssetSlot, bytes: Vec<u8>, content_type: String) {
-    self.run(AdminTask::UploadBrandAsset {
-      id: id.to_owned(),
-      slot: slot.clone(),
-      bytes,
-      content_type,
+    let live = self.clone();
+    let (id, slot) = (id.to_owned(), slot.clone());
+    spawn_local(async move {
+      let path = format!("/api/v1/admin/brands/{id}/assets/{}", slot.as_str());
+      let body = BinaryBody { content_type, bytes };
+      let message = match live
+        .auth
+        .api_request_bytes(ApiMethod::Put, &path, Some(body))
+        .await
+      {
+        Ok(response) if response.status < 300 => {
+          let text = String::from_utf8_lossy(&response.body);
+          if let Ok(brands) = serde_json::from_str::<AdminBrandsResponse>(&text) {
+            live.data.borrow_mut().brands = Some(brands);
+          }
+          None
+        },
+        Ok(response) => Some(format!(
+          "{path}: {}",
+          refusal_of(&String::from_utf8_lossy(&response.body), response.status)
+        )),
+        Err(error) => Some(error.to_string()),
+      };
+      {
+        let mut data = live.data.borrow_mut();
+        data.maybe_error = message;
+        forget_previews(&mut data, &id);
+      }
+      live.changed();
+      live.queue_refresh();
     });
   }
 
-  async fn upload_brand_asset_now(
-    &self,
-    id: String,
-    slot: BrandAssetSlot,
-    bytes: Vec<u8>,
-    content_type: String,
-  ) {
-    let path = format!("/api/v1/admin/brands/{id}/assets/{}", slot.as_str());
-    let body = BinaryBody { content_type, bytes };
-    let message = match self
-      .auth
-      .api_request_bytes(ApiMethod::Put, &path, Some(body))
-      .await
-    {
-      Ok(response) if response.status < 300 => {
-        let text = String::from_utf8_lossy(&response.body);
-        if let Ok(brands) = serde_json::from_str::<AdminBrandsResponse>(&text) {
-          self.data.borrow_mut().brands = Some(brands);
-        }
-        None
-      },
-      Ok(response) => Some(format!(
-        "{path}: {}",
-        refusal_of(&String::from_utf8_lossy(&response.body), response.status)
-      )),
-      Err(error) => Some(error.to_string()),
-    };
-    {
-      let mut data = self.data.borrow_mut();
-      data.maybe_error = message;
-      forget_previews(&mut data, &id);
-    }
-    self.changed();
-    self.queue_refresh();
-  }
-
   pub fn delete_brand_asset(&self, id: &str, slot: &BrandAssetSlot) {
+    let forgotten = id.to_owned();
     self.send_stored(
       ApiMethod::Delete,
       format!("/api/v1/admin/brands/{id}/assets/{}", slot.as_str()),
       None,
-      Stored::Brands {
-        maybe_forgotten: Some(id.to_owned()),
+      move |data, brands: AdminBrandsResponse| {
+        data.brands = Some(brands);
+        forget_previews(data, &forgotten);
       },
     );
   }
@@ -280,7 +288,7 @@ impl AdminLive {
         ApiMethod::Put,
         "/api/v1/admin/settings/mail".to_owned(),
         Some(body),
-        Stored::Mail,
+        |data, mail: AdminMailSettingsResponse| data.mail = Some(mail),
       );
     }
   }
@@ -290,7 +298,7 @@ impl AdminLive {
       ApiMethod::Delete,
       "/api/v1/admin/settings/mail".to_owned(),
       None,
-      Stored::Mail,
+      |data, mail: AdminMailSettingsResponse| data.mail = Some(mail),
     );
   }
 
@@ -310,7 +318,7 @@ impl AdminLive {
         ApiMethod::Put,
         "/api/v1/admin/settings/calendar".to_owned(),
         Some(body),
-        Stored::Calendar,
+        |data, calendar: AdminCalendarSettingsResponse| data.calendar = Some(calendar),
       );
     }
   }
@@ -320,7 +328,7 @@ impl AdminLive {
       ApiMethod::Delete,
       "/api/v1/admin/settings/calendar".to_owned(),
       None,
-      Stored::Calendar,
+      |data, calendar: AdminCalendarSettingsResponse| data.calendar = Some(calendar),
     );
   }
 
@@ -346,7 +354,7 @@ impl AdminLive {
         ApiMethod::Put,
         "/api/v1/admin/settings".to_owned(),
         Some(body),
-        Stored::Runtime,
+        |data, runtime: RuntimeSettingsResponse| data.runtime = Some(runtime),
       );
     }
   }
@@ -356,7 +364,7 @@ impl AdminLive {
       ApiMethod::Delete,
       format!("/api/v1/admin/settings/{}", key.as_str()),
       None,
-      Stored::Runtime,
+      |data, runtime: RuntimeSettingsResponse| data.runtime = Some(runtime),
     );
   }
 
@@ -375,11 +383,9 @@ impl AdminLive {
       Some(space) => format!("/api/v1/admin/spaces/{space}/permission-scheme"),
       None => "/api/v1/admin/permission-scheme".to_owned(),
     };
-    self.load(
-      format!("scheme:{maybe_space:?}"),
-      path,
-      Loaded::Scheme(maybe_space),
-    );
+    self.load(format!("scheme:{maybe_space:?}"), path, move |data, scheme| {
+      data.schemes.insert(maybe_space, scheme);
+    });
     PermissionSchemeResponse { roles: Vec::new() }
   }
 
@@ -401,7 +407,9 @@ impl AdminLive {
     self.load(
       format!("moderation:{channel}"),
       format!("/api/v1/admin/conversations/{channel}/moderation"),
-      Loaded::Moderation(channel),
+      move |data, moderation| {
+        data.moderation.insert(channel, moderation);
+      },
     );
     ChannelModeration::default()
   }
@@ -429,7 +437,12 @@ impl AdminLive {
     self.load(
       format!("members:{channel}"),
       format!("/api/v1/admin/conversations/{channel}/members"),
-      Loaded::Members(channel),
+      move |data, list: ListConversationMembersResponse| {
+        data.members.insert(
+          channel,
+          list.members.into_iter().map(|member| member.user.id).collect(),
+        );
+      },
     );
     Vec::new()
   }
@@ -477,12 +490,7 @@ impl AdminLive {
     }
     loop {
       self.is_refresh_wanted_again.set(false);
-      // The reading and its wire types are in the console's chunk (`areas::admin_refresh`): an
-      // admin's first visit doesn't load them.
-      match crate::areas::admin_refresh(self.clone()).await {
-        Ok(refresh) => refresh.await,
-        Err(error) => self.chunk_failed(&error.to_string()),
-      }
+      self.refresh_once().await;
       // async-ok: a Cell, not a signal.
       if !self.is_refresh_wanted_again.get() {
         break;
@@ -492,24 +500,10 @@ impl AdminLive {
     self.is_refreshing.set(false);
   }
 
-  /// The console's chunk didn't load (offline, a deploy in between): the lists say so, as a failed
-  /// read would.
-  fn chunk_failed(&self, error: &str) {
-    tracing::warn!(%error, "the administration console's data did not load");
-    {
-      let mut data = self.data.borrow_mut();
-      if data.load != AdminLoad::Loaded {
-        data.load = AdminLoad::Failed(error.to_owned());
-      }
-      data.maybe_error = Some(error.to_owned());
-    }
-    self.changed();
-  }
-
   /// The lists first and all at once, so the console shows spaces and channels after one round
   /// trip; the per-channel and per-user details follow with bounded concurrency (not one request
   /// after the other: work proportional to the instance size on open).
-  pub(crate) async fn refresh_once(&self) {
+  async fn refresh_once(&self) {
     let mut errors: Vec<String> = Vec::new();
     let ((spaces, conversations, users, policy, announcement), (instance, brands, mail, calendar, runtime)) =
       join(
@@ -835,47 +829,29 @@ impl AdminLive {
   }
 
   /// Fetches data the console shows on demand and stores it; one request per key at a time.
-  fn load(&self, key: String, path: String, what: Loaded) {
+  fn load<T: serde::de::DeserializeOwned + 'static>(
+    &self,
+    key: String,
+    path: String,
+    store: impl FnOnce(&mut AdminData, T) + 'static,
+  ) {
     if !self.data.borrow_mut().loading.insert(key.clone()) {
       return;
     }
-    self.run(AdminTask::Load { key, path, what });
-  }
-
-  async fn load_now(&self, key: String, path: String, what: Loaded) {
-    let mut errors = Vec::new();
-    let stored = match what {
-      Loaded::Scheme(maybe_space) => self
-        .fetch::<PermissionSchemeResponse>(&path, &mut errors)
-        .await
-        .map(|scheme| {
-          Box::new(move |data: &mut AdminData| drop(data.schemes.insert(maybe_space, scheme))) as Store
-        }),
-      Loaded::Moderation(channel) => {
-        self
-          .fetch::<ChannelModeration>(&path, &mut errors)
-          .await
-          .map(|moderation| {
-            Box::new(move |data: &mut AdminData| drop(data.moderation.insert(channel, moderation))) as Store
-          })
-      },
-      Loaded::Members(channel) => self
-        .fetch::<ListConversationMembersResponse>(&path, &mut errors)
-        .await
-        .map(|list| {
-          let members = list.members.into_iter().map(|member| member.user.id).collect();
-          Box::new(move |data: &mut AdminData| drop(data.members.insert(channel, members))) as Store
-        }),
-    };
-    {
-      let mut data = self.data.borrow_mut();
-      data.loading.remove(&key);
-      match stored {
-        Some(store) => store(&mut data),
-        None => data.maybe_error = errors.into_iter().next(),
+    let live = self.clone();
+    spawn_local(async move {
+      let mut errors = Vec::new();
+      let value = live.fetch::<T>(&path, &mut errors).await;
+      {
+        let mut data = live.data.borrow_mut();
+        data.loading.remove(&key);
+        match value {
+          Some(value) => store(&mut data, value),
+          None => data.maybe_error = errors.into_iter().next(),
+        }
       }
-    }
-    self.changed();
+      live.changed();
+    });
   }
 
   async fn fetch<T: serde::de::DeserializeOwned>(&self, path: &str, errors: &mut Vec<String>) -> Option<T> {
@@ -896,35 +872,30 @@ impl AdminLive {
 
   /// Like [`Self::send`], and an answer of type `T` replaces the cached copy at once, so the form
   /// shows the saved state without waiting for the refresh.
-  fn send_stored(&self, method: ApiMethod, path: String, maybe_body: Option<String>, store: Stored) {
-    self.run(AdminTask::SendStored {
-      method,
-      path,
-      maybe_body,
-      store,
-    });
-  }
-
-  async fn send_stored_now(
+  fn send_stored<T: serde::de::DeserializeOwned + 'static>(
     &self,
     method: ApiMethod,
     path: String,
     maybe_body: Option<String>,
-    store: Stored,
+    store: impl FnOnce(&mut AdminData, T) + 'static,
   ) {
-    let message = match self.auth.api_request(method, &path, maybe_body).await {
-      Ok(response) if response.status < 300 => {
-        if let Err(error) = store.apply(&mut self.data.borrow_mut(), &response.body) {
-          tracing::debug!(%error, %path, "the answer could not be read");
-        }
-        None
-      },
-      Ok(response) => Some(format!("{path}: {}", refusal_of(&response.body, response.status))),
-      Err(error) => Some(error.to_string()),
-    };
-    self.data.borrow_mut().maybe_error = message;
-    self.changed();
-    self.queue_refresh();
+    let live = self.clone();
+    spawn_local(async move {
+      let message = match live.auth.api_request(method, &path, maybe_body).await {
+        Ok(response) if response.status < 300 => {
+          match serde_json::from_str::<T>(&response.body) {
+            Ok(value) => store(&mut live.data.borrow_mut(), value),
+            Err(error) => tracing::debug!(%error, %path, "the answer could not be read"),
+          }
+          None
+        },
+        Ok(response) => Some(format!("{path}: {}", refusal_of(&response.body, response.status))),
+        Err(error) => Some(error.to_string()),
+      };
+      live.data.borrow_mut().maybe_error = message;
+      live.changed();
+      live.queue_refresh();
+    });
   }
 
   fn send_brands(
@@ -935,187 +906,59 @@ impl AdminLive {
     maybe_forgotten: Option<String>,
   ) {
     if let Ok(body) = serde_json::to_string(request) {
-      self.send_stored(method, path, Some(body), Stored::Brands { maybe_forgotten });
+      self.send_stored(
+        method,
+        path,
+        Some(body),
+        move |data, brands: AdminBrandsResponse| {
+          data.brands = Some(brands);
+          if let Some(id) = maybe_forgotten {
+            forget_previews(data, &id);
+          }
+        },
+      );
     }
   }
 
   /// A connection test: its answer, or the refusal, is kept for the console to show.
   fn run_settings_test(&self, kind: SettingsTestKind, path: &'static str, body: String) {
     self.data.borrow_mut().last_test = None;
-    self.run(AdminTask::SettingsTest { kind, path, body });
-  }
-
-  async fn run_settings_test_now(&self, kind: SettingsTestKind, path: &'static str, body: String) {
-    let outcome = match self.auth.api_request(ApiMethod::Post, path, Some(body)).await {
-      Ok(response) if response.status < 300 => serde_json::from_str::<SettingsTestResponse>(&response.body)
-        .unwrap_or_else(|error| SettingsTestResponse {
+    let live = self.clone();
+    spawn_local(async move {
+      let outcome = match live.auth.api_request(ApiMethod::Post, path, Some(body)).await {
+        Ok(response) if response.status < 300 => serde_json::from_str::<SettingsTestResponse>(&response.body)
+          .unwrap_or_else(|error| SettingsTestResponse {
+            is_ok: false,
+            maybe_error: Some(error.to_string()),
+          }),
+        Ok(response) => SettingsTestResponse {
+          is_ok: false,
+          maybe_error: Some(refusal_of(&response.body, response.status)),
+        },
+        Err(error) => SettingsTestResponse {
           is_ok: false,
           maybe_error: Some(error.to_string()),
-        }),
-      Ok(response) => SettingsTestResponse {
-        is_ok: false,
-        maybe_error: Some(refusal_of(&response.body, response.status)),
-      },
-      Err(error) => SettingsTestResponse {
-        is_ok: false,
-        maybe_error: Some(error.to_string()),
-      },
-    };
-    self.data.borrow_mut().last_test = Some((kind, outcome));
-    self.changed();
-    // Mail tests change the delivery status shown next to the form.
-    self.queue_refresh();
+        },
+      };
+      live.data.borrow_mut().last_test = Some((kind, outcome));
+      live.changed();
+      // Mail tests change the delivery status shown next to the form.
+      live.queue_refresh();
+    });
   }
 
   /// Fire and forget; a refusal is shown in the console, then the next refresh shows the truth.
   fn send(&self, method: ApiMethod, path: String, maybe_body: Option<String>) {
-    self.run(AdminTask::Send {
-      method,
-      path,
-      maybe_body,
-    });
-  }
-
-  async fn send_now(&self, method: ApiMethod, path: String, maybe_body: Option<String>) {
-    let message = match self.auth.api_request(method, &path, maybe_body).await {
-      Ok(response) if response.status < 300 => None,
-      Ok(response) => Some(format!("{path}: {}", refusal_of(&response.body, response.status))),
-      Err(error) => Some(error.to_string()),
-    };
-    self.data.borrow_mut().maybe_error = message;
-    self.queue_refresh();
-  }
-
-  /// Runs a request of the console in the background. Its code and the answers' wire types are in
-  /// the console's chunk (`areas::admin_task`), like the refresh.
-  fn run(&self, task: AdminTask) {
     let live = self.clone();
     spawn_local(async move {
-      match crate::areas::admin_task(live.clone(), task).await {
-        Ok(running) => running.await,
-        Err(error) => {
-          // Nothing is under way any more: a later look asks again.
-          live.data.borrow_mut().loading.clear();
-          live.chunk_failed(&error.to_string());
-        },
-      }
+      let message = match live.auth.api_request(method, &path, maybe_body).await {
+        Ok(response) if response.status < 300 => None,
+        Ok(response) => Some(format!("{path}: {}", refusal_of(&response.body, response.status))),
+        Err(error) => Some(error.to_string()),
+      };
+      live.data.borrow_mut().maybe_error = message;
+      live.queue_refresh();
     });
-  }
-
-  /// Does what [`Self::run`] was given.
-  pub(crate) async fn perform(&self, task: AdminTask) {
-    match task {
-      AdminTask::Send {
-        method,
-        path,
-        maybe_body,
-      } => self.send_now(method, path, maybe_body).await,
-      AdminTask::SendStored {
-        method,
-        path,
-        maybe_body,
-        store,
-      } => self.send_stored_now(method, path, maybe_body, store).await,
-      AdminTask::Load { key, path, what } => self.load_now(key, path, what).await,
-      AdminTask::SettingsTest { kind, path, body } => self.run_settings_test_now(kind, path, body).await,
-      AdminTask::BrandPreview { key, path } => self.brand_preview_now(key, path).await,
-      AdminTask::UploadBrandAsset {
-        id,
-        slot,
-        bytes,
-        content_type,
-      } => self.upload_brand_asset_now(id, slot, bytes, content_type).await,
-    }
-  }
-
-  async fn brand_preview_now(&self, key: String, path: String) {
-    let maybe_url = match self.auth.api_request_bytes(ApiMethod::Get, &path, None).await {
-      Ok(response) if response.status == 200 => {
-        preview_data_url(response.maybe_content_type.as_deref(), &response.body)
-      },
-      _ => None,
-    };
-    {
-      let mut data = self.data.borrow_mut();
-      // The loading entry stays, which is what keeps a failed image from being requested again.
-      if let Some(url) = maybe_url {
-        data.loading.remove(&format!("preview:{key}"));
-        data.brand_previews.insert(key, url);
-      }
-    }
-    self.changed();
-  }
-}
-
-/// A request of the console, run in the background by [`AdminLive::run`].
-pub enum AdminTask {
-  /// Fire and forget; a refusal is shown, then the next refresh shows the truth.
-  Send {
-    method: ApiMethod,
-    path: String,
-    maybe_body: Option<String>,
-  },
-  /// Like `Send`, and the answer replaces the cached copy at once.
-  SendStored {
-    method: ApiMethod,
-    path: String,
-    maybe_body: Option<String>,
-    store: Stored,
-  },
-  /// Data the console shows on demand.
-  Load { key: String, path: String, what: Loaded },
-  /// A connection test.
-  SettingsTest {
-    kind: SettingsTestKind,
-    path: &'static str,
-    body: String,
-  },
-  /// A brand image for the editor.
-  BrandPreview { key: String, path: String },
-  UploadBrandAsset {
-    id: String,
-    slot: BrandAssetSlot,
-    bytes: Vec<u8>,
-    content_type: String,
-  },
-}
-
-/// Which cached copy an answer replaces.
-pub enum Stored {
-  /// The brands; `maybe_forgotten` is a brand whose cached images are stale now.
-  Brands {
-    maybe_forgotten: Option<String>,
-  },
-  Mail,
-  Calendar,
-  Runtime,
-}
-
-/// What on-demand data a load is for.
-pub enum Loaded {
-  Scheme(Option<SpaceId>),
-  Moderation(ConversationId),
-  Members(ConversationId),
-}
-
-/// Stores a loaded value in the cache.
-type Store = Box<dyn FnOnce(&mut AdminData)>;
-
-impl Stored {
-  /// Puts the answer `body` into the cache.
-  fn apply(self, data: &mut AdminData, body: &str) -> Result<(), serde_json::Error> {
-    match self {
-      Self::Brands { maybe_forgotten } => {
-        data.brands = Some(serde_json::from_str(body)?);
-        if let Some(id) = maybe_forgotten {
-          forget_previews(data, &id);
-        }
-      },
-      Self::Mail => data.mail = Some(serde_json::from_str(body)?),
-      Self::Calendar => data.calendar = Some(serde_json::from_str(body)?),
-      Self::Runtime => data.runtime = Some(serde_json::from_str(body)?),
-    }
-    Ok(())
   }
 }
 
@@ -1280,9 +1123,6 @@ fn user_from_wire(
         platform: String::new(),
         last_seen: device.maybe_last_seen_at.unwrap_or(device.created_at).0,
         is_current: false,
-        // Admins see the server's list; verifying is for the user's own devices.
-        verification: DeviceVerification::Unknown,
-        maybe_push: None,
       })
       .collect(),
     last_seen: summary.maybe_last_seen_at.unwrap_or(summary.created_at).0,

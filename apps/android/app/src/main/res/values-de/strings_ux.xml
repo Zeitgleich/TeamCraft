@@ -28,7 +28,6 @@
   <string name="connection_connecting">Verbindung zum Server wird aufgebaut…</string>
   <string name="message_link_label">Link zu einer Nachricht</string>
   <string name="message_sent">Gesendet</string>
-  <string name="message_read">Gelesen</string>
   <plurals name="conversation_members">
     <item quantity="one">%d Mitglied</item>
     <item quantity="other">%d Mitglieder</item>

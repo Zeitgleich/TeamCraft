@@ -20,7 +20,6 @@ use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::UserId;
 
 use super::commands::{CommandError, CoreHost, base_dir};
-use crate::notifications::pictures::NotificationPictures;
 
 /// Folder of the caches inside a server's core directory.
 const MEDIA_CACHE_DIR: &str = "media-cache";
@@ -184,20 +183,13 @@ pub async fn core_media_remove(host: State<'_, CoreHost>, key: MediaKey) -> Resu
     .map_err(|error| CommandError::from(error.to_string()))
 }
 
-/// Sign-out: closes the running core's cache and deletes the caches of every server and user, and
-/// the notification pictures made from them. A cache that can't be deleted now (a file in use, a
-/// permission) is deleted at the next start.
+/// Sign-out: closes the running core's cache and deletes the caches of every server and user. A
+/// cache that can't be deleted now (a file in use, a permission) is deleted at the next start.
 #[tauri::command(rename_all = "snake_case")]
-pub async fn core_media_clear(
-  app: AppHandle,
-  host: State<'_, CoreHost>,
-  pictures: State<'_, NotificationPictures>,
-) -> Result<(), CommandError> {
+pub async fn core_media_clear(app: AppHandle, host: State<'_, CoreHost>) -> Result<(), CommandError> {
   if let Ok(runtime) = host.current() {
     runtime.media().set(None);
   }
-  // The notifications' copies of the pictures go with the cache.
-  pictures.forget_all();
   let core_dir = base_dir(&app)?.join("core");
   tauri::async_runtime::spawn_blocking(move || delete_all(&core_dir))
     .await
@@ -218,8 +210,7 @@ pub fn finish_pending_clear(core_dir: &Path) {
   }
 }
 
-/// The media cache of the running core, if one runs and its cache opened.
-pub(crate) fn running_cache(host: &CoreHost) -> Option<Arc<FileMediaCache>> {
+fn running_cache(host: &CoreHost) -> Option<Arc<FileMediaCache>> {
   host.current().ok()?.media().get()
 }
 

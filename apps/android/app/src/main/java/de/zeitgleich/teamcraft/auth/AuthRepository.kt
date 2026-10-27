@@ -28,9 +28,9 @@ import net.openid.appauth.AuthorizationService
 import net.openid.appauth.AuthorizationServiceConfiguration
 import net.openid.appauth.ResponseTypeValues
 import net.openid.appauth.connectivity.ConnectionBuilder
+import net.openid.appauth.connectivity.DefaultConnectionBuilder
 import de.zeitgleich.teamcraft.BuildConfig
 import de.zeitgleich.teamcraft.R
-import de.zeitgleich.teamcraft.core.CoreHttpConnection
 import de.zeitgleich.teamcraft.security.KeystoreBox
 import de.zeitgleich.teamcraft.security.SealedFile
 import de.zeitgleich.teamcraft.server.ServerStore
@@ -242,7 +242,7 @@ class AuthRepository(
 
   private fun open(server: StoredServer): Session {
     val isInsecureHttpAllowed = BuildConfig.DEBUG
-    val connections = CoreConnectionBuilder(isInsecureHttpAllowed)
+    val connections = DevAwareConnectionBuilder(isInsecureHttpAllowed)
     val issuer = Uri.parse(server.issuer)
     val service = AuthorizationService(
       context,
@@ -334,18 +334,20 @@ class AuthRepository(
   }
 
   /**
-   * AppAuth's requests (discovery, code exchange, token refresh) through the core's HTTP client
-   * (issue #433), with AppAuth's own timeouts and without following redirects. HTTPS everywhere;
-   * plain HTTP only to the device itself, or anywhere in development builds: the core refuses the
-   * rest, since the network security config doesn't apply to it.
+   * HTTPS everywhere; plain HTTP only to the device itself, or anywhere in development builds
+   * (as `network_security_config.xml` of the build type).
    */
-  private class CoreConnectionBuilder(private val isInsecureHttpAllowed: Boolean) : ConnectionBuilder {
-    override fun openConnection(uri: Uri): HttpURLConnection =
-      CoreHttpConnection(URL(uri.toString()), isInsecureHttpAllowed).apply {
-        connectTimeout = TimeUnit.SECONDS.toMillis(15).toInt()
-        readTimeout = TimeUnit.SECONDS.toMillis(10).toInt()
-        instanceFollowRedirects = false
+  private class DevAwareConnectionBuilder(private val isInsecureHttpAllowed: Boolean) : ConnectionBuilder {
+    override fun openConnection(uri: Uri): HttpURLConnection {
+      if (uri.scheme == "http" && isPlainHttpAllowed(uri.host, isInsecureHttpAllowed)) {
+        return (URL(uri.toString()).openConnection() as HttpURLConnection).apply {
+          connectTimeout = TimeUnit.SECONDS.toMillis(15).toInt()
+          readTimeout = TimeUnit.SECONDS.toMillis(10).toInt()
+          instanceFollowRedirects = false
+        }
       }
+      return DefaultConnectionBuilder.INSTANCE.openConnection(uri)
+    }
   }
 
   private companion object {

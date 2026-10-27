@@ -127,16 +127,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
         .map(Option::unwrap_or_default),
     );
     let self_join = workspace.policy.admin_self_join;
-    let asked = self.my_join_requests();
     let joinable = maybe_joinable
       .map(|list| list.conversations)
       .unwrap_or_default()
       .into_iter()
       .filter_map(move |conversation| {
-        let join = match browse_join(conversation.visibility.clone(), &self_join)? {
-          BrowseJoin::NeedsApproval if asked.contains(&conversation.id) => BrowseJoin::Requested,
-          join => join,
-        };
+        let join = browse_join(conversation.visibility.clone(), &self_join)?;
         Some(BrowsableChannel {
           join,
           ..browsable(&conversation, space, false)

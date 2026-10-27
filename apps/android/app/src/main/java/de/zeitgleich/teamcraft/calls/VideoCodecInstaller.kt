@@ -2,17 +2,14 @@ package de.zeitgleich.teamcraft.calls
 
 import android.content.Context
 import android.util.Log
+import java.io.ByteArrayOutputStream
 import java.io.File
-import java.io.IOException
 import java.net.HttpURLConnection
-import java.time.Duration
-import kotlinx.coroutines.CancellationException
+import java.net.URL
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import de.zeitgleich.teamcraft.core.CoreHttp
-import uniffi.teamcraft_ffi.HttpFetchRedirects
 import uniffi.teamcraft_ffi.installVideoCodec
 import uniffi.teamcraft_ffi.useInstalledVideoCodec
 import uniffi.teamcraft_ffi.videoCodecDownloadUrl
@@ -26,7 +23,7 @@ object VideoCodecInstaller {
   private const val TAG = "TeamCraftVideo"
   /** Cisco's compressed libraries are about 1 MB. */
   private const val MAX_DOWNLOAD_BYTES = 16 * 1024 * 1024
-  private val TIMEOUT: Duration = Duration.ofSeconds(30)
+  private const val TIMEOUT_MS = 30_000
   private val lock = Mutex()
 
   /** `true` once video can be decoded; a failed download is retried on the next call. */
@@ -38,9 +35,6 @@ object VideoCodecInstaller {
       try {
         installVideoCodec(directory, download(url))
         true
-      } catch (cancelled: CancellationException) {
-        // The download stops with the call that wanted it; the next call tries again.
-        throw cancelled
       } catch (error: Exception) {
         Log.w(TAG, "OpenH264 could not be installed; receiving video stays off", error)
         false
@@ -48,21 +42,24 @@ object VideoCodecInstaller {
     }
   }
 
-  /** Through the core's HTTP client ([CoreHttp]); the timeout is per read, not for the whole download. */
-  private suspend fun download(url: String): ByteArray {
-    val answer = CoreHttp.send(
-      CoreHttp.request(
-        url = url,
-        maxBodyBytes = MAX_DOWNLOAD_BYTES,
-        connectTimeout = TIMEOUT,
-        readTimeout = TIMEOUT,
-        redirects = HttpFetchRedirects.FOLLOW,
-        // Cisco offers the libraries over plain HTTP only; the core checks the download against
-        // Cisco's published hash before it loads it.
-        allowInsecureHttp = true,
-      ),
-    )
-    if (answer.status.toInt() != HttpURLConnection.HTTP_OK) throw IOException("status ${answer.status}")
-    return answer.body
+  private fun download(url: String): ByteArray {
+    val connection = URL(url).openConnection() as HttpURLConnection
+    connection.connectTimeout = TIMEOUT_MS
+    connection.readTimeout = TIMEOUT_MS
+    try {
+      val body = ByteArrayOutputStream()
+      connection.inputStream.use { input ->
+        val buffer = ByteArray(64 * 1024)
+        while (true) {
+          val read = input.read(buffer)
+          if (read < 0) break
+          body.write(buffer, 0, read)
+          check(body.size() <= MAX_DOWNLOAD_BYTES) { "download too large" }
+        }
+      }
+      return body.toByteArray()
+    } finally {
+      connection.disconnect()
+    }
   }
 }

@@ -21,10 +21,4 @@
   <string name="dm_start_group">Gruppe starten</string>
   <string name="clear">Leeren</string>
   <string name="presence_peer_offline">Offline</string>
-  <string name="chats_title">Chats</string>
-  <string name="favorites">Favoriten</string>
-  <string name="direct_messages">Direktnachrichten</string>
-  <string name="no_conversations">Noch keine Unterhaltungen.</string>
-  <string name="favorite_add">Zu Favoriten hinzufügen</string>
-  <string name="favorite_remove">Aus Favoriten entfernen</string>
 </resources>

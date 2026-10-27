@@ -5,10 +5,6 @@
 - Request/response types live in `teamcraft-proto` so clients share them; they derive
   `Serialize`/`Deserialize` and `utoipa::ToSchema` for the OpenAPI spec.
 - One handler per file module, named after the handler (`create_channel_handler.rs`).
-- Routes are registered by feature in `crates/teamcraft-server/src/router/<area>.rs`:
-  `routes!(handlers::…)` adds the route and its `#[utoipa::path]` operation, with the schemas it
-  names, to the OpenAPI document. Schemas no route names (query parameters, gateway payloads) go in
-  that module's `Schemas`. There is no central list of routes or schemas.
 - Handlers return `Result<Json<{Action}Response>, {Feature}Error>`; the error enum implements
   `IntoResponse` and maps each variant to a status code.
 - Error bodies: `{ "error_code": "channel_not_found", "message": "..." }`. `error_code` values are

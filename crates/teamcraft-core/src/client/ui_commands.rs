@@ -8,7 +8,7 @@ use crate::api::ServerApi;
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, MessageFilter, Table};
-use crate::ui_backend::{CoreCommand, history_jump_key, newest_server_id, note_lines_read};
+use crate::ui_backend::{CoreCommand, history_jump_key, newest_server_id};
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn run_ui_command(&mut self, command: CoreCommand) -> Result<(), CoreError> {
@@ -31,9 +31,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.update_account_data(|data, now| data.clear_unread_mark(conversation, now))?;
         // The badge clears now; the server's `unread_update` confirms it.
         crate::read_state::note_unread(&self.store, conversation, 0, 0)?;
-        let messages = self.store.messages(conversation, MessageFilter::All)?;
-        note_lines_read(&self.store, conversation, &messages)?;
-        let maybe_latest = newest_server_id(&messages);
+        let maybe_latest = newest_server_id(&self.store.messages(conversation, MessageFilter::All)?);
         match maybe_latest {
           // Queued: offline, it reaches the server (and the other devices) once back.
           Some(message) => {
@@ -150,7 +148,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           .await
       },
       CoreCommand::RefreshPresence { users } => self.refresh_presence(&users).await,
-      CoreCommand::RefreshReadReceipts { conversation } => self.refresh_read_receipts(conversation).await,
       CoreCommand::SearchDirectory { query } => self.search_directory(&query).await.map(|_| ()),
       CoreCommand::RefreshPrivacy => self.refresh_privacy().await.map(|_| ()),
       CoreCommand::SetLastSeenVisibility { visibility } => self.set_last_seen_visibility(visibility).await,
@@ -160,8 +157,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.revoke_device(device).await?;
         self.refresh_own_devices().await
       },
-      CoreCommand::RenameOwnDevice { device, name } => self.rename_own_device(device, &name).await,
-      CoreCommand::TestPushOwnDevice { device } => self.test_push_own_device(device).await,
       CoreCommand::UploadFiles => self.upload_pending().await.map(|_| ()),
       CoreCommand::GeneratePreviews => self.generate_pending_previews().await.map(|_| ()),
       CoreCommand::DownloadFile {
@@ -210,16 +205,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       } => self.move_channel(conversation, &request).await,
       CoreCommand::RefreshChannelBrowser { space } => self.refresh_channel_browser(space).await.map(|_| ()),
       CoreCommand::JoinChannel { conversation } => self.join_channel(conversation).await,
-      CoreCommand::RequestAdminJoin { conversation } => self.request_admin_join(conversation).await,
-      CoreCommand::WithdrawAdminJoin { conversation } => self.withdraw_admin_join(conversation).await,
-      CoreCommand::ApproveAdminJoin {
-        conversation,
-        user,
-        history,
-      } => self.approve_admin_join_sharing(conversation, user, history).await,
-      CoreCommand::DeclineAdminJoin { conversation, user } => {
-        self.decline_admin_join(conversation, user).await
-      },
       CoreCommand::JoinSpace { space } => self.join_space(space).await,
       CoreCommand::LeaveChannel { conversation } => self.leave_channel(conversation).await,
       CoreCommand::RefreshCategories { space } => self.refresh_categories(space).await.map(|_| ()),
@@ -326,20 +311,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         conversation,
         user,
         role,
-      } => self.set_channel_role(conversation, user, role).await.map(|_| ()),
-      // Asked for explicitly: a role this user can't sign is a failure the user sees, not silence.
-      CoreCommand::ConfirmChannelRole { conversation, user } => {
-        match self.confirm_channel_role(conversation, user).await? {
-          super::RoleSigning::Signed => Ok(()),
-          super::RoleSigning::Unsigned => Err(CoreError::InvalidRequest(
-            "this role can't be signed in a way the channel's members accept".into(),
-          )),
-        }
-      },
-      CoreCommand::RefreshChannelRoles { conversation } => {
-        self.refresh_members(conversation).await?;
-        self.sync_channel_roles(conversation).await
-      },
+      } => self.set_channel_role(conversation, user, role).await,
       CoreCommand::RemoveSpaceMember { space, user } => self.remove_space_member(space, user).await,
       CoreCommand::RevokeSpaceInvite { space, invite } => self.revoke_space_invite(space, invite).await,
       CoreCommand::AddSpaceMembers {

@@ -1,18 +1,12 @@
 //! Settings > Notifications: one master switch, this device's notification status with a test
-//! notification, then what notifies the user, the sound for new messages, do not disturb and
-//! per-conversation levels. The values live in `NotificationPrefs` (see `prefs.rs`); `notify_sync`
-//! sends the server's share to the server.
+//! notification, then what notifies the user, do not disturb and per-conversation levels. The
+//! values live in `NotificationPrefs` (see `prefs.rs`); `notify_sync` sends them to the server.
 
 use leptos::prelude::*;
-use teamcraft_client_api::admin::format_bytes;
-use teamcraft_client_api::message_sound::{
-  BuiltInSound, MessageSound, OwnSoundLimits, OwnSoundPick, OwnSoundRefusal, OwnSoundStatus,
-};
 use teamcraft_client_api::os_notify::{NotificationTag, OsNotification, OsNotificationKind};
 use teamcraft_proto::DndWindow;
 
 use crate::auth::tauri;
-use crate::call_alerts::may_name_names;
 use crate::clock::local_time_zone;
 use crate::components::icons::{Icon, IconName};
 use crate::components::notification_prompt;
@@ -23,24 +17,19 @@ use crate::components::settings_rows::{
   slug_options,
 };
 use crate::feedback::PendingAction;
-use crate::i18n::{I18n, use_i18n};
-use crate::message_sounds::MessageSounds;
+use crate::i18n::use_i18n;
 use crate::model::{Conversation, User, UserId};
-use crate::notification_pictures::picture_of;
-use crate::notifier::PictureSubject;
 use crate::notify_sync::{
   MAX_DND_ALLOWED_USERS, MAX_DND_WINDOWS, format_minutes, is_valid_window, parse_minutes,
 };
 use crate::prefs::{
   DndSchedule, MuteFor, NotificationPrefs, NotifyLevel, PushWhen, ThreadReplies, default_dnd_window,
 };
-use crate::reactive::{SetIfAlive, UpdateIfAlive};
+use crate::reactive::SetIfAlive;
 use crate::state::use_app_state;
 
 /// The tag of the test notification; a newer test replaces the last one.
 const TEST_TAG: &str = "settings-test";
-/// What the page's file picker offers for an own sound (the desktop shell's dialog has its own list).
-const SOUND_FILE_TYPES: &str = "audio/*,.mp3,.ogg,.oga,.wav,.flac";
 
 #[component]
 pub fn NotificationsSection() -> impl IntoView {
@@ -83,7 +72,6 @@ pub fn NotificationsSection() -> impl IntoView {
         on_change=Callback::new(move |value: bool| edit(Box::new(move |n| n.show_preview = value)))
       />
     </SettingsCard>
-    <MessageSoundCard is_off=is_off />
     <SettingsCard heading="notif-mentions">
       <SwitchRow
         label="notif-first-name"
@@ -282,12 +270,6 @@ fn ThisDeviceCard() -> impl IntoView {
     });
   };
   let send_test = move |_| {
-    // The user's own picture, as a direct message shows its sender's (#543), where names may show.
-    let maybe_picture = state.read(|backend| {
-      may_name_names(&backend.push_content_mode())
-        .then(|| picture_of(backend, PictureSubject::Person(backend.me().id)))
-        .flatten()
-    });
     let notification = OsNotification {
       tag: NotificationTag::reminder(TEST_TAG),
       kind: OsNotificationKind::Reminder,
@@ -295,8 +277,6 @@ fn ThisDeviceCard() -> impl IntoView {
       maybe_body: Some(i18n.t("notif-test-body")),
       actions: Vec::new(),
       maybe_reply: None,
-      maybe_picture,
-      sound: Default::default(),
     };
     testing.spawn(async move {
       tauri::try_show_notification(&notification).await?;
@@ -342,220 +322,6 @@ fn ThisDeviceCard() -> impl IntoView {
         </span>
       </SettingRow>
     </SettingsCard>
-  }
-}
-
-/// The sound for new messages (#800): the choice with a preview, and with "Own file…" this
-/// device's file, picked, checked and kept here only, and how long it may play.
-#[component]
-fn MessageSoundCard(#[prop(into)] is_off: Signal<bool>) -> impl IntoView {
-  let state = use_app_state();
-  let i18n = use_i18n();
-  let prefs = state.settings.prefs;
-  let sound = Memo::new(move |_| prefs.get().notifications.message_sound);
-  let limits = Memo::new(move |_| prefs.get().notifications.own_sound_limits);
-  let sounds = use_context::<MessageSounds>().unwrap_or_else(MessageSounds::provide);
-  let picking = PendingAction::new();
-  let removing = PendingAction::new();
-  let maybe_refusal = RwSignal::new(None::<OwnSoundRefusal>);
-  let is_desktop = tauri::is_available();
-  let file_input = NodeRef::<leptos::html::Input>::new();
-  let has_file = Signal::derive(move || matches!(sounds.own_status.get(), Some(OwnSoundStatus::Ready(_))));
-
-  // The own file is looked at when the card shows (it may have gone since) and again when the
-  // length limit changes.
-  Effect::new(move |_| {
-    let limits = limits.get();
-    leptos::task::spawn_local(async move { sounds.refresh_status(limits).await });
-  });
-
-  // A kept file becomes the choice and plays once, as a preview.
-  let after_pick = move |pick: OwnSoundPick, limits: OwnSoundLimits| match pick {
-    OwnSoundPick::Stored(_) => {
-      prefs.update_if_alive(|all| all.notifications.message_sound = MessageSound::OwnFile);
-      sounds.preview(MessageSound::OwnFile, limits);
-    },
-    OwnSoundPick::Refused { reason } => maybe_refusal.set_if_alive(Some(reason)),
-    OwnSoundPick::Cancelled => {},
-  };
-  let choose_file = move || {
-    maybe_refusal.set(None);
-    let limits = limits.get_untracked();
-    if is_desktop {
-      let filter_label = i18n.t("notif-own-sound-filter");
-      picking.spawn(async move {
-        let pick = sounds.pick_in_shell(limits, filter_label).await?;
-        after_pick(pick, limits);
-        Ok(())
-      });
-    } else if let Some(input) = file_input.get_untracked() {
-      // Inside the click: browsers open a file picker only then.
-      input.click();
-    }
-  };
-  let on_file = move |ev: leptos::ev::Event| {
-    #[cfg(target_arch = "wasm32")]
-    {
-      let input: web_sys::HtmlInputElement = event_target(&ev);
-      let Some(file) = input.files().and_then(|files| files.get(0)) else {
-        return;
-      };
-      // Cleared, so picking the same file again counts as a change too.
-      input.set_value("");
-      let limits = limits.get_untracked();
-      picking.spawn(async move {
-        let pick = sounds.keep_picked(file, limits).await?;
-        after_pick(pick, limits);
-        Ok(())
-      });
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    let _ = (ev, after_pick);
-  };
-  let on_choice = move |ev: leptos::ev::Event| {
-    let chosen = MessageSound::from_slug(&event_target_value(&ev));
-    prefs.update(|all| all.notifications.message_sound = chosen);
-    maybe_refusal.set(None);
-    // "Own file…" without a file opens the picker at once; any other sound plays as a preview.
-    if chosen == MessageSound::OwnFile && !has_file.get_untracked() {
-      choose_file();
-    } else if chosen.is_played_by_app() {
-      sounds.preview(chosen, limits.get_untracked());
-    }
-  };
-  let remove = move |_| {
-    maybe_refusal.set(None);
-    removing.spawn(async move { sounds.remove().await });
-  };
-  let file_hint = Signal::derive(move || {
-    let limits = limits.get();
-    // A refusal says what to choose instead; the rules would only repeat it.
-    if let Some(reason) = maybe_refusal.get() {
-      return refusal_text(i18n, reason, limits);
-    }
-    let status = match sounds.own_status.get() {
-      Some(OwnSoundStatus::Ready(info)) => i18n.t_with(
-        "notif-own-sound-current",
-        &[
-          ("name", &info.file_name),
-          ("seconds", &format!("{:.1}", f64::from(info.play_ms) / 1000.0)),
-        ],
-      ),
-      Some(OwnSoundStatus::Unavailable) => i18n.t("notif-own-sound-unavailable"),
-      Some(OwnSoundStatus::NotPicked) | None => i18n.t("notif-own-sound-none"),
-    };
-    let rules = i18n.t_with(
-      "notif-own-sound-limits",
-      &[
-        ("size", &file_size(limits.max_bytes())),
-        ("seconds", &limits.max_play().as_secs().to_string()),
-      ],
-    );
-    format!("{status} {rules}")
-  });
-  let options: Vec<(String, &'static str)> = MessageSound::choices()
-    .map(|choice| (choice.slug().to_owned(), sound_label_key(choice)))
-    .collect();
-
-  view! {
-    <SettingsCard heading="notif-sound">
-      <SettingRow label="notif-message-sound" hint="notif-message-sound-hint">
-        <span class="set-sound-picker">
-          <select
-            class="input set-select"
-            aria-labelledby=format!("{}-label", row_id("notif-message-sound"))
-            aria-describedby=format!("{}-hint", row_id("notif-message-sound"))
-            prop:disabled=move || is_off.get()
-            on:change=on_choice
-          >
-            {options
-              .into_iter()
-              .map(|(slug, key)| {
-                let selected_slug = slug.clone();
-                view! {
-                  <option value=slug selected=move || sound.get().slug() == selected_slug>
-                    {move || i18n.t(key)}
-                  </option>
-                }
-              })
-              .collect_view()}
-          </select>
-          <button
-            type="button"
-            class="btn btn-small"
-            prop:disabled=move || is_off.get() || !sound.get().is_played_by_app()
-            on:click=move |_| sounds.preview(sound.get_untracked(), limits.get_untracked())
-          >
-            <Icon name=IconName::Play />
-            <span>{move || i18n.t("notif-sound-play")}</span>
-          </button>
-        </span>
-      </SettingRow>
-      <Show when=move || sound.get() == MessageSound::OwnFile fallback=|| ()>
-        <SettingRow label="notif-own-sound" live_hint=file_hint>
-          <PendingButton pending=picking class="btn btn-small" on_click=move |_| choose_file()>
-            {move || if has_file.get() { i18n.t("notif-own-sound-replace") } else { i18n.t("notif-own-sound-choose") }}
-          </PendingButton>
-          <Show when=move || has_file.get() || sounds.own_status.get() == Some(OwnSoundStatus::Unavailable) fallback=|| ()>
-            <PendingButton pending=removing class="btn btn-small" on_click=remove>
-              {move || i18n.t("notif-own-sound-remove")}
-            </PendingButton>
-          </Show>
-          {(!is_desktop).then(|| view! {
-            <input type="file" hidden=true accept=SOUND_FILE_TYPES node_ref=file_input on:change=on_file />
-          })}
-        </SettingRow>
-        <SelectRow
-          label="notif-own-sound-length"
-          options=slug_options(&["2", "5", "10"], "notif-own-sound-length-")
-          value=Signal::derive(move || limits.get().max_play_seconds.to_string())
-          on_change=Callback::new(move |value: String| {
-            if let Ok(seconds) = value.parse::<u32>() {
-              prefs.update(|all| all.notifications.own_sound_limits.max_play_seconds = seconds);
-            }
-          })
-        />
-      </Show>
-    </SettingsCard>
-  }
-}
-
-/// The i18n key naming a choice in the list.
-fn sound_label_key(sound: MessageSound) -> &'static str {
-  match sound {
-    MessageSound::System => "notif-sound-system",
-    MessageSound::Silent => "notif-sound-none",
-    MessageSound::OwnFile => "notif-sound-own",
-    MessageSound::BuiltIn(BuiltInSound::Chime) => "notif-sound-chime",
-    MessageSound::BuiltIn(BuiltInSound::Ping) => "notif-sound-ping",
-    MessageSound::BuiltIn(BuiltInSound::Pop) => "notif-sound-pop",
-    MessageSound::BuiltIn(BuiltInSound::Marimba) => "notif-sound-marimba",
-    MessageSound::BuiltIn(BuiltInSound::Knock) => "notif-sound-knock",
-    MessageSound::BuiltIn(BuiltInSound::Keys) => "notif-sound-keys",
-    MessageSound::BuiltIn(BuiltInSound::UhOh) => "notif-sound-uh-oh",
-  }
-}
-
-/// Why a picked file was not kept, and what to do instead.
-fn refusal_text(i18n: I18n, reason: OwnSoundRefusal, limits: OwnSoundLimits) -> String {
-  match reason {
-    OwnSoundRefusal::TooLarge => i18n.t_with(
-      "notif-own-sound-too-large",
-      &[("size", &file_size(limits.max_bytes()))],
-    ),
-    OwnSoundRefusal::NotAudio => i18n.t("notif-own-sound-not-audio"),
-    OwnSoundRefusal::Unreadable | OwnSoundRefusal::Unknown => i18n.t("notif-own-sound-unreadable"),
-  }
-}
-
-/// A size limit as people read it: whole megabytes without a decimal ("1 MB"), anything else as
-/// the file views show sizes.
-fn file_size(bytes: u64) -> String {
-  const MIB: u64 = 1024 * 1024;
-  if bytes >= MIB && bytes.is_multiple_of(MIB) {
-    format!("{} MB", bytes / MIB)
-  } else {
-    format_bytes(bytes)
   }
 }
 
@@ -1013,29 +779,5 @@ mod tests {
     set_enabled(&mut notes, true);
     assert_eq!(notes.desktop, NotifyLevel::All);
     assert_eq!(notes.push, NotificationPrefs::default().push);
-  }
-
-  #[test]
-  fn size_limits_read_as_whole_megabytes_where_they_are() {
-    assert_eq!(file_size(1024 * 1024), "1 MB");
-    assert_eq!(file_size(16 * 1024 * 1024), "16 MB");
-    assert_eq!(file_size(512 * 1024), "512.0 KB");
-  }
-
-  #[test]
-  fn every_sound_has_a_name_in_each_language() {
-    let mut keys: Vec<&str> = MessageSound::choices().map(sound_label_key).collect();
-    for locale in [crate::i18n::Locale::En, crate::i18n::Locale::De] {
-      for key in &keys {
-        assert_ne!(
-          &crate::i18n::translate(locale, key, None),
-          key,
-          "{locale:?} lacks {key}"
-        );
-      }
-    }
-    keys.sort_unstable();
-    keys.dedup();
-    assert_eq!(keys.len(), MessageSound::choices().count());
   }
 }

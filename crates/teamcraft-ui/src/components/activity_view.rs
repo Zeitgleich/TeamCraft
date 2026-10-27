@@ -10,7 +10,6 @@ use crate::clock::{format_date_time, format_relative, now_ms};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
-use crate::components::join_requests::ActivityJoinRequests;
 use crate::components::rich_text::RichText;
 use crate::i18n::use_i18n;
 use crate::model::{Conversation, ThreadSummary, thread_id_of};
@@ -42,13 +41,11 @@ pub fn ActivitySidebar() -> impl IntoView {
     }
     all
   });
-  // Join requests wait above the entries of "All" (they are no mention, reaction or reply).
-  let shows_requests = move || filter.get() == ActivityFilter::All;
   let is_empty = move || {
     if filter.get().lists_threads() {
       threads.with(Vec::is_empty)
     } else {
-      items.with(Vec::is_empty) && !(shows_requests() && feed.with(|feed| !feed.join_requests.is_empty()))
+      items.with(Vec::is_empty)
     }
   };
 
@@ -93,9 +90,6 @@ pub fn ActivitySidebar() -> impl IntoView {
         </button>
       </div>
       <div class="sidebar-scroll">
-        <Show when=shows_requests fallback=|| ()>
-          <ActivityJoinRequests />
-        </Show>
         <ul class="activity-list">
           {move || {
             if filter.get().lists_threads() {

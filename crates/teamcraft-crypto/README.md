@@ -23,7 +23,6 @@ All TeamCraft cryptography. No other crate implements or combines primitives
 | `rendezvous`     | Device linking handshake (AK auth keys, X25519, counter-nonce channel)      | e2ee.md §5                       |
 | `local_store`    | IndexedDB record encryption: HKDF lookup IDs, XChaCha20-Poly1305 records    | e2ee.md §9.1                     |
 | `source_token`   | Bridge source tokens (256 bit), their SHA-256, constant-time lookup         | e2ee.md §13.1, bridge.md         |
-| `fingerprint`    | SHA-256 of a content fed piece by piece, compared in constant time          | bridge.md                        |
 | `aead`, `domain` | Internal: AEAD helper with random nonces; domain separation labels          | –                                |
 
 Dependencies are audited RustCrypto / dalek crates plus `openmls` with `openmls_rust_crypto`.

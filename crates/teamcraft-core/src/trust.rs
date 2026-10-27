@@ -26,18 +26,12 @@ pub(crate) struct PinnedDirectory {
 
 /// Who may change a group's membership (e2ee.md §4.6, admin.md §2.3):
 ///
-/// - current members of the MLS group: channel roles are signed (e2ee.md §4.6.1,
-///   [`crate::channel_roles`]) but don't decide commits yet, so every member counts as allowed to
-///   manage members, also to add an admin, until channels from before signed roles are signed
-///   (security review A11),
-/// - workspace owners and admins from the verified roster who aren't members, for any change
-///   except bringing an owner or admin into a conversation that isn't an open public channel:
-///   themselves or another one alike, as the policy's `admin_self_join` says (admin.md §2.4,
-///   issue #816).
+/// - current members of the MLS group (the signed per-channel roles aren't in the roster yet, so
+///   every member counts as allowed to manage members),
+/// - workspace owners and admins from the verified roster, for any change except adding
+///   themselves, which follows the policy's `admin_self_join` (admin.md §2.4).
 pub(crate) struct WorkspaceAuthority {
   members: HashSet<crypto::UserId>,
-  /// Owners and admins of the fresh verified roster: who acts with an admin's authority, and who
-  /// counts as an admin being let in.
   admins: HashSet<crypto::UserId>,
   /// Meeting guests are members of the group but manage nobody (e2ee.md §4.6, "Meeting guests").
   guests: HashSet<crypto::UserId>,
@@ -46,9 +40,6 @@ pub(crate) struct WorkspaceAuthority {
   maybe_vouched_in_meeting: Option<HashSet<crypto::UserId>>,
   self_join: AdminSelfJoin,
   is_public_channel: bool,
-  /// Decides like clients before v1.0.9, which held only an admin's own self-join to the policy.
-  /// Only for tests of how this version takes such members' commits.
-  is_before_v1_0_9: bool,
 }
 
 impl PinnedDirectory {
@@ -126,7 +117,6 @@ impl WorkspaceAuthority {
       maybe_vouched_in_meeting: None,
       self_join,
       is_public_channel: false,
-      is_before_v1_0_9: false,
     }
   }
 
@@ -150,12 +140,6 @@ impl WorkspaceAuthority {
   /// A public, unarchived channel: members joining by themselves is fine.
   pub(crate) fn for_public_channel(mut self, is_public_channel: bool) -> Self {
     self.is_public_channel = is_public_channel;
-    self
-  }
-
-  /// Tests of mixed versions only: decide like clients before v1.0.9 (issue #816).
-  pub(crate) fn like_before_v1_0_9(mut self, is_before_v1_0_9: bool) -> Self {
-    self.is_before_v1_0_9 = is_before_v1_0_9;
     self
   }
 }
@@ -192,31 +176,13 @@ impl MembershipAuthority for WorkspaceAuthority {
       return false;
     }
     match action {
-      MembershipAction::AddUser { user_id, .. } if self.lets_an_admin_in(actor, *user_id) => {
-        match self.self_join {
-          AdminSelfJoin::Visible => true,
-          // Under `owner_approval` the admin asks instead and a channel owner adds them with an
-          // ordinary member's commit (admin.md §2.4.1): neither their own self-join nor another
-          // admin's signed addition of them is ever committed.
-          AdminSelfJoin::OwnerApproval | AdminSelfJoin::Disabled | AdminSelfJoin::Unknown(_) => false,
-        }
+      MembershipAction::AddUser { user_id, .. } if *user_id == actor => match self.self_join {
+        AdminSelfJoin::Visible => true,
+        // No approval flow yet: without an owner's approval the join is refused.
+        AdminSelfJoin::OwnerApproval | AdminSelfJoin::Disabled | AdminSelfJoin::Unknown(_) => false,
       },
-      // Anybody else, or a removal: an admin's change for the members to commit (admin.md §2.2).
       _ => true,
     }
-  }
-}
-
-impl WorkspaceAuthority {
-  /// Whether `actor`, an admin who isn't a member, adding `target` lets an admin in without the
-  /// members: their own self-join, or another admin's addition of them, so two admins can't add
-  /// each other around the policy (issue #816). `admin_self_join` decides those (admin.md §2.4).
-  /// An open public channel is anybody's to join.
-  fn lets_an_admin_in(&self, actor: crypto::UserId, target: crypto::UserId) -> bool {
-    if self.is_public_channel {
-      return false;
-    }
-    target == actor || (!self.is_before_v1_0_9 && self.admins.contains(&target))
   }
 }
 
@@ -252,78 +218,6 @@ mod tests {
       );
       assert!(!authority.is_authorized(stranger, conversation, &add(stranger)));
     }
-  }
-
-  /// Issue #816: an admin outside the group bringing another admin in follows the policy like a
-  /// self-join; a member adding an admin, admin or not, is an ordinary addition.
-  #[test]
-  fn an_admin_outside_lets_another_admin_in_only_as_the_policy_says() {
-    let (member, user, conversation) = (
-      crypto::UserId::new(1),
-      crypto::UserId::new(3),
-      crypto::ConversationId::new(9),
-    );
-    let (outsider, other, member_admin) = (admin(2), admin(4), admin(5));
-    let (outsider_id, other_id) = (convert::user(outsider), convert::user(other));
-
-    for (self_join, may_let_in) in [
-      (AdminSelfJoin::Visible, true),
-      (AdminSelfJoin::OwnerApproval, false),
-      (AdminSelfJoin::Disabled, false),
-      (AdminSelfJoin::Unknown("later".into()), false),
-    ] {
-      let authority = WorkspaceAuthority::new(
-        [member, convert::user(member_admin)],
-        [outsider, other, member_admin],
-        self_join.clone(),
-      );
-      assert_eq!(
-        authority.is_authorized(outsider_id, conversation, &add(other_id)),
-        may_let_in,
-        "{self_join:?}: another admin"
-      );
-      assert_eq!(
-        authority.is_authorized(outsider_id, conversation, &add(outsider_id)),
-        may_let_in,
-        "{self_join:?}: the self-join"
-      );
-      for adder in [member, convert::user(member_admin)] {
-        assert!(
-          authority.is_authorized(adder, conversation, &add(other_id)),
-          "{self_join:?}: a member adds an admin"
-        );
-      }
-      // Admin changes about anybody else stay as they were (admin.md §2.2).
-      assert!(authority.is_authorized(outsider_id, conversation, &add(user)));
-      assert!(authority.is_authorized(
-        outsider_id,
-        conversation,
-        &MembershipAction::RemoveUser { user_id: other_id }
-      ));
-    }
-  }
-
-  #[test]
-  fn admins_join_an_open_channel_whatever_the_policy() {
-    let (member, conversation) = (crypto::UserId::new(1), crypto::ConversationId::new(9));
-    let (outsider, other) = (admin(2), admin(4));
-    let public =
-      WorkspaceAuthority::new([member], [outsider, other], AdminSelfJoin::Disabled).for_public_channel(true);
-    let (outsider_id, other_id) = (convert::user(outsider), convert::user(other));
-    assert!(public.is_authorized(outsider_id, conversation, &add(other_id)));
-    assert!(public.is_authorized(outsider_id, conversation, &add(outsider_id)));
-  }
-
-  /// The seam for the tests of mixed versions: what v1.0.8 let through, and only that.
-  #[test]
-  fn before_v1_0_9_only_the_self_join_followed_the_policy() {
-    let (member, conversation) = (crypto::UserId::new(1), crypto::ConversationId::new(9));
-    let (outsider, other) = (admin(2), admin(4));
-    let before =
-      WorkspaceAuthority::new([member], [outsider, other], AdminSelfJoin::Disabled).like_before_v1_0_9(true);
-    let (outsider_id, other_id) = (convert::user(outsider), convert::user(other));
-    assert!(before.is_authorized(outsider_id, conversation, &add(other_id)));
-    assert!(!before.is_authorized(outsider_id, conversation, &add(outsider_id)));
   }
 
   #[test]
@@ -381,17 +275,5 @@ mod tests {
     assert!(!public.is_authorized(stranger, conversation, &add(other)));
     let private = WorkspaceAuthority::new([member], Vec::<UserId>::new(), AdminSelfJoin::Visible);
     assert!(!private.is_authorized(stranger, conversation, &add(stranger)));
-  }
-
-  /// A roster admin with the ID `id`.
-  fn admin(id: i64) -> UserId {
-    UserId::from_snowflake(Snowflake::new(id).unwrap())
-  }
-
-  fn add(user: crypto::UserId) -> MembershipAction {
-    MembershipAction::AddUser {
-      user_id: user,
-      history: HistoryShare::FromJoin,
-    }
   }
 }

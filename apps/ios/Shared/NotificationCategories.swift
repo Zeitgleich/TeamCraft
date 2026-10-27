@@ -1,9 +1,8 @@
 import UserNotifications
 
 /// The actions on a notification: reply from the lock screen and mark as read on messages (like the
-/// Android notification), answer and decline on an incoming-call alert, approve and decline on an
-/// admin's request to join. The extension puts the category on what it shows; the app on the
-/// requests it notifies about itself.
+/// Android notification), answer and decline on an incoming-call alert. The extension puts the
+/// category on what it shows.
 enum NotificationCategories {
   static let messageCategory = "message"
   static let callCategory = "call"
@@ -11,12 +10,6 @@ enum NotificationCategories {
   static let markReadAction = "mark_read"
   static let answerCallAction = "answer_call"
   static let declineCallAction = "decline_call"
-  /// An admin's request to join a channel the user owns (issue #799): Approve and Decline, or
-  /// Decline only when the verified roster doesn't list them as an admin.
-  static let joinRequestCategory = "join_request"
-  static let joinRequestDeclineOnlyCategory = "join_request_decline_only"
-  static let approveJoinAction = "approve_join"
-  static let declineJoinAction = "decline_join"
   /// Key of the conversation ID in a notification's `userInfo`.
   static let conversationKey = "conversation_id"
 
@@ -42,17 +35,6 @@ enum NotificationCategories {
       options: [.destructive])
     let call = UNNotificationCategory(
       identifier: callCategory, actions: [answer, decline], intentIdentifiers: [], options: [])
-    // Letting somebody into a channel needs the unlocked phone; the app decides in the background.
-    let approveJoin = UNNotificationAction(
-      identifier: approveJoinAction, title: String(localized: "join_request_approve"),
-      options: [.authenticationRequired])
-    let declineJoin = UNNotificationAction(
-      identifier: declineJoinAction, title: String(localized: "join_request_decline"),
-      options: [.authenticationRequired])
-    let joinRequest = UNNotificationCategory(
-      identifier: joinRequestCategory, actions: [approveJoin, declineJoin], intentIdentifiers: [], options: [])
-    let joinRequestDeclineOnly = UNNotificationCategory(
-      identifier: joinRequestDeclineOnlyCategory, actions: [declineJoin], intentIdentifiers: [], options: [])
-    center.setNotificationCategories([message, call, joinRequest, joinRequestDeclineOnly])
+    center.setNotificationCategories([message, call])
   }
 }

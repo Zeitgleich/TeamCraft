@@ -6,12 +6,8 @@
 //! to the notification plugin. Buttons and the reply field come from a category registered for the
 //! notification (labels are translated, so categories are built as notifications arrive); clicks,
 //! buttons and replies come back through the delegate of `teamcraft-desktop-native`, which is also
-//! why banners show while the app is in front. The sender's or channel's picture (#543) goes along
-//! as an attachment, which Notification Center shows beside the text. (A communication
-//! notification, with the avatar in place of the app icon, needs the Communication Notifications
-//! entitlement and a donated `INSendMessageIntent`; the app has neither.)
+//! why banners show while the app is in front.
 
-use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -86,12 +82,8 @@ fn apply_badge(count: u32) {
     .setBadgeCount_withCompletionHandler(isize::try_from(count).unwrap_or(isize::MAX), Some(&done));
 }
 
-/// Identifier of a notification's picture attachment.
-const PICTURE_ATTACHMENT: &str = "picture";
-
-/// Shows (or replaces) the notification with the same tag, with the picture file at
-/// `maybe_picture` attached (the system moves the file away).
-pub fn show(notification: &OsNotification, maybe_picture: Option<&Path>) {
+/// Shows (or replaces) the notification with the same tag.
+pub fn show(notification: &OsNotification) {
   let content = UNMutableNotificationContent::new();
   content.setTitle(&NSString::from_str(&notification.title));
   if let Some(body) = &notification.maybe_body {
@@ -101,33 +93,20 @@ pub fn show(notification: &OsNotification, maybe_picture: Option<&Path>) {
   let thread = match notification.tag.target() {
     TagTarget::Conversation(id) | TagTarget::Call(id) | TagTarget::MissedCall(id) => id,
     TagTarget::Meeting(id) => id,
-    TagTarget::JoinRequest { conversation, .. } => conversation,
     TagTarget::Reminder => String::new(),
   };
   content.setThreadIdentifier(&NSString::from_str(&thread));
   // A ringing call is silent (the app plays its own ringtone) and time-sensitive: it breaks through
   // a Focus that lets time-sensitive notifications through, as a phone call does. The app's own
-  // do-not-disturb already kept it from ringing (#650). A message is silent when the app plays its
-  // own message sound, or none (#800).
+  // do-not-disturb already kept it from ringing (#650).
   if notification.kind.is_ringing() {
     content.setInterruptionLevel(UNNotificationInterruptionLevel::TimeSensitive);
-  }
-  if !notification.is_quiet() {
+  } else {
     content.setSound(Some(&UNNotificationSound::defaultSound()));
   }
   if let Some(spec) = category_spec(notification) {
     register_category(&spec);
     content.setCategoryIdentifier(&NSString::from_str(&spec.id));
-  }
-  if let Some(file) = maybe_picture {
-    match teamcraft_desktop_native::notification_attachment(PICTURE_ATTACHMENT, file) {
-      Ok(attachment) => content.setAttachments(&NSArray::from_retained_slice(&[attachment])),
-      Err(error) => {
-        tracing::debug!(%error, "notification shown without its picture");
-        // Refused files stay; nothing else uses them.
-        drop(std::fs::remove_file(file));
-      },
-    }
   }
   let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
     &NSString::from_str(notification.tag.as_str()),

@@ -1,4 +1,4 @@
-"""Contrast of the colour tokens of the UI stylesheet, light and dark (issues #361, #362).
+"""Contrast of the colour tokens in main.css, light and dark (issues #361, #362).
 
 WCAG 2.x contrast ratios: 4.5:1 for text (1.4.3), 3:1 for control edges, icons and focus rings
 (1.4.11, 2.4.11). Pairs whose foreground or background is not a plain hex token are not covered.
@@ -7,8 +7,7 @@ import pathlib
 import re
 import unittest
 
-# The tokens and their dark theme are the first area file of the stylesheet (#614).
-STYLESHEET = pathlib.Path(__file__).resolve().parents[2] / "crates/teamcraft-ui/style/main/000-tokens.css"
+STYLESHEET = pathlib.Path(__file__).resolve().parents[2] / "crates/teamcraft-ui/style/main.css"
 TEXT = 4.5
 NON_TEXT = 3.0
 # (foreground, background, minimum, what it is)

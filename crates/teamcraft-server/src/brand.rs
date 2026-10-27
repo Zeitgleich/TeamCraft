@@ -506,11 +506,6 @@ impl Brand {
     }
     let links = BrandLinks {
       maybe_support: checked_url(config.maybe_support_url.as_deref(), "support_url", &id)?,
-      maybe_documentation: checked_url(
-        config.maybe_documentation_url.as_deref(),
-        "documentation_url",
-        &id,
-      )?,
       maybe_privacy: checked_url(config.maybe_privacy_url.as_deref(), "privacy_url", &id)?,
       maybe_terms: checked_url(config.maybe_terms_url.as_deref(), "terms_url", &id)?,
       maybe_imprint: checked_url(config.maybe_imprint_url.as_deref(), "imprint_url", &id)?,
@@ -1274,13 +1269,9 @@ mod tests {
         let mut brands = two_brands();
         brands[0].maybe_support_url = Some(bad.into());
         assert!(registry(&brands, UnknownHostPolicy::Default).is_err(), "{bad}");
-        let mut brands = two_brands();
-        brands[0].maybe_documentation_url = Some(bad.into());
-        assert!(registry(&brands, UnknownHostPolicy::Default).is_err(), "{bad}");
       }
       let mut brands = two_brands();
       brands[0].maybe_support_url = Some("https://support.example.com/help".into());
-      brands[0].maybe_documentation_url = Some("https://docs.example.com/users".into());
       assert!(registry(&brands, UnknownHostPolicy::Default).is_ok());
     }
 

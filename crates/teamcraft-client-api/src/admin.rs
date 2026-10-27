@@ -32,57 +32,13 @@ pub struct AdminChannel {
   pub is_archived: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DeviceInfo {
   pub id: DeviceId,
   pub name: String,
   pub platform: String,
   pub last_seen: TimestampMs,
   pub is_current: bool,
-  /// For the user's own devices: what this device verified (issue #409). Admins see `Unknown`.
-  #[serde(default)]
-  pub verification: DeviceVerification,
-  /// For the user's own devices: how the device gets pushes; `None` where that isn't known (the
-  /// admin console, an older core).
-  #[serde(rename = "push", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_push: Option<DevicePushStatus>,
-}
-
-/// Whether one of the user's devices is theirs by what their identity key signed (e2ee.md §3),
-/// never by the server's word.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DeviceVerification {
-  /// Its certificate opens with the user's identity key and the signed device list names it.
-  Verified,
-  /// The certificate is the user's, but the signed device list doesn't name it yet: it is still
-  /// being set up, or the list is being updated.
-  Pending,
-  /// Nothing the user's identity key signed vouches for it: none of the user's devices set it up.
-  Unverified,
-  /// Not checked: no keys on this device, no list fetched yet, or a newer state this app doesn't
-  /// know.
-  #[default]
-  #[serde(other)]
-  Unknown,
-}
-
-/// How one of the user's devices gets push notifications, as the server reports it (diagnostics,
-/// not a trust decision).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct DevicePushStatus {
-  /// The push service it registered with; `None`: it gets no pushes (a desktop, a browser without
-  /// push).
-  #[serde(rename = "provider", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_provider: Option<teamcraft_proto::PushProvider>,
-  /// When the server last handed a push for it to the push service (since the server started).
-  #[serde(rename = "last_sent_at", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_last_sent_at: Option<TimestampMs>,
-  #[serde(rename = "last_failed_at", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_last_failed_at: Option<TimestampMs>,
-  /// How the push service took the last test push the user sent it from this device.
-  #[serde(rename = "test", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_test: Option<teamcraft_proto::TestPushOutcome>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

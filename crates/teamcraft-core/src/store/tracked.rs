@@ -19,7 +19,6 @@ use teamcraft_proto::{AttachmentId, ClientMessageId, ConversationId, MessageId, 
 
 use super::{
   AttachmentRef, LocalStore, MediaRange, MessageContent, MessageFilter, StoreError, StoredMessage, Table,
-  WriteTally,
 };
 
 /// Records of [`Table::Account`] every conversation entry reads (unread marks, mention rules).
@@ -316,14 +315,6 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   fn write_soon(&self) {
     self.inner.write_soon();
   }
-
-  fn write_tally(&self) -> Option<WriteTally> {
-    self.inner.write_tally()
-  }
-
-  fn lost_deletes(&self, table: Table) -> Vec<String> {
-    self.inner.lost_deletes(table)
-  }
 }
 
 /// What a write to `table` under `key` may change in the snapshot.
@@ -541,8 +532,6 @@ mod tests {
         edits: Vec::new(),
         maybe_edit_id: None,
         is_pinned: false,
-        maybe_verified_commit: None,
-        maybe_server_change: None,
       }
     }
   }

@@ -14,18 +14,15 @@ pub mod physics;
 
 use std::ops::Range;
 
-use teamcraft_client_api::actions::FileInfo;
-use teamcraft_client_api::media_viewer::{self, DOUBLE_TAP_ZOOM, FileRef, MAX_ZOOM, ViewerMedia};
-// Which files the lightbox pages through and how it reads them is shared with the mobile viewers.
-pub use teamcraft_client_api::media_viewer::{Direction, MediaPages, MediaScope as LightboxScope, Position};
+use teamcraft_client_api::actions::{FileInfo, MediaAnchor, MediaPage};
 use teamcraft_proto::AttachmentId;
 
 use crate::model::MessageId;
 
-/// Largest zoom, relative to the fitted size (the same on every platform).
-pub const DEFAULT_MAX_SCALE: f64 = MAX_ZOOM;
+/// Largest zoom, relative to the fitted size.
+pub const DEFAULT_MAX_SCALE: f64 = 8.0;
 /// Zoom of a double-click or double-tap on a fitted image.
-pub const DOUBLE_CLICK_SCALE: f64 = DOUBLE_TAP_ZOOM;
+pub const DOUBLE_CLICK_SCALE: f64 = 2.5;
 /// Zoom step of the `+` and `-` keys and buttons.
 pub const KEY_ZOOM_STEP: f64 = 1.25;
 /// Two taps closer than this in time and space are a double-tap.
@@ -97,6 +94,29 @@ pub enum Command {
 pub enum ModifierStyle {
   Ctrl,
   Command,
+}
+
+/// Which images previous/next page through.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LightboxScope {
+  /// Only the images of the message the lightbox was opened from.
+  Album,
+  /// Every image of the conversation the client knows.
+  #[default]
+  Conversation,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+  Previous,
+  Next,
+}
+
+/// Where the current image is in the list, for "3 / 12" and the arrows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Position {
+  pub index: usize,
+  pub len: usize,
 }
 
 /// A point or a distance in CSS pixels.
@@ -181,13 +201,6 @@ impl MediaKey {
 
   pub fn matches(&self, file: &FileInfo) -> bool {
     file.message == self.message && file.file_id == self.attachment.to_string()
-  }
-
-  fn file_ref(&self) -> FileRef {
-    FileRef {
-      message: self.message,
-      file_id: self.attachment.to_string(),
-    }
   }
 }
 
@@ -357,6 +370,26 @@ impl ModifierStyle {
       true => Self::Command,
       false => Self::Ctrl,
     }
+  }
+}
+
+impl LightboxScope {
+  /// A message with several images opens as an album; a single image pages through the conversation.
+  pub fn for_album_of(images_in_message: usize) -> Self {
+    match images_in_message {
+      0 | 1 => Self::Conversation,
+      _ => Self::Album,
+    }
+  }
+}
+
+impl Position {
+  pub fn has_previous(self) -> bool {
+    self.index > 0
+  }
+
+  pub fn has_next(self) -> bool {
+    self.index + 1 < self.len
   }
 }
 
@@ -651,22 +684,132 @@ impl Pointers {
 /// The images the lightbox pages through, oldest first (left to right). `files` comes newest first,
 /// as [`crate::backend::ChatBackend::conversation_files`] returns it.
 pub fn images_in_scope(files: &[FileInfo], scope: LightboxScope, start: MediaKey) -> Vec<FileInfo> {
-  media_viewer::images_in_scope(files, scope, start.message, ViewerMedia::PicturesAndVideos)
+  let mut images: Vec<FileInfo> = files
+    .iter()
+    .filter(|file| MediaKey::of(file).is_some())
+    .filter(|file| scope == LightboxScope::Conversation || file.message == start.message)
+    .cloned()
+    .collect();
+  oldest_first(&mut images);
+  images
+}
+
+/// What the lightbox has read of a conversation's pictures and videos, newest first: the page
+/// around the opened file, then pages further out as the user comes near an end (#274).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MediaPages {
+  files: Vec<FileInfo>,
+  has_older: bool,
+  has_newer: bool,
+}
+
+impl MediaPages {
+  /// The first page, read around the opened file.
+  pub fn first(page: MediaPage) -> Self {
+    Self {
+      files: page.files,
+      has_older: page.has_older,
+      has_newer: page.has_newer,
+    }
+  }
+
+  /// Newest first.
+  pub fn files(&self) -> &[FileInfo] {
+    &self.files
+  }
+
+  /// The page to read next at `position` of the viewer's list, if the user is within `margin`
+  /// images of an end that has more: the older end first.
+  pub fn wanted(&self, position: Position, margin: usize) -> Option<MediaAnchor> {
+    if wants_older(position, margin, self.has_older) {
+      return self.files.last().map(|oldest| MediaAnchor::Older(oldest.message));
+    }
+    if wants_newer(position, margin, self.has_newer) {
+      return self
+        .files
+        .first()
+        .map(|newest| MediaAnchor::Newer(newest.message));
+    }
+    None
+  }
+
+  /// Adds the page read at `anchor`. A page that brings nothing new ends the paging that way, so an
+  /// unchanged edge isn't asked again.
+  pub fn add(&mut self, anchor: MediaAnchor, page: MediaPage) {
+    let before = self.files.len();
+    match anchor {
+      MediaAnchor::Older(_) => {
+        append_older(&mut self.files, page.files);
+        self.has_older = page.has_older && self.files.len() > before;
+      },
+      MediaAnchor::Newer(_) => {
+        prepend_newer(&mut self.files, page.files);
+        self.has_newer = page.has_newer && self.files.len() > before;
+      },
+      // The first page comes through `first`; nothing else reads these.
+      MediaAnchor::Around(_) | MediaAnchor::Newest => {},
+    }
+  }
+}
+
+/// Whether the viewer, at `position` of its list, should read the next older page: the user is
+/// within `margin` images of the old end and the conversation has more (#274).
+pub fn wants_older(position: Position, margin: usize, has_older: bool) -> bool {
+  has_older && position.index < margin
+}
+
+/// Like [`wants_older`] for the newer end.
+pub fn wants_newer(position: Position, margin: usize, has_newer: bool) -> bool {
+  has_newer && position.len.saturating_sub(position.index + 1) < margin
+}
+
+/// Adds an older page (newest first) to the end of `files`, leaving out files that are in the list
+/// already (a page read while messages arrived can overlap).
+pub fn append_older(files: &mut Vec<FileInfo>, page: Vec<FileInfo>) {
+  let fresh: Vec<FileInfo> = page.into_iter().filter(|file| !is_listed(files, file)).collect();
+  files.extend(fresh);
+}
+
+/// Adds a newer page (newest first) to the start of `files`.
+pub fn prepend_newer(files: &mut Vec<FileInfo>, page: Vec<FileInfo>) {
+  let mut fresh: Vec<FileInfo> = page.into_iter().filter(|file| !is_listed(files, file)).collect();
+  fresh.append(files);
+  *files = fresh;
+}
+
+fn is_listed(files: &[FileInfo], file: &FileInfo) -> bool {
+  files
+    .iter()
+    .any(|listed| listed.message == file.message && listed.file_id == file.file_id)
 }
 
 /// How many images the message of `start` has, to choose the scope it opens with.
 pub fn album_len(files: &[FileInfo], start: MediaKey) -> usize {
-  media_viewer::album_len(files, start.message, ViewerMedia::PicturesAndVideos)
+  files
+    .iter()
+    .filter(|file| file.message == start.message && MediaKey::of(file).is_some())
+    .count()
 }
 
 /// Where `current` is in `images`.
 pub fn position(images: &[FileInfo], current: MediaKey) -> Option<Position> {
-  media_viewer::position(images, &current.file_ref())
+  images
+    .iter()
+    .position(|file| current.matches(file))
+    .map(|index| Position {
+      index,
+      len: images.len(),
+    })
 }
 
 /// The image before or after `current`; `None` at either end (the list doesn't wrap around).
 pub fn neighbor(images: &[FileInfo], current: MediaKey, direction: Direction) -> Option<MediaKey> {
-  media_viewer::neighbor(images, &current.file_ref(), direction).and_then(MediaKey::of)
+  let at = position(images, current)?;
+  let index = match direction {
+    Direction::Previous => at.index.checked_sub(1)?,
+    Direction::Next => at.index + 1,
+  };
+  images.get(index).and_then(MediaKey::of)
 }
 
 /// The thumbnails the strip renders: at most `max` around `index`, so a conversation with thousands
@@ -683,6 +826,22 @@ pub fn strip_range(len: usize, index: usize, max: usize) -> Range<usize> {
 pub fn wheel_zoom_factor(delta_y_px: f64, is_pinch: bool) -> f64 {
   let sensitivity = if is_pinch { 0.01 } else { 0.002 };
   (-delta_y_px * sensitivity).exp()
+}
+
+/// Turns the newest-first list into oldest-first while keeping the files of one message in the order
+/// they were attached.
+fn oldest_first(files: &mut [FileInfo]) {
+  files.reverse();
+  let mut start = 0;
+  while start < files.len() {
+    let message = files[start].message;
+    let len = files[start..]
+      .iter()
+      .take_while(|file| file.message == message)
+      .count();
+    files[start..start + len].reverse();
+    start += len;
+  }
 }
 
 #[cfg(test)]
@@ -748,6 +907,75 @@ mod tests {
         None,
         "no wrap-around"
       );
+    }
+
+    #[test]
+    fn the_next_page_is_wanted_near_an_end_that_has_more() {
+      let at = |index, len| Position { index, len };
+      assert!(wants_older(at(2, 50), 8, true));
+      assert!(!wants_older(at(2, 50), 8, false), "nothing older left");
+      assert!(!wants_older(at(8, 50), 8, true), "far enough from the old end");
+      assert!(wants_newer(at(45, 50), 8, true));
+      assert!(!wants_newer(at(41, 50), 8, true));
+      assert!(!wants_newer(at(49, 50), 8, false));
+      assert!(
+        wants_older(at(0, 3), 8, true) && wants_newer(at(0, 3), 8, true),
+        "a short list wants both"
+      );
+    }
+
+    #[test]
+    fn pages_join_the_list_without_repeats() {
+      // Newest first: message 5 is the newest, 3 the oldest loaded.
+      let mut files = vec![image(5, 50, "e"), image(4, 40, "d"), image(3, 30, "c")];
+      append_older(
+        &mut files,
+        vec![image(3, 30, "c"), image(2, 20, "b"), image(1, 10, "a")],
+      );
+      let messages: Vec<_> = files.iter().map(|file| file.file_id.as_str()).collect();
+      assert_eq!(messages, ["50", "40", "30", "20", "10"]);
+      prepend_newer(
+        &mut files,
+        vec![image(7, 70, "g"), image(6, 60, "f"), image(5, 50, "e")],
+      );
+      let messages: Vec<_> = files.iter().map(|file| file.file_id.as_str()).collect();
+      assert_eq!(messages, ["70", "60", "50", "40", "30", "20", "10"]);
+    }
+
+    #[test]
+    fn pages_are_read_towards_the_end_the_user_comes_near() {
+      let mut pages = MediaPages::first(MediaPage {
+        files: vec![image(5, 50, "e"), image(4, 40, "d"), image(3, 30, "c")],
+        has_older: true,
+        has_newer: true,
+      });
+      let at = |index, len| Position { index, len };
+      assert_eq!(pages.wanted(at(0, 3), 8), Some(MediaAnchor::Older(id(3))));
+      pages.add(
+        MediaAnchor::Older(id(3)),
+        MediaPage {
+          files: vec![image(2, 20, "b")],
+          has_older: false,
+          has_newer: false,
+        },
+      );
+      assert_eq!(
+        pages.wanted(at(1, 4), 8),
+        Some(MediaAnchor::Newer(id(5))),
+        "the old end is reached: the newer one is next"
+      );
+      // A page that only repeats what is listed ends that way too, instead of asking again forever.
+      pages.add(
+        MediaAnchor::Newer(id(5)),
+        MediaPage {
+          files: vec![image(5, 50, "e")],
+          has_older: false,
+          has_newer: true,
+        },
+      );
+      assert_eq!(pages.wanted(at(1, 4), 8), None);
+      let ids: Vec<_> = pages.files().iter().map(|file| file.file_id.as_str()).collect();
+      assert_eq!(ids, ["50", "40", "30", "20"]);
     }
 
     #[test]

@@ -16,12 +16,9 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import de.zeitgleich.teamcraft.auth.AuthRepository
 import de.zeitgleich.teamcraft.calls.CallController
-import de.zeitgleich.teamcraft.core.ActivityReports
 import de.zeitgleich.teamcraft.core.CoreRepository
 import de.zeitgleich.teamcraft.core.NetworkTrust
 import de.zeitgleich.teamcraft.notifications.AvatarCache
-import de.zeitgleich.teamcraft.notifications.JoinRequestNotifier
-import de.zeitgleich.teamcraft.notifications.JoinRequestWatcher
 import de.zeitgleich.teamcraft.notifications.MentionPrefs
 import de.zeitgleich.teamcraft.notifications.MessageNotifier
 import de.zeitgleich.teamcraft.notifications.NotificationContentPrefs
@@ -59,9 +56,6 @@ class AppGraph(context: Context) {
   val push = PushManager(context, core, pushHandler, mentionPrefs, notificationContent, scope)
   val segmentPrefetch = SegmentPrefetch(context)
   val readWatcher = ReadWatcher(core, notifier, scope)
-  /** Admins asking to join a channel the user owns: notified while the app runs (#799). */
-  val joinRequestNotifier = JoinRequestNotifier(context, notificationContent)
-  val joinRequestWatcher = JoinRequestWatcher(core, joinRequestNotifier, scope)
   val network = NetworkWatcher(context) { core.networkChanged() }
   /** The connection banner's grace period, shared by every screen (issue #700). */
   val connectionGrace = ConnectionGrace(scope, core.connectionState, network.isOnline)
@@ -78,12 +72,10 @@ class TeamCraftApplication : Application() {
     NetworkTrust.startInstalling(this, graph.scope)
     graph.segmentPrefetch.schedule()
     graph.readWatcher.start()
-    graph.joinRequestWatcher.start()
     graph.network.start()
     // Older versions staged uploads in the cache, never deleted; the core's staging folder replaced it.
     graph.scope.launch(Dispatchers.IO) { File(cacheDir, "outgoing").deleteRecursively() }
     ProcessLifecycleOwner.get().lifecycle.addObserver(ForegroundSync(graph))
-    ProcessLifecycleOwner.get().lifecycle.addObserver(ActivityReports(graph.core))
   }
 
   /**

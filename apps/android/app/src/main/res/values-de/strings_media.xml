@@ -2,23 +2,8 @@
 <resources>
   <!-- Bildbetrachter und Vorschauen (#315) -->
   <string name="image_loading">Bild in voller Größe wird geladen</string>
+  <string name="image_load_failed">Das Bild konnte nicht geladen werden. Zum erneuten Versuch tippen.</string>
   <string name="image_position">%1$d von %2$d</string>
-  <!-- Bildbetrachter: Alben, Originale, Weiterleiten (#240) -->
-  <string name="image_load_original">Original laden (%1$s)</string>
-  <string name="image_original_failed">Das Original konnte nicht geladen werden.</string>
-  <string name="image_try_again">Erneut versuchen</string>
-  <string name="image_scope_message">Diese Nachricht</string>
-  <string name="image_scope_conversation">Ganzer Chat</string>
-  <string name="image_forward">Nachricht weiterleiten</string>
-  <plurals name="album_more_pictures">
-    <item quantity="one">%d weiteres Bild</item>
-    <item quantity="other">%d weitere Bilder</item>
-  </plurals>
-  <string name="original_download_title">Originalbilder automatisch laden</string>
-  <string name="original_download_always">Immer</string>
-  <string name="original_download_unmetered">Nur im WLAN</string>
-  <string name="original_download_never">Nie</string>
-  <string name="original_download_hint">Ein geöffnetes Bild zeigt sofort seine Vorschau. Sonst wird das Original geladen, wenn du auf \u201eOriginal laden\u201c tippst. Mobile Daten und Hotspots zählen nicht als WLAN.</string>
   <string name="message_pinned">Angeheftet</string>
   <!-- Eingabefeld -->
   <string name="composer_remove_file">%1$s entfernen</string>

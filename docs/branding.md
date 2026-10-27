@@ -47,8 +47,7 @@ icon = "brand-a/icon.png"              # square, app and notification icon
 icon_dark = "brand-a/icon-dark.png"
 favicon = "brand-a/favicon.png"
 favicon_dark = "brand-a/favicon-dark.png"
-support_url = "https://support.brand-a.example.com"   # also linked under Settings > Help & about
-documentation_url = "https://docs.brand-a.example.com" # Settings > Help & about; default: none
+support_url = "https://support.brand-a.example.com"
 privacy_url = "https://brand-a.example.com/privacy"
 terms_url = "https://brand-a.example.com/terms"
 imprint_url = "https://brand-a.example.com/imprint"
@@ -151,7 +150,7 @@ of the request host:
   "colors": { "light": { "accent": "#0b7f78" }, "dark": { "accent": "#35c6ba" } },
   "login_title": { "en": "Welcome to Brand A", "de": "Willkommen bei Brand A" },
   "login_text": { "en": "..." },
-  "links": { "support": "...", "documentation": "...", "privacy": "...", "terms": "...", "imprint": "...", "download": "..." }
+  "links": { "support": "...", "privacy": "...", "terms": "...", "imprint": "...", "download": "..." }
 }
 ```
 
@@ -385,5 +384,4 @@ python3 scripts/brand/mark_parts.py
 
 The product's accent colour is the mark's blue: `#005dfc` in the light theme (5.3:1 with white
 text), `#5c9dff` with `#04122e` text in the dark theme (6.8:1). It is the default of `--accent`
-(`crates/teamcraft-ui/style/main/000-tokens.css`) and of the Android and iOS themes; a brand's own
-colours override it (§2).
+(`style/main.css`) and of the Android and iOS themes; a brand's own colours override it (§2).

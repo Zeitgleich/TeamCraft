@@ -22,10 +22,10 @@ import pathlib
 import re
 import sys
 
-# Parameters Tauri injects itself; they are not part of the arguments sent by the UI. A `Channel`
-# is not one of them: the UI passes it (`__CHANNEL__:<id>`) under the parameter's name.
+# Parameters Tauri injects itself; they are not part of the arguments sent by the UI.
 INJECTED = re.compile(
-    r"^(?:tauri::)?(?:State|AppHandle|Window|WebviewWindow|Webview|Request|ipc::Request)\b"
+    r"^(?:tauri::)?(?:State|AppHandle|Window|WebviewWindow|Webview|Request|Channel|"
+    r"ipc::Request|ipc::Channel)\b"
 )
 COMMAND_ATTRIBUTE = re.compile(
     r"#\[tauri::command(?:\(([^)]*)\))?\]\s*(?:(?:#\[[^\]]*\]|//[^\n]*\n)\s*)*"

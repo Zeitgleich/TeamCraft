@@ -41,8 +41,6 @@ const MAX_LIST_ENTRIES: usize = 200;
 const MAX_INTERVAL_SECS: u64 = 86_400;
 /// Longest period before deactivated users are removed from all chats automatically (ten years).
 const MAX_REMOVAL_DAYS: u64 = 3_650;
-/// Longest time an admin's request to join a private channel may stay open (a quarter).
-const MAX_ADMIN_JOIN_REQUEST_DAYS: u64 = 90;
 
 /// Puts the stored groups on top of the configuration; at startup and after every change.
 pub async fn load(state: &AppState) -> Result<(), ApiError> {
@@ -178,7 +176,6 @@ fn apply(settings: &mut Settings, section: &RuntimeSettingsSection) {
         .default_channels
         .clone_from(&rules.default_channels);
       settings.policy.maybe_remove_deactivated_after_days = rules.maybe_remove_deactivated_after_days;
-      settings.policy.admin_join_request_days = rules.admin_join_request_days;
     },
     RuntimeSettingsSection::Notifications(values) => {
       let notifications = &mut settings.notifications;
@@ -281,7 +278,6 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
       default_spaces: settings.policy.default_spaces.clone(),
       default_channels: settings.policy.default_channels.clone(),
       maybe_remove_deactivated_after_days: settings.policy.maybe_remove_deactivated_after_days,
-      admin_join_request_days: settings.policy.admin_join_request_days,
     },
     notifications: NotificationRuntimeSettings {
       read_receipts_default: notifications.read_receipts_default,
@@ -360,12 +356,6 @@ fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
     RuntimeSettingsSection::ServerRules(rules) => {
       check_count("default_spaces", rules.default_spaces.len())?;
       check_count("default_channels", rules.default_channels.len())?;
-      check_range(
-        "admin_join_request_days",
-        u64::from(rules.admin_join_request_days),
-        1,
-        MAX_ADMIN_JOIN_REQUEST_DAYS,
-      )?;
       match rules.maybe_remove_deactivated_after_days {
         Some(days) => check_range(
           "remove_deactivated_after_days",

@@ -200,7 +200,7 @@ on real devices.
 | Retries              | A send that failed for a temporary reason (5xx, 429, timeout, connection) goes into a durable queue in the database and is tried again with exponential backoff and jitter, at least as long as the push service asked (`Retry-After`), until its TTL ends (at most `push.max_retries` times). While a provider is failing, new wake-ups are queued before the first attempt. Workers claim queued wake-ups with `FOR UPDATE SKIP LOCKED` and hold the row lock while sending: a restart or a killed server loses none and no two workers send one twice. A message read meanwhile, a revoked device or a refused or gone registration ends the retries; a withdrawal drops the queued wake-ups it covers. |
 | Duplicates and order | The apps remember the message IDs they showed (per conversation) and ignore a second wake-up for the same message; MessagingStyle and iOS threads sort by the message time, not by arrival.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | Badge                | The wake-up carries the user's unread count (conversations with unread mentions or DMs plus unread thread mentions); iOS sets it on the notification, Android on the notification (`setNumber`) and launcher.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| Android channels     | `direct_messages` (high), `mentions` (high), `messages` (default: channel messages), `incoming_calls` (high, full-screen intent, ringtone; importance can't be raised after creation, so the older `calls` stays the ongoing-call channel), `meetings` (high: reminders), `join_requests` (default: an admin asks to join a channel the user owns, posted by the app while it runs, admin.md §2.4.1), `other` (low: test pushes). Users change sound and importance in the system settings; the app links there.                                                                                                                                                                                           |
+| Android channels     | `direct_messages` (high), `mentions` (high), `messages` (default: channel messages), `incoming_calls` (high, full-screen intent, ringtone; importance can't be raised after creation, so the older `calls` stays the ongoing-call channel), `meetings` (high: reminders), `other` (low: test pushes). Users change sound and importance in the system settings; the app links there.                                                                                                                                                                                                                                                                                                                       |
 | Android extras       | MessagingStyle per conversation with long-lived conversation shortcuts and a group summary, inline reply, mark read and mute (8 hours, the server's per-conversation setting), battery state in the diagnostics (no exemption request; with UnifiedPush the distributor's), UnifiedPush distributor detection and choice. Senders show their profile picture (circle, fetched in the background through the core, cached; never from the push) or generated initials; bubbles follow in v1.0.5.                                                                                                                                                                                                            |
 | iOS extras           | Mutable-content alerts through the NSE as communication notifications, thread identifier per conversation, relevance score, time-sensitive for urgent, badge.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | Diagnostics          | Mobile screen: test push (the server sends a sealed `test` wake-up end to end), provider, last push received, notification permission, battery optimisation, channel settings, DND state. Admins see per user and device how many pushes were sent, failed and suppressed (counts only).                                                                                                                                                                                                                                                                                                                                                                                                                   |
@@ -302,8 +302,7 @@ audio, file name). How the core gets there, within `PUSH_PREVIEW_BUDGET` (7 s; F
    message from the store. Only the cancel-safe parts are cut at the deadline: following the groups
    (welcomes, MLS) starts only with 2 s left and then runs to completion, since a welcome spends the
    key package before the join is stored. The iOS notification extension runs next to the app and
-   must not advance its state, so it stops after step 2 (`notification_preview_for_push`; e2ee.md
-   §9.4).
+   must not advance its state, so it stops after step 2.
 
 Whatever is known by then is shown: "New message" under the sender's name when the text could not be
 read, never nothing. `PushNotification.maybe_gap` says why less was shown (no session, not decrypted,
@@ -371,17 +370,15 @@ notification. Except for a ringing call, a newer notification closes its predece
 as a new one instead of replacing it: KDE Plasma doesn't report a popup that timed out into its
 history, and replacing that one only updates the history entry, without a popup (#531).
 
-| Platform | Shown through                          | Replace, withdraw | Buttons | Reply field                     | Ringtone, attention                       | Picture²                              |
-|----------|----------------------------------------|-------------------|---------|---------------------------------|-------------------------------------------|---------------------------------------|
-| Linux    | freedesktop notification service       | yes               | yes     | servers with `inline-reply`     | yes; quiet in GNOME/KDE do-not-disturb    | `image-data` hint (pixels, no file)   |
-| Windows  | WinRT toasts (tag, group `teamcraft`)  | yes               | yes     | yes                             | yes; taskbar flash                        | `appLogoOverride`, circle for people  |
-| macOS    | `UNUserNotificationCenter` (bundled)   | yes               | yes     | yes                             | yes; dock bounce                          | attachment                            |
-| Web      | service worker registration, else page | yes               | yes     | no (browsers have none)         | yes, in the tab that runs the calls¹      | `icon` (`data:` URL)                  |
+| Platform | Shown through                          | Replace, withdraw | Buttons | Reply field                     | Ringtone, attention                       |
+|----------|----------------------------------------|-------------------|---------|---------------------------------|-------------------------------------------|
+| Linux    | freedesktop notification service       | yes               | yes     | servers with `inline-reply`     | yes; quiet in GNOME/KDE do-not-disturb    |
+| Windows  | WinRT toasts (tag, group `teamcraft`)  | yes               | yes     | yes                             | yes; taskbar flash                        |
+| macOS    | `UNUserNotificationCenter` (bundled)   | yes               | yes     | yes                             | yes; dock bounce                          |
+| Web      | service worker registration, else page | yes               | yes     | no (browsers have none)         | yes, in the tab that runs the calls¹      |
 
 ¹ Browsers play sound only in a tab the user has interacted with; a tab untouched since it loaded
 shows the incoming call card and the notification without the ringtone.
-
-² See "Pictures" below. The notification plugin (the fallback) shows none.
 
 macOS buttons and the reply field need a notification category (registered as notifications arrive,
 since the labels are translated) and a notification center delegate, an Objective-C class that
@@ -399,69 +396,6 @@ In the browser, a push notification shown by the service worker (no tab open) ha
 top-level message: the worker sets the read position with the stored push session token, in the
 language the page last left next to the database name; with an expired session the click opens the
 conversation instead. Join on meeting reminders needs a server push for reminders and is not built.
-
-**Pictures (#543).** As in messaging apps, a notification shows who wrote or where: the sender's
-avatar for DMs and group DMs (thread replies included), the channel's picture (else its space's) for
-channels, the caller's avatar for ringing and missed calls, and the admin's avatar for a join
-request; the settings' test notification shows the user's own. Meeting and `/remind` reminders have
-none. The UI picks the picture (`teamcraft_ui::notifier::PictureSubject`, `notification_pictures`)
-and names it by its key in the persistent media cache (e2ee.md §9.6), where the app keeps every
-avatar and space or channel picture it showed; the shell (`apps/desktop/src/notifications/pictures.rs`)
-or the page reads it from there and never fetches a picture for a notification. Without a cached copy
-the notification shows the tile the app draws instead (initials on the person's or space's colour,
-drawn by the UI into a canvas); a channel outside any space without a picture has none. Pictures are
-cut to the app's shapes (people round, spaces and channels with rounded corners) at 128 px; the shell
-keeps the last 32 prepared, so a burst of messages decodes a picture once.
-
-- **Privacy:** a picture names a person or place as a name does, so it follows the names, not the
-  text: the workspace policy `push_content` "generic" (or a mode this version doesn't know) removes
-  it with the names, "sender" keeps it; "show message preview" hides only the text. Web Push follows
-  the same rule after the device's own setting ("nothing" removes the picture). Desktop and web have
-  no app lock; the Android app lock caps content at "sender only", which keeps names and so would
-  keep pictures. On the lock screen the system's own preview setting applies (macOS "show previews:
-  when unlocked" hides the attachment too).
-- **Linux:** the pixels go along as the `image-data` hint (spec 1.2), which GNOME Shell and KDE
-  Plasma show in place of the app icon; the app icon and `desktop-entry` still name the app.
-- **Windows:** the toast's `appLogoOverride` with `hint-crop="circle"` for people, from a PNG file in
-  the app's cache directory (one per picture, deleted when it is no longer kept, at sign-out and at
-  start).
-- **macOS:** a `UNNotificationAttachment`, which Notification Center shows beside the text; the
-  system moves the file, so every notification writes its own copy. A communication notification
-  (the avatar in place of the app icon) would need the Communication Notifications entitlement and a
-  donated `INSendMessageIntent`; not built.
-- **Web:** the page sets the notification's `icon` to a `data:` URL of the picture drawn in its shape
-  (the page's CSP allows `data:` images). The service worker's Web Push notifications (no tab open)
-  read the account's media cache with its wrapped key and use the cached picture as it is (PNG, JPEG
-  or WebP up to 1 MiB, as the browser shows it: square, no initials tile), with the same order: the
-  sender for DMs and calls, the channel's picture, then the space's.
-
-**Message sounds (#800).** "Sound for new messages" (`message_sound`) is the system's notification
-sound (the default, as before), none, one of the app's own sounds or the user's own file. The app's
-sounds (Chime, Ping, Pop, Marimba, Knock, Keys and a playful "Uh-oh!") are synthesized like the
-ringtone (`teamcraft_media::message_sounds`; the "uh-oh" is two sung vowels by formant synthesis), so
-there are no sound files and nothing to license; no sound is copied from another product. In a
-browser the synthesis is a chunk of its own that loads with the first sound. A sound
-plays for the message notifications the rules above let through, so a muted conversation, the level
-and do-not-disturb keep it quiet, as does the desktop's own do-not-disturb where the OS tells (GNOME,
-KDE; macOS Focus and Windows' do-not-disturb aren't readable, as for the ringtone); not during a
-call. A burst of messages plays one sound (at most one every 2 s). With the app's sound or none, the
-notification itself is silent (macOS without a sound, Windows `<audio silent>`, freedesktop
-`suppress-sound`, the browser's `silent`), except in a browser tab nobody has touched yet: it can't
-play sound¹, so its notifications keep the system's. The settings play a sound when it is chosen and
-with Play.
-
-The own file is picked in the shell's file dialog (desktop) or the browser's file picker and refused
-unless it decodes (desktop: Symphonia, for MP3, Ogg Vorbis, WAV and FLAC; browser:
-`decodeAudioData`). Limits are settings (`own_sound_limits`): at most 1 MiB, and at most 5 s are
-played (2, 5 or 10 s; longer sounds fade out at the cut). The file stays on that device: in the app's
-data directory (`sounds/`) or in IndexedDB (`teamcraft-sounds`); it is never uploaded or synced, so
-the server never sees it and other devices keep their own choice. Each sound is made or decoded once
-per run and kept in memory, and nothing runs between messages (the desktop plays on a thread that
-ends with the sound, the page closes its `AudioContext`). A missing or broken file never keeps a sound
-from playing: the default sound (Chime) plays instead and the settings say why. The choice is a
-device setting like the desktop level and the ringtone; one value for every kind of message for now,
-and a field of the same type per kind (direct messages, mentions, channels) can follow. On the phones
-the system settings choose the sound (Android channels).
 
 **Calls (desktop).** A ringing call follows the rules of a direct message from the caller: a muted
 conversation, the level "nothing" and do-not-disturb (except people on the allow list) keep it to the
@@ -510,10 +444,6 @@ read without bringing the window up).
 - `GET /api/v1/admin/users/{id}/push-health`: per device the provider and counts since the server
   started (sent, failed, suppressed by DND, held for an attentive desktop, dismissals) with the time of
   the last success and failure. Counts only: no message, conversation or token.
-- `GET /api/v1/me/push-health`: the same for the caller's own devices. Settings > Devices shows per
-  device the push service and when the last push went out, and sends a test push to any of them
-  (issue #409). The counts live in the server process, so after a restart a device shows no push until
-  the next one.
 
 ### What only real devices can show
 
@@ -546,14 +476,6 @@ two blue ticks and no "Seen by"; a group DM shows "Seen by <names>" under my new
 who) and its messages keep the single tick; channels show one tick only. Because both come from read
 receipts, they are reciprocal: someone with receipts off neither sends nor sees them.
 "Delivered" (two grey ticks, derived from device sync cursors on the server) is not built yet.
-
-The rules live in teamcraft-client-api (`receipts`), so every platform decides alike. The mobile apps
-read the result from the core: `MessageExtras::is_read` marks an own message the other member of a
-DM read (issue #769); inside an own bubble, which already has the accent, the two ticks take the
-bubble's full text colour where the single tick is muted. Receipts sent while a device was offline
-never arrive as events: desktop and web read the open DM's receipts after each connection, the apps
-ask the core for them (`refresh_read_receipts`) when a conversation opens and when the connection
-comes back. The group DM's "Seen by" line is not in the apps yet.
 
 ## Urgent messages
 
@@ -589,13 +511,6 @@ a jump to the message.
   unread entry's target the same way. The rail badge and tab counts are counts of these entries.
 - Limits: a thread the user doesn't follow (or beyond the first page of `GET /threads`) has no
   position of its own, so its entries follow the conversation's.
-- Join requests: an admin's request to join a private channel the user owns (admin.md §2.4.1)
-  waits above the entries of "All" with Approve and Decline until it is decided, withdrawn or
-  expired. It has no read state: "Mark all as read" leaves it, and the badge counts it while it
-  waits. Each device shows one system notification per request (Approve where the verified roster
-  lists the admin, and Decline), remembered across restarts and withdrawn once the request is gone.
-  Approve in the notification shares only what is posted from then on and says so; sharing the
-  earlier history is a choice in Activity or the channel settings.
 
 ## Call history
 

@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 
-/// The desktop UI's design tokens (crates/teamcraft-ui/style/main/000-tokens.css), the same values as the
+/// The desktop UI's design tokens (crates/teamcraft-ui/style/main.css), the same values as the
 /// Android theme, so the apps look alike. Each color has a light and a dark value.
 enum Theme {
   static let accent = dynamic(light: 0x005DFC, dark: 0x5C9DFF)

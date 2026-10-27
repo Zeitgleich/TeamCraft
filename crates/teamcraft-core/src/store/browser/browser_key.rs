@@ -16,7 +16,7 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::{AesGcmParams, AesKeyGenParams, CryptoKey, IdbTransactionMode, SubtleCrypto};
 use zeroize::Zeroizing;
 
-use super::idb::{self, KEYS, OpenMode};
+use super::idb::{self, KEYS};
 use crate::store::StoreError;
 
 pub(super) const WRAPPING_KEY: &str = "wrapping_key";
@@ -25,19 +25,9 @@ const AES_GCM: &str = "AES-GCM";
 const IV_LEN: usize = 12;
 
 /// Returns the database key of the IndexedDB database `name`, creating and storing it on first
-/// use; the database is upgraded to this version (a page).
+/// use.
 pub async fn browser_database_key(name: &str) -> Result<SymmetricKey, StoreError> {
-  browser_database_key_with(name, OpenMode::Upgrade).await
-}
-
-/// [`browser_database_key`] at whatever version the database has (the service worker,
-/// [`OpenMode::AsIs`]).
-pub async fn browser_database_key_without_upgrade(name: &str) -> Result<SymmetricKey, StoreError> {
-  browser_database_key_with(name, OpenMode::AsIs).await
-}
-
-async fn browser_database_key_with(name: &str, mode: OpenMode) -> Result<SymmetricKey, StoreError> {
-  let database = idb::open_database_with(name, mode).await?;
+  let database = idb::open_database(name).await?;
   let result = load_or_create(&database).await;
   database.close();
   result

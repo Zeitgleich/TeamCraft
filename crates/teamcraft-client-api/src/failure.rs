@@ -140,15 +140,9 @@ pub enum CallFailure {
   MicrophoneInUse,
   CameraDenied,
   CameraMissing,
-  /// Another app holds the camera.
   CameraInUse,
   /// The camera offers no picture format this app can use.
   CameraUnsupported,
-  /// An iPhone or iPad camera (Continuity Camera) didn't come up: declined on the phone, the
-  /// phone locked or out of reach (#819).
-  CameraNotConnected,
-  /// The camera couldn't be opened for a reason the system doesn't tell.
-  CameraUnavailable,
   /// The screen could not be shared (not offered by the browser, or refused by a policy).
   ScreenUnavailable,
   /// The camera started, but no picture of it could be sent (it delivered nothing, or nothing
@@ -180,7 +174,7 @@ pub enum CallFailure {
 }
 
 impl CallFailure {
-  const ALL: [Self; 20] = [
+  const ALL: [Self; 18] = [
     Self::MicrophoneDenied,
     Self::MicrophoneMissing,
     Self::MicrophoneInUse,
@@ -188,8 +182,6 @@ impl CallFailure {
     Self::CameraMissing,
     Self::CameraInUse,
     Self::CameraUnsupported,
-    Self::CameraNotConnected,
-    Self::CameraUnavailable,
     Self::ScreenUnavailable,
     Self::CameraNoPicture,
     Self::ScreenNoPicture,
@@ -213,8 +205,6 @@ impl CallFailure {
       Self::CameraMissing => "camera_missing",
       Self::CameraInUse => "camera_in_use",
       Self::CameraUnsupported => "camera_unsupported",
-      Self::CameraNotConnected => "camera_not_connected",
-      Self::CameraUnavailable => "camera_unavailable",
       Self::ScreenUnavailable => "screen_unavailable",
       Self::CameraNoPicture => "camera_no_picture",
       Self::ScreenNoPicture => "screen_no_picture",
@@ -231,19 +221,6 @@ impl CallFailure {
 
   fn from_wire(name: &str) -> Option<Self> {
     Self::ALL.into_iter().find(|failure| failure.as_str() == name)
-  }
-
-  /// A camera that didn't open or deliver: choosing another camera may help (#819).
-  pub fn is_camera_failure(self) -> bool {
-    matches!(
-      self,
-      Self::CameraInUse
-        | Self::CameraUnsupported
-        | Self::CameraNotConnected
-        | Self::CameraUnavailable
-        | Self::CameraNoPicture
-        | Self::CameraMissing
-    )
   }
 }
 
@@ -359,16 +336,6 @@ mod tests {
       ActionFailure::new(FailureKind::Call(CallFailure::CameraDenied), "x").to_wire(),
       "call_camera_denied: x"
     );
-  }
-
-  #[test]
-  fn camera_failures_offer_another_camera_but_a_refusal_does_not() {
-    assert!(CallFailure::CameraNotConnected.is_camera_failure());
-    assert!(CallFailure::CameraInUse.is_camera_failure());
-    assert!(CallFailure::CameraUnavailable.is_camera_failure());
-    // Another camera won't help against a refused permission or a missing microphone.
-    assert!(!CallFailure::CameraDenied.is_camera_failure());
-    assert!(!CallFailure::MicrophoneInUse.is_camera_failure());
   }
 
   #[test]

@@ -45,16 +45,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse
   ) async {
     let info = response.notification.request.content.userInfo
-    // Approve or Decline of an admin's request to join; a tap opens the channel like a message.
-    if info[NotificationKeys.kind] as? String == NotificationKeys.joinRequestKind,
-      response.actionIdentifier == NotificationCategories.approveJoinAction
-        || response.actionIdentifier == NotificationCategories.declineJoinAction
-    {
-      await AppModel.shared.handle(
-        joinRequestAction: response.actionIdentifier, tag: info[NotificationAuthenticator.tagKey] as? String,
-        notificationId: response.notification.request.identifier)
-      return
-    }
     guard let conversationId = info[NotificationCategories.conversationKey] as? String else { return }
     let reply = (response as? UNTextInputNotificationResponse)?.userText
     let tag = info[NotificationAuthenticator.tagKey] as? String

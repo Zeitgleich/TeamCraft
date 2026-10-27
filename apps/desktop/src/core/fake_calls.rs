@@ -64,22 +64,14 @@ impl FakeCalls {
   pub fn act(&self, action: CallAction) {
     let mut snapshot = self.lock();
     match action {
-      CallAction::Join {
-        request,
-        is_muted,
-        is_camera_on,
-      } => {
+      CallAction::Join { request, .. } => {
         snapshot.incoming.clear();
         snapshot.running = vec![RunningCall {
           conversation: request.conversation,
           participants: vec![self.carol],
           is_ringing: false,
         }];
-        snapshot.maybe_active = Some(ActiveCall {
-          is_muted,
-          is_camera_on,
-          ..active_call(request, self.carol)
-        });
+        snapshot.maybe_active = Some(active_call(request, self.carol));
       },
       CallAction::Leave => {
         snapshot.maybe_active = None;
@@ -133,8 +125,6 @@ impl FakeCalls {
       | CallAction::SelectCamera { .. }
       | CallAction::SetStatusSounds { .. }
       | CallAction::RefreshDevices
-      // No camera here, and nothing to measure.
-      | CallAction::SetPreview { .. }
       | CallAction::TestSpeakers { .. }
       | CallAction::Unknown => {},
     }

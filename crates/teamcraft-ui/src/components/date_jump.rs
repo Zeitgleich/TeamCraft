@@ -6,7 +6,6 @@ use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-use crate::areas::{self, Place, lazy_area};
 use crate::clock::{local_day_start, now_ms, parse_local_datetime};
 use crate::components::sheet::PopoverBackdrop;
 use crate::i18n::use_i18n;
@@ -55,21 +54,9 @@ pub fn DatePill(label: String, #[prop(optional)] class: &'static str) -> impl In
   .into_any()
 }
 
-/// The menu itself, open while the feed's anchor is set. It loads the first time it opens
-/// (`areas::date_jump`).
+/// The menu itself, open while the feed's anchor is set.
 #[component]
 pub fn DateJumpPopover(conversation: ConversationId, menu: DateJumpMenu) -> impl IntoView {
-  let is_open = Memo::new(move |_| menu.0.with(Option::is_some));
-  move || {
-    is_open
-      .get()
-      .then(|| lazy_area(Place::Popover, move || areas::date_jump(conversation, menu)))
-  }
-}
-
-/// The menu of [`DateJumpPopover`].
-#[component]
-pub fn DateJumpPanel(conversation: ConversationId, menu: DateJumpMenu) -> impl IntoView {
   let i18n = use_i18n();
   let state = use_app_state();
   let node = NodeRef::<html::Div>::new();

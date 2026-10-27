@@ -54,7 +54,6 @@ import de.zeitgleich.teamcraft.ui.screens.OrgRecoveryScreen
 import de.zeitgleich.teamcraft.ui.screens.SearchScreen
 import de.zeitgleich.teamcraft.ui.screens.SettingsScreen
 import de.zeitgleich.teamcraft.ui.screens.SharePickerScreen
-import de.zeitgleich.teamcraft.ui.screens.StoreRecoveryScreen
 import de.zeitgleich.teamcraft.ui.screens.ThreadScreen
 
 @Composable
@@ -134,14 +133,6 @@ fun AppRoot(
         onCancel = viewModel::cancelLinking,
       )
       is AppState.Failed -> MessageScreen(message = current.error, onRetry = viewModel::refresh)
-      is AppState.StoreUnreadable -> StoreRecoveryScreen(
-        problem = current.problem,
-        maybeError = current.maybeError,
-        isBusy = isBusy,
-        onReset = viewModel::resetStore,
-        onRetry = viewModel::retryStore,
-        onSignOut = viewModel::signOut,
-      )
       is AppState.Ready -> {
         ReadyNavigation(viewModel, current, maybeConversationToOpen, onConversationOpened, maybeShare, onShareHandled)
         LinkRequestPrompts(viewModel, Modifier.align(Alignment.TopCenter))

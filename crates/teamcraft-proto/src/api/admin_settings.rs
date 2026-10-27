@@ -361,18 +361,6 @@ pub struct ServerRulesSettings {
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_remove_deactivated_after_days: Option<u32>,
-  /// Days an admin's request to join a private channel stays open for its owners (admin.md §2.4,
-  /// `admin_self_join = owner_approval`). Absent from older servers: the default.
-  #[serde(default = "default_admin_join_request_days")]
-  pub admin_join_request_days: u32,
-}
-
-/// How long an admin's request to join a private channel waits for an owner by default: a week
-/// covers a holiday, and a stale request doesn't hang around for months.
-pub const DEFAULT_ADMIN_JOIN_REQUEST_DAYS: u32 = 7;
-
-fn default_admin_join_request_days() -> u32 {
-  DEFAULT_ADMIN_JOIN_REQUEST_DAYS
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

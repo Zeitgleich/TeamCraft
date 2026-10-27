@@ -23,7 +23,7 @@ pub fn BottomNav() -> impl IntoView {
     let list = state.with_mutes(state.read(|backend| backend.direct_conversations()));
     badge_count(&list)
   });
-  let activity_count = Memo::new(move |_| state.read(|backend| backend.activity().badge_count()));
+  let activity_count = Memo::new(move |_| state.read(|backend| backend.activity().unread_count));
   let spaces_count = Memo::new(move |_| {
     let list = state.with_mutes(state.read(|backend| {
       backend

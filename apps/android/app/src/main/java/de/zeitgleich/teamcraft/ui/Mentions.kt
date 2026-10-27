@@ -11,13 +11,10 @@ object Mentions {
     return if (word.startsWith("@") && word.none { it == '@' && word.indexOf(it) > 0 }) word.drop(1) else null
   }
 
-  /**
-   * Members whose username or display name starts with the query, at most `limit`. Deactivated and
-   * deleted accounts are never offered (issues #654, #751).
-   */
+  /** Members whose username or display name starts with the query, at most `limit`. */
   fun suggestions(query: String, people: List<User>, limit: Int = 6): List<User> =
     people
-      .filter { !it.isBot && it.isOffered }
+      .filter { !it.isBot }
       .filter {
         it.username.startsWith(query, ignoreCase = true) ||
           it.displayName.split(' ').any { part -> part.startsWith(query, ignoreCase = true) }

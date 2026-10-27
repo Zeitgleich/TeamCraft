@@ -4,14 +4,12 @@
 //! Regenerate it with `cargo sqlx prepare --workspace` against a migrated dev database.
 
 mod admin;
-mod admin_join_request;
 mod announcement;
 mod attachment;
 mod audit;
 mod background;
 mod bot;
 mod call_history;
-mod channel_role_log;
 mod conversation;
 mod database;
 mod device;
@@ -57,17 +55,12 @@ pub use admin::{
   AdminConversationFilter, AdminConversationRow, AdminDeviceRow, AdminSpaceRow, AdminUserRow, ChatRemoval,
   ChatRemovalEffects, Deactivation, PushDeviceCount, StorageTotals, UserStatusFilter,
 };
-pub use admin_join_request::{
-  AdminJoinApproval, AdminJoinRequest, AdminJoinRequestClosing, AdminJoinRequestOutcome,
-  RemovedAdminJoinRequest,
-};
 pub use announcement::{NewAnnouncement, StoredAnnouncement};
 pub use attachment::{Attachment, NewAttachment, RemovedAttachment};
 pub use audit::{AuditEntry, AuditQuery, NewAuditEntry};
 pub use background::UserBackground;
 pub use bot::{BOT_ISSUER, StoredBot};
 pub use call_history::{MissedCall, StoredCall};
-pub use channel_role_log::ChannelRoleLogEntry;
 pub use conversation::{
   Conversation, ConversationChanges, ConversationFilter, ConversationMember, ConversationView, ImageChange,
   Membership, MembershipChanges, NewConversation, participants_key,

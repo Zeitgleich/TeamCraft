@@ -16,9 +16,7 @@ use super::sql_group::{
   Migration, MigrationKind, WriteGroup, run_migrations, sqlite_error as database_error,
 };
 use super::sqlite_wipe::wipe_free_pages;
-use super::{
-  DatabaseKeySource, LocalStore, MediaRange, MessageFilter, StoreError, StoredMessage, Table, WriteTally,
-};
+use super::{DatabaseKeySource, LocalStore, MediaRange, MessageFilter, StoreError, StoredMessage, Table};
 
 /// The layout steps of this store, in order ([`run_migrations`]). Released 1.0 databases carry
 /// version 0 (no version was set) and the tables of version 1, apart from databases older than the
@@ -31,11 +29,6 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
   Migration {
     version: 2,
     kind: MigrationKind::Maintenance(wipe_free_pages),
-  },
-  // The MLS state is stored per entry (issue #424); versions before would read none of it.
-  Migration {
-    version: 3,
-    kind: MigrationKind::Marker,
   },
 ];
 /// How a message record spells the media type of a picture or a video (`AttachmentRef`, compact JSON):
@@ -119,10 +112,11 @@ impl SqlCipherStore {
       .execute_batch("PRAGMA secure_delete = ON;")
       .map_err(database_error)?;
     run_migrations(&connection, MIGRATIONS)?;
-    let mut group = WriteGroup::default();
-    group.watch_other_connections(&connection)?;
     Ok(Self {
-      inner: Mutex::new(Inner { connection, group }),
+      inner: Mutex::new(Inner {
+        connection,
+        group: WriteGroup::default(),
+      }),
     })
   }
 
@@ -239,36 +233,23 @@ impl LocalStore for SqlCipherStore {
     maybe_record.map(|record| decode_message(&record)).transpose()
   }
 
-  /// Server messages sort by their ID (`sort_group` 0), so the order index finds one directly. A
-  /// line derived from a commit sorts by the commit's ID in the same group; it is no server
-  /// message, whatever ID the server gave the commit.
+  /// Server messages sort by their ID (`sort_group` 0), so the order index finds one directly.
   fn message_by_server_id(
     &self,
     conversation: ConversationId,
     server_id: MessageId,
   ) -> Result<Option<StoredMessage>, StoreError> {
-    let inner = self.lock();
-    let mut statement = inner
+    let maybe_record: Option<Vec<u8>> = self
+      .lock()
       .connection
-      .prepare(
+      .query_row(
         "SELECT record FROM messages WHERE conversation_id = ?1 AND sort_group = 0 AND sort_value = ?2",
-      )
-      .map_err(database_error)?;
-    let records: Vec<Vec<u8>> = statement
-      .query_map(
         params![conversation.snowflake().get(), server_id.snowflake().get()],
         |row| row.get(0),
       )
-      .map_err(database_error)?
-      .collect::<Result<_, _>>()
+      .optional()
       .map_err(database_error)?;
-    for record in records {
-      let message = decode_message(&record)?;
-      if message.maybe_server_id == Some(server_id) {
-        return Ok(Some(message));
-      }
-    }
-    Ok(None)
+    maybe_record.map(|record| decode_message(&record)).transpose()
   }
 
   fn messages(
@@ -299,16 +280,7 @@ impl LocalStore for SqlCipherStore {
       .map_err(database_error)?
       .collect::<Result<_, _>>()
       .map_err(database_error)?;
-    // The columns only preselect: a row written by an older version may say "listed" for a kind
-    // this one hides (an admin's join as a message, issue #811), so the record decides.
-    let mut messages = Vec::with_capacity(records.len());
-    for record in &records {
-      let message = decode_message(record)?;
-      if message.matches(filter) {
-        messages.push(message);
-      }
-    }
-    Ok(messages)
+    records.iter().map(|record| decode_message(record)).collect()
   }
 
   /// Walks the order index from the range's start and tests the records' bytes for a picture or
@@ -405,12 +377,6 @@ impl LocalStore for SqlCipherStore {
     let Inner { connection, group } = &mut *inner;
     group.end(connection)
   }
-
-  fn write_tally(&self) -> Option<WriteTally> {
-    let mut inner = self.lock();
-    let Inner { connection, group } = &mut *inner;
-    Some(group.tally(connection))
-  }
 }
 
 impl std::fmt::Debug for SqlCipherStore {
@@ -502,66 +468,6 @@ mod tests {
     crate::store::sql_group::tests::assert_numbered(MIGRATIONS);
   }
 
-  /// Issues #811, #818: an admin's join or an archiving as a message that an older version stored
-  /// as listed is hidden now, without rewriting the database.
-  #[test]
-  fn a_row_listed_by_an_older_version_follows_what_this_one_hides() {
-    use teamcraft_proto::{Id, Snowflake};
-
-    use crate::store::{ConversationEvent, MessageContent};
-
-    let store =
-      SqlCipherStore::open_in_memory(&StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
-    let id = |raw: i64| Snowflake::new(raw).unwrap();
-    let conversation = ConversationId::from_snowflake(id(1));
-    let announced = StoredMessage {
-      conversation_id: conversation,
-      client_message_id: ClientMessageId::from_bytes([1; 16]),
-      maybe_server_id: Some(MessageId::from_snowflake(id(100))),
-      sender_user_id: teamcraft_proto::UserId::from_snowflake(id(2)),
-      maybe_thread_id: None,
-      sent_at_ms: 1_000,
-      content: MessageContent::Event {
-        event: ConversationEvent::AdminJoined {
-          user: teamcraft_proto::UserId::from_snowflake(id(3)),
-          is_approved: false,
-        },
-      },
-      is_edited: false,
-      edits: Vec::new(),
-      maybe_edit_id: None,
-      is_pinned: false,
-      maybe_verified_commit: None,
-      maybe_server_change: None,
-    };
-    let archived = StoredMessage {
-      client_message_id: ClientMessageId::from_bytes([2; 16]),
-      maybe_server_id: Some(MessageId::from_snowflake(id(101))),
-      content: MessageContent::Event {
-        event: ConversationEvent::Archived,
-      },
-      ..announced.clone()
-    };
-    store.upsert_message(&announced).unwrap();
-    store.upsert_message(&archived).unwrap();
-    store
-      .lock()
-      .connection
-      .execute("UPDATE messages SET is_hidden = 0", [])
-      .unwrap();
-
-    assert!(
-      store
-        .messages(conversation, MessageFilter::TopLevel)
-        .unwrap()
-        .is_empty()
-    );
-    assert_eq!(
-      store.messages(conversation, MessageFilter::All).unwrap(),
-      vec![announced, archived]
-    );
-  }
-
   #[test]
   fn an_interrupted_group_of_writes_leaves_none_of_them() {
     let directory = scratch_dir();
@@ -608,90 +514,6 @@ mod tests {
       .unwrap();
     assert!(matches!(store.end_writes(), Err(StoreError::GroupFailed(_))));
     assert_eq!(store.get(Table::Outbox, "1").unwrap(), None);
-    let lost = Some(WriteTally { lost: 1, foreign: 0 });
-    assert_eq!(store.write_tally(), lost);
-    crate::store::write_group(&store, || store.put(Table::Outbox, "2", b"entry")).unwrap();
-    assert_eq!(store.write_tally(), lost, "a commit changes nothing");
-  }
-
-  /// Issue #424 review, H1: the layout marks the MLS state per entry; 1.0.8 (its steps end before
-  /// the marker) refuses such a database instead of reading no MLS state.
-  #[test]
-  fn a_version_before_the_mls_state_per_entry_refuses_the_database() {
-    let store =
-      SqlCipherStore::open_in_memory(&StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
-    let as_in_1_0_8 = &MIGRATIONS[..2];
-    assert!(matches!(
-      run_migrations(&store.lock().connection, as_in_1_0_8),
-      Err(StoreError::NewerSchema {
-        found: 3,
-        supported: 2
-      })
-    ));
-  }
-
-  /// Issue #424 review, H2: a commit of another connection to the same file (another process)
-  /// shows in the tally, so the next MLS save writes the whole state.
-  #[test]
-  fn another_connections_commit_shows_in_the_tally() {
-    let directory = scratch_dir();
-    let path = directory.join("store.db");
-    let key = SymmetricKey::generate(&mut OsRng);
-    let ours = SqlCipherStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
-    let theirs = SqlCipherStore::open(&path, &StaticKeySource::new(key)).unwrap();
-    ours.put(Table::Users, "1", b"ours").unwrap();
-    assert_eq!(ours.write_tally(), Some(WriteTally::default()));
-    theirs.put(Table::Users, "2", b"theirs").unwrap();
-    assert_eq!(ours.write_tally().map(|tally| tally.foreign), Some(1));
-    drop((ours, theirs));
-    std::fs::remove_dir_all(&directory).unwrap();
-  }
-
-  /// Issue #424: a save of the MLS state in a group SQLite rolled back (a full disk) went
-  /// through as far as the save could tell. The tally tells the next save, which writes the
-  /// whole state again: the database holds what the provider holds, also after a restart.
-  #[test]
-  fn the_mls_state_is_written_again_after_a_rolled_back_group() {
-    use openmls_traits::OpenMlsProvider as _;
-
-    use crate::mls_storage::{SavedMlsStorage, load_mls_storage, save_mls_storage};
-
-    let directory = scratch_dir();
-    let path = directory.join("store.db");
-    let key = SymmetricKey::generate(&mut OsRng);
-    let provider = openmls_rust_crypto::OpenMlsRustCrypto::default();
-    let set = |key: &[u8], maybe_value: Option<&[u8]>| {
-      let mut values = provider.storage().values.write().unwrap();
-      match maybe_value {
-        Some(value) => values.insert(key.to_vec(), value.to_vec()),
-        None => values.remove(key),
-      };
-    };
-    {
-      let store = SqlCipherStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
-      let saved = SavedMlsStorage::default();
-      set(b"epoch", Some(b"1"));
-      set(b"spent key package", Some(b"secret"));
-      save_mls_storage(&store, &provider, &saved).unwrap();
-
-      set(b"epoch", Some(b"2"));
-      set(b"spent key package", None);
-      store.begin_writes().unwrap();
-      save_mls_storage(&store, &provider, &saved).unwrap();
-      store.lock().connection.execute_batch("ROLLBACK").unwrap();
-      assert!(store.end_writes().is_err());
-
-      set(b"next group", Some(b"3"));
-      save_mls_storage(&store, &provider, &saved).unwrap();
-    }
-    let reopened = SqlCipherStore::open(&path, &StaticKeySource::new(key)).unwrap();
-    let (loaded, _) = load_mls_storage(&reopened).unwrap();
-    assert_eq!(
-      *loaded.storage().values.read().unwrap(),
-      *provider.storage().values.read().unwrap()
-    );
-    drop(reopened);
-    std::fs::remove_dir_all(&directory).unwrap();
   }
 
   #[test]

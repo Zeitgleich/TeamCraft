@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Fails on stylesheet mistakes that silently change what users see (issue #363).
 
-The UI stylesheet is long (style/main/*.css, joined in name order into one file at build time,
-#614), and two rules with the same specificity override each other without a warning, also across
-files. This check fails on:
+The UI stylesheet is long, and two rules with the same specificity override each other without a
+warning. This check fails on:
 
 - a `var(--x)` with no definition of `--x` anywhere in the checked files (variables set at runtime
   are allow-listed in RUNTIME_VARIABLES),
@@ -26,7 +25,7 @@ files. This check fails on:
   `HtmlElement::style().set_property`. Mark a real exception (or the line above it) with
   `// inline-style-ok: <reason>`.
 
-    scripts/check-css.py [paths ...]   # default: the stylesheets as served, and crates/teamcraft-ui/src
+    scripts/check-css.py [paths ...]   # default: crates/teamcraft-ui/style/*.css and crates/teamcraft-ui/src
 
 Paths ending in `.css` are stylesheets; other files and directories are searched for `.rs` files.
 
@@ -38,13 +37,10 @@ import pathlib
 import re
 import sys
 
-# The stylesheets in the order the page loads them: the app's area files joined in name order
-# (scripts/bundle-css.sh), then the loading screen's.
-DEFAULT_STYLESHEET_DIR = pathlib.Path("crates/teamcraft-ui/style/main")
-DEFAULT_LOADER_STYLESHEET = pathlib.Path("crates/teamcraft-ui/style/loader.css")
+DEFAULT_DIR = pathlib.Path("crates/teamcraft-ui/style")
 DEFAULT_RUST_DIR = pathlib.Path("crates/teamcraft-ui/src")
 # Set on elements at runtime: from Rust (`style:--x=…`, `style.setProperty`) or loader.js.
-RUNTIME_VARIABLES = re.compile(r"^--(vv-.*|indicator-.*|hue|media-.*|cols|banners-h|window-controls-.*|tok-.*|tc-loader-.*|link-menu-.*|date-jump-.*|rail-menu-.*|setup-.*|tv-digits|tv-columns)$")
+RUNTIME_VARIABLES = re.compile(r"^--(vv-.*|indicator-.*|hue|media-.*|cols|banners-h|window-controls-.*|tok-.*|tc-loader-.*|link-menu-.*|date-jump-.*|rail-menu-.*|setup-.*)$")
 # Keyframes that are known duplicates, each with the issue that removes it.
 KNOWN_DUPLICATE_KEYFRAMES = {
 }
@@ -101,7 +97,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("paths", nargs="*", type=pathlib.Path)
     args = parser.parse_args(argv)
-    paths = args.paths or [*default_stylesheets(), DEFAULT_RUST_DIR]
+    paths = args.paths or [*sorted(DEFAULT_DIR.glob("*.css")), DEFAULT_RUST_DIR]
     stylesheets = [path for path in paths if path.suffix == ".css"]
     rust_files = [file for path in paths if path.suffix != ".css" for file in rust_files_in(path)]
     findings = check_sources({str(path): path.read_text(encoding="utf-8") for path in stylesheets})
@@ -113,10 +109,6 @@ def main(argv=None):
         print(f"{len(findings)} style problem(s); see scripts/check-css.py for the rules.", file=sys.stderr)
         return 1
     return 0
-
-
-def default_stylesheets():
-    return [*sorted(DEFAULT_STYLESHEET_DIR.glob("*.css"), key=lambda path: path.name), DEFAULT_LOADER_STYLESHEET]
 
 
 def check_sources(sources):

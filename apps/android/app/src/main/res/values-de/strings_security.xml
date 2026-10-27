@@ -2,21 +2,4 @@
 <resources>
   <string name="link_copy_code">Code kopieren</string>
   <string name="secure_screen">Bildschirmfotos und Vorschauen von Chats und Anrufen verhindern</string>
-  <string name="fingerprint_title">Dein Sicherheitscode</string>
-  <string name="fingerprint_hint">Vergleiche ihn mit deinen Kontakten, um die Ende-zu-Ende-Verschlüsselung zu prüfen.</string>
-  <string name="key_changes_title">Geänderte Sicherheitscodes</string>
-  <string name="key_changes_new">Neuer Code: %1$s</string>
-  <string name="key_changes_accept">Verglichen, dem neuen Code vertrauen</string>
-  <string name="backup_title">Schlüssel-Backup</string>
-  <string name="backup_ok">Deine Schlüssel sind gesichert</string>
-  <string name="backup_missing">Deine Schlüssel sind noch nicht gesichert</string>
-  <string name="backup_no_recovery">Wiederherstellung ist nicht eingerichtet</string>
-  <string name="backup_missing_hint">Ohne Backup kann ein neues Gerät deine früheren Nachrichten nicht lesen. Lege eine Wiederherstellungs-Passphrase fest, um eines anzulegen.</string>
-  <string name="backup_no_recovery_hint">Wenn du alle deine Geräte verlierst, kannst du deine Nachrichten nicht mehr lesen. Lege eine Wiederherstellungs-Passphrase fest.</string>
-  <string name="backup_passphrase">Deine Wiederherstellungs-Passphrase schützt es.</string>
-  <string name="backup_passphrase_set">Deine Wiederherstellungs-Passphrase schützt es. Du hast sie am %1$s festgelegt.</string>
-  <string name="backup_organization">Deine Organisation kann es auch wiederherstellen, wenn du alle deine Geräte verlierst.</string>
-  <string name="change_passphrase_title">Wiederherstellungs-Passphrase</string>
-  <string name="change_passphrase_button">Passphrase ändern</string>
-  <string name="change_passphrase_done">Deine Schlüsselsicherung verwendet jetzt die neue Passphrase.</string>
 </resources>

@@ -6,7 +6,6 @@ use teamcraft_client_api::actions::{FileSource, MessagePriority, OutgoingFile, O
 use teamcraft_client_api::admin::format_bytes;
 use wasm_bindgen_futures::JsFuture;
 
-use crate::clock::now_ms;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::composer_commands::{self, CommandButton, Notice, NoticeEvent, Outcome};
 use crate::components::composer_editor;
@@ -18,7 +17,6 @@ use crate::components::file_drop::{DropContent, DroppedFiles, take_drop, transfe
 use crate::components::file_views::blob_url;
 use crate::components::icons::{Icon, IconName};
 use crate::components::sheet::MenuSurface;
-use crate::components::typing_indicator::should_notify_typing;
 use crate::composer_focus::{self, FocusSituation};
 use crate::editor_doc::{BlockFormat, InlineStyle};
 use crate::groups::use_groups;
@@ -582,36 +580,10 @@ pub fn Composer(
     }
     suggestions.set(list);
   };
-  // The others see that the user writes (#733), unless they turned that off (Settings > Privacy);
-  // not in the notes to self, where nobody else is.
-  let is_notes_to_self = untrack(|| {
-    state
-      .read(|backend| backend.conversation(conversation))
-      .is_some_and(|conv| conv.is_notes_to_self)
-  });
-  let last_typing_ms = StoredValue::new(None::<i64>);
-  let announce_typing = move || {
-    if is_notes_to_self
-      || !state
-        .settings
-        .prefs
-        .with_untracked(|prefs| prefs.privacy.share_typing)
-    {
-      return;
-    }
-    let now = now_ms();
-    if !should_notify_typing(is_empty.get_untracked(), now, last_typing_ms.get_value()) {
-      return;
-    }
-    last_typing_ms.set_value(Some(now));
-    // Changes nothing to read: no revision bump, as for the activity reports.
-    state.read(|backend| backend.notify_typing(conversation));
-  };
   let after_edit = move || {
     if let Some(element) = editor.get_untracked() {
       is_empty.set(composer_editor::is_blank(&element));
     }
-    announce_typing();
     save_draft();
     refresh_formats();
   };
@@ -875,7 +847,6 @@ pub fn Composer(
     if notice.with_untracked(|shown| matches!(shown, Some(Notice::Help))) {
       close_notice(NoticeEvent::Edited(&composer_editor::markdown(&element)));
     }
-    announce_typing();
     save_draft();
     refresh_suggestions();
     refresh_formats();

@@ -16,9 +16,8 @@ use crate::admin::DeviceInfo;
 use crate::backend::{ChatBackend, LoadingList, SearchBackend};
 use crate::calls::{
   ActiveCall, BackgroundEffect, BackgroundImageInfo, CallEndReason, CallHistoryItem, CallMoveOffer,
-  CallPreview, CallRequest, CallStatusSounds, CameraFallback, IncomingCall, JoinMedia, MediaDevices,
-  OrgBackgroundRule, OrgBackgrounds, PreviewCamera, PushToTalk, RemoteVideoTrack, RunningCall,
-  ScreenContentMode,
+  CallRequest, CallStatusSounds, IncomingCall, MediaDevices, OrgBackgroundRule, OrgBackgrounds, PushToTalk,
+  RemoteVideoTrack, RunningCall, ScreenContentMode,
 };
 use crate::live::LiveSnapshot;
 use crate::model::{
@@ -58,32 +57,17 @@ pub struct CallSnapshot {
   /// Set when the meeting host removed the user or ended the call; cleared on the next join.
   #[serde(default)]
   pub maybe_end_reason: Option<CallEndReason>,
-  /// The pre-join check's camera (#442).
-  #[serde(default)]
-  pub preview_camera: PreviewCamera,
-  /// The camera that stood in when the chosen one didn't open, at the last camera start (#819).
-  #[serde(default)]
-  pub maybe_camera_fallback: Option<CameraFallback>,
 }
 
 /// Something the user did in or about a call.
-///
-/// The desktop shell (`call_action`) and the browser's call module (`act`) carry it out. A failed
-/// action answers with `ActionFailure` wire text. One that went through answers with nothing, or
-/// with the wire text of a part of it that failed without undoing it ([`CallActionAnswer`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum CallAction {
-  /// Joins with the pre-join screen's choice ([`JoinMedia`]).
   Join {
     request: CallRequest,
-    /// Join with the microphone muted from the first frame.
+    /// Join with the microphone muted from the first frame (the pre-join choice).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     is_muted: bool,
-    /// Start the camera with the call (#453). Older UIs send no flag and turn the camera on with
-    /// [`CallAction::SetCamera`] after the join.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    is_camera_on: bool,
   },
   Leave,
   Decline {
@@ -146,11 +130,6 @@ pub enum CallAction {
   },
   /// Lists the cameras, microphones and speakers again (the pre-join screen opened).
   RefreshDevices,
-  /// Starts, changes or ends the pre-join check of the camera and microphone (#442). Refused
-  /// while a call runs on this device: the call has them.
-  SetPreview {
-    preview: CallPreview,
-  },
   /// Plays a short test sound on the speakers (`None`: the system default); finishes when it
   /// has played, fails when it can't play. The desktop shell's: the browser page plays it itself,
   /// since it has to start inside the click.
@@ -160,22 +139,6 @@ pub enum CallAction {
   },
   #[serde(other)]
   Unknown,
-}
-
-/// What a [`CallAction`] that went through answers: `None`, or a part of it that failed without
-/// undoing it, as `ActionFailure` wire text. A join whose camera didn't start (#453) is still a
-/// join: the call runs, and the UI says why the camera stayed off.
-pub type CallActionAnswer = Option<String>;
-
-impl CallAction {
-  /// Joins `request` with the pre-join choice.
-  pub fn join(request: CallRequest, media: JoinMedia) -> Self {
-    Self::Join {
-      request,
-      is_muted: media.is_muted,
-      is_camera_on: media.is_camera_on,
-    }
-  }
 }
 
 /// HTTP verbs the UI may use for authenticated server calls (the shell attaches the bearer token).
@@ -243,9 +206,6 @@ pub struct SecuritySnapshot {
   /// older shell) allows them, as the server's default does. The server enforces it either way.
   #[serde(rename = "presence_policy", default, skip_serializing_if = "Option::is_none")]
   pub maybe_presence_policy: Option<teamcraft_proto::PresencePolicy>,
-  /// The key backup as this device knows it (issue #410); `None` from an older shell.
-  #[serde(rename = "backup", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_backup: Option<crate::security::KeyBackupState>,
 }
 
 /// What this device pinned for one contact, and a different key the server has shown since.
@@ -511,23 +471,8 @@ pub enum ChatAction {
   RefreshCallHistory,
   /// Fetch this user's device list again (the devices settings were opened).
   RefreshOwnDevices,
-  /// Read again how far the other members read (a DM was opened, or the connection came back
-  /// while it is open): receipts that arrived while offline were missed.
-  RefreshReadReceipts {
-    conversation: ConversationId,
-  },
   /// Sign out one of this user's other devices.
   RevokeOwnDevice {
-    device: DeviceId,
-  },
-  /// Rename one of this user's devices (issue #409).
-  RenameOwnDevice {
-    device: DeviceId,
-    name: String,
-  },
-  /// Ask the server to send a test push to one of this user's devices; the outcome shows in the
-  /// device list.
-  TestPushOwnDevice {
     device: DeviceId,
   },
   /// Founds a new channel (and its encryption group) in a space.
@@ -587,25 +532,6 @@ pub enum ChatAction {
   /// An admin adds themselves to a conversation (subject to the policy's `admin_self_join`).
   AdminJoinChannel {
     conversation: ConversationId,
-  },
-  /// An admin asks the owners of a private channel to let them in (admin.md §2.4).
-  RequestAdminJoin {
-    conversation: ConversationId,
-  },
-  WithdrawAdminJoin {
-    conversation: ConversationId,
-  },
-  /// A channel owner lets an admin in who asked, sharing `history` (older UIs send none: from the
-  /// join on, what a self-join gets).
-  ApproveAdminJoin {
-    conversation: ConversationId,
-    user: UserId,
-    #[serde(default = "history_from_join")]
-    history: HistoryPolicy,
-  },
-  DeclineAdminJoin {
-    conversation: ConversationId,
-    user: UserId,
   },
   /// An admin removes a deactivated user from all chats: signed removals per channel, then the
   /// server's step (admin.md §3.2.1).
@@ -862,13 +788,6 @@ pub enum ChatAction {
     user: UserId,
     role: crate::model::ChannelRole,
   },
-  ConfirmChannelRole {
-    conversation: ConversationId,
-    user: UserId,
-  },
-  RefreshChannelRoles {
-    conversation: ConversationId,
-  },
   RemoveSpaceMember {
     space: SpaceId,
     user: UserId,
@@ -906,26 +825,11 @@ pub enum AttachmentPriority {
   Now,
 }
 
-/// An admin let in without an explicit choice gets what a self-join gets (e2ee.md §4.7).
-fn history_from_join() -> HistoryPolicy {
-  HistoryPolicy::FromJoin
-}
-
 impl ChatAction {
   /// A new message: the host answers it once it is in the outbox and sends it afterwards, so the
   /// message shows at once, also while a sync or an upload holds the client.
   pub fn is_new_message(&self) -> bool {
     matches!(self, Self::SendMessage { .. } | Self::PostMessage { .. })
-  }
-
-  /// The conversation of a typing announcement. It is passing and changes nothing stored or shown:
-  /// the host sends it on the open gateway connection right away, tells the UI of no change, and
-  /// drops it while offline or busy connecting (a late indicator would be wrong).
-  pub fn typing_conversation(&self) -> Option<ConversationId> {
-    match self {
-      Self::Typing { conversation } => Some(*conversation),
-      _ => None,
-    }
   }
 
   /// Runs the action on a backend. The original actions are left to the host, which handles
@@ -957,21 +861,10 @@ impl ChatAction {
       } => backend.set_presence_until(presence, maybe_until),
       Self::SetCustomStatus { maybe_status } => backend.set_custom_status(maybe_status),
       Self::MarkActivityRead => backend.mark_activity_read(),
-      Self::RequestAdminJoin { conversation } => backend.request_admin_join(conversation),
-      Self::WithdrawAdminJoin { conversation } => backend.withdraw_admin_join(conversation),
-      Self::ApproveAdminJoin {
-        conversation,
-        user,
-        history,
-      } => backend.approve_admin_join(conversation, user, history),
-      Self::DeclineAdminJoin { conversation, user } => backend.decline_admin_join(conversation, user),
       Self::SetLastSeenVisibility { visibility } => backend.set_last_seen_visibility(visibility),
       Self::RefreshCallHistory => backend.refresh_call_history(),
       Self::RefreshOwnDevices => backend.refresh_own_devices(),
-      Self::RefreshReadReceipts { conversation } => backend.refresh_read_receipts(conversation),
       Self::RevokeOwnDevice { device } => backend.revoke_own_device(device),
-      Self::RenameOwnDevice { device, name } => backend.rename_own_device(device, name),
-      Self::TestPushOwnDevice { device } => backend.test_push_own_device(device),
       Self::SetThreadFollowed {
         conversation,
         thread,
@@ -1151,8 +1044,6 @@ impl ChatAction {
         user,
         role,
       } => backend.set_channel_role(conversation, user, role),
-      Self::ConfirmChannelRole { conversation, user } => backend.confirm_channel_role(conversation, user),
-      Self::RefreshChannelRoles { conversation } => backend.refresh_channel_roles(conversation),
       Self::RemoveSpaceMember { space, user } => backend.remove_space_member(space, user),
       Self::RevokeSpaceInvite { space, invite } => backend.revoke_space_invite(space, invite),
       Self::SaveSearch { name, query } => backend.save_search(&name, &query),
@@ -1238,9 +1129,6 @@ pub enum ChatQuery {
     conversation: ConversationId,
   },
   CanManageIntegrationSources,
-  CanSignChannelRoles {
-    conversation: ConversationId,
-  },
   SpaceInvites {
     space: SpaceId,
   },
@@ -1365,10 +1253,6 @@ pub enum ChatAnswer {
   CanManageIntegrationSources {
     #[serde(default)]
     can_manage: bool,
-  },
-  CanSignChannelRoles {
-    #[serde(default)]
-    can_sign: bool,
   },
   SpaceInvites {
     invites: Vec<crate::model::PendingInvite>,
@@ -1526,9 +1410,6 @@ impl ChatQuery {
       Self::CanManageIntegrationSources => ChatAnswer::CanManageIntegrationSources {
         can_manage: backend.can_manage_integration_sources(),
       },
-      Self::CanSignChannelRoles { conversation } => ChatAnswer::CanSignChannelRoles {
-        can_sign: backend.can_sign_channel_roles(conversation),
-      },
       Self::SpaceMembers { space } => ChatAnswer::SpaceMembers {
         roster: backend.space_members(space),
       },
@@ -1639,29 +1520,11 @@ mod tests {
         conversation: id_from_raw(7)
       }
     );
-    // Hosts send it at once instead of running it as a command.
-    assert_eq!(typing.typing_conversation(), Some(id_from_raw(7)));
-    let mark_read = ChatAction::MarkRead {
-      conversation: id_from_raw(7),
-    };
-    assert_eq!(mark_read.typing_conversation(), None);
     let query: ChatQuery =
       serde_json::from_str(r#"{"kind":"typing_users","conversation":"7"}"#).expect("parse");
     assert_eq!(
       query,
       ChatQuery::TypingUsers {
-        conversation: id_from_raw(7)
-      }
-    );
-  }
-
-  #[test]
-  fn the_mobile_apps_ask_for_receipts_by_a_stable_name() {
-    let refresh: ChatAction =
-      serde_json::from_str(r#"{"action":"refresh_read_receipts","conversation":"7"}"#).expect("parse");
-    assert_eq!(
-      refresh,
-      ChatAction::RefreshReadReceipts {
         conversation: id_from_raw(7)
       }
     );
@@ -1699,10 +1562,9 @@ mod tests {
         file_id: "pending-1".into(),
       }
     );
-    // Extras from an older core have no send or read state: not failed, not read.
+    // Extras from an older core have no send state: not failed.
     let extras: crate::actions::MessageExtras = serde_json::from_str(r#"{"message":"9"}"#).expect("parse");
     assert!(!extras.is_send_failed);
-    assert!(!extras.is_read);
   }
 
   #[test]
@@ -1744,109 +1606,22 @@ mod tests {
       serde_json::from_str::<CallAction>(r#"{"action":"raise_hand"}"#).expect("parse"),
       CallAction::Unknown
     );
-  }
-
-  /// #453: the pre-join choice travels with the join; a join without it (an older UI) starts
-  /// unmuted with the camera off, as before.
-  #[test]
-  fn a_join_carries_the_pre_join_choice() {
-    let request = CallRequest {
-      conversation: id_from_raw(5),
-      kind: crate::calls::CallKind::Direct,
+    let join = CallAction::Join {
+      request: CallRequest {
+        conversation: id_from_raw(5),
+        kind: crate::calls::CallKind::Direct,
+      },
+      is_muted: false,
     };
-    let plain = CallAction::join(request, JoinMedia::default());
     assert_eq!(
-      serde_json::to_string(&plain).expect("serialize"),
+      serde_json::to_string(&join).expect("serialize"),
       r#"{"action":"join","request":{"conversation":"5","kind":"direct"}}"#
     );
-    assert_eq!(
-      serde_json::from_str::<CallAction>(
-        r#"{"action":"join","request":{"conversation":"5","kind":"direct"}}"#
-      )
-      .expect("parse"),
-      plain
-    );
-    let chosen = CallAction::join(
-      request,
-      JoinMedia {
-        is_muted: true,
-        is_camera_on: true,
-      },
-    );
-    let json = r#"{"action":"join","request":{"conversation":"5","kind":"direct"},"is_muted":true,"is_camera_on":true}"#;
-    assert_eq!(serde_json::to_string(&chosen).expect("serialize"), json);
-    assert_eq!(serde_json::from_str::<CallAction>(json).expect("parse"), chosen);
-    let camera_only: CallAction = serde_json::from_str(
-      r#"{"action":"join","request":{"conversation":"5","kind":"direct"},"is_camera_on":true}"#,
+    let muted: CallAction = serde_json::from_str(
+      r#"{"action":"join","request":{"conversation":"5","kind":"direct"},"is_muted":true}"#,
     )
     .expect("parse");
-    assert_eq!(
-      camera_only,
-      CallAction::Join {
-        request,
-        is_muted: false,
-        is_camera_on: true,
-      }
-    );
-  }
-
-  /// #442: the pre-join check and its camera's state have stable wire names; a snapshot without
-  /// a preview (an older shell) has none running.
-  #[test]
-  fn the_pre_join_check_has_stable_wire_names() {
-    let action = CallAction::SetPreview {
-      preview: CallPreview {
-        is_camera_on: true,
-        is_mic_on: false,
-      },
-    };
-    let json = r#"{"action":"set_preview","preview":{"is_camera_on":true,"is_mic_on":false}}"#;
-    assert_eq!(serde_json::to_string(&action).expect("serialize"), json);
-    assert_eq!(serde_json::from_str::<CallAction>(json).expect("parse"), action);
-    assert_eq!(
-      serde_json::from_str::<CallAction>(r#"{"action":"set_preview","preview":{}}"#).expect("parse"),
-      CallAction::SetPreview {
-        preview: CallPreview::default()
-      }
-    );
-    for (camera, name) in [
-      (PreviewCamera::Off, r#""off""#),
-      (PreviewCamera::Starting, r#""starting""#),
-      (PreviewCamera::Live, r#""live""#),
-      (PreviewCamera::Failed, r#""failed""#),
-    ] {
-      assert_eq!(serde_json::to_string(&camera).expect("serialize"), name);
-      assert_eq!(
-        serde_json::from_str::<PreviewCamera>(name).expect("parse"),
-        camera
-      );
-    }
-    assert_eq!(
-      serde_json::from_str::<PreviewCamera>(r#""paused""#).expect("parse"),
-      PreviewCamera::Unknown
-    );
-    let without: CallSnapshot = serde_json::from_str(
-      r#"{"incoming":[],"running":[],"devices":{"cameras":[],"microphones":[],"speakers":[]}}"#,
-    )
-    .expect("parse");
-    assert_eq!(without.preview_camera, PreviewCamera::Off);
-  }
-
-  /// A call action answers `null`, or the failure of a part that didn't go through.
-  #[test]
-  fn a_call_action_answer_is_null_or_a_failure() {
-    assert_eq!(
-      serde_json::from_str::<CallActionAnswer>("null").expect("parse"),
-      None
-    );
-    let failure = crate::failure::ActionFailure::new(
-      crate::failure::FailureKind::Call(crate::failure::CallFailure::CameraInUse),
-      "busy",
-    )
-    .to_wire();
-    let answer: CallActionAnswer =
-      serde_json::from_str(&serde_json::to_string(&failure).expect("serialize")).expect("parse");
-    assert_eq!(answer, Some(failure));
+    assert!(matches!(muted, CallAction::Join { is_muted: true, .. }));
   }
 
   #[test]
@@ -1873,55 +1648,6 @@ mod tests {
       })
       .expect("serialize"),
       r#"{"action":"set_background_effect","effect":"blur_light"}"#
-    );
-  }
-
-  #[test]
-  fn own_device_actions_have_stable_wire_names() {
-    let device: DeviceId = crate::model::id_from_raw(7);
-    let rename = ChatAction::RenameOwnDevice {
-      device,
-      name: "Work laptop".into(),
-    };
-    let json = serde_json::to_string(&rename).expect("serialize");
-    assert_eq!(
-      json,
-      r#"{"action":"rename_own_device","device":"7","name":"Work laptop"}"#
-    );
-    assert_eq!(serde_json::from_str::<ChatAction>(&json).expect("parse"), rename);
-    assert_eq!(
-      serde_json::to_string(&ChatAction::TestPushOwnDevice { device }).expect("serialize"),
-      r#"{"action":"test_push_own_device","device":"7"}"#
-    );
-  }
-
-  #[test]
-  fn the_backup_state_is_optional_in_the_security_snapshot() {
-    let older: SecuritySnapshot =
-      serde_json::from_str(r#"{"my_fingerprint":"ab","contacts":[]}"#).expect("parse");
-    assert_eq!(older.maybe_backup, None);
-    let snapshot = SecuritySnapshot {
-      maybe_backup: Some(crate::security::KeyBackupState {
-        is_stored: true,
-        has_pending_upload: false,
-        recovery: vec![crate::security::RecoveryMethod::Passphrase],
-        maybe_passphrase_set_at: Some(1_000),
-      }),
-      ..SecuritySnapshot::default()
-    };
-    let json = serde_json::to_value(&snapshot).expect("serialize");
-    assert_eq!(
-      json["backup"],
-      serde_json::json!({"is_stored": true, "has_pending_upload": false, "recovery": ["passphrase"], "passphrase_set_at": 1000})
-    );
-    let newer: crate::security::KeyBackupState =
-      serde_json::from_str(r#"{"is_stored":true,"recovery":["passphrase","hardware_key"]}"#).expect("parse");
-    assert_eq!(
-      newer.recovery,
-      [
-        crate::security::RecoveryMethod::Passphrase,
-        crate::security::RecoveryMethod::Unknown
-      ]
     );
   }
 

@@ -47,14 +47,11 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import java.text.DateFormat
-import java.util.Date
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.CustomStatus
-import de.zeitgleich.teamcraft.core.KeyBackup
 import de.zeitgleich.teamcraft.security.ScreenPrefs
 import de.zeitgleich.teamcraft.ui.AppState
 import de.zeitgleich.teamcraft.ui.LinkConfirmation
@@ -177,8 +174,6 @@ private fun ChatsPage(viewModel: MainViewModel) {
   HorizontalDivider()
   CallStatusSoundsSetting()
   HorizontalDivider()
-  OriginalDownloadSetting()
-  HorizontalDivider()
   Heading(R.string.search_prefetch_title)
   SearchPrefetchSection(viewModel.segmentPrefetch)
 }
@@ -193,38 +188,7 @@ private fun SecurityPage(viewModel: MainViewModel, account: AppState.Ready) {
   SecureScreenSetting()
   AppLockSetting()
   HorizontalDivider()
-  KeyBackupStatus(viewModel)
   ChangePassphrase(viewModel)
-}
-
-/** The key backup in plain words (issue #410): stored or not, and how it is protected. */
-@Composable
-private fun KeyBackupStatus(viewModel: MainViewModel) {
-  val changes by viewModel.changeCount.collectAsState()
-  var backup by remember { mutableStateOf<KeyBackup?>(null) }
-  LaunchedEffect(changes) { backup = viewModel.readChat { snapshot() }?.security?.backup }
-  val state = backup ?: return
-  Heading(R.string.backup_title)
-  val title = when {
-    !state.isStored -> R.string.backup_missing
-    state.hasPassphrase -> R.string.backup_ok
-    else -> R.string.backup_no_recovery
-  }
-  Text(stringResource(title), style = MaterialTheme.typography.titleSmall)
-  val setAt = state.passphraseSetAt
-  val detail = when {
-    !state.isStored -> stringResource(R.string.backup_missing_hint)
-    !state.hasPassphrase -> stringResource(R.string.backup_no_recovery_hint)
-    setAt != null -> stringResource(
-      R.string.backup_passphrase_set,
-      DateFormat.getDateInstance(DateFormat.MEDIUM).format(Date(setAt)),
-    )
-    else -> stringResource(R.string.backup_passphrase)
-  }
-  Text(detail, style = MaterialTheme.typography.bodySmall)
-  if (state.hasOrganization) {
-    Text(stringResource(R.string.backup_organization), style = MaterialTheme.typography.bodySmall)
-  }
 }
 
 /** This device approves a new one: scan or enter its link code, then type the code it shows. */

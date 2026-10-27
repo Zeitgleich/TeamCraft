@@ -151,7 +151,6 @@ mod tests {
       maybe_push_content: None,
       maybe_owners: None,
       maybe_presence_policy: None,
-      maybe_backup: None,
     }
   }
 }

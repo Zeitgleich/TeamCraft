@@ -4,7 +4,7 @@
 //! Declaring the few members used here keeps that flag out of every wasm build of the workspace.
 //! The shapes follow the W3C WebTransport and WebCodecs specifications.
 
-use js_sys::{Function, Object, Promise, Reflect, Uint8Array};
+use js_sys::{Object, Promise, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
 use web_sys::{ReadableStream, WritableStream};
 
@@ -48,6 +48,9 @@ extern "C" {
 
   #[wasm_bindgen(method, getter)]
   pub fn readable(this: &WebTransportDatagramDuplexStream) -> ReadableStream;
+
+  #[wasm_bindgen(method, getter)]
+  pub fn writable(this: &WebTransportDatagramDuplexStream) -> WritableStream;
 
   pub type WebTransportBidirectionalStream;
 
@@ -232,22 +235,6 @@ pub fn dictionary(entries: &[(&str, JsValue)]) -> Result<Object, JsValue> {
     Reflect::set(&object, &JsValue::from_str(key), value)?;
   }
   Ok(object)
-}
-
-/// The stream outgoing datagrams go to: `createWritable()` in the current WebTransport spec
-/// (Safari), the `writable` attribute of earlier drafts (Chromium, Firefox). Takes any value, so
-/// tests can pass stand-ins.
-pub fn datagram_writable(datagrams: &JsValue) -> Result<WritableStream, JsValue> {
-  let create = Reflect::get(datagrams, &JsValue::from_str("createWritable"))?;
-  let stream = match create.dyn_ref::<Function>() {
-    Some(create) => create.call0(datagrams)?,
-    None => Reflect::get(datagrams, &JsValue::from_str("writable"))?,
-  };
-  if !stream.is_object() {
-    return Err(JsValue::from_str("this browser offers no way to send datagrams"));
-  }
-  // Safari's `WebTransportDatagramsWritable` is a `WritableStream`.
-  Ok(stream.unchecked_into())
 }
 
 /// Whether the global scope has a constructor of this name (feature detection).

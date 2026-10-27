@@ -19,9 +19,7 @@
 //!
 //! A rejoin after a lost connection prepares again (fresh token, current devices).
 //!
-//! Failed actions reject with [`crate::failure::ActionFailure`] wire text. An action that went
-//! through resolves with nothing, or with the wire text of a part of it that failed without
-//! undoing it ([`crate::remote::CallActionAnswer`]).
+//! Failed actions reject with [`crate::failure::ActionFailure`] wire text.
 
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{DeviceId, UserId};
@@ -37,7 +35,7 @@ pub const MODULE_META: &str = "teamcraft-calls";
 pub const WORKLET_META: &str = "teamcraft-call-worklet";
 /// `start(callbacks)`: once, after the module is initialized.
 pub const EXPORT_START: &str = "start";
-/// `act(CallAction JSON) -> Promise<undefined | string>` (see the module docs).
+/// `act(CallAction JSON) -> Promise`.
 pub const EXPORT_ACT: &str = "act";
 /// `signal(CallSignal JSON)`: a call event from the gateway.
 pub const EXPORT_SIGNAL: &str = "signal";
@@ -47,12 +45,8 @@ pub const EXPORT_RING: &str = "ring";
 pub const EXPORT_WATCH_VIDEO: &str = "watch_video";
 /// `unwatch_video(MediaStreamId JSON)`.
 pub const EXPORT_UNWATCH_VIDEO: &str = "unwatch_video";
-/// `camera_view() -> video | undefined`: a new `<video>` playing the camera this device sends, or
-/// the pre-join check's camera.
+/// `camera_view() -> video | undefined`: a new `<video>` playing the camera this device sends.
 pub const EXPORT_CAMERA_VIEW: &str = "camera_view";
-/// `preview_level() -> number`: the microphone's level in the pre-join check (#442), from 0
-/// (silence, or no check running) to 1.
-pub const EXPORT_PREVIEW_LEVEL: &str = "preview_level";
 /// `network_changed()`: the page's core saw the network come back or change, or the page woke up
 /// (`online`, `visibilitychange`, `pageshow`, `resume`); a running call checks its session.
 pub const EXPORT_NETWORK_CHANGED: &str = "network_changed";

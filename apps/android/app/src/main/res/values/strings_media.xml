@@ -2,23 +2,8 @@
 <resources>
   <!-- Image viewer and previews (#315) -->
   <string name="image_loading">Loading the full image</string>
+  <string name="image_load_failed">The image couldn\'t be loaded. Tap to try again.</string>
   <string name="image_position">%1$d of %2$d</string>
-  <!-- Image viewer: albums, originals, forwarding (#240) -->
-  <string name="image_load_original">Load original (%1$s)</string>
-  <string name="image_original_failed">The original couldn\'t be loaded.</string>
-  <string name="image_try_again">Try again</string>
-  <string name="image_scope_message">This message</string>
-  <string name="image_scope_conversation">Whole chat</string>
-  <string name="image_forward">Forward message</string>
-  <plurals name="album_more_pictures">
-    <item quantity="one">%d more picture</item>
-    <item quantity="other">%d more pictures</item>
-  </plurals>
-  <string name="original_download_title">Download original images automatically</string>
-  <string name="original_download_always">Always</string>
-  <string name="original_download_unmetered">On Wi-Fi only</string>
-  <string name="original_download_never">Never</string>
-  <string name="original_download_hint">An opened picture shows its preview at once. Otherwise its original loads when you tap \u201cLoad original\u201d. Mobile data and hotspots don\'t count as Wi-Fi.</string>
   <string name="message_pinned">Pinned</string>
   <!-- Composer -->
   <string name="composer_remove_file">Remove %1$s</string>

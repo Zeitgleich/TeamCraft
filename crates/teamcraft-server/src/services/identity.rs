@@ -6,8 +6,8 @@
 
 use teamcraft_db::{IdentityKey, IdentityKeyOutcome, InitialKeyBag, NewIdentityKey};
 use teamcraft_proto::{
-  Base64Bytes, DeviceResponse, GatewayEvent, IdentityKeyResponse, ListDevicesResponse,
-  UploadIdentityKeyRequest, UserEnrollmentResponse, UserId,
+  Base64Bytes, GatewayEvent, IdentityKeyResponse, ListDevicesResponse, UploadIdentityKeyRequest,
+  UserEnrollmentResponse, UserId,
 };
 
 use super::convert::{device_response, unix_millis};
@@ -137,25 +137,7 @@ pub async fn list_user_devices(
 ) -> Result<ListDevicesResponse, ApiError> {
   let user = visible_user(state, caller, user).await?;
   let devices = state.database.list_devices(user.id).await?;
-  let is_own = user.id == caller.user.id;
   Ok(ListDevicesResponse {
-    devices: devices
-      .iter()
-      .map(|device| {
-        let response = device_response(device);
-        if is_own { response } else { keys_only(response) }
-      })
-      .collect(),
+    devices: devices.iter().map(device_response).collect(),
   })
-}
-
-/// Another user's device as their colleagues' clients need it: its keys. The name may be personal
-/// ("Anna's phone") and the push provider tells the platform, so both stay with the owner (and
-/// admins, who have their own list).
-fn keys_only(device: DeviceResponse) -> DeviceResponse {
-  DeviceResponse {
-    name: String::new(),
-    maybe_push_provider: None,
-    ..device
-  }
 }

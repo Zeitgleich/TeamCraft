@@ -97,7 +97,7 @@ async fn channel_changes_are_announced() {
   })));
   let events = workspace_events(&bob_ui, channel);
   assert!(events.contains(&WorkspaceEvent::MadePrivate {
-    maybe_by: Some(alice.client.user_id())
+    by: alice.client.user_id()
   }));
   assert!(events.contains(&WorkspaceEvent::MemberAdded {
     user: bob.client.user_id(),
@@ -186,8 +186,6 @@ async fn a_moved_channel_keeps_its_group_and_is_announced() {
     .find(|space| space.name == "Project B")
     .unwrap()
     .id;
-  // The server moves a channel only when its members are in the new space (e2ee.md §4.8).
-  bob.client.join_space(target).await.unwrap();
 
   alice_ui.update_channel(
     channel,
@@ -209,7 +207,7 @@ async fn a_moved_channel_keeps_its_group_and_is_announced() {
   let bob_ui = backend_of(&bob);
   assert!(
     workspace_events(&bob_ui, channel).contains(&WorkspaceEvent::Moved {
-      maybe_by: Some(alice.client.user_id()),
+      by: alice.client.user_id(),
       space: "Project B".into(),
     })
   );

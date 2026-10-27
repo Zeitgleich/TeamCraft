@@ -19,7 +19,6 @@ use teamcraft_client_api::calls::{
 use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
 use teamcraft_media::call_native::NativeCallError;
 use teamcraft_media::call_video::ReceivedVideoFrame;
-use teamcraft_media::camera_choice::CameraReport;
 use teamcraft_media::effects::{
   BackgroundEffect, BackgroundImage, BlurStrength, Compositor, EffectHandle, EffectsConfig, EffectsError,
   EffectsPipeline, PRESET_HEIGHT, PRESET_WIDTH, PhotoBackground, PresetBackground, SegmentationModel,
@@ -72,28 +71,27 @@ pub(super) fn list_cameras() -> Vec<CameraInfo> {
 }
 
 /// A camera error as the UI reads it (`call_<failure>: detail`), so the user gets a message in their
-/// language that fits the cause (#819: declined on the iPhone, in use, no usable mode, or a reason
-/// the system doesn't tell) instead of "close other apps" for all of them.
-pub(super) fn camera_failure_wire(error: &CaptureError) -> String {
-  match camera_failure(error) {
-    Some(failure) => ActionFailure::new(FailureKind::Call(failure), error.to_string()).to_wire(),
-    None => error.to_string(),
-  }
-}
-
-/// The cause of a camera error, as the UI words it.
-fn camera_failure(error: &CaptureError) -> Option<CallFailure> {
-  match error {
-    CaptureError::NoDevice(_) => Some(CallFailure::CameraMissing),
-    CaptureError::Denied(_) => Some(CallFailure::CameraDenied),
-    CaptureError::InUse(_) => Some(CallFailure::CameraInUse),
-    CaptureError::NotConnected(_) => Some(CallFailure::CameraNotConnected),
-    CaptureError::NoUsableMode(_) | CaptureError::UnsupportedFormat(_) => {
-      Some(CallFailure::CameraUnsupported)
-    },
-    CaptureError::Device(_) => Some(CallFailure::CameraUnavailable),
-    CaptureError::Cancelled(_) | CaptureError::Frame(_) => None,
-  }
+/// language instead of "something went wrong". Capture errors arrive as text from the video
+/// engine, so they are told apart by what `CaptureError` prints.
+pub(super) fn camera_failure_wire(message: String) -> String {
+  let lowered = message.to_lowercase();
+  let failure = if lowered.contains("unsupported pixel format")
+    || lowered.contains("no mode we can")
+    || lowered.contains("no format we can")
+    || lowered.contains("requested format")
+    || lowered.contains("cannot fulfill")
+  {
+    CallFailure::CameraUnsupported
+  } else if lowered.starts_with("no camera available") {
+    CallFailure::CameraMissing
+  } else if lowered.contains("denied access") {
+    CallFailure::CameraDenied
+  } else if lowered.starts_with("capture:") {
+    CallFailure::CameraInUse
+  } else {
+    return message;
+  };
+  ActionFailure::new(FailureKind::Call(failure), message).to_wire()
 }
 
 /// A failed start of an own video track as the UI reads it: the capture's own errors as for
@@ -111,7 +109,7 @@ pub(super) fn start_failure_wire(kind: &VideoTrackKind, error: &NativeCallError)
       ActionFailure::new(FailureKind::Call(failure), start.to_string()).to_wire()
     },
     NativeCallError::Capture(capture) if is_screen => screen_failure_wire(capture),
-    NativeCallError::Capture(capture) => camera_failure_wire(capture),
+    NativeCallError::Capture(capture) => camera_failure_wire(capture.to_string()),
     other => other.to_string(),
   }
 }
@@ -126,19 +124,14 @@ pub(super) fn screen_failure_wire(error: &CaptureError) -> String {
 }
 
 /// Opens the camera (blocking: the portal may ask the user). A chosen device is a V4L2 path; the
-/// portal only offers "the camera", so it is tried for the default (and for a chosen camera that
-/// is no longer listed). V4L2 tries the chosen or first camera and one fallback
-/// (`camera_choice`); the report says which one opened.
+/// portal only offers "the camera", so it is tried for the default.
 #[cfg(target_os = "linux")]
-pub(super) fn open_camera(maybe_id: Option<&str>) -> Result<(Box<dyn VideoCapture>, CameraReport), String> {
-  use teamcraft_media::camera_choice::{open_first, open_order};
+pub(super) fn open_camera(maybe_id: Option<&str>) -> Result<Box<dyn VideoCapture>, String> {
   use teamcraft_media::capture_fallback::FallbackCapture;
   use teamcraft_media::capture_portal::PortalCapture;
   use teamcraft_media::capture_v4l2::V4l2Camera;
 
-  let cameras = list_cameras();
-  let maybe_listed = maybe_id.filter(|id| cameras.iter().any(|camera| camera.id == *id));
-  if maybe_listed.is_none() {
+  if maybe_id.is_none() {
     match PortalCapture::camera(CAMERA_FORMAT) {
       Ok(capture) => {
         info!("camera through the portal (PipeWire), V4L2 if it stays silent");
@@ -148,37 +141,26 @@ pub(super) fn open_camera(maybe_id: Option<&str>) -> Result<(Box<dyn VideoCaptur
         });
         let capture =
           FallbackCapture::new(Box::new(capture), "portal", open_v4l2, "V4L2", PORTAL_CAMERA_WAIT);
-        // The portal decides which camera; nothing to report.
-        return Ok((
-          Box::new(capture) as Box<dyn VideoCapture>,
-          CameraReport::default(),
-        ));
+        return Ok(Box::new(capture));
       },
       Err(error) => info!(%error, "no camera through the portal; trying V4L2"),
     }
   }
-  info!(device = maybe_listed.unwrap_or("default"), "camera through V4L2");
-  let order = open_order(&cameras, maybe_listed);
-  let (camera, used) = open_first(&order, |camera| {
-    V4l2Camera::open(Some(camera.id.as_str()), CAMERA_FORMAT)
-  })
-  .map_err(|error| camera_failure_wire(&error))?;
-  let report = CameraReport::default();
-  report.set(used);
-  Ok((Box::new(camera) as Box<dyn VideoCapture>, report))
+  info!(device = maybe_id.unwrap_or("default"), "camera through V4L2");
+  V4l2Camera::open(maybe_id, CAMERA_FORMAT)
+    .map(|camera| Box::new(camera) as Box<dyn VideoCapture>)
+    .map_err(|error| camera_failure_wire(error.to_string()))
 }
 
-/// The camera opens when the capture starts (on its own thread); the report then says which one.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-pub(super) fn open_camera(maybe_id: Option<&str>) -> Result<(Box<dyn VideoCapture>, CameraReport), String> {
-  let camera = teamcraft_media::capture_nokhwa::NokhwaCamera::open(maybe_id, CAMERA_FORMAT)
-    .map_err(|error| camera_failure_wire(&error))?;
-  let report = camera.report();
-  Ok((Box::new(camera) as Box<dyn VideoCapture>, report))
+pub(super) fn open_camera(maybe_id: Option<&str>) -> Result<Box<dyn VideoCapture>, String> {
+  teamcraft_media::capture_nokhwa::NokhwaCamera::open(maybe_id, CAMERA_FORMAT)
+    .map(|camera| Box::new(camera) as Box<dyn VideoCapture>)
+    .map_err(|error| camera_failure_wire(error.to_string()))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-pub(super) fn open_camera(_maybe_id: Option<&str>) -> Result<(Box<dyn VideoCapture>, CameraReport), String> {
+pub(super) fn open_camera(_maybe_id: Option<&str>) -> Result<Box<dyn VideoCapture>, String> {
   Err("cameras are not supported on this platform yet".into())
 }
 
@@ -274,16 +256,6 @@ fn screen_format(mode: ScreenContentMode) -> CaptureFormat {
 /// links.
 pub(super) fn screen_layers(format: CaptureFormat, mode: ScreenContentMode) -> Vec<VideoLayerInfo> {
   teamcraft_media::video::screen_layers(format.resolution, format.framerate, mode)
-}
-
-/// The chosen camera, opened, with the effects that go in front of it: what the call sends and
-/// the pre-join check shows.
-pub(super) struct OpenedCamera {
-  pub(super) capture: Box<dyn VideoCapture>,
-  /// Which camera delivers, once the capture started (#819).
-  pub(super) report: CameraReport,
-  pub(super) maybe_filter: Option<FrameFilter>,
-  pub(super) maybe_handle: Option<EffectHandle>,
 }
 
 /// The effects filter for the camera, if a segmentation model and a GPU are available. The model
@@ -542,31 +514,14 @@ fn illustration(preset: UiBackgroundPreset) -> PresetBackground {
 mod tests {
   use super::*;
 
-  /// #819: every cause gets its own hint; "close other apps" only when another app holds it.
   #[test]
   fn camera_errors_reach_the_user_as_call_failures() {
-    let wire = |error: CaptureError| camera_failure_wire(&error);
-    for (error, prefix) in [
-      (CaptureError::UnsupportedFormat("Bgra".into()), "call_camera_unsupported: "),
-      (
-        CaptureError::NoUsableMode(
-          "Could not set device property CameraFormat with value 640x480@15FPS, YUYV Format: Not Found/Rejected/Unsupported".into(),
-        ),
-        "call_camera_unsupported: ",
-      ),
-      (CaptureError::NoDevice("camera"), "call_camera_missing: "),
-      (CaptureError::Denied("camera"), "call_camera_denied: "),
-      (CaptureError::InUse("Already in use".into()), "call_camera_in_use: "),
-      (CaptureError::NotConnected("declined".into()), "call_camera_not_connected: "),
-      (CaptureError::Device("Failed to create input".into()), "call_camera_unavailable: "),
-    ] {
-      let text = wire(error);
-      assert!(text.starts_with(prefix), "{text}");
-    }
-    assert_eq!(
-      wire(CaptureError::Cancelled("camera")),
-      CaptureError::Cancelled("camera").to_string()
+    assert!(
+      camera_failure_wire("unsupported pixel format Bgra".into()).starts_with("call_camera_unsupported: ")
     );
+    assert!(camera_failure_wire("no camera available".into()).starts_with("call_camera_missing: "));
+    assert!(camera_failure_wire("capture: device busy".into()).starts_with("call_camera_in_use: "));
+    assert_eq!(camera_failure_wire("the call ended".into()), "the call ended");
   }
 
   #[test]
@@ -588,7 +543,7 @@ mod tests {
       start_failure_wire(&VideoTrackKind::Screen, &not_encoded).starts_with("call_screen_no_picture: ")
     );
     // A capture that didn't open keeps its own wording.
-    let busy = NativeCallError::Capture(CaptureError::InUse("busy".into()));
+    let busy = NativeCallError::Capture(CaptureError::Device("busy".into()));
     assert!(start_failure_wire(&VideoTrackKind::Camera, &busy).starts_with("call_camera_in_use: "));
     assert!(start_failure_wire(&VideoTrackKind::Screen, &busy).starts_with("call_screen_unavailable: "));
     assert_eq!(

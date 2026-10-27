@@ -11,37 +11,16 @@ use crate::store::StoreError;
 pub(crate) const RECORDS: &str = "records";
 /// Object store with the database key wrapping (a non-extractable `CryptoKey` and the wrapped key).
 pub(crate) const KEYS: &str = "keys";
-/// Schema version: bump with an upgrade step when object stores change, or when what records hold
-/// changes so that an older version would misread it. 2: the MLS state per entry (issue #424); the
-/// object stores are those of 1.
-const SCHEMA_VERSION: u32 = 2;
+/// Schema version: bump with an upgrade step when object stores change.
+const SCHEMA_VERSION: u32 = 1;
 /// How long deleting the database may wait for other pages to close it.
 const DELETE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// How a database is opened.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum OpenMode {
-  /// At this version's [`SCHEMA_VERSION`], creating or upgrading it: a page. For the account's
-  /// store only the tab holding its Web Lock opens it (e2ee.md §9.4).
-  Upgrade,
-  /// At whatever version it has, never upgrading it: the service worker. Upgrading closes an older
-  /// page that still owns the store; that page would go on without saving (issue #424 review, M2).
-  AsIs,
-}
-
-/// Opens (and on first use creates) the database `name`, upgrading it to this version.
+/// Opens (and on first use creates) the database `name`.
 pub(crate) async fn open_database(name: &str) -> Result<IdbDatabase, StoreError> {
-  open_database_with(name, OpenMode::Upgrade).await
-}
-
-/// Opens the database `name` as `mode` says; created at the first version if it doesn't exist.
-pub(crate) async fn open_database_with(name: &str, mode: OpenMode) -> Result<IdbDatabase, StoreError> {
-  let factory = factory()?;
-  let request = match mode {
-    OpenMode::Upgrade => factory.open_with_u32(name, SCHEMA_VERSION),
-    OpenMode::AsIs => factory.open(name),
-  }
-  .map_err(|error| js_error("open", &error))?;
+  let request = factory()?
+    .open_with_u32(name, SCHEMA_VERSION)
+    .map_err(|error| js_error("open", &error))?;
   let on_upgrade = Closure::<dyn FnMut(web_sys::Event)>::new({
     let request = request.clone();
     move |_| upgrade(&request)

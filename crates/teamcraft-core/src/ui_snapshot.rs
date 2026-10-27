@@ -12,18 +12,14 @@ use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::live::LiveSnapshot;
 use teamcraft_client_api::model::{ConversationId, Space, SpaceId, User, UserId};
 use teamcraft_client_api::remote::{ChatSnapshot, SecuritySnapshot};
-use teamcraft_client_api::security::{KeyBackupState, RecoveryMethod};
 use teamcraft_client_api::snapshot_changes::{
   ConversationChange, ConversationIndex, SnapshotChanges, SnapshotCursor,
 };
-use teamcraft_crypto::backup::WrapMethod;
 use teamcraft_proto::{
   ConversationKind as ConversationKindProto, ConversationResponse, MessageId, UserSummary,
 };
 
 use crate::account_data::AccountData;
-use crate::client::{WRAPPED_KEYS_KEY, decode_wrapped_keys, stored_account_data};
-use crate::error::CoreError;
 use crate::notify_rules::MentionPreferences;
 use crate::read_state::PresenceIndex;
 use crate::records;
@@ -513,40 +509,4 @@ fn live_since<S: LocalStore>(
     receipts: backend.read(crate::read_state::all_read_receipts(store)),
     marks: backend.read(crate::read_state::marks(store)),
   }
-}
-
-/// The key backup as the engine last stored it (e2ee.md §6, issue #410), for the security part of
-/// the snapshot. `None` while this device doesn't know the wraps yet (before its first key bag
-/// sync).
-pub fn key_backup_state(store: &impl LocalStore) -> Result<Option<KeyBackupState>, CoreError> {
-  let Some(blob) =
-    records::get_json::<teamcraft_proto::Base64Bytes>(store, Table::SyncState, WRAPPED_KEYS_KEY)?
-  else {
-    return Ok(None);
-  };
-  let sync = records::load_sync_state(store)?;
-  let mut recovery = Vec::new();
-  for wrapped in decode_wrapped_keys(blob.as_slice())? {
-    let maybe_method = match wrapped.method() {
-      WrapMethod::Passphrase => Some(RecoveryMethod::Passphrase),
-      WrapMethod::PasskeyPrf => Some(RecoveryMethod::Passkey),
-      WrapMethod::OrgRecovery => Some(RecoveryMethod::Organization),
-      // The device's own wrap restores nothing on another device.
-      WrapMethod::DeviceKeystore => None,
-    };
-    if let Some(method) = maybe_method
-      && !recovery.contains(&method)
-    {
-      recovery.push(method);
-    }
-  }
-  let maybe_passphrase_set_at = stored_account_data(store)?
-    .maybe_recovery_passphrase_set_at
-    .filter(|_| recovery.contains(&RecoveryMethod::Passphrase));
-  Ok(Some(KeyBackupState {
-    is_stored: sync.key_bag_version > 0,
-    has_pending_upload: sync.is_key_bag_dirty,
-    recovery,
-    maybe_passphrase_set_at,
-  }))
 }

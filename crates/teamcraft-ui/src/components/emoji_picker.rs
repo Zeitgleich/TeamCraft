@@ -4,7 +4,6 @@ use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-use crate::areas::{self, Place, lazy_area};
 use crate::components::sheet::{PopoverBackdrop, Sheet};
 use crate::emoji_catalog::{search, shortcode};
 use crate::i18n::use_i18n;
@@ -13,8 +12,7 @@ use crate::state::use_app_state;
 
 /// Emoji per row of the grid; ↑/↓ move by this many.
 const COLUMNS: usize = 8;
-/// The picker's size in rem (`.emoji-picker`, style/main/550-emoji-picker.css): it grows with the
-/// text size.
+/// The picker's size in rem (main.css `.emoji-picker`): it grows with the text size.
 const PICKER_WIDTH_REM: f64 = 20.25;
 const PICKER_HEIGHT_REM: f64 = 18.75;
 /// Space kept between the picker and the window edge.
@@ -22,8 +20,6 @@ const EDGE_PX: f64 = 8.0;
 
 /// A floating emoji picker next to `anchor` (the button that opened it). `on_pick` gets the chosen
 /// emoji, `on_close` runs on Escape or a click outside; neither closes the picker by itself.
-///
-/// It loads the first time it opens (`areas::emoji_picker`).
 #[component]
 pub fn EmojiPicker(
   anchor: web_sys::Element,
@@ -32,19 +28,6 @@ pub fn EmojiPicker(
   /// Give the keyboard focus back to `anchor` when the picker goes away (the composer focuses its
   /// input itself instead).
   #[prop(default = true)]
-  returns_focus: bool,
-) -> impl IntoView {
-  lazy_area(Place::Popover, move || {
-    areas::emoji_picker(anchor.clone(), on_pick, on_close, returns_focus)
-  })
-}
-
-/// The picker of [`EmojiPicker`].
-#[component]
-pub fn EmojiPickerPanel(
-  anchor: web_sys::Element,
-  on_pick: Callback<String>,
-  on_close: Callback<()>,
   returns_focus: bool,
 ) -> impl IntoView {
   let state = use_app_state();

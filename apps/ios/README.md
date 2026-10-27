@@ -127,11 +127,10 @@ organization's admins**. Same flows as the Android app.
    wake-up under the custom key `w` (base64url, no padding, XChaCha20-Poly1305 with the push key).
 3. The extension opens the wake-up, takes the **cross-process lock** (`flock` on a file in the App
    Group; the app holds it while it is in the foreground, so only one process syncs), opens the core
-   with the shared database key, fetches and decrypts the message (`notificationPreviewForPush`) and
+   with the shared database key, fetches and decrypts the message (`notificationForPush`) and
    rewrites the notification: sender and preview, thread grouping, reply and mark-as-read actions,
    and an `INSendMessageIntent` so the system shows it as a communication notification. It posts a
-   Darwin notification so the app reloads. The extension never touches MLS state: unlike the app's
-   `notificationForPush`, the preview never catches the conversation up.
+   Darwin notification so the app reloads. The extension never touches MLS state.
 4. If the app holds the lock, there is no database key, or time runs out, the generic alert stays;
    it keeps the sealed wake-up, so an app in the foreground opens it itself (`willPresent`).
 

@@ -140,7 +140,6 @@ const SERVER_RULES: &[FieldDef] = &[
     kind: Kind::IdList,
   },
   optional_amount("remove_deactivated_after_days", 1, 3_650, DAYS),
-  amount("admin_join_request_days", 1, 90, DAYS),
 ];
 const NOTIFICATIONS: &[FieldDef] = &[
   flag("read_receipts_default"),
@@ -665,7 +664,6 @@ mod tests {
       ("invites_require_verified_email", "true"),
       ("default_spaces", "12, 13"),
       ("default_channels", "abc"),
-      ("admin_join_request_days", "7"),
     ]);
     assert_eq!(
       check(&kind("server_rules"), &ids).err(),
@@ -679,7 +677,6 @@ mod tests {
       ("invites_require_verified_email", "true"),
       ("default_spaces", "12\n13"),
       ("default_channels", ""),
-      ("admin_join_request_days", "7"),
     ]);
     let Ok(RuntimeSettingsSection::ServerRules(rules)) = check(&kind("server_rules"), &rules) else {
       panic!("valid");
@@ -693,7 +690,6 @@ mod tests {
     let empty = typed(&[
       ("invites_require_verified_email", "true"),
       ("remove_deactivated_after_days", ""),
-      ("admin_join_request_days", "7"),
     ]);
     let Ok(RuntimeSettingsSection::ServerRules(rules)) = check(&kind("server_rules"), &empty) else {
       panic!("valid");
@@ -702,7 +698,6 @@ mod tests {
     let set = typed(&[
       ("invites_require_verified_email", "true"),
       ("remove_deactivated_after_days", "90"),
-      ("admin_join_request_days", "7"),
     ]);
     let Ok(RuntimeSettingsSection::ServerRules(rules)) = check(&kind("server_rules"), &set) else {
       panic!("valid");
@@ -711,30 +706,11 @@ mod tests {
     let wrong = typed(&[
       ("invites_require_verified_email", "true"),
       ("remove_deactivated_after_days", "-1"),
-      ("admin_join_request_days", "7"),
     ]);
     assert_eq!(
       check(&kind("server_rules"), &wrong).err(),
       Some(vec![("remove_deactivated_after_days", "admin-error-number")])
     );
-  }
-
-  /// Issue #776: how long admins' join requests wait, in days; always set.
-  #[test]
-  fn the_join_request_expiry_is_a_number_of_days() {
-    let set = typed(&[
-      ("invites_require_verified_email", "true"),
-      ("admin_join_request_days", "14"),
-    ]);
-    let Ok(RuntimeSettingsSection::ServerRules(rules)) = check(&kind("server_rules"), &set) else {
-      panic!("valid");
-    };
-    assert_eq!(rules.admin_join_request_days, 14);
-    let empty = typed(&[
-      ("invites_require_verified_email", "true"),
-      ("admin_join_request_days", ""),
-    ]);
-    assert!(check(&kind("server_rules"), &empty).is_err());
   }
 
   #[test]

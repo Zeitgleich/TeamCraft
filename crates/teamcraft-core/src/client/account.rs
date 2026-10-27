@@ -39,24 +39,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.persist_keys()
   }
 
-  /// Writes the decoded account data next to the key bag for readers without the backup key (the
-  /// UI), as the key bag holds it now: after enrollment, before anything changed it.
-  pub(crate) fn mirror_account_data(&mut self) -> Result<(), CoreError> {
-    let data = self.account_data();
-    self.store_account_data(&data)
-  }
-
-  /// Records that the recovery passphrase was set now (issue #410): in the account data, so the
-  /// user's other devices learn it with the next key bag upload. Leaves the stored key bag alone
-  /// (enrollment stores it with the account); [`Self::update_account_data`] does that otherwise.
-  pub(crate) fn note_passphrase_set(&mut self) -> Result<(), CoreError> {
-    let mut data = self.account_data();
-    data.maybe_recovery_passphrase_set_at = Some(self.now_ms());
-    self.store_account_data(&data)?;
-    self.sync.is_key_bag_dirty = true;
-    self.persist_sync()
-  }
-
   /// Whether local key bag changes (content keys or account data) wait for upload.
   pub fn is_key_bag_dirty(&self) -> bool {
     self.sync.is_key_bag_dirty

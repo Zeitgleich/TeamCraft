@@ -16,9 +16,6 @@ use crate::brand::Brand;
 use crate::i18n::use_i18n;
 use crate::reactive::SetIfAlive;
 
-/// Longest server version shown ("1.0.9-rc.12+build.345").
-const MAX_VERSION_CHARS: usize = 40;
-
 /// The sign-in page of the current server, loading in the background.
 #[derive(Clone, Copy)]
 pub struct SignInPageState {
@@ -93,38 +90,6 @@ pub fn parse_answer(status: u16, body: &str) -> Option<SignInInfo> {
     .map(|info| info.sign_in)
 }
 
-/// The version of the server at `server_url` (empty: the page's own origin) from its public
-/// `server-info`, for Help & about and the debug info (issue #410). `None` when it can't be reached
-/// or the answer isn't a TeamCraft server's.
-pub async fn server_version(server_url: &str) -> Option<String> {
-  match fetch_server_info(server_url).await {
-    Ok((status, body)) => parse_server_version(status, &body),
-    Err(error) => {
-      tracing::debug!(%error, "could not ask the server for its version");
-      None
-    },
-  }
-}
-
-/// The `server_version` of a `server-info` answer, if it reads like a version: it is shown and
-/// copied, so only short version text passes.
-pub fn parse_server_version(status: u16, body: &str) -> Option<String> {
-  if status != 200 {
-    return None;
-  }
-  serde_json::from_str::<ServerInfoResponse>(body)
-    .ok()
-    .filter(|info| info.product == SERVER_INFO_PRODUCT)
-    .map(|info| info.server_version)
-    .filter(|version| {
-      !version.is_empty()
-        && version.len() <= MAX_VERSION_CHARS
-        && version
-          .chars()
-          .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
-    })
-}
-
 /// The card's parts in the server's order, with an "or" between methods. The desktop shell's
 /// content policy blocks remote images, so it shows the provider without its icon.
 pub fn blocks(page: &SignInPage, is_desktop: bool) -> Vec<SignInBlock> {
@@ -186,16 +151,6 @@ mod tests {
 
   mod answers {
     use super::*;
-
-    #[test]
-    fn the_server_version_is_read_from_a_teamcraft_answer_only() {
-      let answer = answer(r#"["sso"]"#);
-      assert_eq!(parse_server_version(200, &answer).as_deref(), Some("1.0.0"));
-      assert_eq!(parse_server_version(500, &answer), None);
-      assert_eq!(parse_server_version(200, "<html>portal</html>"), None);
-      let odd = answer.replace("\"1.0.0\"", "\"1.0<script>\"");
-      assert_eq!(parse_server_version(200, &odd), None);
-    }
 
     #[test]
     fn a_teamcraft_answer_gives_its_sign_in_part() {

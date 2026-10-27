@@ -55,16 +55,6 @@ object Pictures {
   /** A picture decoded before, without waiting. */
   fun cached(key: String): ImageBitmap? = memory.get(key) ?: fullImages.get(key)
 
-  /**
-   * Lets go of the decoded full images except `keys` (the image viewer's picture and its
-   * neighbours, #240): however far the user swipes, memory holds at most those.
-   */
-  fun retainFullImages(keys: Set<String>) {
-    for (key in fullImages.snapshot().keys) {
-      if (key !in keys) fullImages.remove(key)
-    }
-  }
-
   /** Forgets every decoded picture: the account they were decrypted for is gone from this device's session. */
   fun clear() {
     memory.evictAll()

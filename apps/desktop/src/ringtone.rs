@@ -40,8 +40,8 @@ pub async fn set_ringtone(
 
 /// Whether the desktop asked for quiet: GNOME's or KDE's do-not-disturb. macOS Focus and Windows'
 /// do-not-disturb are not readable by apps without extra entitlements; there the OS silences the
-/// notification and the in-app setting silences the ringtone. The message sound asks the same.
-pub(crate) async fn is_desktop_quiet(probe: &crate::attention::OsProbe) -> bool {
+/// notification and the in-app setting silences the ringtone.
+async fn is_desktop_quiet(probe: &crate::attention::OsProbe) -> bool {
   #[cfg(target_os = "linux")]
   {
     probe.buses().is_do_not_disturb().await

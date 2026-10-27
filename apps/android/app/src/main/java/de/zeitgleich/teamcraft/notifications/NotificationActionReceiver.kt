@@ -11,12 +11,10 @@ import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.core.ChatClient
 import de.zeitgleich.teamcraft.core.ConversationNotificationSettings
-import de.zeitgleich.teamcraft.ui.JoinStep
-import uniffi.teamcraft_ffi.JoinRequestItem
 
 /**
- * "Reply" and "mark as read" from a notification, on the phone or in Android Auto, the
- * notification being swiped away, and Approve or Decline of an admin's request to join.
+ * "Reply" and "mark as read" from a notification, on the phone or in Android Auto, and the
+ * notification being swiped away.
  */
 class NotificationActionReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent) {
@@ -54,12 +52,6 @@ class NotificationActionReceiver : BroadcastReceiver() {
             graph.core.core().markRead(conversationId)
             graph.notifier.dismiss(conversationId)
           }
-          ACTION_APPROVE_JOIN, ACTION_DECLINE_JOIN -> {
-            val user = intent.getStringExtra(EXTRA_USER_ID) ?: return@launch
-            val tag = intent.getStringExtra(EXTRA_TAG) ?: return@launch
-            val step = if (intent.action == ACTION_APPROVE_JOIN) JoinStep.Approve else JoinStep.Decline
-            graph.joinRequestNotifier.decide(graph.core, step, conversationId, user, tag)
-          }
         }
       } catch (failure: Exception) {
         Log.w(TAG, "notification action failed: ${failure.javaClass.simpleName}")
@@ -74,13 +66,9 @@ class NotificationActionReceiver : BroadcastReceiver() {
     const val ACTION_MARK_READ = "de.zeitgleich.teamcraft.MARK_READ"
     const val ACTION_MUTE = "de.zeitgleich.teamcraft.MUTE"
     const val ACTION_DISMISSED = "de.zeitgleich.teamcraft.DISMISSED"
-    const val ACTION_APPROVE_JOIN = "de.zeitgleich.teamcraft.APPROVE_JOIN"
-    const val ACTION_DECLINE_JOIN = "de.zeitgleich.teamcraft.DECLINE_JOIN"
     const val KEY_REPLY = "reply"
     private const val EXTRA_CONVERSATION_ID = "conversation_id"
     private const val EXTRA_THREAD_ID = "thread_id"
-    private const val EXTRA_USER_ID = "user_id"
-    private const val EXTRA_TAG = "tag"
     private const val MUTE_DURATION_MS = 8L * 60 * 60 * 1000
     private const val TAG = "TeamCraftNotify"
 
@@ -89,11 +77,5 @@ class NotificationActionReceiver : BroadcastReceiver() {
         .setAction(action)
         .putExtra(EXTRA_CONVERSATION_ID, conversationId)
         .apply { maybeThreadId?.let { putExtra(EXTRA_THREAD_ID, it) } }
-
-    /** Approve or Decline of [request] ([ACTION_APPROVE_JOIN], [ACTION_DECLINE_JOIN]). */
-    fun joinRequestIntent(context: Context, action: String, request: JoinRequestItem): Intent =
-      intent(context, action, request.conversationId)
-        .putExtra(EXTRA_USER_ID, request.userId)
-        .putExtra(EXTRA_TAG, request.notificationTag)
   }
 }

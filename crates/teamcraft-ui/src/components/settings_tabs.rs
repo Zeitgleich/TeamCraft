@@ -6,7 +6,6 @@
 use leptos::prelude::*;
 use teamcraft_client_api::calls::CallStatusSounds;
 use teamcraft_client_api::window_chrome::{TitleBar, TrayIconStyle, WindowPlatform};
-use teamcraft_proto::BrandLinks;
 
 use crate::auth::tauri;
 use crate::components::background_picker::{BackgroundPicker, effect_from_slug, effect_slug};
@@ -22,7 +21,7 @@ use crate::i18n::{Locale, use_i18n};
 use crate::keys::t_with_shortcuts;
 use crate::prefs::{CallPrefs, Density, ImageSize, SidebarSort, TextSize, Zoom};
 use crate::reactive::SetIfAlive;
-use crate::settings::{MediaCacheLimit, MediaCacheMaxAge, PreviewLimit, SendMode, Theme};
+use crate::settings::{MediaCacheLimit, MediaCacheMaxAge, SendMode, Theme};
 use crate::state::use_app_state;
 
 /// The tray icon styles' values in the settings' choices (their wire names).
@@ -268,7 +267,6 @@ pub fn PreferencesSection() -> impl IntoView {
   let prefs = settings.prefs;
   let media_cache_limit = RwSignal::new(MediaCacheLimit::load());
   let media_cache_max_age = RwSignal::new(MediaCacheMaxAge::load());
-  let preview_limit = RwSignal::new(PreviewLimit::load());
   let language_options: Vec<(String, String)> = Locale::ALL
     .into_iter()
     .map(|locale| (locale.tag().to_owned(), format!("language-{}", locale.tag())))
@@ -376,18 +374,6 @@ pub fn PreferencesSection() -> impl IntoView {
           if let Some(age) = MediaCacheMaxAge::from_slug(&slug) {
             age.save();
             media_cache_max_age.set(age);
-          }
-        })
-      />
-      <SelectRow
-        label="settings-preview-limit"
-        hint="settings-preview-limit-hint"
-        options=slug_options(&PreviewLimit::ALL.map(PreviewLimit::slug), "settings-preview-limit-")
-        value=Signal::derive(move || preview_limit.get().slug().to_owned())
-        on_change=Callback::new(move |slug: String| {
-          if let Some(limit) = PreviewLimit::from_slug(&slug) {
-            limit.save();
-            preview_limit.set(limit);
           }
         })
       />
@@ -656,69 +642,34 @@ fn DeviceRow(
   view! { <SelectRow label=label options=options value=value on_change=on_change is_raw_labels=true /> }
 }
 
-/// Applies call preferences to the call session (start state, effect, mirror, devices): all of
-/// them first (`maybe_previous` is `None`), then only the ones that changed. A setting saved during
-/// a call (a camera picked in the call, the share options) must not reset the microphone, the
-/// camera or the device the call uses now.
-pub fn apply_call_prefs(
-  call: crate::calls::CallState,
-  maybe_previous: Option<&CallPrefs>,
-  calls: &CallPrefs,
-) {
-  let is_new =
-    |same: fn(&CallPrefs, &CallPrefs) -> bool| maybe_previous.is_none_or(|previous| !same(previous, calls));
-  if is_new(|a, b| a.start_muted == b.start_muted) {
-    call.is_mic_on.set(!calls.start_muted);
-  }
-  if is_new(|a, b| a.start_camera_off == b.start_camera_off) {
-    call.is_camera_on.set(!calls.start_camera_off);
-  }
-  if is_new(|a, b| a.mirror_self_view == b.mirror_self_view) {
-    call.mirror_self_view.set(calls.mirror_self_view);
-  }
-  if is_new(|a, b| a.background == b.background) {
-    call.effect.set(effect_from_slug(&calls.background));
-  }
-  if is_new(|a, b| a.camera_id == b.camera_id) {
-    call.camera_id.set(calls.camera_id.clone());
-  }
-  if is_new(|a, b| a.microphone_id == b.microphone_id) {
-    call.microphone_id.set(calls.microphone_id.clone());
-  }
-  if is_new(|a, b| a.speaker_id == b.speaker_id) {
-    call.speaker_id.set(calls.speaker_id.clone());
-  }
-  if is_new(|a, b| a.share_sound == b.share_sound) {
-    call.share_sound.set(calls.share_sound);
-  }
-  if is_new(|a, b| a.screen_mode == b.screen_mode) {
-    call.screen_mode.set(calls.screen_mode);
-  }
+/// Applies call preferences to the running call session (start state, effect, mirror, devices).
+pub fn apply_call_prefs(call: crate::calls::CallState, calls: &CallPrefs) {
+  call.is_mic_on.set(!calls.start_muted);
+  call.is_camera_on.set(!calls.start_camera_off);
+  call.mirror_self_view.set(calls.mirror_self_view);
+  call.effect.set(effect_from_slug(&calls.background));
+  call.camera_id.set(calls.camera_id.clone());
+  call.microphone_id.set(calls.microphone_id.clone());
+  call.speaker_id.set(calls.speaker_id.clone());
+  call.share_sound.set(calls.share_sound);
+  call.screen_mode.set(calls.screen_mode);
 }
 
-/// Help & about: versions of the app and the server, debug info for a support request, the
-/// instance's help links, updates (desktop) and notices.
+/// Help & about: versions, debug info for a support request, updates (desktop) and notices.
 #[component]
 pub fn HelpSection() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let version = env!("CARGO_PKG_VERSION");
-  let server = ServerVersion::load();
   let copy_debug = move |_| {
     let layout = format!("{:?}", state.layout.get_untracked());
     copy_and_confirm(debug_info(
       version,
-      server.maybe_version().as_deref(),
       &platform_text(),
       &layout,
       i18n.locale().tag(),
     ));
   };
-  let server_hint = Signal::derive(move || match server.0.get() {
-    ServerVersionState::Loading => i18n.t("settings-help-server-loading"),
-    ServerVersionState::Known(version) => format!("TeamCraft Server {version}"),
-    ServerVersionState::Unknown => i18n.t("settings-help-server-unknown"),
-  });
   view! {
     <SettingsCard heading="settings-help-app">
       <SettingRow label="settings-help-version" live_hint=Signal::derive(move || format!("TeamCraft {version}"))>
@@ -727,106 +678,18 @@ pub fn HelpSection() -> impl IntoView {
           <span>{move || i18n.t("settings-help-copy-debug")}</span>
         </button>
       </SettingRow>
-      <SettingRow label="settings-help-server" live_hint=server_hint>""</SettingRow>
       <p class="set-note">{move || i18n.t("settings-help-copy-debug-hint")}</p>
     </SettingsCard>
-    <HelpLinks />
     {tauri::is_available().then(|| view! { <div class="set-card" id=row_id("settings-updates")><UpdatesSection /></div> })}
     <div class="set-card set-about" id=row_id("about-title")><AboutSection /></div>
     {demo_tools()}
   }
 }
 
-/// The server's version as Help & about shows it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ServerVersionState {
-  Loading,
-  Known(String),
-  /// Not reachable, or not a TeamCraft answer.
-  Unknown,
-}
-
-#[derive(Clone, Copy)]
-struct ServerVersion(RwSignal<ServerVersionState>);
-
-impl ServerVersion {
-  /// Asks the server (its public `server-info`) once the section opens.
-  fn load() -> Self {
-    let state = RwSignal::new(ServerVersionState::Loading);
-    leptos::task::spawn_local(async move {
-      let server_url = crate::auth::AppConfig::load().server_url;
-      let next = match crate::sign_in_page::server_version(&server_url).await {
-        Some(version) => ServerVersionState::Known(version),
-        None => ServerVersionState::Unknown,
-      };
-      state.set_if_alive(next);
-    });
-    Self(state)
-  }
-
-  fn maybe_version(self) -> Option<String> {
-    match self.0.get_untracked() {
-      ServerVersionState::Known(version) => Some(version),
-      ServerVersionState::Loading | ServerVersionState::Unknown => None,
-    }
-  }
-}
-
-/// The instance's documentation, support, privacy, terms and imprint links (the brand's, set in the
-/// admin console or the server configuration); each opens in the browser. Default: none.
-#[component]
-fn HelpLinks() -> impl IntoView {
-  let i18n = use_i18n();
-  let brand = crate::brand::Brand::use_current().0;
-  let links = Memo::new(move |_| brand.with(|view| help_links(&view.links)));
-  view! {
-    <SettingsCard heading="settings-help-links">
-      <Show
-        when=move || !links.with(Vec::is_empty)
-        fallback=move || view! { <p class="set-empty">{move || i18n.t("settings-help-links-none")}</p> }
-      >
-        <ul class="set-links">
-          <For each=move || links.get() key=|(key, link)| (*key, link.clone()) let:item>
-            <li>
-              <a class="set-link" href=item.1.clone() target="_blank" rel="noopener noreferrer">
-                <span>{move || i18n.t(item.0)}</span>
-                <Icon name=IconName::External />
-              </a>
-            </li>
-          </For>
-        </ul>
-      </Show>
-    </SettingsCard>
-  }
-}
-
-/// The links to offer, in the order people look for them: help first, legal last.
-fn help_links(links: &BrandLinks) -> Vec<(&'static str, String)> {
-  [
-    ("settings-help-documentation", &links.maybe_documentation),
-    ("settings-help-support", &links.maybe_support),
-    ("login-brand-privacy", &links.maybe_privacy),
-    ("login-brand-terms", &links.maybe_terms),
-    ("login-brand-imprint", &links.maybe_imprint),
-  ]
-  .into_iter()
-  .filter_map(|(key, maybe_link)| maybe_link.clone().map(|link| (key, link)))
-  .collect()
-}
-
 /// What a support request needs to know about this app, as plain text. Nothing personal: no
-/// names, IDs or server address; the server's version is the release it runs.
-fn debug_info(
-  version: &str,
-  maybe_server_version: Option<&str>,
-  platform: &str,
-  layout: &str,
-  locale: &str,
-) -> String {
-  let server = maybe_server_version.unwrap_or("unknown");
-  format!(
-    "TeamCraft {version}\nServer: {server}\nPlatform: {platform}\nLayout: {layout}\nLanguage: {locale}\n"
-  )
+/// names, IDs or server address.
+fn debug_info(version: &str, platform: &str, layout: &str, locale: &str) -> String {
+  format!("TeamCraft {version}\nPlatform: {platform}\nLayout: {layout}\nLanguage: {locale}\n")
 }
 
 /// The desktop app or the browser's user agent.
@@ -929,56 +792,9 @@ mod tests {
 
   #[test]
   fn debug_info_names_the_build_and_nothing_personal() {
-    let info = debug_info("1.0.3", Some("1.0.9"), "Linux", "Wide", "de");
+    let info = debug_info("1.0.3", "Linux", "Wide", "de");
     assert!(info.starts_with("TeamCraft 1.0.3\n"));
-    assert!(info.contains("Server: 1.0.9\n"));
     assert!(info.contains("Platform: Linux"));
     assert!(info.contains("Language: de"));
-    assert!(debug_info("1.0.3", None, "Linux", "Wide", "de").contains("Server: unknown\n"));
-  }
-
-  #[test]
-  fn help_links_list_only_what_the_instance_set_help_first() {
-    assert!(help_links(&BrandLinks::default()).is_empty());
-    let links = BrandLinks {
-      maybe_imprint: Some("https://example.com/imprint".into()),
-      maybe_documentation: Some("https://docs.example.com".into()),
-      maybe_download: Some("https://example.com/apps".into()),
-      ..BrandLinks::default()
-    };
-    assert_eq!(
-      help_links(&links),
-      [
-        (
-          "settings-help-documentation",
-          "https://docs.example.com".to_owned()
-        ),
-        ("login-brand-imprint", "https://example.com/imprint".to_owned()),
-      ]
-    );
-  }
-
-  /// #819: a camera picked in the call is saved in the preferences; that must not unmute the
-  /// microphone or turn the camera back to the start setting.
-  #[test]
-  fn saving_one_call_setting_leaves_the_others_as_the_call_has_them() {
-    let owner = leptos::prelude::Owner::new();
-    owner.with(|| {
-      let call = crate::calls::CallState::new();
-      let saved = CallPrefs::default();
-      apply_call_prefs(call, None, &saved);
-      assert!(call.is_mic_on.get_untracked());
-      // In the call: muted, camera off, a camera that stood in for the chosen one.
-      call.is_mic_on.set(false);
-      call.is_camera_on.set(false);
-      let picked = CallPrefs {
-        camera_id: "built-in".into(),
-        ..saved.clone()
-      };
-      apply_call_prefs(call, Some(&saved), &picked);
-      assert_eq!(call.camera_id.get_untracked(), "built-in");
-      assert!(!call.is_mic_on.get_untracked(), "still muted");
-      assert!(!call.is_camera_on.get_untracked(), "camera still off");
-    });
   }
 }

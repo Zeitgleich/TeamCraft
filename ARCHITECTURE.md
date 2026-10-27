@@ -318,10 +318,6 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   webview over a Tauri channel (`call_watch_video`: H.264 that WebCodecs decodes, or JPEG images
   where the webview can't decode H.264), and the own camera as sent (with effects) as small JPEG
   images (`call_watch_camera`). The UI draws both with the same `LiveVideo` as the browser.
-  Before a join, the pre-join screen's check opens the camera and microphone on the device only:
-  the camera through the same effects into the self view, the microphone into a level meter
-  (`call_watch_level`; in the browser the call module's `preview_level`). Nothing is encoded or
-  sent; leaving or hiding the screen releases both, and the join takes them over.
 - Browser support (MDN browser-compat-data, checked 2026-10): WebTransport incl. datagrams in Chrome 97,
   Firefox 114, **Safari / iOS Safari 26.4**; WebCodecs `VideoEncoder`/`VideoDecoder` in Chrome 94,
   Firefox 130, Safari 16.4; `AudioEncoder`/`AudioDecoder` in Safari 26. No WebRTC fallback planned;

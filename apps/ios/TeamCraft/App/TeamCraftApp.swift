@@ -20,12 +20,8 @@ struct TeamCraftApp: App {
         .onChange(of: lock.isLocked) { _, _ in updateShield(phase: scenePhase) }
         .onChange(of: scenePhase) { _, phase in
           switch phase {
-          case .active:
-            lock.didBecomeActive()
-            model.reportActivity(.foreground)
-          case .background:
-            lock.didEnterBackground()
-            model.reportActivity(.background)
+          case .active: lock.didBecomeActive()
+          case .background: lock.didEnterBackground()
           default: break
           }
           updateShield(phase: phase)

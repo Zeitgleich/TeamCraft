@@ -285,8 +285,6 @@ jobs:
         run: scripts/check-tauri-args.py
       - name: Stylesheet has no undefined tokens or colliding rules, UI has no inline styles (issues #363, #376)
         run: scripts/check-css.py
-      - name: Stylesheet, Fluent and Android strings stay split per area (issue #614)
-        run: scripts/split-hotspots.py --check
       - name: No emoji as UI icons, markers or labels (issue #575)
         run: scripts/check-no-emoji-icons.py
       - name: Release notes render

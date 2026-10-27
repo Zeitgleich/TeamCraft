@@ -140,7 +140,7 @@ fn ChatsButton() -> impl IntoView {
 fn ActivityButton() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let count = Memo::new(move |_| state.read(|backend| backend.activity().badge_count()));
+  let count = Memo::new(move |_| state.read(|backend| backend.activity().unread_count));
   let tone = activity_tone(state);
   let label = Signal::derive(move || match (count.get(), tone.get()) {
     (0, _) => i18n.t("sidebar-activity"),

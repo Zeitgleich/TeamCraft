@@ -89,7 +89,7 @@ pub fn LastSeen(user: UserId, #[prop(optional)] is_compact: bool) -> impl IntoVi
 /// reach them (message, call, e-mail), what their profile says about their role and hours, and the
 /// spaces and channels the user shares with them. Opened from a name or picture anywhere (message
 /// author, member list, the header of a direct conversation). A centred dialog on wide screens, a
-/// sheet from the bottom on a phone (`.modal-profile` in style/main/440-profile-card.css).
+/// sheet from the bottom on a phone (`.modal-profile` in main.css).
 #[component]
 pub fn UserProfileDialog(user: UserId) -> impl IntoView {
   let state = use_app_state();

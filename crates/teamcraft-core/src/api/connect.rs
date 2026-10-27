@@ -135,11 +135,8 @@ fn percent_decoded(text: &str) -> String {
     .unwrap_or_default()
 }
 
-/// Test kit for Happy Eyeballs (issues #420, #433): an IPv6 address that swallows connection
-/// attempts, and a resolver with fixed answers. The FFI's tests use it through the `test-support`
-/// feature.
-#[cfg(any(test, feature = "test-support"))]
-pub mod black_hole {
+#[cfg(test)]
+pub(crate) mod black_hole {
   use std::net::SocketAddr;
   use std::time::Duration;
 
@@ -148,23 +145,22 @@ pub mod black_hole {
   /// An IPv6 address on this machine that swallows connection attempts like a broken route: a
   /// listener on `[::1]` whose accept queue is full, so the kernel drops further SYNs. `None` where
   /// the machine has no IPv6 loopback (some CI sandboxes).
-  pub struct BlackHole {
-    pub address: SocketAddr,
+  pub(crate) struct BlackHole {
+    pub(crate) address: SocketAddr,
     _listener: tokio::net::TcpListener,
     _queued: Vec<TcpStream>,
   }
 
   impl BlackHole {
-    /// Most tries it takes to fill an accept queue of length 0: Linux keeps one more, macOS keeps
-    /// `kern.ipc.somaxconn` (128) whatever the backlog. A try that the queue takes is instant.
-    const MAX_QUEUED: usize = 256;
+    /// Most tries it takes to fill an accept queue of length 0 (Linux keeps one more).
+    const MAX_QUEUED: usize = 8;
     /// How long a connect may take before it counts as swallowed. Timing-sensitive: a connect to
     /// loopback that the kernel accepts finishes in microseconds; only if one took longer than
     /// this (a machine stalled for 300 ms) would the queue count as full too early, the "black
     /// hole" then accept, and a fallback test fail spuriously.
     const HANG_PROBE: Duration = Duration::from_millis(300);
 
-    pub async fn ipv6(port: u16) -> Option<Self> {
+    pub(crate) async fn ipv6(port: u16) -> Option<Self> {
       let address = SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port));
       let socket = tokio::net::TcpSocket::new_v6().ok()?;
       socket.bind(address).ok()?;
@@ -185,16 +181,6 @@ pub mod black_hole {
         }
       }
       None
-    }
-  }
-
-  /// Resolves every name to the same addresses, in this order.
-  pub struct FixedResolver(pub Vec<SocketAddr>);
-
-  impl reqwest::dns::Resolve for FixedResolver {
-    fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-      let addresses = self.0.clone();
-      Box::pin(async move { Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs) })
     }
   }
 }

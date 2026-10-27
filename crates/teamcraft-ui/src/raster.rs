@@ -7,12 +7,9 @@
 //!   and opened as a document ("Open image in new tab") its scripts would run with the user's
 //!   session. It is decoded by an `<img>` that is never attached to the page (in that mode it runs
 //!   no scripts and loads nothing), drawn into a canvas, and only the resulting PNG is shown.
-//! - the pictures of notifications (#543): a cached avatar or space picture cut to its shape, and
-//!   the generated initials tile, small and square.
 
 use std::time::Duration;
 
-use teamcraft_client_api::os_notify::PictureShape;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
@@ -27,14 +24,6 @@ pub const SVG_DISPLAY_SIDE: u32 = 2048;
 const DECODE_TIMEOUT: Duration = Duration::from_secs(10);
 /// JPEG quality of renditions of photos.
 const JPEG_QUALITY: f64 = 0.85;
-/// The letters of a generated tile: white (`--on-fill`), bold, in the app's font (`--font-ui`).
-const TILE_TEXT_COLOR: &str = "#ffffff";
-const TILE_FONT: &str =
-  r#"700 {size}px system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif"#;
-/// Letter height as a share of the tile, as `.avatar-initials` sits in its circle.
-const TILE_LETTER_SHARE: f64 = 0.4;
-/// What `toDataURL()` puts before the PNG's base64.
-const PNG_DATA_URL_PREFIX: &str = "data:image/png;base64,";
 
 /// How the canvas is encoded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -181,113 +170,6 @@ async fn draw_poster(video: &web_sys::HtmlVideoElement, max_side: u32) -> Option
   })
 }
 
-/// A square PNG of `side` pixels: `letters` in white on `background` (a CSS colour), cut to
-/// `shape`. The generated avatar or space tile of a notification without a cached picture.
-pub fn tile_png(letters: &str, background: &str, side: u32, shape: PictureShape) -> Option<Vec<u8>> {
-  let (canvas, context) = square_canvas(side)?;
-  let size = f64::from(side);
-  shape_path(&context, size, shape);
-  context.set_fill_style_str(background);
-  context.fill();
-  context.set_fill_style_str(TILE_TEXT_COLOR);
-  let letter_px = (size * TILE_LETTER_SHARE).round().to_string();
-  context.set_font(&TILE_FONT.replace("{size}", &letter_px));
-  context.set_text_align("center");
-  context.set_text_baseline("middle");
-  context.fill_text(letters, size / 2.0, size / 2.0).ok()?;
-  png_of(&canvas)
-}
-
-/// The middle square of a picture, scaled to `side` pixels and cut to `shape`, as a PNG data URL:
-/// a cached avatar or space picture as a notification's icon. `None` where the browser can't
-/// decode it.
-pub async fn shaped_square_png_url(
-  bytes: &[u8],
-  media_type: &str,
-  side: u32,
-  shape: PictureShape,
-) -> Option<String> {
-  let source = source_url(&js_sys::Uint8Array::from(bytes), displayable_type(media_type)?)?;
-  let image = web_sys::HtmlImageElement::new().ok()?;
-  image.set_src(&source);
-  let is_decoded = decode_within(&image, DECODE_TIMEOUT).await;
-  let maybe_url = is_decoded.then(|| draw_shaped(&image, side, shape)).flatten();
-  drop(web_sys::Url::revoke_object_url(&source));
-  image.set_src("");
-  maybe_url
-}
-
-fn draw_shaped(image: &web_sys::HtmlImageElement, side: u32, shape: PictureShape) -> Option<String> {
-  let (x, y, crop) = centered_square(image.natural_width(), image.natural_height())?;
-  let (canvas, context) = square_canvas(side)?;
-  let size = f64::from(side);
-  shape_path(&context, size, shape);
-  context.clip();
-  context
-    .draw_image_with_html_image_element_and_sw_and_sh_and_dx_and_dy_and_dw_and_dh(
-      image,
-      f64::from(x),
-      f64::from(y),
-      f64::from(crop),
-      f64::from(crop),
-      0.0,
-      0.0,
-      size,
-      size,
-    )
-    .ok()?;
-  canvas.to_data_url().ok()
-}
-
-/// The largest centered square of a `width` × `height` picture: left, top and side.
-pub fn centered_square(width: u32, height: u32) -> Option<(u32, u32, u32)> {
-  let side = width.min(height);
-  (side > 0).then(|| ((width - side) / 2, (height - side) / 2, side))
-}
-
-fn square_canvas(side: u32) -> Option<(web_sys::HtmlCanvasElement, web_sys::CanvasRenderingContext2d)> {
-  let canvas = web_sys::window()?
-    .document()?
-    .create_element("canvas")
-    .ok()?
-    .dyn_into::<web_sys::HtmlCanvasElement>()
-    .ok()?;
-  canvas.set_width(side);
-  canvas.set_height(side);
-  let context = canvas
-    .get_context("2d")
-    .ok()??
-    .dyn_into::<web_sys::CanvasRenderingContext2d>()
-    .ok()?;
-  Some((canvas, context))
-}
-
-/// Starts a path of `shape` filling the `size` square: corners rounded by its share of the side (a
-/// circle at one half).
-fn shape_path(context: &web_sys::CanvasRenderingContext2d, size: f64, shape: PictureShape) {
-  let radius = size * f64::from(shape.corner_share());
-  context.begin_path();
-  if radius <= 0.0 {
-    context.rect(0.0, 0.0, size, size);
-    return;
-  }
-  context.move_to(radius, 0.0);
-  // `arcTo` only fails for a negative radius.
-  drop(context.arc_to(size, 0.0, size, size, radius));
-  drop(context.arc_to(size, size, 0.0, size, radius));
-  drop(context.arc_to(0.0, size, 0.0, 0.0, radius));
-  drop(context.arc_to(0.0, 0.0, size, 0.0, radius));
-  context.close_path();
-}
-
-/// The canvas as PNG bytes.
-fn png_of(canvas: &web_sys::HtmlCanvasElement) -> Option<Vec<u8>> {
-  use base64::Engine as _;
-  let url = canvas.to_data_url().ok()?;
-  let encoded = url.strip_prefix(PNG_DATA_URL_PREFIX)?;
-  base64::engine::general_purpose::STANDARD.decode(encoded).ok()
-}
-
 /// Resolves when `target` fires `name` once, rejects on its `error` or after `timeout`.
 fn event_within(target: &web_sys::EventTarget, name: &str, timeout: Duration) -> js_sys::Promise {
   js_sys::Promise::new(&mut |resolve, reject| {
@@ -426,14 +308,6 @@ mod tests {
     assert_eq!(target_size(8000, 6000, 960, false), Some((960, 720)));
     assert_eq!(target_size(1, 10_000, 960, false), Some((1, 960)));
     assert_eq!(target_size(0, 10, 960, false), None);
-  }
-
-  #[test]
-  fn a_notification_picture_is_the_middle_square() {
-    assert_eq!(centered_square(512, 512), Some((0, 0, 512)));
-    assert_eq!(centered_square(300, 200), Some((50, 0, 200)));
-    assert_eq!(centered_square(200, 301), Some((0, 50, 200)));
-    assert_eq!(centered_square(0, 10), None);
   }
 
   #[test]

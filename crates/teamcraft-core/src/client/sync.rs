@@ -13,7 +13,6 @@ use teamcraft_proto::{
 use super::Client;
 use super::catch_up::FirstPages;
 use super::read_ahead::FirstListing;
-use super::server_changes::Observed;
 use crate::api::{ApiError, ServerApi};
 use crate::clock::{Clock, SystemClock};
 use crate::error::CoreError;
@@ -112,9 +111,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }
     }
     let conversations = listing.conversations;
-    let known = self.cached_conversations()?;
+    let known: Vec<ConversationId> = self.cached_conversations()?.into_keys().collect();
     for stale in known
-      .keys()
+      .iter()
       .filter(|id| !conversations.iter().any(|conversation| conversation.id == **id))
     {
       self.store.delete(Table::Conversations, &stale.to_string())?;
@@ -122,14 +121,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.unmark_resync(*stale, ResyncPart::Content)?;
     }
     // The whole list first, members after: a UI reading the store meanwhile shows every
-    // conversation at once instead of one per member request (issue #247). A channel whose record
-    // changed while this device was away gets its lines (issue #818), placed after the newest
-    // message the server had then.
+    // conversation at once instead of one per member request (issue #247).
     for conversation in &conversations {
-      let observed = Observed::FromServer {
-        maybe_head: self.head_message(conversation.id),
-      };
-      self.store_conversation_from(known.get(&conversation.id), conversation, observed)?;
+      records::put_json(
+        &self.store,
+        Table::Conversations,
+        &conversation.id.to_string(),
+        conversation,
+      )?;
     }
     tracing::info!(
       conversations = conversations.len(),
@@ -417,7 +416,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       )?))
     };
     // The private parts must be stored before the public parts become claimable.
-    self.save_mls_storage()?;
+    records::save_mls_storage(&self.store, &self.provider)?;
     let request = UploadKeyPackagesRequest {
       key_packages,
       maybe_last_resort,
@@ -568,7 +567,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub(crate) async fn refresh_conversation(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
     match self.api.conversation(conversation).await {
       Ok(response) => {
-        self.store_conversation(&response, Observed::FromServer { maybe_head: None })?;
+        records::put_json(
+          &self.store,
+          Table::Conversations,
+          &conversation.to_string(),
+          &response,
+        )?;
         self.refresh_members(conversation).await
       },
       Err(error) if error.is_not_found() => {

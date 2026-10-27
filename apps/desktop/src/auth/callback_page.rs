@@ -4,8 +4,8 @@
 //! external requests, images only as checked `data:` URLs. Nothing from the redirect (code, state,
 //! error text) is ever written into it.
 //!
-//! The strings come from the UI's Fluent files (`i18n/<language>/callback.ftl`, plain text without
-//! placeables), so translators keep one place.
+//! The strings come from the UI's Fluent files (`callback-*`, plain text without placeables), so
+//! translators keep one place.
 
 use base64::Engine;
 use teamcraft_client_api::sign_in_look::{LookTheme, SignInLook};
@@ -14,8 +14,8 @@ use teamcraft_client_api::sign_in_look::{LookTheme, SignInLook};
 pub const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; \
                                            base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
-const EN_SOURCE: &str = include_str!("../../../../crates/teamcraft-ui/i18n/en/callback.ftl");
-const DE_SOURCE: &str = include_str!("../../../../crates/teamcraft-ui/i18n/de/callback.ftl");
+const EN_SOURCE: &str = include_str!("../../../../crates/teamcraft-ui/i18n/en.ftl");
+const DE_SOURCE: &str = include_str!("../../../../crates/teamcraft-ui/i18n/de.ftl");
 /// A brand name longer than this is not shown (the brand check allows 100 characters).
 const MAX_BRAND_NAME_CHARS: usize = 100;
 /// A logo larger than this (as base64) is left out; the shell passes brand images up to 2 MiB.
@@ -266,7 +266,7 @@ const ICON_CHECK: &str =
 const ICON_ALERT: &str =
   "<svg viewBox=\"0 0 24 24\" width=\"28\" height=\"28\"><path d=\"M12 8v5m0 3.5v.01\"/></svg>";
 
-/// The UI's sign-in card tokens (crates/teamcraft-ui/style/main/000-tokens.css), light and dark.
+/// The UI's sign-in card tokens (style/main.css), light and dark.
 const STYLE: &str = "\
 :root{color-scheme:light;--bg:#f6f7f9;--surface:#fff;--border:#dce0e7;--text:#1b2230;--muted:#566175;\
 --accent:#005dfc;--accent-soft:#e3edff;--danger:#c0392b;--danger-soft:#f9e3e0;\

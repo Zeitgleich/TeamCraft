@@ -68,7 +68,6 @@ exists).
 | No undo after leaving a channel                                                                   | done   |
 | Messages in the outbox look sent; now "Sending…", then "Not sent yet, retrying"                   | done   |
 | Thread replies can't also be sent to the channel ("Also send to #channel")                        | done   |
-| Desktop and web neither send nor show typing ("Alice is typing…"); only the phones did (#733)     | done   |
 
 ## General and desktop
 

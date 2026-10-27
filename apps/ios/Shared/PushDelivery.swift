@@ -78,10 +78,6 @@ enum NotificationKeys {
   static let messageKind = "message"
   static let callKind = "call"
   static let testKind = "test"
-  /// An admin's request to join a channel the user owns, notified by the app itself (issue #799).
-  static let joinRequestKind = "join_request"
-  /// The admin of a join request's notification (with its conversation under `conversation`).
-  static let joinRequestUser = "join_request_user"
 
   /// `userInfo` of a notification the app built; `maybeTag` is `NotificationAuthenticator`'s tag.
   static func userInfo(

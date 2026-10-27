@@ -45,8 +45,6 @@ pub enum CoreError {
   Membership(#[from] MembershipError),
   #[error("device list: {0}")]
   DeviceList(#[from] teamcraft_crypto::device_list::DeviceListError),
-  #[error("channel roles: {0}")]
-  ChannelRoles(#[from] crate::channel_roles::ChannelRoleError),
   #[error("this device is not enrolled yet")]
   NotEnrolled,
   #[error("the account already has an identity key; recover it instead of enrolling anew")]
@@ -89,10 +87,6 @@ pub enum CoreError {
   /// The new device received the transfer but could not open the key bag in it.
   #[error("the new device could not open the keys it received; link it again")]
   LinkRejected,
-  /// This device stopped waiting for the new device's receipt (the user closed the dialog, the app
-  /// stopped). The keys were sent; whether they arrived is unknown.
-  #[error("stopped waiting for the new device to confirm the keys")]
-  LinkCancelled,
   /// The server gave this device the ID of another (or a revoked) device of the user.
   #[error("the server assigned device ID {0}, which the signed device list gives another device")]
   DeviceIdTaken(DeviceId),
@@ -122,10 +116,6 @@ pub enum CoreError {
   NotAnOwner,
   #[error("user {0} isn't an admin in the signed roster")]
   NotAnAdmin(UserId),
-  /// An admin's request to join can't be approved on this device (admin.md §2.4.1): this device's
-  /// own state disagrees with the server's request. The message starts with a stable code.
-  #[error("join_request_not_approvable: {0}")]
-  JoinRequestNotApprovable(JoinRequestRefusal),
   #[error("user {0} has no identity key yet (never enrolled)")]
   UnknownIdentity(UserId),
   /// The signed roster holds this user with an identity key this device can't use, and the new
@@ -176,10 +166,6 @@ pub enum CoreError {
   /// The app asked for something that can't be done as asked (a caller bug or stale UI state).
   #[error("invalid request: {0}")]
   InvalidRequest(String),
-  /// Writing a file on this device failed (a download into the folder or file the user picked):
-  /// the operating system's reason, without the path, which names the file.
-  #[error("writing the file on this device failed: {0}")]
-  LocalFile(#[source] std::io::Error),
   #[error("local data is unreadable: {0}")]
   Corrupt(String),
 }
@@ -191,17 +177,6 @@ pub enum UnreadableStore {
   Damaged,
   /// A newer version of the app changed its layout.
   NewerVersion,
-}
-
-/// Why this device doesn't approve an admin's request to join (admin.md §2.4.1).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum JoinRequestRefusal {
-  /// The verified policy doesn't ask for an owner's approval (any more).
-  #[error("the verified policy doesn't ask for an owner's approval")]
-  PolicyWithoutApproval,
-  /// Not a private, unarchived channel this device knows: a DM, a meeting chat, or unknown.
-  #[error("only requests to join a private channel are approved")]
-  NotAPrivateChannel,
 }
 
 impl CoreError {

@@ -29,15 +29,11 @@ struct RootView: View {
           .overlay(alignment: .top) { LinkPromptOverlay() }
       case .failed(let failure):
         FailureView(failure: failure)
-      case .storeUnreadable(let problem, let failure):
-        StoreRecoveryView(problem: problem, failure: failure)
       }
       // The animated mark while the core starts, handing over to whatever screen comes next (#463).
       LoadingMarkOverlay(isLoading: isStarting)
     }
     .overlay { if model.isBusy { BusyOverlay() } }
-    // Every touch counts for presence; the core reports it at most every 30 s (issue #472).
-    .background { InteractionObserver { model.reportActivity(.interaction) } }
     .fullScreenCover(item: callBinding) { call in
       CallScreen(call: call)
     }

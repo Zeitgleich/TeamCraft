@@ -8,7 +8,6 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use teamcraft_client_api::message_sound::{MessageSound, OwnSoundLimits};
 use teamcraft_proto::{DndWindow, Weekday};
 
 use crate::attention::DEFAULT_ATTENTION_INPUT_SECS;
@@ -227,12 +226,6 @@ pub struct NotificationPrefs {
   pub maybe_meeting_reminder_minutes: Option<u16>,
   /// Remind when a meeting starts.
   pub notifies_meeting_start: bool,
-  /// What plays on this device when a message notifies (notifications.md, "Message sounds"): the
-  /// system's sound (the default), none, one of the app's own sounds or a file picked here. One
-  /// for every kind of message for now; a field per kind can follow, each of this type.
-  pub message_sound: MessageSound,
-  /// How large an own sound file may be and how long it plays.
-  pub own_sound_limits: OwnSoundLimits,
 }
 
 /// Default of "remind before a meeting" (notifications.md, "Meeting reminders").
@@ -263,8 +256,6 @@ impl Default for NotificationPrefs {
       shows_call_window: true,
       maybe_meeting_reminder_minutes: Some(DEFAULT_MEETING_REMINDER_MINUTES),
       notifies_meeting_start: true,
-      message_sound: MessageSound::System,
-      own_sound_limits: OwnSoundLimits::default(),
     }
   }
 }
@@ -813,25 +804,6 @@ mod tests {
     assert!(!off.shows_call_window);
     assert_eq!(off.maybe_meeting_reminder_minutes, None);
     assert!(!off.notifies_meeting_start);
-  }
-
-  #[test]
-  fn the_message_sound_stays_the_system_sound_until_chosen() {
-    let older = Preferences::from_json(r#"{"notifications":{"desktop":"all"}}"#).notifications;
-    assert_eq!(older.message_sound, MessageSound::System);
-    assert_eq!(older.own_sound_limits, OwnSoundLimits::default());
-    let chosen = Preferences::from_json(
-      r#"{"notifications":{"message_sound":"uh_oh","own_sound_limits":{"max_play_seconds":2}}}"#,
-    )
-    .notifications;
-    assert_eq!(
-      chosen.message_sound,
-      MessageSound::BuiltIn(teamcraft_client_api::message_sound::BuiltInSound::UhOh)
-    );
-    assert_eq!(chosen.own_sound_limits.max_play_seconds, 2);
-    // A sound of a newer version keeps the other preferences (and plays the default sound).
-    let newer = Preferences::from_json(r#"{"notifications":{"desktop":"all","message_sound":"trumpet"}}"#);
-    assert_eq!(newer.notifications.desktop, NotifyLevel::All);
   }
 
   #[test]

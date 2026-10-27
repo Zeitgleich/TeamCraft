@@ -1,11 +1,10 @@
 //! Signatures on the workspace's append-only logs: the admin roster and the policy (admin.md §2.3,
-//! e2ee.md §11), and each channel's role log (e2ee.md §4.6.1, issue #380).
+//! e2ee.md §11).
 //!
-//! An entry is signed by a device key over its log, version and payload; the signature travels
-//! together with the device certificate, so a client can check it against the signer's identity
-//! key without asking the server. Which identity keys may sign is the caller's decision: owners of
-//! the roster chain (rooted in the first owner pinned on first use) for the workspace logs, the
-//! channel's verified admins and the roster's admins for a channel's role log.
+//! An entry is signed by an owner's device key over its log, version and payload; the signature
+//! travels together with the device certificate, so a client can check it against the owner's
+//! identity key without asking the server. Which identity keys count as owners is the caller's
+//! decision (the roster chain, rooted in the first owner pinned on first use).
 
 use sha2::{Digest, Sha256};
 use tls_codec::{
@@ -24,8 +23,6 @@ use crate::membership::IdentityDirectory;
 pub enum WorkspaceLog {
   Roster = 1,
   Policy = 2,
-  /// One channel's role assignments; the payload names the channel.
-  ChannelRoles = 3,
 }
 
 /// The signature field of a log entry: the signer's device certificate and its signature.
@@ -87,19 +84,8 @@ pub fn sign_log_entry(
   )
 }
 
-/// The signer an entry claims, unverified: whose identity key to look up (pin) before
-/// [`verify_log_entry`].
-pub fn claimed_signer(signature: &[u8]) -> Result<crate::ids::UserId, WorkspaceLogError> {
-  Ok(
-    SignedLogEntry::tls_deserialize_exact_bytes(signature)?
-      .signer
-      .unverified()
-      .user_id,
-  )
-}
-
-/// Verifies an entry against the identity keys in `owners` (those who may sign this entry).
-/// Returns the signing device.
+/// Verifies an entry against the identity keys in `owners` (only owners may sign). Returns the
+/// signing device.
 pub fn verify_log_entry(
   signature: &[u8],
   log: WorkspaceLog,
@@ -227,7 +213,6 @@ mod tests {
       .unwrap();
       for (log, version, payload) in [
         (WorkspaceLog::Roster, 3, PAYLOAD),
-        (WorkspaceLog::ChannelRoles, 3, PAYLOAD),
         (WorkspaceLog::Policy, 4, PAYLOAD),
         (WorkspaceLog::Policy, 3, br#"{"version":3}"#.as_slice()),
       ] {

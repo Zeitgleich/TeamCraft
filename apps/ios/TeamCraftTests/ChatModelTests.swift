@@ -12,16 +12,6 @@ final class ChatModelTests: XCTestCase {
       unreadCount: unread, mentionCount: mentions, isFavorite: favorite, isMuted: muted, canPost: true)
   }
 
-  func testRightsTheAppDoesNotSetAreOfferedAndTheServerDecides() {
-    let built = item("1", "general", space: "Team A")
-    XCTAssertTrue(built.canReact && built.canManageBookmarks && built.canManageChannel)
-    let reader = ConversationItem(
-      id: "2", maybeSpaceId: "9", maybeSpaceName: "Team A", kind: .public, name: "news", topic: "",
-      unreadCount: 0, mentionCount: 0, isFavorite: false, isMuted: false, canPost: false,
-      canReact: false, canManageBookmarks: false, canManageChannel: false)
-    XCTAssertFalse(reader.canPost || reader.canReact || reader.canManageBookmarks || reader.canManageChannel)
-  }
-
   func testChannelSectionsOrderFavoritesAndSpacesWithoutDirectMessages() {
     let sections = channelSections([
       item("1", "random", space: "Team B"),
@@ -104,39 +94,5 @@ final class ChatModelTests: XCTestCase {
   func testAvatarInitials() {
     XCTAssertEqual(AvatarView.initials(of: "Alex Example"), "AE")
     XCTAssertEqual(AvatarView.initials(of: ""), "?")
-  }
-
-  func testFormerAccountsNameOldMessagesAndDeletedOnesGetTheAppsName() throws {
-    let json = """
-      {
-        "me": {"id": "1", "username": "alex", "display_name": "Alex Example"},
-        "users": [{"id": "2", "username": "sam", "display_name": "Sam Doe"}],
-        "former_users": [
-          {"id": "3", "username": "bea", "display_name": "Bea Former", "is_deactivated": true},
-          {"id": "4", "username": "", "display_name": "Tombstone", "is_deactivated": true, "is_deleted": true}
-        ]
-      }
-      """
-    let people = try XCTUnwrap(Wire.decode(PeopleSnapshot.self, from: json))
-    let names = people.namesById
-    XCTAssertEqual(names["2"], "Sam Doe")
-    XCTAssertEqual(names["3"], "Bea Former")
-    XCTAssertEqual(names["4"], String(localized: "user_deleted_name"))
-    // Only the people to offer are mentionable.
-    XCTAssertEqual(people.users?.map(\.id), ["2"])
-  }
-
-  func testADeletedAuthorGetsTheAppsName() {
-    let message = MessageItem(
-      id: "7", conversationId: "5", authorId: "4", authorName: "Tombstone", sentAtMs: 0, body: "Hello",
-      isEdited: false, isPending: false, replyCount: 0, maybeThreadId: nil, reactions: [], isAuthorDeleted: true)
-    XCTAssertEqual(message.namingDeletedAuthor().authorName, String(localized: "user_deleted_name"))
-    let hit = SearchHitItem(message: message, conversationName: "general", maybeSpaceName: nil)
-    XCTAssertEqual(hit.namingDeletedAuthor().message.authorName, String(localized: "user_deleted_name"))
-
-    var kept = message
-    kept.isAuthorDeleted = false
-    kept.authorName = "Sam Doe"
-    XCTAssertEqual(kept.namingDeletedAuthor().authorName, "Sam Doe")
   }
 }

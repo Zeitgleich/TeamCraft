@@ -104,9 +104,7 @@ final class NotificationService: UNNotificationServiceExtension {
     defer { lock.release() }
     do {
       let core = try CoreFactory().open(account: account, createKey: false, listener: ClosureEventListener {})
-      // Never catches the conversation up: the app alone advances the account's state (MLS,
-      // cursors), or the two processes would fork it (docs/e2ee.md §7.2).
-      let notification = try await core.notificationPreviewForPush(
+      let notification = try await core.notificationForPush(
         payload: sealed, utcOffsetMinutes: PushClock.utcOffsetMinutes())
       // The app reloads what the extension stored.
       StoreChangeNotifier().post()

@@ -4,9 +4,6 @@
 //! reports clicks. Shared by the shell and the UI, so it can serve the tray menu too.
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::Base64Bytes;
-
-use crate::media::MediaKey;
 
 /// What the shell emits to the webview when the user clicked a notification or one of its actions
 /// (payload: [`NotificationActionEvent`] as JSON text).
@@ -20,11 +17,6 @@ const MISSED_CALL_TAG_PREFIX: &str = "missed-call:";
 const MEETING_TAG_PREFIX: &str = "meeting:";
 /// Tag prefix of a note to self (`/remind`); its due time follows.
 const REMINDER_TAG_PREFIX: &str = "reminder:";
-/// Tag prefix of an admin's request to join a private channel; `{conversation}:{user}` follows.
-const JOIN_REQUEST_TAG_PREFIX: &str = "admin-join:";
-/// Side of a notification picture in pixels: the generated tile the UI draws and what the shell
-/// scales a cached picture to (the services show it at 48 to 80 points, so this is sharp at 2x).
-pub const NOTIFICATION_PICTURE_PX: u32 = 128;
 
 /// One notification to show. A newer one with the same tag replaces it; withdrawing the tag
 /// removes it, where the platform can.
@@ -42,56 +34,6 @@ pub struct OsNotification {
   /// `inline-reply`).
   #[serde(rename = "reply", default, skip_serializing_if = "Option::is_none")]
   pub maybe_reply: Option<ReplyField>,
-  /// Who wrote or where (#543): the sender's avatar for direct messages, the channel's or space's
-  /// picture for channels. The UI only sets it where the notification may name names.
-  #[serde(rename = "picture", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_picture: Option<NotificationPicture>,
-  /// Whether the system plays its notification sound with it (`message_sound`).
-  #[serde(default, skip_serializing_if = "NotificationSound::is_system")]
-  pub sound: NotificationSound,
-}
-
-/// Whether the system plays its own sound with a notification.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NotificationSound {
-  /// The system's notification sound, where the user's system settings allow one.
-  #[default]
-  System,
-  /// None: the app plays its own message sound, or the user chose none.
-  Silent,
-  /// A value of a newer version: the system's sound.
-  #[serde(other)]
-  Unknown,
-}
-
-/// The picture beside a notification's text. The shell reads [`Self::maybe_key`] from the
-/// persistent media cache (#749), where the app keeps every picture it showed, and never fetches
-/// one for a notification; without a cached copy it shows the generated fallback. Pictures are
-/// cut to their shape and scaled to [`NOTIFICATION_PICTURE_PX`].
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NotificationPicture {
-  pub shape: PictureShape,
-  /// The cached picture: an avatar, a channel's or a space's picture.
-  #[serde(rename = "key", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_key: Option<MediaKey>,
-  /// What shows while the cache has no picture: the generated initials tile as the app draws it,
-  /// as PNG of [`NOTIFICATION_PICTURE_PX`] pixels, already in its shape.
-  #[serde(rename = "fallback_png", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_fallback_png: Option<Base64Bytes>,
-}
-
-/// The outline a picture is cut to, as the app shows it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PictureShape {
-  /// A person's avatar.
-  Circle,
-  /// A space or channel tile.
-  RoundedSquare,
-  /// From a newer UI: shown as a plain square.
-  #[serde(other)]
-  Unknown,
 }
 
 /// The texts of a notification's reply field.
@@ -119,8 +61,6 @@ pub enum OsNotificationKind {
   MeetingReminder,
   /// `/remind` and other notes to self.
   Reminder,
-  /// An admin asks to join a private channel the user owns (admin.md §2.4).
-  JoinRequest,
   #[serde(other)]
   Unknown,
 }
@@ -147,8 +87,6 @@ pub enum NotificationAction {
   MarkRead,
   /// Sent text from the notification's reply field.
   Reply,
-  /// Let in the admin who asked to join (an owner's decision; the answer to it is `Decline`).
-  Approve,
   #[serde(other)]
   Unknown,
 }
@@ -171,11 +109,6 @@ pub enum TagTarget {
   MissedCall(String),
   Meeting(String),
   Reminder,
-  /// An admin's request to join: the conversation and the admin, as text.
-  JoinRequest {
-    conversation: String,
-    user: String,
-  },
 }
 
 impl NotificationTag {
@@ -200,14 +133,6 @@ impl NotificationTag {
     Self(format!("{REMINDER_TAG_PREFIX}{}", due_at.to_string()))
   }
 
-  pub fn join_request(conversation: impl ToString, user: impl ToString) -> Self {
-    Self(format!(
-      "{JOIN_REQUEST_TAG_PREFIX}{}:{}",
-      conversation.to_string(),
-      user.to_string()
-    ))
-  }
-
   /// A tag as a platform handed it back.
   pub fn from_raw(raw: impl Into<String>) -> Self {
     Self(raw.into())
@@ -228,14 +153,6 @@ impl NotificationTag {
       TagTarget::Meeting(id.to_owned())
     } else if tag.starts_with(REMINDER_TAG_PREFIX) {
       TagTarget::Reminder
-    } else if let Some((conversation, user)) = tag
-      .strip_prefix(JOIN_REQUEST_TAG_PREFIX)
-      .and_then(|rest| rest.split_once(':'))
-    {
-      TagTarget::JoinRequest {
-        conversation: conversation.to_owned(),
-        user: user.to_owned(),
-      }
     } else {
       TagTarget::Conversation(tag.to_owned())
     }
@@ -254,7 +171,6 @@ impl NotificationAction {
       Self::JoinMeeting => "join-meeting",
       Self::MarkRead => "mark-read",
       Self::Reply => "inline-reply",
-      Self::Approve => "approve",
       Self::Unknown => "unknown",
     }
   }
@@ -270,7 +186,6 @@ impl NotificationAction {
       Self::JoinMeeting,
       Self::MarkRead,
       Self::Reply,
-      Self::Approve,
     ]
     .into_iter()
     .find(|action| action.key() == key)
@@ -290,32 +205,6 @@ impl OsNotificationKind {
   /// Calls ring until something happens; everything else may time out like any notification.
   pub fn is_ringing(self) -> bool {
     self == Self::IncomingCall
-  }
-}
-
-impl OsNotification {
-  /// The desktop shows it without the system's sound: a ringing call (the app plays the ringtone),
-  /// or a message whose sound the app plays itself, or none.
-  pub fn is_quiet(&self) -> bool {
-    self.kind.is_ringing() || self.sound == NotificationSound::Silent
-  }
-}
-
-impl NotificationSound {
-  fn is_system(&self) -> bool {
-    matches!(self, Self::System | Self::Unknown)
-  }
-}
-
-impl PictureShape {
-  /// Radius of the outline's corners as a share of the side: a circle, the app's space tile
-  /// (12 px on 40 px, `--radius-md`), or none.
-  pub fn corner_share(self) -> f32 {
-    match self {
-      Self::Circle => 0.5,
-      Self::RoundedSquare => 0.3,
-      Self::Unknown => 0.0,
-    }
   }
 }
 
@@ -339,38 +228,7 @@ mod tests {
       TagTarget::Meeting("7".into())
     );
     assert_eq!(NotificationTag::reminder(99).target(), TagTarget::Reminder);
-    assert_eq!(
-      NotificationTag::join_request(42, 7).target(),
-      TagTarget::JoinRequest {
-        conversation: "42".into(),
-        user: "7".into()
-      }
-    );
     assert_eq!(NotificationTag::conversation(42).as_str(), "42");
-  }
-
-  #[test]
-  fn a_notification_keeps_the_system_sound_unless_told_otherwise() {
-    let older: OsNotification =
-      serde_json::from_str(r#"{"tag":"42","kind":"message","title":"Alice"}"#).unwrap();
-    assert_eq!(older.sound, NotificationSound::System);
-    assert!(!older.is_quiet());
-    assert!(!serde_json::to_string(&older).unwrap().contains("sound"));
-    let quiet = OsNotification {
-      sound: NotificationSound::Silent,
-      ..older.clone()
-    };
-    assert!(quiet.is_quiet());
-    assert!(
-      serde_json::to_string(&quiet)
-        .unwrap()
-        .contains(r#""sound":"silent""#)
-    );
-    let ringing = OsNotification {
-      kind: OsNotificationKind::IncomingCall,
-      ..older
-    };
-    assert!(ringing.is_quiet());
   }
 
   #[test]
@@ -384,7 +242,6 @@ mod tests {
       NotificationAction::JoinMeeting,
       NotificationAction::MarkRead,
       NotificationAction::Reply,
-      NotificationAction::Approve,
     ] {
       assert_eq!(NotificationAction::from_key(action.key()), action);
     }
@@ -392,42 +249,6 @@ mod tests {
       NotificationAction::from_key("snooze"),
       NotificationAction::Unknown
     );
-  }
-
-  #[test]
-  fn a_picture_travels_with_its_key_and_fallback_and_unknown_shapes_are_tolerated() {
-    let user: teamcraft_proto::UserId = serde_json::from_value(serde_json::json!("7")).unwrap();
-    let picture = NotificationPicture {
-      shape: PictureShape::Circle,
-      maybe_key: Some(MediaKey::Avatar(user)),
-      maybe_fallback_png: Some(Base64Bytes::new(b"png".to_vec())),
-    };
-    let json = serde_json::to_value(&picture).unwrap();
-    assert_eq!(
-      json,
-      serde_json::json!({
-        "shape": "circle",
-        "key": { "kind": "avatar", "id": "7" },
-        "fallback_png": "cG5n"
-      })
-    );
-    assert_eq!(
-      serde_json::from_value::<NotificationPicture>(json).unwrap(),
-      picture
-    );
-    let newer: NotificationPicture =
-      serde_json::from_value(serde_json::json!({ "shape": "hexagon" })).unwrap();
-    assert_eq!(newer.shape, PictureShape::Unknown);
-    assert_eq!(newer.maybe_key, None);
-    assert_eq!(newer.shape.corner_share(), 0.0, "a plain square");
-  }
-
-  #[test]
-  fn a_notification_without_a_picture_reads_as_before() {
-    let json = serde_json::json!({ "tag": "5", "kind": "message", "title": "Bob" });
-    let notification: OsNotification = serde_json::from_value(json.clone()).unwrap();
-    assert_eq!(notification.maybe_picture, None);
-    assert_eq!(serde_json::to_value(&notification).unwrap(), json);
   }
 
   #[test]

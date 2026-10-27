@@ -46,7 +46,5 @@ uniffi = "0.32.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
-# The Happy Eyeballs test kit (`api::black_hole`) for `http_fetch`'s tests.
-teamcraft-core = { path = "../teamcraft-core", default-features = false, features = ["ui", "sealed-sqlite", "test-support"] }
 # The other side of the dev-stack conversation is a plain core client.
 reqwest.workspace = true

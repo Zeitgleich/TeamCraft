@@ -68,13 +68,6 @@ pub type Thumbnailer =
 /// A thumbnail of an image file, upright and at most [`THUMBNAIL_SIZE`] pixels on its longer side,
 /// or `None` for anything that isn't a decodable image (or can't be made small enough).
 pub fn thumbnail(bytes: &[u8], media_type: &str) -> Option<Vec<u8>> {
-  thumbnail_within(bytes, media_type, MAX_PIXELS)
-}
-
-/// [`thumbnail`] of a picture with at most `max_pixels` (and never more than the usual limit): a
-/// host that makes thumbnails of untrusted pictures unattended, like the integration bridge, keeps
-/// the memory a decode takes lower.
-pub fn thumbnail_within(bytes: &[u8], media_type: &str, max_pixels: u64) -> Option<Vec<u8>> {
   let media_type = essence(media_type);
   if !media_type.starts_with("image/") {
     return None;
@@ -82,7 +75,7 @@ pub fn thumbnail_within(bytes: &[u8], media_type: &str, max_pixels: u64) -> Opti
   if media_type == "image/svg+xml" {
     return svg_thumbnail(bytes);
   }
-  let image = decode_upright(bytes, max_pixels.min(MAX_PIXELS))?;
+  let image = decode_upright(bytes)?;
   if has_transparency(&image) {
     PNG_STEPS
       .iter()
@@ -149,8 +142,8 @@ fn svg_thumbnail(_bytes: &[u8]) -> Option<Vec<u8>> {
 
 /// Decodes within the limits and turns the picture as its EXIF orientation says: phone cameras
 /// store portrait photos sideways, and a thumbnail without the turn shows them lying down.
-fn decode_upright(bytes: &[u8], max_pixels: u64) -> Option<DynamicImage> {
-  let mut decoder = bounded_reader(bytes, max_pixels)?.into_decoder().ok()?;
+fn decode_upright(bytes: &[u8]) -> Option<DynamicImage> {
+  let mut decoder = bounded_reader(bytes)?.into_decoder().ok()?;
   let orientation = decoder.orientation().ok()?;
   let mut image = DynamicImage::from_decoder(decoder).ok()?;
   image.apply_orientation(orientation);
@@ -166,17 +159,8 @@ fn fitted(image: &DynamicImage, side: u32) -> DynamicImage {
   }
 }
 
-/// Looks at the alpha channel in place: a converted copy would take another 4 bytes a pixel.
 fn has_transparency(image: &DynamicImage) -> bool {
-  match image {
-    DynamicImage::ImageRgba8(buffer) => buffer.pixels().any(|pixel| pixel.0[3] < u8::MAX),
-    DynamicImage::ImageLumaA8(buffer) => buffer.pixels().any(|pixel| pixel.0[1] < u8::MAX),
-    DynamicImage::ImageRgba16(buffer) => buffer.pixels().any(|pixel| pixel.0[3] < u16::MAX),
-    DynamicImage::ImageLumaA16(buffer) => buffer.pixels().any(|pixel| pixel.0[1] < u16::MAX),
-    DynamicImage::ImageRgba32F(buffer) => buffer.pixels().any(|pixel| pixel.0[3] < 1.0),
-    // Any other layout with alpha (a newer `image`) is taken as transparent: a PNG is always right.
-    other => other.color().has_alpha(),
-  }
+  image.color().has_alpha() && image.to_rgba8().pixels().any(|pixel| pixel.0[3] < u8::MAX)
 }
 
 fn encode_jpeg(image: &DynamicImage, quality: u8) -> Option<Vec<u8>> {
@@ -215,7 +199,7 @@ pub struct SquareCrop {
 
 /// The editor's copy of a picked image file; `None` for anything that isn't a decodable image.
 pub fn editor_image(bytes: &[u8]) -> Option<EditorImage> {
-  let image = decode_upright(bytes, MAX_PIXELS)?;
+  let image = decode_upright(bytes)?;
   let image = if image.width().max(image.height()) > EDITOR_IMAGE_MAX_SIDE {
     image.resize(
       EDITOR_IMAGE_MAX_SIDE,
@@ -304,11 +288,11 @@ fn upright_size(mut decoder: impl ImageDecoder) -> Option<(u32, u32)> {
 
 /// Decodes an image within [`MAX_PIXELS`] and [`MAX_DECODER_BYTES`].
 fn decode_bounded(bytes: &[u8]) -> Option<DynamicImage> {
-  bounded_reader(bytes, MAX_PIXELS)?.decode().ok()
+  bounded_reader(bytes)?.decode().ok()
 }
 
-/// A reader for an image whose header is within `max_pixels`, with the decoder's memory capped.
-fn bounded_reader(bytes: &[u8], max_pixels: u64) -> Option<ImageReader<Cursor<&[u8]>>> {
+/// A reader for an image whose header is within [`MAX_PIXELS`], with the decoder's memory capped.
+fn bounded_reader(bytes: &[u8]) -> Option<ImageReader<Cursor<&[u8]>>> {
   let reader = || {
     let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?;
     let mut limits = Limits::default();
@@ -317,7 +301,7 @@ fn bounded_reader(bytes: &[u8], max_pixels: u64) -> Option<ImageReader<Cursor<&[
     Some(reader)
   };
   let (width, height) = reader()?.into_dimensions().ok()?;
-  if u64::from(width) * u64::from(height) > max_pixels || width == 0 || height == 0 {
+  if u64::from(width) * u64::from(height) > MAX_PIXELS || width == 0 || height == 0 {
     return None;
   }
   reader()
@@ -379,22 +363,6 @@ mod tests {
     let picture = ImageBuffer::from_fn(800, 600, |x, _| Rgba([(x % 256) as u8, 0, 0, 255]));
     let made = thumbnail(&encoded(&picture, ImageFormat::Png), "image/png").unwrap();
     assert_eq!(image::guess_format(&made).unwrap(), ImageFormat::Jpeg);
-  }
-
-  #[test]
-  fn pictures_over_the_pixel_limit_are_not_decoded() {
-    // A small file whose header claims 20000 x 20000 pixels: refused from the header alone.
-    let bomb = with_png_size(&encoded(&halves(4, 4), ImageFormat::Png), 20_000, 20_000);
-    assert_eq!(dimensions_from_header(&bomb), (20_000, 20_000));
-    assert!(thumbnail(&bomb, "image/png").is_none());
-    // A host may set a lower limit.
-    let picture = encoded(&halves(100, 100), ImageFormat::Png);
-    assert!(thumbnail_within(&picture, "image/png", 9_999).is_none());
-    assert!(thumbnail_within(&picture, "image/png", 10_000).is_some());
-    assert!(
-      thumbnail_within(&picture, "image/png", u64::MAX).is_some(),
-      "never above the usual"
-    );
   }
 
   #[test]
@@ -627,40 +595,6 @@ mod tests {
     let mut out = Cursor::new(Vec::new());
     picture.write_to(&mut out, format).unwrap();
     out.into_inner()
-  }
-
-  /// The PNG with its header's size replaced (and the header's checksum fixed), not its pixels.
-  fn with_png_size(png: &[u8], width: u32, height: u32) -> Vec<u8> {
-    let mut patched = png.to_vec();
-    patched[16..20].copy_from_slice(&width.to_be_bytes());
-    patched[20..24].copy_from_slice(&height.to_be_bytes());
-    let crc = crc32(&patched[12..29]);
-    patched[29..33].copy_from_slice(&crc.to_be_bytes());
-    patched
-  }
-
-  fn dimensions_from_header(png: &[u8]) -> (u32, u32) {
-    ImageReader::new(Cursor::new(png))
-      .with_guessed_format()
-      .unwrap()
-      .into_dimensions()
-      .unwrap()
-  }
-
-  /// CRC-32 (ISO-HDLC), as PNG chunks use it.
-  fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = u32::MAX;
-    for byte in bytes {
-      crc ^= u32::from(*byte);
-      for _ in 0..8 {
-        crc = if crc & 1 == 1 {
-          (crc >> 1) ^ 0xedb8_8320
-        } else {
-          crc >> 1
-        };
-      }
-    }
-    !crc
   }
 
   /// [`image_dimensions`] through `ImageReader::into_decoder`, as it read them before.

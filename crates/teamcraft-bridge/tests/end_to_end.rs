@@ -106,21 +106,6 @@ async fn post(url: &str, content_type: &str, body: &str) -> reqwest::StatusCode 
     .status()
 }
 
-/// A JSON webhook with an `Idempotency-Key`: the status, and whether the bridge answered from
-/// memory.
-async fn post_with_key(url: &str, key: &str, body: &str) -> (reqwest::StatusCode, bool) {
-  let response = reqwest::Client::new()
-    .post(url)
-    .header("content-type", "application/json")
-    .header("idempotency-key", key)
-    .body(body.to_owned())
-    .send()
-    .await
-    .unwrap();
-  let is_replayed = response.headers().contains_key("idempotent-replayed");
-  (response.status(), is_replayed)
-}
-
 /// Everything the tests share: the server, alice and bob with their gateways, the channel and the
 /// bot's enrolled client.
 struct Setup {
@@ -255,14 +240,9 @@ fn bridge_config(
     interval_ms = 200
     [index]
     interval_secs = 0
-    [files]
-    spool_dir = "{spool}"
     {source}
     "#,
-    url = app.base_url,
-    spool = std::env::temp_dir()
-      .join(format!("teamcraft-bridge-e2e-{}", std::process::id()))
-      .display()
+    url = app.base_url
   ))
   .unwrap();
   config.identity.argon2_memory_kib = weak_argon2().memory_kib;
@@ -310,18 +290,14 @@ async fn webhooks_and_logs_arrive_decrypted_for_a_member_and_the_server_sees_onl
   } = &mut setup;
 
   let script = async {
-    // A Slack-style webhook, and the producer's retry with the same Idempotency-Key, as after an
-    // answer lost on the way: answered from memory and posted once (counted below).
-    let deploy = r#"{"text":"Deploy <https://ci.example.com/42|#42> finished","username":"ci"}"#;
-    let hook = format!("{base}/hooks/{SOURCE_TOKEN}");
-    assert_eq!(
-      post_with_key(&hook, "deploy-42", deploy).await,
-      (reqwest::StatusCode::OK, false)
-    );
-    assert_eq!(
-      post_with_key(&hook, "deploy-42", deploy).await,
-      (reqwest::StatusCode::OK, true)
-    );
+    // A Slack-style webhook.
+    let status = post(
+      &format!("{base}/hooks/{SOURCE_TOKEN}"),
+      "application/json",
+      r#"{"text":"Deploy <https://ci.example.com/42|#42> finished","username":"ci"}"#,
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
     pump_until("bob decrypts the webhook", bob, bob_gateway, |_| {
       texts(bob_store, channel)
         .iter()
@@ -376,7 +352,7 @@ async fn webhooks_and_logs_arrive_decrypted_for_a_member_and_the_server_sees_onl
       .iter()
       .filter(|message| message["sender_user_id"] == bot_id.as_str())
       .collect();
-    assert_eq!(from_bot.len(), 3, "the retried webhook is in it once");
+    assert_eq!(from_bot.len(), 3);
 
     // Bad input is refused without reaching the channel.
     assert_eq!(

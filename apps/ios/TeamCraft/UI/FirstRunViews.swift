@@ -36,12 +36,9 @@ struct NotificationPromptCard: View {
   }
 }
 
-/// No conversations yet: what to do first. Guests browse no channels (issue #758).
+/// No conversations yet: what to do first.
 struct EmptyChatsView: View {
-  @Environment(AppModel.self) private var model
   let onBrowse: (BrowseView.Tab) -> Void
-
-  @State private var canBrowseChannels = true
 
   var body: some View {
     ContentUnavailableView {
@@ -49,19 +46,10 @@ struct EmptyChatsView: View {
     } description: {
       Text("chats_empty_hint")
     } actions: {
-      if canBrowseChannels {
-        Button("browse_channels") { onBrowse(.channels) }
-          .buttonStyle(.borderedProminent)
-          .tint(Theme.accent)
-        Button("message_someone") { onBrowse(.people) }
-      } else {
-        Button("message_someone") { onBrowse(.people) }
-          .buttonStyle(.borderedProminent)
-          .tint(Theme.accent)
-      }
-    }
-    .task(id: model.changeCount) {
-      canBrowseChannels = await model.browseSnapshot()?.canBrowseChannels ?? true
+      Button("browse_channels") { onBrowse(.channels) }
+        .buttonStyle(.borderedProminent)
+        .tint(Theme.accent)
+      Button("message_someone") { onBrowse(.people) }
     }
   }
 }

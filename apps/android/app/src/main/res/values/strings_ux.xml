@@ -31,8 +31,6 @@
   <string name="message_link_label">Message link</string>
   <!-- Accessibility: an own message the server has accepted -->
   <string name="message_sent">Sent</string>
-  <!-- Accessibility: an own message the other member of a DM has read -->
-  <string name="message_read">Read</string>
   <plurals name="conversation_members">
     <item quantity="one">%d member</item>
     <item quantity="other">%d members</item>

@@ -14,7 +14,7 @@ use crate::components::link_menu::{focus_first_item, move_focus, placed_with};
 use crate::components::sheet::PopoverBackdrop;
 use crate::i18n::use_i18n;
 use crate::lightbox::MediaKey;
-use crate::preview::PreviewKind;
+use crate::preview::{self, PreviewKind};
 use crate::state::{Overlay, use_app_state};
 
 /// Room the menu needs below the pointer before it opens upwards (five entries and a separator).
@@ -33,7 +33,7 @@ pub struct AttachmentMenuTarget {
 enum OpenWith {
   /// Pictures and videos: the lightbox.
   Lightbox(MediaKey),
-  /// Markdown, HTML, PDF and text: the document preview (which says when a file is too large).
+  /// Markdown, HTML, PDF: the document preview.
   Preview(MediaKey),
 }
 
@@ -42,7 +42,8 @@ impl OpenWith {
     if let Some(key) = MediaKey::of(file) {
       return Some(Self::Lightbox(key));
     }
-    let is_previewed = PreviewKind::of(&file.media_type, &file.file_name).is_some();
+    let is_previewed = PreviewKind::of(&file.media_type, &file.file_name).is_some()
+      && preview::is_within_limit(file.size_bytes);
     MediaKey::for_file(file)
       .filter(|_| is_previewed)
       .map(Self::Preview)

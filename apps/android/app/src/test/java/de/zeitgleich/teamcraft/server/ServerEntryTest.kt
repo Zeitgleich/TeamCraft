@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.server
 
+import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
@@ -7,6 +8,7 @@ import java.net.UnknownHostException
 import java.net.UnknownServiceException
 import javax.net.ssl.SSLHandshakeException
 import de.zeitgleich.teamcraft.R
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -164,6 +166,19 @@ class ServerEntryTest {
       assertEquals("_", StoragePaths.segment(".."))
       assertEquals(".._etc", StoragePaths.segment("../etc"))
       assertEquals("auth/a_b/session.bin", StoragePaths.sessionFile("a/b"))
+    }
+  }
+
+  class Reading {
+    @Test
+    fun readsAnAnswerUpToTheLimit() {
+      val body = ByteArray(1000) { it.toByte() }
+      assertArrayEquals(body, readAtMost(ByteArrayInputStream(body), maxBytes = 1000))
+    }
+
+    @Test(expected = ResponseTooLargeException::class)
+    fun refusesAnAnswerPastTheLimit() {
+      readAtMost(ByteArrayInputStream(ByteArray(1001)), maxBytes = 1000)
     }
   }
 }

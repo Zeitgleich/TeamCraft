@@ -25,9 +25,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::image_crop_dialog::{
   CropTarget, CropUpload, ImageCropDialog, allow_image_drop, dropped_file,
 };
-use crate::components::join_requests::ChannelJoinRequests;
 use crate::components::modal::Modal;
-use crate::components::pending_button::PendingButton;
 use crate::components::roster_banner::{current_standing, unsigned_reason};
 use crate::components::section_tabs::{Section, SectionTabs};
 use crate::components::space_tile::SpaceTile;
@@ -369,35 +367,10 @@ fn BrowseRow(channel: BrowsableChannel) -> impl IntoView {
             </button>
           }
           .into_any(),
-          // The owners decide (admin.md §2.4); their apps add the admin, members see it.
-          BrowseJoin::NeedsApproval => {
-            let pending = PendingAction::new();
-            view! {
-              <PendingButton
-                pending=pending
-                class="btn btn-small btn-primary"
-                is_disabled=Signal::derive(move || current_standing(state).is_unsigned())
-                on_click=move |_| pending.run(|| state.write(|backend| backend.request_admin_join(id)))
-              >
-                <span title=move || i18n.t("browse-join-ask-hint")>{move || i18n.t("browse-join-ask")}</span>
-              </PendingButton>
-            }
-            .into_any()
-          },
-          BrowseJoin::Requested => {
-            let pending = PendingAction::new();
-            view! {
-              <span class="badge" title=move || i18n.t("browse-join-requested-hint")>{move || i18n.t("browse-join-requested")}</span>
-              <PendingButton
-                pending=pending
-                class="btn btn-small"
-                on_click=move |_| pending.run(|| state.write(|backend| backend.withdraw_admin_join(id)))
-              >
-                {move || i18n.t("browse-join-withdraw")}
-              </PendingButton>
-            }
-            .into_any()
-          },
+          BrowseJoin::NeedsApproval => view! {
+            <span class="muted-text small">{move || i18n.t("browse-join-needs-approval")}</span>
+          }
+          .into_any(),
         }
       }}
     </li>
@@ -599,12 +572,6 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
   });
   let can_manage_roles =
     Memo::new(move |_| scheme.with(|scheme| actor.with(|actor| can_manage_channel_roles(scheme, actor))));
-  // The members and the signed roles are read afresh while the section is open (e2ee.md §4.6.1).
-  Effect::new(move |_| state.write(|backend| backend.refresh_channel_roles(conversation)));
-  let can_sign_roles = Memo::new(move |_| {
-    roles.track();
-    state.read(|backend| backend.can_sign_channel_roles(conversation))
-  });
   view! {
     <div class="settings-row">
       <span class="muted-text">{move || i18n.t_count("members-count", members.with(Vec::len))}</span>
@@ -617,10 +584,9 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
       </Show>
     </div>
     <p class="hint">{move || if can_manage_roles.get() { i18n.t("channel-roles-hint") } else { i18n.t("channel-roles-read-only") }}</p>
-    <ChannelJoinRequests conversation=conversation />
     <ul class="settings-member-list">
       <For each=move || members.get() key=|user| user.id let:user>
-        <ChannelMemberRow conversation=conversation user=user roles=roles access=access space_roster=space_roster admin_count=admin_count can_sign_roles=can_sign_roles />
+        <ChannelMemberRow conversation=conversation user=user roles=roles access=access space_roster=space_roster admin_count=admin_count />
       </For>
     </ul>
   }
@@ -634,8 +600,6 @@ fn ChannelMemberRow(
   access: ChannelAccess,
   space_roster: Memo<SpaceRoster>,
   admin_count: Memo<usize>,
-  /// Whether the user signs roles members accept (a signed channel admin, a workspace admin).
-  can_sign_roles: Memo<bool>,
 ) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
@@ -643,15 +607,6 @@ fn ChannelMemberRow(
   let is_me = id == state.me().id;
   let is_confirming = RwSignal::new(false);
   let pending = PendingAction::new();
-  let signing = PendingAction::new();
-  // An admin or moderator only the server lists: said, and signable by those who can.
-  let is_unsigned = Memo::new(move |_| {
-    roles.with(|list| {
-      list
-        .iter()
-        .any(|member| member.user == id && !member.is_role_signed)
-    })
-  });
   let name = user.display_name.clone();
   let is_guest = user.is_guest;
   // Until the member list is loaded the role is unknown: nothing is offered.
@@ -713,18 +668,6 @@ fn ChannelMemberRow(
         },
         _ => ().into_any(),
       }}
-      <Show when=move || is_unsigned.get() fallback=|| ()>
-        <span class="badge badge-warn" title=move || i18n.t("channel-role-unsigned-hint")>{move || i18n.t("channel-role-unsigned")}</span>
-        <Show when=move || !is_me && can_sign_roles.get() fallback=|| ()>
-          <PendingButton
-            class="btn btn-small"
-            pending=signing
-            on_click=move |_| signing.run(|| state.write(|backend| backend.confirm_channel_role(conversation, id)))
-          >
-            {move || i18n.t("channel-role-sign")}
-          </PendingButton>
-        </Show>
-      </Show>
       {(!is_me).then(|| view! {
         <Show
           when=move || is_confirming.get()
@@ -755,7 +698,6 @@ fn ChannelMemberRow(
         </Show>
       })}
       <FailureNote pending=pending />
-      <FailureNote pending=signing />
     </li>
   }
 }

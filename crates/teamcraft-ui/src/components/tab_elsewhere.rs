@@ -5,7 +5,6 @@ use std::cell::OnceCell;
 
 use leptos::prelude::*;
 
-use crate::areas::{self, Place, lazy_area};
 use crate::components::login::AuthFrame;
 use crate::i18n::use_i18n;
 use crate::tab_handover::{Blocker, InactiveCause, TabRole, TabState, Takeover};
@@ -24,8 +23,7 @@ pub fn TabGate(children: ChildrenFn) -> impl IntoView {
     if is_active.get() {
       children().into_any()
     } else {
-      // Loads when it shows (`areas::tab_elsewhere`): most visits run in one tab.
-      lazy_area(Place::Screen, move || areas::tab_elsewhere(tab))
+      view! { <TabElsewhere tab=tab /> }.into_any()
     }
   }
 }
@@ -81,7 +79,7 @@ fn cancel_takeover() {}
 
 /// The notice: what happened, "Use here" and "Close"; after a refusal, the call that blocks it.
 #[component]
-pub fn TabElsewhere(tab: Signal<TabState>) -> impl IntoView {
+fn TabElsewhere(tab: Signal<TabState>) -> impl IntoView {
   let i18n = use_i18n();
   let is_close_refused = RwSignal::new(false);
   // The loader hands over to the first screen that waits for the user; this is one.

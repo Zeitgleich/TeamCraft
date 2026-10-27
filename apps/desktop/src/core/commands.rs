@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tauri_plugin_dialog::FilePath;
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{AttachmentPriority, LinkRequestView};
 use teamcraft_client_api::remote::{
@@ -16,7 +15,6 @@ use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_media::effects::normalize_background_file;
 use teamcraft_proto::{ConversationId, MessageId, UserId};
-use tokio::sync::oneshot::error::RecvError;
 
 use super::runtime::{CoreConfig, CoreRuntime, FailureHandler, KeyChoice, TokenCache};
 use crate::auth::commands::Service;
@@ -374,8 +372,7 @@ pub async fn core_attachment(
 
 /// "Save…" and "Download" on a file (#719): asks where to put it in the system's save dialog, then
 /// the core downloads and decrypts it to exactly that path beside its loop (the file's transfer
-/// state shows the progress and the result, a failure with its reason). Answers `false` when the
-/// user cancelled the dialog; a dialog that couldn't open is an error, not a cancel (#807).
+/// state shows the progress and the result). Answers `false` when the user cancelled the dialog.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn core_save_attachment(
   window: tauri::WebviewWindow,
@@ -386,39 +383,18 @@ pub async fn core_save_attachment(
   file_name: String,
 ) -> Result<bool, CommandError> {
   let runtime = host.current()?;
-  let maybe_path = ask_save_path(&window, &file_name).await.map_err(|error| {
-    tracing::warn!(%error, conversation_id = %conversation, "no file saved");
-    CommandError(error.to_string())
-  })?;
-  let Some(path) = maybe_path else {
-    tracing::debug!(conversation_id = %conversation, "the save dialog was cancelled");
+  let Some(path) = ask_save_path(&window, &file_name).await else {
     return Ok(false);
   };
-  // Never the path: it names the file.
-  tracing::info!(conversation_id = %conversation, message_id = %message, "saving a file to the picked place");
   runtime
     .save_attachment(conversation, message, file_id, path)
     .await?;
   Ok(true)
 }
 
-/// Why the save dialog gave no place to save to, though the user didn't cancel it.
-#[derive(Debug, PartialEq, Eq, thiserror::Error)]
-enum SaveDialogError {
-  /// The dialog never answered: it couldn't open, or it failed while open.
-  #[error("the save dialog could not be opened")]
-  NotOpened,
-  /// The dialog answered with something that is not a file on this device.
-  #[error("the save dialog answered with a place that is not a file on this device")]
-  NotLocal,
-}
-
 /// The path the user picks in the system's save dialog, starting in the downloads folder with
 /// `file_name`; `None` when cancelled.
-async fn ask_save_path(
-  window: &tauri::WebviewWindow,
-  file_name: &str,
-) -> Result<Option<PathBuf>, SaveDialogError> {
+async fn ask_save_path(window: &tauri::WebviewWindow, file_name: &str) -> Option<PathBuf> {
   use tauri_plugin_dialog::DialogExt;
 
   let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -430,21 +406,15 @@ async fn ask_save_path(
   if let Ok(downloads) = window.path().download_dir() {
     dialog = dialog.set_directory(downloads);
   }
+  // A dropped sender (the dialog failed to open) reads as cancelled.
   dialog.save_file(move |maybe_path| drop(sender.send(maybe_path)));
-  picked_path(receiver.await)
-}
-
-/// What the save dialog's answer means: `None` when the user cancelled. A dropped answer (the
-/// dialog couldn't open on the main thread, or failed) is an error the user is told about, not a
-/// cancel that does nothing (#807).
-fn picked_path(answer: Result<Option<FilePath>, RecvError>) -> Result<Option<PathBuf>, SaveDialogError> {
-  match answer {
-    Err(_) => Err(SaveDialogError::NotOpened),
-    Ok(None) => Ok(None),
-    Ok(Some(picked)) => picked
-      .into_path()
-      .map(Some)
-      .map_err(|_| SaveDialogError::NotLocal),
+  let picked = receiver.await.ok().flatten()?;
+  match picked.into_path() {
+    Ok(path) => Some(path),
+    Err(error) => {
+      tracing::warn!(%error, "the save dialog answered with no local path");
+      None
+    },
   }
 }
 
@@ -537,26 +507,6 @@ mod tests {
   use crate::auth::{DesktopConfig, MemoryStore};
 
   const TOKEN: &str = "local-token-a";
-
-  /// The save dialog's answer: a cancel does nothing; a dialog that never answered, or a place that
-  /// isn't a local file, is an error the UI shows (#807).
-  #[test]
-  fn a_save_dialog_that_never_answers_is_an_error_not_a_cancel() {
-    let (sender, receiver) = tokio::sync::oneshot::channel::<Option<FilePath>>();
-    drop(sender);
-    assert_eq!(
-      picked_path(receiver.blocking_recv()),
-      Err(SaveDialogError::NotOpened)
-    );
-    assert_eq!(picked_path(Ok(None)), Ok(None));
-    let picked = std::env::temp_dir().join("picked.wav");
-    assert_eq!(
-      picked_path(Ok(Some(FilePath::Path(picked.clone())))),
-      Ok(Some(picked))
-    );
-    let remote = FilePath::Url(url::Url::parse("https://example.com/picked.wav").unwrap());
-    assert_eq!(picked_path(Ok(Some(remote))), Err(SaveDialogError::NotLocal));
-  }
 
   #[test]
   fn the_suggested_save_name_stays_a_file_name() {

@@ -20,7 +20,7 @@ import androidx.compose.ui.graphics.Color
 import uniffi.teamcraft_ffi.BrandAccent
 import uniffi.teamcraft_ffi.LoginBrand
 
-/** The desktop UI's tokens (crates/teamcraft-ui/style/main/000-tokens.css), so both apps look alike. */
+/** The desktop UI's tokens (crates/teamcraft-ui/style/main.css), so both apps look alike. */
 private val Light = lightColorScheme(
   primary = Color(0xFF005DFC),
   onPrimary = Color(0xFFFFFFFF),

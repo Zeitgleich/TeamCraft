@@ -22,20 +22,4 @@
   <string name="browse_no_people">Hier erscheinen Personen, mit denen du einen Kanal teilst. Tritt zuerst einem Kanal bei oder lass dich von jemandem hinzufügen.</string>
   <string name="browse_no_channels">Hier gibt es noch keinen Kanal, dem du beitreten kannst. Lege einen mit Neuer Kanal an.</string>
   <string name="browse_no_spaces">Du bist noch in keinem Space. Bitte deine Admins, dich hinzuzufügen.</string>
-  <string name="enroll_title">Dieses Gerät einrichten</string>
-  <string name="enroll_new_hint">Wähle eine Wiederherstellungs-Passphrase. Sie schützt deine Schlüsselsicherung; ohne sie (oder ein anderes Gerät) lässt sich dein Nachrichtenverlauf nicht wiederherstellen.</string>
-  <string name="passphrase">Wiederherstellungs-Passphrase</string>
-  <string name="passphrase_repeat">Passphrase wiederholen</string>
-  <string name="passphrase_too_short">Verwende mindestens 12 Zeichen.</string>
-  <string name="passphrases_differ">Die Passphrasen stimmen nicht überein.</string>
-  <string name="enroll_button">Schlüssel erstellen</string>
-  <string name="recover_button">Wiederherstellen</string>
-  <string name="link_instead">Mit anderem Gerät verknüpfen</string>
-  <string name="device_name">Android-Telefon</string>
-  <string name="org_recovery_instead">Über meine Organisation wiederherstellen</string>
-  <string name="org_recovery_title">Über deine Organisation wiederherstellen</string>
-  <string name="org_recovery_hint">Lies diesen Code einer Administratorin oder einem Administrator deiner Organisation am Telefon oder persönlich vor. Zwei Admins geben die Wiederherstellung frei.</string>
-  <string name="org_recovery_new_passphrase">Wähle eine neue Wiederherstellungs-Passphrase für deine Schlüsselsicherung:</string>
-  <string name="org_recovery_finish">Wiederherstellung abschließen</string>
-  <string name="org_recovery_pending">Die Admins haben noch nicht zugestimmt. Versuche es gleich noch einmal.</string>
 </resources>

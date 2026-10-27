@@ -102,7 +102,6 @@ impl BrandView {
       login_text: clean_texts(response.login_text),
       links: BrandLinks {
         maybe_support: safe_link(response.links.maybe_support),
-        maybe_documentation: safe_link(response.links.maybe_documentation),
         maybe_privacy: safe_link(response.links.maybe_privacy),
         maybe_terms: safe_link(response.links.maybe_terms),
         maybe_imprint: safe_link(response.links.maybe_imprint),
@@ -379,7 +378,6 @@ mod tests {
     ]);
     hostile.links = BrandLinks {
       maybe_support: Some("javascript:alert(1)".into()),
-      maybe_documentation: Some("http://docs.example.com".into()),
       maybe_privacy: Some("https://user:pw@example.com/".into()),
       maybe_terms: Some("http://example.com/terms".into()),
       maybe_imprint: Some("https://example.com/imprint".into()),
@@ -389,7 +387,6 @@ mod tests {
     assert_eq!(view.light, [("--chrome".to_owned(), "#123".to_owned())]);
     assert!(view.assets.is_empty(), "{:?}", view.assets);
     assert_eq!(view.links.maybe_support, None);
-    assert_eq!(view.links.maybe_documentation, None);
     assert_eq!(view.links.maybe_privacy, None);
     assert_eq!(view.links.maybe_terms, None);
     assert_eq!(

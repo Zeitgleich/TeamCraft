@@ -3,21 +3,19 @@
 //! result, and report what the user did with it as [`NOTIFICATION_ACTION_EVENT`]
 //! (notifications.md, "Desktop notifications").
 //!
-//! | Platform | Shown through                        | Replace, withdraw | Buttons | Reply field                  | Picture (#543)          |
-//! |----------|--------------------------------------|-------------------|---------|------------------------------|-------------------------|
-//! | Linux    | freedesktop notification service     | yes               | yes     | where the server offers one  | `image-data` hint       |
-//! | Windows  | WinRT toasts (tag and group)         | yes               | yes     | yes                          | `appLogoOverride`       |
-//! | macOS    | `UNUserNotificationCenter` (bundled) | yes               | yes     | yes                          | attachment              |
+//! | Platform | Shown through                        | Replace, withdraw | Buttons | Reply field                  |
+//! |----------|--------------------------------------|-------------------|---------|------------------------------|
+//! | Linux    | freedesktop notification service     | yes               | yes     | where the server offers one  |
+//! | Windows  | WinRT toasts (tag and group)         | yes               | yes     | yes                          |
+//! | macOS    | `UNUserNotificationCenter` (bundled) | yes               | yes     | yes                          |
 //!
 //! Where none of these is available (no notification service, an unbundled macOS build) the
-//! notification plugin shows title and text only. Pictures come from the media cache
-//! ([`pictures`]).
+//! notification plugin shows title and text only.
 
 #[cfg(target_os = "macos")]
 pub(crate) mod mac_center;
 #[cfg(any(target_os = "macos", test))]
 mod mac_response;
-pub(crate) mod pictures;
 #[cfg(any(windows, test))]
 mod toast_xml;
 #[cfg(windows)]
@@ -30,11 +28,6 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, UserAttentionType};
 use tauri_plugin_notification::NotificationExt;
 use teamcraft_client_api::os_notify::{NOTIFICATION_ACTION_EVENT, NotificationActionEvent, OsNotification};
-
-use self::pictures::NotificationPictures;
-#[cfg(any(windows, target_os = "linux"))]
-use self::pictures::PreparedPicture;
-use crate::core::commands::CoreHost;
 
 #[derive(Debug, Serialize)]
 pub struct NotifyError {
@@ -66,19 +59,10 @@ pub async fn notify_user(
   app: AppHandle,
   shown: State<'_, ShownNotifications>,
   probe: State<'_, crate::attention::OsProbe>,
-  pictures: State<'_, NotificationPictures>,
-  host: State<'_, CoreHost>,
   notification: OsNotification,
 ) -> Result<(), NotifyError> {
-  let maybe_picture = match &notification.maybe_picture {
-    Some(picture) => {
-      let maybe_cache = crate::core::media::running_cache(&host);
-      pictures.resolve(maybe_cache, picture).await
-    },
-    None => None,
-  };
   #[cfg(target_os = "linux")]
-  if linux::notify(&app, &shown, &probe, &notification, maybe_picture.as_deref()).await {
+  if linux::notify(&app, &shown, &probe, &notification).await {
     return Ok(());
   }
   #[cfg(not(target_os = "linux"))]
@@ -87,40 +71,17 @@ pub async fn notify_user(
   {
     let reporter = app.clone();
     let on_action: win_toast::OnAction = std::sync::Arc::new(move |event| report(&reporter, event));
-    let maybe_logo = maybe_picture
-      .as_deref()
-      .and_then(|picture| toast_logo(&pictures, picture));
-    match win_toast::show(
-      &app.config().identifier,
-      &notification,
-      maybe_logo.as_ref(),
-      on_action,
-    ) {
+    match win_toast::show(&app.config().identifier, &notification, on_action) {
       Ok(()) => return Ok(()),
       Err(error) => tracing::debug!(%error, "toast failed, trying the plugin"),
     }
   }
   #[cfg(target_os = "macos")]
   if mac_center::is_available() {
-    let maybe_file = maybe_picture
-      .as_deref()
-      .and_then(|picture| pictures.attachment_file(picture));
-    mac_center::show(&notification, maybe_file.as_deref());
+    mac_center::show(&notification);
     return Ok(());
   }
-  // The plugin shows title and text only.
   notify_plugin(&app, notification)
-}
-
-/// The toast's logo: the picture's file, cut to a circle by the toast for a person.
-#[cfg(windows)]
-fn toast_logo(pictures: &NotificationPictures, picture: &PreparedPicture) -> Option<toast_xml::ToastLogo> {
-  let file = pictures.toast_file(picture)?;
-  let uri = url::Url::from_file_path(&file).ok()?.to_string();
-  Some(toast_xml::ToastLogo {
-    uri,
-    is_circle: picture.shape() == teamcraft_client_api::os_notify::PictureShape::Circle,
-  })
 }
 
 /// Removes the notifications with these tags.
@@ -231,9 +192,9 @@ mod linux {
     NotificationAction, NotificationActionEvent, NotificationTag, OsNotification, OsNotificationKind,
   };
 
-  use super::{PreparedPicture, Shown, ShownNotifications};
+  use super::{Shown, ShownNotifications};
   use crate::attention::OsProbe;
-  use crate::freedesktop::{DesktopNotification, HintImage, ServerEvent};
+  use crate::freedesktop::{DesktopNotification, ServerEvent};
 
   /// Messages of one conversation shown together in a notification; older ones drop off the top.
   const MAX_STACKED_LINES: usize = 5;
@@ -271,14 +232,12 @@ mod linux {
     });
   }
 
-  /// Shows (or replaces) a notification through the freedesktop service, with the picture as
-  /// `image-data`; false if there is no service.
+  /// Shows (or replaces) a notification through the freedesktop service; false if there is none.
   pub async fn notify(
     app: &AppHandle,
     shown: &ShownNotifications,
     probe: &OsProbe,
     notification: &OsNotification,
-    maybe_picture: Option<&PreparedPicture>,
   ) -> bool {
     let _showing = shown.showing.lock().await;
     let tag = notification.tag.as_str();
@@ -324,11 +283,6 @@ mod linux {
         .map(|reply| reply.placeholder.as_str()),
       category: category(notification.kind),
       is_ringing: notification.kind.is_ringing(),
-      is_quiet: notification.is_quiet(),
-      maybe_image: maybe_picture.map(|picture| HintImage {
-        side: picture.side(),
-        rgba: picture.rgba(),
-      }),
     };
     let Some(id) = probe.buses().notify(&desktop).await else {
       return false;
@@ -343,10 +297,7 @@ mod linux {
       OsNotificationKind::Message => "im.received",
       OsNotificationKind::IncomingCall => "call.incoming",
       OsNotificationKind::MissedCall => "call.unanswered",
-      OsNotificationKind::MeetingReminder
-      | OsNotificationKind::Reminder
-      | OsNotificationKind::JoinRequest
-      | OsNotificationKind::Unknown => "",
+      OsNotificationKind::MeetingReminder | OsNotificationKind::Reminder | OsNotificationKind::Unknown => "",
     }
   }
 
@@ -475,8 +426,6 @@ mod tests {
       maybe_body: Some(body.to_owned()),
       actions: Vec::new(),
       maybe_reply: None,
-      sound: Default::default(),
-      maybe_picture: None,
     }
   }
 }

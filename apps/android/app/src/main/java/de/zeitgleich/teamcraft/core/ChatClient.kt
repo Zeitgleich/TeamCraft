@@ -4,18 +4,10 @@ import uniffi.teamcraft_ffi.TeamCraft
 
 /**
  * The chat features of the core, decoded: reads go through the JSON bridge's snapshot, window and
- * queries, changes through actions ([ChatActions]). Nothing here interprets the data; only the
- * snapshot's deleted accounts get [deletedUserName] when one is given (issue #751).
+ * queries, changes through actions ([ChatActions]). Nothing here interprets the data.
  */
-class ChatClient(
-  /** The app's "Deleted user" in the user's language; `null` for readers that show no old messages. */
-  private val deletedUserName: (() -> String)? = null,
-  private val core: suspend () -> TeamCraft,
-) {
-  suspend fun snapshot(): ChatSnapshot {
-    val snapshot = WireJson.decodeFromString(ChatSnapshot.serializer(), core().snapshot())
-    return deletedUserName?.let { snapshot.namingDeletedUsers(it()) } ?: snapshot
-  }
+class ChatClient(private val core: suspend () -> TeamCraft) {
+  suspend fun snapshot(): ChatSnapshot = WireJson.decodeFromString(ChatSnapshot.serializer(), core().snapshot())
 
   /** The newest `limit` messages of a conversation, oldest first. */
   suspend fun latest(conversation: String, limit: Int): MessageWindow {
@@ -31,9 +23,6 @@ class ChatClient(
     )
 
   suspend fun query(query: String): ChatAnswer = decodeAnswer(core().query(query))
-
-  /** A query whose answer goes back to the core undecoded (the image viewer's pages). */
-  suspend fun rawQuery(query: String): String = core().query(query)
 
   suspend fun act(action: String) = core().act(action)
 

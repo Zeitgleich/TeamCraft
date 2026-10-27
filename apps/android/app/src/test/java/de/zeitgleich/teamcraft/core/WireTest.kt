@@ -39,43 +39,6 @@ class WireTest {
     assertFalse(window.messages[0].isPending)
     assertTrue(window.messages[1].isPending)
     assertNotNull(window.messages[1].maybeSystemEvent)
-    assertEquals(null, snapshot.security.backup)
-  }
-
-  @Test
-  fun theKeyBackupStateDecodesAndToleratesNewMethods() {
-    val security = WireJson.decodeFromString(
-      SecuritySnapshot.serializer(),
-      """
-      {"my_fingerprint":"ab","contacts":[],
-       "backup":{"is_stored":true,"has_pending_upload":false,"recovery":["passphrase","organization","hardware_key"],
-                 "passphrase_set_at":1700000000000}}
-      """,
-    )
-    val backup = security.backup!!
-    assertTrue(backup.isStored)
-    assertTrue(backup.hasPassphrase)
-    assertTrue(backup.hasOrganization)
-    assertEquals(1_700_000_000_000L, backup.passphraseSetAt)
-  }
-
-  @Test
-  fun formerAccountsNameOldMessagesAndDeletedOnesGetTheAppsName() {
-    val snapshot = WireJson.decodeFromString(
-      ChatSnapshot.serializer(),
-      """
-      {"me":{"id":"1","username":"alice","display_name":"Alice"},
-       "users":[{"id":"2","username":"sam","display_name":"Sam Doe"}],
-       "former_users":[{"id":"3","username":"bea","display_name":"Bea Former","is_deactivated":true},
-                       {"id":"4","username":"","display_name":"Deleted user","is_deactivated":true,"is_deleted":true}]}
-      """,
-    ).namingDeletedUsers("Gelöschter Nutzer")
-    assertEquals(listOf("2"), snapshot.users.map { it.id })
-    assertEquals("Bea Former", snapshot.name("3"))
-    assertEquals("Gelöschter Nutzer", snapshot.name("4"))
-    assertEquals("", snapshot.user("4")?.username)
-    assertFalse(snapshot.user("3")!!.isOffered)
-    assertTrue(snapshot.user("2")!!.isOffered)
   }
 
   @Test
@@ -114,24 +77,6 @@ class WireTest {
       "[255,216,0,127,128]",
       WireJson.encodeToString(ImageBytesSerializer, decoded.maybeThumbnail),
     )
-  }
-
-  @Test
-  fun aFileNamesItsSenderAndTimeForTheViewer() {
-    val decoded = WireJson.decodeFromString(
-      FileInfo.serializer(),
-      """{"conversation":"7","message":"10","file_id":"3","file_name":"a.jpg","media_type":"image/jpeg",
-          "size_bytes":9,"transfer":{"state":"remote"},"maybe_sender":"42","maybe_sent_at":1700000000000}""",
-    )
-    assertEquals("42", decoded.maybeSender)
-    assertEquals(1_700_000_000_000L, decoded.maybeSentAt)
-    val older = WireJson.decodeFromString(
-      FileInfo.serializer(),
-      """{"conversation":"7","message":"10","file_id":"3","file_name":"a.jpg","media_type":"image/jpeg",
-          "size_bytes":9,"transfer":{"state":"remote"}}""",
-    )
-    assertEquals(null, older.maybeSender)
-    assertEquals(null, older.maybeSentAt)
   }
 
   @Test

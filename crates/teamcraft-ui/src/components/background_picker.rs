@@ -310,7 +310,9 @@ fn focus_effect_tile(option: BackgroundEffect) {
 mod tests {
   use super::*;
   use crate::calls::BackgroundPreset;
-  use crate::i18n::{Locale, joined_source};
+
+  const EN_FTL: &str = include_str!("../../i18n/en.ftl");
+  const DE_FTL: &str = include_str!("../../i18n/de.ftl");
 
   #[test]
   fn slugs_round_trip_for_every_option() {
@@ -382,7 +384,7 @@ mod tests {
 
   #[test]
   fn every_preset_name_and_heading_is_translated() {
-    for lang in Locale::ALL.map(joined_source) {
+    for lang in [EN_FTL, DE_FTL] {
       for option in BackgroundEffect::ALL {
         let key = format!("effect-{} =", option.slug());
         assert!(lang.lines().any(|line| line.starts_with(&key)), "missing {key}");

@@ -6,7 +6,6 @@ use wasm_bindgen::JsCast;
 
 use teamcraft_client_api::actions::MessagePriority;
 
-use crate::areas::{self, Place, lazy_area};
 use crate::components::icons::{Icon, IconName};
 use crate::components::sheet::MenuSurface;
 use crate::editor_doc::{BlockFormat, InlineStyle};
@@ -85,19 +84,12 @@ pub fn format_action_for(ev: &web_sys::KeyboardEvent) -> Option<FormatAction> {
     .map(|(action, _)| *action)
 }
 
-/// Bold, italic, … above the input; buttons keep the editor's focus and selection. Off by default:
-/// it loads when turned on (`areas::format_toolbar`).
+/// Bold, italic, … above the input; buttons keep the editor's focus and selection.
 #[component]
 pub fn FormatToolbar(
   #[prop(into)] active: Signal<ActiveFormats>,
   on_action: Callback<FormatAction>,
 ) -> impl IntoView {
-  lazy_area(Place::Inline, move || areas::format_toolbar(active, on_action))
-}
-
-/// The toolbar of [`FormatToolbar`].
-#[component]
-pub fn FormatToolbarPanel(active: Signal<ActiveFormats>, on_action: Callback<FormatAction>) -> impl IntoView {
   let i18n = use_i18n();
   let toolbar = NodeRef::<html::Div>::new();
   let is_style_menu_open = RwSignal::new(false);

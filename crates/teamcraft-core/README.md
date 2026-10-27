@@ -134,10 +134,7 @@ the server API, the sync engine and first-run enrollment. All cryptography is de
   signed log yet, so every member may add and remove; the server's permission check is the
   finer-grained control until then.
 - Server-reported removals are accepted without a signature: they only ever remove access.
-- `admin_self_join = owner_approval` refuses an admin's own self-join; the admin asks instead
-  (`request_admin_join`), and a channel owner's client lets them in with its own MLS add
-  (`approve_admin_join`, admin.md §2.4). The server's request list is only a hint: the owner's
-  client offers "Approve" only for admins of the fresh verified roster.
+- `admin_self_join = owner_approval` refuses self-joins, since there is no approval flow yet.
 
 ## Stubbed / not yet done
 
