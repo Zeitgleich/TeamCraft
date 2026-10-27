@@ -6,11 +6,10 @@ on:
     paths-ignore:
       - "docs/**"
       - "**/*.md"
+  # Every pull request, docs too: `ci-gate` is the required check of `main` and must appear on each.
+  # Without the `ci` label the jobs are skipped and the gate passes in seconds.
   pull_request:
     types: [opened, synchronize, reopened, labeled]
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
   # By hand, e.g. to get a verdict on main after a docs-only merge before tagging a release.
   workflow_dispatch:
 
@@ -303,3 +302,24 @@ jobs:
           scripts/render-release-notes.py --version "$version" --tag "v$version" --repo "$GITHUB_REPOSITORY" \
             --images "$RUNNER_TEMP/images.txt" > "$RUNNER_TEMP/notes.md"
           if grep -n '{{' "$RUNNER_TEMP/notes.md"; then echo "::error::unfilled placeholder"; exit 1; fi
+
+  # The one required check of `main` (repository ruleset), so auto-merge waits for CI where it ran:
+  # with the `ci` label it passes only when every job above passed; without it the jobs are skipped
+  # and it passes at once, so an unlabelled pull request doesn't wait for builds nobody asked for.
+  ci-gate:
+    name: ci-gate
+    if: always()
+    needs: [check, test, audio-processing, windows, macos, deny, versions]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job that ran passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "job results: $RESULTS"
+          for result in $RESULTS; do
+            case "$result" in
+              success | skipped) ;;
+              *) echo "::error::a CI job ended with '$result'"; exit 1 ;;
+            esac
+          done
